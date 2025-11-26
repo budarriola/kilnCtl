@@ -1,0 +1,167 @@
+EESchema-LIBRARY Version 2.3
+#encoding utf-8
+#SamacSys ECAD Model NE555DR
+#/6648/2/2.37/8/4/Integrated Circuit
+DEF NE555DR IC 0 30 Y Y 1 F N
+F0 "IC" 1050 600 50 H V L CNN
+F1 "NE555DR" 1050 500 50 H V L CNN
+F2 "SOIC127P600X175-8N" 1050 400 50 H I L CNN
+F3 "http://www.ti.com/lit/ds/symlink/ne555.pdf" 1050 300 50 H I L CNN
+F4 "Single Precision Timer" 1050 200 50 H I L CNN "Description"
+F5 "1.75" 1050 100 50 H I L CNN "Height"
+F6 "Texas Instruments" 1050 0 50 H I L CNN "Manufacturer_Name"
+F7 "NE555DR" 1050 -100 50 H I L CNN "Manufacturer_Part_Number"
+F8 "595-NE555DR" 1050 -200 50 H I L CNN "Mouser Part Number"
+F9 "https://www.mouser.com/Search/Refine.aspx?Keyword=595-NE555DR" 1050 -300 50 H I L CNN "Mouser Price/Stock"
+F10 "1218414" 1050 -400 50 H I L CNN "RS Part Number"
+F11 "http//uk.rs-online.com/web/p/products/1218414" 1050 -500 50 H I L CNN "RS Price/Stock"
+DRAW
+X GND 1 600 -1000 200 U 50 50 0 0 B
+X TRIG 2 0 -400 200 R 50 50 0 0 B
+X OUT 3 1200 -200 200 L 50 50 0 0 B
+X ~RESET 4 0 0 200 R 50 50 0 0 B
+X CONT 5 500 600 200 D 50 50 0 0 B
+X THRES 6 0 -300 200 R 50 50 0 0 B
+X DISCH 7 0 -100 200 R 50 50 0 0 B
+X VCC 8 700 600 200 D 50 50 0 0 B
+P 5 0 1 6 200 400 1000 400 1000 -800 200 -800 200 400 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model PS2702-1-F3-A
+#/1901026/960482/2.50/4/2/Integrated Circuit
+DEF PS2702-1-F3-A IC 0 30 Y Y 1 F N
+F0 "IC" 1350 300 50 H V L CNN
+F1 "PS2702-1-F3-A" 1350 200 50 H V L CNN
+F2 "SOP254P700X230-4N" 1350 100 50 H I L CNN
+F3 "https://datasheet.datasheetarchive.com/originals/distributors/Datasheets_SAMA/3022c2dbaac3cc6b21c36d10f6d411c4.pdf" 1350 0 50 H I L CNN
+F4 "The PS2702-1 is an optically coupled isolator containing a GaAs light emitting diode and an NPN silicon darlington-connected phototransistor. This is mounted in a plastic SOP (Small Out-line Package) for high density applications. This package has shield effect to cut off ambient light." 1350 -100 50 H I L CNN "Description"
+F5 "2.3" 1350 -200 50 H I L CNN "Height"
+F6 "551-PS2702-1-F3-A" 1350 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Renesas-Electronics/PS2702-1-F3-A?qs=5N444vrM9tf1xGpPQDiXGA%3D%3D" 1350 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Renesas Electronics" 1350 -500 50 H I L CNN "Manufacturer_Name"
+F9 "PS2702-1-F3-A" 1350 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ANODE 1 0 0 200 R 50 50 0 0 P
+X CATHODE 2 0 -100 200 R 50 50 0 0 P
+X COLLECTOR 4 1500 0 200 L 50 50 0 0 P
+X EMITTER 3 1500 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1300 100 1300 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model 1935161
+#/264705/960482/2.50/2/2/Connector
+DEF 1935161 J 0 30 Y Y 1 F N
+F0 "J" 650 300 50 H V L CNN
+F1 "1935161" 650 200 50 H V L CNN
+F2 "1935161" 650 100 50 H I L CNN
+F3 "https://datasheet.datasheetarchive.com/originals/distributors/SFDatasheet-2/sf-00057459.pdf" 650 0 50 H I L CNN
+F4 "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon" 650 -100 50 H I L CNN "Description"
+F5 "11.55" 650 -200 50 H I L CNN "Height"
+F6 "651-1935161" 650 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D" 650 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Phoenix Contact" 650 -500 50 H I L CNN "Manufacturer_Name"
+F9 "1935161" 650 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X 1 1 0 0 200 R 50 50 0 0 P
+X 2 2 0 -100 200 R 50 50 0 0 P
+P 5 0 1 6 200 100 600 100 600 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model SS16FP
+#/1280360/960482/2.50/2/2/Schottky Diode
+DEF SS16FP D 0 30 Y Y 1 F N
+F0 "D" 500 350 50 H V L CNN
+F1 "SS16FP" 500 250 50 H V L CNN
+F2 "SS12FP" 500 150 50 H I L CNN
+F3 "https://www.onsemi.com/pub/Collateral/S110FP-D.pdf" 500 50 50 H I L CNN
+F4 "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound" 500 -50 50 H I L CNN "Description"
+F5 "1" 500 -150 50 H I L CNN "Height"
+F6 "512-SS16FP" 500 -250 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D" 500 -350 50 H I L CNN "Mouser Price/Stock"
+F8 "onsemi" 500 -450 50 H I L CNN "Manufacturer_Name"
+F9 "SS16FP" 500 -550 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ~ 1 100 0 100 R 50 50 0 0 P
+X ~ 2 700 0 100 L 50 50 0 0 P
+P 2 0 1 6 300 100 300 -100 N
+P 3 0 1 6 300 100 340 100 340 60 N
+P 3 0 1 6 300 -100 260 -100 260 -60 N
+P 2 0 1 6 200 0 300 0 N
+P 2 0 1 6 500 0 600 0 N
+P 4 0 1 10 300 0 500 100 500 -100 300 0 F
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model 1935174
+#/12704403/960482/2.50/3/2/Connector
+DEF 1935174 J 0 30 Y Y 1 F N
+F0 "J" 650 300 50 H V L CNN
+F1 "1935174" 650 200 50 H V L CNN
+F2 "1935174" 650 100 50 H I L CNN
+F3 "" 650 0 50 H I L CNN
+F4 "PCB terminal block, Nominal current: 17.5 A, Nom. voltage: 400 V, Pitch: 5 mm, Number of positions: 3, Connection method: Screw connection with wire protector, Mounting: Wave soldering, Conductor/PCB connection direction: 0 , Color: green, Also possible: Connection of a 1.5 mm conductor with ferrule, then however with reduction in rated voltage or degree of pollution / surge category." 650 -100 50 H I L CNN "Description"
+F5 "11.55" 650 -200 50 H I L CNN "Height"
+F6 "651-1935174" 650 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935174?qs=QWULklcAmSR8B7o4YouITA%3D%3D" 650 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Phoenix Contact" 650 -500 50 H I L CNN "Manufacturer_Name"
+F9 "1935174" 650 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X 1 1 0 0 200 R 50 50 0 0 P
+X 2 2 0 -100 200 R 50 50 0 0 P
+X 3 3 0 -200 200 R 50 50 0 0 P
+P 5 0 1 6 200 100 600 100 600 -300 200 -300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model SJ2-35813B-SMT-TR
+#/645358/960482/2.50/4/2/Connector
+DEF SJ2-35813B-SMT-TR J 0 30 Y Y 1 F N
+F0 "J" 1350 300 50 H V L CNN
+F1 "SJ2-35813B-SMT-TR" 1350 200 50 H V L CNN
+F2 "SJ235813BSMTTR" 1350 100 50 H I L CNN
+F3 "https://www.sameskydevices.com/product/resource/sj2-3581x-smt.pdf" 1350 0 50 H I L CNN
+F4 "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~ 85C" 1350 -100 50 H I L CNN "Description"
+F5 "5.3" 1350 -200 50 H I L CNN "Height"
+F6 "490-SJ2-35813BSMT-TR" 1350 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D" 1350 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Same Sky" 1350 -500 50 H I L CNN "Manufacturer_Name"
+F9 "SJ2-35813B-SMT-TR" 1350 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X SLEEVE 1 0 0 200 R 50 50 0 0 P
+X TIP 2 0 -100 200 R 50 50 0 0 P
+X RING 3 1500 0 200 L 50 50 0 0 P
+X TIP_SWITCH 10 1500 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1300 100 1300 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model LMV358AIDR
+#/1029834/960482/2.50/8/3/Integrated Circuit
+DEF LMV358AIDR IC 0 30 Y Y 1 F N
+F0 "IC" 1150 300 50 H V L CNN
+F1 "LMV358AIDR" 1150 200 50 H V L CNN
+F2 "SOIC127P600X175-8N" 1150 100 50 H I L CNN
+F3 "http://www.ti.com/lit/gpn/lmv358a" 1150 0 50 H I L CNN
+F4 "Dual Low-Voltage Cost-Optimized Rail-to-Rail Output Operational Amplifier" 1150 -100 50 H I L CNN "Description"
+F5 "1.75" 1150 -200 50 H I L CNN "Height"
+F6 "595-LMV358AIDR" 1150 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Texas-Instruments/LMV358AIDR?qs=W0yvOO0ixfGm9Q3tgag7Lw%3D%3D" 1150 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Texas Instruments" 1150 -500 50 H I L CNN "Manufacturer_Name"
+F9 "LMV358AIDR" 1150 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X OUT_A 1 0 0 200 R 50 50 0 0 O
+X -_IN_A 2 0 -100 200 R 50 50 0 0 I
+X +IN_A 3 0 -200 200 R 50 50 0 0 I
+X V- 4 0 -300 200 R 50 50 0 0 W
+X V+ 8 1300 0 200 L 50 50 0 0 W
+X OUT_B 7 1300 -100 200 L 50 50 0 0 O
+X -IN_B 6 1300 -200 200 L 50 50 0 0 I
+X +IN_B 5 1300 -300 200 L 50 50 0 0 I
+P 5 0 1 6 200 100 1100 100 1100 -400 200 -400 200 100 N
+ENDDRAW
+ENDDEF
+#
+#End Library
