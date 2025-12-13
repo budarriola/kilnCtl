@@ -42,4 +42,10 @@ K
 F http://www.ti.com/lit/gpn/lmv358a
 $ENDCMP
 #
+$CMP LT8631IFE#PBF
+D Switching Voltage Regulators 100V, 1A Sync uP Buck Reg
+K
+F https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf
+$ENDCMP
+#
 #End Doc Library

@@ -753,6 +753,516 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "LT8631IFE#PBF_1"
+			(pin_names
+				(offset 0.762)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "IC"
+				(at 36.83 7.62 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "LT8631IFE#PBF"
+				(at 36.83 5.08 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "SOP65P640X120-21N"
+				(at 36.83 2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" "https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf"
+				(at 36.83 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Description" "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description_1" "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg"
+				(at 36.83 -2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Height" "1.2"
+				(at 36.83 -5.08 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Mouser Part Number" "584-LT8631IFE#PBF"
+				(at 36.83 -7.62 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Analog-Devices/LT8631IFEPBF?qs=oahfZPh6IALt9hCBxhtB7A%3D%3D"
+				(at 36.83 -10.16 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Manufacturer_Name" "Analog Devices"
+				(at 36.83 -12.7 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Manufacturer_Part_Number" "LT8631IFE#PBF"
+				(at 36.83 -15.24 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(symbol "LT8631IFE#PBF_1_0_0"
+				(pin passive line
+					(at 0 0 0)
+					(length 5.08)
+					(name "VIN"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -2.54 0)
+					(length 5.08)
+					(name "NO_PIN_1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -5.08 0)
+					(length 5.08)
+					(name "EN/UV"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -7.62 0)
+					(length 5.08)
+					(name "NO_PIN_2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -10.16 0)
+					(length 5.08)
+					(name "PG"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -12.7 0)
+					(length 5.08)
+					(name "NC_1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "6"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -15.24 0)
+					(length 5.08)
+					(name "SYNC/MODE"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "7"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -17.78 0)
+					(length 5.08)
+					(name "RT"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "8"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -20.32 0)
+					(length 5.08)
+					(name "NC_2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "9"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -22.86 0)
+					(length 5.08)
+					(name "TR/SS"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "10"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 20.32 -38.1 90)
+					(length 5.08)
+					(name "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "21"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 0 180)
+					(length 5.08)
+					(name "SW"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "20"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -2.54 180)
+					(length 5.08)
+					(name "NO_PIN_4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "19"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -5.08 180)
+					(length 5.08)
+					(name "BST"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "18"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -7.62 180)
+					(length 5.08)
+					(name "NO_PIN_3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "17"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -10.16 180)
+					(length 5.08)
+					(name "INTVCC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "16"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -12.7 180)
+					(length 5.08)
+					(name "NC_4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "15"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -15.24 180)
+					(length 5.08)
+					(name "IND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "14"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -17.78 180)
+					(length 5.08)
+					(name "NC_3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "13"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -20.32 180)
+					(length 5.08)
+					(name "VOUT"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "12"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 40.64 -22.86 180)
+					(length 5.08)
+					(name "FB"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "11"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "LT8631IFE#PBF_1_0_1"
+				(polyline
+					(pts
+						(xy 5.08 2.54) (xy 35.56 2.54) (xy 35.56 -33.02) (xy 5.08 -33.02) (xy 5.08 2.54)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "Regulator_Linear:LM1117T-3.3"
 			(exclude_from_sim no)
 			(in_bom yes)
@@ -1199,625 +1709,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "SamacSys_Parts:LT8631IFE#PBF"
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "IC"
-				(at 36.83 7.62 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-				)
-			)
-			(property "Value" "LT8631IFE#PBF"
-				(at 36.83 5.08 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-				)
-			)
-			(property "Footprint" "SOP65P640X120-21N"
-				(at 36.83 -94.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf"
-				(at 36.83 -194.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(property "Description" "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Height" "1.2"
-				(at 36.83 -394.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(property "Mouser Part Number" "584-LT8631IFE#PBF"
-				(at 36.83 -494.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Analog-Devices/LT8631IFEPBF?qs=oahfZPh6IALt9hCBxhtB7A%3D%3D"
-				(at 36.83 -594.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(property "Manufacturer_Name" "Analog Devices"
-				(at 36.83 -694.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(property "Manufacturer_Part_Number" "LT8631IFE#PBF"
-				(at 36.83 -794.92 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left top)
-					(hide yes)
-				)
-			)
-			(symbol "LT8631IFE#PBF_1_1"
-				(rectangle
-					(start 5.08 2.54)
-					(end 35.56 -33.02)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type background)
-					)
-				)
-				(pin passive line
-					(at 0 0 0)
-					(length 5.08)
-					(name "VIN"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -2.54 0)
-					(length 5.08)
-					(name "NO_PIN_1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -5.08 0)
-					(length 5.08)
-					(name "EN/UV"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -7.62 0)
-					(length 5.08)
-					(name "NO_PIN_2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -10.16 0)
-					(length 5.08)
-					(name "PG"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "5"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -12.7 0)
-					(length 5.08)
-					(name "NC_1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "6"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -15.24 0)
-					(length 5.08)
-					(name "SYNC/MODE"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "7"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -17.78 0)
-					(length 5.08)
-					(name "RT"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "8"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -20.32 0)
-					(length 5.08)
-					(name "NC_2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "9"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -22.86 0)
-					(length 5.08)
-					(name "TR/SS"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "10"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 20.32 -38.1 90)
-					(length 5.08)
-					(name "GND"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "21"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 0 180)
-					(length 5.08)
-					(name "SW"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "20"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -2.54 180)
-					(length 5.08)
-					(name "NO_PIN_4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "19"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -5.08 180)
-					(length 5.08)
-					(name "BST"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "18"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -7.62 180)
-					(length 5.08)
-					(name "NO_PIN_3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "17"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -10.16 180)
-					(length 5.08)
-					(name "INTVCC"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "16"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -12.7 180)
-					(length 5.08)
-					(name "NC_4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "15"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -15.24 180)
-					(length 5.08)
-					(name "IND"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "14"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -17.78 180)
-					(length 5.08)
-					(name "NC_3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "13"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -20.32 180)
-					(length 5.08)
-					(name "VOUT"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "12"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 40.64 -22.86 180)
-					(length 5.08)
-					(name "FB"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "11"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
-		(symbol "power:VPP"
-			(power)
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "#PWR"
-				(at 0 -3.81 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Value" "VPP"
-				(at 0 3.556 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "Power symbol creates a global label with name \"VPP\""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_keywords" "global power"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "VPP_0_1"
-				(polyline
-					(pts
-						(xy -0.762 1.27) (xy 0 2.54)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0 2.54) (xy 0.762 1.27)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0 0) (xy 0 2.54)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "VPP_1_1"
-				(pin power_in line
-					(at 0 0 90)
-					(length 0)
-					(name "~"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 	)
 	(text "10.1v Ven"
 		(exclude_from_sim no)
@@ -1924,10 +1815,10 @@
 		(uuid "34c9e0db-f220-4f54-b519-8f22bdd4b4ce")
 	)
 	(junction
-		(at 203.2 115.57)
+		(at 95.25 82.55)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "3dce493a-391c-4f2e-a9c6-dbfb0ac8cd91")
+		(uuid "402aa15e-fc10-46e5-86b8-a9580a5e905e")
 	)
 	(junction
 		(at 165.1 35.56)
@@ -1972,6 +1863,12 @@
 		(uuid "84684b24-3448-4cbf-8ca0-4361a3a09cad")
 	)
 	(junction
+		(at 207.01 60.96)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "86f2053d-466b-4ce8-a9f4-f44689632ed9")
+	)
+	(junction
 		(at 198.12 115.57)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1982,6 +1879,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "8d3ce7f4-8fcf-4f7c-b2ab-79e0844ac091")
+	)
+	(junction
+		(at 88.9 129.54)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "98c79124-2ccb-4866-9948-8a41fc3dc85a")
 	)
 	(junction
 		(at 95.25 45.72)
@@ -2054,12 +1957,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "d3c332ae-688d-45a1-926c-605bee9c47c3")
-	)
-	(junction
-		(at 134.62 82.55)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "d5ba95cd-ede4-40fb-ba0e-90ed8c78361e")
 	)
 	(junction
 		(at 133.35 129.54)
@@ -2383,13 +2280,13 @@
 	)
 	(wire
 		(pts
-			(xy 203.2 113.03) (xy 203.2 115.57)
+			(xy 207.01 60.96) (xy 213.36 60.96)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "39d87ece-2213-48ca-b723-4222fa7efa85")
+		(uuid "37a63b98-2bab-43b6-a89e-f47f8a914325")
 	)
 	(wire
 		(pts
@@ -2473,6 +2370,16 @@
 	)
 	(wire
 		(pts
+			(xy 207.01 91.44) (xy 207.01 60.96)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4a93ebe5-970c-4bf7-a81a-6eec384df6b7")
+	)
+	(wire
+		(pts
 			(xy 53.34 25.4) (xy 72.39 25.4)
 		)
 		(stroke
@@ -2503,16 +2410,6 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 86.36) (xy 134.62 86.36)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "54661f6e-75c4-40ac-97bb-3a7941461175")
-	)
-	(wire
-		(pts
 			(xy 132.08 82.55) (xy 109.22 82.55)
 		)
 		(stroke
@@ -2540,6 +2437,16 @@
 			(type default)
 		)
 		(uuid "578876e7-2b76-4696-a274-4fea7ec54c0d")
+	)
+	(wire
+		(pts
+			(xy 88.9 129.54) (xy 78.74 129.54)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "59fd6243-2162-4396-ba37-0d2d68437d3c")
 	)
 	(wire
 		(pts
@@ -2713,7 +2620,7 @@
 	)
 	(wire
 		(pts
-			(xy 91.44 113.03) (xy 91.44 115.57)
+			(xy 91.44 91.44) (xy 91.44 115.57)
 		)
 		(stroke
 			(width 0)
@@ -2763,16 +2670,6 @@
 	)
 	(wire
 		(pts
-			(xy 134.62 82.55) (xy 134.62 86.36)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "906ff844-c491-4d86-a120-b5de971cd6e7")
-	)
-	(wire
-		(pts
 			(xy 134.62 115.57) (xy 142.24 115.57)
 		)
 		(stroke
@@ -2813,16 +2710,6 @@
 	)
 	(wire
 		(pts
-			(xy 134.62 82.55) (xy 132.08 82.55)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9e84e21e-e17d-4d7e-b99d-f2cd7191c4f7")
-	)
-	(wire
-		(pts
 			(xy 154.94 124.46) (xy 154.94 129.54)
 		)
 		(stroke
@@ -2843,6 +2730,16 @@
 	)
 	(wire
 		(pts
+			(xy 91.44 91.44) (xy 207.01 91.44)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a704eacd-dcac-4812-ae30-189cedfc997b")
+	)
+	(wire
+		(pts
 			(xy 111.76 63.5) (xy 109.22 63.5)
 		)
 		(stroke
@@ -2850,6 +2747,16 @@
 			(type default)
 		)
 		(uuid "a84ad79e-8bef-47f9-abbd-134f2f465f3e")
+	)
+	(wire
+		(pts
+			(xy 78.74 129.54) (xy 78.74 82.55)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ab307319-ee97-43fc-9e50-512355ab551e")
 	)
 	(wire
 		(pts
@@ -2890,6 +2797,16 @@
 			(type default)
 		)
 		(uuid "ad74ce9c-df2b-4791-8cd9-991827ad25cb")
+	)
+	(wire
+		(pts
+			(xy 78.74 82.55) (xy 95.25 82.55)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ade7e01c-4585-46cd-bd15-cd00fd79b3de")
 	)
 	(wire
 		(pts
@@ -3003,16 +2920,6 @@
 	)
 	(wire
 		(pts
-			(xy 154.94 110.49) (xy 154.94 115.57)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c1541aa1-fc39-4f25-9551-94bc363acce2")
-	)
-	(wire
-		(pts
 			(xy 181.61 71.12) (xy 181.61 72.39)
 		)
 		(stroke
@@ -3053,7 +2960,7 @@
 	)
 	(wire
 		(pts
-			(xy 154.94 82.55) (xy 134.62 82.55)
+			(xy 132.08 82.55) (xy 154.94 82.55)
 		)
 		(stroke
 			(width 0)
@@ -3283,7 +3190,7 @@
 	)
 	(wire
 		(pts
-			(xy 198.12 60.96) (xy 200.66 60.96)
+			(xy 198.12 60.96) (xy 207.01 60.96)
 		)
 		(stroke
 			(width 0)
@@ -3372,8 +3279,8 @@
 		(uuid "fe149dc3-4bd7-4da3-be1a-0c1a7269c687")
 	)
 	(hierarchical_label "8V"
-		(shape passive)
-		(at 200.66 60.96 0)
+		(shape output)
+		(at 213.36 60.96 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -3383,7 +3290,7 @@
 		(uuid "35900508-17da-44a2-8646-74b16d105eba")
 	)
 	(hierarchical_label "3.3V"
-		(shape passive)
+		(shape output)
 		(at 198.12 110.49 90)
 		(effects
 			(font
@@ -3393,30 +3300,8 @@
 		)
 		(uuid "3c9a4cfe-e270-41d4-8aed-fd7f8a170896")
 	)
-	(hierarchical_label "8V"
-		(shape passive)
-		(at 91.44 113.03 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "819b5ec8-d7da-4421-bdd8-47f82280426f")
-	)
-	(hierarchical_label "Gnd"
-		(shape passive)
-		(at 137.16 86.36 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "b027e069-4e1a-4e2d-8da5-68ce3f044eb3")
-	)
 	(hierarchical_label "12V"
-		(shape passive)
+		(shape output)
 		(at 92.71 22.86 90)
 		(effects
 			(font
@@ -3426,7 +3311,7 @@
 		)
 		(uuid "c4d5656e-b101-415d-b12b-f7ecb845037c")
 	)
-	(hierarchical_label "Gnd"
+	(hierarchical_label "PwrGnd"
 		(shape passive)
 		(at 134.62 134.62 0)
 		(effects
@@ -3438,7 +3323,7 @@
 		(uuid "e05beeba-415e-41cd-8a0a-da3446b07f35")
 	)
 	(hierarchical_label "5V"
-		(shape passive)
+		(shape output)
 		(at 149.86 109.22 90)
 		(effects
 			(font
@@ -3458,7 +3343,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "1839efb0-3ef0-4ab5-8db7-6299c115f5f3")
-		(property "Reference" "R41"
+		(property "Reference" "R46"
 			(at 101.6 67.3099 0)
 			(effects
 				(font
@@ -3512,7 +3397,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "R41")
+					(reference "R46")
 					(unit 1)
 				)
 			)
@@ -3527,7 +3412,7 @@
 		(on_board yes)
 		(dnp no)
 		(uuid "28d776f0-2699-45d1-bdfb-19302fb37ad3")
-		(property "Reference" "D21"
+		(property "Reference" "D22"
 			(at 55.626 29.718 90)
 			(effects
 				(font
@@ -3581,7 +3466,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "D21")
+					(reference "D22")
 					(unit 1)
 				)
 			)
@@ -3805,183 +3690,6 @@
 		)
 	)
 	(symbol
-		(lib_id "SamacSys_Parts:LT8631IFE#PBF")
-		(at 111.76 40.64 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "65dc8f34-5b65-4fa2-9e57-7718ef30fb5f")
-		(property "Reference" "IC1"
-			(at 132.08 33.02 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "LT8631IFE#PBF"
-			(at 132.08 35.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "SamacSys_Parts:SOP65P640X120-21N"
-			(at 148.59 135.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Analog-Devices/LT8631IFEPBF?qs=oahfZPh6IALt9hCBxhtB7A%3D%3D"
-			(at 148.59 235.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(property "Description" "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg"
-			(at 111.76 40.64 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Height" "1.2"
-			(at 148.59 435.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(property "Mouser Part Number" "584-LT8631IFE#PBF"
-			(at 148.59 535.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Analog-Devices/LT8631IFEPBF?qs=oahfZPh6IALt9hCBxhtB7A%3D%3D"
-			(at 148.59 635.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(property "Manufacturer_Name" "Analog Devices"
-			(at 148.59 735.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(property "Manufacturer_Part_Number" "LT8631IFE#PBF"
-			(at 148.59 835.56 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-				(hide yes)
-			)
-		)
-		(pin "3"
-			(uuid "84a76e40-f48a-46f8-ba32-0a43689f4a62")
-		)
-		(pin "19"
-			(uuid "09a67428-b0c0-492b-a3e6-72f62eab05db")
-		)
-		(pin "10"
-			(uuid "10eeb226-7aa6-4e61-8986-3236a36f9775")
-		)
-		(pin "17"
-			(uuid "8ae29402-8c8d-4e43-8f9b-17bda47df69d")
-		)
-		(pin "2"
-			(uuid "2ba92a0f-ce80-4531-a788-f20e62f80cdc")
-		)
-		(pin "11"
-			(uuid "7c9ae0d8-50e4-4645-890b-860d22be1c59")
-		)
-		(pin "15"
-			(uuid "420099be-dca6-40ba-9bf5-d7f9b2cb1c0a")
-		)
-		(pin "6"
-			(uuid "60161850-7194-466a-be93-65e3762a67d5")
-		)
-		(pin "18"
-			(uuid "088a3ae7-6c73-4065-9729-40860680db6a")
-		)
-		(pin "21"
-			(uuid "ecf4c2a0-d78e-4e05-a17e-e81ca5254eff")
-		)
-		(pin "1"
-			(uuid "9abd0390-6715-419d-81a3-2a4bc44cbbff")
-		)
-		(pin "13"
-			(uuid "b24b5123-7db3-46a1-8515-3180457cfec0")
-		)
-		(pin "14"
-			(uuid "85d55c2b-fa94-4fe2-8741-10e40605dbab")
-		)
-		(pin "7"
-			(uuid "7cb07fb4-0471-427d-93b5-ac494d847639")
-		)
-		(pin "12"
-			(uuid "e50d0464-004c-4696-9499-e35ec5ed9793")
-		)
-		(pin "4"
-			(uuid "1f5593db-2fb2-488b-9b5b-584b913d8e65")
-		)
-		(pin "8"
-			(uuid "61646e95-3964-4dc5-917d-715dbf8b2d39")
-		)
-		(pin "9"
-			(uuid "39bad843-c9dd-4ee1-8341-93f5229f2250")
-		)
-		(pin "16"
-			(uuid "0a09b188-5a40-4c70-9eae-800ad57dd763")
-		)
-		(pin "20"
-			(uuid "ae41a01e-fce4-4a5a-acfd-a71bf6ffe50a")
-		)
-		(pin "5"
-			(uuid "cde7a551-1e80-473c-a0b7-51f13c173e09")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "IC1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:C")
 		(at 83.82 30.48 0)
 		(unit 1)
@@ -4140,7 +3848,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "769297f2-6783-4cf0-9aaf-5c8f753a15e1")
-		(property "Reference" "R39"
+		(property "Reference" "R44"
 			(at 97.79 29.2099 0)
 			(effects
 				(font
@@ -4194,7 +3902,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "R39")
+					(reference "R44")
 					(unit 1)
 				)
 			)
@@ -4427,7 +4135,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "7a687f4b-db8a-450c-8f32-188b4428b425")
-		(property "Reference" "R42"
+		(property "Reference" "R47"
 			(at 184.15 66.0399 0)
 			(effects
 				(font
@@ -4481,7 +4189,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "R42")
+					(reference "R47")
 					(unit 1)
 				)
 			)
@@ -4631,6 +4339,194 @@
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
 					(reference "C21")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_name "LT8631IFE#PBF_1")
+		(lib_id "SamacSys_Parts:LT8631IFE#PBF")
+		(at 111.76 40.64 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "a11fe7db-788d-4d33-ac5c-2e8f739574f0")
+		(property "Reference" "IC1"
+			(at 132.08 33.02 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "LT8631IFE#PBF"
+			(at 132.08 35.56 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SOP65P640X120-21N"
+			(at 148.59 38.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf"
+			(at 148.59 40.64 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Description" "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg"
+			(at 111.76 40.64 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description_1" "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg"
+			(at 148.59 43.18 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Height" "1.2"
+			(at 148.59 45.72 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Mouser Part Number" "584-LT8631IFE#PBF"
+			(at 148.59 48.26 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Analog-Devices/LT8631IFEPBF?qs=oahfZPh6IALt9hCBxhtB7A%3D%3D"
+			(at 148.59 50.8 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer_Name" "Analog Devices"
+			(at 148.59 53.34 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer_Part_Number" "LT8631IFE#PBF"
+			(at 148.59 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(pin "4"
+			(uuid "411d4b69-89cc-41cd-9c51-5a50761b47d1")
+		)
+		(pin "3"
+			(uuid "073a39f2-8fc8-480f-a692-5aa72d0dfe61")
+		)
+		(pin "2"
+			(uuid "1c7ab627-4b31-49b8-bbef-98eeac6d40f9")
+		)
+		(pin "1"
+			(uuid "18af82aa-b90b-410c-914b-c8386fdaa6ea")
+		)
+		(pin "5"
+			(uuid "5a67d2c3-77bd-4dbc-8214-7630abce1a27")
+		)
+		(pin "12"
+			(uuid "cdc695ae-108f-4465-ab09-0ab3f601a8d0")
+		)
+		(pin "6"
+			(uuid "df89cdeb-ef4d-4741-92bd-27e67cd753a0")
+		)
+		(pin "7"
+			(uuid "e5c0a507-8c69-43d0-9565-08e624f26540")
+		)
+		(pin "9"
+			(uuid "2986f019-fe78-48a1-b0f8-25633299cec3")
+		)
+		(pin "16"
+			(uuid "019d8d21-77cd-4771-bc40-ea873230d3aa")
+		)
+		(pin "13"
+			(uuid "aacbc0b0-a334-4ae9-954c-86945d336344")
+		)
+		(pin "10"
+			(uuid "d5f9c7e9-465e-43a9-b7b8-ffb07523c66e")
+		)
+		(pin "18"
+			(uuid "d9daf01b-bb51-47a2-b83b-9f00836974bc")
+		)
+		(pin "19"
+			(uuid "753e8767-52c6-4df0-9c7c-585f6d1f43cb")
+		)
+		(pin "14"
+			(uuid "f26eff36-79f9-4eef-8a73-ca2926b4e3de")
+		)
+		(pin "11"
+			(uuid "bf60bc1e-19f9-42fe-83c2-c4ca63401de0")
+		)
+		(pin "17"
+			(uuid "4c25cd8b-02a2-4583-a290-8d09c094f26b")
+		)
+		(pin "21"
+			(uuid "ce9a3c0e-dc40-42f2-bcae-bcace031e942")
+		)
+		(pin "8"
+			(uuid "07465738-8c0e-4d7c-8d0c-dc0fb0776160")
+		)
+		(pin "20"
+			(uuid "eeb24c58-4831-4f6a-aca6-8ef49eec5d33")
+		)
+		(pin "15"
+			(uuid "63ea49a7-ae22-474d-82e0-bb76fa1196fe")
+		)
+		(instances
+			(project ""
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
+					(reference "IC1")
 					(unit 1)
 				)
 			)
@@ -5143,78 +5039,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:VPP")
-		(at 154.94 110.49 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "d8e45c44-a94a-4fd4-a3f0-c45a361e26db")
-		(property "Reference" "#PWR077"
-			(at 154.94 114.3 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "5v"
-			(at 154.94 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 154.94 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 154.94 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 154.94 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "9a742be5-950a-4d59-a468-04e646166ef9")
-		)
-		(instances
-			(project "Power"
-				(path "/71d70a0d-52b4-4573-a5e3-54254cf0f0ef"
-					(reference "#PWR?")
-					(unit 1)
-				)
-			)
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "#PWR077")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:R")
 		(at 95.25 40.64 0)
 		(unit 1)
@@ -5224,7 +5048,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "d9158564-0225-4ad0-9a22-25508ba01fd6")
-		(property "Reference" "R40"
+		(property "Reference" "R45"
 			(at 97.79 39.3699 0)
 			(effects
 				(font
@@ -5278,79 +5102,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "R40")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 203.2 113.03 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "ddc8687f-7ce3-4341-acb6-84c36d02a2c5")
-		(property "Reference" "#PWR078"
-			(at 203.2 116.84 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "3.3v"
-			(at 203.2 107.95 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 203.2 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 203.2 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 203.2 113.03 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "4b024ac5-4c6b-4d01-9f31-9d27b29b8344")
-		)
-		(instances
-			(project "Power"
-				(path "/71d70a0d-52b4-4573-a5e3-54254cf0f0ef"
-					(reference "#PWR?")
-					(unit 1)
-				)
-			)
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "#PWR078")
+					(reference "R45")
 					(unit 1)
 				)
 			)
@@ -5436,7 +5188,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "f2e22924-2d4a-41f3-9fa5-69b81532fd96")
-		(property "Reference" "R43"
+		(property "Reference" "R48"
 			(at 184.15 76.1999 0)
 			(effects
 				(font
@@ -5490,7 +5242,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/b7957fe4-df67-4c41-b5aa-4d77d8d1f123"
-					(reference "R43")
+					(reference "R48")
 					(unit 1)
 				)
 			)

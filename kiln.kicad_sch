@@ -284,6 +284,26 @@
 	)
 	(wire
 		(pts
+			(xy 102.87 92.71) (xy 102.87 95.25)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "1c9d960b-66a6-4ac0-aee1-ce9b351872df")
+	)
+	(wire
+		(pts
+			(xy 111.76 139.7) (xy 111.76 149.86)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "302086e6-08b2-4d63-b6c0-9e2702b14638")
+	)
+	(wire
+		(pts
 			(xy 132.08 88.9) (xy 132.08 95.25)
 		)
 		(stroke
@@ -344,16 +364,6 @@
 	)
 	(wire
 		(pts
-			(xy 111.76 139.7) (xy 111.76 149.86)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "84667853-e8be-40e8-a5cc-dcaa117af9f5")
-	)
-	(wire
-		(pts
 			(xy 109.22 105.41) (xy 123.19 105.41)
 		)
 		(stroke
@@ -390,17 +400,7 @@
 			(width 0)
 			(type default)
 		)
-		(uuid "d2d60650-af63-4df0-888c-f7d6e4c3e3f7")
-	)
-	(wire
-		(pts
-			(xy 102.87 92.71) (xy 102.87 95.25)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "ffb1f576-1959-4896-9d16-a5f69022a80e")
+		(uuid "f4a0a2d7-cc6a-4bd6-b190-58b87ea7b18b")
 	)
 	(symbol
 		(lib_id "power:VPP")
@@ -1294,26 +1294,6 @@
 				(justify left top)
 			)
 		)
-		(pin "3.3V" passive
-			(at 132.08 95.25 90)
-			(uuid "20871187-7846-47dc-bb42-eaa40400f5bf")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "5V" passive
-			(at 134.62 95.25 90)
-			(uuid "35155e59-6e8d-42c2-baee-0888a8ab1bbb")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
 		(pin "GND" passive
 			(at 133.35 118.11 270)
 			(uuid "d38c0bfe-80a6-4566-9aff-886a7d0d282c")
@@ -1322,16 +1302,6 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
-			)
-		)
-		(pin "12V" passive
-			(at 129.54 95.25 90)
-			(uuid "d302eb98-fae7-443d-beb4-cffef1f2ad3a")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
 			)
 		)
 		(pin "DataFromSafty" input
@@ -1362,6 +1332,36 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
+			)
+		)
+		(pin "3.3V" input
+			(at 134.62 95.25 90)
+			(uuid "ef72645a-4a2b-4227-b02c-fd68843ed300")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "5V" input
+			(at 132.08 95.25 90)
+			(uuid "c8522271-b68a-432e-b1aa-f885ee837a0d")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "12V" input
+			(at 129.54 95.25 90)
+			(uuid "09731521-1a27-44d9-a085-49d4b51c8df7")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
 			)
 		)
 		(instances
@@ -1405,16 +1405,6 @@
 				(justify left top)
 			)
 		)
-		(pin "12V" passive
-			(at 106.68 95.25 90)
-			(uuid "b7b73603-7665-4f47-aab8-268137c5a12c")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
 		(pin "GND" passive
 			(at 106.68 119.38 270)
 			(uuid "33e22582-39f0-4f5f-8146-85c5fc879429")
@@ -1423,16 +1413,6 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
-			)
-		)
-		(pin "8V" passive
-			(at 102.87 95.25 90)
-			(uuid "93185368-cc73-4fb0-8197-9b94ed16f61f")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
 			)
 		)
 		(pin "DataGnd" passive
@@ -1468,6 +1448,26 @@
 		(pin "Fault" input
 			(at 109.22 102.87 0)
 			(uuid "ec681327-6a68-4d51-a0b3-4635442750c4")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "8V" input
+			(at 102.87 95.25 90)
+			(uuid "30bdb6ec-d96e-4165-b60d-95ae4cd17d05")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "12V" input
+			(at 106.68 95.25 90)
+			(uuid "2e760dd8-c7fd-48c3-b420-68c3b21e1e04")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1516,9 +1516,9 @@
 				(justify left top)
 			)
 		)
-		(pin "3.3V" passive
+		(pin "3.3V" output
 			(at 116.84 149.86 90)
-			(uuid "fc8867b0-5ba8-49dc-b940-ca7bbe5c0061")
+			(uuid "ccc06324-c06a-4b79-a008-28b72e87f782")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1526,9 +1526,9 @@
 				(justify right)
 			)
 		)
-		(pin "5V" passive
+		(pin "5V" output
 			(at 114.3 149.86 90)
-			(uuid "4fa68610-74b5-4e15-b63b-6bd1b45dc5a5")
+			(uuid "41b5f29a-d084-4f13-893f-ea335dc40c0d")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1536,34 +1536,34 @@
 				(justify right)
 			)
 		)
-		(pin "Gnd" passive
+		(pin "8V" output
+			(at 107.95 149.86 90)
+			(uuid "d47ded75-af5c-4fa5-8b12-c621f6c826d3")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "12V" output
+			(at 111.76 149.86 90)
+			(uuid "6f556b26-ae14-48bb-9b38-8e8125915370")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "PwrGnd" passive
 			(at 114.3 163.83 270)
-			(uuid "4db1f62a-8a39-42bf-bce9-e30c3ee4b95d")
+			(uuid "b72a5b49-d33d-4e47-83a6-5315b783a646")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
 				(justify left)
-			)
-		)
-		(pin "12V" passive
-			(at 111.76 149.86 90)
-			(uuid "cf8a9a81-b95f-41f9-a639-3757f38ba59d")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "8V" passive
-			(at 107.95 149.86 90)
-			(uuid "cf77d7d6-6ffc-404a-a631-4ea0d8d19905")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
 			)
 		)
 		(instances
