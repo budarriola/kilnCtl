@@ -5,145 +5,6 @@
 	(uuid "449e52dd-24dc-4e96-b00e-56bb8ee2aff1")
 	(paper "A4")
 	(lib_symbols
-		(symbol "Device:C"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0.254)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "C"
-				(at 0.635 2.54 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Value" "C"
-				(at 0.635 -2.54 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Footprint" ""
-				(at 0.9652 -3.81 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "~"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "Unpolarized capacitor"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_keywords" "cap capacitor"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_fp_filters" "C_*"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "C_0_1"
-				(polyline
-					(pts
-						(xy -2.032 0.762) (xy 2.032 0.762)
-					)
-					(stroke
-						(width 0.508)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy -2.032 -0.762) (xy 2.032 -0.762)
-					)
-					(stroke
-						(width 0.508)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "C_1_1"
-				(pin passive line
-					(at 0 3.81 270)
-					(length 2.794)
-					(name "~"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -3.81 90)
-					(length 2.794)
-					(name "~"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "Device:R"
 			(pin_numbers
 				(hide yes)
@@ -1727,12 +1588,6 @@
 		(uuid "096aa3f0-35df-4c04-b4b9-8a0b03ce962a")
 	)
 	(junction
-		(at 146.05 127)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "48163846-b674-4423-9e8d-cf2f1a88cc45")
-	)
-	(junction
 		(at 143.51 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1761,12 +1616,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "b0f0041d-766b-49ff-a518-329279d149f4")
-	)
-	(junction
-		(at 146.05 107.95)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b1aa94fb-8fda-4c95-bb65-736665ffbbff")
 	)
 	(junction
 		(at 175.26 72.39)
@@ -1821,16 +1670,6 @@
 			(type default)
 		)
 		(uuid "12fba9d9-116a-4c22-8698-15b36360c594")
-	)
-	(wire
-		(pts
-			(xy 160.02 124.46) (xy 160.02 127)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "17a4d25c-fb65-4ebd-8f3a-3115c7bd4780")
 	)
 	(wire
 		(pts
@@ -2054,16 +1893,6 @@
 	)
 	(wire
 		(pts
-			(xy 160.02 115.57) (xy 149.86 115.57)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "734ac2b7-3924-4249-b187-446e5243c20a")
-	)
-	(wire
-		(pts
 			(xy 166.37 72.39) (xy 175.26 72.39)
 		)
 		(stroke
@@ -2104,36 +1933,6 @@
 	)
 	(wire
 		(pts
-			(xy 160.02 116.84) (xy 160.02 115.57)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9883849f-4e51-4354-a741-ccec0165365d")
-	)
-	(wire
-		(pts
-			(xy 149.86 115.57) (xy 149.86 107.95)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9922a481-fe62-45b8-aacb-508ed3a3feba")
-	)
-	(wire
-		(pts
-			(xy 160.02 127) (xy 146.05 127)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9ca0c986-e080-45d1-995e-d8d87d821b67")
-	)
-	(wire
-		(pts
 			(xy 139.7 107.95) (xy 139.7 111.76)
 		)
 		(stroke
@@ -2141,16 +1940,6 @@
 			(type default)
 		)
 		(uuid "9eb020ad-c2e8-4370-a82e-d403786c1823")
-	)
-	(wire
-		(pts
-			(xy 149.86 107.95) (xy 146.05 107.95)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b5b94f05-cd55-4f66-ad81-2cf09fe9674f")
 	)
 	(wire
 		(pts
@@ -2294,7 +2083,7 @@
 		(on_board yes)
 		(dnp no)
 		(uuid "25d4f2b7-fadb-419e-b5de-223faeda7119")
-		(property "Reference" "R25"
+		(property "Reference" "R32"
 			(at 128.778 122.936 90)
 			(effects
 				(font
@@ -2319,7 +2108,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Draloric/RCA040210K0FKED?qs=sGAEpiMZZMtlubZbdhIBICUKE4ZsXujxYq%2F1aphagis%3D"
 			(at 130.81 123.19 0)
 			(effects
 				(font
@@ -2346,19 +2135,19 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "R25")
+					(reference "R32")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "R53")
+					(reference "R60")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "R29")
+					(reference "R36")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "R62")
+					(reference "R69")
 					(unit 1)
 				)
 			)
@@ -2400,7 +2189,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "https://content.kemet.com/datasheets/KEM_R7002_EC2_EE2.pdf"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/EE2-24SNUH?qs=UeqeubEbzTW%252BOlEhg2peCg%3D%3D"
 			(at 153.67 81.28 0)
 			(effects
 				(font
@@ -2501,7 +2290,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "https://www.onsemi.com/pub/Collateral/S110FP-D.pdf"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
 			(at 125.73 77.47 0)
 			(effects
 				(font
@@ -2593,7 +2382,7 @@
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "D21")
+					(reference "D22")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
@@ -2601,7 +2390,86 @@
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "D23")
+					(reference "D24")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 124.46 116.84 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "7921b1b8-446e-4de3-80a2-3ea5b27bf892")
+		(property "Reference" "R31"
+			(at 122.682 114.554 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "120"
+			(at 124.714 116.84 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 124.46 115.062 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1200FE000?qs=sGAEpiMZZMtlubZbdhIBIMAhWB6%252BRofmsfIIZouqAvg%3D"
+			(at 124.46 116.84 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 124.46 116.84 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "8955c980-a54d-4542-87a0-687c06d86b09")
+		)
+		(pin "1"
+			(uuid "d87806c1-7132-4070-bf74-b71b8e8ea769")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
+					(reference "R31")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
+					(reference "R59")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
+					(reference "R35")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
+					(reference "R68")
 					(unit 1)
 				)
 			)
@@ -2720,88 +2588,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C")
-		(at 160.02 120.65 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "9c62c9b5-1e5e-43f9-b9ff-e194e45cfcec")
-		(property "Reference" "C13"
-			(at 163.83 119.3799 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "0.001uf"
-			(at 163.83 121.9199 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
-			(at 160.9852 124.46 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 160.02 120.65 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
-			(at 160.02 120.65 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "08dc09e8-ec6b-47cf-a18d-458bb5f1159b")
-		)
-		(pin "1"
-			(uuid "cd166644-34ef-41a9-8bd3-110b1a5f82a5")
-		)
-		(instances
-			(project ""
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "C13")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "C44")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "C14")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "C50")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:R")
 		(at 154.94 62.23 90)
 		(unit 1)
@@ -2810,7 +2596,7 @@
 		(on_board yes)
 		(dnp no)
 		(uuid "ba62b14a-1faf-47ff-be8e-31b29ee709d4")
-		(property "Reference" "R26"
+		(property "Reference" "R33"
 			(at 155.194 60.198 90)
 			(effects
 				(font
@@ -2835,7 +2621,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/YAGEO/RC0805FR-100RL?qs=g6xwsc4j%252B%2FqfSt9luyhNYQ%3D%3D"
 			(at 154.94 62.23 0)
 			(effects
 				(font
@@ -2862,19 +2648,19 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "R26")
+					(reference "R33")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "R54")
+					(reference "R61")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "R30")
+					(reference "R37")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "R63")
+					(reference "R70")
 					(unit 1)
 				)
 			)
@@ -2916,7 +2702,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "https://www.littelfuse.com/media?resourcetype=datasheets&itemid=75e32973-b177-4ee3-a0ff-cedaf1abdb93&filename=smaj-datasheet"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Bourns/SMAJ24CA?qs=A3H9pljuJ8RsSQb8zLkILA%3D%3D"
 			(at 146.05 120.65 0)
 			(effects
 				(font
@@ -2947,7 +2733,7 @@
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "D22")
+					(reference "D23")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
@@ -2955,86 +2741,7 @@
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "D24")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R")
-		(at 124.46 116.84 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "dd0ba7d6-efb0-45bb-b4a7-9050193ec655")
-		(property "Reference" "R24"
-			(at 124.714 114.808 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "100"
-			(at 124.206 116.84 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 124.46 118.618 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 124.46 116.84 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Resistor"
-			(at 124.46 116.84 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "eaed8be0-55cc-4e31-88e3-c78420ac4a36")
-		)
-		(pin "1"
-			(uuid "a6f6ac27-caec-4d3b-887a-c73c7b936397")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "R24")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "R52")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "R28")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "R61")
+					(reference "D25")
 					(unit 1)
 				)
 			)
@@ -3050,7 +2757,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "e4636b0d-4f27-4136-a4e5-c6a1a5e61847")
-		(property "Reference" "J7"
+		(property "Reference" "J8"
 			(at 195.58 80.0099 0)
 			(effects
 				(font
@@ -3078,7 +2785,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Phoenix-Contact/1935174?qs=QWULklcAmSR8B7o4YouITA%3D%3D"
 			(at 195.58 78.74 0)
 			(effects
 				(font
@@ -3169,19 +2876,19 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "J7")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "J13")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
 					(reference "J8")
 					(unit 1)
 				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
+					(reference "J14")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
+					(reference "J9")
+					(unit 1)
+				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "J15")
+					(reference "J16")
 					(unit 1)
 				)
 			)
@@ -3196,7 +2903,7 @@
 		(on_board yes)
 		(dnp no)
 		(uuid "ea299d02-76c8-456a-af53-f866985ab587")
-		(property "Reference" "R27"
+		(property "Reference" "R34"
 			(at 155.194 90.678 90)
 			(effects
 				(font
@@ -3221,7 +2928,7 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "~"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/YAGEO/RC0805FR-100RL?qs=g6xwsc4j%252B%2FqfSt9luyhNYQ%3D%3D"
 			(at 154.94 92.71 0)
 			(effects
 				(font
@@ -3248,19 +2955,19 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "R27")
+					(reference "R34")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "R55")
+					(reference "R62")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "R31")
+					(reference "R38")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "R64")
+					(reference "R71")
 					(unit 1)
 				)
 			)
