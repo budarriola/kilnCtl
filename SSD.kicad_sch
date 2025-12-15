@@ -1588,6 +1588,12 @@
 		(uuid "096aa3f0-35df-4c04-b4b9-8a0b03ce962a")
 	)
 	(junction
+		(at 173.99 72.39)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "3a1f1759-2741-4b5e-a4a7-38d1c0519c8c")
+	)
+	(junction
 		(at 143.51 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1618,12 +1624,6 @@
 		(uuid "b0f0041d-766b-49ff-a518-329279d149f4")
 	)
 	(junction
-		(at 175.26 72.39)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b7cd2b36-4dcf-4be8-9d11-8fae91f95e44")
-	)
-	(junction
 		(at 163.83 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1643,7 +1643,7 @@
 	)
 	(wire
 		(pts
-			(xy 175.26 90.17) (xy 163.83 90.17)
+			(xy 173.99 90.17) (xy 163.83 90.17)
 		)
 		(stroke
 			(width 0)
@@ -1763,6 +1763,16 @@
 	)
 	(wire
 		(pts
+			(xy 173.99 78.74) (xy 179.07 78.74)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "332d1733-cad7-4ec3-84f9-096b806ad7b5")
+	)
+	(wire
+		(pts
 			(xy 139.7 90.17) (xy 139.7 107.95)
 		)
 		(stroke
@@ -1793,13 +1803,13 @@
 	)
 	(wire
 		(pts
-			(xy 179.07 83.82) (xy 175.26 83.82)
+			(xy 179.07 81.28) (xy 173.99 81.28)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "469f9cca-184e-408f-acf8-7d0ae21b4203")
+		(uuid "47c23ad1-319a-4565-82fa-05c881bc1d2c")
 	)
 	(wire
 		(pts
@@ -1833,7 +1843,7 @@
 	)
 	(wire
 		(pts
-			(xy 175.26 62.23) (xy 175.26 72.39)
+			(xy 173.99 62.23) (xy 173.99 72.39)
 		)
 		(stroke
 			(width 0)
@@ -1873,7 +1883,17 @@
 	)
 	(wire
 		(pts
-			(xy 175.26 83.82) (xy 175.26 90.17)
+			(xy 176.53 66.04) (xy 161.29 66.04)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "580325ae-9b32-4629-bfe3-81c5738f9db0")
+	)
+	(wire
+		(pts
+			(xy 173.99 81.28) (xy 173.99 90.17)
 		)
 		(stroke
 			(width 0)
@@ -1883,17 +1903,7 @@
 	)
 	(wire
 		(pts
-			(xy 175.26 81.28) (xy 179.07 81.28)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "702fcdb8-3961-4d2e-b1d8-ce6a06272e11")
-	)
-	(wire
-		(pts
-			(xy 166.37 72.39) (xy 175.26 72.39)
+			(xy 166.37 72.39) (xy 173.99 72.39)
 		)
 		(stroke
 			(width 0)
@@ -1923,13 +1933,23 @@
 	)
 	(wire
 		(pts
-			(xy 175.26 72.39) (xy 175.26 81.28)
+			(xy 173.99 72.39) (xy 173.99 78.74)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "8a5ae8c6-2da4-4345-b456-04b1918796af")
+	)
+	(wire
+		(pts
+			(xy 179.07 83.82) (xy 176.53 83.82)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "90abefca-1495-4b97-a80a-07fc56ad2b2b")
 	)
 	(wire
 		(pts
@@ -1940,6 +1960,16 @@
 			(type default)
 		)
 		(uuid "9eb020ad-c2e8-4370-a82e-d403786c1823")
+	)
+	(wire
+		(pts
+			(xy 176.53 66.04) (xy 176.53 83.82)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b533b2f7-8eed-4c3c-9a37-a510d70ffbfa")
 	)
 	(wire
 		(pts
@@ -1973,16 +2003,6 @@
 	)
 	(wire
 		(pts
-			(xy 179.07 78.74) (xy 179.07 66.04)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "e6cfdd07-34f1-41cd-b203-d39f1d1d48ab")
-	)
-	(wire
-		(pts
 			(xy 143.51 92.71) (xy 151.13 92.71)
 		)
 		(stroke
@@ -2003,23 +2023,13 @@
 	)
 	(wire
 		(pts
-			(xy 158.75 62.23) (xy 175.26 62.23)
+			(xy 158.75 62.23) (xy 173.99 62.23)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "eb4e6cea-9b2f-4d30-a7e9-56e711d7f6b2")
-	)
-	(wire
-		(pts
-			(xy 179.07 66.04) (xy 161.29 66.04)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f1ccd1a1-7a21-40e9-a15e-dda4164e16d3")
 	)
 	(wire
 		(pts
@@ -2588,85 +2598,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:R")
-		(at 154.94 62.23 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp yes)
-		(uuid "ba62b14a-1faf-47ff-be8e-31b29ee709d4")
-		(property "Reference" "R38"
-			(at 155.194 60.198 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "0"
-			(at 154.686 62.23 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
-			(at 154.94 64.008 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/YAGEO/RC0805FR-100RL?qs=g6xwsc4j%252B%2FqfSt9luyhNYQ%3D%3D"
-			(at 154.94 62.23 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Resistor"
-			(at 154.94 62.23 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "bdb67e45-dae2-4e40-a30e-4a550ef66c81")
-		)
-		(pin "1"
-			(uuid "1f02b58c-035f-4ad1-8dbb-547f010e30ef")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "R38")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "R66")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "R42")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "R75")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Diode:SMAJ24CA")
 		(at 146.05 120.65 90)
 		(unit 1)
@@ -2742,6 +2673,164 @@
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
 					(reference "D26")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 154.94 92.71 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp yes)
+		(uuid "ca09d830-1b32-4afa-85ce-08d3fa919537")
+		(property "Reference" "R38"
+			(at 155.194 90.678 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "0"
+			(at 154.686 92.71 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
+			(at 154.94 94.488 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Royalohm/1206S4J0000TDE?qs=jcD%2FCkGBYePiYOBtSMuX2g%3D%3D"
+			(at 154.94 92.71 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 154.94 92.71 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "bfa7d2fa-2fed-4741-a1f8-9864ee794c05")
+		)
+		(pin "1"
+			(uuid "9174955f-5d95-4846-8417-28d2df12e912")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
+					(reference "R38")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
+					(reference "R42")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
+					(reference "R39")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
+					(reference "R43")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 154.94 62.23 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp yes)
+		(uuid "e1c15462-38e4-4345-ac0f-34d66e9e40ac")
+		(property "Reference" "R82"
+			(at 155.194 60.198 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "0"
+			(at 154.686 62.23 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
+			(at 154.94 64.008 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Royalohm/1206S4J0000TDE?qs=jcD%2FCkGBYePiYOBtSMuX2g%3D%3D"
+			(at 154.94 62.23 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 154.94 62.23 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "74678f15-7e03-48bf-af60-d5b5449199ab")
+		)
+		(pin "1"
+			(uuid "53927175-1a49-4491-b640-6dbb576e5645")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
+					(reference "R82")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
+					(reference "R84")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
+					(reference "R83")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
+					(reference "R85")
 					(unit 1)
 				)
 			)
@@ -2889,85 +2978,6 @@
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
 					(reference "J16")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R")
-		(at 154.94 92.71 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp yes)
-		(uuid "ea299d02-76c8-456a-af53-f866985ab587")
-		(property "Reference" "R39"
-			(at 155.194 90.678 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "0"
-			(at 154.686 92.71 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
-			(at 154.94 94.488 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/YAGEO/RC0805FR-100RL?qs=g6xwsc4j%252B%2FqfSt9luyhNYQ%3D%3D"
-			(at 154.94 92.71 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Resistor"
-			(at 154.94 92.71 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "f1e19c2c-6a6d-48e8-80f4-8da8877d6189")
-		)
-		(pin "1"
-			(uuid "d3b17bc6-4e5c-434a-bc13-a53f0a95ce67")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "R39")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "R67")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "R43")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "R76")
 					(unit 1)
 				)
 			)
