@@ -145,184 +145,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Diode:SMAJ24CA"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 1.016)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(in_pos_files yes)
-			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "D"
-				(at 0 2.54 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "SMAJ24CA"
-				(at 0 -2.54 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" "Diode_SMD:D_SMA"
-				(at 0 -5.08 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Datasheet" "https://www.littelfuse.com/media?resourcetype=datasheets&itemid=75e32973-b177-4ee3-a0ff-cedaf1abdb93&filename=smaj-datasheet"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Description" "400W bidirectional Transient Voltage Suppressor, 24.0Vr, SMA(DO-214AC)"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "bidirectional diode TVS voltage suppressor"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_fp_filters" "D*SMA*"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(symbol "SMAJ24CA_0_1"
-				(polyline
-					(pts
-						(xy -2.54 -1.27) (xy 0 0) (xy -2.54 1.27) (xy -2.54 -1.27)
-					)
-					(stroke
-						(width 0.2032)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0.508 1.27) (xy 0 1.27) (xy 0 -1.27) (xy -0.508 -1.27)
-					)
-					(stroke
-						(width 0.2032)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 0) (xy -1.27 0)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 2.54 1.27) (xy 2.54 -1.27) (xy 0 0) (xy 2.54 1.27)
-					)
-					(stroke
-						(width 0.2032)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "SMAJ24CA_1_1"
-				(pin passive line
-					(at -3.81 0 0)
-					(length 2.54)
-					(name "A1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 3.81 0 180)
-					(length 2.54)
-					(name "A2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "Relay:EE2-12SNUH"
 			(exclude_from_sim no)
 			(in_bom yes)
@@ -1104,6 +926,234 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "SamacSys_Parts:BSP296NH6327XTSA1"
+			(pin_names
+				(offset 0.762)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "Q"
+				(at 31.75 7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "BSP296NH6327XTSA1"
+				(at 31.75 5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "SOT230P700X170-4N"
+				(at 31.75 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" "https://www.infineon.com/dgdl/Infineon-BSP296N-DS-v02_00-en.pdf?fileId=db3a30433dd58def013dd5af675d001f"
+				(at 31.75 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Description" "Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description_1" "Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223"
+				(at 31.75 -2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Height" "1.7"
+				(at 31.75 -5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Part Number" "726-BSP296NH6327XTSA"
+				(at 31.75 -7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Infineon-Technologies/BSP296NH6327XTSA1?qs=wqPJ3MBjhrj3V6YdzlkuvA%3D%3D"
+				(at 31.75 -10.16 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Name" "Infineon"
+				(at 31.75 -12.7 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Part_Number" "BSP296NH6327XTSA1"
+				(at 31.75 -15.24 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(symbol "BSP296NH6327XTSA1_0_0"
+				(pin passive line
+					(at 0 0 0)
+					(length 5.08)
+					(name "GATE"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -2.54 0)
+					(length 5.08)
+					(name "DRAIN_1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -5.08 0)
+					(length 5.08)
+					(name "SOURCE"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 35.56 0 180)
+					(length 5.08)
+					(name "DRAIN_2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "BSP296NH6327XTSA1_0_1"
+				(polyline
+					(pts
+						(xy 5.08 2.54) (xy 30.48 2.54) (xy 30.48 -7.62) (xy 5.08 -7.62) (xy 5.08 2.54)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "SamacSys_Parts:SS16FP"
 			(pin_names
 				(offset 0.762)
@@ -1356,342 +1406,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Simulation_SPICE:NMOS"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(in_pos_files yes)
-			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "Q"
-				(at 5.08 1.27 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Value" "NMOS"
-				(at 5.08 -1.27 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Footprint" ""
-				(at 5.08 2.54 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Datasheet" "https://ngspice.sourceforge.io/docs/ngspice-html-manual/manual.xhtml#cha_MOSFETs"
-				(at 0 -12.7 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Description" "N-MOSFET transistor, drain/source/gate"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Sim.Device" "NMOS"
-				(at 0 -17.145 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Sim.Type" "VDMOS"
-				(at 0 -19.05 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Sim.Pins" "1=D 2=G 3=S"
-				(at 0 -15.24 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "transistor NMOS N-MOS N-MOSFET simulation"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(symbol "NMOS_0_1"
-				(polyline
-					(pts
-						(xy 0.254 1.905) (xy 0.254 -1.905)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0.254 0) (xy -2.54 0)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0.762 2.286) (xy 0.762 1.27)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0.762 0.508) (xy 0.762 -0.508)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0.762 -1.27) (xy 0.762 -2.286)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0.762 -1.778) (xy 3.302 -1.778) (xy 3.302 1.778) (xy 0.762 1.778)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.016 0) (xy 2.032 0.381) (xy 2.032 -0.381) (xy 1.016 0)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(circle
-					(center 1.651 0)
-					(radius 2.794)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 2.54 2.54) (xy 2.54 1.778)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(circle
-					(center 2.54 1.778)
-					(radius 0.254)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(circle
-					(center 2.54 -1.778)
-					(radius 0.254)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(polyline
-					(pts
-						(xy 2.54 -2.54) (xy 2.54 0) (xy 0.762 0)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 2.794 0.508) (xy 2.921 0.381) (xy 3.683 0.381) (xy 3.81 0.254)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 3.302 0.381) (xy 2.921 -0.254) (xy 3.683 -0.254) (xy 3.302 0.381)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "NMOS_1_1"
-				(pin passive line
-					(at 2.54 5.08 270)
-					(length 2.54)
-					(name "D"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin input line
-					(at -5.08 0 0)
-					(length 2.54)
-					(name "G"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 2.54 -5.08 90)
-					(length 2.54)
-					(name "S"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 	)
 	(text "Install either relay or shorting resistors\nThis relay is not rated for use with heaters"
 		(exclude_from_sim no)
@@ -1702,6 +1416,12 @@
 			)
 		)
 		(uuid "096aa3f0-35df-4c04-b4b9-8a0b03ce962a")
+	)
+	(junction
+		(at 139.7 111.76)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "249c2719-db09-4d9f-a888-86623d8d7e98")
 	)
 	(junction
 		(at 173.99 72.39)
@@ -1716,6 +1436,12 @@
 		(uuid "54643c23-9c66-4bdf-a1b4-10216ae91a61")
 	)
 	(junction
+		(at 116.84 140.97)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "5d4d9d40-7976-4f39-b66f-e4db03c23199")
+	)
+	(junction
 		(at 139.7 107.95)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1728,7 +1454,7 @@
 		(uuid "8caa4e15-072d-489b-b4e3-6bc37dedf569")
 	)
 	(junction
-		(at 139.7 127)
+		(at 139.7 140.97)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "9d928071-f554-478e-9a63-91f2b7af4338")
@@ -1740,16 +1466,16 @@
 		(uuid "b0f0041d-766b-49ff-a518-329279d149f4")
 	)
 	(junction
+		(at 105.41 121.92)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "be7f4efe-0622-4536-b3f1-d2c76e949990")
+	)
+	(junction
 		(at 163.83 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "c2d175d3-1136-4ec1-9697-eebad0692dd2")
-	)
-	(junction
-		(at 130.81 116.84)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "d42eeb46-77e0-4dc2-8321-eaa8824c39cf")
 	)
 	(junction
 		(at 139.7 90.17)
@@ -1769,7 +1495,7 @@
 	)
 	(wire
 		(pts
-			(xy 139.7 107.95) (xy 146.05 107.95)
+			(xy 139.7 107.95) (xy 162.56 107.95)
 		)
 		(stroke
 			(width 0)
@@ -1779,7 +1505,7 @@
 	)
 	(wire
 		(pts
-			(xy 130.81 127) (xy 139.7 127)
+			(xy 105.41 140.97) (xy 116.84 140.97)
 		)
 		(stroke
 			(width 0)
@@ -1809,13 +1535,23 @@
 	)
 	(wire
 		(pts
-			(xy 128.27 116.84) (xy 130.81 116.84)
+			(xy 102.87 121.92) (xy 105.41 121.92)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "1d4c30ed-9ec1-49aa-9f54-01571cca74d4")
+	)
+	(wire
+		(pts
+			(xy 116.84 140.97) (xy 139.7 140.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "20c8043b-c647-488b-8a05-29b858e54e14")
 	)
 	(wire
 		(pts
@@ -1909,6 +1645,16 @@
 	)
 	(wire
 		(pts
+			(xy 152.4 111.76) (xy 139.7 111.76)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "39e3904f-23f9-49bb-9a26-86fd3d42f7e8")
+	)
+	(wire
+		(pts
 			(xy 163.83 92.71) (xy 163.83 90.17)
 		)
 		(stroke
@@ -1929,23 +1675,13 @@
 	)
 	(wire
 		(pts
-			(xy 139.7 127) (xy 139.7 130.81)
+			(xy 139.7 140.97) (xy 139.7 144.78)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "494f659d-704f-4d52-a6b9-4a4f5a111699")
-	)
-	(wire
-		(pts
-			(xy 146.05 116.84) (xy 146.05 107.95)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "4a2afa58-0ce1-4167-aacb-b1feec27f4e7")
 	)
 	(wire
 		(pts
@@ -1969,7 +1705,7 @@
 	)
 	(wire
 		(pts
-			(xy 146.05 127) (xy 139.7 127)
+			(xy 139.7 140.97) (xy 162.56 140.97)
 		)
 		(stroke
 			(width 0)
@@ -1979,7 +1715,7 @@
 	)
 	(wire
 		(pts
-			(xy 130.81 116.84) (xy 130.81 119.38)
+			(xy 105.41 121.92) (xy 105.41 124.46)
 		)
 		(stroke
 			(width 0)
@@ -2029,6 +1765,16 @@
 	)
 	(wire
 		(pts
+			(xy 116.84 124.46) (xy 113.03 124.46)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7b89ad04-2461-4797-8b27-787813f029a4")
+	)
+	(wire
+		(pts
 			(xy 143.51 62.23) (xy 143.51 63.5)
 		)
 		(stroke
@@ -2039,13 +1785,13 @@
 	)
 	(wire
 		(pts
-			(xy 130.81 116.84) (xy 132.08 116.84)
+			(xy 105.41 121.92) (xy 116.84 121.92)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "7d6fd7f2-cfb4-456b-a6c9-7def25607b30")
+		(uuid "7e952b86-355c-4995-9ab0-a021c7a59abf")
 	)
 	(wire
 		(pts
@@ -2069,6 +1815,26 @@
 	)
 	(wire
 		(pts
+			(xy 152.4 121.92) (xy 152.4 111.76)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9a2b5100-bb73-4cb8-8a78-949d9ef4569f")
+	)
+	(wire
+		(pts
+			(xy 105.41 140.97) (xy 105.41 132.08)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9beb9558-4baf-4162-8484-9eb5257b69a6")
+	)
+	(wire
+		(pts
 			(xy 139.7 107.95) (xy 139.7 111.76)
 		)
 		(stroke
@@ -2076,6 +1842,16 @@
 			(type default)
 		)
 		(uuid "9eb020ad-c2e8-4370-a82e-d403786c1823")
+	)
+	(wire
+		(pts
+			(xy 113.03 124.46) (xy 113.03 111.76)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a40a9027-1db7-4883-8d8c-06ab44a271b2")
 	)
 	(wire
 		(pts
@@ -2089,6 +1865,16 @@
 	)
 	(wire
 		(pts
+			(xy 116.84 127) (xy 116.84 140.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b7b7d2d9-e35e-49f9-8980-5918c97df236")
+	)
+	(wire
+		(pts
 			(xy 163.83 90.17) (xy 163.83 88.9)
 		)
 		(stroke
@@ -2099,7 +1885,7 @@
 	)
 	(wire
 		(pts
-			(xy 111.76 116.84) (xy 120.65 116.84)
+			(xy 86.36 121.92) (xy 95.25 121.92)
 		)
 		(stroke
 			(width 0)
@@ -2109,13 +1895,13 @@
 	)
 	(wire
 		(pts
-			(xy 139.7 121.92) (xy 139.7 127)
+			(xy 162.56 109.22) (xy 162.56 107.95)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "ddedbe5b-f2f5-4277-8e10-9ec7547a78bb")
+		(uuid "cfe7c108-db4f-45e4-a315-f93675761c95")
 	)
 	(wire
 		(pts
@@ -2129,16 +1915,6 @@
 	)
 	(wire
 		(pts
-			(xy 146.05 124.46) (xy 146.05 127)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "eae206ec-27f7-4aab-ba26-807552a9d580")
-	)
-	(wire
-		(pts
 			(xy 158.75 62.23) (xy 173.99 62.23)
 		)
 		(stroke
@@ -2146,6 +1922,16 @@
 			(type default)
 		)
 		(uuid "eb4e6cea-9b2f-4d30-a7e9-56e711d7f6b2")
+	)
+	(wire
+		(pts
+			(xy 113.03 111.76) (xy 139.7 111.76)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "efc7eac2-7f54-460b-97ef-c73693a49f6a")
 	)
 	(wire
 		(pts
@@ -2159,6 +1945,16 @@
 	)
 	(wire
 		(pts
+			(xy 162.56 124.46) (xy 162.56 140.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fb83d822-fa3f-4c73-8243-23738e064242")
+	)
+	(wire
+		(pts
 			(xy 143.51 88.9) (xy 143.51 90.17)
 		)
 		(stroke
@@ -2169,7 +1965,7 @@
 	)
 	(hierarchical_label "Trigger"
 		(shape input)
-		(at 111.76 116.84 180)
+		(at 86.36 121.92 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2180,7 +1976,7 @@
 	)
 	(hierarchical_label "RelayGND"
 		(shape passive)
-		(at 139.7 130.81 270)
+		(at 139.7 144.78 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2202,7 +1998,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 130.81 123.19 180)
+		(at 105.41 128.27 180)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2212,7 +2008,7 @@
 		(dnp no)
 		(uuid "25d4f2b7-fadb-419e-b5de-223faeda7119")
 		(property "Reference" "R37"
-			(at 128.778 122.936 90)
+			(at 103.378 128.016 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2222,7 +2018,7 @@
 			)
 		)
 		(property "Value" "10k"
-			(at 130.81 123.444 90)
+			(at 105.41 128.524 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2232,7 +2028,7 @@
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 132.588 123.19 90)
+			(at 107.188 128.27 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2243,7 +2039,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Draloric/RCA040210K0FKED?qs=sGAEpiMZZMtlubZbdhIBICUKE4ZsXujxYq%2F1aphagis%3D"
-			(at 130.81 123.19 0)
+			(at 105.41 128.27 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2254,7 +2050,40 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 130.81 123.19 0)
+			(at 105.41 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 105.41 128.27 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 105.41 128.27 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 105.41 128.27 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2296,6 +2125,215 @@
 		)
 	)
 	(symbol
+		(lib_id "SamacSys_Parts:BSP296NH6327XTSA1")
+		(at 116.84 121.92 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "2c590d09-ef30-4e30-b957-342c51fa22e1")
+		(property "Reference" "Q6"
+			(at 134.62 114.3 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "BSP296NH6327XTSA1"
+			(at 134.62 116.84 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SOT230P700X170-4N"
+			(at 148.59 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.infineon.com/dgdl/Infineon-BSP296N-DS-v02_00-en.pdf?fileId=db3a30433dd58def013dd5af675d001f"
+			(at 148.59 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223"
+			(at 116.84 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223"
+			(at 148.59 124.46 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "1.7"
+			(at 148.59 127 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "726-BSP296NH6327XTSA"
+			(at 148.59 129.54 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Infineon-Technologies/BSP296NH6327XTSA1?qs=wqPJ3MBjhrj3V6YdzlkuvA%3D%3D"
+			(at 148.59 132.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "Infineon"
+			(at 148.59 134.62 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "BSP296NH6327XTSA1"
+			(at 148.59 137.16 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 116.84 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 116.84 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 116.84 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "884cf5d0-2c7f-4382-a09e-54d9e4bac5e3")
+		)
+		(pin "1"
+			(uuid "ba567140-4483-4f40-b06a-c73c78f825e8")
+		)
+		(pin "4"
+			(uuid "9384cf9d-73c0-48f2-8cdf-32df9f6777da")
+		)
+		(pin "3"
+			(uuid "107a8938-af6d-4f74-8930-b8a7513ac5d2")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
+					(reference "Q6")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
+					(reference "Q8")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
+					(reference "Q7")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/c3f3c1c7-367d-41cd-b6cf-4467d28b0b73"
+					(reference "Q10")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
+					(reference "Q9")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Relay:EE2-12SNUH")
 		(at 153.67 81.28 0)
 		(unit 1)
@@ -2317,7 +2355,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "EE2-12SNUH"
+		(property "Value" "EE2-12NUH"
 			(at 147.066 70.104 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2339,7 +2377,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/EE2-24SNUH?qs=UeqeubEbzTW%252BOlEhg2peCg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/EE2-12NUH-L?qs=iaWy59%2Fd4KCUJzluRvvV5g%3D%3D"
 			(at 153.67 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -2350,7 +2388,40 @@
 				)
 			)
 		)
-		(property "Description" "General purpose signal relay, Kemet EE2 Series, DPDT (2 Form C), single coil latching, small footprint SMD, 60W/125VA, 220VDC/250VAC, 2A, 12V DC coil"
+		(property "Description" "General purpose signal relay, Kemet EE2 Series, DPDT (2 Form C), non latching, small footprint SMD, 60W/125VA, 220VDC/250VAC, 2A, 12V DC coil"
+			(at 153.67 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 153.67 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 153.67 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
 			(at 153.67 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -2551,6 +2622,39 @@
 				(justify left)
 			)
 		)
+		(property "Sim.Device" ""
+			(at 124.46 64.77 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 124.46 64.77 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 124.46 64.77 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "2"
 			(uuid "47db62f2-1692-42d1-8803-111ea1f7664f")
 		)
@@ -2584,7 +2688,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 124.46 116.84 270)
+		(at 99.06 121.92 270)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2594,7 +2698,7 @@
 		(dnp no)
 		(uuid "7921b1b8-446e-4de3-80a2-3ea5b27bf892")
 		(property "Reference" "R36"
-			(at 122.682 114.554 90)
+			(at 97.282 119.634 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2604,7 +2708,7 @@
 			)
 		)
 		(property "Value" "120"
-			(at 124.714 116.84 90)
+			(at 99.314 121.92 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2614,7 +2718,7 @@
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 124.46 115.062 90)
+			(at 99.06 120.142 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2625,7 +2729,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1200FE000?qs=sGAEpiMZZMtlubZbdhIBIMAhWB6%252BRofmsfIIZouqAvg%3D"
-			(at 124.46 116.84 0)
+			(at 99.06 121.92 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2636,7 +2740,40 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 124.46 116.84 0)
+			(at 99.06 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 99.06 121.92 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 99.06 121.92 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 99.06 121.92 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2678,8 +2815,8 @@
 		)
 	)
 	(symbol
-		(lib_id "Simulation_SPICE:NMOS")
-		(at 137.16 116.84 0)
+		(lib_id "SamacSys_Parts:SS16FP")
+		(at 162.56 106.68 270)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2687,9 +2824,10 @@
 		(on_board yes)
 		(in_pos_files yes)
 		(dnp no)
-		(uuid "8c8e6c54-9a74-42f3-906d-2d9addeae9bb")
-		(property "Reference" "Q1"
-			(at 133.858 113.538 0)
+		(fields_autoplaced yes)
+		(uuid "c067a9ad-e8b7-4199-a03e-a8c5d7b7f62e")
+		(property "Reference" "D26"
+			(at 166.37 115.5699 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2699,8 +2837,19 @@
 				(justify left)
 			)
 		)
-		(property "Value" "BSP296NH6327XTSA1"
-			(at 143.51 118.1099 0)
+		(property "Value" "SS16FP"
+			(at 166.37 118.1099 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SS12FP"
+			(at 166.37 119.38 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2711,8 +2860,20 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
-			(at 142.24 114.3 0)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 163.83 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 162.56 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2722,8 +2883,80 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Infineon-Technologies/BSP296NH6327XTSA1?qs=wqPJ3MBjhrj3V6YdzlkuvA%3D%3D"
-			(at 137.16 129.54 0)
+		(property "Description_1" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 161.29 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "1"
+			(at 158.75 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "512-SS16FP"
+			(at 156.21 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 153.67 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "onsemi"
+			(at 151.13 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SS16FP"
+			(at 148.59 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 162.56 106.68 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2733,8 +2966,8 @@
 				)
 			)
 		)
-		(property "Description" "N-MOSFET transistor, drain/source/gate"
-			(at 137.16 116.84 0)
+		(property "Sim.Pins" ""
+			(at 162.56 106.68 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2744,130 +2977,8 @@
 				)
 			)
 		)
-		(property "Sim.Device" "NMOS"
-			(at 137.16 133.985 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Sim.Type" "VDMOS"
-			(at 137.16 135.89 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Sim.Pins" "1=D 2=G 3=S"
-			(at 137.16 132.08 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "6bb0971d-6153-45d2-9f7a-9350dd7e85ad")
-		)
-		(pin "2"
-			(uuid "c60651b8-212f-4905-b73f-e84b92bc30e5")
-		)
-		(pin "3"
-			(uuid "94174bec-fa5e-4ba2-b7ca-0685d9c875a9")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "Q1")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "Q3")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "Q2")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/c3f3c1c7-367d-41cd-b6cf-4467d28b0b73"
-					(reference "Q5")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "Q4")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Diode:SMAJ24CA")
-		(at 146.05 120.65 90)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "c85fd852-adb9-4c1d-b1bd-c85c2fa841e6")
-		(property "Reference" "D19"
-			(at 148.336 118.618 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(property "Value" "SMAJ24CA"
-			(at 147.32 124.714 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(property "Footprint" "Diode_SMD:D_SMA"
-			(at 151.13 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Bourns/SMAJ24CA?qs=A3H9pljuJ8RsSQb8zLkILA%3D%3D"
-			(at 146.05 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "400W bidirectional Transient Voltage Suppressor, 24.0Vr, SMA(DO-214AC)"
-			(at 146.05 120.65 0)
+		(property "Sim.Type" ""
+			(at 162.56 106.68 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2878,31 +2989,31 @@
 			)
 		)
 		(pin "2"
-			(uuid "90fbcaf5-8cba-4bd2-8ddf-0b1596a97539")
+			(uuid "290cd320-9114-47e8-bf54-01ee9aeff40c")
 		)
 		(pin "1"
-			(uuid "7197942e-d6b5-45ec-b5c7-383154c5e814")
+			(uuid "19323061-3dd6-4509-9157-f55b71c58acd")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/1389095e-d52a-4619-af64-e9910dc7c62e"
-					(reference "D19")
+					(reference "D26")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-					(reference "D24")
+					(reference "D36")
 					(unit 1)
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-					(reference "D21")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/c3f3c1c7-367d-41cd-b6cf-4467d28b0b73"
 					(reference "D34")
 					(unit 1)
 				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/c3f3c1c7-367d-41cd-b6cf-4467d28b0b73"
+					(reference "D38")
+					(unit 1)
+				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/54172349-357a-423f-9292-efa84b4cc549"
-					(reference "D26")
+					(reference "D37")
 					(unit 1)
 				)
 			)
@@ -2963,6 +3074,39 @@
 		)
 		(property "Description" "Resistor"
 			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 154.94 92.71 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 154.94 92.71 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 154.94 92.71 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3058,6 +3202,39 @@
 		)
 		(property "Description" "Resistor"
 			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 154.94 62.23 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 154.94 62.23 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 154.94 62.23 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3237,6 +3414,39 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 179.07 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 179.07 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 179.07 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 		(pin "2"

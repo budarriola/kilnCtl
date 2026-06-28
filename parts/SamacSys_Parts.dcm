@@ -48,4 +48,10 @@ K
 F https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf
 $ENDCMP
 #
+$CMP BSP296NH6327XTSA1
+D Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223
+K
+F https://www.infineon.com/dgdl/Infineon-BSP296N-DS-v02_00-en.pdf?fileId=db3a30433dd58def013dd5af675d001f
+$ENDCMP
+#
 #End Doc Library

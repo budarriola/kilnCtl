@@ -680,6 +680,12 @@
           "label": "#",
           "name": "${ITEM_NUMBER}",
           "show": true
+        },
+        {
+          "group_by": false,
+          "label": "name",
+          "name": "name",
+          "show": false
         }
       ],
       "filter_string": "",
@@ -687,7 +693,7 @@
       "include_excluded_from_bom": false,
       "name": "",
       "sort_asc": true,
-      "sort_field": "Reference"
+      "sort_field": "Datasheet"
     },
     "bus_aliases": {},
     "connection_grid_size": 50.0,
@@ -738,7 +744,7 @@
         "uuid": "e9c1836b-d16f-494a-819b-41549a786e18"
       }
     ],
-    "used_designators": "U11-13,U17-18,D3-8,D22,D27-35,#PWR18,#PWR21,#PWR23-30,#PWR32-34,#PWR39,#PWR61,#PWR63-64,#PWR67-74,#PWR81-85,A2,C7,C9,C11-29,C45-51,R2-6,R11,R13,R26,R29-33,R35,R44-53,R66-67,R75-81,R86-88,J2-4,J6-7,J10-11,J17-19,FB1-2,K5,Q5,IC1-2,L1-2",
+    "used_designators": "U1-2,U11-13,U17-18,#PWR18,#PWR21,#PWR23-30,#PWR32-34,#PWR39,#PWR61,#PWR63-64,#PWR67-76,#PWR81-85,D3-8,D22,D26-38,A2,C7,C9,C11-29,C45-51,J2-4,J6-7,J10-11,J17-19,R2-6,R11,R13,R26,R29-33,R35,R44-53,R66-67,R75-81,R86-92,FB1-2,K5,Q5-10,IC1-2,L1-2",
     "variants": []
   },
   "sheets": [
