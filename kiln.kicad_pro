@@ -738,7 +738,7 @@
         "uuid": "e9c1836b-d16f-494a-819b-41549a786e18"
       }
     ],
-    "used_designators": "U18,#PWR61,#PWR63,#PWR67-68,#PWR81-82,A2",
+    "used_designators": "U11-13,U17-18,D3-8,D22,D27-35,#PWR18,#PWR21,#PWR23-30,#PWR32-34,#PWR39,#PWR61,#PWR63-64,#PWR67-74,#PWR81-85,A2,C7,C9,C11-29,C45-51,R2-6,R11,R13,R26,R29-33,R35,R44-53,R66-67,R75-81,R86-88,J2-4,J6-7,J10-11,J17-19,FB1-2,K5,Q5,IC1-2,L1-2",
     "variants": []
   },
   "sheets": [
@@ -756,43 +756,59 @@
     ],
     [
       "1389095e-d52a-4619-af64-e9910dc7c62e",
-      "SSD1"
+      "Relay1"
     ],
     [
       "79cb8098-5fc5-49db-9993-ad819d0f9bb4",
-      "SSD2"
+      "Relay2"
     ],
     [
-      "b7957fe4-df67-4c41-b5aa-4d77d8d1f123",
-      "Power"
-    ],
-    [
-      "352ff89a-b0c5-441e-9692-8c7c78c5ff81",
-      "Thermocouple"
+      "97a736c6-3aea-44aa-9cdc-a04a9e3c22ad",
+      "SaftyThermocouple"
     ],
     [
       "88b1d8bc-9aca-411e-bb97-2183f44238e8",
-      "Thermocouple"
-    ],
-    [
-      "bc013942-c6be-49fa-b321-e4929f62929c",
       "Thermocouple1"
     ],
     [
-      "6f9be0ac-ca73-4f51-b23b-16a67ae84d74",
-      "SSD"
-    ],
-    [
-      "e55a10d3-d364-4c02-8371-0e9595bd54af",
+      "bc013942-c6be-49fa-b321-e4929f62929c",
       "Thermocouple2"
     ],
     [
-      "54172349-357a-423f-9292-efa84b4cc549",
-      "SSD"
+      "6f9be0ac-ca73-4f51-b23b-16a67ae84d74",
+      "AuxRelay"
     ],
     [
-      "4928fe5c-e6c8-45bf-90f3-0f12755b9f9e",
+      "e55a10d3-d364-4c02-8371-0e9595bd54af",
       "Thermocouple3"
+    ],
+    [
+      "54172349-357a-423f-9292-efa84b4cc549",
+      "SaftyRelay"
+    ],
+    [
+      "c3f3c1c7-367d-41cd-b6cf-4467d28b0b73",
+      "Relay3"
+    ],
+    [
+      "06c014e0-e2f9-46c3-9b89-68231845021c",
+      "CurrentSense"
+    ],
+    [
+      "c4cd1e48-b8aa-4187-b9df-dc410216a877",
+      "CurrentSense1"
+    ],
+    [
+      "6b00695a-64fa-4e76-ada0-6d4abb3253d0",
+      "CurrentSense2"
+    ],
+    [
+      "79a7153e-7b60-438c-928b-888b0e0879ef",
+      "MainRegulators"
+    ],
+    [
+      "415569b5-e71f-44a8-96ab-1860fbe1fd72",
+      "SaftyRegulators"
     ]
   ],
   "text_variables": {},

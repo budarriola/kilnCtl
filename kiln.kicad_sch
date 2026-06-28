@@ -4,295 +4,26 @@
 	(generator_version "10.0")
 	(uuid "e9c1836b-d16f-494a-819b-41549a786e18")
 	(paper "A")
-	(lib_symbols
-		(symbol "power:GND3"
-			(power global)
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(in_pos_files yes)
-			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "#PWR"
-				(at 0 -6.35 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "GND3"
-				(at 0 -3.81 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" ""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Datasheet" ""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "global power"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(symbol "GND3_0_1"
-				(polyline
-					(pts
-						(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "GND3_1_1"
-				(pin power_in line
-					(at 0 0 270)
-					(length 0)
-					(name ""
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
-		(symbol "power:VPP"
-			(power global)
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(in_pos_files yes)
-			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "#PWR"
-				(at 0 -3.81 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "VPP"
-				(at 0 3.556 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" ""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Datasheet" ""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Description" "Power symbol creates a global label with name \"VPP\""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "global power"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(symbol "VPP_0_1"
-				(polyline
-					(pts
-						(xy -0.762 1.27) (xy 0 2.54)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0 2.54) (xy 0.762 1.27)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 0 0) (xy 0 2.54)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "VPP_1_1"
-				(pin power_in line
-					(at 0 0 90)
-					(length 0)
-					(name ""
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
-	)
-	(text "https://www.sparkfun.com/sparkfun-transceiver-breakout-rs-485.html"
-		(exclude_from_sim no)
-		(at 134.112 73.406 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-		)
-		(uuid "3daaa6e7-1598-4b33-8108-911c5010e95e")
+	(lib_symbols)
+	(junction
+		(at 91.44 121.92)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "ad58f642-2765-48da-b5b9-6d554175344d")
 	)
 	(wire
 		(pts
-			(xy 106.68 119.38) (xy 106.68 120.65)
+			(xy 91.44 118.11) (xy 91.44 121.92)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "0701f25c-dd3b-4480-86db-d84617335c47")
+		(uuid "0ea846b0-dd8f-4a8f-9196-68f5ead69dea")
 	)
 	(wire
 		(pts
-			(xy 101.6 119.38) (xy 101.6 120.65)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "14af56b9-8bc7-4f2d-801c-65c41e5198ac")
-	)
-	(wire
-		(pts
-			(xy 109.22 107.95) (xy 123.19 107.95)
+			(xy 115.57 107.95) (xy 101.6 107.95)
 		)
 		(stroke
 			(width 0)
@@ -302,47 +33,57 @@
 	)
 	(wire
 		(pts
-			(xy 116.84 147.32) (xy 116.84 149.86)
+			(xy 73.66 78.74) (xy 95.25 78.74)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "1bf95f28-5d75-4800-aaab-723c4471bbb9")
+		(uuid "20e73087-7364-4300-aba1-d5b1d43c87ab")
 	)
 	(wire
 		(pts
-			(xy 102.87 92.71) (xy 102.87 95.25)
+			(xy 76.2 121.92) (xy 76.2 90.17)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "1c9d960b-66a6-4ac0-aee1-ce9b351872df")
+		(uuid "26e07e1a-1035-42e1-8c17-5dd709f70a14")
 	)
 	(wire
 		(pts
-			(xy 111.76 139.7) (xy 111.76 149.86)
+			(xy 115.57 110.49) (xy 107.95 110.49)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "302086e6-08b2-4d63-b6c0-9e2702b14638")
+		(uuid "26ede3be-1c48-451c-9ca2-f90802c24f79")
 	)
 	(wire
 		(pts
-			(xy 132.08 88.9) (xy 132.08 95.25)
+			(xy 138.43 119.38) (xy 138.43 123.19)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "33ae79f4-998d-4253-b7b9-272aa438b2dd")
+		(uuid "3c6fa1aa-e3dd-47e0-ad03-9f8c81698ab0")
 	)
 	(wire
 		(pts
-			(xy 109.22 102.87) (xy 123.19 102.87)
+			(xy 132.08 85.09) (xy 132.08 95.25)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5391010a-2078-4eac-9b84-5713ca5c9fe3")
+	)
+	(wire
+		(pts
+			(xy 115.57 102.87) (xy 101.6 102.87)
 		)
 		(stroke
 			(width 0)
@@ -352,47 +93,47 @@
 	)
 	(wire
 		(pts
-			(xy 134.62 92.71) (xy 134.62 95.25)
+			(xy 152.4 85.09) (xy 132.08 85.09)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "56577f2c-d0c3-44c4-8049-e7c2f1f334c4")
+		(uuid "5d7dc0be-d351-4d6e-be9a-405784bd49e1")
 	)
 	(wire
 		(pts
-			(xy 133.35 118.11) (xy 133.35 119.38)
+			(xy 107.95 110.49) (xy 107.95 121.92)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "5f5cf999-3595-4480-ad08-6be4132244a2")
+		(uuid "78329744-b2e3-452f-9151-be09e345e2c7")
 	)
 	(wire
 		(pts
-			(xy 114.3 163.83) (xy 114.3 166.37)
+			(xy 128.27 95.25) (xy 128.27 81.28)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "5feb23b2-57a5-4a2a-a4bd-d70ae9030e89")
+		(uuid "8cb93944-fc11-4835-bd92-62d6cae0528b")
 	)
 	(wire
 		(pts
-			(xy 114.3 143.51) (xy 114.3 149.86)
+			(xy 124.46 77.47) (xy 152.4 77.47)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "653ed4a1-6650-46e7-883d-0aca9a81060e")
+		(uuid "96078b64-e130-481b-b5a9-4a42c73ece69")
 	)
 	(wire
 		(pts
-			(xy 109.22 105.41) (xy 123.19 105.41)
+			(xy 115.57 105.41) (xy 101.6 105.41)
 		)
 		(stroke
 			(width 0)
@@ -402,1051 +143,136 @@
 	)
 	(wire
 		(pts
-			(xy 107.95 146.05) (xy 107.95 149.86)
+			(xy 91.44 121.92) (xy 76.2 121.92)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "9cbad7c1-c305-4f64-857c-ff6efd4533c3")
+		(uuid "9cbe9ebd-7ffc-4f05-883f-442acbb0619d")
 	)
 	(wire
 		(pts
-			(xy 129.54 85.09) (xy 129.54 95.25)
+			(xy 95.25 78.74) (xy 95.25 95.25)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "c00128a9-7def-48ab-a3f6-b73c5ad2d499")
+		(uuid "a36794da-6650-4294-86e9-7297c74cbd7f")
 	)
 	(wire
 		(pts
-			(xy 106.68 93.98) (xy 106.68 95.25)
+			(xy 90.17 86.36) (xy 90.17 95.25)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "f4a0a2d7-cc6a-4bd6-b190-58b87ea7b18b")
+		(uuid "a7b1c2de-c144-407e-a036-a88fd8c61de8")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 116.84 147.32 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "0031c16a-8ebe-4412-a6d3-98a4a3749177")
-		(property "Reference" "#PWR09"
-			(at 116.84 151.13 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 107.95 121.92) (xy 91.44 121.92)
 		)
-		(property "Value" "3.3V"
-			(at 119.634 144.78 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 116.84 147.32 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 116.84 147.32 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 116.84 147.32 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "4e325fb3-2c7c-4638-b31e-a3eb2aa1fa87")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR09")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "a9de536c-0c81-43ac-b495-fcfda23b4301")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 129.54 85.09 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "139c6403-fc00-42f4-ad49-b3caa9f8a7af")
-		(property "Reference" "#PWR010"
-			(at 129.54 88.9 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 128.27 81.28) (xy 152.4 81.28)
 		)
-		(property "Value" "12V"
-			(at 130.048 81.788 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 129.54 85.09 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 129.54 85.09 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 129.54 85.09 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "26b74fde-3a0b-4d85-9372-992e407128ec")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR010")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "af6034b3-61d0-4367-8748-5c16cec1a331")
 	)
-	(symbol
-		(lib_id "power:GND3")
-		(at 133.35 119.38 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "1cabf36e-8e6f-4ee3-bf9e-f5e19208d4ce")
-		(property "Reference" "#PWR012"
-			(at 133.35 125.73 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 92.71 95.25) (xy 92.71 82.55)
 		)
-		(property "Value" "GND"
-			(at 135.89 120.6499 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 133.35 119.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 133.35 119.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
-			(at 133.35 119.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "893e18bc-f045-4898-8d1e-36033fdb69b3")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR012")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "affe5fca-8696-4713-b8ea-e330e8eb832e")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 111.76 139.7 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "2d1265aa-3195-4d07-9c70-1237addd4d38")
-		(property "Reference" "#PWR06"
-			(at 111.76 143.51 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 138.43 123.19) (xy 149.86 123.19)
 		)
-		(property "Value" "12V"
-			(at 112.268 136.398 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 111.76 139.7 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 111.76 139.7 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 111.76 139.7 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "55bf3863-94d6-4474-b475-062800484f8c")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR06")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "bb4eef98-28c8-40d8-b642-f72557e98f10")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 132.08 88.9 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "5c41352d-5c9c-42d4-b5f4-ad71c822b52e")
-		(property "Reference" "#PWR011"
-			(at 132.08 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 124.46 95.25) (xy 124.46 77.47)
 		)
-		(property "Value" "5V"
-			(at 132.588 85.598 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 132.08 88.9 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 132.08 88.9 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 132.08 88.9 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "01635ec8-39bd-4d4f-8039-d41a187b842b")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR011")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "c0ac1e5f-ecb3-4707-8db3-6bf44bfeb545")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 107.95 146.05 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "63c3e199-a95a-4bda-9b8f-b71b49c6b94b")
-		(property "Reference" "#PWR05"
-			(at 107.95 149.86 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 149.86 88.9) (xy 152.4 88.9)
 		)
-		(property "Value" "8V"
-			(at 108.458 142.748 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 107.95 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 107.95 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 107.95 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "38ac7cc2-412a-455e-b070-f8a45c37ea38")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR05")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "c14d4fb0-9247-434d-80e1-a1d0352f13fe")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 106.68 93.98 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "770629cd-ba95-4057-b2b0-31fb0a8aa487")
-		(property "Reference" "#PWR03"
-			(at 106.68 97.79 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 92.71 82.55) (xy 73.66 82.55)
 		)
-		(property "Value" "12V"
-			(at 107.188 90.678 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 106.68 93.98 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 106.68 93.98 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 106.68 93.98 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "dd666bf9-c81d-41a1-aa33-cbefab8e9694")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR03")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "c23e5004-062f-4f96-9c1e-026bb8dccd22")
 	)
-	(symbol
-		(lib_id "power:GND3")
-		(at 106.68 120.65 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "81d2f726-07bc-4e3b-b01c-e66aed46c6c6")
-		(property "Reference" "#PWR04"
-			(at 106.68 127 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 76.2 90.17) (xy 73.66 90.17)
 		)
-		(property "Value" "GND"
-			(at 109.22 121.9199 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 106.68 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 106.68 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
-			(at 106.68 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "989448c0-ee03-4bde-b588-4d906efe82b4")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR04")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "e3ea12e8-1ee9-4791-a36c-080025ce9478")
 	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 114.3 143.51 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "8edffa5c-6dfd-4271-8034-ab59d5a5ae1f")
-		(property "Reference" "#PWR07"
-			(at 114.3 147.32 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 73.66 86.36) (xy 90.17 86.36)
 		)
-		(property "Value" "5V"
-			(at 114.808 140.208 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 114.3 143.51 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 114.3 143.51 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 114.3 143.51 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "927a8255-2ae5-4814-9c0f-1793379cad7d")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR07")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "e41dbbc9-2418-4470-964e-7ec909aca520")
 	)
-	(symbol
-		(lib_id "power:GND3")
-		(at 114.3 166.37 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "98574bc5-6603-43ab-9782-ef855b662fab")
-		(property "Reference" "#PWR08"
-			(at 114.3 172.72 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
+	(wire
+		(pts
+			(xy 149.86 123.19) (xy 149.86 88.9)
 		)
-		(property "Value" "GND"
-			(at 116.84 167.6399 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
+		(stroke
+			(width 0)
+			(type default)
 		)
-		(property "Footprint" ""
-			(at 114.3 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 114.3 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
-			(at 114.3 166.37 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "673639dc-b4fd-4dcf-a0f4-b52b75dea93d")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR08")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND3")
-		(at 101.6 120.65 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "b50c8800-f740-48b2-8ca4-7eac910f6c55")
-		(property "Reference" "#PWR01"
-			(at 101.6 127 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "GND"
-			(at 95.504 121.666 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" ""
-			(at 101.6 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 101.6 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
-			(at 101.6 120.65 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "6142dda6-b635-427c-bf97-12b8c66bbae6")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR01")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 102.87 92.71 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "dedf2657-59f6-4dcd-84b4-6202f0634532")
-		(property "Reference" "#PWR02"
-			(at 102.87 96.52 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "8V"
-			(at 103.378 89.408 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" ""
-			(at 102.87 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 102.87 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 102.87 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "e20a1797-79c2-418d-aae1-4a2d94c0ac54")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR02")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:VPP")
-		(at 134.62 92.71 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "f829c4f2-bd4a-4c05-a6c0-bf30bf703c3d")
-		(property "Reference" "#PWR013"
-			(at 134.62 96.52 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "3.3V"
-			(at 137.414 90.17 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 134.62 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 134.62 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"VPP\""
-			(at 134.62 92.71 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "6047cd11-7ffa-46ed-8331-ec2239ea1585")
-		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(reference "#PWR013")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "efad7739-b5e8-4143-b2ef-60350d627122")
 	)
 	(sheet
-		(at 123.19 95.25)
+		(at 83.82 95.25)
 		(size 17.78 22.86)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -1461,7 +287,7 @@
 		)
 		(uuid "307f7e78-c7c7-4c1f-bfd5-4e5fce95f524")
 		(property "Sheetname" "MainControler"
-			(at 145.288 118.364 90)
+			(at 81.28 103.378 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -1472,7 +298,7 @@
 			)
 		)
 		(property "Sheetfile" "MainControler.kicad_sch"
-			(at 141.732 118.364 90)
+			(at 81.788 117.602 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -1482,48 +308,38 @@
 				(justify left top)
 			)
 		)
-		(pin "GND" passive
-			(at 133.35 118.11 270)
-			(uuid "d38c0bfe-80a6-4566-9aff-886a7d0d282c")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
 		(pin "DataFromSafty" input
-			(at 123.19 105.41 180)
+			(at 101.6 105.41 0)
 			(uuid "9d085f55-5fcf-498c-9cf5-c8f5ea912a2f")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
 		(pin "DataToSafty" output
-			(at 123.19 107.95 180)
+			(at 101.6 107.95 0)
 			(uuid "320f1f4e-d9a7-4d9d-b8d0-7e4a56e07b04")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
-		(pin "Fault" output
-			(at 123.19 102.87 180)
+		(pin "Fault" input
+			(at 101.6 102.87 0)
 			(uuid "084608a7-fe67-4bf2-9cb8-b049c740e882")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
 		(pin "3.3V" input
-			(at 134.62 95.25 90)
+			(at 90.17 95.25 90)
 			(uuid "ef72645a-4a2b-4227-b02c-fd68843ed300")
 			(effects
 				(font
@@ -1533,7 +349,7 @@
 			)
 		)
 		(pin "5V" input
-			(at 132.08 95.25 90)
+			(at 92.71 95.25 90)
 			(uuid "c8522271-b68a-432e-b1aa-f885ee837a0d")
 			(effects
 				(font
@@ -1543,13 +359,23 @@
 			)
 		)
 		(pin "12V" input
-			(at 129.54 95.25 90)
+			(at 95.25 95.25 90)
 			(uuid "09731521-1a27-44d9-a085-49d4b51c8df7")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
 				(justify right)
+			)
+		)
+		(pin "Gnd" passive
+			(at 91.44 118.11 270)
+			(uuid "6a215b2a-7c11-4f55-9774-2f83fec35bb8")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
 			)
 		)
 		(instances
@@ -1561,7 +387,179 @@
 		)
 	)
 	(sheet
-		(at 83.82 95.25)
+		(at 152.4 73.66)
+		(size 25.4 17.78)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "415569b5-e71f-44a8-96ab-1860fbe1fd72")
+		(property "Sheetname" "SaftyRegulators"
+			(at 152.4 72.9484 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "Regulators.kicad_sch"
+			(at 152.4 92.0246 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(pin "3.3V" output
+			(at 152.4 85.09 180)
+			(uuid "cdd896d9-a0a4-4ec9-9d52-f8810b3b9684")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "5V" output
+			(at 152.4 81.28 180)
+			(uuid "563ffa27-e674-412b-8ef0-46d89f7194b4")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "12V" output
+			(at 152.4 77.47 180)
+			(uuid "3652e257-53e0-4b56-9047-dd86b698774b")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "PwrGnd" passive
+			(at 152.4 88.9 180)
+			(uuid "a94e8746-7558-4601-88dd-826686de75b5")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
+					(page "18")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 48.26 74.93)
+		(size 25.4 17.78)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "79a7153e-7b60-438c-928b-888b0e0879ef")
+		(property "Sheetname" "MainRegulators"
+			(at 48.26 74.2184 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "Regulators.kicad_sch"
+			(at 48.26 93.2946 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(pin "3.3V" output
+			(at 73.66 86.36 0)
+			(uuid "25cc6972-186c-4891-8bcd-9c09c810cc26")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "5V" output
+			(at 73.66 82.55 0)
+			(uuid "1668c8cd-6a37-4476-97f0-5f488483d7b1")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "12V" output
+			(at 73.66 78.74 0)
+			(uuid "0d326b17-cda7-41de-9589-77b7ab79c075")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "PwrGnd" passive
+			(at 73.66 90.17 0)
+			(uuid "44613a76-ead1-47af-aeeb-50b527642a4c")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
+					(page "17")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 115.57 95.25)
 		(size 25.4 24.13)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -1576,7 +574,7 @@
 		)
 		(uuid "9d216770-eb40-4527-939f-01f0f376c505")
 		(property "Sheetname" "SaftyProcessor"
-			(at 83.058 119.126 90)
+			(at 146.304 119.126 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -1587,7 +585,7 @@
 			)
 		)
 		(property "Sheetfile" "SaftyProcessor.kicad_sch"
-			(at 79.502 118.872 90)
+			(at 142.24 119.126 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -1597,49 +595,39 @@
 				(justify left top)
 			)
 		)
-		(pin "GND" passive
-			(at 106.68 119.38 270)
-			(uuid "33e22582-39f0-4f5f-8146-85c5fc879429")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(pin "DataGnd" passive
-			(at 101.6 119.38 270)
-			(uuid "467a482a-7270-47ed-b96f-9d43bc367157")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(pin "DataFromSafty" input
-			(at 109.22 107.95 0)
+		(pin "DataFromSafty" output
+			(at 115.57 107.95 180)
 			(uuid "b6e913c0-61d6-4584-a15c-53017d81fcd4")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
-		(pin "DataToSafty" output
-			(at 109.22 105.41 0)
+		(pin "DataToSafty" input
+			(at 115.57 105.41 180)
 			(uuid "4ae2049d-1340-4bc2-aa45-fde59d837eb8")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify right)
+				(justify left)
 			)
 		)
-		(pin "Fault" input
-			(at 109.22 102.87 0)
+		(pin "Fault" output
+			(at 115.57 102.87 180)
 			(uuid "ec681327-6a68-4d51-a0b3-4635442750c4")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "3.3V" input
+			(at 132.08 95.25 90)
+			(uuid "99ffc521-8928-40ed-868a-c391f04a0da7")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1647,9 +635,9 @@
 				(justify right)
 			)
 		)
-		(pin "8V" input
-			(at 102.87 95.25 90)
-			(uuid "30bdb6ec-d96e-4165-b60d-95ae4cd17d05")
+		(pin "5V" input
+			(at 128.27 95.25 90)
+			(uuid "c6f77e30-5620-4032-b81b-351ca0a6b4a4")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1658,8 +646,8 @@
 			)
 		)
 		(pin "12V" input
-			(at 106.68 95.25 90)
-			(uuid "2e760dd8-c7fd-48c3-b420-68c3b21e1e04")
+			(at 124.46 95.25 90)
+			(uuid "0d235b7d-0897-4a7f-b22c-669597656d89")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1667,94 +655,19 @@
 				(justify right)
 			)
 		)
-		(instances
-			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(page "2")
-				)
-			)
-		)
-	)
-	(sheet
-		(at 104.14 149.86)
-		(size 17.78 13.97)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(stroke
-			(width 0.1524)
-			(type solid)
-		)
-		(fill
-			(color 0 0 0 0)
-		)
-		(uuid "b7957fe4-df67-4c41-b5aa-4d77d8d1f123")
-		(property "Sheetname" "Power"
-			(at 103.4284 163.83 90)
-			(show_name no)
-			(do_not_autoplace no)
+		(pin "Gnd" passive
+			(at 138.43 119.38 270)
+			(uuid "c81c2c5c-2f42-44ec-a9cd-99e927bf8903")
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left bottom)
+				(justify left)
 			)
 		)
-		(property "Sheetfile" "Power.kicad_sch"
-			(at 99.06 164.084 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left top)
-			)
-		)
-		(pin "3.3V" output
-			(at 116.84 149.86 90)
-			(uuid "ccc06324-c06a-4b79-a008-28b72e87f782")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "5V" output
-			(at 114.3 149.86 90)
-			(uuid "41b5f29a-d084-4f13-893f-ea335dc40c0d")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "8V" output
-			(at 107.95 149.86 90)
-			(uuid "d47ded75-af5c-4fa5-8b12-c621f6c826d3")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "12V" output
-			(at 111.76 149.86 90)
-			(uuid "6f556b26-ae14-48bb-9b38-8e8125915370")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "PwrGnd" passive
-			(at 114.3 163.83 270)
-			(uuid "b72a5b49-d33d-4e47-83a6-5315b783a646")
+		(pin "MainProcessorDataGnd" passive
+			(at 115.57 110.49 180)
+			(uuid "33d45378-18de-48e9-9e9a-cbb4163e3a9b")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -1765,7 +678,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
-					(page "6")
+					(page "2")
 				)
 			)
 		)

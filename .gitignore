@@ -5,3 +5,5 @@
 /#auto_saved_files#
 /~kiln.kicad_sch.lck
 /kiln.csv
+/_autosave*.kicad_sch
+/*.kicad_pro.lck

@@ -1,0 +1,3087 @@
+(kicad_sch
+	(version 20260306)
+	(generator "eeschema")
+	(generator_version "10.0")
+	(uuid "4d64a835-08a7-432f-a73a-2cf5f789c39e")
+	(paper "A")
+	(lib_symbols
+		(symbol "Device:C"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0.254)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "C"
+				(at 0.635 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "C"
+				(at 0.635 -2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" ""
+				(at 0.9652 -3.81 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Unpolarized capacitor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "cap capacitor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "C_*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "C_0_1"
+				(polyline
+					(pts
+						(xy -2.032 0.762) (xy 2.032 0.762)
+					)
+					(stroke
+						(width 0.508)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.032 -0.762) (xy 2.032 -0.762)
+					)
+					(stroke
+						(width 0.508)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "C_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 2.794)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 2.794)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "Device:R"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "R"
+				(at 2.032 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "R"
+				(at 0 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at -1.778 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Resistor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "R res resistor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "R_*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "R_0_1"
+				(rectangle
+					(start -1.016 -2.54)
+					(end 1.016 2.54)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "R_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 1.27)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 1.27)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "SamacSys_Parts:1935161"
+			(pin_names
+				(offset 0.762)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "J"
+				(at 16.51 7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "1935161"
+				(at 16.51 5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "1935161"
+				(at 16.51 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" "https://datasheet.datasheetarchive.com/originals/distributors/SFDatasheet-2/sf-00057459.pdf"
+				(at 16.51 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Description" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
+				(at 16.51 -2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Height" "11.55"
+				(at 16.51 -5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Part Number" "651-1935161"
+				(at 16.51 -7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
+				(at 16.51 -10.16 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Name" "Phoenix Contact"
+				(at 16.51 -12.7 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Part_Number" "1935161"
+				(at 16.51 -15.24 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(symbol "1935161_0_0"
+				(pin passive line
+					(at 0 0 0)
+					(length 5.08)
+					(name "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -2.54 0)
+					(length 5.08)
+					(name "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "1935161_0_1"
+				(polyline
+					(pts
+						(xy 5.08 2.54) (xy 15.24 2.54) (xy 15.24 -5.08) (xy 5.08 -5.08) (xy 5.08 2.54)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "SamacSys_Parts:SJ2-35813B-SMT-TR"
+			(pin_names
+				(offset 0.762)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "J"
+				(at 34.29 7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "SJ2-35813B-SMT-TR"
+				(at 34.29 5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "SJ235813BSMTTR"
+				(at 34.29 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" "https://www.sameskydevices.com/product/resource/sj2-3581x-smt.pdf"
+				(at 34.29 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Description" "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~ 85C"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description_1" "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~{} 85C"
+				(at 34.29 -2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Height" "5.3"
+				(at 34.29 -5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Part Number" "490-SJ2-35813BSMT-TR"
+				(at 34.29 -7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D"
+				(at 34.29 -10.16 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Name" "Same Sky"
+				(at 34.29 -12.7 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Part_Number" "SJ2-35813B-SMT-TR"
+				(at 34.29 -15.24 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(symbol "SJ2-35813B-SMT-TR_0_0"
+				(pin passive line
+					(at 0 0 0)
+					(length 5.08)
+					(name "SLEEVE"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -2.54 0)
+					(length 5.08)
+					(name "TIP"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 38.1 0 180)
+					(length 5.08)
+					(name "RING"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 38.1 -2.54 180)
+					(length 5.08)
+					(name "TIP_SWITCH"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "10"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "SJ2-35813B-SMT-TR_0_1"
+				(polyline
+					(pts
+						(xy 5.08 2.54) (xy 33.02 2.54) (xy 33.02 -5.08) (xy 5.08 -5.08) (xy 5.08 2.54)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "SamacSys_Parts:SS16FP"
+			(pin_names
+				(offset 0.762)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "D"
+				(at 12.7 8.89 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "SS16FP"
+				(at 12.7 6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "SS12FP"
+				(at 12.7 3.81 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" "https://www.onsemi.com/pub/Collateral/S110FP-D.pdf"
+				(at 12.7 1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Description" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description_1" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+				(at 12.7 -1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Height" "1"
+				(at 12.7 -3.81 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Part Number" "512-SS16FP"
+				(at 12.7 -6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+				(at 12.7 -8.89 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Name" "onsemi"
+				(at 12.7 -11.43 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Manufacturer_Part_Number" "SS16FP"
+				(at 12.7 -13.97 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(symbol "SS16FP_0_0"
+				(pin passive line
+					(at 2.54 0 0)
+					(length 2.54)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 17.78 0 180)
+					(length 2.54)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "SS16FP_0_1"
+				(polyline
+					(pts
+						(xy 5.08 0) (xy 7.62 0)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 7.62 2.54) (xy 7.62 -2.54)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 7.62 2.54) (xy 8.636 2.54) (xy 8.636 1.524)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 7.62 0) (xy 12.7 2.54) (xy 12.7 -2.54) (xy 7.62 0)
+					)
+					(stroke
+						(width 0.254)
+						(type solid)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(polyline
+					(pts
+						(xy 7.62 -2.54) (xy 6.604 -2.54) (xy 6.604 -1.524)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 12.7 0) (xy 15.24 0)
+					)
+					(stroke
+						(width 0.1524)
+						(type solid)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "power:GND3"
+			(power global)
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "#PWR"
+				(at 0 -6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "GND3"
+				(at 0 -3.81 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "global power"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "GND3_0_1"
+				(polyline
+					(pts
+						(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "GND3_1_1"
+				(pin power_in line
+					(at 0 0 270)
+					(length 0)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	)
+	(junction
+		(at 158.75 87.63)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "00239723-6b27-4b74-b6d5-8bf84b0a6cbe")
+	)
+	(junction
+		(at 189.23 87.63)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "1c3c37e0-2ed6-4725-84d7-ea1407e2575d")
+	)
+	(junction
+		(at 158.75 100.33)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "2d654d21-a033-4cbd-ad74-26857294ba56")
+	)
+	(junction
+		(at 123.19 97.79)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "2fd4b802-e964-447e-a8c1-26ff38282467")
+	)
+	(junction
+		(at 138.43 105.41)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "6dce22e3-bc0e-4c7b-b91b-bc4624ccf975")
+	)
+	(junction
+		(at 139.7 100.33)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "716c3667-5bbe-471b-bf70-1d8034dd70c4")
+	)
+	(junction
+		(at 176.53 87.63)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "768245ae-dbfd-48b1-8fdc-5f0e72c53fa9")
+	)
+	(junction
+		(at 123.19 90.17)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "91c12700-ae17-4dc0-a87b-44abc88df71a")
+	)
+	(junction
+		(at 123.19 80.01)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "b90cfbf7-9759-4b4c-9fd2-6cebe5d05fa3")
+	)
+	(junction
+		(at 200.66 87.63)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "f0171ca4-07a6-4331-9c36-0c33bba14f90")
+	)
+	(no_connect
+		(at 82.55 95.25)
+		(uuid "81cb0931-c3bd-4cb6-b78a-1ee0516d6344")
+	)
+	(no_connect
+		(at 82.55 92.71)
+		(uuid "aea0bf31-559a-4c87-b01a-cb0cb14f8620")
+	)
+	(wire
+		(pts
+			(xy 139.7 87.63) (xy 140.97 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0b2f6eda-f5fa-46c0-a60e-db4c67c3d927")
+	)
+	(wire
+		(pts
+			(xy 189.23 88.9) (xy 189.23 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0c23042b-8d89-4668-a002-51718c345229")
+	)
+	(wire
+		(pts
+			(xy 121.92 90.17) (xy 123.19 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "164a9396-2a45-46d7-8497-138c27fdd00d")
+	)
+	(wire
+		(pts
+			(xy 189.23 87.63) (xy 200.66 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "1a7a89a7-c2f7-4aff-936f-fc75b920a0f7")
+	)
+	(wire
+		(pts
+			(xy 158.75 87.63) (xy 160.02 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "1b26eb31-4cef-49f2-ac7d-acd3a7d9843c")
+	)
+	(wire
+		(pts
+			(xy 123.19 80.01) (xy 123.19 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "22797ed9-3093-4cd3-adc8-71b0a927af0c")
+	)
+	(wire
+		(pts
+			(xy 213.36 73.66) (xy 209.55 73.66)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2302219b-a2c6-47f1-b347-193d99de983e")
+	)
+	(wire
+		(pts
+			(xy 186.69 87.63) (xy 189.23 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2363c4bc-c2e1-4511-8f97-e4874006b299")
+	)
+	(wire
+		(pts
+			(xy 121.92 97.79) (xy 123.19 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2a9dc33d-c80a-4be5-a7af-fc53d831f750")
+	)
+	(wire
+		(pts
+			(xy 200.66 96.52) (xy 200.66 101.6)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "327fbcde-9685-4ff6-b056-803d56b58632")
+	)
+	(wire
+		(pts
+			(xy 121.92 95.25) (xy 121.92 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "37036237-2bb7-477e-a2b4-fb06f6b78b63")
+	)
+	(wire
+		(pts
+			(xy 138.43 82.55) (xy 138.43 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "50c73177-49ed-4a8e-8135-f8bcf7053404")
+	)
+	(wire
+		(pts
+			(xy 176.53 87.63) (xy 176.53 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "53b85534-0cbf-4d43-9cc2-f13d80c3b766")
+	)
+	(wire
+		(pts
+			(xy 139.7 100.33) (xy 139.7 109.22)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "547a374a-1b73-4bf0-b9ab-8b5ae3bc9f84")
+	)
+	(wire
+		(pts
+			(xy 138.43 105.41) (xy 123.19 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5d7907a2-c731-4dc9-932d-54c8d2de9d73")
+	)
+	(wire
+		(pts
+			(xy 123.19 76.2) (xy 123.19 80.01)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "69889174-5fa4-45b0-8397-718abada1c65")
+	)
+	(wire
+		(pts
+			(xy 121.92 92.71) (xy 121.92 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6b75fe35-0b1f-4156-9b51-962cc95c5418")
+	)
+	(wire
+		(pts
+			(xy 140.97 100.33) (xy 139.7 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "718d79b4-cd98-4bd7-a31c-930e016cdfb7")
+	)
+	(wire
+		(pts
+			(xy 123.19 97.79) (xy 125.73 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "738daeca-9001-449a-af43-82c424965d22")
+	)
+	(wire
+		(pts
+			(xy 176.53 87.63) (xy 179.07 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "791a6073-407d-487f-8e05-a1ce5ce8c1eb")
+	)
+	(wire
+		(pts
+			(xy 200.66 88.9) (xy 200.66 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "92593793-a480-475f-aee2-7559a05364ea")
+	)
+	(wire
+		(pts
+			(xy 120.65 92.71) (xy 121.92 92.71)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "945c2136-818d-4af7-962c-ace36ef34d74")
+	)
+	(wire
+		(pts
+			(xy 156.21 87.63) (xy 158.75 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "99533a92-edb8-4790-b9ee-132beb2fae57")
+	)
+	(wire
+		(pts
+			(xy 119.38 82.55) (xy 138.43 82.55)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9da8b0ae-9573-45a4-9c3f-53f71ad7360c")
+	)
+	(wire
+		(pts
+			(xy 175.26 87.63) (xy 176.53 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a4c37ff2-f302-44dd-8901-07eed66d84f4")
+	)
+	(wire
+		(pts
+			(xy 189.23 96.52) (xy 189.23 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a97722f8-0a84-48e4-afe7-c9b8adc10b7c")
+	)
+	(wire
+		(pts
+			(xy 156.21 100.33) (xy 158.75 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ba419dea-8ad8-4e8b-8ee8-0e5f0e9338dc")
+	)
+	(wire
+		(pts
+			(xy 158.75 100.33) (xy 158.75 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "bc67ce79-4b21-4d0a-9229-631cd4aca60e")
+	)
+	(wire
+		(pts
+			(xy 123.19 105.41) (xy 123.19 97.79)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "bca22ff8-3ead-4048-83e3-ac2a2baaacba")
+	)
+	(wire
+		(pts
+			(xy 209.55 87.63) (xy 200.66 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ccf568ef-bce7-4fbb-86b5-4b5b1b5bdb6d")
+	)
+	(wire
+		(pts
+			(xy 139.7 100.33) (xy 139.7 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "cd6343c8-0ef6-4e14-8fcd-95d6d27d51e4")
+	)
+	(wire
+		(pts
+			(xy 120.65 95.25) (xy 121.92 95.25)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "cde967f2-d7bb-4990-a537-26e066710a07")
+	)
+	(wire
+		(pts
+			(xy 123.19 90.17) (xy 125.73 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "db3d41b3-5aa9-4a4b-aa03-a405040b7441")
+	)
+	(wire
+		(pts
+			(xy 176.53 100.33) (xy 175.26 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e4af8adc-3516-408e-960b-9f66b831af49")
+	)
+	(wire
+		(pts
+			(xy 158.75 105.41) (xy 138.43 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ef88c482-6de5-40af-9b33-670257a1d39d")
+	)
+	(wire
+		(pts
+			(xy 158.75 100.33) (xy 160.02 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f136d7b7-7a12-4dad-919f-24a7d5d06f33")
+	)
+	(wire
+		(pts
+			(xy 158.75 87.63) (xy 158.75 76.2)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fa453153-bd48-4a83-a270-af50fb3da953")
+	)
+	(wire
+		(pts
+			(xy 209.55 73.66) (xy 209.55 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fab16757-8723-4e5c-90e0-0857589ee6b8")
+	)
+	(wire
+		(pts
+			(xy 119.38 80.01) (xy 123.19 80.01)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fbd7f26d-7575-4b12-b872-1ca86c6ea40b")
+	)
+	(wire
+		(pts
+			(xy 158.75 76.2) (xy 123.19 76.2)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fef3866d-e245-44b3-bc8d-8b4119d2b015")
+	)
+	(hierarchical_label "Vout"
+		(shape output)
+		(at 213.36 73.66 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "5e5bc309-2a0a-4c42-a455-47760435aeb5")
+	)
+	(hierarchical_label "Gnd"
+		(shape passive)
+		(at 139.7 109.22 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "5f581680-8321-45fd-9361-04f56c6d4d9b")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 125.73 93.98 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "0b40f55e-09ac-4ae5-8e81-45c8e55a2d48")
+		(property "Reference" "R2"
+			(at 128.27 92.7099 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "100R 1W"
+			(at 128.27 95.2499 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_2512_6332Metric"
+			(at 123.952 93.98 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ2512F100R?qs=sGAEpiMZZMtlubZbdhIBIOInyB5Ysv8sjaWUpKG2dwk%3D"
+			(at 125.73 93.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 125.73 93.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "c0cb7918-5c72-47b3-a4ef-e88a33b82fc2")
+		)
+		(pin "1"
+			(uuid "88b270a3-974d-47bc-b81f-6a32aa973aff")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "R2")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "R26")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "R3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND3")
+		(at 200.66 101.6 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "0d7914ab-780e-4768-a39a-8090439a8726")
+		(property "Reference" "#PWR024"
+			(at 200.66 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GND_Safty"
+			(at 198.12 106.172 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 200.66 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 200.66 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
+			(at 200.66 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "5167f11e-a31c-4cac-a9d5-c2679b5de392")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "#PWR024")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "#PWR032")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "#PWR026")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 182.88 87.63 90)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "1dca2728-01a7-48c6-8378-b031111f48a2")
+		(property "Reference" "R4"
+			(at 181.356 85.344 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "1k"
+			(at 182.626 87.63 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 182.88 89.408 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+			(at 182.88 87.63 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 182.88 87.63 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "d9522a7e-baf5-43d9-ba91-c3b535ffb3d5")
+		)
+		(pin "1"
+			(uuid "f32f2cb9-e584-4ed6-a800-29b1cf6b8928")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "R4")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "R29")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "R5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "SamacSys_Parts:SS16FP")
+		(at 158.75 87.63 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "2a2875b5-bf47-49d2-9127-18fac4919d8b")
+		(property "Reference" "D3"
+			(at 148.59 80.01 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SS16FP"
+			(at 148.59 82.55 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SS12FP"
+			(at 146.05 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 146.05 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 158.75 87.63 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 146.05 86.36 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "1"
+			(at 146.05 83.82 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "512-SS16FP"
+			(at 146.05 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 146.05 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "onsemi"
+			(at 146.05 76.2 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SS16FP"
+			(at 146.05 73.66 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "2"
+			(uuid "dc535bcd-7120-405b-b02f-a6c82d4d8257")
+		)
+		(pin "1"
+			(uuid "c77c588c-7718-4246-8307-de3ac2e79fd5")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "D3")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "D29")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "D5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "SamacSys_Parts:SS16FP")
+		(at 177.8 100.33 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "3bc63969-745d-4a9d-8179-ca4b0fd940e7")
+		(property "Reference" "D8"
+			(at 167.64 92.71 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SS16FP"
+			(at 167.64 95.25 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SS12FP"
+			(at 165.1 104.14 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 165.1 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 177.8 100.33 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 165.1 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "1"
+			(at 165.1 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "512-SS16FP"
+			(at 165.1 93.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 165.1 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "onsemi"
+			(at 165.1 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SS16FP"
+			(at 165.1 86.36 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "2"
+			(uuid "958f74d1-8aec-4b3a-9d7b-78e79f2f0f92")
+		)
+		(pin "1"
+			(uuid "04ee6b55-ffab-4b5c-ba8e-84fe7ff002be")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "D8")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "D32")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "D28")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "SamacSys_Parts:SS16FP")
+		(at 158.75 100.33 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "3be8e9bf-c81b-47f8-a732-8b313577df53")
+		(property "Reference" "D4"
+			(at 148.59 92.71 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SS16FP"
+			(at 148.59 95.25 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SS12FP"
+			(at 146.05 104.14 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 146.05 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 158.75 100.33 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 146.05 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "1"
+			(at 146.05 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "512-SS16FP"
+			(at 146.05 93.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 146.05 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "onsemi"
+			(at 146.05 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SS16FP"
+			(at 146.05 86.36 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "2"
+			(uuid "ec628faa-8b3d-40f1-96d2-e2121f0b1366")
+		)
+		(pin "1"
+			(uuid "e495239e-a995-46bb-8e95-a5fa8d2bf91c")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "D4")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "D30")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "D6")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 200.66 92.71 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "3cf87053-b728-43d3-aba6-68f0f6dd833d")
+		(property "Reference" "R6"
+			(at 203.2 91.4399 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "47.5k"
+			(at 203.2 93.9799 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 198.882 92.71 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay/CRCW040247K5FKED?qs=sGAEpiMZZMtlubZbdhIBIPs%252BiE%2F4M15xDan5FFmucgw%3D"
+			(at 200.66 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 200.66 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "33aa6190-0c1a-40f8-9898-9d045ee9b392")
+		)
+		(pin "2"
+			(uuid "9691ed16-6044-4fef-81a7-2e06c760ef1f")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "R6")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "R30")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "R13")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "SamacSys_Parts:SS16FP")
+		(at 177.8 87.63 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "4e95c320-b714-4c4d-bc42-9a2dc7359f2d")
+		(property "Reference" "D7"
+			(at 167.64 80.01 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SS16FP"
+			(at 167.64 82.55 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SS12FP"
+			(at 165.1 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 165.1 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 177.8 87.63 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound"
+			(at 165.1 86.36 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "1"
+			(at 165.1 83.82 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "512-SS16FP"
+			(at 165.1 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D"
+			(at 165.1 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "onsemi"
+			(at 165.1 76.2 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SS16FP"
+			(at 165.1 73.66 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "2"
+			(uuid "8a07bf3a-84d8-4f3e-8456-57088159825f")
+		)
+		(pin "1"
+			(uuid "02a581bd-6d36-450a-a2a3-e87719e9474b")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "D7")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "D31")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "D27")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "SamacSys_Parts:1935161")
+		(at 119.38 82.55 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "93dd1491-447c-42e4-8070-a0de1f80192b")
+		(property "Reference" "J2"
+			(at 109.22 72.39 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "1935161"
+			(at 109.22 74.93 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:1935161"
+			(at 102.87 85.09 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
+			(at 102.87 82.55 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
+			(at 119.38 82.55 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
+			(at 102.87 80.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "11.55"
+			(at 102.87 77.47 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "651-1935161"
+			(at 102.87 74.93 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
+			(at 102.87 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "Phoenix Contact"
+			(at 102.87 69.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "1935161"
+			(at 102.87 67.31 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "2"
+			(uuid "3e95991d-e3ff-4ffd-8a97-ce00aaa0ee21")
+		)
+		(pin "1"
+			(uuid "bbe9b68e-793d-4371-89fa-d218ef18b47c")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "J2")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "J7")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "J3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 189.23 92.71 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "bdfb1cf9-8321-4572-8be2-1a21187b72c1")
+		(property "Reference" "C7"
+			(at 193.04 91.4399 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "10uf 16v"
+			(at 179.324 95.504 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 190.1952 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/TAIYO-YUDEN/EMK212BJ106KG-T?qs=sGAEpiMZZMsh%252B1woXyUXjzXZPAgA2%252BEMKgT0bGGdQlI%3D"
+			(at 189.23 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 189.23 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "3c895f2b-15b3-4120-9238-6b08bdf2da5b")
+		)
+		(pin "2"
+			(uuid "70db371d-879f-4bea-a7ad-ebeeb2eda6bc")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "C7")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "C11")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "C9")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "SamacSys_Parts:SJ2-35813B-SMT-TR")
+		(at 120.65 92.71 0)
+		(mirror y)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "ccf1eaaa-a8a3-47aa-8183-0bae8c594e1d")
+		(property "Reference" "J4"
+			(at 101.6 85.09 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SJ2-35813B-SMT-TR"
+			(at 101.6 87.63 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "SamacSys_Parts:SJ235813BSMTTR"
+			(at 86.36 90.17 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D"
+			(at 86.36 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~ 85C"
+			(at 120.65 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~{} 85C"
+			(at 86.36 95.25 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "5.3"
+			(at 86.36 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Part Number" "490-SJ2-35813BSMT-TR"
+			(at 86.36 100.33 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D"
+			(at 86.36 102.87 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Name" "Same Sky"
+			(at 86.36 105.41 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SJ2-35813B-SMT-TR"
+			(at 86.36 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "1"
+			(uuid "bdbca90c-04f9-46de-8f7b-332a2955482d")
+		)
+		(pin "3"
+			(uuid "04125432-15c4-4997-93a7-1f6cbe800f58")
+		)
+		(pin "2"
+			(uuid "56d4610e-be88-46ce-a548-000ee273a140")
+		)
+		(pin "10"
+			(uuid "4b6c5b93-699a-4d68-aa72-0186c6e65533")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "J4")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "J18")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "J6")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND3")
+		(at 189.23 97.79 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "d705ef8b-b59e-48dc-a89f-291bd8ae10a3")
+		(property "Reference" "#PWR021"
+			(at 189.23 104.14 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GND_Safty"
+			(at 184.912 102.108 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 189.23 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 189.23 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
+			(at 189.23 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "a7ba492b-cd4b-45e3-9122-386ed86c573a")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "#PWR021")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "#PWR027")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "#PWR023")
+					(unit 1)
+				)
+			)
+		)
+	)
+)
