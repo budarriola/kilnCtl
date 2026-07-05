@@ -225,4 +225,71 @@ P 5 0 1 6 200 100 1200 100 1200 -300 200 -300 200 100 N
 ENDDRAW
 ENDDEF
 #
+#SamacSys ECAD Model 7447779004
+#/465879/960482/2.50/2/2/Inductor
+DEF 7447779004 L 0 30 Y Y 1 F N
+F0 "L" 650 250 50 H V L CNN
+F1 "7447779004" 650 150 50 H V L CNN
+F2 "WE-PD_7332/7345_PLASTIC_BASE54" 650 50 50 H I L CNN
+F3 "https://www.we-online.com/catalog/datasheet/7447779004.pdf" 650 -50 50 H I L CNN
+F4 "WE-PD Robust SMT Shielded Power Inductor Size 7345; L = 4.7 H +/-20%; IR = 3.16 A; Isat = 4.4 A; RDC = 32 m" 650 -150 50 H I L CNN "Description"
+F5 "3.2" 650 -250 50 H I L CNN "Height"
+F6 "710-7447779004" 650 -350 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Wurth-Elektronik/7447779004?qs=E%2F%2FhvbtCqpPUIu9NVFt5TQ%3D%3D" 650 -450 50 H I L CNN "Mouser Price/Stock"
+F8 "Wurth Elektronik" 650 -550 50 H I L CNN "Manufacturer_Name"
+F9 "7447779004" 650 -650 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ~ 1 0 0 200 R 50 50 0 0 P
+X ~ 2 800 0 200 L 50 50 0 0 P
+A 250 -2 50 1777 -23 0 1 6 N 300 0 200 0
+A 350 -2 50 1777 -23 0 1 6 N 400 0 300 0
+A 450 -2 50 1777 -23 0 1 6 N 500 0 400 0
+A 550 -2 50 1777 -23 0 1 6 N 600 0 500 0
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model LMV321SQ3T2G
+#/4669754/960482/2.50/5/2/Integrated Circuit
+DEF LMV321SQ3T2G IC 0 30 Y Y 1 F N
+F0 "IC" 1050 300 50 H V L CNN
+F1 "LMV321SQ3T2G" 1050 200 50 H V L CNN
+F2 "SOT65P210X110-5N" 1050 100 50 H I L CNN
+F3 "https://www.onsemi.com/pub/Collateral/LMV321-D.PDF" 1050 0 50 H I L CNN
+F4 "Operation from 2.7 V to 5.0 V Single-Sided Power Supply; No Output Crossover Distortion; Industrial temperature Range: -40C to +85C or Automotive -40C to +125C; Rail-to-Rail Output; Low Quiescent Current; No Output Phase-Reversal from Overdriven Input; NCV prefix for Automotive Qualified Version" 1050 -100 50 H I L CNN "Description"
+F5 "1.1" 1050 -200 50 H I L CNN "Height"
+F6 "863-LMV321SQ3T2G" 1050 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/onsemi/LMV321SQ3T2G?qs=yU2N9dt%252BrfkDEebkfLT8KQ%3D%3D" 1050 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "onsemi" 1050 -500 50 H I L CNN "Manufacturer_Name"
+F9 "LMV321SQ3T2G" 1050 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X +IN 1 0 0 200 R 50 50 0 0 P
+X V- 2 0 -100 200 R 50 50 0 0 P
+X -IN 3 0 -200 200 R 50 50 0 0 P
+X OUTPUT 4 1200 0 200 L 50 50 0 0 P
+X V+ 5 1200 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1000 100 1000 -300 200 -300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model BZX84C3V3LT1G
+#/305633/960482/2.50/3/2/Zener Diode
+DEF BZX84C3V3LT1G Z 0 30 Y Y 1 F N
+F0 "Z" 750 300 50 H V L CNN
+F1 "BZX84C3V3LT1G" 750 200 50 H V L CNN
+F2 "SOT96P237X111-3N" 750 100 50 H I L CNN
+F3 "https://www.onsemi.com/pub/Collateral/BZX84C2V4LT1-D.PDF" 750 0 50 H I L CNN
+F4 "250 mW Rating on FR-4 or FR-5 Board; Zener Breakdown Voltage Range - 2.4 V to 75 V; Package Designed for Optimal Automated Board Assembly; Small Package Size for High Density Applications; ESD Rating of Class 3 (>16 KV) per Human Body Model; Mechanical Characteristics:; CASE: Void-free, transfer-molded, thermosetting plastic case; FINISH: Corrosion resistant finish, easily solderable; MAXIMUM CASE TEMPERATURE FOR SOLDERING PURPOSES: 260C for 10 Seconds; POLARITY: Cathode indicated by polarity band; FLAMMAB" 750 -100 50 H I L CNN "Description"
+F5 "1.11" 750 -200 50 H I L CNN "Height"
+F6 "863-BZX84C3V3LT1G" 750 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/onsemi/BZX84C3V3LT1G?qs=vNc2DXHODiIKL62%252Be6h8Pg%3D%3D" 750 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "onsemi" 750 -500 50 H I L CNN "Manufacturer_Name"
+F9 "BZX84C3V3LT1G" 750 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X A 1 0 0 200 R 50 50 0 0 P
+X NC 2 0 -100 200 R 50 50 0 0 N
+X K 3 900 0 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 700 100 700 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
 #End Library

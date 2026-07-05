@@ -113,16 +113,6 @@
 	)
 	(wire
 		(pts
-			(xy 128.27 95.25) (xy 128.27 81.28)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "8cb93944-fc11-4835-bd92-62d6cae0528b")
-	)
-	(wire
-		(pts
 			(xy 124.46 77.47) (xy 152.4 77.47)
 		)
 		(stroke
@@ -183,26 +173,6 @@
 	)
 	(wire
 		(pts
-			(xy 128.27 81.28) (xy 152.4 81.28)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "af6034b3-61d0-4367-8748-5c16cec1a331")
-	)
-	(wire
-		(pts
-			(xy 92.71 95.25) (xy 92.71 82.55)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "affe5fca-8696-4713-b8ea-e330e8eb832e")
-	)
-	(wire
-		(pts
 			(xy 138.43 123.19) (xy 149.86 123.19)
 		)
 		(stroke
@@ -230,16 +200,6 @@
 			(type default)
 		)
 		(uuid "c14d4fb0-9247-434d-80e1-a1d0352f13fe")
-	)
-	(wire
-		(pts
-			(xy 92.71 82.55) (xy 73.66 82.55)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c23e5004-062f-4f96-9c1e-026bb8dccd22")
 	)
 	(wire
 		(pts
@@ -348,16 +308,6 @@
 				(justify right)
 			)
 		)
-		(pin "5V" input
-			(at 92.71 95.25 90)
-			(uuid "c8522271-b68a-432e-b1aa-f885ee837a0d")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
 		(pin "12V" input
 			(at 95.25 95.25 90)
 			(uuid "09731521-1a27-44d9-a085-49d4b51c8df7")
@@ -434,16 +384,6 @@
 				(justify left)
 			)
 		)
-		(pin "5V" output
-			(at 152.4 81.28 180)
-			(uuid "563ffa27-e674-412b-8ef0-46d89f7194b4")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
 		(pin "12V" output
 			(at 152.4 77.47 180)
 			(uuid "3652e257-53e0-4b56-9047-dd86b698774b")
@@ -513,16 +453,6 @@
 		(pin "3.3V" output
 			(at 73.66 86.36 0)
 			(uuid "25cc6972-186c-4891-8bcd-9c09c810cc26")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "5V" output
-			(at 73.66 82.55 0)
-			(uuid "1668c8cd-6a37-4476-97f0-5f488483d7b1")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -628,16 +558,6 @@
 		(pin "3.3V" input
 			(at 132.08 95.25 90)
 			(uuid "99ffc521-8928-40ed-868a-c391f04a0da7")
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-		(pin "5V" input
-			(at 128.27 95.25 90)
-			(uuid "c6f77e30-5620-4032-b81b-351ca0a6b4a4")
 			(effects
 				(font
 					(size 1.27 1.27)

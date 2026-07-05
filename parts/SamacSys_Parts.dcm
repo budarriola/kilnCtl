@@ -54,4 +54,22 @@ K
 F https://www.infineon.com/dgdl/Infineon-BSP296N-DS-v02_00-en.pdf?fileId=db3a30433dd58def013dd5af675d001f
 $ENDCMP
 #
+$CMP 7447779004
+D WE-PD Robust SMT Shielded Power Inductor Size 7345; L = 4.7 H +/-20%; IR = 3.16 A; Isat = 4.4 A; RDC = 32 m
+K
+F https://www.we-online.com/catalog/datasheet/7447779004.pdf
+$ENDCMP
+#
+$CMP LMV321SQ3T2G
+D Operation from 2.7 V to 5.0 V Single-Sided Power Supply; No Output Crossover Distortion; Industrial temperature Range: -40C to +85C or Automotive -40C to +125C; Rail-to-Rail Output; Low Quiescent Current; No Output Phase-Reversal from Overdriven Input; NCV prefix for Automotive Qualified Version
+K
+F https://www.onsemi.com/pub/Collateral/LMV321-D.PDF
+$ENDCMP
+#
+$CMP BZX84C3V3LT1G
+D 250 mW Rating on FR-4 or FR-5 Board; Zener Breakdown Voltage Range - 2.4 V to 75 V; Package Designed for Optimal Automated Board Assembly; Small Package Size for High Density Applications; ESD Rating of Class 3 (>16 KV) per Human Body Model; Mechanical Characteristics:; CASE: Void-free, transfer-molded, thermosetting plastic case; FINISH: Corrosion resistant finish, easily solderable; MAXIMUM CASE TEMPERATURE FOR SOLDERING PURPOSES: 260C for 10 Seconds; POLARITY: Cathode indicated by polarity band; FLAMMAB
+K
+F https://www.onsemi.com/pub/Collateral/BZX84C2V4LT1-D.PDF
+$ENDCMP
+#
 #End Doc Library
