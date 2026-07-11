@@ -3809,7 +3809,7 @@
 				)
 			)
 		)
-		(property "Value" "680"
+		(property "Value" "390"
 			(at 209.804 116.84 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4355,7 +4355,7 @@
 				)
 			)
 		)
-		(property "Value" "680"
+		(property "Value" "390"
 			(at 244.094 104.14 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4623,7 +4623,7 @@
 				)
 			)
 		)
-		(property "Value" "680"
+		(property "Value" "390"
 			(at 240.284 77.47 90)
 			(show_name no)
 			(do_not_autoplace no)

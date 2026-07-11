@@ -744,7 +744,7 @@
         "uuid": "e9c1836b-d16f-494a-819b-41549a786e18"
       }
     ],
-    "used_designators": "U1-3,U11-13,U17-18,#PWR18,#PWR21,#PWR23-30,#PWR32-35,#PWR39,#PWR43,#PWR60-61,#PWR63-64,#PWR67-85,D1-17,D19,D22,D26-38,A2,C7-9,C11-29,C45-62,J2-4,J6-7,J10-11,J17-22,R2-11,R13,R26,R29-33,R35,R44-53,R66-67,R75-81,R86-106,FB1-2,K5,Q5-10,IC1-2,L1-4",
+    "used_designators": "U1-3,U7-13,U17-18,#PWR18,#PWR21,#PWR23-30,#PWR32-35,#PWR39-40,#PWR43,#PWR60-61,#PWR63-64,#PWR67-98,D1-17,D19,D22,D24,D26-39,A2,C1-3,C7-9,C11-29,C45-78,J1-4,J6-7,J10-11,J17-23,R2-11,R13,R26,R29-33,R35,R44-53,R56-58,R61-63,R66-67,R70,R75-81,R86-111,FB1-2,K5,Q1-12,IC1-8,L1-6",
     "variants": []
   },
   "sheets": [
@@ -767,6 +767,10 @@
     [
       "79cb8098-5fc5-49db-9993-ad819d0f9bb4",
       "Relay2"
+    ],
+    [
+      "0dba9547-3e07-4b05-b251-0d0918aca780",
+      "5V Regulator"
     ],
     [
       "97a736c6-3aea-44aa-9cdc-a04a9e3c22ad",
@@ -810,11 +814,11 @@
     ],
     [
       "79a7153e-7b60-438c-928b-888b0e0879ef",
-      "MainRegulators"
+      "MainRegulator"
     ],
     [
       "415569b5-e71f-44a8-96ab-1860fbe1fd72",
-      "SaftyRegulators"
+      "SaftyRegulator"
     ]
   ],
   "text_variables": {},

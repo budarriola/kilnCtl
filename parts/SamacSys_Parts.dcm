@@ -72,4 +72,22 @@ K
 F https://www.onsemi.com/pub/Collateral/BZX84C2V4LT1-D.PDF
 $ENDCMP
 #
+$CMP MSD1048-223MED
+D Coupled Inductors 22uH Shld 20% 1.9A 98mOhms
+K
+F 
+$ENDCMP
+#
+$CMP UCM1H471MNJ1MS
+D Aluminum Electrolytic Capacitors - SMD 50V 470uf 20% AEC-Q200
+K
+F 
+$ENDCMP
+#
+$CMP SI3474DV-T1-GE3
+D P-Channel 12 V (D-S) MOSFET
+K
+F http://www.vishay.com/docs/62875/si3474dv.pdf
+$ENDCMP
+#
 #End Doc Library

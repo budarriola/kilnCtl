@@ -1359,7 +1359,7 @@
 		(uuid "04589cfd-e163-4686-b2c3-e3f9a7842524")
 	)
 	(junction
-		(at 83.82 82.55)
+		(at 67.31 85.09)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "074626d4-3803-4376-91d5-f12e9d4ee917")
@@ -1369,6 +1369,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "08d61093-c4f3-4c9c-98fe-3d57165afc48")
+	)
+	(junction
+		(at 90.17 85.09)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "09ce746e-429d-474e-8a7b-2ed58763fa43")
 	)
 	(junction
 		(at 116.84 86.36)
@@ -1383,10 +1389,16 @@
 		(uuid "1439a285-8e8d-4899-b2eb-8bb60d296411")
 	)
 	(junction
-		(at 82.55 96.52)
+		(at 66.04 99.06)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "2865feee-14d4-494b-bc31-410769bba911")
+	)
+	(junction
+		(at 63.5 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "30dfa431-c692-45a3-a568-61cca90af74c")
 	)
 	(junction
 		(at 165.1 96.52)
@@ -1395,13 +1407,19 @@
 		(uuid "3e85897d-db2c-42a4-9987-8ebad776ea78")
 	)
 	(junction
+		(at 90.17 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "43c181df-849b-448c-bb52-e96f8e343c7b")
+	)
+	(junction
 		(at 116.84 96.52)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "64441171-170d-4c5f-9fa3-17dc7777c9d5")
 	)
 	(junction
-		(at 88.9 82.55)
+		(at 72.39 85.09)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "6a6636dd-81e8-4a7a-add5-3e8064440099")
@@ -1413,16 +1431,16 @@
 		(uuid "8285922c-514e-46dd-91c0-7d336f88b715")
 	)
 	(junction
+		(at 101.6 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "ae31f561-f811-4bb4-9fff-981acaeaac43")
+	)
+	(junction
 		(at 134.62 96.52)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "b69cd668-29b5-4759-a7aa-c65b4ed869c1")
-	)
-	(junction
-		(at 101.6 96.52)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "c2c2d97c-ac0c-4818-8107-de8e9ef9f7a5")
 	)
 	(junction
 		(at 220.98 104.14)
@@ -1431,7 +1449,7 @@
 		(uuid "c5a10cc7-c65c-46ad-9afd-03de856b8752")
 	)
 	(junction
-		(at 88.9 96.52)
+		(at 72.39 99.06)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "c6346f4c-aedb-4192-a124-fac1310972d2")
@@ -1442,9 +1460,23 @@
 		(color 0 0 0 0)
 		(uuid "d59e4322-02a2-4520-ba0e-08b0fb1562f4")
 	)
+	(no_connect
+		(at 25.4 93.98)
+		(uuid "175bfd50-986a-49c3-98ab-828aafa3688f")
+	)
 	(wire
 		(pts
-			(xy 82.55 96.52) (xy 88.9 96.52)
+			(xy 90.17 85.09) (xy 101.6 85.09)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "03b42c0f-80a9-40a1-89fa-d9f3202d0b83")
+	)
+	(wire
+		(pts
+			(xy 66.04 99.06) (xy 72.39 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1464,7 +1496,7 @@
 	)
 	(wire
 		(pts
-			(xy 80.01 91.44) (xy 83.82 91.44)
+			(xy 63.5 93.98) (xy 67.31 93.98)
 		)
 		(stroke
 			(width 0)
@@ -1514,7 +1546,7 @@
 	)
 	(wire
 		(pts
-			(xy 80.01 82.55) (xy 83.82 82.55)
+			(xy 63.5 85.09) (xy 67.31 85.09)
 		)
 		(stroke
 			(width 0)
@@ -1534,7 +1566,7 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 96.52) (xy 101.6 96.52)
+			(xy 72.39 99.06) (xy 90.17 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1554,7 +1586,7 @@
 	)
 	(wire
 		(pts
-			(xy 80.01 96.52) (xy 82.55 96.52)
+			(xy 63.5 99.06) (xy 66.04 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1564,7 +1596,7 @@
 	)
 	(wire
 		(pts
-			(xy 80.01 85.09) (xy 82.55 85.09)
+			(xy 63.5 87.63) (xy 66.04 87.63)
 		)
 		(stroke
 			(width 0)
@@ -1604,6 +1636,16 @@
 	)
 	(wire
 		(pts
+			(xy 63.5 105.41) (xy 63.5 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4c2cf7bd-040f-42fd-b165-71987aa43295")
+	)
+	(wire
+		(pts
 			(xy 226.06 95.25) (xy 226.06 93.98)
 		)
 		(stroke
@@ -1624,7 +1666,7 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 82.55) (xy 101.6 82.55)
+			(xy 72.39 85.09) (xy 90.17 85.09)
 		)
 		(stroke
 			(width 0)
@@ -1644,7 +1686,7 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 102.87) (xy 101.6 96.52)
+			(xy 101.6 102.87) (xy 101.6 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1674,7 +1716,7 @@
 	)
 	(wire
 		(pts
-			(xy 82.55 85.09) (xy 82.55 96.52)
+			(xy 66.04 87.63) (xy 66.04 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1704,13 +1746,23 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 92.71) (xy 88.9 96.52)
+			(xy 72.39 95.25) (xy 72.39 99.06)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "76b10041-07dd-425a-8583-a0222b292e77")
+	)
+	(wire
+		(pts
+			(xy 101.6 99.06) (xy 101.6 96.52)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7cf27514-ce57-4ca5-a7d5-ada290781ad6")
 	)
 	(wire
 		(pts
@@ -1721,6 +1773,16 @@
 			(type default)
 		)
 		(uuid "7ffb1b2c-66c0-479f-8b7e-c51718fbc723")
+	)
+	(wire
+		(pts
+			(xy 25.4 96.52) (xy 22.86 96.52)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "84e398cd-e675-40e8-a325-890af9ff71a1")
 	)
 	(wire
 		(pts
@@ -1774,7 +1836,17 @@
 	)
 	(wire
 		(pts
-			(xy 80.01 93.98) (xy 80.01 96.52)
+			(xy 90.17 95.25) (xy 90.17 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9fda01dd-184f-424a-aeb3-aae67178ce47")
+	)
+	(wire
+		(pts
+			(xy 63.5 96.52) (xy 63.5 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1794,7 +1866,7 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 82.55) (xy 88.9 85.09)
+			(xy 72.39 85.09) (xy 72.39 87.63)
 		)
 		(stroke
 			(width 0)
@@ -1824,7 +1896,7 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 82.55) (xy 101.6 91.44)
+			(xy 101.6 85.09) (xy 101.6 91.44)
 		)
 		(stroke
 			(width 0)
@@ -1834,7 +1906,7 @@
 	)
 	(wire
 		(pts
-			(xy 83.82 82.55) (xy 83.82 91.44)
+			(xy 67.31 85.09) (xy 67.31 93.98)
 		)
 		(stroke
 			(width 0)
@@ -1854,7 +1926,7 @@
 	)
 	(wire
 		(pts
-			(xy 83.82 82.55) (xy 88.9 82.55)
+			(xy 67.31 85.09) (xy 72.39 85.09)
 		)
 		(stroke
 			(width 0)
@@ -1904,6 +1976,16 @@
 	)
 	(wire
 		(pts
+			(xy 90.17 99.06) (xy 101.6 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b6b690be-39e7-462b-aa36-dc276449b2f9")
+	)
+	(wire
+		(pts
 			(xy 101.6 91.44) (xy 104.14 91.44)
 		)
 		(stroke
@@ -1911,6 +1993,26 @@
 			(type default)
 		)
 		(uuid "bb1492ee-24c3-499f-8df2-f3cd44709672")
+	)
+	(wire
+		(pts
+			(xy 22.86 105.41) (xy 63.5 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "bd1c0a32-fc47-4976-a5e4-a367bb0df5ca")
+	)
+	(wire
+		(pts
+			(xy 90.17 85.09) (xy 90.17 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c21f41d3-4491-44d5-9015-da0e4b4d8b0c")
 	)
 	(wire
 		(pts
@@ -1951,6 +2053,16 @@
 			(type default)
 		)
 		(uuid "e9ce7cc9-2f47-4534-a70b-44d98b19b968")
+	)
+	(wire
+		(pts
+			(xy 22.86 96.52) (xy 22.86 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f8ffb170-b3c5-436d-a992-98fbabc4d23d")
 	)
 	(wire
 		(pts
@@ -2165,7 +2277,7 @@
 	)
 	(symbol
 		(lib_id "SamacSys_Parts:SJ2-35813B-SMT-TR")
-		(at 80.01 93.98 180)
+		(at 63.5 96.52 180)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2175,7 +2287,7 @@
 		(dnp no)
 		(uuid "0378ff96-de35-4632-b225-3831565abe33")
 		(property "Reference" "J20"
-			(at 60.96 101.6 0)
+			(at 44.45 104.14 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2185,7 +2297,7 @@
 			)
 		)
 		(property "Value" "SJ2-35813B-SMT-TR"
-			(at 60.96 99.06 0)
+			(at 44.45 101.6 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2195,7 +2307,7 @@
 			)
 		)
 		(property "Footprint" "SamacSys_Parts:SJ235813BSMTTR"
-			(at 45.72 96.52 0)
+			(at 29.21 99.06 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2207,7 +2319,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D"
-			(at 45.72 93.98 0)
+			(at 29.21 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2219,7 +2331,7 @@
 			)
 		)
 		(property "Description" "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~ 85C"
-			(at 80.01 93.98 0)
+			(at 63.5 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2230,7 +2342,7 @@
 			)
 		)
 		(property "Description_1" "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~{} 85C"
-			(at 45.72 91.44 0)
+			(at 29.21 93.98 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2242,7 +2354,7 @@
 			)
 		)
 		(property "Height" "5.3"
-			(at 45.72 88.9 0)
+			(at 29.21 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2254,7 +2366,7 @@
 			)
 		)
 		(property "Mouser Part Number" "490-SJ2-35813BSMT-TR"
-			(at 45.72 86.36 0)
+			(at 29.21 88.9 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2266,7 +2378,7 @@
 			)
 		)
 		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D"
-			(at 45.72 83.82 0)
+			(at 29.21 86.36 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2278,7 +2390,7 @@
 			)
 		)
 		(property "Manufacturer_Name" "Same Sky"
-			(at 45.72 81.28 0)
+			(at 29.21 83.82 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2290,7 +2402,7 @@
 			)
 		)
 		(property "Manufacturer_Part_Number" "SJ2-35813B-SMT-TR"
-			(at 45.72 78.74 0)
+			(at 29.21 81.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2302,7 +2414,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 80.01 93.98 0)
+			(at 63.5 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2313,7 +2425,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 80.01 93.98 0)
+			(at 63.5 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2324,7 +2436,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 80.01 93.98 0)
+			(at 63.5 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2973,18 +3085,18 @@
 	)
 	(symbol
 		(lib_id "SamacSys_Parts:1935161")
-		(at 80.01 85.09 180)
+		(at 63.5 87.63 180)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(in_pos_files yes)
-		(dnp no)
+		(dnp yes)
 		(fields_autoplaced yes)
 		(uuid "89c9411f-0119-44c9-91e6-d044a70e3d07")
 		(property "Reference" "J2"
-			(at 69.85 74.93 0)
+			(at 53.34 77.47 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2994,7 +3106,7 @@
 			)
 		)
 		(property "Value" "1935161"
-			(at 69.85 77.47 0)
+			(at 53.34 80.01 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3004,7 +3116,7 @@
 			)
 		)
 		(property "Footprint" "SamacSys_Parts:1935161"
-			(at 63.5 87.63 0)
+			(at 46.99 90.17 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3016,7 +3128,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 63.5 85.09 0)
+			(at 46.99 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3028,7 +3140,7 @@
 			)
 		)
 		(property "Description" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 80.01 85.09 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3039,7 +3151,7 @@
 			)
 		)
 		(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 63.5 82.55 0)
+			(at 46.99 85.09 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3051,7 +3163,7 @@
 			)
 		)
 		(property "Height" "11.55"
-			(at 63.5 80.01 0)
+			(at 46.99 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3063,7 +3175,7 @@
 			)
 		)
 		(property "Mouser Part Number" "651-1935161"
-			(at 63.5 77.47 0)
+			(at 46.99 80.01 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3075,7 +3187,7 @@
 			)
 		)
 		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 63.5 74.93 0)
+			(at 46.99 77.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3087,7 +3199,7 @@
 			)
 		)
 		(property "Manufacturer_Name" "Phoenix Contact"
-			(at 63.5 72.39 0)
+			(at 46.99 74.93 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3099,7 +3211,7 @@
 			)
 		)
 		(property "Manufacturer_Part_Number" "1935161"
-			(at 63.5 69.85 0)
+			(at 46.99 72.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3111,7 +3223,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 80.01 85.09 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3122,7 +3234,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 80.01 85.09 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3133,7 +3245,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 80.01 85.09 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3555,7 +3667,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 88.9 88.9 0)
+		(at 72.39 91.44 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3566,7 +3678,7 @@
 		(fields_autoplaced yes)
 		(uuid "b2465d95-d11a-4741-807f-66e827b81464")
 		(property "Reference" "R104"
-			(at 91.44 87.6299 0)
+			(at 74.93 90.1699 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3577,7 +3689,7 @@
 			)
 		)
 		(property "Value" "100R 1W"
-			(at 91.44 90.1699 0)
+			(at 74.93 92.7099 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3588,7 +3700,7 @@
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_2512_6332Metric"
-			(at 87.122 88.9 90)
+			(at 70.612 91.44 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3599,7 +3711,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ2512F100R?qs=sGAEpiMZZMtlubZbdhIBIOInyB5Ysv8sjaWUpKG2dwk%3D"
-			(at 88.9 88.9 0)
+			(at 72.39 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3610,7 +3722,7 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 88.9 88.9 0)
+			(at 72.39 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3621,7 +3733,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 88.9 88.9 0)
+			(at 72.39 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3632,7 +3744,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 88.9 88.9 0)
+			(at 72.39 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3643,7 +3755,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 88.9 88.9 0)
+			(at 72.39 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4120,6 +4232,126 @@
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
 					(reference "R8")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 90.17 91.44 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "f2c998c6-f05b-4c39-b814-0fba42f6cd0a")
+		(property "Reference" "R13"
+			(at 87.884 92.964 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "475k"
+			(at 92.71 91.694 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 91.948 91.44 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+			(at 90.17 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 90.17 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 90.17 91.44 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 90.17 91.44 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 90.17 91.44 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "71443467-5341-4b42-a56e-59eb6ed59590")
+		)
+		(pin "1"
+			(uuid "3aeb3eac-c151-43ce-b0da-bf5d0e53d013")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/06c014e0-e2f9-46c3-9b89-68231845021c"
+					(reference "R13")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/6b00695a-64fa-4e76-ada0-6d4abb3253d0"
+					(reference "R70")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/c4cd1e48-b8aa-4187-b9df-dc410216a877"
+					(reference "R63")
 					(unit 1)
 				)
 			)
