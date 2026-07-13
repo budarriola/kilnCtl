@@ -2707,7 +2707,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "0e284c2d-3cd9-4da5-a88f-b170a20eec36")
-		(property "Reference" "C67"
+		(property "Reference" "C13"
 			(at 193.04 80.0099 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2804,7 +2804,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C67")
+					(reference "C13")
 					(unit 1)
 				)
 			)
@@ -2822,7 +2822,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "25efce53-8b3d-42db-8c58-002e5d5bd5df")
-		(property "Reference" "R53"
+		(property "Reference" "R45"
 			(at 124.46 109.2199 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2919,7 +2919,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R53")
+					(reference "R45")
 					(unit 1)
 				)
 			)
@@ -2936,7 +2936,7 @@
 		(in_pos_files yes)
 		(dnp no)
 		(uuid "2741d96f-8577-42d5-9d53-75d7b9a0df59")
-		(property "Reference" "C66"
+		(property "Reference" "C12"
 			(at 174.498 110.744 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3044,7 +3044,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C66")
+					(reference "C12")
 					(unit 1)
 				)
 			)
@@ -3062,7 +3062,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "307c41c5-56ab-4ff7-abef-a4bbdf17b4a4")
-		(property "Reference" "C70"
+		(property "Reference" "C16"
 			(at 238.76 110.4899 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3159,7 +3159,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C70")
+					(reference "C16")
 					(unit 1)
 				)
 			)
@@ -3177,7 +3177,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "47d6cf6c-3f61-4571-9b69-41c3c3ff918a")
-		(property "Reference" "C65"
+		(property "Reference" "C11"
 			(at 135.89 114.2999 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3274,7 +3274,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C65")
+					(reference "C11")
 					(unit 1)
 				)
 			)
@@ -3292,7 +3292,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "4a3b954e-566d-471f-b9c4-3f1c07f84295")
-		(property "Reference" "R57"
+		(property "Reference" "R47"
 			(at 208.28 116.8399 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3389,7 +3389,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R57")
+					(reference "R47")
 					(unit 1)
 				)
 			)
@@ -3407,7 +3407,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "798b30d3-40d7-4527-9531-62ceddbafa02")
-		(property "Reference" "C68"
+		(property "Reference" "C14"
 			(at 196.85 105.4099 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3515,7 +3515,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C68")
+					(reference "C14")
 					(unit 1)
 				)
 			)
@@ -3533,7 +3533,7 @@
 		(dnp yes)
 		(fields_autoplaced yes)
 		(uuid "8c57fd2a-3404-458e-b8f5-bdc6b2d436f1")
-		(property "Reference" "R52"
+		(property "Reference" "R44"
 			(at 121.92 80.0099 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3630,7 +3630,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R52")
+					(reference "R44")
 					(unit 1)
 				)
 			)
@@ -3648,7 +3648,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "8ec38160-ac00-41f3-84ad-369f83ea3965")
-		(property "Reference" "R56"
+		(property "Reference" "R46"
 			(at 208.28 106.6799 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3745,7 +3745,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R56")
+					(reference "R46")
 					(unit 1)
 				)
 			)
@@ -3764,7 +3764,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "92a28eaa-544a-49f7-9343-ec758fbfa2e8")
-		(property "Reference" "IC3"
+		(property "Reference" "IC1"
 			(at 156.21 73.66 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3990,7 +3990,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "IC3")
+					(reference "IC1")
 					(unit 1)
 				)
 			)
@@ -4008,7 +4008,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "a001096f-9138-4166-8590-059eef8a14ec")
-		(property "Reference" "R51"
+		(property "Reference" "R43"
 			(at 121.92 69.8499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4105,7 +4105,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R51")
+					(reference "R43")
 					(unit 1)
 				)
 			)
@@ -4123,7 +4123,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "a82459be-697c-41ef-b8f3-ce546300ae9a")
-		(property "Reference" "R111"
+		(property "Reference" "R42"
 			(at 91.44 90.1699 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4220,7 +4220,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R111")
+					(reference "R42")
 					(unit 1)
 				)
 			)
@@ -4237,7 +4237,7 @@
 		(in_pos_files yes)
 		(dnp no)
 		(uuid "b5b8d6a2-0c42-4da1-8064-7507a77d9620")
-		(property "Reference" "C69"
+		(property "Reference" "C15"
 			(at 218.694 112.268 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4343,7 +4343,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C69")
+					(reference "C15")
 					(unit 1)
 				)
 			)
@@ -4360,7 +4360,7 @@
 		(in_pos_files yes)
 		(dnp no)
 		(uuid "d73f2dc8-58f2-46d3-9beb-5a64722eceef")
-		(property "Reference" "C3"
+		(property "Reference" "C9"
 			(at 97.79 71.1199 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4382,7 +4382,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "CAPAE1360X1450N"
+		(property "Footprint" "SamacSys_Parts:CAPAE1360X1450N"
 			(at 95.25 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -4498,7 +4498,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C3")
+					(reference "C9")
 					(unit 1)
 				)
 			)
@@ -4516,7 +4516,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "e32b828a-7d17-4ddf-95d6-96b879d01a09")
-		(property "Reference" "R110"
+		(property "Reference" "R41"
 			(at 91.44 81.2799 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4613,7 +4613,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "R110")
+					(reference "R41")
 					(unit 1)
 				)
 			)
@@ -4710,7 +4710,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "fcf7a065-9bb8-47f5-8bf8-e6aa5bef122d")
-		(property "Reference" "C64"
+		(property "Reference" "C10"
 			(at 111.76 69.8499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4818,7 +4818,7 @@
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
-					(reference "C64")
+					(reference "C10")
 					(unit 1)
 				)
 			)
