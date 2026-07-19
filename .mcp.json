@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "kicad": {
-      "url": "http://127.0.0.1:8765"
+      "command": "python/.venv/Scripts/python.exe",
+      "args": ["python/kicad_mcp_server.py"]
     }
   }
 }

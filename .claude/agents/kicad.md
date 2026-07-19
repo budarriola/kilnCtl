@@ -33,7 +33,7 @@ Always use line numbers to read narrow file sections — never `Read` an entire 
 
 ## Available MCP Tools
 
-The KiCad MCP server (running on http://127.0.0.1:8765) provides:
+The KiCad MCP server (launched locally over stdio via `.mcp.json`) provides:
 
 ### Inspection / query
 - **inspect_kicad_project** — Get board/schematic summary and component/net counts
