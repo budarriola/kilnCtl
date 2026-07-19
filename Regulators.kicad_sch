@@ -1869,12 +1869,6 @@
 		(uuid "237819dd-e7b7-41f8-93f1-b3278fdc4fc2")
 	)
 	(junction
-		(at 105.41 40.64)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "3837e2bf-89c0-4243-945d-98e65440b423")
-	)
-	(junction
 		(at 243.84 97.79)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1983,6 +1977,12 @@
 		(uuid "b027f29a-3d11-4193-9f9a-8165bae799cf")
 	)
 	(junction
+		(at 105.41 40.64)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "b1f12929-2764-4b76-ab47-2605d8281317")
+	)
+	(junction
 		(at 147.32 50.8)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -2062,6 +2062,16 @@
 	)
 	(wire
 		(pts
+			(xy 100.33 40.64) (xy 105.41 40.64)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0a1ffacb-8e18-41d8-860a-23d46fa67a71")
+	)
+	(wire
+		(pts
 			(xy 207.01 83.82) (xy 207.01 66.04)
 		)
 		(stroke
@@ -2089,16 +2099,6 @@
 			(type default)
 		)
 		(uuid "14a3a758-d90b-4470-b7b0-e91882a65d27")
-	)
-	(wire
-		(pts
-			(xy 100.33 40.64) (xy 105.41 40.64)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "19b41bdb-bb2d-4ab9-9a6d-b9fcb49b3a29")
 	)
 	(wire
 		(pts
@@ -2182,16 +2182,6 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 53.34) (xy 100.33 45.72)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "3edc2449-2970-4c12-a78b-2da0e5ec050c")
-	)
-	(wire
-		(pts
 			(xy 204.47 60.96) (xy 217.17 60.96)
 		)
 		(stroke
@@ -2249,6 +2239,26 @@
 			(type default)
 		)
 		(uuid "4837d3c8-76b9-4cc0-8f51-95deb6916d79")
+	)
+	(wire
+		(pts
+			(xy 100.33 45.72) (xy 100.33 40.64)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4b49189a-3827-40bc-acea-02255490adcf")
+	)
+	(wire
+		(pts
+			(xy 100.33 48.26) (xy 100.33 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4d631419-1788-4bcd-b3e6-b2f9202f104c")
 	)
 	(wire
 		(pts
@@ -2879,16 +2889,6 @@
 			(type default)
 		)
 		(uuid "e6b52a2e-4bfb-4faa-98c2-93df52c24e80")
-	)
-	(wire
-		(pts
-			(xy 100.33 40.64) (xy 100.33 43.18)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "e9a25f7e-01c1-475b-aa33-6d481917a1a2")
 	)
 	(wire
 		(pts
@@ -4750,7 +4750,8 @@
 	)
 	(symbol
 		(lib_id "SamacSys_Parts:1935161")
-		(at 100.33 45.72 180)
+		(at 100.33 45.72 0)
+		(mirror y)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -4760,7 +4761,7 @@
 		(dnp no)
 		(uuid "aea6e0e1-b335-419e-92d5-562fb75101b1")
 		(property "Reference" "J18"
-			(at 90.17 35.56 0)
+			(at 90.17 55.88 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -4770,7 +4771,7 @@
 			)
 		)
 		(property "Value" "1935161"
-			(at 90.17 38.1 0)
+			(at 90.17 53.34 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -4780,7 +4781,7 @@
 			)
 		)
 		(property "Footprint" "SamacSys_Parts:1935161"
-			(at 83.82 48.26 0)
+			(at 83.82 43.18 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4815,7 +4816,7 @@
 			)
 		)
 		(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 83.82 43.18 0)
+			(at 83.82 48.26 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4827,7 +4828,7 @@
 			)
 		)
 		(property "Height" "11.55"
-			(at 83.82 40.64 0)
+			(at 83.82 50.8 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4839,7 +4840,7 @@
 			)
 		)
 		(property "Mouser Part Number" "651-1935161"
-			(at 83.82 38.1 0)
+			(at 83.82 53.34 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4851,7 +4852,7 @@
 			)
 		)
 		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 83.82 35.56 0)
+			(at 83.82 55.88 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4863,7 +4864,7 @@
 			)
 		)
 		(property "Manufacturer_Name" "Phoenix Contact"
-			(at 83.82 33.02 0)
+			(at 83.82 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4875,7 +4876,7 @@
 			)
 		)
 		(property "Manufacturer_Part_Number" "1935161"
-			(at 83.82 30.48 0)
+			(at 83.82 60.96 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
