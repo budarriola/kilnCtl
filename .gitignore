@@ -17,3 +17,4 @@
 /python/.vscode/
 /python/__pycache__/
 /python/kicad_mcp_server.log
+/output/
