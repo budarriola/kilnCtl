@@ -2191,7 +2191,7 @@
 		(in_bom yes)
 		(on_board yes)
 		(in_pos_files yes)
-		(dnp yes)
+		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "0018427d-3809-4335-975e-e6a358248c38")
 		(property "Reference" "D13"
@@ -3287,7 +3287,7 @@
 		(in_bom yes)
 		(on_board yes)
 		(in_pos_files yes)
-		(dnp yes)
+		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "8e476f16-be81-4d34-bc99-4e9e0e4cfbe4")
 		(property "Reference" "D12"

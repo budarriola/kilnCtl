@@ -113,7 +113,6 @@
 		)
 		(capping no)
 		(filling no)
-		(zone_defaults)
 		(pcbplotparams
 			(layerselection 0x00000000_00000000_55555555_5755f5ff)
 			(plot_on_all_layers_selection 0x00000000_00000000_00000000_00000000)
@@ -473,7 +472,7 @@
 	(footprint "Capacitor_SMD:C_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "024e07f3-a2ad-4b5b-b707-37a3e7a0f828")
-		(at 166 101.25)
+		(at 160.5 99)
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C13"
@@ -1382,7 +1381,7 @@
 			(uuid "27f8f4f6-34b6-4b3e-a630-b7e354bd29f1")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -1594,7 +1593,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "09baff7f-17f5-40a5-8ca4-8a0d481c0ae7")
-		(at 165.25 112.24 90)
+		(at 159.75 109.99 90)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R43"
@@ -2185,7 +2184,7 @@
 	(footprint "Capacitor_SMD:C_1206_3216Metric"
 		(layer "F.Cu")
 		(uuid "0e725ed5-5d44-4afe-8447-e9a4f089db92")
-		(at 163 106.475 90)
+		(at 157.5 104.225 90)
 		(descr "Capacitor SMD 1206 (3216 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C10"
@@ -2395,7 +2394,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "0f56723d-3be1-4363-aa22-d1860701c7dc")
-		(at 206.5 83)
+		(at 207.25 85.25)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R22"
@@ -4217,7 +4216,7 @@
 	(footprint "LED_SMD:LED_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "17a9a7d3-f2fa-4023-b45d-34ce192405bb")
-		(at 168.25 112.25 -90)
+		(at 162.75 110 -90)
 		(descr "LED SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: http://www.tortai-tech.com/upload/download/2011102023233369053.pdf)")
 		(tags "LED")
 		(property "Reference" "D5"
@@ -4742,7 +4741,7 @@
 			(uuid "9f56148d-a862-4399-8a52-17f15171cb0a")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935174.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935174.stp"
 			(offset
 				(xyz 5.030000134 3.99999994 5.929999739)
 			)
@@ -4757,7 +4756,7 @@
 	(footprint "Capacitor_SMD:C_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "191b70a7-8182-44c0-a80b-1023bad4fad8")
-		(at 176.25 102.75 -90)
+		(at 170.75 100.5 -90)
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C16"
@@ -5229,7 +5228,7 @@
 			(uuid "e7e0a7b3-53fa-4bbd-b613-9962fd52f486")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Inductor_SMD.3dshapes/L_7.3x7.3_H4.5.step"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/7447779004.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -5237,7 +5236,7 @@
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz 0 0 0)
+				(xyz -0 -0 90)
 			)
 		)
 	)
@@ -6176,7 +6175,7 @@
 			(uuid "c1b53660-5827-432c-9ff5-419c7e68d5bf")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935174.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935174.stp"
 			(offset
 				(xyz 5.030000134 3.99999994 5.929999739)
 			)
@@ -10719,7 +10718,7 @@
 				(pins "3" "2" "1")
 			)
 		)
-		(attr smd dnp)
+		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
 			(start 0.76 1.56)
@@ -11032,7 +11031,7 @@
 	(footprint "SamacSys_Parts:SOP65P640X120-21N"
 		(layer "F.Cu")
 		(uuid "2205791a-ff13-4cf6-b3eb-3c1b529a9e85")
-		(at 168.201338 106.592582 90)
+		(at 162.701338 104.342582 90)
 		(descr "FE Package 20-Lead Plastic TSSOP (4.4mm")
 		(tags "Integrated Circuit")
 		(property "Reference" "IC1"
@@ -11511,7 +11510,7 @@
 			(uuid "7379d21c-1d4d-429c-a6e8-c5115812a41b")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\LT8631IFE#PBF.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/LT8631IFE#PBF.stp"
 			(offset
 				(xyz 0 0 0.6299999858)
 			)
@@ -11856,7 +11855,7 @@
 			(uuid "e80fb851-add8-450a-919b-f3f5eb9dfed9")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -12265,7 +12264,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "321a0cd4-9fbc-482d-a57f-8802cae7ffbf")
-		(at 169.75 112.25 -90)
+		(at 164.25 110 -90)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R45"
@@ -12792,7 +12791,7 @@
 			(uuid "e3d863af-1875-47e9-bdd0-741dca740359")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -14553,7 +14552,7 @@
 	(footprint "PCM_Espressif:ESP32-S3-DevKitC"
 		(layer "F.Cu")
 		(uuid "3e579b48-a047-4493-9247-864b6ca3bfcd")
-		(at 246.59 94.39 -90)
+		(at 246.58728 98.75368 -90)
 		(descr "ESP32-S3 general-purpose development board, based on ESP32-S3-WROOM-1 or ESP32-S3-WROOM-1U,It has all the ESP32-S3 pins exposed and is easy to connect and use.")
 		(tags "ESP32-S3")
 		(property "Reference" "U4"
@@ -15832,6 +15831,17 @@
 			(uuid "0c4fa519-f1d1-4db1-a2da-dcee97c22808")
 		)
 		(embedded_fonts no)
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/ESP32-S3-DEVKITC-1-N8R2--3DModel-STEP-56544.STEP"
+			(offset
+				(xyz 11.5 -30 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz -90 -0 -0)
+			)
+		)
 	)
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "F.Cu")
@@ -16969,7 +16979,7 @@
 			(uuid "3bb4e64a-1c13-4d16-92f3-29966ad0d68c")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -18115,7 +18125,7 @@
 			(uuid "5f501cdf-bcb9-4511-832f-e98c87b569e3")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -18460,7 +18470,7 @@
 			(uuid "0e6b7ef7-33f2-455f-a3cd-7e59ef667c4d")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -18954,7 +18964,7 @@
 			(uuid "44d00c7a-97e0-485f-97b2-839f22e7f9a9")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\LT8631IFE#PBF.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/LT8631IFE#PBF.stp"
 			(offset
 				(xyz 0 0 0.6299999858)
 			)
@@ -19496,7 +19506,7 @@
 			(uuid "3aff59d3-b70d-478e-bdbe-bb39ca7d8527")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -20051,7 +20061,7 @@
 			(uuid "dac31d59-c542-4d1d-b3ff-9e210cf07034")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -20396,7 +20406,7 @@
 			(uuid "d1757fda-8840-405e-b125-feeab00245a8")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -21004,7 +21014,7 @@
 	(footprint "Connector_JST:JST_XH_B10B-XH-AM_1x10_P2.50mm_Vertical"
 		(layer "F.Cu")
 		(uuid "5a2fada0-188b-484a-bad7-1807c7aed6e5")
-		(at 214.5 87.775 180)
+		(at 215.25 90.025 180)
 		(descr "JST XH series connector, B10B-XH-AM, with boss (http://www.jst-mfg.com/product/pdf/eng/eXH.pdf)")
 		(tags "connector JST XH vertical boss")
 		(property "Reference" "J2"
@@ -21371,15 +21381,15 @@
 			(uuid "c1a457b6-7621-4695-b1ac-c7a5f3ac9751")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Connector_JST.3dshapes/JST_XH_B10B-XH-AM_1x10_P2.50mm_Vertical.step"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/B10B-XH-A-LF--SN---3DModel-STEP-418109.STEP"
 			(offset
-				(xyz 0 0 0)
+				(xyz 11.5 -0.5 0)
 			)
 			(scale
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz 0 0 0)
+				(xyz -90 -0 -180)
 			)
 		)
 	)
@@ -21583,7 +21593,7 @@
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(layer "F.Cu")
 		(uuid "5a7b653d-20d1-4d14-a5fd-4ce06571a5f9")
-		(at 166.4125 115)
+		(at 160.9125 112.75)
 		(descr "Resistor SMD 0805 (2012 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R41"
@@ -21849,7 +21859,7 @@
 				(pins "3" "2" "1")
 			)
 		)
-		(attr smd dnp)
+		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
 			(start -0.76 -1.56)
@@ -22147,7 +22157,7 @@
 			(uuid "45289f5b-2dc4-4ffa-81bb-6e172927bd53")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/SOT-23.step"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/BZX84C3V3LT1G.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -22899,7 +22909,7 @@
 			(uuid "6e1ede0a-2162-41ab-b4d4-1b940aca2207")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SJ2-35813B-SMT-TR.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SJ2-35813B-SMT-TR.stp"
 			(offset
 				(xyz 0.09999999999 0 0.03999999851)
 			)
@@ -24033,7 +24043,7 @@
 			(uuid "3f934342-0463-4b0c-8389-0f545a81477f")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SJ2-35813B-SMT-TR.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SJ2-35813B-SMT-TR.stp"
 			(offset
 				(xyz 0.09999999999 0 0.03999999851)
 			)
@@ -25000,7 +25010,7 @@
 			(uuid "08b6219a-049d-4468-bf91-9f0b4ba16afd")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -25015,7 +25025,7 @@
 	(footprint "Inductor_SMD:L_Bourns_SRP1038C_10.0x10.0mm"
 		(layer "F.Cu")
 		(uuid "6e4e9bc6-af41-4e01-9655-f90455f09db5")
-		(at 168.75 93.75)
+		(at 163.25 91.5)
 		(descr "Bourns SRP1038C series SMD inductor http://www.bourns.com/docs/Product-Datasheets/SRP1038C.pdf")
 		(tags "Bourns SRP1038C SMD inductor")
 		(property "Reference" "L1"
@@ -25436,7 +25446,7 @@
 			(uuid "8a0abad3-9f0a-4171-bf4f-c9cbf8dffc6c")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Inductor_SMD.3dshapes/L_Bourns_SRP1038C_10.0x10.0mm.step"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/MSS1048.STEP"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -25444,7 +25454,7 @@
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz 0 0 0)
+				(xyz -90 -0 -90)
 			)
 		)
 	)
@@ -25930,7 +25940,7 @@
 			(uuid "66c739de-ea96-425d-a20e-aa09b689827a")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\LT8631IFE#PBF.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/LT8631IFE#PBF.stp"
 			(offset
 				(xyz 0 0 0.6299999858)
 			)
@@ -26142,7 +26152,7 @@
 	(footprint "Capacitor_SMD:C_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "6eccc95b-070c-44a6-b1f1-dab8a373bad4")
-		(at 192.75 82.75)
+		(at 193.5 85)
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C6"
@@ -28074,7 +28084,7 @@
 			(uuid "6304a4bc-b029-4dfc-aa2e-2b3e747ee3bd")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935174.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935174.stp"
 			(offset
 				(xyz 5.030000134 3.99999994 5.929999739)
 			)
@@ -28435,7 +28445,7 @@
 			(uuid "2bee9275-5054-4829-b2d5-34f9be2f01d3")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -29522,7 +29532,7 @@
 			(uuid "332e3d8f-0a07-4e4b-831e-07743355f1ad")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -29803,7 +29813,7 @@
 				(pins "3" "2" "1")
 			)
 		)
-		(attr smd dnp)
+		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
 			(start 0.76 1.56)
@@ -31632,7 +31642,7 @@
 	(footprint "SamacSys_Parts:CAPAE1360X1450N"
 		(layer "F.Cu")
 		(uuid "8be5d5ca-d140-4300-8c4b-587175dd3825")
-		(at 152.5 105.35 90)
+		(at 147 103.1 90)
 		(descr "12.5x13.5")
 		(tags "Capacitor Polarised")
 		(property "Reference" "C9"
@@ -31919,7 +31929,7 @@
 			(uuid "62383234-fd5a-4b5b-a07e-198f585f6978")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\UCM1H471MNJ1MS.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/UCM1H471MNJ1MS.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -32985,7 +32995,7 @@
 			(uuid "74f862e5-1e4e-4f1a-8da8-2d82425380fb")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\UCM1H471MNJ1MS.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/UCM1H471MNJ1MS.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -34084,7 +34094,7 @@
 			(uuid "f6923541-27c4-459c-9e70-894d24f9e491")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -35033,7 +35043,7 @@
 			(uuid "c57cf145-fae1-445c-aeae-7655d17965b6")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SJ2-35813B-SMT-TR.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SJ2-35813B-SMT-TR.stp"
 			(offset
 				(xyz 0.09999999999 0 0.03999999851)
 			)
@@ -35705,7 +35715,7 @@
 			(uuid "997f094f-0735-46b4-b2fa-c2d482e58edf")
 		)
 		(embedded_fonts no)
-		(model "${KICAD10_3DMODEL_DIR}/Inductor_SMD.3dshapes/L_7.3x7.3_H4.5.step"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/7447779004.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -35713,7 +35723,7 @@
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz 0 0 0)
+				(xyz -0 -0 90)
 			)
 		)
 	)
@@ -36263,7 +36273,7 @@
 			(uuid "485c7573-1396-4d9c-b44a-6ccbbc0778c7")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -36608,7 +36618,7 @@
 			(uuid "0ebc0a39-d55e-4028-83f9-e62fa708e600")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -36964,7 +36974,7 @@
 			(uuid "71f45ffb-d68e-4122-b10e-dd8d096316e3")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935174.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935174.stp"
 			(offset
 				(xyz 5.030000134 3.99999994 5.929999739)
 			)
@@ -37258,7 +37268,7 @@
 				(pins "3" "2" "1")
 			)
 		)
-		(attr smd dnp)
+		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
 			(start -0.76 -1.56)
@@ -37917,7 +37927,7 @@
 			(uuid "c38ba7aa-a631-4e8a-a613-06d3b1745fbd")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -38001,7 +38011,7 @@
 				(pins "3" "2" "1")
 			)
 		)
-		(attr smd dnp)
+		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
 			(start -0.76 -1.56)
@@ -39413,7 +39423,7 @@
 	(footprint "Capacitor_SMD:C_1210_3225Metric"
 		(layer "F.Cu")
 		(uuid "b265f063-dcad-434f-9fa3-cc068c4d5a04")
-		(at 174 102.75 90)
+		(at 168.5 100.5 90)
 		(descr "Capacitor SMD 1210 (3225 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C15"
@@ -40150,7 +40160,7 @@
 			(uuid "bc6ad64c-dd5c-4157-bc97-41ca66529530")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -41754,7 +41764,7 @@
 	(footprint "Capacitor_SMD:C_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "c34a6be3-2389-4245-afd0-fdc7abe8efc3")
-		(at 171 112.25 -90)
+		(at 165.5 110 -90)
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C11"
@@ -42281,7 +42291,7 @@
 			(uuid "d6768c30-7d3f-4c8c-a966-6055ba2a35ac")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -43923,7 +43933,7 @@
 	(footprint "Capacitor_SMD:C_1206_3216Metric"
 		(layer "F.Cu")
 		(uuid "ced4f38f-bb55-4706-80c1-d8c316080b1c")
-		(at 169.5 101.25)
+		(at 164 99)
 		(descr "Capacitor SMD 1206 (3216 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C12"
@@ -44684,7 +44694,7 @@
 			(uuid "d5e9c7a8-7e68-4ece-bb7a-a2a50d2e465c")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935174.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935174.stp"
 			(offset
 				(xyz 5.030000134 3.99999994 5.929999739)
 			)
@@ -46180,7 +46190,7 @@
 			(uuid "ee615b94-daa9-43a7-9aff-6bd69047b964")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\UCM1H471MNJ1MS.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/UCM1H471MNJ1MS.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -47109,7 +47119,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "ecd03097-544e-4ff1-9250-bd5f418e28c1")
-		(at 213.75 83 180)
+		(at 214.5 85.25 180)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R18"
@@ -48829,7 +48839,7 @@
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(layer "F.Cu")
 		(uuid "f567050a-76a2-4141-9edf-2e16206d21b9")
-		(at 169.6625 115)
+		(at 164.1625 112.75)
 		(descr "Resistor SMD 0805 (2012 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R42"
@@ -49477,7 +49487,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "F.Cu")
 		(uuid "f87be5f8-0648-4799-aaf9-966c930a3a9f")
-		(at 166.5 112.24 -90)
+		(at 161 109.99 -90)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R44"
@@ -50004,7 +50014,7 @@
 			(uuid "72c7a525-bb8a-44e0-a804-055493d350ca")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\1935161.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/1935161.stp"
 			(offset
 				(xyz -30.13999894 -44.6699975 -38.17999973)
 			)
@@ -50285,7 +50295,7 @@
 				(pins "3" "2" "1")
 			)
 		)
-		(attr smd dnp)
+		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
 			(start 0.76 1.56)
@@ -52189,7 +52199,7 @@
 			(uuid "b75d1cb1-acb9-4b42-96a7-c55410dc58fc")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -53814,7 +53824,7 @@
 			(uuid "2dd84d24-c5ff-4fe0-834d-78e074c204a3")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -54807,7 +54817,7 @@
 			(uuid "5ef3528f-fe37-4faf-a220-bb98fc2e475b")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -56676,7 +56686,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "B.Cu")
 		(uuid "455fd30f-cba6-4165-bb4e-41975c5161f6")
-		(at 171.25 105.25)
+		(at 165.75 103)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R46"
@@ -57448,7 +57458,7 @@
 			(uuid "5f76e330-71e6-4267-b2b5-93c27d24c44b")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -62961,7 +62971,7 @@
 			(uuid "7d35fff0-f819-44bc-9505-81afda5c0b22")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -68855,7 +68865,7 @@
 			(uuid "089f3e8d-d05c-4dc3-9019-d64ef5d48dcb")
 		)
 		(embedded_fonts no)
-		(model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SS16FP.stp"
+		(model "${KIPRJMOD}/parts/SamacSys_Parts.3dshapes/SS16FP.stp"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -69076,7 +69086,7 @@
 	(footprint "Capacitor_SMD:C_0402_1005Metric"
 		(layer "B.Cu")
 		(uuid "d96d0503-ec47-4985-974a-7f23e8531592")
-		(at 171.25 104)
+		(at 165.75 101.75)
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C14"
@@ -71557,7 +71567,7 @@
 	(footprint "Resistor_SMD:R_0402_1005Metric"
 		(layer "B.Cu")
 		(uuid "fac03f50-092c-46a1-b763-01f4d43c1f4c")
-		(at 171.25 106.5 180)
+		(at 165.75 104.25 180)
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R47"
@@ -71843,63 +71853,16 @@
 		)
 	)
 	(group ""
-		(uuid "05fb6587-5c83-4e50-b36b-00f57ed64fa3")
-		(members "8bb45cd5-412e-4299-b26c-d096254c6619" "942883a4-6321-4166-b89a-6bf240baf3d7"
-			"c9592aa6-ea47-4b11-a3b7-6f8d859d4aea"
-		)
-	)
-	(group ""
-		(uuid "8088d965-4317-41bd-9fca-ce5c231075d7")
-		(members "0f56723d-3be1-4363-aa22-d1860701c7dc" "5a2fada0-188b-484a-bad7-1807c7aed6e5"
-			"6eccc95b-070c-44a6-b1f1-dab8a373bad4" "ecd03097-544e-4ff1-9250-bd5f418e28c1"
-		)
-	)
-	(group ""
-		(uuid "d7acb62b-945a-41ff-9194-e8ea2342e4bb")
+		(uuid "27f8d8f7-2dd3-4f91-a8ea-565c82c10b3a")
 		(members "4d3fec8c-c1b2-4772-b6b8-0d9784f3c60e" "4da981cc-6d53-4f5a-b5ea-434384c59aef"
 			"55349ea2-4753-4806-8328-34c09cac01dd" "b760bff5-d514-49e0-8139-d93eea4a531b"
 			"fce86fd1-9339-4994-ac89-b71f6caeb874"
 		)
 	)
 	(group ""
-		(uuid "05e2a1b8-fc60-4062-a0c6-614a73ea3bb1")
-		(members "08fb6b7d-8d10-43a3-aded-8481711e3595" "2678939a-45b6-4466-96ad-51a9f1cb9683"
-			"36eff220-571e-4e76-8a17-bf10d1a96e48" "4b15cecc-587e-4c28-a48c-41a6bc7544e6"
-			"5066c9f0-eead-4b71-85f2-e1bfcaa7ab3f" "50db8331-05f6-475a-83bf-4be7c0918eef"
-			"5e260400-d551-438d-9e0b-bf07eacdd07e" "6484be33-7e9f-4600-a9b3-09dc3f71e916"
-			"6e6c7c7b-9f3d-44f5-ab4d-62a5e99a10ae" "9f5913cf-97a1-4adb-a01f-eea2917a6f36"
-			"a0f8dfe4-fb8c-4f04-b409-7bf9a4883dd8" "a6a340de-9a81-4c6e-bc99-4789ab904af3"
-			"b584bcb2-e476-46a9-99fd-ff9a7dcca033" "c1eeb436-a97b-4ac9-a863-228890939b07"
-			"c47e4a0b-1372-4bdb-b321-cbb6d9865126" "ca4eefe6-7b9d-4aab-b2be-386f458db732"
-			"d8766b06-5df9-445d-b889-fe460b1d3a36" "e3f27327-0c52-40fc-839f-8c6a8d02163f"
-			"f145f0a8-5557-47ca-8f25-bca0ec9ec39e" "f53272a6-a837-405e-b49a-2aee9bfc2eb0"
-		)
-	)
-	(group ""
-		(uuid "134ca9da-9332-49bd-bd7b-7d3556ff8fe6")
-		(members "6ddb2ca7-d313-46bc-b0be-97d5046983b3" "89498dc4-7b8f-40f8-8f0f-379a59bdba54"
-			"8f4ccec8-a171-4ac2-a7aa-8015ef15c0ae"
-		)
-	)
-	(group ""
-		(uuid "15cafb67-66b7-4367-9dce-6905e22d1b4f")
-		(members "021c62ac-f708-4f2b-988e-8e8267cd367e" "1cbdfa8b-ecf6-45f4-bc22-2a6b5cc36d89"
-			"38447e25-3d3f-42e5-9a75-d11834f8797c" "3b687c65-5a78-431d-8ccd-184aae796020"
-			"5ea2fc7a-97bf-496a-9679-17c633c1dae4" "6aa2199d-2d28-428d-8ebd-5a022ad10dc8"
-			"b2144d7d-ba2d-4b1d-925e-4c9faedf4da7" "cf02f910-0c73-4143-b1f7-038582ac205b"
-			"cfdde4a7-ac16-4a3e-ba0f-6b87fb9bb540" "f292f4ce-b023-40d5-b7a1-3a049634c41c"
-		)
-	)
-	(group ""
-		(uuid "31373fb8-5443-4dd7-9dc7-2fb058dc9cc1")
-		(members "05bb7d8b-d44b-44fb-a8d2-fb70b78a32b5" "1385005b-306d-4f59-b00a-3fc4f87c6aff"
-			"167178b8-de20-4731-a594-bc702b67bafe" "3e579b48-a047-4493-9247-864b6ca3bfcd"
-			"472f01ce-623c-47e8-ad52-3c811087644f" "51d8a9df-0852-42a3-9e04-abd2a3d16f92"
-			"5ba218ab-53f7-4fd3-b41e-21470d26895f" "65da6a76-2323-4256-b823-d353f06e0e17"
-			"761058c2-c0b1-43ca-805b-8101d510e1ef" "857d6c80-169c-4a22-8be2-7eb6a6de6a0f"
-			"8e096ba5-225d-4039-84e7-c9a3538eff79" "929501ed-c2ae-427f-a297-c990fde5fca8"
-			"b966f4ac-bdd0-4880-b69d-c0e8bac784e5" "c9cd1c15-58eb-4cba-8b31-0f67abf23912"
-			"df60387e-8a18-4f45-9818-6d625f55bb0e"
+		(uuid "3486da18-3152-49a3-8b96-b166dd1829ab")
+		(members "0f56723d-3be1-4363-aa22-d1860701c7dc" "5a2fada0-188b-484a-bad7-1807c7aed6e5"
+			"6eccc95b-070c-44a6-b1f1-dab8a373bad4" "ecd03097-544e-4ff1-9250-bd5f418e28c1"
 		)
 	)
 	(group ""
@@ -71914,91 +71877,6 @@
 		)
 	)
 	(group ""
-		(uuid "4c8645c5-da6e-427f-916d-3f6db964009d")
-		(members "15acf76f-31fc-4fb9-acc8-fc68a994cfe0" "27f3180f-59dc-4010-b59e-cab03b188ecd"
-			"58cc1ef4-ca89-4836-a202-19803f1a1cbd" "62f9aec6-ed82-4f7f-903c-2b7c76b1543c"
-			"76a2a22e-6c08-4374-b8d7-fde8abd49367" "8fdb43a6-bf08-499a-86d0-f9a8088d5563"
-			"a738bd49-7852-42e1-b2fa-e29cb8c75ac7" "b01be174-6744-4568-8bce-b8a4c7068af9"
-			"cd2da176-9ce8-4ed1-8e86-722cabeec762" "d287d8ad-1b0e-43f6-9953-693554cc811e"
-		)
-	)
-	(group ""
-		(uuid "4d4e8c0b-86e4-47da-aa39-d25964099d78")
-		(members "004ffd53-c7b4-4e02-94df-68d9377bdeb2" "1b88923d-b5a3-4c9b-b52d-dabe2de64474"
-			"3f943a27-b375-499e-bbc9-348e37c4cb04" "6ff99742-6f34-4f37-abb3-6ffce30d4f2b"
-			"7a5ab132-421f-48f1-a640-9b146c056c41" "8faaf5a0-37fd-4565-911e-e178244d990f"
-			"9d37c7ea-9db9-4273-b45a-6e6cb528c2a1" "a2f16dc4-0829-42dc-87e5-7329453d5fd0"
-			"c3107457-8856-4af1-8076-5ab27ed7ac6a" "f8036e03-c9a9-4f32-b339-1fa6bc47fa16"
-		)
-	)
-	(group ""
-		(uuid "60e76091-9291-435f-a5dd-3a35451c7491")
-		(members "1d909a92-22c4-4f82-8ddb-8b08da01c452" "1f5b8e5f-4738-45eb-b999-56bb6576c641"
-			"242ab3e1-edf5-413b-94f3-af31249ea035" "258a59e4-029d-415d-b095-81780f72d4c8"
-			"4997d3a4-ec98-4dbe-8302-d826dd6e6e0f" "529871ce-5508-4d2a-9be9-de6156b9fa18"
-			"652a7e39-9a64-40c6-ba3b-53d384e77170" "7c12a22a-6baf-4beb-ad35-495146f54231"
-			"7c691dac-95e1-4249-bb41-04feb1042c9f" "7d20baea-8d33-4de2-ba3e-64d87a3a33bf"
-			"8622d791-b288-47d5-b702-edf43a285826" "8bf0e131-c14c-4615-95a5-b512e60b5069"
-			"9cbf7b0f-cd1d-4d60-912d-06e5b7162954" "ae54e031-b11d-4d7e-a348-39bf907cb970"
-			"bd7ee471-5f4f-477c-ae86-53143218069d" "e14ac0b7-d7ac-4e1b-ba7b-068550becfe2"
-		)
-	)
-	(group ""
-		(uuid "6ddb2ca7-d313-46bc-b0be-97d5046983b3")
-		(members "09ec9105-7574-4096-abb2-7c726fad3752" "1b09633f-2c80-4323-9403-3676d379a528"
-			"52663b10-0131-4735-a844-d93e82bd9e40" "65e3317a-5277-460f-a8f1-699ad9122fb5"
-			"75a36678-36f8-44c2-926f-4f727f1108cf" "75f4d105-db48-4833-8c33-2f186a53c9ed"
-			"8281c1a9-8964-45b7-a922-ce934977d8fa" "948c02a0-ba6a-453b-a913-77a50b168cc1"
-			"9b2eb64c-036d-4904-95a0-98c1669fdbfa" "c8bc01dd-d527-49a6-849e-27c18358b77d"
-			"ce4ae1c5-e3aa-4f9e-8552-6c6d7f995000" "e8602fa0-1553-4ac4-bb00-79c3f6236ba2"
-			"f29bdf37-1517-4596-8dd0-df618825441d"
-		)
-	)
-	(group ""
-		(uuid "76f349e9-42a9-433e-9923-e625fe78cb7f")
-		(members "13ec715f-ef0b-4d72-9dd0-5d4da347c149" "17f82fe9-5969-4cb3-a6ca-8f53ff94b295"
-			"20f2f5d6-0a28-475f-a15f-bf310bb65394" "3910f97a-02dc-4eae-aa40-b857614cef20"
-			"8cda04a3-cf0e-4ac0-950a-f0bd735aeeec" "9a1322c5-3018-4035-a3f5-ac1e65b075c1"
-			"aa2a058e-551b-4aa7-9d39-130f35bc0d2e" "ae5d5d34-0c96-476c-9a02-02935b5f1190"
-			"b1e1b162-de77-4906-b940-6e5c947b6a37" "ba2cad83-887f-46e7-8fb9-c79a4c6bf26e"
-		)
-	)
-	(group ""
-		(uuid "89498dc4-7b8f-40f8-8f0f-379a59bdba54")
-		(members "393818ee-c938-4bc9-a00c-6e18c8f94c3a" "4b55ddc2-f616-4323-9125-91caeb09564a"
-			"57cfc3e9-1938-40bc-a2f0-459eeeb6e0b2" "5d346f37-82af-4f1b-ac90-070c28df8371"
-			"6ea2aac6-1e0a-465f-874e-40ecf5e4d333" "74904cc8-f9c5-45fa-85ff-e991fa19e977"
-			"7a8add24-f6d3-42e2-a7c7-dc3ecfdf6ddf" "7c6b1b0a-2e91-45a3-8fe2-a2ada94a29d2"
-			"87864e64-976c-4504-a369-c83f26f883db" "962f0b0d-d055-48e3-a4ad-ebcdf29b6133"
-			"bfb52e28-365d-4bd8-a212-88573c8d9096" "d9162f21-7972-46f4-9ab3-8bf824f98141"
-			"f4a4bf2c-03f0-4ba8-ad0a-d747869f02b5"
-		)
-	)
-	(group ""
-		(uuid "8f4ccec8-a171-4ac2-a7aa-8015ef15c0ae")
-		(members "15892c7c-35d5-4444-88b9-5e6305e3cf06" "1b6fc61f-2d31-46fe-bb36-20b982faf5b5"
-			"1d5e2ed0-b0a8-4708-9881-a8b7fb0fafa3" "4115872b-deed-43d4-bf15-5c2625dbe33e"
-			"44bcbde1-954b-4a3a-a0cd-98c63ef5948d" "45f81e83-f54c-49ca-97b3-41d07f416260"
-			"59b3a065-8c2c-4b3d-8438-12114b1c0b6a" "776eae5b-7687-4aeb-a5d4-4935a87c97e8"
-			"8455abf4-7971-4b3a-943a-e7e450c64a71" "9962eb87-cbfe-4ddd-a81b-ac6146f4baa9"
-			"a4c48250-3de6-4e33-aa9a-4dbff1731210" "b99a2a53-dbee-4eb4-8081-83ada777dabf"
-			"d7cd3ffb-0e45-4504-a0b8-67043320b249"
-		)
-	)
-	(group ""
-		(uuid "91052386-af91-4359-bbcf-763b2b040adc")
-		(members "024e07f3-a2ad-4b5b-b707-37a3e7a0f828" "09baff7f-17f5-40a5-8ca4-8a0d481c0ae7"
-			"0e725ed5-5d44-4afe-8447-e9a4f089db92" "17a9a7d3-f2fa-4023-b45d-34ce192405bb"
-			"191b70a7-8182-44c0-a80b-1023bad4fad8" "2205791a-ff13-4cf6-b3eb-3c1b529a9e85"
-			"321a0cd4-9fbc-482d-a57f-8802cae7ffbf" "455fd30f-cba6-4165-bb4e-41975c5161f6"
-			"5a7b653d-20d1-4d14-a5fd-4ce06571a5f9" "6e4e9bc6-af41-4e01-9655-f90455f09db5"
-			"8be5d5ca-d140-4300-8c4b-587175dd3825" "b265f063-dcad-434f-9fa3-cc068c4d5a04"
-			"c34a6be3-2389-4245-afd0-fdc7abe8efc3" "ced4f38f-bb55-4706-80c1-d8c316080b1c"
-			"d96d0503-ec47-4985-974a-7f23e8531592" "f567050a-76a2-4141-9edf-2e16206d21b9"
-			"f87be5f8-0648-4799-aaf9-966c930a3a9f" "fac03f50-092c-46a1-b763-01f4d43c1f4c"
-		)
-	)
-	(group ""
 		(uuid "a80a280d-31a0-4b76-bf80-d6054da36fa9")
 		(members "033e575c-e4e9-40d9-814f-a12dff854029" "0e5931f7-654d-4567-84b3-2cea5b008e6a"
 			"48916cab-30a5-417a-be4a-1de18972aaa7" "76251b29-02c8-4a13-8c89-6c4cb735fbdd"
@@ -72008,100 +71886,33 @@
 		)
 	)
 	(group ""
-		(uuid "b9bd1846-8779-4ebb-9617-13e4fdcc9483")
-		(members "1fea3527-1d5b-4062-ab10-008cd30345a4" "36329bb7-18b9-4f60-81fd-87c03581c975"
-			"396ff842-1671-4172-bf05-e17732549ce8" "4fc6aa10-2ebe-4c37-b5bb-b0deef5bf880"
-			"74b8f7f9-8fd2-49d9-a18a-0e666f4fef0a" "937600a3-2b20-4705-b469-8f8dcff22017"
-			"b32b362c-9a1f-4c29-b6b9-67d3c509b282"
-		)
-	)
-	(group ""
-		(uuid "bb8c0953-75f4-42da-b332-23b219dd0185")
-		(members "0ca3aa36-edef-449b-91b2-1b6029c09432" "1418b51b-becb-4f5d-9f89-e26815ef5b5c"
-			"1de67f5d-1285-494c-92c3-ac90010a825f" "2cb8e6a3-fa4d-4a57-8e45-f13c42057ba3"
-			"34a21d9e-8dac-4f9e-b2cd-7267de5bffc1" "4a1ec013-6aff-44cd-9e56-273e1a16adef"
-			"50193d66-78e4-4b37-a10a-23d48c4cf00f" "57aad498-0041-4312-8e92-3519f416643c"
-			"5bd18716-5540-4cab-80a8-8766ebbc9a98" "62da680c-bc67-40fb-8544-c1d6b68ab139"
-			"8ad5688c-598c-431f-83ad-e983299a68ad" "976fc7a7-f54b-4ec3-82ff-6408acc12dd6"
-			"bddd1bee-9ed3-4a39-9a31-55f4b0268185" "ce5cd366-99a9-4d51-9f9c-fa64589dd98a"
-			"e6592c1b-8afb-4aff-922e-ff9b52585ab7" "ff7227c7-01c8-4ed0-9ed6-7ad6503e57ba"
-		)
-	)
-	(group ""
-		(uuid "c8c74a19-3df6-4472-8eb8-442bd1ebed4b")
-		(members "09d9b089-ebd7-43c3-a27a-3501906b310f" "0cdb48f2-a0c8-42e0-8e47-b91e533d9840"
-			"16af316a-b8a5-4a2d-bccb-81e327989ff3" "3a6b5369-8355-41b6-9851-772525643a6b"
-			"3b40c298-79fc-4f26-8225-4354f82bf9d5" "444717ee-769f-431d-ae61-14c49720f95b"
-			"5d6ad5d8-ef0c-43a9-8cef-4478c87e77de" "6f1d5aa2-0c15-4029-8022-7e5267f2ec76"
-			"844c12cd-ad45-41df-8a5d-42fa30f0d989" "8889824c-5cd3-451c-bde3-7278c5d3a3bc"
-			"a4d836cf-8a7b-4202-b7a0-c452ae3b11f4" "afdba643-c39c-4f45-8b17-c6c8002de6c5"
-			"bb947047-2fc3-48bc-ac0f-7ee164e2a7cf" "c9362aca-6bee-4f2a-beff-e4e6af57bc42"
-			"cb6ab817-e797-4030-9007-596f59f42c5d" "cfabb997-8596-4a4b-880d-9c5db63de595"
+		(uuid "cde5b6b4-cdb1-478e-8ae9-2759de1bc27e")
+		(members "396ff842-1671-4172-bf05-e17732549ce8" "4fc6aa10-2ebe-4c37-b5bb-b0deef5bf880"
+			"937600a3-2b20-4705-b469-8f8dcff22017" "b32b362c-9a1f-4c29-b6b9-67d3c509b282"
 		)
 	)
 	(group ""
 		(uuid "def1fce5-bf87-4ba3-9a32-5617a8b6584b")
-		(members "15cafb67-66b7-4367-9dce-6905e22d1b4f" "4d4e8c0b-86e4-47da-aa39-d25964099d78"
-			"76f349e9-42a9-433e-9923-e625fe78cb7f" "a80a280d-31a0-4b76-bf80-d6054da36fa9"
+		(members "a80a280d-31a0-4b76-bf80-d6054da36fa9")
+	)
+	(group ""
+		(uuid "53d60175-7d72-49b1-aa76-affded99b7a9")
+		(members "05bb7d8b-d44b-44fb-a8d2-fb70b78a32b5" "51d8a9df-0852-42a3-9e04-abd2a3d16f92"
+			"65da6a76-2323-4256-b823-d353f06e0e17" "857d6c80-169c-4a22-8be2-7eb6a6de6a0f"
+			"929501ed-c2ae-427f-a297-c990fde5fca8" "b966f4ac-bdd0-4880-b69d-c0e8bac784e5"
+			"c9cd1c15-58eb-4cba-8b31-0f67abf23912"
 		)
 	)
 	(group ""
-		(uuid "e78d395b-b641-4097-8981-bacd368b6468")
-		(members "0c81413f-8399-4f4f-bc1a-1209bdbc4259" "11beb83c-4519-4417-80ef-26b51e9e870c"
-			"1248158a-c2e3-4191-b276-7bacb0f3eb02" "16139b40-37c9-4698-81f7-3e2a55c01bc1"
-			"16666f6a-67aa-4d9a-aa92-b0c76d86def3" "1973243f-8e70-4b19-b98a-18393faff251"
-			"2e496308-1060-4d7c-a75c-631efd92a91d" "3605c573-75ac-44d3-b9a6-087ffd110a50"
-			"4dd2a632-67f6-40e8-90ae-d79febdf2647" "58f28c9c-ebf1-4dec-bc46-2203c2a84d7b"
-			"5a5fee14-8041-46db-b2aa-919b7bb6b3b7" "83387594-eb92-42da-b2c5-61aece55ef8d"
-			"920a0c25-023e-4c6a-8e77-75377b1ea603" "bb984da7-73d6-4e08-986a-78732202a598"
-			"cd0ce5b9-fb60-48aa-a236-9527aecd03a9" "cdda3c09-f1d0-4c05-b35b-7bd2563e72f3"
-			"e4a2ebad-d66a-4d46-a3d3-c424b97724e5" "ed8833bc-a31c-4b88-abb7-d321dac64adb"
-			"ff084af6-d6f5-4f7a-abcc-9c826fa4f8db"
+		(uuid "6d53493c-5326-4853-87ef-78d579151dc5")
+		(members "167178b8-de20-4731-a594-bc702b67bafe" "1fea3527-1d5b-4062-ab10-008cd30345a4"
+			"36329bb7-18b9-4f60-81fd-87c03581c975" "5ba218ab-53f7-4fd3-b41e-21470d26895f"
+			"74b8f7f9-8fd2-49d9-a18a-0e666f4fef0a" "8e096ba5-225d-4039-84e7-c9a3538eff79"
 		)
 	)
 	(group ""
-		(uuid "fd4f318a-84b3-44b5-85e3-6d2d84a9eff4")
-		(members "60e76091-9291-435f-a5dd-3a35451c7491" "bb8c0953-75f4-42da-b332-23b219dd0185"
-			"c8c74a19-3df6-4472-8eb8-442bd1ebed4b"
-		)
-	)
-	(group ""
-		(uuid "62de2d28-e4c6-4992-a1ca-59325459c6a5")
-		(members "5804c07a-8d56-4c7f-8247-7032de109db0" "62fb2468-24bc-4e01-a679-2e082ab64c47"
-			"f0bbb949-3000-4fa5-9cd0-54dc7b58aa2c"
-		)
-	)
-	(group ""
-		(uuid "750dd890-4d2b-4cdb-a3ed-71d833c88425")
-		(members "6b622b62-ece2-4061-a1e3-f54375377edd" "c10f104d-c621-4c84-91a7-76ae1197bb1d")
-	)
-	(group ""
-		(uuid "8827482f-96e6-4537-8cf5-9e7bb32b255c")
-		(members "62de2d28-e4c6-4992-a1ca-59325459c6a5" "917fffc5-7a7e-4d3c-a478-fdbc0486d716"
-			"e1cb3e30-1647-471b-9179-8bc85ec361b0"
-		)
-	)
-	(group ""
-		(uuid "917fffc5-7a7e-4d3c-a478-fdbc0486d716")
-		(members "51d6be0f-e36b-42c2-8743-874385ae72fa" "aae181a9-4547-4c2a-849c-3f3472afa541"
-			"f516059f-d3b8-4247-af0a-995e3a83cab2"
-		)
-	)
-	(group ""
-		(uuid "9319e4f2-cf5a-493b-a063-a162a5d9fae5")
-		(members "51d6be0f-e36b-42c2-8743-874385ae72fa" "aae181a9-4547-4c2a-849c-3f3472afa541"
-			"f516059f-d3b8-4247-af0a-995e3a83cab2"
-		)
-	)
-	(group ""
-		(uuid "9aec5646-f096-44cb-8f30-1c53bba2b852")
-		(members "5804c07a-8d56-4c7f-8247-7032de109db0" "62fb2468-24bc-4e01-a679-2e082ab64c47"
-			"f0bbb949-3000-4fa5-9cd0-54dc7b58aa2c"
-		)
-	)
-	(group ""
-		(uuid "e1cb3e30-1647-471b-9179-8bc85ec361b0")
-		(members "6b622b62-ece2-4061-a1e3-f54375377edd" "c10f104d-c621-4c84-91a7-76ae1197bb1d")
+		(uuid "d52c09ae-8f6d-496e-aa97-fd535e09cf4d")
+		(members "1385005b-306d-4f59-b00a-3fc4f87c6aff" "472f01ce-623c-47e8-ad52-3c811087644f")
 	)
 	(embedded_fonts no)
 )
