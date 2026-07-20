@@ -2242,26 +2242,6 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 45.72) (xy 100.33 40.64)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "4b49189a-3827-40bc-acea-02255490adcf")
-	)
-	(wire
-		(pts
-			(xy 100.33 48.26) (xy 100.33 53.34)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "4d631419-1788-4bcd-b3e6-b2f9202f104c")
-	)
-	(wire
-		(pts
 			(xy 207.01 91.44) (xy 207.01 97.79)
 		)
 		(stroke
@@ -2519,6 +2499,16 @@
 			(type default)
 		)
 		(uuid "973c3bcf-2cc2-44ed-a9d2-f7d01479f5a5")
+	)
+	(wire
+		(pts
+			(xy 100.33 40.64) (xy 100.33 45.72)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9d0aab98-e718-4c28-b952-10469c238721")
 	)
 	(wire
 		(pts
@@ -2789,6 +2779,16 @@
 			(type default)
 		)
 		(uuid "c94460a2-a522-4388-b47b-1c28e35442c5")
+	)
+	(wire
+		(pts
+			(xy 100.33 48.26) (xy 100.33 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c9c227c0-d7ae-4622-b75a-ba0c2cf4bb81")
 	)
 	(wire
 		(pts
@@ -3467,7 +3467,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/datasheet/2/585/MLCC-1837944.pdf"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRT31CR71H225KE13L?qs=qkDYIeTQ%252BEkhrDhfEIGgfg%3D%3D"
 			(at 207.01 87.63 0)
 			(hide yes)
 			(show_name no)
@@ -4750,8 +4750,7 @@
 	)
 	(symbol
 		(lib_id "SamacSys_Parts:1935161")
-		(at 100.33 45.72 0)
-		(mirror y)
+		(at 100.33 48.26 180)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -4761,7 +4760,7 @@
 		(dnp no)
 		(uuid "aea6e0e1-b335-419e-92d5-562fb75101b1")
 		(property "Reference" "J18"
-			(at 90.17 55.88 0)
+			(at 90.17 38.1 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -4771,7 +4770,7 @@
 			)
 		)
 		(property "Value" "1935161"
-			(at 90.17 53.34 0)
+			(at 90.17 40.64 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -4781,53 +4780,6 @@
 			)
 		)
 		(property "Footprint" "SamacSys_Parts:1935161"
-			(at 83.82 43.18 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 83.82 45.72 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Description" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 100.33 45.72 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 83.82 48.26 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Height" "11.55"
 			(at 83.82 50.8 0)
 			(hide yes)
 			(show_name no)
@@ -4839,8 +4791,55 @@
 				(justify left)
 			)
 		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
+			(at 83.82 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
+			(at 100.33 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
+			(at 83.82 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Height" "11.55"
+			(at 83.82 43.18 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
 		(property "Mouser Part Number" "651-1935161"
-			(at 83.82 53.34 0)
+			(at 83.82 40.64 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4852,7 +4851,7 @@
 			)
 		)
 		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 83.82 55.88 0)
+			(at 83.82 38.1 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4864,7 +4863,7 @@
 			)
 		)
 		(property "Manufacturer_Name" "Phoenix Contact"
-			(at 83.82 58.42 0)
+			(at 83.82 35.56 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4876,7 +4875,7 @@
 			)
 		)
 		(property "Manufacturer_Part_Number" "1935161"
-			(at 83.82 60.96 0)
+			(at 83.82 33.02 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4888,7 +4887,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 100.33 45.72 0)
+			(at 100.33 48.26 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4899,7 +4898,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 100.33 45.72 0)
+			(at 100.33 48.26 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4910,7 +4909,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 100.33 45.72 0)
+			(at 100.33 48.26 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
