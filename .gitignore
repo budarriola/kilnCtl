@@ -9,5 +9,11 @@
 /*.kicad_pro.lck
 /__pycache__/*
 /.vscode/*
-/python/*
 /~kiln.kicad_pcb.lck
+
+# python/ tooling: track the source (kicad_pcb_tool.py, kicad_mcp_server.py, docs, etc.),
+# ignore the venv, caches, editor settings, and the server's runtime log.
+/python/.venv/
+/python/.vscode/
+/python/__pycache__/
+/python/kicad_mcp_server.log
