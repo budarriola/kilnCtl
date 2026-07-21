@@ -5099,7 +5099,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/datasheet/2/281/1/GRM32EC81C476KE15_01A-1988154.pdf"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL32A476KOJNNNE?qs=d72FGnIDsgQXYP%252BbBe7Sww%3D%3D"
 			(at 250.19 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -5121,7 +5121,7 @@
 				)
 			)
 		)
-		(property "Mouser" "https://www.mouser.com/ProductDetail/Murata-Electronics/GRM32EC81C476KE15L?qs=eeBpzGFlv%252B%2F0ttt4zOip7g%3D%3D"
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL32A476KOJNNNE?qs=d72FGnIDsgQXYP%252BbBe7Sww%3D%3D"
 			(at 250.19 85.09 90)
 			(hide yes)
 			(show_name no)
@@ -5229,7 +5229,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay/CRCW040247K5FKED?qs=sGAEpiMZZMtlubZbdhIBIPs%252BiE%2F4M15xDan5FFmucgw%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW0402154KFKED?qs=sGAEpiMZZMtlubZbdhIBICyxlhGRQNJfRCzUCssnsug%3D"
 			(at 233.68 92.71 0)
 			(hide yes)
 			(show_name no)

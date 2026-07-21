@@ -2887,6 +2887,65 @@ def audit_capacitor_voltages(project_path: str | Path, default_voltage: str | fl
     }
 
 
+def audit_schematic_integrity(project_path: str | Path) -> dict[str, Any]:
+    """Cheap, netlist-independent sanity checks across every placed schematic
+    symbol (power symbols and other "#"-prefixed auto-references excluded,
+    same as list_schematic_parts): duplicate reference designators (two
+    distinct placed instances annotated with the exact same reference - a
+    real KiCad ERC "duplicate reference" error, not just two instances of the
+    same hierarchical block which get their own distinct references), and
+    symbols missing a Value or Footprint altogether. Pure text/structure
+    checks - no Mouser data involved, so this always works even without an
+    API key and is a fast first pass before the slower Mouser-backed audits.
+    """
+    directory = _resolve_schematic_dir(project_path)
+    components = [
+        c for c in _flatten_schematic_components(directory)
+        if not c["lib_id"].startswith("power:") and not c["reference"].startswith("#")
+    ]
+
+    by_reference: dict[str, list[dict[str, Any]]] = {}
+    for component in components:
+        by_reference.setdefault(component["reference"].strip().upper(), []).append(component)
+
+    duplicate_references: list[dict[str, Any]] = []
+    for reference, instances in sorted(by_reference.items()):
+        if len(instances) > 1:
+            duplicate_references.append(
+                {
+                    "reference": reference,
+                    "instance_count": len(instances),
+                    "values": [i["value"] for i in instances],
+                    "sheetfiles": [i["sheetfile"] for i in instances],
+                }
+            )
+
+    missing_value: list[dict[str, Any]] = []
+    missing_footprint: list[dict[str, Any]] = []
+    for component in components:
+        row = {
+            "reference": component["reference"],
+            "value": component["value"],
+            "footprint": component["footprint"],
+            "sheetfile": component["sheetfile"],
+            "dnp": component["dnp"],
+        }
+        if not component["value"].strip():
+            missing_value.append(row)
+        if not component["footprint"].strip():
+            missing_footprint.append(row)
+
+    return {
+        "component_count": len(components),
+        "duplicate_reference_count": len(duplicate_references),
+        "missing_value_count": len(missing_value),
+        "missing_footprint_count": len(missing_footprint),
+        "duplicate_references": duplicate_references,
+        "missing_value": missing_value,
+        "missing_footprint": missing_footprint,
+    }
+
+
 def _normalize_property_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key.lower())
 

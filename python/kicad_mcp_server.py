@@ -38,6 +38,7 @@ try:
     apply_property_position_changes,
     apply_property_position_template,
     audit_capacitor_voltages,
+    audit_schematic_integrity,
     classify_group_by_anchor_pin,
     create_group,
     delete_group,
@@ -96,12 +97,18 @@ except Exception as exc:  # pragma: no cover - optional dependency
 
 try:
     from kicad_mouser_tool import (
+        audit_component_specs_against_mouser,
         audit_manufacturer_part_numbers,
+        audit_schematic_health,
+        audit_stock_sufficiency,
         bulk_list_component_mouser_urls,
         bulk_lookup_mouser_parts,
+        bulk_optimize_component_mouser_alternates,
+        generate_mouser_buy_list,
         generate_mouser_stock_report,
         list_component_mouser_urls,
         lookup_mouser_part,
+        optimize_component_mouser_alternates,
     )
 except Exception as exc:  # pragma: no cover - import safety
     log_message(f"Failed to import Mouser lookup module: {exc}")
@@ -422,6 +429,177 @@ class KiCadMcpServer:
                     "required": ["project_path"],
                 },
                 "handler": self._tool_bulk_list_component_mouser_urls,
+            },
+            "optimize_kicad_mouser_alternates": {
+                "description": (
+                    "Rank a component's candidate Mouser links (its 'Mouser', 'Mouser Price/Stock', "
+                    "'Mouser Part Number Alt', etc properties) by live stock and pricing instead of the "
+                    "static field-name order find_mouser_url normally uses, and recommend which one to "
+                    "treat as primary. Priority order: #1 in stock for at least the board's required "
+                    "quantity, #2 sold with a qty-1 price break (over reel-only/bulk-minimum pricing) - "
+                    "ties broken by greatest quantity in stock, #3 cheapest unit price at the required "
+                    "quantity. `quantity_needed` defaults to how many this part's Value+Footprint group "
+                    "actually places on the board. REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "reference": {"type": "string"},
+                        "quantity_needed": {"type": "integer", "description": "Override the board quantity to optimize for; defaults to the part's actual placed count."},
+                    },
+                    "required": ["project_path", "reference"],
+                },
+                "handler": self._tool_optimize_component_mouser_alternates,
+            },
+            "bulk_optimize_kicad_mouser_alternates": {
+                "description": (
+                    "Batch version of optimize_kicad_mouser_alternates across the schematic's unique "
+                    "parts (or a given subset) - the actionable follow-up to "
+                    "bulk_list_kicad_component_mouser_urls once it's shown which parts have more than one "
+                    "candidate Mouser link. Defaults to skipping parts with only a single candidate link "
+                    "(only_with_alternates=true) to spend the rate-limited API budget on parts where "
+                    "there's an actual choice; set it false to also flag single-link parts that turn out "
+                    "out-of-stock or lack price-break data. Returns `changed` - parts whose live-ranked "
+                    "recommendation differs from the static field-priority pick - as the list worth "
+                    "re-pointing at a better link. REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part."},
+                        "only_with_alternates": {"type": "boolean", "default": True, "description": "Skip parts with only one candidate Mouser link."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_bulk_optimize_component_mouser_alternates,
+            },
+            "generate_kicad_mouser_buy_list": {
+                "description": (
+                    "Build an orderable buy list across the schematic's unique parts (or a given "
+                    "subset): the best Mouser link per part (live stock/price ranked the same way as "
+                    "bulk_optimize_kicad_mouser_alternates) and how many units to actually buy. Buy "
+                    "quantity starts at the board's required quantity, then: parts under $0.05/unit get "
+                    "10 extra, parts under $0.10/unit get 5 extra, and on top of that any part is bumped "
+                    "further whenever a higher Mouser price-break tier's total cost is cheaper overall "
+                    "than the padded quantity's total cost (never bumped below the padded quantity). "
+                    "Writes a Markdown table to `buy_list_path` (defaults to 'buy_list.md' at the project "
+                    "root) with links, quantities, per-line cost, the reason behind any extra units, and "
+                    "a grand total. REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "buy_list_path": {"type": "string", "description": "Output file path; defaults to buy_list.md at the project root."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to include instead of every unique part."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_generate_mouser_buy_list,
+            },
+            "audit_kicad_schematic_integrity": {
+                "description": (
+                    "Cheap, netlist-independent sanity checks across every placed schematic symbol "
+                    "(power symbols excluded): duplicate reference designators (two distinct placed "
+                    "instances annotated with the exact same reference - a real KiCad ERC 'duplicate "
+                    "reference' error, not just two instances of the same hierarchical block, which get "
+                    "their own distinct references), and symbols missing a Value or Footprint altogether. "
+                    "Pure text/structure checks - no Mouser data or API key needed, so this is a fast "
+                    "first pass before the slower Mouser-backed audits."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_audit_schematic_integrity,
+            },
+            "audit_kicad_component_specs": {
+                "description": (
+                    "Cross-check every unique schematic part's Value/Footprint/Manufacturer_Part_Number "
+                    "against what Mouser's Search API actually returns for that part's own linked Mouser "
+                    "product - catches a link that resolves fine but points at the wrong part (wrong "
+                    "resistance/capacitance, wrong package, or a stale/typo'd MPN). This is the exact bug "
+                    "class behind the R96/R103 stale-link issue in todo.md (link pointed at a 47.5kOhm "
+                    "part for a 154k resistor). Three independent checks per part, each reported "
+                    "'match'/'mismatch'/'not_verifiable' (never a silent pass when data is missing): "
+                    "manufacturer_part_number (vs Mouser's MPN - run "
+                    "normalize_kicad_manufacturer_part_number_properties with write=true first so parts "
+                    "carrying the MPN under a differently-named property are picked up), package (EIA "
+                    "imperial size code parsed from the Footprint name vs Mouser's package_size_inch, only "
+                    "meaningful for chip resistors/ceramic capacitors), and value (nominal "
+                    "resistance/capacitance parsed from the Value field vs Mouser's spec, compared "
+                    "numerically within `value_tolerance_pct` percent so '10k' vs '10 kOhm' formatting "
+                    "differences don't read as mismatches - resistors/capacitors only). REQUIRES "
+                    "MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part."},
+                        "value_tolerance_pct": {"type": "number", "default": 1.0, "description": "Allowed percent difference between the schematic's stated value and Mouser's spec before flagging a mismatch."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_audit_component_specs,
+            },
+            "audit_kicad_stock_sufficiency": {
+                "description": (
+                    "Check that at least one candidate Mouser link for every unique schematic part (not "
+                    "just its current primary link - every 'Mouser'/'Mouser Price/Stock'/'Mouser Part "
+                    "Number Alt'/etc field) is in stock for enough units to build `board_quantity` "
+                    "board(s), via the same live-data ranking optimize_kicad_mouser_alternates uses. A "
+                    "part whose primary link is out of stock but has a working alternate is NOT flagged - "
+                    "`insufficient` only lists parts where no candidate link covers the need. "
+                    "`board_quantity` multiplies each part's own schematic-placed count; defaults to 1 "
+                    "board. REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part."},
+                        "board_quantity": {"type": "integer", "default": 1, "description": "How many boards' worth to check stock for."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_audit_stock_sufficiency,
+            },
+            "audit_kicad_schematic_health": {
+                "description": (
+                    "One-call pre-fab/pre-order sanity pass across the whole schematic, combining every "
+                    "error check this project has: (1) audit_kicad_schematic_integrity - duplicate "
+                    "reference designators, missing Value/Footprint; (2) audit_kicad_capacitor_voltages - "
+                    "every capacitor either states its own voltage or is assumed to use "
+                    "`default_capacitor_voltage`; (3) audit_kicad_component_specs - each part's "
+                    "Value/Footprint/MPN matches its linked Mouser product; (4) audit_kicad_stock_sufficiency "
+                    "- at least one candidate link per part covers `board_quantity` board(s). There is no "
+                    "universally-correct default capacitor voltage for this project - ASK THE USER what "
+                    "voltage rating this design assumes for capacitors that don't state one before calling "
+                    "this (Power.kicad_sch/Regulators.kicad_sch's rail voltages are a reasonable thing to "
+                    "bring up in that conversation, but the actual answer is a project decision). Steps 3-4 "
+                    "REQUIRE MOUSER_API_KEY and are the slow, rate-limited part of this call. Writes a "
+                    "Markdown summary to `report_path` (defaults to 'schematic_health_report.md' at the "
+                    "project root); full structured results are also returned as JSON."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "default_capacitor_voltage": {"type": ["string", "number"], "description": "Project's default capacitor voltage rating (e.g. '16V' or 16) for caps that don't state their own - ask the user for this, don't guess."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part (applies to the Mouser-backed steps)."},
+                        "board_quantity": {"type": "integer", "default": 1, "description": "How many boards' worth to check stock sufficiency for."},
+                        "value_tolerance_pct": {"type": "number", "default": 1.0, "description": "Allowed percent difference between a schematic value and Mouser's spec before flagging a mismatch."},
+                        "report_path": {"type": "string", "description": "Output Markdown file path; defaults to schematic_health_report.md at the project root."},
+                    },
+                    "required": ["project_path", "default_capacitor_voltage"],
+                },
+                "handler": self._tool_audit_schematic_health,
             },
             "set_kicad_schematic_property": {
                 "description": (
@@ -1177,6 +1355,54 @@ class KiCadMcpServer:
 
     def _tool_bulk_list_component_mouser_urls(self, args: dict[str, Any]) -> dict[str, Any]:
         return bulk_list_component_mouser_urls(args["project_path"], references=args.get("references"))
+
+    def _tool_optimize_component_mouser_alternates(self, args: dict[str, Any]) -> dict[str, Any]:
+        return optimize_component_mouser_alternates(
+            args["project_path"],
+            args["reference"],
+            quantity_needed=args.get("quantity_needed"),
+        )
+
+    def _tool_bulk_optimize_component_mouser_alternates(self, args: dict[str, Any]) -> dict[str, Any]:
+        return bulk_optimize_component_mouser_alternates(
+            args["project_path"],
+            references=args.get("references"),
+            only_with_alternates=bool(args.get("only_with_alternates", True)),
+        )
+
+    def _tool_generate_mouser_buy_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        return generate_mouser_buy_list(
+            args["project_path"],
+            buy_list_path=args.get("buy_list_path"),
+            references=args.get("references"),
+        )
+
+    def _tool_audit_schematic_integrity(self, args: dict[str, Any]) -> dict[str, Any]:
+        return audit_schematic_integrity(args["project_path"])
+
+    def _tool_audit_component_specs(self, args: dict[str, Any]) -> dict[str, Any]:
+        return audit_component_specs_against_mouser(
+            args["project_path"],
+            references=args.get("references"),
+            value_tolerance_pct=float(args.get("value_tolerance_pct", 1.0)),
+        )
+
+    def _tool_audit_stock_sufficiency(self, args: dict[str, Any]) -> dict[str, Any]:
+        return audit_stock_sufficiency(
+            args["project_path"],
+            references=args.get("references"),
+            board_quantity=int(args.get("board_quantity", 1)),
+        )
+
+    def _tool_audit_schematic_health(self, args: dict[str, Any]) -> dict[str, Any]:
+        return audit_schematic_health(
+            args["project_path"],
+            args["default_capacitor_voltage"],
+            references=args.get("references"),
+            board_quantity=int(args.get("board_quantity", 1)),
+            value_tolerance_pct=float(args.get("value_tolerance_pct", 1.0)),
+            report_path=args.get("report_path"),
+        )
 
     def _tool_set_schematic_property(self, args: dict[str, Any]) -> dict[str, Any]:
         return set_schematic_property(

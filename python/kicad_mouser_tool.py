@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from kicad_pcb_tool import get_schematic_part, list_schematic_parts
+from kicad_pcb_tool import audit_capacitor_voltages, audit_schematic_integrity, get_schematic_part, list_schematic_parts
 
 # Repo-root .env/.mouser_cache.json (both gitignored) - see .env.example for
 # the expected key name.
@@ -740,6 +740,424 @@ def bulk_lookup_mouser_parts(project_path: str | Path, references: list[str] | N
     }
 
 
+# ---------------------------------------------------------------------------
+# Alternate-link optimization - given a component with more than one
+# candidate Mouser link (e.g. "Mouser Price/Stock" plus a second-source
+# "Mouser Part Number Alt"), rank them by live stock/pricing data instead of
+# find_mouser_url's static field-name order, so the link actually best suited
+# to ordering this board is surfaced as the recommended one.
+# ---------------------------------------------------------------------------
+
+
+def _quantity_needed_for_reference(project_path: str | Path, reference: str) -> int:
+    """How many of this part the board actually uses - the Value+Footprint
+    group's total quantity from list_schematic_parts, not just 1 instance.
+    """
+    lowered = reference.strip().upper()
+    for group in list_schematic_parts(project_path)["parts"]:
+        if any(ref.strip().upper() == lowered for ref in group["references"]):
+            return group["quantity"]
+    return 1
+
+
+def _rank_mouser_candidates(candidates: list[dict[str, Any]], quantity_needed: int) -> list[dict[str, Any]]:
+    """Order candidate Mouser links for one component by, in priority order:
+    1. In stock for at least `quantity_needed` units (the board's actual need).
+    2. Sold with a qty-1 price break (not reel-only/bulk-minimum pricing),
+       then the greatest number in stock.
+    3. Cheapest unit price at `quantity_needed` (falls back to the lowest
+       listed tier if the board doesn't need enough to reach any tier).
+    Each candidate dict must have a `mouser` key holding a lookup_mouser_part
+    result. Returns a new list, annotated with the fields the ranking used
+    and sorted best-first.
+    """
+    annotated: list[dict[str, Any]] = []
+    for candidate in candidates:
+        mouser = candidate["mouser"]
+        price_breaks = mouser.get("price_breaks") or []
+        in_stock_count = _availability_in_stock_count(mouser)
+        meets_quantity = in_stock_count is not None and in_stock_count >= quantity_needed
+        has_qty_one_price = bool(price_breaks) and price_breaks[0]["quantity"] == 1
+        tier = _unit_price_for_quantity(price_breaks, quantity_needed)
+        unit_price = tier["unit_price"] if tier else None
+
+        annotated.append(
+            {
+                **candidate,
+                "in_stock_count": in_stock_count,
+                "meets_quantity": meets_quantity,
+                "has_qty_one_price": has_qty_one_price,
+                "unit_price_at_quantity": unit_price,
+                "currency": tier["currency"] if tier else None,
+            }
+        )
+
+    def sort_key(entry: dict[str, Any]) -> tuple[int, int, int, float]:
+        return (
+            0 if entry["meets_quantity"] else 1,
+            0 if entry["has_qty_one_price"] else 1,
+            -(entry["in_stock_count"] or 0),
+            entry["unit_price_at_quantity"] if entry["unit_price_at_quantity"] is not None else float("inf"),
+        )
+
+    ranked = sorted(annotated, key=sort_key)
+    for i, entry in enumerate(ranked):
+        entry["rank"] = i + 1
+    return ranked
+
+
+def optimize_component_mouser_alternates(
+    project_path: str | Path, reference: str, quantity_needed: int | None = None
+) -> dict[str, Any]:
+    """Rank a component's candidate Mouser links (its "Mouser"/"Mouser Price/Stock"/
+    "Mouser Part Number Alt"/etc properties) by live stock and pricing instead of
+    find_mouser_url's static field-name preference order, and recommend which one
+    to treat as primary for ordering this board.
+
+    Ranking priority: (1) in stock for at least the board's required quantity,
+    (2) sold with a qty-1 price break (over reel-only/bulk-minimum pricing), with
+    ties broken by greatest quantity in stock, (3) cheapest unit price at the
+    required quantity. Components with only one candidate link still get looked
+    up so an out-of-stock/no-price-break link is flagged rather than assumed fine.
+
+    `quantity_needed` defaults to how many of this part the schematic actually
+    places (its Value+Footprint group's total across all references) rather than
+    1, since a single-board order needs to cover every instance. REQUIRES
+    MOUSER_API_KEY.
+    """
+    component = get_schematic_part(project_path, reference)
+    properties = component.get("properties", {})
+    all_urls = find_all_mouser_urls(properties)
+    if not all_urls:
+        raise KeyError(f"No Mouser URLs found for {reference}")
+
+    if quantity_needed is None:
+        quantity_needed = _quantity_needed_for_reference(project_path, reference)
+
+    current_primary_url = find_mouser_url(properties)
+
+    candidates: list[dict[str, Any]] = []
+    made_api_call = False
+    for field_name in sorted(all_urls.keys()):
+        url = all_urls[field_name]
+        if _get_cached_mouser_result(url) is None:
+            if made_api_call:
+                time.sleep(_BULK_REQUEST_DELAY_SECONDS)  # stay under Mouser's per-minute call cap
+            made_api_call = True
+        mouser = lookup_mouser_part(url)
+        candidates.append({"field_name": field_name, "url": url, "mouser": mouser})
+
+    ranked = _rank_mouser_candidates(candidates, quantity_needed)
+    recommended = ranked[0]
+
+    return {
+        "reference": reference,
+        "value": component.get("value", ""),
+        "quantity_needed": quantity_needed,
+        "current_primary_url": current_primary_url,
+        "recommended_field": recommended["field_name"],
+        "recommended_url": recommended["url"],
+        "recommendation_changed": recommended["url"] != current_primary_url,
+        "candidates": ranked,
+    }
+
+
+def bulk_optimize_component_mouser_alternates(
+    project_path: str | Path,
+    references: list[str] | None = None,
+    only_with_alternates: bool = True,
+) -> dict[str, Any]:
+    """Batch version of optimize_component_mouser_alternates across the
+    schematic's unique parts (or a given subset). Defaults to skipping parts
+    with only a single candidate Mouser link (`only_with_alternates=True`) so
+    the (rate-limited) API budget is spent on parts where there's actually a
+    choice to make; set it False to also validate single-link parts' stock.
+
+    Returns `changed` - components whose live-ranked recommendation differs
+    from what find_mouser_url's static field-priority order would have picked
+    - as the actionable list of parts worth re-pointing at a better link.
+    REQUIRES MOUSER_API_KEY.
+    """
+    representative_to_group: dict[str, dict[str, Any]] = {}
+    if references is None:
+        parts = list_schematic_parts(project_path)["parts"]
+        references = []
+        for part in parts:
+            if not part["references"]:
+                continue
+            representative = part["references"][0]
+            references.append(representative)
+            representative_to_group[representative] = part
+
+    results: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for reference in references:
+        try:
+            component = get_schematic_part(project_path, reference)
+        except KeyError as exc:
+            errors.append({"reference": reference, "error": str(exc)})
+            continue
+
+        group = representative_to_group.get(reference)
+        all_references = group["references"] if group else [reference]
+        quantity = group["quantity"] if group else 1
+
+        all_urls = find_all_mouser_urls(component.get("properties", {}))
+        if not all_urls:
+            skipped.append(
+                {"reference": reference, "all_references": all_references, "value": component.get("value", ""), "reason": "no Mouser link in properties"}
+            )
+            continue
+        if only_with_alternates and len(all_urls) < 2:
+            skipped.append(
+                {"reference": reference, "all_references": all_references, "value": component.get("value", ""), "reason": "only one candidate link"}
+            )
+            continue
+
+        try:
+            result = optimize_component_mouser_alternates(project_path, reference, quantity_needed=quantity)
+        except Exception as exc:
+            errors.append({"reference": reference, "all_references": all_references, "value": component.get("value", ""), "error": str(exc)})
+            continue
+
+        result["all_references"] = all_references
+        results.append(result)
+        if result["recommendation_changed"]:
+            changed.append(result)
+
+    return {
+        "requested_count": len(references),
+        "evaluated_count": len(results),
+        "changed_count": len(changed),
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "results": results,
+        "changed": changed,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Buy list - how many of each part to actually order, given price-break
+# economics (buying past the required quantity can lower the total bill) and
+# a floor of extra units for very cheap parts (not worth a second order over
+# a handful of cents).
+# ---------------------------------------------------------------------------
+
+# "Under $0.05 at our quantity" -> buy 10 extra; "under $0.10" -> buy 5 extra.
+# Ranges are mutually exclusive (checked narrowest-first) - a part isn't both.
+_CHEAP_PART_PADDING = (
+    (0.05, 10),
+    (0.10, 5),
+)
+
+
+def _optimize_buy_quantity(price_breaks: list[dict[str, Any]], quantity_needed: int) -> dict[str, Any]:
+    """Decide how many units to actually buy for one line item, starting from
+    `quantity_needed` (the board's requirement):
+
+    1. Cheap-part padding: if the unit price at `quantity_needed` is under
+       $0.05, add 10 extra units; under $0.10, add 5 extra. Based on the
+       unit price at the required quantity, not any padded/upgraded quantity.
+    2. Price-break upgrade: compare the total cost of buying at the padded
+       quantity against buying at every higher price-break tier's own
+       minimum quantity - if any higher tier's total bill (tier quantity x
+       tier unit price) is cheaper, buy that tier's quantity instead. This
+       never buys *below* the padded quantity, only more if it's a net
+       savings on the total bill (not just a lower unit price).
+
+    Returns buy_quantity/unit_price/currency/line_cost for the chosen point,
+    plus extra_units (over quantity_needed) and human-readable reasons.
+    Falls back to the padded quantity, unpriced, if the part has no
+    price-break data at all.
+    """
+    base_tier = _unit_price_for_quantity(price_breaks, quantity_needed)
+    base_unit_price = base_tier["unit_price"] if base_tier else None
+
+    padding = 0
+    padding_reason = None
+    if base_unit_price is not None:
+        for threshold, extra in _CHEAP_PART_PADDING:
+            if base_unit_price < threshold:
+                padding = extra
+                padding_reason = f"unit price ${base_unit_price:.4f} at required qty {quantity_needed} is under ${threshold:.2f} - padded by {extra}"
+                break
+    padded_qty = quantity_needed + padding
+
+    options: list[dict[str, Any]] = []
+    padded_tier = _unit_price_for_quantity(price_breaks, padded_qty)
+    if padded_tier:
+        options.append({"quantity": padded_qty, "unit_price": padded_tier["unit_price"], "currency": padded_tier["currency"]})
+    for tier in price_breaks:
+        if tier["quantity"] > padded_qty:
+            options.append({"quantity": tier["quantity"], "unit_price": tier["unit_price"], "currency": tier["currency"]})
+
+    if not options:
+        return {
+            "buy_quantity": padded_qty,
+            "unit_price": None,
+            "currency": None,
+            "line_cost": None,
+            "extra_units": padded_qty - quantity_needed,
+            "padding_reason": padding_reason,
+            "price_break_upgrade": False,
+            "price_break_reason": None,
+        }
+
+    for option in options:
+        option["line_cost"] = round(option["quantity"] * option["unit_price"], 4)
+
+    best = min(options, key=lambda o: (o["line_cost"], o["quantity"]))
+    price_break_upgrade = best["quantity"] > padded_qty
+    price_break_reason = None
+    if price_break_upgrade:
+        padded_cost = next((o["line_cost"] for o in options if o["quantity"] == padded_qty), None)
+        price_break_reason = (
+            f"buying {best['quantity']} at ${best['unit_price']:.4f} (${best['line_cost']:.2f} total) is cheaper "
+            f"than {padded_qty} at ${padded_cost:.2f} total" if padded_cost is not None else
+            f"buying {best['quantity']} at ${best['unit_price']:.4f} totals less than the padded quantity"
+        )
+
+    return {
+        "buy_quantity": best["quantity"],
+        "unit_price": best["unit_price"],
+        "currency": best["currency"],
+        "line_cost": best["line_cost"],
+        "extra_units": best["quantity"] - quantity_needed,
+        "padding_reason": padding_reason,
+        "price_break_upgrade": price_break_upgrade,
+        "price_break_reason": price_break_reason,
+    }
+
+
+def generate_mouser_buy_list(
+    project_path: str | Path,
+    buy_list_path: str | Path | None = None,
+    references: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build an orderable buy list across the schematic's unique parts (or a
+    given subset): the best Mouser link for each part (live stock/price
+    ranked via optimize_component_mouser_alternates, same as
+    bulk_optimize_kicad_mouser_alternates) and how many units to actually buy
+    per _optimize_buy_quantity - the board's required quantity, padded for
+    very cheap parts (10 extra under $0.05/unit, 5 extra under $0.10/unit),
+    then bumped further if a higher price-break tier's total cost undercuts
+    that padded quantity's total cost. Writes a Markdown table to
+    `buy_list_path` (defaults to 'buy_list.md' at the project root) with the
+    link, quantities, per-line cost, and the reason behind any extra units,
+    plus a grand total. REQUIRES MOUSER_API_KEY.
+    """
+    schematic_dir = Path(list_schematic_parts(project_path)["schematic_dir"])
+    output_path = Path(buy_list_path) if buy_list_path is not None else schematic_dir / "buy_list.md"
+
+    optimized = bulk_optimize_component_mouser_alternates(project_path, references=references, only_with_alternates=False)
+
+    buy_lines: list[dict[str, Any]] = []
+    unpriced: list[dict[str, Any]] = []
+    total_by_currency: dict[str, float] = {}
+
+    for entry in optimized["results"]:
+        recommended = entry["candidates"][0]
+        mouser = recommended["mouser"]
+        quantity_needed = entry["quantity_needed"]
+        buy = _optimize_buy_quantity(mouser.get("price_breaks") or [], quantity_needed)
+
+        row = {
+            "reference": entry["reference"],
+            "all_references": entry["all_references"],
+            "value": entry["value"],
+            "quantity_needed": quantity_needed,
+            "buy_quantity": buy["buy_quantity"],
+            "extra_units": buy["extra_units"],
+            "padding_reason": buy["padding_reason"],
+            "price_break_upgrade": buy["price_break_upgrade"],
+            "price_break_reason": buy["price_break_reason"],
+            "unit_price": buy["unit_price"],
+            "currency": buy["currency"],
+            "line_cost": buy["line_cost"],
+            "manufacturer_part_number": mouser.get("manufacturer_part_number"),
+            "mouser_url": recommended["url"],
+        }
+        if buy["unit_price"] is None:
+            unpriced.append(row)
+        else:
+            buy_lines.append(row)
+            total_by_currency[buy["currency"]] = round(total_by_currency.get(buy["currency"], 0.0) + buy["line_cost"], 4)
+
+    lines = [
+        "# Mouser Buy List",
+        "",
+        f"Covers {len(buy_lines) + len(unpriced)} of {optimized['requested_count']} unique parts "
+        f"({optimized['skipped_count']} had no Mouser link, {optimized['error_count']} failed to look up).",
+        "",
+    ]
+    if buy_lines:
+        totals_text = ", ".join(f"{currency} {total:,.2f}" for currency, total in sorted(total_by_currency.items()))
+        lines.append(f"**Estimated total: {totals_text}**, from {len(buy_lines)} priced line items.")
+        if unpriced:
+            lines.append(f"({len(unpriced)} part(s) excluded - no Mouser price-break data; see below.)")
+        lines.append("")
+        lines.append("| Reference(s) | Value | Qty Needed | Buy Qty | Extra | Why | Unit Price | Line Cost | MPN | Mouser Link |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        for row in sorted(buy_lines, key=lambda r: r["line_cost"], reverse=True):
+            refs = ", ".join(row["all_references"])
+            reasons = [r for r in (row["padding_reason"], row["price_break_reason"]) if r]
+            why = "; ".join(reasons) if reasons else "-"
+            lines.append(
+                f"| {refs} | {row['value']} | {row['quantity_needed']} | {row['buy_quantity']} | {row['extra_units']} | "
+                f"{why} | {row['currency']} {row['unit_price']:.4f} | {row['currency']} {row['line_cost']:.2f} | "
+                f"{row['manufacturer_part_number']} | {row['mouser_url']} |"
+            )
+    else:
+        lines.append("No priced line items.")
+    if unpriced:
+        lines += ["", "## Excluded from cost total (no price-break data)", ""]
+        lines.append("| Reference(s) | Value | Qty Needed | Buy Qty | Mouser Link |")
+        lines.append("|---|---|---|---|---|")
+        for row in unpriced:
+            refs = ", ".join(row["all_references"])
+            lines.append(f"| {refs} | {row['value']} | {row['quantity_needed']} | {row['buy_quantity']} | {row['mouser_url']} |")
+    if optimized["skipped"]:
+        lines += ["", "## No Mouser Link", ""]
+        lines.append("| Reference(s) | Value | Reason |")
+        lines.append("|---|---|---|")
+        for row in optimized["skipped"]:
+            refs = ", ".join(row.get("all_references") or [row["reference"]])
+            lines.append(f"| {refs} | {row.get('value', '')} | {row.get('reason', '')} |")
+    if optimized["errors"]:
+        lines += ["", "## Lookup Errors", ""]
+        lines.append("| Reference(s) | Value | Error |")
+        lines.append("|---|---|---|")
+        for row in optimized["errors"]:
+            refs = ", ".join(row.get("all_references") or [row["reference"]])
+            lines.append(f"| {refs} | {row.get('value', '')} | {row.get('error', '')} |")
+    lines += [
+        "",
+        "---",
+        "Note: extra units are padded for very cheap parts (10 extra under $0.05/unit, 5 extra under $0.10/unit) "
+        "and bumped further only when a higher Mouser price-break tier's total cost undercuts the padded "
+        "quantity's total cost.",
+        "",
+    ]
+
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return {
+        "buy_list_path": str(output_path),
+        "total_by_currency": total_by_currency,
+        "priced_line_count": len(buy_lines),
+        "unpriced_count": len(unpriced),
+        "buy_lines": buy_lines,
+        "unpriced": unpriced,
+        "no_mouser_link": optimized["skipped"],
+        "errors": optimized["errors"],
+    }
+
+
 def _canonical_mpn_from_properties(properties: dict[str, str]) -> str | None:
     for key, value in properties.items():
         if re.sub(r"[^a-z0-9]", "", key.lower()) == "manufacturerpartnumber" and value:
@@ -974,4 +1392,438 @@ def generate_mouser_stock_report(
         "not_recommended": not_recommended,
         "skipped": bulk["skipped"],
         "errors": bulk["errors"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schematic health check - cross-checking every part's stated Value/Footprint
+# against what its linked Mouser product actually is, confirming at least one
+# candidate link can supply the build, and rolling that up with the
+# schematic-only integrity/voltage checks into one pre-fab pass.
+# ---------------------------------------------------------------------------
+
+_RESISTANCE_UNIT_MULTIPLIERS = {"r": 1.0, "k": 1e3, "m": 1e6, "meg": 1e6, "g": 1e9}
+_CAPACITANCE_UNIT_MULTIPLIERS = {"f": 1.0, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3}
+_OHM_WORD_RE = re.compile(r"(?i)ohms?")
+_FARAD_WORD_RE = re.compile(r"(?i)farads?")
+_TRAILING_TOLERANCE_RE = re.compile(r"±?\d+(?:\.\d+)?%.*$")
+
+
+def _lookup_unit_multiplier(unit: str, table: dict[str, float]) -> float | None:
+    unit = unit.lower()
+    if not unit:
+        return 1.0
+    if unit in table:
+        return table[unit]
+    return table.get(unit[0])
+
+
+def _parse_engineering_value(text: str | None, table: dict[str, float], word_re: re.Pattern[str]) -> float | None:
+    """Parse a nominal component value ("10k", "4k7", "100nF", "1800 pF",
+    "0.1uF", "10 kOhm") into a base-unit float (ohms or farads), so
+    schematic Value-field text and Mouser's spec text can be compared
+    numerically instead of tripping over formatting differences. Supports
+    KiCad's "unit letter as decimal point" shorthand ("4k7" == 4.7k, "2R2" ==
+    2.2 ohms). Returns None if nothing recognizable is found - callers must
+    treat that as "couldn't verify", never as a mismatch or a zero.
+    """
+    if not text:
+        return None
+    cleaned = re.sub(r"[,\s]", "", text)
+    cleaned = word_re.sub("", cleaned)
+    cleaned = cleaned.replace("Ω", "R").replace("µ", "u")
+    cleaned = _TRAILING_TOLERANCE_RE.sub("", cleaned)
+    if not cleaned:
+        return None
+
+    shorthand = re.match(r"^(\d+)([a-zA-Z]+)(\d+)?$", cleaned)
+    if shorthand:
+        whole, unit, frac = shorthand.group(1), shorthand.group(2), shorthand.group(3)
+        mult = _lookup_unit_multiplier(unit, table)
+        if mult is not None:
+            try:
+                return float(f"{whole}.{frac}" if frac else whole) * mult
+            except ValueError:
+                pass
+
+    standard = re.match(r"^(\d+(?:\.\d+)?)([a-zA-Z]*)$", cleaned)
+    if standard:
+        number, unit = standard.group(1), standard.group(2)
+        mult = _lookup_unit_multiplier(unit, table)
+        if mult is not None:
+            try:
+                return float(number) * mult
+            except ValueError:
+                pass
+    return None
+
+
+def _parse_resistance(text: str | None) -> float | None:
+    return _parse_engineering_value(text, _RESISTANCE_UNIT_MULTIPLIERS, _OHM_WORD_RE)
+
+
+def _parse_capacitance(text: str | None) -> float | None:
+    return _parse_engineering_value(text, _CAPACITANCE_UNIT_MULTIPLIERS, _FARAD_WORD_RE)
+
+
+def _extract_package_code_from_footprint(footprint: str | None) -> str | None:
+    """Pull the imperial EIA size code straight out of a KiCad footprint
+    name, e.g. "Resistor_SMD:R_0402_1005Metric" -> "0402" - the same EIA
+    code table _extract_package_code reads Mouser's Case/Package spec
+    through, so both sides of the package comparison speak the same
+    vocabulary.
+    """
+    if not footprint:
+        return None
+    for token in re.findall(r"\d{4,6}", footprint):
+        if token in _EIA_IMPERIAL_CODES:
+            return token
+    return None
+
+
+def audit_component_specs_against_mouser(
+    project_path: str | Path,
+    references: list[str] | None = None,
+    value_tolerance_pct: float = 1.0,
+) -> dict[str, Any]:
+    """Cross-check every unique schematic part's Value/Footprint/
+    Manufacturer_Part_Number against what Mouser's Search API actually
+    returns for that part's own linked Mouser product - catches a Mouser
+    link that resolves fine but points at the wrong part (wrong
+    resistance/capacitance, wrong package, or a stale/typo'd MPN). This is
+    the exact bug class behind the R96/R103 stale-link issue noted in
+    todo.md (link pointed at a 47.5kOhm part for a 154k resistor) - run this
+    to find any remaining instances of it instead of spotting them by hand.
+
+    Three independent checks per part, each reported "match" / "mismatch" /
+    "not_verifiable" (Mouser or the schematic didn't provide enough to
+    compare - never a silent pass):
+    - manufacturer_part_number: schematic's Manufacturer_Part_Number property
+      vs Mouser's MPN. Run normalize_manufacturer_part_number_properties
+      first so parts that only carry the MPN under a differently-named
+      property are picked up here too.
+    - package: EIA imperial size code parsed out of the schematic Footprint
+      name vs Mouser's package_size_inch (only meaningful for parts Mouser
+      could identify as a chip resistor/ceramic capacitor; anything else is
+      "not_verifiable" for this field, not "match").
+    - value: nominal resistance/capacitance parsed out of the schematic
+      Value field vs Mouser's resistance/capacitance spec, compared
+      numerically within `value_tolerance_pct` percent so formatting
+      differences ("10k" vs "10 kOhm") don't read as mismatches. Only
+      resistors/capacitors (by Mouser's own detected_type) get this check.
+
+    Parts with no Mouser link, or whose lookup fails, are excluded from
+    `results` (see skipped/errors, carried through from
+    bulk_lookup_mouser_parts). REQUIRES MOUSER_API_KEY.
+    """
+    bulk = bulk_lookup_mouser_parts(project_path, references=references)
+
+    rows: list[dict[str, Any]] = []
+    mismatched: list[dict[str, Any]] = []
+
+    for entry in bulk["results"]:
+        mouser = entry["mouser"]
+
+        schematic_mpn = _canonical_mpn_from_properties(entry["schematic_properties"])
+        mouser_mpn = mouser.get("manufacturer_part_number")
+        mouser_mpn = None if mouser_mpn in (None, "unknown") else mouser_mpn
+        if mouser_mpn is None or schematic_mpn is None:
+            mpn_status = "not_verifiable"
+        elif _normalize_mpn_for_compare(schematic_mpn) == _normalize_mpn_for_compare(mouser_mpn):
+            mpn_status = "match"
+        else:
+            mpn_status = "mismatch"
+
+        mouser_package = mouser.get("package_size_inch")
+        schematic_package = _extract_package_code_from_footprint(entry.get("footprint"))
+        if mouser_package in (None, "unknown", "unsupported") or schematic_package is None:
+            package_status = "not_verifiable"
+        elif schematic_package == mouser_package:
+            package_status = "match"
+        else:
+            package_status = "mismatch"
+
+        detected_type = mouser.get("detected_type")
+        schematic_numeric = mouser_numeric = None
+        mouser_stated = None
+        if detected_type == "resistor" and mouser.get("resistance") not in (None, "unknown", "unsupported"):
+            mouser_stated = mouser.get("resistance")
+            schematic_numeric = _parse_resistance(entry.get("value"))
+            mouser_numeric = _parse_resistance(mouser_stated)
+        elif detected_type == "capacitor" and mouser.get("capacitance") not in (None, "unknown", "unsupported"):
+            mouser_stated = mouser.get("capacitance")
+            schematic_numeric = _parse_capacitance(entry.get("value"))
+            mouser_numeric = _parse_capacitance(mouser_stated)
+
+        if schematic_numeric is None or mouser_numeric is None:
+            value_status = "not_verifiable"
+        elif mouser_numeric == 0:
+            value_status = "not_verifiable"
+        else:
+            diff_pct = abs(schematic_numeric - mouser_numeric) / mouser_numeric * 100
+            value_status = "match" if diff_pct <= value_tolerance_pct else "mismatch"
+
+        row = {
+            "reference": entry["reference"],
+            "all_references": entry["all_references"],
+            "value": entry["value"],
+            "footprint": entry.get("footprint"),
+            "mouser_url": entry["mouser_url"],
+            "manufacturer_part_number": {"status": mpn_status, "schematic": schematic_mpn, "mouser": mouser_mpn},
+            "package": {"status": package_status, "schematic": schematic_package, "mouser": mouser_package},
+            "value_check": {
+                "status": value_status,
+                "schematic_numeric": schematic_numeric,
+                "mouser_numeric": mouser_numeric,
+                "mouser_stated": mouser_stated,
+            },
+        }
+        rows.append(row)
+        if "mismatch" in (mpn_status, package_status, value_status):
+            mismatched.append(row)
+
+    return {
+        "checked_count": len(rows),
+        "mismatched_count": len(mismatched),
+        "clean_count": len(rows) - len(mismatched),
+        "results": rows,
+        "mismatched": mismatched,
+        "skipped_count": bulk["skipped_count"],
+        "error_count": bulk["error_count"],
+        "skipped": bulk["skipped"],
+        "errors": bulk["errors"],
+    }
+
+
+def audit_stock_sufficiency(
+    project_path: str | Path,
+    references: list[str] | None = None,
+    board_quantity: int = 1,
+) -> dict[str, Any]:
+    """Check that at least one candidate Mouser link for every unique
+    schematic part (not just its current primary link - every "Mouser"/
+    "Mouser Price/Stock"/"Mouser Part Number Alt"/etc field) is in stock for
+    enough units to build `board_quantity` board(s), via the same live-data
+    ranking optimize_component_mouser_alternates uses. A part whose primary
+    link is out of stock but has a working alternate is NOT flagged;
+    `insufficient` only lists parts where no candidate link covers the need.
+
+    `board_quantity` multiplies each part's own schematic-placed count (from
+    list_schematic_parts) - defaults to 1 board. REQUIRES MOUSER_API_KEY.
+    """
+    representative_to_group: dict[str, dict[str, Any]] = {}
+    if references is None:
+        parts = list_schematic_parts(project_path)["parts"]
+        references = []
+        for part in parts:
+            if not part["references"]:
+                continue
+            representative = part["references"][0]
+            references.append(representative)
+            representative_to_group[representative] = part
+
+    results: list[dict[str, Any]] = []
+    insufficient: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for reference in references:
+        try:
+            component = get_schematic_part(project_path, reference)
+        except KeyError as exc:
+            errors.append({"reference": reference, "error": str(exc)})
+            continue
+
+        group = representative_to_group.get(reference)
+        all_references = group["references"] if group else [reference]
+        needed = (group["quantity"] if group else 1) * board_quantity
+
+        if not find_all_mouser_urls(component.get("properties", {})):
+            skipped.append(
+                {"reference": reference, "all_references": all_references, "value": component.get("value", ""), "reason": "no Mouser link in properties"}
+            )
+            continue
+
+        try:
+            result = optimize_component_mouser_alternates(project_path, reference, quantity_needed=needed)
+        except Exception as exc:
+            errors.append({"reference": reference, "all_references": all_references, "error": str(exc)})
+            continue
+
+        best = result["candidates"][0]
+        row = {
+            "reference": reference,
+            "all_references": all_references,
+            "value": result["value"],
+            "quantity_needed": needed,
+            "meets_quantity": best["meets_quantity"],
+            "best_candidate_in_stock": best["in_stock_count"],
+            "best_candidate_url": best["url"],
+            "candidates": result["candidates"],
+        }
+        results.append(row)
+        if not best["meets_quantity"]:
+            insufficient.append(row)
+
+    return {
+        "board_quantity": board_quantity,
+        "checked_count": len(results),
+        "insufficient_count": len(insufficient),
+        "insufficient": insufficient,
+        "results": results,
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
+def audit_schematic_health(
+    project_path: str | Path,
+    default_capacitor_voltage: str | float,
+    references: list[str] | None = None,
+    board_quantity: int = 1,
+    value_tolerance_pct: float = 1.0,
+    report_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """One-call pre-fab/pre-order sanity pass across the whole schematic,
+    combining every check this project has for catching schematic errors
+    before parts get ordered or the board gets sent to fab:
+
+    1. audit_schematic_integrity (schematic-only, instant) - duplicate
+       reference designators, symbols missing a Value or Footprint.
+    2. audit_capacitor_voltages - every capacitor either states its own
+       voltage rating or is assumed to use `default_capacitor_voltage`.
+       There is no universally-correct default for this project - ASK THE
+       USER what voltage rating this design assumes for capacitors that
+       don't state one before calling this (Power.kicad_sch/
+       Regulators.kicad_sch's rail voltages are a reasonable thing to bring
+       up in that conversation, but the actual answer is a project decision,
+       not something to guess).
+    3. audit_component_specs_against_mouser - each part's Value/Footprint/
+       Manufacturer_Part_Number matches what its linked Mouser product
+       actually is (catches stale/wrong links like the R96/R103 issue in
+       todo.md).
+    4. audit_stock_sufficiency - at least one of each part's candidate
+       Mouser links is in stock for `board_quantity` board(s) worth.
+
+    Steps 3-4 REQUIRE MOUSER_API_KEY and are the slow, rate-limited part of
+    this call - a full ~40-60 unique part schematic can take a couple of
+    minutes. Writes a Markdown summary to `report_path` (defaults to
+    `schematic_health_report.md` at the project root); full structured
+    results are also returned as JSON.
+    """
+    schematic_dir = Path(list_schematic_parts(project_path)["schematic_dir"])
+    output_path = Path(report_path) if report_path is not None else schematic_dir / "schematic_health_report.md"
+
+    integrity = audit_schematic_integrity(project_path)
+    voltages = audit_capacitor_voltages(project_path, default_voltage=default_capacitor_voltage)
+    voltage_mismatches = [v for v in voltages["with_voltage"] if v["status"] == "differs_from_default"]
+    specs = audit_component_specs_against_mouser(project_path, references=references, value_tolerance_pct=value_tolerance_pct)
+    stock = audit_stock_sufficiency(project_path, references=references, board_quantity=board_quantity)
+
+    total_issue_count = (
+        integrity["duplicate_reference_count"]
+        + integrity["missing_value_count"]
+        + integrity["missing_footprint_count"]
+        + voltages["missing_voltage_count"]
+        + len(voltage_mismatches)
+        + specs["mismatched_count"]
+        + stock["insufficient_count"]
+    )
+
+    lines = [
+        "# Schematic Health Report",
+        "",
+        f"**{total_issue_count} issue(s) found.**",
+        "",
+        "## 1. Schematic Integrity",
+        "",
+        f"- Duplicate reference designators: {integrity['duplicate_reference_count']}",
+        f"- Missing Value field: {integrity['missing_value_count']}",
+        f"- Missing Footprint field: {integrity['missing_footprint_count']}",
+        "",
+    ]
+    if integrity["duplicate_references"]:
+        lines.append("| Reference | Instance Count | Values | Sheets |")
+        lines.append("|---|---|---|---|")
+        for row in integrity["duplicate_references"]:
+            lines.append(f"| {row['reference']} | {row['instance_count']} | {', '.join(row['values'])} | {', '.join(row['sheetfiles'])} |")
+        lines.append("")
+    for label, key in (("Missing Value", "missing_value"), ("Missing Footprint", "missing_footprint")):
+        rows = integrity[key]
+        if rows:
+            lines.append(f"### {label}")
+            lines.append("")
+            lines.append("| Reference | Value | Footprint | Sheet |")
+            lines.append("|---|---|---|---|")
+            for row in rows:
+                lines.append(f"| {row['reference']} | {row['value']} | {row['footprint']} | {row['sheetfile']} |")
+            lines.append("")
+
+    lines += [
+        "## 2. Capacitor Voltage Ratings",
+        "",
+        f"Default assumed voltage: **{default_capacitor_voltage}**",
+        f"- Missing a stated voltage (assumed default): {voltages['missing_voltage_count']}",
+        f"- States a voltage that differs from the default: {len(voltage_mismatches)}",
+        "",
+    ]
+    if voltage_mismatches:
+        lines.append("| References | Value | Stated Voltage |")
+        lines.append("|---|---|---|")
+        for row in voltage_mismatches:
+            lines.append(f"| {', '.join(row['references'])} | {row['value']} | {row['stated_voltage']} |")
+        lines.append("")
+
+    lines += [
+        "## 3. Part Specs vs. Mouser Link",
+        "",
+        f"Checked {specs['checked_count']} part(s), {specs['mismatched_count']} mismatch(es) "
+        f"({specs['skipped_count']} had no Mouser link, {specs['error_count']} failed to look up).",
+        "",
+    ]
+    if specs["mismatched"]:
+        lines.append("| References | Value | MPN | Package | Value Check | Mouser Link |")
+        lines.append("|---|---|---|---|---|---|")
+        for row in specs["mismatched"]:
+            lines.append(
+                f"| {', '.join(row['all_references'])} | {row['value']} | {row['manufacturer_part_number']['status']} "
+                f"| {row['package']['status']} | {row['value_check']['status']} | {row['mouser_url']} |"
+            )
+        lines.append("")
+    else:
+        lines.append("None found.")
+        lines.append("")
+
+    lines += [
+        "## 4. Stock Sufficiency",
+        "",
+        f"Board quantity: {stock['board_quantity']}. Checked {stock['checked_count']} part(s), "
+        f"{stock['insufficient_count']} without any candidate link that covers the need.",
+        "",
+    ]
+    if stock["insufficient"]:
+        lines.append("| References | Value | Needed | Best Candidate In Stock | Best Candidate Link |")
+        lines.append("|---|---|---|---|---|")
+        for row in stock["insufficient"]:
+            lines.append(
+                f"| {', '.join(row['all_references'])} | {row['value']} | {row['quantity_needed']} | "
+                f"{row['best_candidate_in_stock']} | {row['best_candidate_url']} |"
+            )
+        lines.append("")
+    else:
+        lines.append("None found.")
+        lines.append("")
+
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return {
+        "report_path": str(output_path),
+        "total_issue_count": total_issue_count,
+        "integrity": integrity,
+        "capacitor_voltages": voltages,
+        "capacitor_voltage_mismatches": voltage_mismatches,
+        "component_specs": specs,
+        "stock_sufficiency": stock,
     }
