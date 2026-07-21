@@ -1,3 +1,6 @@
 [submodule "parts/TFT35-SPI"]
 	path = parts/TFT35-SPI
 	url = https://github.com/bigtreetech/TFT35-SPI.git
+[submodule "mykicadMcp"]
+	path = mykicadMcp
+	url = https://github.com/budarriola/mykicadMcp.git

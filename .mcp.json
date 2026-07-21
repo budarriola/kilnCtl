@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "kicad": {
-      "command": "python/.venv/Scripts/python.exe",
-      "args": ["python/kicad_mcp_server.py"]
+      "command": "mykicadMcp/.venv/Scripts/python.exe",
+      "args": ["mykicadMcp/kicad_mcp_server.py"]
     }
   }
 }

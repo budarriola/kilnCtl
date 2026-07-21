@@ -1,7 +1,7 @@
 # Secrets - never commit. See .env.example for the expected keys.
 /.env
 
-# Mouser lookup result cache (python/kicad_mouser_tool.py) - local speed-up only.
+# Mouser lookup result cache (mykicadMcp/kicad_mouser_tool.py) - local speed-up only.
 /.mouser_cache.json
 
 /kiln-backups
@@ -17,10 +17,6 @@
 /.vscode/*
 /~kiln.kicad_pcb.lck
 
-# python/ tooling: track the source (kicad_pcb_tool.py, kicad_mcp_server.py, docs, etc.),
-# ignore the venv, caches, editor settings, and the server's runtime log.
-/python/.venv/
-/python/.vscode/
-/python/__pycache__/
-/python/kicad_mcp_server.log
+# mykicadMcp/ is a separate git submodule (github.com/budarriola/mykicadMcp);
+# its own .gitignore covers the venv, caches, editor settings, and runtime log.
 /output/

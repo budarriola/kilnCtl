@@ -31,17 +31,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **fp-lib-table** — Footprint library table
 
 ### Python Tools
-- **python/kicad_pcb_tool.py** — Lightweight parser for PCB and netlist files; does not require KiCad runtime
-- **python/kicad_mouser_tool.py** — Mouser Search API sourcing/stock/pricing lookups
-- **python/kicad_ipc_tool.py** — Live-KiCad tools via the IPC API (`kicad-python`); requires a running KiCad session
-- **python/kicad_mcp_server.py** — MCP server that exposes all KiCad tools over stdio or HTTP
-- **python/requirements-mcp.txt** — Python dependencies (requires `mcp>=1.0.0`)
-- **python/kicadAi.md** — Full setup guide and tool reference for the MCP server
+`mykicadMcp/` is a separate git submodule (github.com/budarriola/mykicadMcp) holding the MCP server and its supporting tools:
+- **mykicadMcp/kicad_pcb_tool.py** — Lightweight parser for PCB and netlist files; does not require KiCad runtime
+- **mykicadMcp/kicad_mouser_tool.py** — Mouser Search API sourcing/stock/pricing lookups
+- **mykicadMcp/kicad_ipc_tool.py** — Live-KiCad tools via the IPC API (`kicad-python`); requires a running KiCad session
+- **mykicadMcp/kicad_mcp_server.py** — MCP server that exposes all KiCad tools over stdio or HTTP
+- **mykicadMcp/requirements-mcp.txt** — Python dependencies (requires `mcp>=1.0.0`)
+- **mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
 
 ### MCP Server Tools
 The KiCad MCP server exposes 61 tools across 9 groups (inspection/netlist, schematic data,
 Mouser sourcing, hierarchical groups, layout/placement, PCB groups, label positions, footprint
-flips, and live IPC tools). See **python/kicadAi.md** and `python/docs/mcp-tools/` for the full
+flips, and live IPC tools). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
 reference; a few commonly used ones:
 - `inspect_kicad_project` — Get project-wide metrics and status
 - `list_kicad_components` — List all components on the PCB
@@ -56,19 +57,19 @@ reference; a few commonly used ones:
 1. Ensure Python 3 is installed and in `PATH`
 2. Activate the virtual environment:
    ```powershell
-   python\.venv\Scripts\Activate.ps1
+   mykicadMcp\.venv\Scripts\Activate.ps1
    ```
 3. Install dependencies (if needed):
    ```powershell
-   pip install -r python\requirements-mcp.txt
+   pip install -r mykicadMcp\requirements-mcp.txt
    ```
 4. Test the MCP server:
    ```powershell
-   python python\kicad_mcp_server.py
+   python mykicadMcp\kicad_mcp_server.py
    ```
 
 ### Using MCP with Claude Code
-- Configure MCP in your editor using the server path: `python python\kicad_mcp_server.py`
+- Configure MCP in your editor using the server path: `python mykicadMcp\kicad_mcp_server.py`
 - Example tools: "List the components on the PCB", "Show me component R1 and its connections", "Provide details for net /MainControler/CLK"
 
 ## Key Architecture Notes
@@ -105,7 +106,7 @@ kicad kiln.kicad_sch
 ### Query Component or Net Information
 Use the MCP server tools or call Python directly:
 ```powershell
-python python\kicad_pcb_tool.py
+python mykicadMcp\kicad_pcb_tool.py
 ```
 
 ### Update the BOM
