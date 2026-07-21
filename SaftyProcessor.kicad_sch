@@ -7060,6 +7060,17 @@
 				)
 			)
 		)
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Raspberry-Pi/SC0915?qs=T%252BzbugeAwjgnLi4azxXVFA%3D%3D"
+			(at 149.86 119.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Sim.Device" ""
 			(at 149.86 69.85 0)
 			(hide yes)

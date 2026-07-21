@@ -2465,6 +2465,711 @@ def search_component_by_reference(project_path: str | Path, reference: str) -> d
     }
 
 
+def _resolve_schematic_dir(project_path: str | Path) -> Path:
+    """Resolve a project directory containing `.kicad_sch` files. Deliberately
+    independent of `_resolve_project_path` (which requires a `.kicad_pcb` to
+    exist) - schematic parsing shouldn't fail just because the board hasn't
+    been laid out yet.
+    """
+    path = Path(project_path).expanduser().resolve()
+    if path.is_dir():
+        return path
+    if path.suffix.lower() in {".kicad_sch", ".kicad_pcb", ".kicad_pro"}:
+        return path.parent
+    raise ValueError(f"Unsupported KiCad path: {path}")
+
+
+def _list_schematic_files(directory: Path) -> list[Path]:
+    return sorted(
+        p for p in directory.glob("*.kicad_sch")
+        if not p.name.startswith("_autosave-") and not p.name.startswith("~")
+    )
+
+
+def _root_schematic_path(directory: Path) -> Path | None:
+    """Root schematic filename always matches the KiCad project name (e.g.
+    kiln.kicad_pro -> kiln.kicad_sch), mirroring how `_resolve_project_path`
+    locates the board file.
+    """
+    for pattern in ("*.kicad_pro", "*.kicad_pcb"):
+        candidates = sorted(p for p in directory.glob(pattern) if not p.name.startswith("_autosave-"))
+        for candidate in candidates:
+            root = directory / f"{candidate.stem}.kicad_sch"
+            if root.exists():
+                return root
+    return None
+
+
+def _parse_schematic_sheet_files(sch_path: Path) -> list[str]:
+    """Every `Sheetfile` property named on a `(sheet ...)` block in this file -
+    i.e. which other .kicad_sch files this one instantiates as a sub-sheet.
+    """
+    text = _read_text(sch_path)
+    root = SexprParser(text).parse()
+    sheetfiles: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            if node and node[0] == "sheet":
+                for entry in node[1:]:
+                    if (
+                        isinstance(entry, list) and len(entry) >= 3
+                        and entry[0] == "property" and entry[1] == "Sheetfile"
+                        and isinstance(entry[2], str)
+                    ):
+                        sheetfiles.append(entry[2])
+            for child in node:
+                walk(child)
+
+    walk(root)
+    return sheetfiles
+
+
+def _reachable_schematic_files(directory: Path) -> list[Path]:
+    """Only the .kicad_sch files actually reachable via `(sheet ...)` blocks
+    starting from the project's root schematic - deliberately NOT every
+    .kicad_sch file sitting in the directory. KiCad projects routinely
+    accumulate orphaned sheet files (leftover "untitled.kicad_sch" scratch
+    sheets, disconnected subsystem pages from an earlier design iteration)
+    that were never wired into the design via a (sheet ...) instance;
+    including those would silently inflate BOM quantities and can introduce
+    phantom duplicate reference designators for parts that were never
+    actually placed on the real design.
+    """
+    root_path = _root_schematic_path(directory)
+    if root_path is None:
+        return _list_schematic_files(directory)  # no identifiable project file - best effort
+
+    visited: dict[str, Path] = {}
+    stack = [root_path]
+    while stack:
+        current = stack.pop()
+        if current.name in visited or not current.exists():
+            continue
+        visited[current.name] = current
+        for sheetfile in _parse_schematic_sheet_files(current):
+            stack.append(directory / sheetfile)
+    return sorted(visited.values(), key=lambda p: p.name)
+
+
+_REF_RE = re.compile(r"^([A-Za-z_]*)(\d+)?$")
+
+
+def _reference_sort_key(reference: str) -> tuple[str, int, str]:
+    match = _REF_RE.match(reference or "")
+    if not match:
+        return (reference or "", -1, reference or "")
+    prefix, digits = match.group(1), match.group(2)
+    return (prefix, int(digits) if digits else -1, reference)
+
+
+def _parse_schematic_instances(entry: list[Any]) -> list[dict[str, Any]]:
+    """Flatten a symbol's `(instances (project "name" (path "..." (reference "X") (unit N)) ...))`
+    block. Each `path` entry is one physical placement of the symbol - a
+    hierarchical sheet stamped out more than once (e.g. Thermocouple.kicad_sch
+    used for 5 channels) yields one path/reference per stamped-out instance,
+    all sharing the same underlying symbol definition and properties.
+    """
+    instances: list[dict[str, Any]] = []
+    for project_entry in entry[1:]:
+        if not (isinstance(project_entry, list) and project_entry and project_entry[0] == "project"):
+            continue
+        project_name = project_entry[1] if len(project_entry) > 1 and isinstance(project_entry[1], str) else ""
+        for path_entry in project_entry[2:]:
+            if not (isinstance(path_entry, list) and path_entry and path_entry[0] == "path"):
+                continue
+            path_str = path_entry[1] if len(path_entry) > 1 and isinstance(path_entry[1], str) else ""
+            reference = ""
+            path_unit = 1
+            for field in path_entry[2:]:
+                if not (isinstance(field, list) and field):
+                    continue
+                if field[0] == "reference" and len(field) > 1 and isinstance(field[1], str):
+                    reference = field[1]
+                elif field[0] == "unit" and len(field) > 1 and _is_number(str(field[1])):
+                    path_unit = int(float(field[1]))
+            if reference:
+                instances.append({"project": project_name, "path": path_str, "reference": reference, "unit": path_unit})
+    return instances
+
+
+def _parse_one_schematic_symbol(node: list[Any]) -> dict[str, Any]:
+    lib_id = ""
+    symbol_uuid = ""
+    unit = 1
+    dnp = False
+    in_bom = True
+    on_board = True
+    properties: dict[str, str] = {}
+    pins: list[str] = []
+    instances: list[dict[str, Any]] = []
+
+    for entry in node[1:]:
+        if not (isinstance(entry, list) and entry):
+            continue
+        tag = entry[0]
+        if tag == "lib_id" and len(entry) >= 2 and isinstance(entry[1], str):
+            lib_id = entry[1]
+        elif tag == "uuid" and len(entry) >= 2 and isinstance(entry[1], str):
+            symbol_uuid = entry[1]
+        elif tag == "unit" and len(entry) >= 2 and _is_number(str(entry[1])):
+            unit = int(float(entry[1]))
+        elif tag == "dnp" and len(entry) >= 2:
+            dnp = entry[1] == "yes"
+        elif tag == "in_bom" and len(entry) >= 2:
+            in_bom = entry[1] == "yes"
+        elif tag == "on_board" and len(entry) >= 2:
+            on_board = entry[1] == "yes"
+        elif tag == "property" and len(entry) >= 3 and isinstance(entry[1], str):
+            properties[entry[1]] = str(entry[2])
+        elif tag == "pin" and len(entry) >= 2 and isinstance(entry[1], str):
+            pins.append(entry[1])
+        elif tag == "instances":
+            instances.extend(_parse_schematic_instances(entry))
+
+    return {
+        "lib_id": lib_id,
+        "symbol_uuid": symbol_uuid,
+        "unit": unit,
+        "dnp": dnp,
+        "in_bom": in_bom,
+        "on_board": on_board,
+        "properties": properties,
+        "pins": pins,
+        "instances": instances,
+    }
+
+
+def _parse_schematic_symbols(sch_path: Path) -> list[dict[str, Any]]:
+    """Parse every *placed* symbol instance out of one `.kicad_sch` file - i.e.
+    `(symbol ...)` blocks that carry both a `lib_id` and an `instances` block.
+    That combination is what distinguishes an actual placed component from the
+    `(symbol ...)` unit/graphic sub-blocks nested inside the file's
+    `lib_symbols` library cache, which have neither.
+    """
+    text = _read_text(sch_path)
+    root = SexprParser(text).parse()
+    symbols: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            if node and node[0] == "symbol":
+                has_lib_id = any(isinstance(e, list) and e and e[0] == "lib_id" for e in node[1:])
+                has_instances = any(isinstance(e, list) and e and e[0] == "instances" for e in node[1:])
+                if has_lib_id and has_instances:
+                    symbols.append(_parse_one_schematic_symbol(node))
+                    return
+            for child in node:
+                walk(child)
+
+    walk(root)
+    return symbols
+
+
+_schematic_symbol_cache: dict[str, tuple[float, int, list[dict[str, Any]]]] = {}
+
+
+def _parse_schematic_symbols_cached(sch_path: Path) -> list[dict[str, Any]]:
+    stat = sch_path.stat()
+    key = str(sch_path)
+    cached = _schematic_symbol_cache.get(key)
+    if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+        return cached[2]
+    symbols = _parse_schematic_symbols(sch_path)
+    _schematic_symbol_cache[key] = (stat.st_mtime, stat.st_size, symbols)
+    return symbols
+
+
+def _flatten_schematic_components(directory: Path) -> list[dict[str, Any]]:
+    """One row per placed reference designator across every `.kicad_sch` file
+    reachable from the project's root sheet (see _reachable_schematic_files -
+    NOT every .kicad_sch file in `directory`), expanding each symbol's
+    `instances` block (a symbol drawn once on a hierarchical sheet like
+    Thermocouple.kicad_sch becomes one row per channel it's stamped out into,
+    e.g. U6/U7/U8/U9).
+    """
+    components: list[dict[str, Any]] = []
+    for sch_path in _reachable_schematic_files(directory):
+        for symbol in _parse_schematic_symbols_cached(sch_path):
+            properties = symbol["properties"]
+            for instance in symbol["instances"]:
+                components.append(
+                    {
+                        "reference": instance["reference"],
+                        "unit": instance["unit"],
+                        "value": properties.get("Value", ""),
+                        "footprint": properties.get("Footprint", ""),
+                        "lib_id": symbol["lib_id"],
+                        "dnp": symbol["dnp"],
+                        "in_bom": symbol["in_bom"],
+                        "on_board": symbol["on_board"],
+                        "properties": properties,
+                        "pins": symbol["pins"],
+                        "symbol_uuid": symbol["symbol_uuid"],
+                        "sheetfile": sch_path.name,
+                        "sheet_path": instance["path"],
+                        "project": instance["project"],
+                    }
+                )
+    components.sort(key=lambda c: _reference_sort_key(c["reference"]))
+    return components
+
+
+def list_schematic_parts(project_path: str | Path) -> dict[str, Any]:
+    """Group every placed schematic symbol instance (across all `.kicad_sch`
+    files in the project) into unique BOM-style part rows, grouped by
+    Value + Footprint - the same grouping KiCad's own BOM exporter uses to
+    produce kiln.csv. Each row lists every reference designator that shares
+    it and a total quantity. Use this instead of trusting kiln.csv when the
+    exported BOM might be stale relative to the live schematic, or to find
+    the reference designators for a part before calling get_schematic_part.
+    """
+    directory = _resolve_schematic_dir(project_path)
+    components = _flatten_schematic_components(directory)
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for component in components:
+        # Power symbols (lib_id "power:GND", "power:VPP", etc, reference "#PWR..")
+        # are schematic-only net markers, not orderable parts - KiCad's own BOM
+        # exporter excludes them from kiln.csv the same way, by the "#" reference
+        # prefix it auto-assigns them and never lets the user rename.
+        if component["lib_id"].startswith("power:") or component["reference"].startswith("#"):
+            continue
+        key = (component["value"], component["footprint"])
+        group = groups.get(key)
+        if group is None:
+            properties = component["properties"]
+            group = {
+                "value": component["value"],
+                "footprint": component["footprint"],
+                "lib_id": component["lib_id"],
+                "description": properties.get("Description", ""),
+                "datasheet": properties.get("Datasheet", ""),
+                "manufacturer": properties.get("Manufacturer_Name", ""),
+                "manufacturer_part_number": properties.get("Manufacturer_Part_Number", ""),
+                "references": [],
+                "dnp_references": [],
+            }
+            groups[key] = group
+            order.append(key)
+        group["references"].append(component["reference"])
+        if component["dnp"]:
+            group["dnp_references"].append(component["reference"])
+
+    parts: list[dict[str, Any]] = []
+    for key in order:
+        group = groups[key]
+        group["references"].sort(key=_reference_sort_key)
+        group["dnp_references"].sort(key=_reference_sort_key)
+        group["quantity"] = len(group["references"])
+        if not group["dnp_references"]:
+            del group["dnp_references"]
+        parts.append(group)
+
+    parts.sort(key=lambda p: _reference_sort_key(p["references"][0]) if p["references"] else ("", -1, ""))
+
+    return {
+        "schematic_dir": str(directory),
+        "component_count": len(components),
+        "unique_part_count": len(parts),
+        "parts": parts,
+    }
+
+
+def get_schematic_part(project_path: str | Path, reference: str) -> dict[str, Any]:
+    """Look up one placed schematic symbol by reference designator (e.g. a
+    reference returned in list_schematic_parts' `references`) and return every
+    property KiCad stores on it - Value, Footprint, Datasheet, Manufacturer_*,
+    Mouser fields, Sim.* fields, whatever the symbol carries - plus its pin
+    list and which schematic sheet file/instance it was placed on.
+    """
+    directory = _resolve_schematic_dir(project_path)
+    components = _flatten_schematic_components(directory)
+    lowered = reference.strip().upper()
+    for component in components:
+        if component["reference"].strip().upper() == lowered:
+            return component
+    raise KeyError(f"Schematic symbol {reference} not found")
+
+
+_CAPACITOR_REF_RE = re.compile(r"^C\d+$")
+_VOLTAGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[vV](?![a-zA-Z])")
+
+
+def _extract_voltage(value: str) -> tuple[str, float] | None:
+    """Pull a voltage rating out of a capacitor Value string, e.g. "47uF 16V" ->
+    ("16V", 16.0). Requires the number to be immediately followed by v/V not
+    itself followed by another letter, so it can't mistake the "V" hiding
+    inside an unrelated unit or word for a rating; there is no unit prefix
+    (m/u/n/p) between the digits and the "V" for volts the way there is for
+    farads, so this is unambiguous for capacitor values in practice.
+    """
+    match = _VOLTAGE_RE.search(value or "")
+    if not match:
+        return None
+    return match.group(0).strip(), float(match.group(1))
+
+
+def _coerce_voltage(voltage: str | float | None) -> float | None:
+    if voltage is None:
+        return None
+    if isinstance(voltage, (int, float)):
+        return float(voltage)
+    extracted = _extract_voltage(str(voltage))
+    if extracted:
+        return extracted[1]
+    try:
+        return float(voltage)
+    except ValueError:
+        return None
+
+
+def audit_capacitor_voltages(project_path: str | Path, default_voltage: str | float | None = None) -> dict[str, Any]:
+    """Check every unique capacitor value in the schematic for a voltage rating
+    written into its Value field (e.g. "47uF 16V" vs. plain "0.1uf") - the
+    common schematic convention where every cap is assumed to use one
+    project-wide default voltage rating unless its Value overrides it.
+    Capacitors are identified by KiCad's own "C<n>" reference-designator
+    convention (reused from list_schematic_parts' grouping, so results share
+    its Value+Footprint grouping and reference lists).
+
+    Pass `default_voltage` (e.g. "16V", "16", or 16) to also split entries that
+    *do* state a voltage into ones that just redundantly restate the default
+    vs. ones that genuinely differ from it - the case this convention exists
+    to flag. Without it, entries are only split into has/missing a voltage
+    indication.
+
+    This can only see what's written in the Value field text - it has no way
+    to know a part's *actual* voltage rating beyond that, so "missing_voltage"
+    means "assumed to be the default", not "verified against the real part".
+    """
+    default_numeric = _coerce_voltage(default_voltage)
+
+    parts = list_schematic_parts(project_path)["parts"]
+    capacitors = [p for p in parts if p["references"] and all(_CAPACITOR_REF_RE.match(r) for r in p["references"])]
+
+    with_voltage: list[dict[str, Any]] = []
+    missing_voltage: list[dict[str, Any]] = []
+
+    for cap in capacitors:
+        row = {
+            "value": cap["value"],
+            "footprint": cap["footprint"],
+            "lib_id": cap["lib_id"],
+            "quantity": cap["quantity"],
+            "references": cap["references"],
+        }
+        extracted = _extract_voltage(cap["value"])
+        if extracted is None:
+            row["status"] = "missing_voltage"
+            missing_voltage.append(row)
+            continue
+
+        voltage_text, voltage_numeric = extracted
+        row["stated_voltage"] = voltage_text
+        row["stated_voltage_numeric"] = voltage_numeric
+        if default_numeric is not None:
+            row["status"] = "matches_default" if voltage_numeric == default_numeric else "differs_from_default"
+        else:
+            row["status"] = "has_voltage"
+        with_voltage.append(row)
+
+    return {
+        "default_voltage": default_voltage,
+        "default_voltage_numeric": default_numeric,
+        "capacitor_part_count": len(capacitors),
+        "capacitor_instance_count": sum(c["quantity"] for c in capacitors),
+        "missing_voltage_count": len(missing_voltage),
+        "with_voltage_count": len(with_voltage),
+        "missing_voltage": missing_voltage,
+        "with_voltage": with_voltage,
+    }
+
+
+def _normalize_property_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", key.lower())
+
+
+def _lookup_property_ci(properties: dict[str, str], target_key: str) -> str | None:
+    target_norm = _normalize_property_key(target_key)
+    for key, value in properties.items():
+        if _normalize_property_key(key) == target_norm:
+            return value
+    return None
+
+
+def _invalidate_schematic_cache(sch_path: Path) -> None:
+    _schematic_symbol_cache.pop(str(sch_path), None)
+
+
+_MANUFACTURER_PART_NUMBER_KEY = "Manufacturer_Part_Number"
+
+# Field names seen in the wild (this project and generally) that mean "the
+# manufacturer's own part number" but aren't spelled the same as the project's
+# established canonical property name.
+_MPN_ALIAS_KEYS = frozenset(
+    _normalize_property_key(alias)
+    for alias in (
+        "MPN",
+        "Mfr Part Number",
+        "Mfr. Part Number",
+        "Mfr_Part_Number",
+        "Mfr Part No",
+        "Mfr Part No.",
+        "Manufacturer Part No",
+        "Manufacturer Part No.",
+        "Manufacturer Part Num",
+        "ManufacturerPartNumber",
+        "Part Number",
+        "Part_Number",
+        "PartNumber",
+        "PROD_ID",
+        "Product ID",
+        "Vendor Part Number",
+        "Distributor Part Number",
+    )
+)
+
+
+def normalize_manufacturer_part_number_properties(
+    project_path: str | Path,
+    write: bool = False,
+    allow_while_open: bool = False,
+) -> dict[str, Any]:
+    """Find schematic symbols that carry a manufacturer-part-number-shaped
+    property under some other name (e.g. "PROD_ID", "MPN", "Part Number") but
+    don't already have the project's canonical "Manufacturer_Part_Number"
+    property, and rename that property key to the canonical name - text-only
+    edit, the value itself is left untouched.
+
+    Only renames when exactly one alias candidate is present on a symbol that
+    lacks the canonical key already; a symbol with more than one candidate
+    (ambiguous which one is the real MPN) is reported under `ambiguous`
+    instead of guessed at.
+
+    Defaults to a dry run (write=False) - inspect `changes`/`ambiguous`, then
+    call again with write=True to actually edit the .kicad_sch files. Refuses
+    to write to a sheet KiCad currently has open unless allow_while_open=True
+    (see _check_not_locked_by_editor).
+    """
+    directory = _resolve_schematic_dir(project_path)
+
+    changes: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+
+    for sch_path in _list_schematic_files(directory):
+        for symbol in _parse_schematic_symbols_cached(sch_path):
+            properties = symbol["properties"]
+            if _lookup_property_ci(properties, _MANUFACTURER_PART_NUMBER_KEY) is not None:
+                continue
+            candidates = [
+                (key, value) for key, value in properties.items()
+                if _normalize_property_key(key) in _MPN_ALIAS_KEYS
+            ]
+            if not candidates:
+                continue
+            references = sorted(
+                {instance["reference"] for instance in symbol["instances"] if instance.get("reference")},
+                key=_reference_sort_key,
+            )
+            if len(candidates) > 1:
+                ambiguous.append(
+                    {
+                        "sheetfile": sch_path.name,
+                        "references": references,
+                        "candidate_keys": [key for key, _ in candidates],
+                    }
+                )
+                continue
+            old_key, value = candidates[0]
+            changes.append(
+                {
+                    "sheetfile": sch_path.name,
+                    "symbol_uuid": symbol["symbol_uuid"],
+                    "references": references,
+                    "old_key": old_key,
+                    "new_key": _MANUFACTURER_PART_NUMBER_KEY,
+                    "value": value,
+                }
+            )
+
+    changes_by_file: dict[str, list[dict[str, Any]]] = {}
+    for change in changes:
+        changes_by_file.setdefault(change["sheetfile"], []).append(change)
+
+    if write:
+        for sheetfile in changes_by_file:
+            _check_not_locked_by_editor(directory / sheetfile, allow_while_open)
+
+    applied: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+
+    for sheetfile, file_changes in changes_by_file.items():
+        sch_path = directory / sheetfile
+        text = _read_text(sch_path)
+        file_modified = False
+        for change in file_changes:
+            uuid_marker = f'(uuid "{change["symbol_uuid"]}")'
+            uuid_idx = text.find(uuid_marker)
+            if uuid_idx == -1:
+                missing.append({**change, "reason": "symbol uuid not found in file"})
+                continue
+            old_property_marker = f'(property "{change["old_key"]}" '
+            property_idx = text.find(old_property_marker, uuid_idx)
+            if property_idx == -1:
+                missing.append({**change, "reason": "property not found after symbol uuid"})
+                continue
+            applied.append(change)
+            if write:
+                new_property_marker = f'(property "{change["new_key"]}" '
+                end = property_idx + len(old_property_marker)
+                text = text[:property_idx] + new_property_marker + text[end:]
+                file_modified = True
+        if write and file_modified:
+            with sch_path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(text)
+            _invalidate_schematic_cache(sch_path)
+
+    return {
+        "schematic_dir": str(directory),
+        "write": write,
+        "change_count": len(changes),
+        "changes": changes,
+        "ambiguous_count": len(ambiguous),
+        "ambiguous": ambiguous,
+        "applied_count": len(applied),
+        "missing_count": len(missing),
+        "applied": applied,
+        "missing": missing,
+    }
+
+
+def _find_matching_paren(text: str, open_idx: int) -> int:
+    """`open_idx` must point at a `(`; returns the index of its matching `)`."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    raise ValueError("Unbalanced parentheses while scanning for a matching ')'")
+
+
+def _escape_sexpr_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def set_schematic_property(
+    project_path: str | Path,
+    reference: str,
+    property_name: str,
+    value: str,
+    write: bool = False,
+    allow_while_open: bool = False,
+) -> dict[str, Any]:
+    """Set one property on a schematic symbol by reference designator -
+    updates it in place if already present (matched case-insensitively, e.g.
+    a call for "Mouser" will still find and update an existing "MOUSER"),
+    otherwise inserts it as a new hidden field styled and positioned like the
+    symbol's existing "Datasheet" property (KiCad's own convention for
+    supplementary metadata fields such as distributor links), anchored right
+    after it in the file.
+
+    Defaults to a dry run (write=False) - inspect `change`, then call again
+    with write=True to actually edit the .kicad_sch file. Refuses to write to
+    a sheet KiCad currently has open unless allow_while_open=True.
+    """
+    directory = _resolve_schematic_dir(project_path)
+    components = _flatten_schematic_components(directory)
+    lowered_reference = reference.strip().upper()
+    component = next((c for c in components if c["reference"].strip().upper() == lowered_reference), None)
+    if component is None:
+        raise KeyError(f"Schematic symbol {reference} not found")
+
+    sch_path = directory / component["sheetfile"]
+    text = _read_text(sch_path)
+    uuid_marker = f'(uuid "{component["symbol_uuid"]}")'
+    uuid_idx = text.find(uuid_marker)
+    if uuid_idx == -1:
+        raise ValueError(f"Symbol uuid not found in {component['sheetfile']} (file changed since parse?)")
+
+    existing_key = next(
+        (key for key in component["properties"] if _normalize_property_key(key) == _normalize_property_key(property_name)),
+        None,
+    )
+
+    if existing_key is not None:
+        marker = f'(property "{existing_key}" "'
+        marker_idx = text.find(marker, uuid_idx)
+        if marker_idx == -1:
+            raise ValueError(f"Property {existing_key!r} not found in file text after symbol uuid")
+        value_start = marker_idx + len(marker)
+        value_end = value_start
+        while value_end < len(text) and not (text[value_end] == '"' and text[value_end - 1] != "\\"):
+            value_end += 1
+        old_value = text[value_start:value_end]
+        change = {
+            "sheetfile": component["sheetfile"],
+            "reference": reference,
+            "property": existing_key,
+            "action": "updated",
+            "old_value": old_value,
+            "new_value": value,
+        }
+        if write:
+            _check_not_locked_by_editor(sch_path, allow_while_open)
+            new_text = text[:value_start] + _escape_sexpr_string(value) + text[value_end:]
+            with sch_path.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(new_text)
+            _invalidate_schematic_cache(sch_path)
+        return {"write": write, "change": change}
+
+    anchor_marker = '(property "Datasheet" "'
+    anchor_open_idx = text.find(anchor_marker, uuid_idx)
+    if anchor_open_idx == -1:
+        raise ValueError(
+            f"No 'Datasheet' property found on {reference} to anchor a new {property_name!r} property after"
+        )
+    anchor_close_idx = _find_matching_paren(text, anchor_open_idx)
+    anchor_block = text[anchor_open_idx : anchor_close_idx + 1]
+    at_match = re.search(r"\(at [^)]*\)", anchor_block)
+    at_clause = at_match.group(0) if at_match else "(at 0 0 0)"
+
+    newline = _detect_newline(text)
+    new_block = (
+        f'\n\t\t(property "{property_name}" "{_escape_sexpr_string(value)}"\n'
+        f"\t\t\t{at_clause}\n"
+        f"\t\t\t(hide yes)\n"
+        f"\t\t\t(show_name no)\n"
+        f"\t\t\t(do_not_autoplace no)\n"
+        f"\t\t\t(effects\n"
+        f"\t\t\t\t(font\n"
+        f"\t\t\t\t\t(size 1.27 1.27)\n"
+        f"\t\t\t\t)\n"
+        f"\t\t\t)\n"
+        f"\t\t)"
+    ).replace("\n", newline)
+
+    change = {
+        "sheetfile": component["sheetfile"],
+        "reference": reference,
+        "property": property_name,
+        "action": "inserted",
+        "old_value": None,
+        "new_value": value,
+    }
+    if write:
+        _check_not_locked_by_editor(sch_path, allow_while_open)
+        new_text = text[: anchor_close_idx + 1] + new_block + text[anchor_close_idx + 1 :]
+        with sch_path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(new_text)
+        _invalidate_schematic_cache(sch_path)
+    return {"write": write, "change": change}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect KiCad board files")
     parser.add_argument("project_path", help="Path to a KiCad project directory, .kicad_pcb or .kicad_pro file")

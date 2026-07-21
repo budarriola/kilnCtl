@@ -37,6 +37,7 @@ try:
     apply_layout_template,
     apply_property_position_changes,
     apply_property_position_template,
+    audit_capacitor_voltages,
     classify_group_by_anchor_pin,
     create_group,
     delete_group,
@@ -55,17 +56,21 @@ try:
     get_net,
     get_pin_position,
     get_property_position,
+    get_schematic_part,
     inspect_project,
     list_components,
     list_groups,
     list_hierarchical_templates,
     list_nets,
+    list_schematic_parts,
     list_sibling_instances,
     match_group_members_by_role,
     move_group,
+    normalize_manufacturer_part_number_properties,
     nudge_to_clear,
     pin_distance,
     search_component_by_reference,
+    set_schematic_property,
     suggest_component_placement,
     )
 except Exception as exc:  # pragma: no cover - import safety
@@ -87,6 +92,21 @@ try:
 except Exception as exc:  # pragma: no cover - optional dependency
     log_message(f"KiCad IPC tools unavailable (is kicad-python installed? {exc})")
     _IPC_AVAILABLE = False
+
+
+try:
+    from kicad_mouser_tool import (
+        audit_manufacturer_part_numbers,
+        bulk_list_component_mouser_urls,
+        bulk_lookup_mouser_parts,
+        generate_mouser_stock_report,
+        list_component_mouser_urls,
+        lookup_mouser_part,
+    )
+except Exception as exc:  # pragma: no cover - import safety
+    log_message(f"Failed to import Mouser lookup module: {exc}")
+    traceback.print_exc(file=sys.stderr)
+    raise
 
 
 log_message("KiCad MCP server module imported successfully")
@@ -196,6 +216,235 @@ class KiCadMcpServer:
                     "required": ["project_path", "reference"],
                 },
                 "handler": self._tool_suggest_component_placement,
+            },
+            "list_kicad_schematic_parts": {
+                "description": (
+                    "Get the unique parts list straight from the .kicad_sch files (all sheets, "
+                    "following every hierarchical instance) instead of the exported kiln.csv BOM, "
+                    "which can go stale. Groups every placed symbol by Value + Footprint - the same "
+                    "grouping KiCad's own BOM exporter uses - and returns one row per unique part "
+                    "with its quantity and every reference designator that shares it. Use this first, "
+                    "then pass one of a row's `references` to get_kicad_schematic_part for that part's "
+                    "full property set."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_list_schematic_parts,
+            },
+            "get_kicad_schematic_part": {
+                "description": (
+                    "Get every property KiCad stores on one placed schematic symbol by reference "
+                    "designator (e.g. a reference from list_kicad_schematic_parts' `references`) - "
+                    "Value, Footprint, Datasheet, Manufacturer_Name/Manufacturer_Part_Number, multiple "
+                    "Mouser fields (Mouser, Mouser Part Number, Mouser Part Number Alt, etc), Sim.* "
+                    "fields, whatever that symbol carries - plus its pin list and which schematic "
+                    "sheet file/instance it was placed on."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "reference": {"type": "string"},
+                    },
+                    "required": ["project_path", "reference"],
+                },
+                "handler": self._tool_get_schematic_part,
+            },
+            "audit_kicad_capacitor_voltages": {
+                "description": (
+                    "Check every unique capacitor value in the schematic (identified by the 'C<n>' "
+                    "reference-designator convention) for a voltage rating written into its Value field, "
+                    "e.g. '47uF 16V' vs. plain '0.1uf' - the common schematic convention where every cap "
+                    "is assumed to use one project-wide default voltage unless its Value overrides it. "
+                    "Pass `default_voltage` (e.g. '16V' or 16) to also split parts that do state a "
+                    "voltage into ones that just redundantly restate the default vs. ones that genuinely "
+                    "differ from it; omit it to only split has/missing a voltage indication. Can only see "
+                    "what's written in the Value text, so 'missing_voltage' means 'assumed default', not "
+                    "'verified against the real part'."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "default_voltage": {"type": ["string", "number"], "description": "Project's default capacitor voltage rating, e.g. '16V' or 16."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_audit_capacitor_voltages,
+            },
+            "lookup_mouser_part": {
+                "description": (
+                    "Look up a Mouser product via Mouser's official Search API and extract its "
+                    "manufacturer part number, stock/lifecycle status, plus type-specific electrical "
+                    "specs. Pass a Mouser product URL, e.g. one found in a schematic part's "
+                    "'Mouser Part Number', 'Mouser', 'Mouser Part Number Alt', or 'Datasheet' property "
+                    "via get_kicad_schematic_part (supports multiple Mouser fields). Detects capacitor "
+                    "vs resistor vs other: capacitors get capacitance + voltage_rating, resistors get "
+                    "resistance, and either an MLCC capacitor or SMT resistor additionally gets "
+                    "package_size_inch (e.g. '0402', '0805'). Fields that don't apply to the detected "
+                    "type come back 'unsupported'; fields that should apply but couldn't be found come "
+                    "back 'unknown'. `raw_specifications` has every spec Mouser listed, in case the "
+                    "field-name mapping misses one. REQUIRES MOUSER_API_KEY (repo-root .env) - raises "
+                    "a clear error asking for one if missing; does not fall back to scraping the site. "
+                    "For more than a couple of parts, use bulk_lookup_mouser_parts instead - it's a "
+                    "single round trip."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Mouser product page URL."},
+                    },
+                    "required": ["url"],
+                },
+                "handler": self._tool_lookup_mouser_part,
+            },
+            "bulk_lookup_mouser_parts": {
+                "description": (
+                    "Look up Mouser data (MPN, stock, lifecycle status, electrical specs) for many "
+                    "schematic parts in one call instead of one round trip per part - the fast path for "
+                    "auditing a whole schematic. Defaults to one representative reference per unique part "
+                    "from list_kicad_schematic_parts; pass `references` for a specific subset instead. "
+                    "Parts with no discoverable Mouser link, or whose lookup fails, are reported under "
+                    "`skipped`/`errors` rather than aborting the batch. REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to look up instead of every unique part."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_bulk_lookup_mouser_parts,
+            },
+            "normalize_kicad_manufacturer_part_number_properties": {
+                "description": (
+                    "Find schematic symbols that carry a manufacturer-part-number-shaped property under "
+                    "some other name (e.g. 'PROD_ID', 'MPN', 'Part Number') but don't already have the "
+                    "project's canonical 'Manufacturer_Part_Number' property, and rename that property key "
+                    "to the canonical name (value untouched). Only renames when exactly one alias "
+                    "candidate is present on a symbol lacking the canonical key; symbols with more than "
+                    "one candidate come back under `ambiguous` instead of being guessed at. Defaults to "
+                    "write=false (dry run) - inspect `changes`/`ambiguous`, then call again with "
+                    "write=true to actually edit the .kicad_sch files."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "write": {"type": "boolean", "default": False},
+                        "allow_while_open": {"type": "boolean", "default": False, "description": "Skip the check that refuses to write while KiCad has a sheet open for editing."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_normalize_manufacturer_part_number_properties,
+            },
+            "audit_kicad_manufacturer_part_numbers": {
+                "description": (
+                    "Cross-check each schematic part's 'Manufacturer_Part_Number' property against the "
+                    "manufacturer part number Mouser's Search API actually returns for that part's own "
+                    "Mouser link - catches typos, copy-paste errors, or a stale value left over from "
+                    "swapping which exact part a symbol points to. Run "
+                    "normalize_kicad_manufacturer_part_number_properties (with write=true) first so parts "
+                    "that only carry the MPN under a differently-named property get picked up here too. "
+                    "REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_audit_manufacturer_part_numbers,
+            },
+            "generate_kicad_mouser_stock_report": {
+                "description": (
+                    "Run a bulk Mouser lookup across the schematic's unique parts and write a Markdown "
+                    "report with: a BOM cost estimate for one board (using Mouser's own quantity-break "
+                    "pricing against how many of each part the schematic actually uses, with unpriced "
+                    "parts listed separately rather than silently excluded from the total), and every "
+                    "part Mouser currently shows as out of stock or lifecycle-flagged (Not Recommended "
+                    "for New Designs, obsolete, discontinued, etc), so those can be addressed before "
+                    "fabrication/ordering. Defaults to writing 'mouser_stock_report.md' at the project "
+                    "root. REQUIRES MOUSER_API_KEY."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "report_path": {"type": "string", "description": "Output file path; defaults to mouser_stock_report.md at the project root."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_generate_mouser_stock_report,
+            },
+            "list_kicad_component_mouser_urls": {
+                "description": (
+                    "Get all available Mouser URLs (primary and alternates) for a single component by "
+                    "reference designator. Useful for spotting components with multiple Mouser sources, "
+                    "alternates, or stale/incorrect links. Returns field names alongside URLs so you "
+                    "know which property each link came from (e.g. 'Mouser Part Number', "
+                    "'Mouser Part Number Alt', 'Datasheet', etc). Supports multiple Mouser fields with "
+                    "automatic prioritization."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "reference": {"type": "string"},
+                    },
+                    "required": ["project_path", "reference"],
+                },
+                "handler": self._tool_list_component_mouser_urls,
+            },
+            "bulk_list_kicad_component_mouser_urls": {
+                "description": (
+                    "List all Mouser URLs for many schematic parts in one call - an audit of which parts "
+                    "have alternates, which are missing Mouser links, and which fields each link came from. "
+                    "Defaults to one representative reference per unique part from list_kicad_schematic_parts; "
+                    "pass `references` for a specific subset instead. Useful before bulk_lookup_mouser_parts "
+                    "to spot parts with stale or multiple links that should be cleaned up first."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "references": {"type": "array", "items": {"type": "string"}, "description": "Specific reference designators to check instead of every unique part."},
+                    },
+                    "required": ["project_path"],
+                },
+                "handler": self._tool_bulk_list_component_mouser_urls,
+            },
+            "set_kicad_schematic_property": {
+                "description": (
+                    "Set one property on a schematic symbol by reference designator - updates it in "
+                    "place if already present (matched case-insensitively), otherwise inserts it as a "
+                    "new hidden field styled/positioned like the symbol's existing 'Datasheet' property "
+                    "(KiCad's own convention for supplementary metadata fields such as distributor "
+                    "links), anchored right after it. Defaults to write=false (dry run) - inspect "
+                    "`change`, then call again with write=true to actually edit the .kicad_sch file."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string", "description": "KiCad project directory, .kicad_pro, .kicad_pcb, or .kicad_sch path."},
+                        "reference": {"type": "string"},
+                        "property_name": {"type": "string"},
+                        "value": {"type": "string"},
+                        "write": {"type": "boolean", "default": False},
+                        "allow_while_open": {"type": "boolean", "default": False, "description": "Skip the check that refuses to write while KiCad has a sheet open for editing."},
+                    },
+                    "required": ["project_path", "reference", "property_name", "value"],
+                },
+                "handler": self._tool_set_schematic_property,
             },
             "list_kicad_nets": {
                 "description": "List nets from the KiCad netlist.",
@@ -891,6 +1140,54 @@ class KiCadMcpServer:
             rotation=float(args.get("rotation", 0.0)),
         )
 
+    def _tool_list_schematic_parts(self, args: dict[str, Any]) -> dict[str, Any]:
+        return list_schematic_parts(args["project_path"])
+
+    def _tool_get_schematic_part(self, args: dict[str, Any]) -> dict[str, Any]:
+        return get_schematic_part(args["project_path"], args["reference"])
+
+    def _tool_audit_capacitor_voltages(self, args: dict[str, Any]) -> dict[str, Any]:
+        return audit_capacitor_voltages(args["project_path"], default_voltage=args.get("default_voltage"))
+
+    def _tool_lookup_mouser_part(self, args: dict[str, Any]) -> dict[str, Any]:
+        return lookup_mouser_part(args["url"])
+
+    def _tool_bulk_lookup_mouser_parts(self, args: dict[str, Any]) -> dict[str, Any]:
+        return bulk_lookup_mouser_parts(args["project_path"], references=args.get("references"))
+
+    def _tool_normalize_manufacturer_part_number_properties(self, args: dict[str, Any]) -> dict[str, Any]:
+        return normalize_manufacturer_part_number_properties(
+            args["project_path"],
+            write=bool(args.get("write", False)),
+            allow_while_open=bool(args.get("allow_while_open", False)),
+        )
+
+    def _tool_audit_manufacturer_part_numbers(self, args: dict[str, Any]) -> dict[str, Any]:
+        return audit_manufacturer_part_numbers(args["project_path"], references=args.get("references"))
+
+    def _tool_generate_mouser_stock_report(self, args: dict[str, Any]) -> dict[str, Any]:
+        return generate_mouser_stock_report(
+            args["project_path"],
+            report_path=args.get("report_path"),
+            references=args.get("references"),
+        )
+
+    def _tool_list_component_mouser_urls(self, args: dict[str, Any]) -> dict[str, Any]:
+        return list_component_mouser_urls(args["project_path"], args["reference"])
+
+    def _tool_bulk_list_component_mouser_urls(self, args: dict[str, Any]) -> dict[str, Any]:
+        return bulk_list_component_mouser_urls(args["project_path"], references=args.get("references"))
+
+    def _tool_set_schematic_property(self, args: dict[str, Any]) -> dict[str, Any]:
+        return set_schematic_property(
+            args["project_path"],
+            args["reference"],
+            args["property_name"],
+            args["value"],
+            write=bool(args.get("write", False)),
+            allow_while_open=bool(args.get("allow_while_open", False)),
+        )
+
     def _tool_list_nets(self, args: dict[str, Any]) -> list[dict[str, Any]]:
         return list_nets(args["project_path"])
 
@@ -1182,29 +1479,19 @@ class KiCadMcpServer:
 
 
 def _read_message() -> dict[str, Any] | None:
-    headers: dict[str, str] = {}
     while True:
         line = sys.stdin.buffer.readline()
         if not line:
             log_message("[kicad-mcp] stdin closed before message")
             return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode("utf-8").partition(":")
-        if key:
-            headers[key.strip().lower()] = value.strip()
-
-    length = int(headers.get("content-length", "0"))
-    body = sys.stdin.buffer.read(length)
-    if not body:
-        log_message("[kicad-mcp] empty body received")
-        return None
-    try:
-        message = json.loads(body.decode("utf-8"))
-    except Exception as exc:
-        log_message(f"[kicad-mcp] invalid JSON: {exc}")
-        raise
-    return message
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line.decode("utf-8"))
+        except Exception as exc:
+            log_message(f"[kicad-mcp] invalid JSON: {exc}")
+            raise
 
 
 class MCPHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -1299,9 +1586,7 @@ def parse_args() -> argparse.Namespace:
 def _write_message(message: dict[str, Any] | None) -> None:
     if message is None:
         return
-    payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
-    header = f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8")
-    sys.stdout.buffer.write(header)
+    payload = json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n"
     sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
 

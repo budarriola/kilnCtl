@@ -7783,6 +7783,17 @@
 				)
 			)
 		)
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Espressif-Systems/ESP32-S3-DevKitC-1U-N8R8?qs=Li%252BoUPsLEnv4qqHEsdK%252Bbw%3D%3D&mgh=1&srsltid=AfmBOoqOS62ebvUcmBEUILNpX5fCCt5DrE-3pTM-xdvtT0he9Jzm1cB1j68"
+			(at 133.35 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Sim.Device" ""
 			(at 193.04 99.06 0)
 			(hide yes)
@@ -8013,6 +8024,17 @@
 			)
 		)
 		(property "Description" "Generic connector, single row, 01x10, script generated"
+			(at 366.776 51.054 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/JST-Commercial/B10B-XH-AMLFSN?qs=cIziFXvMxOVgWRjUQes4Xw%3D%3D&srsltid=AfmBOork195JkJExIa92VuCwqISfS--gMCfu7LP7OFkak7bxlowy1x8f"
 			(at 366.776 51.054 0)
 			(hide yes)
 			(show_name no)
@@ -8439,7 +8461,18 @@
 				)
 			)
 		)
-		(property "PROD_ID" "IC-11311"
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Semtech/SX1509BIULTRT?qs=rBWM4%252BvDhIdubk63kOvGUA%3D%3D"
+			(at 251.714 259.842 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Part_Number" "SX1509BIULTRT"
 			(at 249.428 264.414 0)
 			(hide yes)
 			(show_name no)

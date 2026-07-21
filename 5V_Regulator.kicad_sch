@@ -3303,7 +3303,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "90.7k 1%"
+		(property "Value" "90.9k 1%"
 			(at 208.28 119.3799 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3325,7 +3325,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay/CRCW040247K5FKED?qs=sGAEpiMZZMtlubZbdhIBIPs%252BiE%2F4M15xDan5FFmucgw%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW040290K9FKED?qs=sGAEpiMZZMtlubZbdhIBIAbDPbIXdjYGA3h5w11HIuU%3D"
 			(at 205.74 118.11 0)
 			(hide yes)
 			(show_name no)
@@ -4371,7 +4371,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "470uf 50v"
+		(property "Value" "470uf"
 			(at 95.25 75.692 90)
 			(show_name no)
 			(do_not_autoplace no)

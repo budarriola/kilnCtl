@@ -1,3 +1,9 @@
+# Secrets - never commit. See .env.example for the expected keys.
+/.env
+
+# Mouser lookup result cache (python/kicad_mouser_tool.py) - local speed-up only.
+/.mouser_cache.json
+
 /kiln-backups
 /kiln-backups/kiln-2025-11-27_122759.zip
 /kiln-backups/kiln-2025-11-27_123526.zip
