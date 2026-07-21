@@ -1,7 +1,7 @@
 Group 6: PCB Groups (Ctrl+G)
 ==============================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Don't confuse a **PCB group** with the *hierarchical* group from
 [04-hierarchical-groups.md](04-hierarchical-groups.md): `get_kicad_hierarchical_group` finds a

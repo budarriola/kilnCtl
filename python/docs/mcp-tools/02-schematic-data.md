@@ -1,7 +1,7 @@
 Group 2: Schematic Data & Property Maintenance
 ===============================================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Reading and editing the properties KiCad stores on schematic symbols (Value, Footprint,
 Datasheet, Manufacturer_Name/Manufacturer_Part_Number, Mouser fields, Sim.* fields), read

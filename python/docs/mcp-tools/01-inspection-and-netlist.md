@@ -1,6 +1,6 @@
 # Group 1: Project Inspection & PCB/Netlist
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Read-only queries against `kiln.kicad_pcb` and its netlist. Backed by `kicad_pcb_tool.py`,
 which parses the board file directly - no KiCad runtime required. The board is parsed once

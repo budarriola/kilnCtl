@@ -1,7 +1,7 @@
 Group 4: Hierarchical Groups & Sibling Discovery
 ==================================================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 This project has several hierarchical schematic sheets stamped out multiple times on the
 board (relay outputs, thermocouple inputs, current-sense channels, regulators, etc). These

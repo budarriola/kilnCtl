@@ -1,7 +1,7 @@
 Group 7: Silkscreen Label Position Templates
 ===============================================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 The silkscreen-label analogue of Group 5's layout templating: copying a footprint's
 hand-decluttered text-property offset (typically its `Reference` designator, but any property

@@ -1,7 +1,7 @@
 Group 3: Mouser Sourcing & BOM
 ===============================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Backed by `kicad_mouser_tool.py`. Tools that call Mouser's official Search API REQUIRE
 `MOUSER_API_KEY` (set in the repo-root `.env` - copy `.env.example`); they raise a clear error

@@ -1879,7 +1879,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/C0402C182J5RACTU?qs=DBJr%252BvBUjU6HgfnnR9R1kg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
 			(at 186.69 118.11 0)
 			(hide yes)
 			(show_name no)
@@ -2109,7 +2109,7 @@
 				)
 			)
 		)
-		(property "Value" "74269244182"
+		(property "Value" "1.8k"
 			(at 96.52 78.74 90)
 			(hide yes)
 			(show_name no)
@@ -2385,7 +2385,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/C0402C182J5RACTU?qs=DBJr%252BvBUjU6HgfnnR9R1kg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
 			(at 115.57 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -2835,7 +2835,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/C0402C182J5RACTU?qs=DBJr%252BvBUjU6HgfnnR9R1kg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
 			(at 171.45 118.11 0)
 			(hide yes)
 			(show_name no)
@@ -3477,7 +3477,7 @@
 				)
 			)
 		)
-		(property "Value" "74269244182"
+		(property "Value" "1.8k"
 			(at 96.52 88.9 90)
 			(hide yes)
 			(show_name no)

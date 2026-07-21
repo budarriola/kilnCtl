@@ -3100,7 +3100,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/datasheet/2/585/MLCC-1837944.pdf"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
 			(at 135.89 45.72 0)
 			(hide yes)
 			(show_name no)
@@ -3230,7 +3230,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay/CRCW040275K0FKED?qs=Yor07UEv01XD90tYACrZAA%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR0805-JW-222ELF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FxuZ8DK6KmNc%3D"
 			(at 120.65 77.47 0)
 			(hide yes)
 			(show_name no)
@@ -3467,7 +3467,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRT31CR71H225KE13L?qs=qkDYIeTQ%252BEkhrDhfEIGgfg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
 			(at 207.01 87.63 0)
 			(hide yes)
 			(show_name no)
@@ -3597,7 +3597,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/C0402C182J5RACTU?qs=DBJr%252BvBUjU6HgfnnR9R1kg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
 			(at 262.89 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3716,7 +3716,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/datasheet/2/281/1/GCM1555C1H4R7BA16_01A-3141738.pdf"
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Murata-Electronics/GCM1555C1H4R7BA16J?qs=QzBtWTOodeUzFnJ%2FF4zoVA%3D%3D"
 			(at 220.98 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -4276,7 +4276,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay/CRCW040275K0FKED?qs=Yor07UEv01XD90tYACrZAA%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR0805-JW-222ELF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FxuZ8DK6KmNc%3D"
 			(at 120.65 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4395,7 +4395,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/C0402C182J5RACTU?qs=DBJr%252BvBUjU6HgfnnR9R1kg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
 			(at 160.02 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -5585,7 +5585,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/KEMET/C0402C182J5RACTU?qs=DBJr%252BvBUjU6HgfnnR9R1kg%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
 			(at 217.17 55.88 0)
 			(hide yes)
 			(show_name no)

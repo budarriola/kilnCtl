@@ -1,7 +1,7 @@
 Group 9: Live KiCad IPC Tools
 ================================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Backed by `kicad_ipc_tool.py` (the `kicad-python` package). Unlike every other group, these
 talk to a **running** KiCad instance over its IPC API instead of parsing `kiln.kicad_pcb` on

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal stdio MCP server for inspecting KiCad projects from Cline/VS Code."""
+"""MCP server for inspecting and editing KiCad projects, over stdio or HTTP."""
 
 from __future__ import annotations
 

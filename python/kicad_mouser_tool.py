@@ -1651,6 +1651,19 @@ def audit_stock_sufficiency(
             continue
 
         best = result["candidates"][0]
+        candidate_summaries = [
+            {
+                "field_name": c["field_name"],
+                "url": c["url"],
+                "rank": c["rank"],
+                "in_stock_count": c["in_stock_count"],
+                "meets_quantity": c["meets_quantity"],
+                "has_qty_one_price": c["has_qty_one_price"],
+                "unit_price_at_quantity": c["unit_price_at_quantity"],
+                "currency": c["currency"],
+            }
+            for c in result["candidates"]
+        ]
         row = {
             "reference": reference,
             "all_references": all_references,
@@ -1659,7 +1672,7 @@ def audit_stock_sufficiency(
             "meets_quantity": best["meets_quantity"],
             "best_candidate_in_stock": best["in_stock_count"],
             "best_candidate_url": best["url"],
-            "candidates": result["candidates"],
+            "candidates": candidate_summaries,
         }
         results.append(row)
         if not best["meets_quantity"]:

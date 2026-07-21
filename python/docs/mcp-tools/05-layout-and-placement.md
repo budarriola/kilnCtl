@@ -1,7 +1,7 @@
 Group 5: Layout & Placement
 =============================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Moving, aligning, and collision-checking footprints on `kiln.kicad_pcb`. Every tool that
 writes defaults to `write: false` (a dry run returning a preview) - always call it that way

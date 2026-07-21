@@ -1,7 +1,7 @@
 Group 8: Footprint Flip Templates
 ====================================
 
-[< Back to index](index.md)
+[< Back to kicadAi.md](../../kicadAi.md)
 
 Copying a correctly front/back-flipped footprint's full flip state (mirrored
 silkscreen/fab graphics, swapped F./B. layer names, `justify mirror` text flags, adjusted pad
