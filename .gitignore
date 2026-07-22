@@ -20,3 +20,8 @@
 # mykicadMcp/ is a separate git submodule (github.com/budarriola/mykicadMcp);
 # its own .gitignore covers the venv, caches, editor settings, and runtime log.
 /output/
+
+# Autorouter per-board working state (mykicadMcp NETCLASS_PLAN Phase 7) - disposable,
+# machine-local; policy lives in the committed pcb_settings.json instead.
+/*.board_local.json
+/*.route_progress.jsonl

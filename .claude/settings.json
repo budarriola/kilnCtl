@@ -1,8 +1,30 @@
 {
-  "enabledMcpjsonServers": ["kicad"],
   "permissions": {
     "allow": [
-      "Bash(curl * http://127.0.0.1:8765*)"
+      "Bash(curl * http://127.0.0.1:8765*)",
+      "Bash(../mykicadMcp/.venv/Scripts/python.exe -c ' *)",
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_cap_net_voltage_audit.py -v)",
+      "Bash(mykicadMcp/.venv/Scripts/python.exe -c ' *)",
+      "Bash(awk '/\\\\\\(name \"12V_Main\"\\\\\\)/{p=1} p{print NR\": \"$0} p&&/^\\\\t\\\\t\\\\\\)/{c++; if\\(c==1\\){exit}}' kiln.net)",
+      "Bash(awk '/\\\\\\(name \"GND_Main\"\\\\\\)/{p=1} p{print NR\": \"$0} p&&/^\\\\t\\\\t\\\\\\)/{c++; if\\(c==1\\){exit}}' kiln.net)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "PowerShell(& mykicadMcp\\\\.venv\\\\Scripts\\\\python.exe -m pytest mykicadMcp\\\\tests -q 2>$null)",
+      "PowerShell(& mykicadMcp\\\\.venv\\\\Scripts\\\\python.exe -c \"import sys, json; sys.path.insert\\(0, 'mykicadMcp'\\); import kicad_mcp_server as s; srv = s.KiCadMcpServer\\(\\); print\\('tools:', len\\(srv.tools\\), '| cap tool:', 'audit_kicad_capacitor_net_voltages' in srv.tools\\); import kicad_pcb_tool as t; r = t.audit_capacitor_net_voltages\\('.'\\); print\\('summary:', json.dumps\\(r.get\\('summary'\\)\\)\\); rows = [x for x in r.get\\('capacitors', r.get\\('rows', []\\)\\) if x.get\\('reference'\\) == 'C9']; print\\('C9:', json.dumps\\(rows[0] if rows else None\\)\\)\")",
+      "PowerShell($c = Get-Content \"mykicadMcp\\\\NETCLASS_PLAN.md\" -Raw; $start = $c.IndexOf\\('## Phase 8 — Net-aware capacitor voltage check'\\); $end = $c.IndexOf\\('## Implementation strategy'\\); Write-Host \"start=$start end=$end section-length=$\\($end-$start\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\budar\\\\OneDrive\\\\Desktop\\\\kilnCtl\\\\mykicadMcp\\\\.venv\\\\Scripts\\\\python.exe\" -m pytest \"C:\\\\Users\\\\budar\\\\OneDrive\\\\Desktop\\\\kilnCtl\\\\mykicadMcp\\\\tests\" -q 2>$null)",
+      "PowerShell(& \"C:\\\\Users\\\\budar\\\\OneDrive\\\\Desktop\\\\kilnCtl\\\\mykicadMcp\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\budar\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-budar-OneDrive-Desktop-kilnCtl\\\\c1cbd396-867f-4fcb-8d7b-90c81b145b15\\\\scratchpad\\\\verify_kiln.py\")",
+      "PowerShell(git -C \"C:\\\\Users\\\\budar\\\\OneDrive\\\\Desktop\\\\kilnCtl\" status --short)",
+      "PowerShell(git -C \"C:\\\\Users\\\\budar\\\\OneDrive\\\\Desktop\\\\kilnCtl\\\\mykicadMcp\" status --short)",
+      "PowerShell(& mykicadMcp\\\\.venv\\\\Scripts\\\\python.exe -c \"import sys, json; sys.path.insert\\(0, 'mykicadMcp'\\); import kicad_mcp_server as s; srv = s.KiCadMcpServer\\(\\); print\\('tools:', len\\(srv.tools\\), '| layers tool:', 'get_kicad_board_layers' in srv.tools\\); import kicad_pcb_tool as t; L = t.get_board_layers\\('.'\\); print\\('layers:', [\\(l['name'], l['type']\\) for l in L['layers']]\\); r = t.get_trace_cost\\('.'\\); bt = r.get\\('board_totals', {}\\); print\\('board total:', json.dumps\\(bt\\)\\); import os; print\\('board_local exists:', os.path.exists\\('kiln.board_local.json'\\)\\)\")",
+      "Bash(./.venv/Scripts/python.exe -c \"from kicad_mcp_server import KiCadMcpServer; s=KiCadMcpServer\\(\\); print\\('TOOLS:', len\\(s.tools\\)\\)\")",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(awk '/\\\\\\(zone/{z=NR} /\\\\\\(net [0-9]/{if\\(z\\)print NR\": net@zone\"z\" \"$0}' kiln.kicad_pcb)",
+      "Bash(grep -n \"filled_polygon\\\\|\\(zone$\\\\|\\(zone \\(\" kiln.kicad_pcb)",
+      "Bash(awk -F: '$1>9860')",
+      "Bash(awk 'NR>=9860 && NR<=13900 { if\\($0 ~ /^\\\\t\\\\t\\\\\\(zone/\\) zstart=NR; if\\($0 ~ /\\\\\\(net [0-9]+ \"/\\){match\\($0,/\"[^\"]*\"/\\); nm=substr\\($0,RSTART+1,RLENGTH-2\\)} if\\($0 ~ /filled_polygon/ && zstart\\){print \"zone@\"zstart\" net=\"nm\" filled@\"NR; zstart=0} }' kiln.kicad_pcb)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "kicad"
+  ]
 }

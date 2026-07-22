@@ -40,10 +40,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
 
 ### MCP Server Tools
-The KiCad MCP server exposes 61 tools across 9 groups (inspection/netlist, schematic data,
+The KiCad MCP server exposes 72 tools across 10 groups (inspection/netlist, schematic data,
 Mouser sourcing, hierarchical groups, layout/placement, PCB groups, label positions, footprint
-flips, and live IPC tools). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
-reference; a few commonly used ones:
+flips, live IPC tools, and net classes/buses). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
+reference. The net classes & buses group supports bus detection, net-class proposal/creation,
+trace-cost scoring (with live deviation measurement), bus corridor-area measurement, capacitor voltage auditing, and `pcb_settings.json` management; see **mykicadMcp/NETCLASS_PLAN.md** for the design doc.
+A few commonly used tools:
 - `inspect_kicad_project` — Get project-wide metrics and status
 - `list_kicad_components` — List all components on the PCB
 - `get_kicad_component` — Details for a specific component (reference, value, footprint)
