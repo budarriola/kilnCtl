@@ -40,11 +40,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
 
 ### MCP Server Tools
-The KiCad MCP server exposes 72 tools across 10 groups (inspection/netlist, schematic data,
+The KiCad MCP server exposes 82 tools across 11 groups (inspection/netlist, schematic data,
 Mouser sourcing, hierarchical groups, layout/placement, PCB groups, label positions, footprint
-flips, live IPC tools, and net classes/buses). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
+flips, live IPC tools, net classes/buses, and autorouter/routing). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
 reference. The net classes & buses group supports bus detection, net-class proposal/creation,
-trace-cost scoring (with live deviation measurement), bus corridor-area measurement, capacitor voltage auditing, and `pcb_settings.json` management; see **mykicadMcp/NETCLASS_PLAN.md** for the design doc.
+trace-cost scoring (with live deviation measurement), bus corridor-area measurement, capacitor voltage auditing, critical-net classification, connector detection, and `pcb_settings.json` management; the autorouter group covers the headline `route_kicad_board` orchestrator, Phase 7.3b detailed routing (windowed A*), zone inspection, plane-island analysis and costing, ratsnest calculation, layer/constraint querying, and undo. See **mykicadMcp/NETCLASS_PLAN.md** for the design doc.
 A few commonly used tools:
 - `inspect_kicad_project` — Get project-wide metrics and status
 - `list_kicad_components` — List all components on the PCB
@@ -105,10 +105,40 @@ kicad kiln.kicad_pcb
 kicad kiln.kicad_sch
 ```
 
+### Route the Board
+Use the MCP server `route_kicad_board` tool or the CLI:
+```powershell
+# Dry-run preview (no write)
+python mykicadMcp\kicad_router_tool.py route kiln.kicad_pro
+
+# Apply the routing
+python mykicadMcp\kicad_router_tool.py route kiln.kicad_pro --write
+
+# Undo (remove autorouter-owned copper)
+python mykicadMcp\kicad_router_tool.py unroute kiln.kicad_pro --write
+
+# Control effort (quick|balanced|best) and select nets
+python mykicadMcp\kicad_router_tool.py route kiln.kicad_pro --write --effort best --nets /Power/VBUS /MainControler/CLK
+```
+
+The `route_kicad_board` orchestrator runs ratsnest → global route → detailed route (windowed A*)
+in one call, with configurable rip-up aggressiveness. Always preview first (`write=false` is
+default). Phase 7.5 (plane-aware), 7.6 (optimizer), and 7.5.6 (stitching) are M4 TODO hooks.
+
 ### Query Component or Net Information
 Use the MCP server tools or call Python directly:
 ```powershell
 python mykicadMcp\kicad_pcb_tool.py
+```
+
+### Inspect Zones & Plane Islands
+Query copper pours and analyze fill islands:
+```powershell
+# List all zones (copper and keepout)
+python -c "from kicad_router_tool import list_zones; import json; print(json.dumps(list_zones('kiln.kicad_pro'), indent=2))"
+
+# Audit plane islands, costing, and stitching recommendations
+python -c "from kicad_router_tool import audit_plane_islands; import json; print(json.dumps(audit_plane_islands('kiln.kicad_pro'), indent=2))"
 ```
 
 ### Update the BOM
