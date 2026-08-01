@@ -478,6 +478,286 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "Power_Protection:NUP2105L"
+			(pin_names
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "D"
+				(at 5.715 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "NUP2105L"
+				(at 5.715 0.635 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "Package_TO_SOT_SMD:SOT-23"
+				(at 5.715 -1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" "https://www.onsemi.com/pub_link/Collateral/NUP2105L-D.PDF"
+				(at 3.175 3.175 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Dual Line CAN Bus Protector, 24Vrwm"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "can esd protection suppression transient"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "SOT?23*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "NUP2105L_0_0"
+				(pin passive line
+					(at 0 -5.08 90)
+					(length 2.54)
+					(name "A"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "NUP2105L_0_1"
+				(rectangle
+					(start -4.445 2.54)
+					(end 4.445 -2.54)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(polyline
+					(pts
+						(xy -3.81 1.27) (xy -3.175 0.635) (xy -1.905 0.635) (xy -1.27 0)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.54 2.54) (xy -2.54 0.635)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.54 0.635) (xy -2.54 -1.27) (xy 2.54 -1.27) (xy 2.54 0.635)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.54 0.635) (xy -1.905 -0.635) (xy -3.175 -0.635) (xy -2.54 0.635)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.54 0.635) (xy -3.175 1.905) (xy -1.905 1.905) (xy -2.54 0.635) (xy -2.54 1.27)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 -1.27) (xy 0 -2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.27 1.27) (xy 1.905 0.635) (xy 2.54 0.635) (xy 3.175 0.635) (xy 3.81 0)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 2.54 2.54) (xy 2.54 0.635)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 2.54 0.635) (xy 1.905 -0.635) (xy 3.175 -0.635) (xy 2.54 0.635)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 2.54 0.635) (xy 3.175 1.905) (xy 1.905 1.905) (xy 2.54 0.635)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "NUP2105L_1_1"
+				(pin passive line
+					(at -2.54 5.08 270)
+					(length 2.54)
+					(name "K"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 2.54 5.08 270)
+					(length 2.54)
+					(name "K"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "SamacSys_Parts:1935161"
 			(pin_names
 				(offset 0.762)
@@ -1143,31 +1423,59 @@
 			(embedded_fonts no)
 		)
 	)
-	(text "PCC-SMP-K-R"
-		(exclude_from_sim no)
-		(at 165.608 55.88 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-		)
-		(uuid "1cec4bf5-d2a8-423b-ae5a-143bd9821c50")
+	(junction
+		(at 167.64 63.5)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "015cae91-f40d-4838-b2dc-10f555f4ea0a")
 	)
-	(text "https://www.adafruit.com/product/3263?srsltid=AfmBOorLUUCO0d8wNJHWYgz-R17mwZTRphK52e8XEiY23RgYEyE77N2W"
-		(exclude_from_sim no)
-		(at 120.142 42.672 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-		)
-		(uuid "d6941dc2-e2ce-4935-ab4e-9b0ed4422192")
+	(junction
+		(at 104.14 91.44)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "122f724f-ca11-4230-b432-9c56ac3029e7")
+	)
+	(junction
+		(at 149.86 57.15)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "145da69d-f835-43b4-b828-b38b1c9c3233")
 	)
 	(junction
 		(at 115.57 91.44)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "3aa23383-d2e3-4c65-9c37-83f21ae3cda7")
+	)
+	(junction
+		(at 161.29 53.34)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "593fb4a7-6c90-4b0b-b32b-959cb1be194f")
+	)
+	(junction
+		(at 137.16 68.58)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "6623aa21-ccc3-4841-b6bb-40df04991f01")
+	)
+	(junction
+		(at 88.9 91.44)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "9bfa88b0-d0d6-43b7-9002-77610a82ea07")
+	)
+	(junction
+		(at 137.16 58.42)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "b3c2ffdc-769d-4ef5-86ff-8913ee0e7307")
+	)
+	(junction
+		(at 83.82 81.28)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "c183b8fc-f6b5-45c5-93c1-3f6e24bd25a3")
 	)
 	(junction
 		(at 115.57 81.28)
@@ -1182,10 +1490,20 @@
 		(uuid "cf60a182-3982-4887-92e7-7d6419bb18cb")
 	)
 	(junction
-		(at 104.14 91.44)
+		(at 154.94 53.34)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "e4224cb7-d2ff-48ea-aff7-d167488dc7be")
+		(uuid "d0ee24d4-f1e6-4c4c-aeaa-342c54146a73")
+	)
+	(wire
+		(pts
+			(xy 161.29 63.5) (xy 167.64 63.5)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "08fbb851-d459-4d5f-8482-707116d39082")
 	)
 	(wire
 		(pts
@@ -1209,13 +1527,23 @@
 	)
 	(wire
 		(pts
-			(xy 186.69 111.76) (xy 186.69 114.3)
+			(xy 137.16 57.15) (xy 149.86 57.15)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "102b3c8f-e7cb-45fa-8e50-3ea3f5caf0f5")
+		(uuid "0e4a5799-a3a4-4da7-8496-77d7198693b9")
+	)
+	(wire
+		(pts
+			(xy 130.81 67.31) (xy 130.81 68.58)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "127ce101-a058-4eb7-87ce-d5c71c4f920e")
 	)
 	(wire
 		(pts
@@ -1229,7 +1557,7 @@
 	)
 	(wire
 		(pts
-			(xy 85.09 87.63) (xy 87.63 87.63)
+			(xy 63.5 87.63) (xy 66.04 87.63)
 		)
 		(stroke
 			(width 0)
@@ -1239,17 +1567,27 @@
 	)
 	(wire
 		(pts
-			(xy 171.45 111.76) (xy 171.45 114.3)
+			(xy 137.16 59.69) (xy 137.16 58.42)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "1ad8154f-c89d-4e18-a024-0034e3fa1268")
+		(uuid "178a7d8a-9151-403c-974d-a7f8a01ead52")
 	)
 	(wire
 		(pts
-			(xy 171.45 121.92) (xy 171.45 124.46)
+			(xy 167.64 62.23) (xy 167.64 63.5)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "1a9d8c3f-3067-42a3-a2e4-0981d321080b")
+	)
+	(wire
+		(pts
+			(xy 137.16 67.31) (xy 137.16 68.58)
 		)
 		(stroke
 			(width 0)
@@ -1299,13 +1637,23 @@
 	)
 	(wire
 		(pts
-			(xy 186.69 121.92) (xy 186.69 124.46)
+			(xy 168.91 67.31) (xy 168.91 63.5)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "359d51fa-e304-4713-9437-32e95c6e628d")
+		(uuid "311c9a3f-ea11-4a16-b488-c2036691fa0d")
+	)
+	(wire
+		(pts
+			(xy 154.94 53.34) (xy 154.94 72.39)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "3a7bf1d9-8203-427f-9a40-7913dfd8fa52")
 	)
 	(wire
 		(pts
@@ -1326,6 +1674,36 @@
 			(type default)
 		)
 		(uuid "3d9cc7c4-5aa2-4fd8-9e9f-ca0110accf76")
+	)
+	(wire
+		(pts
+			(xy 130.81 68.58) (xy 137.16 68.58)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "3e0eddb1-4f14-4c70-8fef-78c6fa6edf46")
+	)
+	(wire
+		(pts
+			(xy 130.81 59.69) (xy 130.81 58.42)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "40dd9fc6-cafc-4588-9c65-b613a3b24328")
+	)
+	(wire
+		(pts
+			(xy 83.82 81.28) (xy 105.41 81.28)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "433706e5-9b8b-4010-9f3c-f02efc2177a2")
 	)
 	(wire
 		(pts
@@ -1356,6 +1734,36 @@
 			(type default)
 		)
 		(uuid "4f012bef-15e5-4763-8bb3-3532d7383861")
+	)
+	(wire
+		(pts
+			(xy 168.91 63.5) (xy 167.64 63.5)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "50f55eb0-c267-4c63-b8dd-a3169805b75b")
+	)
+	(wire
+		(pts
+			(xy 88.9 91.44) (xy 88.9 102.87)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "52a94c1c-bd06-42d1-9516-adbdef586cbe")
+	)
+	(wire
+		(pts
+			(xy 88.9 91.44) (xy 104.14 91.44)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5c3b3083-41bb-4b1e-814f-09431607170a")
 	)
 	(wire
 		(pts
@@ -1429,7 +1837,7 @@
 	)
 	(wire
 		(pts
-			(xy 87.63 87.63) (xy 87.63 91.44)
+			(xy 66.04 87.63) (xy 66.04 91.44)
 		)
 		(stroke
 			(width 0)
@@ -1459,6 +1867,16 @@
 	)
 	(wire
 		(pts
+			(xy 161.29 53.34) (xy 154.94 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "860f59ff-6344-48a4-8903-ba61bf40af82")
+	)
+	(wire
+		(pts
 			(xy 115.57 69.85) (xy 115.57 72.39)
 		)
 		(stroke
@@ -1469,7 +1887,37 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 81.28) (xy 105.41 81.28)
+			(xy 130.81 58.42) (xy 137.16 58.42)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9014c0d9-dbb2-467e-a8af-0322cf323389")
+	)
+	(wire
+		(pts
+			(xy 149.86 49.53) (xy 149.86 57.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9b828e94-f775-40e3-8e14-368bd9e33edd")
+	)
+	(wire
+		(pts
+			(xy 137.16 58.42) (xy 137.16 57.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9b9350fe-f570-4277-a4b1-2bdedeb89100")
+	)
+	(wire
+		(pts
+			(xy 78.74 81.28) (xy 83.82 81.28)
 		)
 		(stroke
 			(width 0)
@@ -1479,7 +1927,7 @@
 	)
 	(wire
 		(pts
-			(xy 85.09 85.09) (xy 85.09 81.28)
+			(xy 63.5 85.09) (xy 63.5 81.28)
 		)
 		(stroke
 			(width 0)
@@ -1499,13 +1947,13 @@
 	)
 	(wire
 		(pts
-			(xy 154.94 68.58) (xy 154.94 72.39)
+			(xy 161.29 54.61) (xy 161.29 53.34)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "afa6a0d2-591b-4b08-a75b-5f89a788cfd5")
+		(uuid "aa8dc3dd-bfeb-4cf6-a9b1-723a3dc6357c")
 	)
 	(wire
 		(pts
@@ -1519,6 +1967,16 @@
 	)
 	(wire
 		(pts
+			(xy 154.94 39.37) (xy 154.94 41.91)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b2bd5eba-b9bc-4559-834d-57d900294583")
+	)
+	(wire
+		(pts
 			(xy 104.14 91.44) (xy 105.41 91.44)
 		)
 		(stroke
@@ -1526,6 +1984,36 @@
 			(type default)
 		)
 		(uuid "b4f4e3b0-9ef1-4ce4-b757-4a22b2004836")
+	)
+	(wire
+		(pts
+			(xy 167.64 54.61) (xy 167.64 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b5a1cf92-8fed-4531-a834-70b542d492d9")
+	)
+	(wire
+		(pts
+			(xy 161.29 62.23) (xy 161.29 63.5)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b7ff775b-a48f-457f-98ac-c8c681102e07")
+	)
+	(wire
+		(pts
+			(xy 154.94 49.53) (xy 154.94 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ba06cd79-6024-42b7-bcc8-9e3fe602c3b1")
 	)
 	(wire
 		(pts
@@ -1569,7 +2057,7 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 91.44) (xy 104.14 91.44)
+			(xy 78.74 91.44) (xy 88.9 91.44)
 		)
 		(stroke
 			(width 0)
@@ -1579,13 +2067,33 @@
 	)
 	(wire
 		(pts
-			(xy 149.86 68.58) (xy 149.86 72.39)
+			(xy 86.36 113.03) (xy 86.36 115.57)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "d33bebc9-7016-40f4-a843-8c7cd13082b9")
+		(uuid "ca756480-56e0-4a1d-8a53-30113a6814ea")
+	)
+	(wire
+		(pts
+			(xy 137.16 68.58) (xy 137.16 69.85)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d9089fe4-bd56-4dfb-8007-3732b6b1f1ba")
+	)
+	(wire
+		(pts
+			(xy 161.29 53.34) (xy 167.64 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e1ad4b3b-8a0c-48b1-85c5-4a4aceb1489b")
 	)
 	(wire
 		(pts
@@ -1609,7 +2117,17 @@
 	)
 	(wire
 		(pts
-			(xy 85.09 81.28) (xy 92.71 81.28)
+			(xy 149.86 39.37) (xy 149.86 41.91)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "eb823e42-774d-4b7f-911a-3800fb31ead3")
+	)
+	(wire
+		(pts
+			(xy 63.5 81.28) (xy 71.12 81.28)
 		)
 		(stroke
 			(width 0)
@@ -1629,7 +2147,27 @@
 	)
 	(wire
 		(pts
-			(xy 87.63 91.44) (xy 92.71 91.44)
+			(xy 149.86 57.15) (xy 149.86 72.39)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f8b97c2b-8161-4ec0-86df-05ecf4099a13")
+	)
+	(wire
+		(pts
+			(xy 83.82 81.28) (xy 83.82 102.87)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fd686ae1-6f39-4c34-8ad7-4c099753fe69")
+	)
+	(wire
+		(pts
+			(xy 66.04 91.44) (xy 71.12 91.44)
 		)
 		(stroke
 			(width 0)
@@ -1660,7 +2198,7 @@
 	)
 	(hierarchical_label "3.3V_A"
 		(shape passive)
-		(at 149.86 68.58 90)
+		(at 149.86 39.37 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1669,16 +2207,16 @@
 		)
 		(uuid "0e57a607-7b7d-4ead-85fe-6335b02c0d4b")
 	)
-	(hierarchical_label "3.3V_D"
+	(hierarchical_label "TC_AGND"
 		(shape passive)
-		(at 186.69 111.76 90)
+		(at 86.36 115.57 270)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify right)
 		)
-		(uuid "222fdba5-a4df-4f92-a12b-ed51092785c2")
+		(uuid "232254fa-68af-46f4-9d60-dd58240d5249")
 	)
 	(hierarchical_label "TC_AGND"
 		(shape passive)
@@ -1693,7 +2231,7 @@
 	)
 	(hierarchical_label "TC_AGND"
 		(shape passive)
-		(at 171.45 124.46 270)
+		(at 137.16 69.85 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1701,6 +2239,17 @@
 			(justify right)
 		)
 		(uuid "37ed4621-2d72-485f-9238-39346fc47ed9")
+	)
+	(hierarchical_label "TC_DGnd"
+		(shape passive)
+		(at 168.91 67.31 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "39598797-a19b-4275-9b30-627afb1b8dec")
 	)
 	(hierarchical_label "TC_AGND"
 		(shape passive)
@@ -1726,7 +2275,7 @@
 	)
 	(hierarchical_label "3.3V_D"
 		(shape passive)
-		(at 154.94 68.58 90)
+		(at 154.94 39.37 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1734,17 +2283,6 @@
 			(justify left)
 		)
 		(uuid "5795fe30-bb56-43f4-b77b-93971ad6ba2f")
-	)
-	(hierarchical_label "TC_DGnd"
-		(shape passive)
-		(at 186.69 124.46 270)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right)
-		)
-		(uuid "6e11486c-bdca-48ce-88c4-32bfa4ea4d50")
 	)
 	(hierarchical_label "SCK"
 		(shape input)
@@ -1801,17 +2339,6 @@
 		)
 		(uuid "c7d73f96-6458-42d5-82b8-1b23acd61fb1")
 	)
-	(hierarchical_label "3.3V_A"
-		(shape passive)
-		(at 171.45 111.76 90)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "d7b052f5-18aa-4403-b201-78d2de6cb2ae")
-	)
 	(hierarchical_label "MISO"
 		(shape output)
 		(at 175.26 92.71 0)
@@ -1836,7 +2363,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 186.69 118.11 0)
+		(at 167.64 58.42 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -1847,7 +2374,7 @@
 		(fields_autoplaced yes)
 		(uuid "011700f8-b3c5-4016-a835-799ec15bcdc1")
 		(property "Reference" "C22"
-			(at 190.5 116.8399 0)
+			(at 171.45 57.1499 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -1858,7 +2385,7 @@
 			)
 		)
 		(property "Value" "0.1uf"
-			(at 190.5 119.3799 0)
+			(at 171.45 59.6899 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -1869,7 +2396,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
-			(at 187.6552 121.92 0)
+			(at 168.6052 62.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1880,7 +2407,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
-			(at 186.69 118.11 0)
+			(at 167.64 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1891,7 +2418,7 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 186.69 118.11 0)
+			(at 167.64 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1902,7 +2429,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 186.69 118.11 0)
+			(at 167.64 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1913,7 +2440,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 186.69 118.11 0)
+			(at 167.64 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1924,7 +2451,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 186.69 118.11 0)
+			(at 167.64 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2089,8 +2616,106 @@
 		)
 	)
 	(symbol
+		(lib_id "Power_Protection:NUP2105L")
+		(at 86.36 107.95 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "3782c6d6-5c8e-46a8-8699-b2d03280809c")
+		(property "Reference" "D28"
+			(at 92.71 106.6799 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "NUP2105L"
+			(at 92.71 109.2199 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23"
+			(at 92.075 109.22 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://www.onsemi.com/pub_link/Collateral/NUP2105L-D.PDF"
+			(at 89.535 104.775 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Dual Line CAN Bus Protector, 24Vrwm"
+			(at 86.36 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "abb46eed-0f13-42f9-a9f9-52c25aa1c1a5")
+		)
+		(pin "1"
+			(uuid "1f9e5c80-710e-49b1-9385-aabd8672d982")
+		)
+		(pin "3"
+			(uuid "1081cdf9-206a-4b06-8957-b3bc709587dd")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
+					(reference "D29")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
+					(reference "D30")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
+					(reference "D31")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
+					(reference "D28")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:L")
-		(at 96.52 81.28 90)
+		(at 74.93 81.28 90)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2100,7 +2725,7 @@
 		(dnp no)
 		(uuid "3caf6243-f220-4efa-807c-4d06699b040b")
 		(property "Reference" "FB1"
-			(at 96.774 79.248 90)
+			(at 75.184 79.248 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2110,7 +2735,7 @@
 			)
 		)
 		(property "Value" "1.8k"
-			(at 96.52 78.74 90)
+			(at 74.93 78.74 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2121,7 +2746,7 @@
 			)
 		)
 		(property "Footprint" "Inductor_SMD:L_0402_1005Metric_Pad0.77x0.64mm_HandSolder"
-			(at 96.52 81.28 0)
+			(at 74.93 81.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2132,7 +2757,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Wurth-Elektronik/74269244182?qs=sPbYRqrBIVkE9fLgTHgObQ%3D%3D"
-			(at 96.52 81.28 0)
+			(at 74.93 81.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2143,7 +2768,7 @@
 			)
 		)
 		(property "Description" "Inductor"
-			(at 96.52 81.28 0)
+			(at 74.93 81.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2154,7 +2779,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 96.52 81.28 90)
+			(at 74.93 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2165,7 +2790,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 96.52 81.28 90)
+			(at 74.93 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2176,7 +2801,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 96.52 81.28 90)
+			(at 74.93 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2468,6 +3093,143 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 130.81 63.5 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "5a16993f-ffbb-48ff-aaa1-3b424a1547f2")
+		(property "Reference" "C69"
+			(at 126.238 61.214 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "2.2uF"
+			(at 125.222 65.786 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_1206_3216Metric"
+			(at 131.7752 67.31 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "af0a46d2-29c4-44f7-8a1e-bc2901fddf3c")
+		)
+		(pin "1"
+			(uuid "2545aa67-66d4-4f41-9b99-533c9d45ab57")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
+					(reference "C70")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
+					(reference "C71")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
+					(reference "C72")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
+					(reference "C69")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:R")
 		(at 109.22 81.28 270)
 		(unit 1)
@@ -2592,8 +3354,258 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:L")
+		(at 149.86 45.72 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "78923162-82b2-43aa-b11f-250740c460c9")
+		(property "Reference" "FB9"
+			(at 147.828 45.466 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "1.8k"
+			(at 147.32 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Inductor_SMD:L_0402_1005Metric_Pad0.77x0.64mm_HandSolder"
+			(at 149.86 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Wurth-Elektronik/74269244182?qs=sPbYRqrBIVkE9fLgTHgObQ%3D%3D"
+			(at 149.86 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Inductor"
+			(at 149.86 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 149.86 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 149.86 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 149.86 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "055928ab-4582-4ea6-addb-89f904b0166a")
+		)
+		(pin "1"
+			(uuid "fe1184e2-6bde-4948-862b-e66c61fe707a")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
+					(reference "FB10")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
+					(reference "FB11")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
+					(reference "FB12")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
+					(reference "FB9")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:L")
+		(at 154.94 45.72 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "83348242-7c23-49c4-b0af-380260e020a0")
+		(property "Reference" "FB13"
+			(at 152.908 45.466 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "1.8k"
+			(at 152.4 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Inductor_SMD:L_0402_1005Metric_Pad0.77x0.64mm_HandSolder"
+			(at 154.94 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Wurth-Elektronik/74269244182?qs=sPbYRqrBIVkE9fLgTHgObQ%3D%3D"
+			(at 154.94 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Inductor"
+			(at 154.94 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 154.94 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 154.94 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 154.94 45.72 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "c3c80a63-c5e6-4d9c-a225-22a8443c2eda")
+		)
+		(pin "1"
+			(uuid "f30fff49-6c5c-4d38-a1d5-ff24b5924f65")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
+					(reference "FB14")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
+					(reference "FB15")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
+					(reference "FB16")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
+					(reference "FB13")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "SamacSys_Parts:1935161")
-		(at 85.09 87.63 180)
+		(at 63.5 87.63 180)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2604,7 +3616,7 @@
 		(fields_autoplaced yes)
 		(uuid "8ba5ff71-7ebe-400b-98e5-1d0ca202e46f")
 		(property "Reference" "J5"
-			(at 74.93 77.47 0)
+			(at 53.34 77.47 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2614,7 +3626,7 @@
 			)
 		)
 		(property "Value" "1935161"
-			(at 74.93 80.01 0)
+			(at 53.34 80.01 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2624,7 +3636,7 @@
 			)
 		)
 		(property "Footprint" "SamacSys_Parts:1935161"
-			(at 68.58 90.17 0)
+			(at 46.99 90.17 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2636,7 +3648,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 68.58 87.63 0)
+			(at 46.99 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2648,7 +3660,7 @@
 			)
 		)
 		(property "Description" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 85.09 87.63 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2659,7 +3671,7 @@
 			)
 		)
 		(property "Description_1" "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon"
-			(at 68.58 85.09 0)
+			(at 46.99 85.09 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2671,7 +3683,7 @@
 			)
 		)
 		(property "Height" "11.55"
-			(at 68.58 82.55 0)
+			(at 46.99 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2683,7 +3695,7 @@
 			)
 		)
 		(property "Mouser Part Number" "651-1935161"
-			(at 68.58 80.01 0)
+			(at 46.99 80.01 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2695,7 +3707,7 @@
 			)
 		)
 		(property "Mouser Price/Stock" "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D"
-			(at 68.58 77.47 0)
+			(at 46.99 77.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2707,7 +3719,7 @@
 			)
 		)
 		(property "Manufacturer_Name" "Phoenix Contact"
-			(at 68.58 74.93 0)
+			(at 46.99 74.93 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2719,7 +3731,7 @@
 			)
 		)
 		(property "Manufacturer_Part_Number" "1935161"
-			(at 68.58 72.39 0)
+			(at 46.99 72.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2731,7 +3743,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 85.09 87.63 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2742,7 +3754,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 85.09 87.63 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2753,7 +3765,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 85.09 87.63 0)
+			(at 63.5 87.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2792,7 +3804,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 171.45 118.11 0)
+		(at 161.29 58.42 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2800,10 +3812,9 @@
 		(on_board yes)
 		(in_pos_files yes)
 		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "afea295a-8b50-41c7-b9ba-3b3cb616b902")
-		(property "Reference" "C21"
-			(at 175.26 116.8399 0)
+		(uuid "ab30bc2b-09ca-4a86-9a93-0556e1715fb1")
+		(property "Reference" "C73"
+			(at 156.718 56.134 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2813,8 +3824,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "0.1uf"
-			(at 175.26 119.3799 0)
+		(property "Value" "2.2uF"
+			(at 155.702 60.706 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2824,8 +3835,8 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
-			(at 172.4152 121.92 0)
+		(property "Footprint" "Capacitor_SMD:C_1206_3216Metric"
+			(at 162.2552 62.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2835,8 +3846,8 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
-			(at 171.45 118.11 0)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2847,7 +3858,18 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 171.45 118.11 0)
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2858,7 +3880,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 171.45 118.11 0)
+			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2869,7 +3891,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 171.45 118.11 0)
+			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2880,7 +3902,134 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 171.45 118.11 0)
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "f4685927-0a49-4fb3-a910-a152016f0763")
+		)
+		(pin "1"
+			(uuid "f458d282-8dc0-4a1e-aae3-8c1a8612773c")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
+					(reference "C75")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
+					(reference "C77")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
+					(reference "C79")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
+					(reference "C73")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 137.16 63.5 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "afea295a-8b50-41c7-b9ba-3b3cb616b902")
+		(property "Reference" "C21"
+			(at 140.97 62.2299 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "0.1uf"
+			(at 140.97 64.7699 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 138.1252 67.31 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
+			(at 137.16 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 137.16 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 137.16 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 137.16 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 137.16 63.5 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3458,7 +4607,7 @@
 	)
 	(symbol
 		(lib_id "Device:L")
-		(at 96.52 91.44 90)
+		(at 74.93 91.44 90)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3468,7 +4617,7 @@
 		(dnp no)
 		(uuid "fd47df3c-8c5f-4fda-9405-0aedd069b756")
 		(property "Reference" "FB2"
-			(at 96.774 89.408 90)
+			(at 75.184 89.408 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3478,7 +4627,7 @@
 			)
 		)
 		(property "Value" "1.8k"
-			(at 96.52 88.9 90)
+			(at 74.93 88.9 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3489,7 +4638,7 @@
 			)
 		)
 		(property "Footprint" "Inductor_SMD:L_0402_1005Metric_Pad0.77x0.64mm_HandSolder"
-			(at 96.52 91.44 0)
+			(at 74.93 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3500,7 +4649,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Wurth-Elektronik/74269244182?qs=sPbYRqrBIVkE9fLgTHgObQ%3D%3D"
-			(at 96.52 91.44 0)
+			(at 74.93 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3511,7 +4660,7 @@
 			)
 		)
 		(property "Description" "Inductor"
-			(at 96.52 91.44 0)
+			(at 74.93 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3522,7 +4671,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 96.52 91.44 90)
+			(at 74.93 91.44 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3533,7 +4682,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 96.52 91.44 90)
+			(at 74.93 91.44 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3544,7 +4693,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 96.52 91.44 90)
+			(at 74.93 91.44 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

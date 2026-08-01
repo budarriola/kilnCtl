@@ -40,7 +40,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **mykicadMcp/README.md** — Full setup guide and tool reference for the MCP server
 
 ### MCP Server Tools
-The KiCad MCP server exposes 82 tools across 11 groups (inspection/netlist, schematic data,
+The KiCad MCP server exposes 92 tools across 11 groups (inspection/netlist, schematic data,
 Mouser sourcing, hierarchical groups, layout/placement, PCB groups, label positions, footprint
 flips, live IPC tools, net classes/buses, and autorouter/routing). See **mykicadMcp/README.md** and `mykicadMcp/docs/mcp-tools/` for the full
 reference. The net classes & buses group supports bus detection, net-class proposal/creation,

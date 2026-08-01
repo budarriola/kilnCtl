@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "trace_cost": {
+    "weights": {
+      "length_mm": 1.0,
+      "via": 5.0,
+      "deviation_mm": 2.0,
+      "excess_length": 10.0,
+      "layer_span": 8.0
+    },
+    "deviation": {
+      "metric": "mean_perp_distance",
+      "reference": "bus_centerline"
+    },
+    "via_weights": {
+      "through": 1.0,
+      "microvia": 0.5,
+      "blind_buried": 1.5
+    },
+    "non_bus_deviation": 0.0
+  },
+  "corridor": {
+    "clip_band_mult": 3.0
+  },
+  "bus_detection": {
+    "ic_ref_prefixes": [
+      "U",
+      "IC"
+    ],
+    "extra_signatures": {}
+  },
+  "pin_swap": {
+    "enabled": false,
+    "min_gain": 25.0,
+    "ref_prefixes": [
+      "J",
+      "P",
+      "CN",
+      "X"
+    ]
+  },
+  "layer_purpose": {
+    "signal": {
+      "signal": 1.0,
+      "mixed": 1.2,
+      "power": 4.0,
+      "jumper": 2.0
+    },
+    "power": {
+      "signal": 2.0,
+      "mixed": 1.2,
+      "power": 1.0,
+      "jumper": 3.0
+    },
+    "power_net_patterns": [
+      "^GND",
+      "^\\+?\\d+\\.?\\d*[Vv]",
+      "VCC",
+      "VDD",
+      "12[Vv]",
+      "3\\.3[Vv]",
+      "5[Vv]"
+    ]
+  },
+  "autorouter": {
+    "grid_mm": 0.2,
+    "max_grid_mm": 1.0,
+    "min_grid_mm": 0.05,
+    "global_grid_mm": 2.0,
+    "search_window_margin_mm": 8.0,
+    "clearance_fallback_mm": 0.2,
+    "cost": {
+      "step": 1.0,
+      "via": 25.0,
+      "direction_change": 2.0,
+      "congestion": 8.0,
+      "off_corridor": 4.0,
+      "off_direction": 2.0,
+      "away_from_home_per_mm": 0.5
+    },
+    "layer_directions": "auto",
+    "max_ripup_iterations": 5,
+    "allowed_layers": [],
+    "pad_escape_direction_aware": false,
+    "acceleration": "auto",
+    "gpu": {
+      "memory_budget_mb": 0,
+      "batch": "auto",
+      "oom_fallback": true
+    },
+    "cpu": {
+      "workers": 0,
+      "ram_budget_mb": 0,
+      "replicas": "auto",
+      "replica_sync": "chunk_end"
+    },
+    "progress": {
+      "events": true,
+      "open_viewer": true,
+      "color_theme": "auto"
+    }
+  },
+  "plane": {
+    "plane_step": 0.05,
+    "attachment_via": 8.0,
+    "island_base": 40.0,
+    "orphan_island": 1000.0,
+    "island_min_attachments_warn": 2,
+    "create_plane": 15.0,
+    "modify_plane": 5.0
+  },
+  "neck_down": {
+    "enabled": true,
+    "max_width_vs_pad": 1.0,
+    "min_length_mm": 0.5,
+    "max_length_mm": 3.0
+  },
+  "stitching": {
+    "target_spacing_mm": 5.0,
+    "near_high_speed_mm": 1.0,
+    "near_high_speed_pitch_mm": 2.0,
+    "enabled": true
+  },
+  "schematic_checks": {
+    "cap_voltage": {
+      "derating_min_ratio": 2.0,
+      "gnd_tokens": [
+        "GND",
+        "AGND",
+        "DGND",
+        "PGND",
+        "VSS"
+      ],
+      "net_voltages": {},
+      "default_cap_rating": null
+    }
+  },
+  "optimizer": {
+    "max_iterations": 20,
+    "time_budget_s": 300,
+    "worst_k": 5,
+    "unrouted_penalty": 500.0,
+    "accept": "greedy",
+    "sa_initial_temp": 50.0,
+    "sa_cooling": 0.9,
+    "convergence_delta": 0.5,
+    "seed": 1,
+    "effort": "balanced",
+    "plateau_window": 3,
+    "plateau_slope_ratio": 0.1,
+    "ai_decisions": {
+      "enabled": true,
+      "min_score_spread": 5.0,
+      "max_pauses_per_run": 12,
+      "decision_types": [
+        "bundle_layer",
+        "plane_proposal",
+        "conflict_yield",
+        "stitching_budget",
+        "sa_large_move",
+        "give_up_net"
+      ]
+    }
+  },
+  "high_speed": {
+    "bus_frequencies_mhz": {
+      "SPI": 20,
+      "QSPI": 80,
+      "I2C": 0.4,
+      "I2S": 12,
+      "UART": 1,
+      "CAN": 1,
+      "USB": 480,
+      "MIPI": 1000,
+      "DDR": 800,
+      "SWD": 4,
+      "JTAG": 10,
+      "CLK": 25
+    },
+    "velocity_fraction": 0.5,
+    "rise_fraction": 0.05,
+    "critical_length_overrides_mm": {},
+    "critical_fraction": 0.9,
+    "length_weight_mult": 4.0
+  },
+  "switch_node": {
+    "min_inductor_mm": 2.0,
+    "length_weight_mult": 8.0
+  }
+}
