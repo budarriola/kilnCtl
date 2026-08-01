@@ -5,7 +5,7 @@
 	(uuid "da3553bc-48b6-4db0-a395-99bc8c0b7291")
 	(paper "A4")
 	(lib_symbols
-		(symbol "Connector:Conn_01x16_Pin"
+		(symbol "Connector:Conn_01x20_Pin"
 			(pin_names
 				(offset 1.016)
 				(hide yes)
@@ -16,7 +16,7 @@
 			(in_pos_files yes)
 			(duplicate_pin_numbers_are_jumpers no)
 			(property "Reference" "J"
-				(at 0 20.32 0)
+				(at 0 25.4 0)
 				(show_name no)
 				(do_not_autoplace no)
 				(effects
@@ -25,8 +25,8 @@
 					)
 				)
 			)
-			(property "Value" "Conn_01x16_Pin"
-				(at 0 -22.86 0)
+			(property "Value" "Conn_01x20_Pin"
+				(at 0 -27.94 0)
 				(show_name no)
 				(do_not_autoplace no)
 				(effects
@@ -57,7 +57,7 @@
 					)
 				)
 			)
-			(property "Description" "Generic connector, single row, 01x16, script generated"
+			(property "Description" "Generic connector, single row, 01x20, script generated"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -100,7 +100,29 @@
 					)
 				)
 			)
-			(symbol "Conn_01x16_Pin_1_1"
+			(symbol "Conn_01x20_Pin_1_1"
+				(rectangle
+					(start 0.8636 22.987)
+					(end 0 22.733)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(rectangle
+					(start 0.8636 20.447)
+					(end 0 20.193)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
 				(rectangle
 					(start 0.8636 17.907)
 					(end 0 17.653)
@@ -275,6 +297,52 @@
 					)
 					(fill
 						(type outline)
+					)
+				)
+				(rectangle
+					(start 0.8636 -22.733)
+					(end 0 -22.987)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(rectangle
+					(start 0.8636 -25.273)
+					(end 0 -25.527)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.27 22.86) (xy 0.8636 22.86)
+					)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.27 20.32) (xy 0.8636 20.32)
+					)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
 					)
 				)
 				(polyline
@@ -469,8 +537,32 @@
 						(type none)
 					)
 				)
+				(polyline
+					(pts
+						(xy 1.27 -22.86) (xy 0.8636 -22.86)
+					)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.27 -25.4) (xy 0.8636 -25.4)
+					)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
 				(pin passive line
-					(at 5.08 17.78 180)
+					(at 5.08 22.86 180)
 					(length 3.81)
 					(name "Pin_1"
 						(effects
@@ -488,7 +580,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 15.24 180)
+					(at 5.08 20.32 180)
 					(length 3.81)
 					(name "Pin_2"
 						(effects
@@ -506,7 +598,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 12.7 180)
+					(at 5.08 17.78 180)
 					(length 3.81)
 					(name "Pin_3"
 						(effects
@@ -524,7 +616,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 10.16 180)
+					(at 5.08 15.24 180)
 					(length 3.81)
 					(name "Pin_4"
 						(effects
@@ -542,7 +634,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 7.62 180)
+					(at 5.08 12.7 180)
 					(length 3.81)
 					(name "Pin_5"
 						(effects
@@ -560,7 +652,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 5.08 180)
+					(at 5.08 10.16 180)
 					(length 3.81)
 					(name "Pin_6"
 						(effects
@@ -578,7 +670,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 2.54 180)
+					(at 5.08 7.62 180)
 					(length 3.81)
 					(name "Pin_7"
 						(effects
@@ -596,7 +688,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 0 180)
+					(at 5.08 5.08 180)
 					(length 3.81)
 					(name "Pin_8"
 						(effects
@@ -614,7 +706,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -2.54 180)
+					(at 5.08 2.54 180)
 					(length 3.81)
 					(name "Pin_9"
 						(effects
@@ -632,7 +724,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -5.08 180)
+					(at 5.08 0 180)
 					(length 3.81)
 					(name "Pin_10"
 						(effects
@@ -650,7 +742,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -7.62 180)
+					(at 5.08 -2.54 180)
 					(length 3.81)
 					(name "Pin_11"
 						(effects
@@ -668,7 +760,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -10.16 180)
+					(at 5.08 -5.08 180)
 					(length 3.81)
 					(name "Pin_12"
 						(effects
@@ -686,7 +778,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -12.7 180)
+					(at 5.08 -7.62 180)
 					(length 3.81)
 					(name "Pin_13"
 						(effects
@@ -704,7 +796,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -15.24 180)
+					(at 5.08 -10.16 180)
 					(length 3.81)
 					(name "Pin_14"
 						(effects
@@ -722,7 +814,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -17.78 180)
+					(at 5.08 -12.7 180)
 					(length 3.81)
 					(name "Pin_15"
 						(effects
@@ -740,7 +832,7 @@
 					)
 				)
 				(pin passive line
-					(at 5.08 -20.32 180)
+					(at 5.08 -15.24 180)
 					(length 3.81)
 					(name "Pin_16"
 						(effects
@@ -750,6 +842,78 @@
 						)
 					)
 					(number "16"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 -17.78 180)
+					(length 3.81)
+					(name "Pin_17"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "17"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 -20.32 180)
+					(length 3.81)
+					(name "Pin_18"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "18"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 -22.86 180)
+					(length 3.81)
+					(name "Pin_19"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "19"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 -25.4 180)
+					(length 3.81)
+					(name "Pin_20"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "20"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -1617,10 +1781,10 @@
 		)
 	)
 	(junction
-		(at 222.25 93.98)
+		(at 222.25 101.6)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "3c78d1c3-f1b2-4158-b714-9c8ebcfc9310")
+		(uuid "17fffd55-aea9-4629-9412-517e7f90ade6")
 	)
 	(junction
 		(at 181.61 34.29)
@@ -1629,10 +1793,22 @@
 		(uuid "4ebbfc61-c2a0-4b00-8278-af172ea2410a")
 	)
 	(junction
+		(at 196.85 29.21)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "6b440dac-b0d4-4da0-8564-df3ad81b3d54")
+	)
+	(junction
 		(at 162.56 34.29)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "70101830-a23c-41ce-9c3f-50917dfab0ba")
+	)
+	(junction
+		(at 222.25 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "86f89e3a-ad60-4022-8958-ad90bc7f8ffd")
 	)
 	(junction
 		(at 137.16 31.75)
@@ -1663,6 +1839,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "d20b2bd9-46a1-414d-8091-9b8e68cab005")
+	)
+	(junction
+		(at 222.25 104.14)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "d6246c3f-e7fc-4870-a0bc-6c3eacf4b653")
 	)
 	(junction
 		(at 41.91 63.5)
@@ -1838,6 +2020,16 @@
 	)
 	(wire
 		(pts
+			(xy 222.25 76.2) (xy 222.25 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "38f086eb-3ca5-4af0-81b3-8ad82179d926")
+	)
+	(wire
+		(pts
 			(xy 83.82 93.98) (xy 87.63 93.98)
 		)
 		(stroke
@@ -1888,7 +2080,7 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 93.98) (xy 224.79 93.98)
+			(xy 222.25 104.14) (xy 224.79 104.14)
 		)
 		(stroke
 			(width 0)
@@ -1905,6 +2097,16 @@
 			(type default)
 		)
 		(uuid "45fbf41d-c513-475e-a38b-181f0cf89b93")
+	)
+	(wire
+		(pts
+			(xy 222.25 99.06) (xy 222.25 101.6)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "484891de-7b3d-4995-a6d1-9481a27dc7be")
 	)
 	(wire
 		(pts
@@ -1968,7 +2170,7 @@
 	)
 	(wire
 		(pts
-			(xy 200.66 88.9) (xy 224.79 88.9)
+			(xy 200.66 93.98) (xy 224.79 93.98)
 		)
 		(stroke
 			(width 0)
@@ -1985,6 +2187,16 @@
 			(type default)
 		)
 		(uuid "52863a6a-3a8b-4ddd-8b23-87cfbde505dc")
+	)
+	(wire
+		(pts
+			(xy 224.79 99.06) (xy 222.25 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "52aff60c-059d-4426-ad50-50b4b753e2ca")
 	)
 	(wire
 		(pts
@@ -2008,7 +2220,7 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 96.52) (xy 222.25 93.98)
+			(xy 222.25 106.68) (xy 222.25 104.14)
 		)
 		(stroke
 			(width 0)
@@ -2098,6 +2310,26 @@
 	)
 	(wire
 		(pts
+			(xy 196.85 41.91) (xy 196.85 44.45)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6ce5fd77-c58e-4018-9987-c2774f31a57e")
+	)
+	(wire
+		(pts
+			(xy 222.25 101.6) (xy 222.25 104.14)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6d2997c3-d2c2-42f0-b2e2-d7019bc7f40e")
+	)
+	(wire
+		(pts
 			(xy 218.44 45.72) (xy 218.44 48.26)
 		)
 		(stroke
@@ -2158,6 +2390,16 @@
 	)
 	(wire
 		(pts
+			(xy 200.66 86.36) (xy 224.79 86.36)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8a0d9bb1-bb8d-4564-8715-5d1552555544")
+	)
+	(wire
+		(pts
 			(xy 41.91 63.5) (xy 41.91 60.96)
 		)
 		(stroke
@@ -2178,16 +2420,6 @@
 	)
 	(wire
 		(pts
-			(xy 224.79 76.2) (xy 222.25 76.2)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "92c3ae1f-2866-49a1-9402-e67c1a5eda9e")
-	)
-	(wire
-		(pts
 			(xy 181.61 24.13) (xy 181.61 29.21)
 		)
 		(stroke
@@ -2205,6 +2437,16 @@
 			(type default)
 		)
 		(uuid "9705af61-5d03-4be8-8f9d-c2f3ebecaefd")
+	)
+	(wire
+		(pts
+			(xy 224.79 76.2) (xy 222.25 76.2)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "993dd92e-ea93-4fab-bb83-f52a00e7bd77")
 	)
 	(wire
 		(pts
@@ -2238,7 +2480,7 @@
 	)
 	(wire
 		(pts
-			(xy 200.66 91.44) (xy 224.79 91.44)
+			(xy 200.66 96.52) (xy 224.79 96.52)
 		)
 		(stroke
 			(width 0)
@@ -2288,6 +2530,16 @@
 	)
 	(wire
 		(pts
+			(xy 222.25 101.6) (xy 224.79 101.6)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "af71012a-563e-4432-b748-50209cdde32f")
+	)
+	(wire
+		(pts
 			(xy 165.1 36.83) (xy 165.1 34.29)
 		)
 		(stroke
@@ -2308,7 +2560,7 @@
 	)
 	(wire
 		(pts
-			(xy 200.66 86.36) (xy 224.79 86.36)
+			(xy 200.66 91.44) (xy 224.79 91.44)
 		)
 		(stroke
 			(width 0)
@@ -2378,16 +2630,6 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 76.2) (xy 222.25 93.98)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "bf47f8e4-8907-4572-aea1-ce53b82d84ad")
-	)
-	(wire
-		(pts
 			(xy 181.61 43.18) (xy 181.61 45.72)
 		)
 		(stroke
@@ -2405,6 +2647,16 @@
 			(type default)
 		)
 		(uuid "c5b0b44e-9e3e-4718-b1ca-2818c3d3cd06")
+	)
+	(wire
+		(pts
+			(xy 200.66 88.9) (xy 224.79 88.9)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ca43ee88-10a8-4c07-ada3-c16184ff00d6")
 	)
 	(wire
 		(pts
@@ -2518,6 +2770,16 @@
 	)
 	(wire
 		(pts
+			(xy 196.85 29.21) (xy 196.85 34.29)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e75594a6-d508-4948-a14a-ab81a2a437e0")
+	)
+	(wire
+		(pts
 			(xy 218.44 55.88) (xy 218.44 58.42)
 		)
 		(stroke
@@ -2617,7 +2879,7 @@
 		(uuid "49ff2644-02fc-445f-a348-aefe6a9c19cf")
 	)
 	(label "SDA"
-		(at 200.66 88.9 0)
+		(at 200.66 93.98 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2786,6 +3048,16 @@
 		)
 		(uuid "d1e99a7b-196c-4e3c-a5cc-31de380da17b")
 	)
+	(label "CS0"
+		(at 200.66 86.36 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "d34354a7-90b0-4ef0-92ce-795a8c04da27")
+	)
 	(label "thermoFault_1"
 		(at 200.66 66.04 0)
 		(effects
@@ -2806,6 +3078,16 @@
 		)
 		(uuid "e29a1ab9-f042-4e91-9fd2-e7926b65477a")
 	)
+	(label "CS1"
+		(at 200.66 88.9 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "eb23fdd8-c383-4f00-9c8e-131d0d8be394")
+	)
 	(label "MISO"
 		(at 200.66 81.28 0)
 		(effects
@@ -2817,7 +3099,7 @@
 		(uuid "f71a6202-6466-4ad9-9f12-3cd45e90b20e")
 	)
 	(label "CS2"
-		(at 200.66 86.36 0)
+		(at 200.66 91.44 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2827,7 +3109,7 @@
 		(uuid "f7e21ae9-1c16-45d4-9833-fbd64b8dc612")
 	)
 	(label "SCL"
-		(at 200.66 91.44 0)
+		(at 200.66 96.52 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -3360,6 +3642,84 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND3")
+		(at 196.85 44.45 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "3bcc49d6-68f1-44f6-9d02-0e35de23cf12")
+		(property "Reference" "#PWR019"
+			(at 196.85 50.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GND"
+			(at 192.278 48.768 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 196.85 44.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 196.85 44.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
+			(at 196.85 44.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "d3f4391a-987f-4505-9feb-5296ec7e9b18")
+		)
+		(instances
+			(project "ThermocoupleBoard"
+				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
+					(reference "#PWR019")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:VPP")
 		(at 196.85 24.13 0)
 		(unit 1)
@@ -3439,7 +3799,7 @@
 	)
 	(symbol
 		(lib_id "power:GND3")
-		(at 222.25 96.52 0)
+		(at 222.25 106.68 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3449,7 +3809,7 @@
 		(dnp no)
 		(uuid "465456aa-78ed-47c1-b921-d952b2bfc779")
 		(property "Reference" "#PWR018"
-			(at 222.25 102.87 0)
+			(at 222.25 113.03 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3460,7 +3820,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 217.678 100.838 0)
+			(at 217.678 110.998 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3471,7 +3831,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 222.25 96.52 0)
+			(at 222.25 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3482,7 +3842,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 222.25 96.52 0)
+			(at 222.25 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3493,7 +3853,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND3\" , ground"
-			(at 222.25 96.52 0)
+			(at 222.25 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3588,6 +3948,152 @@
 			(project "ThermocoupleBoard"
 				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
 					(reference "#PWR012")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:Conn_01x20_Pin")
+		(at 229.87 78.74 0)
+		(mirror y)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "6a19667a-0fc6-400d-9ecf-6c6955166612")
+		(property "Reference" "J5"
+			(at 227.076 52.07 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Conn_01x20_Pin"
+			(at 229.235 53.34 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Horizontal"
+			(at 229.87 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 229.87 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Generic connector, single row, 01x20, script generated"
+			(at 229.87 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "mouser" "https://www.mouser.com/en/ProductDetail/Samtec/TSW-120-08-T-S-RA?qs=rU5fayqh%252BE0LX6YURvevrg%3D%3D"
+			(at 229.87 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "13"
+			(uuid "5754a26b-307a-4c90-b0ec-602d496fb9d1")
+		)
+		(pin "4"
+			(uuid "856c3736-cfae-4804-a731-74a45c7696d5")
+		)
+		(pin "9"
+			(uuid "15e5f0af-db3b-4148-94d3-218670a9bbc1")
+		)
+		(pin "14"
+			(uuid "993e5867-060d-4721-8652-ac7cad8a89b1")
+		)
+		(pin "3"
+			(uuid "69f2af28-5592-4ead-9854-40fd5160bfcc")
+		)
+		(pin "1"
+			(uuid "1de563c3-a7e2-4d60-824e-893058e1128d")
+		)
+		(pin "6"
+			(uuid "8443a2bf-f41e-4cc8-8b1b-9a660593459a")
+		)
+		(pin "8"
+			(uuid "03caed46-8958-45e7-9c78-d0374d11f033")
+		)
+		(pin "10"
+			(uuid "cc045106-4a33-4d52-a771-a7765cb35e7b")
+		)
+		(pin "12"
+			(uuid "bcd49014-802f-404c-b6de-33108e189cc5")
+		)
+		(pin "18"
+			(uuid "395e1a8a-939f-44f3-a1ab-5a5c56388bb4")
+		)
+		(pin "2"
+			(uuid "875cc588-b8a0-4d01-9c76-cd31e84c0d3d")
+		)
+		(pin "11"
+			(uuid "e0894a82-6e8a-4285-bc5e-b4aef59bcd09")
+		)
+		(pin "16"
+			(uuid "1808ca38-c844-4505-b69a-fbb83345024e")
+		)
+		(pin "17"
+			(uuid "48252809-38e8-42d9-90d9-11a68af055d0")
+		)
+		(pin "5"
+			(uuid "a0d27461-8235-4513-aef9-915911dda258")
+		)
+		(pin "7"
+			(uuid "d21e8cc0-c469-49bd-a266-d4f9cca08622")
+		)
+		(pin "15"
+			(uuid "cfd5545f-ce8f-4499-b881-37d3a38607ea")
+		)
+		(pin "20"
+			(uuid "fd88c037-0deb-473b-bc74-4f7b8114e96a")
+		)
+		(pin "19"
+			(uuid "e6cabe42-3580-4e0d-aff8-a1af0d97cead")
+		)
+		(instances
+			(project "ThermocoupleBoard"
+				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
+					(reference "J5")
 					(unit 1)
 				)
 			)
@@ -3711,162 +4217,6 @@
 			(project "ThermocoupleBoard"
 				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
 					(reference "C1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Connector:Conn_01x16_Pin")
-		(at 229.87 73.66 0)
-		(mirror y)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "70c54e4e-a400-45a5-a694-1facba73173a")
-		(property "Reference" "J1"
-			(at 229.616 52.832 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "Conn_01x16_Pin"
-			(at 229.235 53.34 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x16_P2.54mm_Horizontal"
-			(at 229.87 73.66 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 229.87 73.66 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Generic connector, single row, 01x16, script generated"
-			(at 229.87 73.66 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/Amphenol-FCI/68016-116HLF?qs=QKvFUfBIyQJGaW1tNFNciA%3D%3D"
-			(at 229.87 73.66 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Adam-Tech/PH1RA-16-UA?qs=HoCaDK9Nz5dYYvducoda0w%3D%3D"
-			(at 229.87 73.66 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Harwin/M20-9751646?qs=WS5Jv%252B%252Bx1qWb9zMqORwc6Q%3D%3D"
-			(at 229.87 73.66 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "6"
-			(uuid "ab0caf4e-d181-4213-a362-9d5cc7fdcc7d")
-		)
-		(pin "16"
-			(uuid "0d4471b1-6d60-4aeb-a54d-8e22692211d0")
-		)
-		(pin "8"
-			(uuid "a0bd6c19-5d89-428f-8c72-488645db74c1")
-		)
-		(pin "2"
-			(uuid "b2582347-ff3a-44f3-993b-08531dd3c382")
-		)
-		(pin "14"
-			(uuid "99abefa3-f26d-4c0e-ab9d-1d60eb29d93e")
-		)
-		(pin "12"
-			(uuid "e20b0fb9-dbcd-4bfb-9c34-fe0c5f7febaf")
-		)
-		(pin "5"
-			(uuid "b2850435-046b-46b6-97bc-22a1e5b93420")
-		)
-		(pin "15"
-			(uuid "d6e989a8-fa91-454a-b939-9b8a35479806")
-		)
-		(pin "9"
-			(uuid "7dcf2f8e-00c6-453c-8813-130077d06f13")
-		)
-		(pin "4"
-			(uuid "ef22de5b-0bc3-4a82-87ed-0eb9017c64c5")
-		)
-		(pin "1"
-			(uuid "9deb254d-ac5b-4729-b7e6-19ac0cdf2a28")
-		)
-		(pin "3"
-			(uuid "c350dcad-cc9a-4b88-87f6-24c2dd6b17d3")
-		)
-		(pin "10"
-			(uuid "b006b2de-b9f0-4511-92e4-5c0d262e1566")
-		)
-		(pin "11"
-			(uuid "9319923d-8e23-4972-ab11-8e9ba8b08f12")
-		)
-		(pin "13"
-			(uuid "dee16c13-52e4-4219-a5bd-308628f585a0")
-		)
-		(pin "7"
-			(uuid "4bf533f1-3db7-459c-be78-c9308efefd68")
-		)
-		(instances
-			(project "ThermocoupleBoard"
-				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
-					(reference "J1")
 					(unit 1)
 				)
 			)
@@ -4998,6 +5348,129 @@
 			(project "ThermocoupleBoard"
 				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
 					(reference "#PWR03")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 196.85 38.1 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "e701475e-2d39-4cb1-aad6-02b911fafbf1")
+		(property "Reference" "C28"
+			(at 193.294 39.878 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "47uF 16V"
+			(at 200.152 38.608 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_1210_3225Metric"
+			(at 195.8848 34.29 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL32A476KOJNNNE?qs=d72FGnIDsgQXYP%252BbBe7Sww%3D%3D"
+			(at 196.85 38.1 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 196.85 38.1 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL32A476KOJNNNE?qs=d72FGnIDsgQXYP%252BbBe7Sww%3D%3D"
+			(at 196.85 38.1 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 196.85 38.1 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 196.85 38.1 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 196.85 38.1 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "589577b2-a9b2-446d-9935-62011fe8367c")
+		)
+		(pin "2"
+			(uuid "c25d9d72-3629-4aba-946c-00f7ebd468fa")
+		)
+		(instances
+			(project "ThermocoupleBoard"
+				(path "/da3553bc-48b6-4db0-a395-99bc8c0b7291"
+					(reference "C28")
 					(unit 1)
 				)
 			)
