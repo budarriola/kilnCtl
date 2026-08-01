@@ -2554,7 +2554,40 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-473GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2F9E7OUz1JBW4%3D"
+			(at 186.69 104.14 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW040247K0JNEDC?qs=sGAEpiMZZMtG0KNrPCHnjXEaY7S8QU1xVgHf7CBxtPq%2FbTahxI%252BhTg%3D%3D"
+			(at 186.69 104.14 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ0402J47K?qs=sGAEpiMZZMtG0KNrPCHnjW0BEZmmc%252BDpcw30ABv1AjMQktL%2FA9OLGA%3D%3D"
+			(at 186.69 104.14 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Panasonic/ERA-2AED473X?qs=sGAEpiMZZMtG0KNrPCHnjXA8RZptup0%2Fp2NBlG8lA4o%3D"
 			(at 186.69 104.14 0)
 			(hide yes)
 			(show_name no)
@@ -3042,7 +3075,40 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-473GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2F9E7OUz1JBW4%3D"
+			(at 107.95 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW040247K0JNEDC?qs=sGAEpiMZZMtG0KNrPCHnjXEaY7S8QU1xVgHf7CBxtPq%2FbTahxI%252BhTg%3D%3D"
+			(at 107.95 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ0402J47K?qs=sGAEpiMZZMtG0KNrPCHnjW0BEZmmc%252BDpcw30ABv1AjMQktL%2FA9OLGA%3D%3D"
+			(at 107.95 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Panasonic/ERA-2AED473X?qs=sGAEpiMZZMtG0KNrPCHnjXA8RZptup0%2Fp2NBlG8lA4o%3D"
 			(at 107.95 96.52 0)
 			(hide yes)
 			(show_name no)
@@ -4196,7 +4262,40 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-473GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2F9E7OUz1JBW4%3D"
+			(at 107.95 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW040247K0JNEDC?qs=sGAEpiMZZMtG0KNrPCHnjXEaY7S8QU1xVgHf7CBxtPq%2FbTahxI%252BhTg%3D%3D"
+			(at 107.95 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ0402J47K?qs=sGAEpiMZZMtG0KNrPCHnjW0BEZmmc%252BDpcw30ABv1AjMQktL%2FA9OLGA%3D%3D"
+			(at 107.95 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Panasonic/ERA-2AED473X?qs=sGAEpiMZZMtG0KNrPCHnjXA8RZptup0%2Fp2NBlG8lA4o%3D"
 			(at 107.95 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -4316,7 +4415,40 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73H1ETTP4753F?qs=sGAEpiMZZMtG0KNrPCHnjTfdXMgOKgkhR4xhu8w5usc%3D"
+			(at 90.17 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-FX-4753GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FAILJE2uKbuo%3D"
+			(at 90.17 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW0402475KFKED?qs=sGAEpiMZZMtG0KNrPCHnjUwx9ESGNTAnrTVgwjbK4Cs%3D"
+			(at 90.17 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Panasonic/ERJ-2RKF4753X?qs=sGAEpiMZZMtG0KNrPCHnjTg0x5DoQJ5Pe3%2FPo%2FkEwq8%3D"
 			(at 90.17 91.44 0)
 			(hide yes)
 			(show_name no)

@@ -2672,6 +2672,50 @@
 				)
 			)
 		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/onsemi/SZNUP2105LT3G?qs=PJJcWtbOkNXrvSZpB7E7mw%3D%3D"
+			(at 89.535 104.775 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/onsemi/SZNUP2105LT1G?qs=PJJcWtbOkNWqqZbXH80dfQ%3D%3D"
+			(at 89.535 104.775 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/onsemi/NUP2105LT1G?qs=ZXBb0xZ9WeDHmiHN%252BYKtYA%3D%3D"
+			(at 89.535 104.775 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Diotec-Semiconductor/NUP2105L?qs=OlC7AqGiEDnwfsnn7%252BuLZg%3D%3D"
+			(at 89.535 104.775 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Description" "Dual Line CAN Bus Protector, 24Vrwm"
 			(at 86.36 107.95 0)
 			(hide yes)
@@ -3147,6 +3191,50 @@
 				)
 			)
 		)
+		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM31CR71H225KA55L?qs=aEuGZpxfbxXH69FledLqTA%3D%3D"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRT31CR71H225KE13L?qs=qkDYIeTQ%252BEkhrDhfEIGgfg%3D%3D"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 130.81 63.5 0)
 			(hide yes)
@@ -3250,7 +3338,7 @@
 				)
 			)
 		)
-		(property "Value" "2k"
+		(property "Value" "2.2k"
 			(at 109.474 81.28 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3271,7 +3359,29 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1200FE000?qs=sGAEpiMZZMtlubZbdhIBIMAhWB6%252BRofmsfIIZouqAvg%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ0402J2K2?qs=sGAEpiMZZMtG0KNrPCHnjW0BEZmmc%252BDpYMUb5aIRivWnzZusksZArA%3D%3D"
+			(at 109.22 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73B1ETTP222J?qs=sGAEpiMZZMtG0KNrPCHnjV5PF2HVMrQCyFb5Jr3rn%252Bc%3D"
+			(at 109.22 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-222GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FUswrnEfVCX0%3D"
 			(at 109.22 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -3857,6 +3967,50 @@
 				)
 			)
 		)
+		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM31CR71H225KA55L?qs=aEuGZpxfbxXH69FledLqTA%3D%3D"
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRT31CR71H225KE13L?qs=qkDYIeTQ%252BEkhrDhfEIGgfg%3D%3D"
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 161.29 58.42 0)
 			(hide yes)
@@ -4214,7 +4368,7 @@
 				)
 			)
 		)
-		(property "Value" "2k"
+		(property "Value" "2.2k"
 			(at 112.014 115.57 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4235,7 +4389,29 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1200FE000?qs=sGAEpiMZZMtlubZbdhIBIMAhWB6%252BRofmsfIIZouqAvg%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ0402J2K2?qs=sGAEpiMZZMtG0KNrPCHnjW0BEZmmc%252BDpYMUb5aIRivWnzZusksZArA%3D%3D"
+			(at 111.76 115.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73B1ETTP222J?qs=sGAEpiMZZMtG0KNrPCHnjV5PF2HVMrQCyFb5Jr3rn%252Bc%3D"
+			(at 111.76 115.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-222GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FUswrnEfVCX0%3D"
 			(at 111.76 115.57 0)
 			(hide yes)
 			(show_name no)
@@ -4502,7 +4678,7 @@
 				)
 			)
 		)
-		(property "Value" "2k"
+		(property "Value" "2.2k"
 			(at 109.474 91.44 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4523,7 +4699,29 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1200FE000?qs=sGAEpiMZZMtlubZbdhIBIMAhWB6%252BRofmsfIIZouqAvg%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/TE-Connectivity-Holsworthy/CRGCQ0402J2K2?qs=sGAEpiMZZMtG0KNrPCHnjW0BEZmmc%252BDpYMUb5aIRivWnzZusksZArA%3D%3D"
+			(at 109.22 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73B1ETTP222J?qs=sGAEpiMZZMtG0KNrPCHnjV5PF2HVMrQCyFb5Jr3rn%252Bc%3D"
+			(at 109.22 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-222GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FUswrnEfVCX0%3D"
 			(at 109.22 91.44 0)
 			(hide yes)
 			(show_name no)
