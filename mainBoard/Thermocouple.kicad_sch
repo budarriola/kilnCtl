@@ -2469,18 +2469,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C28")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C34")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C41")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C22")
 					(unit 1)
@@ -2596,18 +2584,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C25")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C31")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C38")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C19")
 					(unit 1)
@@ -2672,6 +2648,17 @@
 				)
 			)
 		)
+		(property "Description" "Dual Line CAN Bus Protector, 24Vrwm"
+			(at 86.36 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/onsemi/SZNUP2105LT3G?qs=PJJcWtbOkNXrvSZpB7E7mw%3D%3D"
 			(at 89.535 104.775 0)
 			(hide yes)
@@ -2716,17 +2703,6 @@
 				)
 			)
 		)
-		(property "Description" "Dual Line CAN Bus Protector, 24Vrwm"
-			(at 86.36 107.95 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
 		(pin "2"
 			(uuid "abb46eed-0f13-42f9-a9f9-52c25aa1c1a5")
 		)
@@ -2738,18 +2714,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "D29")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "D30")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "D31")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "D28")
 					(unit 1)
@@ -2863,18 +2827,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "FB3")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "FB5")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "FB7")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "FB1")
 					(unit 1)
@@ -2990,18 +2942,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C26")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C32")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C39")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C20")
 					(unit 1)
@@ -3117,18 +3057,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C24")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C30")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C37")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C18")
 					(unit 1)
@@ -3191,6 +3119,17 @@
 				)
 			)
 		)
+		(property "Description" "Unpolarized capacitor"
+			(at 130.81 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
 			(at 130.81 63.5 0)
 			(hide yes)
@@ -3225,17 +3164,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
-			(at 130.81 63.5 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
 			(at 130.81 63.5 0)
 			(hide yes)
 			(show_name no)
@@ -3298,18 +3226,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C70")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C71")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C72")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C69")
 					(unit 1)
@@ -3370,6 +3286,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 109.22 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73B1ETTP222J?qs=sGAEpiMZZMtG0KNrPCHnjV5PF2HVMrQCyFb5Jr3rn%252Bc%3D"
 			(at 109.22 81.28 0)
 			(hide yes)
@@ -3382,17 +3309,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-222GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FUswrnEfVCX0%3D"
-			(at 109.22 81.28 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 109.22 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -3444,18 +3360,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "R51")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "R54")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "R61")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "R48")
 					(unit 1)
@@ -3569,18 +3473,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "FB10")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "FB11")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "FB12")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "FB9")
 					(unit 1)
@@ -3694,18 +3586,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "FB14")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "FB15")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "FB16")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "FB13")
 					(unit 1)
@@ -3893,18 +3773,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "J6")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "J7")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "J9")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "J5")
 					(unit 1)
@@ -3967,6 +3835,17 @@
 				)
 			)
 		)
+		(property "Description" "Unpolarized capacitor"
+			(at 161.29 58.42 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
 			(at 161.29 58.42 0)
 			(hide yes)
@@ -4001,17 +3880,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
-			(at 161.29 58.42 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
 			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -4074,18 +3942,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C75")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C77")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C79")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C73")
 					(unit 1)
@@ -4201,18 +4057,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C27")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C33")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C40")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C21")
 					(unit 1)
@@ -4328,18 +4172,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "C23")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "C29")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "C36")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "C17")
 					(unit 1)
@@ -4400,6 +4232,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 111.76 115.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73B1ETTP222J?qs=sGAEpiMZZMtG0KNrPCHnjV5PF2HVMrQCyFb5Jr3rn%252Bc%3D"
 			(at 111.76 115.57 0)
 			(hide yes)
@@ -4412,17 +4255,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-222GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FUswrnEfVCX0%3D"
-			(at 111.76 115.57 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 111.76 115.57 0)
 			(hide yes)
 			(show_name no)
@@ -4474,18 +4306,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "R53")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "R56")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "R63")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "R50")
 					(unit 1)
@@ -4638,18 +4458,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "U7")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "U8")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "U9")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "U6")
 					(unit 1)
@@ -4710,6 +4518,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 109.22 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73B1ETTP222J?qs=sGAEpiMZZMtG0KNrPCHnjV5PF2HVMrQCyFb5Jr3rn%252Bc%3D"
 			(at 109.22 91.44 0)
 			(hide yes)
@@ -4722,17 +4541,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Bourns/CR0402-JW-222GLF?qs=sGAEpiMZZMtG0KNrPCHnjfC2zYK6Lg3%2FUswrnEfVCX0%3D"
-			(at 109.22 91.44 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 109.22 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -4784,18 +4592,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "R52")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "R55")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "R62")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "R49")
 					(unit 1)
@@ -4909,18 +4705,6 @@
 		)
 		(instances
 			(project "kiln"
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/88b1d8bc-9aca-411e-bb97-2183f44238e8"
-					(reference "FB4")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/bc013942-c6be-49fa-b321-e4929f62929c"
-					(reference "FB6")
-					(unit 1)
-				)
-				(path "/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524/e55a10d3-d364-4c02-8371-0e9595bd54af"
-					(reference "FB8")
-					(unit 1)
-				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505/97a736c6-3aea-44aa-9cdc-a04a9e3c22ad"
 					(reference "FB2")
 					(unit 1)

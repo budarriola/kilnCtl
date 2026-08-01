@@ -3111,6 +3111,17 @@
 				)
 			)
 		)
+		(property "Description" "Unpolarized capacitor"
+			(at 135.89 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
 			(at 135.89 45.72 0)
 			(hide yes)
@@ -3145,17 +3156,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
-			(at 135.89 45.72 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
 			(at 135.89 45.72 0)
 			(hide yes)
 			(show_name no)
@@ -3522,6 +3522,17 @@
 				)
 			)
 		)
+		(property "Description" "Unpolarized capacitor"
+			(at 207.01 87.63 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
 			(at 207.01 87.63 0)
 			(hide yes)
@@ -3556,17 +3567,6 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
-			(at 207.01 87.63 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
 			(at 207.01 87.63 0)
 			(hide yes)
 			(show_name no)
