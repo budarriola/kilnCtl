@@ -8406,7 +8406,40 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Beyschlag/MCS04020C1001FE000?qs=sGAEpiMZZMtlubZbdhIBIMFZrYW9%252Bak7nVRDfe1Ameo%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
+			(at 250.19 80.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
+			(at 250.19 80.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Part_Number" "RCS04021K00FKED"
+			(at 250.19 80.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Name" "Vishay / Draloric"
 			(at 250.19 80.01 0)
 			(hide yes)
 			(show_name no)

@@ -3432,7 +3432,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
+		(property "Footprint" "Resistor_SMD:R_2010_5025Metric"
 			(at 154.94 94.488 90)
 			(hide yes)
 			(show_name no)
@@ -3443,7 +3443,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Royalohm/1206S4J0000TDE?qs=jcD%2FCkGBYePiYOBtSMuX2g%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR2010-J-000ELF?qs=iQmVXIlZDPkUtxAs54Hu3Q%3D%3D"
 			(at 154.94 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -3455,6 +3455,72 @@
 			)
 		)
 		(property "Description" "Resistor"
+			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW20100000ZSTF?qs=LuV47j0yrcCuX3titWMqhw%3D%3D"
+			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73Z2HTTE?qs=yjBPpuQqhAOWWHTNoHnqSQ%3D%3D"
+			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW20100000Z0EF?qs=uSoEc56oFvrUbxXi0J%2Fe1w%3D%3D"
+			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Bourns/CR2010-J-000ELF?qs=iQmVXIlZDPkUtxAs54Hu3Q%3D%3D"
+			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Part_Number" "CR2010-J/-000ELF"
+			(at 154.94 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Name" "Bourns"
 			(at 154.94 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -3560,7 +3626,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
+		(property "Footprint" "Resistor_SMD:R_2010_5025Metric"
 			(at 154.94 64.008 90)
 			(hide yes)
 			(show_name no)
@@ -3571,7 +3637,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.mouser.com/ProductDetail/Royalohm/1206S4J0000TDE?qs=jcD%2FCkGBYePiYOBtSMuX2g%3D%3D"
+		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Bourns/CR2010-J-000ELF?qs=iQmVXIlZDPkUtxAs54Hu3Q%3D%3D"
 			(at 154.94 62.23 0)
 			(hide yes)
 			(show_name no)
@@ -3583,6 +3649,72 @@
 			)
 		)
 		(property "Description" "Resistor"
+			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW20100000ZSTF?qs=LuV47j0yrcCuX3titWMqhw%3D%3D"
+			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/KOA-Speer/RK73Z2HTTE?qs=yjBPpuQqhAOWWHTNoHnqSQ%3D%3D"
+			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW20100000Z0EF?qs=uSoEc56oFvrUbxXi0J%2Fe1w%3D%3D"
+			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Bourns/CR2010-J-000ELF?qs=iQmVXIlZDPkUtxAs54Hu3Q%3D%3D"
+			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Part_Number" "CR2010-J/-000ELF"
+			(at 154.94 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Manufacturer_Name" "Bourns"
 			(at 154.94 62.23 0)
 			(hide yes)
 			(show_name no)
