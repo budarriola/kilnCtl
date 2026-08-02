@@ -652,9 +652,9 @@
 				(justify left)
 			)
 		)
-		(pin "PGood" output
+		(pin "RESET" output
 			(at 152.4 81.28 180)
-			(uuid "e6a2da79-b185-4406-82d8-43254dfb4627")
+			(uuid "299ccf36-522d-4c70-93f4-13b06c8fbcbd")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -738,9 +738,9 @@
 				(justify right)
 			)
 		)
-		(pin "PGood" output
+		(pin "RESET" output
 			(at 48.26 78.74 180)
-			(uuid "35744817-0a67-4438-b7a4-c9e942a3a0ad")
+			(uuid "ef84e36d-3451-43df-bdd5-ed7bb2f802ce")
 			(effects
 				(font
 					(size 1.27 1.27)

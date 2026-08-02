@@ -851,10 +851,6 @@
       "5V Regulator"
     ],
     [
-      "97a736c6-3aea-44aa-9cdc-a04a9e3c22ad",
-      "SaftyThermocouple"
-    ],
-    [
       "6f9be0ac-ca73-4f51-b23b-16a67ae84d74",
       "AuxRelay"
     ],

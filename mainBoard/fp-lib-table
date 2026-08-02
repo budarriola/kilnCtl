@@ -1,4 +1,5 @@
 (fp_lib_table
-  (version 7)
-  (lib (name "SamacSys_Parts")(type "KiCad")(uri "${KIPRJMOD}/parts/SamacSys_Parts.pretty")(options "")(descr ""))
+	(version 7)
+	(lib (name "SamacSys_Parts") (type "KiCad") (uri "${KIPRJMOD}/parts/SamacSys_Parts.pretty") (options "") (descr ""))
+	(lib (name "parts") (type "KiCad") (uri "C:/Users/budar/OneDrive/Desktop/kilnCtl/parts") (options "") (descr ""))
 )
