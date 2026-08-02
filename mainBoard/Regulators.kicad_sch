@@ -943,7 +943,7 @@
 				(pin passive line
 					(at 38.1 0 180)
 					(length 5.08)
-					(name "VSS"
+					(name "VCC"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -1503,16 +1503,16 @@
 		(uuid "00afb23a-3034-4cb8-bbf9-08d3d5f0f736")
 	)
 	(junction
-		(at 130.81 90.17)
+		(at 127 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "06291d1b-44cb-4105-a0d6-543ec5fedbfd")
 	)
 	(junction
-		(at 147.32 92.71)
+		(at 99.06 87.63)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "0d65a957-34d1-46df-a3e5-01f6d861df99")
+		(uuid "075f2a01-9efe-4dff-b54f-3ce55ebe50f5")
 	)
 	(junction
 		(at 227.33 77.47)
@@ -1563,12 +1563,6 @@
 		(uuid "b1f12929-2764-4b76-ab47-2605d8281317")
 	)
 	(junction
-		(at 101.6 87.63)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "c4098db8-a7e0-407d-82ac-48e06e2e29cb")
-	)
-	(junction
 		(at 194.31 87.63)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1582,7 +1576,7 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 82.55) (xy 137.16 92.71)
+			(xy 142.24 82.55) (xy 142.24 92.71)
 		)
 		(stroke
 			(width 0)
@@ -1632,13 +1626,33 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 100.33) (xy 137.16 105.41)
+			(xy 135.89 80.01) (xy 152.4 80.01)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0cb4667d-e7ab-4b11-b4d0-3456e20797cb")
+	)
+	(wire
+		(pts
+			(xy 142.24 100.33) (xy 142.24 105.41)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "0f8a7066-2c20-4137-9f43-5ce3ad5f5c2d")
+	)
+	(wire
+		(pts
+			(xy 135.89 93.98) (xy 135.89 80.01)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "177329ad-49b9-4941-8f35-e295c53c7cc9")
 	)
 	(wire
 		(pts
@@ -1712,7 +1726,7 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 76.2) (xy 101.6 78.74)
+			(xy 99.06 76.2) (xy 99.06 78.74)
 		)
 		(stroke
 			(width 0)
@@ -1752,7 +1766,7 @@
 	)
 	(wire
 		(pts
-			(xy 130.81 90.17) (xy 152.4 90.17)
+			(xy 127 90.17) (xy 152.4 90.17)
 		)
 		(stroke
 			(width 0)
@@ -1782,7 +1796,7 @@
 	)
 	(wire
 		(pts
-			(xy 130.81 90.17) (xy 130.81 92.71)
+			(xy 127 90.17) (xy 127 92.71)
 		)
 		(stroke
 			(width 0)
@@ -1842,7 +1856,7 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 86.36) (xy 101.6 87.63)
+			(xy 99.06 86.36) (xy 99.06 87.63)
 		)
 		(stroke
 			(width 0)
@@ -1862,7 +1876,7 @@
 	)
 	(wire
 		(pts
-			(xy 147.32 92.71) (xy 147.32 100.33)
+			(xy 151.13 92.71) (xy 151.13 102.87)
 		)
 		(stroke
 			(width 0)
@@ -1879,6 +1893,16 @@
 			(type default)
 		)
 		(uuid "6968d2e6-9fc4-4043-a559-1b3f548fa81c")
+	)
+	(wire
+		(pts
+			(xy 135.89 101.6) (xy 135.89 105.41)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "74580812-b282-4326-86fb-562ddbbe7841")
 	)
 	(wire
 		(pts
@@ -1902,7 +1926,7 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 96.52) (xy 101.6 97.79)
+			(xy 99.06 96.52) (xy 99.06 97.79)
 		)
 		(stroke
 			(width 0)
@@ -1912,7 +1936,7 @@
 	)
 	(wire
 		(pts
-			(xy 147.32 92.71) (xy 152.4 92.71)
+			(xy 151.13 92.71) (xy 152.4 92.71)
 		)
 		(stroke
 			(width 0)
@@ -1939,26 +1963,6 @@
 			(type default)
 		)
 		(uuid "9f948f5a-a42f-4b94-91bf-0bffeee95353")
-	)
-	(wire
-		(pts
-			(xy 101.6 87.63) (xy 101.6 88.9)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "a2ece209-7ae3-44b9-91bc-b89627f817c2")
-	)
-	(wire
-		(pts
-			(xy 147.32 80.01) (xy 147.32 92.71)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "a5ad0863-d841-400b-ac65-faa4873bfbfe")
 	)
 	(wire
 		(pts
@@ -2032,7 +2036,7 @@
 	)
 	(wire
 		(pts
-			(xy 130.81 76.2) (xy 130.81 90.17)
+			(xy 127 76.2) (xy 127 90.17)
 		)
 		(stroke
 			(width 0)
@@ -2052,6 +2056,16 @@
 	)
 	(wire
 		(pts
+			(xy 99.06 87.63) (xy 99.06 88.9)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c0a4d8ce-5f65-49c3-991a-e47b47e52111")
+	)
+	(wire
+		(pts
 			(xy 96.52 36.83) (xy 96.52 41.91)
 		)
 		(stroke
@@ -2062,27 +2076,7 @@
 	)
 	(wire
 		(pts
-			(xy 101.6 87.63) (xy 152.4 87.63)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "ca1fa39f-bd4e-400f-b6fe-8a05a35777ae")
-	)
-	(wire
-		(pts
-			(xy 152.4 80.01) (xy 147.32 80.01)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "cb5fe386-0cfe-4f55-a447-16038303f0b5")
-	)
-	(wire
-		(pts
-			(xy 130.81 100.33) (xy 130.81 105.41)
+			(xy 127 100.33) (xy 127 105.41)
 		)
 		(stroke
 			(width 0)
@@ -2172,7 +2166,7 @@
 	)
 	(wire
 		(pts
-			(xy 124.46 85.09) (xy 152.4 85.09)
+			(xy 120.65 85.09) (xy 152.4 85.09)
 		)
 		(stroke
 			(width 0)
@@ -2202,6 +2196,16 @@
 	)
 	(wire
 		(pts
+			(xy 99.06 87.63) (xy 152.4 87.63)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f4cfb440-1207-4749-bac3-32457ee53491")
+	)
+	(wire
+		(pts
 			(xy 101.6 29.21) (xy 116.84 29.21)
 		)
 		(stroke
@@ -2222,13 +2226,24 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 82.55) (xy 152.4 82.55)
+			(xy 142.24 82.55) (xy 152.4 82.55)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "fead8c90-f467-431c-a164-a9218aae3939")
+	)
+	(hierarchical_label "PwrGnd"
+		(shape passive)
+		(at 135.89 105.41 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "03ec5a90-7ca3-402a-958e-17f7bb5df9fa")
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
@@ -2254,7 +2269,7 @@
 	)
 	(hierarchical_label "RESET"
 		(shape output)
-		(at 124.46 85.09 180)
+		(at 120.65 85.09 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2265,7 +2280,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 137.16 105.41 270)
+		(at 142.24 105.41 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2276,7 +2291,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 101.6 97.79 270)
+		(at 99.06 97.79 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2287,7 +2302,7 @@
 	)
 	(hierarchical_label "12V"
 		(shape output)
-		(at 101.6 76.2 90)
+		(at 99.06 76.2 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2309,7 +2324,7 @@
 	)
 	(hierarchical_label "12V"
 		(shape output)
-		(at 130.81 76.2 90)
+		(at 127 76.2 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2331,7 +2346,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 147.32 100.33 270)
+		(at 151.13 102.87 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2353,7 +2368,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 130.81 105.41 270)
+		(at 127 105.41 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2375,7 +2390,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 130.81 96.52 0)
+		(at 127 96.52 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2385,7 +2400,7 @@
 		(dnp no)
 		(uuid "101e2b04-4af0-4268-b13d-fa2f886a1d3f")
 		(property "Reference" "C54"
-			(at 124.714 94.488 0)
+			(at 120.904 94.488 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2396,7 +2411,7 @@
 			)
 		)
 		(property "Value" "4.7 uF 100 VDC"
-			(at 126.746 111.76 90)
+			(at 122.936 111.76 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2407,7 +2422,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_1206_3216Metric"
-			(at 131.7752 100.33 0)
+			(at 127.9652 100.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2418,7 +2433,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2429,7 +2444,7 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2440,7 +2455,7 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRM31CZ72A475KE11K?qs=d0WKAl%252BL4KZ8%252BL6wtNbppg%3D%3D"
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2451,7 +2466,7 @@
 			)
 		)
 		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRM31CZ72A475KE11L?qs=d0WKAl%252BL4KYxySVtstmK4g%3D%3D"
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2462,7 +2477,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2473,7 +2488,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2484,7 +2499,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 130.81 96.52 0)
+			(at 127 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2508,6 +2523,179 @@
 				)
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/79a7153e-7b60-438c-928b-888b0e0879ef"
 					(reference "C54")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 135.89 97.79 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "3aa91746-f1eb-40d2-a752-4af9feda24d7")
+		(property "Reference" "C13"
+			(at 131.318 95.504 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "2.2uF"
+			(at 130.302 100.076 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_1206_3216Metric"
+			(at 136.8552 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM31CR71H225KA55L?qs=aEuGZpxfbxXH69FledLqTA%3D%3D"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRT31CR71H225KE13L?qs=qkDYIeTQ%252BEkhrDhfEIGgfg%3D%3D"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 135.89 97.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "d0e87f65-bbbe-4e6f-8465-fdff09fda115")
+		)
+		(pin "1"
+			(uuid "a6ebac2f-fe47-4156-854a-24abbac996ad")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/415569b5-e71f-44a8-96ab-1860fbe1fd72"
+					(reference "C14")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/79a7153e-7b60-438c-928b-888b0e0879ef"
+					(reference "C13")
 					(unit 1)
 				)
 			)
@@ -2634,7 +2822,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 101.6 82.55 0)
+		(at 99.06 82.55 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2645,7 +2833,7 @@
 		(fields_autoplaced yes)
 		(uuid "517e9f1c-59fb-420a-8fec-3807957c7162")
 		(property "Reference" "R107"
-			(at 104.14 81.2799 0)
+			(at 101.6 81.2799 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2656,7 +2844,7 @@
 			)
 		)
 		(property "Value" "71.5k 1%"
-			(at 104.14 83.8199 0)
+			(at 101.6 83.8199 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2667,7 +2855,7 @@
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 99.822 82.55 90)
+			(at 97.282 82.55 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2678,7 +2866,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay/CRCW0402422KFKED?qs=rzhQWu8UUS38CTZyFvhEkw%3D%3D"
-			(at 101.6 82.55 0)
+			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2689,7 +2877,7 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 101.6 82.55 0)
+			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2700,7 +2888,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 101.6 82.55 0)
+			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2711,7 +2899,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 101.6 82.55 0)
+			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2722,7 +2910,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 101.6 82.55 0)
+			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3460,7 +3648,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 101.6 92.71 0)
+		(at 99.06 92.71 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3471,7 +3659,7 @@
 		(fields_autoplaced yes)
 		(uuid "d040a39e-8ccc-402f-9d61-ff1a2f2b6d49")
 		(property "Reference" "R108"
-			(at 104.14 91.4399 0)
+			(at 101.6 91.4399 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3482,7 +3670,7 @@
 			)
 		)
 		(property "Value" "10k 1%"
-			(at 104.14 93.9799 0)
+			(at 101.6 93.9799 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3493,7 +3681,7 @@
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 99.822 92.71 90)
+			(at 97.282 92.71 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3504,7 +3692,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Vishay/CRCW0402154KFKED?qs=sGAEpiMZZMtlubZbdhIBICyxlhGRQNJfRCzUCssnsug%3D"
-			(at 101.6 92.71 0)
+			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3515,7 +3703,7 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 101.6 92.71 0)
+			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3526,7 +3714,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 101.6 92.71 0)
+			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3537,7 +3725,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 101.6 92.71 0)
+			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3548,7 +3736,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 101.6 92.71 0)
+			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3697,7 +3885,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 137.16 96.52 0)
+		(at 142.24 96.52 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3707,7 +3895,7 @@
 		(dnp no)
 		(uuid "d5e6df0d-2250-441f-967c-3c9aadbaf530")
 		(property "Reference" "C69"
-			(at 138.938 93.98 0)
+			(at 144.018 93.98 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3718,7 +3906,7 @@
 			)
 		)
 		(property "Value" "6500p"
-			(at 138.938 99.06 0)
+			(at 144.018 99.06 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3729,7 +3917,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
-			(at 138.1252 100.33 0)
+			(at 143.2052 100.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3740,7 +3928,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
-			(at 137.16 96.52 0)
+			(at 142.24 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3751,7 +3939,7 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 137.16 96.52 0)
+			(at 142.24 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3762,7 +3950,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 137.16 96.52 0)
+			(at 142.24 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3773,7 +3961,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 137.16 96.52 0)
+			(at 142.24 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3784,7 +3972,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 137.16 96.52 0)
+			(at 142.24 96.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

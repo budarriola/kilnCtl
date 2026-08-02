@@ -42,7 +42,7 @@
   (pad 19 smd rect (at 2.925 -2.275 90) (size 0.45 1.45) (layers F.Cu F.Paste F.Mask))
   (pad 20 smd rect (at 2.925 -2.925 90) (size 0.45 1.45) (layers F.Cu F.Paste F.Mask))
   (pad 21 smd rect (at 0 0 0) (size 2.74 3.86) (layers F.Cu F.Paste F.Mask))
-  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\SamacSys_Parts.3dshapes\\LT8631IFE#PBF.stp"
+  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\mainBoard\\parts\\SamacSys_Parts.3dshapes\\LT8631IFE#PBF.stp"
     (at (xyz 0 0 0.024803149418568))
     (scale (xyz 1 1 1))
     (rotate (xyz -90 0 0))

@@ -3,6 +3,9 @@
     "kicad": {
       "command": "mykicadMcp/.venv/Scripts/python.exe",
       "args": ["mykicadMcp/kicad_mcp_server.py"]
+    },
+    "pdf-mcp": {
+      "command": "pdfMcp/.venv/Scripts/pdf-mcp.exe"
     }
   }
 }

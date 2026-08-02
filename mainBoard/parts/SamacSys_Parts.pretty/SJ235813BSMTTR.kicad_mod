@@ -46,7 +46,7 @@
   (pad 10 smd rect (at 6.100 -3.425 0) (size 1.500 2.550) (layers F.Cu F.Paste F.Mask))
   (pad 11 np_thru_hole circle (at -2.000 0.05) (size 1.5 1.5) (drill 1.5) (layers *.Cu *.Mask))
   (pad 12 np_thru_hole circle (at 4.000 0.05) (size 1.5 1.5) (drill 1.5) (layers *.Cu *.Mask))
-  (model "C:\\Users\\barriola\\Desktop\\kiln\\parts\\SamacSys_Parts.3dshapes\\SJ2-35813B-SMT-TR.stp"
+  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\mainBoard\\parts\\SamacSys_Parts.3dshapes\\SJ2-35813B-SMT-TR.stp"
     (at (xyz 0.0039370079326817 0 0.0015748031144067))
     (scale (xyz 1 1 1))
     (rotate (xyz 90 0 -90))

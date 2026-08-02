@@ -12,6 +12,18 @@
 		(uuid "1958d9b2-cd79-46eb-bf1e-750c4d4f900f")
 	)
 	(junction
+		(at 149.86 88.9)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "58524800-a825-4b59-9aea-18cb50b0c42f")
+	)
+	(junction
+		(at 147.32 77.47)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "9d3838bb-2ebc-4167-a79a-4ef9d0233f29")
+	)
+	(junction
 		(at 91.44 121.92)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -22,6 +34,16 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "f683852f-2c3e-4ff7-9e42-4942bb870c9a")
+	)
+	(wire
+		(pts
+			(xy 120.65 46.99) (xy 181.61 46.99)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "002fa656-4a76-46a1-99d3-b6d4f6bcb935")
 	)
 	(wire
 		(pts
@@ -75,6 +97,16 @@
 	)
 	(wire
 		(pts
+			(xy 181.61 46.99) (xy 181.61 54.61)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "23120f06-ba8c-48a6-8be1-95b622c16e49")
+	)
+	(wire
+		(pts
 			(xy 76.2 121.92) (xy 76.2 96.52)
 		)
 		(stroke
@@ -112,6 +144,16 @@
 			(type default)
 		)
 		(uuid "4136e5d4-ef19-41d6-ad6f-919fb4ee0d6b")
+	)
+	(wire
+		(pts
+			(xy 120.65 95.25) (xy 120.65 46.99)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "51fc6f88-5f1d-4bed-8600-7deb74ab16d3")
 	)
 	(wire
 		(pts
@@ -165,6 +207,26 @@
 	)
 	(wire
 		(pts
+			(xy 149.86 62.23) (xy 153.67 62.23)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "68167e33-528b-43ac-a79d-0a11b3ded70c")
+	)
+	(wire
+		(pts
+			(xy 181.61 54.61) (xy 180.34 54.61)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7051ced0-3029-4bf5-8d48-70e19075c5bc")
+	)
+	(wire
+		(pts
 			(xy 107.95 110.49) (xy 107.95 121.92)
 		)
 		(stroke
@@ -182,6 +244,16 @@
 			(type default)
 		)
 		(uuid "7884976f-3963-493a-a4c7-2bf8118515ef")
+	)
+	(wire
+		(pts
+			(xy 149.86 88.9) (xy 149.86 62.23)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7d7b2e23-778f-4073-8fa5-a4ac4b7c7601")
 	)
 	(wire
 		(pts
@@ -205,7 +277,7 @@
 	)
 	(wire
 		(pts
-			(xy 124.46 77.47) (xy 152.4 77.47)
+			(xy 124.46 77.47) (xy 147.32 77.47)
 		)
 		(stroke
 			(width 0)
@@ -275,6 +347,16 @@
 	)
 	(wire
 		(pts
+			(xy 144.78 81.28) (xy 144.78 57.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b8cf8df1-b6bf-49ab-b768-e804b8ec83ca")
+	)
+	(wire
+		(pts
 			(xy 138.43 123.19) (xy 149.86 123.19)
 		)
 		(stroke
@@ -302,6 +384,16 @@
 			(type default)
 		)
 		(uuid "c14d4fb0-9247-434d-80e1-a1d0352f13fe")
+	)
+	(wire
+		(pts
+			(xy 147.32 54.61) (xy 153.67 54.61)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c91bade0-0e44-41ec-9ac0-c3f1f4cbbcbb")
 	)
 	(wire
 		(pts
@@ -335,6 +427,16 @@
 	)
 	(wire
 		(pts
+			(xy 144.78 57.15) (xy 153.67 57.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d5b470dc-3987-47a2-a8ff-344e2811e934")
+	)
+	(wire
+		(pts
 			(xy 76.2 90.17) (xy 73.66 90.17)
 		)
 		(stroke
@@ -365,6 +467,26 @@
 	)
 	(wire
 		(pts
+			(xy 152.4 81.28) (xy 144.78 81.28)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e784a65f-14d4-40cf-a560-ba1ac50e2301")
+	)
+	(wire
+		(pts
+			(xy 147.32 77.47) (xy 147.32 54.61)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ee6696df-c42f-4a8b-b13e-98eaccbb41bd")
+	)
+	(wire
+		(pts
 			(xy 149.86 123.19) (xy 149.86 88.9)
 		)
 		(stroke
@@ -382,6 +504,16 @@
 			(type default)
 		)
 		(uuid "f8f85ab5-83dd-48a3-b2ce-d5af18ed2b4f")
+	)
+	(wire
+		(pts
+			(xy 147.32 77.47) (xy 152.4 77.47)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fdd513f6-ad03-41f7-986a-b272a5963288")
 	)
 	(sheet
 		(at 48.26 48.26)
@@ -671,6 +803,92 @@
 		)
 	)
 	(sheet
+		(at 153.67 52.07)
+		(size 26.67 12.7)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "641ca61d-1615-4e04-b469-618851044f75")
+		(property "Sheetname" "Safty 5V Regulator"
+			(at 153.67 51.3584 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "5V_Regulator.kicad_sch"
+			(at 153.67 65.3546 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(pin "5V" output
+			(at 180.34 54.61 0)
+			(uuid "91c9e4ac-8413-48fc-913a-f6dcdb14819f")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(pin "12V" input
+			(at 153.67 54.61 180)
+			(uuid "bf788713-efb9-4cc8-b4fc-6a9e684e6de9")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "EN" input
+			(at 153.67 57.15 180)
+			(uuid "8f829aa6-8e4e-414a-987c-05026ce196e9")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(pin "PwrGnd" passive
+			(at 153.67 62.23 180)
+			(uuid "03497090-38e6-4355-aeb7-88539300e503")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18"
+					(page "7")
+				)
+			)
+		)
+	)
+	(sheet
 		(at 48.26 74.93)
 		(size 25.4 17.78)
 		(exclude_from_sim no)
@@ -861,6 +1079,16 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
+			)
+		)
+		(pin "5V" input
+			(at 120.65 95.25 90)
+			(uuid "9e704331-238c-4bea-a5fa-817b86174e9c")
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
 			)
 		)
 		(instances

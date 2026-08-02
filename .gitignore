@@ -21,6 +21,10 @@
 # its own .gitignore covers the venv, caches, editor settings, and runtime log.
 /output/
 
+# pdf-mcp (github.com/jztan/pdf-mcp) - third-party MCP server, installed local-only.
+/pdfMcp/.venv/
+/pdfMcp/__pycache__/
+
 # Autorouter per-board working state (mykicadMcp NETCLASS_PLAN Phase 7) - disposable,
 # machine-local; policy lives in the committed pcb_settings.json instead.
 /mainBoard/*.board_local.json

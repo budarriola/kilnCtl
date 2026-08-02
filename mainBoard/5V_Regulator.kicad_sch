@@ -765,7 +765,7 @@
 				(pin passive line
 					(at 38.1 0 180)
 					(length 5.08)
-					(name "VSS"
+					(name "VCC"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -1143,12 +1143,6 @@
 		(uuid "027c2392-6d5a-4b13-be0b-9a2a74a1c79e")
 	)
 	(junction
-		(at 111.76 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "23841e92-abb6-4074-92cc-0d6e3bb70a79")
-	)
-	(junction
 		(at 181.61 82.55)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1173,7 +1167,7 @@
 		(uuid "8e9f93de-df92-4710-885b-e92e66db1d71")
 	)
 	(junction
-		(at 100.33 92.71)
+		(at 92.71 92.71)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "8fc8db31-0afa-4821-837a-6f0151f0acb4")
@@ -1185,7 +1179,7 @@
 		(uuid "a8325f0e-6919-4e6b-aa05-9b12325f1207")
 	)
 	(junction
-		(at 105.41 95.25)
+		(at 97.79 95.25)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "c9a17dc1-3ef1-4ef8-97e4-fdccb3c52257")
@@ -1195,6 +1189,10 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "daefc83f-9662-4453-a2eb-72136c6c8c3e")
+	)
+	(no_connect
+		(at 116.84 90.17)
+		(uuid "db950ff0-b3ad-4bf8-ae1e-12fbc8e37094")
 	)
 	(wire
 		(pts
@@ -1208,7 +1206,7 @@
 	)
 	(wire
 		(pts
-			(xy 111.76 97.79) (xy 111.76 105.41)
+			(xy 115.57 97.79) (xy 115.57 104.14)
 		)
 		(stroke
 			(width 0)
@@ -1235,6 +1233,16 @@
 			(type default)
 		)
 		(uuid "195053c8-ed01-4b54-9bef-a5b47f30ddad")
+	)
+	(wire
+		(pts
+			(xy 106.68 104.14) (xy 106.68 85.09)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "196b5c49-b686-4327-a4d2-0f38932dc49d")
 	)
 	(wire
 		(pts
@@ -1268,7 +1276,7 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 92.71) (xy 100.33 85.09)
+			(xy 92.71 92.71) (xy 92.71 85.09)
 		)
 		(stroke
 			(width 0)
@@ -1348,16 +1356,6 @@
 	)
 	(wire
 		(pts
-			(xy 116.84 85.09) (xy 111.76 85.09)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "4a87e2c0-200a-46ad-9a51-d8f78e47a25c")
-	)
-	(wire
-		(pts
 			(xy 154.94 95.25) (xy 173.99 95.25)
 		)
 		(stroke
@@ -1418,7 +1416,7 @@
 	)
 	(wire
 		(pts
-			(xy 116.84 92.71) (xy 100.33 92.71)
+			(xy 116.84 92.71) (xy 92.71 92.71)
 		)
 		(stroke
 			(width 0)
@@ -1458,7 +1456,7 @@
 	)
 	(wire
 		(pts
-			(xy 111.76 97.79) (xy 116.84 97.79)
+			(xy 115.57 97.79) (xy 116.84 97.79)
 		)
 		(stroke
 			(width 0)
@@ -1478,7 +1476,7 @@
 	)
 	(wire
 		(pts
-			(xy 105.41 95.25) (xy 105.41 99.06)
+			(xy 97.79 95.25) (xy 97.79 99.06)
 		)
 		(stroke
 			(width 0)
@@ -1508,7 +1506,7 @@
 	)
 	(wire
 		(pts
-			(xy 97.79 92.71) (xy 100.33 92.71)
+			(xy 90.17 92.71) (xy 92.71 92.71)
 		)
 		(stroke
 			(width 0)
@@ -1528,7 +1526,7 @@
 	)
 	(wire
 		(pts
-			(xy 114.3 87.63) (xy 114.3 113.03)
+			(xy 113.03 87.63) (xy 113.03 113.03)
 		)
 		(stroke
 			(width 0)
@@ -1538,7 +1536,7 @@
 	)
 	(wire
 		(pts
-			(xy 105.41 106.68) (xy 105.41 111.76)
+			(xy 97.79 106.68) (xy 97.79 111.76)
 		)
 		(stroke
 			(width 0)
@@ -1548,7 +1546,7 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 74.93) (xy 100.33 77.47)
+			(xy 92.71 74.93) (xy 92.71 77.47)
 		)
 		(stroke
 			(width 0)
@@ -1628,7 +1626,7 @@
 	)
 	(wire
 		(pts
-			(xy 114.3 87.63) (xy 116.84 87.63)
+			(xy 113.03 87.63) (xy 116.84 87.63)
 		)
 		(stroke
 			(width 0)
@@ -1638,7 +1636,7 @@
 	)
 	(wire
 		(pts
-			(xy 114.3 120.65) (xy 114.3 125.73)
+			(xy 113.03 120.65) (xy 113.03 125.73)
 		)
 		(stroke
 			(width 0)
@@ -1678,7 +1676,27 @@
 	)
 	(wire
 		(pts
-			(xy 105.41 95.25) (xy 116.84 95.25)
+			(xy 106.68 85.09) (xy 116.84 85.09)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ed4e3fa1-6b74-4255-8f68-8af0a339301f")
+	)
+	(wire
+		(pts
+			(xy 106.68 111.76) (xy 106.68 115.57)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "eebb67a9-647a-4788-92c2-d6c7ac1c64a0")
+	)
+	(wire
+		(pts
+			(xy 97.79 95.25) (xy 116.84 95.25)
 		)
 		(stroke
 			(width 0)
@@ -1688,23 +1706,13 @@
 	)
 	(wire
 		(pts
-			(xy 105.41 81.28) (xy 105.41 95.25)
+			(xy 97.79 81.28) (xy 97.79 95.25)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "f5816b92-13e5-4be8-a769-f13d6eddd33f")
-	)
-	(wire
-		(pts
-			(xy 111.76 85.09) (xy 111.76 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f5a39f5d-b5f0-4cb5-aa96-19fabd4a215f")
 	)
 	(wire
 		(pts
@@ -1750,7 +1758,7 @@
 	)
 	(hierarchical_label "12V"
 		(shape output)
-		(at 100.33 74.93 90)
+		(at 92.71 74.93 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1758,6 +1766,17 @@
 			(justify left)
 		)
 		(uuid "81aec043-c184-460f-a512-dceaec0c60ba")
+	)
+	(hierarchical_label "PwrGnd"
+		(shape passive)
+		(at 106.68 115.57 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "933e7b55-de5c-4fae-9459-acbb6fe8c6b8")
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
@@ -1783,7 +1802,7 @@
 	)
 	(hierarchical_label "12V"
 		(shape output)
-		(at 105.41 81.28 90)
+		(at 97.79 81.28 90)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1794,7 +1813,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 105.41 111.76 270)
+		(at 97.79 111.76 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1805,7 +1824,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 114.3 125.73 270)
+		(at 113.03 125.73 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1816,7 +1835,7 @@
 	)
 	(hierarchical_label "PwrGnd"
 		(shape passive)
-		(at 111.76 105.41 270)
+		(at 115.57 104.14 270)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1838,7 +1857,7 @@
 	)
 	(hierarchical_label "EN"
 		(shape input)
-		(at 97.79 92.71 180)
+		(at 90.17 92.71 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1959,15 +1978,19 @@
 			)
 		)
 		(pin "1"
-			(uuid "42f3cbb1-aad3-4c43-8643-3ea3f87f6e86")
+			(uuid "22e922b3-30ec-455d-8086-3d864cf53800")
 		)
 		(pin "2"
-			(uuid "c5913438-22bd-42fc-8b56-c88661a3c8e1")
+			(uuid "f65127bd-d00b-426b-82fc-8fd45471ed93")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "R100")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "R113")
 					(unit 1)
 				)
 			)
@@ -2074,15 +2097,19 @@
 			)
 		)
 		(pin "1"
-			(uuid "fa699125-929c-4a28-a58a-eab70bf71027")
+			(uuid "d6b06036-0d18-4f74-b4ed-71b695a1e71b")
 		)
 		(pin "2"
-			(uuid "344690ba-77eb-46f3-b1d1-dd4f171fe2d8")
+			(uuid "83c28b0e-f581-4295-b751-46608420050f")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "C63")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "C65")
 					(unit 1)
 				)
 			)
@@ -2197,15 +2224,19 @@
 			)
 		)
 		(pin "1"
-			(uuid "80c49467-9095-4a90-b17a-7268f47ce1b0")
+			(uuid "d1f25e6a-e362-4f53-9a67-5a2cbbc80135")
 		)
 		(pin "2"
-			(uuid "4e0b11e1-31d5-43d6-8bfd-4e9ad39ddf55")
+			(uuid "81abc02b-5c76-42e4-bad7-a1657ad8086d")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "C64")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "C66")
 					(unit 1)
 				)
 			)
@@ -2350,43 +2381,43 @@
 			)
 		)
 		(pin "10"
-			(uuid "1b490f7c-1490-4f83-b9fd-94a0d9ef8410")
+			(uuid "def5bb8a-cd72-4525-bc76-fa0730346290")
 		)
 		(pin "1"
-			(uuid "0d4ef055-6910-435d-92f6-730b3dfa3a6a")
+			(uuid "42b2b304-9f61-45c6-a093-0d34a074d786")
 		)
 		(pin "4"
-			(uuid "4c894070-40fc-4bf5-a720-6672b3574fcd")
+			(uuid "9193b209-148c-41c0-89b0-255a819ab6a4")
 		)
 		(pin "8"
-			(uuid "783fe13b-a87a-44fe-802c-a22a9c7289ee")
+			(uuid "aefb6abc-4818-4bf1-9cb5-472d129b9eaa")
 		)
 		(pin "9"
-			(uuid "62464969-dab7-442f-9baf-d0a2a39bfb80")
+			(uuid "befc3f94-b977-4591-99aa-29b0ff9effb0")
 		)
 		(pin "3"
-			(uuid "a4459be0-ea6e-4df1-973f-131f8b4b494d")
+			(uuid "f88a3a17-a86f-43c1-8996-5bc35c30ee8d")
 		)
 		(pin "2"
-			(uuid "f928b975-d0d1-4e1b-8cd3-f7bfc75bdff5")
+			(uuid "f7f81375-c0ef-4b9a-8ab3-026e9d450980")
 		)
 		(pin "5"
-			(uuid "f4d6dc27-dacd-472e-b42c-d289a13a5f55")
+			(uuid "88af5d37-d9b3-4dc9-9ccd-02b74977f75f")
 		)
 		(pin "6"
-			(uuid "297ebfdb-5c22-488c-be7f-1be3b45aa3be")
+			(uuid "f7d66a25-a3a7-42fd-9ba0-762872b409f8")
 		)
 		(pin "7"
-			(uuid "af6a9609-54ab-4ba1-b7c5-eb2833035928")
+			(uuid "4191a0fe-e5b1-4415-852d-3d9ee0121727")
 		)
 		(pin "11"
-			(uuid "138b4b08-447d-44f0-b7dc-832a40e02dc2")
+			(uuid "81b9a155-d4a9-4518-ab12-42df6818fe45")
 		)
 		(pin "12"
-			(uuid "00a77f56-29db-4889-a25e-95f9b391857b")
+			(uuid "0b3f40f1-9ae2-4f59-9917-4e38d1253dcb")
 		)
 		(pin "13"
-			(uuid "424ba947-994c-47b7-bbfc-60c4e377866d")
+			(uuid "37145c5c-9433-4b49-a1ce-8ba20f9474ee")
 		)
 		(instances
 			(project "kiln"
@@ -2394,12 +2425,16 @@
 					(reference "IC6")
 					(unit 1)
 				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "IC7")
+					(unit 1)
+				)
 			)
 		)
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 100.33 81.28 180)
+		(at 92.71 81.28 180)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2409,7 +2444,7 @@
 		(dnp no)
 		(uuid "45a947d3-bff9-4d13-8379-279a9c4d5212")
 		(property "Reference" "R41"
-			(at 98.044 82.804 90)
+			(at 90.424 82.804 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2419,7 +2454,7 @@
 			)
 		)
 		(property "Value" "10k"
-			(at 100.33 81.534 90)
+			(at 92.71 81.534 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2429,7 +2464,7 @@
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 102.108 81.28 90)
+			(at 94.488 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2440,7 +2475,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Vishay-Draloric/RCA040210K0FKED?qs=sGAEpiMZZMtlubZbdhIBICUKE4ZsXujxYq%2F1aphagis%3D"
-			(at 100.33 81.28 0)
+			(at 92.71 81.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2451,7 +2486,7 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 100.33 81.28 0)
+			(at 92.71 81.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2462,7 +2497,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 100.33 81.28 90)
+			(at 92.71 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2473,7 +2508,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 100.33 81.28 90)
+			(at 92.71 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2484,7 +2519,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 100.33 81.28 90)
+			(at 92.71 81.28 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2495,10 +2530,10 @@
 			)
 		)
 		(pin "2"
-			(uuid "a1ba46f3-e070-4da1-ba71-e208080c7259")
+			(uuid "9f587dec-98e5-4b86-9aea-19dbd8922c15")
 		)
 		(pin "1"
-			(uuid "618b1f67-3fd9-433d-a358-48c94dcabc56")
+			(uuid "88cc079d-f647-416b-8715-6b697561f600")
 		)
 		(instances
 			(project "kiln"
@@ -2506,12 +2541,16 @@
 					(reference "R41")
 					(unit 1)
 				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "R42")
+					(unit 1)
+				)
 			)
 		)
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 114.3 116.84 0)
+		(at 113.03 116.84 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2521,7 +2560,7 @@
 		(dnp no)
 		(uuid "59eea258-a983-4ff1-a0b5-8dea7281e460")
 		(property "Reference" "C71"
-			(at 116.078 114.3 0)
+			(at 114.808 114.3 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2531,8 +2570,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "6500p"
-			(at 116.078 119.38 0)
+		(property "Value" "6800p"
+			(at 114.808 119.38 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2543,7 +2582,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
-			(at 115.2652 120.65 0)
+			(at 113.9952 120.65 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2554,7 +2593,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM155R71H104KE02J?qs=hNud%2FORuBR1wlwGPFWBVDg%3D%3D"
-			(at 114.3 116.84 0)
+			(at 113.03 116.84 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2565,7 +2604,7 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 114.3 116.84 0)
+			(at 113.03 116.84 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2576,7 +2615,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 114.3 116.84 0)
+			(at 113.03 116.84 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2587,7 +2626,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 114.3 116.84 0)
+			(at 113.03 116.84 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2598,7 +2637,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 114.3 116.84 0)
+			(at 113.03 116.84 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2609,15 +2648,192 @@
 			)
 		)
 		(pin "1"
-			(uuid "3e0f7c4a-6bf2-4ff2-918e-f89d41964579")
+			(uuid "3ac34f97-e71a-4bfd-94d2-90886d877089")
 		)
 		(pin "2"
-			(uuid "8772d695-eeff-41c4-88ea-adb2d77c4ebc")
+			(uuid "074d803a-36d5-438f-ae3f-da9cbfad1331")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "C71")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "C72")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 106.68 107.95 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "61da9ceb-a1a2-4184-b95f-758493d2bfee")
+		(property "Reference" "C11"
+			(at 102.108 105.664 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "2.2uF"
+			(at 101.092 110.236 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_1206_3216Metric"
+			(at 107.6452 111.76 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 4" "https://www.mouser.com/en/ProductDetail/KEMET/C1206C225K5RACAUTO7210?qs=%252BfJPIY6s7PlNVZKyV3SAGA%3D%3D"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 3" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GCM31CR71H225KA55L?qs=aEuGZpxfbxXH69FledLqTA%3D%3D"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt 2" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRT31CR71H225KE13L?qs=qkDYIeTQ%252BEkhrDhfEIGgfg%3D%3D"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNFNE?qs=%252B6g0mu59x7Ixea%2FwRKCoRw%3D%3D"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Mouser" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Device" ""
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" ""
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Type" ""
+			(at 106.68 107.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "bd86f761-24c2-4bb8-8bad-83bc5a652243")
+		)
+		(pin "1"
+			(uuid "a77922bc-9182-4967-969d-04596d3158a7")
+		)
+		(instances
+			(project "kiln"
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
+					(reference "C11")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "C12")
 					(unit 1)
 				)
 			)
@@ -2724,15 +2940,19 @@
 			)
 		)
 		(pin "1"
-			(uuid "b5489ac2-2b3c-445d-8de4-fa6b19cd3a5f")
+			(uuid "4beae930-bfdd-4cdd-95dd-49d2edfd5f81")
 		)
 		(pin "2"
-			(uuid "d52bf4e5-0a7e-4ff6-953c-dca3a7c9e939")
+			(uuid "4d5b9c1e-2113-422e-9999-ca962474e89b")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "R92")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "R93")
 					(unit 1)
 				)
 			)
@@ -2839,10 +3059,10 @@
 			)
 		)
 		(pin "1"
-			(uuid "d84c6fbe-f99f-49db-9773-cadedeba0d30")
+			(uuid "407b0565-752d-4896-8c55-59abe28c961a")
 		)
 		(pin "2"
-			(uuid "f2bb67a7-e171-49ac-8563-d7eaaa34afb6")
+			(uuid "44edf4db-7ba5-41a0-bb88-0f7d695c460c")
 		)
 		(instances
 			(project "kiln"
@@ -2850,12 +3070,16 @@
 					(reference "R97")
 					(unit 1)
 				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "R111")
+					(unit 1)
+				)
 			)
 		)
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 105.41 102.87 0)
+		(at 97.79 102.87 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -2865,7 +3089,7 @@
 		(dnp no)
 		(uuid "a492f452-8099-444c-83bb-a8233a69b3e8")
 		(property "Reference" "C55"
-			(at 99.314 100.838 0)
+			(at 91.694 100.838 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2876,7 +3100,7 @@
 			)
 		)
 		(property "Value" "4.7 uF 100 VDC"
-			(at 101.854 118.11 90)
+			(at 94.234 118.11 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -2887,7 +3111,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_1206_3216Metric"
-			(at 106.3752 106.68 0)
+			(at 98.7552 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2898,7 +3122,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.mouser.com/ProductDetail/Samsung-Electro-Mechanics/CL31B225KBHNNNE?qs=349EhDEZ59oNolj3jR402w%3D%3D"
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2909,7 +3133,7 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2920,7 +3144,7 @@
 			)
 		)
 		(property "Mouser Part Number Alt" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRM31CZ72A475KE11K?qs=d0WKAl%252BL4KZ8%252BL6wtNbppg%3D%3D"
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2931,7 +3155,7 @@
 			)
 		)
 		(property "Mouser" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRM31CZ72A475KE11L?qs=d0WKAl%252BL4KYxySVtstmK4g%3D%3D"
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2942,7 +3166,7 @@
 			)
 		)
 		(property "Sim.Device" ""
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2953,7 +3177,7 @@
 			)
 		)
 		(property "Sim.Pins" ""
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2964,7 +3188,7 @@
 			)
 		)
 		(property "Sim.Type" ""
-			(at 105.41 102.87 0)
+			(at 97.79 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2975,15 +3199,19 @@
 			)
 		)
 		(pin "2"
-			(uuid "0e6d9d8c-f80c-4481-bb44-532cfb835d7d")
+			(uuid "2bb88020-b6c0-48da-9cb3-b883e7008cd4")
 		)
 		(pin "1"
-			(uuid "c383fc00-d83e-41be-bffd-ad5a77c8a031")
+			(uuid "1c46104a-d090-42ba-a836-b058f457014b")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "C55")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "C56")
 					(unit 1)
 				)
 			)
@@ -3090,15 +3318,19 @@
 			)
 		)
 		(pin "1"
-			(uuid "eac32559-f1b5-4f94-a1ab-9cd04338c235")
+			(uuid "22aa67a4-a303-43a5-b80c-ca8cf55147a4")
 		)
 		(pin "2"
-			(uuid "0feab543-f98f-42a4-b3dc-aa471b134979")
+			(uuid "07b9db2b-3924-46d8-bcad-7de24dc08d7a")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "R99")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "R112")
 					(unit 1)
 				)
 			)
@@ -3245,15 +3477,19 @@
 			)
 		)
 		(pin "1"
-			(uuid "1dad9259-908e-4746-852c-1f35f327f50d")
+			(uuid "1a946b04-e99b-4dc0-8810-9ae4deffa6c5")
 		)
 		(pin "2"
-			(uuid "ef7776a2-3110-4b9d-91cf-430de8f431c1")
+			(uuid "795850f2-bc46-4f50-904c-1c3aba601d50")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "C9")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "C10")
 					(unit 1)
 				)
 			)
@@ -3338,15 +3574,19 @@
 			)
 		)
 		(pin "2"
-			(uuid "db62bdc4-4952-4741-93c5-343dadce3a12")
+			(uuid "ec83d8bc-303d-4e01-bb7e-4079e444bbdb")
 		)
 		(pin "1"
-			(uuid "ca222064-211b-4983-8cc4-3abab80fed72")
+			(uuid "48b68c5f-afa0-4547-bad2-04540eafe5fa")
 		)
 		(instances
 			(project "kiln"
 				(path "/e9c1836b-d16f-494a-819b-41549a786e18/0dba9547-3e07-4b05-b251-0d0918aca780"
 					(reference "D28")
+					(unit 1)
+				)
+				(path "/e9c1836b-d16f-494a-819b-41549a786e18/641ca61d-1615-4e04-b469-618851044f75"
+					(reference "D29")
 					(unit 1)
 				)
 			)
