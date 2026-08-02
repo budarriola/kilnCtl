@@ -678,14 +678,6 @@
     [
       "e4f13f40-3d70-4bc2-ae51-4d5562ca7151",
       "Thermocouple1"
-    ],
-    [
-      "70961eba-ab42-488c-a903-6662367dc743",
-      "Thermocouple2"
-    ],
-    [
-      "62193ff9-b2d5-4926-9d95-0bd14a24c6eb",
-      "Thermocouple3"
     ]
   ],
   "text_variables": {},
