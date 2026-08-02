@@ -7763,7 +7763,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Horizontal"
 			(at 101.6 163.83 0)
 			(hide yes)
 			(show_name no)
