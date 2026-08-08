@@ -288,7 +288,48 @@
     "equivalence_files": []
   },
   "erc": {
-    "erc_exclusions": [],
+    "erc_exclusions": [
+      [
+        "multiple_net_names|1143000|1612900|c04cc0dd-dcb3-4829-84c8-6a1185268b31|317bac30-1698-4e0b-b3f2-79757c4b2fe0|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505",
+        ""
+      ],
+      [
+        "multiple_net_names|1282700|1663700|d3df975b-9934-4e83-a516-6c88967929b7|2eb082d1-e290-4a12-81f0-1a0344aa6505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505",
+        ""
+      ],
+      [
+        "multiple_net_names|1397000|1663700|1d789228-5f30-4080-89da-b3c0bc09cc87|4816a4f7-ddfd-487e-a30f-f5c485c94f57|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505",
+        ""
+      ],
+      [
+        "multiple_net_names|1536700|1663700|dc1dfb46-d3dd-4773-9c44-c034751234e1|b753e049-da35-4244-83c7-9c831bdfbeec|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505",
+        ""
+      ],
+      [
+        "multiple_net_names|3695700|2197100|e4ac1b76-7a62-4eb7-9fcc-f3bf129bc85f|7aa2c910-a50e-4b0b-be44-0ed7fa3b1541|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524",
+        ""
+      ],
+      [
+        "multiple_net_names|3810000|2120900|d04e6227-7295-4fb5-892d-363f72511e8c|2deadb32-9269-41a7-b21b-b75a2c3514e6|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524",
+        ""
+      ],
+      [
+        "multiple_net_names|3949700|2197100|9ae34984-7aa3-4f1c-ab4b-05f8e338a41e|2e5d45aa-1563-4954-9e70-bf63a1fca70c|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524",
+        ""
+      ],
+      [
+        "multiple_net_names|4076700|2120900|7f027e61-49ed-468e-a15c-dbc27fbe7f97|b5d135be-53e6-401c-a72c-e50333d2870c|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524|/e9c1836b-d16f-494a-819b-41549a786e18/307f7e78-c7c7-4c1f-bfd5-4e5fce95f524",
+        ""
+      ],
+      [
+        "pin_to_pin|1498600|1054100|a6d3993e-c08e-487f-9867-4e456f15fba6|489a5654-602d-4cf8-a544-3f22c04104cb|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505",
+        ""
+      ],
+      [
+        "power_pin_not_driven|1727200|774700|8bf0114d-8fd6-46ec-8726-d11e30109faa|00000000-0000-0000-0000-000000000000|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|/e9c1836b-d16f-494a-819b-41549a786e18/9d216770-eb40-4527-939f-01f0f376c505|",
+        ""
+      ]
+    ],
     "meta": {
       "version": 0
     },
@@ -471,7 +512,7 @@
       "different_unit_net": "error",
       "duplicate_reference": "error",
       "duplicate_sheet_names": "error",
-      "endpoint_off_grid": "warning",
+      "endpoint_off_grid": "ignore",
       "extra_units": "error",
       "field_name_whitespace": "warning",
       "footprint_filter": "ignore",
@@ -773,7 +814,7 @@
         "uuid": "e9c1836b-d16f-494a-819b-41549a786e18"
       }
     ],
-    "used_designators": "U1-18,#PWR1-98,D1-39,A1-2,C1-80,J1-25,R1-113,FB1-16,K1-5,Q1-12,IC1-8,L1-6",
+    "used_designators": "U1-18,#PWR1-98,D1-39,A1-2,C1-80,J1-25,R1-115,FB1-16,K1-5,Q1-12,IC1-8,L1-6",
     "variants": []
   },
   "sheets": [

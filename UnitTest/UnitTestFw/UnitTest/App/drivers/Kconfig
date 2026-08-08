@@ -1,0 +1,129 @@
+menu "kilnCtl Hardware Configuration"
+
+    menu "I2C Bus (MCP4728 DAC + SSD1306 OLED)"
+        config KILNCTL_I2C_SDA_IO
+            int "I2C SDA GPIO"
+            default 8
+            range 0 48
+
+        config KILNCTL_I2C_SCL_IO
+            int "I2C SCL GPIO"
+            default 9
+            range 0 48
+    endmenu
+
+    menu "UART Link (PC control interface)"
+        choice KILNCTL_UART_PORT_CHOICE
+            prompt "UART port"
+            default KILNCTL_UART_PORT_0
+            help
+                Which hardware UART peripheral to use for the PC link.
+
+        config KILNCTL_UART_PORT_0
+            bool "UART0"
+        config KILNCTL_UART_PORT_1
+            bool "UART1"
+        endchoice
+
+        config KILNCTL_UART_TX_IO
+            int "UART TX GPIO"
+            default 43
+            range 0 48
+            help
+                On boards with two USB-C ports, this should be routed
+                through the dedicated USB-UART bridge chip and its own
+                USB-C port -- distinct from the native USB /
+                USB-Serial-JTAG port (commonly GPIO19/20) used for
+                flashing/debugging, which shares its port with JTAG.
+
+        config KILNCTL_UART_RX_IO
+            int "UART RX GPIO"
+            default 44
+            range 0 48
+
+        config KILNCTL_UART_BAUD_RATE
+            int "UART baud rate"
+            default 115200
+
+        config KILNCTL_UART_OWNER_QUEUE_LEN
+            int "uart_owner request queue length"
+            default 8
+            help
+                How many in-flight uart_owner_transfer() requests (from any
+                caller sharing this owner) can be queued before a caller
+                blocks.
+
+        config KILNCTL_UART_OWNER_TASK_PRIORITY
+            int "uart_owner task priority"
+            default 5
+
+        config KILNCTL_UART_OWNER_STACK_SIZE
+            int "uart_owner task stack size (bytes)"
+            default 4096
+
+        config KILNCTL_UART_PROTOCOL_TASK_PRIORITY
+            int "uart_protocol RX task priority"
+            default 6
+
+        config KILNCTL_UART_PROTOCOL_STACK_SIZE
+            int "uart_protocol RX task stack size (bytes)"
+            default 4096
+    endmenu
+
+    menu "AD9833 Waveform Generator (SPI)"
+        choice KILNCTL_AD9833_SPI_HOST_CHOICE
+            prompt "SPI host peripheral"
+            default KILNCTL_AD9833_SPI_HOST_SPI2
+
+        config KILNCTL_AD9833_SPI_HOST_SPI2
+            bool "SPI2"
+        config KILNCTL_AD9833_SPI_HOST_SPI3
+            bool "SPI3"
+        endchoice
+
+        config KILNCTL_AD9833_SCLK_IO
+            int "AD9833 SCLK GPIO"
+            default 4
+            range 0 48
+
+        config KILNCTL_AD9833_MOSI_IO
+            int "AD9833 MOSI GPIO"
+            default 5
+            range 0 48
+
+        config KILNCTL_AD9833_CS_IO
+            int "AD9833 CS GPIO"
+            default 6
+            range 0 48
+
+        config KILNCTL_AD9833_MCLK_HZ
+            int "AD9833 MCLK crystal frequency (Hz)"
+            default 25000000
+            help
+                Must match the crystal/oscillator actually wired to the
+                part's MCLK pin (25 MHz is common on breakout boards but not
+                universal). A wrong value skews every programmed frequency.
+    endmenu
+
+    menu "SSD1306 OLED Display (I2C)"
+        config KILNCTL_SSD1306_I2C_ADDR
+            hex "SSD1306 I2C address"
+            default 0x3C
+            help
+                Common default is 0x3C; some boards use 0x3D.
+
+        config KILNCTL_SSD1306_WIDTH
+            int "SSD1306 width (pixels)"
+            default 128
+
+        config KILNCTL_SSD1306_HEIGHT
+            int "SSD1306 height (pixels, multiple of 8)"
+            default 64
+    endmenu
+
+    config KILNCTL_HEARTBEAT_LED_GPIO
+        int "Heartbeat LED GPIO"
+        default 18
+        range 0 48
+
+endmenu

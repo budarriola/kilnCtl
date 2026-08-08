@@ -4321,6 +4321,10 @@
 		(uuid "144fa2b7-c591-4a84-b457-7ba701abdfce")
 	)
 	(no_connect
+		(at 218.44 76.2)
+		(uuid "1b05954b-ba2d-4967-a031-2e81582bb1c6")
+	)
+	(no_connect
 		(at 218.44 66.04)
 		(uuid "20052540-d241-4cd9-b429-88081b0e7406")
 	)
@@ -4331,6 +4335,18 @@
 	(no_connect
 		(at 167.64 78.74)
 		(uuid "29a97f39-d6ab-4fdf-a265-b5a2406b6808")
+	)
+	(no_connect
+		(at 218.44 81.28)
+		(uuid "365931b2-5d49-4e87-a869-4a2060288adb")
+	)
+	(no_connect
+		(at 167.64 58.42)
+		(uuid "3921fbee-d273-4164-8a9b-8da935bd6db9")
+	)
+	(no_connect
+		(at 167.64 68.58)
+		(uuid "3c566b6e-cb68-4d8a-be6e-6de160a89776")
 	)
 	(no_connect
 		(at 218.44 132.08)
@@ -4365,8 +4381,24 @@
 		(uuid "a17dffdb-1455-41a7-afd7-79157470b21d")
 	)
 	(no_connect
+		(at 167.64 66.04)
+		(uuid "aec90208-c5b6-4e69-845f-74e69c43b400")
+	)
+	(no_connect
+		(at 218.44 78.74)
+		(uuid "df2772bc-d292-4c85-8b66-88cfeb9e3147")
+	)
+	(no_connect
 		(at 218.44 134.62)
 		(uuid "ee459f52-ae96-4d12-abb4-7c55e84724cd")
+	)
+	(no_connect
+		(at 237.49 241.3)
+		(uuid "ef395fcd-ea6e-4d86-9e8f-c612679ebfd0")
+	)
+	(no_connect
+		(at 191.77 53.34)
+		(uuid "f081a810-ab76-4f2b-b977-2ae15c9b4309")
 	)
 	(no_connect
 		(at 219.71 60.96)
@@ -4471,6 +4503,16 @@
 			(type default)
 		)
 		(uuid "0b70dc11-6169-4374-ab62-025fa05a450f")
+	)
+	(wire
+		(pts
+			(xy 73.66 251.46) (xy 77.47 251.46)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0c2d2dc3-0e73-4ffd-9dec-f06028f91e5c")
 	)
 	(wire
 		(pts
@@ -5694,16 +5736,6 @@
 	)
 	(wire
 		(pts
-			(xy 73.66 251.46) (xy 77.47 251.46)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "8fcc2f90-6476-4ce6-9dcc-8fe79655140f")
-	)
-	(wire
-		(pts
 			(xy 355.6 177.8) (xy 355.6 179.07)
 		)
 		(stroke
@@ -5881,6 +5913,16 @@
 			(type default)
 		)
 		(uuid "a35b23cc-7de8-4c4f-ae7a-5e6baf85fe34")
+	)
+	(wire
+		(pts
+			(xy 73.66 254) (xy 73.66 251.46)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a4006b1a-8a20-4885-929e-3be2f42fb0a9")
 	)
 	(wire
 		(pts
@@ -6071,16 +6113,6 @@
 			(type default)
 		)
 		(uuid "b32c4f65-5070-4ca0-be59-0d715bec5497")
-	)
-	(wire
-		(pts
-			(xy 73.66 254) (xy 73.66 251.46)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b35f2077-1983-439a-b7c7-ba24ba265ea4")
 	)
 	(wire
 		(pts
@@ -8417,6 +8449,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 250.19 80.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
 			(at 250.19 80.01 0)
 			(hide yes)
@@ -8440,17 +8483,6 @@
 			)
 		)
 		(property "Manufacturer_Name" "Vishay / Draloric"
-			(at 250.19 80.01 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 250.19 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -15671,29 +15703,6 @@
 			"eb4f5fba-d780-4d02-9996-e1df7c7f7307" "f044b55f-d529-4926-8909-7daebd25d173"
 			"f8a2fda7-e8a8-41fe-ad7d-2408a3e9b663" "fbcb5c3a-ea4c-4a8a-871b-50252cb0ed70"
 			"fd544f9d-9116-4cd2-996d-24e4e0b62c26" "fd6b7163-8cdd-49ab-815c-510e5b6b4f95"
-		)
-	)
-	(group ""
-		(uuid "a80a280d-31a0-4b76-bf80-d6054da36fa9")
-		(members "01d73998-251e-46de-a2fb-a5a766ac558a" "0573eaf9-e3df-4530-962c-78bc83545154"
-			"0737ef3c-69a1-468c-8842-02ca677120c3" "117851f6-d39b-4fea-8490-fd64b189ec0f"
-			"11c982a4-99ba-45fc-834c-d547e334d636" "1389095e-d52a-4619-af64-e9910dc7c62e"
-			"1ec62650-1534-4460-b805-bf7b33f4c68d" "244220b5-df49-43ee-a84f-561544e6ed67"
-			"2916a857-e3b9-44ed-bde1-e73f86681a16" "2cce3e1d-ccf5-4310-9af2-4968b5e5e0b5"
-			"303affac-7630-4324-aca9-6191ae359fd5" "33ecd58f-5c1f-4b58-b38a-0af34679d267"
-			"345ba1de-b0bb-4ef3-a095-0c0381bd9f19" "3610133e-be30-44a0-abe6-0374ff26957c"
-			"4de58580-80ba-4376-9790-77f9885ee922" "63fd10b0-d1e2-4439-9774-1a8b257597a7"
-			"6724e6ac-942f-45c6-b0f2-1750c4c1cf61" "6bf8ce12-cc33-4862-905e-dd1731657d5b"
-			"6e13c2b5-94ac-4a6c-8c8e-c6d59b729331" "6f9be0ac-ca73-4f51-b23b-16a67ae84d74"
-			"751c634f-5138-4078-9bd3-a79a12005d8d" "79cb8098-5fc5-49db-9993-ad819d0f9bb4"
-			"848a709c-d019-45d1-8bfa-23270ccef253" "84b57c7d-5f05-4494-8b27-49d0c0f12979"
-			"8fcc2f90-6476-4ce6-9dcc-8fe79655140f" "96dde035-5b41-42e1-bc7b-e5b832ca1820"
-			"98406b61-8a98-4104-84d1-7287adea4546" "a84bf762-754e-45cd-8956-712b8932ab94"
-			"b35f2077-1983-439a-b7c7-ba24ba265ea4" "b545b762-d2df-4408-bdc4-224515640d70"
-			"bf66c716-06dc-4d7d-9e17-9c4a2297bbb9" "c3f3c1c7-367d-41cd-b6cf-4467d28b0b73"
-			"cb40a6e9-53fc-44d5-8f34-a1f8bf702a5c" "dfe1a20b-0dda-4c17-abd3-430b66453aaf"
-			"e5f57a7b-d976-41bf-87c8-a6a07491b757" "f45116ee-173d-4db6-934d-32365a809670"
-			"f88bfe89-8103-4f8f-8378-326cad5fa3a3"
 		)
 	)
 	(group ""

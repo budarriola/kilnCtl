@@ -2757,7 +2757,7 @@
 				)
 			)
 		)
-		(property "Manufacturer_Part_Number" "CRCW0402110KFKED"
+		(property "Description" "Resistor"
 			(at 217.17 83.82 0)
 			(hide yes)
 			(show_name no)
@@ -2768,7 +2768,7 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Manufacturer_Part_Number" "CRCW0402110KFKED"
 			(at 217.17 83.82 0)
 			(hide yes)
 			(show_name no)
@@ -2887,7 +2887,7 @@
 				)
 			)
 		)
-		(property "Manufacturer_Part_Number" "CRCW040271K5FKED"
+		(property "Description" "Resistor"
 			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -2898,7 +2898,7 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Manufacturer_Part_Number" "CRCW040271K5FKED"
 			(at 99.06 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -3296,7 +3296,7 @@
 				)
 			)
 		)
-		(property "Manufacturer_Part_Number" "CRCW040233K2FKED"
+		(property "Description" "Resistor"
 			(at 199.39 101.6 0)
 			(hide yes)
 			(show_name no)
@@ -3307,7 +3307,7 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Manufacturer_Part_Number" "CRCW040233K2FKED"
 			(at 199.39 101.6 0)
 			(hide yes)
 			(show_name no)
@@ -3616,7 +3616,7 @@
 				)
 			)
 		)
-		(property "Manufacturer_Part_Number" "CRCW040241K2FKED"
+		(property "Description" "Resistor"
 			(at 217.17 93.98 0)
 			(hide yes)
 			(show_name no)
@@ -3627,7 +3627,7 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Manufacturer_Part_Number" "CRCW040241K2FKED"
 			(at 217.17 93.98 0)
 			(hide yes)
 			(show_name no)
@@ -3746,7 +3746,7 @@
 				)
 			)
 		)
-		(property "Manufacturer_Part_Number" "CRCW040210K0FKED"
+		(property "Description" "Resistor"
 			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -3757,7 +3757,7 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Manufacturer_Part_Number" "CRCW040210K0FKED"
 			(at 99.06 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -3993,6 +3993,17 @@
 				)
 			)
 		)
+		(property "Description" "Unpolarized capacitor"
+			(at 142.24 96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Murata-Electronics/GRM1555C1H682GE01D?qs=d0WKAl%252BL4KZmZL9n8aRONA%3D%3D"
 			(at 142.24 96.52 0)
 			(hide yes)
@@ -4016,17 +4027,6 @@
 			)
 		)
 		(property "Manufacturer_Name" "Murata Electronics"
-			(at 142.24 96.52 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
 			(at 142.24 96.52 0)
 			(hide yes)
 			(show_name no)

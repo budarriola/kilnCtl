@@ -2829,6 +2829,62 @@
 		(color 0 0 0 0)
 		(uuid "f46352b6-67b7-4b69-9a15-db8943f2b061")
 	)
+	(no_connect
+		(at 172.72 59.69)
+		(uuid "0d4278a6-70ef-4be9-ad26-a9587499359a")
+	)
+	(no_connect
+		(at 127 92.71)
+		(uuid "205e747e-76d9-40ea-ad25-a6c3f361b067")
+	)
+	(no_connect
+		(at 127 49.53)
+		(uuid "24ecac62-e118-43e9-8dfd-ca4eeb1ba9b2")
+	)
+	(no_connect
+		(at 149.86 31.75)
+		(uuid "4f4136b7-76b0-4bc8-81a0-1caa7caf6888")
+	)
+	(no_connect
+		(at 127 46.99)
+		(uuid "5aed9d69-e24f-42a3-bbef-ab41990edc14")
+	)
+	(no_connect
+		(at 172.72 64.77)
+		(uuid "78863a58-b258-4e53-a8c7-ae07563a6b7b")
+	)
+	(no_connect
+		(at 172.72 67.31)
+		(uuid "8dcb7b3e-9e55-4c42-8afe-675ae497ebb6")
+	)
+	(no_connect
+		(at 172.72 72.39)
+		(uuid "8fd328ce-91ae-4197-944c-f3c13b06cca3")
+	)
+	(no_connect
+		(at 172.72 57.15)
+		(uuid "a1d909be-bfcf-4961-a1c1-9db991333150")
+	)
+	(no_connect
+		(at 172.72 62.23)
+		(uuid "aa520567-18bb-4779-8ced-629d04a25596")
+	)
+	(no_connect
+		(at 127 90.17)
+		(uuid "c925c912-479a-4ac9-8d2e-2f75f178e508")
+	)
+	(no_connect
+		(at 144.78 31.75)
+		(uuid "cebf53ad-814d-4505-880a-0f4096a197c4")
+	)
+	(no_connect
+		(at 127 87.63)
+		(uuid "e0e15a3e-56a7-4256-8b6e-0089856c5022")
+	)
+	(no_connect
+		(at 172.72 69.85)
+		(uuid "e52aebac-7665-47b9-b432-c8d6f375e535")
+	)
 	(wire
 		(pts
 			(xy 29.21 140.97) (xy 44.45 140.97)
@@ -4379,7 +4435,7 @@
 		)
 		(uuid "b0c9712a-78c6-4a0e-9f0c-3b7c74b2288c")
 	)
-	(label "fault"
+	(label "mainFault"
 		(at 114.3 80.01 0)
 		(effects
 			(font
@@ -4439,7 +4495,7 @@
 		)
 		(uuid "d4682b66-dfa2-4c2f-9006-f92b02b06bdc")
 	)
-	(label "fault"
+	(label "mainFault"
 		(at 201.93 77.47 0)
 		(effects
 			(font
@@ -5880,6 +5936,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 218.44 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
 			(at 218.44 72.39 0)
 			(hide yes)
@@ -5903,17 +5970,6 @@
 			)
 		)
 		(property "Manufacturer_Name" "Vishay / Draloric"
-			(at 218.44 72.39 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 218.44 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -8339,6 +8395,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 218.44 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
 			(at 218.44 99.06 0)
 			(hide yes)
@@ -8362,17 +8429,6 @@
 			)
 		)
 		(property "Manufacturer_Name" "Vishay / Draloric"
-			(at 218.44 99.06 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 218.44 99.06 0)
 			(hide yes)
 			(show_name no)
@@ -9588,6 +9644,17 @@
 				)
 			)
 		)
+		(property "Description" "Resistor"
+			(at 233.68 33.02 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Mouser Part Number" "https://www.mouser.com/en/ProductDetail/Vishay-Draloric/RCS04021K00FKED?qs=NKmfXavxMazECCYilLNNOw%3D%3D"
 			(at 233.68 33.02 0)
 			(hide yes)
@@ -9611,17 +9678,6 @@
 			)
 		)
 		(property "Manufacturer_Name" "Vishay / Draloric"
-			(at 233.68 33.02 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Resistor"
 			(at 233.68 33.02 0)
 			(hide yes)
 			(show_name no)
