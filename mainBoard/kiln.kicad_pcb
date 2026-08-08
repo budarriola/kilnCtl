@@ -140,8 +140,8 @@
 			(sketchpadsonfab no)
 			(plotpadnumbers no)
 			(hidednponfab no)
-			(sketchdnponfab yes)
-			(crossoutdnponfab yes)
+			(sketchdnponfab no)
+			(crossoutdnponfab no)
 			(subtractmaskfromsilk yes)
 			(outputformat 1)
 			(mirror no)
@@ -10366,7 +10366,7 @@
 				)
 			)
 		)
-		(property "Value" "22Î¼F 25V"
+		(property "Value" "22μF 25V"
 			(at 0 2.3 90)
 			(layer "F.Fab")
 			(uuid "cc08f48b-64b3-448a-9873-ee8dbb0e26bb")
@@ -15429,7 +15429,7 @@
 				)
 			)
 		)
-		(property "Value" "22Î¼F 25V"
+		(property "Value" "22μF 25V"
 			(at 0 2.3 0)
 			(layer "F.Fab")
 			(uuid "a15103da-eadc-4f4a-a4e1-be4951fa71ff")
@@ -34974,7 +34974,7 @@
 				)
 			)
 		)
-		(property "Value" "22Î¼F 25V"
+		(property "Value" "22μF 25V"
 			(at 0 2.3 0)
 			(layer "F.Fab")
 			(uuid "fd084cad-95fd-44fe-b41c-4f0a5b15cc5b")
@@ -42630,7 +42630,7 @@
 				)
 			)
 		)
-		(property "Value" "22Î¼F 25V"
+		(property "Value" "22μF 25V"
 			(at 0 2.3 90)
 			(layer "F.Fab")
 			(uuid "3ccce180-5d19-4e80-aed3-27fcb5807706")
@@ -131517,38 +131517,9 @@
 		)
 	)
 	(group ""
-		(uuid "647f76ed-f085-4ddc-9884-8bede4e006f7")
-		(members "3a6b5369-8355-41b6-9851-772525643a6b" "3b40c298-79fc-4f26-8225-4354f82bf9d5"
-			"444717ee-769f-431d-ae61-14c49720f95b" "5d6ad5d8-ef0c-43a9-8cef-4478c87e77de"
-			"65e33734-cec5-45f2-a786-7139fe32515c" "844c12cd-ad45-41df-8a5d-42fa30f0d989"
-			"8889824c-5cd3-451c-bde3-7278c5d3a3bc" "8fedbc1b-2e44-45a1-9fdf-c5f748b33976"
-			"afdba643-c39c-4f45-8b17-c6c8002de6c5" "b0775845-614f-4e37-bc4a-735be492e114"
-			"c9362aca-6bee-4f2a-beff-e4e6af57bc42" "cb6ab817-e797-4030-9007-596f59f42c5d"
-			"cfabb997-8596-4a4b-880d-9c5db63de595" "e062357a-7d6d-4ba3-97f7-e8e8d32a7ad4"
-			"e5f97904-94cd-45af-bf4c-54cd39bf14d3"
-		)
-	)
-	(group ""
-		(uuid "7fc52a8e-5302-4c9b-87b0-f1489f2989e7")
-		(members "0ca3aa36-edef-449b-91b2-1b6029c09432" "1418b51b-becb-4f5d-9f89-e26815ef5b5c"
-			"1c671a01-0545-44ed-8a3a-5c71d76ffeaf" "2cb8e6a3-fa4d-4a57-8e45-f13c42057ba3"
-			"4a1ec013-6aff-44cd-9e56-273e1a16adef" "4c6be400-dcd0-41a3-b42d-7cd96700b5e8"
-			"5bd18716-5540-4cab-80a8-8766ebbc9a98" "8ad5688c-598c-431f-83ad-e983299a68ad"
-			"8ff8831a-0f66-468a-bfc7-ead43e6a7415" "ce5cd366-99a9-4d51-9f9c-fa64589dd98a"
-			"d08272dc-9ea4-4cef-9a23-a62ef4b02a5f" "f928c0ca-ef4c-40ac-b0db-7e9cdfc2dc8a"
-			"ff7227c7-01c8-4ed0-9ed6-7ad6503e57ba"
-		)
-	)
-	(group ""
-		(uuid "b6e2f484-1caf-4a35-9def-60fbdc21c6b5")
-		(members "1d909a92-22c4-4f82-8ddb-8b08da01c452" "1f5b8e5f-4738-45eb-b999-56bb6576c641"
-			"242ab3e1-edf5-413b-94f3-af31249ea035" "258a59e4-029d-415d-b095-81780f72d4c8"
-			"652a7e39-9a64-40c6-ba3b-53d384e77170" "7c691dac-95e1-4249-bb41-04feb1042c9f"
-			"7e680224-ed46-4a30-8c7f-892364803be4" "8bf0e131-c14c-4615-95a5-b512e60b5069"
-			"9cbf7b0f-cd1d-4d60-912d-06e5b7162954" "ae503240-587f-450b-916e-0236ab4fcd85"
-			"ae54e031-b11d-4d7e-a348-39bf907cb970" "b2ccf732-15d3-42c5-aabf-22de6a5d64cd"
-			"bc0be19f-bffd-4bfe-96d7-6810370b0540" "bc20712a-7bb8-4e9f-a77c-5c87ea131b69"
-			"bd7ee471-5f4f-477c-ae86-53143218069d"
+		(uuid "cde5b6b4-cdb1-478e-8ae9-2759de1bc27e")
+		(members "396ff842-1671-4172-bf05-e17732549ce8" "4fc6aa10-2ebe-4c37-b5bb-b0deef5bf880"
+			"937600a3-2b20-4705-b469-8f8dcff22017" "b32b362c-9a1f-4c29-b6b9-67d3c509b282"
 		)
 	)
 	(group ""
@@ -131562,6 +131533,13 @@
 	(group ""
 		(uuid "307c9e26-5404-4be2-a466-b3798cecd838")
 		(members "1385005b-306d-4f59-b00a-3fc4f87c6aff" "472f01ce-623c-47e8-ad52-3c811087644f")
+	)
+	(group ""
+		(uuid "6d53493c-5326-4853-87ef-78d579151dc5")
+		(members "167178b8-de20-4731-a594-bc702b67bafe" "1fea3527-1d5b-4062-ab10-008cd30345a4"
+			"36329bb7-18b9-4f60-81fd-87c03581c975" "5ba218ab-53f7-4fd3-b41e-21470d26895f"
+			"74b8f7f9-8fd2-49d9-a18a-0e666f4fef0a" "8e096ba5-225d-4039-84e7-c9a3538eff79"
+		)
 	)
 	(embedded_fonts no)
 	(embedded_files

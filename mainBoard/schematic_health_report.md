@@ -1,18 +1,12 @@
 # Schematic Health Report
 
-**12 issue(s) found.**
+**9 issue(s) found.**
 
 ## 1. Schematic Integrity
 
-- Duplicate reference designators: 3
+- Duplicate reference designators: 0
 - Missing Value field: 0
 - Missing Footprint field: 0
-
-| Reference | Instance Count | Values | Sheets |
-|---|---|---|---|
-| U7 | 3 | AD8542, AD8542, AD8542 | CurrentSense.kicad_sch, CurrentSense.kicad_sch, CurrentSense.kicad_sch |
-| U8 | 3 | AD8542, AD8542, AD8542 | CurrentSense.kicad_sch, CurrentSense.kicad_sch, CurrentSense.kicad_sch |
-| U9 | 3 | AD8542, AD8542, AD8542 | CurrentSense.kicad_sch, CurrentSense.kicad_sch, CurrentSense.kicad_sch |
 
 ## 2. Duplicate Mouser Links (different Values, same linked part)
 
