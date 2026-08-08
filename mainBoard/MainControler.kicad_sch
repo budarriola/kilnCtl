@@ -4158,6 +4158,16 @@
 		)
 		(uuid "6dcd743e-f7d4-4c60-8296-4f63b5f32ac6")
 	)
+	(text "Must REMOVE RGB LED. FOR THERMOFAULT 0/2 to work"
+		(exclude_from_sim no)
+		(at 263.906 136.906 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "a4da7a31-d556-438f-8c32-6a3d24328fcd")
+	)
 	(text "should connect to the isolated io"
 		(exclude_from_sim no)
 		(at 114.3 27.178 0)
