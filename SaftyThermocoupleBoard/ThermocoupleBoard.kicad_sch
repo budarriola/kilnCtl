@@ -3078,7 +3078,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_2x06_P2.54mm_Horizontal"
+		(property "Footprint" "Connector_PinHeader_1.27mm:PinHeader_2x06_P1.27mm_Horizontal"
 			(at 229.87 120.65 0)
 			(hide yes)
 			(show_name no)
