@@ -63,6 +63,12 @@ _link = get_shared_link()
 #: process's own diagnostics, this is a persistent per-session record of
 #: what was sent to the device, matching what the GUI keeps.
 _session_log = SessionLogger(name="uart_control.mcp_session")
+# Also persist uart_control's own module-level warnings (serial read
+# failures, link-hub connection loss) into the session file, matching the
+# GUI. main()'s stderr logging only reaches whoever is watching the
+# process's console, which for an MCP server launched by a client is
+# nobody.
+_session_log.capture_package_logs()
 
 
 def _on_boot_push(version) -> None:  # devices.FirmwareVersion, avoid an import cycle in the annotation

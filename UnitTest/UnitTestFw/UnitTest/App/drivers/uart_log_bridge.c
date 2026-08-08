@@ -1,5 +1,6 @@
 #include "uart_log_bridge.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -43,6 +44,13 @@ typedef struct {
  * same pattern as the other uart_bridge.c task contexts (static, lives for
  * the program's duration). */
 static uart_log_bridge_t s_bridge;
+
+/* Lines lost to a full queue (producer outrunning the sender, e.g. a burst
+ * right before a reset) since the last time this was reported. Not a
+ * critical-section-protected counter -- an occasional lost increment under
+ * concurrent ESP_LOGx callers just means the reported count is a lower
+ * bound, which is still far better than the previous silent-drop behavior. */
+static volatile uint32_t s_dropped_lines = 0;
 
 /* ESP-IDF's default formatted line looks like (optionally ANSI-colored):
  *   "E (12345) TAG: message\r\n"
@@ -110,6 +118,12 @@ static int uart_log_vprintf(const char *fmt, va_list args)
         return n;
     }
 
+    /* vsnprintf truncates silently at the buffer boundary; note it here so a
+     * long line reads as "...[+N]" on the PC side instead of just quietly
+     * ending mid-word with no sign anything was cut. */
+    bool line_truncated = (size_t)n >= sizeof(line);
+    size_t overflow = line_truncated ? (size_t)n - (sizeof(line) - 1) : 0;
+
     const char *text = line;
     size_t text_len = (size_t)n < sizeof(line) - 1 ? (size_t)n : sizeof(line) - 1;
     uint8_t level = uart_log_parse_level(&text, &text_len);
@@ -117,10 +131,22 @@ static int uart_log_vprintf(const char *fmt, va_list args)
     if (s_bridge.queue && xTaskGetCurrentTaskHandle() != s_bridge.sender_task) {
         uart_log_entry_t entry;
         entry.level = level;
-        size_t copy_len = text_len < sizeof(entry.text) ? text_len : sizeof(entry.text);
+        /* Reserve room for a "...[+N]" truncation marker so the copy below
+         * never fights the vsnprintf truncation for the same bytes. */
+        char marker[16];
+        size_t marker_len = 0;
+        if (line_truncated) {
+            int m = snprintf(marker, sizeof(marker), "...[+%u]", (unsigned)overflow);
+            marker_len = (m > 0 && (size_t)m < sizeof(marker)) ? (size_t)m : 0;
+        }
+        size_t max_text = sizeof(entry.text) - marker_len;
+        size_t copy_len = text_len < max_text ? text_len : max_text;
         memcpy(entry.text, text, copy_len);
-        entry.len = (uint8_t)copy_len;
-        xQueueSend(s_bridge.queue, &entry, 0);
+        memcpy(entry.text + copy_len, marker, marker_len);
+        entry.len = (uint8_t)(copy_len + marker_len);
+        if (xQueueSend(s_bridge.queue, &entry, 0) != pdTRUE) {
+            s_dropped_lines++;
+        }
     }
 
     return n;
@@ -147,6 +173,28 @@ static void uart_log_bridge_task(void *arg)
         uart_protocol_send(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
                             UART_TASK_ID_LOG, payload, (size_t)entry.len + 1,
                             UART_LOG_BRIDGE_ACK_TIMEOUT_MS);
+
+        /* Surface any lines lost to a full queue since the last report --
+         * built directly as a payload (not through ESP_LOGx, which
+         * uart_log_vprintf's self-filter would drop anyway since this is
+         * running on sender_task) so a burst that outran the queue is
+         * visible on the PC side as a specific count, not just a gap in the
+         * transcript. Checked after every send, not just when the queue runs
+         * dry, so a steady stream of overflow still gets reported promptly
+         * instead of only once the device finally quiets down. */
+        uint32_t dropped = s_dropped_lines;
+        if (dropped > 0) {
+            s_dropped_lines -= dropped;
+            uint8_t drop_payload[1 + UART_LOG_TEXT_MAX];
+            drop_payload[0] = UART_LOG_LEVEL_WARN;
+            int m = snprintf((char *)&drop_payload[1], UART_LOG_TEXT_MAX,
+                              "uart_log_bridge: %u log line(s) dropped (queue full)",
+                              (unsigned)dropped);
+            size_t drop_len = (m > 0 && (size_t)m < UART_LOG_TEXT_MAX) ? (size_t)m : UART_LOG_TEXT_MAX - 1;
+            uart_protocol_send(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
+                                UART_TASK_ID_LOG, drop_payload, drop_len + 1,
+                                UART_LOG_BRIDGE_ACK_TIMEOUT_MS);
+        }
     }
 }
 
@@ -164,8 +212,15 @@ esp_err_t uart_log_bridge_start(uart_protocol_t *proto)
     }
 
     s_bridge.proto = proto;
+    /* Priority 7: above every other uart_bridge.c task (all priority 5) and
+     * uart_owner/uart_protocol (5/6, see settings.h/Kconfig defaults) --
+     * deliberately the highest-priority task in the app. Log delivery is
+     * exactly what needs to keep running when something else is busy or
+     * wedged (an I2C lockup, a burst of bridge traffic); at the old
+     * priority 4 it was *below* the very tasks it reports on, so it could be
+     * starved right when its output mattered most. */
     BaseType_t created = xTaskCreatePinnedToCore(uart_log_bridge_task, "uart_log_bridge", 4096,
-                                                  &s_bridge, 4, &s_bridge.sender_task,
+                                                  &s_bridge, 7, &s_bridge.sender_task,
                                                   tskNO_AFFINITY);
     if (created != pdPASS) {
         s_bridge.proto = NULL;

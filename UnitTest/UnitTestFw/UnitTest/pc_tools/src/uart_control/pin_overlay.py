@@ -43,7 +43,7 @@ PIN_POSITIONS: dict[int, tuple[str, int]] = {
     6: ("left", 268),    # AD9833_CS_IO
     18: ("left", 420),   # HEARTBEAT_LED_GPIO
     8: ("left", 451),    # I2C_MASTER_SDA_IO
-    9: ("left", 573),    # I2C_MASTER_SCL_IO
+    9: ("left", 545),    # I2C_MASTER_SCL_IO
     43: ("right", 146),  # UART_OWNER_TX_IO (silkscreened "TX")
     44: ("right", 176),  # UART_OWNER_RX_IO (silkscreened "RX")
 }

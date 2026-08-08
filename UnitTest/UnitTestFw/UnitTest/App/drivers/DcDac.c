@@ -218,23 +218,51 @@ esp_err_t DcDac_set_all_percent(DcDacClass *dac, const float percents[4])
     return DcDac_write_all_and_update(dac, vals);
 }
 
+/* MCP4728 single/sequential-write data-byte layout (datasheet Fig 5-13,
+ * confirmed against Adafruit_MCP4728's setChannelValue()): the 12-bit value
+ * is NOT simply value>>4 / value<<4 across two bytes -- that's the packing
+ * for a left-justified-in-16-bits DAC (e.g. SPI parts like the MCP4921),
+ * which this is not. Byte 1's *top* nibble is VREF/PD1/PD0/Gx control bits,
+ * not data:
+ *
+ *   byte1 = VREF PD1 PD0 Gx D11 D10 D9 D8
+ *   byte2 = D7 D6 D5 D4 D3 D2 D1 D0
+ *
+ * The previous (value>>4)/((value&0xF)<<4) packing put data bits where PD1:
+ * PD0 live -- at full scale (0xFFF) that sent PD1:PD0 = 11, which is a
+ * power-down encoding: it disconnects the output amplifier and ties the pin
+ * through a ~500k resistor to ground instead of driving it. That -- not
+ * just VREF picking the wrong reference -- is why the channel measured
+ * barely above zero instead of anywhere near full scale.
+ *
+ * VREF=0 selects VDD (this board's 3.3V rail) as the reference, giving the
+ * full 0-VCC output range; VREF=1 selects the internal 2.048V reference
+ * instead and is never what DcDac_set_channel_percent's callers want. PD1:
+ * PD0=00 is normal (not powered down). Gx is ignored when VREF=VDD. */
+#define MCP4728_VREF_VDD   0x00u
+#define MCP4728_PD_NORMAL  0x00u
+#define MCP4728_GAIN_X1    0x00u
+
+static inline void mcp4728_pack_data_bytes(uint16_t value, uint8_t out[2])
+{
+    uint16_t config = (MCP4728_VREF_VDD << 15) | (MCP4728_PD_NORMAL << 13) | (MCP4728_GAIN_X1 << 12);
+    uint16_t word = config | (value & 0x0FFF);
+    out[0] = (uint8_t)(word >> 8);
+    out[1] = (uint8_t)(word & 0xFF);
+}
+
 esp_err_t DcDac_write_and_update_channel(DcDacClass *dac, uint8_t channel, uint16_t value)
 {
     if (!dac) return ESP_ERR_INVALID_ARG;
     if (channel > 3) return ESP_ERR_INVALID_ARG;
     if (value > 4095) value = 4095;
 
-    /* Compose a 3-byte Write-and-Update command. Control bits below are
-       chosen to follow a common MCP4728 write-and-update pattern; verify
-       against the datasheet for your device and adjust control bits if
-       necessary. */
     uint8_t buf[3];
     uint8_t base = dac->fmt.base_write_update;
     if (dac->variant == DCDAC_VARIANT_BASIC_ACK) base = dac->fmt.base_fast_write;
     uint8_t ctrl = base | ((channel & 0x03) << 1);
     buf[0] = ctrl;
-    buf[1] = (uint8_t)(value >> 4);
-    buf[2] = (uint8_t)((value & 0x0F) << 4);
+    mcp4728_pack_data_bytes(value, &buf[1]);
     return DcDac_write_raw(dac, buf, sizeof(buf));
 }
 
@@ -249,8 +277,7 @@ esp_err_t DcDac_write_all_and_update(DcDacClass *dac, const uint16_t values[4])
         if (dac->variant == DCDAC_VARIANT_BASIC_ACK) base = dac->fmt.base_fast_write;
         uint8_t ctrl = base | ((ch & 0x03) << 1);
         buf[ch*3 + 0] = ctrl;
-        buf[ch*3 + 1] = (uint8_t)(v >> 4);
-        buf[ch*3 + 2] = (uint8_t)((v & 0x0F) << 4);
+        mcp4728_pack_data_bytes(v, &buf[ch*3 + 1]);
     }
     return DcDac_write_raw(dac, buf, sizeof(buf));
 }
@@ -259,16 +286,21 @@ esp_err_t DcDac_power_down_channel(DcDacClass *dac, uint8_t channel, uint8_t pow
 {
     if (!dac) return ESP_ERR_INVALID_ARG;
     if (channel > 3) return ESP_ERR_INVALID_ARG;
-    power_mode &= 0x03; // only two bits
+    power_mode &= 0x03; // only two bits (PD1:PD0)
 
-    /* Power-down control often lives in control byte; build a small payload
-       that sets the power bits for the given channel. This implementation
-       uses the control byte pattern with the power bits set in positions
-       commonly seen on 12-bit I2C DACs—verify with your datasheet. */
+    /* PD1:PD0 are control bits in the *data* byte (bits 6:5 of byte1, same
+     * position mcp4728_pack_data_bytes always zeros for MCP4728_PD_NORMAL),
+     * not in the command/channel byte -- the previous version OR'd
+     * power_mode into ctrl's low bits, which land on the UDAC bit and
+     * nothing else, so it never actually powered anything down. Keep VREF/
+     * Gx at the same normal-operation values used elsewhere; only PD
+     * changes here. Data bits (D11:D0) are irrelevant while powered down,
+     * left at 0. */
     uint8_t base = dac->fmt.base_eeprom_write;
     if (dac->variant == DCDAC_VARIANT_BASIC_ACK) base = dac->fmt.base_fast_write;
-    uint8_t ctrl = base | ((channel & 0x03) << 1) | (power_mode & 0x03);
-    uint8_t buf[3] = { ctrl, 0x00, 0x00 };
+    uint8_t ctrl = base | ((channel & 0x03) << 1);
+    uint16_t config = (MCP4728_VREF_VDD << 15) | ((uint16_t)power_mode << 13) | (MCP4728_GAIN_X1 << 12);
+    uint8_t buf[3] = { ctrl, (uint8_t)(config >> 8), (uint8_t)(config & 0xFF) };
     return DcDac_write_raw(dac, buf, sizeof(buf));
 }
 
@@ -283,8 +315,7 @@ esp_err_t DcDac_eeprom_write_channel(DcDacClass *dac, uint8_t channel, uint16_t 
     uint8_t ctrl = base | ((channel & 0x03) << 1);
     uint8_t buf[3];
     buf[0] = ctrl;
-    buf[1] = (uint8_t)(value >> 4);
-    buf[2] = (uint8_t)((value & 0x0F) << 4);
+    mcp4728_pack_data_bytes(value, &buf[1]);
 
     // EEPROM write can take longer than a normal write; use a longer timeout.
     // Route through the owner (like DcDac_write_raw does) rather than

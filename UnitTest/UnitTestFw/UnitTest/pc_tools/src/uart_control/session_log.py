@@ -72,6 +72,29 @@ class QueueLogHandler(logging.Handler):
             pass
 
 
+class _ForwardToSessionHandler(logging.Handler):
+    """Re-emits records from the ``uart_control`` package into a SessionLogger.
+
+    Kept as a forwarder rather than just attaching the session's own
+    FileHandler to the package logger, because SessionLogger swaps its file
+    handler out at every session boundary -- forwarding through the logger
+    means package records always land in whatever file is current, with no
+    re-attaching needed on rollover.
+    """
+
+    def __init__(self, session: "SessionLogger") -> None:
+        super().__init__()
+        self.session = session
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # Prefix with the originating module so these are visibly not
+            # the app's own session lines.
+            self.session.logger.log(record.levelno, "%s: %s", record.name, record.getMessage())
+        except Exception:  # pragma: no cover - logging must never raise
+            pass
+
+
 # ---------------------------------------------------------------------------
 # session logger
 # ---------------------------------------------------------------------------
@@ -103,6 +126,32 @@ class SessionLogger:
         handler = QueueLogHandler(sink)
         self.logger.addHandler(handler)
         return handler
+
+    def capture_package_logs(self, package: str = "uart_control", level: int = logging.WARNING) -> None:
+        """Route this package's own module-level logging into the session log.
+
+        Modules like :mod:`uart_control.serial_link` and
+        :mod:`uart_control.link_hub` log genuinely diagnostic things through
+        their own ``logging.getLogger(__name__)`` -- a serial read failing,
+        the reader thread exiting, the connection to the link hub dying.
+        Without this, a host that never configures logging (the GUI does
+        not) drops every one of them on the floor, so the session log shows
+        a link going down with no reason recorded anywhere.
+
+        Safe against recursion: this logger is itself under ``package``, but
+        it sets ``propagate = False`` (see __init__), so records logged here
+        never climb back up to the package logger this handler listens on.
+        """
+        forwarder = _ForwardToSessionHandler(self)
+        forwarder.setLevel(level)
+        package_logger = logging.getLogger(package)
+        package_logger.addHandler(forwarder)
+        # Don't lower an explicitly-configured level, but make sure the
+        # package logger is permissive enough for `level` to get through --
+        # a logger left at NOTSET/WARNING default would otherwise filter
+        # these out before the handler ever sees them.
+        if package_logger.level == logging.NOTSET or package_logger.level > level:
+            package_logger.setLevel(level)
 
     # -- session lifecycle -------------------------------------------------
     def start_session(self, reason: str) -> Optional[Path]:

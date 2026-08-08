@@ -287,6 +287,17 @@ class RemoteUartLink:
     def __init__(self, own_device: Device = Device.HOST, host: str = HUB_HOST, port: int = HUB_PORT) -> None:
         self.own_device = own_device
         self._sock = socket.create_connection((host, port), timeout=_RPC_TIMEOUT_CONNECT)
+        # create_connection's timeout is meant to bound the *connect*, but it
+        # stays on the socket and applies to every later recv too -- so an
+        # idle link (nobody sending, which is the normal resting state
+        # between commands) made _read_loop's readline raise TimeoutError
+        # after exactly _RPC_TIMEOUT_CONNECT seconds. That is an OSError
+        # subclass, so _read_loop swallowed it and flipped _is_connected to
+        # False: the GUI showed "Disconnected" exactly 10 s after the last
+        # command, with a perfectly healthy board and port. Go back to
+        # blocking for the socket's actual lifetime; per-request deadlines
+        # are enforced at the application layer by _request's event.wait().
+        self._sock.settimeout(None)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         self._write_lock = threading.Lock()
@@ -440,6 +451,21 @@ class RemoteUartLink:
         except OSError:
             pass
         finally:
+            # Reaching here means the socket to the hub is gone (hub process
+            # exited, or it closed our connection) -- NOT that the serial
+            # port dropped. Those look identical downstream (is_connected
+            # goes False, the GUI just shows "Disconnected"), so say which
+            # one it was: a hub that vanished points at another pc_tools
+            # process, a serial drop points at the cable/board.
+            # Only worth warning about if we actually believed we had a live
+            # link: a reader ending on an already-disconnected client (or on
+            # a normal close(), which sets _stop) is just teardown, not a
+            # fault.
+            if not self._stop.is_set() and self._is_connected:
+                log.warning(
+                    "connection to the link hub was lost (hub process exited?); "
+                    "this client is now disconnected -- the physical port may still be fine"
+                )
             self._is_connected = False
 
     def _handle_event(self, msg: dict) -> None:
@@ -492,7 +518,22 @@ def get_shared_link(own_device: Device = Device.HOST) -> RemoteUartLink:
     normally just one caller (gui.py / mcp_server.py, at startup).
     """
     listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # The whole "first one to bind wins" election below depends on bind()
+    # genuinely FAILING when a hub already holds the port. On Windows,
+    # SO_REUSEADDR does not mean what it means on POSIX: it lets a second
+    # process bind an already-bound listening port, so every process would
+    # believe it was the hub. Two hubs means two UartLinks racing for one
+    # COM port -- the loser's connect() blocks on an already-open port until
+    # the RPC times out ("hub did not respond to 'connect' within 10.0s"),
+    # and when whichever process actually owned the port exits, every client
+    # of it silently flips to disconnected. Use SO_EXCLUSIVEADDRUSE there,
+    # which is the flag that actually refuses a duplicate bind; keep
+    # SO_REUSEADDR on POSIX, where it never permitted duplicate listeners
+    # and only avoids TIME_WAIT rebind failures.
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows
+        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listen_sock.bind((HUB_HOST, HUB_PORT))
         listen_sock.listen(16)

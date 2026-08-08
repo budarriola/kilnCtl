@@ -34,6 +34,7 @@ static const char *TAG = "SSD1306";
 #define SSD1306_CMD_INVERT_DISPLAY       0xA7
 #define SSD1306_CMD_SET_COLUMN_ADDR      0x21
 #define SSD1306_CMD_SET_PAGE_ADDR        0x22
+#define SSD1306_CMD_DEACTIVATE_SCROLL    0x2E
 
 // Standard ASCII 5x7 font, printable characters 0x20-0x7F (96 glyphs).
 // Each glyph is 5 columns; each column byte is 7 vertically-stacked pixel
@@ -233,6 +234,16 @@ esp_err_t SSD1306_init(SSD1306Class *oled, i2c_master_bus_handle_t bus, uint8_t 
         SSD1306_CMD_SET_VCOM_DETECT, 0x40,
         SSD1306_CMD_DISPLAY_RESUME,
         SSD1306_CMD_NORMAL_DISPLAY,
+        /* Hardware scrolling is a persistent controller mode: it survives a
+         * CPU-only reset (the panel keeps its own state unless power is
+         * actually removed), so a re-init after e.g. a watchdog reboot could
+         * otherwise come up with a leftover scroll still running and the
+         * framebuffer sliding across the screen. Adafruit_SSD1306's begin()
+         * sends this for the same reason, immediately before DISPLAY_ON;
+         * this driver was missing it. Note this is a correctness fix, not a
+         * brightness one -- every contrast/charge-pump/precharge value above
+         * already matches that library exactly. */
+        SSD1306_CMD_DEACTIVATE_SCROLL,
         SSD1306_CMD_DISPLAY_ON,
     };
     err = ssd1306_write_cmd_stream(oled, init_cmds, sizeof(init_cmds));

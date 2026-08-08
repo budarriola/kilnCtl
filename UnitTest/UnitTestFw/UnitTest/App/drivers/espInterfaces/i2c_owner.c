@@ -6,10 +6,39 @@
 
 static const char *TAG = "esp_i2c_owner";
 
+/* One raw attempt at whatever request.tx/rx_buffer describe. Pulled out of
+ * i2c_owner_task's loop so the retry-after-reset path below can call it
+ * twice without duplicating the tx/rx/tx+rx dispatch. */
+static esp_err_t i2c_owner_do_transfer(const i2c_owner_request_t *request)
+{
+    if (request->tx_buffer && request->tx_length > 0 && request->rx_buffer && request->rx_length > 0) {
+        return i2c_master_transmit_receive(request->device,
+                                            request->tx_buffer,
+                                            request->tx_length,
+                                            request->rx_buffer,
+                                            request->rx_length,
+                                            request->timeout_ms);
+    }
+    if (request->tx_buffer && request->tx_length > 0) {
+        return i2c_master_transmit(request->device,
+                                    request->tx_buffer,
+                                    request->tx_length,
+                                    request->timeout_ms);
+    }
+    if (request->rx_buffer && request->rx_length > 0) {
+        return i2c_master_receive(request->device,
+                                   request->rx_buffer,
+                                   request->rx_length,
+                                   request->timeout_ms);
+    }
+    return ESP_ERR_INVALID_ARG;
+}
+
 static void i2c_owner_task(void *arg)
 {
     i2c_owner_t *owner = (i2c_owner_t *)arg;
     i2c_owner_request_t request;
+    uint32_t consecutive_failures = 0;
 
     while (true) {
         if (xQueueReceive(owner->request_queue, &request, portMAX_DELAY) != pdTRUE) {
@@ -20,26 +49,46 @@ static void i2c_owner_task(void *arg)
             break;
         }
 
-        esp_err_t result = ESP_OK;
-        if (request.tx_buffer && request.tx_length > 0 && request.rx_buffer && request.rx_length > 0) {
-            result = i2c_master_transmit_receive(request.device,
-                                                 request.tx_buffer,
-                                                 request.tx_length,
-                                                 request.rx_buffer,
-                                                 request.rx_length,
-                                                 request.timeout_ms);
-        } else if (request.tx_buffer && request.tx_length > 0) {
-            result = i2c_master_transmit(request.device,
-                                         request.tx_buffer,
-                                         request.tx_length,
-                                         request.timeout_ms);
-        } else if (request.rx_buffer && request.rx_length > 0) {
-            result = i2c_master_receive(request.device,
-                                        request.rx_buffer,
-                                        request.rx_length,
-                                        request.timeout_ms);
+        esp_err_t result = i2c_owner_do_transfer(&request);
+
+        /* A failed/timed-out transaction (marginal wiring, a slave holding
+         * SDA low mid-transfer, ...) can leave the bus wedged: every
+         * subsequent transfer -- even to a different, healthy device --
+         * fails the same way, since nothing else ever recovers it. Reset it
+         * right here, on the owner task, then retry ONCE so the caller that
+         * hit the wedge doesn't have to (that's what turned "one bad
+         * transfer" into "every transfer after it, forever" -- press
+         * "Print" again and it looked like the whole link was dead). Skip
+         * ESP_ERR_INVALID_ARG (a caller bug, not a bus problem -- resetting
+         * won't fix it and would just add noise). */
+        if (result != ESP_OK && result != ESP_ERR_INVALID_ARG) {
+            esp_err_t reset_err = i2c_master_bus_reset(owner->bus);
+            if (reset_err != ESP_OK) {
+                consecutive_failures++;
+                ESP_LOGE(TAG,
+                         "transfer failed (%s); bus reset ALSO failed: %s (%lu consecutive failures)",
+                         esp_err_to_name(result), esp_err_to_name(reset_err),
+                         (unsigned long)consecutive_failures);
+            } else {
+                esp_err_t retry_result = i2c_owner_do_transfer(&request);
+                if (retry_result == ESP_OK) {
+                    ESP_LOGW(TAG, "transfer failed (%s); bus reset recovered it on retry",
+                             esp_err_to_name(result));
+                    result = retry_result;
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures++;
+                    ESP_LOGE(TAG,
+                             "transfer failed (%s); bus reset done but retry ALSO failed (%s) "
+                             "(%lu consecutive failures -- likely a wiring/hardware fault, not "
+                             "a transient glitch)",
+                             esp_err_to_name(result), esp_err_to_name(retry_result),
+                             (unsigned long)consecutive_failures);
+                    result = retry_result;
+                }
+            }
         } else {
-            result = ESP_ERR_INVALID_ARG;
+            consecutive_failures = 0;
         }
 
         if (request.result_out) {

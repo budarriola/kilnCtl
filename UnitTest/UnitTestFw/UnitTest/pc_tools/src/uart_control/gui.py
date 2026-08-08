@@ -61,6 +61,30 @@ _PINOUT_SCALE = 1.0
 #: late still shows history.
 _LOG_HISTORY_LINES = 2000
 
+#: How long the contrast slider must sit still before its value is actually
+#: sent. Long enough that a drag across the whole track collapses into one
+#: send, short enough to still feel immediate.
+_CONTRAST_DEBOUNCE_MS = 150
+
+#: The SSD1306's SET_CONTRAST register (0x81) sets segment drive current
+#: roughly linearly, but human brightness perception is roughly logarithmic
+#: (Weber-Fechner) -- equal steps in current give rapidly shrinking steps in
+#: *perceived* brightness, so nearly the whole visible range compresses into
+#: the low end of 0-255 and the slider feels dead past ~40-60. 2.2 matches
+#: the gamma used for the same reason in display/LED brightness controls
+#: generally (e.g. sRGB).
+_CONTRAST_GAMMA = 2.2
+
+
+def _contrast_slider_to_register(slider_value: int) -> int:
+    """Map a 0-255 *perceptually linear* slider position to the 0-255 byte
+    actually written to SET_CONTRAST, so equal slider movement gives
+    roughly equal perceived brightness steps instead of equal current
+    steps. Endpoints are exact (0->0, 255->255); the compression happens in
+    between."""
+    normalized = max(0, min(255, slider_value)) / 255.0
+    return round((normalized ** _CONTRAST_GAMMA) * 255)
+
 #: Same idea for the device console (firmware ESP_LOGx output over
 #: UART_TASK_ID_LOG) -- kept separate from the session log's history since
 #: it's a different stream (raw firmware text, not this app's own events).
@@ -74,6 +98,18 @@ _DEVICE_LOG_COLORS: dict[LogLevel, str] = {
     LogLevel.INFO: "#000000",
     LogLevel.DEBUG: "#555555",
     LogLevel.VERBOSE: "#888888",
+}
+
+#: Firmware log level -> SessionLogger method, so device-side ESP_LOGx lines
+#: (the only channel that ever carries a hint of *why* the board reset --
+#: e.g. an I2C/SPI driver error logged right before a watchdog reboot) land
+#: in the persistent session log file, not just the in-app Device Console
+#: popup's capped in-memory deque. Mirrors mcp_server.py's
+#: _DEVICE_LOG_SESSION_METHOD, which already did this -- the GUI just never
+#: had the equivalent wiring.
+_DEVICE_LOG_SESSION_METHOD_NAME: dict[LogLevel, str] = {
+    LogLevel.ERROR: "error",
+    LogLevel.WARN: "warning",
 }
 
 
@@ -92,12 +128,24 @@ class UartControlApp:
         self.ports: list[PortInfo] = []
         self.popups: dict[str, tk.Toplevel] = {}
 
+        #: Debounce state for the live-applying contrast slider (see
+        #: _build_oled_popup). Held on the app, not the popup, so closing and
+        #: reopening the OLED window can't strand a pending `after` callback
+        #: or lose track of what was last pushed to the panel.
+        self._contrast_after_id: Optional[str] = None
+        self._contrast_last_sent: Optional[int] = None
+
         # Session logging. Nothing is written until the first session starts
         # (a successful connect), but the in-app view is fed from the start.
         self.log_lines: "queue.Queue[str]" = queue.Queue()
         self.log_history: "deque[str]" = deque(maxlen=_LOG_HISTORY_LINES)
         self.session_log = SessionLogger()
         self.session_log.attach_view(self.log_lines)
+        # Without this, uart_control's own module-level warnings (a serial
+        # read failing, the reader thread exiting, the link hub connection
+        # dying) go nowhere at all -- the GUI configures no logging -- and
+        # the session log records a link going down with no reason.
+        self.session_log.capture_package_logs()
 
         # Task INFO is registered here, at construction -- not lazily when the
         # About window opens -- so the firmware's once-per-boot version push
@@ -118,7 +166,13 @@ class UartControlApp:
         # _drain_results) is what actually touches widgets/history.
         self.device_log_lines: "queue.Queue[LogLine]" = queue.Queue()
         self.device_log_history: "deque[LogLine]" = deque(maxlen=_DEVICE_LOG_HISTORY_LINES)
-        self.device_log = LogClient(self.link, on_line=self.device_log_lines.put)
+        self.device_log = LogClient(self.link, on_line=self._on_device_log_line)
+
+        #: True once a session is underway, so the very next unexpected drop
+        #: (link was up, goes down without the user clicking Disconnect) gets
+        #: exactly one log line instead of silent UI-only state flips -- see
+        #: _drain_results.
+        self._was_connected = False
 
         root.title("ESP32-S3 UART Manual Control")
         root.geometry("620x200")
@@ -356,8 +410,17 @@ class UartControlApp:
         self._drain_device_log_lines()
 
         # The reader thread can die if the cable is yanked; keep the UI honest.
-        if not self.link.is_connected and self.connect_button["text"] == "Disconnect":
+        connected = self.link.is_connected
+        if not connected and self.connect_button["text"] == "Disconnect":
             self._set_connection_state()
+        if self._was_connected and not connected:
+            # Link was up last poll, is down now, and nobody clicked
+            # Disconnect -- record it with a timestamp so a reboot/dropout
+            # burst is visible in the log file after the fact, not just as a
+            # gap in output. Complements _on_boot_push (which fires on the
+            # *reconnect* side, once the boot-version push arrives).
+            self.session_log.error("link dropped unexpectedly (was connected to %s)", self.link.port)
+        self._was_connected = connected
         self.root.after(100, self._drain_results)
 
     def post(self, action: Callable[[], None]) -> None:
@@ -677,6 +740,18 @@ class UartControlApp:
         top = self.popups.get("device_log")
         return top is not None and top.winfo_exists()
 
+    def _on_device_log_line(self, line: LogLine) -> None:
+        """LogClient's consumer thread: queue for the Tk-side Device Console
+        view (as before), and also mirror ERROR/WARN lines into the
+        persistent session log file -- previously these only ever reached
+        the in-app popup's capped in-memory deque, so anything the firmware
+        logged right before a reset (e.g. an I2C/SPI driver error) was lost
+        the moment the deque wrapped or the app closed."""
+        self.device_log_lines.put(line)
+        method_name = _DEVICE_LOG_SESSION_METHOD_NAME.get(line.level)
+        if method_name is not None:
+            getattr(self.session_log, method_name)("device: %s", line.text)
+
     def _append_device_log_lines(self, lines) -> None:
         """Insert already-decoded lines into the (already unlocked-by-caller
         or freshly built) device console text widget, one tagged line each."""
@@ -758,6 +833,36 @@ class UartControlApp:
     def _build_dac_popup(self, top: tk.Toplevel) -> None:
         percent_vars: list[tk.DoubleVar] = []
         mode_vars: list[tk.IntVar] = []
+        voltage_labels: list[tk.StringVar] = []
+
+        # DcDac.c now explicitly selects VREF=VDD (see mcp4728_pack_data_bytes
+        # in DcDac.c) rather than the internal 2.048V reference, so 100% is
+        # this board's actual supply rail -- but that rail is whatever it
+        # measures on the day, not exactly 3.3000V, and this same popup gets
+        # reused on boards wired to other rails. Keep it adjustable rather
+        # than hardcoding the nominal value, so the displayed voltage can be
+        # corrected against a meter instead of just repeating the datasheet
+        # number.
+        vref_var = tk.DoubleVar(value=3.3)
+
+        ref_row = ttk.Frame(top)
+        ref_row.pack(fill="x", padx=8, pady=(8, 0))
+        ttk.Label(ref_row, text="VCC reference (V, for the voltage readout below):").pack(side="left")
+        ttk.Spinbox(
+            ref_row, from_=0.1, to=6.0, increment=0.01, textvariable=vref_var, width=6
+        ).pack(side="left", padx=(6, 0))
+
+        def refresh_voltage(idx: int) -> None:
+            try:
+                pct = percent_vars[idx].get()
+                vref = vref_var.get()
+            except tk.TclError:
+                return  # a spinbox mid-edit; leave the last good reading showing
+            voltage_labels[idx].set(f"≈ {pct / 100.0 * vref:.3f} V")
+
+        def refresh_all_voltages(*_args) -> None:
+            for i in range(devices.DAC_CHANNELS):
+                refresh_voltage(i)
 
         frame = ttk.LabelFrame(top, text="Channel outputs (% of full scale)")
         frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -765,8 +870,16 @@ class UartControlApp:
         for ch in range(devices.DAC_CHANNELS):
             percent = tk.DoubleVar(value=0.0)
             mode = tk.IntVar(value=0)
+            voltage_text = tk.StringVar(value="≈ 0.000 V")
             percent_vars.append(percent)
             mode_vars.append(mode)
+            voltage_labels.append(voltage_text)
+            # Live: recompute on every percent change, whether from dragging
+            # the Scale, typing in the Spinbox, or "Zero All" -- not just on
+            # release, and not gated behind "Set" (that only affects what's
+            # actually on the wire, this is just the readout for what's
+            # dialed in).
+            percent.trace_add("write", lambda *_a, i=ch: refresh_voltage(i))
 
             ttk.Label(frame, text=f"CH{ch}").grid(row=ch, column=0, padx=(6, 4), pady=4)
             ttk.Scale(
@@ -781,6 +894,9 @@ class UartControlApp:
             ttk.Spinbox(
                 frame, from_=0.0, to=100.0, increment=0.1, textvariable=percent, width=7
             ).grid(row=ch, column=2, padx=4, pady=4)
+            ttk.Label(frame, textvariable=voltage_text, width=11, anchor="e").grid(
+                row=ch, column=3, padx=(2, 6), pady=4
+            )
             ttk.Button(
                 frame,
                 text="Set",
@@ -790,10 +906,10 @@ class UartControlApp:
                     UART_TASK_ID_DAC,
                     lambda c=c, p=p: devices.dac_set_channel_percent(c, p.get()),
                 ),
-            ).grid(row=ch, column=3, padx=4, pady=4)
-            ttk.Label(frame, text="PD mode").grid(row=ch, column=4, padx=(10, 2))
+            ).grid(row=ch, column=4, padx=4, pady=4)
+            ttk.Label(frame, text="PD mode").grid(row=ch, column=5, padx=(10, 2))
             ttk.Spinbox(frame, from_=0, to=3, textvariable=mode, width=3).grid(
-                row=ch, column=5, padx=2
+                row=ch, column=6, padx=2
             )
             ttk.Button(
                 frame,
@@ -803,9 +919,13 @@ class UartControlApp:
                     UART_TASK_ID_DAC,
                     lambda c=c, m=m: devices.dac_power_down(c, m.get()),
                 ),
-            ).grid(row=ch, column=6, padx=(4, 6), pady=4)
+            ).grid(row=ch, column=7, padx=(4, 6), pady=4)
 
         frame.columnconfigure(1, weight=1)
+        # Changing the shared VCC reference re-derives every channel's
+        # readout immediately, not just the next time a slider moves.
+        vref_var.trace_add("write", refresh_all_voltages)
+        refresh_all_voltages()
 
         actions = ttk.Frame(top)
         actions.pack(fill="x", padx=8, pady=(0, 8))
@@ -1024,15 +1144,38 @@ class UartControlApp:
             command=lambda v: contrast_var.set(round(float(v))),
         ).grid(row=0, column=0, padx=(6, 4), pady=6)
         ttk.Spinbox(mf, from_=0, to=255, textvariable=contrast_var, width=5).grid(row=0, column=1, padx=2)
-        ttk.Button(
-            mf,
-            text="Set Contrast",
-            command=lambda: self.send_async(
-                f"OLED contrast {contrast_var.get()}",
+
+        # Live-apply: no "Set Contrast" button, the value is pushed to the
+        # panel as you move the slider (or type in the spinbox). Dragging a
+        # Scale fires its callback for every pixel of travel, and each send
+        # can block a worker thread for up to max_retries * ack_timeout, so
+        # this debounces: only the value you settle on goes out, not the
+        # dozens swept through on the way there.
+        def send_contrast_now() -> None:
+            self._contrast_after_id = None
+            try:
+                slider_value = int(contrast_var.get())
+            except (tk.TclError, ValueError):
+                return  # spinbox mid-edit (empty or partial); wait for a valid value
+            slider_value = max(0, min(255, slider_value))
+            register_value = _contrast_slider_to_register(slider_value)
+            if register_value == self._contrast_last_sent:
+                return  # no-op move, or the Scale re-firing on a programmatic set
+            self._contrast_last_sent = register_value
+            self.send_async(
+                f"OLED contrast {slider_value} (reg 0x{register_value:02X})",
                 UART_TASK_ID_OLED,
-                lambda: devices.oled_set_contrast(contrast_var.get()),
-            ),
-        ).grid(row=0, column=2, padx=(4, 10))
+                lambda: devices.oled_set_contrast(register_value),
+            )
+
+        def on_contrast_changed(*_args) -> None:
+            if self._contrast_after_id is not None:
+                self.root.after_cancel(self._contrast_after_id)
+            self._contrast_after_id = self.root.after(_CONTRAST_DEBOUNCE_MS, send_contrast_now)
+
+        # Traced on the variable rather than wired to the Scale's command, so
+        # typing a value into the spinbox applies too, not just dragging.
+        contrast_var.trace_add("write", on_contrast_changed)
         ttk.Checkbutton(mf, text="Invert", variable=invert_var).grid(row=0, column=3, padx=4)
         ttk.Button(
             mf,

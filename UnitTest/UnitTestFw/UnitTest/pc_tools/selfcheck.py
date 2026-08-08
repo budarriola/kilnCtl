@@ -438,6 +438,16 @@ def link_hub_checks() -> None:
         status = client_a.status()
         check("hub status reachable via RPC", status["connected"], False)
 
+        # Regression guard: create_connection's connect timeout must not be
+        # left on the socket. If it is, an idle link (the normal resting
+        # state between commands) makes the reader thread raise TimeoutError
+        # -- an OSError subclass, so _read_loop swallows it -- and the client
+        # silently goes "disconnected" that many seconds after the last
+        # traffic, with healthy hardware. Asserted as a property rather than
+        # by idling for real, so this stays instant.
+        check("client socket is blocking (no lingering connect timeout)",
+              client_a._sock.gettimeout(), None)
+
         task_id = devices.UART_TASK_ID_LOG
         inbox_a = client_a.register_task(task_id)
         inbox_b = client_b.register_task(task_id)
