@@ -150,6 +150,30 @@ send:
     return httpd_resp_send(req, json, o);
 }
 
+/* See dashboard_http.h -- mirrors status_get_handler()'s io_ready/
+ * thermo_ready/safety_ready computation exactly (same order, same
+ * sim_backend_enabled() branch) so readiness_http.c can never see a
+ * different answer than /api/status does for the same three flags. */
+void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, bool *out_safety_ready)
+{
+    if (out_io_ready) {
+        *out_io_ready = s_dash.io != NULL;
+    }
+    if (out_safety_ready) {
+        *out_safety_ready = s_dash.safety != NULL;
+    }
+    if (out_thermo_ready) {
+        MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+        size_t count = 0;
+        if (sim_backend_enabled()) {
+            sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
+        } else if (s_dash.thermo_bus && s_dash.thermo_bus->initialized) {
+            MAX31856_read_all(s_dash.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+        }
+        *out_thermo_ready = count > 0;
+    }
+}
+
 static esp_err_t relay_post_handler(httpd_req_t *req)
 {
     if (!s_dash.io) {

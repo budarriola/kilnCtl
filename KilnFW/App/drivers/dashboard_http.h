@@ -19,6 +19,8 @@
 #ifndef DASHBOARD_HTTP_H
 #define DASHBOARD_HTTP_H
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 #include "kiln_io.h"
 #include "MAX31856.h"
@@ -36,6 +38,19 @@ extern "C" {
  * bring-up block in app_main, once it's known what actually came up. */
 esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
                                SafetyLinkClass *safety_or_null);
+
+/* Read-only accessor for readiness_http.c (TODO.md 8.3): the same three
+ * hardware-answering flags /api/status reports as io_ready/thermo_ready/
+ * safety_ready, without readiness_http.c needing its own copy of the
+ * io/thermo/safety pointers or the "did anything actually answer" read
+ * logic -- one owner, one point of truth, same discipline as
+ * zones_config_get_*() being the only way profiles_http.c touches zone
+ * config. thermo_ready performs the same live read status_get_handler()
+ * does (a board-less bus reads back count==0 with no error), so calling
+ * this is not free, but it is called only when the readiness page is
+ * requested, not on any hot path. Safe to call even if
+ * dashboard_http_start() was never reached (all three read as false). */
+void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, bool *out_safety_ready);
 
 #ifdef __cplusplus
 }

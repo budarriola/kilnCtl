@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Ready to fire?</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --not-done: #b00; --cannot-yet: #888;
+    --off: #a67c00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+      --card-bg: #232323; --link: #6cf; --ok: #4caf50; --not-done: #ff6b6b; --cannot-yet: #999;
+      --off: #d9a441;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+    --card-bg: #232323; --link: #6cf; --ok: #4caf50; --not-done: #ff6b6b; --cannot-yet: #999;
+    --off: #d9a441;
+  }
+  body { font-family: sans-serif; max-width: 560px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  p { color: var(--muted); }
+  .item { display: flex; align-items: flex-start; gap: 0.6em; background: var(--card-bg);
+          border: 1px solid var(--border); border-radius: 4px; padding: 0.6em 0.9em;
+          margin-bottom: 0.5em; }
+  .item .mark { font-size: 1.1em; line-height: 1.3em; width: 1.2em; text-align: center; flex-shrink: 0; }
+  .item .body { flex: 1; }
+  .item .label { font-weight: bold; }
+  .item .detail { color: var(--muted); font-size: 0.85em; margin-top: 0.15em; }
+  .item .fix { font-size: 0.85em; margin-top: 0.2em; display: inline-block; }
+  .item.status-ok .mark { color: var(--ok); }
+  .item.status-not_done .mark { color: var(--not-done); }
+  .item.status-cannot_yet .mark { color: var(--cannot-yet); }
+  .item.status-deliberately_off .mark { color: var(--off); }
+  .item.status-cannot_yet { opacity: 0.75; }
+  .legend { font-size: 0.8em; color: var(--muted); margin-bottom: 1em; }
+  .legend span { margin-right: 1em; white-space: nowrap; }
+  .empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/">&larr; Dashboard</a>
+<h1>Ready to fire?</h1>
+<p>A status page, not a forced setup flow (TODO.md 8.3) -- it answers "what
+is missing" on a board someone else configured a while ago, in the order
+each item actually becomes checkable. Nothing here is required to run a
+firing; it is a checklist, not a gate.</p>
+<div class="legend">
+  <span>&#10003; ok</span>
+  <span style="color:var(--not-done)">&#10007; not done</span>
+  <span style="color:var(--off)">&#8212; deliberately off</span>
+  <span style="color:var(--cannot-yet)">&#8943; can't check yet</span>
+</div>
+<div id="items"><p class="empty">Loading&hellip;</p></div>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  var MARK = { ok: '✓', not_done: '✗', cannot_yet: '⋯', deliberately_off: '—' };
+
+  function render(items) {
+    var el = document.getElementById('items');
+    if (!items || !items.length) {
+      el.innerHTML = '<p class="empty">No checklist data.</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var mark = MARK[it.status] || '?';
+      html += '<div class="item status-' + it.status + '">' +
+              '<div class="mark">' + mark + '</div>' +
+              '<div class="body">' +
+              '<div class="label">' + esc(it.label) + '</div>' +
+              '<div class="detail">' + esc(it.detail) + '</div>' +
+              (it.fix_url ? '<a class="fix" href="' + esc(it.fix_url) + '">Fix this &rarr;</a>' : '') +
+              '</div></div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function esc(s) {
+    var d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function poll() {
+    fetch('/api/readiness').then(function (r) { return r.json(); }).then(function (j) {
+      render(j.items);
+    }).catch(function () {
+      document.getElementById('items').innerHTML = '<p class="empty">Could not load readiness data.</p>';
+    });
+  }
+  poll();
+  setInterval(poll, 5000);
+})();
+</script>
+</body>
+</html>

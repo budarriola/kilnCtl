@@ -25,6 +25,7 @@
 #include "nvs_report.h"
 #include "profile_executor.h"
 #include "profiles_http.h"
+#include "readiness_http.h"
 #include "relay_cycles.h"
 #include "rules_http.h"
 #include "safety_link.h"
@@ -448,6 +449,17 @@ void app_main(void)
     // nvs_partition_init() -- this only observes what those calls established,
     // it does not itself mount or erase anything.
     nvs_report_capture();
+
+    // TODO.md 8.3: the "is this kiln ready to fire?" status page. Read-only
+    // aggregator over the getters every module above already exposes --
+    // registered last among the settings pages so every fact it can report
+    // (zones_config_is_valid(), nvs_report_get(), dashboard_http_get_hw_ready(),
+    // etc.) reflects this boot's actual state rather than a partial one.
+    esp_err_t readiness_err = readiness_http_start();
+    if (readiness_err != ESP_OK) {
+        ESP_LOGW(TAG, "readiness_http_start failed: %s -- no readiness page this boot",
+                 esp_err_to_name(readiness_err));
+    }
 
     // Development-only /api/sim (fault injection into the simulated plant).
     // Compiles to a no-op returning ESP_OK unless CONFIG_KILNCTL_SIM_PLANT --

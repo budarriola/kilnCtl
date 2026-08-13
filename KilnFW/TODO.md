@@ -2495,7 +2495,7 @@ session to check either).
 
 ### 8.3 Config wizard page: what is set up, what is not
 
-- [ ] **A page that answers "is this kiln ready to fire?"** as a checklist
+- [x] **A page that answers "is this kiln ready to fire?"** as a checklist
       with per-item status and a link to the page that fixes each one.
       Candidates, all derivable from state that already exists: network
       configured; thermocouple count and zone mapping set; relays assigned
@@ -2504,19 +2504,61 @@ session to check either).
       autotune run per zone (or gains entered by hand); hardware present and
       answering (`io_ready` / `thermo_ready` / `safety_ready` from
       `/api/status`); every storage section compatible (8.2's report).
-- [ ] **Distinguish "not done" from "cannot be done yet."** Assigning
+- [x] **Distinguish "not done" from "cannot be done yet."** Assigning
       relays to zones is meaningless before the thermocouple count is set,
       and autotune cannot run without a zone. Order and gate the items
       rather than presenting a flat list of red crosses.
-- [ ] **Distinguish "unset" from "deliberately off",** which this firmware
+- [x] **Distinguish "unset" from "deliberately off",** which this firmware
       already cares about: `max_temp_c == 0` means no ceiling, and
       `cross_zone_max_delta_c == 0` disables guard 8. Both are legitimate
       choices and neither should nag forever — but "I chose this" has to be
       recordable, or the wizard becomes noise that gets ignored, which is
       worse than no wizard at all.
-- [ ] **It is a status page first and a wizard second.** The value is
+- [x] **It is a status page first and a wizard second.** The value is
       answering "what is missing" on a board someone else set up six months
       ago, not walking a first-time user through screens in order.
+
+**Built (2026-08-13)**: `App/drivers/readiness_http.{c,h}` + embedded
+`readiness_page.html`, serving `GET /readiness` (the page) and
+`GET /api/readiness` (the JSON it polls every 5s). Pure read-only
+aggregator — no new storage, no new persisted fields: every item is computed
+by calling the getters `zones_http.h` / `profiles_http.h` / `wifi_prov.h` /
+`nvs_report.h` already expose, plus one new getter,
+`dashboard_http_get_hw_ready()`, added to mirror `/api/status`'s
+io_ready/thermo_ready/safety_ready without a second copy of that read logic.
+Registered in `main.c` after `nvs_report_capture()`, added to
+`CMakeLists.txt` SRCS/EMBED_TXTFILES, linked from `main_page.html`'s
+Settings section. `/api/readiness` returns
+`{"items":[{"key","label","status","detail","fix_url"}, ...]}` with
+`status` one of `ok` / `not_done` / `cannot_yet` / `deliberately_off`. The 11
+items: network configured (AP-only mode reports `deliberately_off`, not
+`not_done`); thermocouple count/zone mapping; relays assigned to zones
+(`cannot_yet` until thermo count is set); control mode chosen per zone (see
+gap below); guard limits `max_temp_c` (`deliberately_off` when every
+configured zone reads 0, per the field's own documented convention); the
+guard-8 `cross_zone_max_delta_c` (`cannot_yet` below 2 zones, since the
+guard is inert otherwise; `deliberately_off` at 0); calibration entered
+(informational only, see gap below); at least one profile saved; autotune
+run per zone or gains entered by hand (either satisfies it, per this
+section's own wording); hardware present and answering; storage sections
+compatible (`zones_config_valid` plus every `nvs_report_get()` section's
+present/mounted).
+
+Two honest, documented gaps left as `not_done`/`ok`-only rather than
+inventing a distinction the storage doesn't carry: (1) **control mode**
+— `zone_control_mode_t`'s OFF (0) is both the zero-initialized default of
+an untouched zone and a legitimate "this zone isn't used" choice
+(`zones_http.h`'s own doc comment), and there is no separate "explicitly
+set" bit the way `max_temp_c`/`cross_zone_max_delta_c` effectively have via
+their documented 0-means-off convention — so this item reports `ok` as soon
+as the zone exists rather than falsely claiming `deliberately_off` when it
+cannot actually tell. (2) **calibration** — `cal_offset_c` has no such
+documented "0 is a deliberate choice" convention (a truly zero offset is
+also a plausible honest reading), so a 0 there is reported `not_done`
+rather than invented as `deliberately_off`. Closing either gap would need a
+new persisted "explicitly set" flag per field, which this pass deliberately
+did not add — TODO.md 8.3's brief was to read what already exists, not grow
+the storage schema. Build verified clean via `ninja -j 24` in `KilnFW/build`.
 
 ### 8.4 Network page: live status, mode switch, and saved networks
 

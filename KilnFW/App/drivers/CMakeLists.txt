@@ -27,6 +27,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "zones_http.c"
                        "rules_http.c"
                        "profiles_http.c"
+                       "readiness_http.c"
                        "pid.c"
                        "thermal_guard.c"
                        "heater_output.c"
@@ -42,6 +43,7 @@ idf_component_register(SRCS "MAX31856.c"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
                        EMBED_TXTFILES "wifi_provision_page.html" "main_page.html"
                                       "zones_page.html" "rules_page.html" "profiles_page.html"
+                                      "readiness_page.html"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
                                 esp_partition)
