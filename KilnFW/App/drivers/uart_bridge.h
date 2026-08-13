@@ -63,10 +63,32 @@ esp_err_t uart_bridge_start_safety_task(uart_protocol_t *proto, SafetyLinkClass 
  * unsolicited GET_FW_VERSION payload at boot. Owns no hardware. */
 esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto);
 
-/* SYSTEM (task 6): admin commands against the link itself (currently just
- * RESTART_UART). Needs the uart_owner_t directly, since that's where the
+/* SYSTEM (task 6): admin commands against the link itself (RESTART_UART,
+ * FACTORY_RESET). Needs the uart_owner_t directly, since that's where the
  * RX-flush primitive lives. */
 esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *owner);
+
+/* CONTROL (task 8): zone config reads + narrow PID/model writes -- see
+ * uart_task_ids.h for the scope cap versus /api/zones. No hardware handle
+ * needed; everything routes through zones_http.c's public getters/setters. */
+esp_err_t uart_bridge_start_control_task(uart_protocol_t *proto);
+
+/* PROFILES (task 9): fire profile CRUD + execution control -- mirrors
+ * profiles_http.c and dashboard_http.c's /api/profile_exec*. No hardware
+ * handle needed; routes through profiles_http_get() and the
+ * profile_executor_* API, both already safe to call with nothing attached. */
+esp_err_t uart_bridge_start_profiles_task(uart_protocol_t *proto);
+
+/* AUTOTUNE (task 10): mirrors dashboard_http.c's /api/autotune*, minus the
+ * bulk matrix/CSV endpoints (see uart_task_ids.h for why those stay
+ * HTTP-only). Routes through the autotune_engine_* API. */
+esp_err_t uart_bridge_start_autotune_task(uart_protocol_t *proto);
+
+/* WIFI (task 11): mirrors wifi_provision_http.c's status/scan/provision/
+ * networks/forget surface, so Wi-Fi can be configured over a link that
+ * works even with Wi-Fi down. Routes through wifi_prov.h; never touches
+ * kiln_io/relay_authority/safety_link. */
+esp_err_t uart_bridge_start_wifi_task(uart_protocol_t *proto);
 
 /* --------------------------------------------------------------------------
  * PC link watchdog -- the implementation of

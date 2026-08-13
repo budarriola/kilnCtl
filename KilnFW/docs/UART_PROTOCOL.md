@@ -1,4 +1,4 @@
-# Hardened UART protocol — wire format reference (protocol version 3)
+# Hardened UART protocol — wire format reference (protocol version 4)
 
 The ESP32-S3 firmware and the PC-side `pc_tools` package talk to each other
 over a single UART link using a custom, reliable, addressed message protocol
@@ -24,6 +24,36 @@ reason, independent of this version bump.
 The *same* framing also carries the opto-isolated link between the ESP and the
 RP2040 safety processor, on a second UART with `UART_PROTO_DEVICE_SAFETY` as
 the peer — see [`docs/SAFETY_LINK.md`](SAFETY_LINK.md).
+
+**Version 4** (2026-08-13): four new task_ids — `CONTROL` (8), `PROFILES` (9),
+`AUTOTUNE` (10), `WIFI` (11) — plus a `FACTORY_RESET` subcommand on `SYSTEM`
+(6), so a PC-side GUI can drive everything the HTTP dashboard offers
+(`App/drivers/dashboard_http.c`, `zones_http.c`, `rules_http.c`,
+`profiles_http.c`, `wifi_provision_http.c`, `factory_reset.c`) without
+needing Wi-Fi — additive to HTTP, not a replacement. Every new command
+mirrors an existing HTTP endpoint's request/response *fields*, not its
+HTTP-specific plumbing (JSON/form-encoding, status codes); see each task's
+doc comment in `App/drivers/uart_task_ids.h` (the frozen contract, and the
+authoritative byte-level reference — this file summarizes it) for exact
+payload layouts. Two deliberate scope caps, both because the 253-byte
+payload ceiling has no honest way around them:
+- **Zone config** (task `CONTROL`): only the fields a live control loop
+  needs to read/retune (PID gains, plant model, ramp/temp ceilings) are
+  exposed. `/api/zones`' whole-page fields — zone naming, relay assignment,
+  heater window timing, the cross-zone guard threshold — stay HTTP-only;
+  that endpoint validates ~20 fields per zone together and does not
+  decompose into a safe per-field wire write.
+- **Autotune bulk data**: `/api/autotune/matrix` (the cross-zone coupling
+  matrix + RGA) and `/api/autotune/trace.csv`/`history.csv` (raw sample
+  dumps) are HTTP-only — table/CSV data that doesn't fit one frame and has
+  no meaningful truncated form (a partial coupling matrix is misleading, not
+  merely incomplete).
+
+Rules (task `CONTROL` does **not** cover this — see the task table below)
+and full profile-execution history stay HTTP-only for the same reason: the
+rules DSL is free-form text with no fixed-size encoding, and history is a
+2880-sample ring buffer. `GET /api/rules`/`POST /api/rules` have no UART
+mirror in this pass.
 
 Source of truth:
 - Firmware: `App/drivers/espInterfaces/uart_protocol.h` / `.c`,
@@ -130,8 +160,17 @@ their own device (ESP task 1 and HOST task 1 are unrelated).
 | 5 | `UART_TASK_ID_LOG` | firmware console output (`ESP_LOGx`), forwarded unsolicited | — |
 | 6 | `UART_TASK_ID_SYSTEM` | link-recovery commands (restart) | — |
 | 7 | `UART_TASK_ID_SAFETY` | opto-isolated link to the RP2040 safety processor | [`docs/SAFETY_LINK.md`](SAFETY_LINK.md) |
+| 8 | `UART_TASK_ID_CONTROL` | zone config (PID/model/read-back) + manual relay control | `uart_task_ids.h` |
+| 9 | `UART_TASK_ID_PROFILES` | fire profile CRUD + execution control | `uart_task_ids.h` |
+| 10 | `UART_TASK_ID_AUTOTUNE` | PID autotune (step/relay methods) | `uart_task_ids.h` |
+| 11 | `UART_TASK_ID_WIFI` | Wi-Fi status/scan/provision/forget | `uart_task_ids.h` |
 
 The PC side registers the same numeric IDs for symmetry.
+
+Manual relay control (mirroring `POST /api/relay`) is **not** a CONTROL
+subcommand — use IO's `SET_RELAY`/`SET_RELAY_MASK` (task 2, above), which
+already gate through `relay_authority_on_blocked()`, the exact same check
+`/api/relay` uses.
 
 ### Queries and unsolicited pushes
 
@@ -458,6 +497,15 @@ Admin-style commands against the link itself, as opposed to a device on it.
 | Subcmd | Name | Args |
 |---|---|---|
 | `0x01` | `RESTART_UART` | none |
+| `0x02` | `FACTORY_RESET` | byte1=scope (0=wifi 1=kiln 2=profiles 3=all) |
+
+`FACTORY_RESET` mirrors `POST /api/factory_reset` (`factory_reset.c`)
+exactly: same per-partition NVS erase, same unconditional reboot ~500ms
+later (so this command's own ACK has a chance to leave first). No reply
+frame either way — the ACK is the delivery confirmation, and the reboot
+itself (a fresh unsolicited `GET_FW_VERSION` push from INFO) is the real
+evidence the erase happened. An out-of-range scope byte is rejected with no
+erase and no reboot.
 
 `RESTART_UART` is an on-demand recovery lever for a link that's gotten stuck
 (RX ring buffer overflow, line noise) without power-cycling the board — it
@@ -550,7 +598,7 @@ byte(4+N1)     datetime_len (N2)
 N2 bytes       build date+time, ASCII "YYYY-MM-DD HH:MM:SSZ", not null-terminated
 ```
 
-`UART_PROTOCOL_VERSION` (`uart_task_ids.h`, currently **2**) is a manually
+`UART_PROTOCOL_VERSION` (`uart_task_ids.h`, currently **4**) is a manually
 maintained integer bumped whenever a wire-incompatible change is made
 (task_id/subcommand renumbering, a payload's byte layout/length/endianness, or
 the envelope itself). It is deliberately **not** an automatic hash of the
@@ -582,3 +630,118 @@ listening (the common case — the PC usually connects after the board is
 already up), it just fails silently after its own retries; nothing surfaces
 to the firmware side as an error. A client should treat an unsolicited version
 reply (one with nothing currently outstanding) as a **device reboot signal**.
+
+### CONTROL (task 8) — `uart_bridge_ext.c: control_task`
+
+Zone configuration reads plus narrow PID/plant-model writes. Byte-level
+layout is authoritative in `uart_task_ids.h`'s `CONTROL_CMD_*` comment block
+(right after `INFO_CMD_GET_WIFI_STATUS`) — this is a summary.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `GET_ZONES` | none — **query** |
+| `0x02` | `SET_ZONE_PID` | byte1=zone, bytes2..5=kp f32 LE, bytes6..9=ki f32 LE, bytes10..13=kd f32 LE — **reply: ok/fail** |
+| `0x03` | `SET_ZONE_MODEL` | byte1=zone, bytes2..5=k_dc f32 LE, bytes6..9=tau_s f32 LE, bytes10..13=dead_time_s f32 LE — **reply: ok/fail** |
+
+`GET_ZONES` response: `byte0=0x01 byte1=thermo_count byte2=relay_count
+byte3=count(N)`, then N × 31-byte records: `index(1) relay_mask(1)
+control_mode(1) cal_offset_c(f32) pid_kp(f32) pid_ki(f32) pid_kd(f32)
+max_ramp_c_per_hr(f32) max_temp_c(f32) min_temp_c(f32)`.
+
+Unlike THERMO/IO's silent `SET_*`, `SET_ZONE_PID`/`SET_ZONE_MODEL` reply
+`byte0=subcmd byte1=ok(0/1)` — a rejected zone index or out-of-range gain is
+exactly what a GUI needs to know immediately.
+
+Scope cap: `/api/zones`' full whole-page fields (zone naming, relay
+assignment, heater window/min-on/min-off timing, cross-zone delta) are
+**not** writable here — that endpoint validates ~20 fields per zone
+together in one commit-or-reject pass that doesn't fit a 253-byte frame or
+decompose safely into per-field writes. Use HTTP for those. Manual relay
+control is IO task's `SET_RELAY`/`SET_RELAY_MASK` (task 2), not duplicated
+here — see the task table above.
+
+**Relays & Rules DSL (`/api/rules`) has no UART mirror in this pass** — the
+rule text is free-form and can run to ~2KB, well past the 253-byte cap, and
+this protocol has no chunking/multi-part convention to split it over (see
+the framing section above). Use HTTP for reading or editing relay rules.
+
+### PROFILES (task 9) — `uart_bridge_ext.c: profiles_task`
+
+Fire profile storage (mirrors `profiles_http.c`) and execution control
+(mirrors `dashboard_http.c`'s `/api/profile_exec*`). Full layout in
+`uart_task_ids.h`'s `PROFILES_CMD_*` block.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `LIST` | none — **query** |
+| `0x02` | `GET` | byte1=id(0-7) — **query** |
+| `0x03` | `SAVE` | byte1=id(0-7, or `0xFF`=first free slot), byte2=name_len, name, zone_mask, segment_count, then 12 bytes/segment (target_c f32, ramp_c_per_hr f32, dwell_min u32) — **reply: ok/fail** |
+| `0x04` | `DELETE` | byte1=id — **reply: ok/fail** |
+| `0x05` | `GET_EXEC_STATUS` | none — **query** |
+| `0x06` | `START` | byte1=id — **reply: ok/fail** |
+| `0x07` | `STOP` | none — **reply: always ok** |
+| `0x08` | `PAUSE` | none — **reply: ok/fail** |
+| `0x09` | `RESUME` | none — **reply: ok/fail** |
+| `0x0A` | `ACK_LAST_RUN` | none — **reply: ok/fail** |
+
+`GET_EXEC_STATUS`'s per-zone block mirrors `/api/control`'s tuning-focused
+shape (control_mode/actual_c/duty/relay_on/faulted), not
+`/api/profile_exec`'s fuller one — the lifecycle fields (state,
+segment_index/count, dwelling, target_c, ramp-lock) are still carried at the
+top level; only the fault-reason strings and the `last_run` breadcrumb are
+dropped for space. Every mutating command replies `byte0=subcmd
+byte1=ok(0/1)`, plus a length-prefixed error string on failure (`SAVE`,
+`START`) — same reasoning as CONTROL's `SET_*` replies: these can fail for
+an operator-relevant reason the GUI needs immediately.
+
+`0xFF` (`PROFILES_SAVE_ID_NEW`) as `SAVE`'s id byte requests "first free
+slot", mirroring `POST /api/profile`'s empty/`-1`/out-of-range `id` field.
+
+### AUTOTUNE (task 10) — `uart_bridge_ext.c: autotune_task`
+
+Mirrors `dashboard_http.c`'s `/api/autotune` (GET) and `/api/autotune/
+start|abort|accept`. Full layout in `uart_task_ids.h`'s `AUTOTUNE_CMD_*`
+block.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `GET_STATUS` | none — **query** |
+| `0x02` | `START` | byte1=zone, byte2=method(0=step,1=relay), bytes3..6=step_duty-or-setpoint_c f32, bytes7..10=relay_d f32, bytes11..14=relay_h_c f32, byte15=rule(0=tl,1=zn) — **reply: ok/fail** |
+| `0x03` | `ABORT` | none — **reply: always ok** |
+| `0x04` | `ACCEPT` | none — **reply: ok/fail** |
+
+`START` always sends all 16 argument bytes; fields the selected method
+doesn't use are ignored (mirrors the HTTP form's server-side defaulting).
+
+**Not mirrored**: `/api/autotune/matrix` (cross-zone coupling matrix + RGA)
+and `/api/autotune/trace.csv`/`history.csv` (raw sample dumps) — both are
+bulk/table data that don't fit one 253-byte frame and have no honest
+truncated form (a partial coupling matrix or truncated CSV trace is
+misleading, not merely incomplete). Use HTTP for those.
+
+### WIFI (task 11) — `uart_bridge_ext.c: wifi_task`
+
+Mirrors `wifi_provision_http.c`'s `GET /status`, `GET /scan`, `POST
+/provision`, `GET /networks`, `POST /forget` — exists specifically so
+Wi-Fi can be configured over a link that works even when Wi-Fi itself is
+down or unconfigured. Never touches `kiln_io`/`relay_authority`/
+`safety_link`. Full layout in `uart_task_ids.h`'s `WIFI_CMD_*` block.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `GET_STATUS` | none — **query** |
+| `0x02` | `SCAN` | none — **query**, capped at 6 entries + truncated flag |
+| `0x03` | `ADD_NETWORK` | ssid_len+ssid, password_len+password — **reply: ok/fail** |
+| `0x04` | `SET_MODE` | byte1=mode(0=home,1=ap) — **reply: ok/fail** |
+| `0x05` | `SET_AP_IDENTITY` | has_ssid(0/1)[+ssid_len+ssid], has_password(0/1)[+password_len+password] — **reply: ok/fail** |
+| `0x06` | `GET_NETWORKS` | none — **query**, capped at 5 entries + truncated flag |
+| `0x07` | `FORGET` | ssid_len+ssid — **reply: ok/fail** |
+
+`SCAN`/`GET_NETWORKS` cap their result count (`WIFI_WIRE_MAX_SCAN_ENTRIES`=6,
+`WIFI_WIRE_MAX_NETWORK_ENTRIES`=5) to fit one frame, setting a `truncated`
+flag rather than splitting across frames (no existing multi-part convention
+to reuse). Use HTTP for the complete list on a crowded RF environment.
+`ADD_NETWORK` mirrors `wifi_prov_add_network()` (adds to, or updates the
+password of, the saved-network list) — the `/provision` endpoint's
+`ssid`/`password` form fields, not its `mode`/`ap_ssid`/`ap_password`
+fields (those are `SET_MODE`/`SET_AP_IDENTITY`).

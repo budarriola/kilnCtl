@@ -539,6 +539,27 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to start safety uart bridge task");
     }
 
+    // CONTROL/PROFILES/AUTOTUNE/WIFI (tasks 8-11): additive UART coverage for
+    // everything the HTTP dashboard offers (TODO.md "UART parity with
+    // HTTP"), so the PC-side GUI can drive the board without Wi-Fi. None of
+    // these own hardware directly -- they route through the same
+    // zones_http.c/profiles_http.c/profile_executor.c/autotune_engine.c/
+    // wifi_prov.c getters and setters the HTTP handlers already call above,
+    // so starting them unconditionally (no io_ready/thermo_bus.initialized
+    // gate) matches those modules' own "safe with nothing attached" design.
+    if (uart_bridge_start_control_task(&uart_proto) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start control uart bridge task");
+    }
+    if (uart_bridge_start_profiles_task(&uart_proto) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start profiles uart bridge task");
+    }
+    if (uart_bridge_start_autotune_task(&uart_proto) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start autotune uart bridge task");
+    }
+    if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start wifi uart bridge task");
+    }
+
     // --- Fail-safe on loss of the PC link -----------------------------------
     // Started last, so it is watching a link every bridge above can already
     // feed. Until the host's first frame or ACK it holds the board in the

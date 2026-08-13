@@ -6,6 +6,7 @@
 #include "build_info.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "factory_reset.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -1375,6 +1376,27 @@ static void system_bridge_task(void *arg)
                     ESP_LOGI(TAG, "system: UART restarted (RX flushed) by host request");
                 } else {
                     ESP_LOGW(TAG, "system: UART restart failed: %s", esp_err_to_name(err));
+                }
+                break;
+            }
+            case SYSTEM_CMD_FACTORY_RESET: {
+                if (!bridge_args_ok("system", &msg, 2)) {
+                    break;
+                }
+                /* No reply either way -- see uart_task_ids.h's doc comment:
+                 * the reboot itself (a fresh unsolicited GET_FW_VERSION push
+                 * from INFO) is the real confirmation, and this command's own
+                 * ACK is already the delivery confirmation. */
+                esp_err_t err = factory_reset_execute((factory_reset_scope_t)msg.payload[1]);
+                if (err == ESP_ERR_INVALID_ARG) {
+                    ESP_LOGW(TAG, "system: FACTORY_RESET scope %u out of range -- rejected, nothing erased",
+                             msg.payload[1]);
+                } else if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u erase failed: %s -- rebooting anyway",
+                             msg.payload[1], esp_err_to_name(err));
+                } else {
+                    ESP_LOGW(TAG, "system: FACTORY_RESET scope %u requested by host -- erasing and rebooting",
+                             msg.payload[1]);
                 }
                 break;
             }

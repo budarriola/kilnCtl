@@ -351,6 +351,126 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     return true;
 }
 
+/* ---- UART bridge entry points (uart_bridge_ext.c) -------------------------
+ *
+ * Same range/feasibility validation and NVS commit as profile_post_handler()/
+ * profile_delete_post_handler() below, factored out so the UART CONTROL
+ * bridge doesn't have to re-implement (and risk drifting from) this file's
+ * one copy of "what makes a profile valid." The HTTP handlers keep their own
+ * string-parsing step (http_form_find_field + strtof/strtol) since the UART
+ * side already hands over a decoded profile_t -- everything downstream of
+ * that parse is shared. */
+
+bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                        uint8_t *out_warning_count, char *err_msg, size_t err_cap)
+{
+    if (!candidate || !out_id) {
+        if (err_msg) snprintf(err_msg, err_cap, "internal error");
+        return false;
+    }
+    if (candidate->segment_count < 1 || candidate->segment_count > PROFILE_MAX_SEGMENTS) {
+        snprintf(err_msg, err_cap, "seg_count out of range (1-12)");
+        return false;
+    }
+    uint8_t thermo_count = zones_config_get_thermo_count();
+    uint8_t valid_zone_bits = thermo_count >= 8 ? 0xFF : (uint8_t)((1u << thermo_count) - 1u);
+    if (candidate->zone_mask == 0 || (candidate->zone_mask & (uint8_t)~valid_zone_bits) != 0) {
+        snprintf(err_msg, err_cap,
+                "zone_mask must select at least one configured zone (check Thermocouples & Zones settings)");
+        return false;
+    }
+    for (uint8_t i = 0; i < candidate->segment_count; i++) {
+        const profile_segment_t *seg = &candidate->segments[i];
+        if (isnan(seg->target_c) || seg->target_c < PROFILE_TARGET_C_MIN || seg->target_c > PROFILE_TARGET_C_MAX) {
+            snprintf(err_msg, err_cap, "segment %u: target_c out of range (0-1400)", i + 1);
+            return false;
+        }
+        if (isnan(seg->ramp_c_per_hr) || seg->ramp_c_per_hr < PROFILE_RAMP_C_PER_HR_MIN ||
+            seg->ramp_c_per_hr > PROFILE_RAMP_C_PER_HR_MAX) {
+            snprintf(err_msg, err_cap, "segment %u: ramp_c_per_hr out of range (0-1000)", i + 1);
+            return false;
+        }
+        if (seg->dwell_min > PROFILE_DWELL_MIN_MAX) {
+            snprintf(err_msg, err_cap, "segment %u: dwell_min out of range (0-1440)", i + 1);
+            return false;
+        }
+    }
+
+    uint8_t target_id;
+    if (requested_id < PROFILES_MAX_COUNT) {
+        target_id = requested_id;
+    } else {
+        int free_slot = -1;
+        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+            if (!(s_profiles.used_bitmap & (1u << i))) {
+                free_slot = i;
+                break;
+            }
+        }
+        if (free_slot < 0) {
+            snprintf(err_msg, err_cap, "profile storage full");
+            return false;
+        }
+        target_id = (uint8_t)free_slot;
+    }
+
+    /* Feasibility check (TODO.md section 5), same rule profile_post_handler
+     * runs: every participating zone's max-ramp ceiling must accommodate
+     * every ramped segment, or the whole submission is rejected. */
+    uint8_t warn_count = 0;
+    for (uint8_t i = 0; i < candidate->segment_count; i++) {
+        float rate = candidate->segments[i].ramp_c_per_hr;
+        if (rate <= 0.0f) {
+            continue;
+        }
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            if (!(candidate->zone_mask & (1u << zi))) {
+                continue;
+            }
+            float ceiling = 0.0f;
+            zones_config_get_max_ramp(zi, &ceiling);
+            if (rate > ceiling) {
+                snprintf(err_msg, err_cap, "segment %u: ramp rate %.1f C/hr exceeds zone %u's %.1f C/hr ceiling",
+                        i + 1, (double)rate, zi, (double)ceiling);
+                return false;
+            }
+            if (rate > PROFILE_RAMP_WARN_FRACTION * ceiling) {
+                warn_count++;
+            }
+        }
+    }
+
+    s_profiles.profiles[target_id] = *candidate;
+    s_profiles.used_bitmap |= (1u << target_id);
+    esp_err_t err = nvs_save_slot(target_id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
+                 target_id, esp_err_to_name(err));
+        /* Still applied -- same convention as profile_post_handler(). */
+    }
+
+    *out_id = target_id;
+    if (out_warning_count) {
+        *out_warning_count = warn_count;
+    }
+    return true;
+}
+
+bool profiles_http_delete(uint8_t id)
+{
+    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
+        return false;
+    }
+    s_profiles.used_bitmap &= ~(1u << id);
+    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    esp_err_t err = nvs_erase_slot((uint8_t)id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
+                 esp_err_to_name(err));
+    }
+    return true;
+}
+
 /* ---- HTML page ------------------------------------------------------------ */
 
 static esp_err_t page_get_handler(httpd_req_t *req)

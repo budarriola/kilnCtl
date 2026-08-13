@@ -48,7 +48,17 @@ extern "C" {
 #define UART_PROTO_MAX_PAYLOAD   253
 #define UART_PROTO_MAX_RETRIES   10
 #define UART_PROTO_DEFAULT_ACK_TIMEOUT_MS 200
-#define UART_PROTO_MAX_TASKS     8
+/* Raised 8 -> 16 (2026-08-13) when uart_task_ids.h grew task_ids 8-11
+ * (CONTROL/PROFILES/AUTOTUNE/WIFI): this board's own ESP-side registrations
+ * alone (THERMO, IO, INFO, DISPLAY, LOG, SYSTEM, SAFETY, CONTROL, PROFILES,
+ * AUTOTUNE, WIFI = 11) already exceeded the old cap of 8, which would have
+ * made uart_protocol_register_task() start failing (ESP_ERR_NO_MEM) for
+ * whichever bridge started 9th -- silently dropping that task_id's coverage
+ * rather than refusing to boot. 16 leaves headroom over the current 11
+ * (the PC side registers its own independent 11 on the HOST device, which
+ * is a *different* uart_protocol_t instance/task table and unaffected by
+ * this board-side cap). */
+#define UART_PROTO_MAX_TASKS     16
 #define UART_PROTO_DEDUP_DEPTH   4
 
 /* Who a frame is addressed to / came from. ESP and HOST are the two ends of

@@ -76,6 +76,43 @@ static void reboot_task(void *arg)
     esp_restart();
 }
 
+/* Shared by both entry points (HTTP name-based lookup and the UART SYSTEM
+ * task's index-based one): erases every partition in *scope, logs a WARN
+ * per partition (success or failure), and unconditionally schedules the
+ * delayed reboot -- whatever DID erase needs every module re-initializing
+ * clean against it either way, and a partial erase left in place with the
+ * old init state is worse than one that reboots and re-observes reality
+ * (same reasoning reset_post_handler() always had). Returns the first
+ * partition's erase error, if any. */
+static esp_err_t execute_scope(const reset_scope_t *scope)
+{
+    ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
+    esp_err_t first_err = ESP_OK;
+    for (size_t i = 0; scope->partitions[i] != NULL; i++) {
+        const char *part = scope->partitions[i];
+        esp_err_t err = nvs_flash_erase_partition(part);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_flash_erase_partition('%s') failed: %s", part, esp_err_to_name(err));
+            if (first_err == ESP_OK) {
+                first_err = err;
+            }
+        } else {
+            ESP_LOGW(TAG, "erased NVS partition '%s'", part);
+        }
+    }
+
+    xTaskCreate(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
+    return first_err;
+}
+
+esp_err_t factory_reset_execute(factory_reset_scope_t scope)
+{
+    if ((size_t)scope >= NUM_SCOPES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return execute_scope(&kScopes[(size_t)scope]);
+}
+
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > FACTORY_RESET_BODY_MAX) {
@@ -123,29 +160,14 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
-    esp_err_t first_err = ESP_OK;
-    for (size_t i = 0; scope->partitions[i] != NULL; i++) {
-        const char *part = scope->partitions[i];
-        esp_err_t err = nvs_flash_erase_partition(part);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "nvs_flash_erase_partition('%s') failed: %s", part, esp_err_to_name(err));
-            if (first_err == ESP_OK) {
-                first_err = err;
-            }
-        } else {
-            ESP_LOGW(TAG, "erased NVS partition '%s'", part);
-        }
-    }
+    esp_err_t first_err = execute_scope(scope);
 
     if (first_err != ESP_OK) {
         /* Best-effort is not good enough here: an operator who asked for a
          * wipe and silently got a partial one (e.g. "all" that only erased
          * two of three partitions) needs to know, not just see a reboot and
-         * assume it worked. Still reboots below -- whatever DID erase needs
-         * every module re-initializing clean against it either way, and a
-         * partial erase left in place with the old init state is worse than
-         * one that reboots and re-observes reality. */
+         * assume it worked. execute_scope() already scheduled the reboot
+         * regardless. */
         char msg[64];
         snprintf(msg, sizeof(msg), "erase failed for one or more partitions: %s", esp_err_to_name(first_err));
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -153,12 +175,6 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     } else {
         httpd_resp_sendstr(req, "ok, rebooting");
     }
-
-    /* Reboot unconditionally (see the success/failure branches above for
-     * why): every module's *_init()/nvs_load() only runs at boot, so nothing
-     * downstream of this handler will notice the erase until app_main runs
-     * again. */
-    xTaskCreate(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
     return ESP_OK;
 }
 

@@ -16,6 +16,7 @@
 #define PROFILES_HTTP_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -59,6 +60,23 @@ esp_err_t profiles_http_start(void);
  * out-of-range or unused slot -- the caller must treat that as "cannot
  * run," not as an empty/zeroed profile. */
 bool profiles_http_get(uint8_t id, profile_t *out);
+
+/* Validate-and-commit entry point shared with the UART CONTROL bridge
+ * (uart_bridge_ext.c) -- the same range/feasibility validation and NVS
+ * commit profile_post_handler() runs, minus the x-www-form-urlencoded
+ * parsing step (the caller already has a decoded profile_t). requested_id
+ * >= PROFILES_MAX_COUNT means "first free slot", same convention as the
+ * HTTP handler's "id missing/-1/out of range" case. On success, writes the
+ * committed slot to *out_id and the number of ramp-rate warnings (segments
+ * within 20% of a zone's ceiling; see PROFILE_RAMP_WARN_FRACTION) to
+ * *out_warning_count (may be NULL). On failure, leaves stored state
+ * untouched and writes a human-readable reason into err_msg. */
+bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                        uint8_t *out_warning_count, char *err_msg, size_t err_cap);
+
+/* Same erase-and-clear profile_delete_post_handler() runs. Returns false
+ * (no-op) for an out-of-range or already-unused id. */
+bool profiles_http_delete(uint8_t id);
 
 #ifdef __cplusplus
 }

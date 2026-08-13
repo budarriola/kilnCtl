@@ -36,16 +36,32 @@
  * DISPLAY_BLIT_CHUNK_PIXELS (pc_tools devices.py) moved. Bumped anyway
  * because a v2 peer's UART_PROTO_MAX_PAYLOAD=128 receive buffer would
  * truncate/reject a v3 sender's larger frame -- exactly what this version
- * gate exists to catch instead of silently misbehaving. */
-#define UART_PROTOCOL_VERSION 3u
+ * gate exists to catch instead of silently misbehaving.
+ *
+ * Version 4 (2026-08-13): four new task_ids added (CONTROL=8, PROFILES=9,
+ * AUTOTUNE=10, WIFI=11) so the PC-side GUI can drive everything the HTTP
+ * dashboard offers without Wi-Fi, plus a new SYSTEM subcommand
+ * (FACTORY_RESET). Existing task_ids 1-7 and their payloads are UNCHANGED --
+ * this is purely additive, so it would not strictly need a version bump
+ * under the "renumbering/layout change" policy above, but is bumped anyway
+ * because an old PC build that has never heard of task_id 8-11 would
+ * otherwise report a false "compatible" against firmware whose new commands
+ * it cannot use, which is exactly the kind of silent skew
+ * INFO_CMD_GET_FW_VERSION's exact-match policy exists to catch. See
+ * docs/UART_PROTOCOL.md for the new task/command tables. */
+#define UART_PROTOCOL_VERSION 4u
 
-#define UART_TASK_ID_THERMO  1u  /* MAX31856 x3 on the thermocouple board (J6) */
-#define UART_TASK_ID_IO      2u  /* SX1509 expander: relays, digital I/O, DRDY */
-#define UART_TASK_ID_INFO    3u
-#define UART_TASK_ID_DISPLAY 4u  /* ILI9488 TFT on J2 */
-#define UART_TASK_ID_LOG     5u
-#define UART_TASK_ID_SYSTEM  6u
-#define UART_TASK_ID_SAFETY  7u  /* opto-isolated link to the RP2040 safety processor */
+#define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
+#define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */
+#define UART_TASK_ID_INFO     3u
+#define UART_TASK_ID_DISPLAY  4u  /* ILI9488 TFT on J2 */
+#define UART_TASK_ID_LOG      5u
+#define UART_TASK_ID_SYSTEM   6u
+#define UART_TASK_ID_SAFETY   7u  /* opto-isolated link to the RP2040 safety processor */
+#define UART_TASK_ID_CONTROL  8u  /* zone config + live per-zone control status -- mirrors zones_http.c */
+#define UART_TASK_ID_PROFILES 9u  /* fire profile CRUD + execution -- mirrors profiles_http.c/dashboard_http.c */
+#define UART_TASK_ID_AUTOTUNE 10u /* PID autotune -- mirrors dashboard_http.c's /api/autotune* */
+#define UART_TASK_ID_WIFI     11u /* Wi-Fi status/scan/provision -- mirrors wifi_provision_http.c */
 
 /* --- THERMO (task_id = UART_TASK_ID_THERMO) ---
  * Three MAX31856 cold-junction-compensated thermocouple front ends living on
@@ -447,8 +463,23 @@
  *                       delimiter and already auto-flushes RX on a HW
  *                       FIFO/ring-buffer overflow event (see uart_owner.c)
  *                       -- this just makes that same recovery available on
- *                       demand instead of waiting for it to trip. */
-#define SYSTEM_CMD_RESTART_UART 0x01u
+ *                       demand instead of waiting for it to trip.
+ *   0x02 FACTORY_RESET byte1=scope (0=wifi, 1=kiln, 2=profiles, 3=all --
+ *                       factory_reset_scope_t in factory_reset.h). Mirrors
+ *                       POST /api/factory_reset (factory_reset.c) exactly:
+ *                       same per-partition erase, same unconditional reboot
+ *                       ~500ms later so this command's own ACK has a chance
+ *                       to leave first. No reply frame either way -- like
+ *                       every other non-query SYSTEM/IO/THERMO command, the
+ *                       ACK is the only confirmation, and the reboot itself
+ *                       (visible as a fresh unsolicited GET_FW_VERSION push
+ *                       from INFO, see uart_task_ids.h's boot-push doc
+ *                       comment) is the real evidence the erase happened. An
+ *                       out-of-range scope byte is rejected with no erase
+ *                       and no reboot, same "reject cleanly before touching
+ *                       anything" discipline as every other bridge here. */
+#define SYSTEM_CMD_RESTART_UART  0x01u
+#define SYSTEM_CMD_FACTORY_RESET 0x02u
 
 /* --- INFO (task_id = UART_TASK_ID_INFO) ---
  * Unlike the device tasks, this is a query: the requester's DATA frame
@@ -521,5 +552,358 @@
  *   N bytes      = station IP, dotted-quad ASCII, not null-terminated
  */
 #define INFO_CMD_GET_WIFI_STATUS 0x03u
+
+/* --- CONTROL (task_id = UART_TASK_ID_CONTROL) ---
+ * Zone configuration and manual relay control -- mirrors zones_http.c's
+ * /api/zones (config) and dashboard_http.c's /api/relay (control). Manual
+ * relay switching is NOT duplicated here: use IO_CMD_SET_RELAY /
+ * IO_CMD_SET_RELAY_MASK (task UART_TASK_ID_IO) -- they already pass through
+ * relay_authority_on_blocked(), the exact same gate /api/relay uses, so a
+ * second implementation here would just be a second place for that gate to
+ * drift out of sync.
+ *
+ * Scope cap: zones_cfg_t has ~20 fields per zone (name, heater window/min-on/
+ * min-off timing, cross-zone delta, plant model) and /api/zones is a
+ * whole-page validate-and-commit that cross-checks all of them together --
+ * that does not fit one 253-byte frame and does not decompose into a safe
+ * per-field write without reimplementing zones_http.c's whole-page
+ * commit-or-reject discipline over the wire. Only the fields a live control
+ * loop actually needs to read or retune are exposed: GET_ZONES reads back
+ * everything zones_config_get_*() already exposes as a getter, and
+ * SET_ZONE_PID/SET_ZONE_MODEL write through the two setters zones_http.h
+ * already exports publicly (zones_config_set_pid/zones_config_set_model --
+ * the same ones autotune_engine_accept() uses). Zone naming, relay
+ * assignment, heater window timing and the cross-zone guard threshold remain
+ * HTTP-only; use the Thermocouples & Zones page for those.
+ *
+ * byte0 = subcommand:
+ *   0x01 GET_ZONES     (no args) -- QUERY, see below
+ *   0x02 SET_ZONE_PID   byte1=zone_index
+ *                        bytes2..5  = kp f32 LE
+ *                        bytes6..9  = ki f32 LE
+ *                        bytes10..13= kd f32 LE
+ *                       Same validation as zones_config_set_pid() (finite,
+ *                       >= 0); rejected without writing anything otherwise.
+ *   0x03 SET_ZONE_MODEL byte1=zone_index
+ *                        bytes2..5  = model_k_dc f32 LE
+ *                        bytes6..9  = model_tau_s f32 LE
+ *                        bytes10..13= model_dead_time_s f32 LE
+ *                       Same validation as zones_config_set_model(); an
+ *                       all-zero triple clears the model (documented
+ *                       "no model" encoding), a negative value is rejected.
+ * Both SET_* commands answer with a one-byte ok/fail QUERY-style reply
+ * (unlike THERMO/IO's silent SET_*) because a rejected zone_index or an
+ * out-of-range gain is exactly the kind of mistake a GUI needs to surface
+ * immediately, the same way the HTTP JSON {"ok":false,...} responses do.
+ *
+ * GET_ZONES response payload:
+ *   byte0 = CONTROL_CMD_GET_ZONES (0x01)
+ *   byte1 = thermo_count (zones_config_get_thermo_count())
+ *   byte2 = relay_count (KILN_IO_RELAY_COUNT on this board)
+ *   byte3 = count (N, == thermo_count, capped at MAX31856_CHANNEL_COUNT)
+ *   N * 31 bytes, one per zone:
+ *     [0]      index
+ *     [1]      relay_mask
+ *     [2]      control_mode (zone_control_mode_t)
+ *     [3..6]   cal_offset_c, f32 LE
+ *     [7..10]  pid_kp, f32 LE
+ *     [11..14] pid_ki, f32 LE
+ *     [15..18] pid_kd, f32 LE
+ *     [19..22] max_ramp_c_per_hr, f32 LE
+ *     [23..26] max_temp_c, f32 LE
+ *     [27..30] min_temp_c, f32 LE
+ *
+ * SET_ZONE_PID / SET_ZONE_MODEL response payload:
+ *   byte0 = the subcommand echoed back (0x02 / 0x03)
+ *   byte1 = ok (0/1)
+ */
+#define CONTROL_CMD_GET_ZONES    0x01u
+#define CONTROL_CMD_SET_ZONE_PID 0x02u
+#define CONTROL_CMD_SET_ZONE_MODEL 0x03u
+
+/* --- PROFILES (task_id = UART_TASK_ID_PROFILES) ---
+ * Fire profile storage (mirrors profiles_http.c's /api/profiles, /api/profile,
+ * /api/profile/delete) and execution (mirrors dashboard_http.c's
+ * /api/profile_exec and /api/profile_exec/start|stop|pause|resume|
+ * ack_last_run). GET_EXEC_STATUS's per-zone block mirrors /api/control's
+ * tuning-focused per-zone shape (control_mode/actual/duty/PID terms) rather
+ * than /api/profile_exec's fuller one -- that is the shape a live control
+ * loop or tuning GUI actually needs; the lifecycle-only fields
+ * (segment_index/segment_count/dwelling/target_c/ramp-lock) are still
+ * carried at the top level so nothing from /api/profile_exec is lost, only
+ * the fault_reason strings and last_run breadcrumb are dropped for space --
+ * use HTTP for those.
+ *
+ * Unlike THERMO/IO's silent SET_*, every mutating command here (SAVE,
+ * DELETE, START, PAUSE, RESUME, ACK_LAST_RUN) answers with an explicit
+ * ok/fail reply, because these can fail for an operator-relevant reason
+ * (feasibility check, no such profile, nothing running to pause) the same
+ * way their HTTP counterparts' JSON bodies report one -- a silent failure
+ * a GUI would only notice on the next poll is the wrong UX for "did my
+ * firing actually start".
+ *
+ * byte0 = subcommand:
+ *   0x01 LIST            (no args) -- QUERY, see below
+ *   0x02 GET             byte1=id(0-7) -- QUERY, see below
+ *   0x03 SAVE            byte1=id(0-7, or 0xFF for "first free slot")
+ *                         byte2=name_len(N1, 0-15)  N1 bytes=name (ASCII)
+ *                         byte(3+N1)=zone_mask
+ *                         byte(4+N1)=segment_count(1-12)
+ *                         segment_count * 12 bytes:
+ *                           target_c f32 LE, ramp_c_per_hr f32 LE,
+ *                           dwell_min u32 LE
+ *                         Same target_c/ramp_c_per_hr range and
+ *                         feasibility validation as POST /api/profile;
+ *                         rejected (whole submission) without writing
+ *                         anything on any failure. -- QUERY-style reply,
+ *                         see below.
+ *   0x04 DELETE          byte1=id(0-7) -- QUERY-style reply, see below
+ *   0x05 GET_EXEC_STATUS (no args) -- QUERY, see below
+ *   0x06 START           byte1=id(0-7) -- QUERY-style reply, see below
+ *   0x07 STOP            (no args) -- QUERY-style reply, always ok
+ *   0x08 PAUSE           (no args) -- QUERY-style reply, see below
+ *   0x09 RESUME          (no args) -- QUERY-style reply, see below
+ *   0x0A ACK_LAST_RUN    (no args) -- QUERY-style reply, see below
+ *
+ * LIST response payload:
+ *   byte0 = PROFILES_CMD_LIST (0x01)
+ *   byte1 = count (N, used slots only)
+ *   N * variable: id(1) name_len(1) name(name_len bytes) zone_mask(1)
+ *                 segment_count(1)
+ *
+ * GET response payload:
+ *   byte0 = PROFILES_CMD_GET (0x02)
+ *   byte1 = ok (0/1, 0 = no such profile -- nothing else follows)
+ *   [if ok] byte2=id byte3=name_len(N1) N1 bytes=name byte(4+N1)=zone_mask
+ *           byte(5+N1)=segment_count(N2)
+ *           N2 * 12 bytes: target_c f32 LE, ramp_c_per_hr f32 LE,
+ *                          dwell_min u32 LE
+ *
+ * SAVE response payload:
+ *   byte0 = PROFILES_CMD_SAVE (0x03)
+ *   byte1 = ok (0/1)
+ *   [if ok]  byte2=id  byte3=warning_count (capped; see HTTP for the full
+ *            warning text -- this just tells the GUI "N segments are within
+ *            20% of a zone's ramp ceiling, go check the details over HTTP")
+ *   [if !ok] byte2=err_len(N)  N bytes=error text (ASCII, truncated to fit)
+ *
+ * DELETE / START / PAUSE / RESUME / ACK_LAST_RUN response payload:
+ *   byte0 = the subcommand echoed back
+ *   byte1 = ok (0/1)
+ *   [START, if !ok] byte2=err_len(N)  N bytes=error text (truncated to fit)
+ *
+ * GET_EXEC_STATUS response payload:
+ *   byte0        = PROFILES_CMD_GET_EXEC_STATUS (0x05)
+ *   byte1        = state (profile_exec_state_t: 0=idle 1=running 2=paused
+ *                  3=done 4=faulted)
+ *   byte2        = profile_id
+ *   byte3        = name_len (N1)
+ *   N1 bytes     = profile_name, ASCII
+ *   byte(4+N1)   = zone_mask
+ *   byte(5+N1)   = segment_index
+ *   byte(6+N1)   = segment_count
+ *   byte(7+N1)   = dwelling (0/1)
+ *   bytes(8+N1)..(11+N1)  = target_c, f32 LE
+ *   bytes(12+N1)..(15+N1) = segment_elapsed_s, u32 LE
+ *   bytes(16+N1)..(19+N1) = dwell_remaining_s, u32 LE
+ *   byte(20+N1)  = ramp_lock_held (0/1)
+ *   byte(21+N1)  = ramp_lock_lagging_mask
+ *   byte(22+N1)  = fault_guard (thermal_guard_trip_t; only meaningful when
+ *                  state == faulted)
+ *   byte(23+N1)  = zone_count (N2, active zones only)
+ *   N2 * 14 bytes, one per active zone:
+ *     [0]     zone index
+ *     [1]     control_mode (zone_control_mode_t)
+ *     [2..5]  actual_c, f32 LE (meaningless if !actual_valid)
+ *     [6]     actual_valid (0/1)
+ *     [7..10] duty, f32 LE
+ *     [11]    relay_commanded_on (0/1)
+ *     [12]    faulted (0/1)
+ *     [13]    fault_guard (thermal_guard_trip_t; only meaningful if faulted)
+ */
+#define PROFILES_CMD_LIST             0x01u
+#define PROFILES_CMD_GET              0x02u
+#define PROFILES_CMD_SAVE             0x03u
+#define PROFILES_CMD_DELETE           0x04u
+#define PROFILES_CMD_GET_EXEC_STATUS  0x05u
+#define PROFILES_CMD_START            0x06u
+#define PROFILES_CMD_STOP             0x07u
+#define PROFILES_CMD_PAUSE            0x08u
+#define PROFILES_CMD_RESUME           0x09u
+#define PROFILES_CMD_ACK_LAST_RUN     0x0Au
+
+#define PROFILES_SAVE_ID_NEW 0xFFu /* byte1 sentinel for "first free slot" */
+
+/* --- AUTOTUNE (task_id = UART_TASK_ID_AUTOTUNE) ---
+ * Mirrors dashboard_http.c's /api/autotune (GET) and /api/autotune/
+ * start|abort|accept. /api/autotune/matrix (the cross-zone coupling matrix +
+ * RGA) and /api/autotune/trace.csv|history.csv (the raw sample dumps) are
+ * NOT mirrored -- both are bulk/table data (up to MAX31856_CHANNEL_COUNT^2
+ * matrix cells with nested arrays, or up to AUTOTUNE_ENGINE_MAX_SAMPLES CSV
+ * rows) that do not fit this protocol's 253-byte payload cap and do not have
+ * a meaningful truncated form -- a partial coupling matrix or a truncated
+ * CSV trace is actively misleading rather than merely incomplete. Use HTTP
+ * for those.
+ *
+ * byte0 = subcommand:
+ *   0x01 GET_STATUS (no args) -- QUERY, see below
+ *   0x02 START      byte1=zone_index
+ *                    byte2=method (0=step, 1=relay)
+ *                    bytes3..6  = step_duty (method 0) or setpoint_c
+ *                                 (method 1), f32 LE
+ *                    bytes7..10 = relay_d, f32 LE (method 1 only; <=0 means
+ *                                 "engine default", same as the HTTP form)
+ *                    bytes11..14= relay_h_c, f32 LE (method 1 only; <=0 =
+ *                                 default)
+ *                    byte15     = rule (method 1 only: 0=tyreus-luyben,
+ *                                 1=ziegler-nichols)
+ *                    Always send all 16 argument bytes; the ones the
+ *                    selected method doesn't use are ignored, same as the
+ *                    HTTP form's optional fields defaulting server-side.
+ *                    -- QUERY-style reply, see below
+ *   0x03 ABORT      (no args) -- QUERY-style reply, always ok
+ *   0x04 ACCEPT     (no args) -- QUERY-style reply, see below
+ *
+ * GET_STATUS response payload:
+ *   byte0        = AUTOTUNE_CMD_GET_STATUS (0x01)
+ *   byte1        = state (autotune_engine_state_t: 0=idle 1=settling
+ *                  2=stepping 3=relay_approach 4=relay_cycling 5=done
+ *                  6=aborted)
+ *   byte2        = method (0=step, 1=relay)
+ *   byte3        = zone_index
+ *   bytes4..7    = elapsed_s, u32 LE
+ *   bytes8..9    = sample_count, u16 LE
+ *   bytes10..13  = actual_c, f32 LE (meaningless if !actual_valid)
+ *   byte14       = actual_valid (0/1)
+ *   bytes15..18  = duty, f32 LE
+ *   byte19       = model_valid (0/1, step method only)
+ *   bytes20..23  = model.k_gain_c_per_duty, f32 LE
+ *   bytes24..27  = model.tau_s, f32 LE
+ *   bytes28..31  = model.dead_time_s, f32 LE
+ *   bytes32..35  = proposed_gains.kp, f32 LE
+ *   bytes36..39  = proposed_gains.ki, f32 LE
+ *   bytes40..43  = proposed_gains.kd, f32 LE
+ *   byte44       = proposed_gains.rule (autotune_rule_t: 0=simc
+ *                  1=ziegler-nichols 2=tyreus-luyben)
+ *   bytes45..48  = predicted_max_ramp_c_per_hr, f32 LE (step method only)
+ *   byte49       = relay.valid (0/1, relay method only)
+ *   bytes50..53  = relay.ku, f32 LE
+ *   bytes54..57  = relay.tu_s, f32 LE
+ *   bytes58..61  = relay.amplitude_c, f32 LE
+ *   byte62       = abort_reason_len (N, only meaningful when state ==
+ *                  aborted; 0 otherwise)
+ *   N bytes      = abort_reason, ASCII, truncated to whatever fits the
+ *                  253-byte cap (see HTTP for the untruncated text)
+ *
+ * START response payload:
+ *   byte0 = AUTOTUNE_CMD_START (0x02)
+ *   byte1 = ok (0/1)
+ *   [if !ok] byte2=err_len(N)  N bytes=error text (truncated to fit)
+ *
+ * ABORT / ACCEPT response payload:
+ *   byte0 = the subcommand echoed back
+ *   byte1 = ok (0/1)
+ */
+#define AUTOTUNE_CMD_GET_STATUS 0x01u
+#define AUTOTUNE_CMD_START      0x02u
+#define AUTOTUNE_CMD_ABORT      0x03u
+#define AUTOTUNE_CMD_ACCEPT     0x04u
+
+#define AUTOTUNE_METHOD_WIRE_STEP  0x00u
+#define AUTOTUNE_METHOD_WIRE_RELAY 0x01u
+#define AUTOTUNE_RULE_WIRE_TL 0x00u
+#define AUTOTUNE_RULE_WIRE_ZN 0x01u
+
+/* --- WIFI (task_id = UART_TASK_ID_WIFI) ---
+ * Mirrors wifi_provision_http.c's GET /status, GET /scan, POST /provision,
+ * GET /networks, POST /forget. Exists specifically so Wi-Fi can be
+ * configured over a link that works even when Wi-Fi itself is down or
+ * unconfigured (TODO.md section 1's "losing Wi-Fi must never be fatal to
+ * the control loop" cuts both ways: the control/UART path must also never
+ * *depend* on Wi-Fi being up to fix Wi-Fi). This task never touches
+ * kiln_io/relay_authority/safety_link, same rule wifi_prov.h documents for
+ * its own HTTP surface.
+ *
+ * SCAN and GET_NETWORKS results are capped (WIFI_WIRE_MAX_SCAN_ENTRIES,
+ * WIFI_WIRE_MAX_NETWORK_ENTRIES below) to fit one 253-byte payload -- a
+ * truncated flag is set rather than splitting across frames, since this
+ * protocol has no existing multi-part convention to reuse (see
+ * docs/UART_PROTOCOL.md) and a stale/partial scan list is still useful,
+ * unlike a truncated CSV dump. Use GET /scan or /networks over HTTP for the
+ * complete list on a crowded RF environment.
+ *
+ * byte0 = subcommand:
+ *   0x01 GET_STATUS   (no args) -- QUERY, see below
+ *   0x02 SCAN         (no args) -- QUERY, see below
+ *   0x03 ADD_NETWORK  byte1=ssid_len(N1, 1-32)  N1 bytes=ssid
+ *                     byte(2+N1)=password_len(N2, 0-64)  N2 bytes=password
+ *                     Mirrors wifi_prov_add_network() exactly (adds to the
+ *                     saved-network list, or updates the password of an
+ *                     already-saved SSID; switches to home mode). --
+ *                     QUERY-style reply, see below
+ *   0x04 SET_MODE     byte1=mode (0=home, 1=ap)
+ *                     -- QUERY-style reply, see below
+ *   0x05 SET_AP_IDENTITY
+ *                     byte1=has_ssid(0/1)
+ *                     [if 1] byte2=ap_ssid_len(N1,1-32) N1 bytes=ap_ssid
+ *                     byte(2+has_ssid?N1:0)=has_password(0/1)
+ *                     [if 1] byte+1=ap_password_len(N2,0 or 8-63)
+ *                            N2 bytes=ap_password
+ *                     Either field may be omitted (has_*=0) to leave it
+ *                     unchanged, mirroring /provision's independent
+ *                     ap_ssid/ap_password form fields. -- QUERY-style
+ *                     reply, see below
+ *   0x06 GET_NETWORKS (no args) -- QUERY, see below
+ *   0x07 FORGET       byte1=ssid_len(N)  N bytes=ssid
+ *                     -- QUERY-style reply, see below
+ *
+ * Every mutating command here answers with an explicit ok/fail reply, same
+ * reasoning as PROFILES above -- a rejected SSID/password length or "no
+ * such saved network" is exactly what an operator provisioning a board with
+ * no other network access needs to see immediately.
+ *
+ * GET_STATUS response payload:
+ *   byte0       = WIFI_CMD_GET_STATUS (0x01)
+ *   byte1       = mode (0=home, 1=ap)
+ *   byte2       = state (wifi_prov_state_t: 0=ap_mode 1=unprovisioned
+ *                 2=connecting 3=connected 4=reconnecting)
+ *   byte3       = sta_connected (0/1)
+ *   byte4       = ssid_len (N1)         N1 bytes = ssid (active/best-guess)
+ *   byte(5+N1)  = ap_ssid_len (N2)      N2 bytes = ap_ssid
+ *   byte(6+N1+N2) = ap_password_len (N3) N3 bytes = ap_password (plaintext
+ *                 -- see wifi_prov_get_ap_password()'s doc comment for why
+ *                 this one field is deliberately not a saved-network secret)
+ *   byte(7+N1+N2+N3) = sta_ip_len (N4)  N4 bytes = sta_ip, dotted-quad ASCII
+ *   byte(8+N1+N2+N3+N4) = sta_rssi, i8 (signed, dBm; -127 if not connected)
+ *   byte(9+N1+N2+N3+N4) = ap_clients
+ *
+ * SCAN response payload:
+ *   byte0 = WIFI_CMD_SCAN (0x02)
+ *   byte1 = count (N, capped at WIFI_WIRE_MAX_SCAN_ENTRIES)
+ *   byte2 = truncated (0/1 -- more results existed than fit)
+ *   N * variable: ssid_len(1) ssid(ssid_len bytes) rssi(i8) secure(0/1)
+ *
+ * ADD_NETWORK / SET_MODE / SET_AP_IDENTITY / FORGET response payload:
+ *   byte0 = the subcommand echoed back
+ *   byte1 = ok (0/1)
+ *
+ * GET_NETWORKS response payload:
+ *   byte0 = WIFI_CMD_GET_NETWORKS (0x06)
+ *   byte1 = count (N, capped at WIFI_WIRE_MAX_NETWORK_ENTRIES)
+ *   byte2 = truncated (0/1)
+ *   N * variable: ssid_len(1) ssid(ssid_len bytes) saved(0/1) in_range(0/1)
+ *                 rssi(i8, only meaningful if in_range) secure(0/1, only
+ *                 meaningful if in_range) connected(0/1)
+ */
+#define WIFI_CMD_GET_STATUS     0x01u
+#define WIFI_CMD_SCAN           0x02u
+#define WIFI_CMD_ADD_NETWORK    0x03u
+#define WIFI_CMD_SET_MODE       0x04u
+#define WIFI_CMD_SET_AP_IDENTITY 0x05u
+#define WIFI_CMD_GET_NETWORKS   0x06u
+#define WIFI_CMD_FORGET         0x07u
+
+#define WIFI_WIRE_MAX_SCAN_ENTRIES 6u
+#define WIFI_WIRE_MAX_NETWORK_ENTRIES 5u
 
 #endif // UART_TASK_IDS_H
