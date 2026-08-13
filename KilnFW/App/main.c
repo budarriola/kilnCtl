@@ -21,6 +21,7 @@
 #include "kiln_io.h"
 #include "mdns.h"
 #include "monitor_task.h"
+#include "nvs_report.h"
 #include "profile_executor.h"
 #include "profiles_http.h"
 #include "relay_cycles.h"
@@ -429,6 +430,13 @@ void app_main(void)
         ESP_LOGW(TAG, "profiles_http_start failed: %s -- no Profiles page this boot",
                  esp_err_to_name(profiles_err));
     }
+
+    // TODO.md 8.2's boot-time report: capture AFTER every module above that
+    // owns an NVS partition (wifi_prov_start() far above, relay_cycles_init(),
+    // zones/rules/profiles_http_start() just above) has already run its own
+    // nvs_partition_init() -- this only observes what those calls established,
+    // it does not itself mount or erase anything.
+    nvs_report_capture();
 
     // Development-only /api/sim (fault injection into the simulated plant).
     // Compiles to a no-op returning ESP_OK unless CONFIG_KILNCTL_SIM_PLANT --

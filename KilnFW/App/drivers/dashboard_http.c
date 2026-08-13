@@ -8,6 +8,7 @@
 
 #include "autotune_engine.h"
 #include "http_form.h"
+#include "nvs_report.h"
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
@@ -32,7 +33,7 @@ static struct {
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    char json[768];
+    char json[896];
     size_t o = 0;
     int n;
 
@@ -116,7 +117,25 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         APPEND("]");
     }
 
-    APPEND(",\"safety_ready\":%s}", s_dash.safety != NULL ? "true" : "false");
+    APPEND(",\"safety_ready\":%s", s_dash.safety != NULL ? "true" : "false");
+
+    /* TODO.md 8.2's "one boot-time report": present/mounted per NVS
+     * partition, so the wizard (8.3) can say precisely which storage section
+     * is missing rather than an operator discovering it as an unexplained
+     * "unconfigured" zone/rule/profile page. */
+    {
+        size_t nvs_count = 0;
+        const nvs_report_section_t *sections = nvs_report_get(&nvs_count);
+        APPEND(",\"nvs_sections\":[");
+        for (size_t i = 0; i < nvs_count; i++) {
+            APPEND("%s{\"name\":\"%s\",\"present\":%s,\"mounted\":%s}", i == 0 ? "" : ",",
+                   sections[i].name, sections[i].present ? "true" : "false",
+                   sections[i].mounted ? "true" : "false");
+        }
+        APPEND("]");
+    }
+
+    APPEND("}");
 
 #undef APPEND
 

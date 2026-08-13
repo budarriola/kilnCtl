@@ -102,23 +102,37 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     char ap_ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
     json_escape(wifi_prov_get_ap_ssid(), ap_ssid_escaped, sizeof(ap_ssid_escaped));
 
+    /* 2026-08-13: the board's OWN AP password, deliberately exposed here --
+     * unlike any *saved network's* password (never sent by this server,
+     * anywhere -- see wifi_prov_get_saved_networks()'s doc comment), an
+     * operator on the setup page needs to see what they configured for the
+     * board's own identity. See wifi_prov_get_ap_password()'s doc comment
+     * for the full reasoning. */
+    char ap_password_escaped[WIFI_PROV_PASSWORD_MAX_LEN * 2 + 1];
+    json_escape(wifi_prov_get_ap_password(), ap_password_escaped, sizeof(ap_password_escaped));
+
     char sta_ip[16];
     bool sta_connected = wifi_prov_is_sta_connected();
     if (!sta_connected || wifi_prov_get_sta_ip(sta_ip, sizeof(sta_ip)) != ESP_OK) {
         sta_ip[0] = '\0';
     }
 
+    int8_t sta_rssi = wifi_prov_get_sta_rssi();
+    uint8_t ap_clients = wifi_prov_get_ap_client_count();
+
     /* mode is the one explicit toggle the page renders; state is the
      * finer-grained detail of what's happening while home mode acts on a
      * join (unprovisioned/connecting/connected/reconnecting) -- both are
      * sent so the page can show one coherent switch plus a status line
      * without guessing at either from the other. */
-    char json[288];
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":\"%s\",\"sta_connected\":%s,"
-                     "\"sta_ip\":\"%s\",\"ap_ssid\":\"%s\"}",
+                     "\"sta_ip\":\"%s\",\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
+                     "\"ap_clients\":%u}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_escaped,
-                     sta_connected ? "true" : "false", sta_ip, ap_ssid_escaped);
+                     sta_connected ? "true" : "false", sta_ip, ap_ssid_escaped, ap_password_escaped,
+                     (int)sta_rssi, (unsigned)ap_clients);
     if (n < 0) {
         n = 0;
     }
@@ -165,6 +179,156 @@ static esp_err_t scan_get_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
+}
+
+/* WIFI_PROV_MAX_SAVED_NETWORKS is a .c-file-private define in wifi_prov.c,
+ * not exposed via wifi_prov.h -- 8 is a literal mirror of that value, kept
+ * generous (wifi_prov_get_saved_networks() truncates to whatever bound is
+ * passed here, it doesn't care if this is exact). */
+#define NETWORKS_SAVED_MAX 8
+
+static esp_err_t networks_get_handler(httpd_req_t *req)
+{
+    static wifi_prov_saved_network_t saved[NETWORKS_SAVED_MAX];
+    size_t saved_count = 0;
+    wifi_prov_get_saved_networks(saved, sizeof(saved) / sizeof(saved[0]), &saved_count);
+
+    static wifi_prov_scan_result_t scanned[20];
+    size_t scan_count = 0;
+    esp_err_t scan_err = wifi_prov_scan(scanned, sizeof(scanned) / sizeof(scanned[0]), &scan_count);
+    if (scan_err != ESP_OK) {
+        /* AP-mode (ESP_ERR_NOT_SUPPORTED) or any other transient scan
+         * failure -- this is a merged status readout, not a scan endpoint,
+         * so it degrades to saved-only (all in_range:false) rather than
+         * failing the whole response. */
+        if (scan_err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "wifi_prov_scan failed in /networks: %s", esp_err_to_name(scan_err));
+        }
+        scan_count = 0;
+    }
+
+    const char *active_ssid = wifi_prov_get_saved_ssid();
+    bool sta_connected = wifi_prov_is_sta_connected();
+
+    /* Bounded by NETWORKS_SAVED_MAX + MAX_SCAN entries above, each
+     * contributing a fixed-size chunk -- no per-request allocation sized
+     * from anything a client sent. Sized generously over
+     * (20 scan + 8 saved) * ~80 bytes/entry for the extra fields this
+     * response carries versus /scan's plain entries. */
+    char json[(20 + NETWORKS_SAVED_MAX) * 96 + 16];
+    size_t o = 0;
+    json[o++] = '[';
+    bool first = true;
+
+    for (size_t i = 0; i < saved_count; i++) {
+        const char *ssid = saved[i].ssid;
+        bool in_range = false;
+        int8_t rssi = 0;
+        bool secure = false;
+        for (size_t j = 0; j < scan_count; j++) {
+            if (strcmp(ssid, scanned[j].ssid) == 0) {
+                in_range = true;
+                rssi = scanned[j].rssi;
+                secure = scanned[j].secure;
+                break;
+            }
+        }
+        bool connected = sta_connected && strcmp(ssid, active_ssid) == 0;
+
+        char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+        json_escape(ssid, ssid_escaped, sizeof(ssid_escaped));
+
+        int n;
+        if (in_range) {
+            /* rssi/secure key omitted entirely (not emitted as null) when a
+             * saved network isn't currently in scan range -- simplest to
+             * parse client-side, documented here and in the endpoint doc. */
+            n = snprintf(json + o, sizeof(json) - o,
+                         "%s{\"ssid\":\"%s\",\"saved\":true,\"in_range\":true,\"rssi\":%d,"
+                         "\"secure\":%s,\"connected\":%s}",
+                         first ? "" : ",", ssid_escaped, (int)rssi, secure ? "true" : "false",
+                         connected ? "true" : "false");
+        } else {
+            n = snprintf(json + o, sizeof(json) - o,
+                         "%s{\"ssid\":\"%s\",\"saved\":true,\"in_range\":false,\"connected\":%s}",
+                         first ? "" : ",", ssid_escaped, connected ? "true" : "false");
+        }
+        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+            break; /* ran out of room -- stop here rather than overrun */
+        }
+        o += (size_t)n;
+        first = false;
+    }
+
+    for (size_t j = 0; j < scan_count; j++) {
+        bool already_saved = false;
+        for (size_t i = 0; i < saved_count; i++) {
+            if (strcmp(scanned[j].ssid, saved[i].ssid) == 0) {
+                already_saved = true;
+                break;
+            }
+        }
+        if (already_saved) {
+            continue; /* already emitted above with saved:true, in_range:true */
+        }
+
+        bool connected = sta_connected && strcmp(scanned[j].ssid, active_ssid) == 0;
+        char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+        json_escape(scanned[j].ssid, ssid_escaped, sizeof(ssid_escaped));
+
+        int n = snprintf(json + o, sizeof(json) - o,
+                         "%s{\"ssid\":\"%s\",\"saved\":false,\"in_range\":true,\"rssi\":%d,"
+                         "\"secure\":%s,\"connected\":%s}",
+                         first ? "" : ",", ssid_escaped, (int)scanned[j].rssi,
+                         scanned[j].secure ? "true" : "false", connected ? "true" : "false");
+        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+            break; /* ran out of room -- stop here rather than overrun */
+        }
+        o += (size_t)n;
+        first = false;
+    }
+
+    if (o + 1 < sizeof(json)) {
+        json[o++] = ']';
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, o);
+}
+
+static esp_err_t forget_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > PROV_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[PROV_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            ESP_LOGW(TAG, "forget body read failed/short: %d", ret);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    int ssid_len = http_form_find_field(body, "ssid", ssid, sizeof(ssid));
+    if (ssid_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid missing or too long");
+        return ESP_OK;
+    }
+
+    esp_err_t err = wifi_prov_forget_network(ssid, (size_t)ssid_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_forget_network failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not forget network");
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr(req, "ok");
 }
 
 static esp_err_t provision_post_handler(httpd_req_t *req)
@@ -271,10 +435,14 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
         password_len = 0;
     }
 
-    esp_err_t err = wifi_prov_set_credentials(ssid, (size_t)ssid_len, password, (size_t)password_len);
+    esp_err_t err = wifi_prov_add_network(ssid, (size_t)ssid_len, password, (size_t)password_len);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "wifi_prov_set_credentials failed: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not save credentials");
+        ESP_LOGW(TAG, "wifi_prov_add_network failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_NO_MEM) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "saved network list is full");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not save credentials");
+        }
         return ESP_OK;
     }
     return httpd_resp_sendstr(req, "ok");
@@ -335,11 +503,19 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t provision_uri = {
         .uri = "/provision", .method = HTTP_POST, .handler = provision_post_handler,
     };
+    static const httpd_uri_t networks_uri = {
+        .uri = "/networks", .method = HTTP_GET, .handler = networks_get_handler,
+    };
+    static const httpd_uri_t forget_uri = {
+        .uri = "/forget", .method = HTTP_POST, .handler = forget_post_handler,
+    };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &wifi_page_uri);
     httpd_register_uri_handler(s_server, &status_uri);
     httpd_register_uri_handler(s_server, &scan_uri);
     httpd_register_uri_handler(s_server, &provision_uri);
+    httpd_register_uri_handler(s_server, &networks_uri);
+    httpd_register_uri_handler(s_server, &forget_uri);
 
     ESP_LOGI(TAG, "provisioning HTTP server up");
     return ESP_OK;

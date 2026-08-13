@@ -37,11 +37,29 @@
     margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
     background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
   }
-  #status { margin-top: 1em; font-weight: bold; }
+  #status { margin-top: 1em; padding: 1em; border: 1px solid var(--border); border-radius: 4px;
+            background: var(--button-bg); }
+  #statusRows { list-style: none; padding: 0; margin: 0; }
+  #statusRows li { display: flex; justify-content: space-between; padding: 0.4em 0;
+                    border-bottom: 1px solid var(--border); }
+  #statusRows li:last-child { border-bottom: none; }
+  .status-label { font-weight: bold; opacity: 0.8; }
+  .status-value { text-align: right; font-family: monospace; }
+  .rssi-excellent { color: #0a0; } .rssi-good { color: #0a0; } .rssi-fair { color: #aa0; } .rssi-weak { color: #a00; }
   ul#networks { list-style: none; padding: 0; margin-top: 0.5em; }
   ul#networks li { padding: 0.5em; border: 1px solid var(--border); margin-bottom: 0.3em;
-                    cursor: pointer; display: flex; justify-content: space-between; }
+                    cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   ul#networks li:hover { background: var(--hover-bg); }
+  ul#networks li.connected { border-color: var(--link); }
+  ul#networks .net-left { display: flex; align-items: center; gap: 0.5em; overflow: hidden; }
+  ul#networks .net-ssid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul#networks .net-right { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
+  .badge-saved { font-size: 0.75em; padding: 0.1em 0.4em; border-radius: 3px;
+                 background: var(--link); color: #fff; flex-shrink: 0; }
+  .forget-btn { margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
+  #connectSection { margin-top: 0.5em; padding: 0.5em; border: 1px solid var(--border);
+                     border-radius: 4px; display: none; }
+  #connectSection label { margin-top: 0.5em; }
   .mode-toggle { display: flex; border: 1px solid var(--input-border); border-radius: 4px;
                  overflow: hidden; margin-top: 0.5em; }
   .mode-toggle button { flex: 1; margin: 0; border: none; border-radius: 0; padding: 0.7em 0.5em;
@@ -55,7 +73,9 @@
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 <a href="/" id="mainLink" style="display:none">&larr; Main page</a>
 <h1>kilnCtl Wi-Fi Setup</h1>
-<div id="status">Checking status…</div>
+<div id="status">
+  <ul id="statusRows"></ul>
+</div>
 
 <h2>Mode</h2>
 <div class="mode-toggle">
@@ -67,18 +87,18 @@
   network on permanently and never attempts to join anything else.</div>
 
 <div id="homeSection">
-  <h2>Nearby networks</h2>
+  <h2>Networks</h2>
   <button id="scanBtn" type="button">Scan</button>
   <ul id="networks"></ul>
 
-  <h2>Home network</h2>
-  <form id="homeForm">
+  <div id="connectSection">
     <label for="ssid">Network name (SSID)</label>
-    <input type="text" id="ssid" name="ssid" maxlength="32" required>
+    <input type="text" id="ssid" name="ssid" maxlength="32" readonly disabled>
     <label for="password">Password</label>
     <input type="password" id="password" name="password" maxlength="64">
-    <button type="submit">Connect</button>
-  </form>
+    <button id="connectSubmitBtn" type="button">Connect</button>
+    <button id="connectCancelBtn" type="button">Cancel</button>
+  </div>
 </div>
 
 <div id="apSection">
@@ -95,14 +115,66 @@
 </div>
 
 <script>
-function setStatus(text) { document.getElementById('status').textContent = text; }
+function rssiClass(rssi) {
+  if (rssi >= -50) return 'rssi-excellent';
+  if (rssi >= -60) return 'rssi-good';
+  if (rssi >= -70) return 'rssi-fair';
+  return 'rssi-weak';
+}
 
-function describeStatus(s) {
-  if (s.mode === 'ap') return 'Access Point mode: "' + s.ap_ssid + '" is up, permanently.';
-  if (s.state === 'connected') return 'Connected to ' + s.ssid + (s.sta_ip ? ' (' + s.sta_ip + ')' : '') + '.';
-  if (s.state === 'connecting') return 'Joining ' + s.ssid + '… (fallback AP "' + s.ap_ssid + '" is up meanwhile)';
-  if (s.state === 'reconnecting') return 'Was connected to ' + s.ssid + ', reconnecting… (fallback AP "' + s.ap_ssid + '" is up meanwhile)';
-  return 'Home Wi-Fi mode: not connected yet -- access point "' + s.ap_ssid + '" is up, waiting for setup.';
+function rssiBar(rssi) {
+  if (rssi === -127) return '—';
+  var bars = Math.floor((rssi + 100) / 10);
+  if (bars < 0) bars = 0; if (bars > 5) bars = 5;
+  return '●'.repeat(bars) + '○'.repeat(5 - bars) + ' ' + rssi + ' dBm';
+}
+
+function renderStatus(s) {
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '';
+
+  function addRow(label, value) {
+    var li = document.createElement('li');
+    var labelEl = document.createElement('span');
+    labelEl.className = 'status-label';
+    labelEl.textContent = label;
+    var valueEl = document.createElement('span');
+    valueEl.className = 'status-value';
+    valueEl.textContent = value;
+    li.appendChild(labelEl);
+    li.appendChild(valueEl);
+    rows.appendChild(li);
+  }
+
+  addRow('Mode', s.mode === 'ap' ? 'Access Point' : 'Home Wi-Fi');
+
+  if (s.mode === 'home') {
+    addRow('Status', s.state === 'connected' ? 'Connected' :
+                      s.state === 'connecting' ? 'Joining…' :
+                      s.state === 'reconnecting' ? 'Reconnecting…' : 'Not connected');
+    if (s.ssid && s.state !== 'unprovisioned') {
+      addRow('Network', s.ssid || '—');
+    }
+    if (s.sta_ip) {
+      addRow('IP Address', s.sta_ip);
+    }
+    if (s.sta_connected) {
+      var rssiEl = document.createElement('li');
+      var label = document.createElement('span');
+      label.className = 'status-label'; label.textContent = 'Signal';
+      var value = document.createElement('span');
+      value.className = 'status-value ' + rssiClass(s.sta_rssi);
+      value.textContent = rssiBar(s.sta_rssi);
+      rssiEl.appendChild(label); rssiEl.appendChild(value);
+      rows.appendChild(rssiEl);
+    }
+  } else {
+    addRow('Status', 'Active');
+    addRow('AP Network', s.ap_ssid || '—');
+    addRow('Clients', s.ap_clients || '0');
+  }
+
+  addRow('mDNS', 'kiln.local');
 }
 
 let polling = false;
@@ -118,10 +190,17 @@ function applyModeUi(mode) {
 
 function poll() {
   fetch('/status').then(r => r.json()).then(s => {
-    setStatus(describeStatus(s));
+    renderStatus(s);
     applyModeUi(s.mode);
     if (document.activeElement !== document.getElementById('apSsid')) {
       document.getElementById('apSsid').value = s.ap_ssid || '';
+    }
+    /* Pre-fill the board's own AP password too -- deliberately different
+     * from every saved *network* password (never sent by the backend at
+     * all, anywhere) -- see wifi_prov_get_ap_password()'s doc comment in
+     * wifi_prov.h for why this one specifically is shown. */
+    if (document.activeElement !== document.getElementById('apPassword')) {
+      document.getElementById('apPassword').value = s.ap_password || '';
     }
     document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
     if (s.state === 'connecting' || s.state === 'reconnecting') {
@@ -130,67 +209,170 @@ function poll() {
     } else {
       polling = false;
     }
-  }).catch(() => setStatus('Could not reach the board.'));
+  }).catch(() => {
+    var rows = document.getElementById('statusRows');
+    rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not reach the board</span></li>';
+  });
 }
 
-function renderNetworks(list) {
+function openConnectSection(ssid) {
+  var section = document.getElementById('connectSection');
+  document.getElementById('ssid').value = ssid;
+  document.getElementById('password').value = '';
+  section.style.display = '';
+  document.getElementById('password').focus();
+}
+
+function closeConnectSection() {
+  var section = document.getElementById('connectSection');
+  section.style.display = 'none';
+  document.getElementById('ssid').value = '';
+  document.getElementById('password').value = '';
+}
+
+function submitConnect() {
+  var body = 'ssid=' + encodeURIComponent(document.getElementById('ssid').value) +
+             '&password=' + encodeURIComponent(document.getElementById('password').value);
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Submitting…</span></li>';
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(r => {
+      if (!r.ok) throw new Error('rejected');
+      document.getElementById('password').value = '';
+      closeConnectSection();
+      poll();
+      fetchNetworks();
+    })
+    .catch(() => {
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not submit</span></li>';
+    });
+}
+
+function forgetNetwork(ssid, savedCount) {
+  var msg = savedCount === 1
+    ? 'This is the last saved network. Forgetting it will switch this board to Access Point mode. Continue?'
+    : 'Forget this network?';
+  if (!confirm(msg)) return;
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Forgetting…</span></li>';
+  fetch('/forget', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                      body: 'ssid=' + encodeURIComponent(ssid) })
+    .then(r => { if (!r.ok) throw new Error('rejected'); poll(); fetchNetworks(); })
+    .catch(() => {
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not forget network</span></li>';
+    });
+}
+
+function renderNetworkList(list) {
   const ul = document.getElementById('networks');
   ul.innerHTML = '';
-  list.sort((a, b) => b.rssi - a.rssi).forEach(function (net) {
+  const savedCount = list.filter(function (n) { return n.saved; }).length;
+  list.sort(function (a, b) {
+    if (a.in_range !== b.in_range) return a.in_range ? -1 : 1;
+    if (a.in_range && b.in_range) return b.rssi - a.rssi;
+    return a.ssid.localeCompare(b.ssid);
+  }).forEach(function (net) {
     const li = document.createElement('li');
-    li.textContent = net.ssid + (net.secure ? ' 🔒' : '') + ' (' + net.rssi + ' dBm)';
-    li.addEventListener('click', function () {
-      document.getElementById('ssid').value = net.ssid;
-      document.getElementById('password').focus();
-    });
+    if (net.connected) li.classList.add('connected');
+
+    const left = document.createElement('span');
+    left.className = 'net-left';
+    const ssidEl = document.createElement('span');
+    ssidEl.className = 'net-ssid';
+    ssidEl.textContent = net.ssid + (net.secure ? ' 🔒' : '');
+    left.appendChild(ssidEl);
+    if (net.saved) {
+      const badge = document.createElement('span');
+      badge.className = 'badge-saved';
+      badge.textContent = 'Saved';
+      left.appendChild(badge);
+    }
+
+    const right = document.createElement('span');
+    right.className = 'net-right';
+    if (net.in_range && typeof net.rssi === 'number') {
+      const rssiEl = document.createElement('span');
+      rssiEl.className = rssiClass(net.rssi);
+      rssiEl.textContent = rssiBar(net.rssi);
+      right.appendChild(rssiEl);
+    }
+    if (net.saved) {
+      const forgetBtn = document.createElement('button');
+      forgetBtn.type = 'button';
+      forgetBtn.className = 'forget-btn';
+      forgetBtn.textContent = 'Forget';
+      forgetBtn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        forgetNetwork(net.ssid, savedCount);
+      });
+      right.appendChild(forgetBtn);
+    }
+
+    li.appendChild(left);
+    li.appendChild(right);
+
+    if (!net.saved && net.in_range) {
+      li.addEventListener('click', function () {
+        openConnectSection(net.ssid);
+      });
+    }
+
     ul.appendChild(li);
+  });
+}
+
+function fetchNetworks() {
+  fetch('/networks').then(r => {
+    if (!r.ok) throw new Error('networks unavailable');
+    return r.json();
+  }).then(renderNetworkList).catch(function () {
+    document.getElementById('networks').innerHTML = '<li>Network list unavailable (Access Point mode, or scan failed).</li>';
   });
 }
 
 document.getElementById('scanBtn').addEventListener('click', function () {
   document.getElementById('networks').innerHTML = '<li>Scanning…</li>';
-  fetch('/scan').then(r => {
-    if (!r.ok) throw new Error('scan unavailable');
-    return r.json();
-  }).then(renderNetworks).catch(function () {
-    document.getElementById('networks').innerHTML = '<li>Scan unavailable (Access Point mode, or scan failed).</li>';
-  });
+  fetchNetworks();
 });
 
-document.getElementById('homeForm').addEventListener('submit', function (ev) {
-  ev.preventDefault();
-  var body = 'ssid=' + encodeURIComponent(document.getElementById('ssid').value) +
-             '&password=' + encodeURIComponent(document.getElementById('password').value);
-  setStatus('Submitting…');
-  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
-    .then(r => { if (!r.ok) throw new Error('rejected'); setStatus('Attempting to join…'); poll(); })
-    .catch(() => setStatus('Could not submit -- check the values and try again.'));
+document.getElementById('connectSubmitBtn').addEventListener('click', function () {
+  submitConnect();
+});
+
+document.getElementById('connectCancelBtn').addEventListener('click', function () {
+  closeConnectSection();
 });
 
 document.getElementById('apForm').addEventListener('submit', function (ev) {
   ev.preventDefault();
   var body = 'ap_ssid=' + encodeURIComponent(document.getElementById('apSsid').value) +
              '&ap_password=' + encodeURIComponent(document.getElementById('apPassword').value);
-  setStatus('Saving access point identity…');
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Saving…</span></li>';
   fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
     .then(r => {
       if (!r.ok) throw new Error('rejected');
-      setStatus('Access point identity saved. If this device was joined to the old network, it must rejoin under the new name/password.');
       poll();
     })
-    .catch(() => setStatus('Could not submit -- check the values and try again.'));
+    .catch(() => {
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not submit</span></li>';
+    });
 });
 
 function postMode(mode) {
-  setStatus('Switching mode…');
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Switching…</span></li>';
   fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'mode=' + mode })
     .then(r => { if (!r.ok) throw new Error('rejected'); poll(); })
-    .catch(() => setStatus('Could not submit -- try again.'));
+    .catch(() => {
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not switch</span></li>';
+    });
 }
 document.getElementById('modeHomeBtn').addEventListener('click', function () { postMode('home'); });
 document.getElementById('modeApBtn').addEventListener('click', function () { postMode('ap'); });
 
 poll();
+fetchNetworks();
 
 (function () {
   var btn = document.getElementById('themeBtn');

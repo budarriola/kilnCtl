@@ -32,26 +32,68 @@ static const char *TAG = "wifi_prov";
  * the network to go fix it. Splitting the credentials into their own partition
  * means neither wipe can reach the other, in either direction.
  *
- * The same split is what makes "reset the kiln's configuration" (erase the
- * default `nvs`) a thing the operator can do without stranding the board.
+ * 2026-08-13: the same reasoning was extended to the REST of the default
+ * `nvs` partition's former contents. zones/rules/relay_cycles/run_state now
+ * live in their own `kiln_nvs` partition and fire profiles in their own
+ * `profiles_nvs` (see partitions.csv) -- each with the same scoped
+ * nvs_partition_init()-and-erase-ONLY-that-partition pattern this file
+ * pioneered, and each doing its own one-time migration off the default
+ * partition independently, the same way this module migrates Wi-Fi
+ * credentials below. This module no longer initializes the default `nvs`
+ * partition as a side effect for anyone else -- that was a historical
+ * accident (main.c happened to call wifi_prov_start() first), and every
+ * module that touches NVS now owns its own partition's init.
+ *
+ * The same split is what makes "reset the kiln's configuration" (erase
+ * `kiln_nvs` and/or `profiles_nvs`) a thing the operator can do without
+ * stranding the board off Wi-Fi, and without one corrupt section taking any
+ * other section with it.
  *
  * It does NOT make the credentials immortal: `esptool erase_flash` clears the
- * whole chip and this partition goes with it, exactly like every other one.
- * The survival matrix is:
+ * whole chip and every partition goes with it. The survival matrix is:
  *   flash bootloader+partition-table+app  -> credentials survive (this is the
  *                                            common case, and the reason the
  *                                            first three partitions.csv rows
  *                                            are kept byte-identical to the
  *                                            stock table)
- *   erase the default `nvs` partition     -> credentials survive, kiln config
- *                                            is lost
+ *   erase the default `nvs` partition     -> credentials survive; kiln_nvs
+ *                                            and profiles_nvs are UNAFFECTED
+ *                                            (default `nvs` is only read now,
+ *                                            during migration, never written)
+ *   erase `kiln_nvs`                      -> zones/rules/relay_cycles/
+ *                                            run_state lost; credentials and
+ *                                            profiles survive
+ *   erase `profiles_nvs`                  -> fire profiles lost; everything
+ *                                            else survives
  *   esptool erase_flash                   -> nothing survives, credentials
  *                                            included */
 #define WIFI_NVS_PARTITION "wifi_nvs"
 
+/* TODO.md 8.4: how often to re-scan for a saved network while the board is
+ * sitting in AP fallback (home mode, but not currently joined) instead of
+ * only retrying the same target on every disconnect event. 30s balances
+ * "notices a network coming back into range reasonably promptly" against
+ * not spending unnecessary scan time/radio contention when nothing has
+ * changed -- there is no requirement driving a tighter number, this is
+ * deliberately not the same cadence as WIFI_STA_CONNECT_TIMEOUT_MS (which
+ * governs how long a single join attempt gets, not how often to look for a
+ * *different* target). Runs via rescan_timer_cb() on the esp_timer service
+ * task, never on the Wi-Fi driver's own event-loop task -- see that
+ * function's comment for why that distinction matters. */
+#define WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS 30000
+
 #define NVS_KEY_SSID "ssid"
 #define NVS_KEY_PASS "pass"
 #define NVS_KEY_HAS_CREDS "has_creds"
+/* Legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/NVS_KEY_HAS_CREDS)
+ * are never written by this build any more -- see NVS_KEY_SAVED_NETS below --
+ * but are still READ once, by the one-time list-format migration in
+ * nvs_load_saved_nets(), for boards provisioned by firmware that predates
+ * TODO.md 8.4's bounded-list rework. Left in place afterward, same rationale
+ * as every other "old copy stays, never re-read" migration in this file. */
+#define NVS_KEY_SAVED_NETS "saved_nets"
+#define WIFI_PROV_MAX_SAVED_NETWORKS 8
+#define SAVED_NETS_VERSION 1
 #define NVS_KEY_MODE "mode"           /* u8: 0 = WIFI_PROV_MODE_HOME, 1 = WIFI_PROV_MODE_AP */
 #define NVS_KEY_LOCAL_ONLY "local_only" /* legacy, read-only: pre-2026-08-11 firmware's
                                           * only mode flag. Migrated into NVS_KEY_MODE the
@@ -62,6 +104,27 @@ static const char *TAG = "wifi_prov";
 #define NVS_KEY_AP_PASS "ap_pass"
 #define NVS_KEY_HAS_AP_PASS "has_ap_pass"
 
+/* TODO.md 8.4: a bounded list of saved networks, replacing the old single
+ * ssid/password/has_creds slot. Versioned the same way zones_http.c/
+ * rules_http.c version their NVS blobs (see nvs_load_saved_nets() below) --
+ * this is a same-partition version bump, so the 3-outcome load logic there is
+ * simpler than wifi_prov's own cross-partition credential migration: exact
+ * match uses it, unreadable/absent/wrong-size treats it as an empty list,
+ * and a version NEWER than this build's SAVED_NETS_VERSION refuses to load
+ * (leaves flash untouched) rather than risk misinterpreting a layout this
+ * build doesn't know about -- the same firmware-rollback-safety rationale as
+ * zones_cfg_t's version check. */
+typedef struct {
+    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    char password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+} saved_net_t;
+
+typedef struct {
+    uint8_t version; /* SAVED_NETS_VERSION at save time */
+    uint8_t count;
+    saved_net_t nets[WIFI_PROV_MAX_SAVED_NETWORKS];
+} saved_nets_blob_t;
+
 /* Named (rather than anonymous) so the migration path in wifi_prov_start()
  * can take a whole-struct snapshot of what the new partition yielded before
  * speculatively re-loading over it from the old one. */
@@ -71,10 +134,25 @@ static struct wifi_prov_state {
     esp_netif_t *sta_netif;
     esp_timer_handle_t ap_fallback_timer; /* one-shot; brings the AP back if a
                                            * reconnect doesn't land in time */
+    esp_timer_handle_t rescan_timer; /* periodic; see rescan_timer_cb() --
+                                      * looks for a stronger/available saved
+                                      * network while sitting in AP fallback
+                                      * that the operator didn't choose */
 
-    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
-    char password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
-    bool has_creds;
+    saved_nets_blob_t saved_nets; /* the bounded list of saved networks --
+                                   * "has credentials" is now simply
+                                   * saved_nets.count > 0, derived everywhere
+                                   * it's needed rather than stored separately,
+                                   * which is what closes out the 2026-08-13
+                                   * has_creds/ssid disagreement class for
+                                   * good: there is no second flag left to
+                                   * drift out of sync with the list. */
+    char active_ssid[WIFI_PROV_SSID_MAX_LEN + 1]; /* the SSID apply_sta_config()
+                                   * most recently configured for a join --
+                                   * "the network currently being tried or
+                                   * connected to", independent of what's in
+                                   * the saved list. Empty if nothing has been
+                                   * configured yet this boot. */
     wifi_prov_mode_t mode;
 
     /* The fallback AP's OWN identity -- distinct from the station
@@ -89,8 +167,28 @@ static struct wifi_prov_state {
     char ap_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
     bool has_ap_password_override;
 
+    char active_password[WIFI_PROV_PASSWORD_MAX_LEN + 1]; /* password paired with
+                                   * active_ssid above -- kept in RAM only for
+                                   * apply_sta_config() to use, same as every
+                                   * password this module already holds
+                                   * in-memory in plaintext. */
+
     wifi_prov_state_t state;
+    int8_t sta_rssi; /* signal strength (dBm) when connected, -127 if not */
 } s_wifi;
+
+/* Winning legacy single-network credential (pre-8.4 NVS_KEY_SSID/PASS/
+ * HAS_CREDS format), set by migrate_from_default_partition() and consumed
+ * exactly once by nvs_load_saved_nets() to wrap it into saved_nets.nets[0]
+ * the first time this build runs against an old NVS blob. Module-static
+ * (rather than a parameter threaded through) because migrate_from_default_
+ * partition() already has to decide "which whole config wins" for the
+ * mode/AP-identity fields it does carry in s_wifi -- this rides along with
+ * that same decision instead of duplicating it. */
+static struct {
+    bool has;
+    saved_net_t net;
+} s_legacy_single;
 
 /* ---- NVS -------------------------------------------------------------- */
 
@@ -124,29 +222,14 @@ static esp_err_t nvs_load_from(const char *partition, bool *out_found)
         *out_found = true;
     }
 
-    size_t len = sizeof(s_wifi.ssid);
-    err = nvs_get_str(h, NVS_KEY_SSID, s_wifi.ssid, &len);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        nvs_close(h);
-        return err;
-    }
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        s_wifi.ssid[0] = '\0';
-    }
-
-    len = sizeof(s_wifi.password);
-    err = nvs_get_str(h, NVS_KEY_PASS, s_wifi.password, &len);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        nvs_close(h);
-        return err;
-    }
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        s_wifi.password[0] = '\0';
-    }
-
+    /* The legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/
+     * NVS_KEY_HAS_CREDS) are no longer read here -- they're only consulted
+     * by the one-time list-format migration in nvs_load_saved_nets_from(),
+     * which runs after this function (and after migrate_from_default_partition(),
+     * on whichever single-key data wins that decision). This function no
+     * longer touches s_wifi.saved_nets/active_ssid at all. */
+    size_t len;
     uint8_t u8 = 0;
-    err = nvs_get_u8(h, NVS_KEY_HAS_CREDS, &u8);
-    s_wifi.has_creds = (err == ESP_OK) && u8;
 
     /* Mode: prefer the new key. If it's missing, this is an NVS blob
      * written by pre-2026-08-11 firmware -- fall back to the old
@@ -211,20 +294,124 @@ static esp_err_t nvs_load_from(const char *partition, bool *out_found)
  * see the migration note in wifi_prov_start()), so a rollback to firmware that
  * predates the split still finds the credentials it knew about, just frozen at
  * whatever they were when this build first ran. */
-static esp_err_t nvs_save_creds(void)
+
+/* Reads the legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/
+ * NVS_KEY_HAS_CREDS) out of `partition`, with the same has_creds-missing
+ * inference the pre-8.4 nvs_load_from() used to apply in place: if the flag
+ * key is genuinely absent, trust the presence of a non-empty ssid rather than
+ * silently reporting "nothing saved" (covers a partial write that landed
+ * ssid/pass but not the flag). This is read-only and exists purely to feed
+ * the one-time list-format migration in nvs_load_saved_nets() -- nothing
+ * else in this build ever reads these keys again, and nothing writes them. */
+static void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *out_has)
 {
+    memset(out_net, 0, sizeof(*out_net));
+    *out_has = false;
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return; /* namespace/partition absent -- nothing legacy to find */
+    }
+
+    size_t len = sizeof(out_net->ssid);
+    err = nvs_get_str(h, NVS_KEY_SSID, out_net->ssid, &len);
+    if (err != ESP_OK) {
+        out_net->ssid[0] = '\0';
+    }
+
+    len = sizeof(out_net->password);
+    err = nvs_get_str(h, NVS_KEY_PASS, out_net->password, &len);
+    if (err != ESP_OK) {
+        out_net->password[0] = '\0';
+    }
+
+    uint8_t u8 = 0;
+    err = nvs_get_u8(h, NVS_KEY_HAS_CREDS, &u8);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *out_has = out_net->ssid[0] != '\0';
+    } else {
+        *out_has = (err == ESP_OK) && u8;
+    }
+
+    nvs_close(h);
+}
+
+/* Reads the current saved_nets_blob_t out of `partition`, applying the same
+ * 3-outcome version-check pattern as zones_http.c/rules_http.c's blob
+ * loaders: exact SAVED_NETS_VERSION match uses it as-is; an absent/unreadable/
+ * wrong-size blob is treated as an empty list (count 0, not an error -- first
+ * boot looks the same as "nothing saved"); a version NEWER than this build's
+ * SAVED_NETS_VERSION means the blob was written by newer firmware (the
+ * firmware-rollback case) -- refuse to load it and leave flash untouched
+ * rather than risk misinterpreting fields/layout this build doesn't know
+ * about, same rationale as zones_cfg_t's version check. */
+static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob_t *out_blob)
+{
+    memset(out_blob, 0, sizeof(*out_blob));
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_PART_NOT_FOUND) {
+        out_blob->version = SAVED_NETS_VERSION;
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t len = sizeof(*out_blob);
+    err = nvs_get_blob(h, NVS_KEY_SAVED_NETS, out_blob, &len);
+    nvs_close(h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        memset(out_blob, 0, sizeof(*out_blob));
+        out_blob->version = SAVED_NETS_VERSION;
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "saved_nets blob read from '%s' failed (%s) -- treating as empty",
+                 partition, esp_err_to_name(err));
+        memset(out_blob, 0, sizeof(*out_blob));
+        out_blob->version = SAVED_NETS_VERSION;
+        return ESP_OK;
+    }
+    if (len != sizeof(*out_blob)) {
+        ESP_LOGW(TAG, "saved_nets blob from '%s' is the wrong size -- treating as empty", partition);
+        memset(out_blob, 0, sizeof(*out_blob));
+        out_blob->version = SAVED_NETS_VERSION;
+        return ESP_OK;
+    }
+
+    if (out_blob->version == SAVED_NETS_VERSION) {
+        return ESP_OK; /* current version -- happy path */
+    }
+    if (out_blob->version < SAVED_NETS_VERSION) {
+        /* v1 is the first version that has ever existed -- hook point for a
+         * future migration, nothing to convert yet. */
+        out_blob->version = SAVED_NETS_VERSION;
+        return ESP_OK;
+    }
+    /* out_blob->version > SAVED_NETS_VERSION: written by newer firmware
+     * (firmware-rollback case, same as zones_cfg_t) -- refuse to load,
+     * flash data left untouched. */
+    ESP_LOGW(TAG, "saved_nets blob from '%s' is version %u, newer than this firmware's %u -- "
+                  "refusing to load, flash data left untouched",
+             partition, (unsigned)out_blob->version, (unsigned)SAVED_NETS_VERSION);
+    memset(out_blob, 0, sizeof(*out_blob));
+    out_blob->version = SAVED_NETS_VERSION;
+    return ESP_OK;
+}
+
+static esp_err_t nvs_save_saved_nets(void)
+{
+    s_wifi.saved_nets.version = SAVED_NETS_VERSION;
+
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_set_str(h, NVS_KEY_SSID, s_wifi.ssid);
-    if (err == ESP_OK) {
-        err = nvs_set_str(h, NVS_KEY_PASS, s_wifi.password);
-    }
-    if (err == ESP_OK) {
-        err = nvs_set_u8(h, NVS_KEY_HAS_CREDS, s_wifi.has_creds ? 1 : 0);
-    }
+    err = nvs_set_blob(h, NVS_KEY_SAVED_NETS, &s_wifi.saved_nets, sizeof(s_wifi.saved_nets));
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
@@ -329,39 +516,61 @@ static void migrate_from_default_partition(bool found_in_wifi_nvs)
      * hold nothing useful. */
     struct wifi_prov_state from_wifi_nvs = s_wifi;
 
+    /* Legacy single-network credentials, read directly -- nvs_load_from()
+     * itself no longer touches NVS_KEY_SSID/PASS/HAS_CREDS (see
+     * nvs_load_saved_nets_from() for the current, list-based loader). These
+     * are needed only to decide which side's legacy credentials should feed
+     * the one-time list-format migration in nvs_load_saved_nets(): whichever
+     * whole config "wins" the adopt decision below is also whichever legacy
+     * credentials win, so s_legacy_single is set on every return path. */
+    saved_net_t wifi_nvs_legacy_net;
+    bool wifi_nvs_has_legacy = false;
+    nvs_load_legacy_single(WIFI_NVS_PARTITION, &wifi_nvs_legacy_net, &wifi_nvs_has_legacy);
+
     bool found_in_default = false;
     esp_err_t err = nvs_load_from(NVS_DEFAULT_PART_NAME, &found_in_default);
     if (err != ESP_OK || !found_in_default) {
         s_wifi = from_wifi_nvs;
+        s_legacy_single.has = wifi_nvs_has_legacy;
+        s_legacy_single.net = wifi_nvs_legacy_net;
         return;
     }
 
+    saved_net_t default_legacy_net;
+    bool default_has_legacy = false;
+    nvs_load_legacy_single(NVS_DEFAULT_PART_NAME, &default_legacy_net, &default_has_legacy);
+
     /* Adopt the old copy when the new home has nothing at all (the true
      * first-boot-after-the-split case), or when the new home exists but has no
-     * credentials while the old one does -- which is what a board looks like
-     * if it reached the new firmware, saved only an AP-identity override, and
-     * still has its real network sitting in the old partition. Anything the
-     * new partition has already recorded otherwise wins outright; the new
+     * legacy credentials while the old one does -- which is what a board looks
+     * like if it reached the new firmware, saved only an AP-identity override,
+     * and still has its real network sitting in the old partition. Anything
+     * the new partition has already recorded otherwise wins outright; the new
      * location is the source of truth from the moment it holds credentials. */
-    bool adopt = !found_in_wifi_nvs || (s_wifi.has_creds && !from_wifi_nvs.has_creds);
+    bool adopt = !found_in_wifi_nvs || (default_has_legacy && !wifi_nvs_has_legacy);
     if (!adopt) {
         s_wifi = from_wifi_nvs;
+        s_legacy_single.has = wifi_nvs_has_legacy;
+        s_legacy_single.net = wifi_nvs_legacy_net;
         return;
     }
 
     ESP_LOGI(TAG, "migrating Wi-Fi config from the default NVS partition to '%s' (ssid '%s', mode %s)",
-             WIFI_NVS_PARTITION, s_wifi.ssid, s_wifi.mode == WIFI_PROV_MODE_AP ? "AP" : "home");
+             WIFI_NVS_PARTITION, default_legacy_net.ssid, s_wifi.mode == WIFI_PROV_MODE_AP ? "AP" : "home");
 
-    /* Write everything through, not just the credentials: the mode and the AP
-     * identity overrides are part of the same persisted config and would
-     * otherwise silently revert to defaults on the next boot, once this
-     * function stops adopting the old copy. Failures are logged and survivable
-     * -- s_wifi is already correct for this boot either way, and the migration
-     * simply gets retried next time. */
-    esp_err_t save_err = nvs_save_creds();
-    if (save_err == ESP_OK) {
-        save_err = nvs_save_mode();
-    }
+    s_legacy_single.has = default_has_legacy;
+    s_legacy_single.net = default_legacy_net;
+
+    /* Write the mode/AP-identity fields through, same as before -- they're
+     * part of the same persisted config and would otherwise silently revert
+     * to defaults on the next boot, once this function stops adopting the old
+     * copy. The legacy credentials themselves are NOT written back out here
+     * (no nvs_save_creds() any more): s_legacy_single is only ever consumed
+     * by nvs_load_saved_nets(), which persists it in the new list format, not
+     * the old single-key one. Failures are logged and survivable -- s_wifi is
+     * already correct for this boot either way, and the migration simply gets
+     * retried next time. */
+    esp_err_t save_err = nvs_save_mode();
     if (save_err == ESP_OK && s_wifi.has_ap_ssid_override) {
         save_err = nvs_save_ap_ssid();
     }
@@ -371,6 +580,41 @@ static void migrate_from_default_partition(bool found_in_wifi_nvs)
     if (save_err != ESP_OK) {
         ESP_LOGE(TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
                  WIFI_NVS_PARTITION, esp_err_to_name(save_err));
+    }
+}
+
+/* Loads the current saved-networks list from WIFI_NVS_PARTITION and, the
+ * first time this ever runs against a board that has no list saved yet but
+ * does have a winning legacy single-network credential (s_legacy_single, set
+ * by migrate_from_default_partition() just before this is called), wraps
+ * that single credential into nets[0]/count=1 and persists it in the new
+ * format. The old single-key entries are never deleted and never read again
+ * after this -- same "leave the old copy in place" rationale as every other
+ * migration in this file. Must be called after migrate_from_default_
+ * partition() so s_legacy_single reflects the cross-partition "which copy
+ * wins" decision, not just whatever WIFI_NVS_PARTITION alone happened to
+ * hold. */
+static void nvs_load_saved_nets(void)
+{
+    esp_err_t err = nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &s_wifi.saved_nets);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "saved_nets load from '%s' failed: %s -- starting with an empty list",
+                 WIFI_NVS_PARTITION, esp_err_to_name(err));
+        memset(&s_wifi.saved_nets, 0, sizeof(s_wifi.saved_nets));
+        s_wifi.saved_nets.version = SAVED_NETS_VERSION;
+    }
+
+    if (s_wifi.saved_nets.count == 0 && s_legacy_single.has && s_legacy_single.net.ssid[0] != '\0') {
+        ESP_LOGI(TAG, "migrating legacy single-network credential ('%s') to the saved-networks list",
+                 s_legacy_single.net.ssid);
+        s_wifi.saved_nets.nets[0] = s_legacy_single.net;
+        s_wifi.saved_nets.count = 1;
+        s_wifi.saved_nets.version = SAVED_NETS_VERSION;
+        esp_err_t save_err = nvs_save_saved_nets();
+        if (save_err != ESP_OK) {
+            ESP_LOGE(TAG, "saving migrated saved_nets list to '%s' failed: %s -- will retry next boot",
+                     WIFI_NVS_PARTITION, esp_err_to_name(save_err));
+        }
     }
 }
 
@@ -406,16 +650,97 @@ static void apply_ap_config(void)
     }
 }
 
+/* Configures the STA driver for whatever is currently in s_wifi.active_ssid/
+ * active_password -- callers are responsible for having set those first (see
+ * select_and_apply_join_candidate() and the direct nets[0] assignment in
+ * wifi_prov_start()). */
 static void apply_sta_config(void)
 {
     wifi_config_t sta_cfg = { 0 };
-    strncpy((char *)sta_cfg.sta.ssid, s_wifi.ssid, sizeof(sta_cfg.sta.ssid) - 1);
-    strncpy((char *)sta_cfg.sta.password, s_wifi.password, sizeof(sta_cfg.sta.password) - 1);
-    sta_cfg.sta.threshold.authmode = strlen(s_wifi.password) > 0 ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    strncpy((char *)sta_cfg.sta.ssid, s_wifi.active_ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    strncpy((char *)sta_cfg.sta.password, s_wifi.active_password, sizeof(sta_cfg.sta.password) - 1);
+    sta_cfg.sta.threshold.authmode = strlen(s_wifi.active_password) > 0 ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_config(STA) failed: %s", esp_err_to_name(err));
     }
+}
+
+/* Selects which saved network to attempt next and configures the STA driver
+ * for it (active_ssid/active_password + apply_sta_config()). Only called
+ * from home-mode join paths (start_sta_join() and the disconnect branch of
+ * on_wifi_event()) where s_wifi.saved_nets.count > 0 is already guaranteed
+ * by the caller.
+ *
+ * Tie-break policy (2026-08-13, TODO.md 8.4): scan first and prefer the
+ * HIGHEST-RSSI saved network actually in range. Iterating the saved list in
+ * order and only replacing the current best on a STRICT improvement means
+ * equal RSSI favors the earlier entry in the saved list -- list order is a
+ * secondary preference, applied automatically by this iteration order rather
+ * than as an explicit second comparison. If the scan finds NONE of the saved
+ * SSIDs in range (scan failed, everything out of range, or a saved network is
+ * hidden and doesn't show up in an active scan), fall back to the saved list
+ * in order starting at index 0 -- today's effective single-network behavior,
+ * generalized. This never blocks or skips connecting just because the scan
+ * came up empty of matches.
+ *
+ * CAUTION -- flagged, not resolved, for hardware verification: on_wifi_event()
+ * (see the comment atop the "Event handlers" section below) runs on the Wi-Fi
+ * driver's own default-event-loop task, not the caller's stack. wifi_prov_scan()
+ * is a BLOCKING scan (tens to ~150ms per channel found, plus scan setup/teardown).
+ * Calling it from here means every disconnect-triggered reconnect blocks the
+ * Wi-Fi driver's own event processing for the scan's duration, not just the
+ * user-initiated join from start_sta_join() (which runs on the HTTP handler's
+ * task, where blocking is fine). This has NOT been changed to run off-task
+ * (e.g. via a dedicated worker task/queue) because that would be a larger
+ * structural change than TODO.md 8.4 asked for -- but it needs hardware
+ * verification that a blocking scan inside the event handler doesn't stall
+ * other Wi-Fi event processing (AP client join/leave, IP event delivery,
+ * etc.) for the scan's duration before this ships to real boards. */
+static void select_and_apply_join_candidate(void)
+{
+    if (s_wifi.saved_nets.count == 0) {
+        return;
+    }
+
+    int best_idx = -1;
+    int8_t best_rssi = INT8_MIN;
+
+    static wifi_prov_scan_result_t scan_results[20];
+    size_t scan_count = 0;
+    esp_err_t scan_err =
+        wifi_prov_scan(scan_results, sizeof(scan_results) / sizeof(scan_results[0]), &scan_count);
+    if (scan_err == ESP_OK) {
+        for (uint8_t i = 0; i < s_wifi.saved_nets.count; i++) {
+            for (size_t s = 0; s < scan_count; s++) {
+                if (strcmp(scan_results[s].ssid, s_wifi.saved_nets.nets[i].ssid) != 0) {
+                    continue;
+                }
+                if (best_idx < 0 || scan_results[s].rssi > best_rssi) {
+                    best_idx = i;
+                    best_rssi = scan_results[s].rssi;
+                }
+                break; /* saved net i found in the scan; move to the next saved net */
+            }
+        }
+    } else if (scan_err != ESP_ERR_NOT_SUPPORTED) {
+        /* ESP_ERR_NOT_SUPPORTED (AP-only mode) shouldn't happen here since
+         * this only runs from home-mode join paths, but isn't worth logging
+         * as a warning if it somehow does -- anything else genuinely is. */
+        ESP_LOGW(TAG, "auto-join scan failed: %s -- falling back to saved-list order", esp_err_to_name(scan_err));
+    }
+
+    if (best_idx < 0) {
+        best_idx = 0; /* nothing in range matched -- try list order, starting at 0 */
+    }
+
+    strncpy(s_wifi.active_ssid, s_wifi.saved_nets.nets[best_idx].ssid, sizeof(s_wifi.active_ssid) - 1);
+    s_wifi.active_ssid[sizeof(s_wifi.active_ssid) - 1] = '\0';
+    strncpy(s_wifi.active_password, s_wifi.saved_nets.nets[best_idx].password,
+            sizeof(s_wifi.active_password) - 1);
+    s_wifi.active_password[sizeof(s_wifi.active_password) - 1] = '\0';
+
+    apply_sta_config();
 }
 
 static void cancel_ap_fallback_timer(void)
@@ -442,6 +767,30 @@ static void ap_fallback_timer_cb(void *arg)
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
 }
 
+/* TODO.md 8.4: periodically look for a saved network while the board is
+ * sitting in AP fallback that the OPERATOR did not choose -- i.e. mode is
+ * still WIFI_PROV_MODE_HOME (a deliberate switch to WIFI_PROV_MODE_AP is
+ * left alone; that AP is intentional, permanent, and this must never
+ * second-guess it) but state isn't WIFI_PROV_STATE_CONNECTED, meaning
+ * either no join has landed yet or a previous one dropped and is being
+ * retried. Runs on the esp_timer service task, NOT the Wi-Fi driver's
+ * event-loop task -- unlike on_wifi_event() (see that section's header
+ * comment and the note left in its WIFI_EVENT_STA_DISCONNECTED branch),
+ * blocking here in wifi_prov_scan() does not stall Wi-Fi event delivery,
+ * which is exactly why this periodic path exists instead of just running
+ * the scan-based tie-break from the disconnect handler directly. */
+static void rescan_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_wifi.mode != WIFI_PROV_MODE_HOME || s_wifi.state == WIFI_PROV_STATE_CONNECTED ||
+        s_wifi.saved_nets.count == 0) {
+        return;
+    }
+    ESP_LOGI(TAG, "periodic rescan: looking for a saved network while in AP fallback");
+    select_and_apply_join_candidate();
+    esp_wifi_connect();
+}
+
 static void start_ap_fallback_timer(void)
 {
     if (!s_wifi.ap_fallback_timer) {
@@ -455,16 +804,18 @@ static void start_ap_fallback_timer(void)
     }
 }
 
-/* Common to wifi_prov_set_credentials() and wifi_prov_set_mode(HOME):
- * starts (or restarts) a station join attempt against the saved
- * credentials, AP staying up alongside it until the join is confirmed. Only
- * meaningful when s_wifi.has_creds is already true and mode is already
- * WIFI_PROV_MODE_HOME -- callers are responsible for having gotten there
- * first. This is the "don't strand the phone" guarantee: the AP is never
- * torn down before IP_EVENT_STA_GOT_IP confirms the join actually worked. */
+/* Common to wifi_prov_add_network() and wifi_prov_set_mode(HOME): starts (or
+ * restarts) a station join attempt, AP staying up alongside it until the
+ * join is confirmed. Only meaningful when s_wifi.saved_nets.count > 0 already
+ * and mode is already WIFI_PROV_MODE_HOME -- callers are responsible for
+ * having gotten there first. This is the "don't strand the phone" guarantee:
+ * the AP is never torn down before IP_EVENT_STA_GOT_IP confirms the join
+ * actually worked. Picks which saved network to try via
+ * select_and_apply_join_candidate()'s scan-based tie-break -- see that
+ * function's comment for the policy and the blocking-scan caveat. */
 static void start_sta_join(void)
 {
-    apply_sta_config();
+    select_and_apply_join_candidate();
     cancel_ap_fallback_timer();
     s_wifi.state = WIFI_PROV_STATE_CONNECTING;
     esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
@@ -485,16 +836,32 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)arg;
     (void)base;
     if (id == WIFI_EVENT_STA_START) {
-        if (s_wifi.has_creds && s_wifi.mode == WIFI_PROV_MODE_HOME) {
+        if (s_wifi.saved_nets.count > 0 && s_wifi.mode == WIFI_PROV_MODE_HOME) {
             esp_wifi_connect();
         }
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_wifi.mode == WIFI_PROV_MODE_AP || !s_wifi.has_creds) {
+        s_wifi.sta_rssi = -127; /* lost connection */
+        if (s_wifi.mode == WIFI_PROV_MODE_AP || s_wifi.saved_nets.count == 0) {
             return; /* not attempting station at all */
         }
         bool was_connected = (s_wifi.state == WIFI_PROV_STATE_CONNECTED);
         s_wifi.state = was_connected ? WIFI_PROV_STATE_RECONNECTING : WIFI_PROV_STATE_CONNECTING;
         ESP_LOGI(TAG, "station disconnected, retrying join");
+        /* Deliberately NOT re-running select_and_apply_join_candidate()'s
+         * scan-based tie-break here (2026-08-13 fix): this handler runs on
+         * the Wi-Fi driver's own default-event-loop task (see this section's
+         * header comment), and that function does a genuinely blocking scan.
+         * Calling it on every disconnect would stall the Wi-Fi driver's own
+         * event processing -- AP client join/leave, IP event delivery, the
+         * next disconnect itself -- for the scan's duration, every time a
+         * flaky link drops. Instead this just retries the SAME
+         * active_ssid/active_password already configured (fast,
+         * non-blocking, matches this handler's pre-8.4 behavior).
+         * Re-picking the best candidate happens on a separate cadence,
+         * off this task -- see rescan_timer_cb(), which runs on the
+         * esp_timer service task and is the only place
+         * select_and_apply_join_candidate() is still called from a path
+         * that isn't a caller's own HTTP-handler/app_main task. */
         esp_wifi_connect();
         if (!s_wifi.ap_fallback_timer) {
             return;
@@ -523,6 +890,12 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         ESP_LOGE(TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
     }
     s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+
+    /* Capture RSSI of the connected network */
+    wifi_ap_record_t ap_info = {};
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        s_wifi.sta_rssi = ap_info.rssi;
+    }
 }
 
 /* ---- Public API --------------------------------------------------------- */
@@ -533,22 +906,26 @@ esp_err_t wifi_prov_start(void)
         return ESP_OK;
     }
 
-    /* This module is still the de-facto owner of DEFAULT-partition NVS
-     * bring-up for the whole firmware: zones_http, rules_http, profiles_http,
-     * run_state and relay_cycles all call nvs_open() without ever initializing
-     * the partition themselves, and app_main calls wifi_prov_start() before
-     * any of them. Splitting the credentials out did not change that -- both
-     * partitions get initialized here, just through strictly separate recovery
-     * paths so one being unmountable can never cost the other its contents. */
+    s_wifi.sta_rssi = -127; /* not connected */
+
+    /* 2026-08-13: zones_http/rules_http/profiles_http/run_state/relay_cycles
+     * now each own their real (kiln_nvs / profiles_nvs) partition's init and
+     * persistence -- see those files. The default `nvs` partition is no
+     * longer written by anyone; it is only ever READ, once, by each module's
+     * one-time migration-off-the-old-location step, and every one of those
+     * migration reads happens after wifi_prov_start() returns (main.c calls
+     * this first). This init call stays here for exactly that: it is the
+     * one thing that must run before any module's migration read of the old
+     * default-partition data can succeed. If this fails, migration reads
+     * elsewhere fail closed (nvs_open_from_partition on an uninitialized
+     * partition errors, same as a blank one) and every module just starts
+     * from its own (already-migrated, or first-boot-empty) real partition --
+     * never fatal, never a reason to block Wi-Fi bring-up. */
     esp_err_t default_err = nvs_partition_init(NVS_DEFAULT_PART_NAME);
     if (default_err != ESP_OK) {
-        /* Not fatal to Wi-Fi: the credentials live somewhere else now, so the
-         * board can still come up on the network and be talked to -- which is
-         * exactly the situation the split exists to preserve. The kiln-config
-         * readers that depend on this partition will fail their own nvs_open()
-         * calls and fall back to their defaults, as they already do on a blank
-         * partition. */
-        ESP_LOGE(TAG, "default NVS init failed: %s -- zones/rules/profiles/run_state will not persist",
+        ESP_LOGW(TAG, "default NVS init failed: %s -- one-time migration reads for "
+                 "zones/rules/profiles/run_state/relay_cycles will find nothing to migrate "
+                 "(harmless if already migrated; otherwise those sections start unconfigured)",
                  esp_err_to_name(default_err));
     }
 
@@ -568,12 +945,26 @@ esp_err_t wifi_prov_start(void)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "wifi_cfg load from '%s' failed: %s -- starting unprovisioned",
                      WIFI_NVS_PARTITION, esp_err_to_name(err));
-            s_wifi.has_creds = false;
             s_wifi.mode = WIFI_PROV_MODE_HOME;
-        } else if (default_err == ESP_OK) {
-            /* Only worth attempting when the default partition actually
-             * mounted -- there is nothing to migrate from otherwise. */
-            migrate_from_default_partition(found_in_wifi_nvs);
+        } else {
+            if (default_err == ESP_OK) {
+                /* Only worth attempting when the default partition actually
+                 * mounted -- there is nothing to migrate from otherwise. */
+                migrate_from_default_partition(found_in_wifi_nvs);
+            } else {
+                /* No cross-partition migration possible, but WIFI_NVS_PARTITION
+                 * itself may still hold legacy single-key credentials from a
+                 * pre-8.4 build of THIS partition's own format -- make sure
+                 * nvs_load_saved_nets() below still has a chance to pick them
+                 * up. migrate_from_default_partition() would normally set
+                 * this; do it directly here since that function didn't run. */
+                nvs_load_legacy_single(WIFI_NVS_PARTITION, &s_legacy_single.net, &s_legacy_single.has);
+            }
+            /* Load the saved-networks list (and, the first time, migrate the
+             * legacy single-key credential s_legacy_single now holds into
+             * it) -- must happen after the block above so it reflects
+             * whichever copy the cross-partition decision settled on. */
+            nvs_load_saved_nets();
         }
     }
 
@@ -618,17 +1009,51 @@ esp_err_t wifi_prov_start(void)
         s_wifi.ap_fallback_timer = NULL;
     }
 
+    /* Periodic, started unconditionally and left running for the module's
+     * whole lifetime -- rescan_timer_cb() itself no-ops unless mode is HOME
+     * and state isn't CONNECTED, so an always-on timer is simpler than
+     * starting/stopping it around every state transition, at the cost of one
+     * cheap wakeup every WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS regardless of
+     * state -- negligible next to the AP/STA radio work it occasionally
+     * triggers. */
+    const esp_timer_create_args_t rescan_timer_args = {
+        .callback = &rescan_timer_cb,
+        .name = "wifi_ap_fallback_rescan",
+    };
+    err = esp_timer_create(&rescan_timer_args, &s_wifi.rescan_timer);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_timer_create failed: %s -- no periodic AP-fallback rescan", esp_err_to_name(err));
+        s_wifi.rescan_timer = NULL;
+    } else {
+        err = esp_timer_start_periodic(s_wifi.rescan_timer, (uint64_t)WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS * 1000);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_timer_start_periodic failed: %s -- no periodic AP-fallback rescan",
+                     esp_err_to_name(err));
+        }
+    }
+
     apply_ap_config();
     if (s_wifi.mode == WIFI_PROV_MODE_AP) {
         s_wifi.state = WIFI_PROV_STATE_AP_MODE;
         err = esp_wifi_set_mode(WIFI_MODE_AP);
         ESP_LOGI(TAG, "AP mode: AP '%s' only, station never attempted", wifi_prov_get_ap_ssid());
-    } else if (s_wifi.has_creds) {
+    } else if (s_wifi.saved_nets.count > 0) {
+        /* Initial boot config, before the Wi-Fi driver/task exists at all --
+         * no scan-based tie-break here (wifi_prov_scan() requires the driver
+         * already started, which it isn't yet at this point in bring-up).
+         * Just take the first saved entry; the scan-based tie-break in
+         * select_and_apply_join_candidate() takes over from the very next
+         * join attempt onward (a disconnect, or an explicit add/mode
+         * change). */
+        strncpy(s_wifi.active_ssid, s_wifi.saved_nets.nets[0].ssid, sizeof(s_wifi.active_ssid) - 1);
+        s_wifi.active_ssid[sizeof(s_wifi.active_ssid) - 1] = '\0';
+        strncpy(s_wifi.active_password, s_wifi.saved_nets.nets[0].password, sizeof(s_wifi.active_password) - 1);
+        s_wifi.active_password[sizeof(s_wifi.active_password) - 1] = '\0';
         apply_sta_config();
         s_wifi.state = WIFI_PROV_STATE_CONNECTING;
         err = esp_wifi_set_mode(WIFI_MODE_APSTA);
         start_ap_fallback_timer();
-        ESP_LOGI(TAG, "attempting station join to '%s', AP '%s' available meanwhile", s_wifi.ssid,
+        ESP_LOGI(TAG, "attempting station join to '%s', AP '%s' available meanwhile", s_wifi.active_ssid,
                  wifi_prov_get_ap_ssid());
     } else {
         s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
@@ -671,7 +1096,13 @@ wifi_prov_mode_t wifi_prov_get_mode(void)
 
 const char *wifi_prov_get_saved_ssid(void)
 {
-    return s_wifi.ssid;
+    if (s_wifi.active_ssid[0] != '\0') {
+        return s_wifi.active_ssid;
+    }
+    if (s_wifi.saved_nets.count > 0) {
+        return s_wifi.saved_nets.nets[0].ssid;
+    }
+    return "";
 }
 
 const char *wifi_prov_get_ap_ssid(void)
@@ -679,8 +1110,13 @@ const char *wifi_prov_get_ap_ssid(void)
     return s_wifi.has_ap_ssid_override ? s_wifi.ap_ssid : WIFI_AP_SSID;
 }
 
-esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const char *password,
-                                    size_t password_len)
+const char *wifi_prov_get_ap_password(void)
+{
+    return s_wifi.has_ap_password_override ? s_wifi.ap_password : WIFI_AP_DEFAULT_PASSWORD;
+}
+
+esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *password,
+                                 size_t password_len)
 {
     if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
@@ -692,28 +1128,50 @@ esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const cha
         return ESP_ERR_INVALID_STATE;
     }
 
-    memcpy(s_wifi.ssid, ssid, ssid_len);
-    s_wifi.ssid[ssid_len] = '\0';
-    memcpy(s_wifi.password, password, password_len);
-    s_wifi.password[password_len] = '\0';
-    s_wifi.has_creds = true;
+    char new_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    memcpy(new_ssid, ssid, ssid_len);
+    new_ssid[ssid_len] = '\0';
 
-    esp_err_t err = nvs_save_creds();
+    /* Upsert by exact SSID match -- update the password in place if this
+     * SSID is already saved, otherwise append a new entry. */
+    int idx = -1;
+    for (uint8_t i = 0; i < s_wifi.saved_nets.count; i++) {
+        if (strcmp(s_wifi.saved_nets.nets[i].ssid, new_ssid) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (s_wifi.saved_nets.count >= WIFI_PROV_MAX_SAVED_NETWORKS) {
+            /* List is full and this is a genuinely new SSID -- refuse
+             * without touching anything already saved, rather than silently
+             * evicting an existing entry the operator didn't ask to remove. */
+            return ESP_ERR_NO_MEM;
+        }
+        idx = s_wifi.saved_nets.count;
+        s_wifi.saved_nets.count++;
+        strncpy(s_wifi.saved_nets.nets[idx].ssid, new_ssid, sizeof(s_wifi.saved_nets.nets[idx].ssid) - 1);
+        s_wifi.saved_nets.nets[idx].ssid[sizeof(s_wifi.saved_nets.nets[idx].ssid) - 1] = '\0';
+    }
+    memcpy(s_wifi.saved_nets.nets[idx].password, password, password_len);
+    s_wifi.saved_nets.nets[idx].password[password_len] = '\0';
+
+    esp_err_t err = nvs_save_saved_nets();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_save_creds failed: %s -- credentials will not survive a reboot",
+        ESP_LOGE(TAG, "nvs_save_saved_nets failed: %s -- this network will not survive a reboot",
                  esp_err_to_name(err));
         /* Still attempt the join below -- the operator asked for this
          * network right now, whether or not it persists. */
     }
 
     if (s_wifi.mode == WIFI_PROV_MODE_AP) {
-        /* Submitting real credentials is an explicit choice to join a
-         * network -- it supersedes a previously-set AP-mode preference the
-         * same way picking a network in the Network settings page (TODO.md
-         * section 4) would. Without this, AP mode had no way back out
-         * through the HTTP API: the provisioning page's mode toggle set it,
-         * but nothing ever cleared it again from this path. */
-        ESP_LOGI(TAG, "credentials submitted while in AP mode -- switching to home mode");
+        /* Submitting a network is an explicit choice to join something -- it
+         * supersedes a previously-set AP-mode preference the same way
+         * picking a network in the Network settings page (TODO.md section 4)
+         * would. Without this, AP mode had no way back out through the HTTP
+         * API: the provisioning page's mode toggle set it, but nothing ever
+         * cleared it again from this path. */
+        ESP_LOGI(TAG, "network submitted while in AP mode -- switching to home mode");
         s_wifi.mode = WIFI_PROV_MODE_HOME;
         esp_err_t mode_err = nvs_save_mode();
         if (mode_err != ESP_OK) {
@@ -722,7 +1180,87 @@ esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const cha
         }
     }
 
+    /* start_sta_join() re-runs the scan-based tie-break, so this may join a
+     * different (stronger, already-in-range) saved network than the one just
+     * added -- that's intended, not a bug: adding a network is "make this
+     * available", not "connect to this one specifically". */
     start_sta_join();
+    return ESP_OK;
+}
+
+esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const char *password,
+                                    size_t password_len)
+{
+    return wifi_prov_add_network(ssid, ssid_len, password, password_len);
+}
+
+esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
+{
+    if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char target[WIFI_PROV_SSID_MAX_LEN + 1];
+    memcpy(target, ssid, ssid_len);
+    target[ssid_len] = '\0';
+
+    int idx = -1;
+    for (uint8_t i = 0; i < s_wifi.saved_nets.count; i++) {
+        if (strcmp(s_wifi.saved_nets.nets[i].ssid, target) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        return ESP_OK; /* nothing saved under this SSID -- not a failure */
+    }
+
+    /* Compact: shift everything after idx down by one. Deliberately no
+     * "can't remove the last one" guard -- bringing count to 0 is a valid,
+     * fully-supported state (falls back to AP-capable/unprovisioned
+     * behavior via the count > 0 checks elsewhere in this file, the same way
+     * has_creds == false used to). If this was the currently-active/
+     * connected network, the existing disconnect/reconnect event handlers
+     * discover on their own that there's nothing left to reconnect to --
+     * this function doesn't force a disconnect itself. */
+    for (uint8_t i = (uint8_t)idx; i + 1 < s_wifi.saved_nets.count; i++) {
+        s_wifi.saved_nets.nets[i] = s_wifi.saved_nets.nets[i + 1];
+    }
+    s_wifi.saved_nets.count--;
+    memset(&s_wifi.saved_nets.nets[s_wifi.saved_nets.count], 0, sizeof(s_wifi.saved_nets.nets[0]));
+
+    esp_err_t err = nvs_save_saved_nets();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_saved_nets failed: %s -- removal will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    return ESP_OK;
+}
+
+esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t max_results, size_t *out_count)
+{
+    if (!out || max_results == 0 || !out_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t n = s_wifi.saved_nets.count;
+    if (n > max_results) {
+        n = max_results;
+    }
+    for (size_t i = 0; i < n; i++) {
+        strncpy(out[i].ssid, s_wifi.saved_nets.nets[i].ssid, WIFI_PROV_SSID_MAX_LEN);
+        out[i].ssid[WIFI_PROV_SSID_MAX_LEN] = '\0';
+        /* Password deliberately not copied out -- wifi_prov_saved_network_t
+         * has no field for it, by design; see the .h doc comment. */
+    }
+    *out_count = n;
     return ESP_OK;
 }
 
@@ -747,7 +1285,7 @@ esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
             ESP_LOGE(TAG, "esp_wifi_set_mode(AP) failed: %s", esp_err_to_name(mode_err));
         }
         ESP_LOGI(TAG, "AP mode enabled: station never attempted");
-    } else if (s_wifi.has_creds) {
+    } else if (s_wifi.saved_nets.count > 0) {
         ESP_LOGI(TAG, "home mode enabled, resuming join to saved network");
         start_sta_join();
     } else {
@@ -943,4 +1481,33 @@ esp_err_t wifi_prov_scan(wifi_prov_scan_result_t *results, size_t max_results, s
     }
     *out_count = n;
     return ESP_OK;
+}
+
+int8_t wifi_prov_get_sta_rssi(void)
+{
+    if (!s_wifi.started || s_wifi.state != WIFI_PROV_STATE_CONNECTED) {
+        return -127; /* not connected */
+    }
+    return s_wifi.sta_rssi;
+}
+
+uint8_t wifi_prov_get_ap_client_count(void)
+{
+    if (!s_wifi.started) {
+        return 0;
+    }
+
+    wifi_mode_t mode;
+    if (esp_wifi_get_mode(&mode) != ESP_OK) {
+        return 0;
+    }
+    if ((mode != WIFI_MODE_AP) && (mode != WIFI_MODE_APSTA)) {
+        return 0; /* AP is not active */
+    }
+
+    wifi_sta_list_t sta_list;
+    if (esp_wifi_ap_get_sta_list(&sta_list) != ESP_OK) {
+        return 0;
+    }
+    return (uint8_t)(sta_list.num > 255 ? 255 : sta_list.num); /* cap at uint8 */
 }

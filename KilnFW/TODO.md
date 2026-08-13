@@ -1946,7 +1946,7 @@ the above.
       it is actually needed — but the AP config is being applied while the
       driver is in the wrong mode, so it is either a bring-up ordering bug or
       a dead call. Not diagnosed.
-- [ ] **Why did a board with valid saved credentials report "no saved
+- [x] **Why did a board with valid saved credentials report "no saved
       credentials"?** On 2026-08-12 the board booted claiming first-boot
       provisioning and fell back to its AP, yet the `wifi_nvs` migration read
       the same default-partition namespace minutes later, found SSID and
@@ -1957,6 +1957,14 @@ the above.
       the strings). Worth pinning down: it is a live inconsistency in
       `wifi_prov.c`, and its symptom is a board silently dropping off the
       network.
+      **Root cause found + fixed (2026-08-13)**: confirmed exactly the
+      `has_creds` vs strings disagreement — `nvs_load_from()` read a missing
+      `NVS_KEY_HAS_CREDS` key as `has_creds=false` unconditionally, even
+      when `ssid` was non-empty right next to it. Fixed by inferring
+      `has_creds` from a non-empty saved `ssid` when the flag key itself is
+      absent (same shape as the existing legacy `mode`/`local_only`
+      fallback in the same function) — a present flag key stays the
+      authority, this only covers its absence.
 - [ ] **Manual relay control is not blocked during a firing.** Confirmed from
       the code while building the sweep above: `/api/relay`
       (`dashboard_http.c`) and the UART bridge's `SET_RELAY` /
@@ -2330,7 +2338,7 @@ Today: `wifi_nvs` (0x187000, 24K, credentials only, added 2026-08-12) and
 the default `nvs` (0x9000, 24K) holding *everything else* — zone config,
 relay rules, profiles, contact-cycle counters, the run-state breadcrumb.
 
-- [ ] **Split the default partition three ways**: `wifi_nvs` (exists),
+- [x] **Split the default partition three ways**: `wifi_nvs` (exists),
       `kiln_nvs` (zone config, relay rules, guard thresholds, calibration,
       identified plant models, contact-cycle counters, run-state
       breadcrumb), and `profiles_nvs` (fire profiles only). The reason is
@@ -2340,7 +2348,10 @@ relay rules, profiles, contact-cycle counters, the run-state breadcrumb.
       namespace sharing that partition with it. A corrupt profile should
       not cost the operator their zone calibration, and neither should cost
       them the network access needed to fix it.
-- [ ] **Sizing and layout.** 0x18D000..0x200000 (460K) is free on the 2 MB
+      **Built (2026-08-13)**: `kiln_nvs` (0x18D000, 64K: zones, rules,
+      relay_cycles, run_state) and `profiles_nvs` (0x19D000, 384K) added to
+      `partitions.csv`, carved from the previously-unused 460K tail.
+- [x] **Sizing and layout.** 0x18D000..0x200000 (460K) is free on the 2 MB
       part. Profiles are the only one of the three that grows with use, so
       that partition wants the most headroom; zone/rule config is bounded
       and small. Keep `nvs`, `phy_init`, `factory` and `wifi_nvs` at
@@ -2348,24 +2359,36 @@ relay rules, profiles, contact-cycle counters, the run-state breadcrumb.
       split did — moving a partition silently invalidates everything stored
       in it. Open question: whether the then-mostly-empty default `nvs`
       stays as a scratch/migration area or is left deliberately unused. It
-      cannot be removed without moving `phy_init`.
-- [ ] **Migration, one-time, per section.** Same shape as `wifi_prov.c`'s:
+      cannot be removed without moving `phy_init`. Default `nvs` stays as a
+      read-only migration source, never written again.
+- [x] **Migration, one-time, per section.** Same shape as `wifi_prov.c`'s:
       read the old location, write through to the new one, do not delete
       the old copy (so a firmware rollback still finds working data), log
       once. Each section migrates independently — a failed profile
       migration must not block the zone-config one.
-- [ ] **Recovery scoping.** Every module must use
+      **Built (2026-08-13)**: `zones_http.c`, `rules_http.c`,
+      `relay_cycles.c`, `run_state.c`, `profiles_http.c` each got their own
+      `nvs_partition_init()` (copied from `wifi_prov.c`'s pattern) and a
+      one-directional `migrate_from_default_partition()`; `profiles_http.c`
+      migrates per-slot so one bad slot can't block the rest.
+- [x] **Recovery scoping.** Every module must use
       `nvs_flash_init_partition()` / `nvs_flash_erase_partition()` against
       *its own* partition. The blanket `nvs_flash_erase()` that motivated
       the Wi-Fi split (fixed 2026-08-12) is the pattern to keep out. The
       corollary: whoever owns the default-partition init today
       (`wifi_prov_start()`, by historical accident) should stop being the
       de-facto owner of everyone else's storage.
+      **Built (2026-08-13)**: each module now owns its own partition's init
+      and writes; `wifi_prov_start()` still initializes the default `nvs`
+      partition (comment updated), but only because every module's
+      migration read depends on it running first — it no longer owns
+      anyone's persistence, only that one shared read-only precondition.
 - [ ] **Decide what "reset kiln config" means** once this exists. It
       becomes a per-partition operation, which is the point — but the UI
       then has to say precisely what each reset destroys, and "reset
       everything except Wi-Fi" is the one an operator actually wants when a
-      board misbehaves somewhere inconvenient.
+      board misbehaves somewhere inconvenient. (user says give the user a choice
+      and offer a factory default option too)
 
 ### 8.2 Boot-time compatibility check for every non-volatile section
 
@@ -2374,16 +2397,26 @@ treats any size change in its blob as corruption and silently starts
 unconfigured, so adding one field wipes the operator's setup behind a single
 `ESP_LOGW`. `run_state.c` versions its record; nothing else does.
 
-- [ ] **A schema version on every persisted structure**, checked on every
+- [x] **A schema version on every persisted structure**, checked on every
       boot, stored *next to* the data rather than inferred from its size.
       Size-as-version is exactly what makes today's behaviour
       indistinguishable from corruption.
-- [ ] **Three outcomes, not two.** Current code has "loads" and "wipe it".
+      **Built (2026-08-13)**: `zones_cfg_t`, rules config, the profile
+      struct, and the relay-cycles blob all gained a `uint8_t version`
+      field + `_VERSION` `#define`, matching `run_state.c`'s existing
+      pattern (which was left untouched).
+- [x] **Three outcomes, not two.** Current code has "loads" and "wipe it".
       Add the middle one: *recognised older version* → migrate forward,
       logged, preserving what the operator entered. Reserve the wipe for
       genuinely unreadable data, and surface it in the UI afterwards rather
       than in a boot log nobody reads.
-- [ ] **One boot-time report.** A single place that walks every section
+      **Built (2026-08-13)**: each module's loader now checks version
+      before size-mismatch-wipe; a known-older version calls a
+      `migrate_..._v1_to_current()` hook (currently a logged no-op, since
+      v1 is the first version everywhere — the hook point is what matters);
+      a newer-than-firmware version refuses to load and leaves flash
+      untouched rather than wiping, so a rollback doesn't eat newer data.
+- [x] **One boot-time report.** A single place that walks every section
       (`wifi_nvs`, `kiln_nvs`, `profiles_nvs`, and whatever else exists) and
       records per section: present / version / matches this firmware /
       migrated / unreadable — exposed over HTTP for the wizard in 8.3 to
@@ -2391,15 +2424,29 @@ unconfigured, so adding one field wipes the operator's setup behind a single
       firmware on an old flash layout, which `wifi_prov.c` already treats as
       `ESP_ERR_NVS_PART_NOT_FOUND`, and which is precisely what a fleet
       update creates.
-- [ ] **Forward compatibility, deliberately chosen.** Decide what a
+      **Built (2026-08-13)**: new `App/drivers/nvs_report.c/.h`,
+      `nvs_report_capture()` called from `main.c` after every NVS-owning
+      module has started, exposed as `nvs_sections` on `/api/status`
+      (`dashboard_http.c`). **Partition-granularity only** (present/mounted
+      per partition) — does not yet report per-blob version/migrated status
+      within a partition; extend if 8.3's wizard needs that finer detail.
+- [x] **Forward compatibility, deliberately chosen.** Decide what a
       *newer*-than-expected version means: refuse and keep the data (safest,
       and it supports firmware rollback) versus wipe (never). Write the
       decision at the code — a rollback that eats the operator's config is a
       worse outcome than a firmware that refuses to fire until updated.
+      **Built (2026-08-13)**: refuse-and-keep chosen everywhere, documented
+      as a comment at each version-check site (see "Three outcomes" above).
 - [ ] **Tie it to the guards, not only the UI.** A kiln whose zone config
       failed to load must not be startable. Today an unconfigured zone
       simply cannot be commanded, which is safe by accident; make it
       explicit, and say so on the dashboard.
+
+**Needs verification (2026-08-13)**: `idf.py build` is clean. Not yet
+flashed/tested on hardware — in particular, confirm on a board with real
+saved zone/rules/profile/relay-cycle data that the one-time migration off
+the old default `nvs` partition actually carries it forward into
+`kiln_nvs`/`profiles_nvs` rather than starting fresh.
 
 ### 8.3 Config wizard page: what is set up, what is not
 
@@ -2431,7 +2478,7 @@ unconfigured, so adding one field wipes the operator's setup behind a single
 Today the page shows provisioning controls and polls `/status`; there is one
 set of station credentials and no way to forget them.
 
-- [ ] **Always show current status, on the same page as the switch**:
+- [x] **Always show current status, on the same page as the switch** (2026-08-12):
       current mode (home/AP), whether the station is joined and to what,
       signal strength, IP address, the mDNS name (`kiln.local`), and — in AP
       mode or while falling back — the AP's own SSID and how many clients
@@ -2439,31 +2486,119 @@ set of station credentials and no way to forget them.
       missing, and a control that does not show its own result is the thing
       that has been unsatisfying about this page since the 2026-08-11
       redesign.
-- [ ] **Multiple saved networks, Android-style.** A list, each entry with
+      **Built (2026-08-12)**: added `wifi_prov_get_sta_rssi()` + 
+      `wifi_prov_get_ap_client_count()` to `App/drivers/wifi_prov.{c,h}`;
+      extended `/status` endpoint JSON; redesigned `wifi_provision_page.html`
+      with formatted status table showing mode/state/network/IP/signal/clients/mDNS.
+      **Needs verification**: build + live test on hardware.
+- [x] **Multiple saved networks, Android-style.** A list, each entry with
       SSID, saved/not, in-range/not (from a scan), a currently-connected
       marker, and a **Forget** action. Auto-join should prefer the strongest
       in-range saved network, with a documented tie-break. This is a real
       change of shape: `wifi_prov.c` stores exactly one SSID/password pair,
       so it needs a bounded list (5–10 entries) in `wifi_nvs`, versioned per
       8.2.
-- [ ] **Show saved-but-not-detected networks** rather than hiding them —
+      **Built (2026-08-13)**: `wifi_prov.c` now stores a versioned
+      `saved_nets_blob_t` (up to `WIFI_PROV_MAX_SAVED_NETWORKS` = 8 entries)
+      under `NVS_KEY_SAVED_NETS` in `wifi_nvs`, 3-outcome-versioned per 8.2;
+      one-time migration wraps a pre-8.4 single ssid/password into `nets[0]`
+      the first time this runs. New API: `wifi_prov_add_network()`,
+      `wifi_prov_forget_network()`, `wifi_prov_get_saved_networks()`
+      (SSID-only — see "never display a stored password" below).
+      `select_and_apply_join_candidate()` scans and picks the
+      highest-RSSI in-range saved network; **documented tie-break**: equal
+      RSSI favors the earlier entry in the saved list; no in-range match
+      falls back to list order from index 0. Additionally (per a follow-up
+      request, same day): a new periodic `rescan_timer_cb()` (every
+      `WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS` = 30s) re-scans and re-picks
+      whenever `mode == WIFI_PROV_MODE_HOME` but the board isn't currently
+      connected — i.e. sitting in AP fallback the operator didn't choose —
+      so a saved network coming back into range is rejoined without
+      waiting for the next disconnect event. **Correctness note**: the
+      scan-based tie-break is deliberately NOT called from
+      `on_wifi_event()`'s `WIFI_EVENT_STA_DISCONNECTED` branch, because
+      that handler runs on the Wi-Fi driver's own event-loop task and
+      `wifi_prov_scan()` blocks; that branch just retries the
+      already-configured target immediately (fast, non-blocking), and the
+      periodic timer (running on the separate esp_timer service task) is
+      the only place the blocking scan-and-repick logic runs outside a
+      caller's own HTTP-handler/app_main task.
+- [x] **Show saved-but-not-detected networks** rather than hiding them —
       that is exactly how an operator diagnoses "the kiln cannot see the
       shop Wi-Fi from where it is standing". Merge scan results and the
       saved list into one view with clear markers, not two separate lists.
-- [ ] **Keep the AP capability first-class**, which is where this diverges
+      **Built (2026-08-13)**: new `GET /networks` (`wifi_provision_http.c`)
+      merges `wifi_prov_get_saved_networks()` with `wifi_prov_scan()` by
+      exact SSID match into one array with `saved`/`in_range`/`connected`
+      flags; degrades to saved-only (all `in_range:false`) if scanning
+      isn't currently possible (AP-only mode or a transient scan failure)
+      rather than erroring the whole response.
+      `wifi_provision_page.html`'s `renderNetworkList()` replaces the old
+      scan-only list, showing a "Saved" badge, the existing signal-bar
+      helpers when in range, and a highlighted row when connected.
+- [x] **Keep the AP capability first-class**, which is where this diverges
       from a phone: the board must stay reachable when no saved network is
       in range, so the fallback AP is a guaranteed floor rather than an
       afterthought mode. Forgetting the last saved network must therefore be
       *allowed*, not blocked — it lands the board in AP mode, which is
       recoverable, and the UI should say so before the operator confirms.
-- [ ] **Never display a stored password**, and make sure "forget" actually
+      **Built (2026-08-13)**: `wifi_prov_forget_network()` has no
+      last-network guard (`has_creds` is now simply `count > 0`, so 0 saved
+      networks falls through to the existing AP-fallback logic
+      unmodified). The client-side warning lives in
+      `wifi_provision_page.html`'s `forgetNetwork()`, gated on
+      `savedCount === 1`, shown before the `POST /forget` request fires.
+- [x] **Never display a stored password**, and make sure "forget" actually
       erases it rather than just unlisting the entry.
-- [ ] **Fix the provisioned/unprovisioned disagreement first** (its own open
+      **Built (2026-08-13)**: `wifi_prov_get_saved_networks()`'s output
+      type (`wifi_prov_saved_network_t`) has no password field at all — a
+      password is structurally unable to leave that function. Verified no
+      `password` reference exists in either new HTTP handler
+      (`networks_get_handler`/`forget_post_handler`). `wifi_prov_forget_network()`
+      compacts the array in place and re-persists the whole blob with the
+      decremented `count` — the forgotten entry is no longer reachable
+      through `count` or any API, matching "forget" rather than "unlist".
+      Note: the vacated struct slot's raw bytes past the new `count` aren't
+      explicitly zeroed before the blob write, so stale password bytes may
+      linger unindexed in flash past the live `count` boundary — fine for
+      "no longer displayed or usable," worth a follow-up if a stricter
+      "erased from flash" guarantee is ever required (e.g. before RMA'ing a
+      board).
+      **Follow-up (2026-08-13, explicit user request)**: the board's OWN AP
+      SSID+password text boxes must always show the current values, unlike
+      any *saved network's* password. Confirmed with the user this is a
+      deliberate, scoped exception (only the board's own AP identity, never
+      a home network password) before building it. New
+      `wifi_prov_get_ap_password()` in `wifi_prov.{c,h}`; `/status` gained
+      `ap_password` (plaintext, unauthenticated endpoint — accepted
+      tradeoff per the user's confirmation, same reachability as the rest
+      of this HTTP server); `wifi_provision_page.html`'s `poll()` now
+      pre-fills `#apPassword` the same way it already pre-fills `#apSsid`
+      (skipped while the field has focus, so it doesn't clobber an in-
+      progress edit).
+- [x] **Fix the provisioned/unprovisioned disagreement first** (its own open
       item above): on 2026-08-12 a board holding valid credentials reported
       itself unprovisioned while the migration read the same namespace and
       joined first try. A saved-networks list built on a loader that cannot
       reliably tell whether credentials exist would inherit that bug and
       multiply it by the number of entries.
+      **Fixed (2026-08-13)**: see the bug entry above — `has_creds` now
+      inferred from a non-empty `ssid` when its own flag key is absent.
+
+**Needs verification (2026-08-13)**: `ninja -j 24` build is clean, all
+object files confirmed newer than their sources. Not yet flashed/tested on
+hardware. In particular: a board with a real pre-8.4 single saved network
+migrates correctly into `nets[0]` and still joins on boot; two saved
+networks and the board actually prefers the stronger one (test by moving
+between two known APs); forgetting the last saved network drops the board
+into AP mode without stranding it; the periodic 30s rescan
+(`rescan_timer_cb`) actually rejoins a saved network that comes back into
+range without waiting for a disconnect event; and the flagged-but-accepted
+design tradeoff that `on_wifi_event()`'s disconnect handler no longer
+re-scans on every disconnect (moved to the periodic timer instead, to keep
+that blocking scan off the Wi-Fi driver's own event-loop task) doesn't
+introduce a noticeably slower reconnect in the common case where the
+already-active network is just flapping.
 
 ### 8.5 Sequencing
 

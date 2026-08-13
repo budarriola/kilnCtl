@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 
 #include "MAX31856.h"
 #include "http_form.h"
@@ -18,6 +19,22 @@ static const char *TAG = "profiles_http";
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_USED "prof_used"
 /* "prof0".."prof7" -- see profile_nvs_key() below. */
+
+/* profiles_nvs is the 2026-08-13 split target for fire profiles (see
+ * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
+ * default `nvs` partition's contents that grows with use, so they get their
+ * own partition with the most headroom rather than sharing kiln_nvs with
+ * zones/rules/relay_cycles/run_state. Each module manages its own migration
+ * and partition init independently rather than assuming another module
+ * already brought its partition up. NVS_DEFAULT_PART_NAME (from
+ * nvs_flash.h, expands to "nvs") is the old, still-live home this module's
+ * data used to persist to, kept readable for the one-time migration below
+ * and for firmware rollback. */
+#define PROFILES_NVS_PARTITION "profiles_nvs"
+
+/* Bump whenever the on-flash per-slot layout (profile_persisted_t) changes;
+ * see nvs_load_all_from(). */
+#define PROFILE_VERSION 1
 
 /* PROFILES_MAX_COUNT / PROFILE_NAME_MAX_LEN / PROFILE_MAX_SEGMENTS and the
  * profile_t/profile_segment_t layout now live in profiles_http.h --
@@ -47,10 +64,23 @@ extern const uint8_t profiles_page_html_end[] asm("_binary_profiles_page_html_en
  * mentions as a design choice isn't worth the extra code path. The
  * prof_used bitmap still exists in NVS/RAM so a listing never has to probe
  * 8 keys to find out which exist. */
-static struct {
+typedef struct {
     profile_t profiles[PROFILES_MAX_COUNT];
     uint8_t used_bitmap; /* bit N = slot N in use */
-} s_profiles;
+} profiles_state_t;
+
+static profiles_state_t s_profiles;
+
+/* On-flash per-slot layout, one per "profN" key. version-prefixed so a slot
+ * can be told apart from a stale/rolled-back/corrupt one at load time --
+ * see nvs_load_all_from(). profile_t itself (the payload) stays in
+ * profiles_http.h unversioned; only the persisted wrapper carries the
+ * version tag, since profile_executor.c consumes profile_t directly through
+ * profiles_http_get() and has no business knowing about on-flash layout. */
+typedef struct {
+    uint8_t version;
+    profile_t profile;
+} profile_persisted_t;
 
 /* application/x-www-form-urlencoded whole-profile submit: id, name, zone,
  * seg_count, plus 3 fields per segment across up to 12 segments. Generous
@@ -65,14 +95,63 @@ static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 
 /* ---- NVS ---------------------------------------------------------------- */
 
-static esp_err_t nvs_load_all(void)
+static esp_err_t nvs_save_slot(uint8_t id);
+
+/* Brings up one NVS partition, erasing ONLY that partition if its contents
+ * are unusable. Copied/adapted from wifi_prov.c's nvs_partition_init() (see
+ * that file for the full rationale) -- NO_FREE_PAGES / NEW_VERSION_FOUND
+ * have no other cure, so erasing is the only way forward, but the erase
+ * must stay scoped to the partition that is actually broken rather than
+ * blast-radius the default partition (or any other split-off partition)
+ * with it. */
+static esp_err_t nvs_partition_init(const char *partition)
 {
-    memset(&s_profiles, 0, sizeof(s_profiles));
+    esp_err_t err = nvs_flash_init_partition(partition);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+                 partition, esp_err_to_name(err));
+        err = nvs_flash_erase_partition(partition);
+        if (err == ESP_OK) {
+            err = nvs_flash_init_partition(partition);
+        }
+    }
+    return err;
+}
+
+/* Hook point for migrating an older on-flash profile_persisted_t layout
+ * forward. v1 is the first version that has ever shipped, so there is
+ * nothing to convert yet -- this is a no-op passthrough that exists purely
+ * so the next version bump has somewhere to add real field conversion,
+ * rather than inventing the load-time branching from scratch. */
+static void migrate_profile_v1_to_current(profile_persisted_t *slot)
+{
+    static bool logged = false;
+    if (!logged) {
+        ESP_LOGI(TAG, "migrating a profile slot from struct version 1 -- no-op passthrough (v1 is current)");
+        logged = true;
+    }
+    slot->version = PROFILE_VERSION;
+}
+
+/* Loads NVS_NAMESPACE/NVS_KEY_USED + "profN" out of `partition` into *out,
+ * applying a three-outcome version check to EACH slot independently: a
+ * failed read, wrong blob size, or unrecognized version marks only that one
+ * slot unused -- one bad slot must never take any other slot down with it
+ * (TODO.md 8.1's explicit "a failed profile migration must not block"
+ * requirement). *out_any_found reports whether the used-bitmap key existed
+ * at all (vs. existing but empty/unreadable), which the one-time migration
+ * below keys off. */
+static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out, bool *out_any_found)
+{
+    memset(out, 0, sizeof(*out));
+    if (out_any_found) {
+        *out_any_found = false;
+    }
 
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return ESP_OK; /* no kiln_cfg namespace yet -- nothing configured */
+        return ESP_OK; /* no kiln_cfg namespace on this partition yet -- nothing configured */
     }
     if (err != ESP_OK) {
         return err;
@@ -84,24 +163,57 @@ static esp_err_t nvs_load_all(void)
         nvs_close(h);
         return err;
     }
-    s_profiles.used_bitmap = (err == ESP_OK) ? bitmap : 0;
+    if (err == ESP_OK) {
+        out->used_bitmap = bitmap;
+        if (out_any_found) {
+            *out_any_found = true;
+        }
+    }
 
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        if (!(s_profiles.used_bitmap & (1u << id))) {
+        if (!(out->used_bitmap & (1u << id))) {
             continue;
         }
         char key[8];
         profile_nvs_key(id, key, sizeof(key));
-        size_t len = sizeof(s_profiles.profiles[id]);
-        esp_err_t slot_err = nvs_get_blob(h, key, &s_profiles.profiles[id], &len);
-        if (slot_err != ESP_OK || len != sizeof(s_profiles.profiles[id])) {
+        profile_persisted_t loaded;
+        size_t len = sizeof(loaded);
+        esp_err_t slot_err = nvs_get_blob(h, key, &loaded, &len);
+        if (slot_err != ESP_OK || len != sizeof(loaded)) {
             /* The bitmap says used but the blob is missing/wrong-size --
-             * trust the blob, not the bitmap: mark it unused rather than
-             * hand a client a garbage-decoded profile. */
-            ESP_LOGW(TAG, "prof%u load failed or wrong size (%s) -- marking unused", id,
+             * trust the blob, not the bitmap: mark THIS slot unused rather
+             * than hand a client a garbage-decoded profile. Other slots are
+             * unaffected. */
+            ESP_LOGW(TAG, "prof%u load from '%s' failed or wrong size (%s) -- marking unused", id, partition,
                      esp_err_to_name(slot_err));
-            s_profiles.used_bitmap &= ~(1u << id);
-            memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+            out->used_bitmap &= ~(1u << id);
+            continue;
+        }
+
+        if (loaded.version == PROFILE_VERSION) {
+            out->profiles[id] = loaded.profile; /* current version -- happy path */
+        } else if (loaded.version < PROFILE_VERSION) {
+            /* Known older layout -- run it through the migration chain. */
+            ESP_LOGI(TAG, "prof%u is struct version %u, migrating to %u", id, (unsigned)loaded.version,
+                     (unsigned)PROFILE_VERSION);
+            migrate_profile_v1_to_current(&loaded);
+            out->profiles[id] = loaded.profile;
+        } else {
+            /* loaded.version > PROFILE_VERSION: this slot was written by
+             * NEWER firmware than this build -- the firmware-rollback case
+             * from TODO.md 8.1. Its layout may use fields this older build
+             * doesn't understand, so treating it as corrupt and wiping it
+             * would destroy data a roll-forward (or the newer firmware
+             * itself) still needs. Refuse to load instead: leave the slot's
+             * flash bytes completely untouched and just don't surface it
+             * for this boot -- this is the ONE outcome above that is not a
+             * "bad slot," so it deliberately does not erase or overwrite
+             * anything. */
+            ESP_LOGW(TAG, "prof%u is struct version %u, newer than this firmware's %u -- refusing to load, "
+                          "flash left untouched",
+                     id, (unsigned)loaded.version, (unsigned)PROFILE_VERSION);
+            out->used_bitmap &= ~(1u << id);
+            continue;
         }
     }
 
@@ -112,13 +224,17 @@ static esp_err_t nvs_load_all(void)
 static esp_err_t nvs_save_slot(uint8_t id)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
     char key[8];
     profile_nvs_key(id, key, sizeof(key));
-    err = nvs_set_blob(h, key, &s_profiles.profiles[id], sizeof(s_profiles.profiles[id]));
+    profile_persisted_t persisted = {
+        .version = PROFILE_VERSION,
+        .profile = s_profiles.profiles[id],
+    };
+    err = nvs_set_blob(h, key, &persisted, sizeof(persisted));
     if (err == ESP_OK) {
         err = nvs_set_u8(h, NVS_KEY_USED, s_profiles.used_bitmap);
     }
@@ -132,7 +248,7 @@ static esp_err_t nvs_save_slot(uint8_t id)
 static esp_err_t nvs_erase_slot(uint8_t id)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
@@ -149,6 +265,79 @@ static esp_err_t nvs_erase_slot(uint8_t id)
     }
     nvs_close(h);
     return err;
+}
+
+/* One-time move of persisted profiles out of the default partition's
+ * NVS_NAMESPACE/"profN" keys and into PROFILES_NVS_PARTITION's, for boards
+ * provisioned by firmware predating the 2026-08-13 split. Simplified from
+ * wifi_prov.c's migrate_from_default_partition() the same way
+ * rules_http.c's is: profiles_nvs is only ever consulted first, so if it
+ * already has anything there is nothing to migrate and no "which wins"
+ * question to answer -- only the old default-partition location could hold
+ * pre-migration data.
+ *
+ * Migrated slot-by-slot rather than as one operation: a failure migrating
+ * one slot must not stop the others (TODO.md 8.1's explicit requirement).
+ * Old default-nvs blobs predate the version field entirely (they are a bare
+ * profile_t, not a profile_persisted_t) -- this migration IS the event that
+ * introduces struct versioning for profiles, so each slot found is stamped
+ * with the current PROFILE_VERSION as it's carried across. The old copies
+ * are deliberately left in place (not deleted), same rationale as
+ * wifi_prov.c/rules_http.c: they need to still be there if someone rolls
+ * back to pre-split firmware. */
+static void migrate_from_default_partition(void)
+{
+    nvs_handle_t old_h;
+    esp_err_t err = nvs_open_from_partition(NVS_DEFAULT_PART_NAME, NVS_NAMESPACE, NVS_READONLY, &old_h);
+    if (err != ESP_OK) {
+        return; /* no kiln_cfg namespace on the default partition -- nothing to migrate */
+    }
+
+    uint8_t old_bitmap = 0;
+    err = nvs_get_u8(old_h, NVS_KEY_USED, &old_bitmap);
+    if (err != ESP_OK || old_bitmap == 0) {
+        nvs_close(old_h);
+        return; /* nothing recorded as used in the old location */
+    }
+
+    ESP_LOGI(TAG, "migrating fire profiles from the default NVS partition to '%s'", PROFILES_NVS_PARTITION);
+
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!(old_bitmap & (1u << id))) {
+            continue;
+        }
+        char key[8];
+        profile_nvs_key(id, key, sizeof(key));
+
+        /* Old (pre-split, pre-version) blobs are a bare profile_t -- no
+         * version prefix ever existed for them. */
+        profile_t old_profile;
+        size_t len = sizeof(old_profile);
+        esp_err_t slot_err = nvs_get_blob(old_h, key, &old_profile, &len);
+        if (slot_err != ESP_OK || len != sizeof(old_profile)) {
+            ESP_LOGW(TAG,
+                     "prof%u migration read failed or wrong size (%s) -- skipping this slot, others still "
+                     "attempted",
+                     id, esp_err_to_name(slot_err));
+            continue;
+        }
+
+        s_profiles.profiles[id] = old_profile;
+        s_profiles.used_bitmap |= (1u << id);
+        esp_err_t save_err = nvs_save_slot(id);
+        if (save_err != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "prof%u migration write to '%s' failed: %s -- running from the old copy this boot, will "
+                     "retry",
+                     id, PROFILES_NVS_PARTITION, esp_err_to_name(save_err));
+            /* Don't let a failed write claim the slot as migrated in RAM --
+             * a write failure on this slot must not affect any other. */
+            s_profiles.used_bitmap &= ~(1u << id);
+            memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+        }
+    }
+
+    nvs_close(old_h);
 }
 
 /* ---- Public getter (profile_executor.c) ----------------------------------- */
@@ -556,7 +745,27 @@ static esp_err_t profile_delete_post_handler(httpd_req_t *req)
 
 esp_err_t profiles_http_start(void)
 {
-    esp_err_t err = nvs_load_all();
+    /* profiles_nvs is used only by this module, but nvs_flash_init_partition()
+     * on an already-initialized partition is a harmless no-op (ESP_OK), so
+     * bringing it up here independently (rather than assuming some other
+     * module did it) is safe either way. */
+    esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
+    if (part_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- profiles will not persist", PROFILES_NVS_PARTITION,
+                 esp_err_to_name(part_err));
+    }
+
+    esp_err_t err = ESP_OK;
+    if (part_err == ESP_OK) {
+        bool found_in_profiles_nvs = false;
+        err = nvs_load_all_from(PROFILES_NVS_PARTITION, &s_profiles, &found_in_profiles_nvs);
+        if (err == ESP_OK && !found_in_profiles_nvs) {
+            /* Nothing recorded in profiles_nvs yet -- see if the old
+             * default partition has pre-split profiles worth carrying
+             * forward. */
+            migrate_from_default_partition();
+        }
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "profile NVS load failed: %s -- starting with no saved profiles", esp_err_to_name(err));
         memset(&s_profiles, 0, sizeof(s_profiles));

@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 
 #include "MAX31856.h"
 #include "http_form.h"
@@ -17,6 +18,18 @@ static const char *TAG = "zones_http";
 
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_ZONES "zones_cfg"
+
+/* kiln_nvs is the 2026-08-13 split target for zones/rules/relay_cycles/
+ * run_state (see partitions.csv and TODO.md 8.1); each module manages its own
+ * migration and partition init independently rather than assuming another
+ * module already brought the partition up. NVS_DEFAULT_PART_NAME (from
+ * nvs_flash.h, expands to "nvs") is the old, still-live home this module's
+ * data used to persist to, kept readable for the one-time migration below and
+ * for firmware rollback. */
+#define KILN_NVS_PARTITION "kiln_nvs"
+
+/* Bump whenever zones_cfg_t's on-flash layout changes; see nvs_load_from(). */
+#define ZONES_CFG_VERSION 1
 
 #define ZONE_NAME_MAX_LEN 15
 
@@ -106,6 +119,7 @@ typedef struct {
 } zone_cfg_t;
 
 typedef struct {
+    uint8_t version; /* ZONES_CFG_VERSION at save time -- see nvs_load_from() */
     uint8_t thermo_count;
     uint8_t relay_count;
     /* TODO.md 6A.5 load-staggering: 0 = unlimited (default, existing
@@ -149,43 +163,154 @@ static uint32_t s_config_generation = 1;
 
 /* ---- NVS ---------------------------------------------------------------- */
 
-static esp_err_t nvs_load(void)
+static esp_err_t nvs_save(void);
+static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg);
+
+/* Brings up one NVS partition, erasing ONLY that partition if its contents
+ * are unusable. Copied/adapted from wifi_prov.c's nvs_partition_init() (see
+ * that file for the full rationale) -- NO_FREE_PAGES / NEW_VERSION_FOUND have
+ * no other cure, so erasing is the only way forward, but the erase must stay
+ * scoped to the partition that is actually broken rather than blast-radius
+ * the rest of kiln_nvs (or, worse, the default partition) with it. */
+static esp_err_t nvs_partition_init(const char *partition)
 {
-    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    esp_err_t err = nvs_flash_init_partition(partition);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+                 partition, esp_err_to_name(err));
+        err = nvs_flash_erase_partition(partition);
+        if (err == ESP_OK) {
+            err = nvs_flash_init_partition(partition);
+        }
+    }
+    return err;
+}
+
+/* Reads NVS_NAMESPACE/NVS_KEY_ZONES out of `partition` into *out_cfg, applying
+ * the three-outcome version handling nvs_load() relies on. *out_found reports
+ * whether the namespace/key existed at all (vs. existing but unreadable),
+ * which is what the one-time migration below keys off. */
+static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool *out_found)
+{
+    if (out_found) {
+        *out_found = false;
+    }
+    memset(out_cfg, 0, sizeof(*out_cfg));
 
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(partition, NVS_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        /* Nothing saved yet -- first boot, nothing configured. Not an error,
-         * mirrors wifi_prov.c's nvs_load. */
-        return ESP_OK;
+        return ESP_OK; /* namespace never created -- nothing configured, not an error */
     }
     if (err != ESP_OK) {
         return err;
     }
 
-    size_t len = sizeof(s_zones.cfg);
-    err = nvs_get_blob(h, NVS_KEY_ZONES, &s_zones.cfg, &len);
+    size_t len = sizeof(*out_cfg);
+    err = nvs_get_blob(h, NVS_KEY_ZONES, out_cfg, &len);
     nvs_close(h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        memset(out_cfg, 0, sizeof(*out_cfg));
         return ESP_OK;
     }
-    if (err != ESP_OK || len != sizeof(s_zones.cfg)) {
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "zones_cfg blob read from '%s' failed (%s) -- treating as unreadable",
+                 partition, esp_err_to_name(err));
+        memset(out_cfg, 0, sizeof(*out_cfg));
+        return ESP_OK;
+    }
+    if (out_found) {
+        *out_found = true;
+    }
+    if (len != sizeof(*out_cfg)) {
         /* A short/mismatched blob (e.g. a stale layout from before a struct
          * change) is not trustworthy -- fall back to "nothing configured"
          * rather than serve a config that decoded into garbage floats. */
-        ESP_LOGW(TAG, "zones_cfg blob load failed or wrong size (%s) -- starting unconfigured",
-                 esp_err_to_name(err));
-        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        ESP_LOGW(TAG, "zones_cfg blob from '%s' is the wrong size -- treating as unreadable", partition);
+        memset(out_cfg, 0, sizeof(*out_cfg));
+        return ESP_OK;
+    }
+
+    if (out_cfg->version == ZONES_CFG_VERSION) {
+        return ESP_OK; /* current version -- happy path */
+    }
+    if (out_cfg->version < ZONES_CFG_VERSION) {
+        /* Known older layout -- run it through the migration chain. v1 is the
+         * first version that has ever existed, so this is currently just the
+         * hook point: nothing to actually convert yet. */
+        ESP_LOGI(TAG, "zones_cfg from '%s' is version %u, migrating to %u", partition,
+                 (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
+        migrate_zones_cfg_v1_to_current(out_cfg);
+        return ESP_OK;
+    }
+    /* out_cfg->version > ZONES_CFG_VERSION: the data was written by NEWER
+     * firmware than this build. This is the firmware-rollback case from
+     * TODO.md 8.1 -- an operator rolled back after a bad update, and the data
+     * on flash may use fields/layout this older build doesn't know about.
+     * Wiping it here would destroy config the newer firmware (or a
+     * roll-forward back to it) still needs, so refuse to load instead: leave
+     * flash untouched and fall back to defaults for this boot only. */
+    ESP_LOGW(TAG, "zones_cfg from '%s' is version %u, newer than this firmware's %u -- "
+                  "refusing to load, flash data left untouched",
+             partition, (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
+    memset(out_cfg, 0, sizeof(*out_cfg));
+    if (out_found) {
+        *out_found = false; /* don't let a newer-version blob look migratable */
     }
     return ESP_OK;
 }
 
+/* Hook point for migrating an older on-flash zones_cfg_t layout forward. v1
+ * is the first version that has ever shipped, so there is nothing to convert
+ * yet -- this is a no-op passthrough that exists purely so the next version
+ * bump has somewhere to add real field conversion instead of every stored
+ * config's next boot looking like corruption. */
+static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
+{
+    cfg->version = ZONES_CFG_VERSION;
+}
+
+/* One-time move of the persisted zones config out of the default partition's
+ * NVS_NAMESPACE/NVS_KEY_ZONES and into KILN_NVS_PARTITION's, for boards
+ * provisioned by firmware predating the 2026-08-13 split. Simplified from
+ * wifi_prov.c's migrate_from_default_partition() to a one-directional copy:
+ * kiln_nvs is only ever consulted first, so if it already has something there
+ * is nothing to migrate and no "which wins" question to answer -- only the
+ * old default-partition location could hold pre-migration data. The old copy
+ * is deliberately left in place (not deleted), same rationale as
+ * wifi_prov.c: it needs to still be there if someone rolls back to
+ * pre-split firmware. */
+static void migrate_from_default_partition(void)
+{
+    zones_cfg_t from_default;
+    bool found_in_default = false;
+    esp_err_t err = nvs_load_from(NVS_DEFAULT_PART_NAME, &from_default, &found_in_default);
+    if (err != ESP_OK || !found_in_default) {
+        return; /* nothing to migrate */
+    }
+
+    ESP_LOGI(TAG, "migrating zones_cfg from the default NVS partition to '%s'", KILN_NVS_PARTITION);
+
+    s_zones.cfg = from_default;
+    esp_err_t save_err = nvs_save();
+    if (save_err != ESP_OK) {
+        ESP_LOGE(TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
+                 KILN_NVS_PARTITION, esp_err_to_name(save_err));
+    }
+}
+
+static esp_err_t nvs_load(void)
+{
+    bool found = false;
+    return nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, &found);
+}
+
 static esp_err_t nvs_save(void)
 {
+    s_zones.cfg.version = ZONES_CFG_VERSION;
+
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
@@ -759,7 +884,26 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
 
 esp_err_t zones_http_start(void)
 {
-    esp_err_t err = nvs_load();
+    /* kiln_nvs is shared by zones/rules/relay_cycles/run_state, and each
+     * module brings it up independently rather than assuming another module
+     * already has -- nvs_flash_init_partition() on an already-initialized
+     * partition is a harmless no-op (ESP_OK), so this is safe to repeat. */
+    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- zones will not persist",
+                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+    }
+
+    esp_err_t err = ESP_OK;
+    if (part_err == ESP_OK) {
+        err = nvs_load();
+        bool found_in_kiln_nvs = (err == ESP_OK && s_zones.cfg.version != 0);
+        if (!found_in_kiln_nvs) {
+            /* Nothing usable in kiln_nvs yet -- see if the old default
+             * partition has a pre-split copy worth carrying forward. */
+            migrate_from_default_partition();
+        }
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "zones_cfg NVS load failed: %s -- starting unconfigured", esp_err_to_name(err));
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));

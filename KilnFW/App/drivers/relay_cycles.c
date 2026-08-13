@@ -19,6 +19,23 @@ static const char *TAG = "relay_cycles";
 #define NVS_NAMESPACE "kiln_cfg"
 #define NVS_KEY_CYCLES "relay_cyc"
 
+/* TODO.md 8.1: this module's persisted store, split out of the default NVS
+ * partition into its own partition so a corrupt/erased default partition
+ * cannot take relay history with it. */
+#define KILN_NVS_PARTITION "kiln_nvs"
+
+/* The blob has no version field of its own on disk before this change (a
+ * bare uint32_t[KILN_IO_RELAY_COUNT]); wrapping it in a versioned struct
+ * changes the on-disk layout, which is fine here -- unlike run_state.c's
+ * blob, this one is diagnostic-only and already treats any size mismatch as
+ * "start at zero", so the version add rides the same tolerant path. */
+#define RELAY_CYCLES_VERSION 1
+
+typedef struct {
+    uint8_t  version;
+    uint32_t counts[KILN_IO_RELAY_COUNT];
+} relay_cycles_blob_t;
+
 typedef struct {
     SemaphoreHandle_t lock;
     uint32_t          counts[KILN_IO_RELAY_COUNT];
@@ -28,6 +45,68 @@ typedef struct {
 } relay_cycles_t;
 
 static relay_cycles_t s_rc;
+
+/* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
+ * are unusable. Adapted from wifi_prov.c's nvs_partition_init() (2026-08-12
+ * NVS-partition split): NO_FREE_PAGES / NEW_VERSION_FOUND leave NVS unable
+ * to mount at all, so erasing is the only cure, but it must stay scoped to
+ * the partition that is actually broken. */
+static esp_err_t nvs_partition_init(const char *partition)
+{
+    esp_err_t err = nvs_flash_init_partition(partition);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+                 partition, esp_err_to_name(err));
+        err = nvs_flash_erase_partition(partition);
+        if (err == ESP_OK) {
+            err = nvs_flash_init_partition(partition);
+        }
+    }
+    return err;
+}
+
+/* One-time, one-directional copy of the old default-partition blob into
+ * KILN_NVS_PARTITION, for boards provisioned by firmware predating the
+ * split. The old copy is left in place (never deleted) so a rollback to
+ * pre-split firmware still finds its counts -- see wifi_prov.c's
+ * migrate_from_default_partition() for the fuller rationale. Only called
+ * when KILN_NVS_PARTITION has nothing under NVS_KEY_CYCLES yet. */
+static void migrate_from_default_partition(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return;
+    }
+    relay_cycles_blob_t old_blob;
+    size_t len = sizeof(old_blob);
+    err = nvs_get_blob(h, NVS_KEY_CYCLES, &old_blob, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        /* Nothing in the old location either (or it's the pre-version-field
+         * bare uint32_t[] blob, a different size) -- nothing to migrate. */
+        return;
+    }
+    if (len != sizeof(old_blob) || old_blob.version != RELAY_CYCLES_VERSION) {
+        return;
+    }
+
+    nvs_handle_t hw;
+    err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &hw);
+    if (err != ESP_OK) {
+        return;
+    }
+    err = nvs_set_blob(hw, NVS_KEY_CYCLES, &old_blob, sizeof(old_blob));
+    if (err == ESP_OK) {
+        err = nvs_commit(hw);
+    }
+    nvs_close(hw);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "migrated relay cycle counts from default NVS partition to '%s'", KILN_NVS_PARTITION);
+    } else {
+        ESP_LOGW(TAG, "relay cycle count migration to '%s' failed: %s", KILN_NVS_PARTITION, esp_err_to_name(err));
+    }
+}
 
 static bool ensure_lock(void)
 {
@@ -44,11 +123,14 @@ static bool ensure_lock(void)
 static esp_err_t persist_locked(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_set_blob(h, NVS_KEY_CYCLES, s_rc.counts, sizeof(s_rc.counts));
+    relay_cycles_blob_t blob;
+    blob.version = RELAY_CYCLES_VERSION;
+    memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
+    err = nvs_set_blob(h, NVS_KEY_CYCLES, &blob, sizeof(blob));
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
@@ -66,24 +148,44 @@ esp_err_t relay_cycles_init(void)
         return ESP_ERR_NO_MEM;
     }
 
+    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- relay cycle counts will not persist",
+                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+    }
+
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     memset(s_rc.counts, 0, sizeof(s_rc.counts));
 
+    /* Migrate before the real load so a pre-split board's counts show up on
+     * the very first boot after the update, not one boot late. */
+    if (part_err == ESP_OK) {
+        migrate_from_default_partition();
+    }
+
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_OK) {
-        size_t len = sizeof(s_rc.counts);
-        err = nvs_get_blob(h, NVS_KEY_CYCLES, s_rc.counts, &len);
-        if (err != ESP_OK || len != sizeof(s_rc.counts)) {
-            /* Missing (first boot) or written by a build with a different
-             * relay count: start from zero rather than refusing to run. The
-             * counter is diagnostic, not safety-critical -- losing it costs
-             * history, not correctness. */
+        relay_cycles_blob_t blob;
+        size_t len = sizeof(blob);
+        err = nvs_get_blob(h, NVS_KEY_CYCLES, &blob, &len);
+        if (err == ESP_OK && len == sizeof(blob) && blob.version == RELAY_CYCLES_VERSION) {
+            memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
+        } else if (err == ESP_OK && len == sizeof(blob) && blob.version > RELAY_CYCLES_VERSION) {
+            /* Newer than this firmware understands -- a firmware-rollback
+             * case (TODO.md 8.1). Refuse to load rather than guess at a
+             * layout this build doesn't know, and leave flash untouched so
+             * a subsequent boot on the newer firmware still finds it. */
+            ESP_LOGW(TAG, "relay cycle blob version %u is newer than this firmware's %u -- refusing to load, "
+                     "leaving flash untouched", blob.version, RELAY_CYCLES_VERSION);
+        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+            /* Missing (first boot, or nothing survived migration) is the
+             * only case treated identically to "start at zero" without a
+             * warning; anything else (wrong size, unreadable, version 0 from
+             * some corrupt write) is logged as unreadable/corrupt data. */
             memset(s_rc.counts, 0, sizeof(s_rc.counts));
-            if (err != ESP_ERR_NVS_NOT_FOUND) {
-                ESP_LOGW(TAG, "relay cycle blob load failed or wrong size (%s) -- starting at zero",
-                         esp_err_to_name(err));
-            }
+            ESP_LOGW(TAG, "relay cycle blob load failed or wrong size (%s) -- starting at zero",
+                     esp_err_to_name(err));
         }
         nvs_close(h);
     }

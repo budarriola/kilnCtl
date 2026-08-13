@@ -18,6 +18,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "relay_authority.c"
                        "relay_cycles.c"
                        "run_state.c"
+                       "nvs_report.c"
                        "dashboard_http.c"
                        "wifi_prov.c"
                        "wifi_provision_http.c"
@@ -40,7 +41,8 @@ idf_component_register(SRCS "MAX31856.c"
                        EMBED_TXTFILES "wifi_provision_page.html" "main_page.html"
                                       "zones_page.html" "rules_page.html" "profiles_page.html"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
-                                esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer)
+                                esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
+                                esp_partition)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it

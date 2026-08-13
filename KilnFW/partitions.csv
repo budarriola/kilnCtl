@@ -23,11 +23,18 @@
 # Layout of the 2 MB (0x200000) flash:
 #   0x000000..0x008000  bootloader (implicit, below the table offset)
 #   0x008000..0x009000  partition table itself (CONFIG_PARTITION_TABLE_OFFSET)
-#   0x009000..0x00F000  nvs        24K   default NVS: zones, rules, profiles, run_state
-#   0x00F000..0x010000  phy_init    4K   RF calibration data
-#   0x010000..0x187000  factory  1500K   application image
-#   0x187000..0x18D000  wifi_nvs   24K   Wi-Fi credentials ONLY (this file's addition)
-#   0x18D000..0x200000  unused    460K   headroom for future partitions
+#   0x009000..0x00F000  nvs         24K   default NVS: legacy home of zones/rules/
+#                                         profiles/run_state, kept as-is for rollback
+#                                         and one-time migration reads (2026-08-13)
+#   0x00F000..0x010000  phy_init     4K   RF calibration data
+#   0x010000..0x187000  factory   1500K   application image
+#   0x187000..0x18D000  wifi_nvs    24K   Wi-Fi credentials ONLY
+#   0x18D000..0x19D000  kiln_nvs    64K   zones, rules, relay_cycles, run_state
+#                                         (2026-08-13 split, see App/drivers/wifi_prov.c
+#                                         nvs_partition_init() for the pattern reused)
+#   0x19D000..0x1FD000  profiles_nvs 384K fire profiles only -- the one section that
+#                                         grows with use, so it gets the most headroom
+#   0x1FD000..0x200000  unused      12K   remaining headroom
 #
 # wifi_nvs is 0x6000 = 24 KB, the same size as the default `nvs`. NVS needs a
 # minimum of three 4K sectors to operate (two data pages plus one spare to
@@ -36,13 +43,25 @@
 # anyway and the extra sectors mean the wear-levelling compaction that triggers
 # NO_FREE_PAGES essentially never has to run here.
 #
+# kiln_nvs/profiles_nvs (2026-08-13): same rationale as wifi_nvs above, applied
+# to the rest of the default `nvs` partition's former contents -- see TODO.md
+# 8.1. zones/rules/relay_cycles/run_state are bounded and small (64K, same
+# sector-count reasoning as wifi_nvs); profiles are the only section that
+# grows with use, so profiles_nvs gets the remaining headroom. The old
+# default `nvs` partition is deliberately left in place, unresized, so a
+# rollback to pre-split firmware still finds working data there, and so this
+# firmware's one-time migration (read old location, write through, do NOT
+# delete the old copy) has somewhere to read from.
+#
 # What this does NOT protect against: `esptool erase_flash`. That erases the
 # entire chip -- bootloader, partition table, and every partition including
 # this one. No partition layout can survive it. See wifi_prov.c's header for
 # the full survival matrix.
 #
-# Name,     Type, SubType, Offset,   Size,     Flags
-nvs,        data, nvs,     0x9000,   0x6000,
-phy_init,   data, phy,     0xf000,   0x1000,
-factory,    app,  factory, 0x10000,  0x177000,
-wifi_nvs,   data, nvs,     0x187000, 0x6000,
+# Name,       Type, SubType, Offset,   Size,     Flags
+nvs,          data, nvs,     0x9000,   0x6000,
+phy_init,     data, phy,     0xf000,   0x1000,
+factory,      app,  factory, 0x10000,  0x177000,
+wifi_nvs,     data, nvs,     0x187000, 0x6000,
+kiln_nvs,     data, nvs,     0x18D000, 0x10000,
+profiles_nvs, data, nvs,     0x19D000, 0x60000,

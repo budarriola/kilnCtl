@@ -107,8 +107,15 @@ wifi_prov_state_t wifi_prov_get_state(void);
  * RECONNECTING depending on what's happened since). */
 wifi_prov_mode_t wifi_prov_get_mode(void);
 
-/* NULL-terminated. Empty string if nothing saved. Points at static storage;
- * valid for the process lifetime, no ownership transfer. */
+/* NULL-terminated. There is no longer one canonical "the" saved network --
+ * this now returns the active/most-recently-attempted SSID (the one
+ * apply_sta_config() last configured for a join), or if nothing is currently
+ * active, the first entry in the saved-network list (list order, index 0) if
+ * any are saved, or an empty string if none are. Existing callers (e.g. the
+ * status page's "which network") keep working unchanged -- this is still a
+ * single best-guess answer to "which network", just sourced from a list
+ * instead of a single slot. Points at static storage; valid for the process
+ * lifetime, no ownership transfer. */
 const char *wifi_prov_get_saved_ssid(void);
 
 /* NULL-terminated. The fallback AP's own SSID as currently in effect --
@@ -117,6 +124,23 @@ const char *wifi_prov_get_saved_ssid(void);
  * been saved. Points at static storage; valid for the process lifetime, no
  * ownership transfer. */
 const char *wifi_prov_get_ap_ssid(void);
+
+/* NULL-terminated. The fallback AP's own password as currently in effect --
+ * either the runtime override set via wifi_prov_set_ap_password(), or the
+ * compile-time KILNCTL_WIFI_AP_DEFAULT_PASSWORD Kconfig default. Empty
+ * string means an open (unsecured) AP. Points at static storage; valid for
+ * the process lifetime, no ownership transfer.
+ *
+ * 2026-08-13, deliberately DIFFERENT from every saved *station* network's
+ * password (see wifi_prov_get_saved_networks(), which structurally cannot
+ * return one): this is the board's OWN access point identity, which an
+ * operator standing in front of the board's setup page needs to see in
+ * order to know what they just configured -- there is no "forget and
+ * re-enter" workflow for the board's own AP the way there is for a joined
+ * network. wifi_provision_http.c's /status handler exposes this in plain
+ * text; a *saved network's* password must never be added there or
+ * anywhere else. */
+const char *wifi_prov_get_ap_password(void);
 
 /* Saves ssid/password to NVS and (if in home mode) starts a join attempt.
  * ssid_len/password_len are the number of bytes at ssid/password, NOT
@@ -127,9 +151,51 @@ const char *wifi_prov_get_ap_ssid(void);
  * password_len may be 0 (open network). Submitting credentials while in AP
  * mode is treated as an explicit choice to switch to home mode -- see the
  * .c file for why (mirrors the old "local_only" exit path, now generalized
- * to the mode concept). */
+ * to the mode concept).
+ *
+ * (2026-08-13, TODO.md 8.4: this is now a thin wrapper around
+ * wifi_prov_add_network() -- kept because other code still calls it under
+ * this name. Prefer wifi_prov_add_network() for new callers.) */
 esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const char *password,
                                     size_t password_len);
+
+/* Adds ssid/password to the bounded list of saved networks (see
+ * WIFI_PROV_MAX_SAVED_NETWORKS in the .c file), or updates the password of an
+ * already-saved network with the same SSID (exact string match). ssid_len/
+ * password_len follow the same rules as wifi_prov_set_credentials() above --
+ * NOT counting a NUL, re-validated here, ESP_ERR_INVALID_SIZE rather than
+ * truncating. Returns ESP_ERR_NO_MEM without changing anything if the list is
+ * already full (WIFI_PROV_MAX_SAVED_NETWORKS entries) and ssid is not already
+ * one of them. On success, persists the whole list to NVS and, if currently
+ * in home mode, starts (or restarts) a join attempt -- reusing whatever
+ * network the auto-join tie-break in the .c file currently prefers, which is
+ * not necessarily the network just added. Submitting a network while in AP
+ * mode switches to home mode first, same as wifi_prov_set_credentials()
+ * always has. */
+esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *password,
+                                 size_t password_len);
+
+/* Removes the saved network matching ssid (exact string match, ssid_len NOT
+ * counting a NUL) from the list, compacts the remaining entries, and persists
+ * the change. Explicitly allowed to bring the list to zero entries -- that is
+ * not a special case here, it is just what "no saved networks" (formerly
+ * has_creds == false) looks like. If ssid is not found, this is a no-op that
+ * still returns ESP_OK (nothing to remove is not a failure). If the removed
+ * network was the one currently active/connected, the existing disconnect/
+ * reconnect event handlers discover there is nothing left to reconnect to on
+ * their own -- this function does not itself force a disconnect. */
+esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len);
+
+typedef struct {
+    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+} wifi_prov_saved_network_t;
+
+/* Writes up to max_results currently-saved SSIDs (list order) into out and
+ * the actual count into *out_count. SSID only -- there is deliberately no way
+ * to get a saved password back out through this or any other function; the
+ * password never leaves NVS/RAM once saved. */
+esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t max_results,
+                                        size_t *out_count);
 
 /* Sets and persists the Wi-Fi mode (the provisioning page's single toggle).
  * Switching to WIFI_PROV_MODE_AP: any in-progress or future station join is
@@ -171,6 +237,14 @@ bool wifi_prov_is_sta_connected(void);
  * currently connected -- there is nothing to report, not a failure of this
  * call. */
 esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap);
+
+/* Returns RSSI (signal strength in dBm) of the currently-connected station, or
+ * -127 if not connected. RSSI is negative; -30 is excellent, -90 is weak. */
+int8_t wifi_prov_get_sta_rssi(void);
+
+/* Returns the number of clients currently connected to the AP (when in AP mode
+ * or AP+STA fallback). Returns 0 if AP is not currently active. */
+uint8_t wifi_prov_get_ap_client_count(void);
 
 typedef struct {
     char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
