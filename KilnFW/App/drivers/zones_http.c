@@ -148,6 +148,28 @@ static struct {
     zones_cfg_t cfg;
 } s_zones;
 
+/* TODO.md 8.2 "Tie it to the guards, not only the UI": explicit "this
+ * zone config is trustworthy" flag, distinct from s_zones.cfg simply reading
+ * as all-zero. Before this flag existed, an unconfigured zone was refused
+ * only by accident -- relay_mask happened to be 0 whether that was a
+ * genuinely empty config OR a version-refused/wipe/first-boot load failure,
+ * so apply_relay()/begin_run_locked() silently did nothing in either case
+ * with no way for a caller (or the dashboard) to tell "nothing configured
+ * yet" from "config failed to load, do not trust this."
+ *
+ * false whenever nvs_load_from() hit the wipe path (short/wrong-size blob),
+ * the newer-refuses-to-load path, or the namespace was simply never created
+ * (first boot, nothing saved yet) -- all three are "cannot vouch for this
+ * config" for the same reason: what's live in s_zones.cfg is the
+ * zero-initialized default, not something read off flash. true only after a
+ * load that actually decoded a real blob (current version, or an older
+ * version successfully migrated) or a POST that validated and committed a
+ * fresh config to s_zones.cfg -- see nvs_load()/zones_http_start() and
+ * zones_post_handler(). Whole-partition granularity, matching the loader:
+ * this struct's load is all-or-nothing, so there is no meaningful
+ * per-zone version of this flag. */
+static bool s_zones_config_valid = false;
+
 /* TODO.md 6A.7 config-reload counter. Kept outside s_zones deliberately:
  * s_zones.cfg is what nvs_save() blobs out verbatim, and this must never
  * become part of the persisted layout (a saved generation would be
@@ -190,10 +212,20 @@ static esp_err_t nvs_partition_init(const char *partition)
  * the three-outcome version handling nvs_load() relies on. *out_found reports
  * whether the namespace/key existed at all (vs. existing but unreadable),
  * which is what the one-time migration below keys off. */
-static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool *out_found)
+/* out_valid, if non-NULL, reports whether *out_cfg is a real decoded config
+ * that later stages (zones_http_start(), zones_config_is_valid()) may treat
+ * as trustworthy -- see s_zones_config_valid's comment for the exact rule.
+ * Distinct from *out_found: found means "the key existed at all" (what the
+ * one-time migration keys off), valid means "and what came back is safe to
+ * run a kiln against." A newer-refuses-to-load blob is found but not
+ * valid; a migrated older blob is both. */
+static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool *out_found, bool *out_valid)
 {
     if (out_found) {
         *out_found = false;
+    }
+    if (out_valid) {
+        *out_valid = false;
     }
     memset(out_cfg, 0, sizeof(*out_cfg));
 
@@ -232,7 +264,10 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     }
 
     if (out_cfg->version == ZONES_CFG_VERSION) {
-        return ESP_OK; /* current version -- happy path */
+        if (out_valid) {
+            *out_valid = true; /* current version -- happy path */
+        }
+        return ESP_OK;
     }
     if (out_cfg->version < ZONES_CFG_VERSION) {
         /* Known older layout -- run it through the migration chain. v1 is the
@@ -241,6 +276,9 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
         ESP_LOGI(TAG, "zones_cfg from '%s' is version %u, migrating to %u", partition,
                  (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
         migrate_zones_cfg_v1_to_current(out_cfg);
+        if (out_valid) {
+            *out_valid = true; /* migrated -- still a real, trustworthy config */
+        }
         return ESP_OK;
     }
     /* out_cfg->version > ZONES_CFG_VERSION: the data was written by NEWER
@@ -257,6 +295,7 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     if (out_found) {
         *out_found = false; /* don't let a newer-version blob look migratable */
     }
+    /* out_valid already false: refused, not trustworthy for this boot. */
     return ESP_OK;
 }
 
@@ -284,7 +323,8 @@ static void migrate_from_default_partition(void)
 {
     zones_cfg_t from_default;
     bool found_in_default = false;
-    esp_err_t err = nvs_load_from(NVS_DEFAULT_PART_NAME, &from_default, &found_in_default);
+    bool valid_in_default = false;
+    esp_err_t err = nvs_load_from(NVS_DEFAULT_PART_NAME, &from_default, &found_in_default, &valid_in_default);
     if (err != ESP_OK || !found_in_default) {
         return; /* nothing to migrate */
     }
@@ -292,6 +332,10 @@ static void migrate_from_default_partition(void)
     ESP_LOGI(TAG, "migrating zones_cfg from the default NVS partition to '%s'", KILN_NVS_PARTITION);
 
     s_zones.cfg = from_default;
+    /* A found-but-invalid blob (newer-than-us, refused) never gets here --
+     * nvs_load_from() clears out_found in that case -- so anything that
+     * reaches this point was actually decoded, current or migrated. */
+    s_zones_config_valid = valid_in_default;
     esp_err_t save_err = nvs_save();
     if (save_err != ESP_OK) {
         ESP_LOGE(TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
@@ -299,10 +343,10 @@ static void migrate_from_default_partition(void)
     }
 }
 
-static esp_err_t nvs_load(void)
+static esp_err_t nvs_load(bool *out_valid)
 {
     bool found = false;
-    return nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, &found);
+    return nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, &found, out_valid);
 }
 
 static esp_err_t nvs_save(void)
@@ -336,6 +380,15 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
 uint32_t zones_config_generation(void)
 {
     return s_config_generation;
+}
+
+/* TODO.md 8.2 "Tie it to the guards, not only the UI" -- see
+ * s_zones_config_valid's comment for the exact rule. Consulted by
+ * profile_executor.c/autotune_engine.c before allowing a run to start, and
+ * reported on /api/status (dashboard_http.c) as zones_config_valid. */
+bool zones_config_is_valid(void)
+{
+    return s_zones_config_valid;
 }
 
 uint8_t zones_config_get_thermo_count(void)
@@ -870,6 +923,13 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
      * not make a running profile re-read identical settings (TODO.md
      * 6A.7). */
     s_zones.cfg = tmp;
+    /* A validated, freshly-submitted config is trustworthy the moment it's
+     * live in RAM, regardless of whether the NVS write below succeeds --
+     * same "applied now either way" convention nvs_save()'s failure handling
+     * already uses below. This is the other half of s_zones_config_valid's
+     * contract: true after either a real successful load OR a fresh valid
+     * save. */
+    s_zones_config_valid = true;
     s_config_generation++;
     esp_err_t err = nvs_save();
     if (err != ESP_OK) {
@@ -896,17 +956,28 @@ esp_err_t zones_http_start(void)
 
     esp_err_t err = ESP_OK;
     if (part_err == ESP_OK) {
-        err = nvs_load();
+        bool valid = false;
+        err = nvs_load(&valid);
+        s_zones_config_valid = (err == ESP_OK) && valid;
         bool found_in_kiln_nvs = (err == ESP_OK && s_zones.cfg.version != 0);
         if (!found_in_kiln_nvs) {
             /* Nothing usable in kiln_nvs yet -- see if the old default
-             * partition has a pre-split copy worth carrying forward. */
+             * partition has a pre-split copy worth carrying forward.
+             * migrate_from_default_partition() sets s_zones_config_valid
+             * itself if it finds and applies something. */
             migrate_from_default_partition();
         }
+    } else {
+        s_zones_config_valid = false; /* partition itself didn't come up */
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "zones_cfg NVS load failed: %s -- starting unconfigured", esp_err_to_name(err));
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        s_zones_config_valid = false;
+    }
+    if (!s_zones_config_valid) {
+        ESP_LOGW(TAG, "zones config did NOT load cleanly -- zone commanding is refused until a valid "
+                      "config is loaded or saved (TODO.md 8.2 'Tie it to the guards')");
     }
     /* A load replaces the whole config, not one field, so it counts as a
      * change even on the very first boot -- both branches above land here.

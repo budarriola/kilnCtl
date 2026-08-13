@@ -1463,6 +1463,18 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (err_msg) snprintf(err_msg, err_cap, "profile targets no zones");
         return false;
     }
+    /* TODO.md 8.2 "Tie it to the guards, not only the UI": refuse explicitly
+     * rather than let this fall through to apply_relay()'s relay_mask == 0
+     * check, which cannot tell "genuinely no zones configured" from "zone
+     * config failed to load" -- both read as the same zeroed struct. */
+    if (!zones_config_is_valid()) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "zone config failed to load or has not been saved -- this kiln cannot be started "
+                     "until zone config loads cleanly (see /settings/zones)");
+        }
+        return false;
+    }
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if ((p.zone_mask & (1u << zi)) && autotune_engine_is_active_on_zone(zi)) {
             if (err_msg) {

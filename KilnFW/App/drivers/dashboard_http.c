@@ -119,6 +119,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     APPEND(",\"safety_ready\":%s", s_dash.safety != NULL ? "true" : "false");
 
+    /* TODO.md 8.2 "Tie it to the guards, not only the UI": surface the same
+     * flag profile_executor.c/autotune_engine.c now refuse on, so the
+     * dashboard and pc_tools' Zones panel can say "zone config failed to
+     * load" explicitly instead of a kiln that just silently won't fire. */
+    APPEND(",\"zones_config_valid\":%s", zones_config_is_valid() ? "true" : "false");
+
     /* TODO.md 8.2's "one boot-time report": present/mounted per NVS
      * partition, so the wizard (8.3) can say precisely which storage section
      * is missing rather than an operator discovering it as an unexplained

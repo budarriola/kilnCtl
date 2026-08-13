@@ -62,6 +62,22 @@ uint8_t zones_config_get_thermo_count(void);
  * a run, regardless of which zones it spans. */
 uint8_t zones_config_get_max_simultaneous_relays(void);
 
+/* TODO.md 8.2 "Tie it to the guards, not only the UI". true only after a
+ * real, trustworthy zones config is live -- a successful load (current
+ * version, or an older version successfully migrated) or a fresh validated
+ * POST /api/zones save. false whenever the loader hit the version-refuses
+ * (newer-than-firmware) path, a corrupt/wrong-size blob, an NVS partition
+ * that failed to come up, or the namespace was simply never created
+ * (first boot). Distinct from "thermo_count == 0", which is a legitimately
+ * saved empty config, not a failed load.
+ *
+ * profile_executor.c and autotune_engine.c must refuse to start a run when
+ * this is false, with an explicit reason -- not rely on relay_mask reading
+ * as 0 by coincidence of the zeroed struct. dashboard_http.c reports this
+ * on /api/status as "zones_config_valid" so the on-device dashboard and the
+ * pc_tools GUI's Zones panel can say so instead of silently doing nothing. */
+bool zones_config_is_valid(void);
+
 /* Below: read-only accessors for profile_executor.c (TODO.md section 6).
  * Same rule as zones_config_get_max_ramp -- false means "cannot answer,"
  * not "answer is zero." */

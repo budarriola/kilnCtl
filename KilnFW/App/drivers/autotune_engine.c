@@ -687,6 +687,17 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * the lock NOT held on failure. */
 static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
 {
+    /* TODO.md 8.2 "Tie it to the guards, not only the UI": same explicit
+     * refusal as profile_executor_run() -- must not rely on the relay_mask
+     * check below happening to read 0 for a failed-to-load config too. */
+    if (!zones_config_is_valid()) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "zone config failed to load or has not been saved -- autotune cannot run until "
+                     "zone config loads cleanly (see /settings/zones)");
+        }
+        return false;
+    }
     uint8_t mask = 0;
     if (!zones_config_get_relay_mask(zone_index, &mask) || mask == 0) {
         if (err_msg) snprintf(err_msg, err_cap, "zone has no relay mask configured");

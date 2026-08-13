@@ -2465,16 +2465,33 @@ unconfigured, so adding one field wipes the operator's setup behind a single
       worse outcome than a firmware that refuses to fire until updated.
       **Built (2026-08-13)**: refuse-and-keep chosen everywhere, documented
       as a comment at each version-check site (see "Three outcomes" above).
-- [ ] **Tie it to the guards, not only the UI.** A kiln whose zone config
+- [x] **Tie it to the guards, not only the UI.** A kiln whose zone config
       failed to load must not be startable. Today an unconfigured zone
       simply cannot be commanded, which is safe by accident; make it
       explicit, and say so on the dashboard.
+      **Built (2026-08-13)**: explicit `s_zones_config_valid` flag in
+      `zones_http.c`, whole-partition granularity (the load already is
+      all-or-nothing) — false on the wipe path, the newer-refuses path, an
+      NVS partition that failed to come up, or a never-created namespace
+      (first boot); true only after a real decoded load (current version or
+      a migrated older one) or a freshly validated `POST /api/zones`.
+      Exposed as `zones_config_is_valid()` (`zones_http.h`).
+      `profile_executor_run()` and `autotune_engine.c`'s `begin_run_locked()`
+      now refuse explicitly with a clear reason when it's false, ahead of
+      (not instead of) the existing relay_mask==0 checks and
+      relay_authority's gates — those are unchanged. `/api/status`
+      (`dashboard_http.c`) reports it as `zones_config_valid` for the
+      on-device dashboard and pc_tools' Zones panel.
 
-**Needs verification (2026-08-13)**: `idf.py build` is clean. Not yet
-flashed/tested on hardware — in particular, confirm on a board with real
-saved zone/rules/profile/relay-cycle data that the one-time migration off
-the old default `nvs` partition actually carries it forward into
-`kiln_nvs`/`profiles_nvs` rather than starting fresh.
+**Needs verification (2026-08-13)**: `idf.py build` is clean (verified via
+`ninja -j 24` in `KilnFW/build`, per the documented idf.py python-env
+workaround). Not yet flashed/tested on hardware — in particular, confirm on
+a board with real saved zone/rules/profile/relay-cycle data that the
+one-time migration off the old default `nvs` partition actually carries it
+forward into `kiln_nvs`/`profiles_nvs` rather than starting fresh, and that
+`zones_config_valid` reads `true` after that migration and `false` on a
+genuinely first-boot/unconfigured board (no hardware attached to this
+session to check either).
 
 ### 8.3 Config wizard page: what is set up, what is not
 
