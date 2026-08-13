@@ -58,6 +58,11 @@
   button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
   .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
                padding: 0.7em 1em; margin-top: 0.5em; }
+  button.danger-btn { display: block; width: 100%; text-align: left; padding: 0.6em 1em;
+                       font-size: 0.9em; border-radius: 4px; border: 1px solid var(--fault-color);
+                       background: var(--button-bg); color: var(--fault-color); cursor: pointer;
+                       margin-bottom: 0.5em; }
+  button.danger-btn:hover { background: var(--fault-color); color: #fff; }
   .exec-card .row { display: flex; justify-content: space-between; margin-bottom: 0.3em; }
   .exec-state { font-weight: bold; text-transform: capitalize; }
   .exec-state.state-faulted { color: var(--fault-color); }
@@ -113,6 +118,19 @@ Red marks are thermal-guard trips. <a href="/api/history.csv">Download CSV</a></
 <a class="button" href="/settings/zones">Thermocouples &amp; zones</a>
 <a class="button" href="/settings/relays">Relays &amp; rules</a>
 <a class="button" href="/wifi">Network settings</a>
+
+<h2 style="border-top-color: var(--fault-color);">Danger zone</h2>
+<p>Each button below erases ONLY what it says and reboots the board
+immediately -- there is no undo. "Wi-Fi" never touches zones/rules/profiles;
+"kiln config" never touches Wi-Fi or profiles; "profiles" never touches
+anything else. "Factory default" erases all three.</p>
+<p>
+<button type="button" class="danger-btn" data-scope="wifi">Reset Wi-Fi only</button>
+<button type="button" class="danger-btn" data-scope="kiln">Reset kiln config only (zones, rules, relay cycles, run state)</button>
+<button type="button" class="danger-btn" data-scope="profiles">Reset fire profiles only</button>
+<button type="button" class="danger-btn" data-scope="all">Factory default (erase everything)</button>
+</p>
+<p id="resetStatus"></p>
 
 <script>
 const FAULT_BITS = [
@@ -509,6 +527,36 @@ window.addEventListener('resize', pollHistory);
     apply(next);
   });
 })();
+
+var SCOPE_LABELS = {
+  wifi: 'Wi-Fi credentials only',
+  kiln: 'kiln config only (zones, rules, relay cycles, run state)',
+  profiles: 'saved fire profiles only',
+  all: 'EVERYTHING (factory default)',
+};
+document.querySelectorAll('.danger-btn').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var scope = b.getAttribute('data-scope');
+    var label = SCOPE_LABELS[scope] || scope;
+    if (!confirm('This permanently erases ' + label + ' and reboots the board right now. ' +
+                 'There is no undo. Continue?')) {
+      return;
+    }
+    var status = document.getElementById('resetStatus');
+    status.textContent = 'Erasing and rebooting...';
+    fetch('/api/factory_reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'scope=' + encodeURIComponent(scope),
+    }).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (res) {
+      status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
+    }).catch(function () {
+      status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+    });
+  });
+});
 </script>
 </body>
 </html>

@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 
 #include "dashboard_http.h"
+#include "factory_reset.h"
 #include "ILI9488.h"
 #include "MAX31856.h"
 #include "SX1509.h"
@@ -429,6 +430,16 @@ void app_main(void)
     if (profiles_err != ESP_OK) {
         ESP_LOGW(TAG, "profiles_http_start failed: %s -- no Profiles page this boot",
                  esp_err_to_name(profiles_err));
+    }
+
+    // TODO.md 8.1: the explicit-scope reset/factory-default endpoint. Only
+    // needs the shared httpd instance -- no hardware pointers, same as the
+    // settings pages just above -- and is likewise never a reason to fail
+    // app_main.
+    esp_err_t factory_reset_err = factory_reset_http_start();
+    if (factory_reset_err != ESP_OK) {
+        ESP_LOGW(TAG, "factory_reset_http_start failed: %s -- no reset/factory-default endpoint this boot",
+                 esp_err_to_name(factory_reset_err));
     }
 
     // TODO.md 8.2's boot-time report: capture AFTER every module above that

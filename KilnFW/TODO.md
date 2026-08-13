@@ -2383,12 +2383,40 @@ relay rules, profiles, contact-cycle counters, the run-state breadcrumb.
       partition (comment updated), but only because every module's
       migration read depends on it running first — it no longer owns
       anyone's persistence, only that one shared read-only precondition.
-- [ ] **Decide what "reset kiln config" means** once this exists. It
+- [x] **Decide what "reset kiln config" means** once this exists. It
       becomes a per-partition operation, which is the point — but the UI
       then has to say precisely what each reset destroys, and "reset
       everything except Wi-Fi" is the one an operator actually wants when a
       board misbehaves somewhere inconvenient. (user says give the user a choice
       and offer a factory default option too)
+      **Built (2026-08-13)**: new `App/drivers/factory_reset.c/.h`, registering
+      `POST /api/factory_reset` on the shared httpd instance (same
+      `wifi_provision_http_get_server()` pattern as every other `*_http.c`).
+      Body is `application/x-www-form-urlencoded`, `scope=wifi|kiln|profiles|all`
+      — matching this codebase's existing form-encoded POST convention
+      (`http_form_find_field`) rather than introducing a JSON parser. No
+      default scope: a missing or unrecognized value is a clean 400
+      ("scope missing or malformed" / "unrecognized scope"), never a guess.
+      Each scope maps to `nvs_flash_erase_partition()` on exactly the
+      partition(s) it names (`wifi` → `wifi_nvs`; `kiln` → `kiln_nvs`;
+      `profiles` → `profiles_nvs`; `all` → all three) — the same scoped-erase
+      pattern every module's own `nvs_partition_init()` already uses, not the
+      blanket `nvs_flash_erase()` this split was fixed to retire. After
+      erasing, a short-lived task delays 500ms (so the HTTP response reaches
+      the client first) and calls `esp_restart()`, since every module's load
+      only runs at boot. `main_page.html` grew a "Danger zone" section with
+      one confirm-then-POST button per scope, styled off the page's existing
+      fault color, each button's confirm dialog naming exactly what that
+      scope destroys. `main.c` calls `factory_reset_http_start()` alongside
+      the other settings-page `_http_start()` calls, after
+      `profiles_http_start()`. `App/drivers/CMakeLists.txt` SRCS updated; no
+      new EMBED_TXTFILES entry (the UI lives in the existing `main_page.html`,
+      not a separate page). Build verified clean via `ninja -j 24` in
+      `KilnFW/build` (per the documented idf.py python-env workaround). **Not
+      flashed or exercised on real hardware** — in particular, the actual
+      erase-then-reboot cycle, and whether the "ok, rebooting" response
+      reliably reaches the browser before the socket drops, are unverified
+      on a board.
 
 ### 8.2 Boot-time compatibility check for every non-volatile section
 
