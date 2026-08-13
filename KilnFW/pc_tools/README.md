@@ -38,13 +38,17 @@ Both are also VS Code tasks ("KilnCtrl: Open GUI" / "...: Run MCP Server").
 | `protocol.py` | SLIP framing, CRC-16/CCITT-FALSE, `Frame`, enums, task ids, every subcommand constant |
 | `serial_link.py` | `UartLink` (reader thread, retry/ACK logic), port discovery |
 | `link_hub.py` | Lets several pc_tools processes share one physical port |
-| `devices.py` | Payload builders + response parsers for all seven tasks |
+| `devices.py` | Payload builders + response parsers for all eleven tasks |
 | `thermo.py` | `ThermoClient`: owns task 1, MAX31856 queries + the auto-report push |
 | `io_expander.py` | `IoClient`: owns task 2, SX1509 queries + the auto-report push |
 | `info.py` | `InfoClient`: owns task 3, pin config / FW version, spots boot pushes |
 | `display.py` | `DisplayClient`: owns task 4, READ_ID plus the blit stream; Pillow image conversion and a test-pattern generator |
 | `device_log.py` | `LogClient`: owns task 5, the firmware's forwarded ESP_LOGx output |
 | `safety.py` | `SafetyClient`: owns task 7, the isolated RP2040 link |
+| `control.py` | `ControlClient`: owns task 8, zone PID/plant-model read + narrow writes |
+| `profiles.py` | `ProfilesClient`: owns task 9, fire profile CRUD + execution control |
+| `autotune.py` | `AutotuneClient`: owns task 10, PID autotune status/start/abort/accept |
+| `wifi_uart.py` | `WifiUartClient`: owns task 11, Wi-Fi status/scan/provision/forget over UART |
 | `pin_overlay.py` | Badge coordinates in `assets/pinout.png` + overlay drawing |
 | `session_log.py` | Per-session log files, semantic rollover, retention setting |
 | `settings.py` | Persisted app settings (`settings.json`): last-used port, log retention |
@@ -144,6 +148,64 @@ and caches the last good answer, so a dead link is a *successful* query
 reporting `link_up = 0`, and a raised `SafetyQueryError` means the **ESP**
 didn't answer -- a different fault entirely.
 
+### Zones / PID -- task 8 (`manualCtrl -> Zones / PID (UART)`)
+
+Read-back of every zone's PID gains, plant model and configured limits, plus
+narrow writes: `Set PID` (Kp/Ki/Kd) and `Set Model` (K_dc/tau_s/dead_time_s;
+an all-zero triple clears the model). Both writes reply ok/fail immediately
+rather than silently, so a rejected zone index or out-of-range gain shows up
+right away. `/api/zones`' whole-page fields -- zone naming, relay assignment,
+heater window timing, cross-zone guard threshold -- are **not** writable here
+(that endpoint validates ~20 fields per zone together and doesn't decompose
+into a safe per-field wire write); use the web dashboard for those. Manual
+relay control is the I/O page's `Set Relay`/`Set Relay Mask`, not duplicated
+here.
+
+### Fire Profiles -- task 9 (`manualCtrl -> Fire Profiles (UART)`)
+
+List/create/edit/delete stored profiles (name, zone mask, up to 12 segments of
+target_c/ramp_c_per_hr/dwell_min), and drive execution: start, stop, pause,
+resume, acknowledge the last run, and a live exec-status readout (state,
+segment progress, ramp-lock, per-zone actual/duty/fault). Every mutating
+command replies ok/fail (+ error text on `Save`/`Start` failure) rather than
+leaving the GUI to find out on the next poll.
+
+### Autotune -- task 10 (`manualCtrl -> Autotune (UART)`)
+
+Status (state/method/zone/elapsed/samples/fitted model/proposed gains/
+predicted max ramp), start (step or relay method, with the same
+setpoint/duty/relay-d/relay-h/rule fields the HTTP form exposes), abort and
+accept. The cross-zone coupling matrix and the trace/history CSV dumps stay
+HTTP-only (Open Web Dashboard) -- bulk/table data that doesn't fit one
+253-byte frame and has no honest truncated form.
+
+### Relay Rules -- HTTP only (`manualCtrl -> Relay Rules (HTTP)`)
+
+Plain-text editor over `GET`/`POST /api/rules`. The rules DSL is free-form
+text with no fixed-size wire encoding, so this one page is HTTP-only by
+design -- see docs/UART_PROTOCOL.md.
+
+### Danger Zone -- factory reset (`manualCtrl -> Danger Zone (Factory Reset)`)
+
+Scope-selectable factory reset (Wi-Fi only / kiln config only / profiles only
+/ all) over UART (`SYSTEM_CMD_FACTORY_RESET`), so it works with no network.
+Destructive on real hardware: a confirmation dialog followed by a
+type-to-confirm text prompt, no default scope pre-selected. Mirrors
+`POST /api/factory_reset` exactly -- same per-partition NVS erase, same
+unconditional reboot ~500ms later; no reply frame either way, so the ACK is
+the only immediate confirmation and the reboot itself (a fresh unsolicited
+`GET_FW_VERSION` push) is the real evidence the erase happened.
+
+### Wi-Fi Settings -- HTTP or UART (`manualCtrl -> Wi-Fi Settings`)
+
+The existing HTTP-based popup gained a **"Use UART (no network needed)"**
+checkbox: when checked, Refresh Status / Scan / Connect / mode switch go over
+task 11 (`WifiUartClient`) instead of `urllib` HTTP against the host/IP field
+-- the point being that Wi-Fi can be provisioned before the board has ever
+joined a network, when there's no HTTP path to it yet. AP-identity editing
+(`SET_AP_IDENTITY`) stays HTTP-only in this pass. The read-only Firing Status
+popup is unchanged.
+
 ## Generic button press (MCP)
 
 Every bespoke tool (`thermo_read`, `io_set_relay`, ...) also has a same-named
@@ -188,7 +250,9 @@ and `io_get_reports()`, since an MCP client has nowhere to receive a push.
 `GET_FW_VERSION` carries `UART_PROTOCOL_VERSION` (see `uart_task_ids.h`) at a
 *fixed* byte offset that never moves across versions, so it can always be read
 and compared before trusting the rest of the payload. **This board is version
-2.** Version 1 is the unit-test fixture, and the two are not merely different:
+4** (task_ids 8-11 -- CONTROL/PROFILES/AUTOTUNE/WIFI -- plus
+`SYSTEM_CMD_FACTORY_RESET`, additive to versions 2/3's task set). Version 1 is
+the unit-test fixture, and the two are not merely different:
 they reuse the same task ids for different hardware, so a v1 firmware would
 accept a thermocouple command on task 1 and interpret it as an MCP4728 DAC
 write. Hence a hard equality check, not `>=`.

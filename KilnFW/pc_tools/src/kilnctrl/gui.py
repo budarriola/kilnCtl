@@ -44,12 +44,15 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable, Optional
 
 from . import devices, pin_overlay, pinout_reference, settings
+from .autotune import AutotuneClient, AutotuneQueryError
+from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
 from .devices import (
     FirmwareVersion,
     IoState,
     LogLine,
     PinConfigEntry,
+    ProfileSegment,
     SafetyStatus,
     ThermoReading,
     WifiStatus,
@@ -58,25 +61,38 @@ from .display import BlitError, DisplayClient, DisplayQueryError
 from .info import InfoClient, InfoQueryError
 from .io_expander import IoClient, IoQueryError
 from .link_hub import get_shared_link
+from .profiles import ProfilesClient, ProfilesQueryError
 from .protocol import (
     DISPLAY_NATIVE_HEIGHT,
     DISPLAY_NATIVE_WIDTH,
     IO_DIGITAL_COUNT,
     IO_RELAY_COUNT,
+    PROFILES_SAVE_ID_NEW,
     THERMO_CHANNEL_COUNT,
+    UART_TASK_ID_AUTOTUNE,
+    UART_TASK_ID_CONTROL,
     UART_TASK_ID_DISPLAY,
     UART_TASK_ID_IO,
+    UART_TASK_ID_PROFILES,
     UART_TASK_ID_SAFETY,
     UART_TASK_ID_SYSTEM,
     UART_TASK_ID_THERMO,
+    UART_TASK_ID_WIFI,
+    AUTOTUNE_METHOD_RELAY,
+    AUTOTUNE_METHOD_STEP,
+    AUTOTUNE_RULE_TL,
+    AUTOTUNE_RULE_ZN,
     AvgMode,
     LogLevel,
     TcType,
+    WIFI_MODE_AP,
+    WIFI_MODE_HOME,
 )
 from .safety import SafetyClient, SafetyQueryError
 from .serial_link import PortInfo, list_ports, recommend_port
 from .session_log import MAX_KEEP_LOGS, MIN_KEEP_LOGS, SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
+from .wifi_uart import WifiUartClient, WifiUartQueryError
 
 _NO_PORTS = "<no serial ports found>"
 
@@ -213,6 +229,18 @@ class KilnCtrlApp:
         self.display = DisplayClient(self.link)
         self.safety = SafetyClient(self.link)
 
+        # Tasks CONTROL (8), PROFILES (9), AUTOTUNE (10), WIFI (11) -- v4
+        # additions so the GUI can drive zone tuning, profile CRUD/execution,
+        # autotune and Wi-Fi provisioning without needing HTTP/Wi-Fi at all.
+        # Registered here for the same "never miss an unregistered-task NACK"
+        # reason as the tasks above, even though none of these four push
+        # unsolicited data -- every reply here is to a request this client
+        # itself sent.
+        self.control = ControlClient(self.link)
+        self.profiles_client = ProfilesClient(self.link)
+        self.autotune_client = AutotuneClient(self.link)
+        self.wifi_uart_client = WifiUartClient(self.link)
+
         #: Pending `after` id for the safety page's poll loop, so closing the
         #: window (or losing the link) actually stops it.
         self._safety_poll_id: Optional[str] = None
@@ -247,8 +275,15 @@ class KilnCtrlApp:
         manual.add_command(label="Display (ILI9488)...", command=self.open_display_popup)
         manual.add_command(label="Safety Processor...", command=self.open_safety_popup)
         manual.add_separator()
+        manual.add_command(label="Zones / PID (UART)...", command=self.open_zones_popup)
+        manual.add_command(label="Fire Profiles (UART)...", command=self.open_profiles_popup)
+        manual.add_command(label="Autotune (UART)...", command=self.open_autotune_popup)
+        manual.add_command(label="Relay Rules (HTTP)...", command=self.open_rules_popup)
+        manual.add_separator()
         manual.add_command(label="Wi-Fi Settings...", command=self.open_wifi_settings_popup)
         manual.add_command(label="Firing Status (PID/Autotune)...", command=self.open_firing_status_popup)
+        manual.add_separator()
+        manual.add_command(label="Danger Zone (Factory Reset)...", command=self.open_danger_zone_popup)
         menubar.add_cascade(label="manualCtrl", menu=manual)
 
         logs = tk.Menu(menubar, tearoff=0)
@@ -675,6 +710,705 @@ class KilnCtrlApp:
         webbrowser.open(url)
         self.set_status(f"Opened {url} in browser.")
 
+    # ======================================================================
+    # Zones / PID panel (task 8, CONTROL) -- UART mirror of /api/zones'
+    # tuning-focused fields (PID gains + plant model + read-back). The
+    # whole-page fields (naming, relay assignment, heater window timing,
+    # cross-zone guard) stay HTTP-only -- see docs/UART_PROTOCOL.md.
+    # ======================================================================
+    def open_zones_popup(self) -> None:
+        self._popup("zones", "Zones / PID (UART)", self._build_zones_popup)
+        self.zones_refresh_async()
+
+    def _build_zones_popup(self, top: tk.Toplevel) -> None:
+        top.geometry("560x420")
+        ttk.Button(top, text="Refresh", command=self.zones_refresh_async).pack(
+            anchor="w", padx=8, pady=(8, 4)
+        )
+        self.zones_status_var = tk.StringVar(value="Not queried yet.")
+        ttk.Label(top, textvariable=self.zones_status_var, anchor="w").pack(
+            fill="x", padx=8, pady=(0, 4)
+        )
+
+        container = ttk.Frame(top)
+        container.pack(fill="both", expand=True, padx=8, pady=4)
+        canvas = tk.Canvas(container, highlightthickness=0)
+        scroll = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        self.zones_list_frame = ttk.Frame(canvas)
+        self.zones_list_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=self.zones_list_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="left", fill="y")
+
+        self._zones_widgets: dict = {}
+
+    def zones_refresh_async(self) -> None:
+        if not self._is_open("zones"):
+            return
+        self.zones_status_var.set("Querying zones...")
+        self.query_async(
+            "Get zones", lambda: self.control.get_zones(), self._apply_zones,
+            error_types=(ControlQueryError,),
+        )
+
+    def _apply_zones(self, result) -> None:
+        if not self._is_open("zones"):
+            return
+        thermo_count, relay_count, zones = result
+        self.zones_status_var.set(
+            f"{len(zones)} zone(s) ({thermo_count} thermocouples, {relay_count} relays)"
+        )
+        for child in self.zones_list_frame.winfo_children():
+            child.destroy()
+        self._zones_widgets = {}
+        for zone in zones:
+            frame = ttk.LabelFrame(self.zones_list_frame, text=zone.describe())
+            frame.pack(fill="x", padx=4, pady=4)
+            kp_var = tk.StringVar(value=f"{zone.pid_kp:.5f}")
+            ki_var = tk.StringVar(value=f"{zone.pid_ki:.6f}")
+            kd_var = tk.StringVar(value=f"{zone.pid_kd:.5f}")
+            row = ttk.Frame(frame)
+            row.pack(fill="x", padx=6, pady=4)
+            ttk.Label(row, text="Kp:").pack(side="left")
+            ttk.Entry(row, textvariable=kp_var, width=10).pack(side="left", padx=(2, 8))
+            ttk.Label(row, text="Ki:").pack(side="left")
+            ttk.Entry(row, textvariable=ki_var, width=10).pack(side="left", padx=(2, 8))
+            ttk.Label(row, text="Kd:").pack(side="left")
+            ttk.Entry(row, textvariable=kd_var, width=10).pack(side="left", padx=(2, 8))
+            ttk.Button(
+                row, text="Set PID",
+                command=lambda z=zone.index, a=kp_var, b=ki_var, c=kd_var: self.zones_set_pid_async(z, a, b, c),
+            ).pack(side="left", padx=(8, 0))
+
+            k_var = tk.StringVar()
+            tau_var = tk.StringVar()
+            dead_var = tk.StringVar()
+            row2 = ttk.Frame(frame)
+            row2.pack(fill="x", padx=6, pady=(0, 6))
+            ttk.Label(row2, text="K_dc:").pack(side="left")
+            ttk.Entry(row2, textvariable=k_var, width=10).pack(side="left", padx=(2, 8))
+            ttk.Label(row2, text="tau_s:").pack(side="left")
+            ttk.Entry(row2, textvariable=tau_var, width=10).pack(side="left", padx=(2, 8))
+            ttk.Label(row2, text="dead_time_s:").pack(side="left")
+            ttk.Entry(row2, textvariable=dead_var, width=10).pack(side="left", padx=(2, 8))
+            ttk.Button(
+                row2, text="Set Model (0,0,0 clears)",
+                command=lambda z=zone.index, a=k_var, b=tau_var, c=dead_var: self.zones_set_model_async(z, a, b, c),
+            ).pack(side="left", padx=(8, 0))
+            self._zones_widgets[zone.index] = frame
+
+    def zones_set_pid_async(self, zone: int, kp_var, ki_var, kd_var) -> None:
+        try:
+            kp, ki, kd = float(kp_var.get()), float(ki_var.get()), float(kd_var.get())
+        except ValueError as exc:
+            self.zones_status_var.set(f"Set PID: {exc}")
+            return
+
+        def apply(ok: bool) -> None:
+            if self._is_open("zones"):
+                self.zones_status_var.set(f"Zone {zone} PID {'set' if ok else 'REJECTED'}.")
+                if ok:
+                    self.zones_refresh_async()
+
+        self.query_async(
+            f"Set zone {zone} PID", lambda: self.control.set_zone_pid(zone, kp, ki, kd), apply,
+            error_types=(ControlQueryError,),
+        )
+
+    def zones_set_model_async(self, zone: int, k_var, tau_var, dead_var) -> None:
+        try:
+            k_dc, tau_s, dead_time_s = float(k_var.get() or 0), float(tau_var.get() or 0), float(dead_var.get() or 0)
+        except ValueError as exc:
+            self.zones_status_var.set(f"Set Model: {exc}")
+            return
+
+        def apply(ok: bool) -> None:
+            if self._is_open("zones"):
+                self.zones_status_var.set(f"Zone {zone} model {'set' if ok else 'REJECTED'}.")
+                if ok:
+                    self.zones_refresh_async()
+
+        self.query_async(
+            f"Set zone {zone} model",
+            lambda: self.control.set_zone_model(zone, k_dc, tau_s, dead_time_s),
+            apply,
+            error_types=(ControlQueryError,),
+        )
+
+    # ======================================================================
+    # Fire Profiles panel (task 9, PROFILES) -- CRUD + execution control,
+    # UART mirror of profiles_http.c / dashboard_http.c's /api/profile_exec*.
+    # ======================================================================
+    def open_profiles_popup(self) -> None:
+        self._popup("profiles", "Fire Profiles (UART)", self._build_profiles_popup)
+        self.profiles_refresh_async()
+        self.profiles_refresh_exec_status_async()
+
+    def _build_profiles_popup(self, top: tk.Toplevel) -> None:
+        top.geometry("620x520")
+        self.profiles_status_var = tk.StringVar(value="Not queried yet.")
+        ttk.Label(top, textvariable=self.profiles_status_var, anchor="w").pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
+
+        list_frame = ttk.LabelFrame(top, text="Saved profiles")
+        list_frame.pack(fill="both", expand=True, padx=8, pady=4)
+        self.profiles_listbox = tk.Listbox(list_frame, height=8, exportselection=False)
+        self.profiles_listbox.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        self.profiles_listbox.bind("<<ListboxSelect>>", self._on_profile_select)
+        pscroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.profiles_listbox.yview)
+        self.profiles_listbox.configure(yscrollcommand=pscroll.set)
+        pscroll.pack(side="left", fill="y", pady=6)
+        btns = ttk.Frame(list_frame)
+        btns.pack(side="left", fill="y", padx=6, pady=6)
+        ttk.Button(btns, text="Refresh", command=self.profiles_refresh_async).pack(fill="x")
+        ttk.Button(btns, text="Load", command=self.profile_load_async).pack(fill="x", pady=(4, 0))
+        ttk.Button(btns, text="New", command=self._profile_new).pack(fill="x", pady=(4, 0))
+        ttk.Button(btns, text="Delete", command=self.profile_delete_async).pack(fill="x", pady=(4, 0))
+        self._profiles_summaries: list = []
+
+        edit_frame = ttk.LabelFrame(top, text="Edit / Save")
+        edit_frame.pack(fill="x", padx=8, pady=4)
+        row = ttk.Frame(edit_frame)
+        row.pack(fill="x", padx=6, pady=6)
+        ttk.Label(row, text="Id (blank=new):").pack(side="left")
+        self.profile_id_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.profile_id_var, width=4).pack(side="left", padx=(2, 8))
+        ttk.Label(row, text="Name:").pack(side="left")
+        self.profile_name_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.profile_name_var, width=16).pack(side="left", padx=(2, 8))
+        ttk.Label(row, text="Zone mask:").pack(side="left")
+        self.profile_zone_mask_var = tk.StringVar(value="1")
+        ttk.Entry(row, textvariable=self.profile_zone_mask_var, width=4).pack(side="left", padx=(2, 8))
+
+        ttk.Label(
+            edit_frame, text="Segments (one per line): target_c, ramp_c_per_hr, dwell_min",
+            foreground=_MUTED_COLOR,
+        ).pack(anchor="w", padx=6)
+        self.profile_segments_text = tk.Text(edit_frame, height=6)
+        self.profile_segments_text.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(edit_frame, text="Save Profile", command=self.profile_save_async).pack(
+            anchor="w", padx=6, pady=(0, 6)
+        )
+
+        exec_frame = ttk.LabelFrame(top, text="Execution")
+        exec_frame.pack(fill="x", padx=8, pady=(4, 8))
+        self.profile_exec_status_var = tk.StringVar(value="Not queried yet.")
+        ttk.Label(
+            exec_frame, textvariable=self.profile_exec_status_var, anchor="w", justify="left",
+            wraplength=560,
+        ).pack(fill="x", padx=6, pady=6)
+        exec_btns = ttk.Frame(exec_frame)
+        exec_btns.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(exec_btns, text="Start selected", command=self.profile_start_async).pack(side="left")
+        ttk.Button(exec_btns, text="Stop", command=self.profile_stop_async).pack(side="left", padx=6)
+        ttk.Button(exec_btns, text="Pause", command=self.profile_pause_async).pack(side="left")
+        ttk.Button(exec_btns, text="Resume", command=self.profile_resume_async).pack(side="left", padx=6)
+        ttk.Button(exec_btns, text="Ack Last Run", command=self.profile_ack_last_run_async).pack(
+            side="left"
+        )
+        ttk.Button(exec_btns, text="Refresh Status", command=self.profiles_refresh_exec_status_async).pack(
+            side="left", padx=6
+        )
+
+    def _profile_new(self) -> None:
+        self.profile_id_var.set("")
+        self.profile_name_var.set("")
+        self.profile_zone_mask_var.set("1")
+        self.profile_segments_text.delete("1.0", "end")
+
+    def profiles_refresh_async(self) -> None:
+        if not self._is_open("profiles"):
+            return
+        self.profiles_status_var.set("Querying profile list...")
+        self.query_async(
+            "List profiles", lambda: self.profiles_client.list(), self._apply_profiles_list,
+            error_types=(ProfilesQueryError,),
+        )
+
+    def _apply_profiles_list(self, summaries) -> None:
+        if not self._is_open("profiles"):
+            return
+        self._profiles_summaries = summaries
+        self.profiles_listbox.delete(0, "end")
+        for s in summaries:
+            self.profiles_listbox.insert(
+                "end", f"[{s.id}] {s.name}  zones=0x{s.zone_mask:02X}  segments={s.segment_count}"
+            )
+        self.profiles_status_var.set(f"{len(summaries)} profile(s).")
+
+    def _on_profile_select(self, _event: object) -> None:
+        pass  # selection is read explicitly by profile_load_async/start_async
+
+    def _selected_profile_id(self) -> "Optional[int]":
+        sel = self.profiles_listbox.curselection()
+        if not sel or sel[0] >= len(self._profiles_summaries):
+            return None
+        return self._profiles_summaries[sel[0]].id
+
+    def profile_load_async(self) -> None:
+        pid = self._selected_profile_id()
+        if pid is None:
+            self.profiles_status_var.set("Load: select a profile first.")
+            return
+
+        def apply(detail) -> None:
+            if not self._is_open("profiles"):
+                return
+            if detail is None:
+                self.profiles_status_var.set(f"Profile {pid}: not found.")
+                return
+            self.profile_id_var.set(str(detail.id))
+            self.profile_name_var.set(detail.name)
+            self.profile_zone_mask_var.set(str(detail.zone_mask))
+            self.profile_segments_text.delete("1.0", "end")
+            for seg in detail.segments:
+                self.profile_segments_text.insert(
+                    "end", f"{seg.target_c}, {seg.ramp_c_per_hr}, {seg.dwell_min}\n"
+                )
+            self.profiles_status_var.set(f"Loaded profile {pid}: {detail.name!r}")
+
+        self.query_async(
+            f"Get profile {pid}", lambda: self.profiles_client.get(pid), apply,
+            error_types=(ProfilesQueryError,),
+        )
+
+    def _parse_segments(self) -> "list[ProfileSegment]":
+        segments = []
+        for line in self.profile_segments_text.get("1.0", "end").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 3:
+                raise ValueError(f"segment line {line!r} must be 'target_c, ramp_c_per_hr, dwell_min'")
+            target_c, ramp, dwell = float(parts[0]), float(parts[1]), int(float(parts[2]))
+            segments.append(ProfileSegment(target_c=target_c, ramp_c_per_hr=ramp, dwell_min=dwell))
+        if not segments:
+            raise ValueError("at least one segment is required")
+        return segments
+
+    def profile_save_async(self) -> None:
+        name = self.profile_name_var.get().strip()
+        if not name:
+            self.profiles_status_var.set("Save: name is required.")
+            return
+        id_text = self.profile_id_var.get().strip()
+        profile_id = PROFILES_SAVE_ID_NEW if not id_text else int(id_text)
+        try:
+            zone_mask = int(self.profile_zone_mask_var.get())
+            segments = self._parse_segments()
+        except ValueError as exc:
+            self.profiles_status_var.set(f"Save: {exc}")
+            return
+
+        def apply(result) -> None:
+            if not self._is_open("profiles"):
+                return
+            if result.ok:
+                self.profile_id_var.set(str(result.id))
+                self.profiles_status_var.set(
+                    f"Saved as id {result.id}"
+                    + (f" ({result.warning_count} warning(s))" if result.warning_count else "")
+                )
+                self.profiles_refresh_async()
+            else:
+                self.profiles_status_var.set(f"Save REJECTED: {result.error}")
+
+        self.query_async(
+            "Save profile",
+            lambda: self.profiles_client.save(profile_id, name, zone_mask, segments),
+            apply,
+            error_types=(ProfilesQueryError,),
+        )
+
+    def profile_delete_async(self) -> None:
+        pid = self._selected_profile_id()
+        if pid is None:
+            self.profiles_status_var.set("Delete: select a profile first.")
+            return
+        if not messagebox.askyesno("Delete profile", f"Delete profile {pid}?", parent=self.root):
+            return
+
+        def apply(ok: bool) -> None:
+            if self._is_open("profiles"):
+                self.profiles_status_var.set(f"Delete {pid}: {'ok' if ok else 'REJECTED'}.")
+                if ok:
+                    self.profiles_refresh_async()
+
+        self.query_async(
+            f"Delete profile {pid}", lambda: self.profiles_client.delete(pid), apply,
+            error_types=(ProfilesQueryError,),
+        )
+
+    def profiles_refresh_exec_status_async(self) -> None:
+        if not self._is_open("profiles"):
+            return
+        self.query_async(
+            "Exec status", lambda: self.profiles_client.get_exec_status(),
+            self._apply_profile_exec_status, error_types=(ProfilesQueryError,),
+        )
+
+    def _apply_profile_exec_status(self, status) -> None:
+        if not self._is_open("profiles"):
+            return
+        lines = [
+            f"State: {status.state_name}   Profile: {status.name!r} (id {status.profile_id})   "
+            f"Zones: 0x{status.zone_mask:02X}",
+            f"Segment {status.segment_index + 1}/{status.segment_count}"
+            f"{'  (dwelling)' if status.dwelling else '  (ramping)'}   Target: {status.target_c:.1f}C",
+        ]
+        if status.ramp_lock_held:
+            lines.append(f"Ramp-lock held -- waiting on zone mask 0x{status.ramp_lock_lagging_mask:02X}")
+        for z in status.zones:
+            actual = f"{z.actual_c:.1f}C" if z.actual_valid else "no reading"
+            state = "FAULT" if z.faulted else ("ON" if z.relay_commanded_on else "off")
+            lines.append(f"  Zone {z.zone}: {actual}  mode={z.control_mode}  {state}  duty={z.duty:.2f}")
+        self.profile_exec_status_var.set("\n".join(lines))
+
+    def profile_start_async(self) -> None:
+        pid = self._selected_profile_id()
+        if pid is None:
+            self.profiles_status_var.set("Start: select a profile first.")
+            return
+
+        def apply(result) -> None:
+            if not self._is_open("profiles"):
+                return
+            self.profiles_status_var.set(
+                f"Start {pid}: ok" if result.ok else f"Start {pid} REJECTED: {result.error}"
+            )
+            self.profiles_refresh_exec_status_async()
+
+        self.query_async(
+            f"Start profile {pid}", lambda: self.profiles_client.start(pid), apply,
+            error_types=(ProfilesQueryError,),
+        )
+
+    def _profile_exec_action(self, description: str, action) -> None:
+        def apply(ok: bool) -> None:
+            if self._is_open("profiles"):
+                self.profiles_status_var.set(f"{description}: {'ok' if ok else 'REJECTED'}.")
+                self.profiles_refresh_exec_status_async()
+
+        self.query_async(description, action, apply, error_types=(ProfilesQueryError,))
+
+    def profile_stop_async(self) -> None:
+        self._profile_exec_action("Stop", lambda: self.profiles_client.stop())
+
+    def profile_pause_async(self) -> None:
+        self._profile_exec_action("Pause", lambda: self.profiles_client.pause())
+
+    def profile_resume_async(self) -> None:
+        self._profile_exec_action("Resume", lambda: self.profiles_client.resume())
+
+    def profile_ack_last_run_async(self) -> None:
+        self._profile_exec_action("Ack Last Run", lambda: self.profiles_client.ack_last_run())
+
+    # ======================================================================
+    # Autotune panel (task 10, AUTOTUNE)
+    # ======================================================================
+    def open_autotune_popup(self) -> None:
+        self._popup("autotune", "Autotune (UART)", self._build_autotune_popup)
+        self.autotune_refresh_async()
+
+    def _build_autotune_popup(self, top: tk.Toplevel) -> None:
+        top.geometry("480x420")
+        status_frame = ttk.LabelFrame(top, text="Status")
+        status_frame.pack(fill="x", padx=8, pady=(8, 4))
+        self.autotune_status_var = tk.StringVar(value="Not queried yet.")
+        ttk.Label(
+            status_frame, textvariable=self.autotune_status_var, anchor="w", justify="left",
+            wraplength=440,
+        ).pack(fill="x", padx=6, pady=6)
+        ttk.Button(status_frame, text="Refresh", command=self.autotune_refresh_async).pack(
+            anchor="w", padx=6, pady=(0, 6)
+        )
+
+        start_frame = ttk.LabelFrame(top, text="Start")
+        start_frame.pack(fill="x", padx=8, pady=4)
+        row = ttk.Frame(start_frame)
+        row.pack(fill="x", padx=6, pady=6)
+        ttk.Label(row, text="Zone:").pack(side="left")
+        self.autotune_zone_var = tk.StringVar(value="0")
+        ttk.Entry(row, textvariable=self.autotune_zone_var, width=4).pack(side="left", padx=(2, 8))
+        ttk.Label(row, text="Method:").pack(side="left")
+        self.autotune_method_var = tk.StringVar(value="step")
+        ttk.Combobox(
+            row, textvariable=self.autotune_method_var, values=("step", "relay"),
+            state="readonly", width=8,
+        ).pack(side="left", padx=(2, 8))
+        row2 = ttk.Frame(start_frame)
+        row2.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(row2, text="Step duty / setpoint C:").pack(side="left")
+        self.autotune_value_var = tk.StringVar(value="0.5")
+        ttk.Entry(row2, textvariable=self.autotune_value_var, width=8).pack(side="left", padx=(2, 8))
+        row3 = ttk.Frame(start_frame)
+        row3.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(row3, text="Relay d (<=0=default):").pack(side="left")
+        self.autotune_relay_d_var = tk.StringVar(value="-1")
+        ttk.Entry(row3, textvariable=self.autotune_relay_d_var, width=6).pack(side="left", padx=(2, 8))
+        ttk.Label(row3, text="Relay h C (<=0=default):").pack(side="left")
+        self.autotune_relay_h_var = tk.StringVar(value="-1")
+        ttk.Entry(row3, textvariable=self.autotune_relay_h_var, width=6).pack(side="left", padx=(2, 8))
+        ttk.Label(row3, text="Rule:").pack(side="left")
+        self.autotune_rule_var = tk.StringVar(value="tl")
+        ttk.Combobox(
+            row3, textvariable=self.autotune_rule_var, values=("tl", "zn"), state="readonly", width=4,
+        ).pack(side="left", padx=(2, 8))
+        ttk.Button(start_frame, text="Start", command=self.autotune_start_async).pack(
+            anchor="w", padx=6, pady=(0, 6)
+        )
+
+        action_frame = ttk.Frame(top)
+        action_frame.pack(fill="x", padx=8, pady=(4, 8))
+        ttk.Button(action_frame, text="Abort", command=self.autotune_abort_async).pack(side="left")
+        ttk.Button(action_frame, text="Accept", command=self.autotune_accept_async).pack(
+            side="left", padx=6
+        )
+        ttk.Label(
+            top,
+            text="Cross-zone coupling matrix and trace/history CSV are HTTP-only "
+            "(Open Web Dashboard) -- not mirrored over UART.",
+            foreground=_MUTED_COLOR, wraplength=440, justify="left",
+        ).pack(fill="x", padx=8, pady=(0, 8))
+
+    def autotune_refresh_async(self) -> None:
+        if not self._is_open("autotune"):
+            return
+        self.query_async(
+            "Autotune status", lambda: self.autotune_client.get_status(), self._apply_autotune_status,
+            error_types=(AutotuneQueryError,),
+        )
+
+    def _apply_autotune_status(self, status) -> None:
+        if not self._is_open("autotune"):
+            return
+        lines = [
+            f"State: {status.state_name}   Method: {'relay' if status.method else 'step'}   "
+            f"Zone: {status.zone}   Elapsed: {status.elapsed_s}s   Samples: {status.sample_count}",
+        ]
+        if status.actual_valid:
+            lines.append(f"Actual: {status.actual_c:.1f}C   Duty: {status.duty:.2f}")
+        if status.state == 6 and status.abort_reason:
+            lines.append(f"Aborted: {status.abort_reason}")
+        if status.state == 5 and status.model_valid:
+            m = status.model
+            g = status.proposed_gains
+            lines.append(f"Fitted K={m.k_gain_c_per_duty:.2f}  tau={m.tau_s:.0f}s  L={m.dead_time_s:.0f}s")
+            lines.append(f"Proposed Kp={g.kp:.4f} Ki={g.ki:.5f} Kd={g.kd:.4f}")
+            lines.append(f"Predicted max ramp: ~{status.predicted_max_ramp_c_per_hr:.0f} C/hr")
+        if status.state == 5 and status.relay_valid:
+            r = status.relay
+            lines.append(f"Relay: Ku={r.ku:.3f}  Tu={r.tu_s:.0f}s  amplitude={r.amplitude_c:.1f}C")
+        self.autotune_status_var.set("\n".join(lines))
+
+    def autotune_start_async(self) -> None:
+        try:
+            zone = int(self.autotune_zone_var.get())
+            method = AUTOTUNE_METHOD_RELAY if self.autotune_method_var.get() == "relay" else AUTOTUNE_METHOD_STEP
+            value = float(self.autotune_value_var.get())
+            relay_d = float(self.autotune_relay_d_var.get())
+            relay_h = float(self.autotune_relay_h_var.get())
+            rule = AUTOTUNE_RULE_ZN if self.autotune_rule_var.get() == "zn" else AUTOTUNE_RULE_TL
+        except ValueError as exc:
+            self.autotune_status_var.set(f"Start: {exc}")
+            return
+
+        def apply(result) -> None:
+            if not self._is_open("autotune"):
+                return
+            ok, error = result
+            self.autotune_status_var.set(f"Start: ok" if ok else f"Start REJECTED: {error}")
+            self.autotune_refresh_async()
+
+        self.query_async(
+            "Start autotune",
+            lambda: self.autotune_client.start(zone, method, value, relay_d, relay_h, rule),
+            apply,
+            error_types=(AutotuneQueryError,),
+        )
+
+    def autotune_abort_async(self) -> None:
+        def apply(ok: bool) -> None:
+            if self._is_open("autotune"):
+                self.autotune_status_var.set(f"Abort: {'ok' if ok else 'failed'}.")
+                self.autotune_refresh_async()
+
+        self.query_async("Abort autotune", lambda: self.autotune_client.abort(), apply,
+                          error_types=(AutotuneQueryError,))
+
+    def autotune_accept_async(self) -> None:
+        def apply(ok: bool) -> None:
+            if self._is_open("autotune"):
+                self.autotune_status_var.set(f"Accept: {'ok' if ok else 'REJECTED'}.")
+                self.autotune_refresh_async()
+
+        self.query_async("Accept autotune", lambda: self.autotune_client.accept(), apply,
+                          error_types=(AutotuneQueryError,))
+
+    # ======================================================================
+    # Danger Zone panel -- factory reset, over UART (SYSTEM_CMD_FACTORY_RESET)
+    # so it works with no network. Destructive: double confirmation, scope
+    # is explicit, no default action pre-selected as "convenient".
+    # ======================================================================
+    def open_danger_zone_popup(self) -> None:
+        self._popup("danger_zone", "Danger Zone (Factory Reset)", self._build_danger_zone_popup)
+
+    def _build_danger_zone_popup(self, top: tk.Toplevel) -> None:
+        tk.Label(
+            top,
+            text="FACTORY RESET erases NVS-backed configuration and reboots the device.\n"
+            "This cannot be undone. Choose the narrowest scope that does what you need.",
+            fg=_BAD_COLOR, wraplength=440, justify="left",
+        ).pack(fill="x", padx=8, pady=(8, 8))
+
+        self.danger_scope_var = tk.StringVar(value="wifi")
+        for value, label in (
+            ("wifi", "Wi-Fi only (saved networks, AP identity)"),
+            ("kiln", "Kiln config only (zones, PID, relay rules)"),
+            ("profiles", "Fire profiles only"),
+            ("all", "ALL of the above"),
+        ):
+            ttk.Radiobutton(
+                top, text=label, variable=self.danger_scope_var, value=value
+            ).pack(anchor="w", padx=16, pady=2)
+
+        self.danger_status_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.danger_status_var, foreground=_BAD_COLOR).pack(
+            fill="x", padx=8, pady=(8, 4)
+        )
+        ttk.Button(
+            top, text="Factory Reset...", command=self.danger_zone_confirm
+        ).pack(padx=8, pady=(0, 8))
+
+    def danger_zone_confirm(self) -> None:
+        scope_name = self.danger_scope_var.get()
+        scope_values = {"wifi": 0, "kiln": 1, "profiles": 2, "all": 3}
+        scope = scope_values[scope_name]
+        if not messagebox.askyesno(
+            "Confirm Factory Reset",
+            f"This will ERASE the {scope_name!r} configuration and REBOOT the device.\n\n"
+            "This cannot be undone. Continue?",
+            icon="warning", parent=self.root,
+        ):
+            return
+        # Second confirmation via typed text -- a destructive action on real
+        # hardware deserves more friction than one dialog click.
+        typed = simpledialog.askstring(
+            "Type to confirm",
+            f"Type RESET to erase {scope_name!r} configuration:",
+            parent=self.root,
+        )
+        if typed != "RESET":
+            self.danger_status_var.set("Factory reset cancelled (confirmation text did not match).")
+            return
+
+        self.danger_status_var.set(f"Sending factory reset ({scope_name})...")
+
+        self.send_async(
+            f"Factory reset ({scope_name})",
+            UART_TASK_ID_SYSTEM,
+            lambda: devices.system_factory_reset(scope),
+        )
+        self.session_log.info("factory reset requested: scope=%s", scope_name)
+        self.danger_status_var.set(
+            f"Factory reset ({scope_name}) sent. Device will erase and reboot "
+            "~500ms after the ACK -- watch the Device Console / FW version line."
+        )
+
+    # ======================================================================
+    # Relay Rules panel (HTTP only -- GET/POST /api/rules; free-form DSL text
+    # with no fixed-size encoding, no UART mirror -- see docs/UART_PROTOCOL.md)
+    # ======================================================================
+    def open_rules_popup(self) -> None:
+        self._popup("rules", "Relay Rules (HTTP)", self._build_rules_popup)
+        self.rules_refresh_async()
+
+    def _build_rules_popup(self, top: tk.Toplevel) -> None:
+        top.geometry("560x480")
+        host_row = ttk.Frame(top)
+        host_row.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(host_row, text="Device host/IP:").pack(side="left")
+        self.rules_host_var = tk.StringVar(value=self._wifi_default_host())
+        ttk.Entry(host_row, textvariable=self.rules_host_var, width=16).pack(
+            side="left", padx=(6, 6)
+        )
+        ttk.Button(host_row, text="Refresh", command=self.rules_refresh_async).pack(side="left")
+
+        self.rules_status_var = tk.StringVar(value="Not queried yet.")
+        ttk.Label(top, textvariable=self.rules_status_var, anchor="w").pack(
+            fill="x", padx=8, pady=(0, 4)
+        )
+
+        self.rules_text = scrolledtext.ScrolledText(top, wrap="none")
+        self.rules_text.pack(fill="both", expand=True, padx=8, pady=4)
+
+        ttk.Button(top, text="Save (POST /api/rules)", command=self.rules_save_async).pack(
+            anchor="w", padx=8, pady=(0, 8)
+        )
+
+    def _rules_host(self) -> str:
+        var = getattr(self, "rules_host_var", None)
+        if var is not None:
+            host = var.get().strip()
+            if host:
+                return host
+        return self._wifi_default_host()
+
+    def rules_refresh_async(self) -> None:
+        if not self._is_open("rules"):
+            return
+        host = self._rules_host()
+        self.rules_status_var.set(f"Querying {host}...")
+
+        def worker() -> None:
+            url = f"http://{host}/api/rules"
+            try:
+                with urllib.request.urlopen(url, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
+                    text = resp.read().decode("utf-8", errors="replace")
+            except Exception as exc:  # pragma: no cover - network/device dependent
+                err = self._wifi_http_error_text(exc)
+                self.post(lambda: self.rules_status_var.set(f"Query failed: {err}"))
+                return
+            self.post(lambda: self._apply_rules_text(text))
+
+        threading.Thread(target=worker, name="rules-http-get", daemon=True).start()
+
+    def _apply_rules_text(self, text: str) -> None:
+        if not self._is_open("rules"):
+            return
+        self.rules_text.delete("1.0", "end")
+        self.rules_text.insert("1.0", text)
+        self.rules_status_var.set("Loaded.")
+
+    def rules_save_async(self) -> None:
+        if not self._is_open("rules"):
+            return
+        host = self._rules_host()
+        body = self.rules_text.get("1.0", "end")
+        self.rules_status_var.set(f"Saving to {host}...")
+
+        def worker() -> None:
+            url = f"http://{host}/api/rules"
+            req = urllib.request.Request(
+                url, data=body.encode("utf-8"), method="POST",
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=_WIFI_HTTP_TIMEOUT_S) as resp:
+                    resp.read()
+            except Exception as exc:  # pragma: no cover - network/device dependent
+                err = self._wifi_http_error_text(exc)
+                self.post(lambda: self.rules_status_var.set(f"Save failed: {err}"))
+                return
+            self.post(lambda: self.rules_status_var.set("Saved."))
+
+        threading.Thread(target=worker, name="rules-http-post", daemon=True).start()
+
     # -- Wi-Fi settings popup ------------------------------------------------
     # Talks straight HTTP to wifi_provision_http.c's routes (/status, /scan,
     # /provision) -- the same API the captive-portal page a phone sees uses.
@@ -726,6 +1460,18 @@ class KilnCtrlApp:
         ttk.Button(
             host_row, text="Refresh Status", command=self.wifi_settings_refresh_status_async
         ).pack(side="left")
+
+        # UART toggle: the whole point of task WIFI (11) is provisioning
+        # without needing an existing HTTP/network path in the first place --
+        # useful before the board has ever joined a network, when the host/IP
+        # field above has nothing valid to point at. When checked, every
+        # action in this popup goes over the UART link (self.wifi_uart_client)
+        # instead of urllib HTTP against the host field; the host field itself
+        # is then unused.
+        self.wifi_use_uart_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            host_row, text="Use UART (no network needed)", variable=self.wifi_use_uart_var,
+        ).pack(side="left", padx=(12, 0))
 
         self.wifi_settings_status_var = tk.StringVar(value="Not queried yet.")
         ttk.Label(
@@ -848,8 +1594,33 @@ class KilnCtrlApp:
             return f"unreachable: {exc.reason}"
         return str(exc)
 
+    def _wifi_use_uart(self) -> bool:
+        return bool(getattr(self, "wifi_use_uart_var", None) and self.wifi_use_uart_var.get())
+
     def wifi_settings_refresh_status_async(self) -> None:
         if not self._wifi_settings_is_open():
+            return
+        if self._wifi_use_uart():
+            self.wifi_settings_status_var.set("Querying over UART...")
+
+            def apply(status) -> None:
+                if not self._wifi_settings_is_open():
+                    return
+                self.wifi_mode_var.set(status.mode_name)
+                if status.ap_ssid and not self.wifi_ap_ssid_var.get():
+                    self.wifi_ap_ssid_var.set(status.ap_ssid)
+                text = (
+                    f"Mode: {'Access Point' if status.mode_name == 'ap' else 'Home Wi-Fi'}  |  "
+                    f"Saved SSID: {status.ssid}  |  "
+                    f"Station: {'connected (' + status.sta_ip + ')' if status.sta_connected else 'not connected'}"
+                )
+                self.wifi_settings_status_var.set(text)
+                self.session_log.info("wifi (UART) settings status: %s", text)
+
+            self.query_async(
+                "Wi-Fi status (UART)", lambda: self.wifi_uart_client.get_status(), apply,
+                error_types=(WifiUartQueryError,),
+            )
             return
         host = self._wifi_host()
         self.wifi_settings_status_var.set(f"Querying {host}...")
@@ -891,6 +1662,27 @@ class KilnCtrlApp:
     def wifi_scan_async(self) -> None:
         if not self._wifi_settings_is_open():
             return
+        if self._wifi_use_uart():
+            self.wifi_settings_status_var.set("Scanning over UART...")
+
+            def apply(result) -> None:
+                if not self._wifi_settings_is_open():
+                    return
+                entries, truncated = result
+                self.wifi_scan_list.delete(0, "end")
+                self._wifi_scan_entries = []
+                for e in entries:
+                    lock = "" if e.secure else " (open)"
+                    self.wifi_scan_list.insert("end", f"{e.ssid}  [{e.rssi} dBm]{lock}")
+                    self._wifi_scan_entries.append((e.ssid, e.secure))
+                suffix = " (truncated)" if truncated else ""
+                self.wifi_settings_status_var.set(f"{len(entries)} network(s) found{suffix}.")
+
+            self.query_async(
+                "Wi-Fi scan (UART)", lambda: self.wifi_uart_client.scan(), apply,
+                error_types=(WifiUartQueryError,),
+            )
+            return
         self.wifi_settings_status_var.set(f"Scanning from {self._wifi_host()}...")
 
         def worker() -> None:
@@ -928,6 +1720,27 @@ class KilnCtrlApp:
             self.wifi_settings_status_var.set("Connect: SSID is required.")
             return
         password = self.wifi_password_var.get()
+        if self._wifi_use_uart():
+            self.wifi_settings_status_var.set(f"Sending credentials for {ssid!r} over UART...")
+            self.session_log.info("wifi (UART) settings: add network %r", ssid)
+
+            def apply(ok: bool) -> None:
+                if not self._wifi_settings_is_open():
+                    return
+                self.wifi_settings_status_var.set(
+                    f"Credentials sent for {ssid!r}. Joining in the background -- Refresh Status "
+                    "to check progress." if ok else f"Add network {ssid!r}: REJECTED."
+                )
+                if ok:
+                    self.wifi_settings_refresh_status_async()
+
+            self.query_async(
+                "Wi-Fi add network (UART)",
+                lambda: self.wifi_uart_client.add_network(ssid, password),
+                apply,
+                error_types=(WifiUartQueryError,),
+            )
+            return
         host = self._wifi_host()
         self.wifi_settings_status_var.set(f"Sending credentials for {ssid!r} to {host}...")
         self.session_log.info("wifi settings: connect to %r via %s", ssid, host)
@@ -952,6 +1765,23 @@ class KilnCtrlApp:
         if not self._wifi_settings_is_open():
             return
         want_mode = self.wifi_mode_var.get()
+        if self._wifi_use_uart():
+            mode_byte = WIFI_MODE_AP if want_mode == "ap" else WIFI_MODE_HOME
+            self.wifi_settings_status_var.set(
+                f"Switching to {'Access Point' if want_mode == 'ap' else 'Home Wi-Fi'} mode over UART..."
+            )
+
+            def apply(ok: bool) -> None:
+                if self._wifi_settings_is_open():
+                    self.wifi_settings_status_var.set(f"Mode change: {'ok' if ok else 'REJECTED'}.")
+                    if ok:
+                        self.wifi_settings_refresh_status_async()
+
+            self.query_async(
+                "Wi-Fi set mode (UART)", lambda: self.wifi_uart_client.set_mode(mode_byte), apply,
+                error_types=(WifiUartQueryError,),
+            )
+            return
         host = self._wifi_host()
         self.wifi_settings_status_var.set(
             f"Switching to {'Access Point' if want_mode == 'ap' else 'Home Wi-Fi'} mode on {host}..."
@@ -2976,6 +3806,10 @@ class KilnCtrlApp:
                 self.io,
                 self.display,
                 self.safety,
+                self.control,
+                self.profiles_client,
+                self.autotune_client,
+                self.wifi_uart_client,
             ):
                 client.close()
             # close(), not disconnect(): this link may be shared with another

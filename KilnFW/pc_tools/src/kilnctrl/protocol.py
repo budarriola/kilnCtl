@@ -74,7 +74,11 @@ DEFAULT_BAUD_RATE = 921600
 #: Version 3 (2026-08-11): UART_PROTO_MAX_PAYLOAD 128 -> 253. Frame layout
 #: unchanged; bumped only so a v2 peer's smaller receive buffer can't
 #: silently truncate a v3 sender's larger frame.
-UART_PROTOCOL_VERSION = 3
+#: Version 4 (2026-08-13): four new task_ids -- CONTROL (8), PROFILES (9),
+#: AUTOTUNE (10), WIFI (11) -- plus SYSTEM_CMD_FACTORY_RESET, so the GUI can
+#: drive everything the HTTP dashboard offers without needing Wi-Fi. See
+#: docs/UART_PROTOCOL.md's "Version 4" section and each task's block below.
+UART_PROTOCOL_VERSION = 4
 
 
 class Device(enum.IntEnum):
@@ -100,12 +104,25 @@ UART_TASK_ID_DISPLAY = 4  # ILI9488 TFT on J2
 UART_TASK_ID_LOG = 5
 UART_TASK_ID_SYSTEM = 6
 UART_TASK_ID_SAFETY = 7  # opto-isolated link to the RP2040 safety processor
+UART_TASK_ID_CONTROL = 8  # zone config (PID/model/read-back) + manual relay control
+UART_TASK_ID_PROFILES = 9  # fire profile CRUD + execution control
+UART_TASK_ID_AUTOTUNE = 10  # PID autotune (step/relay methods)
+UART_TASK_ID_WIFI = 11  # Wi-Fi status/scan/provision/forget
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged
 # link is actually made of, without risking eating this very request's own
-# in-flight ACK off the TX side.
+# in-flight ACK off the TX side. FACTORY_RESET mirrors POST /api/factory_reset
+# exactly (same NVS erase + unconditional reboot ~500ms later); no reply
+# frame either way, an out-of-range scope byte is rejected with no erase.
 SYSTEM_CMD_RESTART_UART = 0x01
+SYSTEM_CMD_FACTORY_RESET = 0x02
+
+#: FACTORY_RESET scope byte values.
+FACTORY_RESET_SCOPE_WIFI = 0
+FACTORY_RESET_SCOPE_KILN = 1
+FACTORY_RESET_SCOPE_PROFILES = 2
+FACTORY_RESET_SCOPE_ALL = 3
 
 # --- THERMO subcommands (3x MAX31856 over the shared SPI bus, CS0/CS1/CS2) --
 #
@@ -205,6 +222,70 @@ SAFETY_CMD_SET_FAULT_OUT = 0x06
 
 #: Age field in GET_STATUS: "no valid status has ever been received".
 SAFETY_AGE_NEVER = 0xFFFF
+
+# --- CONTROL subcommands (task_id = UART_TASK_ID_CONTROL) -------------------
+# Zone configuration reads plus narrow PID/plant-model writes. GET_ZONES is a
+# query; SET_ZONE_PID/SET_ZONE_MODEL reply ok/fail (unlike THERMO/IO's silent
+# SET_*). Manual relay control stays on IO (task 2) -- not duplicated here.
+CONTROL_CMD_GET_ZONES = 0x01
+CONTROL_CMD_SET_ZONE_PID = 0x02
+CONTROL_CMD_SET_ZONE_MODEL = 0x03
+
+#: Bytes per zone record in a GET_ZONES reply (uart_task_ids.h).
+CONTROL_ZONE_RECORD_LEN = 31
+
+# --- PROFILES subcommands (task_id = UART_TASK_ID_PROFILES) -----------------
+PROFILES_CMD_LIST = 0x01
+PROFILES_CMD_GET = 0x02
+PROFILES_CMD_SAVE = 0x03
+PROFILES_CMD_DELETE = 0x04
+PROFILES_CMD_GET_EXEC_STATUS = 0x05
+PROFILES_CMD_START = 0x06
+PROFILES_CMD_STOP = 0x07
+PROFILES_CMD_PAUSE = 0x08
+PROFILES_CMD_RESUME = 0x09
+PROFILES_CMD_ACK_LAST_RUN = 0x0A
+
+#: SAVE's id byte requesting "first free slot" -- mirrors POST /api/profile's
+#: empty/-1/out-of-range id field.
+PROFILES_SAVE_ID_NEW = 0xFF
+#: Max profile slots (id 0..7).
+PROFILES_MAX_COUNT = 8
+#: Bytes per segment in a SAVE request / GET reply (target_c f32, ramp f32, dwell_min u32).
+PROFILES_SEGMENT_LEN = 12
+
+# --- AUTOTUNE subcommands (task_id = UART_TASK_ID_AUTOTUNE) -----------------
+AUTOTUNE_CMD_GET_STATUS = 0x01
+AUTOTUNE_CMD_START = 0x02
+AUTOTUNE_CMD_ABORT = 0x03
+AUTOTUNE_CMD_ACCEPT = 0x04
+
+#: START method byte.
+AUTOTUNE_METHOD_STEP = 0
+AUTOTUNE_METHOD_RELAY = 1
+#: START rule byte.
+AUTOTUNE_RULE_TL = 0  # Tyreus-Luyben
+AUTOTUNE_RULE_ZN = 1  # Ziegler-Nichols
+
+# --- WIFI subcommands (task_id = UART_TASK_ID_WIFI) --------------------------
+# Mirrors wifi_provision_http.c's GET /status, GET /scan, POST /provision,
+# GET /networks, POST /forget -- exists specifically so Wi-Fi can be
+# configured over a link that works even when Wi-Fi itself is down.
+WIFI_CMD_GET_STATUS = 0x01
+WIFI_CMD_SCAN = 0x02
+WIFI_CMD_ADD_NETWORK = 0x03
+WIFI_CMD_SET_MODE = 0x04
+WIFI_CMD_SET_AP_IDENTITY = 0x05
+WIFI_CMD_GET_NETWORKS = 0x06
+WIFI_CMD_FORGET = 0x07
+
+#: SCAN/GET_NETWORKS entry caps (uart_task_ids.h).
+WIFI_WIRE_MAX_SCAN_ENTRIES = 6
+WIFI_WIRE_MAX_NETWORK_ENTRIES = 5
+
+#: SET_MODE's mode byte.
+WIFI_MODE_HOME = 0
+WIFI_MODE_AP = 1
 
 
 class LogLevel(enum.IntEnum):

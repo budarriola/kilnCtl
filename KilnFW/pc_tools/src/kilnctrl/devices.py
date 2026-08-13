@@ -28,6 +28,45 @@ import struct
 from dataclasses import dataclass
 
 from .protocol import (
+    AUTOTUNE_CMD_ABORT,
+    AUTOTUNE_CMD_ACCEPT,
+    AUTOTUNE_CMD_GET_STATUS,
+    AUTOTUNE_CMD_START,
+    AUTOTUNE_METHOD_RELAY,
+    AUTOTUNE_METHOD_STEP,
+    AUTOTUNE_RULE_TL,
+    AUTOTUNE_RULE_ZN,
+    CONTROL_CMD_GET_ZONES,
+    CONTROL_CMD_SET_ZONE_MODEL,
+    CONTROL_CMD_SET_ZONE_PID,
+    CONTROL_ZONE_RECORD_LEN,
+    FACTORY_RESET_SCOPE_ALL,
+    PROFILES_CMD_ACK_LAST_RUN,
+    PROFILES_CMD_DELETE,
+    PROFILES_CMD_GET,
+    PROFILES_CMD_GET_EXEC_STATUS,
+    PROFILES_CMD_LIST,
+    PROFILES_CMD_PAUSE,
+    PROFILES_CMD_RESUME,
+    PROFILES_CMD_SAVE,
+    PROFILES_CMD_START,
+    PROFILES_CMD_STOP,
+    PROFILES_SAVE_ID_NEW,
+    PROFILES_SEGMENT_LEN,
+    SYSTEM_CMD_FACTORY_RESET,
+    UART_TASK_ID_AUTOTUNE,
+    UART_TASK_ID_CONTROL,
+    UART_TASK_ID_PROFILES,
+    UART_TASK_ID_WIFI,
+    WIFI_CMD_ADD_NETWORK,
+    WIFI_CMD_FORGET,
+    WIFI_CMD_GET_NETWORKS,
+    WIFI_CMD_GET_STATUS,
+    WIFI_CMD_SCAN,
+    WIFI_CMD_SET_AP_IDENTITY,
+    WIFI_CMD_SET_MODE,
+    WIFI_MODE_AP,
+    WIFI_MODE_HOME,
     DISPLAY_CMD_BLIT_BEGIN,
     DISPLAY_CMD_BLIT_DATA,
     DISPLAY_CMD_BLIT_END,
@@ -119,7 +158,62 @@ __all__ = [
     "UART_TASK_ID_LOG",
     "UART_TASK_ID_SYSTEM",
     "UART_TASK_ID_SAFETY",
+    "UART_TASK_ID_CONTROL",
+    "UART_TASK_ID_PROFILES",
+    "UART_TASK_ID_AUTOTUNE",
+    "UART_TASK_ID_WIFI",
     "system_restart_uart",
+    "system_factory_reset",
+    # CONTROL
+    "ZoneConfig",
+    "ControlResponseError",
+    "control_get_zones",
+    "control_set_zone_pid",
+    "control_set_zone_model",
+    "parse_control_response",
+    # PROFILES
+    "ProfileSummary",
+    "ProfileSegment",
+    "ProfileDetail",
+    "ProfileSaveResult",
+    "ZoneExecStatus",
+    "ProfileExecStatus",
+    "ProfilesResponseError",
+    "profiles_list",
+    "profiles_get",
+    "profiles_save",
+    "profiles_delete",
+    "profiles_get_exec_status",
+    "profiles_start",
+    "profiles_stop",
+    "profiles_pause",
+    "profiles_resume",
+    "profiles_ack_last_run",
+    "parse_profiles_response",
+    # AUTOTUNE
+    "AutotuneModel",
+    "AutotuneGains",
+    "AutotuneRelayResult",
+    "AutotuneStatus",
+    "AutotuneResponseError",
+    "autotune_get_status",
+    "autotune_start",
+    "autotune_abort",
+    "autotune_accept",
+    "parse_autotune_response",
+    # WIFI (UART)
+    "UartWifiStatus",
+    "UartWifiScanEntry",
+    "UartWifiSavedNetwork",
+    "WifiUartResponseError",
+    "wifi_uart_get_status",
+    "wifi_uart_scan",
+    "wifi_uart_add_network",
+    "wifi_uart_set_mode",
+    "wifi_uart_set_ap_identity",
+    "wifi_uart_get_networks",
+    "wifi_uart_forget",
+    "parse_wifi_uart_response",
     # THERMO
     "THERMO_CHANNEL_COUNT",
     "THERMO_CHANNEL_ALL",
@@ -365,6 +459,22 @@ def _decoded_float(value: float, name: str, allow_nan: bool = False) -> float:
 def system_restart_uart() -> bytes:
     """0x01 RESTART_UART request: byte0 = subcommand, no args."""
     return struct.pack("<B", SYSTEM_CMD_RESTART_UART)
+
+
+def system_factory_reset(scope: int = FACTORY_RESET_SCOPE_ALL) -> bytes:
+    """0x02 FACTORY_RESET: byte1=scope (0=wifi 1=kiln 2=profiles 3=all).
+
+    Mirrors POST /api/factory_reset exactly: same per-partition NVS erase,
+    same unconditional reboot ~500ms later. No reply frame either way -- the
+    ACK is the only delivery confirmation, and the reboot itself (a fresh
+    unsolicited GET_FW_VERSION push) is the real evidence the erase happened.
+    An out-of-range scope byte is rejected by the firmware with no erase and
+    no reboot, so validate it here too rather than letting a typo silently
+    no-op on the device.
+    """
+    return struct.pack(
+        "<BB", SYSTEM_CMD_FACTORY_RESET, _check_range(scope, 0, 3, "scope")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1972,3 +2082,851 @@ def parse_log_frame(payload: bytes) -> LogLine:
         level = LogLevel.INFO
     text = payload[1:].decode("ascii", errors="replace")
     return LogLine(level=level, text=text)
+
+
+# ---------------------------------------------------------------------------
+# CONTROL -- zone config reads + narrow PID/model writes
+# (task_id = UART_TASK_ID_CONTROL)
+#
+# Scope cap: /api/zones' whole-page fields (naming, relay assignment, heater
+# window timing, cross-zone guard) are NOT writable here -- see
+# docs/UART_PROTOCOL.md. Manual relay control is IO task's SET_RELAY/
+# SET_RELAY_MASK, not duplicated here.
+# ---------------------------------------------------------------------------
+class ControlResponseError(ValueError):
+    """Raised when a CONTROL response payload does not match its wire layout."""
+
+
+@dataclass(frozen=True)
+class ZoneConfig:
+    """One 31-byte zone record from a GET_ZONES reply."""
+
+    index: int
+    relay_mask: int
+    control_mode: int
+    cal_offset_c: float
+    pid_kp: float
+    pid_ki: float
+    pid_kd: float
+    max_ramp_c_per_hr: float
+    max_temp_c: float
+    min_temp_c: float
+
+    def describe(self) -> str:
+        return (
+            f"Zone {self.index} (relay_mask 0x{self.relay_mask:02X}, "
+            f"mode {self.control_mode}): Kp={self.pid_kp:.4f} Ki={self.pid_ki:.5f} "
+            f"Kd={self.pid_kd:.4f}  cal={self.cal_offset_c:+.2f}C  "
+            f"ramp<={self.max_ramp_c_per_hr:.0f}C/hr  range={self.min_temp_c:.0f}.."
+            f"{self.max_temp_c:.0f}C"
+        )
+
+
+def control_get_zones() -> bytes:
+    """0x01 GET_ZONES request (query): no args."""
+    return struct.pack("<B", CONTROL_CMD_GET_ZONES)
+
+
+def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> bytes:
+    """0x02 SET_ZONE_PID: zone, kp/ki/kd f32 LE. Replies ok/fail."""
+    return struct.pack(
+        "<BBfff",
+        CONTROL_CMD_SET_ZONE_PID,
+        _check_u8(zone, "zone"),
+        _check_finite(kp, "kp"),
+        _check_finite(ki, "ki"),
+        _check_finite(kd, "kd"),
+    )
+
+
+def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float) -> bytes:
+    """0x03 SET_ZONE_MODEL: zone, k_dc/tau_s/dead_time_s f32 LE. Replies ok/fail.
+
+    An all-zero triple clears the model (the documented "no model" encoding).
+    """
+    return struct.pack(
+        "<BBfff",
+        CONTROL_CMD_SET_ZONE_MODEL,
+        _check_u8(zone, "zone"),
+        _check_finite(k_dc, "k_dc"),
+        _check_finite(tau_s, "tau_s"),
+        _check_finite(dead_time_s, "dead_time_s"),
+    )
+
+
+def parse_control_response(
+    payload: bytes,
+) -> "tuple[int, tuple[int, int, list[ZoneConfig]] | bool]":
+    """Decode a CONTROL reply into ``(subcmd, value)``.
+
+    GET_ZONES value is ``(thermo_count, relay_count, [ZoneConfig, ...])``;
+    SET_ZONE_PID/SET_ZONE_MODEL value is a plain ``ok`` bool.
+    """
+    if len(payload) < 1:
+        raise ControlResponseError("CONTROL response is empty")
+    subcommand = payload[0]
+
+    if subcommand == CONTROL_CMD_GET_ZONES:
+        if len(payload) < 4:
+            raise ControlResponseError("GET_ZONES response header is truncated")
+        thermo_count, relay_count, count = payload[1], payload[2], payload[3]
+        expected = 4 + count * CONTROL_ZONE_RECORD_LEN
+        if len(payload) != expected:
+            raise ControlResponseError(
+                f"GET_ZONES count={count} implies {expected} bytes, got {len(payload)}"
+            )
+        zones = []
+        for i in range(count):
+            offset = 4 + i * CONTROL_ZONE_RECORD_LEN
+            (
+                index,
+                relay_mask,
+                control_mode,
+                cal_offset_c,
+                pid_kp,
+                pid_ki,
+                pid_kd,
+                max_ramp,
+                max_temp,
+                min_temp,
+            ) = struct.unpack_from("<BBBfffffff", payload, offset)
+            zones.append(
+                ZoneConfig(
+                    index=index,
+                    relay_mask=relay_mask,
+                    control_mode=control_mode,
+                    cal_offset_c=cal_offset_c,
+                    pid_kp=pid_kp,
+                    pid_ki=pid_ki,
+                    pid_kd=pid_kd,
+                    max_ramp_c_per_hr=max_ramp,
+                    max_temp_c=max_temp,
+                    min_temp_c=min_temp,
+                )
+            )
+        return subcommand, (thermo_count, relay_count, zones)
+
+    if subcommand in (CONTROL_CMD_SET_ZONE_PID, CONTROL_CMD_SET_ZONE_MODEL):
+        if len(payload) < 2:
+            raise ControlResponseError("SET_ZONE_* response is missing its ok byte")
+        return subcommand, bool(payload[1])
+
+    raise ControlResponseError(f"unknown CONTROL response subcommand 0x{subcommand:02X}")
+
+
+# ---------------------------------------------------------------------------
+# PROFILES -- fire profile CRUD + execution control
+# (task_id = UART_TASK_ID_PROFILES)
+# ---------------------------------------------------------------------------
+class ProfilesResponseError(ValueError):
+    """Raised when a PROFILES response payload does not match its wire layout."""
+
+
+@dataclass(frozen=True)
+class ProfileSegment:
+    target_c: float
+    ramp_c_per_hr: float
+    dwell_min: int
+
+
+@dataclass(frozen=True)
+class ProfileSummary:
+    """One entry from a LIST reply."""
+
+    id: int
+    name: str
+    zone_mask: int
+    segment_count: int
+
+
+@dataclass(frozen=True)
+class ProfileDetail:
+    """A GET reply's full profile (segments included)."""
+
+    id: int
+    name: str
+    zone_mask: int
+    segments: "list[ProfileSegment]"
+
+
+@dataclass(frozen=True)
+class ProfileSaveResult:
+    ok: bool
+    id: "Optional[int]" = None
+    warning_count: int = 0
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ZoneExecStatus:
+    zone: int
+    control_mode: int
+    actual_c: float
+    actual_valid: bool
+    duty: float
+    relay_commanded_on: bool
+    faulted: bool
+    fault_guard: int
+
+
+@dataclass(frozen=True)
+class ProfileExecStatus:
+    state: int
+    profile_id: int
+    name: str
+    zone_mask: int
+    segment_index: int
+    segment_count: int
+    dwelling: bool
+    target_c: float
+    segment_elapsed_s: int
+    dwell_remaining_s: int
+    ramp_lock_held: bool
+    ramp_lock_lagging_mask: int
+    fault_guard: int
+    zones: "list[ZoneExecStatus]"
+
+    #: profile_exec_state_t values.
+    STATE_NAMES = {0: "idle", 1: "running", 2: "paused", 3: "done", 4: "faulted"}
+
+    @property
+    def state_name(self) -> str:
+        return self.STATE_NAMES.get(self.state, f"unknown({self.state})")
+
+
+def _pack_str8(text: str, max_len: int, name: str) -> bytes:
+    encoded = text.encode("ascii", errors="replace")
+    if len(encoded) > max_len:
+        raise ValueError(f"{name} too long: {len(encoded)} bytes > {max_len}")
+    return struct.pack("<B", len(encoded)) + encoded
+
+
+def profiles_list() -> bytes:
+    """0x01 LIST request (query): no args."""
+    return struct.pack("<B", PROFILES_CMD_LIST)
+
+
+def profiles_get(profile_id: int) -> bytes:
+    """0x02 GET request (query): id 0-7."""
+    return struct.pack("<BB", PROFILES_CMD_GET, _check_range(profile_id, 0, 7, "profile_id"))
+
+
+def profiles_save(
+    profile_id: int, name: str, zone_mask: int, segments: "list[ProfileSegment]"
+) -> bytes:
+    """0x03 SAVE request: id (or PROFILES_SAVE_ID_NEW), name, zone_mask,
+    segment_count, then 12 bytes/segment (target_c f32, ramp f32, dwell u32).
+
+    Replies ok/fail (see :func:`parse_profiles_response`).
+    """
+    if profile_id != PROFILES_SAVE_ID_NEW:
+        _check_range(profile_id, 0, 7, "profile_id")
+    if not 1 <= len(segments) <= 12:
+        raise ValueError(f"segment count must be 1..12, got {len(segments)}")
+    body = struct.pack("<BB", PROFILES_CMD_SAVE, profile_id)
+    body += _pack_str8(name, 15, "name")
+    body += struct.pack("<BB", _check_u8(zone_mask, "zone_mask"), len(segments))
+    for i, seg in enumerate(segments):
+        body += struct.pack(
+            "<ffI",
+            _check_finite(seg.target_c, f"segment {i} target_c"),
+            _check_finite(seg.ramp_c_per_hr, f"segment {i} ramp_c_per_hr"),
+            _check_range(seg.dwell_min, 0, 0xFFFFFFFF, f"segment {i} dwell_min"),
+        )
+    return body
+
+
+def profiles_delete(profile_id: int) -> bytes:
+    """0x04 DELETE request: id 0-7. Replies ok/fail."""
+    return struct.pack("<BB", PROFILES_CMD_DELETE, _check_range(profile_id, 0, 7, "profile_id"))
+
+
+def profiles_get_exec_status() -> bytes:
+    """0x05 GET_EXEC_STATUS request (query): no args."""
+    return struct.pack("<B", PROFILES_CMD_GET_EXEC_STATUS)
+
+
+def profiles_start(profile_id: int) -> bytes:
+    """0x06 START request: id 0-7. Replies ok/fail (+ error text on failure)."""
+    return struct.pack("<BB", PROFILES_CMD_START, _check_range(profile_id, 0, 7, "profile_id"))
+
+
+def profiles_stop() -> bytes:
+    """0x07 STOP request: no args. Always replies ok."""
+    return struct.pack("<B", PROFILES_CMD_STOP)
+
+
+def profiles_pause() -> bytes:
+    """0x08 PAUSE request: no args. Replies ok/fail."""
+    return struct.pack("<B", PROFILES_CMD_PAUSE)
+
+
+def profiles_resume() -> bytes:
+    """0x09 RESUME request: no args. Replies ok/fail."""
+    return struct.pack("<B", PROFILES_CMD_RESUME)
+
+
+def profiles_ack_last_run() -> bytes:
+    """0x0A ACK_LAST_RUN request: no args. Replies ok/fail."""
+    return struct.pack("<B", PROFILES_CMD_ACK_LAST_RUN)
+
+
+def parse_profiles_response(payload: bytes) -> "tuple[int, object]":
+    """Decode a PROFILES reply into ``(subcmd, value)``.
+
+    Layouts (uart_task_ids.h) -- see the module docstring cross-reference for
+    the byte-level offsets; this mirrors them field for field.
+    """
+    if len(payload) < 1:
+        raise ProfilesResponseError("PROFILES response is empty")
+    subcommand = payload[0]
+
+    if subcommand == PROFILES_CMD_LIST:
+        if len(payload) < 2:
+            raise ProfilesResponseError("LIST response is missing its count byte")
+        count = payload[1]
+        offset = 2
+        summaries = []
+        for i in range(count):
+            if offset + 2 > len(payload):
+                raise ProfilesResponseError(f"LIST entry {i} header truncated")
+            pid = payload[offset]
+            name_len = payload[offset + 1]
+            name_start = offset + 2
+            name_end = name_start + name_len
+            if name_end + 2 > len(payload):
+                raise ProfilesResponseError(f"LIST entry {i} truncated")
+            name = payload[name_start:name_end].decode("ascii", errors="replace")
+            zone_mask = payload[name_end]
+            segment_count = payload[name_end + 1]
+            summaries.append(
+                ProfileSummary(id=pid, name=name, zone_mask=zone_mask, segment_count=segment_count)
+            )
+            offset = name_end + 2
+        if offset != len(payload):
+            raise ProfilesResponseError(
+                f"LIST response has {len(payload) - offset} trailing bytes"
+            )
+        return subcommand, summaries
+
+    if subcommand == PROFILES_CMD_GET:
+        if len(payload) < 2:
+            raise ProfilesResponseError("GET response is missing its ok byte")
+        ok = payload[1]
+        if not ok:
+            return subcommand, None
+        if len(payload) < 4:
+            raise ProfilesResponseError("GET response header is truncated")
+        pid = payload[2]
+        name_len = payload[3]
+        name_start = 4
+        name_end = name_start + name_len
+        if name_end + 2 > len(payload):
+            raise ProfilesResponseError("GET response name/header truncated")
+        name = payload[name_start:name_end].decode("ascii", errors="replace")
+        zone_mask = payload[name_end]
+        segment_count = payload[name_end + 1]
+        seg_start = name_end + 2
+        expected = seg_start + segment_count * PROFILES_SEGMENT_LEN
+        if len(payload) != expected:
+            raise ProfilesResponseError(
+                f"GET segment_count={segment_count} implies {expected} bytes, "
+                f"got {len(payload)}"
+            )
+        segments = []
+        for i in range(segment_count):
+            off = seg_start + i * PROFILES_SEGMENT_LEN
+            target_c, ramp, dwell = struct.unpack_from("<ffI", payload, off)
+            segments.append(
+                ProfileSegment(target_c=target_c, ramp_c_per_hr=ramp, dwell_min=dwell)
+            )
+        return subcommand, ProfileDetail(
+            id=pid, name=name, zone_mask=zone_mask, segments=segments
+        )
+
+    if subcommand == PROFILES_CMD_SAVE:
+        if len(payload) < 2:
+            raise ProfilesResponseError("SAVE response is missing its ok byte")
+        ok = payload[1]
+        if ok:
+            if len(payload) < 4:
+                raise ProfilesResponseError("SAVE ok response header is truncated")
+            return subcommand, ProfileSaveResult(
+                ok=True, id=payload[2], warning_count=payload[3]
+            )
+        err_len = payload[2] if len(payload) > 2 else 0
+        error = ""
+        if err_len:
+            error = payload[3 : 3 + err_len].decode("ascii", errors="replace")
+        return subcommand, ProfileSaveResult(ok=False, error=error)
+
+    if subcommand in (
+        PROFILES_CMD_DELETE,
+        PROFILES_CMD_PAUSE,
+        PROFILES_CMD_RESUME,
+        PROFILES_CMD_ACK_LAST_RUN,
+        PROFILES_CMD_STOP,
+    ):
+        if len(payload) < 2:
+            raise ProfilesResponseError("response is missing its ok byte")
+        return subcommand, bool(payload[1])
+
+    if subcommand == PROFILES_CMD_START:
+        if len(payload) < 2:
+            raise ProfilesResponseError("START response is missing its ok byte")
+        ok = payload[1]
+        if ok:
+            return subcommand, ProfileSaveResult(ok=True)
+        err_len = payload[2] if len(payload) > 2 else 0
+        error = ""
+        if err_len:
+            error = payload[3 : 3 + err_len].decode("ascii", errors="replace")
+        return subcommand, ProfileSaveResult(ok=False, error=error)
+
+    if subcommand == PROFILES_CMD_GET_EXEC_STATUS:
+        if len(payload) < 4:
+            raise ProfilesResponseError("GET_EXEC_STATUS response header is truncated")
+        state = payload[1]
+        profile_id = payload[2]
+        name_len = payload[3]
+        name_start = 4
+        name_end = name_start + name_len
+        # fixed-width block after the name: zone_mask(1) segment_index(1)
+        # segment_count(1) dwelling(1) target_c(4) segment_elapsed_s(4)
+        # dwell_remaining_s(4) ramp_lock_held(1) ramp_lock_lagging_mask(1)
+        # fault_guard(1) zone_count(1) = 20 bytes
+        fixed_end = name_end + 20
+        if fixed_end > len(payload):
+            raise ProfilesResponseError("GET_EXEC_STATUS fixed block truncated")
+        name = payload[name_start:name_end].decode("ascii", errors="replace")
+        zone_mask = payload[name_end]
+        segment_index = payload[name_end + 1]
+        segment_count = payload[name_end + 2]
+        dwelling = bool(payload[name_end + 3])
+        target_c, segment_elapsed_s, dwell_remaining_s = struct.unpack_from(
+            "<fII", payload, name_end + 4
+        )
+        ramp_lock_held = bool(payload[name_end + 16])
+        ramp_lock_lagging_mask = payload[name_end + 17]
+        fault_guard = payload[name_end + 18]
+        zone_count = payload[name_end + 19]
+        zones_start = fixed_end
+        expected = zones_start + zone_count * 14
+        if len(payload) != expected:
+            raise ProfilesResponseError(
+                f"GET_EXEC_STATUS zone_count={zone_count} implies {expected} bytes, "
+                f"got {len(payload)}"
+            )
+        zones = []
+        for i in range(zone_count):
+            off = zones_start + i * 14
+            zone, control_mode = payload[off], payload[off + 1]
+            actual_c = struct.unpack_from("<f", payload, off + 2)[0]
+            actual_valid = bool(payload[off + 6])
+            duty = struct.unpack_from("<f", payload, off + 7)[0]
+            relay_on = bool(payload[off + 11])
+            faulted = bool(payload[off + 12])
+            fg = payload[off + 13]
+            zones.append(
+                ZoneExecStatus(
+                    zone=zone,
+                    control_mode=control_mode,
+                    actual_c=actual_c,
+                    actual_valid=actual_valid,
+                    duty=duty,
+                    relay_commanded_on=relay_on,
+                    faulted=faulted,
+                    fault_guard=fg,
+                )
+            )
+        return subcommand, ProfileExecStatus(
+            state=state,
+            profile_id=profile_id,
+            name=name,
+            zone_mask=zone_mask,
+            segment_index=segment_index,
+            segment_count=segment_count,
+            dwelling=dwelling,
+            target_c=target_c,
+            segment_elapsed_s=segment_elapsed_s,
+            dwell_remaining_s=dwell_remaining_s,
+            ramp_lock_held=ramp_lock_held,
+            ramp_lock_lagging_mask=ramp_lock_lagging_mask,
+            fault_guard=fault_guard,
+            zones=zones,
+        )
+
+    raise ProfilesResponseError(f"unknown PROFILES response subcommand 0x{subcommand:02X}")
+
+
+# ---------------------------------------------------------------------------
+# AUTOTUNE -- PID autotune (step/relay methods)
+# (task_id = UART_TASK_ID_AUTOTUNE)
+# ---------------------------------------------------------------------------
+class AutotuneResponseError(ValueError):
+    """Raised when an AUTOTUNE response payload does not match its wire layout."""
+
+
+@dataclass(frozen=True)
+class AutotuneModel:
+    k_gain_c_per_duty: float
+    tau_s: float
+    dead_time_s: float
+
+
+@dataclass(frozen=True)
+class AutotuneGains:
+    kp: float
+    ki: float
+    kd: float
+    rule: int
+
+
+@dataclass(frozen=True)
+class AutotuneRelayResult:
+    ku: float
+    tu_s: float
+    amplitude_c: float
+
+
+@dataclass(frozen=True)
+class AutotuneStatus:
+    state: int
+    method: int
+    zone: int
+    elapsed_s: int
+    sample_count: int
+    actual_c: float
+    actual_valid: bool
+    duty: float
+    model_valid: bool
+    model: AutotuneModel
+    proposed_gains: AutotuneGains
+    predicted_max_ramp_c_per_hr: float
+    relay_valid: bool
+    relay: AutotuneRelayResult
+    abort_reason: str
+
+    STATE_NAMES = {
+        0: "idle", 1: "settling", 2: "stepping", 3: "relay_approach",
+        4: "relay_cycling", 5: "done", 6: "aborted",
+    }
+
+    @property
+    def state_name(self) -> str:
+        return self.STATE_NAMES.get(self.state, f"unknown({self.state})")
+
+
+def autotune_get_status() -> bytes:
+    """0x01 GET_STATUS request (query): no args."""
+    return struct.pack("<B", AUTOTUNE_CMD_GET_STATUS)
+
+
+def autotune_start(
+    zone: int,
+    method: int,
+    step_duty_or_setpoint_c: float,
+    relay_d: float = -1.0,
+    relay_h_c: float = -1.0,
+    rule: int = AUTOTUNE_RULE_TL,
+) -> bytes:
+    """0x02 START: zone, method(0=step,1=relay), setpoint/duty, relay_d,
+    relay_h_c, rule -- always sends all 16 argument bytes (fields the
+    selected method doesn't use are ignored, same as the HTTP form's
+    server-side defaulting). ``relay_d``/``relay_h_c`` <=0 means "engine
+    default". Replies ok/fail (+ error text on failure).
+    """
+    if method not in (AUTOTUNE_METHOD_STEP, AUTOTUNE_METHOD_RELAY):
+        raise ValueError(f"method must be 0 (step) or 1 (relay), got {method}")
+    if rule not in (AUTOTUNE_RULE_TL, AUTOTUNE_RULE_ZN):
+        raise ValueError(f"rule must be 0 (tyreus-luyben) or 1 (ziegler-nichols), got {rule}")
+    return struct.pack(
+        "<BBBfffB",
+        AUTOTUNE_CMD_START,
+        _check_u8(zone, "zone"),
+        method,
+        _check_finite(step_duty_or_setpoint_c, "step_duty_or_setpoint_c"),
+        _check_finite(relay_d, "relay_d"),
+        _check_finite(relay_h_c, "relay_h_c"),
+        rule,
+    )
+
+
+def autotune_abort() -> bytes:
+    """0x03 ABORT: no args. Always replies ok."""
+    return struct.pack("<B", AUTOTUNE_CMD_ABORT)
+
+
+def autotune_accept() -> bytes:
+    """0x04 ACCEPT: no args. Replies ok/fail."""
+    return struct.pack("<B", AUTOTUNE_CMD_ACCEPT)
+
+
+def parse_autotune_response(payload: bytes) -> "tuple[int, object]":
+    """Decode an AUTOTUNE reply into ``(subcmd, value)``."""
+    if len(payload) < 1:
+        raise AutotuneResponseError("AUTOTUNE response is empty")
+    subcommand = payload[0]
+
+    if subcommand == AUTOTUNE_CMD_GET_STATUS:
+        if len(payload) < 63:
+            raise AutotuneResponseError(
+                f"GET_STATUS response must be >= 63 bytes, got {len(payload)}"
+            )
+        state, method, zone = payload[1], payload[2], payload[3]
+        elapsed_s = struct.unpack_from("<I", payload, 4)[0]
+        sample_count = struct.unpack_from("<H", payload, 8)[0]
+        actual_c = struct.unpack_from("<f", payload, 10)[0]
+        actual_valid = bool(payload[14])
+        duty = struct.unpack_from("<f", payload, 15)[0]
+        model_valid = bool(payload[19])
+        k_gain, tau_s, dead_time_s = struct.unpack_from("<fff", payload, 20)
+        kp, ki, kd = struct.unpack_from("<fff", payload, 32)
+        rule = payload[44]
+        predicted_max_ramp = struct.unpack_from("<f", payload, 45)[0]
+        relay_valid = bool(payload[49])
+        ku, tu_s, amplitude_c = struct.unpack_from("<fff", payload, 50)
+        abort_len = payload[62]
+        abort_reason = ""
+        if abort_len:
+            if len(payload) < 63 + abort_len:
+                raise AutotuneResponseError("GET_STATUS abort_reason truncated")
+            abort_reason = payload[63 : 63 + abort_len].decode("ascii", errors="replace")
+        return subcommand, AutotuneStatus(
+            state=state,
+            method=method,
+            zone=zone,
+            elapsed_s=elapsed_s,
+            sample_count=sample_count,
+            actual_c=actual_c,
+            actual_valid=actual_valid,
+            duty=duty,
+            model_valid=model_valid,
+            model=AutotuneModel(k_gain_c_per_duty=k_gain, tau_s=tau_s, dead_time_s=dead_time_s),
+            proposed_gains=AutotuneGains(kp=kp, ki=ki, kd=kd, rule=rule),
+            predicted_max_ramp_c_per_hr=predicted_max_ramp,
+            relay_valid=relay_valid,
+            relay=AutotuneRelayResult(ku=ku, tu_s=tu_s, amplitude_c=amplitude_c),
+            abort_reason=abort_reason,
+        )
+
+    if subcommand == AUTOTUNE_CMD_START:
+        if len(payload) < 2:
+            raise AutotuneResponseError("START response is missing its ok byte")
+        ok = payload[1]
+        if ok:
+            return subcommand, (True, "")
+        err_len = payload[2] if len(payload) > 2 else 0
+        error = ""
+        if err_len:
+            error = payload[3 : 3 + err_len].decode("ascii", errors="replace")
+        return subcommand, (False, error)
+
+    if subcommand in (AUTOTUNE_CMD_ABORT, AUTOTUNE_CMD_ACCEPT):
+        if len(payload) < 2:
+            raise AutotuneResponseError("response is missing its ok byte")
+        return subcommand, bool(payload[1])
+
+    raise AutotuneResponseError(f"unknown AUTOTUNE response subcommand 0x{subcommand:02X}")
+
+
+# ---------------------------------------------------------------------------
+# WIFI (UART) -- status/scan/provision/forget, mirrors wifi_provision_http.c
+# (task_id = UART_TASK_ID_WIFI)
+#
+# Exists so Wi-Fi can be provisioned over a link that works even when Wi-Fi
+# itself is down or unconfigured -- never touches kiln_io/relay_authority/
+# safety_link.
+# ---------------------------------------------------------------------------
+class WifiUartResponseError(ValueError):
+    """Raised when a WIFI (UART) response payload does not match its wire layout."""
+
+
+@dataclass(frozen=True)
+class UartWifiStatus:
+    mode: int
+    state: int
+    sta_connected: bool
+    ssid: str
+    ap_ssid: str
+    ap_password: str
+    sta_ip: str
+    sta_rssi: int
+    ap_clients: int
+
+    @property
+    def mode_name(self) -> str:
+        return "ap" if self.mode == WIFI_MODE_AP else "home"
+
+
+@dataclass(frozen=True)
+class UartWifiScanEntry:
+    ssid: str
+    rssi: int
+    secure: bool
+
+
+@dataclass(frozen=True)
+class UartWifiSavedNetwork:
+    ssid: str
+    saved: bool
+    in_range: bool
+    rssi: int
+    secure: bool
+    connected: bool
+
+
+def wifi_uart_get_status() -> bytes:
+    """0x01 GET_STATUS request (query): no args."""
+    return struct.pack("<B", WIFI_CMD_GET_STATUS)
+
+
+def wifi_uart_scan() -> bytes:
+    """0x02 SCAN request (query): no args. Capped at 6 entries + truncated flag."""
+    return struct.pack("<B", WIFI_CMD_SCAN)
+
+
+def wifi_uart_add_network(ssid: str, password: str = "") -> bytes:
+    """0x03 ADD_NETWORK: ssid_len+ssid, password_len+password. Replies ok/fail."""
+    return (
+        struct.pack("<B", WIFI_CMD_ADD_NETWORK)
+        + _pack_str8(ssid, 32, "ssid")
+        + _pack_str8(password, 64, "password")
+    )
+
+
+def wifi_uart_set_mode(mode: int) -> bytes:
+    """0x04 SET_MODE: mode(0=home,1=ap). Replies ok/fail."""
+    if mode not in (WIFI_MODE_HOME, WIFI_MODE_AP):
+        raise ValueError(f"mode must be 0 (home) or 1 (ap), got {mode}")
+    return struct.pack("<BB", WIFI_CMD_SET_MODE, mode)
+
+
+def wifi_uart_set_ap_identity(
+    ap_ssid: "Optional[str]" = None, ap_password: "Optional[str]" = None
+) -> bytes:
+    """0x05 SET_AP_IDENTITY: has_ssid[+ssid], has_password[+password].
+
+    Either field may be omitted (None) to leave it unchanged. Replies ok/fail.
+    """
+    body = struct.pack("<B", WIFI_CMD_SET_AP_IDENTITY)
+    if ap_ssid is not None:
+        body += struct.pack("<B", 1) + _pack_str8(ap_ssid, 32, "ap_ssid")
+    else:
+        body += struct.pack("<B", 0)
+    if ap_password is not None:
+        body += struct.pack("<B", 1) + _pack_str8(ap_password, 63, "ap_password")
+    else:
+        body += struct.pack("<B", 0)
+    return body
+
+
+def wifi_uart_get_networks() -> bytes:
+    """0x06 GET_NETWORKS request (query): no args. Capped at 5 entries."""
+    return struct.pack("<B", WIFI_CMD_GET_NETWORKS)
+
+
+def wifi_uart_forget(ssid: str) -> bytes:
+    """0x07 FORGET: ssid_len+ssid. Replies ok/fail."""
+    return struct.pack("<B", WIFI_CMD_FORGET) + _pack_str8(ssid, 32, "ssid")
+
+
+def _unpack_str8(payload: bytes, offset: int, name: str) -> "tuple[str, int]":
+    if offset >= len(payload):
+        raise WifiUartResponseError(f"{name}: length byte out of range")
+    length = payload[offset]
+    start = offset + 1
+    end = start + length
+    if end > len(payload):
+        raise WifiUartResponseError(f"{name}: {length}-byte string overruns payload")
+    return payload[start:end].decode("ascii", errors="replace"), end
+
+
+def parse_wifi_uart_response(payload: bytes) -> "tuple[int, object]":
+    """Decode a WIFI (UART) reply into ``(subcmd, value)``."""
+    if len(payload) < 1:
+        raise WifiUartResponseError("WIFI response is empty")
+    subcommand = payload[0]
+
+    if subcommand == WIFI_CMD_GET_STATUS:
+        if len(payload) < 4:
+            raise WifiUartResponseError("GET_STATUS response header is truncated")
+        mode, state, sta_connected = payload[1], payload[2], bool(payload[3])
+        offset = 4
+        ssid, offset = _unpack_str8(payload, offset, "ssid")
+        ap_ssid, offset = _unpack_str8(payload, offset, "ap_ssid")
+        ap_password, offset = _unpack_str8(payload, offset, "ap_password")
+        sta_ip, offset = _unpack_str8(payload, offset, "sta_ip")
+        if offset + 2 > len(payload):
+            raise WifiUartResponseError("GET_STATUS response tail is truncated")
+        sta_rssi = struct.unpack_from("<b", payload, offset)[0]
+        ap_clients = payload[offset + 1]
+        return subcommand, UartWifiStatus(
+            mode=mode,
+            state=state,
+            sta_connected=sta_connected,
+            ssid=ssid,
+            ap_ssid=ap_ssid,
+            ap_password=ap_password,
+            sta_ip=sta_ip,
+            sta_rssi=sta_rssi,
+            ap_clients=ap_clients,
+        )
+
+    if subcommand == WIFI_CMD_SCAN:
+        if len(payload) < 3:
+            raise WifiUartResponseError("SCAN response header is truncated")
+        count, truncated = payload[1], bool(payload[2])
+        offset = 3
+        entries = []
+        for i in range(count):
+            ssid, offset = _unpack_str8(payload, offset, f"SCAN entry {i} ssid")
+            if offset + 2 > len(payload):
+                raise WifiUartResponseError(f"SCAN entry {i} rssi/secure truncated")
+            rssi = struct.unpack_from("<b", payload, offset)[0]
+            secure = bool(payload[offset + 1])
+            offset += 2
+            entries.append(UartWifiScanEntry(ssid=ssid, rssi=rssi, secure=secure))
+        return subcommand, (entries, truncated)
+
+    if subcommand == WIFI_CMD_GET_NETWORKS:
+        if len(payload) < 3:
+            raise WifiUartResponseError("GET_NETWORKS response header is truncated")
+        count, truncated = payload[1], bool(payload[2])
+        offset = 3
+        entries = []
+        for i in range(count):
+            ssid, offset = _unpack_str8(payload, offset, f"network {i} ssid")
+            if offset + 4 > len(payload):
+                raise WifiUartResponseError(f"network {i} flags truncated")
+            saved = bool(payload[offset])
+            in_range = bool(payload[offset + 1])
+            rssi = struct.unpack_from("<b", payload, offset + 2)[0]
+            secure = bool(payload[offset + 3])
+            # connected flag was documented as a 6th field; guard for firmware
+            # that omits it rather than raising on an otherwise-valid frame.
+            if offset + 5 <= len(payload):
+                connected = bool(payload[offset + 4])
+                offset += 5
+            else:
+                connected = False
+                offset += 4
+            entries.append(
+                UartWifiSavedNetwork(
+                    ssid=ssid, saved=saved, in_range=in_range, rssi=rssi, secure=secure,
+                    connected=connected,
+                )
+            )
+        return subcommand, (entries, truncated)
+
+    if subcommand in (
+        WIFI_CMD_ADD_NETWORK,
+        WIFI_CMD_SET_MODE,
+        WIFI_CMD_SET_AP_IDENTITY,
+        WIFI_CMD_FORGET,
+    ):
+        if len(payload) < 2:
+            raise WifiUartResponseError("response is missing its ok byte")
+        return subcommand, bool(payload[1])
+
+    raise WifiUartResponseError(f"unknown WIFI response subcommand 0x{subcommand:02X}")
