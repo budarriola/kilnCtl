@@ -31,6 +31,7 @@
 #define UART_TASK_ID_OLED    4u
 #define UART_TASK_ID_LOG     5u
 #define UART_TASK_ID_SYSTEM  6u
+#define UART_TASK_ID_PCF8575 7u
 
 /* --- DAC (task_id = UART_TASK_ID_DAC) command payload ---
  * byte0 = subcommand:
@@ -80,6 +81,52 @@
 #define OLED_CMD_SET_CONTRAST  0x05u
 #define OLED_CMD_SET_INVERT    0x06u
 #define OLED_CMD_SET_POWER     0x07u
+
+/* --- PCF8575 I/O expander (task_id = UART_TASK_ID_PCF8575) command payload ---
+ * byte0 = subcommand:
+ *   0x01 WRITE_PORT   bytes1..2 = port value u16 LE (bit N = pin N)
+ *   0x02 WRITE_PIN    byte1=pin(0-15)  byte2=level(0/1)
+ *   0x03 SET_MASK     bytes1..2 = mask u16 LE (drive those pins high/input)
+ *   0x04 CLEAR_MASK   bytes1..2 = mask u16 LE (drive those pins low)
+ *   0x05 TOGGLE_MASK  bytes1..2 = mask u16 LE
+ *   0x06 READ_PORT    (no args) -- QUERY, see below
+ *   0x07 SET_ADDRESS  byte1=addr(0x20-0x27)
+ *   0x08 SCAN         (no args) -- QUERY, see below
+ *
+ * Pin semantics are the part's quasi-bidirectional ones: writing 1 leaves
+ * only a weak pull-up (that IS the "input" state, and the power-on state of
+ * all 16 pins), writing 0 drives the pin hard low. A pin this device is
+ * driving low always reads back 0, so write it high before reading it.
+ * SET/CLEAR/TOGGLE_MASK are read-modify-write against the firmware's shadow
+ * of the last value *written*, not against a read-back (the part has no
+ * readable output register).
+ *
+ * READ_PORT and SCAN are queries, same shape as the INFO task below: the
+ * request DATA frame is ACKed as usual, and the answer arrives as a separate
+ * DATA frame from (ESP, UART_TASK_ID_PCF8575) back to whichever
+ * (device, task_id) asked. Unlike INFO's replies, these DO carry their
+ * subcommand back in byte0, so the receiver never has to guess which layout
+ * it's looking at:
+ *
+ *   READ_PORT response:
+ *     byte0    = PCF8575_CMD_READ_PORT (0x06)
+ *     byte1-2  = port pin states, u16 LE
+ *     byte3-4  = shadow (last value written), u16 LE
+ *     byte5    = the address the firmware is currently talking to
+ *
+ *   SCAN response:
+ *     byte0    = PCF8575_CMD_SCAN (0x08)
+ *     byte1    = count (N) of addresses in 0x20-0x27 that ACKed
+ *     N bytes  = those addresses
+ */
+#define PCF8575_CMD_WRITE_PORT  0x01u
+#define PCF8575_CMD_WRITE_PIN   0x02u
+#define PCF8575_CMD_SET_MASK    0x03u
+#define PCF8575_CMD_CLEAR_MASK  0x04u
+#define PCF8575_CMD_TOGGLE_MASK 0x05u
+#define PCF8575_CMD_READ_PORT   0x06u
+#define PCF8575_CMD_SET_ADDRESS 0x07u
+#define PCF8575_CMD_SCAN        0x08u
 
 /* --- LOG (task_id = UART_TASK_ID_LOG) ---
  * Firmware -> PC only, unsolicited (fire-and-forget, no reply expected and

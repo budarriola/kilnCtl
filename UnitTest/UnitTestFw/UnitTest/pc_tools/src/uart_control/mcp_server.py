@@ -34,12 +34,14 @@ except ImportError:  # pragma: no cover - mcp 1.x
 from . import actions, devices, settings
 from .device_log import LogClient
 from .devices import LogLine
+from .expander import ExpanderClient, ExpanderQueryError
 from .info import InfoClient, InfoQueryError
 from .link_hub import get_shared_link
 from .protocol import (
     UART_TASK_ID_AD9833,
     UART_TASK_ID_DAC,
     UART_TASK_ID_OLED,
+    UART_TASK_ID_PCF8575,
     UART_TASK_ID_SYSTEM,
     LogLevel,
 )
@@ -115,10 +117,17 @@ def _on_device_log_line(line: LogLine) -> None:
 #: front for the same "don't miss the boot-time backlog" reason as _info.
 _device_log = LogClient(_link, on_line=_on_device_log_line)
 
+#: Owns task PCF8575 (7) so the expander's query replies (READ_PORT / SCAN)
+#: have somewhere to land -- registered up front like _info and _device_log,
+#: though nothing is ever pushed unsolicited on this task.
+_expander = ExpanderClient(_link)
+
 #: Backs the generic press_button/list_buttons tools (actions.py) with the
 #: same link/info/log this module's own bespoke tools use, so both paths
 #: hit the identical underlying state.
-_action_ctx = actions.ActionContext(link=_link, info=_info, session_log=_session_log)
+_action_ctx = actions.ActionContext(
+    link=_link, info=_info, session_log=_session_log, expander=_expander
+)
 
 
 def _send(dst_task: int, payload: bytes) -> str:
@@ -245,6 +254,7 @@ def close_server() -> str:
         time.sleep(0.2)  # let the stdio transport flush this tool's reply first
         _info.close()
         _device_log.close()
+        _expander.close()
         _link.close()
         _session_log.close()
         os._exit(0)
@@ -377,6 +387,81 @@ def oled_set_power(on: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PCF8575 I/O expander (task 7)
+#
+# Pin semantics are quasi-bidirectional: writing 1 leaves only a weak pull-up
+# (that IS the input state, and the power-on state of all 16 pins), writing 0
+# drives the pin hard low. A pin driven low always reads back 0, so write it
+# high before reading it.
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def expander_write_port(value: int) -> str:
+    """Write all 16 expander pins at once (bit N = pin N, 0..0xFFFF)."""
+    return _send(UART_TASK_ID_PCF8575, devices.pcf8575_write_port(value))
+
+
+@mcp.tool()
+def expander_write_pin(pin: int, level: bool) -> str:
+    """Drive one expander pin (0-15) high (weak pull-up / input) or low."""
+    return _send(UART_TASK_ID_PCF8575, devices.pcf8575_write_pin(pin, level))
+
+
+@mcp.tool()
+def expander_set_mask(mask: int) -> str:
+    """Take the masked pins high (weak pull-up / input), leaving the rest alone."""
+    return _send(UART_TASK_ID_PCF8575, devices.pcf8575_set_mask(mask))
+
+
+@mcp.tool()
+def expander_clear_mask(mask: int) -> str:
+    """Drive the masked pins low, leaving the rest alone."""
+    return _send(UART_TASK_ID_PCF8575, devices.pcf8575_clear_mask(mask))
+
+
+@mcp.tool()
+def expander_toggle_mask(mask: int) -> str:
+    """Invert the masked pins, leaving the rest alone."""
+    return _send(UART_TASK_ID_PCF8575, devices.pcf8575_toggle_mask(mask))
+
+
+@mcp.tool()
+def expander_set_address(addr: int) -> str:
+    """Re-target the running firmware at another PCF8575 address (0x20-0x27).
+
+    All eight addresses the part's A2/A1/A0 pins can select are supported; the
+    board's pins are pulled down, so 0x20 is the boot default.
+    """
+    return _send(UART_TASK_ID_PCF8575, devices.pcf8575_set_address(addr))
+
+
+@mcp.tool()
+def expander_read_port() -> str:
+    """Read the expander's live pin states, output shadow, and current address.
+
+    Like the INFO tools this returns real device data rather than a
+    SendResult: READ_PORT is a query, so the ACK only confirms delivery and
+    the answer arrives in a separate DATA frame (see expander.py).
+    """
+    try:
+        port = _expander.read_port()
+    except ExpanderQueryError as exc:
+        return f"error: {exc}"
+    return port.describe()
+
+
+@mcp.tool()
+def expander_scan() -> str:
+    """Probe 0x20-0x27 on the device's I2C bus; report which addresses answered."""
+    try:
+        found = _expander.scan()
+    except ExpanderQueryError as exc:
+        return f"error: {exc}"
+    if not found:
+        return "no device answered in 0x20-0x27"
+    return ", ".join(f"0x{a:02X}" for a in found)
+
+
+# ---------------------------------------------------------------------------
 # INFO queries (task 3)
 #
 # Unlike every tool above, these return real device data rather than a
@@ -489,6 +574,7 @@ def main() -> int:
     finally:
         _info.close()
         _device_log.close()
+        _expander.close()
         # close(), not disconnect(): this link may be shared with another
         # process (see link_hub.py) -- exiting shouldn't yank the physical
         # port out from under it. The disconnect MCP tool is the only thing

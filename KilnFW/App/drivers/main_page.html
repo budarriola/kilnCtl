@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --on-color: #1a7a1a; --off-color: #888; --fault-color: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+      --card-bg: #232323; --on-color: #4caf50; --off-color: #999; --fault-color: #ff6b6b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+    --card-bg: #232323; --on-color: #4caf50; --off-color: #999; --fault-color: #ff6b6b;
+  }
+  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  a.button { display: inline-block; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
+             border: 1px solid var(--border); border-radius: 4px; text-decoration: none;
+             color: var(--fg); background: var(--button-bg); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+          padding: 0.7em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
+          align-items: center; }
+  .temp { font-size: 1.1em; font-weight: bold; }
+  .fault { color: var(--fault-color); font-size: 0.85em; }
+  .stale { color: var(--muted); font-size: 0.85em; }
+  button.relay-toggle { padding: 0.4em 1em; font-size: 0.9em; border-radius: 4px;
+                         border: 1px solid var(--border); cursor: pointer; }
+  button.relay-on { background: var(--on-color); color: #fff; }
+  button.relay-off { background: var(--button-bg); color: var(--fg); }
+  .empty { color: var(--muted); font-style: italic; }
+  .zone-group { border: 1px solid var(--border); border-radius: 4px; margin-bottom: 0.7em;
+                overflow: hidden; }
+  .zone-group h3 { margin: 0; padding: 0.5em 1em; font-size: 0.9em;
+                    background: var(--card-bg); border-bottom: 1px solid var(--border); }
+  .zone-group .card { border: none; border-radius: 0; border-bottom: 1px solid var(--border);
+                       margin-bottom: 0; }
+  .zone-group .card:last-child { border-bottom: none; }
+  select { width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
+           border-radius: 4px; margin-bottom: 0.5em; }
+  button.run-btn { padding: 0.6em 1.2em; font-size: 0.95em; border-radius: 4px;
+                    border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
+                    cursor: pointer; margin-right: 0.5em; margin-top: 0.3em; }
+  button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
+  .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+               padding: 0.7em 1em; margin-top: 0.5em; }
+  .exec-card .row { display: flex; justify-content: space-between; margin-bottom: 0.3em; }
+  .exec-state { font-weight: bold; text-transform: capitalize; }
+  .exec-state.state-faulted { color: var(--fault-color); }
+  .exec-state.state-running { color: var(--on-color); }
+  #historyChart { width: 100%; height: 220px; background: var(--card-bg);
+                  border: 1px solid var(--border); border-radius: 4px; display: block; }
+  /* Previous-run breadcrumb (TODO.md 6A.3). Uses the existing card colours
+     rather than a new palette; only the left rule is coloured, so an
+     interrupted firing reads as urgent without the page shouting on every
+     ordinary boot after a normal firing. */
+  .banner { background: var(--card-bg); border: 1px solid var(--border);
+            border-left: 4px solid var(--off-color); border-radius: 4px;
+            padding: 0.7em 1em; margin-bottom: 1em; font-size: 0.9em; }
+  .banner.interrupted { border-left-color: var(--fault-color); }
+  .banner h3 { margin: 0 0 0.4em 0; font-size: 0.95em; }
+  .banner.interrupted h3 { color: var(--fault-color); }
+  .banner .row { display: flex; justify-content: space-between; margin-bottom: 0.2em;
+                 color: var(--muted); }
+  .banner .note { color: var(--muted); font-style: italic; margin-top: 0.5em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<h1>kilnCtl</h1>
+<div id="lastRunBanner"></div>
+
+<h2>Thermocouples</h2>
+<div id="channels"><p class="empty">Loading…</p></div>
+
+<h2>Relays</h2>
+<p>Grouped by zone (Settings &rarr; Thermocouples &amp; Zones) -- relays in
+the same group are assigned to the same zone and switch together when a
+profile drives that zone.</p>
+<div id="relays"><p class="empty">Loading…</p></div>
+
+<h2>Firing profiles</h2>
+<div id="execCard"></div>
+<div id="runPicker">
+  <label for="profileSelect">Profile</label>
+  <select id="profileSelect"></select>
+  <button id="runBtn" type="button" class="run-btn primary">Start</button>
+</div>
+<p><a class="button" href="/profiles">Manage fire profiles</a></p>
+
+<h2>History</h2>
+<p>This run's trend: actual vs. desired temperature (left axis) and commanded
+duty (right axis, 0-1), one sample per 30s. Resets when a new profile starts.
+Red marks are thermal-guard trips. <a href="/api/history.csv">Download CSV</a></p>
+<canvas id="historyChart" width="600" height="220"></canvas>
+<p id="historyEmpty" class="empty">No history yet -- start a firing profile.</p>
+
+<h2>Settings</h2>
+<a class="button" href="/settings/zones">Thermocouples &amp; zones</a>
+<a class="button" href="/settings/relays">Relays &amp; rules</a>
+<a class="button" href="/wifi">Network settings</a>
+
+<script>
+const FAULT_BITS = [
+  [0x01, 'open circuit'], [0x02, 'over/under voltage'], [0x04, 'TC low'],
+  [0x08, 'TC high'], [0x10, 'CJ low'], [0x20, 'CJ high'],
+  [0x40, 'TC out of range'], [0x80, 'CJ out of range'],
+];
+function faultText(bits) {
+  return FAULT_BITS.filter(([b]) => bits & b).map(([, t]) => t).join(', ');
+}
+
+function renderChannels(data) {
+  const el = document.getElementById('channels');
+  if (!data.thermo_ready) {
+    el.innerHTML = '<p class="empty">No thermocouple board attached.</p>';
+    return;
+  }
+  el.innerHTML = '';
+  data.channels.forEach(function (ch) {
+    const div = document.createElement('div');
+    div.className = 'card';
+    let detail;
+    if (ch.spi_failed) {
+      detail = '<span class="fault">SPI read failed</span>';
+    } else if (!ch.valid) {
+      detail = '<span class="fault">' + (faultText(ch.fault_status) || 'invalid reading') + '</span>';
+    } else {
+      detail = ch.temp_c.toFixed(1) + ' &deg;C (CJ ' + ch.cj_c.toFixed(1) + ' &deg;C)' +
+                (ch.stale ? ' <span class="stale">(stale)</span>' : '');
+    }
+    div.innerHTML = '<span>Channel ' + ch.channel + '</span><span class="temp">' + detail + '</span>';
+    el.appendChild(div);
+  });
+}
+
+function setRelay(relay, on) {
+  fetch('/api/relay', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'relay=' + relay + '&on=' + (on ? '1' : '0'),
+  }).then(poll).catch(poll);
+}
+
+function relayRow(r) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  const btn = document.createElement('button');
+  btn.className = 'relay-toggle ' + (r.on ? 'relay-on' : 'relay-off');
+  btn.textContent = r.on ? 'ON' : 'OFF';
+  btn.addEventListener('click', function () { setRelay(r.relay, !r.on); });
+  div.innerHTML = '<span>Relay ' + r.relay + '</span>';
+  div.appendChild(btn);
+  return div;
+}
+
+// Groups relays by the zone that claims them (zones.relay_mask, bit N-1 =
+// Relay N -- same numbering as kiln_io.h). A relay claimed by no zone (or
+// zones aren't configured at all) falls into "Unassigned" so it's never
+// silently hidden.
+var zonesCache = { zones: [] };
+function renderRelays(statusData) {
+  const el = document.getElementById('relays');
+  if (!statusData.io_ready) {
+    el.innerHTML = '<p class="empty">No relay board attached.</p>';
+    return;
+  }
+  el.innerHTML = '';
+  const relaysByN = {};
+  statusData.relays.forEach(function (r) { relaysByN[r.relay] = r; });
+  const claimed = {};
+
+  zonesCache.zones.slice(0, zonesCache.thermo_count || 0).forEach(function (z, i) {
+    const relaysHere = [];
+    for (let bit = 0; bit < 4; bit++) {
+      if (z.relay_mask & (1 << bit)) {
+        const n = bit + 1;
+        if (relaysByN[n]) { relaysHere.push(relaysByN[n]); claimed[n] = true; }
+      }
+    }
+    if (relaysHere.length === 0) return;
+    const group = document.createElement('div');
+    group.className = 'zone-group';
+    group.innerHTML = '<h3>' + (z.name || ('Zone ' + i)) + '</h3>';
+    relaysHere.forEach(function (r) { group.appendChild(relayRow(r)); });
+    el.appendChild(group);
+  });
+
+  const unassigned = statusData.relays.filter(function (r) { return !claimed[r.relay]; });
+  if (unassigned.length > 0) {
+    const group = document.createElement('div');
+    group.className = 'zone-group';
+    group.innerHTML = '<h3>Unassigned</h3>';
+    unassigned.forEach(function (r) { group.appendChild(relayRow(r)); });
+    el.appendChild(group);
+  }
+}
+
+function loadZones() {
+  return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
+    zonesCache = data;
+  }).catch(function () {});
+}
+
+// -- Firing profile execution --------------------------------------------
+
+function loadProfileList() {
+  return fetch('/api/profiles').then(function (r) { return r.json(); }).then(function (list) {
+    const sel = document.getElementById('profileSelect');
+    sel.innerHTML = '';
+    if (list.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = 'No saved profiles -- create one first';
+      sel.appendChild(opt);
+      document.getElementById('runBtn').disabled = true;
+      return;
+    }
+    document.getElementById('runBtn').disabled = false;
+    list.forEach(function (p) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + ' (zone ' + p.zone + ')';
+      sel.appendChild(opt);
+    });
+  }).catch(function () {});
+}
+
+function fmtDuration(s) {
+  const m = Math.floor(s / 60), sec = s % 60;
+  return m + 'm ' + sec + 's';
+}
+
+// Shared by the exec card and the previous-run banner (both name zones by
+// bit position, zones.relay_mask-style, per zones_http.h).
+function zoneName(zi) {
+  return (zonesCache.zones[zi] && zonesCache.zones[zi].name) || ('Zone ' + zi);
+}
+
+// -- Previous-run breadcrumb (TODO.md 6A.3, "No auto-resume across reboot") --
+//
+// This is a report on a firing that is already over, NOT a live status and
+// NOT an offer to resume one. The firmware never restarts a firing by
+// itself; starting one is always the operator's explicit action through the
+// picker below. The banner exists to answer the question a brownout leaves
+// behind -- "did it stop because I stopped it, or because the power went
+// out" -- and then get out of the way once acknowledged.
+function renderLastRun(st) {
+  const el = document.getElementById('lastRunBanner');
+  const lr = st.last_run;
+  if (!lr || !lr.present) { el.innerHTML = ''; return; }
+
+  var names = [];
+  for (var b = 0; b < 8; b++) { if (lr.zone_mask & (1 << b)) names.push(zoneName(b)); }
+
+  var html = '<div class="banner' + (lr.interrupted ? ' interrupted' : '') + '">' +
+    '<h3>' + (lr.interrupted
+      ? 'Previous firing was interrupted &mdash; it never ended cleanly'
+      : 'Previous firing ended (' + lr.phase + ')') + '</h3>' +
+    '<div class="row"><span>Profile</span><span>' + (lr.profile_name || ('id ' + lr.profile_id)) +
+      ' &mdash; ' + (names.join(', ') || 'no zones') + '</span></div>' +
+    '<div class="row"><span>Segment</span><span>' + (lr.segment_index + 1) + ' / ' + lr.segment_count +
+      ' (' + (lr.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
+    '<div class="row"><span>Target at that point</span><span>' + lr.target_c.toFixed(1) + ' &deg;C</span></div>' +
+    '<div class="row"><span>Into the segment</span><span>' + fmtDuration(lr.segment_elapsed_s) + '</span></div>' +
+    // Uptime, not a clock time: the board has no RTC and no guaranteed SNTP,
+    // so an absolute timestamp here would be fabricated. See run_state.h.
+    '<div class="row"><span>Recorded at</span><span>' + fmtDuration(lr.uptime_at_write_s) +
+      ' into that boot</span></div>';
+  if (lr.fault_reason) {
+    html += '<div class="row fault"><span>Fault ' + lr.fault_guard + '</span><span>' +
+            lr.fault_reason + '</span></div>';
+  }
+  html += '<p class="note">' + (lr.interrupted
+    ? 'Nothing was restarted. Relays came up off and stay off until you start a firing.'
+    : 'Recorded by the controller, so this stop was deliberate.') + '</p>' +
+    '<button class="run-btn" id="ackLastRunBtn">Dismiss</button></div>';
+
+  el.innerHTML = html;
+  document.getElementById('ackLastRunBtn').addEventListener('click', function () {
+    fetch('/api/profile_exec/ack_last_run', { method: 'POST' }).then(pollExec).catch(pollExec);
+  });
+}
+
+function renderExec(st) {
+  const card = document.getElementById('execCard');
+  const picker = document.getElementById('runPicker');
+  if (st.state === 'idle') {
+    card.innerHTML = '';
+    picker.style.display = '';
+    return;
+  }
+  picker.style.display = 'none';
+
+  var zoneNames = [];
+  for (var zb = 0; zb < 8; zb++) { if (st.zone_mask & (1 << zb)) zoneNames.push(zoneName(zb)); }
+
+  let html = '<div class="exec-card">' +
+    '<div class="row"><span>' + st.profile_name + ' &mdash; ' + zoneNames.join(', ') + '</span>' +
+    '<span class="exec-state state-' + st.state + '">' + st.state + '</span></div>' +
+    '<div class="row"><span>Segment</span><span>' + (st.segment_index + 1) + ' / ' + st.segment_count +
+    ' (' + (st.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
+    '<div class="row"><span>Shared target</span><span>' + st.target_c.toFixed(1) + ' &deg;C</span></div>';
+  if (st.ramp_lock_held) {
+    var laggingNames = [];
+    for (var lb = 0; lb < 8; lb++) { if (st.ramp_lock_lagging_mask & (1 << lb)) laggingNames.push(zoneName(lb)); }
+    html += '<div class="row fault"><span>Ramp-lock held</span><span>waiting on ' +
+            (laggingNames.join(', ') || 'a zone') + '</span></div>';
+  }
+  (st.zones || []).forEach(function (z) {
+    html += '<div class="row"><span>' + zoneName(z.zone) + '</span><span>' +
+      (z.actual_valid ? z.actual_c.toFixed(1) + ' &deg;C' : 'no reading') +
+      (z.faulted ? ' &mdash; FAULTED' : (z.relay_on ? ' &mdash; ON' : ' &mdash; off')) + '</span></div>';
+    if (z.faulted) {
+      html += '<div class="row fault">' + zoneName(z.zone) + ': ' + z.fault_reason + '</div>';
+    }
+  });
+  if (st.dwelling && st.state === 'running') {
+    html += '<div class="row"><span>Dwell remaining</span><span>' + fmtDuration(st.dwell_remaining_s) + '</span></div>';
+  }
+  if (st.state === 'faulted' && st.fault_reason) {
+    html += '<div class="row fault">' + st.fault_reason + '</div>';
+  }
+  html += '</div>';
+
+  html += '<div style="margin-top:0.5em">';
+  if (st.state === 'running') {
+    html += '<button class="run-btn" id="pauseBtn">Pause</button>';
+  } else if (st.state === 'paused') {
+    html += '<button class="run-btn primary" id="resumeBtn">Resume</button>';
+  }
+  if (st.state === 'running' || st.state === 'paused' || st.state === 'faulted' || st.state === 'done') {
+    html += '<button class="run-btn" id="stopBtn">Stop</button>';
+  }
+  html += '</div>';
+
+  card.innerHTML = html;
+  const pauseBtn = document.getElementById('pauseBtn');
+  if (pauseBtn) pauseBtn.addEventListener('click', function () { execAction('pause'); });
+  const resumeBtn = document.getElementById('resumeBtn');
+  if (resumeBtn) resumeBtn.addEventListener('click', function () { execAction('resume'); });
+  const stopBtn = document.getElementById('stopBtn');
+  if (stopBtn) stopBtn.addEventListener('click', function () { execAction('stop'); });
+}
+
+function execAction(action) {
+  fetch('/api/profile_exec/' + action, { method: 'POST' }).then(pollExec).catch(pollExec);
+}
+
+document.getElementById('runBtn').addEventListener('click', function () {
+  const id = document.getElementById('profileSelect').value;
+  if (id === undefined || id === '') return;
+  fetch('/api/profile_exec/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'id=' + id,
+  }).then(function (r) { return r.json(); }).then(function (result) {
+    if (result.ok === false) alert(result.error || 'failed to start');
+    pollExec();
+  }).catch(pollExec);
+});
+
+function parseHistoryCsv(text) {
+  var lines = text.split('\n').filter(function (l) { return l.trim().length > 0; });
+  var rows = [];
+  for (var i = 1; i < lines.length; i++) { // skip header
+    var f = lines[i].split(',');
+    if (f.length < 5) continue;
+    rows.push({
+      t: parseFloat(f[0]), actual: parseFloat(f[1]), desired: parseFloat(f[2]),
+      duty: parseFloat(f[3]), guard: parseInt(f[4], 10),
+    });
+  }
+  return rows;
+}
+
+function drawHistoryChart(rows) {
+  var canvas = document.getElementById('historyChart');
+  var empty = document.getElementById('historyEmpty');
+  if (!rows.length) {
+    canvas.style.display = 'none';
+    empty.style.display = '';
+    return;
+  }
+  canvas.style.display = '';
+  empty.style.display = 'none';
+
+  var dpr = window.devicePixelRatio || 1;
+  var cssW = canvas.clientWidth || 600, cssH = 220;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  var ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  var style = getComputedStyle(document.documentElement);
+  var fg = style.getPropertyValue('--fg').trim() || '#111';
+  var muted = style.getPropertyValue('--muted').trim() || '#444';
+  var border = style.getPropertyValue('--border').trim() || '#888';
+
+  var padL = 42, padR = 36, padT = 10, padB = 20;
+  var plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+
+  var tMin = rows[0].t, tMax = rows[rows.length - 1].t;
+  if (tMax === tMin) tMax = tMin + 1;
+  var tempVals = [];
+  rows.forEach(function (r) {
+    if (!isNaN(r.actual)) tempVals.push(r.actual);
+    if (!isNaN(r.desired)) tempVals.push(r.desired);
+  });
+  var tMinV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
+  var tMaxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
+  if (tMaxV === tMinV) tMaxV = tMinV + 1;
+  tMinV -= (tMaxV - tMinV) * 0.05; tMaxV += (tMaxV - tMinV) * 0.05;
+
+  function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
+  function yTemp(v) { return padT + plotH - (v - tMinV) / (tMaxV - tMinV) * plotH; }
+  function yDuty(d) { return padT + plotH - d * plotH; }
+
+  ctx.strokeStyle = border; ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, plotW, plotH);
+
+  ctx.fillStyle = muted; ctx.font = '10px sans-serif';
+  ctx.fillText(tMaxV.toFixed(0) + 'C', 2, padT + 8);
+  ctx.fillText(tMinV.toFixed(0) + 'C', 2, padT + plotH);
+  ctx.fillText('1.0', cssW - padR + 4, padT + 8);
+  ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
+
+  function drawLine(key, yFn, color) {
+    ctx.beginPath();
+    var started = false;
+    rows.forEach(function (r) {
+      var v = r[key];
+      if (isNaN(v)) { started = false; return; }
+      var px = x(r.t), py = yFn(v);
+      if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+    });
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  drawLine('desired', yTemp, '#888');
+  drawLine('duty', yDuty, '#3a9');
+  drawLine('actual', yTemp, '#e63');
+
+  rows.forEach(function (r) {
+    if (r.guard && r.guard !== 0) {
+      var px = x(r.t);
+      ctx.strokeStyle = '#c22'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
+    }
+  });
+
+  ctx.fillStyle = fg; ctx.font = '11px sans-serif';
+  ctx.fillText('— actual', padL + 4, cssH - 4);
+  ctx.fillStyle = '#888'; ctx.fillText('— desired', padL + 70, cssH - 4);
+  ctx.fillStyle = '#3a9'; ctx.fillText('— duty', padL + 145, cssH - 4);
+  ctx.fillStyle = fg;
+}
+
+function pollHistory() {
+  fetch('/api/history.csv').then(function (r) { return r.text(); }).then(function (text) {
+    drawHistoryChart(parseHistoryCsv(text));
+  }).catch(function () {});
+}
+
+function pollExec() {
+  fetch('/api/profile_exec').then(function (r) { return r.json(); }).then(function (st) {
+    renderExec(st);
+    renderLastRun(st);
+  }).catch(function () {});
+}
+
+function poll() {
+  fetch('/api/status').then(r => r.json()).then(function (data) {
+    renderChannels(data);
+    renderRelays(data);
+  }).catch(function () {});
+  pollExec();
+  setTimeout(poll, 2000);
+}
+
+loadZones().then(function () { loadProfileList(); poll(); });
+pollHistory();
+setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
+window.addEventListener('resize', pollHistory);
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

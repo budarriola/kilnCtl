@@ -144,7 +144,41 @@ static const uint8_t font5x7[96][5] = {
     { 0x3C, 0x26, 0x23, 0x26, 0x3C }, // 0x7F (DEL) -- unused in practice but kept for table completeness
 };
 
-static esp_err_t ssd1306_write_cmd_stream(SSD1306Class *oled, const uint8_t *cmds, size_t len)
+/* Read-back on this panel is limited to the one status byte the controller
+ * returns for an I2C read; the GDDRAM itself can only be read through the
+ * parallel/SPI read strobe, which this two-wire hookup doesn't have. So a
+ * framebuffer or command write can only be confirmed as far as the ACK, and
+ * the single piece of state that IS verifiable is the display on/off bit.
+ *
+ * Status byte: D7 = BUSY, D6 = display OFF (1 = sleeping). Plenty of cheap
+ * modules NACK the read or answer 0x00/0xFF, so a status read that fails or
+ * comes back with one of those is treated as "no status available" rather
+ * than as a failed write. */
+#define SSD1306_STATUS_BUSY_BIT 0x80u
+#define SSD1306_STATUS_OFF_BIT  0x40u
+
+static esp_err_t ssd1306_transmit(SSD1306Class *oled, const uint8_t *buf, size_t len,
+                                  uint32_t timeout_ms)
+{
+    return oled->owner_initialized
+        ? i2c_owner_transfer(&oled->owner, oled->dev, buf, len, NULL, 0, timeout_ms)
+        : i2c_master_transmit(oled->dev, buf, len, timeout_ms);
+}
+
+/* ESP_ERR_NOT_SUPPORTED = the panel answered, but with nothing usable. */
+static esp_err_t ssd1306_read_status(SSD1306Class *oled, uint8_t *out_status)
+{
+    uint8_t status = 0;
+    esp_err_t err = oled->owner_initialized
+        ? i2c_owner_transfer(&oled->owner, oled->dev, NULL, 0, &status, 1, 500)
+        : i2c_master_receive(oled->dev, &status, 1, 500);
+    if (err != ESP_OK) return err;
+    if (status == 0x00 || status == 0xFF) return ESP_ERR_NOT_SUPPORTED;
+    *out_status = status;
+    return ESP_OK;
+}
+
+static esp_err_t ssd1306_send_cmd_stream_once(SSD1306Class *oled, const uint8_t *cmds, size_t len)
 {
     // Build a single I2C transaction: [0x00 control][cmd bytes...]
     uint8_t *buf = malloc(len + 1);
@@ -152,10 +186,27 @@ static esp_err_t ssd1306_write_cmd_stream(SSD1306Class *oled, const uint8_t *cmd
     buf[0] = SSD1306_CTRL_CMD;
     memcpy(&buf[1], cmds, len);
 
-    esp_err_t err = oled->owner_initialized
-        ? i2c_owner_transfer(&oled->owner, oled->dev, buf, len + 1, NULL, 0, 1000)
-        : i2c_master_transmit(oled->dev, buf, len + 1, 1000);
+    esp_err_t err = ssd1306_transmit(oled, buf, len + 1, 1000);
     free(buf);
+    return err;
+}
+
+/* Nothing here is read-back verifiable (see the comment above), so this is
+ * retry-on-transport-error only, reported the same way as the verified writes
+ * in the other I2C drivers. */
+static esp_err_t ssd1306_write_cmd_stream(SSD1306Class *oled, const uint8_t *cmds, size_t len)
+{
+    esp_err_t err = ESP_FAIL;
+    for (unsigned attempt = 1; attempt <= I2C_WRITE_RETRY_ATTEMPTS; ++attempt) {
+        err = ssd1306_send_cmd_stream_once(oled, cmds, len);
+        if (err == ESP_OK) return ESP_OK;
+        if (err == ESP_ERR_NO_MEM) return err;  // retrying won't conjure heap
+        ESP_LOGW(TAG, "command 0x%02X (%u bytes) failed (attempt %u/%u): %s", cmds[0],
+                 (unsigned)len, attempt, (unsigned)I2C_WRITE_RETRY_ATTEMPTS,
+                 esp_err_to_name(err));
+    }
+    ESP_LOGE(TAG, "command 0x%02X failed after %u attempts: %s", cmds[0],
+             (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
     return err;
 }
 
@@ -190,7 +241,7 @@ esp_err_t SSD1306_init(SSD1306Class *oled, i2c_master_bus_handle_t bus, uint8_t 
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = addr,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = I2C_MASTER_FREQ_HZ,
     };
     esp_err_t err = i2c_master_bus_add_device(bus, &dev_config, &oled->dev);
     if (err != ESP_OK) {
@@ -326,9 +377,17 @@ esp_err_t SSD1306_display(SSD1306Class *oled)
     buf[0] = SSD1306_CTRL_DATA;
     memcpy(&buf[1], oled->framebuffer, fb_len);
 
-    err = oled->owner_initialized
-        ? i2c_owner_transfer(&oled->owner, oled->dev, buf, fb_len + 1, NULL, 0, 2000)
-        : i2c_master_transmit(oled->dev, buf, fb_len + 1, 2000);
+    /* GDDRAM can't be read back over I2C, so this is retry-on-error only. */
+    for (unsigned attempt = 1; attempt <= I2C_WRITE_RETRY_ATTEMPTS; ++attempt) {
+        err = ssd1306_transmit(oled, buf, fb_len + 1, 2000);
+        if (err == ESP_OK) break;
+        ESP_LOGW(TAG, "framebuffer write failed (attempt %u/%u): %s", attempt,
+                 (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "framebuffer write failed after %u attempts: %s",
+                 (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+    }
     free(buf);
     return err;
 }
@@ -359,7 +418,40 @@ esp_err_t SSD1306_set_invert(SSD1306Class *oled, bool invert)
 esp_err_t SSD1306_set_power(SSD1306Class *oled, bool on)
 {
     if (!oled) return ESP_ERR_INVALID_ARG;
-    return ssd1306_write_cmd1(oled, on ? SSD1306_CMD_DISPLAY_ON : SSD1306_CMD_DISPLAY_OFF);
+
+    /* The one SSD1306 write that can actually be confirmed: the status byte
+     * carries the display on/off state back. */
+    const uint8_t cmd = on ? SSD1306_CMD_DISPLAY_ON : SSD1306_CMD_DISPLAY_OFF;
+    esp_err_t err = ESP_FAIL;
+    for (unsigned attempt = 1; attempt <= I2C_WRITE_RETRY_ATTEMPTS; ++attempt) {
+        err = ssd1306_send_cmd_stream_once(oled, &cmd, 1);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "display %s failed (attempt %u/%u): %s", on ? "on" : "off", attempt,
+                     (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+            continue;
+        }
+
+        uint8_t status = 0;
+        esp_err_t status_err = ssd1306_read_status(oled, &status);
+        if (status_err != ESP_OK) {
+            /* Panel won't report status -- the ACK is all there is. Not an
+             * error, and not worth retrying a write that already succeeded. */
+            ESP_LOGD(TAG, "display %s: no readable status (%s), accepting the ACK",
+                     on ? "on" : "off", esp_err_to_name(status_err));
+            return ESP_OK;
+        }
+        if (((status & SSD1306_STATUS_OFF_BIT) == 0) == on) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "display %s: status 0x%02X still says %s (attempt %u/%u)",
+                 on ? "on" : "off", status, on ? "off" : "on", attempt,
+                 (unsigned)I2C_WRITE_RETRY_ATTEMPTS);
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+
+    ESP_LOGE(TAG, "display %s failed after %u attempts: %s", on ? "on" : "off",
+             (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+    return err;
 }
 
 // Draws one glyph column-byte into the page-addressed framebuffer at pixel

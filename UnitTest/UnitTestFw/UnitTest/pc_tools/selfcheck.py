@@ -223,7 +223,7 @@ def info_checks() -> None:
     check(
         "pin config labels resolved",
         entries[0].label,
-        "I2C SDA (MCP4728 DAC + SSD1306 OLED)",
+        "I2C SDA (MCP4728 DAC + SSD1306 OLED + PCF8575)",
     )
     check("pin config abbrevs resolved", [e.abbrev for e in entries][:4], ["SDA", "SCL", "TX", "RX"])
     check("every reported gpio is on the diagram", pin_overlay.unmapped_gpios(entries), [])
@@ -341,6 +341,148 @@ def info_checks() -> None:
             client.get_fw_version(timeout=0.3)
             check("undelivered query raises", False, True)
         except InfoQueryError as exc:
+            check("undelivered query raises", exc.send_result is not None, True)
+    finally:
+        stop.set()
+        client.close()
+        host.disconnect()
+        esp.disconnect()
+
+
+def expander_checks() -> None:
+    """PCF8575 payload layouts, then the query flow over the virtual link.
+
+    Same request/response shape as INFO (request ACKed, answer in a separate
+    DATA frame), but with a self-describing reply -- byte0 echoes the
+    subcommand -- so this also checks that the two reply layouts are told
+    apart by that byte rather than structurally.
+    """
+    from uart_control.expander import ExpanderClient, ExpanderQueryError
+    from uart_control.protocol import (
+        PCF8575_CMD_READ_PORT,
+        PCF8575_CMD_SCAN,
+        UART_TASK_ID_PCF8575,
+    )
+    from uart_control.serial_link import UartLink
+
+    print("\n== PCF8575 payload layouts (uart_task_ids.h) ==")
+    check("task id PCF8575 == 7", UART_TASK_ID_PCF8575, 7)
+    check(
+        "write_port bytes (u16 LE)",
+        devices.pcf8575_write_port(0xBEEF),
+        b"\x01" + struct.pack("<H", 0xBEEF),
+    )
+    check("write_pin bytes", devices.pcf8575_write_pin(15, True), b"\x02\x0F\x01")
+    check("set_mask bytes", devices.pcf8575_set_mask(0x0100), b"\x03\x00\x01")
+    check("clear_mask bytes", devices.pcf8575_clear_mask(0x0001), b"\x04\x01\x00")
+    check("toggle_mask bytes", devices.pcf8575_toggle_mask(0xFFFF), b"\x05\xff\xff")
+    check("read_port request bytes", devices.pcf8575_read_port(), b"\x06")
+    check("set_address bytes", devices.pcf8575_set_address(0x27), b"\x07\x27")
+    check("scan request bytes", devices.pcf8575_scan(), b"\x08")
+    check("all eight addresses offered", devices.PCF8575_ADDRESSES,
+          (0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27))
+
+    for label, fn in (
+        ("pin 16 rejected", lambda: devices.pcf8575_write_pin(16, True)),
+        ("port 0x10000 rejected", lambda: devices.pcf8575_write_port(0x10000)),
+        ("address 0x28 rejected", lambda: devices.pcf8575_set_address(0x28)),
+        ("address 0x1F rejected", lambda: devices.pcf8575_set_address(0x1F)),
+    ):
+        try:
+            fn()
+            check(label, False, True)
+        except ValueError:
+            check(label, True, True)
+
+    # Replies as pcf8575_bridge_task() emits them.
+    read_reply = bytes([PCF8575_CMD_READ_PORT]) + struct.pack("<HH", 0xFF0E, 0xFFFF) + bytes([0x21])
+    subcommand, port = devices.parse_pcf8575_response(read_reply)
+    check("classify READ_PORT reply", subcommand, PCF8575_CMD_READ_PORT)
+    check("read port pins", hex(port.pins), hex(0xFF0E))
+    check("read port shadow", hex(port.shadow), hex(0xFFFF))
+    check("read port address", hex(port.addr), hex(0x21))
+    check("pin 0 reads low (external pull-down)", port.pin(0), False)
+    check("pin 1 reads high", port.pin(1), True)
+    check("pin 0 not driven low by us", port.driven_low(0), False)
+
+    scan_reply = bytes([PCF8575_CMD_SCAN, 2, 0x20, 0x24])
+    subcommand, found = devices.parse_pcf8575_response(scan_reply)
+    check("classify SCAN reply", subcommand, PCF8575_CMD_SCAN)
+    check("scan addresses", found, [0x20, 0x24])
+
+    for label, bad in (
+        ("empty expander reply rejected", b""),
+        ("short READ_PORT reply rejected", bytes([PCF8575_CMD_READ_PORT, 0, 0])),
+        ("SCAN count mismatch rejected", bytes([PCF8575_CMD_SCAN, 3, 0x20])),
+        ("unknown subcommand rejected", b"\x7f\x00"),
+    ):
+        try:
+            devices.parse_pcf8575_response(bad)
+            check(label, False, True)
+        except devices.ExpanderResponseError:
+            check(label, True, True)
+
+    print("\n== PCF8575 query flow over the virtual link ==")
+    a, b = FakePort("HOST"), FakePort("ESP")
+    a.peer, b.peer = b, a
+
+    host = UartLink(own_device=Device.HOST, ack_timeout=0.3)
+    esp = UartLink(own_device=Device.ESP, ack_timeout=0.3)
+    esp_inbox = esp.register_task(UART_TASK_ID_PCF8575)
+    _wire_up(host, a)
+    _wire_up(esp, b)
+
+    stop = threading.Event()
+    writes: list[bytes] = []
+
+    def stub_pcf8575_bridge_task() -> None:
+        """Stand-in for pcf8575_bridge_task(): answer queries, record writes."""
+        while not stop.is_set():
+            try:
+                msg = esp_inbox.get(timeout=0.1)
+            except Exception:
+                continue
+            if not msg.payload:
+                continue
+            if msg.payload[0] == PCF8575_CMD_READ_PORT:
+                reply = read_reply
+            elif msg.payload[0] == PCF8575_CMD_SCAN:
+                reply = scan_reply
+            else:
+                writes.append(msg.payload)  # write-style subcommand: ACK only
+                continue
+            esp.send(
+                dst_task=msg.src_task,
+                src_task=UART_TASK_ID_PCF8575,
+                payload=reply,
+                dst_device=msg.src_device,
+            )
+
+    responder = threading.Thread(target=stub_pcf8575_bridge_task, daemon=True)
+    responder.start()
+
+    client = ExpanderClient(host)
+    try:
+        got = client.read_port(timeout=3.0)
+        check("live read_port query", (hex(got.pins), hex(got.addr)), (hex(0xFF0E), hex(0x21)))
+        check("live scan query", client.scan(timeout=3.0), [0x20, 0x24])
+
+        from uart_control.serial_link import SendResult
+
+        res = client.send(devices.pcf8575_write_pin(3, False))
+        check("write-style subcommand ACKed", res, SendResult.OK)
+        deadline = time.time() + 2.0
+        while not writes and time.time() < deadline:
+            time.sleep(0.02)
+        check("write reached the bridge", writes[:1], [b"\x02\x03\x00"])
+
+        # Deaf peer: the request itself never gets through.
+        a.drop_next_writes = 100
+        host.max_retries = 2
+        try:
+            client.read_port(timeout=0.3)
+            check("undelivered query raises", False, True)
+        except ExpanderQueryError as exc:
             check("undelivered query raises", exc.send_result is not None, True)
     finally:
         stop.set()
@@ -519,11 +661,14 @@ def actions_checks() -> None:
     incompatible version is observed, not just when explicitly told to.
     """
     from uart_control import actions
+    from uart_control.expander import ExpanderClient
     from uart_control.info import InfoClient
     from uart_control.protocol import (
         INFO_CMD_GET_FW_VERSION,
         INFO_CMD_GET_PIN_CONFIG,
+        PCF8575_CMD_READ_PORT,
         UART_TASK_ID_INFO,
+        UART_TASK_ID_PCF8575,
     )
     from uart_control.serial_link import UartLink
 
@@ -543,6 +688,7 @@ def actions_checks() -> None:
     for task_id in (devices.UART_TASK_ID_DAC, devices.UART_TASK_ID_AD9833, devices.UART_TASK_ID_OLED):
         esp.register_task(task_id)
     esp_info_inbox = esp.register_task(UART_TASK_ID_INFO)
+    esp_expander_inbox = esp.register_task(UART_TASK_ID_PCF8575)
     _wire_up(host, a)
     _wire_up(esp, b)
 
@@ -569,11 +715,34 @@ def actions_checks() -> None:
                 dst_device=msg.src_device,
             )
 
+    def stub_pcf8575_bridge_task() -> None:
+        """Answer READ_PORT; every other subcommand is ACK-only."""
+        while not stop.is_set():
+            try:
+                msg = esp_expander_inbox.get(timeout=0.1)
+            except Exception:
+                continue
+            if not msg.payload or msg.payload[0] != PCF8575_CMD_READ_PORT:
+                continue
+            esp.send(
+                dst_task=msg.src_task,
+                src_task=UART_TASK_ID_PCF8575,
+                payload=bytes([PCF8575_CMD_READ_PORT])
+                + struct.pack("<HH", 0xFFFE, 0xFFFF)
+                + bytes([0x20]),
+                dst_device=msg.src_device,
+            )
+
     responder = threading.Thread(target=stub_info_bridge_task, daemon=True)
     responder.start()
+    expander_responder = threading.Thread(target=stub_pcf8575_bridge_task, daemon=True)
+    expander_responder.start()
 
     info_client = InfoClient(host)
-    ctx = actions.ActionContext(link=host, info=info_client, session_log=_FakeSessionLog())
+    expander_client = ExpanderClient(host)
+    ctx = actions.ActionContext(
+        link=host, info=info_client, session_log=_FakeSessionLog(), expander=expander_client
+    )
 
     try:
         print("\n== action registry: live virtual-link exercise ==")
@@ -600,6 +769,12 @@ def actions_checks() -> None:
 
         result = actions.ACTIONS["OLED: Write & Show"].run(ctx, text="hi")
         check("OLED: Write & Show (compound) succeeds", result.startswith("ok"), True)
+
+        result = actions.ACTIONS["Expander: Write Pin"].run(ctx, pin=2, level=False)
+        check("Expander: Write Pin succeeds", result.startswith("ok"), True)
+
+        result = actions.ACTIONS["Expander: Read Port"].run(ctx)
+        check("Expander: Read Port returns device data", "addr 0x20" in result, True)
 
         pin_text = actions.ACTIONS["INFO: Get Pin Config"].run(ctx)
         check("INFO: Get Pin Config returns entries", "GPIO8" in pin_text, True)
@@ -634,6 +809,7 @@ def actions_checks() -> None:
     finally:
         stop.set()
         info_client.close()
+        expander_client.close()
         host.disconnect()
         esp.disconnect()
 
@@ -746,6 +922,8 @@ def main() -> int:
     loopback_checks()
 
     info_checks()
+
+    expander_checks()
 
     log_checks()
 

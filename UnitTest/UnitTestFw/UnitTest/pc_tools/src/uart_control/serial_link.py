@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import secrets
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -48,6 +49,28 @@ log = logging.getLogger(__name__)
 #: Per-attempt ACK wait. The firmware defaults to 200 ms, but a USB-serial
 #: round trip through a host driver deserves more headroom; overridable.
 DEFAULT_ACK_TIMEOUT_S = 0.4
+
+
+def _random_msg_index() -> int:
+    """A random starting MSG_INDEX for a host session.
+
+    Not cosmetic. The firmware dedups inbound DATA against a ring of the last
+    ``UART_PROTO_DEDUP_DEPTH`` (4) ``(src_device, src_task, msg_index)`` tuples
+    *per task*, and that ring lives as long as the board stays powered -- it
+    has no notion of "the host restarted". Starting every host session at
+    index 0 therefore made the first few sends of a new session look like
+    retransmits of the previous session's: the firmware re-ACKed them
+    **without delivering them to the task**, which on a query task shows up as
+    the maddening "request 0x02 was ACKed but no reply arrived" -- a delivered,
+    acknowledged, silently discarded message.
+
+    It went unnoticed while opening the port also reset the board (see
+    connect()), since a reboot cleared the rings; fixing that reset exposed
+    this. Randomizing the start makes a collision a 4-in-65536 accident per
+    task instead of a certainty, the same reasoning behind randomized TCP
+    initial sequence numbers.
+    """
+    return secrets.randbelow(0x10000)
 
 
 class SendResult(str, Enum):
@@ -220,7 +243,7 @@ class UartLink:
         # Serializes the whole send-and-wait-for-ack cycle (firmware tx_lock).
         self._tx_lock = threading.RLock()
         self._write_lock = threading.Lock()  # guards raw port writes (ACKs vs DATA)
-        self._next_tx_index = 0
+        self._next_tx_index = _random_msg_index()
 
         self._await_lock = threading.Lock()
         self._awaited: Optional[tuple[int, int, int]] = None  # (device, task, index)
@@ -253,8 +276,19 @@ class UartLink:
                     "(note: the ESP32-S3 native USB-Serial-JTAG port is not this UART)"
                 )
 
+        # Constructed *without* a port so it stays closed, then opened
+        # explicitly below. This matters: the board's USB-UART bridge straps
+        # EN/BOOT off DTR/RTS (the esptool auto-reset circuit), and passing
+        # port= to the constructor opens the port with both lines asserted at
+        # their driver defaults -- which pulses EN and reboots the ESP32-S3.
+        # Deasserting them afterwards is too late; the reset already happened,
+        # and every first query after a connect died against a rebooting board
+        # ("ACKed but no reply"), recovering only because the firmware's
+        # once-per-boot version push happened to land a moment later.
+        # Assigning dtr/rts while closed instead records the desired state,
+        # which pyserial applies as part of opening the port, so the lines are
+        # never asserted in the first place.
         ser = serial.Serial(
-            port=port,
             baudrate=self.baudrate,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
@@ -265,9 +299,16 @@ class UartLink:
             dsrdtr=False,
             xonxoff=False,
         )
-        # Some USB-UART bridges strap EN/BOOT off DTR/RTS (esptool auto-reset
-        # circuit). Deassert both so merely opening the port cannot reset the
-        # ESP32-S3 out from under us.
+        try:
+            ser.dtr = False
+            ser.rts = False
+        except (OSError, serial.SerialException):  # pragma: no cover - driver dependent
+            # Some backends refuse this while closed; the post-open deassert
+            # below is the fallback (it still stops the lines being *held*
+            # asserted, it just can't prevent the open-time pulse).
+            log.debug("could not preset DTR/RTS before open", exc_info=True)
+        ser.port = port
+        ser.open()
         try:
             ser.dtr = False
             ser.rts = False
@@ -278,6 +319,11 @@ class UartLink:
 
         self._serial = ser
         self._port = port
+        # Fresh session, fresh index space -- a reconnect to a board that has
+        # been up the whole time is exactly the case the firmware's dedup ring
+        # cannot distinguish from a retransmit (see _random_msg_index).
+        with self._tx_lock:
+            self._next_tx_index = _random_msg_index()
         self._decoder.reset()
         self._stop.clear()
         self._reader = threading.Thread(

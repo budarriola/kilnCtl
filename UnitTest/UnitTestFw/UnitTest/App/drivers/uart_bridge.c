@@ -31,6 +31,12 @@ typedef struct {
     AD9833Class *gen;
 } ad9833_bridge_ctx_t;
 
+typedef struct {
+    uart_protocol_t *proto;
+    QueueHandle_t inbox;
+    PCF8575Class *expander;
+} pcf8575_bridge_ctx_t;
+
 static void dac_bridge_task(void *arg)
 {
     dac_bridge_ctx_t *ctx = (dac_bridge_ctx_t *)arg;
@@ -215,6 +221,142 @@ static void oled_bridge_task(void *arg)
             ESP_LOGW(TAG, "oled: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
         }
     }
+}
+
+/* Little-endian u16 out of a payload, matching every other multi-byte
+ * payload field in this protocol (see the endianness note in
+ * uart_task_ids.h). */
+static uint16_t bridge_u16_le(const uint8_t *bytes)
+{
+    return (uint16_t)(bytes[0] | ((uint16_t)bytes[1] << 8));
+}
+
+static void bridge_put_u16_le(uint8_t *out, uint16_t value)
+{
+    out[0] = (uint8_t)(value & 0xFF);
+    out[1] = (uint8_t)((value >> 8) & 0xFF);
+}
+
+static void pcf8575_bridge_task(void *arg)
+{
+    pcf8575_bridge_ctx_t *ctx = (pcf8575_bridge_ctx_t *)arg;
+    uart_proto_message_t msg;
+
+    while (true) {
+        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
+            continue;
+        }
+        if (msg.length < 1) {
+            continue;
+        }
+
+        uint8_t subcmd = msg.payload[0];
+        esp_err_t err = ESP_ERR_INVALID_ARG;
+        /* Largest reply is SCAN: subcmd + count + up to 8 addresses. */
+        uint8_t reply[2 + PCF8575_ADDR_COUNT];
+        size_t reply_len = 0;
+
+        switch (subcmd) {
+            case PCF8575_CMD_WRITE_PORT: {
+                if (msg.length < 3) break;
+                err = PCF8575_write_port(ctx->expander, bridge_u16_le(&msg.payload[1]));
+                break;
+            }
+            case PCF8575_CMD_WRITE_PIN: {
+                if (msg.length < 3) break;
+                err = PCF8575_write_pin(ctx->expander, msg.payload[1], msg.payload[2] != 0);
+                break;
+            }
+            case PCF8575_CMD_SET_MASK: {
+                if (msg.length < 3) break;
+                err = PCF8575_set_mask(ctx->expander, bridge_u16_le(&msg.payload[1]));
+                break;
+            }
+            case PCF8575_CMD_CLEAR_MASK: {
+                if (msg.length < 3) break;
+                err = PCF8575_clear_mask(ctx->expander, bridge_u16_le(&msg.payload[1]));
+                break;
+            }
+            case PCF8575_CMD_TOGGLE_MASK: {
+                if (msg.length < 3) break;
+                err = PCF8575_toggle_mask(ctx->expander, bridge_u16_le(&msg.payload[1]));
+                break;
+            }
+            case PCF8575_CMD_SET_ADDRESS: {
+                if (msg.length < 2) break;
+                err = PCF8575_set_address(ctx->expander, msg.payload[1]);
+                break;
+            }
+            case PCF8575_CMD_READ_PORT: {
+                uint16_t port = 0;
+                err = PCF8575_read_port(ctx->expander, &port);
+                if (err != ESP_OK) break;
+                reply[0] = PCF8575_CMD_READ_PORT;
+                bridge_put_u16_le(&reply[1], port);
+                bridge_put_u16_le(&reply[3], PCF8575_get_shadow(ctx->expander));
+                reply[5] = ctx->expander->addr;
+                reply_len = 6;
+                break;
+            }
+            case PCF8575_CMD_SCAN: {
+                uint8_t found[PCF8575_ADDR_COUNT];
+                size_t count = 0;
+                err = PCF8575_scan(ctx->expander->bus, found, sizeof(found), &count);
+                if (err != ESP_OK) break;
+                reply[0] = PCF8575_CMD_SCAN;
+                reply[1] = (uint8_t)count;
+                memcpy(&reply[2], found, count);
+                reply_len = 2 + count;
+                break;
+            }
+            default:
+                ESP_LOGW(TAG, "pcf8575: unknown subcmd 0x%02X", subcmd);
+                break;
+        }
+
+        if (err != ESP_OK) {
+            /* Query failures are deliberately silent on the wire (only
+             * logged), same as every other bridge: the requester sees a
+             * reply-timeout rather than a bogus port value. */
+            ESP_LOGW(TAG, "pcf8575: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            continue;
+        }
+
+        if (reply_len > 0) {
+            /* Answer whoever asked, carried in the inbound message's
+             * device/task_id -- same arrangement as info_bridge_task. */
+            esp_err_t send_err = uart_protocol_send(ctx->proto, msg.device, msg.task_id,
+                                                     UART_TASK_ID_PCF8575, reply, reply_len, 1000);
+            if (send_err != ESP_OK) {
+                ESP_LOGW(TAG, "pcf8575 reply (cmd 0x%02X) to dev%u/task%u failed: %s", subcmd,
+                         msg.device, msg.task_id, esp_err_to_name(send_err));
+            }
+        }
+    }
+}
+
+esp_err_t uart_bridge_start_pcf8575_task(uart_protocol_t *proto, PCF8575Class *expander)
+{
+    if (!proto || !expander) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    static pcf8575_bridge_ctx_t ctx;
+    ctx.proto = proto;
+    ctx.expander = expander;
+
+    esp_err_t err = uart_protocol_register_task(proto, UART_TASK_ID_PCF8575, BRIDGE_INBOX_LEN, &ctx.inbox);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    BaseType_t created = xTaskCreatePinnedToCore(pcf8575_bridge_task, "pcf8575_uart_bridge", 4096,
+                                                  &ctx, 5, NULL, tskNO_AFFINITY);
+    if (created != pdPASS) {
+        uart_protocol_unregister_task(proto, UART_TASK_ID_PCF8575);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 typedef struct {

@@ -84,6 +84,7 @@ UART_TASK_ID_INFO = 3
 UART_TASK_ID_OLED = 4
 UART_TASK_ID_LOG = 5
 UART_TASK_ID_SYSTEM = 6
+UART_TASK_ID_PCF8575 = 7
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged
@@ -115,6 +116,28 @@ OLED_CMD_DISPLAY = 0x04
 OLED_CMD_SET_CONTRAST = 0x05
 OLED_CMD_SET_INVERT = 0x06
 OLED_CMD_SET_POWER = 0x07
+
+# PCF8575 I/O expander subcommands. WRITE_PORT/SET_MASK/CLEAR_MASK/TOGGLE_MASK
+# carry a u16 LE; the mask forms are read-modify-write against the firmware's
+# shadow of the last value *written* (the part has no readable output
+# register). READ_PORT and SCAN are queries: like INFO, the request is ACKed
+# for delivery only and the answer arrives as a separate DATA frame -- but
+# unlike INFO, those replies echo their subcommand in byte0, so they're
+# self-describing (see expander.py).
+PCF8575_CMD_WRITE_PORT = 0x01
+PCF8575_CMD_WRITE_PIN = 0x02
+PCF8575_CMD_SET_MASK = 0x03
+PCF8575_CMD_CLEAR_MASK = 0x04
+PCF8575_CMD_TOGGLE_MASK = 0x05
+PCF8575_CMD_READ_PORT = 0x06
+PCF8575_CMD_SET_ADDRESS = 0x07
+PCF8575_CMD_SCAN = 0x08
+
+#: The three address pins select one of these eight addresses; all are
+#: supported both at build time (Kconfig) and at runtime (SET_ADDRESS).
+PCF8575_ADDR_MIN = 0x20
+PCF8575_ADDR_MAX = 0x27
+PCF8575_PIN_COUNT = 16
 
 
 class LogLevel(enum.IntEnum):

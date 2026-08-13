@@ -1,0 +1,211 @@
+"""Client for the firmware's SAFETY task (task 7): the isolated RP2040 link.
+
+The RP2040 safety processor (A1) sits in its own ground domain. The only
+things crossing the barrier are two opto-isolated UART lines and one
+opto-isolated fault line, and the Pico -- not the ESP -- owns the safety
+thermocouple board on J7, the three current-sense channels, the E-stop input
+and the safety relay K4. This task is the PC's window onto that link.
+
+Two queries (``GET_STATUS``, ``GET_LINK_STATS``) with the same shape as the
+ones on task INFO: the request is ACKed for delivery only and the answer
+arrives as a separate DATA frame from ``(ESP, UART_TASK_ID_SAFETY)``, echoing
+its subcommand in byte0. Nothing is pushed unsolicited here, so this client is
+the same simple shape as :class:`~kilnctrl.display.DisplayClient`.
+
+Two things worth stating plainly, because both are easy to get backwards:
+
+* **GET_STATUS never blocks on the far side.** The ESP polls the Pico on its
+  own schedule and caches the last good answer; the reply is that cache plus
+  its age. A dead link is therefore a *successful* query reporting
+  ``link_up = 0`` and ``age = 65535``, not a timeout. :meth:`get_status`
+  raising means the ESP didn't answer -- a different fault entirely.
+* **The fault line is an output.** ``SET_FAULT_OUT`` drives ESP GPIO6, which
+  lights U1's LED and pulls the Pico's ``mainFault`` input low. It is this
+  firmware telling the safety processor that the main controller has faulted,
+  not a signal coming back. The firmware asserts it by itself on PC-link loss,
+  a thermocouple fault or a watchdog; :meth:`set_fault_out` is a manual
+  override of that.
+
+**The Pico firmware that answers this protocol does not exist in this
+repository yet.** Until it does, ``link_up = 0`` with ``age = 65535`` is the
+expected steady state, not something to debug -- every UI built on this client
+should say so rather than painting it as an error.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+from typing import Optional
+
+from . import devices
+from .devices import SafetyLinkStats, SafetyResponseError, SafetyStatus
+from .protocol import (
+    SAFETY_CMD_GET_LINK_STATS,
+    SAFETY_CMD_GET_STATUS,
+    UART_TASK_ID_SAFETY,
+    Device,
+    Frame,
+)
+from .serial_link import SendResult, UartLink
+
+log = logging.getLogger(__name__)
+
+#: How long to wait for the reply DATA frame *after* the request was ACKed.
+#: Both queries are answered from ESP-side state, so this only has to cover
+#: one more UART round trip -- not the isolated link's own poll period.
+DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+
+class SafetyQueryError(RuntimeError):
+    """Raised when a SAFETY query cannot be completed.
+
+    Note what this does *not* mean: a down isolated link is a normal,
+    successful reply (see the module docstring). This is only raised when the
+    **ESP** failed to answer.
+
+    :attr:`send_result` is set when the failure was at the delivery layer (the
+    request never got an ACK), and None when the request was delivered but no
+    valid reply came back in time.
+    """
+
+    def __init__(self, message: str, send_result: Optional[SendResult] = None) -> None:
+        super().__init__(message)
+        self.send_result = send_result
+
+
+class _Pending:
+    """A single outstanding query: what we asked for, and where to put it."""
+
+    def __init__(self, subcommand: int) -> None:
+        self.subcommand = subcommand
+        self.event = threading.Event()
+        self.value: object = None
+
+
+class SafetyClient:
+    """Owns task :data:`UART_TASK_ID_SAFETY` on the PC side of a link.
+
+    Thread-safety: every method here blocks on a UART round trip and must not
+    be called from a GUI thread.
+    """
+
+    def __init__(self, link: UartLink, task_id: int = UART_TASK_ID_SAFETY) -> None:
+        self.link = link
+        self.task_id = task_id
+
+        self._inbox: "queue.Queue[Frame]" = link.register_task(task_id)
+        #: Last status seen, so a page can render immediately on open.
+        self.last_status: Optional[SafetyStatus] = None
+        self._pending: Optional[_Pending] = None
+        self._pending_lock = threading.Lock()
+        #: Serializes queries so at most one reply is ever outstanding.
+        self._query_lock = threading.RLock()
+
+        self._stop = threading.Event()
+        self._consumer = threading.Thread(
+            target=self._consume_loop, name="uart-safety-rx", daemon=True
+        )
+        self._consumer.start()
+
+    # -- lifecycle ---------------------------------------------------------
+    def close(self) -> None:
+        """Stop the consumer thread and release task 7. Safe to call twice."""
+        self._stop.set()
+        if self._consumer.is_alive() and self._consumer is not threading.current_thread():
+            self._consumer.join(timeout=2.0)
+        self.link.unregister_task(self.task_id)
+
+    # -- writes ------------------------------------------------------------
+    def send(self, payload: bytes) -> SendResult:
+        """Send one non-query subcommand payload (built by ``devices.py``)."""
+        return self.link.send(
+            dst_task=self.task_id, src_task=self.task_id, payload=payload
+        )
+
+    # -- queries -----------------------------------------------------------
+    def get_status(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> SafetyStatus:
+        """Read the cached safety status: flags, safety TC, three currents, age."""
+        value = self._query(
+            SAFETY_CMD_GET_STATUS, devices.safety_get_status(), timeout
+        )
+        return value  # type: ignore[return-value]
+
+    def get_link_stats(
+        self, timeout: float = DEFAULT_REPLY_TIMEOUT_S
+    ) -> SafetyLinkStats:
+        """Read the ESP's own counters for the isolated UART.
+
+        These move even while the far side is silent -- frames sent and
+        timeouts both climbing with nothing received is exactly the signature
+        of the missing Pico firmware.
+        """
+        value = self._query(
+            SAFETY_CMD_GET_LINK_STATS, devices.safety_get_link_stats(), timeout
+        )
+        return value  # type: ignore[return-value]
+
+    def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
+        with self._query_lock:
+            pending = _Pending(subcommand)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self.link.send(
+                    dst_task=self.task_id,
+                    src_task=self.task_id,
+                    payload=payload,
+                    dst_device=Device.ESP,
+                )
+                if not result.ok:
+                    raise SafetyQueryError(
+                        f"SAFETY request 0x{subcommand:02X} not delivered: "
+                        f"{result.describe()}",
+                        send_result=result,
+                    )
+                if not pending.event.wait(timeout):
+                    raise SafetyQueryError(
+                        f"SAFETY request 0x{subcommand:02X} was ACKed but no reply "
+                        f"arrived within {timeout:.1f} s -- note this means the ESP "
+                        "didn't answer, not that the isolated link is down (a down "
+                        "link is a normal reply with link_up = 0)"
+                    )
+                return pending.value
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
+
+    # -- receive -----------------------------------------------------------
+    def _consume_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame = self._inbox.get(timeout=0.2)
+            except queue.Empty:
+                continue  # poll interval so close() is noticed promptly
+            try:
+                self._handle_reply(frame)
+            except Exception:  # pragma: no cover - never kill the consumer
+                log.exception("error handling SAFETY frame")
+
+    def _handle_reply(self, frame: Frame) -> None:
+        try:
+            subcommand, value = devices.parse_safety_response(frame.payload)
+        except SafetyResponseError as exc:
+            log.warning("dropping malformed SAFETY response: %s", exc)
+            return
+
+        if isinstance(value, SafetyStatus):
+            self.last_status = value
+
+        with self._pending_lock:
+            pending = self._pending
+        if pending is not None and pending.subcommand == subcommand:
+            pending.value = value
+            pending.event.set()
+            return
+
+        # Nothing outstanding: a stale reply to a query we already gave up on.
+        # Nothing on this task is ever pushed unsolicited.
+        log.debug("ignoring unsolicited SAFETY response 0x%02X", subcommand)

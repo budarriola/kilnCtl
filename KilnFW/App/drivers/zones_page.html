@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Thermocouples &amp; Zones</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+      --card-bg: #232323; --input-bg: #222; --input-border: #666; --link: #6cf;
+      --ok: #4ac26b; --warn: #d4a72c; --bad: #f0776a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+    --card-bg: #232323; --input-bg: #222; --input-border: #666; --link: #6cf;
+    --ok: #4ac26b; --warn: #d4a72c; --bad: #f0776a;
+  }
+  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type=text], input[type=number] {
+    width: 100%; box-sizing: border-box; padding: 0.4em; font-size: 1em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+  }
+  .zone { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+          padding: 0.7em 1em; margin-bottom: 0.7em; }
+  .relaybits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
+  .row2 { display: flex; gap: 0.7em; }
+  .row2 > div { flex: 1; }
+  button { margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border); }
+  #msg { margin-top: 1em; font-weight: bold; }
+  .empty { color: var(--muted); font-style: italic; }
+  h3 { font-size: 0.95em; margin-top: 1.2em; }
+  table.coupling { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+  table.coupling th, table.coupling td { border: 1px solid var(--border); padding: 0.3em 0.4em; text-align: center; }
+  table.coupling th { background: var(--card-bg); }
+  table.coupling td.diag { background: var(--card-bg); font-weight: bold; }
+  table.coupling td.empty { color: var(--muted); }
+  /* Verdict colouring is applied to the DIAGONAL only -- the off-diagonal
+     elements of an RGA are fully determined by the diagonal for a 2x2 and
+     are not independently actionable, so colouring them would just add
+     alarm without adding information. */
+  table.coupling td.rga-ok { color: var(--ok); }
+  table.coupling td.rga-warn { color: var(--warn); }
+  table.coupling td.rga-bad { color: var(--bad); }
+  p.verdict-ok { color: var(--ok); }
+  p.verdict-warn { color: var(--warn); }
+  p.verdict-bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/">&larr; Dashboard</a>
+<h1>Thermocouples &amp; Zones</h1>
+<p>One zone per configured thermocouple channel. PID tuning lives here too,
+per the project's settled page layout. Calibration offset is stored here
+but not yet applied to live readings anywhere -- that's a separate,
+not-yet-built change to the readout path.</p>
+<p>A running firing profile drives this zone's relay(s) toward its target using
+whichever control mode is selected below -- PID mode uses these Kp/Ki/Kd
+values, rendered onto the relay as a slow (1-minute) on/off duty cycle, not
+smooth proportional output: <strong>Kp</strong> sets how hard it reacts to
+the current temperature error, <strong>Ki</strong> corrects slow long-term
+drift (e.g. never quite reaching setpoint), <strong>Kd</strong> damps
+overshoot from reacting too fast. The max ramp rate below is what the Fire
+Profiles page checks a segment's ramp rate against before letting it save.
+Don't know good Kp/Ki/Kd numbers for this kiln? Use Autotune below instead
+of guessing.</p>
+
+<label for="thermoCount">Thermocouples in use (0-3)</label>
+<input type="number" id="thermoCount" min="0" max="3" value="0">
+<label for="relayCount">Relays in use (0-4)</label>
+<input type="number" id="relayCount" min="0" max="4" value="0">
+<label for="maxSimultaneous">Max relays energized at once (0 = unlimited) -- if your
+supply/breaker can't take every zone's relay on together, cap it here; a zone that gets
+skipped a tick keeps its lost on-time and makes it up on its own next window rather than
+just losing it (PID mode only -- bang-bang mode has no window to make it up in)</label>
+<input type="number" id="maxSimultaneous" min="0" max="4" value="0">
+
+<div id="zones"><p class="empty">Loading&hellip;</p></div>
+
+<button id="saveBtn" type="button">Save</button>
+<p id="msg"></p>
+
+<h2>PID Autotune</h2>
+<h3>Step test (start here)</h3>
+<p>Runs an open-loop step test on one zone: holds heat off to settle, then
+applies a fixed duty and records the response until it looks settled or 4
+hours pass. Fits a plant model from the response and proposes Kp/Ki/Kd
+(SIMC rule) -- nothing is written to the zone above until you click Accept.
+Owns that zone's relay(s) while running; refuses to start while a firing
+profile is running, and a firing profile refuses to start while this is
+running. Guard suite is fully armed during the test. This is a real heat
+test, not a simulation -- only run it with the kiln empty and attended.</p>
+<label for="atZone">Zone (both tests below)</label>
+<select id="atZone"></select>
+<label for="atDuty">Step duty (0-1, e.g. 0.5)</label>
+<input type="number" id="atDuty" min="0.05" max="1" step="0.05" value="0.5">
+<button id="atStartBtn" type="button">Start step test</button>
+
+<h3>Relay-feedback test (Åström–Hägglund) -- read this first</h3>
+<p class="verdict-bad"><b>This test heats the kiln to a temperature you choose and then
+deliberately makes it oscillate around that temperature, over and over, for at least five
+full cycles.</b> On a kiln one cycle is ten minutes or more, so the chamber spends hours
+swinging above and below your setpoint. That thermal cycling is hard on the ware --
+anything in the kiln is being held at temperature and repeatedly heated and cooled, which
+is exactly what glaze and cone schedules are designed to avoid -- and it is hard on the
+elements, which age with every hot/cold cycle. Do not run it on a real firing, and do not
+run it at cone temperature. The step test above asks nothing like this of the kiln and
+also gives you a plant model, which this test does not.</p>
+<p>What it measures: the ultimate gain and period (Ku, Tu) at the setpoint you pick, and
+proposes gains from them. It writes <b>no plant model</b> -- so if a step test already
+measured one for this zone, accepting a relay result leaves that model alone rather than
+replacing it. Guard suite is fully armed exactly as it is for the step test: any guard trip
+ends the run with the relays off. Aborts on its own if the zone can't reach the setpoint in
+4 hours, or if it hasn't produced enough cycles within 4 hours of oscillating. The setpoint
+is refused if it is within 50&nbsp;°C of this zone's max/min temperature limits, because the
+oscillation overshoots its band and would trip its own guard.</p>
+<p class="hint">Honesty note, same as everywhere else on this page: this path has never
+completed on real hardware. The identification math is tested against a simulated plant;
+the on-target state machine that drives the relay has never seen a thermocouple, because
+this bench unit has none attached and every live autotune run so far aborts on the
+sensor guard within seconds.</p>
+<label for="atSetpoint">Oscillation setpoint (&deg;C) -- required, no default. Pick the
+temperature you actually care about controlling; that is the only place this test measures.</label>
+<input type="number" id="atSetpoint" min="0" max="1400" step="5" value="">
+<label for="atRelayD">Relay half-amplitude d (duty, blank = 0.35 -- swings duty between
+0.5&minus;d and 0.5+d)</label>
+<input type="number" id="atRelayD" min="0.05" max="0.5" step="0.05" value="">
+<label for="atRelayH">Hysteresis h (&deg;C, blank = 2.0 -- half-width, so the relay switches
+across a band twice this wide)</label>
+<input type="number" id="atRelayH" min="0.5" max="20" step="0.5" value="">
+<label for="atRule">Tuning rule</label>
+<select id="atRule">
+  <option value="tl" selected>Tyreus-Luyben (conservative -- recommended)</option>
+  <option value="zn">Ziegler-Nichols (aggressive -- designed to leave the loop oscillating)</option>
+</select>
+<button id="atRelayStartBtn" type="button">Start relay test</button>
+
+<h3>Run status</h3>
+<button id="atAbortBtn" type="button">Abort</button>
+<button id="atAcceptBtn" type="button" disabled>Accept proposed gains</button>
+<p id="atStatus" class="hint">Idle.</p>
+
+<h3>Cross-zone coupling matrix</h3>
+<p class="hint">Filled in one row at a time: when zone i's autotune step test
+runs, every zone's response to it is logged, not just zone i's -- so K[i][j]
+is zone j's steady-state gain (&deg;C per unit duty) to zone i's step. The
+diagonal is each zone's own direct gain (same number the Autotune result
+above shows). Empty until that row's zone has completed a run this session
+(not persisted across reboot).</p>
+<div id="couplingMatrix"><p class="empty">No autotune runs completed yet this session.</p></div>
+
+<h3>Do the zones interfere? (Relative Gain Array)</h3>
+<p class="hint">Computed from the matrix above. Read only the <b>bold diagonal</b>:
+it is a score for &quot;can this zone be controlled on its own?&quot;. <b>1.00 means
+yes</b> -- what this zone's heater does to this zone's temperature doesn't change
+when the other zones are also regulating, so one independent PID per zone is the
+right thing and nothing more is needed. Numbers well above 1 mean the zones are
+propping each other up and each loop has to work harder than it thinks;
+<b>negative</b> means the neighbours' loops actually reverse this zone's response,
+and the zones would fight each other all firing. It is only computed over zones
+that have <em>all</em> their cross-gains measured, and it is refused outright
+rather than estimated when the matrix has a hole in it or is degenerate -- a
+wrong answer here would say &quot;your zones are independent&quot; about a kiln
+where they are not.</p>
+<div id="rgaMatrix"><p class="empty">Not computable yet.</p></div>
+
+<script>
+var RELAY_NAMES = ['Relay1', 'Relay2', 'Relay3', 'Relay4'];
+var current = { thermo_count: 0, relay_count: 0, zones: [] };
+
+function zoneBlock(z, i, relayCount) {
+  var div = document.createElement('div');
+  div.className = 'zone';
+  div.dataset.index = i;
+  var relayHtml = '';
+  for (var r = 0; r < relayCount; r++) {
+    var checked = (z.relay_mask & (1 << r)) ? ' checked' : '';
+    relayHtml += '<label><input type="checkbox" class="relaybit" data-bit="' + r + '"' + checked + '> ' +
+                 RELAY_NAMES[r] + '</label>';
+  }
+  var mode = z.control_mode || 0;
+  var modeHtml = '<select class="mode">' +
+    '<option value="0"' + (mode === 0 ? ' selected' : '') + '>Off (never commands heat)</option>' +
+    '<option value="1"' + (mode === 1 ? ' selected' : '') + '>Bang-bang (on/off with hysteresis)</option>' +
+    '<option value="2"' + (mode === 2 ? ' selected' : '') + '>PID (time-proportioned)</option>' +
+    '</select>';
+  /* Read-only on purpose: these three come out of an autotune step test, not
+     out of an operator's head, so there is nothing sensible to type here.
+     They are still carried in the save body (see the save handler) because
+     this endpoint takes whole-page submits -- a page that displayed the
+     model but posted without it would wipe, on the next unrelated edit, a
+     measurement that cost hours of kiln time to make. The values are parked
+     on the element's dataset rather than re-read from `current` at save
+     time so that they travel with the block they were rendered from. */
+  var k = z.model_k_dc || 0, tau = z.model_tau_s || 0, dead = z.model_dead_time_s || 0;
+  var haveModel = (k > 0 && tau > 0 && dead > 0);
+  div.dataset.modelK = k;
+  div.dataset.modelTau = tau;
+  div.dataset.modelDead = dead;
+  var modelHtml = '<label>Identified plant model</label><p class="hint">' +
+    (haveModel
+      ? 'K = ' + k.toFixed(1) + ' &deg;C/duty, tau = ' + tau.toFixed(0) + ' s, dead time = ' +
+        dead.toFixed(0) + ' s'
+      : 'not identified yet -- run Autotune below and accept the result') +
+    '</p>';
+  div.innerHTML =
+    '<h2>Zone ' + i + ' (channel ' + i + ')</h2>' +
+    '<label>Name</label><input type="text" class="name" maxlength="15" value="' + (z.name || '') + '">' +
+    '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
+    '<label>Control mode</label>' + modeHtml +
+    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
+    '<div class="row2">' +
+      '<div><label>Kp</label><input type="number" step="0.01" class="kp" value="' + z.pid_kp + '"></div>' +
+      '<div><label>Ki</label><input type="number" step="0.01" class="ki" value="' + z.pid_ki + '"></div>' +
+      '<div><label>Kd</label><input type="number" step="0.01" class="kd" value="' + z.pid_kd + '"></div>' +
+    '</div>' +
+    '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
+    '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
+    '<label>Sanity-check rate (&deg;C/min, 0 = use default) -- while the profile executor is ' +
+    'driving this zone, its reading must move at least this much in the commanded direction ' +
+    'or it flags a possible detached thermocouple</label>' +
+    '<input type="number" step="0.1" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
+    '<div class="row2">' +
+      '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
+      '<input type="number" step="1" class="maxtemp" value="' + (z.max_temp_c || 0) + '"></div>' +
+      '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
+      '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
+    '</div>' +
+    '<label>Relay timing (ms, 0 = use firmware default: 60000/2000/2000) -- how this zone\'s ' +
+    'relay(s) are switched in PID mode, and the on/off debounce in both PID and bang-bang mode</label>' +
+    '<div class="row2">' +
+      '<div><label>Window</label><input type="number" step="1000" class="window" value="' + (z.heater_window_ms || 0) + '"></div>' +
+      '<div><label>Min on</label><input type="number" step="100" class="minon" value="' + (z.heater_min_on_ms || 0) + '"></div>' +
+      '<div><label>Min off</label><input type="number" step="100" class="minoff" value="' + (z.heater_min_off_ms || 0) + '"></div>' +
+    '</div>' +
+    '<label>Cross-zone plausibility (&deg;C, 0 = disabled) -- trips if this zone disagrees ' +
+    'with another zone by more than this for 10 minutes, catching a thermocouple that fell ' +
+    'out of the chamber. Needs 2+ zones. Leave at 0 until you have measured how far this ' +
+    'kiln\'s zones legitimately drift apart -- real kilns stratify, and a too-tight value ' +
+    'here stops a good firing</label>' +
+    '<input type="number" step="5" class="xzone" value="' + (z.cross_zone_max_delta_c || 0) + '">' +
+    modelHtml;
+  return div;
+}
+
+function renderZones() {
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
+  var el = document.getElementById('zones');
+  el.innerHTML = '';
+  if (thermoCount === 0) {
+    el.innerHTML = '<p class="empty">No thermocouples configured -- set the count above.</p>';
+    return;
+  }
+  for (var i = 0; i < thermoCount; i++) {
+    var z = current.zones[i] || { name: '', relay_mask: 0, cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0 };
+    el.appendChild(zoneBlock(z, i, relayCount));
+  }
+}
+
+function loadCurrent() {
+  fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
+    current = data;
+    document.getElementById('thermoCount').value = data.thermo_count;
+    document.getElementById('relayCount').value = data.relay_count;
+    document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
+    renderZones();
+    populateAutotuneZones();
+  }).catch(function () {
+    document.getElementById('zones').innerHTML = '<p class="empty">Could not load current config.</p>';
+  });
+}
+
+document.getElementById('thermoCount').addEventListener('change', renderZones);
+document.getElementById('relayCount').addEventListener('change', renderZones);
+
+document.getElementById('saveBtn').addEventListener('click', function () {
+  var msg = document.getElementById('msg');
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
+  var maxSimultaneous = parseInt(document.getElementById('maxSimultaneous').value, 10) || 0;
+  var params = ['thermo_count=' + thermoCount, 'relay_count=' + relayCount,
+                 'max_simultaneous_relays=' + maxSimultaneous];
+  var blocks = document.getElementById('zones').querySelectorAll('.zone');
+  blocks.forEach(function (div) {
+    var i = div.dataset.index;
+    var mask = 0;
+    div.querySelectorAll('.relaybit').forEach(function (cb) {
+      if (cb.checked) mask |= (1 << parseInt(cb.dataset.bit, 10));
+    });
+    params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
+    params.push('z' + i + '_relay_mask=' + mask);
+    params.push('z' + i + '_cal=' + div.querySelector('.cal').value);
+    params.push('z' + i + '_kp=' + div.querySelector('.kp').value);
+    params.push('z' + i + '_ki=' + div.querySelector('.ki').value);
+    params.push('z' + i + '_kd=' + div.querySelector('.kd').value);
+    params.push('z' + i + '_ramp=' + div.querySelector('.ramp').value);
+    params.push('z' + i + '_sanity=' + div.querySelector('.sanity').value);
+    params.push('z' + i + '_mode=' + div.querySelector('.mode').value);
+    params.push('z' + i + '_maxtemp=' + div.querySelector('.maxtemp').value);
+    params.push('z' + i + '_mintemp=' + div.querySelector('.mintemp').value);
+    params.push('z' + i + '_window=' + div.querySelector('.window').value);
+    params.push('z' + i + '_minon=' + div.querySelector('.minon').value);
+    params.push('z' + i + '_minoff=' + div.querySelector('.minoff').value);
+    params.push('z' + i + '_xzone=' + div.querySelector('.xzone').value);
+    /* Echoed back exactly as loaded. There is no input for these -- this is
+       purely to stop a whole-page save from clearing a stored model, since
+       the server treats an omitted field as "set it to zero" and zero is
+       the "no model identified" encoding. */
+    params.push('z' + i + '_k=' + div.dataset.modelK);
+    params.push('z' + i + '_tau=' + div.dataset.modelTau);
+    params.push('z' + i + '_deadtime=' + div.dataset.modelDead);
+  });
+  msg.textContent = 'Saving…';
+  fetch('/api/zones', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    msg.textContent = 'Saved.';
+    loadCurrent();
+  }).catch(function (e) {
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+});
+
+loadCurrent();
+
+function populateAutotuneZones() {
+  var sel = document.getElementById('atZone');
+  var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  var prev = sel.value;
+  sel.innerHTML = '';
+  for (var i = 0; i < thermoCount; i++) {
+    var opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = 'Zone ' + i + ((current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '');
+    sel.appendChild(opt);
+  }
+  if (prev !== '' && thermoCount > 0) sel.value = prev;
+}
+document.getElementById('thermoCount').addEventListener('change', populateAutotuneZones);
+
+var AT_STATE_NAMES = { idle: 'Idle.', settling: 'Settling at zero duty before stepping…',
+  stepping: 'Step applied, recording response…',
+  relay_approach: 'Relay test: heating to the setpoint, not recording yet…',
+  relay_cycling: 'Relay test: oscillating around the setpoint and recording…',
+  done: 'Done -- gains proposed below.', aborted: 'Aborted.' };
+
+function pollAutotune() {
+  fetch('/api/autotune').then(function (r) { return r.json(); }).then(function (s) {
+    var el = document.getElementById('atStatus');
+    var acceptBtn = document.getElementById('atAcceptBtn');
+    var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + s.zone + ', ' + s.elapsed_s + 's elapsed, ' +
+               s.sample_count + ' samples' + (s.actual_valid ? ', ' + s.actual_c.toFixed(1) + '°C now' : '') + '.';
+    /* Cycle progress is the only honest progress bar a relay run has: the
+       elapsed time says nothing about how far along it is, because how long a
+       cycle takes is the quantity being measured. */
+    if (s.method === 'relay' && (s.state === 'relay_approach' || s.state === 'relay_cycling')) {
+      line += ' Target ' + s.relay_setpoint_c.toFixed(0) + '°C, d=' + s.relay_d.toFixed(2) +
+              ', h=±' + s.relay_h_c.toFixed(1) + '°C, ' + s.relay_cycles_seen + ' of ' +
+              s.relay_cycles_target + ' cycles complete.';
+    }
+    if (s.state === 'aborted' && s.abort_reason) {
+      line += ' Reason: ' + s.abort_reason;
+    }
+    if (s.state === 'done' && s.method === 'relay' && s.relay_valid) {
+      line += ' Measured Ku=' + s.relay_ku.toFixed(4) + ' duty/°C, Tu=' + s.relay_tu_s.toFixed(0) +
+              's (' + (s.relay_tu_s / 60).toFixed(1) + ' min), amplitude ±' + s.relay_amplitude_c.toFixed(1) +
+              '°C over ' + s.relay_cycles_used + ' cycles. Proposed (' + s.rule + ') Kp=' +
+              s.proposed_kp.toFixed(4) + ' Ki=' + s.proposed_ki.toFixed(5) + ' Kd=' + s.proposed_kd.toFixed(4) +
+              '. No plant model measured -- accepting writes gains only. ' +
+              '<a href="/api/autotune/trace.csv">Download trace CSV</a>';
+      el.innerHTML = line;
+      acceptBtn.disabled = false;
+      return;
+    }
+    if (s.state === 'done' && s.model_valid) {
+      line += ' Fitted K=' + s.k_gain_c_per_duty.toFixed(1) + '°C/duty, tau=' + s.tau_s.toFixed(0) +
+              's, L=' + s.dead_time_s.toFixed(0) + 's. Proposed Kp=' + s.proposed_kp.toFixed(4) +
+              ' Ki=' + s.proposed_ki.toFixed(5) + ' Kd=' + s.proposed_kd.toFixed(4) +
+              '. Predicted max ramp ≈ ' + s.predicted_max_ramp_c_per_hr.toFixed(0) + '°C/hr. ' +
+              '<a href="/api/autotune/trace.csv">Download trace CSV</a>';
+      el.innerHTML = line;
+    } else {
+      el.textContent = line;
+    }
+    acceptBtn.disabled = !(s.state === 'done' && s.model_valid);
+  }).catch(function () {});
+}
+setInterval(pollAutotune, 3000);
+pollAutotune();
+
+/* Bands the diagonal RGA elements are judged against. These are the numbers
+ * the prose above promises, kept here as one definition so the wording, the
+ * cell colouring and the verdict line can never drift apart:
+ *   |L-1| <= 0.20            -> independent; per-zone PID is correct as-is
+ *   L in [0.5, 2.0]          -> real but tolerable interaction
+ *   L outside that, or L < 0 -> decentralized control is fighting itself
+ * The 0.8-1.2 band is the conventional "essentially decoupled" rule of
+ * thumb; 0.5-2.0 is the equally conventional point past which pairing is
+ * usually reconsidered. Neither is a law of physics -- they are stated on
+ * the page so the reader can see what the verdict was keyed to. */
+var RGA_INDEPENDENT_TOL = 0.20;
+var RGA_STRONG_LO = 0.5;
+var RGA_STRONG_HI = 2.0;
+
+function rgaClass(v) {
+  if (v < 0 || v < RGA_STRONG_LO || v > RGA_STRONG_HI) return 'rga-bad';
+  if (Math.abs(v - 1) > RGA_INDEPENDENT_TOL) return 'rga-warn';
+  return 'rga-ok';
+}
+
+function renderRga(rga) {
+  var el = document.getElementById('rgaMatrix');
+  if (!rga) { el.innerHTML = '<p class="empty">Not computable yet.</p>'; return; }
+  if (!rga.available) {
+    /* The firmware's own reason string, verbatim -- it distinguishes "no two
+     * zones fully measured yet" (expected, just keep autotuning) from
+     * "singular" (a real finding about the kiln), and paraphrasing it here
+     * would give a second place for that distinction to be got wrong. */
+    el.innerHTML = '<p class="empty">Not computable: ' + rga.reason + '</p>';
+    return;
+  }
+
+  var z = rga.zones;
+  var html = '<table class="coupling"><tr><th>&Lambda;</th>';
+  for (var c = 0; c < rga.n; c++) html += '<th>zone ' + z[c] + '</th>';
+  html += '</tr>';
+  var worst = null;          /* diagonal element furthest from 1, in either direction */
+  for (var i = 0; i < rga.n; i++) {
+    html += '<tr><th>zone ' + z[i] + '</th>';
+    for (var j = 0; j < rga.n; j++) {
+      var v = rga.lambda[i][j];
+      if (i === j) {
+        if (worst === null || Math.abs(v - 1) > Math.abs(worst.v - 1)) worst = { zone: z[i], v: v };
+        html += '<td class="diag ' + rgaClass(v) + '">' + v.toFixed(2) + '</td>';
+      } else {
+        html += '<td>' + v.toFixed(2) + '</td>';
+      }
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+
+  /* Verdict keyed to the worst diagonal element actually computed -- one
+   * bad zone is enough to make per-zone loops the wrong architecture, so
+   * the summary follows the worst, not an average. */
+  var cls, msg;
+  if (worst.v < 0) {
+    cls = 'verdict-bad';
+    msg = 'Zone ' + worst.zone + ' reads &Lambda; = ' + worst.v.toFixed(2) + ', which is <b>negative</b>. ' +
+          'With the other zones also regulating, turning this zone’s heat up ends up pushing it the ' +
+          'wrong way. Independent per-zone PID is the wrong arrangement for this kiln -- expect the zones ' +
+          'to hunt against each other rather than settle.';
+  } else if (worst.v < RGA_STRONG_LO || worst.v > RGA_STRONG_HI) {
+    cls = 'verdict-bad';
+    msg = 'Zone ' + worst.zone + ' reads &Lambda; = ' + worst.v.toFixed(2) + ', well outside ' +
+          RGA_STRONG_LO.toFixed(1) + '–' + RGA_STRONG_HI.toFixed(1) + '. These zones are strongly ' +
+          'coupled: each loop is largely correcting for what its neighbours just did. Per-zone PID will ' +
+          'still fire the kiln, but expect sluggish settling and zones that overshoot when a neighbour ' +
+          'changes. Tune conservatively and don’t chase the last few degrees of zone-to-zone spread.';
+  } else if (Math.abs(worst.v - 1) > RGA_INDEPENDENT_TOL) {
+    cls = 'verdict-warn';
+    msg = 'Zone ' + worst.zone + ' reads &Lambda; = ' + worst.v.toFixed(2) + ', outside the ' +
+          (1 - RGA_INDEPENDENT_TOL).toFixed(2) + '–' + (1 + RGA_INDEPENDENT_TOL).toFixed(2) +
+          ' band. The zones do influence each other noticeably, but each one is still mostly its own ' +
+          'heater’s business. Per-zone PID is fine; just tune it a little gently.';
+  } else {
+    cls = 'verdict-ok';
+    msg = 'Every diagonal element is within ' + RGA_INDEPENDENT_TOL.toFixed(2) + ' of 1.00 (worst: zone ' +
+          worst.zone + ' at ' + worst.v.toFixed(2) + '). These zones are effectively independent -- one ' +
+          'PID per zone is exactly right, and nothing here needs cross-zone compensation.';
+  }
+  html += '<p class="' + cls + '">' + msg + '</p>';
+
+  var covered = 'Computed over zones ' + z.join(', ') + ' only';
+  if (rga.n < thermoCountForRga()) covered += ' -- the remaining zone(s) have not been autotuned yet';
+  html += '<p class="hint">' + covered + '. Determinant ' + rga.det + '.</p>';
+  el.innerHTML = html;
+}
+
+/* The RGA's own zone count is the size of the measured sub-block; the full
+ * configured count comes from the form, so "we only used 2 of your 3 zones"
+ * can be said out loud instead of being silently implied by the labels. */
+function thermoCountForRga() {
+  return parseInt(document.getElementById('thermoCount').value, 10) || 0;
+}
+
+function pollCouplingMatrix() {
+  fetch('/api/autotune/matrix').then(function (r) { return r.json(); }).then(function (m) {
+    renderRga(m.rga);
+    var el = document.getElementById('couplingMatrix');
+    var n = m.zone_count;
+    var byIJ = {};
+    m.cells.forEach(function (c) { byIJ[c.i + ',' + c.j] = c; });
+    var anyValid = m.cells.some(function (c) { return c.valid; });
+    if (!anyValid) {
+      el.innerHTML = '<p class="empty">No autotune runs completed yet this session.</p>';
+      return;
+    }
+    var html = '<table class="coupling"><tr><th>step zone \\ response at</th>';
+    for (var j = 0; j < n; j++) html += '<th>zone ' + j + '</th>';
+    html += '</tr>';
+    for (var i = 0; i < n; i++) {
+      html += '<tr><th>zone ' + i + '</th>';
+      for (var jj = 0; jj < n; jj++) {
+        var c = byIJ[i + ',' + jj];
+        if (c && c.valid) {
+          html += '<td' + (i === jj ? ' class="diag"' : '') + '>' + c.k.toFixed(1) + '&deg;C/duty<br>' +
+                  '<span class="hint">&tau;=' + c.tau_s.toFixed(0) + 's L=' + c.dead_time_s.toFixed(0) + 's</span></td>';
+        } else {
+          html += '<td class="empty">&mdash;</td>';
+        }
+      }
+      html += '</tr>';
+    }
+    html += '</table>';
+    el.innerHTML = html;
+  }).catch(function () {});
+}
+setInterval(pollCouplingMatrix, 5000);
+pollCouplingMatrix();
+
+document.getElementById('atStartBtn').addEventListener('click', function () {
+  var zone = document.getElementById('atZone').value;
+  var duty = document.getElementById('atDuty').value;
+  if (zone === '') { document.getElementById('atStatus').textContent = 'No zone configured/selected.'; return; }
+  fetch('/api/autotune/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'zone=' + zone + '&step_duty=' + duty,
+  }).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) document.getElementById('atStatus').textContent = 'Start failed: ' + j.error;
+    else pollAutotune();
+  }).catch(function () {});
+});
+
+document.getElementById('atRelayStartBtn').addEventListener('click', function () {
+  var status = document.getElementById('atStatus');
+  var zone = document.getElementById('atZone').value;
+  var sp = document.getElementById('atSetpoint').value;
+  if (zone === '') { status.textContent = 'No zone configured/selected.'; return; }
+  if (sp === '') { status.textContent = 'A relay test needs an oscillation setpoint -- there is no default.'; return; }
+  /* Deliberately blunt and deliberately not styleable away: this is the one
+     control on the page that makes the kiln misbehave on purpose, and the
+     operator should have to say so out loud before it starts. */
+  if (!confirm('Start a RELAY test on zone ' + zone + ' at ' + sp + '°C?\n\n' +
+               'The kiln will be heated to that temperature and then deliberately oscillated ' +
+               'around it for at least 5 cycles (10+ minutes each). This thermally cycles the ' +
+               'ware and the elements. It can run for up to 8 hours. Do not do this during a ' +
+               'real firing.')) {
+    return;
+  }
+  /* d and h are sent only when the operator filled them in; the firmware's
+     documented defaults apply otherwise, so the page never has to hold a
+     second copy of them that could drift out of step. */
+  var body = 'method=relay&zone=' + zone + '&setpoint_c=' + encodeURIComponent(sp) +
+             '&rule=' + document.getElementById('atRule').value;
+  var d = document.getElementById('atRelayD').value;
+  var h = document.getElementById('atRelayH').value;
+  if (d !== '') body += '&relay_d=' + encodeURIComponent(d);
+  if (h !== '') body += '&relay_h=' + encodeURIComponent(h);
+  fetch('/api/autotune/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+  }).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j.ok) status.textContent = 'Start failed: ' + j.error;
+    else pollAutotune();
+  }).catch(function () {});
+});
+document.getElementById('atAbortBtn').addEventListener('click', function () {
+  fetch('/api/autotune/abort', { method: 'POST' }).then(pollAutotune).catch(function () {});
+});
+document.getElementById('atAcceptBtn').addEventListener('click', function () {
+  fetch('/api/autotune/accept', { method: 'POST' }).then(function (r) {
+    if (r.ok) { loadCurrent(); pollAutotune(); }
+    else document.getElementById('atStatus').textContent = 'Accept failed.';
+  }).catch(function () {});
+});
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

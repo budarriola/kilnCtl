@@ -1,0 +1,4 @@
+dependencies:
+  # mDNS: advertises this board as kiln.local so the web UI/pc_tools don't
+  # need the raw station IP -- see mdns_init()/mdns_hostname_set() in main.c.
+  espressif/mdns: "^1"

@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Fire Profiles</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --warn: #b06a00; --err: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+      --card-bg: #232323; --input-bg: #222; --input-border: #666; --link: #6cf;
+      --warn: #e0a030; --err: #ff6b6b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
+    --card-bg: #232323; --input-bg: #222; --input-border: #666; --link: #6cf;
+    --warn: #e0a030; --err: #ff6b6b;
+  }
+  body { font-family: sans-serif; max-width: 560px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type=text], input[type=number], select {
+    width: 100%; box-sizing: border-box; padding: 0.4em; font-size: 1em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+  }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+          padding: 0.6em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
+          align-items: center; }
+  .seg { display: flex; gap: 0.5em; align-items: flex-end; margin-top: 0.5em; }
+  .seg > div { flex: 1; }
+  .seg label { font-size: 0.75em; margin-top: 0; }
+  button { padding: 0.6em 1.2em; font-size: 0.95em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border); }
+  button.small { padding: 0.3em 0.7em; font-size: 0.85em; }
+  #msg { margin-top: 1em; }
+  #msg .err { color: var(--err); font-weight: bold; }
+  #msg .warn { color: var(--warn); }
+  .empty { color: var(--muted); font-style: italic; }
+  .hint { font-size: 0.8em; color: var(--muted); margin: 0.2em 0 0; }
+  .s-ramp.near-ceiling { border-color: var(--warn); }
+  .s-ramp.over-ceiling { border-color: var(--err); }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/">&larr; Dashboard</a>
+<h1>Fire Profiles</h1>
+<p>Create and edit named firing profiles here. Run them from the Dashboard.
+A profile can target more than one zone; when it does, every selected zone
+shares one ramp/dwell schedule and the schedule waits for the slowest zone
+to catch up before advancing (ramp-lock, TODO.md 6A.5) -- each zone still
+runs its own PID/bang-bang loop and thermal guards independently.</p>
+
+<h2>Saved profiles</h2>
+<div id="list"><p class="empty">Loading&hellip;</p></div>
+
+<h2 id="editorTitle">New profile</h2>
+<label for="pname">Name</label>
+<input type="text" id="pname" maxlength="15">
+<label>Zone(s) -- select more than one to run them together off a single shared
+ramp/dwell schedule (ramp-lock: the schedule only advances once every
+selected zone has caught up, TODO.md 6A.5)</label>
+<div id="pzone"></div>
+<p class="hint" id="zoneCeiling"></p>
+
+<div id="segments"></div>
+<button id="addSegBtn" type="button" class="small">+ Add segment</button>
+
+<div style="margin-top:1em">
+  <button id="saveBtn" type="button">Save profile</button>
+  <button id="newBtn" type="button">New</button>
+</div>
+<div id="msg"></div>
+
+<script>
+var editingId = null;
+var zones = [];
+var zoneCeilings = []; // max_ramp_c_per_hr per zone, parallel to `zones`; 0 = unset
+var RAMP_WARN_FRACTION = 0.8; // mirrors PROFILE_RAMP_WARN_FRACTION in profiles_http.c
+var MAX_SEGMENTS = 12;
+
+function loadZones() {
+  return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
+    zones = [];
+    zoneCeilings = [];
+    for (var i = 0; i < data.thermo_count; i++) {
+      zones.push(data.zones[i].name || ('Zone ' + i));
+      zoneCeilings.push(data.zones[i].max_ramp_c_per_hr || 0);
+    }
+    var container = document.getElementById('pzone');
+    container.innerHTML = '';
+    zones.forEach(function (name, i) {
+      var label = document.createElement('label');
+      label.style.display = 'inline-block';
+      label.style.fontWeight = 'normal';
+      label.style.marginRight = '1em';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'pzone-cb';
+      cb.value = i;
+      cb.addEventListener('change', updateZoneCeiling);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + i + ': ' + name));
+      container.appendChild(label);
+    });
+    if (zones.length === 0) {
+      container.innerHTML = '<span class="empty">No zones configured</span>';
+    }
+    updateZoneCeiling();
+  });
+}
+
+function selectedZoneMask() {
+  var mask = 0;
+  document.querySelectorAll('.pzone-cb').forEach(function (cb) {
+    if (cb.checked) mask |= (1 << parseInt(cb.value, 10));
+  });
+  return mask;
+}
+
+function setSelectedZoneMask(mask) {
+  document.querySelectorAll('.pzone-cb').forEach(function (cb) {
+    cb.checked = (mask & (1 << parseInt(cb.value, 10))) !== 0;
+  });
+}
+
+/* Feasibility is only as good as its weakest zone (TODO.md 6A.5: a
+ * ramp-locked multi-zone profile is limited by whichever zone is slowest),
+ * so the ceiling shown/checked client-side is the MINIMUM across every
+ * currently-selected zone, matching profiles_http.c's authoritative
+ * per-zone loop. Zones with no ceiling configured (0) are excluded from the
+ * minimum rather than forcing it to 0 -- "not yet configured" and "genuinely
+ * zero headroom" are different states, same convention zones_http.c uses
+ * elsewhere. */
+function currentCeiling() {
+  var min = 0;
+  document.querySelectorAll('.pzone-cb').forEach(function (cb) {
+    if (!cb.checked) return;
+    var c = zoneCeilings[parseInt(cb.value, 10)] || 0;
+    if (c > 0 && (min === 0 || c < min)) min = c;
+  });
+  return min;
+}
+
+function updateZoneCeiling() {
+  var el = document.getElementById('zoneCeiling');
+  var ceiling = currentCeiling();
+  var anySelected = selectedZoneMask() !== 0;
+  if (!anySelected) {
+    el.textContent = 'Select at least one zone.';
+  } else {
+    el.textContent = ceiling > 0
+      ? 'Lowest max ramp rate ceiling among selected zones (Settings → Thermocouples & Zones): ' + ceiling + ' °C/hr.'
+      : 'No max ramp rate set for the selected zone(s) yet -- ramp feasibility can\'t be checked until one is.';
+  }
+  document.getElementById('segments').querySelectorAll('.s-ramp').forEach(checkRamp);
+}
+
+// Client-side preview only -- TODO.md section 5 explicitly requires the
+// authoritative check to stay on-device (profiles_http.c's
+// PROFILE_RAMP_WARN_FRACTION), which still runs on save regardless of what
+// this shows. This just surfaces the same rule earlier, before a round trip.
+function checkRamp(input) {
+  var ceiling = currentCeiling();
+  var rate = parseFloat(input.value) || 0;
+  input.classList.remove('near-ceiling', 'over-ceiling');
+  if (ceiling <= 0 || rate <= 0) return;
+  if (rate > ceiling) {
+    input.classList.add('over-ceiling');
+  } else if (rate > RAMP_WARN_FRACTION * ceiling) {
+    input.classList.add('near-ceiling');
+  }
+}
+
+function segmentRow(seg) {
+  var div = document.createElement('div');
+  div.className = 'seg';
+  div.innerHTML =
+    '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (seg.target_c || 0) + '"></div>' +
+    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (seg.ramp_c_per_hr || 0) + '"></div>' +
+    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (seg.dwell_min || 0) + '"></div>' +
+    '<button type="button" class="small remove">&times;</button>';
+  div.querySelector('.remove').addEventListener('click', function () { div.remove(); });
+  var rampInput = div.querySelector('.s-ramp');
+  rampInput.addEventListener('input', function () { checkRamp(rampInput); });
+  checkRamp(rampInput);
+  return div;
+}
+
+document.getElementById('addSegBtn').addEventListener('click', function () {
+  var container = document.getElementById('segments');
+  if (container.children.length >= MAX_SEGMENTS) return;
+  container.appendChild(segmentRow({}));
+});
+
+function resetEditor() {
+  editingId = null;
+  document.getElementById('editorTitle').textContent = 'New profile';
+  document.getElementById('pname').value = '';
+  setSelectedZoneMask(0);
+  updateZoneCeiling();
+  document.getElementById('segments').innerHTML = '';
+  document.getElementById('addSegBtn').click();
+  document.getElementById('msg').innerHTML = '';
+}
+
+function loadList() {
+  fetch('/api/profiles').then(function (r) { return r.json(); }).then(function (list) {
+    var el = document.getElementById('list');
+    if (list.length === 0) {
+      el.innerHTML = '<p class="empty">No saved profiles.</p>';
+      return;
+    }
+    el.innerHTML = '';
+    list.forEach(function (p) {
+      var div = document.createElement('div');
+      div.className = 'card';
+      var zoneList = [];
+      for (var zb = 0; zb < 8; zb++) { if (p.zone_mask & (1 << zb)) zoneList.push(zb); }
+      div.innerHTML = '<span>' + p.name + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
+                       ', ' + p.segment_count + ' segments)</span>';
+      var btnGroup = document.createElement('span');
+      var editBtn = document.createElement('button');
+      editBtn.className = 'small';
+      editBtn.textContent = 'Edit';
+      editBtn.addEventListener('click', function () { editProfile(p.id); });
+      var delBtn = document.createElement('button');
+      delBtn.className = 'small';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', function () { deleteProfile(p.id); });
+      btnGroup.appendChild(editBtn);
+      btnGroup.appendChild(delBtn);
+      div.appendChild(btnGroup);
+      el.appendChild(div);
+    });
+  }).catch(function () {
+    document.getElementById('list').innerHTML = '<p class="empty">Could not load profiles.</p>';
+  });
+}
+
+function editProfile(id) {
+  fetch('/api/profile?id=' + id).then(function (r) { return r.json(); }).then(function (p) {
+    editingId = id;
+    document.getElementById('editorTitle').textContent = 'Edit: ' + p.name;
+    document.getElementById('pname').value = p.name;
+    setSelectedZoneMask(p.zone_mask);
+    updateZoneCeiling();
+    var container = document.getElementById('segments');
+    container.innerHTML = '';
+    p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+    document.getElementById('msg').innerHTML = '';
+    window.scrollTo(0, document.body.scrollHeight);
+  });
+}
+
+function deleteProfile(id) {
+  fetch('/api/profile/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
+  }).then(function () { loadList(); if (editingId === id) resetEditor(); });
+}
+
+document.getElementById('newBtn').addEventListener('click', resetEditor);
+
+document.getElementById('saveBtn').addEventListener('click', function () {
+  var msg = document.getElementById('msg');
+  var rows = document.getElementById('segments').querySelectorAll('.seg');
+  if (rows.length === 0) {
+    msg.innerHTML = '<span class="err">At least one segment is required.</span>';
+    return;
+  }
+  var params = [];
+  params.push('id=' + (editingId === null ? '-1' : editingId));
+  params.push('name=' + encodeURIComponent(document.getElementById('pname').value));
+  var zoneMask = selectedZoneMask();
+  if (zoneMask === 0) {
+    msg.innerHTML = '<span class="err">Select at least one zone.</span>';
+    return;
+  }
+  params.push('zone_mask=' + zoneMask);
+  params.push('seg_count=' + rows.length);
+  rows.forEach(function (row, i) {
+    params.push('seg' + i + '_target=' + row.querySelector('.s-target').value);
+    params.push('seg' + i + '_ramp=' + row.querySelector('.s-ramp').value);
+    params.push('seg' + i + '_dwell=' + row.querySelector('.s-dwell').value);
+  });
+  msg.textContent = 'Saving…';
+  fetch('/api/profile', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+    .then(function (result) {
+      if (!result.ok || result.data.ok === false) {
+        msg.innerHTML = '<span class="err">' + (result.data.error || 'save failed') + '</span>';
+        return;
+      }
+      var html = 'Saved.';
+      if (result.data.warnings && result.data.warnings.length > 0) {
+        html += '<br>' + result.data.warnings.map(function (w) { return '<span class="warn">' + w + '</span>'; }).join('<br>');
+      }
+      msg.innerHTML = html;
+      editingId = result.data.id;
+      loadList();
+    }).catch(function () {
+      msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
+    });
+});
+
+loadZones().then(function () { resetEditor(); loadList(); });
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

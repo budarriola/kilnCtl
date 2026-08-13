@@ -1,0 +1,275 @@
+#include "thermal_guard.h"
+
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Firmware-wide defaults for the thresholds not yet promoted to per-zone
+ * config -- see thermal_guard.h's doc comment. Values and rationale are
+ * TODO.md 6A.3's own first-pass numbers, carried over verbatim. */
+#define PROGRESS_DUTY_MIN 0.5f
+#define PROGRESS_WINDOW_S 300.0f
+#define WRONG_DIR_RATE_C_PER_MIN 1.0f
+#define WRONG_DIR_WINDOW_S 120.0f
+#define OFF_SETTLE_S 120.0f
+#define RUNAWAY_RATE_C_PER_MIN 1.0f
+#define RUNAWAY_MARGIN_C 20.0f
+#define DRIFT_HYSTERESIS_C 25.0f
+#define DRIFT_PERIOD_S 600.0f
+#define SENSOR_FAULT_DEBOUNCE_TICKS 3u
+#define FROZEN_WINDOW_S 600.0f
+/* Guard 8's window. Only the *period* has a default -- the delta threshold
+ * deliberately does not; see thermal_guard_cfg_t.cross_zone_max_delta_c. */
+#define CROSS_ZONE_PERIOD_S_DEFAULT 600.0f
+
+void thermal_guard_reset(thermal_guard_state_t *state)
+{
+    memset(state, 0, sizeof(*state));
+}
+
+void thermal_guard_clear(thermal_guard_state_t *state)
+{
+    thermal_guard_reset(state);
+}
+
+static void trip(thermal_guard_state_t *state, thermal_guard_trip_t reason, const char *fmt, ...)
+{
+    state->is_tripped = true;
+    state->reason = reason;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(state->detail, sizeof(state->detail), fmt, ap);
+    va_end(ap);
+}
+
+static float effective_rate(float cfg_rate_c_per_min, float fallback)
+{
+    return (cfg_rate_c_per_min > 0.0f) ? cfg_rate_c_per_min : fallback;
+}
+
+bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t *cfg,
+                        const thermal_guard_input_t *in)
+{
+    if (state->is_tripped) {
+        return false; /* already latched -- caller should have stopped driving anyway */
+    }
+
+    /* --- Guard 6: sensor validity, debounced ------------------------------ */
+    if (!in->sensor_ok) {
+        state->sensor_fault_streak++;
+        if (state->sensor_fault_streak >= SENSOR_FAULT_DEBOUNCE_TICKS) {
+            trip(state, THERMAL_GUARD_TRIP_SENSOR_INVALID,
+                 "sensor invalid for %u consecutive reads", (unsigned)state->sensor_fault_streak);
+            return true;
+        }
+        /* A bad read also can't feed any window below with a real number --
+         * skip the rest of this tick's checks rather than reasoning about a
+         * value that isn't trustworthy. */
+        return false;
+    }
+    state->sensor_fault_streak = 0;
+
+    /* --- Guard 5: absolute limits, immediate, no debounce ------------------ */
+    if (cfg->max_temp_c > 0.0f && in->measurement_c >= cfg->max_temp_c) {
+        trip(state, THERMAL_GUARD_TRIP_MAX_TEMP, "%.1fC >= max_temp_c %.1fC", (double)in->measurement_c,
+             (double)cfg->max_temp_c);
+        return true;
+    }
+    if (in->measurement_c <= cfg->min_temp_c) {
+        trip(state, THERMAL_GUARD_TRIP_MIN_TEMP, "%.1fC <= min_temp_c %.1fC", (double)in->measurement_c,
+             (double)cfg->min_temp_c);
+        return true;
+    }
+
+    /* --- Guard 7: frozen sensor -------------------------------------------- */
+    if (in->commanded_duty > 0.0f) {
+        if (!state->frozen_window_active || in->measurement_c != state->frozen_last_c) {
+            state->frozen_window_active = true;
+            state->frozen_last_c = in->measurement_c;
+            state->frozen_elapsed_s = 0.0f;
+        } else {
+            state->frozen_elapsed_s += in->dt_s;
+            if (state->frozen_elapsed_s >= FROZEN_WINDOW_S) {
+                trip(state, THERMAL_GUARD_TRIP_FROZEN, "reading unchanged at %.1fC for %.0fs while duty > 0",
+                     (double)in->measurement_c, (double)state->frozen_elapsed_s);
+                return true;
+            }
+        }
+    } else {
+        state->frozen_window_active = false;
+    }
+
+    float rate_cfg = effective_rate(cfg->sanity_rate_c_per_min, 0.5f);
+
+    /* --- Guards 1 & 2: heating-failed / wrong-direction --------------------
+     * Both share one rolling window over "duty is at/above the progress
+     * threshold" periods; which guard applies depends on which way the
+     * error points. */
+    if (in->commanded_duty >= PROGRESS_DUTY_MIN) {
+        float error = in->setpoint_c - in->measurement_c;
+        if (!state->progress_window_active) {
+            state->progress_window_active = true;
+            state->progress_window_start_c = in->measurement_c;
+            state->progress_window_elapsed_s = 0.0f;
+        } else {
+            state->progress_window_elapsed_s += in->dt_s;
+            float window_s = (error > 0.0f) ? PROGRESS_WINDOW_S : WRONG_DIR_WINDOW_S;
+            if (state->progress_window_elapsed_s >= window_s) {
+                float delta = in->measurement_c - state->progress_window_start_c;
+                float elapsed_min = state->progress_window_elapsed_s / 60.0f;
+                if (error > 0.0f) {
+                    /* Guard 1: heating, below setpoint, must be rising. */
+                    float expected = rate_cfg * elapsed_min;
+                    if (delta < expected) {
+                        trip(state, THERMAL_GUARD_TRIP_HEATING_FAILED,
+                             "heating but rose only %.1fC in %.1fmin (need >=%.1fC)", (double)delta,
+                             (double)elapsed_min, (double)expected);
+                        return true;
+                    }
+                } else {
+                    /* Guard 2: heating while already at/above setpoint and
+                     * falling faster than the wrong-direction threshold --
+                     * a miswired zone driving full output making things
+                     * worse. */
+                    float falling_c_per_min = -delta / elapsed_min;
+                    if (falling_c_per_min > WRONG_DIR_RATE_C_PER_MIN) {
+                        trip(state, THERMAL_GUARD_TRIP_WRONG_DIRECTION,
+                             "heating commanded but temperature falling %.2fC/min", (double)falling_c_per_min);
+                        return true;
+                    }
+                }
+                /* Window satisfied (or the falling-but-under-threshold case
+                 * for guard 2) -- slide to a fresh window rather than
+                 * growing forever. */
+                state->progress_window_start_c = in->measurement_c;
+                state->progress_window_elapsed_s = 0.0f;
+            }
+        }
+    } else {
+        state->progress_window_active = false;
+    }
+
+    /* --- Guard 3: runaway with heat off (welded contact) ------------------- */
+    if (in->commanded_duty <= 0.0f) {
+        if (!state->off_window_active) {
+            state->off_window_active = true;
+            state->off_window_elapsed_s = 0.0f;
+            state->runaway_baseline_c = in->measurement_c;
+        } else {
+            state->off_window_elapsed_s += in->dt_s;
+            if (state->off_window_elapsed_s >= OFF_SETTLE_S) {
+                /* Re-baseline exactly once, at the instant the settle window
+                 * ends, so the rise and the time it is divided by cover the
+                 * SAME interval.
+                 *
+                 * Found on hardware 2026-08-12 (simulated plant, TODO.md
+                 * 6A.8): measuring delta from the start of the off-window but
+                 * dividing by the time since settle ended reported a 4.3C
+                 * rise as "257.74C/min" on the first tick past the window,
+                 * because that tick's denominator is one dt. Any zone sitting
+                 * at duty 0 through the settle window and drifting up by even
+                 * a fraction of a degree -- a dwell, a neighbour's heat
+                 * arriving through the chamber, ordinary coasting after a
+                 * ramp -- would trip a welded-contact fault. That is a
+                 * false positive on the guard whose whole job is to be
+                 * believed when it fires. */
+                if (!state->runaway_rate_baseline_valid) {
+                    state->runaway_rate_baseline_valid = true;
+                    state->runaway_rate_baseline_c = in->measurement_c;
+                    state->runaway_rate_elapsed_s = 0.0f;
+                } else {
+                    state->runaway_rate_elapsed_s += in->dt_s;
+                }
+                /* The margin check keeps the ORIGINAL baseline: "20C above
+                 * where it was when heat was commanded off" is the absolute
+                 * statement, independent of when the rate window started. */
+                float delta = in->measurement_c - state->runaway_baseline_c;
+                float rate_delta = in->measurement_c - state->runaway_rate_baseline_c;
+                float elapsed_min = state->runaway_rate_elapsed_s / 60.0f;
+                /* Below ~a third of the settle window the sample is too short
+                 * to divide by; the margin check still applies meanwhile. */
+                float rate = (elapsed_min >= (OFF_SETTLE_S / 3.0f) / 60.0f) ? rate_delta / elapsed_min : 0.0f;
+                if (rate > RUNAWAY_RATE_C_PER_MIN || delta > RUNAWAY_MARGIN_C) {
+                    trip(state, THERMAL_GUARD_TRIP_RUNAWAY,
+                         "heat commanded off %.0fs but temperature rose %.1fC (rate %.2fC/min) -- possible welded relay",
+                         (double)state->off_window_elapsed_s, (double)delta, (double)rate);
+                    return true;
+                }
+            }
+        }
+    } else {
+        state->off_window_active = false;
+        state->runaway_rate_baseline_valid = false;
+    }
+
+    /* --- Guard 4: drift at setpoint -----------------------------------------
+     * "Settled" once the zone has ever come within DRIFT_HYSTERESIS_C of
+     * setpoint (at_setpoint_window_active, reused as that latch); from then
+     * on a *sustained* excursion back outside that band for DRIFT_PERIOD_S
+     * trips. A brief excursion (a dwell wandering, a ramp segment just
+     * starting) resets the sustained-excursion timer but doesn't un-settle
+     * the zone -- matches TODO.md 6A.3's "loose and slow, a kiln legitimately
+     * wanders" intent, deliberately looser than a 3D printer's 4C/40s. Note
+     * this deliberately does NOT use the bang-bang hysteresis band
+     * (heater_output.h, typically ~2C) -- that band is tight enough that a
+     * normal dwell cycling the relay would spend most of its time just
+     * outside it, which would make this guard fire on completely healthy
+     * operation. */
+    float abs_error = fabsf(in->setpoint_c - in->measurement_c);
+    if (abs_error <= DRIFT_HYSTERESIS_C) {
+        state->at_setpoint_window_active = true;
+        state->at_setpoint_elapsed_s = 0.0f;
+    } else if (state->at_setpoint_window_active) {
+        state->at_setpoint_elapsed_s += in->dt_s;
+        if (state->at_setpoint_elapsed_s >= DRIFT_PERIOD_S) {
+            trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs after settling",
+                 (double)DRIFT_HYSTERESIS_C, (double)state->at_setpoint_elapsed_s);
+            return true;
+        }
+    }
+
+    /* --- Guard 8: cross-zone plausibility ----------------------------------
+     * Two zones in one chamber cannot disagree by more than
+     * cross_zone_max_delta_c for longer than cross_zone_period_s. This is the
+     * check that catches a thermocouple which fell out of the kiln body even
+     * when guards 1 and 2 are satisfied, because that zone's elements really
+     * are heating the chamber -- its neighbors climb, it doesn't.
+     *
+     * Disabled unless the caller supplies BOTH a threshold and peer readings;
+     * see thermal_guard_cfg_t.cross_zone_max_delta_c for why the threshold
+     * has no default. Compared against the *worst* disagreeing peer rather
+     * than an average: with three zones, an average would let one badly wrong
+     * channel hide behind a healthy one. */
+    if (cfg->cross_zone_max_delta_c > 0.0f && in->peer_c && in->peer_count > 0) {
+        float worst_delta = 0.0f;
+        int worst_peer = -1;
+        for (uint8_t i = 0; i < in->peer_count; i++) {
+            if (i == in->peer_index_self) continue;
+            if (in->peer_ok && !in->peer_ok[i]) continue; /* untrustworthy reading -- guard 6's problem, not this one */
+            float delta = fabsf(in->measurement_c - in->peer_c[i]);
+            if (delta > worst_delta) {
+                worst_delta = delta;
+                worst_peer = (int)i;
+            }
+        }
+
+        if (worst_peer >= 0 && worst_delta > cfg->cross_zone_max_delta_c) {
+            state->cross_zone_elapsed_s += in->dt_s;
+            float period_s = (cfg->cross_zone_period_s > 0.0f) ? cfg->cross_zone_period_s
+                                                               : CROSS_ZONE_PERIOD_S_DEFAULT;
+            if (state->cross_zone_elapsed_s >= period_s) {
+                trip(state, THERMAL_GUARD_TRIP_CROSS_ZONE,
+                     "%.1fC differs from zone %d's %.1fC by %.1fC (>%.1fC) for %.0fs",
+                     (double)in->measurement_c, worst_peer, (double)in->peer_c[worst_peer],
+                     (double)worst_delta, (double)cfg->cross_zone_max_delta_c,
+                     (double)state->cross_zone_elapsed_s);
+                return true;
+            }
+        } else {
+            state->cross_zone_elapsed_s = 0.0f;
+        }
+    }
+
+    return false;
+}

@@ -18,8 +18,8 @@ actually wired on the reference board.
 
 | Signal | GPIO | Kconfig option | Notes |
 |---|---|---|---|
-| I2C SDA | 8 | `KILNCTL_I2C_SDA_IO` | shared: MCP4728 DAC + SSD1306 OLED |
-| I2C SCL | 9 | `KILNCTL_I2C_SCL_IO` | shared: MCP4728 DAC + SSD1306 OLED |
+| I2C SDA | 8 | `KILNCTL_I2C_SDA_IO` | shared: MCP4728 DAC + SSD1306 OLED + PCF8575 expander |
+| I2C SCL | 9 | `KILNCTL_I2C_SCL_IO` | shared: MCP4728 DAC + SSD1306 OLED + PCF8575 expander |
 | UART TX | 43 | `KILNCTL_UART_TX_IO` | labeled "TX" on the board; routed through the dedicated USB-UART bridge chip, **not** the native USB-Serial-JTAG port |
 | UART RX | 44 | `KILNCTL_UART_RX_IO` | labeled "RX" on the board |
 | AD9833 SCLK | 4 | `KILNCTL_AD9833_SCLK_IO` | |
@@ -41,6 +41,7 @@ protocol runs over — see `docs/UART_PROTOCOL.md`.
 | `KILNCTL_AD9833_MCLK_HZ` | 25000000 | **must match the actual crystal wired to the AD9833's MCLK pin** — a wrong value skews every programmed frequency |
 | `KILNCTL_SSD1306_I2C_ADDR` | 0x3C | 0x3D on some boards |
 | `KILNCTL_SSD1306_WIDTH` / `_HEIGHT` | 128 / 64 | pixels; height must be a multiple of 8 |
+| `KILNCTL_PCF8575_I2C_ADDR` | 0x20 | address pins A2/A1/A0 select 0x20–0x27; all pulled down on this board. Boot-time address only — the running firmware can be re-targeted at any of the eight over UART, see [`docs/PCF8575.md`](PCF8575.md) |
 
 ## Live pin config over UART
 

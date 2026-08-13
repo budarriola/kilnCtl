@@ -6,6 +6,20 @@
     },
     "pdf-mcp": {
       "command": "pdfMcp/.venv/Scripts/pdf-mcp.exe"
+    },
+    "saleae": {
+      "type": "http",
+      "url": "http://127.0.0.1:10530/mcp"
+    },
+    "esp-idf": {
+      "command": "C:\\Users\\budar\\.espressif\\python_env\\idf6.0_py3.14_env\\Scripts\\python.exe",
+      "args": ["C:\\esp\\v6.0.2\\esp-idf\\tools\\idf.py", "-C", "KilnFW", "mcp-server"],
+      "env": {
+        "IDF_PATH": "C:\\esp\\v6.0.2\\esp-idf",
+        "IDF_TOOLS_PATH": "C:\\Users\\budar\\.espressif",
+        "IDF_PYTHON_ENV_PATH": "C:\\Users\\budar\\.espressif\\python_env\\idf6.0_py3.14_env",
+        "ESP_IDF_VERSION": "6.0.2"
+      }
     }
   }
 }

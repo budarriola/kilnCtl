@@ -33,13 +33,15 @@ from typing import Callable, Optional
 
 from . import devices, pin_overlay, settings
 from .device_log import LogClient
-from .devices import FirmwareVersion, LogLine, PinConfigEntry
+from .devices import ExpanderPort, FirmwareVersion, LogLine, PinConfigEntry
+from .expander import ExpanderClient, ExpanderQueryError
 from .info import InfoClient, InfoQueryError
 from .link_hub import get_shared_link
 from .protocol import (
     UART_TASK_ID_AD9833,
     UART_TASK_ID_DAC,
     UART_TASK_ID_OLED,
+    UART_TASK_ID_PCF8575,
     UART_TASK_ID_SYSTEM,
     LogLevel,
     Waveform,
@@ -112,6 +114,12 @@ _DEVICE_LOG_SESSION_METHOD_NAME: dict[LogLevel, str] = {
     LogLevel.WARN: "warning",
 }
 
+#: Datasheet pin names for the PCF8575's two 8-bit ports: bit 0-7 are P00-P07,
+#: bit 8-15 are P10-P17. Worth spelling out in the UI rather than showing bare
+#: bit numbers, since that's what's silkscreened on the breakout.
+def _expander_pin_name(index: int) -> str:
+    return f"P{index // 8}{index % 8}"
+
 
 class UartControlApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -168,6 +176,19 @@ class UartControlApp:
         self.device_log_history: "deque[LogLine]" = deque(maxlen=_DEVICE_LOG_HISTORY_LINES)
         self.device_log = LogClient(self.link, on_line=self._on_device_log_line)
 
+        # Task PCF8575 (7). Registered here rather than when the expander
+        # window opens for consistency with the two above, and because the
+        # window's very first action is usually a read -- which needs this
+        # inbox to already exist for the reply to land in.
+        self.expander = ExpanderClient(self.link)
+
+        #: Set when the expander window is opened (or reopened) and cleared by
+        #: the read that fills it in. Lives here rather than in the builder so
+        #: an open that happens before the link is usable stays armed: the
+        #: scan/read are refused then, and _apply_fw_version retries once the
+        #: firmware version confirms queries are allowed again.
+        self._expander_autoload_pending = False
+
         #: True once a session is underway, so the very next unexpected drop
         #: (link was up, goes down without the user clicking Disconnect) gets
         #: exactly one log line instead of silent UI-only state flips -- see
@@ -193,6 +214,7 @@ class UartControlApp:
         manual.add_command(label="MCP4728 DAC...", command=self.open_dac_popup)
         manual.add_command(label="AD9833 Generator...", command=self.open_ad9833_popup)
         manual.add_command(label="SSD1306 OLED...", command=self.open_oled_popup)
+        manual.add_command(label="PCF8575 Expander...", command=self.open_expander_popup)
         menubar.add_cascade(label="manualCtrl", menu=manual)
 
         logs = tk.Menu(menubar, tearoff=0)
@@ -475,6 +497,15 @@ class UartControlApp:
         )
         self._refresh_about_version()
 
+        # An expander window opened before the version landed had its scan and
+        # read refused (_expander_query_allowed), leaving the rows blank. Now
+        # that queries are allowed, load it -- this also covers a device reboot
+        # while the window is up, where the firmware is back on its Kconfig
+        # address and whatever is on screen is stale.
+        if version.compatible and self._expander_is_open():
+            self._expander_autoload_pending = True
+            self.expander_scan_async()
+
         if not version.compatible and not self._incompatibility_warned:
             # Only nag once per connection (re-armed in toggle_connect on a
             # fresh connect) -- a persistent mismatch would otherwise pop a
@@ -521,6 +552,20 @@ class UartControlApp:
 
     def open_oled_popup(self) -> None:
         self._popup("oled", "SSD1306 OLED - manual control", self._build_oled_popup)
+
+    def open_expander_popup(self) -> None:
+        self._popup("expander", "PCF8575 Expander - manual control", self._build_expander_popup)
+        # Reopening an already-open window skips the builder, so arm the
+        # autoload here: opening the page should always land on live data, not
+        # on whatever was on screen when it was last closed.
+        self._expander_autoload_pending = True
+        # A board can carry up to eight of these, so which addresses are real
+        # is board-specific: scan on open so the address list is populated with
+        # what's actually installed rather than the part's whole range. The
+        # port read that fills the pin rows is chained off the scan result --
+        # see _apply_expander_scan. Quietly skipped when not connected --
+        # _expander_query_allowed says so.
+        self.expander_scan_async()
 
     def open_about_popup(self) -> None:
         self._popup("about", "About - pin configuration", self._build_about_popup)
@@ -1244,11 +1289,456 @@ class UartControlApp:
 
         threading.Thread(target=worker, name="uart-send-oled", daemon=True).start()
 
+    # -- PCF8575 expander popup ---------------------------------------------
+    def _build_expander_popup(self, top: tk.Toplevel) -> None:
+        """16 pin toggles (write-through), a read-back row, mask ops, and the
+        address controls -- all eight addresses the part's A2/A1/A0 pins can
+        select are reachable here without reflashing."""
+        self._expander_pin_vars: list[tk.BooleanVar] = []
+        self._expander_read_vars: list[tk.StringVar] = []
+        #: Address the firmware has actually confirmed (from a READ_PORT), as
+        #: opposed to whatever the dropdown is showing. None until the first
+        #: read-back lands, which is what makes the open-time sync below know
+        #: it still has to prove the selection rather than assume it.
+        self._expander_active_addr: int | None = None
+        #: Set while an address switch is in flight so a second selection
+        #: (the combobox stays live during the round trip) can't interleave
+        #: two SET_ADDRESS/READ_PORT pairs on the same task.
+        self._expander_addr_busy = False
+        self.expander_addr_var = tk.StringVar(value="")
+        self.expander_mask_var = tk.StringVar(value="0x0001")
+        self.expander_status_var = tk.StringVar(value="Scanning for expanders...")
+
+        # -- address --------------------------------------------------------
+        af = ttk.LabelFrame(top, text="I2C address (A2/A1/A0 pins select 0x20-0x27)")
+        af.pack(fill="x", padx=8, pady=(8, 4))
+        # Starts empty: the part's 0x20-0x27 range says what a PCF8575 *can* be
+        # strapped to, not what this board answers on, and offering an address
+        # nothing lives at is how you end up picking one that just fails. The
+        # scan on open fills this in (see _apply_expander_scan).
+        self.expander_addr_combo = ttk.Combobox(
+            af,
+            textvariable=self.expander_addr_var,
+            state="disabled",
+            width=7,
+            values=[],
+        )
+        self.expander_addr_combo.grid(row=0, column=0, padx=6, pady=6)
+        # Picking an address is the whole gesture -- no separate confirm step.
+        # The combobox is readonly, so this fires on a user's dropdown pick and
+        # not on the .set() calls that read-backs and scans make, which is what
+        # keeps an applied address from re-applying itself.
+        self.expander_addr_combo.bind(
+            "<<ComboboxSelected>>", self._on_expander_addr_selected
+        )
+        ttk.Button(af, text="Scan 0x20-0x27", command=self.expander_scan_async).grid(
+            row=0, column=1, padx=4
+        )
+        ttk.Label(
+            af,
+            text="Board's address pins are pulled down -> 0x20.",
+            foreground="#555",
+        ).grid(row=0, column=2, padx=(12, 6), sticky="w")
+
+        # -- pins -----------------------------------------------------------
+        pf = ttk.LabelFrame(top, text="Pins (checked = high / weak pull-up / input, unchecked = driven low)")
+        pf.pack(fill="x", padx=8, pady=4)
+        for index in range(devices.PCF8575_PIN_COUNT):
+            # Power-on state is all-high, and that's what the firmware's
+            # shadow starts at too, so start checked rather than showing a
+            # state the device isn't actually in.
+            var = tk.BooleanVar(value=True)
+            read_var = tk.StringVar(value="?")
+            self._expander_pin_vars.append(var)
+            self._expander_read_vars.append(read_var)
+
+            row = (index // 8) * 3
+            col = index % 8
+            ttk.Label(pf, text=_expander_pin_name(index), anchor="center").grid(
+                row=row, column=col, padx=4, pady=(6, 0)
+            )
+            # command= (not a trace) so programmatic .set() from a read-back
+            # can't fire a write back at the device.
+            ttk.Checkbutton(
+                pf, variable=var, command=lambda i=index: self._expander_write_pin(i)
+            ).grid(row=row + 1, column=col, padx=4)
+            ttk.Label(pf, textvariable=read_var, anchor="center", width=3).grid(
+                row=row + 2, column=col, padx=4, pady=(0, 6)
+            )
+
+        # -- whole-port actions ---------------------------------------------
+        wf = ttk.Frame(top)
+        wf.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(wf, text="Read Port", command=self.expander_read_port_async).pack(side="left")
+        ttk.Button(
+            wf,
+            text="Write Port",
+            command=lambda: self.send_async(
+                "Expander write port",
+                UART_TASK_ID_PCF8575,
+                lambda: devices.pcf8575_write_port(self._expander_port_from_checkboxes()),
+            ),
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            wf, text="All High", command=lambda: self._expander_set_all(True)
+        ).pack(side="left")
+        ttk.Button(
+            wf, text="All Low", command=lambda: self._expander_set_all(False)
+        ).pack(side="left", padx=6)
+
+        # -- masks ----------------------------------------------------------
+        mf = ttk.LabelFrame(top, text="Mask (read-modify-write against the firmware's output shadow)")
+        mf.pack(fill="x", padx=8, pady=4)
+        ttk.Entry(mf, textvariable=self.expander_mask_var, width=10).grid(
+            row=0, column=0, padx=6, pady=6
+        )
+        for col, (label, builder) in enumerate(
+            (
+                ("Set (high)", devices.pcf8575_set_mask),
+                ("Clear (low)", devices.pcf8575_clear_mask),
+                ("Toggle", devices.pcf8575_toggle_mask),
+            ),
+            start=1,
+        ):
+            ttk.Button(
+                mf,
+                text=label,
+                command=lambda lbl=label, b=builder: self.send_async(
+                    f"Expander mask {lbl} {self.expander_mask_var.get()}",
+                    UART_TASK_ID_PCF8575,
+                    lambda b=b: b(self._expander_mask_value()),
+                ),
+            ).grid(row=0, column=col, padx=4)
+
+        ttk.Label(top, textvariable=self.expander_status_var, anchor="w", foreground="#555").pack(
+            fill="x", padx=8, pady=(0, 8)
+        )
+
+    def _expander_is_open(self) -> bool:
+        top = self.popups.get("expander")
+        return top is not None and top.winfo_exists()
+
+    def _expander_mask_value(self) -> int:
+        """Parse the mask entry, accepting 0x-prefixed hex, 0b binary or decimal."""
+        text = self.expander_mask_var.get().strip()
+        try:
+            return int(text, 0)
+        except ValueError:
+            raise ValueError(f"mask must be a number (e.g. 0x00FF), got {text!r}") from None
+
+    def _expander_port_from_checkboxes(self) -> int:
+        value = 0
+        for index, var in enumerate(self._expander_pin_vars):
+            if var.get():
+                value |= 1 << index
+        return value
+
+    def _expander_write_pin(self, index: int) -> None:
+        level = self._expander_pin_vars[index].get()
+        self.send_async(
+            f"Expander {_expander_pin_name(index)} = {int(level)}",
+            UART_TASK_ID_PCF8575,
+            lambda: devices.pcf8575_write_pin(index, level),
+        )
+
+    def _expander_set_all(self, level: bool) -> None:
+        """Set every checkbox and push the whole port in one frame (16 separate
+        WRITE_PIN sends would be 16 round trips)."""
+        for var in self._expander_pin_vars:
+            var.set(level)
+        self.send_async(
+            f"Expander all pins {'high' if level else 'low'}",
+            UART_TASK_ID_PCF8575,
+            lambda: devices.pcf8575_write_port(0xFFFF if level else 0x0000),
+        )
+
+    def expander_read_port_async(self) -> None:
+        """Query the live pin states; a query blocks for a UART round trip
+        *after* the ACK, so it runs on a worker like the INFO ones."""
+        if not self._expander_query_allowed("read port"):
+            return
+        self.expander_status_var.set("Reading port...")
+
+        def worker() -> None:
+            try:
+                port = self.expander.read_port()
+            except ExpanderQueryError as exc:
+                self.session_log.warning("expander read failed: %s", exc)
+                self.post(lambda: self._expander_set_status(f"read failed: {exc}", error=True))
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                self.session_log.error("expander read error: %s", exc)
+                self.post(lambda: self._expander_set_status(f"error: {exc}", error=True))
+                return
+            self.session_log.info("expander read: %s", port.describe())
+            self.post(lambda: self._apply_expander_port(port))
+
+        threading.Thread(target=worker, name="uart-expander-read", daemon=True).start()
+
+    def _on_expander_addr_selected(self, _event: "tk.Event") -> None:
+        """Dropdown pick applies straight away.
+
+        Re-picking the address already in force is a no-op rather than a
+        pointless bus round trip -- the combobox fires this on every selection,
+        including choosing the same entry again.
+        """
+        try:
+            addr = int(self.expander_addr_var.get(), 0)
+        except ValueError:
+            self._expander_set_status(
+                f"bad address {self.expander_addr_var.get()!r}", error=True
+            )
+            return
+        if addr == self._expander_active_addr:
+            return
+        self.expander_apply_address_async()
+
+    def expander_apply_address_async(self) -> None:
+        """Switch the firmware to the selected address, then read back to prove
+        it took.
+
+        SET_ADDRESS is ACK-only, and the firmware refuses an address nothing
+        answers on (PCF8575_set_address probes first), so the ACK alone says
+        nothing about which chip we're now talking to -- READ_PORT reports the
+        address actually in force.
+        """
+        if not self._expander_query_allowed("set address"):
+            self._expander_restore_addr_selection()
+            return
+        if self._expander_addr_busy:
+            return
+        try:
+            addr = int(self.expander_addr_var.get(), 0)
+        except ValueError:
+            self._expander_set_status(
+                f"bad address {self.expander_addr_var.get()!r}", error=True
+            )
+            self._expander_restore_addr_selection()
+            return
+        self._expander_addr_busy = True
+        self.expander_status_var.set(f"Switching to 0x{addr:02X}...")
+
+        def worker() -> None:
+            try:
+                result = self.expander.send(devices.pcf8575_set_address(addr))
+                if not result.ok:
+                    self.session_log.warning(
+                        "expander set address: %s", result.describe()
+                    )
+                    self.post(
+                        lambda: self._expander_address_failed(
+                            f"address 0x{addr:02X}: {result.describe()}"
+                        )
+                    )
+                    return
+                try:
+                    port = self.expander.read_port()
+                except Exception as exc:
+                    self.session_log.warning(
+                        "expander address read-back failed: %s", exc
+                    )
+                    self.post(
+                        lambda: self._expander_address_failed(
+                            f"0x{addr:02X} not confirmed: {exc}"
+                        )
+                    )
+                    return
+                if port.addr != addr:
+                    # The firmware kept its old address: nothing answered at the
+                    # requested one (see PCF8575.c's probe-before-switch).
+                    self.session_log.warning(
+                        "expander address 0x%02X refused, still on 0x%02X",
+                        addr,
+                        port.addr,
+                    )
+                    self.post(
+                        lambda: self._expander_address_failed(
+                            f"no device at 0x{addr:02X} -- still on 0x{port.addr:02X}",
+                            # The firmware told us where it actually is, so the
+                            # dropdown follows that rather than the rejected pick.
+                            actual=port.addr,
+                        )
+                    )
+                    return
+                self.session_log.info(
+                    "expander now at 0x%02X: %s", addr, port.describe()
+                )
+                self.post(lambda: self._apply_expander_port(port))
+            finally:
+                self.post(self._expander_addr_done)
+
+        threading.Thread(target=worker, name="uart-expander-addr", daemon=True).start()
+
+    def _expander_addr_done(self) -> None:
+        self._expander_addr_busy = False
+
+    def _expander_address_failed(self, text: str, actual: "int | None" = None) -> None:
+        """Report a refused switch and put the dropdown back on the address
+        that's really in force -- with no Apply button, a stale selection would
+        otherwise read as if it had been applied."""
+        if actual is not None:
+            self._expander_active_addr = actual
+        self._expander_restore_addr_selection()
+        self._expander_set_status(text, error=True)
+
+    def _expander_restore_addr_selection(self) -> None:
+        if self._expander_active_addr is None or not self._expander_is_open():
+            return
+        shown = f"0x{self._expander_active_addr:02X}"
+        # Never put a value on a dropdown that has no entries to back it: an
+        # emptied list means we've stopped believing any address is live.
+        if shown in self.expander_addr_combo.cget("values"):
+            self.expander_addr_var.set(shown)
+
+    def expander_scan_async(self) -> None:
+        if not self._expander_query_allowed("scan"):
+            # _expander_query_allowed already explained itself on the main
+            # status bar; the popup would otherwise sit on "Scanning..." with a
+            # dropdown that never fills.
+            if self._expander_is_open():
+                self._expander_set_addr_choices([])
+                self.expander_status_var.set("no scan yet -- connect first.")
+            self._expander_active_addr = None
+            return
+        self.expander_status_var.set("Scanning 0x20-0x27...")
+
+        def worker() -> None:
+            try:
+                found = self.expander.scan()
+            except ExpanderQueryError as exc:
+                self.session_log.warning("expander scan failed: %s", exc)
+                self.post(lambda: self._expander_scan_unusable(f"scan failed: {exc}"))
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                self.session_log.error("expander scan error: %s", exc)
+                self.post(lambda: self._expander_scan_unusable(f"error: {exc}"))
+                return
+            text = (
+                "responded: " + ", ".join(f"0x{a:02X}" for a in found)
+                if found
+                else "no device answered in 0x20-0x27"
+            )
+            self.session_log.info("expander scan: %s", text)
+            self.post(lambda: self._apply_expander_scan(found, text))
+
+        threading.Thread(target=worker, name="uart-expander-scan", daemon=True).start()
+
+    def _expander_query_allowed(self, what: str) -> bool:
+        """Same gate send_async applies to writes -- queries on this task are
+        device commands too, unlike the INFO ones (which are exempt because
+        they're how compatibility gets discovered in the first place)."""
+        if not self.link.is_connected:
+            self.set_status(f"Expander {what}: not connected.", error=True)
+            return False
+        if self.info.compatible is not True:
+            reason = (
+                "protocol version mismatch"
+                if self.info.compatible is False
+                else "firmware version not yet confirmed"
+            )
+            self.set_status(f"Expander {what}: refused ({reason}).", error=True)
+            return False
+        return True
+
+    def _apply_expander_scan(self, found: "list[int]", text: str) -> None:
+        """Narrow the address dropdown to the expanders that actually answered.
+
+        A board can carry up to eight PCF8575s, so the scan result -- not the
+        part's full 0x20-0x27 range -- is the choice list. An empty scan empties
+        the dropdown rather than falling back to the full range: now that
+        picking an entry applies it, every offered address has to be one that
+        answers, and a list of eight dead ones is worse than none.
+        """
+        if not self._expander_is_open():
+            self._expander_set_status(text)
+            return
+
+        if found:
+            values = [f"0x{a:02X}" for a in found]
+            self._expander_set_addr_choices(values)
+            # Keep the current pick if it answered; otherwise follow the scan
+            # so the dropdown never shows an address that isn't populated.
+            if self.expander_addr_var.get() not in values:
+                self.expander_addr_var.set(values[0])
+            self._expander_set_status(text)
+            # Open-time sync. The scan says what's installed but not which one
+            # the firmware is talking to, and a .set() above moves the dropdown
+            # without firing <<ComboboxSelected>>, so the shown selection is a
+            # guess until a read-back confirms it.
+            #
+            # On a page load that read is a plain READ_PORT: its reply carries
+            # the address actually in force (and the pin/shadow state to fill
+            # the rows with), so opening the window never writes to the bus and
+            # can't move the firmware off the chip it was already on. Only a
+            # deliberate dropdown pick sends SET_ADDRESS.
+            if self._expander_autoload_pending:
+                self._expander_autoload_pending = False
+                self.expander_read_port_async()
+            elif self._expander_active_addr is None or self.expander_addr_var.get() != (
+                f"0x{self._expander_active_addr:02X}"
+            ):
+                self.expander_apply_address_async()
+            return
+
+        self._expander_set_addr_choices([])
+        # Nothing answered, so there's no address worth proving; a stale
+        # confirmation would make the next scan skip the sync above.
+        self._expander_active_addr = None
+        self._expander_set_status(text, error=True)
+
+    def _expander_scan_unusable(self, text: str) -> None:
+        """A scan that errored out tells us nothing about what's installed, so
+        the previous list can't be trusted either -- leaving it up would offer
+        addresses that now apply themselves on a click."""
+        if self._expander_is_open():
+            self._expander_set_addr_choices([])
+        self._expander_active_addr = None
+        self._expander_set_status(text, error=True)
+
+    def _expander_set_addr_choices(self, values: "list[str]") -> None:
+        """Populate the address dropdown, disabling it outright when empty so
+        there's nothing to pick and nothing that looks pickable."""
+        self.expander_addr_combo.configure(
+            values=values, state="readonly" if values else "disabled"
+        )
+        if not values:
+            self.expander_addr_var.set("")
+
+    def _expander_set_status(self, text: str, error: bool = False) -> None:
+        if self._expander_is_open():
+            self.expander_status_var.set(text)
+        self.set_status(f"Expander: {text}", error=error)
+
+    def _apply_expander_port(self, port: ExpanderPort) -> None:
+        """Show a read-back: per-pin 1/0 row, and re-sync the checkboxes to the
+        firmware's shadow (the last value actually written) so the window
+        stops guessing after a reboot or an address change."""
+        if not self._expander_is_open():
+            return
+        for index, read_var in enumerate(self._expander_read_vars):
+            read_var.set("1" if port.pins & (1 << index) else "0")
+            self._expander_pin_vars[index].set(bool(port.shadow & (1 << index)))
+        # Every read-back carries the address in force, so this is the one
+        # place the confirmed address gets set -- it self-corrects after a
+        # firmware reboot or an address change made elsewhere.
+        self._expander_active_addr = port.addr
+        # A device that answered a read is a device that exists, so it belongs
+        # in the dropdown even if it got there via "Read Port" rather than a
+        # scan -- otherwise the list stays empty while the window shows live
+        # pin data from that very address.
+        shown = f"0x{port.addr:02X}"
+        values = list(self.expander_addr_combo.cget("values"))
+        if shown not in values:
+            self._expander_set_addr_choices(sorted(values + [shown]))
+        self.expander_addr_var.set(shown)
+        self._expander_set_status(port.describe())
+
     # -- shutdown ----------------------------------------------------------
     def on_close(self) -> None:
         try:
             self.info.close()
             self.device_log.close()
+            self.expander.close()
             # close(), not disconnect(): this link may be shared with another
             # process (see link_hub.py) -- closing the window shouldn't yank
             # the physical port out from under it. An explicit Disconnect

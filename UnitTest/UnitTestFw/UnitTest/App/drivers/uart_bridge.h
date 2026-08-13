@@ -3,6 +3,7 @@
 
 #include "AD9833.h"
 #include "DcDac.h"
+#include "PCF8575.h"
 #include "SSD1306.h"
 #include "esp_err.h"
 #include "espInterfaces/uart_protocol.h"
@@ -18,6 +19,13 @@ extern "C" {
 esp_err_t uart_bridge_start_dac_task(uart_protocol_t *proto, DcDacClass *dac);
 esp_err_t uart_bridge_start_ad9833_task(uart_protocol_t *proto, AD9833Class *gen);
 esp_err_t uart_bridge_start_oled_task(uart_protocol_t *proto, SSD1306Class *oled);
+
+/* Registers UART_TASK_ID_PCF8575 and spawns a task that turns incoming
+ * messages into PCF8575_ calls. Unlike the DAC/AD9833/OLED bridges this one
+ * is part query channel: READ_PORT and SCAN answer with their own DATA frame
+ * back to the requester (see uart_task_ids.h), so the PC side must itself be
+ * registered on this task_id to receive them. */
+esp_err_t uart_bridge_start_pcf8575_task(uart_protocol_t *proto, PCF8575Class *expander);
 
 /* Registers UART_TASK_ID_INFO and spawns a task that answers
  * INFO_CMD_GET_PIN_CONFIG queries with this firmware's actual pin usage

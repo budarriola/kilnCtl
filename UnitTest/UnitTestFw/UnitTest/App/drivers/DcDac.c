@@ -74,10 +74,17 @@ esp_err_t DcDac_init(DcDacClass *dac, int sda_gpio, int scl_gpio, uint8_t addr, 
     if (!dac) return ESP_ERR_INVALID_ARG;
     dac->addr = addr;
     dac->variant = variant;
+    /* MCP4728 command bases (datasheet 5.6, the C2/C1/C0 + W1/W0 field):
+     *   0x00 Fast Write            0x40 Multi-Write (DAC register only)
+     *   0x50 Sequential Write      0x58 Single Write (DAC register + EEPROM)
+     *   0x60 Write I2C address bits
+     * base_eeprom_write used to be 0x60 -- the address-write command, which
+     * needs an LDAC edge and NACKs without one, so every power-down and EEPROM
+     * write silently failed. Read-back verification is what turned that up. */
     // set conservative default command format; may be overridden below
     dac->fmt.base_fast_write = 0x00;
     dac->fmt.base_write_update = 0x40;
-    dac->fmt.base_eeprom_write = 0x60;
+    dac->fmt.base_eeprom_write = 0x58;
     dac->fmt.read_len = 8;
 
     i2c_master_bus_config_t bus_config = {
@@ -133,7 +140,7 @@ esp_err_t DcDac_init(DcDacClass *dac, int sda_gpio, int scl_gpio, uint8_t addr, 
         case DCDAC_VARIANT_MCP4728_AD:
             dac->fmt.base_fast_write = 0x00;
             dac->fmt.base_write_update = 0x40;
-            dac->fmt.base_eeprom_write = 0x60;
+            dac->fmt.base_eeprom_write = 0x58;
             dac->fmt.read_len = 8;
             break;
         case DCDAC_VARIANT_BASIC_ACK:
@@ -146,7 +153,7 @@ esp_err_t DcDac_init(DcDacClass *dac, int sda_gpio, int scl_gpio, uint8_t addr, 
         default:
             dac->fmt.base_fast_write = 0x00;
             dac->fmt.base_write_update = 0x40;
-            dac->fmt.base_eeprom_write = 0x60;
+            dac->fmt.base_eeprom_write = 0x58;
             dac->fmt.read_len = 8;
             break;
     }
@@ -181,13 +188,174 @@ esp_err_t DcDac_submit_request(DcDacClass *dac, const DcDacRequest *request)
     }
 }
 
+/* ---- transport + read-back verification ---------------------------------
+ *
+ * A read of the MCP4728 (no register pointer -- just a plain read) returns 24
+ * bytes: 6 per channel, in channel order A..D. Per channel:
+ *
+ *   [0] RDY/#BSY, POR, channel, address bits   (status of the DAC register)
+ *   [1] VREF PD1 PD0 Gx D11 D10 D9 D8          (DAC register, as stored)
+ *   [2] D7 D6 D5 D4 D3 D2 D1 D0
+ *   [3] same status layout, for the EEPROM copy
+ *   [4] VREF PD1 PD0 Gx D11..D8                (EEPROM copy)
+ *   [5] D7..D0
+ *
+ * Bytes [1]/[2] (and [4]/[5]) are byte-for-byte what mcp4728_pack_data_bytes
+ * sends, so verifying a write is a plain compare -- no decoding needed.
+ * RDY/#BSY is 1 when the part is idle; it drops to 0 for the duration of an
+ * EEPROM write (up to ~50 ms), during which the EEPROM copy still reads back
+ * the old value, so anything that touches EEPROM has to wait for it. */
+#define DCDAC_READ_BYTES_PER_CH (DCDAC_READ_FRAME_LEN / 4u)
+#define DCDAC_STATUS_RDY_BIT    0x80u
+#define DCDAC_EEPROM_READY_TIMEOUT_MS 100
+#define DCDAC_EEPROM_POLL_MS    5
+#define DCDAC_READ_TIMEOUT_MS   500
+
+/* What a write is expected to leave behind, for the read-back check. */
+typedef struct {
+    uint8_t hi[4];         // expected byte [1] (and [4]) per channel
+    uint8_t lo[4];         // expected byte [2] (and [5]) per channel
+    uint8_t channel_mask;  // bit N set = verify channel N
+    bool check_eeprom;     // command also writes EEPROM: wait for RDY, verify the copy
+} dcdac_expect_t;
+
+static bool dcdac_readback_supported(const DcDacClass *dac)
+{
+    /* BASIC_ACK is by definition a part that ACKs writes but can't be read
+     * back, and UNKNOWN means detection failed -- don't invent read traffic
+     * for either; the write's ACK is all the confirmation available. */
+    return dac->variant == DCDAC_VARIANT_MCP4728_AD || dac->variant == DCDAC_VARIANT_READABLE;
+}
+
+static esp_err_t dcdac_transmit(DcDacClass *dac, const uint8_t *data, size_t len,
+                                uint32_t timeout_ms)
+{
+    if (!dac->owner_initialized) {
+        return i2c_master_transmit(dac->dev, data, len, timeout_ms);
+    }
+    return i2c_owner_transfer(&dac->owner, dac->dev, data, len, NULL, 0, timeout_ms);
+}
+
+static esp_err_t dcdac_read_frame(DcDacClass *dac, uint8_t frame[DCDAC_READ_FRAME_LEN])
+{
+    if (!dac->owner_initialized) {
+        return i2c_master_receive(dac->dev, frame, DCDAC_READ_FRAME_LEN, DCDAC_READ_TIMEOUT_MS);
+    }
+    return i2c_owner_transfer(&dac->owner, dac->dev, NULL, 0, frame, DCDAC_READ_FRAME_LEN,
+                              DCDAC_READ_TIMEOUT_MS);
+}
+
+static esp_err_t dcdac_read_frame_ready(DcDacClass *dac, uint8_t frame[DCDAC_READ_FRAME_LEN])
+{
+    uint32_t waited_ms = 0;
+    while (true) {
+        esp_err_t err = dcdac_read_frame(dac, frame);
+        if (err != ESP_OK) return err;
+        if (frame[0] & DCDAC_STATUS_RDY_BIT) return ESP_OK;
+        if (waited_ms >= DCDAC_EEPROM_READY_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "still busy (RDY/#BSY low) %lu ms after an EEPROM write",
+                     (unsigned long)waited_ms);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DCDAC_EEPROM_POLL_MS));
+        waited_ms += DCDAC_EEPROM_POLL_MS;
+    }
+}
+
+static esp_err_t dcdac_verify(DcDacClass *dac, const dcdac_expect_t *expect, const char *what)
+{
+    uint8_t frame[DCDAC_READ_FRAME_LEN];
+    esp_err_t err = expect->check_eeprom ? dcdac_read_frame_ready(dac, frame)
+                                         : dcdac_read_frame(dac, frame);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    esp_err_t result = ESP_OK;
+    for (uint8_t ch = 0; ch < 4; ++ch) {
+        if (!(expect->channel_mask & (1u << ch))) continue;
+        const uint8_t *slice = &frame[ch * DCDAC_READ_BYTES_PER_CH];
+        if (slice[1] != expect->hi[ch] || slice[2] != expect->lo[ch]) {
+            ESP_LOGW(TAG, "%s: ch%u DAC register reads 0x%02X%02X, expected 0x%02X%02X",
+                     what, ch, slice[1], slice[2], expect->hi[ch], expect->lo[ch]);
+            result = ESP_ERR_INVALID_RESPONSE;
+        }
+        if (expect->check_eeprom && (slice[4] != expect->hi[ch] || slice[5] != expect->lo[ch])) {
+            ESP_LOGW(TAG, "%s: ch%u EEPROM reads 0x%02X%02X, expected 0x%02X%02X",
+                     what, ch, slice[4], slice[5], expect->hi[ch], expect->lo[ch]);
+            result = ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+    return result;
+}
+
+/* Write, read back, compare -- and if any of those three steps fails, say so
+ * and do the whole thing again, up to I2C_WRITE_RETRY_ATTEMPTS times. `expect`
+ * NULL (or a part that can't be read back) degrades to write-and-retry, since
+ * the ACK is then the only confirmation available. */
+static esp_err_t dcdac_write_verified(DcDacClass *dac, const uint8_t *payload, size_t len,
+                                      uint32_t timeout_ms, const dcdac_expect_t *expect,
+                                      const char *what)
+{
+    if (!dac || !dac->dev || !payload || len == 0) return ESP_ERR_INVALID_ARG;
+
+    const bool verify = expect && dcdac_readback_supported(dac);
+    if (expect && !verify) {
+        ESP_LOGD(TAG, "%s: variant %d is not readable, sending without read-back check",
+                 what, dac->variant);
+    }
+
+    esp_err_t err = ESP_FAIL;
+    for (unsigned attempt = 1; attempt <= I2C_WRITE_RETRY_ATTEMPTS; ++attempt) {
+        err = dcdac_transmit(dac, payload, len, timeout_ms);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "%s failed (attempt %u/%u): %s", what, attempt,
+                     (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+            continue;
+        }
+        if (!verify) {
+            return ESP_OK;
+        }
+
+        err = dcdac_verify(dac, expect, what);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "%s did not verify (attempt %u/%u): %s", what, attempt,
+                 (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+    }
+
+    ESP_LOGE(TAG, "%s failed after %u attempts: %s", what,
+             (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+    return err;
+}
+
+/* Raw bytes from the UART bridge: the driver has no idea what register state
+ * they're supposed to produce, so there is nothing to compare a read-back
+ * against. Transport errors are still retried. */
 esp_err_t DcDac_write_raw(DcDacClass *dac, const uint8_t *data, size_t len)
 {
     if (!dac || !data || len == 0) return ESP_ERR_INVALID_ARG;
-    if (!dac->owner_initialized) {
-        return i2c_master_transmit(dac->dev, data, len, 1000);
-    }
-    return i2c_owner_transfer(&dac->owner, dac->dev, data, len, NULL, 0, 1000);
+    return dcdac_write_verified(dac, data, len, 1000, NULL, "raw write");
+}
+
+esp_err_t DcDac_read_registers(DcDacClass *dac, uint8_t *out, size_t len)
+{
+    if (!dac || !dac->dev || !out || len != DCDAC_READ_FRAME_LEN) return ESP_ERR_INVALID_ARG;
+    return dcdac_read_frame(dac, out);
+}
+
+esp_err_t DcDac_read_channel(DcDacClass *dac, uint8_t channel, uint16_t *out_dac,
+                             uint16_t *out_eeprom)
+{
+    if (!dac || channel > 3) return ESP_ERR_INVALID_ARG;
+    uint8_t frame[DCDAC_READ_FRAME_LEN];
+    esp_err_t err = dcdac_read_frame(dac, frame);
+    if (err != ESP_OK) return err;
+    const uint8_t *slice = &frame[channel * DCDAC_READ_BYTES_PER_CH];
+    if (out_dac)    *out_dac    = (uint16_t)(((slice[1] & 0x0F) << 8) | slice[2]);
+    if (out_eeprom) *out_eeprom = (uint16_t)(((slice[4] & 0x0F) << 8) | slice[5]);
+    return ESP_OK;
 }
 
 esp_err_t DcDac_set_channel(DcDacClass *dac, uint8_t channel, uint16_t value)
@@ -263,13 +431,20 @@ esp_err_t DcDac_write_and_update_channel(DcDacClass *dac, uint8_t channel, uint1
     uint8_t ctrl = base | ((channel & 0x03) << 1);
     buf[0] = ctrl;
     mcp4728_pack_data_bytes(value, &buf[1]);
-    return DcDac_write_raw(dac, buf, sizeof(buf));
+
+    /* Multi-write touches the DAC register only, so the EEPROM copy is left
+     * alone and must not be part of the comparison. */
+    dcdac_expect_t expect = { .channel_mask = (uint8_t)(1u << channel), .check_eeprom = false };
+    expect.hi[channel] = buf[1];
+    expect.lo[channel] = buf[2];
+    return dcdac_write_verified(dac, buf, sizeof(buf), 1000, &expect, "write-and-update");
 }
 
 esp_err_t DcDac_write_all_and_update(DcDacClass *dac, const uint16_t values[4])
 {
     if (!dac || !values) return ESP_ERR_INVALID_ARG;
     uint8_t buf[12];
+    dcdac_expect_t expect = { .channel_mask = 0x0F, .check_eeprom = false };
     for (int ch = 0; ch < 4; ++ch) {
         uint16_t v = values[ch];
         if (v > 4095) v = 4095;
@@ -278,8 +453,10 @@ esp_err_t DcDac_write_all_and_update(DcDacClass *dac, const uint16_t values[4])
         uint8_t ctrl = base | ((ch & 0x03) << 1);
         buf[ch*3 + 0] = ctrl;
         mcp4728_pack_data_bytes(v, &buf[ch*3 + 1]);
+        expect.hi[ch] = buf[ch*3 + 1];
+        expect.lo[ch] = buf[ch*3 + 2];
     }
-    return DcDac_write_raw(dac, buf, sizeof(buf));
+    return dcdac_write_verified(dac, buf, sizeof(buf), 1000, &expect, "write-all-and-update");
 }
 
 esp_err_t DcDac_power_down_channel(DcDacClass *dac, uint8_t channel, uint8_t power_mode)
@@ -301,7 +478,17 @@ esp_err_t DcDac_power_down_channel(DcDacClass *dac, uint8_t channel, uint8_t pow
     uint8_t ctrl = base | ((channel & 0x03) << 1);
     uint16_t config = (MCP4728_VREF_VDD << 15) | ((uint16_t)power_mode << 13) | (MCP4728_GAIN_X1 << 12);
     uint8_t buf[3] = { ctrl, (uint8_t)(config >> 8), (uint8_t)(config & 0xFF) };
-    return DcDac_write_raw(dac, buf, sizeof(buf));
+
+    /* base_eeprom_write is the Single Write command: it stores to EEPROM as
+     * well as the DAC register, so both copies are checked and the read-back
+     * has to wait out RDY/#BSY. */
+    dcdac_expect_t expect = {
+        .channel_mask = (uint8_t)(1u << channel),
+        .check_eeprom = (base == dac->fmt.base_eeprom_write),
+    };
+    expect.hi[channel] = buf[1];
+    expect.lo[channel] = buf[2];
+    return dcdac_write_verified(dac, buf, sizeof(buf), 1000, &expect, "power-down");
 }
 
 esp_err_t DcDac_eeprom_write_channel(DcDacClass *dac, uint8_t channel, uint16_t value)
@@ -321,10 +508,15 @@ esp_err_t DcDac_eeprom_write_channel(DcDacClass *dac, uint8_t channel, uint16_t 
     // Route through the owner (like DcDac_write_raw does) rather than
     // calling i2c_master_transmit directly, so this can't jump ahead of or
     // interleave with other already-queued transactions on the same bus.
-    if (!dac->owner_initialized) {
-        return i2c_master_transmit(dac->dev, buf, sizeof(buf), 5000);
-    }
-    return i2c_owner_transfer(&dac->owner, dac->dev, buf, sizeof(buf), NULL, 0, 5000);
+    // Verify both copies once the part reports itself ready again -- a failed
+    // EEPROM write is the one that silently survives a power cycle.
+    dcdac_expect_t expect = {
+        .channel_mask = (uint8_t)(1u << channel),
+        .check_eeprom = true,
+    };
+    expect.hi[channel] = buf[1];
+    expect.lo[channel] = buf[2];
+    return dcdac_write_verified(dac, buf, sizeof(buf), 5000, &expect, "EEPROM write");
 }
 
 esp_err_t DcDac_detect_variant(DcDacClass *dac, DcDacVariant *out_variant)

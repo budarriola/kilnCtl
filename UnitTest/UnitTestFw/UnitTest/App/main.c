@@ -10,6 +10,7 @@
 
 #include "AD9833.h"
 #include "DcDac.h"
+#include "PCF8575.h"
 #include "SSD1306.h"
 #include "i2c_scan.h"
 #include "monitor_task.h"
@@ -55,6 +56,12 @@ void app_main(void)
     // does not abort app_main.
     static SSD1306Class oled;
     esp_err_t oled_err = SSD1306_start(&oled, dac.bus);
+
+    // Third device on the same shared I2C bus (0x20-0x27, address pins pulled
+    // down on this board). Non-critical like the OLED: a failure here is
+    // logged and the rest of app_main carries on.
+    static PCF8575Class expander;
+    esp_err_t expander_err = PCF8575_start(&expander, dac.bus);
 
     static monitor_task_t monitor;
     monitor_task_init(&monitor, &dac.owner.task_handle);
@@ -111,5 +118,8 @@ void app_main(void)
     }
     if (oled_err == ESP_OK && uart_bridge_start_oled_task(&uart_proto, &oled) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start OLED uart bridge task");
+    }
+    if (expander_err == ESP_OK && uart_bridge_start_pcf8575_task(&uart_proto, &expander) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start PCF8575 uart bridge task");
     }
 }

@@ -6,7 +6,7 @@ protocol built on top of `uart_owner` (the raw serialized-transaction layer).
 
 Source of truth:
 - Firmware: `App/drivers/espInterfaces/uart_protocol.h` / `.c`, `App/drivers/uart_task_ids.h`, `App/drivers/uart_bridge.c`
-- PC: `pc_tools/src/uart_control/protocol.py`, `serial_link.py`, `devices.py`, `info.py`
+- PC: `pc_tools/src/uart_control/protocol.py`, `serial_link.py`, `devices.py`, `info.py`, `expander.py`
 
 ## Physical layer
 
@@ -68,6 +68,15 @@ that's the natural layout for a `memcpy` straight into an ESP32 `float`/
   re-ACKed **without** being delivered to the application a second time.
 - If the destination `task_id` isn't registered, the receiver replies
   `NACK` ("undeliverable") instead of silently dropping the frame.
+- The dedup ring lives as long as the receiver does, and has no notion of the
+  peer having restarted. A host that began every session at `MSG_INDEX` 0
+  would therefore have its first sends mistaken for retransmits of the
+  *previous* session's and re-ACKed **without delivery** — which on a query
+  task looks like "request was ACKed but no reply arrived". `pc_tools`
+  randomizes its starting `MSG_INDEX` per connection to avoid this (see
+  `_random_msg_index()` in `serial_link.py`); the firmware's counter starts at
+  0 at boot, which is safe because a boot is also when its peer's rings are
+  meaningless anyway.
 - If a registered task's inbox is full, the receiver withholds the `ACK`
   (does not record the dedup entry either) so the sender's retry gives the
   task time to drain its queue — this doubles as natural backpressure.
@@ -94,6 +103,7 @@ their own device (ESP task 1 and HOST task 1 are unrelated).
 | 4 | `UART_TASK_ID_OLED` | SSD1306 OLED commands |
 | 5 | `UART_TASK_ID_LOG` | firmware console output (ESP_LOGx), forwarded unsolicited |
 | 6 | `UART_TASK_ID_SYSTEM` | link-recovery commands (restart) |
+| 7 | `UART_TASK_ID_PCF8575` | PCF8575 I/O expander commands + port/address queries |
 
 The PC side registers the same numeric IDs for symmetry (see
 `pc_tools/src/uart_control/protocol.py`).
@@ -136,6 +146,54 @@ nothing reaches the panel until `DISPLAY`.
 | `0x05` | `SET_CONTRAST` | byte1=contrast(0-255) |
 | `0x06` | `SET_INVERT` | byte1=invert(0/1) |
 | `0x07` | `SET_POWER` | byte1=on(0/1) |
+
+### PCF8575 I/O expander (task 7) — `App/drivers/uart_bridge.c: pcf8575_bridge_task`
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `WRITE_PORT` | bytes1..2=port value `u16` LE (bit N = pin N) |
+| `0x02` | `WRITE_PIN` | byte1=pin(0-15), byte2=level(0/1) |
+| `0x03` | `SET_MASK` | bytes1..2=mask `u16` LE — those pins go weak-high/input |
+| `0x04` | `CLEAR_MASK` | bytes1..2=mask `u16` LE — those pins are driven low |
+| `0x05` | `TOGGLE_MASK` | bytes1..2=mask `u16` LE |
+| `0x06` | `READ_PORT` | none — **query**, see below |
+| `0x07` | `SET_ADDRESS` | byte1=addr(0x20-0x27) |
+| `0x08` | `SCAN` | none — **query**, see below |
+
+Pin semantics are the part's quasi-bidirectional ones: writing a 1 leaves only
+a weak pull-up (that *is* the input state, and the power-on state of all 16
+pins), writing a 0 drives the pin hard low, and a pin driven low always reads
+back 0 regardless of what's wired to it. The mask subcommands are
+read-modify-write against the firmware's shadow of the last value *written* —
+the part has no readable output register. See [`docs/PCF8575.md`](PCF8575.md).
+
+`SET_ADDRESS` re-targets the running firmware at any of the eight addresses
+the part's A2/A1/A0 pins can select, without reflashing; the board's pins are
+pulled down, so it boots on 0x20.
+
+`READ_PORT` and `SCAN` are **queries**, same shape as the INFO ones below: the
+request is ACKed for delivery only and the answer arrives as a separate `DATA`
+frame from `(ESP, task 7)` back to whichever `(device, task_id)` asked, so the
+requester must itself be registered on task 7. Unlike the INFO replies, these
+echo their subcommand in byte0 and are therefore self-describing — no
+structural classification needed:
+
+```
+READ_PORT response:
+  byte0     0x06
+  byte1-2   pin states, u16 LE
+  byte3-4   shadow (last value written), u16 LE
+  byte5     the I2C address the firmware is currently talking to
+
+SCAN response:
+  byte0     0x08
+  byte1     count (N) of addresses in 0x20-0x27 that ACKed
+  N bytes   those addresses
+```
+
+A failed I2C transfer on the firmware side produces **no** reply frame (it's
+logged on the device and forwarded over task `LOG`), so the PC sees a reply
+timeout rather than a bogus port value.
 
 ### LOG (task 5) — `App/drivers/uart_log_bridge.c`
 
@@ -254,7 +312,7 @@ sides can disagree about numbering or layouts; there's no meaningful "forward
 compatible" case. `InfoClient.compatible` (`info.py`) is `None` until a
 version has actually been observed (via a query reply or a boot push), so
 callers can distinguish "not yet known" from "confirmed incompatible". Both
-`gui.py` and `mcp_server.py` refuse to send any DAC/AD9833/OLED command while
+`gui.py` and `mcp_server.py` refuse to send any DAC/AD9833/OLED/PCF8575 command while
 `compatible` is anything other than `True` — INFO queries themselves are
 exempt, since that's how compatibility gets discovered in the first place.
 The GUI additionally pops an error dialog once per connection on a confirmed

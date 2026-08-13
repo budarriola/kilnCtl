@@ -7,11 +7,13 @@ requires-python = ">=3.10"
 dependencies = [
     "pyserial>=3.5",
     "mcp>=1.2.0",
+    "logic2-automation>=1.0.11",
 ]
 
 [project.scripts]
 uart-mcp-server = "uart_control.mcp_server:main"
 uart-control-gui = "uart_control.gui:main"
+saleae-capture = "uart_control.logic_capture:main"
 
 [build-system]
 requires = ["hatchling"]

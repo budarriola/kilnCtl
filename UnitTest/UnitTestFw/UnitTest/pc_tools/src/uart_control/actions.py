@@ -23,8 +23,15 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import devices
+from .expander import ExpanderClient, ExpanderQueryError
 from .info import InfoClient, InfoQueryError
-from .protocol import UART_TASK_ID_AD9833, UART_TASK_ID_DAC, UART_TASK_ID_OLED, UART_TASK_ID_SYSTEM
+from .protocol import (
+    UART_TASK_ID_AD9833,
+    UART_TASK_ID_DAC,
+    UART_TASK_ID_OLED,
+    UART_TASK_ID_PCF8575,
+    UART_TASK_ID_SYSTEM,
+)
 from .serial_link import UartLink, list_ports
 
 
@@ -35,6 +42,11 @@ class ActionContext:
     link: UartLink
     info: InfoClient
     session_log: object  # SessionLogger; typed loosely to avoid an import cycle in type checkers
+    #: Owns task 7's inbox, needed only by the two PCF8575 *query* actions
+    #: (read port / scan addresses). Optional so a caller that only drives
+    #: write-style actions doesn't have to stand one up; those two report the
+    #: absence rather than raising.
+    expander: Optional[ExpanderClient] = None
 
 
 @dataclass(frozen=True)
@@ -248,6 +260,85 @@ _register(
     'Compound action: clear, set cursor, print text, then display -- the OLED "one call" convenience.',
     {"text": str, "col": int, "row": int},
     lambda ctx, text, col=0, row=0: _oled_write_and_show(ctx, text, col, row),
+)
+
+# ---------------------------------------------------------------------------
+# PCF8575 I/O expander
+#
+# Writes go through _send like every other device command. The two queries
+# (read port / scan) need the ExpanderClient that owns task 7's inbox, since
+# their answers come back as separate DATA frames -- same shape as INFO.
+# ---------------------------------------------------------------------------
+def _expander_query(ctx: ActionContext, describe: Callable[[object], str],
+                    query: Callable[[ExpanderClient], object]) -> str:
+    if ctx.expander is None:
+        return "error: no expander client registered for task 7 in this context"
+    try:
+        value = query(ctx.expander)
+    except ExpanderQueryError as exc:
+        return f"error: {exc}"
+    return describe(value)
+
+
+_register(
+    "Expander: Write Port",
+    "Write all 16 PCF8575 pins at once (bit N = pin N; 1 = weak-high/input, 0 = driven low).",
+    {"value": int},
+    lambda ctx, value: _send(ctx, UART_TASK_ID_PCF8575, devices.pcf8575_write_port(value)),
+)
+_register(
+    "Expander: Write Pin",
+    "Drive one PCF8575 pin (0-15) high (weak pull-up / input) or low.",
+    {"pin": int, "level": bool},
+    lambda ctx, pin, level: _send(
+        ctx, UART_TASK_ID_PCF8575, devices.pcf8575_write_pin(pin, level)
+    ),
+)
+_register(
+    "Expander: Set Mask",
+    "Take the masked PCF8575 pins high (weak pull-up / input), leaving the rest alone.",
+    {"mask": int},
+    lambda ctx, mask: _send(ctx, UART_TASK_ID_PCF8575, devices.pcf8575_set_mask(mask)),
+)
+_register(
+    "Expander: Clear Mask",
+    "Drive the masked PCF8575 pins low, leaving the rest alone.",
+    {"mask": int},
+    lambda ctx, mask: _send(ctx, UART_TASK_ID_PCF8575, devices.pcf8575_clear_mask(mask)),
+)
+_register(
+    "Expander: Toggle Mask",
+    "Invert the masked PCF8575 pins, leaving the rest alone.",
+    {"mask": int},
+    lambda ctx, mask: _send(ctx, UART_TASK_ID_PCF8575, devices.pcf8575_toggle_mask(mask)),
+)
+_register(
+    "Expander: Set Address",
+    "Re-target the running firmware at another PCF8575 address (0x20-0x27, i.e. 32-39).",
+    {"addr": int},
+    lambda ctx, addr: _send(ctx, UART_TASK_ID_PCF8575, devices.pcf8575_set_address(addr)),
+)
+_register(
+    "Expander: Read Port",
+    "Read the PCF8575's live pin states, plus the firmware's output shadow and current address.",
+    {},
+    lambda ctx: _expander_query(
+        ctx, lambda port: port.describe(), lambda client: client.read_port()
+    ),
+)
+_register(
+    "Expander: Scan Addresses",
+    "Probe 0x20-0x27 on the device's I2C bus and report which addresses answered.",
+    {},
+    lambda ctx: _expander_query(
+        ctx,
+        lambda found: (
+            ", ".join(f"0x{a:02X}" for a in found)
+            if found
+            else "no device answered in 0x20-0x27"
+        ),
+        lambda client: client.scan(),
+    ),
 )
 
 # ---------------------------------------------------------------------------

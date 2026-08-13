@@ -1,6 +1,7 @@
-idf_component_register(SRCS "i2c_scan.c" "uart_log_bridge.c" "DcDac.c"
+idf_component_register(SRCS "PCF8575.c" "i2c_scan.c" "uart_log_bridge.c" "DcDac.c"
                        "AD9833.c"
                        "SSD1306.c"
+                       "PCF8575.c"
                        "uart_bridge.c"
                        "espInterfaces/esp_spi_owner.c"
                        "espInterfaces/i2c_owner.c"

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl Wi-Fi Setup</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --border: #ccc; --input-bg: #fff; --input-border: #999;
+    --button-bg: #f2f2f2; --hover-bg: #eee; --link: #06c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #181818; --fg: #eee; --border: #444; --input-bg: #222; --input-border: #666;
+      --button-bg: #2a2a2a; --hover-bg: #333; --link: #6cf;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #181818; --fg: #eee; --border: #444; --input-bg: #222; --input-border: #666;
+    --button-bg: #2a2a2a; --hover-bg: #333; --link: #6cf;
+  }
+  body { font-family: sans-serif; max-width: 420px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 2em; border-top: 1px solid var(--border); padding-top: 1em; }
+  label { display: block; margin-top: 1em; font-weight: bold; }
+  input[type=text], input[type=password] {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+  }
+  button {
+    margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+    background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+  }
+  #status { margin-top: 1em; font-weight: bold; }
+  ul#networks { list-style: none; padding: 0; margin-top: 0.5em; }
+  ul#networks li { padding: 0.5em; border: 1px solid var(--border); margin-bottom: 0.3em;
+                    cursor: pointer; display: flex; justify-content: space-between; }
+  ul#networks li:hover { background: var(--hover-bg); }
+  .mode-toggle { display: flex; border: 1px solid var(--input-border); border-radius: 4px;
+                 overflow: hidden; margin-top: 0.5em; }
+  .mode-toggle button { flex: 1; margin: 0; border: none; border-radius: 0; padding: 0.7em 0.5em;
+                         background: var(--button-bg); color: var(--fg); }
+  .mode-toggle button.active { background: var(--link); color: #fff; }
+  .mode-toggle button + button { border-left: 1px solid var(--input-border); }
+  .hint { color: var(--fg); opacity: 0.7; font-size: 0.85em; margin-top: 0.3em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/" id="mainLink" style="display:none">&larr; Main page</a>
+<h1>kilnCtl Wi-Fi Setup</h1>
+<div id="status">Checking status…</div>
+
+<h2>Mode</h2>
+<div class="mode-toggle">
+  <button id="modeHomeBtn" type="button">Home Wi-Fi</button>
+  <button id="modeApBtn" type="button">Access Point</button>
+</div>
+<div class="hint">Home Wi-Fi joins the network below (this board's own access point stays
+  up as a fallback until that join is confirmed). Access Point keeps this board's own
+  network on permanently and never attempts to join anything else.</div>
+
+<div id="homeSection">
+  <h2>Nearby networks</h2>
+  <button id="scanBtn" type="button">Scan</button>
+  <ul id="networks"></ul>
+
+  <h2>Home network</h2>
+  <form id="homeForm">
+    <label for="ssid">Network name (SSID)</label>
+    <input type="text" id="ssid" name="ssid" maxlength="32" required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" maxlength="64">
+    <button type="submit">Connect</button>
+  </form>
+</div>
+
+<div id="apSection">
+  <h2>This board's access point</h2>
+  <form id="apForm">
+    <label for="apSsid">Network name (SSID)</label>
+    <input type="text" id="apSsid" name="ap_ssid" maxlength="32" required>
+    <label for="apPassword">Password</label>
+    <input type="password" id="apPassword" name="ap_password" maxlength="64">
+    <div class="hint">Leave the password blank for an open (unsecured) network. A non-empty
+      password must be 8-63 characters (WPA2).</div>
+    <button type="submit">Save</button>
+  </form>
+</div>
+
+<script>
+function setStatus(text) { document.getElementById('status').textContent = text; }
+
+function describeStatus(s) {
+  if (s.mode === 'ap') return 'Access Point mode: "' + s.ap_ssid + '" is up, permanently.';
+  if (s.state === 'connected') return 'Connected to ' + s.ssid + (s.sta_ip ? ' (' + s.sta_ip + ')' : '') + '.';
+  if (s.state === 'connecting') return 'Joining ' + s.ssid + '… (fallback AP "' + s.ap_ssid + '" is up meanwhile)';
+  if (s.state === 'reconnecting') return 'Was connected to ' + s.ssid + ', reconnecting… (fallback AP "' + s.ap_ssid + '" is up meanwhile)';
+  return 'Home Wi-Fi mode: not connected yet -- access point "' + s.ap_ssid + '" is up, waiting for setup.';
+}
+
+let polling = false;
+let lastMode = null;
+function applyModeUi(mode) {
+  if (mode === lastMode) return;
+  lastMode = mode;
+  document.getElementById('modeHomeBtn').classList.toggle('active', mode !== 'ap');
+  document.getElementById('modeApBtn').classList.toggle('active', mode === 'ap');
+  document.getElementById('homeSection').style.display = mode === 'ap' ? 'none' : '';
+  document.getElementById('apSection').style.display = mode === 'ap' ? '' : 'none';
+}
+
+function poll() {
+  fetch('/status').then(r => r.json()).then(s => {
+    setStatus(describeStatus(s));
+    applyModeUi(s.mode);
+    if (document.activeElement !== document.getElementById('apSsid')) {
+      document.getElementById('apSsid').value = s.ap_ssid || '';
+    }
+    document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
+    if (s.state === 'connecting' || s.state === 'reconnecting') {
+      if (!polling) { polling = true; }
+      setTimeout(poll, 2000);
+    } else {
+      polling = false;
+    }
+  }).catch(() => setStatus('Could not reach the board.'));
+}
+
+function renderNetworks(list) {
+  const ul = document.getElementById('networks');
+  ul.innerHTML = '';
+  list.sort((a, b) => b.rssi - a.rssi).forEach(function (net) {
+    const li = document.createElement('li');
+    li.textContent = net.ssid + (net.secure ? ' 🔒' : '') + ' (' + net.rssi + ' dBm)';
+    li.addEventListener('click', function () {
+      document.getElementById('ssid').value = net.ssid;
+      document.getElementById('password').focus();
+    });
+    ul.appendChild(li);
+  });
+}
+
+document.getElementById('scanBtn').addEventListener('click', function () {
+  document.getElementById('networks').innerHTML = '<li>Scanning…</li>';
+  fetch('/scan').then(r => {
+    if (!r.ok) throw new Error('scan unavailable');
+    return r.json();
+  }).then(renderNetworks).catch(function () {
+    document.getElementById('networks').innerHTML = '<li>Scan unavailable (Access Point mode, or scan failed).</li>';
+  });
+});
+
+document.getElementById('homeForm').addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  var body = 'ssid=' + encodeURIComponent(document.getElementById('ssid').value) +
+             '&password=' + encodeURIComponent(document.getElementById('password').value);
+  setStatus('Submitting…');
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(r => { if (!r.ok) throw new Error('rejected'); setStatus('Attempting to join…'); poll(); })
+    .catch(() => setStatus('Could not submit -- check the values and try again.'));
+});
+
+document.getElementById('apForm').addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  var body = 'ap_ssid=' + encodeURIComponent(document.getElementById('apSsid').value) +
+             '&ap_password=' + encodeURIComponent(document.getElementById('apPassword').value);
+  setStatus('Saving access point identity…');
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(r => {
+      if (!r.ok) throw new Error('rejected');
+      setStatus('Access point identity saved. If this device was joined to the old network, it must rejoin under the new name/password.');
+      poll();
+    })
+    .catch(() => setStatus('Could not submit -- check the values and try again.'));
+});
+
+function postMode(mode) {
+  setStatus('Switching mode…');
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'mode=' + mode })
+    .then(r => { if (!r.ok) throw new Error('rejected'); poll(); })
+    .catch(() => setStatus('Could not submit -- try again.'));
+}
+document.getElementById('modeHomeBtn').addEventListener('click', function () { postMode('home'); });
+document.getElementById('modeApBtn').addEventListener('click', function () { postMode('ap'); });
+
+poll();
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

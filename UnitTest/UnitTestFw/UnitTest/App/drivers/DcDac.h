@@ -15,6 +15,10 @@
 
 #define DCDAC_DEFAULT_I2C_ADDR 0x60u
 
+/* A plain read of the MCP4728 returns 6 bytes per channel (status + DAC
+ * register + status + EEPROM copy), 4 channels, always in that order. */
+#define DCDAC_READ_FRAME_LEN 24u
+
 typedef enum {
     DCDAC_VARIANT_UNKNOWN = 0,
     DCDAC_VARIANT_READABLE,    // device responds to read-style probe
@@ -65,7 +69,18 @@ typedef struct {
 esp_err_t DcDac_init(DcDacClass *dac, int sda_gpio, int scl_gpio, uint8_t addr, uint32_t clk_hz, DcDacVariant variant);
 esp_err_t DcDac_init_default(DcDacClass *dac, int sda_gpio, int scl_gpio, uint32_t clk_hz, DcDacVariant variant);
 esp_err_t DcDac_submit_request(DcDacClass *dac, const DcDacRequest *request);
+
+/* Arbitrary bytes straight to the part. The only write here that is NOT
+ * read-back verified -- the driver can't know what register state the caller
+ * intended -- though transport errors are still retried like everywhere else. */
 esp_err_t DcDac_write_raw(DcDacClass *dac, const uint8_t *data, size_t len);
+
+/* Raw 24-byte read frame (len must be DCDAC_READ_FRAME_LEN), and the decoded
+ * 12-bit DAC-register / EEPROM values for one channel. Either out pointer may
+ * be NULL. Only meaningful on a readable part (MCP4728-AD / READABLE). */
+esp_err_t DcDac_read_registers(DcDacClass *dac, uint8_t *out, size_t len);
+esp_err_t DcDac_read_channel(DcDacClass *dac, uint8_t channel, uint16_t *out_dac,
+                             uint16_t *out_eeprom);
 esp_err_t DcDac_set_channel(DcDacClass *dac, uint8_t channel, uint16_t value);
 esp_err_t DcDac_write_and_update_channel(DcDacClass *dac, uint8_t channel, uint16_t value);
 esp_err_t DcDac_write_all_and_update(DcDacClass *dac, const uint16_t values[4]);

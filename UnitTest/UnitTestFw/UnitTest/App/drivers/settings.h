@@ -14,6 +14,15 @@
  * macros into the plain names the rest of the drivers/app code uses, so
  * nothing downstream needs to know or care that they're Kconfig-backed. */
 
+/* How many times an I2C write is attempted before the driver gives up.
+ * Every attempt is a full write plus (where the part allows it) a read-back
+ * that confirms the device actually holds what was written; a mismatch is
+ * logged and counts as a failed attempt just like a NACK or a timeout. This
+ * sits on top of the single bus-reset-and-retry that i2c_owner already does
+ * per transaction, so a wedged bus gets reset up to this many times before
+ * the error is reported to the caller. */
+#define I2C_WRITE_RETRY_ATTEMPTS 5
+
 #define I2C_MASTER_SCL_IO      CONFIG_KILNCTL_I2C_SCL_IO
 #define I2C_MASTER_SDA_IO      CONFIG_KILNCTL_I2C_SDA_IO
 #define I2C_MASTER_FREQ_HZ     CONFIG_I2C_MASTER_FREQUENCY
@@ -55,5 +64,11 @@
 #define SSD1306_I2C_ADDR        CONFIG_KILNCTL_SSD1306_I2C_ADDR
 #define SSD1306_WIDTH           CONFIG_KILNCTL_SSD1306_WIDTH
 #define SSD1306_HEIGHT          CONFIG_KILNCTL_SSD1306_HEIGHT
+
+/* PCF8575 16-bit I/O expander (I2C, shares the DAC's bus like the OLED). Only
+ * the boot-time address -- all of 0x20-0x27 are supported, and the running
+ * firmware can be re-targeted at any of them over UART (PCF8575_set_address).
+ */
+#define PCF8575_I2C_ADDR        CONFIG_KILNCTL_PCF8575_I2C_ADDR
 
 #endif // SETTINGS_H

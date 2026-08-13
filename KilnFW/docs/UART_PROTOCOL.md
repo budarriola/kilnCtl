@@ -1,0 +1,584 @@
+# Hardened UART protocol — wire format reference (protocol version 3)
+
+The ESP32-S3 firmware and the PC-side `pc_tools` package talk to each other
+over a single UART link using a custom, reliable, addressed message protocol
+built on top of `uart_owner` (the raw serialized-transaction layer).
+
+**Version 2** is the kilnCtl main board. The framing, CRC and ACK layer are
+byte-identical to version 1; what changed is the task table. The unit-test
+fixture's devices (MCP4728 DAC = 1, AD9833 = 2, SSD1306 OLED = 4, PCF8575 = 7)
+are gone and those `task_id`s are reused for this board's hardware. INFO (3),
+LOG (5) and SYSTEM (6) keep both their numbering and their payloads.
+
+**Version 3** (2026-08-11): `UART_PROTO_MAX_PAYLOAD` raised 128 → 253 (the
+LENGTH header field is one byte, so 255 is the hard ceiling; 253 keeps
+`DISPLAY_BLIT_CHUNK_PIXELS` an exact pixel count). Everything else about the
+frame layout is unchanged — bumped anyway so a v2 peer's smaller receive
+buffer can't silently truncate a v3 sender's larger frame. Motivated by the
+DISPLAY blit path: it's strict stop-and-wait (see Reliability below), so the
+per-frame ACK round trip, not raw baud, dominates a full-screen fill's time;
+halving the frame count roughly halves that. The PC-link baud rate was also
+raised 115200 → 921600 the same day (`KILNCTL_UART_BAUD_RATE`) for the same
+reason, independent of this version bump.
+
+The *same* framing also carries the opto-isolated link between the ESP and the
+RP2040 safety processor, on a second UART with `UART_PROTO_DEVICE_SAFETY` as
+the peer — see [`docs/SAFETY_LINK.md`](SAFETY_LINK.md).
+
+Source of truth:
+- Firmware: `App/drivers/espInterfaces/uart_protocol.h` / `.c`,
+  `App/drivers/uart_task_ids.h` (the frozen contract),
+  `App/drivers/uart_bridge.c` (the bridges that implement it)
+- PC: `pc_tools/src/`
+
+## Physical layer
+
+UART0, 921600 baud (both Kconfig-configurable — `KILNCTL_UART_*`), 8N1, no
+flow control, on GPIO43/44. Those are the ESP32-S3-DevKitC's own UART0 pins,
+routed through the module's dedicated USB-UART bridge and its "UART" USB-C
+port — **not** the native USB-Serial-JTAG port used for flashing/debugging.
+The main board leaves both unconnected, so this link belongs to the dev board
+alone (see `docs/HARDWARE.md`).
+
+## Framing (SLIP-style byte stuffing)
+
+```
+DELIM ( ...stuffed bytes... ) DELIM
+```
+
+- `DELIM = 0x7E` marks both the start and end of a frame. Back-to-back
+  delimiters are just empty-frame noise and are ignored, which is also how a
+  receiver resyncs after garbage on the line: any byte before the first
+  `DELIM` is discarded.
+- `ESC = 0x7D`, `ESC_XOR = 0x20`. Any raw byte equal to `DELIM` or `ESC` is
+  stuffed as `ESC (byte ^ ESC_XOR)`.
+
+## Raw (unstuffed) frame layout
+
+All **header** multi-byte fields are big-endian.
+
+| Offset | Field | Size | Notes |
+|---|---|---|---|
+| 0 | `MSG_TYPE` | 1 | `DATA=0x01`, `ACK=0x02`, `NACK=0x03` |
+| 1–2 | `MSG_INDEX` | 2 (BE) | sender-assigned; reused verbatim on retransmit |
+| 3 | `SRC_DEVICE` | 1 | `ESP=0`, `HOST=1`, `SAFETY=2` |
+| 4 | `SRC_TASK` | 1 | |
+| 5 | `DST_DEVICE` | 1 | |
+| 6 | `DST_TASK` | 1 | |
+| 7 | `LENGTH` | 1 | payload length, 0–253 (255 is the byte's hard ceiling; `UART_PROTO_MAX_PAYLOAD` caps it at 253) |
+| 8..8+LEN-1 | `PAYLOAD` | LEN | |
+| 8+LEN..+1 | `CRC16` | 2 (BE) | CRC-16/CCITT-FALSE over bytes `[0, 8+LEN)` |
+
+CRC-16/CCITT-FALSE: poly `0x1021`, init `0xFFFF`, no reflection, no xorout.
+Check value: `crc16(b"123456789") == 0x29B1`.
+
+Note the deliberate endianness split: header fields are big-endian, but the
+multi-byte fields *inside* command payloads (below) are little-endian —
+that's the natural layout for a `memcpy` straight into an ESP32 `float`, or a
+Python `struct.pack("<...")`. Don't "fix" this asymmetry. (The SX1509's own
+registers are big-endian pairs, but that conversion lives inside `SX1509.c`
+and never reaches the wire.)
+
+## Reliability
+
+- A sender picks the next `MSG_INDEX`, transmits a `DATA` frame, and blocks
+  waiting for a reply (`ACK`/`NACK`) whose `SRC_DEVICE`/`SRC_TASK` matches
+  the `DST_DEVICE`/`DST_TASK` it sent to, and whose `MSG_INDEX` matches.
+- On timeout it retransmits the **same** `MSG_INDEX`, up to
+  `UART_PROTO_MAX_RETRIES = 10` total attempts.
+- Only one outstanding send-and-await-ack cycle is allowed at a time per
+  side (serialized with a lock), so replies can never be cross-matched
+  between concurrent senders.
+- The receiver dedups: a retransmitted `DATA` frame (the receiver's own
+  prior `ACK` was lost) is recognized via a small ring of recently-accepted
+  `(src_device, src_task, msg_index)` tuples per registered task, and gets
+  re-ACKed **without** being delivered to the application a second time.
+- If the destination `task_id` isn't registered, the receiver replies
+  `NACK` ("undeliverable") instead of silently dropping the frame.
+- The dedup ring lives as long as the receiver does, and has no notion of the
+  peer having restarted. A host that began every session at `MSG_INDEX` 0
+  would therefore have its first sends mistaken for retransmits of the
+  *previous* session's and re-ACKed **without delivery** — which on a query
+  task looks like "request was ACKed but no reply arrived". `pc_tools`
+  randomizes its starting `MSG_INDEX` per connection to avoid this; the
+  firmware's counter starts at 0 at boot, which is safe because a boot is also
+  when its peer's rings are meaningless anyway.
+- If a registered task's inbox is full, the receiver withholds the `ACK`
+  (does not record the dedup entry either) so the sender's retry gives the
+  task time to drain its queue — this doubles as natural backpressure.
+
+Return values callers can expect from a send:
+
+| Result | Meaning |
+|---|---|
+| `OK` | ACKed — delivered to the destination task's inbox |
+| `UNDELIVERABLE` (NACK) | destination task not registered there |
+| `TIMEOUT` | no reply after all retries — link or peer down |
+
+## Task registration
+
+Any task on either side can register a `task_id` (1 byte) to get an inbox
+queue for messages addressed to it. Task IDs only need to be unique within
+their own device (ESP task 1 and HOST task 1 are unrelated).
+
+| task_id | Owner | Purpose | Driver |
+|---|---|---|---|
+| 1 | `UART_TASK_ID_THERMO` | 3x MAX31856 thermocouple channels on J6 | [`docs/MAX31856.md`](MAX31856.md) |
+| 2 | `UART_TASK_ID_IO` | SX1509 expander: relays, digital I/O, `~DRDY`, raw registers | [`docs/SX1509.md`](SX1509.md) |
+| 3 | `UART_TASK_ID_INFO` | device info queries (pin config, FW version) | — |
+| 4 | `UART_TASK_ID_DISPLAY` | ILI9488 480x320 TFT on J2 | [`docs/ILI9488.md`](ILI9488.md) |
+| 5 | `UART_TASK_ID_LOG` | firmware console output (`ESP_LOGx`), forwarded unsolicited | — |
+| 6 | `UART_TASK_ID_SYSTEM` | link-recovery commands (restart) | — |
+| 7 | `UART_TASK_ID_SAFETY` | opto-isolated link to the RP2040 safety processor | [`docs/SAFETY_LINK.md`](SAFETY_LINK.md) |
+
+The PC side registers the same numeric IDs for symmetry.
+
+### Queries and unsolicited pushes
+
+Two mechanisms sit on top of plain DATA frames, and both matter for how a PC
+client must be structured:
+
+- **Queries.** The subcommands marked *query* below are ACKed as usual
+  (delivery confirmation only, no payload), and the actual answer arrives as a
+  *separate* `DATA` frame from `(ESP, that task_id)` back to whichever
+  `(device, task_id)` sent the request. **The requester must itself be
+  registered on a `task_id` to receive it.** Every query response except the
+  INFO ones echoes its subcommand in byte0 and is therefore self-describing.
+- **Unsolicited pushes.** THERMO `SET_AUTO_REPORT` (0x08) and IO
+  `SET_AUTO_REPORT` (0x06) switch on a periodic push of exactly the payload
+  the matching `READ` query returns, addressed back to whoever sent the
+  `SET_AUTO_REPORT`. IO additionally pushes immediately on every SX1509 `~INT`
+  edge, so an input change is reported without waiting out the period. LOG is
+  push-only. INFO pushes its version payload once at boot.
+
+A failed operation on the firmware side produces **no** reply frame — it is
+logged on the device and forwarded over task `LOG` — so the PC sees a reply
+timeout rather than a fabricated value.
+
+## Command payloads
+
+### THERMO (task 1) — `uart_bridge.c: thermo_bridge_task`
+
+Three MAX31856 cold-junction-compensated thermocouple front ends on the J6
+daughterboard, on the shared SPI bus with `CS0`/`CS1`/`CS2` = channels 0/1/2.
+Each part's `~FAULT` is an ESP32-S3 GPIO; each part's `~DRDY` is an **SX1509
+pin**, so DRDY state is only observable through the IO task's `READ`.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `CONFIG_CHANNEL` | byte1=channel(0-2), byte2=tc_type, byte3=avg_mode, byte4=filter(0=60Hz,1=50Hz), byte5=conv_mode(0=one-shot,1=auto) |
+| `0x02` | `SET_THRESHOLDS` | byte1=channel, bytes2..5=tc_high `f32` LE °C, bytes6..9=tc_low `f32` LE, byte10=cj_high `i8` °C, byte11=cj_low `i8` |
+| `0x03` | `SET_CJ_OFFSET` | byte1=channel, bytes2..5=offset `f32` LE °C (±8 °C range) |
+| `0x04` | `ONE_SHOT` | byte1=channel — result is **not** returned; poll with `READ` |
+| `0x05` | `READ` | byte1=channel(0-2) or `0xFF` for all — **query** |
+| `0x06` | `READ_FAULTS` | byte1=channel or `0xFF` — **query** |
+| `0x07` | `CLEAR_FAULTS` | byte1=channel |
+| `0x08` | `SET_AUTO_REPORT` | byte1=channel mask (bit N = channel N), bytes2..3=period_ms `u16` LE (0 = off) |
+| `0x09` | `READ_REG` | byte1=channel, byte2=reg_addr, byte3=len(1-16) — **query**, debug |
+| `0x0A` | `WRITE_REG` | byte1=channel, byte2=reg_addr, byte3=value |
+
+`tc_type` is `CR1.TC[3:0]`: `B=0x00 E=0x01 J=0x02 K=0x03 N=0x04 R=0x05 S=0x06
+T=0x07`, plus the raw voltage modes `VMODE_G8=0x08`, `VMODE_G32=0x0C`.
+`avg_mode` is `CR1.AVGSEL`: `1=0x00 2=0x01 4=0x02 8=0x03 16=0x04` samples.
+
+The 50/60 Hz filter bit may only be changed while conversions are off, so
+`CONFIG_CHANNEL` stops auto conversion, writes, and restores `conv_mode`.
+
+**`READ` / auto-report response** — identical layouts, so a client parses one
+thing:
+
+```
+byte0    0x05
+byte1    count (N)
+N * 12 bytes, one per channel:
+  [0]     channel
+  [1..4]  thermocouple temperature, f32 LE, degC (linearized, 19-bit)
+  [5..8]  cold-junction temperature, f32 LE, degC
+  [9]     fault status register (SR)
+  [10]    flags: bit0 ~FAULT pin asserted (low)
+                 bit1 SPI read failed
+                 bit2 reading is stale (no conversion since last read)
+  [11]    reserved, 0
+```
+
+A channel whose SPI read failed — or that never came up at boot — still
+appears, with flags bit1 set and both temperatures NaN (`00 00 C0 7F`). A
+missing channel is more confusing than an explicitly-bad one.
+
+`SR` bits: `OPEN=0x01 OVUV=0x02 TCLOW=0x04 TCHIGH=0x08 CJLOW=0x10 CJHIGH=0x20
+TCRANGE=0x40 CJRANGE=0x80`.
+
+```
+READ_FAULTS response:
+  byte0    0x06
+  byte1    count (N)
+  N * 3 bytes: [0] channel, [1] SR, [2] MASK register
+
+READ_REG response:
+  byte0    0x09
+  byte1    channel
+  byte2    reg_addr
+  byte3    len (N)
+  N bytes  register contents
+```
+
+Example — configure ch0 as type K, 1 sample, 60 Hz, automatic; then read all
+three:
+
+```
+01 00 03 00 00 01
+05 FF
+```
+
+### IO (task 2) — `uart_bridge.c: io_bridge_task`
+
+The SX1509 (U5, 0x3E) through the `kiln_io` board layer. Both a board-level
+view (relays and I/O by their schematic names, **1-based**) and raw register
+access are exposed; the board-level commands are what a GUI or control loop
+should use. `~INT` → GPIO7, `~RESET` ← GPIO10.
+
+Relay numbering is the schematic's `Relay1..Relay4`, which is the expander's
+bit order and **not** the K-designator order: `Relay1`→K3/J8, `Relay2`→K1/J3,
+`Relay3`→K2/J4, `Relay4`→K5/J11. See `docs/HARDWARE.md`.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `SET_RELAY` | byte1=relay(1-4), byte2=on(0/1) |
+| `0x02` | `SET_RELAY_MASK` | byte1=mask (bits0-3 = relay1-4, which to change), byte2=value (bits0-3) — one atomic register write |
+| `0x03` | `SET_IO` | byte1=io(1-7), byte2=level(0/1); only meaningful for an output |
+| `0x04` | `SET_IO_DIR` | byte1=io(1-7), byte2=dir(0=output, 1=input), byte3=pullup(0/1, input only) |
+| `0x05` | `READ` | none — **query** |
+| `0x06` | `SET_AUTO_REPORT` | bytes1..2=period_ms `u16` LE (0 = off) |
+| `0x07` | `ALL_RELAYS_OFF` | none — unconditional |
+| `0x10` | `SX_WRITE_REG` | byte1=reg_addr, byte2=value |
+| `0x11` | `SX_READ_REG` | byte1=reg_addr, byte2=len(1-16) — **query**, debug |
+| `0x12` | `SX_SET_DIR` | bytes1..2 `u16` LE (bit N: 1 = input, matching `RegDir`) |
+| `0x13` | `SX_SET_PULLUP` | bytes1..2 `u16` LE |
+| `0x14` | `SX_SET_OPENDRAIN` | bytes1..2 `u16` LE |
+| `0x15` | `SX_SET_DEBOUNCE` | bytes1..2=enable mask `u16` LE, byte3=config(0-7; 0.5 ms << config) |
+| `0x16` | `SX_SET_INT_MASK` | bytes1..2=mask `u16` LE (1 = masked), bytes3..4=sense `u16` LE |
+| `0x17` | `SX_LED_DRIVER` | byte1=pin(0-15), byte2=enable(0/1), byte3=intensity(0-255) |
+| `0x18` | `SX_RESET` | byte1=hard(0 = `RegReset` software reset, 1 = pulse `~RESET`) |
+| `0x19` | `SX_SCAN` | none — **query**: probes 0x3E/0x3F/0x70/0x71 |
+
+`ALL_RELAYS_OFF` is kept as its own subcommand rather than a special case of
+`SET_RELAY_MASK` precisely so it is one short frame that cannot be misparsed
+as anything else. It is also the state the firmware falls back to on link loss
+or a safety fault.
+
+**`SET_RELAY` / `SET_RELAY_MASK` are refused, silently on the wire, if they
+would turn any relay ON while a safety fault is asserted** (see
+[`docs/SAFETY_MODEL.md`](SAFETY_MODEL.md)). "Silently on the wire" means: the
+frame is still ACKed at the transport level (it was delivered to the task),
+but no state changes and, like every other `SET_*` in this task, there is no
+task-level reply either way. The only way to see that a command was refused
+is that the next `READ` / auto-report still shows the relay off. Turning a
+relay OFF, and `ALL_RELAYS_OFF`, are never refused.
+
+The `sense` field of `SX_SET_INT_MASK` is 16 bits for 16 pins, i.e. **2 bits
+per pin pair**: bits `[2p+1:2p]` give the mode for pins `2p` and `2p+1`
+together (`0` none, `1` rising, `2` falling, `3` both). The firmware expands
+each pair onto both of its pins before writing the part's four `RegSense`
+registers, which are 2 bits per *pin*. Per-pin sense is therefore not
+expressible over the wire; use `SX_WRITE_REG` against 0x14–0x17 if you need
+it.
+
+**`READ` / auto-report response** — again identical layouts:
+
+```
+byte0    0x05
+bytes1-2 RegData, u16 LE, raw pin states (bit N = expander pin N)
+bytes3-4 RegDir,  u16 LE (1 = input)
+byte5    relay shadow, bits0-3 = relay1-4 as last commanded
+byte6    digital I/O levels, bits0-6 = io1-io7
+byte7    DRDY bits: bit0-2 = channel 0-2 ~DRDY asserted (pin is LOW)
+byte8    flags: bit0 = ~INT currently asserted
+                bit1 = last I2C transfer failed
+```
+
+The `relay shadow` is what was last *commanded*, kept separately from the pin
+states so that a failed write, or a direct poke at `RegData` over the debug
+subcommands, shows up as a divergence rather than being hidden.
+
+```
+SX_READ_REG response:
+  byte0    0x11
+  byte1    reg_addr
+  byte2    len (N)
+  N bytes  register contents
+
+SX_SCAN response:
+  byte0    0x19
+  byte1    count (N)
+  N bytes  the addresses that ACKed
+```
+
+Example — energize Relay1 (K3/J8), then turn Relay2 and Relay4 on and Relay3
+off in a single register write, then start 250 ms reporting:
+
+```
+01 01 01
+02 0E 0A
+06 FA 00
+```
+
+### DISPLAY (task 4) — `uart_bridge.c: display_bridge_task`
+
+ILI9488 480x320 SPI TFT on J2. `SCK`/`MOSI`/`MISO` are the shared SPI bus and
+`CS3` is a real GPIO, but D/C and `~RESET` hang off the SX1509 — so every
+command/data transition costs an I2C transfer. The driver batches hard: one
+D/C toggle per command, then all of that command's data in one SPI
+transaction. Do not expect per-pixel throughput; full-screen work should go
+through `FILL_RECT`/`BLIT` rather than repeated small writes.
+
+Colours are **RGB565 `u16` LE** on the wire; the driver expands to the 18-bit
+RGB666 format the panel requires over SPI (see [`docs/ILI9488.md`](ILI9488.md)
+for why RGB565 is not an option on this interface).
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `RESET` | byte1=hard(0 = software reset, 1 = pulse `~RESET` via the expander) |
+| `0x02` | `SET_POWER` | byte1=on(0/1) — display off + sleep-in when 0 |
+| `0x03` | `SET_ROTATION` | byte1=rotation(0-3); 0/2 portrait 320x480, 1/3 landscape 480x320 |
+| `0x04` | `SET_INVERT` | byte1=invert(0/1) |
+| `0x05` | `CLEAR` | bytes1..2=colour `u16` LE (whole screen) |
+| `0x06` | `FILL_RECT` | bytes1..2=x, 3..4=y, 5..6=w, 7..8=h, 9..10=colour, all `u16` LE |
+| `0x07` | `DRAW_RECT` | same args as `FILL_RECT` — 1 px outline |
+| `0x08` | `DRAW_LINE` | bytes1..2=x0, 3..4=y0, 5..6=x1, 7..8=y1, 9..10=colour |
+| `0x09` | `SET_TEXT_CURSOR` | bytes1..2=x, 3..4=y (pixels, glyph top-left) |
+| `0x0A` | `SET_TEXT_STYLE` | bytes1..2=fg, 3..4=bg, byte5=size(1-8), byte6=opaque_background(0/1) |
+| `0x0B` | `PRINT` | bytes1..(length-1)=ASCII, **not** null-terminated; cursor advances and wraps |
+| `0x0C` | `BLIT_BEGIN` | bytes1..2=x, 3..4=y, 5..6=w, 7..8=h — opens a pixel window |
+| `0x0D` | `BLIT_DATA` | bytes1..(length-1)=RGB565 pixels, `u16` LE, row-major, continuing where the last chunk stopped |
+| `0x0E` | `BLIT_END` | none — closes the window |
+| `0x0F` | `READ_ID` | none — **query** |
+
+Coordinates are bounds-checked, never clipped: an out-of-range rectangle is
+rejected outright rather than partially drawn. An odd `BLIT_DATA` length (a
+split pixel), more pixels than the window holds, or anything other than
+`BLIT_DATA`/`BLIT_END` while a blit is open is an error **and aborts the
+blit** — a desynchronized stream would otherwise smear the rest of the image.
+
+```
+READ_ID response:
+  byte0     0x0F
+  byte1     ok (0/1) -- 0 if the read failed or the panel answered all-zero
+  bytes2..4 the three ID bytes from RDDID (0x04)
+  bytes5..6 width  u16 LE, as currently rotated
+  bytes7..8 height u16 LE
+```
+
+`READ_ID` always answers, even for a panel that is not responding (`ok = 0`),
+so it never times out on the PC side.
+
+### SAFETY (task 7) — `uart_bridge.c: safety_bridge_task`
+
+The PC's window onto the opto-isolated link to the RP2040 safety processor.
+The ESP polls the Pico over that link and caches the last good answer;
+`GET_STATUS` returns **the cache**, never a blocking round trip, so a dead
+link shows up as stale/invalid status rather than a hung request. Until the
+Pico firmware exists, `link_up` is 0 and `age` is 65535.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `GET_STATUS` | none — **query** |
+| `0x02` | `REQUEST_ENABLE` | byte1=enable(0/1) — advisory; the Pico's own interlocks always win |
+| `0x03` | `PING` | none — forces an immediate poll instead of waiting for the next tick |
+| `0x04` | `GET_LINK_STATS` | none — **query** |
+| `0x05` | `SET_POLL_PERIOD` | bytes1..2=period_ms `u16` LE (0 = stop polling) |
+| `0x06` | `SET_FAULT_OUT` | byte1=assert(0/1) — drives the isolated fault line (GPIO6) |
+
+`SET_FAULT_OUT` is a manual override of a line the firmware otherwise asserts
+on its own (loss of the PC link, a thermocouple fault, watchdog). The line is
+high whenever *any* source is set, so clearing the manual source cannot clear
+an automatic one.
+
+```
+GET_STATUS response:
+  byte0       0x01
+  byte1       flags: bit0 link_up (a valid reply within 3 poll periods)
+                     bit1 Fault line currently asserted by this firmware
+                     bit2 estop asserted (as reported by the Pico)
+                     bit3 safety relay K4 energized
+                     bit4 heating enable currently granted
+                     bit5 safety thermocouple reading valid
+  bytes2..5   safety thermocouple temperature, f32 LE, degC
+  bytes6..9   safety cold-junction temperature, f32 LE, degC
+  byte10      safety thermocouple fault status (same bits as THERMO's SR)
+  bytes11..14 current sense 1, f32 LE, amps
+  bytes15..18 current sense 2, f32 LE, amps
+  bytes19..22 current sense 3, f32 LE, amps
+  bytes23..24 age of this data, u16 LE, ms (65535 = never received)
+
+GET_LINK_STATS response:
+  byte0       0x04
+  bytes1..4   frames sent,          u32 LE
+  bytes5..8   frames received,      u32 LE
+  bytes9..12  CRC/framing errors,   u32 LE
+  bytes13..16 timeouts,             u32 LE
+  bytes17..18 poll period, u16 LE, ms
+```
+
+When `TEMP_VALID` is clear the two temperatures are NaN, not 0 — an explicit
+not-a-number is much harder to mistake for a cold kiln than a plausible zero.
+
+### LOG (task 5) — `App/drivers/uart_log_bridge.c`
+
+Firmware → PC only, unsolicited (fire-and-forget; nothing ever sends a
+request to this `task_id`). `uart_log_bridge_early_init()` installs an
+`esp_log_set_vprintf()` hook as the very first thing in `app_main`, so
+**every** `ESP_LOGx` call anywhere in the firmware — not just from
+`uart_bridge.c` — is captured and forwarded here *instead of* (not in
+addition to) the USB-Serial-JTAG console. Device log output is therefore
+visible over the same always-on link used for control, without a second cable
+or an active debugger session; it is why an `SX1509_start()` or `ILI9488_start()`
+failure shows up as a `LOG` frame.
+
+Log lines emitted before the `uart_protocol_t` exists — which covers all of
+the driver bring-up in `app_main`, including the I2C bus, the expander, the
+i2c scan, the thermocouples and the panel — are buffered in a queue and sent
+once `uart_log_bridge_start()` runs, oldest first. Nothing from boot onward is
+lost, only delayed until the link is up. If the queue itself fills up (PC not
+connected for a while) further lines are dropped rather than blocking whichever
+task tried to log; this channel is best-effort by design and never allowed to
+stall real work.
+
+One frame per log line (or truncated chunk of one line, never split across
+frames):
+
+| Field | Value |
+|---|---|
+| byte0 | level: `0x00 ERROR` `0x01 WARN` `0x02 INFO` `0x03 DEBUG` `0x04 VERBOSE` |
+| bytes1..(length-1) | ASCII text `"TAG: message"`, **not** null-terminated |
+
+### SYSTEM (task 6) — `uart_bridge.c: system_bridge_task`
+
+Admin-style commands against the link itself, as opposed to a device on it.
+
+| Subcmd | Name | Args |
+|---|---|---|
+| `0x01` | `RESTART_UART` | none |
+
+`RESTART_UART` is an on-demand recovery lever for a link that's gotten stuck
+(RX ring buffer overflow, line noise) without power-cycling the board — it
+calls `uart_owner_restart()`, which flushes only the UART peripheral's *RX*
+ring buffer and resets its rx-error counter. Deliberately RX-only: the ACK
+for this very request is still sitting in the TX ring buffer when the
+handler runs, and flushing that side too would eat the request's own reply
+out from under it. In practice this rarely needs to be reached for by hand —
+the framing layer already resyncs on the next `0x7E` delimiter regardless of
+what garbage came before it, and `uart_owner.c`'s event task already runs
+this same RX flush automatically the moment a HW FIFO/ring-buffer overflow
+is detected — but it's available as an explicit last resort.
+
+### INFO (task 3) — `uart_bridge.c: info_bridge_task`
+
+A pure **query** channel: the request `DATA` frame is ACKed as usual (delivery
+confirmation only), and the answer arrives as a *separate* `DATA` frame sent
+back from `(ESP, task 3)` to whichever `(device, task_id)` the request came
+from.
+
+Request: byte0 = subcommand, no further args.
+
+| Subcmd | Name |
+|---|---|
+| `0x01` | `GET_PIN_CONFIG` |
+| `0x02` | `GET_FW_VERSION` |
+
+**`GET_PIN_CONFIG` response** — mirrors `s_pin_config[]` in `uart_bridge.c`,
+which is built from the same `settings.h`/Kconfig macros the drivers
+themselves initialize from, so it can't drift out of sync with what's
+actually wired up:
+
+```
+byte0            entry_count (N)
+N * { u8 gpio, u8 function_id }
+```
+
+`function_id` values (`PIN_FUNC_*` in `uart_task_ids.h`):
+
+| id | Meaning | id | Meaning |
+|---|---|---|---|
+| `0x01` | `I2C_SDA` | `0x09` | `SPI_MISO` |
+| `0x02` | `I2C_SCL` | `0x0A` | `THERMO_FAULT` (`~FAULT`, active low) |
+| `0x03` | `UART_TX` | `0x0B` | `EXPANDER_IRQ` (SX1509 `~INT`) |
+| `0x04` | `UART_RX` | `0x0C` | `EXPANDER_RST` (SX1509 `~RESET`) |
+| `0x05` | `SPI_SCLK` | `0x0D` | `SAFETY_TX` (isolated, inverted) |
+| `0x06` | `SPI_MOSI` | `0x0E` | `SAFETY_RX` |
+| `0x07` | `SPI_CS` | `0x0F` | `SAFETY_FAULT` (isolated fault line, output) |
+| `0x08` | `LED_HEARTBEAT` | | |
+
+Human-readable labels live PC-side only — the wire carries only the numeric
+id, and the same id may legitimately appear several times (four `SPI_CS`
+entries, three `THERMO_FAULT` entries).
+
+**Only real ESP32-S3 GPIOs appear here.** The relay drives, the three `~DRDY`
+inputs and the display's D/C and `~RESET` are SX1509 pins, not GPIOs, and are
+reported through the IO task's `READ` instead. `LED_HEARTBEAT` is **absent by
+default on this board** — there is no MCU-driven LED (D25/D28 are rail
+indicators wired straight to 3.3V/5V) and `KILNCTL_HEARTBEAT_LED_GPIO` is -1,
+which has no honest single-byte representation.
+
+What the firmware reports on a default build:
+
+| GPIO | function_id | | GPIO | function_id |
+|---|---|-|---|---|
+| 8  | `I2C_SDA` | | 18 | `SPI_CS` (thermo ch2) |
+| 9  | `I2C_SCL` | | 21 | `SPI_CS` (display) |
+| 43 | `UART_TX` | | 38 | `THERMO_FAULT` (ch0) |
+| 44 | `UART_RX` | | 47 | `THERMO_FAULT` (ch1) |
+| 12 | `SPI_SCLK` | | 48 | `THERMO_FAULT` (ch2) |
+| 11 | `SPI_MOSI` | | 7  | `EXPANDER_IRQ` |
+| 13 | `SPI_MISO` | | 10 | `EXPANDER_RST` |
+| 14 | `SPI_CS` (thermo ch0) | | 5 | `SAFETY_TX` |
+| 17 | `SPI_CS` (thermo ch1) | | 4 | `SAFETY_RX` |
+| | | | 6 | `SAFETY_FAULT` |
+
+**`GET_FW_VERSION` response** — built from `build_info.h`, which is
+regenerated on *every* build (not just on a CMake reconfigure — see
+`App/drivers/gen_build_info.cmake`), so it can never be stale relative to
+what's actually flashed:
+
+```
+byte0-1        UART_PROTOCOL_VERSION, u16 LE -- fixed offset across every
+               version of this protocol; always read and compare this
+               first, before trusting anything else in the payload
+byte2          dirty flag (0=clean, 1=dirty/unknown)
+byte3          commit_len (N1)
+N1 bytes       git commit, ASCII, not null-terminated
+byte(4+N1)     datetime_len (N2)
+N2 bytes       build date+time, ASCII "YYYY-MM-DD HH:MM:SSZ", not null-terminated
+```
+
+`UART_PROTOCOL_VERSION` (`uart_task_ids.h`, currently **2**) is a manually
+maintained integer bumped whenever a wire-incompatible change is made
+(task_id/subcommand renumbering, a payload's byte layout/length/endianness, or
+the envelope itself). It is deliberately **not** an automatic hash of the
+header: a hash would flag harmless edits — comments, reordering, adding an
+unrelated new command — as incompatible just as readily as an actual break.
+See the comment above the `#define` for the exact bump policy.
+
+Compatibility should be treated as an **exact match**, not `>=`: any mismatch,
+newer or older, means the two sides can disagree about numbering or layouts,
+and there is no meaningful "forward compatible" case. A PC client should
+refuse to send any device command until it has observed a matching version;
+INFO queries themselves are exempt, since that is how compatibility gets
+discovered in the first place.
+
+Neither INFO response carries a subcommand/type byte back — a raw INFO reply
+is therefore not self-describing by itself, and the PC side classifies it
+structurally (its internal length fields either add up as a pin-config reply
+or as a version reply, and in practice the two never collide). Every other
+query response in this protocol *does* echo its subcommand in byte0; INFO is
+the exception for historical reasons and is frozen that way.
+
+### Boot-time version push
+
+Once, right after the INFO task starts at boot, the firmware makes a
+best-effort attempt to *send* the `GET_FW_VERSION` response payload
+unsolicited to `(HOST, task 3)` — this only lands if a PC client is already
+connected and has task 3 registered at that exact moment. If nobody's
+listening (the common case — the PC usually connects after the board is
+already up), it just fails silently after its own retries; nothing surfaces
+to the firmware side as an error. A client should treat an unsolicited version
+reply (one with nothing currently outstanding) as a **device reboot signal**.

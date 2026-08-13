@@ -42,6 +42,17 @@ from .protocol import (
     OLED_CMD_SET_CURSOR,
     OLED_CMD_SET_INVERT,
     OLED_CMD_SET_POWER,
+    PCF8575_ADDR_MAX,
+    PCF8575_ADDR_MIN,
+    PCF8575_CMD_CLEAR_MASK,
+    PCF8575_CMD_READ_PORT,
+    PCF8575_CMD_SCAN,
+    PCF8575_CMD_SET_ADDRESS,
+    PCF8575_CMD_SET_MASK,
+    PCF8575_CMD_TOGGLE_MASK,
+    PCF8575_CMD_WRITE_PIN,
+    PCF8575_CMD_WRITE_PORT,
+    PCF8575_PIN_COUNT,
     SYSTEM_CMD_RESTART_UART,
     UART_PROTO_MAX_PAYLOAD,
     UART_PROTOCOL_VERSION,
@@ -50,6 +61,7 @@ from .protocol import (
     UART_TASK_ID_INFO,
     UART_TASK_ID_LOG,
     UART_TASK_ID_OLED,
+    UART_TASK_ID_PCF8575,
     UART_TASK_ID_SYSTEM,
     LogLevel,
     PinFunction,
@@ -64,7 +76,24 @@ __all__ = [
     "UART_TASK_ID_OLED",
     "UART_TASK_ID_LOG",
     "UART_TASK_ID_SYSTEM",
+    "UART_TASK_ID_PCF8575",
     "system_restart_uart",
+    "PCF8575_ADDR_MIN",
+    "PCF8575_ADDR_MAX",
+    "PCF8575_ADDRESSES",
+    "PCF8575_PIN_COUNT",
+    "PCF8575_PORT_POWER_ON_STATE",
+    "ExpanderPort",
+    "ExpanderResponseError",
+    "pcf8575_write_port",
+    "pcf8575_write_pin",
+    "pcf8575_set_mask",
+    "pcf8575_clear_mask",
+    "pcf8575_toggle_mask",
+    "pcf8575_read_port",
+    "pcf8575_set_address",
+    "pcf8575_scan",
+    "parse_pcf8575_response",
     "PinFunction",
     "Waveform",
     "LogLevel",
@@ -122,8 +151,8 @@ WAVEFORM_LABELS: dict[int, str] = {
 #: names the peripheral/driver that owns the pin in App/main.c, sourced from
 #: the same App/drivers/settings.h macros s_pin_config[] is built from.
 PIN_FUNCTION_LABELS: dict[int, str] = {
-    PinFunction.I2C_SDA: "I2C SDA (MCP4728 DAC + SSD1306 OLED)",
-    PinFunction.I2C_SCL: "I2C SCL (MCP4728 DAC + SSD1306 OLED)",
+    PinFunction.I2C_SDA: "I2C SDA (MCP4728 DAC + SSD1306 OLED + PCF8575)",
+    PinFunction.I2C_SCL: "I2C SCL (MCP4728 DAC + SSD1306 OLED + PCF8575)",
     PinFunction.UART_TX: "UART0 TX (this link)",
     PinFunction.UART_RX: "UART0 RX (this link)",
     PinFunction.SPI_SCLK: "SPI SCLK (AD9833)",
@@ -319,6 +348,170 @@ def oled_set_invert(invert: bool) -> bytes:
 def oled_set_power(on: bool) -> bytes:
     """0x07 SET_POWER: byte1=on(0/1)."""
     return struct.pack("<BB", OLED_CMD_SET_POWER, _check_bool_byte(on, "on"))
+
+
+# ---------------------------------------------------------------------------
+# PCF8575 I/O expander (task_id = UART_TASK_ID_PCF8575)
+#
+# Pin semantics are the part's quasi-bidirectional ones: a 1 bit leaves only a
+# weak pull-up -- that IS the "input" state, and the power-on state of all 16
+# pins -- while a 0 bit drives the pin hard low. A pin the expander is driving
+# low always reads back 0, so write it high before reading it.
+#
+# READ_PORT and SCAN are queries like the INFO ones below, but their replies
+# echo the subcommand in byte0, so they're self-describing and need no
+# structural guessing -- see parse_pcf8575_response().
+# ---------------------------------------------------------------------------
+#: Every address the three address pins can select. The board's pins are all
+#: pulled down (0x20), but the firmware can be re-targeted at any of these at
+#: runtime with pcf8575_set_address().
+PCF8575_ADDRESSES = tuple(range(PCF8575_ADDR_MIN, PCF8575_ADDR_MAX + 1))
+
+#: Power-on state of all 16 pins (weak-high / input), and what the firmware
+#: seeds its output shadow with.
+PCF8575_PORT_POWER_ON_STATE = 0xFFFF
+
+
+class ExpanderResponseError(ValueError):
+    """Raised when a PCF8575 response payload does not match its wire layout."""
+
+
+def _check_port_value(value: int, name: str = "value") -> int:
+    value = int(value)
+    if not 0 <= value <= 0xFFFF:
+        raise ValueError(f"{name} must be a 16-bit value 0..0xFFFF, got {value}")
+    return value
+
+
+def _check_pin(pin: int) -> int:
+    pin = int(pin)
+    if not 0 <= pin < PCF8575_PIN_COUNT:
+        raise ValueError(f"pin must be 0..{PCF8575_PIN_COUNT - 1}, got {pin}")
+    return pin
+
+
+def _check_expander_addr(addr: int) -> int:
+    addr = int(addr)
+    if not PCF8575_ADDR_MIN <= addr <= PCF8575_ADDR_MAX:
+        raise ValueError(
+            f"address must be 0x{PCF8575_ADDR_MIN:02X}..0x{PCF8575_ADDR_MAX:02X}, "
+            f"got 0x{addr:02X}"
+        )
+    return addr
+
+
+def pcf8575_write_port(value: int) -> bytes:
+    """0x01 WRITE_PORT: bytes1..2 = port value u16 LE (bit N = pin N)."""
+    return struct.pack("<BH", PCF8575_CMD_WRITE_PORT, _check_port_value(value))
+
+
+def pcf8575_write_pin(pin: int, level: bool) -> bytes:
+    """0x02 WRITE_PIN: byte1=pin(0-15), byte2=level(0/1)."""
+    return struct.pack(
+        "<BBB", PCF8575_CMD_WRITE_PIN, _check_pin(pin), _check_bool_byte(level, "level")
+    )
+
+
+def pcf8575_set_mask(mask: int) -> bytes:
+    """0x03 SET_MASK: bytes1..2 = mask u16 LE (those pins go weak-high/input)."""
+    return struct.pack("<BH", PCF8575_CMD_SET_MASK, _check_port_value(mask, "mask"))
+
+
+def pcf8575_clear_mask(mask: int) -> bytes:
+    """0x04 CLEAR_MASK: bytes1..2 = mask u16 LE (those pins are driven low)."""
+    return struct.pack("<BH", PCF8575_CMD_CLEAR_MASK, _check_port_value(mask, "mask"))
+
+
+def pcf8575_toggle_mask(mask: int) -> bytes:
+    """0x05 TOGGLE_MASK: bytes1..2 = mask u16 LE."""
+    return struct.pack("<BH", PCF8575_CMD_TOGGLE_MASK, _check_port_value(mask, "mask"))
+
+
+def pcf8575_read_port() -> bytes:
+    """0x06 READ_PORT request: byte0 = subcommand, no args (query)."""
+    return struct.pack("<B", PCF8575_CMD_READ_PORT)
+
+
+def pcf8575_set_address(addr: int) -> bytes:
+    """0x07 SET_ADDRESS: byte1=addr(0x20-0x27), re-targets the live driver."""
+    return struct.pack("<BB", PCF8575_CMD_SET_ADDRESS, _check_expander_addr(addr))
+
+
+def pcf8575_scan() -> bytes:
+    """0x08 SCAN request: byte0 = subcommand, no args (query)."""
+    return struct.pack("<B", PCF8575_CMD_SCAN)
+
+
+@dataclass(frozen=True)
+class ExpanderPort:
+    """Decoded READ_PORT response.
+
+    ``pins`` is what the pins actually read; ``shadow`` is the last value the
+    firmware *wrote*. They differ where something external is pulling a
+    weak-high pin down -- which is exactly what makes the expander useful as
+    an input -- so both are reported rather than just the one.
+    """
+
+    pins: int
+    shadow: int
+    addr: int
+
+    def pin(self, index: int) -> bool:
+        """Read state of one pin (True = high)."""
+        return bool(self.pins & (1 << _check_pin(index)))
+
+    def driven_low(self, index: int) -> bool:
+        """Whether this pin is being held low by *our own* output.
+
+        A pin the expander drives low always reads 0 regardless of what's
+        wired to it, so its read state carries no information about the
+        outside world until it's written high again.
+        """
+        return not (self.shadow & (1 << _check_pin(index)))
+
+    def describe(self) -> str:
+        return (
+            f"addr 0x{self.addr:02X}  pins 0x{self.pins:04X} "
+            f"({self.pins:016b})  shadow 0x{self.shadow:04X}"
+        )
+
+
+def parse_pcf8575_response(payload: bytes) -> "tuple[int, ExpanderPort | list[int]]":
+    """Decode a PCF8575 query reply into ``(subcommand, value)``.
+
+    Layouts (pcf8575_bridge_task in uart_bridge.c)::
+
+        READ_PORT: byte0=0x06, bytes1-2 pins u16 LE, bytes3-4 shadow u16 LE,
+                   byte5 current I2C address
+        SCAN:      byte0=0x08, byte1=count(N), N address bytes
+
+    Unlike the INFO replies these carry their subcommand back, so no
+    structural guessing is needed. Raises :class:`ExpanderResponseError` on
+    anything that doesn't match.
+    """
+    if len(payload) < 1:
+        raise ExpanderResponseError("PCF8575 response is empty")
+    subcommand = payload[0]
+
+    if subcommand == PCF8575_CMD_READ_PORT:
+        if len(payload) != 6:
+            raise ExpanderResponseError(
+                f"READ_PORT response must be 6 bytes, got {len(payload)}"
+            )
+        pins, shadow = struct.unpack("<HH", payload[1:5])
+        return subcommand, ExpanderPort(pins=pins, shadow=shadow, addr=payload[5])
+
+    if subcommand == PCF8575_CMD_SCAN:
+        if len(payload) < 2:
+            raise ExpanderResponseError("SCAN response is missing its count byte")
+        count = payload[1]
+        if len(payload) != 2 + count:
+            raise ExpanderResponseError(
+                f"SCAN count={count} implies {2 + count} bytes, got {len(payload)}"
+            )
+        return subcommand, list(payload[2:])
+
+    raise ExpanderResponseError(f"unknown PCF8575 response subcommand 0x{subcommand:02X}")
 
 
 # ---------------------------------------------------------------------------

@@ -18,10 +18,12 @@ from .protocol import (
     UART_TASK_ID_AD9833,
     UART_TASK_ID_DAC,
     UART_TASK_ID_INFO,
+    UART_TASK_ID_PCF8575,
     Waveform,
     crc16_ccitt_false,
 )
-from .devices import FirmwareVersion, PinConfigEntry
+from .devices import ExpanderPort, FirmwareVersion, PinConfigEntry
+from .expander import ExpanderClient, ExpanderQueryError
 from .info import InfoClient, InfoQueryError
 from .serial_link import PortInfo, SendResult, UartLink, list_ports, recommend_port
 
@@ -29,6 +31,9 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Device",
+    "ExpanderClient",
+    "ExpanderPort",
+    "ExpanderQueryError",
     "FirmwareVersion",
     "Frame",
     "FrameDecoder",
@@ -46,6 +51,7 @@ __all__ = [
     "UART_TASK_ID_AD9833",
     "UART_TASK_ID_DAC",
     "UART_TASK_ID_INFO",
+    "UART_TASK_ID_PCF8575",
     "Waveform",
     "crc16_ccitt_false",
     "list_ports",

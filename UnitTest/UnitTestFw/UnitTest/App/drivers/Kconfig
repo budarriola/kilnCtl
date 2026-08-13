@@ -1,6 +1,6 @@
 menu "kilnCtl Hardware Configuration"
 
-    menu "I2C Bus (MCP4728 DAC + SSD1306 OLED)"
+    menu "I2C Bus (MCP4728 DAC + SSD1306 OLED + PCF8575 expander)"
         config KILNCTL_I2C_SDA_IO
             int "I2C SDA GPIO"
             default 8
@@ -119,6 +119,20 @@ menu "kilnCtl Hardware Configuration"
         config KILNCTL_SSD1306_HEIGHT
             int "SSD1306 height (pixels, multiple of 8)"
             default 64
+    endmenu
+
+    menu "PCF8575 I/O Expander (I2C)"
+        config KILNCTL_PCF8575_I2C_ADDR
+            hex "PCF8575 I2C address"
+            default 0x20
+            range 0x20 0x27
+            help
+                The three address pins select 0x20 (A2=A1=A0 low, the
+                pulled-down default on this board) through 0x27. All eight
+                are supported; this is only the address the firmware comes
+                up on -- it can be re-targeted at runtime from the PC (see
+                the SET_ADDRESS subcommand in docs/UART_PROTOCOL.md) without
+                reflashing.
     endmenu
 
     config KILNCTL_HEARTBEAT_LED_GPIO

@@ -1,0 +1,457 @@
+menu "KilnCtrl Hardware Configuration"
+
+    menu "I2C Bus (SX1509 I/O expander)"
+        config KILNCTL_I2C_SDA_IO
+            int "I2C SDA GPIO"
+            default 8
+            range 0 48
+
+        config KILNCTL_I2C_SCL_IO
+            int "I2C SCL GPIO"
+            default 9
+            range 0 48
+    endmenu
+
+    menu "SPI Bus (MAX31856 x3 + ILI9488 display)"
+        choice KILNCTL_SPI_HOST_CHOICE
+            prompt "SPI host peripheral"
+            default KILNCTL_SPI_HOST_SPI2
+
+        config KILNCTL_SPI_HOST_SPI2
+            bool "SPI2"
+        config KILNCTL_SPI_HOST_SPI3
+            bool "SPI3"
+        endchoice
+
+        config KILNCTL_SPI_SCLK_IO
+            int "SPI SCLK GPIO"
+            default 12
+            range 0 48
+
+        config KILNCTL_SPI_MOSI_IO
+            int "SPI MOSI GPIO"
+            default 11
+            range 0 48
+
+        config KILNCTL_SPI_MISO_IO
+            int "SPI MISO GPIO"
+            default 13
+            range 0 48
+    endmenu
+
+    menu "MAX31856 Thermocouple Channels (via J6)"
+        config KILNCTL_THERMO_CS0_IO
+            int "Channel 0 ~CS GPIO"
+            default 14
+            range 0 48
+
+        config KILNCTL_THERMO_CS1_IO
+            int "Channel 1 ~CS GPIO"
+            default 17
+            range 0 48
+
+        config KILNCTL_THERMO_CS2_IO
+            int "Channel 2 ~CS GPIO"
+            default 18
+            range 0 48
+
+        config KILNCTL_THERMO_FAULT0_IO
+            int "Channel 0 ~FAULT GPIO"
+            default 38
+            range 0 48
+
+        config KILNCTL_THERMO_FAULT1_IO
+            int "Channel 1 ~FAULT GPIO"
+            default 47
+            range 0 48
+
+        config KILNCTL_THERMO_FAULT2_IO
+            int "Channel 2 ~FAULT GPIO"
+            default 48
+            range 0 48
+
+        config KILNCTL_THERMO_SPI_CLOCK_HZ
+            int "MAX31856 SPI clock (Hz)"
+            default 4000000
+            help
+                The part is rated to 5 MHz. The signals cross a ribbon cable
+                to the daughterboard, so back this off if reads come back
+                corrupted.
+
+        config KILNCTL_THERMO_DEFAULT_AUTO_CONVERT
+            bool "Start channels in automatic conversion mode"
+            default y
+            help
+                Automatic mode converts continuously (~100 ms with one
+                sample averaged) and asserts ~DRDY each time. With this off
+                the channels come up idle and each reading needs an explicit
+                one-shot.
+    endmenu
+
+    menu "SX1509 I/O Expander (relays + digital I/O + display control)"
+        config KILNCTL_SX1509_I2C_ADDR
+            hex "SX1509 I2C address"
+            default 0x3E
+            help
+                ADDR1/ADDR0 both strapped to GND on this board, giving 0x3E.
+                The part also answers at 0x3F/0x70/0x71 when strapped
+                differently; the running firmware can be re-targeted from the
+                PC without reflashing.
+
+        config KILNCTL_SX1509_IRQ_IO
+            int "SX1509 ~INT GPIO"
+            default 7
+            range 0 48
+
+        config KILNCTL_SX1509_RESET_IO
+            int "SX1509 ~RESET GPIO"
+            default 10
+            range 0 48
+
+        config KILNCTL_SX1509_RELAYS_OFF_ON_LINK_LOSS
+            bool "Drop all relays when the PC link goes away"
+            default y
+            help
+                A kiln element left on by a crashed or unplugged controller
+                is the failure this exists to prevent. Turn it off only for
+                bench work where the board is expected to run unattached.
+    endmenu
+
+    menu "ILI9488 Display (BIGTREETECH TFT35 SPI V2.1, J2)"
+        config KILNCTL_DISPLAY_CS_IO
+            int "Display ~CS GPIO"
+            default 21
+            range 0 48
+
+        config KILNCTL_DISPLAY_SPI_CLOCK_HZ
+            int "Display SPI clock (Hz)"
+            default 20000000
+
+        config KILNCTL_DISPLAY_WIDTH
+            int "Display width (pixels, unrotated)"
+            default 320
+
+        config KILNCTL_DISPLAY_HEIGHT
+            int "Display height (pixels, unrotated)"
+            default 480
+
+        config KILNCTL_DISPLAY_SWAP_DC_RESET
+            bool "Take the schematic's LCD_IORQ/LCD_Reset naming literally"
+            default n
+            help
+                The main board calls J2 pin 1 LCD_IORQ and pin 4 LCD_Reset,
+                but every available pinout for the BIGTREETECH TFT35 SPI
+                module says pin 1 is the touch controller's interrupt and
+                pin 4 is RS (data/command), with no panel reset brought out.
+                Off (the default) follows the module: data/command on
+                expander IO15 (J2 pin 4). Turn this on to use the
+                schematic's naming instead: data/command on IO14 (pin 1).
+                If the panel shows nothing but its ID reads back correctly,
+                this is the first thing to flip.
+
+        config KILNCTL_DISPLAY_ROTATION
+            int "Startup rotation (0-3)"
+            default 1
+            range 0 3
+            help
+                0/2 are portrait 320x480, 1/3 landscape 480x320.
+
+        config KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
+            bool "Drive D/C and ~RESET from ESP32 GPIOs directly (bench wiring)"
+            default n
+            help
+                Bench-wiring override for bring-up when the SX1509 expander
+                isn't available or isn't trusted yet: instead of D/C and
+                ~RESET going through the expander (IO14/IO15, the normal main
+                board wiring -- see KILNCTL_DISPLAY_SWAP_DC_RESET), drive them
+                from two bare ESP32 GPIOs, same as ~CS already is. With this
+                on, the display no longer needs the expander at all -- it will
+                come up even if the SX1509 is dead or unwired, unlike the
+                normal (off) wiring where the expander is required just to
+                send a single command. Off (the default) matches the main
+                board as designed. All other display connections (SPI,
+                ~CS, power) are unaffected either way.
+
+        config KILNCTL_DISPLAY_DC_GPIO
+            int "D/C GPIO (direct-wired bench mode)"
+            default 0
+            range 0 48
+            depends on KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
+
+        config KILNCTL_DISPLAY_RESET_GPIO
+            int "~RESET GPIO (direct-wired bench mode)"
+            default 1
+            range 0 48
+            depends on KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
+    endmenu
+
+    menu "Safety Processor Link (opto-isolated UART to the RP2040)"
+        config KILNCTL_SAFETY_TX_IO
+            int "Safety UART TX GPIO"
+            default 5
+            range 0 48
+            help
+                Drives U2's optocoupler LED, whose collector is the Pico's
+                RX. Note the schematic calls this net DataFromSafty -- the
+                name reads backwards; this really is the ESP's transmit.
+
+        config KILNCTL_SAFETY_RX_IO
+            int "Safety UART RX GPIO"
+            default 4
+            range 0 48
+            help
+                U3's collector (the Pico's TX drives its LED). No external
+                pull-up is fitted, so the driver enables the internal one.
+
+        config KILNCTL_SAFETY_FAULT_IO
+            int "Isolated fault line GPIO (output)"
+            default 6
+            range 0 48
+            help
+                Output, not input: driving it high lights U1's LED and pulls
+                the safety processor's mainFault input low.
+
+        config KILNCTL_SAFETY_BAUD_RATE
+            int "Safety link baud rate"
+            default 115200
+            help
+                Optocouplers, not a line driver -- the TCMT1109's switching
+                time is the limit here, so don't push this far without
+                looking at the waveform.
+
+        config KILNCTL_SAFETY_POLL_PERIOD_MS
+            int "Safety processor poll period (ms)"
+            default 500
+            range 0 60000
+            help
+                How often the firmware asks the safety processor for its
+                status. 0 disables polling entirely (the link then only
+                carries explicit PING/REQUEST_ENABLE traffic).
+    endmenu
+
+    menu "UART Link (PC control interface)"
+        choice KILNCTL_UART_PORT_CHOICE
+            prompt "UART port"
+            default KILNCTL_UART_PORT_0
+            help
+                Which hardware UART peripheral to use for the PC link.
+                UART1 is taken by the safety processor link, so this should
+                stay on UART0 unless that link is disabled.
+
+        config KILNCTL_UART_PORT_0
+            bool "UART0"
+        config KILNCTL_UART_PORT_1
+            bool "UART1"
+        endchoice
+
+        config KILNCTL_UART_TX_IO
+            int "UART TX GPIO"
+            default 43
+            range 0 48
+            help
+                GPIO43/44 are the dev board's own UART0 pins, routed through
+                its USB-UART bridge and its dedicated USB-C port -- distinct
+                from the native USB / USB-Serial-JTAG port (GPIO19/20) used
+                for flashing and debugging. The main board leaves both
+                unconnected.
+
+        config KILNCTL_UART_RX_IO
+            int "UART RX GPIO"
+            default 44
+            range 0 48
+
+        config KILNCTL_UART_BAUD_RATE
+            int "UART baud rate"
+            default 921600
+            help
+                PC link only (UART_OWNER_PORT_NUM), not the isolated safety
+                link (KILNCTL_SAFETY_BAUD_RATE, separate UART, unchanged).
+                Bumped from 115200 -- the CH343 USB-UART bridge on this board
+                is rated well past this, and every frame is still CRC'd and
+                retried (protocol.py's Frame/UartLink), so a bad byte at the
+                higher rate is a retry, not silent corruption. The dominant
+                cost in a DISPLAY blit is still the per-frame stop-and-wait
+                ACK round trip (UART_PROTO_MAX_PAYLOAD=128 B/frame, one ACK
+                each), so this helps but does not fix that; pipelining
+                multiple in-flight frames would need a wire-protocol change,
+                not a config one. Must match pc_tools's DEFAULT_BAUD_RATE
+                (protocol.py) -- both sides hardcode the same value rather
+                than negotiating it.
+
+        config KILNCTL_UART_OWNER_QUEUE_LEN
+            int "uart_owner request queue length"
+            default 8
+            help
+                How many in-flight uart_owner_transfer() requests (from any
+                caller sharing this owner) can be queued before a caller
+                blocks.
+
+        config KILNCTL_UART_OWNER_TASK_PRIORITY
+            int "uart_owner task priority"
+            default 5
+
+        config KILNCTL_UART_OWNER_STACK_SIZE
+            int "uart_owner task stack size (bytes)"
+            default 4096
+
+        config KILNCTL_UART_PROTOCOL_TASK_PRIORITY
+            int "uart_protocol RX task priority"
+            default 6
+
+        config KILNCTL_UART_PROTOCOL_STACK_SIZE
+            int "uart_protocol RX task stack size (bytes)"
+            default 4096
+    endmenu
+
+    menu "Wi-Fi Provisioning"
+        config KILNCTL_WIFI_AP_SSID
+            string "Fallback AP SSID"
+            default "kilnCtl"
+            help
+                SSID the board advertises whenever it has no working station
+                connection -- no credentials saved, saved credentials that
+                fail to join, or AP mode is selected (AP mode still uses
+                this AP, permanently instead of as a fallback). Overridden
+                at runtime, without a rebuild, by wifi_prov_set_ap_ssid()
+                (the GUI's Access Point mode "Save" control) once that has
+                been called at least once.
+
+        config KILNCTL_WIFI_AP_DEFAULT_PASSWORD
+            string "Fallback AP password"
+            default "password"
+            help
+                Compile-time default so a fresh board is usable without an
+                existing network. WPA2-PSK requires 8-63 characters. Change
+                this before fielding a board outside a bench/lab setting.
+                Overridden at runtime, without a rebuild, by
+                wifi_prov_set_ap_password() (the GUI's "Set AP Password"
+                control) once that has been called at least once.
+
+        config KILNCTL_WIFI_AP_CHANNEL
+            int "Fallback AP channel"
+            default 6
+            range 1 13
+
+        config KILNCTL_WIFI_STA_CONNECT_TIMEOUT_MS
+            int "Station join timeout (ms)"
+            default 15000
+            help
+                How long to wait for a station join (association + DHCP)
+                before giving up and falling back to (or staying on) the AP.
+    endmenu
+
+    config KILNCTL_LOG_TEE_CONSOLE
+        bool "Also print log lines to the console UART"
+        default y
+        help
+            uart_log_bridge replaces console logging with a push to the PC
+            link. That queue drops lines when full, which it reliably is
+            during the boot burst -- so the board's own account of a failed
+            bring-up is exactly what gets lost. With this on, every line also
+            goes to the console UART (GPIO43/44), where nothing can drop it.
+
+            Costs a blocking console write per log line. Turn it off if a
+            logging-heavy path ever needs the microseconds back.
+
+    menu "Simulated plant (development only)"
+
+        config KILNCTL_SIM_PLANT
+            bool "Run the control stack against a simulated kiln"
+            default n
+            help
+                Feeds the profile executor, autotune engine, and dashboard
+                from App/test/sim_plant.c's thermal model instead of the
+                MAX31856 thermocouples, and lets faults (dead element,
+                welded relay, detached/frozen/open thermocouple) be injected
+                over POST /api/sim. This is how the thermal guards get
+                exercised end to end without a kiln -- and without the
+                thermocouple daughterboard or relay expander, neither of
+                which is attached to the bench unit.
+
+                LEAVE THIS OFF FOR ANYTHING THAT WILL BE NEAR A REAL KILN.
+                With it on the board reports fabricated temperatures and
+                will happily claim a healthy firing with nothing plugged in.
+                Relay writes still go out to the real expander if one is
+                present, so a sim build must not be flashed to a board wired
+                to elements.
+
+        config KILNCTL_SIM_AMBIENT_C
+            int "Simulated ambient temperature (degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 20
+
+        config KILNCTL_SIM_THERMAL_MASS_J_PER_C
+            int "Simulated zone thermal mass (J per degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 50000
+            help
+                With the default loss coefficient this sets the zone's time
+                constant tau = mass/loss = 10000s, which is kiln-like.
+
+        config KILNCTL_SIM_HEATER_POWER_W
+            int "Simulated element power per zone (W, at duty 1.0)"
+            depends on KILNCTL_SIM_PLANT
+            default 2000
+
+        config KILNCTL_SIM_LOSS_W_PER_C
+            int "Simulated linear heat loss (W per degC above ambient)"
+            depends on KILNCTL_SIM_PLANT
+            default 5
+            help
+                Sets the duty-1.0 ceiling: ambient + power/loss (420 degC
+                with the defaults here). Raise the power or lower this to
+                simulate a kiln that can reach cone temperature.
+
+        config KILNCTL_SIM_RADIATIVE_COEFF_E12
+            int "Simulated radiative loss coefficient (units of 1e-12 W per K^4)"
+            depends on KILNCTL_SIM_PLANT
+            default 2000
+            help
+                Adds a Stefan-Boltzmann loss term on top of the linear one,
+                so plant gain falls with temperature the way a real kiln's
+                does. 0 disables it (purely linear plant). Expressed in
+                1e-12 units because Kconfig has no float type; the default
+                2000 means 2e-9 W/K^4.
+
+        config KILNCTL_SIM_COUPLING_W_PER_C
+            int "Simulated inter-zone conductance (W per degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 3
+            help
+                How strongly each zone heats its neighbors. 0 makes the
+                zones independent, which is the one thing a real
+                multi-zone kiln is not.
+
+        config KILNCTL_SIM_SENSOR_DELAY_S
+            int "Simulated sensor transport delay (s)"
+            depends on KILNCTL_SIM_PLANT
+            default 5
+
+        config KILNCTL_SIM_SENSOR_LAG_S
+            int "Simulated thermocouple lag time constant (s)"
+            depends on KILNCTL_SIM_PLANT
+            default 8
+
+        config KILNCTL_SIM_SENSOR_NOISE_MC
+            int "Simulated sensor noise, peak-to-peak (milli-degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 0
+            help
+                0 for a clean reading. 1000 (i.e. 1 degC) is a reasonable
+                value for checking that the guards do not false-trip on
+                noise alone.
+
+    endmenu
+
+    config KILNCTL_HEARTBEAT_LED_GPIO
+        int "Heartbeat LED GPIO (-1 to disable)"
+        default -1
+        range -1 48
+        help
+            The main board has no MCU-driven LED -- D25/D28 are rail
+            indicators tied straight to 3.3V/5V -- and the dev board's
+            addressable RGB LED is removed on this build. Left at -1 the
+            monitor task still runs and still reports over the log link; it
+            just doesn't blink anything.
+
+endmenu

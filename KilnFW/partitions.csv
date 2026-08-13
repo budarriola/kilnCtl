@@ -1,0 +1,48 @@
+# KilnCtl partition table -- 2 MB flash (ESP32-S3).
+#
+# Derived from ESP-IDF's stock partitions_singleapp_large.csv. The first three
+# entries are byte-identical to that stock table on purpose: this board has
+# already been flashed with the stock layout and has live data sitting in `nvs`
+# at 0x9000 (zone config, rules, profiles, the run-state breadcrumb). Moving or
+# resizing any of those three would silently invalidate everything stored in
+# them the moment the new table is flashed. The ONLY change here is the fourth
+# entry, appended into flash that was previously unused.
+#
+# Why `wifi_nvs` is a separate partition rather than another namespace inside
+# `nvs`:
+#   - NVS's own corruption recovery is partition-wide. When nvs_flash_init()
+#     reports NO_FREE_PAGES or NEW_VERSION_FOUND the only fix is to erase the
+#     whole partition, taking every namespace in it with it. With credentials
+#     living in the same partition as zones/rules/profiles, a corrupt profile
+#     blob meant the operator lost the Wi-Fi they needed to fix it -- i.e. the
+#     board dropped off the network exactly when it became unreachable by any
+#     other means. Splitting them means a wipe of one cannot reach the other.
+#   - It also makes "reset the kiln config" (erase `nvs`) a survivable
+#     operation that does not strand the board off Wi-Fi.
+#
+# Layout of the 2 MB (0x200000) flash:
+#   0x000000..0x008000  bootloader (implicit, below the table offset)
+#   0x008000..0x009000  partition table itself (CONFIG_PARTITION_TABLE_OFFSET)
+#   0x009000..0x00F000  nvs        24K   default NVS: zones, rules, profiles, run_state
+#   0x00F000..0x010000  phy_init    4K   RF calibration data
+#   0x010000..0x187000  factory  1500K   application image
+#   0x187000..0x18D000  wifi_nvs   24K   Wi-Fi credentials ONLY (this file's addition)
+#   0x18D000..0x200000  unused    460K   headroom for future partitions
+#
+# wifi_nvs is 0x6000 = 24 KB, the same size as the default `nvs`. NVS needs a
+# minimum of three 4K sectors to operate (two data pages plus one spare to
+# compact into); 0x6000 gives six, which is far more than the handful of small
+# string/u8 entries wifi_prov.c stores, but the space above the app is free
+# anyway and the extra sectors mean the wear-levelling compaction that triggers
+# NO_FREE_PAGES essentially never has to run here.
+#
+# What this does NOT protect against: `esptool erase_flash`. That erases the
+# entire chip -- bootloader, partition table, and every partition including
+# this one. No partition layout can survive it. See wifi_prov.c's header for
+# the full survival matrix.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x177000,
+wifi_nvs,   data, nvs,     0x187000, 0x6000,

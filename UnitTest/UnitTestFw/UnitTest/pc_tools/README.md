@@ -29,14 +29,50 @@ Both are also VS Code tasks ("UART Control: Open GUI" / "...: Run MCP Server").
 | --- | --- |
 | `protocol.py` | SLIP framing, CRC-16/CCITT-FALSE, `Frame`, enums, task IDs |
 | `serial_link.py` | `UartLink` (reader thread, retry/ACK logic), port discovery |
-| `devices.py` | DAC / AD9833 / INFO payload builders + INFO response parsers |
+| `devices.py` | DAC / AD9833 / OLED / PCF8575 / INFO payload builders + response parsers |
 | `info.py` | `InfoClient`: owns task 3, queries pin config / FW version, spots boot pushes |
+| `expander.py` | `ExpanderClient`: owns task 7, PCF8575 writes plus the read-port / address-scan queries |
 | `pin_overlay.py` | Measured badge coordinates in `assets/pinout.png` + overlay drawing |
 | `session_log.py` | Per-session log files, semantic rollover, retention setting |
 | `settings.py` | Persisted app settings (`settings.json`): last-used port, log retention |
 | `actions.py` | Named-action registry (one entry per GUI button) backing `press_button` |
 | `mcp_server.py` | MCP tools over stdio, incl. bespoke DAC/AD9833/OLED/INFO tools and the generic `press_button`/`list_buttons` pair |
 | `gui.py` | Tkinter GUI: `manualCtrl`, `Logs` and `About` menus |
+| `logic_capture.py` | Saleae Logic 2 automation-API (gRPC) client: device list, timed digital capture |
+
+## Saleae Logic 2
+
+Logic 2 runs two local servers, both toggled from **Preferences** and both
+already enabled here (`%APPDATA%\Logic\config.json`:
+`automationServerEnabled`, `mcpServerEnabled`):
+
+| server | endpoint | used by |
+| --- | --- | --- |
+| automation (gRPC) | `127.0.0.1:10430` | `logic_capture.py` / `logic2-automation` |
+| MCP (HTTP) | `127.0.0.1:10530/mcp` | registered as `saleae` in the repo's `.mcp.json` |
+
+Logic 2 must already be running — neither server can launch it. Prefer the MCP
+server for interactive, agent-driven capture; use `logic_capture.py` when the
+capture has to be interleaved with UART traffic from a single process (arm the
+analyzer, drive the DUT, export the decode).
+
+```powershell
+uv run --project pc_tools python -m uart_control.logic_capture devices
+uv run --project pc_tools python -m uart_control.logic_capture rates --channels 0,1
+uv run --project pc_tools python -m uart_control.logic_capture capture --channels 0,1 --seconds 2 --out logs/saleae
+```
+
+`SALEAE_AUTOMATION_HOST` / `SALEAE_AUTOMATION_PORT` override the endpoint.
+
+Two device quirks the API doesn't surface as queries, both handled in
+`logic_capture.py`:
+
+- the sample rate must be one of a fixed set that depends on the enabled
+  channel count — hence the `rates` subcommand, which recovers the legal set
+  from the backend's rejection message (default is 25 MS/s);
+- the attached Logic 16 exposes threshold *ranges* (1.8–3.6 V, 3.6–5.0 V) and
+  rejects any explicit value, so `--threshold` is unset by default and Logic's
+  own setting is used.
 
 ## Generic button press (MCP)
 
@@ -74,6 +110,20 @@ single consumer rather than letting callers drain the queue.
 * The firmware version appears in the status bar, refreshed on connect and on
   every detected reboot.
 
+## PCF8575 expander task (task 7)
+
+Mostly ordinary write commands, but `READ_PORT` and `SCAN` are queries with the
+same request/reply shape as INFO — hence `ExpanderClient`, which owns task 7's
+inbox. Two differences from `InfoClient`: nothing is ever pushed unsolicited on
+this task, and the replies echo their subcommand in byte0, so they're
+self-describing rather than classified structurally.
+
+All eight addresses the part's A2/A1/A0 pins can select (0x20–0x27) are
+reachable: **manualCtrl → PCF8575 Expander...** has an address combobox, an
+address scan, 16 write-through pin toggles, whole-port and mask operations, and
+a read-back row. Note the quasi-bidirectional pin semantics (a pin driven low
+always reads back 0) documented in [`../docs/PCF8575.md`](../docs/PCF8575.md).
+
 ## Protocol version compatibility
 
 `GET_FW_VERSION` carries `UART_PROTOCOL_VERSION` (see `uart_task_ids.h`) at a
@@ -92,6 +142,23 @@ actually break the wire format, so `UART_PROTOCOL_VERSION` is a manually
 maintained integer (bump policy documented next to it in `uart_task_ids.h`),
 not a hash of the header — a hash would flag harmless edits (comments,
 reordering) as incompatible just as readily as a real break.
+
+## Connecting does not reset the board
+
+Two things had to be right for this, and both were wrong before:
+
+* `UartLink.connect()` configures DTR/RTS **while the port is still closed**,
+  then opens it. Passing `port=` to `serial.Serial()` opens with those lines
+  at their driver defaults, which pulses the board's auto-reset circuit —
+  deasserting them afterwards is too late.
+* The starting `MSG_INDEX` is randomized per connection. The firmware's dedup
+  ring outlives any host session, so restarting the host at index 0 made its
+  first sends look like retransmits: re-ACKed, never delivered. See
+  [`../docs/UART_PROTOCOL.md`](../docs/UART_PROTOCOL.md).
+
+Together these are why the first query after a connect used to fail with
+"ACKed but no reply arrived", recovering only when the firmware's
+once-per-boot version push happened to land right after.
 
 ## Session logs
 

@@ -1,0 +1,542 @@
+/*
+ * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Unlicense OR CC0-1.0
+ */
+#include "driver/i2c_master.h"
+#include "driver/spi_master.h"
+#include "esp_err.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "dashboard_http.h"
+#include "ILI9488.h"
+#include "MAX31856.h"
+#include "SX1509.h"
+#include "autotune_engine.h"
+#include "i2c_scan.h"
+#include "kiln_io.h"
+#include "mdns.h"
+#include "monitor_task.h"
+#include "profile_executor.h"
+#include "profiles_http.h"
+#include "relay_cycles.h"
+#include "rules_http.h"
+#include "safety_link.h"
+#include "settings.h"
+#include "sim_backend.h"
+#include "uart_bridge.h"
+#include "uart_log_bridge.h"
+#include "uart_owner.h"
+#include "uart_protocol.h"
+#include "wifi_prov.h"
+#include "zones_http.h"
+
+static const char *TAG = "app_main";
+
+/* The three MAX31856 ~DRDY lines land on the SX1509 (IO8/IO9/IO10), not on
+ * ESP32 GPIOs, so the thermocouple driver cannot see them without owning an
+ * I2C device it has no business owning. It takes this callback instead --
+ * see MAX31856_set_drdy_provider() -- and falls back to an elapsed-time
+ * heuristic whenever it returns false. */
+static bool kiln_drdy_provider(uint8_t channel, bool *out_asserted, void *ctx)
+{
+    kiln_io_t *io = (kiln_io_t *)ctx;
+    return kiln_io_get_drdy(io, channel, out_asserted) == ESP_OK;
+}
+
+/* The state app_main must leave the board in on *any* path that stops short of
+ * a working PC link: relays down, isolated fault line up.
+ *
+ * app_main returning is not a crash -- FreeRTOS keeps running and so do every
+ * task started before the failure -- so "we gave up here" has to be an
+ * explicit, positive action rather than the absence of one. Both steps are
+ * best-effort by nature (the expander may be the thing that failed), which is
+ * why each is reported separately instead of short-circuiting. */
+static void kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool safety_ok,
+                                  uint32_t fault_sources, const char *why)
+{
+    ESP_LOGE(TAG, "entering safe state: %s", why);
+
+    if (io) {
+        esp_err_t err = kiln_io_all_relays_off(io);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "could not drop the relays: %s -- RELAY STATE IS UNKNOWN",
+                     esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGE(TAG, "no expander: relays cannot be commanded and their state is UNKNOWN");
+    }
+
+    if (safety_ok) {
+        esp_err_t err = safety_link_set_fault_source(safety, fault_sources, true);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "could not assert the isolated fault line: %s", esp_err_to_name(err));
+        }
+    } else {
+        /* Worst case on this board: no relay control *and* no way to tell the
+         * safety processor. Nothing here can fix it; the log line is so the
+         * operator does not have to infer it from silence. */
+        ESP_LOGE(TAG, "no safety link: the RP2040 cannot be told the main controller has faulted");
+    }
+}
+
+/* Every task creation in this file is a single-line "start" call -- the
+ * semaphore/queue/task choreography behind each one lives in that driver's
+ * own file (MAX31856_start_all in MAX31856.c, monitor_task_start in
+ * monitor_task.c, uart_bridge_start_* in uart_bridge.c, etc.), not here.
+ *
+ * Only two failures abort app_main: the UART owner and the protocol stack on
+ * top of it. Everything else is logged and stepped over -- a board with a dead
+ * panel or an absent thermocouple daughterboard is still a board worth having
+ * on the link, and the log bridge is what carries that news to the PC.
+ *
+ * "Stepped over" is not the same as ignored, though. Three of those failures
+ * mean the kiln is uncontrolled or unmonitored -- no expander (relay state
+ * unknown), no SPI bus and no thermocouple channel at all (no temperature) --
+ * and each raises a bit in boot_fault_sources, which is asserted on the
+ * isolated fault line as soon as the safety link exists. Both abort paths call
+ * kiln_enter_safe_state() first: app_main returning does not stop FreeRTOS, so
+ * leaving the board safe has to be an action, not an omission. */
+void app_main(void)
+{
+    // Installed before anything else touches ESP_LOGx, so every line from
+    // here on -- including failures during the driver bring-up immediately
+    // below -- is captured and queued. Nothing is actually sent yet (there's
+    // no uart_protocol_t until further down); see uart_log_bridge_start()
+    // below for when the backlog actually flushes.
+    uart_log_bridge_early_init();
+
+    // --- Wi-Fi (station "home" mode / AP mode, see wifi_prov.h) -------------
+    // A third client alongside the UART PC link and the safety processor
+    // link, not a dependency of either -- started here, independent of and
+    // not gating anything below, so a Wi-Fi failure can never delay or block
+    // relay-safety-relevant bring-up. wifi_prov_start() is non-blocking: the
+    // station join (if any) happens on the Wi-Fi driver's own event loop.
+    esp_err_t wifi_err = wifi_prov_start();
+    if (wifi_err != ESP_OK) {
+        ESP_LOGE(TAG, "wifi_prov_start failed: %s -- no Wi-Fi this boot, PC link and safety link unaffected",
+                 esp_err_to_name(wifi_err));
+    }
+
+    // Advertises this board as "kiln.local" over mDNS so the web UI/pc_tools
+    // don't need the station's raw IP -- reachable from Wi-Fi's AP fallback
+    // and station modes alike, same as the HTTP server itself. Needs the
+    // netif/event loop wifi_prov_start() just brought up, but not a joined
+    // network, so it runs unconditionally rather than gating on wifi_err:
+    // the AP fallback case still wants kiln.local to resolve. Non-fatal like
+    // everything else here -- no name resolution is not a reason to fail
+    // app_main.
+    esp_err_t mdns_err = mdns_init();
+    if (mdns_err == ESP_OK) {
+        mdns_hostname_set("kiln");
+        mdns_instance_name_set("kilnCtl");
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    } else {
+        ESP_LOGW(TAG, "mdns_init failed: %s -- no kiln.local this boot", esp_err_to_name(mdns_err));
+    }
+
+    // --- I2C bus -----------------------------------------------------------
+    // ESP-IDF allows exactly one i2c_master_bus_handle_t per physical bus, so
+    // it is created here and handed to whoever needs it, rather than by the
+    // first driver that happens to want it.
+    i2c_master_bus_handle_t i2c_bus = NULL;
+    i2c_master_bus_config_t i2c_config = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    esp_err_t i2c_err = i2c_new_master_bus(&i2c_config, &i2c_bus);
+    if (i2c_err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_new_master_bus failed: %s -- no expander, no relays, no display",
+                 esp_err_to_name(i2c_err));
+        i2c_bus = NULL;
+    }
+
+    // --- SX1509 expander + the board layer over it -------------------------
+    // First on the bus and first of the devices, because it owns the relay
+    // drives. kiln_io_init loads every relay bit LOW into the data latch
+    // *before* it turns those pins into outputs, so the coils never see the
+    // expander's power-on latch default of 1 -- see kiln_io.h.
+    static SX1509Class expander;
+    static kiln_io_t kio;
+    bool io_ready = false;
+    if (i2c_bus) {
+        esp_err_t exp_err = SX1509_start(&expander, i2c_bus);
+        if (exp_err != ESP_OK) {
+            ESP_LOGE(TAG, "SX1509 bring-up failed: %s", esp_err_to_name(exp_err));
+        } else {
+            esp_err_t io_err = kiln_io_init(&kio, &expander);
+            if (io_err != ESP_OK) {
+                ESP_LOGE(TAG, "kiln_io_init failed: %s -- relay state is not guaranteed",
+                         esp_err_to_name(io_err));
+            } else {
+                io_ready = true;
+                ESP_LOGI(TAG, "board I/O up: all relays off");
+            }
+        }
+    }
+
+    // Runs once the expander is in its safe state (relays off) but before
+    // anything else starts talking on the bus, so the results reflect what is
+    // actually wired up. Logged like any other ESP_LOGx and so forwarded to
+    // the GUI's Device Console -- which is where a missing SX1509 shows up.
+    if (i2c_bus) {
+        i2c_scan_bus(i2c_bus);
+    }
+
+    // --- Shared SPI bus ----------------------------------------------------
+    // Initialized here rather than by either of its two drivers, because only
+    // the FIRST spi_bus_initialize() on a host takes effect and the two want
+    // incompatible buses: MAX31856_bus_init asks for SPI_DMA_DISABLED with
+    // max_transfer_sz 17 (fine for a 17-byte register burst, fatal for the
+    // display, whose scratch buffer is 1440 bytes and needs DMA), while the
+    // ILI9488 driver never initializes a bus at all -- it only adds a device.
+    // Doing it once, here, with the display's requirements is the only order
+    // that cannot depend on which driver happens to start first: both then
+    // find the host already up, which each handles.
+    spi_bus_config_t spi_config = {
+        .mosi_io_num = KILN_SPI_MOSI_IO,
+        .miso_io_num = KILN_SPI_MISO_IO,
+        .sclk_io_num = KILN_SPI_SCLK_IO,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = ILI9488_SCRATCH_BYTES,
+    };
+    esp_err_t spi_err = spi_bus_initialize(KILN_SPI_HOST, &spi_config, SPI_DMA_CH_AUTO);
+    if (spi_err != ESP_OK) {
+        ESP_LOGE(TAG, "spi_bus_initialize failed: %s -- thermocouples and display are out",
+                 esp_err_to_name(spi_err));
+    }
+
+    /* Accumulated across the rest of bring-up and applied to the isolated fault
+     * line as soon as the safety link is up (a few lines below -- it cannot be
+     * asserted before the driver that owns the GPIO exists).
+     *
+     * "Logged and carried on" is the right policy for a board that should still
+     * appear on the link with a dead panel; it is NOT the right policy for
+     * anything that leaves the kiln unmonitored or uncontrolled. Those failures
+     * get a bit here, and the safety processor is told. */
+    uint32_t boot_fault_sources = 0;
+
+    if (!io_ready) {
+        /* No expander means no relay control at all: the four coils are
+         * wherever power-on left them and nothing in this firmware can move
+         * them. That is the single worst state this board can boot into, so it
+         * is a fault regardless of what else came up. */
+        ESP_LOGE(TAG, "expander did not come up -- RELAY STATE IS UNKNOWN and uncommandable");
+#if CONFIG_KILNCTL_SIM_PLANT
+        /* ...except in a simulated-plant build, where the model IS the
+         * actuator and there are no coils to be uncertain about. Asserting
+         * here would block relay-on globally through relay_authority and make
+         * the sim incapable of ever heating, which defeats the entire point
+         * of the build (TODO.md 6A.8: provoking each guard on real silicon).
+         * Scoped to CONFIG_KILNCTL_SIM_PLANT precisely because suppressing
+         * this fault on a board wired to a kiln would be indefensible. */
+        ESP_LOGW(TAG, "SIM BUILD: not asserting a boot fault for the missing expander -- "
+                      "the simulated plant is the actuator");
+#else
+        boot_fault_sources |= SAFETY_FAULT_SRC_APP;
+#endif
+    }
+    if (spi_err != ESP_OK) {
+        /* No SPI bus means no MAX31856 can be read: the kiln has no temperature
+         * measurement on this side of the barrier. Reported as a thermocouple
+         * fault because that is exactly what it is from the safety
+         * processor's point of view. */
+        boot_fault_sources |= SAFETY_FAULT_SRC_THERMO;
+    }
+
+    // --- MAX31856 thermocouple channels (J6) -------------------------------
+    // Finds the bus already up and shares it (and, having not created it, will
+    // not free it). Channels that fail are logged and left out; losing one
+    // thermocouple is not a reason to have no thermocouples.
+    static MAX31856BusClass thermo_bus;
+    static MAX31856Class thermo_ch[MAX31856_CHANNEL_COUNT];
+    esp_err_t thermo_err = MAX31856_start_all(&thermo_bus, thermo_ch);
+    if (thermo_err != ESP_OK) {
+        ESP_LOGE(TAG, "thermocouple bring-up incomplete: %s", esp_err_to_name(thermo_err));
+    }
+    if (!thermo_bus.initialized) {
+        /* Not one channel answered. A kiln with no readable thermocouple is
+         * one the safety processor must know about -- it is the condition its
+         * own independent thermocouple exists to cover for. A *partial*
+         * failure is deliberately not flagged here: the THERMO READ response
+         * reports the dead channels explicitly (spi_failed, NaN), which is
+         * finer-grained information than this one wire can carry. */
+        ESP_LOGE(TAG, "no thermocouple channel came up -- no temperature measurement on this side");
+        boot_fault_sources |= SAFETY_FAULT_SRC_THERMO;
+    }
+
+    // ~DRDY is an expander pin, so this is the only thing that can turn the
+    // thermocouple driver's "is this reading stale" flag from an elapsed-time
+    // guess into the truth.
+    if (io_ready && thermo_bus.initialized) {
+        esp_err_t drdy_err = MAX31856_set_drdy_provider(&thermo_bus, kiln_drdy_provider, &kio);
+        if (drdy_err != ESP_OK) {
+            ESP_LOGW(TAG, "MAX31856_set_drdy_provider failed: %s", esp_err_to_name(drdy_err));
+        }
+    }
+
+    // --- ILI9488 display (J2) ----------------------------------------------
+    // Borrows the thermocouple bus's spi_owner_t, which is what keeps a
+    // 1440-byte pixel push from being interleaved into the middle of a
+    // register burst at a different clock and mode. Normally needs kiln_io
+    // for D/C and ~RESET, both of which are expander pins -- except under
+    // KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO bench wiring, where ILI9488_start
+    // drives them from bare GPIOs instead (see settings.h/ILI9488.c) and the
+    // expander isn't needed for the display at all, so the io_ready gate
+    // below is relaxed in that case specifically.
+    static ILI9488Class display;
+    bool display_ready = false;
+    // Only D/C strictly requires the expander (ILI9488_init fails without io
+    // when dc_gpio < 0 -- there'd be no way to send even a command). ~RESET
+    // going through a missing expander is already tolerated: it just falls
+    // back to a software reset, same as a genuinely absent reset line today.
+    bool display_needs_expander = (DISPLAY_DC_GPIO < 0);
+    if ((io_ready || !display_needs_expander) && thermo_bus.owner_initialized) {
+        esp_err_t disp_err =
+            ILI9488_start(&display, &thermo_bus.owner, KILN_SPI_HOST, io_ready ? &kio : NULL);
+        if (disp_err != ESP_OK) {
+            ESP_LOGE(TAG, "ILI9488 bring-up failed: %s", esp_err_to_name(disp_err));
+        } else {
+            display_ready = true;
+        }
+    } else {
+        ESP_LOGW(TAG, "display skipped: %s",
+                 io_ready ? "SPI bus unavailable"
+                          : "expander unavailable (D/C and/or ~RESET still routed through it)");
+    }
+
+    // --- Safety processor link (opto-isolated UART1 + the fault line) ------
+    // Comes up whether or not an RP2040 is answering; a silent far side is
+    // link_up = 0, not a startup failure.
+    static SafetyLinkClass safety;
+    esp_err_t safety_err = safety_link_start(&safety);
+    if (safety_err != ESP_OK) {
+        /* Not a silent degradation: this is the board's last line of defence
+         * and the only channel that survives everything else failing. Losing
+         * it means no fault can be signalled to the processor that can cut
+         * power independently. */
+        ESP_LOGE(TAG, "safety_link_start failed: %s -- THE ISOLATED FAULT LINE IS UNAVAILABLE; "
+                      "no main-controller fault can be signalled to the RP2040",
+                 esp_err_to_name(safety_err));
+    } else if (boot_fault_sources != 0) {
+        /* First moment the accumulated bring-up failures can actually reach
+         * the safety processor. */
+        esp_err_t err = safety_link_set_fault_source(&safety, boot_fault_sources, true);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "could not assert boot fault sources 0x%02X: %s",
+                     (unsigned)boot_fault_sources, esp_err_to_name(err));
+        } else {
+            ESP_LOGE(TAG, "isolated fault line asserted at boot, sources 0x%02X",
+                     (unsigned)boot_fault_sources);
+        }
+    }
+
+#if CONFIG_KILNCTL_SIM_PLANT
+    /* Same reasoning as the missing-expander case above: with no RP2040
+     * answering, the link's own fail-safe policy asserts
+     * SAFETY_FAULT_SRC_SAFETY_LINK, which blocks relay-on everywhere and
+     * leaves a simulated firing unable to command heat. A sim build has no
+     * kiln to protect, so the policy is turned off here -- and ONLY here.
+     * Everything else about the link (reporting, status, the fault line
+     * itself) is untouched. */
+    if (safety_err == ESP_OK) {
+        esp_err_t policy_err = safety_link_fault_on_link_loss(&safety, false);
+        ESP_LOGW(TAG, "SIM BUILD: safety-link loss demoted to non-fault (%s) -- "
+                      "a missing RP2040 must not block a simulated firing",
+                 esp_err_to_name(policy_err));
+    }
+#endif
+
+    // Lifetime relay contact-cycle counts (TODO.md 6A.1), loaded before the
+    // executor starts adding to them. A failure here costs the wear history,
+    // not correctness, so it is logged and ignored like every other
+    // non-essential subsystem in this file.
+    esp_err_t cycles_err = relay_cycles_init();
+    if (cycles_err != ESP_OK) {
+        ESP_LOGW(TAG, "relay_cycles_init failed: %s -- contact-cycle history not kept this boot",
+                 esp_err_to_name(cycles_err));
+    }
+
+    // --- Profile executor (TODO.md section 6) -------------------------------
+    // Must come up before dashboard_http_start() below, which registers the
+    // /api/profile_exec* routes that call into this module at request time.
+    // Same non-fatal, NULL-tolerant convention as everything else here: with
+    // no expander/thermo bus it still runs its state machine (useful for
+    // exercising the dashboard UI) but withholds heat, per
+    // profile_executor.h's doc comment. NOT YET VERIFIED AGAINST REAL RELAY/
+    // THERMOCOUPLE HARDWARE -- see docs/PROJECT_STATUS.md.
+    esp_err_t exec_err = profile_executor_start(io_ready ? &kio : NULL,
+                                                thermo_bus.initialized ? &thermo_bus : NULL,
+                                                safety_err == ESP_OK ? &safety : NULL);
+    if (exec_err != ESP_OK) {
+        ESP_LOGW(TAG, "profile_executor_start failed: %s -- no profile execution this boot",
+                 esp_err_to_name(exec_err));
+    }
+
+    // --- Autotune engine (TODO.md 6A.4) -------------------------------------
+    // Same bring-up convention and NULL-tolerance as profile_executor above;
+    // must also come up before dashboard_http_start() (registers /api/autotune*).
+    esp_err_t autotune_err = autotune_engine_start(io_ready ? &kio : NULL,
+                                                   thermo_bus.initialized ? &thermo_bus : NULL,
+                                                   safety_err == ESP_OK ? &safety : NULL);
+    if (autotune_err != ESP_OK) {
+        ESP_LOGW(TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(autotune_err));
+    }
+
+    // --- Dashboard HTTP API (live status + manual relay control) -----------
+    // Registers on the httpd instance wifi_prov_start() already brought up
+    // -- if that failed (no Wi-Fi this boot), this just logs and is skipped
+    // like every other bring-up step here; a dashboard nobody can reach
+    // over Wi-Fi is not a reason to fail app_main. Reads the same kio/
+    // thermo_bus this file owns rather than duplicating them, and reuses
+    // the safety pointer for the same relay_authority gate the UART bridge
+    // uses below.
+    esp_err_t dash_err = dashboard_http_start(io_ready ? &kio : NULL,
+                                              thermo_bus.initialized ? &thermo_bus : NULL,
+                                              safety_err == ESP_OK ? &safety : NULL);
+    if (dash_err != ESP_OK) {
+        ESP_LOGW(TAG, "dashboard_http_start failed: %s -- no dashboard this boot",
+                 esp_err_to_name(dash_err));
+    }
+
+    // --- Settings/Profiles HTTP pages (TODO.md sections 3 and 5) -----------
+    // Pure config CRUD -- none of these take hardware pointers, they only
+    // need the shared httpd instance above. Each failure is logged and
+    // skipped, same non-fatal convention as dashboard_http_start: a missing
+    // settings page is never a reason to fail app_main or touch the
+    // control/safety path.
+    esp_err_t zones_err = zones_http_start();
+    if (zones_err != ESP_OK) {
+        ESP_LOGW(TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",
+                 esp_err_to_name(zones_err));
+    }
+    esp_err_t rules_err = rules_http_start();
+    if (rules_err != ESP_OK) {
+        ESP_LOGW(TAG, "rules_http_start failed: %s -- no Relays & Rules page this boot",
+                 esp_err_to_name(rules_err));
+    }
+    esp_err_t profiles_err = profiles_http_start();
+    if (profiles_err != ESP_OK) {
+        ESP_LOGW(TAG, "profiles_http_start failed: %s -- no Profiles page this boot",
+                 esp_err_to_name(profiles_err));
+    }
+
+    // Development-only /api/sim (fault injection into the simulated plant).
+    // Compiles to a no-op returning ESP_OK unless CONFIG_KILNCTL_SIM_PLANT --
+    // there is no way to reach this endpoint from a production image.
+    esp_err_t sim_err = sim_backend_register_http();
+    if (sim_err != ESP_OK) {
+        ESP_LOGW(TAG, "sim_backend_register_http failed: %s -- no /api/sim this boot",
+                 esp_err_to_name(sim_err));
+    }
+
+    static monitor_task_t monitor;
+    monitor_task_init(&monitor, &expander.owner.task_handle);
+    if (monitor_task_start(&monitor) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start heartbeat monitor task");
+    }
+
+    // --- PC link -----------------------------------------------------------
+    static uart_owner_t uart_owner;
+    esp_err_t uart_err = uart_owner_init(&uart_owner, UART_OWNER_PORT_NUM, UART_OWNER_TX_IO,
+                                          UART_OWNER_RX_IO, UART_OWNER_BAUD_RATE,
+                                          UART_OWNER_QUEUE_LEN, UART_OWNER_TASK_PRIORITY,
+                                          UART_OWNER_STACK_SIZE, tskNO_AFFINITY);
+    if (uart_err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_owner_init failed: %s", esp_err_to_name(uart_err));
+        /* No PC link will ever come up, so the link watchdog below is never
+         * started and nothing else will ever drop the relays. Do it here,
+         * before returning, or the board sits forever with whatever the
+         * expander's power-on latch left energized. */
+        kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
+                              SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
+                              "the PC link UART could not be opened");
+        return;
+    }
+
+    static uart_protocol_t uart_proto;
+    uart_err = uart_protocol_init(&uart_proto, &uart_owner, UART_PROTO_DEVICE_ESP,
+                                   UART_PROTOCOL_TASK_PRIORITY, UART_PROTOCOL_STACK_SIZE,
+                                   tskNO_AFFINITY);
+    if (uart_err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_protocol_init failed: %s", esp_err_to_name(uart_err));
+        /* Same reasoning as the uart_owner_init failure above: the port exists
+         * but nothing can be addressed over it, so no host will ever command
+         * these relays and no watchdog is watching them. */
+        kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
+                              SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
+                              "the PC link protocol stack could not be started");
+        return;
+    }
+
+    // Starts draining the backlog (everything logged since app_main started)
+    // over the wire. Started before the other bridge tasks below purely so
+    // buffered boot-time log lines -- e.g. an SX1509 or panel failure -- reach
+    // the PC as early as possible; registration order otherwise doesn't matter
+    // between these tasks.
+    if (uart_log_bridge_start(&uart_proto) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start log uart bridge task");
+    }
+
+    if (uart_bridge_start_info_task(&uart_proto) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start info uart bridge task");
+    }
+    if (uart_bridge_start_system_task(&uart_proto, &uart_owner) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start system uart bridge task");
+    }
+    if (thermo_bus.initialized) {
+        /* Reports the actual error and the free heap: this failure was hit on
+         * the bench 2026-08-12 and the old message ("Failed to start thermo
+         * uart bridge task") could not distinguish a task-registration
+         * refusal (ESP_ERR_INVALID_STATE / task id already taken) from
+         * ESP_ERR_NO_MEM, which is the difference between a logic bug and a
+         * memory-pressure problem. */
+        esp_err_t thermo_task_err = uart_bridge_start_thermo_task(&uart_proto, &thermo_bus);
+        if (thermo_task_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start thermo uart bridge task: %s (free heap %lu B, largest block %u B)",
+                     esp_err_to_name(thermo_task_err), (unsigned long)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+        }
+    }
+    if (io_ready &&
+        uart_bridge_start_io_task(&uart_proto, &kio, safety_err == ESP_OK ? &safety : NULL) !=
+            ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start io uart bridge task");
+    }
+    if (display_ready && uart_bridge_start_display_task(&uart_proto, &display) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start display uart bridge task");
+    }
+    if (safety_err == ESP_OK &&
+        uart_bridge_start_safety_task(&uart_proto, &safety) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start safety uart bridge task");
+    }
+
+    // --- Fail-safe on loss of the PC link -----------------------------------
+    // Started last, so it is watching a link every bridge above can already
+    // feed. Until the host's first frame or ACK it holds the board in the
+    // link-lost state -- relays off, fault line asserted -- which is the same
+    // state a pulled USB cable produces, and the correct one for a controller
+    // nobody is currently controlling. See uart_bridge.h for the timing and
+    // exactly what "the link went away" means here.
+    esp_err_t wd_err = uart_bridge_start_link_watchdog(io_ready ? &kio : NULL,
+                                                       safety_err == ESP_OK ? &safety : NULL);
+    if (wd_err != ESP_OK) {
+        // Nothing left that drops the relays on link loss. That is the one
+        // failure in this file worth shouting about: a kiln whose controller
+        // has gone away will stay exactly as hot as it was.
+        ESP_LOGE(TAG, "PC link watchdog did not start (%s) -- RELAYS WILL NOT DROP ON LINK LOSS",
+                 esp_err_to_name(wd_err));
+        kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
+                              SAFETY_FAULT_SRC_APP,
+                              "no link watchdog, so relays cannot be guaranteed to drop");
+    }
+}
