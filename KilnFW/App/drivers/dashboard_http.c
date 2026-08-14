@@ -214,6 +214,17 @@ static esp_err_t relay_post_handler(httpd_req_t *req)
     }
     bool want_on = on_val[0] == '1';
 
+    /* TODO.md section 0's ownership decision: a relay a running (or paused,
+     * pre-resume) profile claimed is refused to a manual command in either
+     * direction -- not just ON -- since a de-energize mid-window fights the
+     * executor's own time-proportioning exactly as much as an unwanted
+     * energize does. */
+    if (relay_authority_manual_blocked_by_owner((uint8_t)relay)) {
+        ESP_LOGW(TAG, "dashboard: relay %ld refused -- owned by a running profile", relay);
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "relay owned by a running profile");
+        return ESP_OK;
+    }
+
     if (want_on) {
         uint32_t sources = 0;
         if (relay_authority_on_blocked(s_dash.safety, &sources)) {

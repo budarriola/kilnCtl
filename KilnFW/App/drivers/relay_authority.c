@@ -44,3 +44,37 @@ void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked)
         s_zone_blocked[zone_index] = blocked;
     }
 }
+
+/* Deliberately not KILN_IO_RELAY_COUNT -- same minimal-include reasoning as
+ * RELAY_AUTHORITY_MAX_ZONES above; 4 is that constant's actual value today. */
+#define RELAY_AUTHORITY_MAX_RELAYS 4u
+
+static relay_owner_t s_relay_owner[RELAY_AUTHORITY_MAX_RELAYS];
+
+relay_owner_t relay_authority_get_owner(uint8_t relay_index)
+{
+    if (relay_index < 1u || relay_index > RELAY_AUTHORITY_MAX_RELAYS) {
+        return RELAY_OWNER_NONE;
+    }
+    return s_relay_owner[relay_index - 1u];
+}
+
+void relay_authority_claim_mask(uint8_t relay_mask, relay_owner_t owner)
+{
+    for (uint8_t i = 0; i < RELAY_AUTHORITY_MAX_RELAYS; i++) {
+        if (relay_mask & (1u << i)) {
+            s_relay_owner[i] = owner;
+        }
+    }
+}
+
+void relay_authority_release_mask(uint8_t relay_mask)
+{
+    relay_authority_claim_mask(relay_mask, RELAY_OWNER_NONE);
+}
+
+bool relay_authority_manual_blocked_by_owner(uint8_t relay_index)
+{
+    relay_owner_t owner = relay_authority_get_owner(relay_index);
+    return owner == RELAY_OWNER_PROFILE || owner == RELAY_OWNER_RULE;
+}

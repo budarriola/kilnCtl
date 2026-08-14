@@ -1799,6 +1799,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.history_count = 0;
     s_exec.history_head = 0;
 
+    /* TODO.md section 0's ownership decision, closing the "manual relay
+     * control is not blocked during a firing" gap: claim every relay this
+     * run touches so /api/relay and the UART SET_RELAY* commands refuse a
+     * manual command against it until pause/halt hands it back. */
+    relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
+
     s_exec.state = PROFILE_EXEC_RUNNING;
     run_snapshot_buf_t start_snap;
     capture_run_snapshot(&start_snap);
@@ -1821,6 +1827,9 @@ void profile_executor_halt(void)
         return;
     }
     force_all_relays_off();
+    /* Hand every relay this run ever claimed back to unowned -- a halted run
+     * owns nothing, and the next run (or a manual command) starts clean. */
+    relay_authority_release_mask(s_exec.claimed_relay_mask);
     /* Captured BEFORE the fault fields are cleared below: if this halt is the
      * operator acknowledging a trip, the reason for that trip is the most
      * useful thing the breadcrumb can carry, and clearing it first would
@@ -1868,6 +1877,12 @@ bool profile_executor_pause(void)
         return false;
     }
     force_all_relays_off();
+    /* TODO.md section 0: pausing is the one explicit way to hand a
+     * PROFILE-owned relay back to MANUAL (not NONE -- a paused firing still
+     * "belongs" to the operator's session, it's just not driving right now;
+     * resuming reclaims PROFILE below). Chosen over auto-pause-on-touch so
+     * a manual command never has the side effect of pausing a firing. */
+    relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_MANUAL);
     s_exec.state = PROFILE_EXEC_PAUSED;
     run_snapshot_buf_t pause_snap;
     capture_run_snapshot(&pause_snap);
@@ -1889,6 +1904,9 @@ bool profile_executor_resume(void)
         xSemaphoreGive(s_exec.lock);
         return false;
     }
+    /* Reclaim PROFILE ownership handed to MANUAL on pause -- see
+     * profile_executor_pause()'s comment. */
+    relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
     /* Shared ramp/dwell state (target_c, segment_elapsed_s) is untouched by
      * pause -- the control task simply doesn't tick it while PAUSED, so
      * there's nothing to un-shift on resume (unlike the old tick-delta-

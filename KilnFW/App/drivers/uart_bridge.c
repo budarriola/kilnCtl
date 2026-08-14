@@ -738,6 +738,14 @@ static void io_bridge_task(void *arg)
                 if (!bridge_range_ok("io", subcmd, "relay", msg.payload[1], 1,
                                      KILN_IO_RELAY_COUNT)) { rejected = true; break; }
                 bool want_on = msg.payload[2] != 0;
+                /* TODO.md section 0: a relay a running profile owns refuses a
+                 * manual command in either direction -- see relay_authority.h. */
+                if (relay_authority_manual_blocked_by_owner(msg.payload[1])) {
+                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u owned by a running profile",
+                             subcmd, msg.payload[1]);
+                    rejected = true;
+                    break;
+                }
                 uint32_t sources = 0;
                 if (want_on && io_relay_on_blocked(ctx, &sources)) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON while safety fault "
@@ -761,6 +769,23 @@ static void io_bridge_task(void *arg)
                     ESP_LOGW(TAG, "io: subcmd 0x%02X relay mask 0x%02X selects no valid relay "
                                   "(valid bits 0x%02X) -- rejected", subcmd, msg.payload[1],
                              relay_bits);
+                    rejected = true;
+                    break;
+                }
+                /* TODO.md section 0: any selected relay owned by a running
+                 * profile refuses the whole mask write, same all-or-nothing
+                 * rule as the ON check below. */
+                bool any_owned = false;
+                for (uint8_t ri = 1; ri <= KILN_IO_RELAY_COUNT; ri++) {
+                    if ((msg.payload[1] & (1u << (ri - 1u))) &&
+                        relay_authority_manual_blocked_by_owner(ri)) {
+                        any_owned = true;
+                        break;
+                    }
+                }
+                if (any_owned) {
+                    ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X selects a relay owned "
+                                  "by a running profile", subcmd, msg.payload[1]);
                     rejected = true;
                     break;
                 }

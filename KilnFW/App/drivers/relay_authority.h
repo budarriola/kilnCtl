@@ -65,6 +65,41 @@ bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, u
  * reboot, same as everything else here). */
 void relay_authority_set_zone_blocked(uint8_t zone_index, bool blocked);
 
+/* Per-relay ownership (TODO.md section 0's "does the web UI's manual relay
+ * override fight a running profile over the same relay" decision, closing
+ * the open gap TODO.md's "Manual relay control is not blocked during a
+ * firing" bullet flagged). NONE and MANUAL both leave a relay reachable by
+ * a manual command; PROFILE and RULE do not. This module only stores the
+ * tag and answers "is a manual command against this relay refused" -- the
+ * policy of *when* to claim/release (profile start/pause/resume/halt) lives
+ * in the caller (profile_executor.c today; a rule evaluator, once one
+ * exists, would claim RULE the same way). */
+typedef enum {
+    RELAY_OWNER_NONE = 0,
+    RELAY_OWNER_MANUAL,
+    RELAY_OWNER_PROFILE,
+    RELAY_OWNER_RULE,
+} relay_owner_t;
+
+/* relay_index is 1-based (matches kiln_io_set_relay's convention), 1..4. */
+relay_owner_t relay_authority_get_owner(uint8_t relay_index);
+
+/* mask follows the project's existing "bit N-1 = relay N" convention
+ * (zone_cfg_t.relay_mask, kiln_io_set_relay_mask). Claiming/releasing a
+ * relay not in the mask is a no-op for that relay. */
+void relay_authority_claim_mask(uint8_t relay_mask, relay_owner_t owner);
+
+/* Shorthand for relay_authority_claim_mask(relay_mask, RELAY_OWNER_NONE). */
+void relay_authority_release_mask(uint8_t relay_mask);
+
+/* True when relay_index is owned by something other than NONE/MANUAL, i.e.
+ * a manual command (dashboard /api/relay, UART SET_RELAY/SET_RELAY_MASK/
+ * SX_WRITE_REG) against it must be refused. Independent of, and checked in
+ * addition to, relay_authority_on_blocked()/relay_authority_zone_blocked()
+ * -- a relay can be refused for a safety fault, for being owned by a
+ * profile, or both. */
+bool relay_authority_manual_blocked_by_owner(uint8_t relay_index);
+
 #ifdef __cplusplus
 }
 #endif

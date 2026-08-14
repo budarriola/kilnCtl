@@ -2084,7 +2084,7 @@ the above.
       absent (same shape as the existing legacy `mode`/`local_only`
       fallback in the same function) — a present flag key stays the
       authority, this only covers its absence.
-- [ ] **Manual relay control is not blocked during a firing.** Confirmed from
+- [x] **Manual relay control is not blocked during a firing.** Confirmed from
       the code while building the sweep above: `/api/relay`
       (`dashboard_http.c`) and the UART bridge's `SET_RELAY` /
       `SET_RELAY_MASK` / `SX_WRITE_REG` can energize *or de-energize* any
@@ -2096,6 +2096,34 @@ the above.
       touches relays this run itself claimed). Note the rules engine cannot
       hold a relay at all today: `rules_http.{c,h}` stores and validates rule
       config, but no evaluator task exists.
+      **Built (2026-08-13)**: `relay_authority.{c,h}` gained the
+      MANUAL/PROFILE/RULE ownership tags section 0 designed —
+      `relay_authority_claim_mask()`/`relay_authority_release_mask()`/
+      `relay_authority_get_owner()`/`relay_authority_manual_blocked_by_owner()`,
+      per-relay (1-based, matching `kiln_io_set_relay`'s index), separate
+      from and additive to the existing global/per-zone fault checks.
+      `profile_executor.c` claims `PROFILE` for `claimed_relay_mask` on
+      `profile_executor_run()`, hands it to `MANUAL` on
+      `profile_executor_pause()` (per section 0's "pause is the one explicit
+      way to hand a relay back to MANUAL" decision — not `NONE`, and
+      resuming reclaims `PROFILE`), and releases to `NONE` on
+      `profile_executor_halt()`. `dashboard_http.c`'s `relay_post_handler()`
+      and `uart_bridge.c`'s `IO_CMD_SET_RELAY`/`IO_CMD_SET_RELAY_MASK`
+      handlers now refuse a manual command (either direction, not just ON —
+      a de-energize mid-window fights the executor's time-proportioning
+      exactly as much as an unwanted energize) against an owned relay,
+      before the existing safety-fault check runs. **Scope gap, left open
+      on purpose**: `IO_CMD_SX_WRITE_REG`'s raw-register debug path was not
+      extended — it addresses SX1509 pin bits, not the 1-based relay index
+      this module's API takes, and mapping one to the other for a
+      debug-only command was judged not worth the complexity this pass;
+      it already refuses an ON while a safety fault is asserted (the
+      pre-existing check), just not an ownership-only refusal. The rules
+      engine's `RULE` tag is plumbed through but has no caller yet — no
+      evaluator task exists (unchanged). Build-verified only; not exercised
+      live (no relay hardware attached this session, and needs an actual
+      profile run to observe the refusal). Build-verified via `ninja -j 24`
+      in `KilnFW/build` — clean.
 - [x] **Re-check `max_ramp_c_per_hr` against a running profile.** It is a
       run-start feasibility gate (section 5) and the reload path deliberately
       does not consume it, so an operator can now lower it mid-firing below
