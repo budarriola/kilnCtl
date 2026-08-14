@@ -13,10 +13,10 @@
 // and functional-range blending (full-on/full-off outside pid_range_c,
 // integrator held) so a cold start doesn't spend an hour winding up I.
 //
-// Feedforward (ff_u) is accepted but the executor currently always passes
-// 0.0f -- the FOPDT model it would come from is autotune's job (TODO.md
-// 6A.4), not yet built. The parameter exists now so wiring it in later is a
-// call-site change, not an API change.
+// Feedforward (ff_u) is an optional duty term in [0,1] from a caller's own
+// FOPDT model (autotune, TODO.md 6A.4); pid_update()/pid_seed_bumpless() both
+// take it explicitly rather than assuming 0, so a zone with no identified
+// model just passes 0.0f.
 #ifndef PID_H
 #define PID_H
 
@@ -54,11 +54,13 @@ void pid_reset(pid_state_t *state);
 /* Bumpless transfer (TODO.md 6A.2): call whenever control resumes after a
  * discontinuity (mode change, tuning change, profile resume, autotune
  * handoff) so the very next pid_update() produces u_desired instead of
- * whatever a cold integral would compute. Solves integral = (u_desired -
- * P) / Ki and seeds it (clamped to >= 0, since a negative integral would
- * itself violate the anti-windup clamp on the next tick). */
+ * whatever a cold integral would compute. ff_u is the same feedforward duty
+ * the next pid_update()/pid_update_terms() call will be given -- solves
+ * integral = (u_desired - P - ff_u) / Ki and seeds it (clamped to >= 0,
+ * since a negative integral would itself violate the anti-windup clamp on
+ * the next tick). Pass 0.0f for a zone with no feedforward model. */
 void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
-                       float u_desired);
+                       float u_desired, float ff_u);
 
 /* Term breakdown from the most recent pid_update_terms() call -- "tuning by
  * evidence, not intuition" (TODO.md 6A.9's /api/control bullet). p/i/d/ff

@@ -30,9 +30,23 @@ or if no `SafetyLinkClass` was successfully started at boot at all (absence
 of the safety subsystem is treated as "cannot prove safe", not "assume
 safe"). See the wire-level note in `docs/UART_PROTOCOL.md` under `IO` task 2.
 
-This is the only place in the firmware today that directly gates a relay
-command against a safety condition. Everything below either feeds a fault
-source into this gate, or is a case this gate does **not** yet cover.
+**Update (2026-08-13): no longer the only caller, and the gate itself moved.**
+The check this section describes was extracted into
+`App/drivers/relay_authority.{c,h}` (`relay_authority_on_blocked()`) so every
+caller shares one implementation instead of each reimplementing the same
+fault-source read; `uart_bridge.c`'s `io_relay_on_blocked()` is now a thin
+wrapper over it. Two more real callers exist beside the UART bridge:
+`dashboard_http.c`'s `POST /api/relay` (the web UI's manual relay control,
+TODO.md section 2) and `App/drivers/profile_executor.c` (the profile
+execution engine, TODO.md section 6/6A) — both gate every relay-ON command
+through the same function, so the rule stated above ("the safety condition
+wins") holds identically for all three. `profile_executor.c` additionally
+introduced a second, narrower gate, `relay_authority_zone_blocked()`
+(TODO.md 6A.6): some guard trips (thermal_guard's per-zone-physics guards)
+block only the tripping zone's relays rather than the whole board, layered
+*on top of* the global gate above, never replacing it. Everything below
+still describes the global gate correctly; treat "the only place" in the
+paragraph above as historical.
 
 ### 2. The fault-source mask (`App/drivers/safety_link.c`)
 
@@ -214,3 +228,15 @@ covered by the ESP-IDF build (`idf.py build`, clean under
 `-Wall -Wextra -Werror` as of this writing) but **untested on real hardware**
 unless stated otherwise above — see `docs/PROJECT_STATUS.md` for what "done"
 means across the whole project.
+
+**Added 2026-08-13, run-level policy (not a relay-authority change)**:
+`zones_config_get_continue_on_zone_trip()` (`zones_http.c`, default `false`)
+governs whether a per-zone thermal guard trip (one that only blocks that
+zone's relays, per `relay_authority_zone_blocked()` above) also aborts every
+other active zone in a multi-zone firing. Default is abort-the-whole-firing,
+per TODO.md 6A.3's explicit rationale (a partially-blind, still-heating
+chamber is worse than stopping); an operator can opt into
+"continue with the healthy zones" per-board. This sits entirely inside
+`profile_executor.c`'s `escalate_guard_trip()` and does not touch either
+relay-authority gate — it decides which zones the executor *chooses* to
+fault, not whether a relay command is permitted.

@@ -79,9 +79,21 @@ void run_test_pid(void)
         pid_state_t s;
         pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.02f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
         pid_reset(&s);
-        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f);
+        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f, 0.0f);
         float u = pid_update(&s, &cfg, 200.5f, 200.0f, 1.0f, 0.0f);
         TEST_CHECK_NEAR(u, 0.6f, 0.02, "bumpless-seeded tick reproduces u_desired closely");
+    }
+
+    /* Bumpless transfer with feedforward: the seed must subtract ff_u before
+     * solving for the integral, so the reproduced tick (P + I + ff) still
+     * lands on u_desired rather than u_desired + ff_u. */
+    {
+        pid_state_t s;
+        pid_cfg_t cfg = {.kp = 0.0f, .ki = 0.02f, .kd = 0.0f, .d_filter_tau_s = 1.0f, .b = 1.0f, .pid_range_c = 1000.0f};
+        pid_reset(&s);
+        pid_seed_bumpless(&s, &cfg, 200.5f, 200.0f, 0.6f, 0.25f);
+        float u = pid_update(&s, &cfg, 200.5f, 200.0f, 1.0f, 0.25f);
+        TEST_CHECK_NEAR(u, 0.6f, 0.02, "bumpless-seeded tick with ff_u still reproduces u_desired");
     }
 
     /* Feedforward simply adds, subject to the same clamp. */

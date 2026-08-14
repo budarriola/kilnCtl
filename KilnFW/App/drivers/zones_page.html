@@ -94,6 +94,13 @@ skipped a tick keeps its lost on-time and makes it up on its own next window rat
 just losing it (PID mode only -- bang-bang mode has no window to make it up in)</label>
 <input type="number" id="maxSimultaneous" min="0" max="4" value="0">
 
+<label><input type="checkbox" id="continueOnZoneTrip" style="width:auto;display:inline-block;margin-right:0.4em;">
+Continue firing other zones when one zone's guard trips</label>
+<p class="hint">Off by default (recommended): a guard trip on ANY zone aborts the whole
+firing, since the remaining zones would keep dumping heat into a chamber whose
+temperature is now partly unmeasured. Turn this on only if you deliberately want
+independent per-zone firings that don't take each other down.</p>
+
 <div id="zones"><p class="empty">Loading&hellip;</p></div>
 
 <button id="saveBtn" type="button">Save</button>
@@ -283,6 +290,7 @@ function loadCurrent() {
     document.getElementById('thermoCount').value = data.thermo_count;
     document.getElementById('relayCount').value = data.relay_count;
     document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
+    document.getElementById('continueOnZoneTrip').checked = !!data.continue_on_zone_trip;
     renderZones();
     populateAutotuneZones();
   }).catch(function () {
@@ -298,8 +306,10 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
   var maxSimultaneous = parseInt(document.getElementById('maxSimultaneous').value, 10) || 0;
+  var continueOnZoneTrip = document.getElementById('continueOnZoneTrip').checked ? 1 : 0;
   var params = ['thermo_count=' + thermoCount, 'relay_count=' + relayCount,
-                 'max_simultaneous_relays=' + maxSimultaneous];
+                 'max_simultaneous_relays=' + maxSimultaneous,
+                 'continue_on_zone_trip=' + continueOnZoneTrip];
   var blocks = document.getElementById('zones').querySelectorAll('.zone');
   blocks.forEach(function (div) {
     var i = div.dataset.index;

@@ -123,6 +123,17 @@ typedef struct {
      * under ff with i small and steady, and a large i sitting under a
      * non-zero ff means the model is wrong, not that the loop is. */
     float    pid_ff;
+    /* TODO.md 6A.2's "Output clamp [0,1]... the controller should report
+     * 'cannot follow, cooling-limited' rather than sit at u=0 looking
+     * healthy while the actual curve diverges." True once this zone's PID
+     * output has sat at 0 (nothing to give -- there is no active cooling)
+     * for PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S while still reading more
+     * than PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C above the ramp target
+     * -- i.e. the kiln is losing heat slower than the profile asked it to,
+     * and nothing the loop can command will close that gap. Only
+     * meaningful when control_mode == ZONE_CONTROL_MODE_PID; always false
+     * for BANGBANG (no continuous u=0 to observe the same way) and OFF. */
+    bool     cooling_limited;
 } profile_exec_zone_status_t;
 
 typedef struct {
@@ -148,6 +159,15 @@ typedef struct {
 } profile_exec_status_t;
 
 #define PROFILE_EXECUTOR_HYSTERESIS_C 2.0f /* BANGBANG mode's fixed band -- see profile_executor.c */
+
+/* TODO.md 6A.2's cooling-limited diagnostic (see
+ * profile_exec_zone_status_t::cooling_limited): how far above target and
+ * how long before "duty pinned at 0" is reported as "cannot follow" rather
+ * than just a normal, brief overshoot settling out. Firmware-wide constants
+ * for now, like PROFILE_EXECUTOR_HYSTERESIS_C above -- not yet per-zone
+ * config, since nothing has asked for that granularity here. */
+#define PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C 2.0f
+#define PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S 60.0f
 
 #define PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN 0.5f
 

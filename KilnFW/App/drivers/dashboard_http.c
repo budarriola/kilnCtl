@@ -289,11 +289,12 @@ static size_t append_zone_status_json(char *json, size_t cap, size_t o, const pr
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"control_mode\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,"
                         "\"duty\":%.3f,\"relay_on\":%s,\"pid_p\":%.4f,\"pid_i\":%.4f,\"pid_d\":%.4f,"
-                        "\"pid_ff\":%.4f,\"faulted\":%s,\"fault_guard\":%u}",
+                        "\"pid_ff\":%.4f,\"cooling_limited\":%s,\"faulted\":%s,\"fault_guard\":%u}",
                         first ? "" : ",", zi, z->control_mode, (double)(z->actual_valid ? z->actual_c : 0.0f),
                         z->actual_valid ? "true" : "false", (double)z->duty,
                         z->relay_commanded_on ? "true" : "false", (double)z->pid_p, (double)z->pid_i,
-                        (double)z->pid_d, (double)z->pid_ff, z->faulted ? "true" : "false", z->fault_guard);
+                        (double)z->pid_d, (double)z->pid_ff, z->cooling_limited ? "true" : "false",
+                        z->faulted ? "true" : "false", z->fault_guard);
         } else {
             n = snprintf(json + o, cap - o,
                         "%s{\"zone\":%u,\"actual_c\":%.2f,\"actual_valid\":%s,\"relay_on\":%s,"

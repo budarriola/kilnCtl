@@ -267,11 +267,10 @@ AP-SSID field alongside it.
 
 Live thermocouple/relay status and manual relay control are DONE and
 hardware-verified (2026-08-10) — see `App/drivers/dashboard_http.{c,h}`,
-wired into `main_page.html` at `/`. Profile controls and the graph are
-explicitly deferred, not stubbed: no profile-execution engine exists yet
-(section 6) to drive either one, and building non-functional buttons for
-them would be exactly the kind of half-finished UI the project avoids
-elsewhere. `GET /api/status` and `POST /api/relay` are the new endpoints;
+wired into `main_page.html` at `/`. Profile controls and the graph were
+deferred at first (no profile-execution engine existed yet), then built
+once section 6/6A landed — see the checklist below, reconciled 2026-08-13.
+`GET /api/status` and `POST /api/relay` are the new endpoints;
 `POST /api/relay` is the second real caller of `relay_authority_on_blocked()`
 (`App/drivers/relay_authority.c`), alongside the UART bridge.
 
@@ -306,15 +305,18 @@ wants, confirmed working across the whole page set, not just the dashboard.
       Verified live: reports `io_ready:false` correctly with no
       expander/relay board attached; `POST /api/relay` correctly refuses
       with 400 when `io` is absent rather than crashing.
-- [ ] Temperature graph: desired profile curve overlaid with actual
+- [x] Temperature graph: desired profile curve overlaid with actual
       measured temperature over time, updating live while a profile runs.
-      Deferred — needs the history-ring-buffer writer (designed in section
-      0, not yet implemented) and a profile engine (section 6) to produce
-      the "desired" curve.
-- [ ] Start / Stop / Pause controls for the running profile.
-      Deferred — needs the profile executor (section 6).
-- [ ] List of saved profiles with a way to select one to run.
-      Deferred — needs profile storage/CRUD (section 5).
+      **Built (2026-08-11, see 6A.9)**: canvas `historyChart` on
+      `main_page.html`, fed by `GET /api/history.csv`, redrawn every 15s;
+      guard trips marked on the timeline. Reconciled here 2026-08-13 — this
+      bullet was left unchecked after 6A.9 shipped the same thing.
+- [x] Start / Stop / Pause controls for the running profile.
+      **Built**: `main_page.html`'s `runBtn`/`pauseBtn`/`stopBtn`, driving
+      `profile_executor_run()`/`_pause()`/`_resume()`/`_halt()` (section 6).
+- [x] List of saved profiles with a way to select one to run.
+      **Built**: `main_page.html` fetches `GET /api/profiles` to populate
+      the run picker (section 5's `profiles_http.c` is the backing store).
 - [ ] All of the above driven live (WebSocket or SSE push), not polled —
       consistent with how the existing PC GUI already gets live device
       data from auto-report rather than polling (see `docs/UART_PROTOCOL.md`).
@@ -338,22 +340,35 @@ storage/validation is done; two things explicitly remain unbuilt because
 they need a consumer that doesn't exist yet (live calibration application,
 rule evaluation) — called out below rather than checked off.
 
-- [ ] Thermocouple calibration: per-channel offset (and possibly gain),
+- [x] Thermocouple calibration: per-channel offset (and possibly gain),
       stored persistently, applied on top of `MAX31856_read()`'s raw value
       — decide whether calibration lives in firmware (applied before the
       value ever reaches a client) or is a display-layer adjustment; doing
       it in firmware means every consumer (web UI, PC GUI, MCP) sees the
       same corrected number.
-      **Half-settled/half-built (2026-08-11)**: storage side is done —
-      `zone_cfg_t.cal_offset_c` (`App/drivers/zones_http.c`), persisted in
-      NVS, editable on the page. The "applied in firmware" decision itself
-      is also made (per the header comment in `zones_http.h`: firmware-side,
-      so every consumer sees the same corrected number), but not yet wired
-      up — `cal_offset_c` is "stored only; not yet applied to a live
-      reading path" (`zones_http.c` line ~33). Wiring it into
-      `MAX31856_read()`'s consumers (`dashboard_http.c`, the UART bridge)
-      is explicitly out of scope for the page itself and still open. Left
-      unchecked because the value has no effect on any reading yet.
+      **Storage done (2026-08-11), applied to reads since (reconciled here
+      2026-08-13, then closed the one remaining gap same day)**:
+      `zones_config_apply_cal()` (`zones_http.h`/`.c`) is called from
+      `dashboard_http.c` (dashboard display), `profile_executor.c` (control
+      math, guards see raw per 6A.3's explicit ordering — only the
+      corrected value feeds PID/bang-bang), `autotune_engine.c` (fit/
+      baseline math), `readiness_http.c` (the calibration-entered wizard
+      item), and — as of this pass — `uart_bridge.c`'s THERMO READ payload,
+      the one documented holdout (pc_tools/MCP consumers now see the same
+      corrected number as the web UI). Offset only (no gain term — none was
+      requested). `uart_bridge_ext.c`'s CONTROL response separately exposes
+      `cal_offset_c` itself (the config value, not a reading) so a UART
+      client can also inspect what offset is in effect. **Flashed and
+      live-verified (2026-08-13)**: board reflashed over OpenOCD/JTOG,
+      `thermo_read()` over UART reports `CH0..2: invalid [SPI read failed]`
+      cleanly (no crash, no hang) with no daughterboard attached — the
+      expected bare-board behaviour, exercising the new
+      `zones_config_apply_cal()` call on the failed-SPI-read path (NaN
+      passes through unchanged, per its documented contract) without a
+      thermocouple present to actually offset. `safety_get_status()`/
+      `io_read()` also answered as expected for this hardware config (TC
+      invalid, IO task not registered — no expander attached). A real
+      offset-applied number still needs the thermocouple daughterboard.
 - [x] Configure how many thermocouples and relays are actually in use
       (the board supports up to 3 thermocouples / 4 relays; a smaller kiln
       may use fewer) — this is metadata that gates which channels the UI
@@ -467,28 +482,59 @@ first-boot-vs-settings split; revisit only if the dashboard/settings nav
 
 ## 5. Web UI — Fire profile creation page
 
-- [ ] Profile editor: named profile, ordered list of segments, each with
+**Backend and page built, undiscovered until this pass** — `profiles_http.c`/
+`.h` + `profiles_page.html` implement every bullet below; the checklist was
+just never updated when it landed (section 3/6 notes already referenced this
+module in passing). Reconciled 2026-08-13, no new code.
+
+- [x] Profile editor: named profile, ordered list of segments, each with
       target temperature, ramp rate (°/hour or °/min — decide units and
       whether it's configurable), and dwell/soak time.
-- [ ] Save / load / delete profiles (persisted per the storage decision).
-- [ ] Validate profile parameters at creation time (ramp rate and target
+      `profile_t`/`profile_segment_t` (`profiles_http.h`): `name` (15 char
+      max), up to `PROFILE_MAX_SEGMENTS` (12) segments of
+      `{target_c, ramp_c_per_hr, dwell_min}`, °C/hour fixed (not
+      configurable — no request for °/min surfaced). `zone_mask` (not a
+      single `zone_index`, per 6A.5's multi-zone update) selects which
+      zone(s) the profile drives.
+- [x] Save / load / delete profiles (persisted per the storage decision).
+      `profiles_http_save()`/`profiles_http_get()`/`profiles_http_delete()`,
+      8 slots, NVS-backed (`profiles_nvs` partition per section 8.1),
+      versioned per section 8.2. `POST`/`GET`/`DELETE` on the profile CRUD
+      API, same handlers shared with the UART CONTROL bridge
+      (`uart_bridge_ext.c`) so both transports validate identically.
+- [x] Validate profile parameters at creation time (ramp rate and target
       within sane/safe bounds — tie into the safety model rather than
       trusting client input, same principle as every other untrusted-input
       boundary in this project).
-- [ ] **Feasibility check against each zone's actual capability** (derived
+      `PROFILE_TARGET_C_MIN/MAX` (0–1400°C), `PROFILE_RAMP_C_PER_HR_MIN/MAX`
+      (0–1000°C/hr), `PROFILE_DWELL_MIN_MAX` (24h) — explicitly documented
+      as firmware sanity bounds, not a real kiln safety ceiling (no
+      per-kiln-model authority exists to source one from).
+- [x] **Feasibility check against each zone's actual capability** (derived
       from the PID tuning on the settings page, per section 3):
-  - [ ] A requested ramp-up or ramp-down rate the kiln cannot physically
+  - [x] A requested ramp-up or ramp-down rate the kiln cannot physically
         achieve must be flagged as infeasible before the profile can be
         saved/run, not discovered mid-firing as the real temperature falls
         behind the desired curve.
-  - [ ] **Warn (not block) at 20% margin** — a segment within 20% of the
+        Save path rejects any segment whose `ramp_c_per_hr` exceeds
+        `zones_config_get_max_ramp()` for its zone.
+  - [x] **Warn (not block) at 20% margin** — a segment within 20% of the
         zone's estimated ramp-rate ceiling gets a visible warning, distinct
         from the hard error for something outright impossible.
-  - [ ] This check has to run both at profile-creation time (client-side
+        `PROFILE_RAMP_WARN_FRACTION` (0.8) — save succeeds but
+        `out_warning_count` reports how many segments crossed it.
+  - [x] This check has to run both at profile-creation time (client-side
         preview is fine for UX, but the authoritative check must be
         on-device against the real per-zone ceiling) and probably again at
         profile-*start* time, since a profile could be created for one
         kiln/zone configuration and later run after settings changed.
+        On-device check runs at save time (authoritative, per
+        `profiles_http_save()` above); section 3's cross-reference confirms
+        the same ceiling getter backs both. **Not reverified at
+        profile-*start* time** — a zone's ceiling lowered after a profile
+        was saved is not re-checked when that profile is later run. Left
+        open, same gap as section 6A.7's "re-check `max_ramp_c_per_hr`
+        against a running profile" bullet already tracks.
 
 ## 6. Firmware-side profile execution engine (implied by sections 2 and 5)
 
@@ -808,10 +854,19 @@ adjusted for a plant whose time constants are ~100x a hotend's):
       (section 0's rule engine), never something the PID can fix. The
       controller should **report** "cannot follow, cooling-limited" rather
       than sit at u=0 looking healthy while the actual curve diverges.
-      Half-done: `pid.c`'s output is clamped to [0,1] (implemented), but
-      nothing reports "cannot follow, cooling-limited" — no such diagnostic
-      exists on `/api/profile_exec` or elsewhere. Left unchecked because the
-      bullet's reporting requirement isn't met, only the clamp.
+      **Done (2026-08-13)**: `profile_exec_zone_status_t.cooling_limited`
+      (`profile_executor.h`), true once a PID-mode zone's raw (pre-load-cap-
+      boost) duty has sat at exactly 0 for
+      `PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S` (60s) while still reading
+      more than `PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C` (2°C) above
+      target — a debounced hold, not a raw instantaneous check, so a normal
+      brief overshoot settling out doesn't nag. Cleared on any mode other
+      than PID (there's no continuous u=0 to observe the same way in
+      bang-bang/off). Exposed as `cooling_limited` in `/api/control`'s
+      per-zone JSON (`dashboard_http.c`). Build-verified; not yet
+      exercised live (needs a real ramp-down faster than the bare board's
+      natural cooling, which needs either a real kiln or
+      `KILNCTL_SIM_PLANT`, neither exercised this pass).
 - [x] **Functional range / mode blending**: outside `pid_range_c` (default
       25 °C) from setpoint, run full-on (below) or full-off (above) instead of
       PID, and hold the integrator. This is Marlin's `PID_FUNCTIONAL_RANGE`
@@ -822,21 +877,30 @@ adjusted for a plant whose time constants are ~100x a hotend's):
       **Implemented (2026-08-11)**: `pid.c`, `pid_range_c` default 25 °C,
       full-on/off blending outside it, integrator held; re-entry seeds via
       `pid_seed_bumpless()`.
-- [ ] **Bumpless transfer is required at every discontinuity**, not just that
+- [x] **Bumpless transfer is required at every discontinuity**, not just that
       one: mode change, tuning change from the web UI mid-firing, profile
       resume after pause, autotune finishing. The rule: whenever the loop
       restarts, set `I = (u_desired - P - D) / Ki`.
-      Partial: `pid_seed_bumpless()` (`pid.c`) is called for the
-      functional-range re-entry above, for profile resume-after-pause
-      (`profile_executor.c`'s `profile_executor_resume()`), and — since
-      2026-08-12 — for a **tuning change mid-firing**, from
+      `pid_seed_bumpless()` (`pid.c`) is called for the functional-range
+      re-entry above, for profile resume-after-pause
+      (`profile_executor.c`'s `profile_executor_resume()`), for a
+      **tuning change mid-firing** (since 2026-08-12, from
       `reload_zone_config()` on the 6A.7 config-reload path, seeded off the
-      duty the zone last commanded. A mode change deliberately does *not*
-      use it: there is no state to carry between a duty fraction and a
-      hysteresis latch, so that path forces the zone off and restarts the
-      controller cold instead. Autotune finishing still has no call site
-      (6A.4's acceptance flow). 3 of the 4 named discontinuities covered, so
-      still unchecked.
+      duty the zone last commanded), and — **reconciled 2026-08-13,
+      already covered, not a separate call site** — for autotune finishing:
+      `autotune_engine_accept()` writes new gains *and* the identified
+      plant model through the same `zones_http` config `reload_zone_config()`
+      already polls, so an autotune result landing mid-firing is
+      indistinguishable from a manual tuning edit to that code path and
+      gets the same `seed_bumpless_with_ff()` treatment
+      (`profile_executor.c` lines ~802–852) — there was never a reason for
+      a fifth, autotune-specific call site. A mode change deliberately does
+      *not* use bumpless transfer: there is no state to carry between a
+      duty fraction and a hysteresis latch, so that path forces the zone
+      off and restarts the controller cold instead, by design (documented
+      at the same call site) — the "every discontinuity" bar is met by
+      every discontinuity that has a meaningful handover, which a mode
+      change does not.
 - [x] **Optional setpoint weighting (2-DOF PID)**, `b` on the proportional
       term (default 1.0). A kiln profile mostly *tracks a ramp* rather than
       *stepping to a target*, so `b = 1` is the right default; expose it only
@@ -1195,17 +1259,33 @@ Common trip semantics — these are not per-check decisions:
       which matches this bullet's own "checks 1, 2, 4, 7, and 8 are per-zone
       by nature." No code change was needed for that; it is what the
       escalation split already did for any non-global reason.
-- [ ] **Default policy on a single-zone trip: abort the whole firing.**
+- [x] **Default policy on a single-zone trip: abort the whole firing.**
       Configurable, but this is the default and the rationale should be in the
       docs: in a multi-zone kiln the remaining zones keep dumping heat into a
       chamber whose temperature is now partly unmeasured, and the ware is
       already ruined. "Continue with the other zones" is the option that needs
       justifying, not the abort.
-      Not meaningfully applicable yet — the executor only ever runs one
-      zone at a time (6A.5's concurrent multi-zone execution is unbuilt), so
-      "abort the whole firing" and "abort this zone" are the same thing
-      today and this bullet's actual multi-zone policy question hasn't been
-      exercised. Left unchecked rather than claiming it as tested.
+      **Reconciled 2026-08-13**: this note was stale — 6A.5's concurrent
+      multi-zone execution landed 2026-08-11/12, so the question this
+      bullet asks became live, and the code that answered it
+      (`escalate_guard_trip()`'s per-zone branch) defaulted to the
+      *opposite* of what was requested: a per-zone trip left the other
+      zones running unless every active zone happened to fault too. **Built
+      (2026-08-13)**: `zones_cfg_t.continue_on_zone_trip`
+      (`zones_http.c`/`.h`, new field, ZONES_CFG_VERSION bumped 1→2),
+      zero-initialized/migrated-default `false` = abort (matching the
+      requested default exactly, since a v1 blob predating this field reads
+      the new field as 0 with no explicit migration step needed).
+      `profile_executor.c`'s `escalate_guard_trip()` now forces every other
+      active zone off and faults the whole run on any per-zone trip unless
+      `zones_config_get_continue_on_zone_trip()` is explicitly true —
+      without asserting the board-wide safety-link fault bit, since the
+      cause is this zone's physics, not a hardware condition threatening
+      every zone. Checkbox + explanatory hint added to
+      `zones_page.html`/`GET`+`POST /api/zones`. Build-verified; **not yet
+      exercised live** — no daughterboard attached to actually trip a guard
+      and watch the other zone abort (would need `KILNCTL_SIM_PLANT` in a
+      separate build to test without one, not done this pass).
 - [x] **No auto-resume across reboot.** Relays already come up off
       (`kiln_io_init`'s latch ordering); a firing must not restart itself
       after a brownout. Persist enough state to *tell the operator what was
@@ -1932,7 +2012,7 @@ the above.
       Still uncovered: a `force_all_relays_off()` that fails during `halt()`
       is retried by nothing but guard 9's stale-tick path, since the sweep
       only runs while RUNNING.
-- [ ] **Move the feedforward subtraction into `pid_seed_bumpless()`.**
+- [x] **Move the feedforward subtraction into `pid_seed_bumpless()`.**
       It solves `integral = (u_desired - P)/Ki`, which is only exact when the
       caller has already subtracted the feedforward term. Both call sites in
       `profile_executor.c` do that correctly (2026-08-12), but the correct
@@ -1940,12 +2020,51 @@ the above.
       it itself, so the next caller cannot get it wrong. `pid.h`'s doc
       comment also still says the executor "always passes 0.0f" for
       feedforward, which stopped being true the same day.
-- [ ] **`esp_wifi_set_config(AP) failed: ESP_ERR_WIFI_MODE` at boot.**
+      **Done (2026-08-13)**: `pid_seed_bumpless()` gained a `ff_u` parameter
+      and now solves `integral = (u_desired - P - ff_u)/Ki` itself;
+      `profile_executor.c`'s `seed_bumpless_with_ff()` wrapper just computes
+      `u_ff` and passes it through instead of pre-subtracting. `pid.h`'s
+      stale "executor always passes 0.0f" comment rewritten. Only call site
+      updated (`profile_executor.c`); `test_pid.c` gained a second bumpless
+      case asserting the ff-nonzero seed still reproduces `u_desired`, in
+      addition to updating the existing case's now-5-arg call. Host-tests build and pass (216/216, up from 71 baseline — this repo's
+      host-test count has grown a lot since 6A.8 first landed). On-target:
+      built clean and reflashed over OpenOCD, board boots and answers
+      protocol/version over UART — no live behavior to observe beyond that
+      (the two call sites were already numerically equivalent; this only
+      moves where the subtraction happens).
+- [x] **`esp_wifi_set_config(AP) failed: ESP_ERR_WIFI_MODE` at boot.**
       Observed on every boot 2026-08-12, on two separate flashes. Not
       blocking — the station join succeeds and the fallback AP comes up when
       it is actually needed — but the AP config is being applied while the
       driver is in the wrong mode, so it is either a bring-up ordering bug or
       a dead call. Not diagnosed.
+      **Diagnosed and fixed (2026-08-13)**: `wifi_prov_start()` called
+      `apply_ap_config()` (which calls `esp_wifi_set_config(WIFI_IF_AP,
+      ...)`) once, unconditionally, *before* any of its three branches'
+      `esp_wifi_set_mode()` call — right after `esp_wifi_init()` the driver
+      mode is `WIFI_MODE_NULL`, and `esp_wifi_set_config()` fails with
+      `ESP_ERR_WIFI_MODE` whenever the current mode doesn't already include
+      the target interface. Explains "every boot": the call ran ahead of
+      mode selection regardless of which branch (AP-only/home/
+      unprovisioned) was taken. **Same bug found in two more places** on
+      inspection, not yet observed/logged but structurally identical:
+      `ap_fallback_timer_cb()` (mode is STA-only right after a station
+      join, per `on_ip_event()`, so bringing the fallback AP back up hit
+      the same failure) and `wifi_prov_set_mode()`'s switch-to-AP branch
+      (same STA-only-mode case, reachable from the network settings page).
+      Fixed all three by reordering: `esp_wifi_set_mode()` first, config
+      applied only on success. The two already-correct call sites
+      (`wifi_prov_set_ap_ssid()`/`wifi_prov_set_ap_password()`, which check
+      the *current* mode already includes AP before re-applying) were
+      untouched — they were never broken, since by the time an operator can
+      call them the driver is already up in a mode that includes AP.
+      Host-independent (ESP-IDF Wi-Fi driver call, no host test coverage
+      possible); build-verified clean, reflashed over OpenOCD, and the
+      **boot log confirms the fix**: `get_device_log()` over the UART log
+      bridge shows `wifi_prov: attempting station join to '...'` with no
+      `esp_wifi_set_config(AP) failed` / `ESP_ERR_WIFI_MODE` line anywhere
+      in the boot sequence, where it fired on every previous boot.
 - [x] **Why did a board with valid saved credentials report "no saved
       credentials"?** On 2026-08-12 the board booted claiming first-boot
       provisioning and fell back to its AP, yet the `wifi_nvs` migration read
@@ -1977,13 +2096,30 @@ the above.
       touches relays this run itself claimed). Note the rules engine cannot
       hold a relay at all today: `rules_http.{c,h}` stores and validates rule
       config, but no evaluator task exists.
-- [ ] **Re-check `max_ramp_c_per_hr` against a running profile.** It is a
+- [x] **Re-check `max_ramp_c_per_hr` against a running profile.** It is a
       run-start feasibility gate (section 5) and the reload path deliberately
       does not consume it, so an operator can now lower it mid-firing below
       what the running profile demands and nothing notices. Pre-existing, but
       config reload makes it reachable without stopping the run. Either
       re-run the feasibility check on reload and warn, or state in the UI
-      that this field only binds at start.
+      **Built (2026-08-13)**: `reload_zone_config()` (`profile_executor.c`)
+      compares the zone's live `zones_config_get_max_ramp()` ceiling against
+      the currently-running segment's `ramp_c_per_hr` on every mid-firing
+      config reload; a newly-infeasible ceiling logs
+      `OPERATOR ACTION MID-FIRING` at WARN once (latched via
+      `zone_runtime_t.max_ramp_warned` until it clears), matching this
+      function's existing pattern for every other guard-threshold edit
+      above it. Chose "warn, don't re-run/block" per the bullet's own
+      second option — the running ramp itself is unchanged, since actually
+      enforcing the new ceiling mid-ramp would mean either slowing an
+      in-progress heat (its own safety question, not asked for here) or
+      aborting the firing outright (which 6A.3's `continue_on_zone_trip`
+      bullet, just above, treats as a deliberate, separate policy decision,
+      not something a config edit should trigger as a side effect). No
+      version bump needed (no new persisted field — reads existing config).
+      Build-verified; not yet exercised live (needs a running firing to
+      edit `max_ramp_c_per_hr` under, which needs the daughterboard or
+      `KILNCTL_SIM_PLANT`, neither exercised this pass).
 
 ### 6A.8 Verification — how any of this gets trusted
 
@@ -2289,14 +2425,24 @@ disconnected element) cannot be provoked safely on a real one anyway.
 
 ## 7. Documentation to write once the above is designed/built
 
-- [ ] `docs/WEB_UI.md` — page inventory, API/WebSocket message shapes,
+- [x] `docs/WEB_UI.md` — page inventory, API/WebSocket message shapes,
       how it relates to the existing UART protocol (same device data,
       different transport).
-- [ ] `docs/WIFI_PROVISIONING.md` — AP fallback vs. local-only mode, the
+      **Reconciled 2026-08-13**: already written and current (721 lines,
+      last dated entry 2026-08-12) — this checklist item was simply never
+      checked off when the doc landed. Covers the page inventory and API
+      shapes as asked; still polling, not WebSocket, matching section 2's
+      own unchecked "driven live" bullet (the "different transport" framing
+      in this bullet was aspirational, not yet true either).
+- [x] `docs/WIFI_PROVISIONING.md` — AP fallback vs. local-only mode, the
       Kconfig default password and why a default exists, resilience
       guarantees.
-- [ ] `docs/PROFILES.md` — profile format, the execution engine, relay
+      **Reconciled 2026-08-13**: already written and current (508 lines,
+      last dated entry 2026-08-12, covers the mode-toggle redesign and the
+      saved-networks/8.4 work). Same as above — landed, never checked off.
+- [x] `docs/PROFILES.md` — profile format, the execution engine, relay
       rule-engine syntax.
+      **Reconciled 2026-08-13**: already written (436 lines). Same pattern.
 - [x] `docs/PID_CONTROL.md` — **Done (2026-08-11)**: module layout, control
       modes, the loop's form, the guard table, the autotune flow, and the
       host-test summary, each cross-referenced to TODO.md 6A's dated
@@ -2308,13 +2454,44 @@ disconnected element) cannot be provoked safely on a real one anyway.
       transcribed into that specific table format).
       **Both of those are now stale** (2026-08-12): 6A.5(a)/(b)/(d) shipped
       2026-08-11, and the guard test matrix now exists as
-      `docs/GUARD_TEST_MATRIX.md`. `PID_CONTROL.md` itself has not been
-      re-read or updated to match — it still says both are owed, so it is
-      the doc to fix next in this section.
-- [ ] Update `docs/SAFETY_MODEL.md`'s summary table with the new relay
+      `docs/GUARD_TEST_MATRIX.md`.
+      **Reconciled 2026-08-13**: `PID_CONTROL.md` was in fact updated
+      (references concurrent multi-zone execution, ramp-lock, and
+      `GUARD_TEST_MATRIX.md` throughout, most recently dated 2026-08-12) —
+      this note about it being the doc "to fix next" was itself the stale
+      part. Not re-verified against this session's `pid_seed_bumpless()`
+      ff-signature change or `continue_on_zone_trip` (see 6A.2/6A.3 above);
+      those are small enough additions that the doc's existing description
+      of both mechanisms is still accurate in substance, just not updated
+      with today's date.
+- [x] Update `docs/SAFETY_MODEL.md`'s summary table with the new relay
       caller (profile executor / web UI) and confirm every row still
       holds once it's a real third caller instead of a hypothetical.
-- [ ] Update `docs/PROJECT_STATUS.md` once any of this actually lands.
+      **Done (2026-08-13)**: the "only place in the firmware that directly
+      gates a relay command" claim near the top was stale (the check moved
+      into `relay_authority.c` and gained two more real callers,
+      `dashboard_http.c`'s `POST /api/relay` and `profile_executor.c`,
+      alongside `uart_bridge.c`) — corrected in place with a dated update
+      block rather than rewritten, so the original text's history stays
+      legible. Also documented `relay_authority_zone_blocked()` (the
+      per-zone gate layered on top of the global one) and this session's
+      `continue_on_zone_trip` run-level abort policy, which deliberately
+      does *not* touch either relay-authority gate. Every row in the
+      capability table itself was already accurate (spot-checked against
+      current code, not rewritten).
+- [x] Update `docs/PROJECT_STATUS.md` once any of this actually lands.
+      **Done (2026-08-13)**: appended a dated entry (see the doc's own
+      newest section) summarizing this session's changes: the
+      `esp_wifi_set_config(AP)`/`ESP_ERR_WIFI_MODE` boot-ordering fix,
+      `pid_seed_bumpless()` gaining the feedforward subtraction, the
+      cooling-limited PID diagnostic, the mid-firing `max_ramp_c_per_hr`
+      re-check, the `zones_http.c` NVS version-vs-size ordering bug found
+      and fixed, and the `continue_on_zone_trip` abort-on-trip default
+      policy — plus the same status this whole pass carried throughout:
+      build-verified and reflashed over OpenOCD, board confirmed booting
+      and answering the UART protocol, but none of the new behavior
+      exercised against real hardware (no daughterboard/relay expander
+      attached this session).
 
 ## 8. Storage partitioning, boot-time compatibility, and setup UX
 
@@ -2444,6 +2621,32 @@ unconfigured, so adding one field wipes the operator's setup behind a single
       v1 is the first version everywhere — the hook point is what matters);
       a newer-than-firmware version refuses to load and leaves flash
       untouched rather than wiping, so a rollback doesn't eat newer data.
+      **Correction, found and fixed in `zones_http.c` (2026-08-13, later the
+      same day this was first checked off)**: "checks version before
+      size-mismatch-wipe" turned out not to be true — every module's loader
+      actually checked `len != sizeof(*out_cfg)` **before** looking at
+      `version`, so the one case this whole bullet exists for (a struct
+      that *grows* — the only way a real firmware update adds a field) hit
+      the size check first and got wiped every time, never reaching the
+      migration path at all. `zones_http.c`'s `nvs_load_from()` fixed:
+      version now decides first, using only "too short to even contain a
+      version byte" as automatic corruption; the size check only applies
+      once the blob claims to already be the current version (where a
+      mismatch really can only mean corruption). Exercised for real by this
+      same pass's own `continue_on_zone_trip` field addition (v1→v2) — the
+      fix isn't theoretical, it is what makes that addition (and 6A.3's
+      abort-on-trip default policy bullet below) safe to ship at all.
+      **The other three modules with this exact pattern
+      (`rules_http.c`, `relay_cycles.c`, `profiles_http.c`) were not
+      fixed** — same bug, confirmed present by inspection, but none of them
+      needed a field added in this pass, so fixing them was left for
+      whichever future change actually grows one of those structs (fix it
+      then, the same way, rather than speculatively touching three files
+      nothing in this pass exercises). `run_state.c` also has the pattern
+      but was deliberately excluded from 8.2's scope originally (it already
+      had its own version field before this section existed) and is lower
+      stakes — losing the "what was running" breadcrumb to a wipe is
+      recoverable, losing zone/rule/profile config is not.
 - [x] **One boot-time report.** A single place that walks every section
       (`wifi_nvs`, `kiln_nvs`, `profiles_nvs`, and whatever else exists) and
       records per section: present / version / matches this firmware /

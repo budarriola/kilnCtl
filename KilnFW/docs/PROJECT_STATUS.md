@@ -874,3 +874,52 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
    main board's relays, and if so, add the isolated-link path for it.
 6. Confirm the J2 pin identity against the physical connector and drop the
    now-unneeded `KILNCTL_DISPLAY_SWAP_DC_RESET` ambiguity from the docs.
+
+## 2026-08-13 update
+
+This doc had drifted well behind TODO.md's own dated notes (which cover
+2026-08-13's NVS partitioning/versioning work, the readiness wizard, and the
+saved-networks list) — a full re-sync is its own task, not attempted here.
+This entry only covers what changed in the same pass that did the sync,
+found and fixed while reconciling TODO.md's checklist against the actual
+code:
+
+- **`esp_wifi_set_config(AP) failed: ESP_ERR_WIFI_MODE`, observed on every
+  boot since 2026-08-12, root-caused and fixed.** `wifi_prov_start()` (and
+  two more call sites with the identical pattern, `ap_fallback_timer_cb()`
+  and `wifi_prov_set_mode()`'s AP branch) called `apply_ap_config()` —
+  `esp_wifi_set_config(WIFI_IF_AP, ...)` — before `esp_wifi_set_mode()` had
+  ever put the driver into a mode that includes the AP interface. Fixed by
+  reordering all three: mode first, config only on success. Boot log
+  confirmed clean (no `ESP_ERR_WIFI_MODE` line) after the fix.
+- **A real NVS persistence bug found and fixed in `zones_http.c`.** Every
+  module using the 8.2 version/size-check pattern checked blob size *before*
+  version, which made the version-based migration path dead code for the
+  one case it exists for (a struct that grows). Fixed in `zones_http.c`
+  (version decides first now); the same latent bug still exists unfixed in
+  `rules_http.c`/`relay_cycles.c`/`profiles_http.c` — flagged, not touched,
+  since nothing in this pass grew any of those three structs.
+- **`pid_seed_bumpless()` now takes `ff_u` and subtracts it internally**
+  (previously the caller pre-subtracted it, per TODO.md 6A.2's own
+  "move it into pid.c" item). Host tests updated and passing (216/216).
+- **Two new PID/executor diagnostics**: `cooling_limited` (per zone, in
+  `/api/control` — a PID-mode zone stuck at duty 0 while still hot, TODO.md
+  6A.2's "report cooling-limited" bullet) and a WARN log when
+  `max_ramp_c_per_hr` is lowered mid-firing below what the running segment
+  needs (TODO.md 6A.7).
+- **New run-level policy, `continue_on_zone_trip`** (`zones_cfg_t`, default
+  `false`): a per-zone thermal guard trip now aborts the whole multi-zone
+  firing by default, matching TODO.md 6A.3's explicit request; the previous
+  behavior (other zones kept running) is preserved only as an explicit
+  opt-in. `ZONES_CFG_VERSION` bumped 1→2, migration verified by inspection
+  (a v1 blob reads the new field as its zero/abort default with no explicit
+  conversion step).
+- **Status**: all of the above build-verified (`ninja -j 24`, clean) and
+  flashed to the bench unit over OpenOCD/JTAG; the board boots and answers
+  the UART protocol correctly after each flash. None of it has been
+  exercised against real behavior — no thermocouple daughterboard or relay
+  expander is attached to this bench unit, so nothing here has actually
+  tripped a guard, run a firing, or been watched cooling-limited on real
+  hardware. `docs/SAFETY_MODEL.md` was updated in the same pass to match
+  (relay-authority's real caller count, `relay_authority_zone_blocked()`,
+  and this policy).

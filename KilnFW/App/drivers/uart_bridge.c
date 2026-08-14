@@ -17,6 +17,7 @@
 #include "settings.h"
 #include "uart_task_ids.h"
 #include "wifi_prov.h"
+#include "zones_http.h"
 
 static const char *TAG = "uart_bridge";
 
@@ -242,6 +243,10 @@ static size_t thermo_build_read_payload(MAX31856BusClass *bus, uint8_t chan_mask
         MAX31856Reading reading;
         if (dev) {
             (void)MAX31856_read(dev, &reading);
+            /* Zone i <-> channel i (zones_http.h). Firmware-applied
+             * calibration now reaches every consumer, per TODO.md section
+             * 3 -- the UART bridge was the one documented holdout. */
+            reading.tc_temperature_c = zones_config_apply_cal(ch, reading.tc_temperature_c);
         } else {
             /* Never came up. Reported exactly like a failed transfer rather
              * than omitted, for the same reason. */

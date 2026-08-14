@@ -759,10 +759,14 @@ static void ap_fallback_timer_cb(void *arg)
         return; /* reconnected before the timer fired */
     }
     ESP_LOGW(TAG, "station join did not land within the timeout -- bringing the fallback AP up");
-    apply_ap_config();
+    /* Mode first, then config -- the current mode here can be STA-only (see
+     * on_ip_event()), which does not include the AP interface; the same
+     * ESP_ERR_WIFI_MODE ordering bug fixed in wifi_prov_start(). */
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_mode(APSTA) failed: %s", esp_err_to_name(err));
+    } else {
+        apply_ap_config();
     }
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
 }
@@ -1032,10 +1036,19 @@ esp_err_t wifi_prov_start(void)
         }
     }
 
-    apply_ap_config();
+    /* esp_wifi_set_config() fails with ESP_ERR_WIFI_MODE if the driver's
+     * current mode doesn't already include the target interface -- right
+     * after esp_wifi_init() the mode is WIFI_MODE_NULL, so calling
+     * apply_ap_config()/apply_sta_config() before esp_wifi_set_mode() below
+     * (as this used to do, unconditionally, ahead of all three branches)
+     * failed on every single boot. Fixed 2026-08-13 by setting the mode
+     * first in each branch and applying config only once it succeeds. */
     if (s_wifi.mode == WIFI_PROV_MODE_AP) {
         s_wifi.state = WIFI_PROV_STATE_AP_MODE;
         err = esp_wifi_set_mode(WIFI_MODE_AP);
+        if (err == ESP_OK) {
+            apply_ap_config();
+        }
         ESP_LOGI(TAG, "AP mode: AP '%s' only, station never attempted", wifi_prov_get_ap_ssid());
     } else if (s_wifi.saved_nets.count > 0) {
         /* Initial boot config, before the Wi-Fi driver/task exists at all --
@@ -1049,15 +1062,21 @@ esp_err_t wifi_prov_start(void)
         s_wifi.active_ssid[sizeof(s_wifi.active_ssid) - 1] = '\0';
         strncpy(s_wifi.active_password, s_wifi.saved_nets.nets[0].password, sizeof(s_wifi.active_password) - 1);
         s_wifi.active_password[sizeof(s_wifi.active_password) - 1] = '\0';
-        apply_sta_config();
         s_wifi.state = WIFI_PROV_STATE_CONNECTING;
         err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err == ESP_OK) {
+            apply_ap_config();
+            apply_sta_config();
+        }
         start_ap_fallback_timer();
         ESP_LOGI(TAG, "attempting station join to '%s', AP '%s' available meanwhile", s_wifi.active_ssid,
                  wifi_prov_get_ap_ssid());
     } else {
         s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
         err = esp_wifi_set_mode(WIFI_MODE_AP);
+        if (err == ESP_OK) {
+            apply_ap_config();
+        }
         ESP_LOGI(TAG, "no saved credentials: AP '%s' for first-boot provisioning", wifi_prov_get_ap_ssid());
     }
     if (err != ESP_OK) {
@@ -1279,10 +1298,15 @@ esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
     if (mode == WIFI_PROV_MODE_AP) {
         cancel_ap_fallback_timer();
         s_wifi.state = WIFI_PROV_STATE_AP_MODE;
-        apply_ap_config();
+        /* Mode first, then config -- switching here from home mode while
+         * connected leaves the driver in WIFI_MODE_STA, which doesn't
+         * include the AP interface yet; same ordering bug as
+         * wifi_prov_start()/ap_fallback_timer_cb(). */
         esp_err_t mode_err = esp_wifi_set_mode(WIFI_MODE_AP);
         if (mode_err != ESP_OK) {
             ESP_LOGE(TAG, "esp_wifi_set_mode(AP) failed: %s", esp_err_to_name(mode_err));
+        } else {
+            apply_ap_config();
         }
         ESP_LOGI(TAG, "AP mode enabled: station never attempted");
     } else if (s_wifi.saved_nets.count > 0) {

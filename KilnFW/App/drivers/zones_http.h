@@ -62,6 +62,13 @@ uint8_t zones_config_get_thermo_count(void);
  * a run, regardless of which zones it spans. */
 uint8_t zones_config_get_max_simultaneous_relays(void);
 
+/* TODO.md 6A.3's "default policy on a single-zone trip: abort the whole
+ * firing" -- false (the default, matching a migrated pre-2026-08-13 blob
+ * that predates this field) means abort; true is the explicit opt-in to
+ * continue with the other healthy zones. Global, not per-zone -- see
+ * zones_cfg_t::continue_on_zone_trip's comment. */
+bool zones_config_get_continue_on_zone_trip(void);
+
 /* TODO.md 8.2 "Tie it to the guards, not only the UI". true only after a
  * real, trustworthy zones config is live -- a successful load (current
  * version, or an older version successfully migrated) or a fresh validated
@@ -209,16 +216,16 @@ uint32_t zones_config_generation(void);
  * "unconfigured zone / invalid reading -> pass through" behavior explicit
  * rather than relying on float semantics).
  *
- * SCOPE NOTE: only dashboard_http.c's display and profile_executor.c's
- * control math (TODO.md 6A.2/6A.3) call this today. The UART bridge
- * (uart_bridge.c, consumed by pc_tools/MCP) still reports MAX31856_read()'s
- * raw value uncorrected -- doing this at the single lowest-common point
- * (a calibration-provider hook on MAX31856BusClass, mirroring the existing
- * drdy_provider pattern) is the right long-term fix and is exactly what the
- * project's own "one owner, one point of truth" discipline calls for, but
- * touching that already-stable, heavily-documented low-level driver was
- * judged out of scope for this change. Tracked in TODO.md as a known,
- * explicit inconsistency, not a silently-dropped requirement. */
+ * SCOPE NOTE: dashboard_http.c's display, profile_executor.c/
+ * autotune_engine.c's control math (TODO.md 6A.2/6A.3), readiness_http.c's
+ * wizard check, and now uart_bridge.c's THERMO READ payload (2026-08-13,
+ * closing the one documented holdout) all call this. A single
+ * calibration-provider hook on MAX31856BusClass itself, mirroring the
+ * existing drdy_provider pattern, remains the theoretically cleaner
+ * lowest-common-point fix, but with every actual consumer now calling
+ * through this function there is no live inconsistency left to motivate it
+ * -- revisit only if a new consumer reads MAX31856_read() directly instead
+ * of going through here. */
 float zones_config_apply_cal(uint8_t zone_index, float raw_c);
 
 #ifdef __cplusplus

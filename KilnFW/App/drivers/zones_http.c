@@ -29,7 +29,7 @@ static const char *TAG = "zones_http";
 #define KILN_NVS_PARTITION "kiln_nvs"
 
 /* Bump whenever zones_cfg_t's on-flash layout changes; see nvs_load_from(). */
-#define ZONES_CFG_VERSION 1
+#define ZONES_CFG_VERSION 2
 
 #define ZONE_NAME_MAX_LEN 15
 
@@ -127,6 +127,15 @@ typedef struct {
      * applies to the whole board, not one zone. Enforced by
      * profile_executor.c, not here; this struct only stores it. */
     uint8_t max_simultaneous_relays;
+    /* TODO.md 6A.3's "default policy on a single-zone trip: abort the whole
+     * firing" -- 0 (the zero-initialized default, matching a migrated v1
+     * blob that predates this field) is that default; 1 is the explicitly
+     * opted-in "continue with the other healthy zones" alternative the
+     * bullet says needs justifying, not the abort. Global, same reasoning as
+     * max_simultaneous_relays: a multi-zone firing's abort policy is a
+     * whole-board decision, not a per-zone one. Enforced by
+     * profile_executor.c's escalate_guard_trip(). */
+    uint8_t continue_on_zone_trip;
     zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
 } zones_cfg_t;
 
@@ -254,25 +263,46 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     if (out_found) {
         *out_found = true;
     }
-    if (len != sizeof(*out_cfg)) {
-        /* A short/mismatched blob (e.g. a stale layout from before a struct
-         * change) is not trustworthy -- fall back to "nothing configured"
-         * rather than serve a config that decoded into garbage floats. */
-        ESP_LOGW(TAG, "zones_cfg blob from '%s' is the wrong size -- treating as unreadable", partition);
+    /* BUG FIXED 2026-08-13: this used to reject on `len != sizeof(*out_cfg)`
+     * BEFORE ever looking at `version`, which made the version-based
+     * migration path below dead code for the one case it exists for --
+     * adding a field grows sizeof(zones_cfg_t), so a pre-existing (smaller,
+     * older-version) blob would always fail that check and get wiped
+     * instead of migrated, even though nvs_get_blob() already copied
+     * everything the old blob had (out_cfg was zeroed first, so any new
+     * trailing fields correctly read as their zero default). Only a blob
+     * too short to even contain the `version` byte is unreadable; anything
+     * else is the version check's job now, matching what TODO.md 8.2's
+     * "three outcomes, not two" actually asked for. */
+    if (len < sizeof(out_cfg->version)) {
+        ESP_LOGW(TAG, "zones_cfg blob from '%s' is too short to contain a version -- treating as unreadable",
+                 partition);
         memset(out_cfg, 0, sizeof(*out_cfg));
         return ESP_OK;
     }
 
     if (out_cfg->version == ZONES_CFG_VERSION) {
+        if (len != sizeof(*out_cfg)) {
+            /* Current version but wrong size can only mean genuine
+             * corruption -- a real current-version blob is always written
+             * at exactly sizeof(*out_cfg). */
+            ESP_LOGW(TAG, "zones_cfg blob from '%s' claims current version but is the wrong size -- "
+                          "treating as unreadable", partition);
+            memset(out_cfg, 0, sizeof(*out_cfg));
+            return ESP_OK;
+        }
         if (out_valid) {
             *out_valid = true; /* current version -- happy path */
         }
         return ESP_OK;
     }
     if (out_cfg->version < ZONES_CFG_VERSION) {
-        /* Known older layout -- run it through the migration chain. v1 is the
-         * first version that has ever existed, so this is currently just the
-         * hook point: nothing to actually convert yet. */
+        /* Known older layout -- run it through the migration chain. A v1
+         * blob is shorter than the current struct (it predates
+         * continue_on_zone_trip); nvs_get_blob() already copied everything
+         * it had into a zeroed out_cfg, so the new field reads as 0 --
+         * exactly the "abort the whole firing" default TODO.md 6A.3 asks
+         * for, with no explicit conversion needed. */
         ESP_LOGI(TAG, "zones_cfg from '%s' is version %u, migrating to %u", partition,
                  (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
         migrate_zones_cfg_v1_to_current(out_cfg);
@@ -299,11 +329,11 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
     return ESP_OK;
 }
 
-/* Hook point for migrating an older on-flash zones_cfg_t layout forward. v1
- * is the first version that has ever shipped, so there is nothing to convert
- * yet -- this is a no-op passthrough that exists purely so the next version
- * bump has somewhere to add real field conversion instead of every stored
- * config's next boot looking like corruption. */
+/* Migrates an older on-flash zones_cfg_t layout forward. v1 -> v2
+ * (2026-08-13) added continue_on_zone_trip as a new trailing field; a v1
+ * blob is shorter, but nvs_get_blob() already copied it into a zeroed
+ * out_cfg before this runs (see nvs_load_from()), so the new field already
+ * reads as 0 -- no explicit conversion needed, just the version bump. */
 static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
 {
     cfg->version = ZONES_CFG_VERSION;
@@ -399,6 +429,11 @@ uint8_t zones_config_get_thermo_count(void)
 uint8_t zones_config_get_max_simultaneous_relays(void)
 {
     return s_zones.cfg.max_simultaneous_relays;
+}
+
+bool zones_config_get_continue_on_zone_trip(void)
+{
+    return s_zones.cfg.continue_on_zone_trip != 0;
 }
 
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
@@ -593,8 +628,10 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
         o += (size_t)n;                                                                            \
     } while (0)
 
-    APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,\"zones\":[",
-           s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays);
+    APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
+           "\"continue_on_zone_trip\":%s,\"zones\":[",
+           s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
+           s_zones.cfg.continue_on_zone_trip ? "true" : "false");
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         const zone_cfg_t *z = &s_zones.cfg.zones[i];
         char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
@@ -905,6 +942,24 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
                 return ESP_OK;
             }
             tmp.max_simultaneous_relays = (uint8_t)v;
+        }
+    }
+    /* Optional, same "missing means keep the safe default" convention as
+     * max_simultaneous_relays above -- tmp is zeroed, so a caller that
+     * never sends this field gets continue_on_zone_trip=0 (abort the whole
+     * firing), TODO.md 6A.3's stated default. Only "0" or "1" accepted. */
+    {
+        char val[4];
+        int len = http_form_find_field(body, "continue_on_zone_trip", val, sizeof(val));
+        if (len > 0) {
+            if (strcmp(val, "1") == 0) {
+                tmp.continue_on_zone_trip = 1;
+            } else if (strcmp(val, "0") == 0) {
+                tmp.continue_on_zone_trip = 0;
+            } else {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "continue_on_zone_trip must be 0 or 1");
+                return ESP_OK;
+            }
         }
     }
 

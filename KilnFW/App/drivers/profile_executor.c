@@ -161,6 +161,14 @@ typedef struct {
     float duty;
     pid_terms_t last_pid_terms;
 
+    /* TODO.md 6A.2's cooling-limited diagnostic: seconds duty has
+     * continuously read 0 while still PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C
+     * above target, in PID mode. Reset to 0 the instant either condition
+     * breaks -- this is a debounce against a normal brief overshoot, not an
+     * accumulating total. */
+    float cooling_limited_hold_s;
+    bool  cooling_limited;
+
     /* TODO.md 6A.5 load-staggering cap: ms of on-time this zone wanted but
      * was denied because zones_config_get_max_simultaneous_relays() was
      * exceeded this tick. Paid back as a duty boost on this zone's next
@@ -184,6 +192,12 @@ typedef struct {
     bool     per_zone_blocked; /* true if this run set relay_authority_set_zone_blocked() for it */
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
+
+    /* TODO.md 6A.7's max_ramp_c_per_hr re-check (see reload_zone_config()):
+     * latches once this zone's current segment has newly become infeasible
+     * against a lowered ceiling, so the WARN logs once per occurrence
+     * rather than every reload tick while it stays true. */
+    bool     max_ramp_warned;
 } zone_runtime_t;
 
 typedef struct {
@@ -371,13 +385,12 @@ static float zone_feedforward(const zone_runtime_t *z, float setpoint_c, float r
     return u_ff;
 }
 
-/* Seeds the PID integral so the very next tick reproduces u_desired -- with
- * the feedforward term accounted for. pid_seed_bumpless() solves
- * integral = (u_desired - P)/Ki, which was exact while ff was always 0, but
- * the tick it seeds now computes P + I + D + ff: seeding against u_desired
- * directly would come back one whole feedforward term HIGH, and on a hot kiln
- * ff is the largest term in the sum. Handing it (u_desired - u_ff) instead
- * keeps "reproduce the duty this zone was already commanding" true.
+/* Seeds the PID integral so the very next tick (which computes
+ * P + I + D + ff) reproduces u_desired -- pid_seed_bumpless() itself now
+ * subtracts ff_u before solving for the integral (TODO.md 6A.2's "move the
+ * feedforward subtraction into pid_seed_bumpless()"), so this wrapper only
+ * has to compute the feedforward term the next tick will use and hand it
+ * over alongside u_desired.
  *
  * When u_ff alone already exceeds u_desired the shortfall cannot be expressed
  * -- the integral floor is 0, since a negative one violates the anti-windup
@@ -388,7 +401,7 @@ static float zone_feedforward(const zone_runtime_t *z, float setpoint_c, float r
 static void seed_bumpless_with_ff(zone_runtime_t *z, float u_desired)
 {
     float u_ff = zone_feedforward(z, s_exec.target_c, s_exec.target_rate_c_per_s);
-    pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired - u_ff);
+    pid_seed_bumpless(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, u_desired, u_ff);
 }
 
 /* Turns zone zi's relay(s) on/off as one group -- see profile_executor.h.
@@ -465,12 +478,14 @@ static void force_all_relays_off(void)
  * WHOLE run, not just the tripping zone. Guards whose failure mode is
  * specific to one zone's physics only block that zone, via
  * relay_authority_zone_blocked()'s per-zone mask -- the run continues for
- * any other still-healthy active zone (TODO.md 6A.5's multi-zone execution
- * is what makes that distinction meaningful; with only one zone ever
- * running before this pass, "per-zone" and "whole run" were the same
- * thing). Returns true if this trip faulted the whole run (global trip, or
- * the last active zone just faulted), false if the run continues. Must be
- * called with s_exec.lock held. */
+ * any other still-healthy active zone UNLESS
+ * zones_config_get_continue_on_zone_trip() is false (the default,
+ * TODO.md 6A.3's "abort the whole firing" policy) -- in that case a
+ * per-zone trip also faults every other active zone, just without
+ * asserting the board-wide safety-link fault the `global` branch does.
+ * Returns true if this trip faulted the whole run (global trip, abort
+ * policy, or the last active zone just faulted anyway), false if the run
+ * continues. Must be called with s_exec.lock held. */
 static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *detail)
 {
     bool global = (reason == THERMAL_GUARD_TRIP_RUNAWAY || reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
@@ -511,6 +526,33 @@ static bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const c
     s_exec.zones[zi].fault_guard = reason;
     force_zone_relay_off(zi);
     ESP_LOGE(TAG, "zone %u thermal guard tripped (per-zone): %s", zi, detail);
+
+    /* TODO.md 6A.3's "default policy on a single-zone trip: abort the whole
+     * firing" -- the remaining zones would keep dumping heat into a chamber
+     * whose temperature is now partly unmeasured, and the ware is already
+     * ruined; "continue" is the option that needs justifying, so it is the
+     * one that requires an explicit opt-in
+     * (zones_config_get_continue_on_zone_trip()). This does NOT assert the
+     * board-wide SAFETY_FAULT_SRC_* bit the `global` branch above does --
+     * the trip's cause is this zone's physics specifically, not a hardware
+     * condition threatening every zone, so only the executor's run is
+     * faulted, not the safety link. */
+    if (!zones_config_get_continue_on_zone_trip()) {
+        for (uint8_t zi2 = 0; zi2 < MAX31856_CHANNEL_COUNT; zi2++) {
+            if (!s_exec.zones[zi2].active || s_exec.zones[zi2].faulted) continue;
+            s_exec.zones[zi2].faulted = true;
+            strncpy(s_exec.zones[zi2].fault_reason, detail, sizeof(s_exec.zones[zi2].fault_reason) - 1);
+            s_exec.zones[zi2].fault_reason[sizeof(s_exec.zones[zi2].fault_reason) - 1] = '\0';
+            s_exec.zones[zi2].fault_guard = reason;
+            force_zone_relay_off(zi2);
+        }
+        s_exec.state = PROFILE_EXEC_FAULTED;
+        snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
+                "zone %u thermal guard tripped, whole firing aborted per policy: %s", zi, detail);
+        s_exec.fault_guard = reason;
+        ESP_LOGE(TAG, "zone %u per-zone trip abandoned the whole firing (continue_on_zone_trip is off)", zi);
+        return true;
+    }
 
     bool all_faulted = true;
     for (uint8_t zi2 = 0; zi2 < MAX31856_CHANNEL_COUNT; zi2++) {
@@ -924,6 +966,35 @@ static bool reload_zone_config(uint8_t zi)
         changed = true;
     }
 
+    /* TODO.md 6A.7's "re-check max_ramp_c_per_hr against a running profile":
+     * this ceiling is a run-*start* feasibility gate (profiles_http.c), so
+     * an operator lowering it mid-firing below what the running segment
+     * demands previously went unnoticed until the ware finished. This does
+     * not abort or throttle anything -- the ramp itself is unaffected, same
+     * as every other guard-threshold edit above -- it only makes the gap
+     * loud in the log, once per zone per time it newly becomes infeasible
+     * (not every tick), mirroring this function's existing pattern for
+     * guard thresholds. z->max_ramp_warned resets the instant the segment
+     * changes or the ceiling is raised back above it, so a real re-trip
+     * after that logs again instead of staying silently latched. */
+    {
+        float ceiling = 0.0f;
+        bool have_ceiling = zones_config_get_max_ramp(zi, &ceiling) && ceiling > 0.0f;
+        const profile_segment_t *seg =
+            (s_exec.segment_index < s_exec.profile.segment_count)
+                ? &s_exec.profile.segments[s_exec.segment_index]
+                : NULL;
+        bool now_infeasible = have_ceiling && seg && seg->ramp_c_per_hr > ceiling;
+        if (now_infeasible && !z->max_ramp_warned) {
+            ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u max_ramp_c_per_hr lowered to %.1f, below the "
+                          "current segment's %.1f C/hr -- the running ramp is UNCHANGED, this only flags that "
+                          "it now exceeds the configured ceiling", zi, (double)ceiling, (double)seg->ramp_c_per_hr);
+            z->max_ramp_warned = true;
+        } else if (!now_infeasible) {
+            z->max_ramp_warned = false;
+        }
+    }
+
     return changed;
 }
 
@@ -1140,6 +1211,19 @@ static void executor_task_entry(void *arg)
                     duty = pid_update_terms(&z->pid_state, &z->pid_cfg, s_exec.target_c, z->actual_c, dt_s,
                                             u_ff, &z->last_pid_terms);
                 }
+                /* TODO.md 6A.2's cooling-limited diagnostic. Checked against
+                 * the RAW duty pid_update_terms() just returned, before the
+                 * load-cap boost below can add anything to it -- a boosted
+                 * duty is not "the loop asked for heat," it is "another
+                 * zone's deferred credit landed here," and boost only ever
+                 * makes duty larger, never masks a genuine 0. */
+                if (sensor_ok[zi] && duty <= 0.0f &&
+                    z->actual_c > s_exec.target_c + PROFILE_EXECUTOR_COOLING_LIMITED_MARGIN_C) {
+                    z->cooling_limited_hold_s += dt_s;
+                } else {
+                    z->cooling_limited_hold_s = 0.0f;
+                }
+                z->cooling_limited = z->cooling_limited_hold_s >= PROFILE_EXECUTOR_COOLING_LIMITED_HOLD_S;
                 /* Pay back any load-cap-deferred on-time as a duty boost --
                  * only actually consumed below if this tick turns out to
                  * open a fresh window (heater_output_duty() only reads the
@@ -1188,12 +1272,19 @@ static void executor_task_entry(void *arg)
                 }
                 want_relay_on[zi] = heater_output_bangbang(&z->heater_state, &z->heater_cfg, want_raw, dt_ms);
                 duty = want_relay_on[zi] ? 1.0f : 0.0f;
+                /* Cooling-limited is a PID-mode-only diagnostic (see its
+                 * field comment) -- clear it rather than let a stale true
+                 * from a PID period before a mode switch linger. */
+                z->cooling_limited_hold_s = 0.0f;
+                z->cooling_limited = false;
                 break;
             }
             case ZONE_CONTROL_MODE_OFF:
             default:
                 want_relay_on[zi] = false;
                 duty = 0.0f;
+                z->cooling_limited_hold_s = 0.0f;
+                z->cooling_limited = false;
                 break;
             }
             z->duty = duty;
@@ -1883,6 +1974,7 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->pid_i = z->last_pid_terms.i;
             zo->pid_d = z->last_pid_terms.d;
             zo->pid_ff = z->last_pid_terms.ff;
+            zo->cooling_limited = z->cooling_limited;
         }
 
         if (s_exec.state == PROFILE_EXEC_FAULTED) {

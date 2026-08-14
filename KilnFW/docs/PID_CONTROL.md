@@ -247,18 +247,18 @@ Details that matter more than the formula:
   P/I/D/FF split is visible while tuning.
 
 **It broke bumpless transfer, and that is worth knowing if you touch this
-code.** `pid_seed_bumpless()` solves `integral = (u_desired - P)/Ki`, exact
-only while feedforward was always 0. With it live, seeding against
-`u_desired` comes back one whole feedforward term high — and on a hot kiln
-that is the largest term in the sum. Both call sites now seed against
-`u_desired - u_ff`; a model appearing mid-run re-seeds too, since ff jumping
-from 0 to most of the duty on top of an integral built to supply that same
-heat would peg the element until the integrator unwound. One consequence:
-resume can no longer reproduce `u = 0` when ff > 0 — a resumed zone comes
-back at exactly its feedforward duty, the model's estimate of the hold cost
-with nothing accumulated on top. The subtraction belongs inside `pid.c`;
-that move is a TODO item, and `pid.h`'s comment still claims the executor
-always passes 0.0f.
+code.** `pid_seed_bumpless()` solves `integral = (u_desired - P - ff_u)/Ki`
+— seeding against `u_desired` alone would come back one whole feedforward
+term high, and on a hot kiln that is the largest term in the sum. A model
+appearing mid-run re-seeds too, since ff jumping from 0 to most of the duty
+on top of an integral built to supply that same heat would peg the element
+until the integrator unwound. One consequence: resume can no longer
+reproduce `u = 0` when ff > 0 — a resumed zone comes back at exactly its
+feedforward duty, the model's estimate of the hold cost with nothing
+accumulated on top. **Update (2026-08-13): the subtraction now lives inside
+`pid.c`** — `pid_seed_bumpless()` takes `ff_u` directly and does it itself,
+so `profile_executor.c`'s wrapper just passes the term through instead of
+pre-subtracting it.
 
 **Untested against a real kiln.** A wrong `K_dc` from a bad fit now reaches
 the duty directly, bounded only by the clamp and the guards.

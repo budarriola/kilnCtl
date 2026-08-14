@@ -9,12 +9,12 @@ void pid_reset(pid_state_t *state)
 }
 
 void pid_seed_bumpless(pid_state_t *state, const pid_cfg_t *cfg, float setpoint, float measurement,
-                       float u_desired)
+                       float u_desired, float ff_u)
 {
     state->prev_measurement = measurement;
     state->d_filtered = 0.0f;
     float p_term = cfg->kp * (cfg->b * setpoint - measurement);
-    float integral_needed = (cfg->ki > 0.0f) ? (u_desired - p_term) / cfg->ki : 0.0f;
+    float integral_needed = (cfg->ki > 0.0f) ? (u_desired - p_term - ff_u) / cfg->ki : 0.0f;
     if (integral_needed < 0.0f) {
         integral_needed = 0.0f; /* the same floor the anti-windup clamp enforces every tick */
     }
