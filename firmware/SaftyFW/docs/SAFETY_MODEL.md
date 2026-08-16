@@ -692,6 +692,39 @@ reported healthy, the startup grace has elapsed, and no guard is tripped.
 
 ---
 
+## 6a. Version disagreement between the two processors
+
+The protocol version check is **mutual**: the ESP verifies the safety
+processor's, the safety processor verifies the ESP's, and neither trusts the
+other's data until both agree
+([`../../CommonFW/docs/LINK_PROTOCOL.md`](../../CommonFW/docs/LINK_PROTOCOL.md),
+`ANNOUNCE_VERSION`). One-directional checking would leave this processor parsing
+setpoints, the relay mask and a borrowed thermocouple reading out of a frame
+whose format it had never confirmed — and it is the side that must not guess.
+
+**On a mismatch this processor does not trip.** It sets `DEGRADED_NO_CONTEXT`
+(`ARCHITECTURE.md`) and carries on with the guards that need no context. The
+reasoning is the doctrine in §2 applied honestly:
+
+- A version mismatch is evidence that two builds were flashed out of step. It is
+  not evidence of a hot kiln. It fails the *magnitude* bar outright.
+- Tripping would also be redundant: the ESP treats the same mismatch as a link
+  fault and refuses every heater-on. The kiln is already prevented from heating
+  by the processor that commands the heat.
+- During development, mismatches will be frequent. A guard that fires on every
+  mismatched pair of builds is a guard people learn to work around, and that
+  habit is the actual hazard.
+
+What does **not** relax: S1 absolute over-temp, S5 sensor invalid, S7 E-stop,
+S11 frozen reading and S12 cold junction all keep running and keep authority
+over K4. Those are the guards that matter when the main controller is an unknown
+quantity, and they need nothing from it.
+
+The context-dependent guards — S2, S3, S4, S10, S13 — report as **disabled**,
+never as passing. A guard that cannot evaluate must not look like a guard that
+evaluated and found nothing wrong; that distinction is the difference between a
+safety case and a green light.
+
 ## 6b. Update mode
 
 Field updates over the isolated link are planned

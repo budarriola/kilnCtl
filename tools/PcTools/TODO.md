@@ -312,6 +312,10 @@ reimplementing the transfer.
       supplied per call or read from an environment variable
 - [ ] A protocol-version mismatch between a Pico image and the running ESP is a
       hard error here, not a warning — an agent will click through a warning
+- [ ] `ota_status()` reports **both** processors' protocol version and
+      `min_compatible`, and says plainly whether they are compatible and which
+      side is older. This is the first thing to check when the link is behaving
+      oddly, and it should not require reading two frames by hand
 - [ ] SWD recovery documented alongside, since a bricked Pico is recovered by
       the debug probe and not by these tools
 

@@ -136,6 +136,8 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 - [ ] ESP → Pico context frames, including `relay_recent_mask`
 - [ ] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power
 - [ ] Pico never blocks on the link — all five no-wait rules honoured
+- [ ] Mutual version handshake: `ANNOUNCE_VERSION` both ways, `min_compatible`
+      checked in both directions, compatibility floor reserved at ids `0x00`–`0x0F`
 - [ ] TX ring reserves capacity for telemetry; log frames dropped above the
       watermark and the drops counted
 - [ ] Borrowed-thermocouple staleness split correctly across S11 / S13 / S6
@@ -200,6 +202,13 @@ path. Two facts set the shape of this milestone:
       programmed; signature field and key space reserved even though signing is off
 - [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
       mode over UART1 with no timeout out of it
+- [ ] **Mutual protocol-version check** (lands with M5, gates this): each side
+      verifies the other, a mismatch blocks heating on the ESP and puts the Pico
+      in `DEGRADED_NO_CONTEXT` without latching a trip
+- [ ] **Compatibility floor** frozen so a version mismatch can never disable the
+      update path itself — otherwise every mismatch needs a debug probe
+- [ ] Image header validated before the first erase, so a wrong-target upload
+      cannot erase a slot
 - [ ] Challenge–response on the AP password, so it never crosses the wire;
       lockout after 3 failures
 - [ ] Both paths refused unless the kiln is idle and cool, with the specific
@@ -243,6 +252,10 @@ Any change that touches these needs both plans read, not one:
 - All board relays are **pilot relays**, driving external contactors and SSRs.
 - **Neither processor is updatable while the kiln can heat**, and the Pico
   enforces that itself rather than trusting the ESP.
+- **Each processor checks the other's protocol version**, in both directions, and
+  neither trusts the other's data until both agree. The frames that establish
+  that, and the ones that carry an update, are frozen so a mismatch can never
+  lock out the fix.
 
 ## What "done" means
 

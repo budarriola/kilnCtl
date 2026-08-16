@@ -424,6 +424,38 @@ here is power-constrained.
 diagnostic frame can distinguish "everything is fine" from "something is off but
 not dangerous", which is most of what this system will ever say.
 
+### `DEGRADED_NO_CONTEXT` — an orthogonal flag, not a state
+
+The version handshake is mutual: each processor checks the other's protocol
+version and neither trusts the other until both agree
+(`../../CommonFW/docs/LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`). When the ESP's
+version is missing or incompatible, the safety processor cannot parse context
+frames, so setpoints, the relay mask and any borrowed thermocouple reading are
+all unavailable.
+
+This is deliberately **a flag on top of the state above, not a state of its
+own**, because it is orthogonal to everything the state machine tracks: a
+processor can be in `GRACE`, `ARMED` or `TRIPPED` and simultaneously have no
+usable context. Modelling it as a state would mean duplicating the trip
+transitions inside it, which is how a state machine acquires the bug where a
+trip is missed in one branch.
+
+While the flag is set:
+
+- context frames are **discarded unparsed** — no best-effort decode of a layout
+  this build does not recognise;
+- context-free guards (S1, S5, S7, S11, S12) run unchanged and still command the
+  relay;
+- context-dependent guards (S2, S3, S4, S10, S13) are **reported as disabled**,
+  never as passing;
+- **no trip is latched merely because of the mismatch.** Two processors flashed
+  out of step is a development event, not a dangerous kiln, and the ESP is
+  already refusing to heat. Tripping here would be the nuisance trip that §2 of
+  `SAFETY_MODEL.md` exists to prevent.
+
+Telemetry keeps flowing throughout, which is what lets the ESP display the
+mismatch and push the update that fixes it.
+
 ```c
 typedef enum {
     SAFETY_TRIP_NONE = 0,

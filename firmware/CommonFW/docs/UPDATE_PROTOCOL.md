@@ -234,6 +234,140 @@ write that reported success and did not land.
 
 ---
 
+### The image must say what it is, before anything is erased
+
+`UPDATE_BEGIN` carries a header that the Pico validates **before it erases a
+single sector**:
+
+| Field | Purpose |
+|---|---|
+| `magic` | A constant identifying this as a `SaftyFW` image and nothing else |
+| `target` | `RP2040` — refuses an ESP image outright |
+| `header_version` | Refuse the unrecognised rather than guess |
+| `protocol_version`, `min_compatible` | What the new image will speak (see below) |
+| `length`, `crc32` | Checked at the end against what was written |
+
+Without this, uploading a `KilnFW` image to the Pico endpoint erases the staging
+slot before discovering the mistake. The slot is recoverable — it is not the
+running one — but a needless erase of a safety processor during what the operator
+thinks is a routine update is exactly the kind of avoidable scare that makes
+people stop applying updates.
+
+The ESP does the same check on its own side. ESP-IDF images already carry a
+magic byte and a chip ID; **verify them before calling `esp_ota_begin()`**, not
+after.
+
+### Version compatibility is checked before, and after
+
+The two processors check each other's protocol version continuously
+([`LINK_PROTOCOL.md`](LINK_PROTOCOL.md), `ANNOUNCE_VERSION`). Updates interact
+with that in three places:
+
+1. **Before pushing a Pico image**, the ESP compares the image header's
+   `protocol_version` / `min_compatible` against its own. If they are
+   incompatible, **refuse** — because the only route to the Pico is through the
+   ESP, and installing an image it cannot talk to turns the next update into a
+   debug-probe job. An override exists for the case where the ESP is about to be
+   updated too, and it must be an explicit, separately-confirmed action.
+2. **Update the ESP first** when both need it. The ESP can always be recovered
+   over USB; the Pico's easy path runs through the ESP. The GUI should say this
+   rather than leaving the order to chance.
+3. **After either update**, the handshake re-runs and the result is reported as
+   the outcome of the update — "now running 1.5.0 / protocol 6, compatible" or a
+   named mismatch. A version-mismatch fault storm immediately after a successful
+   flash is a confusing way to learn the two builds do not match.
+
+### The ESP cannot buffer the image it is relaying
+
+A Pico image is on the order of 200 KB. The ESP has neither the RAM to hold it
+nor a spare flash partition to stage it in — the proposed layout leaves 84 KB
+above the app slots. So the relay **streams**: HTTP body in, `UPDATE_DATA`
+frames out, nothing retained.
+
+That makes the browser upload rate the link rate, about 8 KB/s, so a 200 KB
+upload occupies the socket for roughly half a minute. Consequences that have to
+be designed for rather than discovered:
+
+- **Do not read the request body faster than the link drains.** TCP flow control
+  does the work if the handler simply stops calling `httpd_req_recv()`; what
+  breaks it is reading ahead into a buffer that then has nowhere to go.
+- **The HTTP receive timeout must exceed the whole transfer**, not just one
+  chunk. `CONFIG_HTTPD_REQ_HDR_LEN`-style defaults are irrelevant here; the
+  socket timeout is what bites.
+- **A browser or proxy may still time out.** The MCP tool path does not have
+  this problem, which is another reason the tools matter more than the page.
+- [ ] Decide whether to accept the image into a temporary file in a
+      `profiles_nvs`-sized spare partition instead, trading flash wear and a
+      layout change for a fast upload followed by a slow, resumable relay.
+      Streaming is simpler and is the recommendation; this is the fallback if
+      browser timeouts prove unworkable.
+
+### Throughput: stop-and-wait is the wrong tool for bulk transfer
+
+Stop-and-wait with a 200 ms timeout leaves the wire idle for most of every round
+trip, and a single persistently-failing frame costs 2 s.
+
+Because `UPDATE_DATA` carries an **explicit offset** and the whole image is CRC'd
+at the end, acknowledging each frame is not what makes the transfer correct — the
+final verify is. So:
+
+> Send `UPDATE_DATA` as **unacknowledged broadcast frames**, and have the Pico
+> report the ranges it is missing.
+
+The Pico tracks received ranges in a bitmap (a 256 KB image at 248 bytes per
+frame is ~1030 bits, 129 bytes of RAM) and emits a `UPDATE_STATUS` gap report
+every 500 ms. The ESP streams continuously, then retransmits whatever the gap
+reports name, until there are no gaps and the CRC verifies.
+
+This reuses `UPDATE_PROTO_MSG_BROADCAST`, which already has to exist, and it
+turns a lossy link from a linear slowdown into a small percentage of
+retransmission. It also removes the retry-storm failure mode entirely.
+
+- [ ] Cap total retransmission rounds, and fail cleanly rather than looping if a
+      range never lands. A link that cannot deliver the same 248 bytes after ten
+      attempts is broken, and saying so beats retrying forever.
+
+### An ESP reboot must not look like an ESP failure
+
+When the ESP reboots to finish its own update, the link goes quiet and
+`SAFETY_MODEL.md` S6(b) — "main controller unhealthy" — starts counting. Default
+`link_timeout_s` is 10 s, so a normal reboot may or may not trip it depending on
+boot time. **A safety trip on every routine ESP update is precisely the
+over-sensitivity this design is supposed to avoid.**
+
+So the ESP sends `SAFETY_CMD_ANNOUNCE_REBOOT` before it goes:
+
+- The Pico starts a grace window, default 60 s, during which S6(b) does not trip.
+- **The grace window is not permission to heat.** The Pico's own guards are
+  unaffected, and it holds the relay in whatever state its guards demand. The ESP
+  cannot command heat while it is rebooting anyway.
+- If the ESP does not come back within the window, S6(b) trips as normal. A
+  reboot announcement that is followed by silence is a *worse* signal than
+  unannounced silence, not a better one.
+- Any current above `i_present_a` during the grace window ends it immediately and
+  trips. Heat with nobody in charge is the one case where a promise to return
+  counts for nothing.
+
+### One update at a time, and a record of what happened
+
+- [ ] A single update mutex covering both processors. A second browser tab, or
+      an agent racing a human, must be refused rather than interleaved.
+- [ ] An append-only update record in NVS: timestamp, processor, image SHA-256,
+      version before and after, result. For a device that can start a fire,
+      "which firmware was running when that happened" should not depend on
+      someone remembering.
+- [ ] A downgrade is allowed but logged as such. Blocking it would eventually
+      block a legitimate rollback during debugging.
+
+### What holds the heaters off while the ESP reboots
+
+- [ ] **Establish what the SX1509's outputs do across an ESP reset.** Its
+      `~RESET` is driven by the ESP; if the expander is not reset and its output
+      register is non-volatile across the ESP's reboot, relays could stay
+      energised through the update. The interlocks require an idle kiln so
+      nothing should be on — but "should be" is not the standard that applies to
+      the thing that energises heaters, and this is a five-minute bench check.
+
 ## 5. Recovery
 
 | Failure | ESP | Pico |
@@ -297,10 +431,35 @@ during development will be driven by an agent:
 - [ ] Lockout after 3 failures, doubling to 15 minutes, every attempt logged
 - [ ] Documented: this does not defend against someone who knows the AP password
 
+**Version compatibility** (`LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`)
+- [ ] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
+- [ ] `min_compatible` field added to both version frames at a fixed offset
+- [ ] Both sides check **both** directions of `peer.protocol >= self.min_compatible`
+- [ ] ESP on mismatch: link fault, heating blocked, GUI names both versions and
+      which to update
+- [ ] Pico on mismatch: `DEGRADED_NO_CONTEXT`, **no trip latched**, context frames
+      discarded unparsed, context-free guards still running and still commanding
+      the relay, context-dependent guards reported as disabled
+- [ ] Compatibility floor frozen: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
+      the `UPDATE_*` frames work regardless of version, ids `0x00`–`0x0F` reserved
+- [ ] Floor layouts may only be **appended** to, never reordered or resized
+- [ ] Re-checked on every reconnect and every `boot_id` change, not once at boot
+- [ ] ESP refuses to push a Pico image it could not then talk to, unless
+      explicitly overridden
+- [ ] GUI states the order — ESP first — when both need updating
+
+**Image identification**
+- [ ] Pico image header: magic, target, header version, protocol version,
+      `min_compatible`, length, CRC32 — all validated **before the first erase**
+- [ ] ESP image magic and chip ID checked before `esp_ota_begin()`
+
 **ESP OTA**
 - [ ] New partition table with `otadata` + two app slots, first three entries unmoved
 - [ ] Offsets confirmed against the live table before the one-time serial flash
 - [ ] Pre-change table archived for rollback
+- [ ] **`nvs`, `wifi_nvs`, `kiln_nvs` and `profiles_nvs` read out with esptool and
+      saved before the table is flashed.** The one irreversible step in this whole
+      plan is writing a wrong partition table over live config
 - [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`
 - [ ] `esp_ota_mark_app_valid_cancel_rollback()` called only after NVS, safety link
       and web server are all confirmed up — never at the end of `app_main()`
@@ -309,10 +468,30 @@ during development will be driven by an agent:
 **Pico update**
 - [ ] Five frames added to `LINK_PROTOCOL.md` and to `CommonFW`'s codecs
 - [ ] **Isolated-link error rate measured at 115200 before this is built**
+- [ ] `UPDATE_DATA` sent unacknowledged; Pico keeps a received-range bitmap and
+      emits a gap report every 500 ms; ESP retransmits only the named ranges
+- [ ] Retransmission rounds capped, with a clean failure rather than a loop
 - [ ] Erase handled asynchronously, not inside a frame handler
 - [ ] Streamed to flash; no whole-image RAM buffer
 - [ ] CRC verified by reading back from flash, not from the received stream
 - [ ] Progress reported at least every 2 s
+
+**Relaying through the ESP**
+- [ ] HTTP body read no faster than the link drains — TCP backpressure, no
+      read-ahead buffer with nowhere to go
+- [ ] Socket timeout covers the whole ~35 s transfer, not one chunk
+- [ ] Documented that a browser or proxy may time out where the MCP path will not
+
+**Reboots and concurrency**
+- [ ] `SAFETY_CMD_ANNOUNCE_REBOOT` suppresses S6(b) for a bounded grace window
+      (default 60 s) — **and grants no permission to heat**
+- [ ] Grace window ends immediately, and trips, on any current above `i_present_a`
+- [ ] Silence past the window trips as normal
+- [ ] Single update mutex across both processors; a concurrent attempt is refused
+- [ ] Append-only update record in NVS: timestamp, processor, image SHA-256,
+      version before and after, result
+- [ ] Downgrades allowed but logged as such
+- [ ] SX1509 output state across an ESP reset established on the bench
 
 **Surfaces**
 - [ ] Web page with per-processor version, slot, interlock state, progress, rollback

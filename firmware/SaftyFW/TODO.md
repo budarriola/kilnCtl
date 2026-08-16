@@ -253,6 +253,33 @@ gating items are:
       before `KilnFW` can send any — the reverse of the stub already described
       in `firmware/KilnFW/docs/SAFETY_LINK.md`.
 
+## Phase 7b — Mutual version compatibility
+
+Both processors must check each other. Design:
+[`../CommonFW/docs/LINK_PROTOCOL.md`](../CommonFW/docs/LINK_PROTOCOL.md),
+`ANNOUNCE_VERSION`. This lands with the link, not with updates — it is what makes
+every later frame safe to parse.
+
+- [ ] 7b.1 `KILNLINK_PROTOCOL_VERSION` and `KILNLINK_MIN_COMPATIBLE` in
+      `CommonFW`, one definition, both firmwares including it
+- [ ] 7b.2 `ANNOUNCE_VERSION` = `0x0F` sent by the ESP unprompted at boot, on
+      retry, and on every `boot_id` change (`KilnFW` work)
+- [ ] 7b.3 `min_compatible` added to `FW_VERSION` at a fixed offset; version
+      fields read and compared **before** anything after them is parsed
+- [ ] 7b.4 Compatibility evaluated in **both** directions
+- [ ] 7b.5 Mismatch sets `DEGRADED_NO_CONTEXT`: context frames discarded
+      unparsed, context-free guards still commanding the relay, context-dependent
+      guards reported disabled, **no trip latched**
+- [ ] 7b.6 Telemetry keeps flowing during a mismatch — it is the only way the ESP
+      can display the problem or push the fix
+- [ ] 7b.7 **Compatibility floor**: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
+      the `UPDATE_*` frames work regardless of version. Ids `0x00`–`0x0F`
+      reserved; those layouts may be appended to, never reordered or resized.
+      Without this a mismatch makes the field-update path unusable and every fix
+      needs a debug probe
+- [ ] 7b.8 Host test: every combination of older/newer/equal on both sides,
+      including a peer that announces a `min_compatible` above its own version
+
 ## Phase 8 — Telemetry (required)
 
 The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCOL.md` §8.
@@ -363,6 +390,13 @@ metadata format and the slot boundaries are effectively permanent.
       thermocouple reading, ADC sampling, every task checked in, and one
       acknowledged telemetry frame. **Not at the end of `main()`** — an image
       that boots but cannot read its thermocouple is worse than the old one.
+- [ ] 10.8b Image header validated **before the first erase**: magic, target,
+      header version, protocol version, `min_compatible`, length, CRC32. Without
+      it, a `KilnFW` image uploaded to the Pico endpoint erases the staging slot
+      before the mistake is noticed.
+- [ ] 10.8c `UPDATE_DATA` unacknowledged, with a received-range bitmap and a gap
+      report every 500 ms — stop-and-wait leaves the wire idle most of every
+      round trip and turns a lossy link into a retry storm.
 - [ ] 10.9 The Pico independently enforces its own preconditions: relay open, no
       trip pending, temperature below the ceiling. It does not take the ESP's
       word for any of them.

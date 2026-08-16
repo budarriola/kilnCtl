@@ -373,6 +373,109 @@ One byte, no arguments. Sent by the ESP at boot and whenever the Pico's
 `boot_id` changes. **The ESP retries this**; the Pico answers every copy it
 sees and never tracks whether its answer arrived (§2).
 
+### `SAFETY_CMD_ANNOUNCE_VERSION` = `0x0F` (ESP → Pico)
+
+**The version check is mutual. Each side checks the other, and both must agree
+before either trusts anything the other says.**
+
+The original design had the ESP request the Pico's version and the Pico answer.
+That is half a handshake: it lets the ESP detect a mismatch, and leaves the
+safety processor parsing context frames from a main controller whose format it
+has never verified. Since the context frame is where setpoints, the relay mask
+and a borrowed thermocouple reading arrive, the safety processor is precisely the
+side that must not be guessing.
+
+So the ESP announces itself too, unprompted, in the same layout as Frame C:
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x0F` |
+| 1..2 | u16 LE | **`KILNLINK_PROTOCOL_VERSION`** — fixed offset, never moves |
+| 3..4 | u16 LE | **`KILNLINK_MIN_COMPATIBLE`** — the oldest peer this build will talk to |
+| 5 | u8 | `dirty` (0 = clean, 1 = dirty **or unknown**) |
+| 6 | u8 | `commit_len` (N1) |
+| 7.. | N1 × u8 | git commit hash, ASCII |
+| … | u8 | `datetime_len` (N2) |
+| … | N2 × u8 | build date+time, ASCII |
+| … | u8 | `boot_id` |
+
+Sent as `BROADCAST` at ESP boot, repeated a few times against loss, and re-sent
+whenever the Pico's `boot_id` changes — a Pico that has just rebooted has
+forgotten everything, including who it is talking to. Frame C gains the same
+`min_compatible` field at the matching offset.
+
+#### What "compatible" means
+
+Compatibility is decided on the **protocol** version, never the firmware
+version. Two builds months apart that speak the same protocol are fine together;
+that is the whole point of versioning the wire separately from the code.
+
+```
+compatible  ==  peer.protocol >= self.min_compatible
+            &&  self.protocol >= peer.min_compatible
+```
+
+Both directions, because "I can read you" and "you can read me" are different
+claims. Bumping `KILNLINK_MIN_COMPATIBLE` is the deliberate act of dropping
+support for older peers, and it belongs in the same commit as whatever change
+made them incompatible.
+
+#### What each side does about a mismatch
+
+**The ESP:** treats it exactly like a dead link — `SAFETY_FAULT_SRC_SAFETY_LINK`
+asserts, every heater-on is blocked, a running firing aborts. A safety processor
+it cannot parse is not a safety processor. The GUI must show **both** versions
+and which one is older, because "incompatible" without saying which side to
+update is a message that generates a support question rather than answering one.
+
+**The Pico:** enters `DEGRADED_NO_CONTEXT` and **does not latch a trip.**
+
+That last part matters and is easy to get wrong. A version mismatch is not
+evidence of a dangerous kiln; it is evidence that the two processors were flashed
+out of step, which happens constantly during development. Tripping on it would
+be a nuisance trip in the exact style §2 of `SAFETY_MODEL.md` forbids — and it
+would be pointless, because the ESP is already refusing to heat.
+
+In `DEGRADED_NO_CONTEXT` the Pico:
+
+- **discards every context frame unparsed.** It does not attempt a best-effort
+  decode of a layout it does not recognise. Guessing at the offset of a setpoint
+  is worse than having no setpoint.
+- **keeps running every guard that needs no context** — absolute over-temp,
+  sensor invalid, E-stop, frozen reading, cold junction. These are the guards
+  that matter with an unknown main controller, and they still command the relay.
+- **disables every guard that needs context** — sustained-over-setpoint,
+  load-active correlation, thermocouple disagreement, borrowed-channel staleness
+  — and reports them as disabled rather than passing.
+- **keeps sending telemetry**, including its own version, so the ESP can display
+  the mismatch and so an update can be pushed to fix it.
+
+#### The compatibility floor: why a mismatch can never brick the link
+
+There is a trap here worth naming, because walking into it costs a bench visit
+with a debug probe:
+
+> If two incompatible peers refuse to talk, and the only way to update the Pico
+> is *through* the ESP over that same link, then a mismatch makes the field
+> update path unusable.
+
+The fix is to carve out a subset that is **frozen at version 1 and never
+changes**: the framing itself, `ANNOUNCE_VERSION`, `FW_VERSION`, and the
+`UPDATE_*` frames (`../docs/UPDATE_PROTOCOL.md` §4). Both sides must honour
+those regardless of protocol version, and a mismatch must never disable them.
+
+- Frame ids `0x00`–`0x0F` are reserved for the floor. Nothing above `0x0F` may
+  be required to establish contact or to carry an update.
+- The floor's layouts may gain **appended** fields, never reordered or resized
+  ones. A peer reads the prefix it understands and ignores the tail.
+- `KILNLINK_MIN_COMPATIBLE` does not apply to the floor. That is what makes it a
+  floor.
+
+This is also why the ESP must **refuse to push a Pico image whose declared
+protocol version its own build cannot talk to**, unless explicitly overridden:
+that single action is the one that creates the lockout. When both processors
+need updating, the ESP goes first, and the GUI should say so.
+
 ### `SAFETY_CMD_SET_CLOCK` = `0x0C` (ESP → Pico), optional
 
 | Offset | Type | Field |
@@ -513,19 +616,26 @@ parser can be reused rather than rewritten:
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | `0x0B` |
-| 1..2 | u16 LE | **`UART_PROTOCOL_VERSION`** — fixed offset, never moves |
-| 3 | u8 | `dirty` (0 = clean, 1 = dirty **or unknown**) |
-| 4 | u8 | `commit_len` (N1) |
-| 5.. | N1 × u8 | git commit hash, ASCII, not null-terminated |
+| 1..2 | u16 LE | **`KILNLINK_PROTOCOL_VERSION`** — fixed offset, never moves |
+| 3..4 | u16 LE | **`KILNLINK_MIN_COMPATIBLE`** — oldest peer this build will talk to |
+| 5 | u8 | `dirty` (0 = clean, 1 = dirty **or unknown**) |
+| 6 | u8 | `commit_len` (N1) |
+| 7.. | N1 × u8 | git commit hash, ASCII, not null-terminated |
 | … | u8 | `datetime_len` (N2) |
 | … | N2 × u8 | build date+time, ASCII `YYYY-MM-DD HH:MM:SSZ` |
 | … | u8 | `boot_id` |
 | … | u8 | `config_version` |
 | … | u16 LE | `config_crc` — CRC of the active threshold/calibration set |
 
-**Read bytes 1–2 first and compare before parsing anything after them**, same
-rule as the ESP's version frame. A mismatched protocol version means the rest
-of this frame may not mean what you think.
+**Read bytes 1–4 first and decide compatibility before parsing anything after
+them**, same rule as the ESP's `ANNOUNCE_VERSION` frame. A mismatched protocol
+version means the rest of this frame may not mean what you think — the two
+version fields and the frame id are the only parts whose position is guaranteed.
+
+This frame is part of the **compatibility floor** described under
+`ANNOUNCE_VERSION` above: it must be emitted and parseable regardless of whether
+the two sides agree on anything else, because it is how they find out that they
+do not.
 
 The last two fields are the ones worth having beyond a build stamp: **the GUI
 should display the safety processor's active config CRC**, so "which thresholds

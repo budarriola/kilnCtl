@@ -2956,6 +2956,32 @@ Wi-Fi. Only `0x10000`..`0x187000` may be re-carved.
 authorising a Pico update, which makes this endpoint the safety processor's
 attack surface as well as its update path.
 
+### 9.0 Mutual version compatibility (prerequisite)
+
+Not strictly an update feature — it lands with the link — but the update paths
+depend on it, so it is tracked here as a gate. Design:
+[`../CommonFW/docs/LINK_PROTOCOL.md`](../CommonFW/docs/LINK_PROTOCOL.md),
+`ANNOUNCE_VERSION`.
+
+- [ ] `ANNOUNCE_VERSION` = `0x0F` sent unprompted at boot, repeated against loss,
+      and re-sent on every `boot_id` change — a Pico that just rebooted has
+      forgotten who it was talking to
+- [ ] `KILNLINK_MIN_COMPATIBLE` published alongside the protocol version, and
+      compatibility evaluated in **both** directions
+- [ ] A mismatch is treated exactly like a dead link: `SAFETY_FAULT_SRC_SAFETY_LINK`,
+      heating blocked, a running firing aborted
+- [ ] The GUI names **both** versions and which one is older. "Incompatible"
+      without saying which side to update generates a question instead of
+      answering one
+- [ ] The compatibility floor — framing, `ANNOUNCE_VERSION`, `FW_VERSION`,
+      `UPDATE_*` — stays functional across any mismatch, so the fix can be pushed
+      over the link rather than needing a debug probe
+- [ ] **Refuse to push a Pico image this build could not then talk to.** That one
+      action is what creates a lockout. Override must be explicit and separately
+      confirmed
+- [ ] When both need updating, the GUI states the order: **ESP first**, because
+      the ESP is recoverable over USB and the Pico's easy path runs through it
+
 ### 9.1 Partition table
 
 - [ ] New table: `otadata` 8 K + `ota_0` / `ota_1` inside `0x10000`..`0x187000`,
@@ -3008,6 +3034,22 @@ attack surface as well as its update path.
 
 - [ ] Streamed `esp_ota_ops` POST handler; a full image will not fit in RAM
 - [ ] Pico relay: the five `UPDATE_*` frames, codecs living in `CommonFW`
+- [ ] **The Pico image is relayed, never staged.** There is no RAM for 200 KB and
+      no spare partition — the proposed layout leaves 84 KB. Read the HTTP body no
+      faster than the link drains and let TCP flow control do the work; the thing
+      that breaks it is reading ahead into a buffer with nowhere to go
+- [ ] Socket timeout covers the whole ~35 s transfer, not one chunk
+- [ ] `UPDATE_DATA` sent unacknowledged, retransmitting only the ranges the Pico's
+      gap reports name. Stop-and-wait leaves the wire idle for most of every round
+      trip and costs 2 s per persistently-failing frame
+- [ ] ESP image magic and chip ID verified **before** `esp_ota_begin()`
+- [ ] `SAFETY_CMD_ANNOUNCE_REBOOT` sent before the ESP reboots, so a routine
+      update does not trip S6(b) on the safety processor. It suppresses the trip
+      for a bounded window and grants **no** permission to heat
+- [ ] Single update mutex across both processors — a second tab, or an agent
+      racing a human, is refused rather than interleaved
+- [ ] Append-only update record in NVS: timestamp, processor, image SHA-256,
+      version before and after, result
 - [ ] Progress pushed to the GUI at least every 2 s for both paths
 - [ ] Protocol-version mismatch between the uploaded Pico image and the running
       one warned about, with a second confirmation — that is the case where a
