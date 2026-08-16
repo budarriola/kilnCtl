@@ -3003,10 +3003,58 @@ more room after it on a 16 MB part.
 - [ ] `CONFIG_ESPTOOLPY_FLASHSIZE` set to the **confirmed** size, **and reflash
       the bootloader** — the flash size is in its header, so a new table alone
       does nothing
-- [ ] **PSRAM is disabled entirely** (`# CONFIG_SPIRAM is not set`), on a module
-      with either 2 MB or 8 MB of it. Not an OTA matter, but section 6A and the
-      web UI are the parts that would benefit, and it is worth a decision rather
-      than an oversight. Octal PSRAM has its own errata — enable deliberately
+### 9.1a PSRAM — decided: stays off
+
+**Decision (2026-08-16): leave `CONFIG_SPIRAM` unset. Do not enable PSRAM.**
+
+The module carries 2 MB or 8 MB of it depending on which variant is actually
+fitted, and none of it is used. That is the right answer today, for four
+reasons and with one named condition that would reverse it.
+
+**1. Nothing needs it, and the one thing that might is designed not to.** The
+only workload on this board big enough to care is a display framebuffer:
+480 x 320 x 3 = 450 KB, which does not fit in 512 KB of internal SRAM alongside
+Wi-Fi. But `docs/ILI9488.md` drives the panel by streaming straight into its own
+GRAM, with no framebuffer at all — the correct design for a panel that has its
+own memory. A PSRAM framebuffer would render the same pixels twice: once into
+PSRAM, then over SPI to the glass.
+
+**2. Determinism.** PSRAM is behind a cache on a serial bus, and a miss stalls
+the CPU for as long as the fetch takes. This firmware time-proportions heater
+output, runs a PID tick, holds a 500 ms telemetry cadence, and depends on a link
+whose 1.5 s silence blocks all heating. Adding a stall source to that in exchange
+for memory nothing is asking for is a bad trade in the only direction that
+matters.
+
+**3. It creates a new boot failure mode.** PSRAM initialisation can fail. A
+device that must fail safe then needs a defined answer to "came up with less
+memory than the build assumed", which is more `kiln_enter_safe_state()` surface
+bought for nothing.
+
+**4. It puts every existing DMA buffer under audit.** PSRAM is not generally
+DMA-capable, so allocations feeding SPI (three MAX31856 channels plus the panel),
+I2C and two UARTs would all need `MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL` checked
+by hand. Real work, real opportunity for a subtle bug, no benefit.
+
+**It is also not a one-way door, and the doors open in different directions.**
+Turning PSRAM on later is a config change plus that DMA audit. Turning it off
+later, after code has grown to assume 8 MB of heap, is a rewrite. Staying off
+until something concrete needs it is the cheap ordering.
+
+- [x] Decision recorded; `# CONFIG_SPIRAM is not set` is deliberate, not an oversight
+- [ ] **Trigger to revisit: a locally-rendered UI on the ILI9488.** If the panel
+      ever has to show something the ESP composes itself — needing read-back,
+      compositing, or flicker-free partial redraw — that needs ~450 KB and PSRAM
+      becomes required rather than optional. `docs/ILI9488.md` is cross-linked
+- [ ] Second trigger, weaker: TLS on the web server, or many concurrent HTTP
+      connections. Measure the heap before assuming either needs it
+- [ ] **Keep GPIO 33-37 unassigned.** On an R8 (octal PSRAM) module those pins
+      are consumed by the PSRAM inside the module whether or not the software
+      enables it. The board currently uses 0-21, 38, 43, 44, 47 and 48, so there
+      is no conflict — this is to keep it that way
+- [ ] Note for sourcing: the **flash** is what earns the module's keep, since OTA
+      needs it. The PSRAM on an R8 part is being paid for and not used. That is an
+      acceptable trade for a one-off, not a reason to specify R8 on a reorder
 - [ ] `otadata` at `0x200000`, `ota_0`/`ota_1` 2 MB each above it, optional
       512 K `pico_img` staging partition. Full layout in
       [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md) §3

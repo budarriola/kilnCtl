@@ -223,6 +223,18 @@ path. Two facts set the shape of this milestone:
 
 ---
 
+## Decisions taken, so they are not re-litigated
+
+| Decision | Date | Where the reasoning lives |
+|---|---|---|
+| Pico bench path is the Debug Probe: SWD plus its UART bridge on GP16/GP17. **The Pico's own USB is not used.** | 2026-08-16 | `firmware/SaftyFW/docs/ARCHITECTURE.md` §1 |
+| **PSRAM stays disabled** on the ESP32-S3. Not an oversight — nothing needs it, and it costs determinism, a boot failure mode and a DMA audit | 2026-08-16 | `firmware/KilnFW/TODO.md` §9.1a |
+| Library paths use `${KIPRJMOD}/../lib`, not a KiCad path variable | 2026-08-16 | `docs/REPO_LAYOUT.md` B1 |
+| OTA authentication is challenge–response on the AP password, never a form POST | 2026-08-16 | `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` §2 |
+| Update frames and the version handshake are a **frozen compatibility floor** | 2026-08-16 | `firmware/CommonFW/docs/LINK_PROTOCOL.md` |
+
+---
+
 ## Working from the repository root
 
 Claude and the editor are opened at `kilnCtl/` from 2026-08-16 onward. This is

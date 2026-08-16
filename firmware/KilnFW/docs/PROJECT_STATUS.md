@@ -77,10 +77,17 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   **Settle it with `esptool flash_id` and fix the other two records.**
 
   Regardless of which: the firmware is configured for **2 MB**
-  (`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`) and **PSRAM is not enabled at all**
-  (`# CONFIG_SPIRAM is not set`), so at minimum 6 MB of flash and 2 MB of PSRAM
-  are sitting unused. Not a problem today; it is the deciding constraint for OTA
-  — see `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3.
+  (`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`), so at minimum 6 MB of flash is
+  unreachable. That is the deciding constraint for OTA — see
+  `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3, and it needs fixing.
+- **PSRAM: deliberately off**, and staying off (decision 2026-08-16,
+  `TODO.md` 9.1a). `# CONFIG_SPIRAM is not set`. Nothing on this board needs it:
+  the only candidate workload is a display framebuffer, and `docs/ILI9488.md`
+  streams straight to the panel's own GRAM instead. Against that, PSRAM adds
+  cache-miss stalls to a firmware with real-time heater and link deadlines, a
+  new boot failure mode, and a DMA-capability audit of every existing driver
+  buffer. The named trigger to revisit is a locally-rendered UI on the panel.
+  **This is a decision, not an oversight** — do not "fix" it by enabling PSRAM.
 - **Python**: `python -c "import kilnctrl"` succeeds. `selfcheck.py` **fails 16
   of its checks** as of 2026-08-16; they fail identically on the
   pre-reorganisation source, so they are pre-existing and unrelated to the move.
