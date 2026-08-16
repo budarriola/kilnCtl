@@ -148,15 +148,26 @@ because it changes what a bare main board will do.
 - [ ] Bench escape hatch documented: `safety_link_fault_on_link_loss(link, false)`
 - [ ] GUI shows safety temperature, enclosure temperature and power
 
-## M7 — Repo reorganisation
+## M7 — Repo reorganisation · *done 2026-08-16, three items open*
 
-Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Explicitly scheduled **after** the
-safety firmware is written (blocker B6) — moving paths mid-bring-up buys nothing
-and breaks tooling at the worst moment.
+Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Done **before** `SaftyFW`
+phase 1, which is the timing blocker B6 preferred: the paths in the new
+documents are correct from the start rather than being rewritten later.
 
-- [ ] All of B1–B5 resolved
+- [x] Tree split into `hardware/`, `firmware/`, `tools/`, `docs/` — 380 files,
+      all byte-identical renames
+- [x] B1 library tables, B2 TFT35-SPI submodule, B3 `CLAUDE.md`, B5 clean tree
+- [x] Everything else the move broke: `.mcp.json`, both `.vscode`
+      `compile-commands-dir` settings, two `PcTools` modules that derived paths
+      from `__file__`, 3D model paths in 17 footprints, twelve broken doc links
+- [x] B4 — the stale `mainBoard/kiln.net` deleted
+- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — blocked at the time by
+      running MCP server processes holding the directories open
+- [ ] **Open all four KiCad projects and confirm no missing symbols or
+      footprints.** B1 fails silently until someone does this
 - [ ] Fresh `git clone` into a scratch directory opens `mainBoard` — the only
-      test that catches the absolute-path breakage
+      test that catches the absolute-path breakage for someone who is not this
+      user on this machine
 
 ---
 
