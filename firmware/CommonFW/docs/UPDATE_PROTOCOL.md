@@ -128,28 +128,82 @@ can only be written over serial. **You cannot OTA your way into being
 OTA-capable.** The first flash of the new table is a one-time USB operation, and
 it must happen before any of this is useful.
 
-Worse, `partitions.csv` carries a long comment explaining why the first three
-entries must not move: live NVS data sits at `0x9000`, and the `wifi_nvs` /
-`kiln_nvs` / `profiles_nvs` split above the app was done specifically so a
-config wipe cannot strand the board off Wi-Fi. **Those must keep their current
-offsets.** Only the app region between `0x10000` and `0x187000` may be re-carved.
+#### The measurement that changed this plan
 
-The space available for app slots is `0x177000` = 1500 KB. The current image is
-about 301 KB, roughly 20 % of one slot. A workable split:
+A build on 2026-08-16 put **`KilnCtrl.bin` at 0x1237A0 — 1167 KB**, with 22 % of
+the app partition free. An earlier version of this section sized two 704 KB
+slots around a 301 KB image, a figure taken from `PROJECT_STATUS.md` that was
+several builds out of date. **The image does not fit in the slots that plan
+proposed, and two copies of it do not fit in the 1500 KB app region at all.**
+
+Dual-slot OTA is therefore impossible in the 2 MB the firmware is currently
+configured for. Measure the image before sizing anything.
+
+#### The 8 MB nobody is using
+
+The fitted module is an **ESP32-S3-DevKitC-1U-N8R8**, which has **8 MB of
+flash** (BOM, `mainBoard` U4). The firmware is built with
+`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`, so six of those eight megabytes are
+unaddressable and have been sitting unused. That is also why nobody noticed:
+nothing could reach past 2 MB to find it empty.
+
+Switching to 8 MB makes the whole problem go away, and — better — it means
+**nothing that exists today has to move**:
 
 ```
-otadata   data, ota,   0x010000, 0x002000     8K
-ota_0     app,  ota_0, 0x012000, 0x0B0000   704K
-ota_1     app,  ota_1, 0x0C2000, 0x0B0000   704K
-                                            (84K spare below wifi_nvs at 0x187000)
+# unchanged, live data, do not touch
+nvs           data, nvs,     0x009000, 0x006000    24K
+phy_init      data, phy,     0x00F000, 0x001000     4K
+factory       app,  factory, 0x010000, 0x177000  1500K   <- kept as recovery image
+wifi_nvs      data, nvs,     0x187000, 0x006000    24K
+kiln_nvs      data, nvs,     0x18D000, 0x010000    64K
+profiles_nvs  data, nvs,     0x19D000, 0x060000   384K
+
+# new, entirely inside the previously unreachable 6 MB
+otadata       data, ota,     0x200000, 0x002000     8K
+ota_0         app,  ota_0,   0x210000, 0x200000  2048K   <- 1.75x the current image
+ota_1         app,  ota_1,   0x410000, 0x200000  2048K
+pico_img      data, fat,     0x610000, 0x080000   512K   <- staging, see below
+# spare                      0x690000..0x800000 ~1.4M
 ```
 
-- [ ] **Confirm these offsets against the real table before flashing anything.**
-      Getting this wrong erases the profiles partition.
-- [ ] Keep a copy of the pre-change table so a rollback to pre-OTA firmware is
-      possible over serial.
-- [ ] 704 KB is 2.3× the current image. Check the headroom against what
-      sections 6A and 8 of `KilnFW/TODO.md` are still going to add.
+Why this shape rather than re-carving the existing app region:
+
+- **No existing partition moves**, so the reason `partitions.csv` gives for
+  freezing the first three entries — live zone, rule, profile and Wi-Fi data —
+  is satisfied by not touching them at all rather than by careful arithmetic.
+  The dangerous version of this change is the one that shifts `profiles_nvs`.
+- **`factory` survives as a recovery image.** With `otadata` invalid or erased
+  the bootloader falls back to `factory`, which is a known-good build reachable
+  without a serial cable. Deleting it to reclaim 1500 KB would trade the last
+  free recovery path for space there is no shortage of.
+- **2 MB slots against a 1167 KB image** is 1.75×, which leaves room for what
+  sections 6A and 8 of `KilnFW/TODO.md` still intend to add. The previous 704 KB
+  proposal had already been overtaken before it was written down.
+
+- [ ] **Confirm the physical flash with `esptool flash_id` before trusting the
+      BOM.** A board built with a different module variant will brick on a table
+      that addresses memory it does not have.
+- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE_8MB`, and **reflash the bootloader** — the
+      flash size lives in the bootloader header, so a new table alone is not
+      enough.
+- [ ] Confirm the offsets against the real table before flashing. Getting this
+      wrong erases `profiles_nvs`.
+- [ ] Archive the pre-change table, and read out all four NVS partitions with
+      `esptool read_flash` first. This is the one irreversible step in the plan.
+
+#### A staging partition also solves the relay problem
+
+512 KB of `pico_img` is enough to hold a safety-processor image, which removes
+the constraint described in §4 that the ESP must stream the Pico's image at link
+speed because it has nowhere to put it. With staging, the browser upload runs at
+Wi-Fi speed and finishes in a second, and the slow relay over the isolated link
+happens afterwards — resumable, restartable, and immune to an HTTP timeout.
+
+- [ ] Decide between streaming and staging once the 8 MB table exists. Staging
+      is better in every way except flash wear, and an update is not a frequent
+      enough event for wear to matter. Streaming remains the fallback if the
+      8 MB change is deferred.
 
 ### Rollback is not optional
 
@@ -296,11 +350,10 @@ be designed for rather than discovered:
   socket timeout is what bites.
 - **A browser or proxy may still time out.** The MCP tool path does not have
   this problem, which is another reason the tools matter more than the page.
-- [ ] Decide whether to accept the image into a temporary file in a
-      `profiles_nvs`-sized spare partition instead, trading flash wear and a
-      layout change for a fast upload followed by a slow, resumable relay.
-      Streaming is simpler and is the recommendation; this is the fallback if
-      browser timeouts prove unworkable.
+- [ ] **Superseded if the 8 MB table lands:** a 512 KB `pico_img` staging
+      partition removes this constraint entirely — fast upload, then a slow
+      resumable relay that no HTTP timeout can interrupt. See §3. Streaming
+      remains the fallback if the flash-size change is deferred.
 
 ### Throughput: stop-and-wait is the wrong tool for bulk transfer
 
@@ -454,7 +507,14 @@ during development will be driven by an agent:
 - [ ] ESP image magic and chip ID checked before `esp_ota_begin()`
 
 **ESP OTA**
-- [ ] New partition table with `otadata` + two app slots, first three entries unmoved
+- [ ] **Physical flash size confirmed with `esptool flash_id`** — the BOM says
+      8 MB (N8R8) and the build says 2 MB; the plan depends on the BOM being right
+- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE_8MB` **and the bootloader reflashed** — flash
+      size lives in the bootloader header
+- [ ] New partitions placed entirely above `0x200000`, so **nothing existing moves**
+- [ ] `factory` retained as the serial-free recovery image
+- [ ] Slot size checked against a **measured** image, not a remembered one. It was
+      1167 KB on 2026-08-16, not the 301 KB this plan was first written around
 - [ ] Offsets confirmed against the live table before the one-time serial flash
 - [ ] Pre-change table archived for rollback
 - [ ] **`nvs`, `wifi_nvs`, `kiln_nvs` and `profiles_nvs` read out with esptool and

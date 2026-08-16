@@ -53,14 +53,32 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   and nowhere else yet.
 - **Datasheets curated** to comm-interface parts only (I2C/SPI/UART) in
   `firmware/KilnFW/Datasheets/`.
-- **Build**: `idf.py build` from a full clean, ESP-IDF v6.0.2, target
-  `esp32s3`, succeeds with zero warnings under this project's
-  `-Wall -Wextra -Werror`. `KilnCtrl.bin` ≈ 0x497e0 bytes, ~71% of the app
-  partition free. This machine's `export.ps1` is broken (looks for a venv
-  path the EIM installer doesn't create); the working activation is
-  `& 'C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1'`.
-- **Python**: `python -c "import kilnctrl"` succeeds; `python selfcheck.py`
-  passes all checks (492 as of the hardening pass).
+- **Build**: `idf.py -C firmware/KilnFW build` from a full clean, ESP-IDF
+  v6.0.2, target `esp32s3`, succeeds under this project's
+  `-Wall -Wextra -Werror`. Re-verified 2026-08-16 after the repository
+  reorganisation, which needed an `idf.py fullclean` first — the CMake cache
+  records the project directory and refuses to build once it moves.
+
+  **`KilnCtrl.bin` is 0x1237A0 bytes (1167 KB), 22% of the app partition free.**
+  This entry previously read 0x497e0 and ~71% free; that was roughly four
+  builds' worth out of date and materially wrong for anything sizing a
+  partition. Measure before quoting.
+
+  This machine's `export.ps1` is broken (looks for a venv path the EIM
+  installer doesn't create); the working activation is
+  `& 'C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1'`. Invoking
+  the ESP-IDF python directly also works but needs `ESP_IDF_VERSION`,
+  `IDF_PATH`, `IDF_TOOLS_PATH` and `IDF_PYTHON_ENV_PATH` all set, plus cmake
+  and ninja on `PATH` — the profile script is the shorter route.
+- **Flash**: the fitted module is an **ESP32-S3-DevKitC-1U-N8R8 — 8 MB flash**
+  (BOM, `mainBoard` U4), but the firmware is configured for **2 MB**
+  (`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`). Six of the eight megabytes are unused.
+  This is not a problem today and is the deciding constraint for OTA — see
+  `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3.
+- **Python**: `python -c "import kilnctrl"` succeeds. `selfcheck.py` **fails 16
+  of its checks** as of 2026-08-16; they fail identically on the
+  pre-reorganisation source, so they are pre-existing and unrelated to the move.
+  The previous claim here that all 492 pass is stale — see `docs/REPO_LAYOUT.md`.
 - **PC-link UART baud raised to 921600** (was 115200), to speed up the
   DISPLAY blit path — changed consistently in `App/drivers/Kconfig`
   (`KILNCTL_UART_BAUD_RATE` default), `sdkconfig`

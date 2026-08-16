@@ -2984,13 +2984,29 @@ depend on it, so it is tracked here as a gate. Design:
 
 ### 9.1 Partition table
 
-- [ ] New table: `otadata` 8 K + `ota_0` / `ota_1` inside `0x10000`..`0x187000`,
-      first three entries and the three NVS partitions **unmoved**
+**This changed once the image was actually measured.** A clean build on
+2026-08-16 is **1167 KB** (0x1237A0), not the ~301 KB `PROJECT_STATUS.md` used to
+claim. Two copies of that do not fit in the 1500 KB app region, so dual-slot OTA
+is impossible in the 2 MB the firmware is configured for.
+
+The fitted module is an **ESP32-S3-DevKitC-1U-N8R8 with 8 MB of flash**, built
+with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB`. Six megabytes are unaddressable and
+unused. Switching to 8 MB means the OTA partitions go **above `0x200000`, where
+nothing exists**, so no live data moves at all.
+
+- [ ] **`esptool flash_id` first.** The plan rests on the BOM being right about
+      the module variant; a table addressing memory the chip lacks bricks it
+- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE_8MB`, **and reflash the bootloader** — the
+      flash size is in its header, so a new table alone does nothing
+- [ ] `otadata` at `0x200000`, `ota_0`/`ota_1` 2 MB each above it, optional
+      512 K `pico_img` staging partition. Full layout in
+      [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md) §3
+- [ ] **`factory` kept**, not reclaimed — with `otadata` erased the bootloader
+      falls back to it, which is the only recovery path that needs no cable
 - [ ] Offsets confirmed against the live table before flashing — getting this
       wrong erases `profiles_nvs`
 - [ ] Pre-change table archived so a rollback to pre-OTA firmware is possible
-- [ ] Slot size checked against what sections 6A and 8 still intend to add. The
-      current image is ~301 KB; 704 KB per slot is 2.3× headroom today
+- [ ] Slot size re-checked against a **measured** image whenever 6A or 8 lands
 - [ ] One-time serial flash documented as a prerequisite step, not a footnote
 
 ### 9.2 Rollback

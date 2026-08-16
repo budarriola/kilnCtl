@@ -194,8 +194,10 @@ path. Two facts set the shape of this milestone:
 
 - [ ] **Measure the isolated link's real error rate at 115200 first.** Nobody has
       characterised the optocouplers; retry cost is 200 ms × up to 10
-- [ ] ESP partition table re-carved between `0x10000` and `0x187000`, the NVS
-      partitions left exactly where they are, flashed once over serial
+- [ ] **Confirm 8 MB flash, then switch to it.** The module is an N8R8 but the
+      build says 2 MB, and the real image is 1167 KB — two copies do not fit in
+      the 1500 KB app region. At 8 MB the OTA partitions go above `0x200000`
+      where nothing exists, so no live data moves. Bootloader must be reflashed
 - [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, and the app confirms itself only
       after NVS, safety link and web server are up
 - [ ] Pico flash layout and metadata format frozen before the first board is
