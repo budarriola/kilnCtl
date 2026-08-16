@@ -68,6 +68,26 @@ Set at **user** scope, so they survive a reboot and are visible to any shell:
 `kilnCtl.code-workspace` uses `${env:IDF_PATH}` and `${env:IDF_PYTHON_ENV_PATH}`
 directly in its build task, which is why that file needs no generation step.
 
+## Why the script checks outcomes, not exit codes
+
+`git submodule update --init --recursive` silently **skips** any gitlink with no
+`.gitmodules` entry and still exits 0. For a while this repository had four such
+gitlinks — Claude Code agent worktrees, committed by accident — and the setup
+step reported success the whole time while `git submodule status` failed outright.
+
+The lesson generalised: a step that reports success by exit code cannot
+distinguish "did the work" from "found nothing to do". So the script now proves
+the outcome instead:
+
+- every path in `.gitmodules` exists, is non-empty, and resolves to a commit;
+- any tracked gitlink **not** in `.gitmodules` is named, with the `git rm --cached`
+  command to fix it;
+- after `uv sync`, `import kilnctrl` is actually executed — which is also what
+  catches a stale editable-install path left behind by a directory move.
+
+These checks are read-only, so they run under `-WhatIf` too. A dry run should
+still tell you what is broken.
+
 ## What the script does not do
 
 It **discovers and configures**; it does not install. If a tool is missing it
@@ -86,7 +106,8 @@ You still need, installed yourself:
 ## Verifying the clone
 
 ```powershell
-# Both submodules resolve
+# Both submodules resolve. A non-zero exit here means a gitlink is tracked
+# without a .gitmodules entry -- setup.ps1 now detects and names that case.
 git submodule status
 
 # KilnFW builds
@@ -114,6 +135,7 @@ shows up as missing footprints rather than as an error.
 | `import kilnctrl` fails | `uv sync --project tools/PcTools` has not run |
 | KiCad reports missing footprints | Submodules not initialised, or a library table has picked up an absolute path again — `docs/REPO_LAYOUT.md` B1 |
 | MCP servers missing | `.mcp.json` not generated; re-run the setup script |
+| `git submodule status` exits 128 | A gitlink is tracked with no `.gitmodules` entry. `git rm --cached <path>` it. This happened once already, when four Claude Code agent worktrees were swept in by a `git add -A` |
 
 ## Completion checklist
 

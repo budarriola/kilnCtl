@@ -201,9 +201,50 @@ Expand-Template 'templates/UnitTestFwOuter.settings.json.in'     'firmware/UnitT
 # ------------------------------------------------------------- submodules ----
 
 Step 'Submodules'
+
+# Check the outcome, not the exit code. `git submodule update --init` silently
+# SKIPS any gitlink with no .gitmodules entry and still exits 0 -- which is
+# exactly what happened when four Claude Code agent worktrees were accidentally
+# committed as gitlinks: this step reported success while `git submodule status`
+# failed outright. An exit code that cannot distinguish "did the work" from
+# "found nothing to do" is not a check.
 if ($PSCmdlet.ShouldProcess('git submodules', 'init and update')) {
     git submodule update --init --recursive
-    if ($LASTEXITCODE -ne 0) { Warn 'git submodule update failed.' } else { Ok 'submodules present' }
+    if ($LASTEXITCODE -ne 0) { Warn 'git submodule update returned non-zero.' }
+}
+
+# The verification below is read-only, so it runs even under -WhatIf. That is
+# deliberate: a dry run should still be able to tell you what is broken.
+if ($true) {
+    # Every path declared in .gitmodules must exist, be non-empty, and resolve
+    # to a commit.
+    $declared = @()
+    if (Test-Path .gitmodules) {
+        $declared = Select-String -Path .gitmodules -Pattern '^\s*path\s*=\s*(.+?)\s*$' |
+                    ForEach-Object { $_.Matches[0].Groups[1].Value }
+    }
+    if (-not $declared) {
+        Warn 'No submodule paths declared in .gitmodules -- expected at least two.'
+    }
+    foreach ($sm in $declared) {
+        if (-not (Test-Path -LiteralPath $sm)) { Warn "submodule missing: $sm"; continue }
+        if (-not (Get-ChildItem -LiteralPath $sm -Force -ErrorAction SilentlyContinue)) {
+            Warn "submodule directory is empty (not checked out): $sm"; continue
+        }
+        git -C $sm rev-parse HEAD *> $null
+        if ($LASTEXITCODE -ne 0) { Warn "submodule has no resolvable HEAD: $sm" }
+        else { Ok "submodule $sm" }
+    }
+
+    # A tracked gitlink with no .gitmodules entry breaks `git submodule status`
+    # for everyone, so name it here rather than letting it surface later.
+    $links = git ls-files -s | Where-Object { $_ -match '^160000' } |
+             ForEach-Object { ($_ -split "`t", 2)[1] }
+    foreach ($l in $links) {
+        if ($declared -notcontains $l) {
+            Warn "tracked gitlink with no .gitmodules entry: $l -- this breaks 'git submodule status'. Untrack it with: git rm --cached '$l'"
+        }
+    }
 }
 
 # ------------------------------------------------------------------ venvs ----
@@ -213,9 +254,24 @@ if (-not $SkipVenv) {
     $uv = (Get-Command uv -ErrorAction SilentlyContinue)
     if (-not $uv) {
         Warn 'uv is not on PATH. Install it (https://docs.astral.sh/uv/) then re-run, or create the venv by hand.'
-    } elseif ($PSCmdlet.ShouldProcess('tools/PcTools', 'uv sync')) {
-        uv sync --project tools/PcTools
-        if ($LASTEXITCODE -ne 0) { Warn 'uv sync failed for tools/PcTools.' } else { Ok 'tools/PcTools synced' }
+    } else {
+        if ($PSCmdlet.ShouldProcess('tools/PcTools', 'uv sync')) {
+            uv sync --project tools/PcTools
+            if ($LASTEXITCODE -ne 0) { Warn 'uv sync failed for tools/PcTools.' }
+        }
+
+        # Same principle: prove the package imports rather than trusting the
+        # sync's exit code. This is also what catches a stale editable-install
+        # .pth left behind by a directory move.
+        $venvPy = Join-Path $RepoRoot 'tools\PcTools\.venv\Scripts\python.exe'
+        if (-not (Test-Path -LiteralPath $venvPy)) {
+            Warn 'tools/PcTools/.venv/Scripts/python.exe not found after sync.'
+        } else {
+            & $venvPy -c 'import kilnctrl' *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Warn "tools/PcTools synced but 'import kilnctrl' fails. A stale editable-install path is the usual cause; 'uv sync --reinstall --project tools/PcTools' fixes it."
+            } else { Ok 'tools/PcTools synced, import kilnctrl works' }
+        }
     }
 }
 
