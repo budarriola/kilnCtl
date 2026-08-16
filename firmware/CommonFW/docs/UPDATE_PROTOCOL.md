@@ -139,16 +139,40 @@ proposed, and two copies of it do not fit in the 1500 KB app region at all.**
 Dual-slot OTA is therefore impossible in the 2 MB the firmware is currently
 configured for. Measure the image before sizing anything.
 
-#### The 8 MB nobody is using
+#### The flash nobody is using — and nobody has written down correctly
 
-The fitted module is an **ESP32-S3-DevKitC-1U-N8R8**, which has **8 MB of
-flash** (BOM, `mainBoard` U4). The firmware is built with
-`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`, so six of those eight megabytes are
-unaddressable and have been sitting unused. That is also why nobody noticed:
-nothing could reach past 2 MB to find it empty.
+The firmware is built with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB`. Whatever the module
+actually has beyond 2 MB is unaddressable and has been sitting unused, which is
+also why nobody noticed it was there: nothing could reach past 2 MB to look.
 
-Switching to 8 MB makes the whole problem go away, and — better — it means
-**nothing that exists today has to move**:
+**How much is beyond 2 MB is currently an open question, because this repository
+records three different modules:**
+
+| Source | Part | Flash | PSRAM |
+|---|---|---|---|
+| `hardware/sourcing/master_buy_list.md`, `buy_list_aggregate.md` | `ESP32-S3-DevKitC-1U-N8R8` | 8 MB | 8 MB |
+| 3D model in the footprint library | `ESP32-S3-DEVKITC-1-N8R2` | 8 MB | 2 MB |
+| The board actually in use (Lonely Binary LB-ESP32S3-X1, 2026-08-16) | **`N16R8`** | **16 MB** | **8 MB** |
+
+The supplier offers N8R2 and N16R8 only — **`N8R8` is not one of their
+variants**, so the buy list is describing a part that was never bought from
+there. An earlier revision of this document asserted 8 MB on the strength of
+that BOM line; treat it as unverified.
+
+- [ ] **Settle it with `esptool flash_id` on the board**, and update the BOM and
+      the 3D model reference to match. Three records disagreeing is worse than
+      one record being wrong, because each one looks authoritative on its own.
+
+**The layout below does not depend on the answer.** It needs 8 MB; at 16 MB
+everything simply has more room after it. Sizing it for 8 MB and discovering
+16 MB costs nothing, whereas sizing it for 16 MB and discovering 8 MB is a
+bricked table. The conservative number is the right one to build against.
+
+Switching away from 2 MB makes the whole problem go away, and — better — it
+means **nothing that exists today has to move**:
+
+Offsets assume **at least 8 MB**. On a 16 MB part every partition below is
+identical and the spare region at the end simply grows.
 
 ```
 # unchanged, live data, do not touch
@@ -164,7 +188,8 @@ otadata       data, ota,     0x200000, 0x002000     8K
 ota_0         app,  ota_0,   0x210000, 0x200000  2048K   <- 1.75x the current image
 ota_1         app,  ota_1,   0x410000, 0x200000  2048K
 pico_img      data, fat,     0x610000, 0x080000   512K   <- staging, see below
-# spare                      0x690000..0x800000 ~1.4M
+# spare                      0x690000..0x800000 ~1.4M   (8 MB part)
+#                            0x690000..0x1000000 ~9.4M  (16 MB part)
 ```
 
 Why this shape rather than re-carving the existing app region:
@@ -181,12 +206,12 @@ Why this shape rather than re-carving the existing app region:
   sections 6A and 8 of `KilnFW/TODO.md` still intend to add. The previous 704 KB
   proposal had already been overtaken before it was written down.
 
-- [ ] **Confirm the physical flash with `esptool flash_id` before trusting the
-      BOM.** A board built with a different module variant will brick on a table
-      that addresses memory it does not have.
-- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE_8MB`, and **reflash the bootloader** — the
-      flash size lives in the bootloader header, so a new table alone is not
-      enough.
+- [ ] **Confirm the physical flash with `esptool flash_id` before trusting any
+      of the three records above.** A table that addresses memory the chip does
+      not have will not boot.
+- [ ] Set `CONFIG_ESPTOOLPY_FLASHSIZE` to the **confirmed** size, and **reflash
+      the bootloader** — the flash size lives in the bootloader header, so a new
+      table alone is not enough.
 - [ ] Confirm the offsets against the real table before flashing. Getting this
       wrong erases `profiles_nvs`.
 - [ ] Archive the pre-change table, and read out all four NVS partitions with

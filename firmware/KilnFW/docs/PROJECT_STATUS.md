@@ -70,11 +70,17 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   the ESP-IDF python directly also works but needs `ESP_IDF_VERSION`,
   `IDF_PATH`, `IDF_TOOLS_PATH` and `IDF_PYTHON_ENV_PATH` all set, plus cmake
   and ninja on `PATH` — the profile script is the shorter route.
-- **Flash**: the fitted module is an **ESP32-S3-DevKitC-1U-N8R8 — 8 MB flash**
-  (BOM, `mainBoard` U4), but the firmware is configured for **2 MB**
-  (`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`). Six of the eight megabytes are unused.
-  This is not a problem today and is the deciding constraint for OTA — see
-  `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3.
+- **Flash and PSRAM — unresolved, three records disagree.** The buy lists say
+  `ESP32-S3-DevKitC-1U-N8R8` (8 MB / 8 MB), the footprint library's 3D model says
+  `N8R2` (8 MB / 2 MB), and the board actually in use is a Lonely Binary
+  `N16R8` (16 MB / 8 MB) — a supplier who does not offer an N8R8 at all.
+  **Settle it with `esptool flash_id` and fix the other two records.**
+
+  Regardless of which: the firmware is configured for **2 MB**
+  (`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`) and **PSRAM is not enabled at all**
+  (`# CONFIG_SPIRAM is not set`), so at minimum 6 MB of flash and 2 MB of PSRAM
+  are sitting unused. Not a problem today; it is the deciding constraint for OTA
+  — see `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3.
 - **Python**: `python -c "import kilnctrl"` succeeds. `selfcheck.py` **fails 16
   of its checks** as of 2026-08-16; they fail identically on the
   pre-reorganisation source, so they are pre-existing and unrelated to the move.

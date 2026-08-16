@@ -194,10 +194,12 @@ path. Two facts set the shape of this milestone:
 
 - [ ] **Measure the isolated link's real error rate at 115200 first.** Nobody has
       characterised the optocouplers; retry cost is 200 ms × up to 10
-- [ ] **Confirm 8 MB flash, then switch to it.** The module is an N8R8 but the
-      build says 2 MB, and the real image is 1167 KB — two copies do not fit in
-      the 1500 KB app region. At 8 MB the OTA partitions go above `0x200000`
-      where nothing exists, so no live data moves. Bootloader must be reflashed
+- [ ] **Establish the real flash size, then switch to it.** Three records in the
+      repo disagree — buy lists say N8R8 (8 MB), the 3D model says N8R2 (8 MB),
+      the board in hand is an N16R8 (16 MB) — while the build says 2 MB. The real
+      image is 1167 KB, so two copies do not fit in the 1500 KB app region. The
+      layout is sized for 8 MB and puts everything above `0x200000` where nothing
+      exists, so no live data moves. Bootloader must be reflashed
 - [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, and the app confirms itself only
       after NVS, safety link and web server are up
 - [ ] Pico flash layout and metadata format frozen before the first board is

@@ -2989,15 +2989,24 @@ depend on it, so it is tracked here as a gate. Design:
 claim. Two copies of that do not fit in the 1500 KB app region, so dual-slot OTA
 is impossible in the 2 MB the firmware is configured for.
 
-The fitted module is an **ESP32-S3-DevKitC-1U-N8R8 with 8 MB of flash**, built
-with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB`. Six megabytes are unaddressable and
-unused. Switching to 8 MB means the OTA partitions go **above `0x200000`, where
-nothing exists**, so no live data moves at all.
+The module is built with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB`, and everything past
+2 MB is unaddressable and unused. **How much is past it is unresolved**: the buy
+lists say `N8R8` (8 MB), the 3D model says `N8R2` (8 MB), and the board actually
+in use is a Lonely Binary `N16R8` (16 MB). The supplier does not even offer an
+N8R8. Either way the OTA partitions go **above `0x200000`, where nothing
+exists**, so no live data moves — the layout is sized for 8 MB and simply has
+more room after it on a 16 MB part.
 
-- [ ] **`esptool flash_id` first.** The plan rests on the BOM being right about
-      the module variant; a table addressing memory the chip lacks bricks it
-- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE_8MB`, **and reflash the bootloader** — the
-      flash size is in its header, so a new table alone does nothing
+- [ ] **`esptool flash_id` first**, and then correct the buy lists and the 3D
+      model reference. Three records disagreeing is worse than one being wrong,
+      because each looks authoritative alone
+- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE` set to the **confirmed** size, **and reflash
+      the bootloader** — the flash size is in its header, so a new table alone
+      does nothing
+- [ ] **PSRAM is disabled entirely** (`# CONFIG_SPIRAM is not set`), on a module
+      with either 2 MB or 8 MB of it. Not an OTA matter, but section 6A and the
+      web UI are the parts that would benefit, and it is worth a decision rather
+      than an oversight. Octal PSRAM has its own errata — enable deliberately
 - [ ] `otadata` at `0x200000`, `ota_0`/`ota_1` 2 MB each above it, optional
       512 K `pico_img` staging partition. Full layout in
       [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md) §3
