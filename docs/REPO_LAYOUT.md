@@ -385,9 +385,14 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
       projects have their `.kicad_pro`/`.kicad_pcb`/`.kicad_sch`/`.kicad_prl`;
       every hierarchical sheet reference, library-table URI, project-local
       footprint and 3D model path resolves to a file that exists
-- [ ] All four KiCad projects **opened in KiCad** with no missing symbols or
-      footprints. The audit above checks every reference statically; only
-      opening them exercises KiCad's own global library table
+- [x] **`mainBoard`, `ThermocoupleBoard` and `SaftyThermocoupleBoard` opened in
+      KiCad (2026-08-16) with no changes made and no missing libraries.** This is
+      the check that catches B1, and `mainBoard` is the project B1 applied to —
+      `${KIPRJMOD}/../lib` resolves. KiCad rewrote the three `.kicad_pro` files
+      byte-identically (mtime only) and took one backup, which `.gitignore`
+      caught. Nothing new needed ignoring
+- [ ] `UnitTestFixture` opened. Not yet done, and the lowest-risk of the four —
+      it has no project library tables of its own and relies on KiCad's globals
 - [ ] **Fresh `git clone` into a scratch dir, `mainBoard` opens there**
 - [ ] `idf.py build` succeeds. The move invalidates `firmware/KilnFW/build/`,
       whose CMake cache holds the old absolute path — expect to `idf.py fullclean` first

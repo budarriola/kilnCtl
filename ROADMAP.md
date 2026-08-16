@@ -165,8 +165,9 @@ documents are correct from the start rather than being rewritten later.
 - [x] B4 — the stale `mainBoard/kiln.net` deleted
 - [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — blocked at the time by
       running MCP server processes holding the directories open
-- [ ] **Open all four KiCad projects and confirm no missing symbols or
-      footprints.** B1 fails silently until someone does this
+- [x] **Three of four KiCad projects opened, no missing libraries (2026-08-16).**
+      Includes `mainBoard`, which is the one B1 applied to, so the relative
+      library path is confirmed working. `UnitTestFixture` still unopened
 - [ ] Fresh `git clone` into a scratch directory opens `mainBoard` — the only
       test that catches the absolute-path breakage for someone who is not this
       user on this machine
