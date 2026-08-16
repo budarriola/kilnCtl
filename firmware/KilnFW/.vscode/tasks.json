@@ -2,26 +2,6 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "KilnCtrl: Open GUI",
-      "type": "shell",
-      "command": "${workspaceFolder}\\pc_tools\\.venv\\Scripts\\kilnctrl-gui.exe",
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated"
-      },
-      "problemMatcher": []
-    },
-    {
-      "label": "KilnCtrl: Run MCP Server",
-      "type": "shell",
-      "command": "${workspaceFolder}\\pc_tools\\.venv\\Scripts\\kilnctrl-mcp-server.exe",
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated"
-      },
-      "problemMatcher": []
-    },
-    {
       "label": "openocd",
       "type": "shell",
       "command": "C:\\Espressif\\tools\\openocd-esp32\\v0.12.0-esp32-20260424\\openocd-esp32\\bin\\openocd.exe",

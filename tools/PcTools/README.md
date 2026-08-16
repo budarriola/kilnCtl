@@ -1,4 +1,4 @@
-# pc_tools / kilnctrl
+# PcTools / kilnctrl
 
 PC-side counterpart to the kilnCtl main board's hardened UART protocol,
 implemented in `App/drivers/espInterfaces/uart_protocol.{c,h}` and addressed by
@@ -21,15 +21,24 @@ scores JTAG-looking ports negatively for exactly this reason.
 
 ## Usage
 
+Commands are written to run **from the repository root**. This package lives at
+`tools/PcTools/`; it moved out of `KilnFW/pc_tools/` because it serves both
+processors, so it is no longer inside either firmware.
+
 ```powershell
 # Tkinter manual-control GUI
-uv run --project pc_tools kilnctrl-gui
+uv run --project tools/PcTools kilnctrl-gui
 
 # MCP server (stdio transport)
-uv run --project pc_tools kilnctrl-mcp-server
+uv run --project tools/PcTools kilnctrl-mcp-server
 ```
 
-Both are also VS Code tasks ("KilnCtrl: Open GUI" / "...: Run MCP Server").
+Both are also VS Code tasks — **"PcTools: Open GUI"** and
+**"PcTools: Run MCP Server"**, defined in `kilnCtl.code-workspace` rather than in
+a firmware's `tasks.json`, since neither belongs to one firmware.
+
+The package still imports as `kilnctrl`: that is the *system's* name, not the
+main board's, so the directory moved and the package did not.
 
 ## Layout
 
@@ -37,7 +46,7 @@ Both are also VS Code tasks ("KilnCtrl: Open GUI" / "...: Run MCP Server").
 | --- | --- |
 | `protocol.py` | SLIP framing, CRC-16/CCITT-FALSE, `Frame`, enums, task ids, every subcommand constant |
 | `serial_link.py` | `UartLink` (reader thread, retry/ACK logic), port discovery |
-| `link_hub.py` | Lets several pc_tools processes share one physical port |
+| `link_hub.py` | Lets several `kilnctrl` processes share one physical port |
 | `devices.py` | Payload builders + response parsers for all eleven tasks |
 | `thermo.py` | `ThermoClient`: owns task 1, MAX31856 queries + the auto-report push |
 | `io_expander.py` | `IoClient`: owns task 2, SX1509 queries + the auto-report push |
@@ -320,9 +329,9 @@ capture has to be interleaved with UART traffic from a single process (arm the
 analyzer, drive the DUT, export the decode).
 
 ```powershell
-uv run --project pc_tools python -m kilnctrl.logic_capture devices
-uv run --project pc_tools python -m kilnctrl.logic_capture rates --channels 0,1
-uv run --project pc_tools python -m kilnctrl.logic_capture capture --channels 0,1 --seconds 2 --out logs/saleae
+uv run --project tools/PcTools python -m kilnctrl.logic_capture devices
+uv run --project tools/PcTools python -m kilnctrl.logic_capture rates --channels 0,1
+uv run --project tools/PcTools python -m kilnctrl.logic_capture capture --channels 0,1 --seconds 2 --out logs/saleae
 ```
 
 `SALEAE_AUTOMATION_HOST` / `SALEAE_AUTOMATION_PORT` override the endpoint.
@@ -340,7 +349,7 @@ Two device quirks the API doesn't surface as queries, both handled in
 ## Session logs
 
 Both the GUI and the MCP server write one log file per session to
-`pc_tools/logs/session_*.log`. A new file starts when a connect succeeds or
+`tools/PcTools/logs/session_*.log`. A new file starts when a connect succeeds or
 when a device reboot is detected — both semantic triggers, hence a
 hand-swapped `FileHandler` rather than one of `logging`'s size/time rotating
 handlers. **Logs → Keep Logs...** sets how many files to retain (persisted in
@@ -360,7 +369,7 @@ succeeded. Device-level failures surface only as firmware log lines — the GUI'
 ## Self-check
 
 ```powershell
-uv run --project pc_tools python pc_tools/selfcheck.py
+uv run --project tools/PcTools python tools/PcTools/selfcheck.py
 ```
 
 Runs framing/CRC/payload-layout checks for all seven tasks and cross-wires two

@@ -214,8 +214,10 @@ path. Two facts set the shape of this milestone:
 Claude and the editor are opened at `kilnCtl/` from 2026-08-16 onward. This is
 now a load-bearing assumption rather than a preference:
 
-- The two `.vscode/settings.json` files use `${workspaceFolder}/firmware/…`,
-  which is correct **only** with the root as the workspace.
+- **Open `kilnCtl.code-workspace`, not the folder.** The ESP-IDF extension needs
+  a `CMakeLists.txt` in the workspace folder it is pointed at, and the repository
+  root does not have one. The multi-root workspace gives it `firmware/KilnFW`
+  while keeping the root open alongside.
 - `.mcp.json` uses root-relative paths, including `-C firmware/KilnFW` for the
   ESP-IDF server.
 - `idf.py` needs `-C firmware/KilnFW`; `uv` needs `--project tools/PcTools`.

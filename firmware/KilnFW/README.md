@@ -22,24 +22,35 @@ their wire `task_id`s are reused, which is why the protocol version is now
 # ESP-IDF v6.0.2 environment (this machine's export.ps1 is broken; use this)
 & 'C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1'
 
-idf.py set-target esp32s3
-idf.py build
+idf.py -C firmware/KilnFW set-target esp32s3
+idf.py -C firmware/KilnFW build
 
 # Flash over JTAG with OpenOCD, then monitor
-idf.py monitor
+idf.py -C firmware/KilnFW monitor
 
-# PC control GUI
-uv run --project pc_tools kilnctrl-gui
+# PC control GUI -- PcTools serves both processors and lives outside this firmware
+uv run --project tools/PcTools kilnctrl-gui
 ```
 
+Every command above runs **from the repository root**, which is where the editor
+and the shell are opened. That is why they carry a path argument: this firmware
+is `firmware/KilnFW/`, not the working directory. If you would rather not type
+`-C`, `cd firmware/KilnFW` first and drop it — but do not assume a bare
+`idf.py build` picks the right project. From the root it fails outright; from the
+wrong firmware directory it quietly builds the other one.
+
+In VS Code, open **`kilnCtl.code-workspace`** rather than the folder. The ESP-IDF
+extension treats a workspace folder as a single project and needs a
+`CMakeLists.txt` in it, which the repository root does not have.
+
 Hardware configuration (every pin, bus, clock and timeout) lives under
-`idf.py menuconfig` → **KilnCtrl Hardware Configuration**; `App/drivers/settings.h`
+`idf.py -C firmware/KilnFW menuconfig` → **KilnCtrl Hardware Configuration**; `App/drivers/settings.h`
 translates those into the plain names the drivers use.
 
 ### Building against the simulated plant
 
 For developing the control stack without a kiln (or without a thermocouple
-daughterboard), `idf.py menuconfig` → **KilnCtrl Hardware Configuration** →
+daughterboard), `idf.py -C firmware/KilnFW menuconfig` → **KilnCtrl Hardware Configuration** →
 **Simulated plant (development only)** → **KILNCTL_SIM_PLANT** (default off)
 compiles the host tests' thermal model into the firmware. The profile
 executor, autotune engine, and dashboard then read simulated temperatures

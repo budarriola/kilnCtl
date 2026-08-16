@@ -14,7 +14,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=${workspaceFolder}/firmware/KilnFW/build"
+    "--compile-commands-dir=${workspaceFolder}/build"
   ],
   "idf.flashType": "JTAG",
   "idf.monitorPort": "COM7",
@@ -22,20 +22,20 @@
     "defaultColor": "#ffffff",
     "commands": [
       {
-        "name": "$(plug) UnitTestGui",
+        "name": "$(plug) PcTools GUI",
         "color": "#42b883",
         "singleInstance": true,
         "useVsCodeApi": true,
         "command": "workbench.action.tasks.runTask",
-        "args": "UART Control: Open GUI"
+        "args": "PcTools: Open GUI"
       },
       {
-        "name": "$(plug) KilnFW GUI",
+        "name": "$(beaker) PcTools Selfcheck",
         "color": "#42b883",
         "singleInstance": true,
         "useVsCodeApi": true,
         "command": "workbench.action.tasks.runTask",
-        "args": "KilnCtrl: Open GUI"
+        "args": "PcTools: Selfcheck"
       }
     ]
   }

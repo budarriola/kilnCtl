@@ -1,0 +1,126 @@
+{
+  // Multi-root workspace. Open this file (File -> Open Workspace from File),
+  // not the kilnCtl folder, so that:
+  //
+  //   - the ESP-IDF extension can find a CMakeLists.txt. It treats a workspace
+  //     folder as one project; with the repo root open as a single folder there
+  //     is no project at the top level and the extension has nothing to attach
+  //     to.
+  //   - each firmware keeps its own .vscode/settings.json, and ${workspaceFolder}
+  //     inside those files means that firmware's directory, which is what they
+  //     were written to assume.
+  //
+  // Cross-folder references use ${workspaceFolder:Name} with the names below.
+  // Settings that belong to the whole repo live here rather than in a root
+  // .vscode/settings.json, because /.vscode/ is gitignored and this file is not.
+  "folders": [
+    {
+      "name": "kilnCtl",
+      "path": ".",
+      // The other entries below surface these directories with their own
+      // settings, so hide them here rather than showing every file twice.
+      "//": "Docs, plans and anything not owned by a sub-project."
+    },
+    { "name": "KilnFW", "path": "firmware/KilnFW" },
+    { "name": "SaftyFW", "path": "firmware/SaftyFW" },
+    { "name": "CommonFW", "path": "firmware/CommonFW" },
+    { "name": "UnitTestFw", "path": "firmware/UnitTestFw/UnitTest" },
+    { "name": "PcTools", "path": "tools/PcTools" },
+    { "name": "hardware", "path": "hardware" }
+  ],
+
+  "settings": {
+    // Shown only in the "kilnCtl" root folder, so the sub-projects listed above
+    // are not duplicated in the explorer. Each still has its own entry.
+    "files.exclude": {
+      "firmware/KilnFW": true,
+      "firmware/SaftyFW": true,
+      "firmware/CommonFW": true,
+      "firmware/UnitTestFw": true,
+      "tools/PcTools": true,
+      "hardware": true
+    },
+    "search.exclude": {
+      "**/.venv": true,
+      "**/build": true,
+      "**/managed_components": true,
+      "**/__pycache__": true,
+      "**/*-backups": true,
+      "**/parts/SamacSys_Parts.3dshapes": true
+    },
+    "files.associations": {
+      "*.kicad_sch": "lisp",
+      "*.kicad_pcb": "lisp",
+      "*.kicad_mod": "lisp",
+      "*.kicad_sym": "lisp",
+      "fp-lib-table": "lisp",
+      "sym-lib-table": "lisp"
+    },
+    // KiCad round-trips its own files byte for byte. Nothing here may reformat
+    // them or strip trailing whitespace - see docs/REPO_LAYOUT.md on the CRLF
+    // trap that nearly rewrote five schematics during the reorganisation.
+    "[lisp]": {
+      "files.trimTrailingWhitespace": false,
+      "files.insertFinalNewline": false,
+      "editor.formatOnSave": false
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder:PcTools}/.venv/Scripts/python.exe"
+  },
+
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        // Lives here rather than in KilnFW/.vscode/tasks.json because PcTools
+        // serves both processors and is no longer inside that firmware.
+        "label": "PcTools: Open GUI",
+        "type": "shell",
+        "command": "${workspaceFolder:PcTools}/.venv/Scripts/kilnctrl-gui.exe",
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        "label": "PcTools: Run MCP Server",
+        "type": "shell",
+        "command": "${workspaceFolder:PcTools}/.venv/Scripts/kilnctrl-mcp-server.exe",
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        "label": "PcTools: Selfcheck",
+        "type": "shell",
+        "command": "${workspaceFolder:PcTools}/.venv/Scripts/python.exe",
+        "args": ["selfcheck.py"],
+        "options": { "cwd": "${workspaceFolder:PcTools}" },
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        "label": "KilnFW: Build",
+        "type": "shell",
+        "command": "C:\\Users\\budar\\.espressif\\python_env\\idf6.0_py3.14_env\\Scripts\\python.exe",
+        "args": ["C:\\esp\\v6.0.2\\esp-idf\\tools\\idf.py", "-C", "${workspaceFolder:KilnFW}", "build"],
+        "options": {
+          "env": {
+            "IDF_PATH": "C:\\esp\\v6.0.2\\esp-idf",
+            "IDF_TOOLS_PATH": "C:\\Users\\budar\\.espressif",
+            "IDF_PYTHON_ENV_PATH": "C:\\Users\\budar\\.espressif\\python_env\\idf6.0_py3.14_env"
+          }
+        },
+        "group": "build",
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": ["$gcc"]
+      }
+    ]
+  },
+
+  "extensions": {
+    "recommendations": [
+      "espressif.esp-idf-extension",
+      "raspberry-pi.raspberry-pi-pico",
+      "marus25.cortex-debug",
+      "llvm-vs-code-extensions.vscode-clangd",
+      "ms-python.python"
+    ]
+  }
+}

@@ -133,7 +133,41 @@ and it changes what is left to do.
 - `CLAUDE.md` at the root is loaded automatically, and its paths are now written
   relative to the root.
 
-### What it breaks, and nobody has fixed yet
+### Fixed with a multi-root workspace file (2026-08-16)
+
+`kilnCtl.code-workspace` at the root. **Open that file, not the folder.**
+
+The deciding argument was not tidiness. The ESP-IDF extension treats a workspace
+folder as one project and looks for a `CMakeLists.txt` in it; with the repository
+root open as a single folder there is no project at the top level for it to
+attach to. A multi-root workspace gives it `firmware/KilnFW` as a folder in its
+own right while the root stays open alongside.
+
+This has a consequence that is easy to get backwards: **in a multi-root
+workspace, `${workspaceFolder}` inside `firmware/KilnFW/.vscode/settings.json`
+means `firmware/KilnFW`, not the repository root.** The clangd
+`--compile-commands-dir` arguments were changed to `${workspaceFolder}/firmware/…`
+during the move, which was right for a single root and wrong here; they are back
+to `${workspaceFolder}/build`. Cross-folder references use the
+`${workspaceFolder:Name}` form instead.
+
+Settings that belong to the whole repository live **in the workspace file**, not
+in a root `.vscode/settings.json`, because `/.vscode/` is gitignored and the
+workspace file is not. That is also why the GUI, MCP-server and selfcheck tasks
+moved there: they invoke `tools/PcTools`, which is not inside any firmware.
+
+Two stale things surfaced while doing this:
+
+- `firmware/KilnFW/.vscode/tasks.json` still launched
+  `${workspaceFolder}\pc_tools\.venv\Scripts\kilnctrl-gui.exe` — broken by the
+  move and missed in the path-fix commit. Those two tasks are now in the
+  workspace file, pointing at `${workspaceFolder:PcTools}`.
+- The existing root `.vscode/settings.json` (untracked, gitignored) has an
+  action button running `${workspaceFolder}\python\start_kicad_mcp_http_server.ps1`.
+  There is no `python/` directory and has not been for some time. It is
+  superseded by the workspace file and can be deleted.
+
+### What was breaking before that
 
 **VS Code reads `<root>/.vscode/`, not the nested ones.** `firmware/KilnFW/.vscode/`
 and `firmware/UnitTestFw/UnitTest/.vscode/` hold clangd arguments, launch
@@ -141,22 +175,16 @@ configurations and tasks that will simply not apply any more. They are not
 broken files — they are ignored ones, which is worse, because they still look
 maintained.
 
-- [ ] Decide between a root `.vscode/` and a committed
-      `kilnCtl.code-workspace` multi-root file. **The workspace file is the
-      better fit**: it can name `firmware/KilnFW`, `firmware/SaftyFW` and
-      `tools/PcTools` as separate folders, each keeping its own settings, which
-      is exactly the structure that already exists.
-- [ ] Note the `.gitignore` interaction: `/.vscode/` is ignored, so a root
-      `.vscode/settings.json` would not be committed. A `.code-workspace` file
-      at the root is not ignored and will be.
-- [ ] Merge or re-point the clangd `--compile-commands-dir` arguments, whichever
-      option is chosen.
-- [ ] Tell the ESP-IDF extension where the project is. The MCP server already
-      gets `-C firmware/KilnFW`; the VS Code extension needs the equivalent.
-- [ ] Document the invocations that now need a path argument:
-      `idf.py -C firmware/KilnFW build`, `uv run --project tools/PcTools …`.
-      `firmware/KilnFW/README.md` and `tools/PcTools/README.md` both still
-      assume their own directory is the working directory.
+- [x] `kilnCtl.code-workspace` written and committed; `/.vscode/` stays ignored
+- [x] clangd `--compile-commands-dir` back to `${workspaceFolder}/build` in both
+      firmware settings files — correct for folder scope in a multi-root workspace
+- [x] ESP-IDF extension gets `firmware/KilnFW` as a workspace folder, which is
+      what it needs; the MCP server already had `-C firmware/KilnFW`
+- [x] `idf.py -C firmware/KilnFW …` and `uv run --project tools/PcTools …`
+      documented in both READMEs, with the reason
+- [x] The two `pc_tools` tasks in `KilnFW/.vscode/tasks.json` fixed and moved
+- [ ] Delete the stale root `.vscode/settings.json` action button (local,
+      untracked — the workspace file supersedes it)
 
 ### What it does not change
 

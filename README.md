@@ -16,6 +16,18 @@ holds the milestone order and the cross-processor dependencies, and links to the
 plan that owns each area. If you do not already know which document covers what
 you are about to do, start there.
 
+## Opening this repository
+
+In VS Code, open **`kilnCtl.code-workspace`** rather than the `kilnCtl` folder.
+The ESP-IDF extension treats a workspace folder as one project and needs a
+`CMakeLists.txt` in it; the repository root does not have one. The workspace file
+lists each firmware, `tools/PcTools` and `hardware` as folders in their own right,
+and carries the shared tasks.
+
+Shell commands in this repository are written to run from the root, so they carry
+a path argument: `idf.py -C firmware/KilnFW build`,
+`uv run --project tools/PcTools kilnctrl-gui`.
+
 ## Layout
 
 ```
