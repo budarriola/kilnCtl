@@ -77,7 +77,9 @@ or crashed safety processor means a kiln that will not fire
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Toolchain, one-task-per-interface layering, priorities and core affinity, boot order, **RP2040 flash/watchdog/ADC gotchas**, state machine and trip codes |
 | [`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md) | Every tunable in one table with defaults, and whether getting it wrong is dangerous, a nuisance, or cosmetic |
 | [`docs/GUARD_TEST_MATRIX.md`](docs/GUARD_TEST_MATRIX.md) | How each guard is provoked on host and hardware — **nuisance-rejection tests first** |
-| [`TODO.md`](TODO.md) | Sequenced build plan, phases 0–8, including the `KilnFW`-side blockers |
+| [`docs/BOOTLOADER.md`](docs/BOOTLOADER.md) | **The RP2040 has no UART bootloader in mask ROM**, so field updates need one written: flash layout, metadata, recovery mode, and the rollback bar an image has to clear |
+| [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md) | Updating **both** processors: the interlocks, the one-password authentication, ESP OTA partitioning, and the frames that carry an image over the isolated link |
+| [`TODO.md`](TODO.md) | Sequenced build plan, phases 0–10, including the `KilnFW`-side blockers |
 
 ## Three things to know before touching this
 

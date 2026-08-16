@@ -116,6 +116,60 @@ hardware/firmware interface belong there, read before touching either side.
 
 ---
 
+## Working from the repository root
+
+**From 2026-08-16 the editor and Claude are opened at `kilnCtl/`, not at an
+individual firmware folder.** This is now an assumption the tooling depends on,
+and it changes what is left to do.
+
+### What it makes correct
+
+- The two `.vscode/settings.json` files were changed to
+  `${workspaceFolder}/firmware/…` during the move. `${workspaceFolder}` is the
+  *opened* folder, so those are right with the root open and wrong if someone
+  opens `firmware/KilnFW` directly. That is now the supported way round.
+- `.mcp.json` uses root-relative paths throughout, including
+  `-C firmware/KilnFW` for the ESP-IDF server.
+- `CLAUDE.md` at the root is loaded automatically, and its paths are now written
+  relative to the root.
+
+### What it breaks, and nobody has fixed yet
+
+**VS Code reads `<root>/.vscode/`, not the nested ones.** `firmware/KilnFW/.vscode/`
+and `firmware/UnitTestFw/UnitTest/.vscode/` hold clangd arguments, launch
+configurations and tasks that will simply not apply any more. They are not
+broken files — they are ignored ones, which is worse, because they still look
+maintained.
+
+- [ ] Decide between a root `.vscode/` and a committed
+      `kilnCtl.code-workspace` multi-root file. **The workspace file is the
+      better fit**: it can name `firmware/KilnFW`, `firmware/SaftyFW` and
+      `tools/PcTools` as separate folders, each keeping its own settings, which
+      is exactly the structure that already exists.
+- [ ] Note the `.gitignore` interaction: `/.vscode/` is ignored, so a root
+      `.vscode/settings.json` would not be committed. A `.code-workspace` file
+      at the root is not ignored and will be.
+- [ ] Merge or re-point the clangd `--compile-commands-dir` arguments, whichever
+      option is chosen.
+- [ ] Tell the ESP-IDF extension where the project is. The MCP server already
+      gets `-C firmware/KilnFW`; the VS Code extension needs the equivalent.
+- [ ] Document the invocations that now need a path argument:
+      `idf.py -C firmware/KilnFW build`, `uv run --project tools/PcTools …`.
+      `firmware/KilnFW/README.md` and `tools/PcTools/README.md` both still
+      assume their own directory is the working directory.
+
+### What it does not change
+
+Anything that derives paths from `__file__` or `${KIPRJMOD}` — the `PcTools`
+modules and the KiCad library tables — is independent of the working directory
+by construction. That was worth doing for its own sake and it pays off here.
+
+The outstanding `mykicadMcp/` and `pdfMcp/` move is unaffected and still worth
+finishing: `.mcp.json` refers to both by root-relative path, so the move is a
+two-line edit there once the directories can be renamed.
+
+---
+
 ## Blockers — fix these as part of the move, not after
 
 ### B1. Absolute paths in two KiCad library tables · **silent breakage** — FIXED
@@ -312,14 +366,28 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
 - [x] 3D model paths in 17 `.kicad_mod` files repointed
 - [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — **blocked**, see the top of this file
 
+**Working from the repository root** (see the section above)
+- [ ] `kilnCtl.code-workspace` written, or a root `.vscode/` chosen instead
+- [ ] Nested `.vscode/` settings merged or re-pointed — they are currently ignored, not broken
+- [ ] ESP-IDF extension told the project is `firmware/KilnFW`
+- [ ] `idf.py -C …` / `uv run --project …` documented in both READMEs
+
 **Commit 3 — cleanup**
 - [ ] B4: `hardware/mainBoard/kiln.net` regenerated or deleted
 - [ ] Root `README.md` written
 - [ ] `docs/SYSTEM_ARCHITECTURE.md` and `docs/SAFETY_CASE.md` stubbed
 
 **Verification**
-- [ ] All four KiCad projects open with no missing symbols or footprints —
-      **not yet done, and this is the one that catches B1 silently**
+- [x] **Every KiCad file audited against its pre-move blob (2026-08-16).** All
+      87 are byte-identical except the 19 deliberately edited (2 library tables,
+      17 footprint 3D model paths), and those differ by exactly one line each —
+      38 changed lines total, every one a `uri` or a `model` path. All four
+      projects have their `.kicad_pro`/`.kicad_pcb`/`.kicad_sch`/`.kicad_prl`;
+      every hierarchical sheet reference, library-table URI, project-local
+      footprint and 3D model path resolves to a file that exists
+- [ ] All four KiCad projects **opened in KiCad** with no missing symbols or
+      footprints. The audit above checks every reference statically; only
+      opening them exercises KiCad's own global library table
 - [ ] **Fresh `git clone` into a scratch dir, `mainBoard` opens there**
 - [ ] `idf.py build` succeeds. The move invalidates `firmware/KilnFW/build/`,
       whose CMake cache holds the old absolute path — expect to `idf.py fullclean` first

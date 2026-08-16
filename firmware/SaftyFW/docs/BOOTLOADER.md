@@ -1,0 +1,237 @@
+# RP2040 Bootloader — field updates over the isolated link
+
+> **Status:** planning, nothing built · **Last reviewed:** 2026-08-16
+> **Keep this file current.** The flash layout here is a commitment: once a
+> bootloader is written to a board over SWD it is not going to be changed in the
+> field, so the offsets and the metadata format have to be right before the
+> first unit is programmed. Edit this file in the same change as any layout
+> decision.
+
+The wire protocol, the interlocks and the authentication live in
+[`../../CommonFW/docs/UPDATE_PROTOCOL.md`](../../CommonFW/docs/UPDATE_PROTOCOL.md).
+This file is the RP2040 half: what runs, where it lives in flash, and how a bad
+image gets undone.
+
+---
+
+## 1. The fact that shapes everything
+
+**The RP2040 mask ROM has no UART bootloader.** Its boot paths are USB
+(PICOBOOT / UF2 mass storage) and executing the second-stage loader from flash.
+There is no vendor-supported way to push an image in over a serial line.
+
+So updating the safety processor over the isolated link means writing a
+bootloader. That is a meaningful amount of new code in the one component whose
+entire design argument is that every line in it can fail with nothing to catch
+it — which is why the layout below spends its complexity budget on exactly one
+property:
+
+> **The bootloader is written once over SWD and never updates itself.**
+
+It is the recovery path. A recovery path that can be overwritten by the thing it
+recovers from is not a recovery path. If the bootloader itself ever needs
+changing, that is a debug-probe operation on a bench, not a field update.
+
+---
+
+## 2. Flash layout
+
+The Pico module has 2 MB of flash, memory-mapped for execute-in-place at
+`0x10000000`.
+
+```
+0x10000000  +--------------------------------+
+            | second stage (boot2)      256 B|  vendor, from the SDK
+0x10000100  +--------------------------------+
+            | bootloader                ~64 K|  written once over SWD, never
+            |                                |  updated in the field
+0x10010000  +--------------------------------+
+            | metadata sector             4 K|  two copies, A/B, CRC'd
+0x10011000  +--------------------------------+
+            | slot A                     ~832K|  application
+0x100E1000  +--------------------------------+
+            | slot B                     ~832K|  application
+0x101B1000  +--------------------------------+
+            | config                      64 K|  runtime configuration
+0x101C1000  +--------------------------------+
+            | reserved                   ~252K|  headroom
+0x10200000  +--------------------------------+
+```
+
+- [ ] **Confirm the module's actual flash size before committing to this.**
+      2 MB is the standard Pico; a Pico clone or a W variant may differ, and the
+      layout is baked in at first programming.
+- [ ] Slot sizes are a guess until there is an image to measure. A FreeRTOS SMP
+      application with a MAX31856 driver, ADC sampling and the link is likely
+      150–250 KB, so 832 KB is generous. Size the slots once, generously, and
+      stop moving them.
+- [ ] Both slots must be erase-block aligned (4 KB sectors, 64 KB blocks).
+- [ ] The config partition stays **outside** both slots, so an update never
+      touches the kiln's safety configuration. A config format change is then a
+      migration problem, not an update problem.
+
+### Metadata
+
+Two copies in the metadata sector, each CRC'd, written alternately so a power
+loss during a metadata write always leaves one valid copy:
+
+| Field | Notes |
+|---|---|
+| `magic`, `format_version` | Refuse anything unrecognised rather than guessing |
+| `active_slot` | A or B |
+| `slot[2].state` | `EMPTY` / `STAGED` / `VALID` / `PENDING_VERIFY` / `BAD` |
+| `slot[2].length`, `slot[2].crc32` | Verified before every boot, not just after an update |
+| `slot[2].version[16]`, `build_commit[20]`, `build_epoch` | Reported over the link |
+| `boot_attempts` | Incremented before jumping, cleared on check-in |
+| `crc32` | Over the whole record |
+
+---
+
+## 3. What the bootloader does
+
+On every reset, in this order:
+
+1. **Drive GPIO6 low.** First statement, before anything else, exactly as the
+   application does. The relay must be open before any other decision is taken —
+   a bootloader that leaves the safety relay in an unknown state for even a few
+   milliseconds of flash-CRC time is not acceptable.
+2. Read and validate metadata. If both copies are bad, enter recovery.
+3. Check `boot_attempts` on the active slot. Above the limit (3), mark the slot
+   `BAD`, switch to the other slot if it is `VALID`, and record why.
+4. CRC the active slot against its recorded length and CRC. **Every boot**, not
+   just the first after an update — this is what catches flash degradation and a
+   partially-erased slot.
+5. Increment `boot_attempts`, write metadata, jump to the application.
+
+If no slot is bootable, enter recovery instead of looping.
+
+### What it must never do
+
+- Never write to its own region.
+- Never touch the config partition.
+- Never enable interrupts it does not need, bring up the ADC, or initialise the
+  thermocouple SPI. It is not a safety processor; it is a loader with the relay
+  pinned low.
+- Never wait indefinitely on the link. Every recovery wait is bounded.
+
+---
+
+## 4. Recovery mode
+
+Entered when no slot is bootable, or on an explicit request latched in a
+watchdog scratch register before a deliberate reboot.
+
+In recovery the bootloader brings up **only** UART1 at the link's baud rate and
+speaks a minimal subset of the update protocol: `UPDATE_BEGIN`, `UPDATE_DATA`,
+`UPDATE_END`, `UPDATE_ABORT`, `UPDATE_STATUS`. It does not implement telemetry,
+context frames or anything else.
+
+- GPIO6 stays low the entire time.
+- It emits a distinctive `UPDATE_STATUS` on a slow timer so the ESP can tell
+  "sitting in recovery" from "dead", and the GUI can say so.
+- There is no timeout out of recovery. There is nothing safe to time out *into*.
+
+This is what makes the whole scheme defensible: a failed update lands in a state
+that can be updated again over the same link, without a probe.
+
+---
+
+## 5. Rollback: the application must earn its slot
+
+A new image boots with its slot marked `PENDING_VERIFY`. It becomes `VALID` only
+when the application calls the equivalent of "I am actually working" — and, as
+with the ESP, that call must not be at the end of `main()`.
+
+The safety processor's bar for a working image:
+
+- [ ] Configuration loaded and its CRC verified
+- [ ] Thermocouple front end returning a plausible reading
+- [ ] ADC sampling
+- [ ] All tasks checked in with the watchdog at least once
+- [ ] At least one telemetry frame acknowledged by the ESP
+
+An image that boots but cannot read its thermocouple is worse than the old one,
+and it would sail through any check that just proves `main()` ran.
+
+If the application does not confirm within a bounded time, the watchdog resets,
+`boot_attempts` exceeds its limit, and the bootloader falls back to the previous
+slot. The previous slot is never erased until the new one is `VALID`.
+
+### Writing flash while running from flash
+
+The application receives the image and writes it, so the standard RP2040 rules
+apply and they are not optional here:
+
+- The flash write routine and every ISR that can fire during it must be in RAM
+  (`__not_in_flash_func`), or the core will fetch from a flash that is mid-erase.
+- Core 1 must be parked for the duration — `flash_safe_execute()` with the
+  multicore lockout, already required for config writes in
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) §8.
+- **A 64 KB block erase takes on the order of hundreds of milliseconds**, during
+  which both cores are effectively stopped. The watchdog must be fed around it,
+  and the guards are not running. This is a second, independent reason the
+  relay must already be open before an update starts.
+- [ ] Decide whether to erase the whole staging slot up front or block-by-block
+      as data arrives. Up front is simpler and keeps the stalls out of the
+      streaming path; it also means a longer window before the first byte lands.
+
+---
+
+## 6. Optional: image signing
+
+`UPDATE_PROTOCOL.md` §2 explains the gap — the ESP authorises Pico updates, so a
+compromised ESP can flash the safety processor with anything.
+
+The answer, if it is ever judged worth the cost, is a public key in the
+bootloader, which is written once over SWD and never updated. The bootloader
+then refuses any image without a valid signature, and a compromised ESP can only
+deliver images the developer signed.
+
+This is **not** planned for the first version, because it needs a signing key
+that has to be kept somewhere and a build step that uses it, and getting key
+management wrong produces a confident false sense of security. But it must be
+possible to turn on later without a flash-layout change:
+
+- [ ] Reserve space in the bootloader region for a public key, populated or not
+- [ ] Reserve a signature field in the image header from the start
+- [ ] Reserve a metadata flag for "signature required", defaulting to off
+
+Reserving the space costs nothing now. Not reserving it means the upgrade path
+is a bench visit to every board.
+
+---
+
+## 7. Completion checklist
+
+**Before the first board is programmed** — these are effectively permanent
+- [ ] Module flash size confirmed on the actual hardware
+- [ ] Layout fixed: bootloader, metadata, two slots, config, all block-aligned
+- [ ] Metadata format frozen, with a `format_version` that can refuse the unknown
+- [ ] Signature field and public-key space reserved even though signing is off
+- [ ] DEBUG header fitted — the recovery path underneath the recovery path
+
+**Bootloader**
+- [ ] GPIO6 driven low as the first statement
+- [ ] Metadata double-buffered and CRC'd; survives power loss mid-write
+- [ ] Active slot CRC'd on **every** boot
+- [ ] `boot_attempts` limit falls back to the other slot
+- [ ] Never writes its own region or the config partition
+- [ ] Recovery mode: UART1 only, GPIO6 low, no timeout out
+- [ ] Bootloader-only build flashed over SWD, verified independently of any app
+
+**Application side**
+- [ ] Staged writes to the inactive slot only
+- [ ] Flash routines and interruptible ISRs in RAM; core 1 parked
+- [ ] Watchdog handled across multi-hundred-millisecond erases
+- [ ] Whole-slot CRC verified by reading **back from flash**
+- [ ] `PENDING_VERIFY` cleared only after config, thermocouple, ADC, watchdog
+      check-in and one acknowledged telemetry frame
+
+**Verification**
+- [ ] Power cut during erase, during streaming, and during the metadata write —
+      old image still boots in all three
+- [ ] Deliberately corrupted slot rejected at boot
+- [ ] Image that boots but fails a bring-up check is rolled back automatically
+- [ ] Both slots deliberately invalidated: lands in recovery and can be updated
+      over the link with no probe attached
+- [ ] Update refused while the relay is closed

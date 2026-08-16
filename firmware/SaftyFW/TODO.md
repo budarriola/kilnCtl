@@ -326,6 +326,50 @@ See `../CommonFW/docs/LINK_PROTOCOL.md` §7 for the full panel spec and presenta
         the silkscreen — a current-output CT fitted here reads garbage and
         nothing detects it.
 
+## Phase 10 — Field updates over the isolated link
+
+Last, deliberately. A bootloader is new code in the one component with nothing
+behind it, and it is only defensible because SWD sits underneath as the recovery
+path. Full design: [`docs/BOOTLOADER.md`](docs/BOOTLOADER.md), wire contract and
+interlocks: [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md).
+
+**Decide the flash layout before programming the first board** — the bootloader
+is written once over SWD and never updated in the field, so its region, the
+metadata format and the slot boundaries are effectively permanent.
+
+- [ ] **10.0 Measure the isolated link's error rate at 115200** over a sustained
+      multi-megabyte transfer. The TCMT1109 optocouplers are the bandwidth limit
+      and nobody has characterised them. A 5 % frame loss turns a 35 s update
+      into minutes, because retries cost 200 ms each up to ten times.
+- [ ] 10.1 Confirm the module's actual flash size on real hardware.
+- [ ] 10.2 Freeze the flash layout and the metadata format, with a
+      `format_version` that refuses the unrecognised. Reserve the signature
+      field and public-key space now even though signing ships off —
+      `BOOTLOADER.md` §6.
+- [ ] 10.3 Bootloader: GPIO6 low as the first statement; double-buffered CRC'd
+      metadata; active-slot CRC on **every** boot; `boot_attempts` fallback.
+      Never writes its own region or the config partition.
+- [ ] 10.4 Recovery mode: UART1 only, GPIO6 low, minimal frame subset, no
+      timeout out of it. This is what makes a failed update recoverable without
+      a probe.
+- [ ] 10.5 Bootloader-only build, flashed and verified over SWD independently of
+      any application.
+- [ ] 10.6 Application side: staged writes to the inactive slot, flash routines
+      and interruptible ISRs in RAM, core 1 parked, watchdog handled across
+      multi-hundred-millisecond erases.
+- [ ] 10.7 Whole-slot CRC verified by reading **back from flash** — the only
+      check that catches a write that reported success and did not land.
+- [ ] 10.8 `PENDING_VERIFY` cleared only after config CRC, a plausible
+      thermocouple reading, ADC sampling, every task checked in, and one
+      acknowledged telemetry frame. **Not at the end of `main()`** — an image
+      that boots but cannot read its thermocouple is worse than the old one.
+- [ ] 10.9 The Pico independently enforces its own preconditions: relay open, no
+      trip pending, temperature below the ceiling. It does not take the ESP's
+      word for any of them.
+- [ ] 10.10 Verification: power cut during erase, during streaming, and during
+      the metadata write; corrupt slot rejected; bad-but-booting image rolled
+      back; both slots invalidated and recovered over the link with no probe.
+
 ---
 
 ## Deliberately not doing
@@ -335,6 +379,9 @@ Recorded so these do not get re-proposed as oversights.
 - **No PID, no profiles, no control of any kind.** That is `KilnFW`'s job. Every
   feature added here is a feature that can fail in the one place with no backup.
 - **No filesystem, no network, no display, no USB console.**
+- **The bootloader never updates itself.** It is the recovery path; a
+  recovery path that the thing it recovers from can overwrite is not one.
+  Changing it is a bench operation over SWD.
 - **No dynamic allocation after init.**
 - **No auto-recovery from a latched trip.** "The temperature came back down" is
   evidence the trip worked, not evidence the fault is gone.

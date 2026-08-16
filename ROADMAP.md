@@ -29,12 +29,14 @@ project rather than two.
 | [`ROADMAP.md`](ROADMAP.md) (this file) | Milestone order, cross-processor dependencies |
 | [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) | Main firmware: web UI, profiles, PID, thermal protection, storage |
 | [`firmware/KilnFW/docs/PROJECT_STATUS.md`](firmware/KilnFW/docs/PROJECT_STATUS.md) | What in `KilnFW` is built vs. verified — the honest ledger |
-| [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–9 |
+| [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
 | [`firmware/SaftyFW/docs/ARCHITECTURE.md`](firmware/SaftyFW/docs/ARCHITECTURE.md) | Tasks, priorities, core affinity, logging transports |
 | [`firmware/SaftyFW/docs/HARDWARE.md`](firmware/SaftyFW/docs/HARDWARE.md) | The traced board, pin map, bench connections |
 | [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md) | Shared `kilnlink` code, used by both firmwares |
 | [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
+| [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md) | Field updates for both processors: interlocks, one-password auth, ESP OTA partitioning |
+| [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 
@@ -169,6 +171,57 @@ documents are correct from the start rather than being rewritten later.
       test that catches the absolute-path breakage for someone who is not this
       user on this machine
 
+## M8 — Field updates
+
+Owned by [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md)
+and [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md);
+tracked as `KilnFW/TODO.md` section 9 and `SaftyFW/TODO.md` phase 10.
+
+Last, and genuinely last: a bootloader is new code in the component with nothing
+behind it, and it is only defensible because SWD sits underneath as the recovery
+path. Two facts set the shape of this milestone:
+
+- **The RP2040 mask ROM has no UART bootloader.** Updating the Pico over the
+  isolated link means writing one. It is written once over SWD and never
+  updates itself.
+- **You cannot OTA your way into being OTA-capable.** The ESP needs a new
+  partition table with two app slots, and a partition table can only be written
+  over a cable.
+
+- [ ] **Measure the isolated link's real error rate at 115200 first.** Nobody has
+      characterised the optocouplers; retry cost is 200 ms × up to 10
+- [ ] ESP partition table re-carved between `0x10000` and `0x187000`, the NVS
+      partitions left exactly where they are, flashed once over serial
+- [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, and the app confirms itself only
+      after NVS, safety link and web server are up
+- [ ] Pico flash layout and metadata format frozen before the first board is
+      programmed; signature field and key space reserved even though signing is off
+- [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
+      mode over UART1 with no timeout out of it
+- [ ] Challenge–response on the AP password, so it never crosses the wire;
+      lockout after 3 failures
+- [ ] Both paths refused unless the kiln is idle and cool, with the specific
+      blocker named
+- [ ] Link-loss heating block **not** bypassed during a Pico update — alarm text
+      suppressed, never the block
+- [ ] Four MCP tools, since most development updates will be agent-driven
+
+---
+
+## Working from the repository root
+
+Claude and the editor are opened at `kilnCtl/` from 2026-08-16 onward. This is
+now a load-bearing assumption rather than a preference:
+
+- The two `.vscode/settings.json` files use `${workspaceFolder}/firmware/…`,
+  which is correct **only** with the root as the workspace.
+- `.mcp.json` uses root-relative paths, including `-C firmware/KilnFW` for the
+  ESP-IDF server.
+- `idf.py` needs `-C firmware/KilnFW`; `uv` needs `--project tools/PcTools`.
+
+What it changes, and what still needs doing, is
+[`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) "Working from the repository root".
+
 ---
 
 ## Cross-processor invariants
@@ -184,6 +237,8 @@ Any change that touches these needs both plans read, not one:
 - Guards clear two independent bars — a magnitude correct operation cannot reach,
   and a duration a transient cannot sustain.
 - All board relays are **pilot relays**, driving external contactors and SSRs.
+- **Neither processor is updatable while the kiln can heat**, and the Pico
+  enforces that itself rather than trusting the ESP.
 
 ## What "done" means
 

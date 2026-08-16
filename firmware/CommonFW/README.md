@@ -192,3 +192,12 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [ ] Round-trip proven against the *pre-refactor* implementation's output before old code is deleted
 - [ ] `SaftyFW` linking `kilnlink` with no duplicated protocol code
 - [ ] `grep` check in CI: no CRC or stuffing implementation outside `CommonFW`
+
+## Related
+
+- [`docs/LINK_PROTOCOL.md`](docs/LINK_PROTOCOL.md) — the wire, both ends.
+- [`docs/UPDATE_PROTOCOL.md`](docs/UPDATE_PROTOCOL.md) — firmware updates for
+  both processors: interlocks, authentication, ESP OTA partitioning, and the
+  frames that carry an image to the Pico over the isolated link. The update
+  frame codecs belong in `kilnlink` for the same reason the rest do — one
+  implementation, shared test vectors.

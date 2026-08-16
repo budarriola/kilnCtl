@@ -2932,3 +2932,100 @@ list, which needs somewhere versioned to live; and 8.3 last, since the wizard
 is mostly a view over state the other three establish. The exception is
 8.4's status display, which depends on none of it and is the smallest useful
 thing on this list.
+
+---
+
+## 9. Firmware updates — ESP OTA and relaying the Pico's image
+
+Full design, including the interlocks and the authentication both paths share:
+[`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md).
+The RP2040 half is [`../SaftyFW/docs/BOOTLOADER.md`](../SaftyFW/docs/BOOTLOADER.md).
+
+Two things make this more than a normal OTA feature.
+
+**The partition table has to change, and only a cable can change it.** OTA needs
+`otadata` plus two app slots; a partition table can only be written over serial.
+**You cannot OTA your way into being OTA-capable**, so the first flash of the new
+table is a one-time USB operation that has to happen before any of this is
+useful. `partitions.csv` also documents at length why `nvs`, `phy_init` and the
+three NVS partitions above the app must keep their current offsets — live data
+sits in them, and the split exists so a config wipe cannot strand the board off
+Wi-Fi. Only `0x10000`..`0x187000` may be re-carved.
+
+**The safety processor's image travels through here.** The ESP is the only thing
+authorising a Pico update, which makes this endpoint the safety processor's
+attack surface as well as its update path.
+
+### 9.1 Partition table
+
+- [ ] New table: `otadata` 8 K + `ota_0` / `ota_1` inside `0x10000`..`0x187000`,
+      first three entries and the three NVS partitions **unmoved**
+- [ ] Offsets confirmed against the live table before flashing — getting this
+      wrong erases `profiles_nvs`
+- [ ] Pre-change table archived so a rollback to pre-OTA firmware is possible
+- [ ] Slot size checked against what sections 6A and 8 still intend to add. The
+      current image is ~301 KB; 704 KB per slot is 2.3× headroom today
+- [ ] One-time serial flash documented as a prerequisite step, not a footnote
+
+### 9.2 Rollback
+
+- [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` (currently off)
+- [ ] `esp_ota_mark_app_valid_cancel_rollback()` called **only** after NVS
+      partitions read, the safety link is exchanging frames, and the web server
+      is answering — never at the end of `app_main()`. An image that boots but
+      cannot reach the safety processor is exactly the one that must roll back,
+      and it would pass a "we reached the end of main" check
+- [ ] `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` left off unless a security version is
+      actually going to be maintained
+
+### 9.3 Authentication — the AP password, not sent over the wire
+
+- [ ] `GET /api/ota/challenge`: 16 random bytes, single use, 30 s expiry
+- [ ] Client proves knowledge via
+      `HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"), nonce || context)`
+      where context is `"esp"` or `"pico"`. mbedTLS is already linked in
+- [ ] Constant-time comparison; the nonce is invalidated whether or not it matched
+- [ ] Lockout after 3 failures, doubling to a 15-minute ceiling, per endpoint
+- [ ] Every attempt logged with source IP
+- [ ] The derived key, not the literal PSK, is what gets compared — a bug that
+      leaks the compared bytes must not leak the Wi-Fi password
+- [ ] Documented plainly: this does not defend against anyone who already knows
+      the AP password, because that is the credential
+
+### 9.4 Interlocks
+
+- [ ] Both update paths refused unless: no profile or autotune running, no heater
+      commanded, `run_state` idle, every zone below a configured ceiling
+      (default 100 °C), and the safety link healthy
+- [ ] Refusals name the specific unmet precondition — "zone 2 is at 340 °C", not
+      "update failed"
+- [ ] Refuse to start either update while the other is in progress
+- [ ] During a Pico update the link goes quiet, so `SAFETY_FAULT_SRC_SAFETY_LINK`
+      asserts and blocks heating. **Correct — do not special-case it.** Suppress
+      only the alarm *text*, never the block in `relay_authority_on_blocked()`
+
+### 9.5 Transfer
+
+- [ ] Streamed `esp_ota_ops` POST handler; a full image will not fit in RAM
+- [ ] Pico relay: the five `UPDATE_*` frames, codecs living in `CommonFW`
+- [ ] Progress pushed to the GUI at least every 2 s for both paths
+- [ ] Protocol-version mismatch between the uploaded Pico image and the running
+      one warned about, with a second confirmation — that is the case where a
+      successful update leaves the two processors unable to talk
+
+### 9.6 Web page
+
+- [ ] Per processor: running version, build commit, build date, dirty flag,
+      active slot, and the version sitting in the inactive slot
+- [ ] Interlock state shown **before** the file picker, with the blocker named
+- [ ] Progress bar, and a rollback button per processor
+- [ ] Reachable only when the kiln is idle
+
+### 9.7 Verification
+
+- [ ] Power pulled mid-transfer, both processors — both still boot the old image
+- [ ] Corrupt image rejected, both processors
+- [ ] An image that boots but fails bring-up is rolled back with no intervention
+- [ ] Update attempted while firing: refused, blocker named
+- [ ] Wrong password: refused, locked out, logged
+- [ ] Recovery from a deliberately bricked Pico over SWD

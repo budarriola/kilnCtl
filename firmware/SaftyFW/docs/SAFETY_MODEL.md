@@ -692,6 +692,34 @@ reported healthy, the startup grace has elapsed, and no guard is tripped.
 
 ---
 
+## 6b. Update mode
+
+Field updates over the isolated link are planned
+([`../../CommonFW/docs/UPDATE_PROTOCOL.md`](../../CommonFW/docs/UPDATE_PROTOCOL.md),
+[`BOOTLOADER.md`](BOOTLOADER.md)). They matter here because **while its flash is
+being rewritten the safety processor is not watching anything.**
+
+Three rules follow, and none of them are negotiable:
+
+1. **The Pico enforces its own preconditions.** Relay open, no trip pending,
+   every reading below a configured ceiling (default 100 °C). It does not take
+   the ESP's word for any of them, for the same reason this processor exists at
+   all — the ESP is the thing that might be wrong.
+2. **GPIO6 stays low for the entire update**, including through the bootloader
+   and recovery mode. A block erase stops both cores for hundreds of
+   milliseconds at a time, during which no guard is running; the relay being
+   already open is what makes that survivable.
+3. **The link going quiet during an update must still block heating on the ESP.**
+   `SAFETY_FAULT_SRC_SAFETY_LINK` asserting at 1.5 s is the correct behaviour,
+   not a bug to be papered over. The GUI may say "updating" instead of "not
+   responding"; `relay_authority_on_blocked()` must not learn the difference.
+
+An update is also the one moment when the safety processor's own code changes,
+so the rollback bar is deliberately higher than "it booted": configuration CRC
+verified, a plausible thermocouple reading, ADC sampling, every task checked in,
+and one acknowledged telemetry frame. An image that boots but cannot read its
+thermocouple is worse than the one it replaced.
+
 ## 7. What this does NOT protect against
 
 Stated plainly, because a safety case that only lists successes is not a safety

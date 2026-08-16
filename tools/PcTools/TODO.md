@@ -287,6 +287,34 @@ good manners — it is rule 3 of the no-hang constraint
 (`firmware/CommonFW/docs/LINK_PROTOCOL.md` §2). `log_task` is the lowest priority in the
 system and its output is always droppable (`firmware/SaftyFW/docs/ARCHITECTURE.md` §4).
 
+## Firmware updates from here
+
+Both processors gain field-update paths — the ESP over Wi-Fi, the Pico over the
+isolated link relayed by the ESP. Design:
+[`../../firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](../../firmware/CommonFW/docs/UPDATE_PROTOCOL.md).
+
+For day-to-day work the MCP tools matter more than the web page, because most
+updates during development will be driven by an agent rather than a browser.
+They must not become a second, weaker way in: the same interlocks and the same
+challenge–response apply, and the tools call the ESP's endpoints rather than
+reimplementing the transfer.
+
+- [ ] `ota_status()` — both processors: running version, build commit, active
+      slot, the version in the inactive slot, and **why an update is currently
+      refused**, naming the blocker
+- [ ] `ota_update_esp(image_path, password)` — streams, waits for the reboot,
+      returns the version actually running afterwards
+- [ ] `ota_update_pico(image_path, password)` — same, relayed over the link,
+      with progress surfaced at least every 2 s
+- [ ] `ota_rollback(processor)` — explicit, refused under the same interlocks
+- [ ] Every call logged with the image's SHA-256, and refusals logged too
+- [ ] The password is never written to the log or to a settings file; it is
+      supplied per call or read from an environment variable
+- [ ] A protocol-version mismatch between a Pico image and the running ESP is a
+      hard error here, not a warning — an agent will click through a warning
+- [ ] SWD recovery documented alongside, since a bricked Pico is recovered by
+      the debug probe and not by these tools
+
 ## What this does not become
 
 - **Not a second control path that bypasses safety.** Every relay command from
@@ -355,6 +383,13 @@ system and its output is always droppable (`firmware/SaftyFW/docs/ARCHITECTURE.m
 - [ ] Transport availability shown honestly; USB console reported as a build-time capability, not a toggle
 - [ ] Dropped-log-frame counter surfaced from the diagnostic frame
 - [ ] Pico log emission best-effort and droppable — **never blocking**, per no-hang rule 3
+
+**Firmware updates**
+- [ ] `ota_status`, `ota_update_esp`, `ota_update_pico`, `ota_rollback`
+- [ ] Tools call the ESP's endpoints; no second transfer implementation
+- [ ] Image SHA-256 logged on every call, refusals included
+- [ ] Password never persisted to log or settings
+- [ ] Protocol-version mismatch is a hard error, not a warning
 
 **Integrity**
 - [ ] Python codec checked against `firmware/CommonFW/test/vectors/`
