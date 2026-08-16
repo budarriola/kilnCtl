@@ -1,46 +1,48 @@
 # Secrets - never commit. See .env.example for the expected keys.
 /.env
 
-# Mouser lookup result cache (mykicadMcp/kicad_mouser_tool.py) - local speed-up only.
+# Mouser lookup result cache (tools/mykicadMcp/kicad_mouser_tool.py) - local speed-up only.
 /.mouser_cache.json
 
-/mainBoard/kiln-backups
-/mainBoard/kiln-backups/kiln-2025-11-27_122759.zip
-/mainBoard/kiln-backups/kiln-2025-11-27_123526.zip
-/mainBoard/kiln-backups/kiln-2025-11-27_124248.zip
-/#auto_saved_files#
-/mainBoard/~kiln.kicad_sch.lck
-/mainBoard/kiln.csv
-/_autosave*.kicad_sch
-/*.kicad_pro.lck
-/__pycache__/*
-/.vscode/*
-/mainBoard/~kiln.kicad_pcb.lck
+# --- KiCad working files ---------------------------------------------------
+# These patterns are deliberately unanchored. The previous anchored forms
+# (/mainBoard/..., /ThermocoupleBoard/...) stopped matching the moment the tree
+# was reorganised into hardware/ and firmware/, which silently exposed a pile of
+# backup archives and autorouter scratch files. Unanchored patterns survive a
+# board moving between directories.
+*-backups/
+#auto_saved_files#
+_autosave*.kicad_sch
+*.kicad_pro.lck
+*.lck
+/hardware/mainBoard/kiln.csv
 
-# mykicadMcp/ is a separate git submodule (github.com/budarriola/mykicadMcp);
-# its own .gitignore covers the venv, caches, editor settings, and runtime log.
+# Autorouter per-board working state (mykicadMcp NETCLASS_PLAN Phase 7) -
+# disposable and machine-local; policy lives in the committed pcb_settings.json.
+*.board_local.json
+*.route_progress.jsonl
+
+# Root-level KiCad export scratch. Per-board output/ directories are tracked -
+# they hold the schematic PDFs.
 /output/
 
-# pdf-mcp (github.com/jztan/pdf-mcp) - third-party MCP server, installed local-only.
-/pdfMcp/.venv/
-/pdfMcp/__pycache__/
+# --- Tooling ---------------------------------------------------------------
+# tools/mykicadMcp/ is a separate git submodule (github.com/budarriola/mykicadMcp);
+# its own .gitignore covers the venv, caches, editor settings, and runtime log.
 
-# Autorouter per-board working state (mykicadMcp NETCLASS_PLAN Phase 7) - disposable,
-# machine-local; policy lives in the committed pcb_settings.json instead.
-/mainBoard/*.board_local.json
-/mainBoard/*.route_progress.jsonl
-/ThermocoupleBoard/ThermocoupleBoard-backups/
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-07-31_221718.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_113148.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_113324.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_113524.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_113658.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_114522.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_114742.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_115110.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_115606.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_120930.zip
-/ThermocoupleBoard/ThermocoupleBoard-backups/ThermocoupleBoard-2026-08-01_130001.zip
-/SaftyThermocoupleBoard/ThermocoupleBoard-backups/
-*.lck
-/UnitTest/UnitTestFixture-backups/*
+# pdf-mcp (github.com/jztan/pdf-mcp) - third-party MCP server, installed local-only.
+/tools/pdfMcp/
+/pdfMcp/
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+.venv/
+.pytest_cache/
+
+# --- Editor ----------------------------------------------------------------
+/.vscode/
+
+# --- Windows ---------------------------------------------------------------
+# A shell with no /dev/null turns a redirect into a file literally named "nul",
+# which is then awkward to delete. Ignore it so it never gets committed again.
+nul
