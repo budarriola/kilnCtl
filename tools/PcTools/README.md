@@ -5,7 +5,7 @@ implemented in `App/drivers/espInterfaces/uart_protocol.{c,h}` and addressed by
 `App/drivers/uart_task_ids.h`. That header is the wire contract: every task id,
 subcommand and payload layout here matches it byte for byte.
 
-What is on the other end (see [`../docs/HARDWARE.md`](../docs/HARDWARE.md) for
+What is on the other end (see [`../../firmware/KilnFW/docs/HARDWARE.md`](../../firmware/KilnFW/docs/HARDWARE.md) for
 the full trace): an **ESP32-S3-DevKitC** driving three **MAX31856**
 thermocouple channels over J6, an **SX1509** I/O expander (four relays, seven
 digital I/O, the three `~DRDY` inputs, and the display's D/C and `~RESET`), an
@@ -282,7 +282,7 @@ Two things had to be right for this, and both were wrong before:
 * The starting `MSG_INDEX` is randomized per connection. The firmware's dedup
   ring outlives any host session, so restarting the host at index 0 made its
   first sends look like retransmits: re-ACKed, never delivered. See
-  [`../docs/UART_PROTOCOL.md`](../docs/UART_PROTOCOL.md).
+  [`../../firmware/KilnFW/docs/UART_PROTOCOL.md`](../../firmware/KilnFW/docs/UART_PROTOCOL.md).
 
 Together these are why the first query after a connect used to fail with
 "ACKed but no reply arrived", recovering only when the firmware's

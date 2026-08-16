@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Standalone sanity check for the KilnCtrl wire protocol implementation.
 
-Run with:  uv run --project pc_tools python pc_tools/selfcheck.py
+Run with:  uv run --project tools/PcTools python tools/PcTools/selfcheck.py
 
 Verifies CRC-16/CCITT-FALSE against the standard check value, round-trips
 stuffing/unstuffing (including bytes that must be escaped), exercises the

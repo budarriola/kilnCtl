@@ -18,10 +18,10 @@ twice, it drifts — and it drifts silently, because a framing or field-offset
 mismatch does not fail loudly, it delivers a plausible wrong number.
 
 This project already has evidence of exactly that failure mode: the isolated
-link's wire direction was documented backwards in `KilnFW/docs/SAFETY_LINK.md`
+link's wire direction was documented backwards in `firmware/KilnFW/docs/SAFETY_LINK.md`
 for months, because the description lived inside one of the two implementations
 and read as an implementation note rather than as a contract with a second party
-(`SaftyFW/docs/HARDWARE.md` §1).
+(`firmware/SaftyFW/docs/HARDWARE.md` §1).
 
 So: **one definition of the frame layouts, one encoder, one decoder, one set of
 test vectors, and the protocol document lives here** rather than inside either
@@ -30,7 +30,7 @@ firmware.
 ## Layout
 
 ```
-CommonFW/
+firmware/CommonFW/
 ├─ README.md                       ← this file
 ├─ docs/
 │  └─ LINK_PROTOCOL.md             ← THE contract. Owned here, not by either firmware
@@ -122,7 +122,7 @@ against the *existing* implementation's output before the old code is removed.
 
 ### `pc_tools` — the third implementation
 
-`KilnFW/pc_tools/src/kilnctrl/protocol.py` implements this same framing in
+`tools/PcTools/src/kilnctrl/protocol.py` implements this same framing in
 Python and cannot link C. It is the reason for `test/vectors/`.
 
 ## Test vectors are the mechanism that keeps three implementations honest
@@ -153,7 +153,7 @@ a second number.
 Bump it when a change would break a peer running the old value: renumbering an
 id, changing a payload layout or length, or changing the envelope. Do not bump
 for comments or internal refactors. It is a human judgement call, deliberately
-not a hash of the file — the reasoning in `KilnFW/App/drivers/uart_task_ids.h:8-20`
+not a hash of the file — the reasoning in `firmware/KilnFW/App/drivers/uart_task_ids.h:8-20`
 applies unchanged and should be carried over with the constant.
 
 ---
@@ -163,13 +163,13 @@ applies unchanged and should be carried over with the constant.
 Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
 
 **Structure**
-- [ ] `CommonFW/` created with the layout above
+- [ ] `firmware/CommonFW/` created with the layout above
 - [ ] `CMakeLists.txt` producing a `kilnlink` target consumable by pico-sdk
-- [ ] ESP-IDF component wrapper in `KilnFW/components/kilnlink/`
+- [ ] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
 - [ ] Builds clean under xtensa-gcc, arm-none-eabi-gcc and MSVC at `-Wall -Wextra -Werror`
 
 **Contract**
-- [ ] `docs/LINK_PROTOCOL.md` moved here from `SaftyFW/docs/` and cross-links updated
+- [ ] `docs/LINK_PROTOCOL.md` moved here from `firmware/SaftyFW/docs/` and cross-links updated
 - [ ] `kilnlink_version.h` created; `KilnFW`'s `UART_PROTOCOL_VERSION` aliased to it
 - [ ] `kilnlink_ids.h` — shared ids split out of `uart_task_ids.h`, PC-link ids left behind
 

@@ -1,6 +1,6 @@
 # Aggregate Mouser Buy List — mainBoard + SaftyThermocoupleBoard + ThermocoupleBoard
 
-Sum of the 3 per-board buy cards ([mainBoard/buy_list.md](mainBoard/buy_list.md), [SaftyThermocoupleBoard/buy_list.md](SaftyThermocoupleBoard/buy_list.md), [ThermocoupleBoard/buy_list.md](ThermocoupleBoard/buy_list.md)), regenerated after adding two more padding tiers: parts $0.50/unit or under now get +2 extra units, parts $1.00/unit or under get +1 extra (on top of the existing +10 under $0.05, +5 under $0.10, +5 at $0.25-or-under tiers). Same MPN across boards merged; qty and cost added straight across (each board's own price-break padding kept as-is, not re-optimized jointly).
+Sum of the 3 per-board buy cards ([hardware/mainBoard/buy_list.md](../mainBoard/buy_list.md), [hardware/SaftyThermocoupleBoard/buy_list.md](../SaftyThermocoupleBoard/buy_list.md), [hardware/ThermocoupleBoard/buy_list.md](../ThermocoupleBoard/buy_list.md)), regenerated after adding two more padding tiers: parts $0.50/unit or under now get +2 extra units, parts $1.00/unit or under get +1 extra (on top of the existing +10 under $0.05, +5 under $0.10, +5 at $0.25-or-under tiers). Same MPN across boards merged; qty and cost added straight across (each board's own price-break padding kept as-is, not re-optimized jointly).
 
 **Total: USD 235.73** (149.648 + 58.376 + 27.710)
 

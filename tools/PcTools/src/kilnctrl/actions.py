@@ -4,7 +4,7 @@ Backs the MCP server's generic ``press_button`` tool, which mirrors every
 control the human GUI offers (``gui.py``) instead of requiring one bespoke
 ``@mcp.tool()`` per button. This is deliberately decoupled from ``mcp_server.py``
 (no dependency on the ``mcp`` package here) so it can be exercised directly by
-``pc_tools/selfcheck.py`` without hardware or an MCP client.
+``tools/PcTools/selfcheck.py`` without hardware or an MCP client.
 
 gui.py's own widget ``command=`` callbacks are left exactly as they were --
 already tested, low blast-radius to leave alone -- this module doesn't

@@ -2,15 +2,15 @@
 
 > **Status:** planning · **Last reviewed:** 2026-08-16
 > **Keep this file current.** Tick items as they land, and keep "built" and
-> "verified on hardware" distinct — `KilnFW/docs/PROJECT_STATUS.md` is the model
+> "verified on hardware" distinct — `firmware/KilnFW/docs/PROJECT_STATUS.md` is the model
 > for that discipline. If a phase changes shape, edit it here rather than
 > letting the plan and the work drift apart.
 
-Top-level ordering across both processors lives in [`../ROADMAP.md`](../ROADMAP.md);
+Top-level ordering across both processors lives in [`../../ROADMAP.md`](../../ROADMAP.md);
 this file owns the safety-processor detail. Phases here map to roadmap milestones
 M0 and M2–M6.
 
-Planning doc. **Nothing here is built yet** — `SaftyFW/` contains only these
+Planning doc. **Nothing here is built yet** — `firmware/SaftyFW/` contains only these
 documents. Written before any code so the sequencing, the thresholds and the
 protocol can be argued about while they are still cheap to change.
 
@@ -38,27 +38,27 @@ Nothing downstream works until 0.1 and 0.2 land.
 - [ ] **0.0b Build the coordinated two-board GPIO test rig** — a GPIO probe on
       *both* processors plus the PC script that drives them, reaching each by a
       path that is **not** the link under test (ESP over USB serial, Pico over
-      SWD). `../PcTools/README.md` §1/§1b/§1c.
+      SWD). `../../tools/PcTools/TODO.md` §1/§1b/§1c.
 - [ ] **0.1 Fix the swapped safety-UART pins in `KilnFW`.** `KILNCTL_SAFETY_TX_IO`
       must become **4** and `KILNCTL_SAFETY_RX_IO` must become **5**
-      (`KilnFW/App/drivers/Kconfig:189-200`, plus `sdkconfig`). Move the internal
+      (`firmware/KilnFW/App/drivers/Kconfig:189-200`, plus `sdkconfig`). Move the internal
       pull-up to GPIO5. **The link cannot work in either direction until this is
       done.** Full trace and the independent R15 confirmation: `docs/HARDWARE.md` §1.
 - [ ] **0.2 Add `UART_PROTO_MSG_BROADCAST = 0x04`** to
-      `KilnFW/App/drivers/espInterfaces/uart_protocol.{c,h}` — send without
+      `firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.{c,h}` — send without
       waiting for an ACK, receive without sending one. Required because the
       safety processor never transmits an ACK; without it every ESP push costs
       10 retries × 50 ms. See `../CommonFW/docs/LINK_PROTOCOL.md` §1.
-- [ ] **0.3 Correct `KilnFW/docs/SAFETY_LINK.md` and `KilnFW/docs/HARDWARE.md`.**
+- [ ] **0.3 Correct `firmware/KilnFW/docs/SAFETY_LINK.md` and `firmware/KilnFW/docs/HARDWARE.md`.**
       Both describe the optocoupler data directions backwards (U3 is drawn
       mirrored relative to U1/U2). Do this *with* 0.1, or the next person will
       "fix" 0.1 back.
-- [ ] **0.4 Regenerate or delete `mainBoard/kiln.net`.** Dated 2026-07-19,
+- [ ] **0.4 Regenerate or delete `hardware/mainBoard/kiln.net`.** Dated 2026-07-19,
       sources a pre-move path, and disagrees with the current schematic in at
       least three places. It is the likely origin of the errors in 0.3.
       See `docs/HARDWARE.md` §10.
-- [ ] **0.4b Move `KilnFW/pc_tools/` → `PcTools/`** and add the **GPIO probe**
-      (`../PcTools/README.md` §1). The probe is what makes 0.0 runnable without
+- [ ] **0.4b Move `tools/PcTools/` → `PcTools/`** and add the **GPIO probe**
+      (`../../tools/PcTools/TODO.md` §1). The probe is what makes 0.0 runnable without
       building a one-off firmware, and it is reusable for every future
       "is this net where the schematic says" question. Default off, hard
       deny-list including **GPIO6**.
@@ -96,8 +96,8 @@ The link contract is shared code, implemented once. See
 [`../CommonFW/README.md`](../CommonFW/README.md) for the full checklist; the
 gating items are:
 
-- [ ] `CommonFW/` created; `kilnlink` CMake target consumable by pico-sdk
-- [ ] ESP-IDF component wrapper in `KilnFW/components/kilnlink/`
+- [ ] `firmware/CommonFW/` created; `kilnlink` CMake target consumable by pico-sdk
+- [ ] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
 - [ ] `kilnlink_version.h` owns `KILNLINK_PROTOCOL_VERSION`; `KilnFW`'s
       `UART_PROTOCOL_VERSION` becomes an alias, not a second number
 - [ ] Shared ids split out of `uart_task_ids.h`; PC-link ids left behind
@@ -141,8 +141,8 @@ gating items are:
 
 ## Phase 3 — Thermocouple
 
-- [ ] Port `KilnFW/App/drivers/MAX31856.c`. **Port it, do not rewrite it** — same
-      part, same registers, and `KilnFW/docs/MAX31856.md` already documents the
+- [ ] Port `firmware/KilnFW/App/drivers/MAX31856.c`. **Port it, do not rewrite it** — same
+      part, same registers, and `firmware/KilnFW/docs/MAX31856.md` already documents the
       traps.
 - [ ] `spi_owner` request-queue task; `CS0` driven as a plain GPIO.
 - [ ] `~DRDY` (GPIO12) as a real **interrupt** — unlike the main board, this is a
@@ -169,10 +169,10 @@ gating items are:
       These need no link and no current calibration, and S1 alone justifies the
       board. S11 and S12 are free — both read data S1 already fetches.
 - [ ] `discrete_task`: debounce E-stop (50 ms) and `mainFault` (200 ms).
-- [ ] Host test harness (MSVC, no SDK), mirroring `KilnFW/App/test/`.
+- [ ] Host test harness (MSVC, no SDK), mirroring `firmware/KilnFW/App/test/`.
 - [ ] **Write the nuisance-rejection tests before the trip tests.** A 900 ms
       sensor dropout must *not* trip S5; a single noisy SPI read must not either.
-- [ ] Reuse `KilnFW/App/test/sim_plant.c` for realistic thermal traces.
+- [ ] Reuse `firmware/KilnFW/App/test/sim_plant.c` for realistic thermal traces.
 
 ## Phase 5 — Relay authority
 
@@ -251,7 +251,7 @@ gating items are:
 - [ ] Enable **S3** / **S4** once phase 5's mapping check has passed.
 - [ ] Develop the parser against a **PC-side stub emitting context frames**
       before `KilnFW` can send any — the reverse of the stub already described
-      in `KilnFW/docs/SAFETY_LINK.md`.
+      in `firmware/KilnFW/docs/SAFETY_LINK.md`.
 
 ## Phase 8 — Telemetry (required)
 

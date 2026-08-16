@@ -452,8 +452,17 @@ def _find_openocd_exe() -> Optional[str]:
 
 
 def _kiln_fw_root() -> str:
-    """KilnFW/ project root -- this file lives at KilnFW/pc_tools/src/kilnctrl/."""
-    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    """firmware/KilnFW/ project root.
+
+    This file lives at tools/PcTools/src/kilnctrl/, so the repo root is four
+    levels up. These tools serve both processors and no longer sit inside the
+    main firmware, which is why this is an explicit path rather than a walk up
+    to the parent directory.
+    """
+    repo_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    )
+    return os.path.join(repo_root, "firmware", "KilnFW")
 
 
 def _run_openocd(openocd_exe: str, board_cfg_relpath: str, tcl_commands: str, cwd: str, timeout_s: int) -> tuple[bool, str]:

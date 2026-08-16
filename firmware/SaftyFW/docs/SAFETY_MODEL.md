@@ -12,7 +12,7 @@ important — what it will deliberately **not** trip on.
 
 This is the design document the rest of `SaftyFW` answers to. If a guard in the
 code and a guard in this file disagree, one of them is a bug; check the code
-before assuming the file is right, the way `KilnFW/docs/SAFETY_MODEL.md` asks
+before assuming the file is right, the way `firmware/KilnFW/docs/SAFETY_MODEL.md` asks
 you to.
 
 ---
@@ -380,7 +380,7 @@ intermittent and short enough that "blind for the whole firing" cannot happen.
 While blind, the status frame reports **NaN** temperatures with
 `SAFETY_FLAG_TEMP_VALID` clear — never 0, never the last good reading. An
 explicit not-a-number is much harder to mistake for a cold kiln than a
-plausible-looking stale value. (Same rule `KilnFW/docs/SAFETY_LINK.md` sets for
+plausible-looking stale value. (Same rule `firmware/KilnFW/docs/SAFETY_LINK.md` sets for
 this field, and the ESP already parses it that way.)
 
 ### S6 — Main controller unhealthy · **TRIP**, conditionally
@@ -607,7 +607,7 @@ Defaults: `borrowed_stale_s` = **10 s**, `borrowed_stale_trip_s` = **60 s**.
 
 `sample_counter` is a per-zone byte in the context frame that the ESP increments
 **only when it actually consumes a fresh conversion** from that channel — never
-merely because it built a frame (`CommonFW/docs/LINK_PROTOCOL.md` §4).
+merely because it built a frame (`firmware/CommonFW/docs/LINK_PROTOCOL.md` §4).
 
 Without it, the failure is undetectable. A MAX31856 on the main board that stops
 converting keeps returning its last value; the ESP forwards it faithfully every
@@ -678,7 +678,7 @@ The rules governing it are short and absolute:
 
 **A trip latches.** `SAFETY_CMD_REQUEST_ENABLE` from the ESP is refused while
 latched — it is advisory and the Pico's interlocks always win, which
-`KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
+`firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
 
 **Clearing requires a deliberate operator act**: an explicit clear command over
 the link, or an E-stop assert-then-release cycle (a physical action, at the
@@ -745,7 +745,7 @@ so a series lid switch gets door interlocking for the price of a wire.
 ## Completion checklist
 
 Tick **built** and **verified on hardware** separately — they are not the same
-claim, and `KilnFW/docs/PROJECT_STATUS.md` is the model for keeping them apart.
+claim, and `firmware/KilnFW/docs/PROJECT_STATUS.md` is the model for keeping them apart.
 Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 
 ### Guards

@@ -69,7 +69,7 @@ or crashed safety processor means a kiln that will not fire
 |---|---|
 | [`docs/HARDWARE.md`](docs/HARDWARE.md) | The traced board: Pico pin map, K4 and the contactor interlock, E-stop and `mainFault` polarity, ADC reference, the back-fed 3V3 rail — **and a correction to `KilnFW`'s isolated-link direction** |
 | [`docs/SAFETY_MODEL.md`](docs/SAFETY_MODEL.md) | The nuisance-trip doctrine, the thermocouple-placement modes, all twelve guards with thresholds and rationale, trip semantics, and an honest list of what this does **not** protect against |
-| [`../PcTools/README.md`](../PcTools/README.md) | The GUI/MCP server for **both** processors: the move out of `KilnFW/`, the three transports, and the capabilities that make it usable headlessly |
+| [`../../tools/PcTools/TODO.md`](../../tools/PcTools/TODO.md) | The GUI/MCP server for **both** processors: the move out of `firmware/KilnFW/`, the three transports, and the capabilities that make it usable headlessly |
 | [`../CommonFW/README.md`](../CommonFW/README.md) | **The shared link code** — what is shared, what is not, and the rules that let one source build under ESP-IDF, pico-sdk and MSVC |
 | [`../CommonFW/docs/LINK_PROTOCOL.md`](../CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends: framing, the unacknowledged broadcast frame, the ESP→Pico context format, the telemetry frames, **what the web GUI should show**, and the `KilnFW` changes required |
 | [`docs/CURRENT_SENSE.md`](docs/CURRENT_SENSE.md) | The analog front end (precision rectifier + 1 s peak hold), why there is no RMS sampler, calibration, and the commissioning check |
@@ -84,7 +84,7 @@ or crashed safety processor means a kiln that will not fire
 **The isolated UART pins are swapped in `KilnFW` today.** Traced from the
 current schematic, ESP TX is **GPIO4** (`DataToSafty`) and ESP RX is **GPIO5**
 (`DataFromSafty`) — the opposite of `KILNCTL_SAFETY_TX_IO`/`RX_IO`'s defaults,
-and the opposite of what `KilnFW/docs/SAFETY_LINK.md` "Trap 1" claims. R15's
+and the opposite of what `firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 1" claims. R15's
 placement confirms the trace. Nothing works until this is fixed
 ([`docs/HARDWARE.md`](docs/HARDWARE.md) §1, `TODO.md` 0.1).
 
@@ -99,7 +99,7 @@ must all land in that state ([`docs/HARDWARE.md`](docs/HARDWARE.md) §3).
 Pico and nothing exposes halt/step/memory access to an agent; the plan wraps
 OpenOCD (already installed, already this project's ESP flashing path) to cover
 both processors uniformly. The Pico's console reaches the GUI as `kilnlink` LOG
-frames relayed by the ESP — no extra cable ([`../PcTools/README.md`](../PcTools/README.md)).
+frames relayed by the ESP — no extra cable ([`../../tools/PcTools/TODO.md`](../../tools/PcTools/TODO.md)).
 
 **Do not connect USB to the Pico while `12v_Safty` is applied.** A1's 3V3 pin is
 back-fed from the board's regulator with VSYS and VBUS unconnected; USB would
@@ -109,11 +109,11 @@ put the on-module regulator in contention with it. Flash over SWD
 ## Related
 
 - [`../CommonFW`](../CommonFW) — the shared link contract and codecs, linked by both firmwares
-- [`../PcTools`](../PcTools) — one GUI and MCP server for both processors
+- [`../../tools/PcTools`](../../tools/PcTools) — one GUI and MCP server for both processors
 - [`../KilnFW`](../KilnFW) — ESP32-S3 main controller firmware
-- [`../mainBoard`](../mainBoard) — KiCad project; `output/kiln.pdf` is the
+- [`../../hardware/mainBoard`](../../hardware/mainBoard) — KiCad project; `output/kiln.pdf` is the
   authoritative schematic. **`kiln.net` is stale — do not trace from it.**
-- [`../SaftyThermocoupleBoard`](../SaftyThermocoupleBoard) — the single-channel
+- [`../../hardware/SaftyThermocoupleBoard`](../../hardware/SaftyThermocoupleBoard) — the single-channel
   MAX31856 daughterboard on J7
 
 

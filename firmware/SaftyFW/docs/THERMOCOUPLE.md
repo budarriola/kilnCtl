@@ -10,7 +10,7 @@ Pico's SPI0 through J7. This is the sensor that guards S1, S2, S5, S8, S10, S11
 and S12 all read, so it is the single most consequential component in the
 system.
 
-`KilnFW/docs/MAX31856.md` is the reference for the part itself — registers,
+`firmware/KilnFW/docs/MAX31856.md` is the reference for the part itself — registers,
 fixed-point formats, and the traps. **Port that driver rather than rewriting
 it.** This document covers only what differs here, and the decisions that are
 `SaftyFW`'s to make.
@@ -161,7 +161,7 @@ from a kiln holding a steady soak.**
 
 So the context frame carries a per-zone **`sample_counter`**, incremented by the
 ESP only when it actually consumes a fresh conversion — never merely because it
-built a frame (`CommonFW/docs/LINK_PROTOCOL.md` §4). Three distinct failures then
+built a frame (`firmware/CommonFW/docs/LINK_PROTOCOL.md` §4). Three distinct failures then
 become three distinct diagnoses:
 
 | Symptom | Guard | Meaning |
@@ -200,7 +200,7 @@ while the zone sensors stay type K, or a shell-mounted safety sensor stays K
 while a high-fire zone moves to S.
 
 The wire already supports it: `THERMO_CMD_CONFIG_CHANNEL`'s `byte2 = tc_type` is
-per-channel (`KilnFW/App/drivers/uart_task_ids.h`). What does **not** yet support
+per-channel (`firmware/KilnFW/App/drivers/uart_task_ids.h`). What does **not** yet support
 it is `KilnFW`'s configuration — all three zone channels are configured
 identically today.
 
@@ -210,7 +210,7 @@ So the plan is:
   J7 sensor.
 - **`KilnFW`**: `zone_cfg_t` gains a per-zone `tc_type`, exposed on the
   Thermocouples & Zones page and pushed to the part at init
-  (`SaftyFW/TODO.md` 0.14).
+  (`firmware/SaftyFW/TODO.md` 0.14).
 - **The context frame** carries each zone's type, so the Pico is never guessing
   what a borrowed reading means.
 

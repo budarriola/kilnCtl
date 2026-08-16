@@ -21,7 +21,7 @@ talks to that owner rather than to the peripheral.
 | Build | CMake + `arm-none-eabi-gcc` | pico-sdk's native flow |
 | Flash/debug | **SWD via OpenOCD + a debug probe** | Not USB. See `HARDWARE.md` §7 — USB contends with the back-fed 3V3 rail. Matches this project's existing OpenOCD workflow |
 | Warnings | `-Wall -Wextra -Werror` | Same bar `KilnFW` holds |
-| Host tests | MSVC, no SDK | Same pattern as `KilnFW/App/test/` |
+| Host tests | MSVC, no SDK | Same pattern as `firmware/KilnFW/App/test/` |
 
 ### Logging has three transports, in this order
 
@@ -62,7 +62,7 @@ TinyUSB is either linked in or it is not.
 #### Isolated-path log emission: runtime, GUI-configurable, default quiet
 
 This one *is* runtime-configurable, and should be exposed per-peer in the GUI
-(`PcTools/README.md`, "Logging and consoles"). Default: **errors and warnings
+(`tools/PcTools/TODO.md`, "Logging and consoles"). Default: **errors and warnings
 only**, with verbose levels enabled on demand.
 
 The reason to default it quiet is not bandwidth. At 115200 baud the link moves
@@ -72,7 +72,7 @@ reason is the **TX ring**:
 > **A log frame must never be able to displace a telemetry frame.**
 
 Telemetry dropping is what the ESP interprets as a possibly-dead safety
-processor (`CommonFW/docs/LINK_PROTOCOL.md` §8) — it blocks heating at 1.5 s and
+processor (`firmware/CommonFW/docs/LINK_PROTOCOL.md` §8) — it blocks heating at 1.5 s and
 aborts a firing at 30 s. A burst of verbose logging that fills the TX ring could
 therefore stop a firing, which is a spectacular way for a debug feature to cause
 an outage.
@@ -144,7 +144,7 @@ rather than a promise.
 
 | Module | Purpose |
 |---|---|
-| `max31856.c` | Port of `KilnFW/App/drivers/MAX31856.c`. Same part, same registers, same conversions — **port it, do not rewrite it.** `KilnFW/docs/MAX31856.md` is the reference |
+| `max31856.c` | Port of `firmware/KilnFW/App/drivers/MAX31856.c`. Same part, same registers, same conversions — **port it, do not rewrite it.** `firmware/KilnFW/docs/MAX31856.md` is the reference |
 | `uart_frame.c` | `0x7E` framing, `0x7D` stuffing, CRC16/CCITT-FALSE. Byte-compatible with `uart_protocol.c`. **Parse only + emit; no ACK, no retry, no dedup** |
 
 ### Application
@@ -239,7 +239,7 @@ Sixty seconds of watching before permitting heat costs nothing on a firing
 measured in hours.
 
 Only `uart_owner` failing to initialise aborts the boot; everything else is
-logged and stepped over. Same policy as `KilnFW/App/main.c`.
+logged and stepped over. Same policy as `firmware/KilnFW/App/main.c`.
 
 ---
 
@@ -470,7 +470,7 @@ The cases worth writing first are the *nuisance* cases, not the trip cases —
 a 60 s heater window at 15 % duty must not trip S4; a 40 °C ramp-end overshoot
 must not trip S2; a 900 ms sensor dropout must not trip S5.
 
-**Reuse `KilnFW/App/test/sim_plant.c`.** It already models a kiln with element
+**Reuse `firmware/KilnFW/App/test/sim_plant.c`.** It already models a kiln with element
 lag, sensor transport delay and radiative loss. Driving `safety_guards` from it
 gives realistic thermal traces for free.
 
@@ -481,7 +481,7 @@ permit heating, but no guard verdict here may ever depend on whether anything
 is listening.
 
 **Link testing with no Pico attached** already works from the ESP side —
-`KilnFW/docs/SAFETY_LINK.md` §"How to test this without a Pico" describes
+`firmware/KilnFW/docs/SAFETY_LINK.md` §"How to test this without a Pico" describes
 loopback and a PC-side stub on the safety UART. The stub is the right way to
 develop the context-broadcast format before either firmware is finished, and it
 works in reverse too: a PC-side stub *emitting* context frames is how

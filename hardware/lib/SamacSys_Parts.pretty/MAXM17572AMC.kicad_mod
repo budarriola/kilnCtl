@@ -38,7 +38,7 @@
   (pad 11 smd rect (at 1.600 -0.75 90) (size 0.250 0.600) (layers F.Cu F.Paste F.Mask))
   (pad 12 smd rect (at 1.600 -1.25 90) (size 0.250 0.600) (layers F.Cu F.Paste F.Mask))
   (pad 13 smd rect (at 0.000 -0 0) (size 2.100 2.400) (layers F.Cu F.Paste F.Mask))
-  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\parts\\MAXM17572AMC+T.stp"
+  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\hardware\\lib\\MAXM17572AMC+T.stp"
     (at (xyz 0 0 0.018503936960941))
     (scale (xyz 1 1 1))
     (rotate (xyz -180 0 0))

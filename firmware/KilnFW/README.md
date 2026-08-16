@@ -9,7 +9,7 @@ them.
 
 The controller is an ESP32-S3-DevKitC (U4) plugged into the main board.
 `docs/HARDWARE.md` is the authority on what is wired to what; it was traced
-from `mainBoard/kiln.kicad_sch` and the two thermocouple daughterboards.
+from `hardware/mainBoard/kiln.kicad_sch` and the two thermocouple daughterboards.
 
 This firmware started as the unit-test fixture's and was retargeted at this
 board. The fixture's devices (MCP4728 DAC, AD9833, SSD1306, PCF8575) are gone;
@@ -73,7 +73,7 @@ run on hardware. See [`docs/PID_CONTROL.md`](docs/PID_CONTROL.md) and
 | [`docs/SAFETY_LINK.md`](docs/SAFETY_LINK.md) | The isolated link to the RP2040, the contract its firmware must implement, and the fault line |
 | [`docs/SAFETY_MODEL.md`](docs/SAFETY_MODEL.md) | The safety-wins policy: what actually blocks a relay from energizing today, and what still doesn't |
 | [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) | What's done and verified vs. outstanding, across firmware and PC tooling |
-| [`pc_tools/README.md`](pc_tools/README.md) | The PC-side Python package: GUI, MCP server, session logging, layout |
+| [`../../tools/PcTools/README.md`](../../tools/PcTools/README.md) | The PC-side Python package: GUI, MCP server, session logging, layout |
 
 ## Firmware layout
 
@@ -110,4 +110,4 @@ run on hardware. See [`docs/PID_CONTROL.md`](docs/PID_CONTROL.md) and
 
 ## PC tools layout
 
-See [`pc_tools/README.md`](pc_tools/README.md) for the full breakdown.
+See [`../../tools/PcTools/README.md`](../../tools/PcTools/README.md) for the full breakdown.

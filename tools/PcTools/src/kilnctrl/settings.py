@@ -1,4 +1,4 @@
-"""Persisted app settings (``pc_tools/src/kilnctrl/settings.json``).
+"""Persisted app settings (``tools/PcTools/src/kilnctrl/settings.json``).
 
 Single settings file shared by the GUI and (where relevant) the MCP server:
 the last-used serial port and the log retention count today, with room to
@@ -18,7 +18,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-#: pc_tools/src/kilnctrl/settings.json (next to this file)
+#: tools/PcTools/src/kilnctrl/settings.json (next to this file)
 SETTINGS_PATH = Path(__file__).resolve().with_name("settings.json")
 
 

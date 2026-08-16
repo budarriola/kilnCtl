@@ -8,7 +8,7 @@
 How each guard gets provoked, on the host and on real hardware, and what
 "verified" means for it.
 
-Modelled on `KilnFW/docs/GUARD_TEST_MATRIX.md`. **A guard that has only ever
+Modelled on `firmware/KilnFW/docs/GUARD_TEST_MATRIX.md`. **A guard that has only ever
 passed a host test is not commissioned** — the host tests prove the logic, the
 hardware tests prove the wiring, and most of the failures worth catching here
 are wiring.
@@ -49,7 +49,7 @@ heater window and the 1 s peak-hold conspire to break, and it is the reason
 ## 2. Host tests
 
 Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
-`KilnFW/App/test/`. These are cheap, so they should be exhaustive.
+`firmware/KilnFW/App/test/`. These are cheap, so they should be exhaustive.
 
 | Guard | Provocation | Assert |
 |---|---|---|
@@ -81,7 +81,7 @@ Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 | All | `CLEAR_TRIP` with a mismatched `trip_mask` | **Refused** |
 | All | Guard verdicts with the TX path stubbed out | **Bit-identical** to a live-TX run |
 
-Drive the thermal ones from `KilnFW/App/test/sim_plant.c` — it already models
+Drive the thermal ones from `firmware/KilnFW/App/test/sim_plant.c` — it already models
 element lag, sensor transport delay and radiative loss, so the traces are
 realistic rather than synthetic ramps.
 
@@ -163,7 +163,7 @@ plausible way this system ends up quietly unprotected.
 ## 4. Recording results
 
 For each guard: date, firmware commit, config CRC, what was done, what happened,
-and pass/fail. `KilnFW/docs/PROJECT_STATUS.md` is the model — it distinguishes
+and pass/fail. `firmware/KilnFW/docs/PROJECT_STATUS.md` is the model — it distinguishes
 "built", "compiles", "live-verified on hardware", and it is scrupulous about
 which is which.
 
@@ -180,7 +180,7 @@ should say so rather than being listed as coverage.
 - [ ] Nuisance-rejection tests written **before** trip tests, all of §1
 - [ ] §2's full provocation table implemented and passing
 - [ ] Property tests: ceiling monotonicity over the float range incl. NaN/Inf
-- [ ] Fuzz over every decoder (`CommonFW/test`)
+- [ ] Fuzz over every decoder (`firmware/CommonFW/test`)
 
 **Hardware — safe state first**
 - [ ] §3.1 all five rows passed

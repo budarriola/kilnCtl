@@ -11,7 +11,7 @@ Both triggers are semantic, which is why this uses a plain
 ``RotatingFileHandler`` / ``TimedRotatingFileHandler``: neither size nor time
 is what rolls this over.
 
-Files land in ``pc_tools/logs/session_YYYYmmdd_HHMMSS.log``. After each
+Files land in ``tools/PcTools/logs/session_YYYYmmdd_HHMMSS.log``. After each
 rollover the oldest files beyond the configured keep-count are deleted. That
 count is persisted in the shared ``settings.json`` (see :mod:`kilnctrl.settings`).
 """
@@ -28,7 +28,7 @@ from . import settings
 
 log = logging.getLogger(__name__)
 
-#: pc_tools/  (this file is pc_tools/src/kilnctrl/session_log.py)
+#: tools/PcTools/  (this file is tools/PcTools/src/kilnctrl/session_log.py)
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 LOG_DIR = PROJECT_DIR / "logs"
 

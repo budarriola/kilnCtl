@@ -6,17 +6,17 @@
 > the schematic and re-run the bench checks in §1. If it disagrees with the
 > board, **the board wins.** Checklist at the bottom.
 
-Everything here was traced from **`mainBoard/output/kiln.pdf`** (KiCad 10.0.4,
+Everything here was traced from **`hardware/mainBoard/output/kiln.pdf`** (KiCad 10.0.4,
 the PDF added in commit `c50cded` "add pdf sch of same board"), cross-checked
-against `mainBoard/SaftyProcessor.kicad_sch` and its child sheets. Where a
+against `hardware/mainBoard/SaftyProcessor.kicad_sch` and its child sheets. Where a
 schematic *net name* and the silicon disagree, this file follows the silicon
 and says so.
 
-**Do not trace this board from `mainBoard/kiln.net`.** That netlist is dated
+**Do not trace this board from `hardware/mainBoard/kiln.net`.** That netlist is dated
 `2026-07-19`, its `(source)` field still points at the pre-move
 `kilnCtl\kiln.kicad_sch`, and it disagrees with the current schematic in at
 least three places (see [Stale sources](#stale-sources) at the bottom). It is
-almost certainly the origin of the two errors in `KilnFW/docs/HARDWARE.md`
+almost certainly the origin of the two errors in `firmware/KilnFW/docs/HARDWARE.md`
 corrected below.
 
 The safety processor is a **Raspberry Pi Pico (RP2040)**, designator **A1**,
@@ -27,11 +27,11 @@ shares no connection with `GND_Main` except through three optocouplers.
 
 ## 1. The correction that matters most
 
-> **The isolated UART directions in `KilnFW/docs/HARDWARE.md` and
-> `KilnFW/docs/SAFETY_LINK.md` are inverted relative to the current board,
+> **The isolated UART directions in `firmware/KilnFW/docs/HARDWARE.md` and
+> `firmware/KilnFW/docs/SAFETY_LINK.md` are inverted relative to the current board,
 > and `KilnFW`'s pin defaults are swapped with them.**
 
-`KilnFW/docs/SAFETY_LINK.md` "Trap 1" states that the net names are backwards —
+`firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 1" states that the net names are backwards —
 that `DataToSafty` is the ESP's RX and `DataFromSafty` is the ESP's TX.
 **On this revision of the board that is false. The net names are correct as
 written.** Traced from the optocoupler symbols:
@@ -124,7 +124,7 @@ measurement**, so the bench checks below still stand.
 
 Both boards powered (main **and** `12v_Safty`), a minimal **GPIO probe on each
 processor**, and the PC driving both sides
-([`../../PcTools/README.md`](../../PcTools/README.md) §1).
+([`../../../tools/PcTools/TODO.md`](../../../tools/PcTools/TODO.md) §1).
 
 > **The PC must reach each processor by a path that is not the link under test.**
 > ESP over its USB serial, Pico over SWD. You cannot test the isolated UART
@@ -202,7 +202,7 @@ Static resistance checks, everything unpowered, as an independent cross-check:
 ### Once both firmwares exist
 
 Capture the isolated pair with the Saleae and decode `kilnlink` framing
-(`PcTools/README.md` §2). This is the only check that proves baud, polarity and
+(`tools/PcTools/TODO.md` §2). This is the only check that proves baud, polarity and
 the inversion pair together, under real traffic.
 
 ### What the docs still get right
@@ -254,7 +254,7 @@ Also on the sheet: R3 10k to `GND_Safty` and R4/R5/R6 10k to `3.3v_Safty` on
 the SPI group — verify which line each lands on at bring-up before assuming a
 default state for MISO/CLK/MOSI.
 
-`KilnFW/docs/HARDWARE.md`'s Pico section is **correct** on this map (GPIO7/8 =
+`firmware/KilnFW/docs/HARDWARE.md`'s Pico section is **correct** on this map (GPIO7/8 =
 SDA/SCL, GPIO11/12 = thermoFault/thermoDrdy). The stale `kiln.net` disagrees;
 ignore it.
 
@@ -452,7 +452,7 @@ A **Raspberry Pi Debug Probe**, or a spare Pico flashed with `debugprobe`
 firmware. Either presents two interfaces over a single USB cable to the PC:
 
 - **CMSIS-DAP SWD** — programming, reset, halt/step, memory read/write via
-  OpenOCD (`PcTools/README.md`, "Debug and programming").
+  OpenOCD (`tools/PcTools/TODO.md`, "Debug and programming").
 - **A USB-serial UART bridge** — an ordinary console, with no USB connected to
   the Pico itself.
 
@@ -523,7 +523,7 @@ galvanic separation — is not present while you are debugging. Consequences:
   bonding is a problem for a particular measurement.
 
 **This is the strongest argument for the ESP-relayed log path**
-(`CommonFW/docs/LINK_PROTOCOL.md`, LOG relay): it is the only console route with
+(`firmware/CommonFW/docs/LINK_PROTOCOL.md`, LOG relay): it is the only console route with
 **no PC connection to the safety domain at all**, so isolation stays intact and
 it works in the deployed system rather than only on the bench.
 
@@ -546,7 +546,7 @@ makes USB *electrically* safe; it does not restore isolation.
 ## 8. Safety thermocouple (J7)
 
 Main board **J7** is a 2x06 1.27 mm header on the **safety** domain, carrying
-the Pico's SPI and I2C out to the separate `SaftyThermocoupleBoard/` project:
+the Pico's SPI and I2C out to the separate `hardware/SaftyThermocoupleBoard/` project:
 
 | Pin | Signal | | Pin | Signal |
 |---|---|-|---|---|
@@ -557,10 +557,10 @@ the Pico's SPI and I2C out to the separate `SaftyThermocoupleBoard/` project:
 | 9 | `CLK` | | 10 | GND_Safty |
 | 11 | `CS0` | | 12 | GND_Safty |
 
-The daughterboard is the same design as `ThermocoupleBoard/` with **one**
+The daughterboard is the same design as `hardware/ThermocoupleBoard/` with **one**
 MAX31856 populated, and makes its own analog 3.3 V with an LT1962.
 
-Driver consequences (all of which `KilnFW/docs/MAX31856.md` already documents
+Driver consequences (all of which `firmware/KilnFW/docs/MAX31856.md` already documents
 for the identical part — **read it, and port rather than reinvent**):
 
 - SPI **mode 1** (CPOL=0, CPHA=1), up to 5 MHz. The RP2040's SPI0 on
@@ -629,11 +629,11 @@ Recorded so the next person does not repeat the trace:
 
 | Source | Status | Evidence |
 |---|---|---|
-| `mainBoard/output/kiln.pdf` | **current** | KiCad 10.0.4; values match the `.kicad_sch` sources; added by commit `c50cded` |
-| `mainBoard/*.kicad_sch` | **current** | spot-checked `CurrentSense.kicad_sch` — R43 10k, R46 7.15k, U8 AD8542, matches the PDF |
-| `mainBoard/kiln.net` | **STALE — do not use** | dated 2026-07-19; `(source)` is the pre-move `kilnCtl\kiln.kicad_sch`; says U10–U12 are LMV321 with 47k/475k (board has AD8542 with 10k/7.15k), puts the safety MAX31856 on the main board (it is on the daughterboard via J7), and puts `thermoFault`/`thermoDrdy` on GPIO7/8 (they are on GPIO11/12) |
-| `KilnFW/docs/HARDWARE.md` | correct except §"Isolation barrier" | Pico pin map, J7 table and power notes all match. The three-optocoupler table has U2/U3 reversed |
-| `KilnFW/docs/SAFETY_LINK.md` | "Trap 1" and the R15 boot note are wrong | see §1 |
+| `hardware/mainBoard/output/kiln.pdf` | **current** | KiCad 10.0.4; values match the `.kicad_sch` sources; added by commit `c50cded` |
+| `hardware/mainBoard/*.kicad_sch` | **current** | spot-checked `CurrentSense.kicad_sch` — R43 10k, R46 7.15k, U8 AD8542, matches the PDF |
+| `hardware/mainBoard/kiln.net` | **STALE — do not use** | dated 2026-07-19; `(source)` is the pre-move `kilnCtl\kiln.kicad_sch`; says U10–U12 are LMV321 with 47k/475k (board has AD8542 with 10k/7.15k), puts the safety MAX31856 on the main board (it is on the daughterboard via J7), and puts `thermoFault`/`thermoDrdy` on GPIO7/8 (they are on GPIO11/12) |
+| `firmware/KilnFW/docs/HARDWARE.md` | correct except §"Isolation barrier" | Pico pin map, J7 table and power notes all match. The three-optocoupler table has U2/U3 reversed |
+| `firmware/KilnFW/docs/SAFETY_LINK.md` | "Trap 1" and the R15 boot note are wrong | see §1 |
 | `ltspice/currentMon.asc` | **matches the built circuit** | same topology and same 10k/7.15k/1M/1µF values as the schematic; a genuinely useful model, see `CURRENT_SENSE.md` |
 
 **`kiln.net` should be regenerated or deleted** — `TODO.md` item 0.4. Leaving a
@@ -659,7 +659,7 @@ stale netlist in the tree next to a correct schematic is how the two errors in
 - [ ] RUN (pin 30) reset wire considered at build time
 - [ ] **Ground-bonding understood**: any PC debug connection bypasses the isolation barrier; no mains-referenced load wiring attached while debugging
 - [ ] CT type confirmed voltage-output (R72 is DNP)
-- [ ] `mainBoard/kiln.net` regenerated or deleted
+- [ ] `hardware/mainBoard/kiln.net` regenerated or deleted
 
 **Record**
 - [ ] Board revision this trace corresponds to, written at the top

@@ -23,7 +23,7 @@
   (fp_circle (center -2.75 -3.07) (end -2.75 -2.8498) (layer F.Fab) (width 0.127))
   (pad 1 smd rect (at 0 -3 0) (size 1.7 2) (layers F.Cu F.Paste F.Mask))
   (pad 2 smd rect (at 0 3 0) (size 1.7 2) (layers F.Cu F.Paste F.Mask))
-  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\mainBoard\\parts\\SamacSys_Parts.3dshapes\\7447779004.stp"
+  (model "C:\\Users\\budar\\OneDrive\\Desktop\\kilnCtl\\hardware\\mainBoard\\parts\\SamacSys_Parts.3dshapes\\7447779004.stp"
     (at (xyz 0 0 0))
     (scale (xyz 1 1 1))
     (rotate (xyz 0 0 0))

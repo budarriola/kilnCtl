@@ -10,7 +10,7 @@
 
 Implemented **once**, in [`../`](../README.md), and linked into both
 [`../../KilnFW`](../../KilnFW) and [`../../SaftyFW`](../../SaftyFW). Do not
-reimplement any of it in either firmware — see `CommonFW/README.md` for the
+reimplement any of it in either firmware — see `firmware/CommonFW/README.md` for the
 transport-vs-contract split.
 
 The wire between the ESP32-S3 (`KilnFW`) and the RP2040 (`SaftyFW`), across
@@ -153,7 +153,7 @@ on the side of the link that can afford one.
 ## 3. Framing
 
 Unchanged from `uart_protocol.c`, and **implemented once in
-`CommonFW/src/kilnlink_frame.c`** — neither firmware reimplements it. The values
+`firmware/CommonFW/src/kilnlink_frame.c`** — neither firmware reimplements it. The values
 are tabulated here because they are the contract; the code is the only place
 they are written down twice, and CI should assert there is no second CRC or
 byte-stuffing implementation anywhere in the tree.
@@ -174,11 +174,11 @@ byte-stuffing implementation anywhere in the tree.
 inverts both directions in its own peripheral, and each optocoupler inverts
 once; two inversions in series cancel. Adding inversion on the Pico side —
 PIO, or an external inverter — cancels the optocouplers' and the link goes
-dead. See `SaftyFW/docs/HARDWARE.md` §1.
+dead. See `firmware/SaftyFW/docs/HARDWARE.md` §1.
 
-**Pins: `PicoTx` = GPIO4, `PicoRx` = GPIO5** (`SaftyFW/docs/HARDWARE.md` §2). On the ESP
+**Pins: `PicoTx` = GPIO4, `PicoRx` = GPIO5** (`firmware/SaftyFW/docs/HARDWARE.md` §2). On the ESP
 side these land on **GPIO4 = ESP TX** and **GPIO5 = ESP RX**, which is *swapped*
-relative to `KilnFW`'s current `Kconfig` defaults. That is `SaftyFW/TODO.md` item 0.1
+relative to `KilnFW`'s current `Kconfig` defaults. That is `firmware/SaftyFW/TODO.md` item 0.1
 and it blocks everything else in this document.
 
 ### Receiver robustness — required, not optional
@@ -238,7 +238,7 @@ Per-zone block (**14 bytes**):
 ### `sample_counter` is what makes a borrowed thermocouple safe to use
 
 The safety processor may be configured to use one of the **main board's**
-thermocouples as its safety sensor (`SaftyFW/docs/THERMOCOUPLE.md` §3). When it
+thermocouples as its safety sensor (`firmware/SaftyFW/docs/THERMOCOUPLE.md` §3). When it
 does, the reading arrives through this frame rather than from its own MAX31856 —
 and that creates a failure mode the Pico must be able to see.
 
@@ -249,7 +249,7 @@ condition under which a kiln at setpoint sits for hours.
 
 `sample_counter` breaks the ambiguity. It increments **only when a new
 conversion was actually read** from that channel — driven by `~DRDY` (or the
-elapsed-time fallback `KilnFW/docs/MAX31856.md` documents), never by the mere act
+elapsed-time fallback `firmware/KilnFW/docs/MAX31856.md` documents), never by the mere act
 of building this frame. So:
 
 | `sample_counter` | `measured_c` | Meaning |
@@ -274,7 +274,7 @@ currently configures all three channels identically.
 Carrying it here lets the Pico (a) sanity-check that a borrowed channel is the
 type it was told to expect, and (b) apply the right plausibility range. A
 mismatch between the configured type and the thermocouple physically fitted is
-otherwise **silent and reads low** — see `SaftyFW/docs/THERMOCOUPLE.md` §2.
+otherwise **silent and reads low** — see `firmware/SaftyFW/docs/THERMOCOUPLE.md` §2.
 
 Top-level flags (byte 1):
 
@@ -316,7 +316,7 @@ measures link health with no return path.
 that a calibration offset must never be able to hide an out-of-range sensor.
 
 **`SIM_PLANT` is not decoration.** `KilnFW` can be built against a simulated
-plant that reports fabricated temperatures (`KilnFW/README.md`). A safety
+plant that reports fabricated temperatures (`firmware/KilnFW/README.md`). A safety
 processor that silently correlated against simulated data would be actively
 dangerous. On seeing this bit set, `SaftyFW` **disables every context-consuming
 guard (S2, S3, S4) and raises a persistent warning.** S1 and S5–S12 are unaffected,
@@ -365,7 +365,7 @@ mask back prevents a stale "clear" queued before a *second*, different trip
 from clearing that one too.
 
 This is the GUI's path to acknowledging a trip. The E-stop assert/release cycle
-remains available as the physical alternative (`SaftyFW/docs/SAFETY_MODEL.md` §6).
+remains available as the physical alternative (`firmware/SaftyFW/docs/SAFETY_MODEL.md` §6).
 
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
@@ -388,7 +388,7 @@ a bad time from the ESP becomes a safety input.
 ### `SAFETY_CMD_REQUEST_ENABLE` = `0x02` (existing)
 
 Kept, converted to `BROADCAST`. Advisory only — the Pico's interlocks always
-win, which `KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already
+win, which `firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already
 handles. In practice it is now redundant with `HEAT_REQUESTED` in the context
 frame; keep it for one release, then retire it.
 
@@ -425,14 +425,14 @@ one ESP→Pico signal that works with the UART completely dead.
 > **This line cannot detect a dead ESP.** Unpowered main board ⇒ LED dark ⇒
 > R8 pulls GPIO10 high ⇒ reads *healthy*. Guard S6 treats the fault line and
 > the UART timeout as independent evidence for exactly this reason. See
-> `SaftyFW/docs/HARDWARE.md` §4.
+> `firmware/SaftyFW/docs/HARDWARE.md` §4.
 
 **`SAFETY_FAULT_SRC_SAFETY_LINK` needs re-examining on the ESP side.** It is
 currently asserted when the Pico fails to answer a poll, with
 `fault_on_link_loss` defaulting true. With no return path there are no polls to
 miss, so as written it would assert permanently. **Redefined in §8** as "no
 telemetry frame within 1.5 s", which is what makes *the safety processor must be
-alive to heat* enforceable. `SaftyFW/TODO.md` item 0.6.
+alive to heat* enforceable. `firmware/SaftyFW/TODO.md` item 0.6.
 
 ---
 
@@ -580,7 +580,7 @@ question anyone asks, and this frame is the only place the answer is preserved.
 | 47..54 | f64 LE | `energy_wh` accumulated since the Pico last booted |
 
 `i_conducting_a` is the draw **while conducting**, not a duty-averaged figure —
-see `SaftyFW/docs/CURRENT_SENSE.md` §3b for why those must be reported separately, and why
+see `firmware/SaftyFW/docs/CURRENT_SENSE.md` §3b for why those must be reported separately, and why
 the ESP's own duty figure is the better multiplier.
 
 `energy_wh` resets on Pico reboot; `boot_id` in the context/version frames is
@@ -604,12 +604,12 @@ Two rules, both non-negotiable:
   never blocking the task that logged. This is rule 3 of §2, not a nicety —
   a log line must never be able to stall the safety processor.
 - **`log_task` is the lowest priority in the system**
-  (`SaftyFW/docs/ARCHITECTURE.md` §4), so a chatty log cannot delay a trip.
+  (`firmware/SaftyFW/docs/ARCHITECTURE.md` §4), so a chatty log cannot delay a trip.
 
 The PC distinguishes the two streams by the frame's source device, and should
 mark the transport on each line: a log line relayed through the ESP and one read
 over RTT mean very different things when the link is what is under
-investigation. See `PcTools/README.md`, "Logging and consoles".
+investigation. See `tools/PcTools/TODO.md`, "Logging and consoles".
 
 ---
 
@@ -624,7 +624,7 @@ already on the wire from §6 — this section is about `KilnFW`'s dashboard
 
 | Shown | Source | Notes |
 |---|---|---|
-| **Safety temperature** | 23-byte status frame, bytes 2..5 | **Label it with its placement mode** — "Chamber (safety)" vs "External overheat" (`SaftyFW/docs/SAFETY_MODEL.md` §3). Shown as `—` when `TEMP_VALID` is clear, never as a number |
+| **Safety temperature** | 23-byte status frame, bytes 2..5 | **Label it with its placement mode** — "Chamber (safety)" vs "External overheat" (`firmware/SaftyFW/docs/SAFETY_MODEL.md` §3). Shown as `—` when `TEMP_VALID` is clear, never as a number |
 | **Enclosure temperature** | status frame bytes 6..9 (MAX31856 cold junction) | This is the electronics enclosure, not the kiln. Colour it against S12's `cj_warn_c` (60 °C) and `cj_max_c` (85 °C) |
 | **Power, total and per channel** | `SAFETY_CMD_POWER` | Plus `i_conducting_a` per channel — the number that drifts as elements age |
 | **Energy this firing** | integrate `p_total_w`, reset on profile start | The figure people actually want |
@@ -647,13 +647,13 @@ will generate support questions forever.
 
 **Mark the power figure as an estimate.** No voltage is measured anywhere;
 `mains_voltage_v` is a nominal and elements are resistive, so a 5 % supply sag is
-a 10 % power error (`SaftyFW/docs/CURRENT_SENSE.md` §3b). Show it to three significant
+a 10 % power error (`firmware/SaftyFW/docs/CURRENT_SENSE.md` §3b). Show it to three significant
 figures at most, and show `—` when `mains_voltage_configured` is clear rather
 than silently assuming 240 V.
 
 **Give `TRIP_INEFFECTIVE` its own treatment.** Every other trip means
 "investigate the kiln". S9 means **"power is still flowing — go to the
-breaker"** (`SaftyFW/docs/SAFETY_MODEL.md` S9). Different required action, so it must not
+breaker"** (`firmware/SaftyFW/docs/SAFETY_MODEL.md` S9). Different required action, so it must not
 look like the others.
 
 **Show the safety processor's own build identity, not just the ESP's.** Two
@@ -679,10 +679,10 @@ The mechanism already exists on the ESP and needs only to be pointed at the
 telemetry stream: `safety_link_set_fault_source(SAFETY_FAULT_SRC_SAFETY_LINK)`
 feeds `relay_authority_on_blocked()`, which every relay-on path already goes
 through — the UART bridge, the dashboard's `POST /api/relay`, and
-`profile_executor` (`KilnFW/docs/SAFETY_MODEL.md` §1). So asserting that one bit
+`profile_executor` (`firmware/KilnFW/docs/SAFETY_MODEL.md` §1). So asserting that one bit
 blocks **every** heater-on event on the board, with no new gate to write.
 
-**Two timeouts, not one**, for the same reason `SaftyFW/docs/SAFETY_MODEL.md` §2 gives:
+**Two timeouts, not one**, for the same reason `firmware/SaftyFW/docs/SAFETY_MODEL.md` §2 gives:
 blocking new heat is cheap and instantly reversible, aborting a firing is
 neither.
 
@@ -697,7 +697,7 @@ seconds of silence must not be survivable.
 **At boot the ESP must have heard from the Pico before it will heat at all.**
 Before the first frame ever arrives, the link counts as down — the same
 "absence is not proof of safety" rule `KilnFW` already applies to the PC link
-(`KilnFW/docs/SAFETY_MODEL.md` §3). An unpopulated A1, an unprogrammed Pico and
+(`firmware/KilnFW/docs/SAFETY_MODEL.md` §3). An unpopulated A1, an unprogrammed Pico and
 a crashed one all correctly refuse to let the kiln heat.
 
 **This makes `fault_on_link_loss` load-bearing rather than vestigial**, and
@@ -717,7 +717,7 @@ telemetry frame within 1.5 s", which is a real, checkable condition.
 ## 9. Changes required in `KilnFW`
 
 Neither firmware is complete; these are the ESP-side items. Sequenced in
-`SaftyFW/TODO.md` phase 0, and **items 0.1 and 0.2 block all bring-up.**
+`firmware/SaftyFW/TODO.md` phase 0, and **items 0.1 and 0.2 block all bring-up.**
 
 | # | Change | Files |
 |---|---|---|
@@ -731,8 +731,8 @@ Neither firmware is complete; these are the ESP-side items. Sequenced in
 | 0.8 | Send `SET_FIRING_CEILING` at profile start/edit — the highest target the profile will ask for | `profile_executor.c`, `profiles_http.c` |
 | 0.9 | Surface `DIAG`, `FW_VERSION` (incl. **config CRC**) and `TRIP_EVENT` on the dashboard and over the PC link | `dashboard_http.c`, `uart_bridge.c` |
 | 0.10 | Bump `UART_PROTOCOL_VERSION` 4 → 5 with a note explaining the broadcast type | `uart_task_ids.h:52` |
-| 0.11 | Correct `docs/SAFETY_LINK.md` "Trap 1" and the R15 boot-artefact note; correct `docs/HARDWARE.md`'s optocoupler table | `KilnFW/docs/` |
-| 0.12 | Update `docs/SAFETY_MODEL.md`'s summary table — the "safety processor reports E-stop/fault" row flips from **No** to **Yes** once 0.6 lands | `KilnFW/docs/` |
+| 0.11 | Correct `docs/SAFETY_LINK.md` "Trap 1" and the R15 boot-artefact note; correct `docs/HARDWARE.md`'s optocoupler table | `firmware/KilnFW/docs/` |
+| 0.12 | Update `docs/SAFETY_MODEL.md`'s summary table — the "safety processor reports E-stop/fault" row flips from **No** to **Yes** once 0.6 lands | `firmware/KilnFW/docs/` |
 
 Item 0.11 matters more than it looks. Those two documents currently describe the
 link direction backwards, and they are the first thing anyone reads before
@@ -754,10 +754,10 @@ Two more, driven by the borrowed-thermocouple option:
 
 ## 10. Completion checklist
 
-**Blocking (`SaftyFW/TODO.md` phase 0)**
+**Blocking (`firmware/SaftyFW/TODO.md` phase 0)**
 - [ ] 0.1 Safety-UART pins swapped in `KilnFW` (TX→4, RX→5), pull-up moved to GPIO5
 - [ ] 0.2 `UART_PROTO_MSG_BROADCAST = 0x04` added
-- [ ] 0.3 `KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
+- [ ] 0.3 `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
 - [ ] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped to 5, `UART_PROTOCOL_VERSION` aliased to it
 
 **ESP → Pico**

@@ -3586,7 +3586,7 @@ class KilnCtrlApp:
             top,
             text=(
                 "Every interface the schematic defines, present or not -- traced from "
-                "docs/HARDWARE.md, which is itself traced from mainBoard/kiln.kicad_sch "
+                "docs/HARDWARE.md, which is itself traced from hardware/mainBoard/kiln.kicad_sch "
                 "plus the two daughterboard schematics. This is a static reference, not "
                 "live data; see \"Pin Configuration...\" for what the connected device "
                 "actually reports."

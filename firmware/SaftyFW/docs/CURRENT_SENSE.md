@@ -49,7 +49,7 @@ exactly as before. That is the right way round.
 
 ## 1. The circuit
 
-Traced from `mainBoard/output/kiln.pdf` p.4. Designators are channel 1's;
+Traced from `hardware/mainBoard/output/kiln.pdf` p.4. Designators are channel 1's;
 channels 2 and 3 are identical (`R78/R83/…`, `R84/R89/…`).
 
 ```

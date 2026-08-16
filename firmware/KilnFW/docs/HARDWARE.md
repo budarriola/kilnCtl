@@ -1,8 +1,8 @@
 # KilnCtrl Hardware Map
 
-Everything here was traced from `mainBoard/kiln.kicad_sch` (netlist exported with
-`kicad-cli sch export netlist`), plus `ThermocoupleBoard/` and
-`SaftyThermocoupleBoard/` for the two daughterboards. Where a schematic *net
+Everything here was traced from `hardware/mainBoard/kiln.kicad_sch` (netlist exported with
+`kicad-cli sch export netlist`), plus `hardware/ThermocoupleBoard/` and
+`hardware/SaftyThermocoupleBoard/` for the two daughterboards. Where a schematic *net
 name* disagrees with what the silicon actually does, this file follows the
 silicon and says so.
 

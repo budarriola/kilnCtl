@@ -6,13 +6,13 @@
 > at the bottom.
 
 **Status: proposed move, not executed.** The code exists today at
-`KilnFW/pc_tools/` and works. This document plans (a) moving it out from under
+`tools/PcTools/` and works. This document plans (a) moving it out from under
 one firmware, (b) making it serve both processors, and (c) the capabilities that
 make it usable by an agent rather than only by a human at a Tk window.
 
 ## Why move it
 
-`KilnFW/pc_tools/` is filed under the ESP32 firmware, but it is about to talk to
+`tools/PcTools/` is filed under the ESP32 firmware, but it is about to talk to
 two processors. It has the same problem `LINK_PROTOCOL.md` had before it moved to
 `CommonFW`: a component that serves two peers, living inside one of them, reads
 as belonging to that one.
@@ -20,11 +20,11 @@ as belonging to that one.
 Concretely it already contains `safety.py` — a page and MCP tools for a
 processor whose firmware is in a different directory.
 
-**Proposed: `PcTools/` at the repository root**, sibling to `CommonFW/`,
-`KilnFW/` and `SaftyFW/`. Under the `REPO_LAYOUT.md` reorganisation it becomes
+**Proposed: `PcTools/` at the repository root**, sibling to `firmware/CommonFW/`,
+`firmware/KilnFW/` and `firmware/SaftyFW/`. Under the `REPO_LAYOUT.md` reorganisation it becomes
 `tools/PcTools/`, or `firmware/PcTools/` if it is felt to belong with the
 firmware it mirrors — either is defensible; what is not is leaving it under
-`KilnFW/`.
+`firmware/KilnFW/`.
 
 The Python package keeps the name `kilnctrl`: it is the system's name, not the
 main board's, and renaming it would churn every import and the two console
@@ -37,7 +37,7 @@ The GUI and the MCP server should not care how a processor is reached.
 | Path | Reaches | Notes |
 |---|---|---|
 | **USB serial → ESP32** | ESP directly, **and the Pico through it** | The primary path. The `SAFETY` task (task 7) already relays; no second cable |
-| **USB-TTL adapter → isolated UART** | Pico directly | For bring-up before the ESP side works, or when the ESP is the thing under suspicion. **Must invert** — see `SaftyFW/docs/HARDWARE.md` §1 |
+| **USB-TTL adapter → isolated UART** | Pico directly | For bring-up before the ESP side works, or when the ESP is the thing under suspicion. **Must invert** — see `firmware/SaftyFW/docs/HARDWARE.md` §1 |
 | **SWD/RTT → Pico** | Pico directly | Development and flashing. Also the only path when the Pico will not talk |
 
 **The Pico-through-the-ESP path is the one to build first.** It needs no new
@@ -64,7 +64,7 @@ and flashing a one-off test firmware**, and it generalises: every future
 "is this net actually where the schematic says" question becomes one MCP call.
 
 **It must be gated.** Raw pin control on a board that drives relays is exactly
-the hazard `KilnFW/docs/SAFETY_MODEL.md` spends its length on. The gate should
+the hazard `firmware/KilnFW/docs/SAFETY_MODEL.md` spends its length on. The gate should
 mirror the existing `SX_WRITE_REG`/`SX_SET_DIR` treatment:
 
 - A compile-time `KILNCTL_ENABLE_GPIO_PROBE`, **default off**, so a production
@@ -80,7 +80,7 @@ mirror the existing `SX_WRITE_REG`/`SX_SET_DIR` treatment:
 
 The same capability on the safety processor, reached over SWD (see "Debug and
 programming" below), because the definitive isolated-UART test needs both ends
-driven and read in a coordinated way — `SaftyFW/docs/HARDWARE.md` §1.
+driven and read in a coordinated way — `firmware/SaftyFW/docs/HARDWARE.md` §1.
 
 Same gating discipline, and one absolute rule: **the probe may never write
 GPIO6 (`saftyRelay`)**. A debug tool that can energize the safety relay is a
@@ -128,7 +128,7 @@ large practical difference in how much of a session gets spent on plumbing.
 A stub implementing the Pico side against `CommonFW`'s codecs — answering
 context frames, emitting telemetry, and able to inject faults on demand.
 
-`KilnFW/docs/SAFETY_LINK.md` already describes this as the recommended way to
+`firmware/KilnFW/docs/SAFETY_LINK.md` already describes this as the recommended way to
 develop the RP2040 protocol layer before any RP2040 is involved. It should be a
 first-class, scriptable tool, and it should run in **both** directions: a stub
 Pico for testing `KilnFW`, and a stub ESP emitting context frames for testing
@@ -213,7 +213,7 @@ Two practical notes:
   controller (`S6`). Expect a trip, and expect it to be *correct*.
 - Debugging the Pico needs a probe on SWD, which is also the recommended
   flashing path — one probe covers both jobs. The exact wiring, free pins and
-  the ground-bonding caveat are in `SaftyFW/docs/HARDWARE.md` §7b.
+  the ground-bonding caveat are in `firmware/SaftyFW/docs/HARDWARE.md` §7b.
 - ⚠️ **Any PC debug connection into the safety domain bonds `GND_Safty` to PC
   ground**, and if the ESP is on the same PC, bypasses the isolation barrier for
   the duration. Bench only, never with load wiring connected.
@@ -236,7 +236,7 @@ plus its UART bridge on GP16/GP17. The Pico's own USB is not used.**
 | Path | Needs | Verdict |
 |---|---|---|
 | **`kilnlink` LOG frames over the isolated link** | nothing extra | **Primary.** Task id 5 (`LOG`) already exists and the ESP already forwards every log line to the PC. The Pico emits as device `SAFETY`, task 5; the ESP relays. Zero new hardware, works in the deployed system |
-| **Probe UART bridge, UART0 on GP16/GP17** | the debug probe (same cable as SWD) | **Bench primary.** An ordinary console with no USB on the Pico. Present before the link works and during early boot, which is when a console earns its keep. Wiring: `SaftyFW/docs/HARDWARE.md` §7b |
+| **Probe UART bridge, UART0 on GP16/GP17** | the debug probe (same cable as SWD) | **Bench primary.** An ordinary console with no USB on the Pico. Present before the link works and during early boot, which is when a console earns its keep. Wiring: `firmware/SaftyFW/docs/HARDWARE.md` §7b |
 | **RTT over SWD** | the debug probe, no extra pins | **Fallback.** For assembled boards where GP16/GP17 are inaccessible, and for output from contexts too early or too broken for a UART driver |
 | **USB CDC (`stdio_usb`)** | a USB cable to the Pico | **Not used.** Compile-time only, default off — see below |
 
@@ -244,12 +244,12 @@ plus its UART bridge on GP16/GP17. The Pico's own USB is not used.**
 > for flashing and debug regardless, and the same probe cable already carries a
 > UART bridge. Against that it links TinyUSB into the safety processor, blocks by
 > default when no host is reading, is absent during early crashes and watchdog
-> loops, and drops on every reset. `SaftyFW/docs/ARCHITECTURE.md` §1 has the full
+> loops, and drops on every reset. `firmware/SaftyFW/docs/ARCHITECTURE.md` §1 has the full
 > reasoning. It survives only as `SAFTYFW_ENABLE_USB_STDIO`, **default off,
 > debug builds only** — a build option, never a runtime GUI toggle.
 >
 > Separately, and no longer driving any decision: A1's 3V3 pin is back-fed from
-> `3.3v_Safty` with VSYS and VBUS unconnected (`SaftyFW/docs/HARDWARE.md` §7), so
+> `3.3v_Safty` with VSYS and VBUS unconnected (`firmware/SaftyFW/docs/HARDWARE.md` §7), so
 > USB on a powered board puts the module regulator in contention with IC3. Recorded
 > as a hardware fact for whoever ignores the above.
 
@@ -271,7 +271,7 @@ plus its UART bridge on GP16/GP17. The Pico's own USB is not used.**
 - Per-peer level filter, and a copy-to-clipboard that preserves both.
 - **A control for the safety processor's log level over the link**, per peer.
   This is a runtime setting sent as a link command, defaulting to warnings and
-  errors only — see `SaftyFW/docs/ARCHITECTURE.md` §1 for why it defaults quiet.
+  errors only — see `firmware/SaftyFW/docs/ARCHITECTURE.md` §1 for why it defaults quiet.
 - **Show which transports are actually available**, greyed out when not: the USB
   console is a *compile-time* option in `SaftyFW` (`SAFTYFW_ENABLE_USB_STDIO`,
   default off), so the GUI must report "not present in this build" rather than
@@ -284,29 +284,29 @@ plus its UART bridge on GP16/GP17. The Pico's own USB is not used.**
 Same discipline as `uart_log_bridge`: best-effort, dropped locally when the queue
 is full, **never blocking the task that logged**. On the Pico this is not just
 good manners — it is rule 3 of the no-hang constraint
-(`CommonFW/docs/LINK_PROTOCOL.md` §2). `log_task` is the lowest priority in the
-system and its output is always droppable (`SaftyFW/docs/ARCHITECTURE.md` §4).
+(`firmware/CommonFW/docs/LINK_PROTOCOL.md` §2). `log_task` is the lowest priority in the
+system and its output is always droppable (`firmware/SaftyFW/docs/ARCHITECTURE.md` §4).
 
 ## What this does not become
 
 - **Not a second control path that bypasses safety.** Every relay command from
   here goes through `relay_authority_on_blocked()`, exactly as
-  `KilnFW/docs/SAFETY_MODEL.md` requires of the existing tools. The GPIO probe's
+  `firmware/KilnFW/docs/SAFETY_MODEL.md` requires of the existing tools. The GPIO probe's
   deny-list exists so it cannot become a way around that.
 - **Not a place for firmware logic.** It observes and commands; it does not
   decide anything safety-relevant.
 - **Not a fourth protocol implementation.** It consumes `CommonFW`'s test
   vectors so its Python codec is checked against the C one
-  (`CommonFW/README.md`).
+  (`firmware/CommonFW/README.md`).
 
 ---
 
 ## Completion checklist
 
 **Move**
-- [ ] `KilnFW/pc_tools/` → `PcTools/` via `git mv` (history preserved)
+- [ ] `tools/PcTools/` → `PcTools/` via `git mv` (history preserved)
 - [ ] Package stays `kilnctrl`; console scripts unchanged
-- [ ] `KilnFW/README.md` and `CLAUDE.md` references updated
+- [ ] `firmware/KilnFW/README.md` and `CLAUDE.md` references updated
 - [ ] `.gitignore` re-rooted (`logs/`, `.venv/`, `__pycache__/`)
 - [ ] `selfcheck.py` still passes after the move
 
@@ -321,7 +321,7 @@ system and its output is always droppable (`SaftyFW/docs/ARCHITECTURE.md` §4).
 **Capabilities**
 - [ ] 1. GPIO probe on the **ESP**, with `KILNCTL_ENABLE_GPIO_PROBE` **default off**, a pin deny-list including **GPIO6**, writes refused during a profile, every call logged
 - [ ] 1b. GPIO probe on the **Pico** over SWD; **GPIO6 (`saftyRelay`) never writable**; writes refused unless `INIT`/`GRACE`
-- [ ] 1c. Coordinated two-board test script implementing `SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C, reaching each processor by a path that is **not** the link under test
+- [ ] 1c. Coordinated two-board test script implementing `firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C, reaching each processor by a path that is **not** the link under test
 - [ ] 2. Saleae capture as an MCP tool, with `kilnlink` frame decoding
 - [ ] 3. GUI-vs-MCP capability audit completed and gaps closed
 - [ ] 4. `get_board_state()` one-call snapshot, both processors
@@ -357,5 +357,5 @@ system and its output is always droppable (`SaftyFW/docs/ARCHITECTURE.md` §4).
 - [ ] Pico log emission best-effort and droppable — **never blocking**, per no-hang rule 3
 
 **Integrity**
-- [ ] Python codec checked against `CommonFW/test/vectors/`
+- [ ] Python codec checked against `firmware/CommonFW/test/vectors/`
 - [ ] No relay path here bypasses `relay_authority_on_blocked()`

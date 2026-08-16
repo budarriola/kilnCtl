@@ -27,16 +27,16 @@ project rather than two.
 | Plan | Owns |
 |---|---|
 | [`ROADMAP.md`](ROADMAP.md) (this file) | Milestone order, cross-processor dependencies |
-| [`KilnFW/TODO.md`](KilnFW/TODO.md) | Main firmware: web UI, profiles, PID, thermal protection, storage |
-| [`KilnFW/docs/PROJECT_STATUS.md`](KilnFW/docs/PROJECT_STATUS.md) | What in `KilnFW` is built vs. verified — the honest ledger |
-| [`SaftyFW/TODO.md`](SaftyFW/TODO.md) | Safety firmware, phases 0–9 |
-| [`SaftyFW/docs/SAFETY_MODEL.md`](SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
-| [`SaftyFW/docs/ARCHITECTURE.md`](SaftyFW/docs/ARCHITECTURE.md) | Tasks, priorities, core affinity, logging transports |
-| [`SaftyFW/docs/HARDWARE.md`](SaftyFW/docs/HARDWARE.md) | The traced board, pin map, bench connections |
-| [`CommonFW/README.md`](CommonFW/README.md) | Shared `kilnlink` code, used by both firmwares |
-| [`CommonFW/docs/LINK_PROTOCOL.md`](CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
-| [`PcTools/README.md`](PcTools/README.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
-| [`REPO_LAYOUT.md`](REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
+| [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) | Main firmware: web UI, profiles, PID, thermal protection, storage |
+| [`firmware/KilnFW/docs/PROJECT_STATUS.md`](firmware/KilnFW/docs/PROJECT_STATUS.md) | What in `KilnFW` is built vs. verified — the honest ledger |
+| [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–9 |
+| [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
+| [`firmware/SaftyFW/docs/ARCHITECTURE.md`](firmware/SaftyFW/docs/ARCHITECTURE.md) | Tasks, priorities, core affinity, logging transports |
+| [`firmware/SaftyFW/docs/HARDWARE.md`](firmware/SaftyFW/docs/HARDWARE.md) | The traced board, pin map, bench connections |
+| [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md) | Shared `kilnlink` code, used by both firmwares |
+| [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
+| [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
+| [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 
 ---
 
@@ -59,13 +59,13 @@ Four facts set the order. Everything else can be shuffled.
 
 ## M0 — Unblock the link · *the only milestone with no alternatives*
 
-Owned by [`SaftyFW/TODO.md`](SaftyFW/TODO.md) phase 0.
+Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
 
 - [ ] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1)
 - [ ] `KILNCTL_SAFETY_TX_IO` = 4, `RX_IO` = 5, pull-up moved to GPIO5
-- [ ] `KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` corrected in the same change
+- [ ] `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` corrected in the same change
 - [ ] `UART_PROTO_MSG_BROADCAST = 0x04` added to `uart_protocol.{c,h}`
-- [ ] `mainBoard/kiln.net` regenerated or deleted — it is stale and misleading
+- [ ] `hardware/mainBoard/kiln.net` regenerated or deleted — it is stale and misleading
 - [x] Bench path decided: Debug Probe SWD + probe UART bridge on GP16/GP17; no Pico USB
 - [ ] DEBUG header and GP16/GP17 access provided before A1 is soldered down
 
@@ -76,11 +76,11 @@ System-wiring decisions that gate any bench trip test, and are not firmware work
 
 ## M1 — Tooling that makes everything after it cheaper
 
-Owned by [`PcTools/README.md`](PcTools/README.md). Worth doing early precisely
+Owned by [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md). Worth doing early precisely
 because it is what turns later hardware questions into a script instead of a
 soldering session.
 
-- [ ] `KilnFW/pc_tools/` → `PcTools/`, package still `kilnctrl`
+- [x] `KilnFW/pc_tools/` → `tools/PcTools/`, package still `kilnctrl`
 - [ ] GPIO probe on the ESP, default off, deny-list including GPIO6
 - [ ] GPIO probe on the Pico over SWD, GPIO6 never writable
 - [ ] Coordinated two-board test script, reaching each side by a path that is
@@ -90,8 +90,8 @@ soldering session.
 
 ## M2 — `CommonFW`, before either firmware depends on it
 
-Owned by [`CommonFW/README.md`](CommonFW/README.md), gating items repeated in
-[`SaftyFW/TODO.md`](SaftyFW/TODO.md) phase 1.
+Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating items repeated in
+[`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 1.
 
 - [ ] `kilnlink` target consumable by both pico-sdk and ESP-IDF
 - [ ] `KILNLINK_PROTOCOL_VERSION` the single source; `UART_PROTOCOL_VERSION` an alias
@@ -103,7 +103,7 @@ Owned by [`CommonFW/README.md`](CommonFW/README.md), gating items repeated in
 
 ## M3 — Safety processor to first trustworthy reading
 
-Owned by [`SaftyFW/TODO.md`](SaftyFW/TODO.md) phases 2–4. Independent of the
+Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 2–4. Independent of the
 link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 
 - [ ] FreeRTOS SMP skeleton, tasks at the planned priorities and core affinities
@@ -115,18 +115,18 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 
 ## M4 — Relay authority
 
-Owned by [`SaftyFW/TODO.md`](SaftyFW/TODO.md) phase 5. First milestone that can
+Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 5. First milestone that can
 physically stop a kiln, and the first that can nuisance-trip one.
 
 - [ ] Relay owner task is the only writer of GPIO6
 - [ ] Trip latches; clearing requires an explicit command
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
-- [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](SaftyFW/docs/GUARD_TEST_MATRIX.md)
+- [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
 
 ## M5 — The link carrying real traffic
 
-Owned by [`SaftyFW/TODO.md`](SaftyFW/TODO.md) phases 6–8, contract in
-[`CommonFW/docs/LINK_PROTOCOL.md`](CommonFW/docs/LINK_PROTOCOL.md).
+Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, contract in
+[`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md).
 
 - [ ] Current sensing: load-active detection and a power estimate — **not** an
       over/under-current trip
@@ -150,7 +150,7 @@ because it changes what a bare main board will do.
 
 ## M7 — Repo reorganisation
 
-Owned by [`REPO_LAYOUT.md`](REPO_LAYOUT.md). Explicitly scheduled **after** the
+Owned by [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md). Explicitly scheduled **after** the
 safety firmware is written (blocker B6) — moving paths mid-bring-up buys nothing
 and breaks tooling at the worst moment.
 
@@ -180,7 +180,7 @@ Same four levels everywhere, and they are not interchangeable:
 
 **planned** → **built** (compiles, `-Wall -Wextra -Werror`) → **host-tested**
 (synthetic inputs, negative paths) → **hardware-verified** (observed on the real
-board). [`KilnFW/docs/PROJECT_STATUS.md`](KilnFW/docs/PROJECT_STATUS.md) keeps
+board). [`firmware/KilnFW/docs/PROJECT_STATUS.md`](firmware/KilnFW/docs/PROJECT_STATUS.md) keeps
 built and verified distinct; every plan here is expected to do the same.
 
 ## Roadmap upkeep

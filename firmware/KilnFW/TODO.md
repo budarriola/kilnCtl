@@ -1,6 +1,6 @@
 # TODO — Web UI / Kiln Control Front End
 
-Top-level ordering across both processors lives in [`../ROADMAP.md`](../ROADMAP.md);
+Top-level ordering across both processors lives in [`../../ROADMAP.md`](../../ROADMAP.md);
 this file owns the main-firmware detail. The cross-processor items — the swapped
 safety-UART pins, `CommonFW`, and the safety-liveness gate on heating — are
 sequenced there and tracked in [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
@@ -2128,7 +2128,7 @@ the above.
       evaluator task exists (unchanged). Build-verified only; not exercised
       live (no relay hardware attached this session, and needs an actual
       profile run to observe the refusal). Build-verified via `ninja -j 24`
-      in `KilnFW/build` — clean.
+      in `firmware/KilnFW/build` — clean.
 - [x] **Re-check `max_ramp_c_per_hr` against a running profile.** It is a
       run-start feasibility gate (section 5) and the reload path deliberately
       does not consume it, so an operator can now lower it mid-firing below
@@ -2622,7 +2622,7 @@ relay rules, profiles, contact-cycle counters, the run-state breadcrumb.
       `profiles_http_start()`. `App/drivers/CMakeLists.txt` SRCS updated; no
       new EMBED_TXTFILES entry (the UI lives in the existing `main_page.html`,
       not a separate page). Build verified clean via `ninja -j 24` in
-      `KilnFW/build` (per the documented idf.py python-env workaround). **Not
+      `firmware/KilnFW/build` (per the documented idf.py python-env workaround). **Not
       flashed or exercised on real hardware** — in particular, the actual
       erase-then-reboot cycle, and whether the "ok, rebooting" response
       reliably reaches the browser before the socket drops, are unverified
@@ -2720,7 +2720,7 @@ unconfigured, so adding one field wipes the operator's setup behind a single
       on-device dashboard and pc_tools' Zones panel.
 
 **Needs verification (2026-08-13)**: `idf.py build` is clean (verified via
-`ninja -j 24` in `KilnFW/build`, per the documented idf.py python-env
+`ninja -j 24` in `firmware/KilnFW/build`, per the documented idf.py python-env
 workaround). Not yet flashed/tested on hardware — in particular, confirm on
 a board with real saved zone/rules/profile/relay-cycle data that the
 one-time migration off the old default `nvs` partition actually carries it
@@ -2794,7 +2794,7 @@ also a plausible honest reading), so a 0 there is reported `not_done`
 rather than invented as `deliberately_off`. Closing either gap would need a
 new persisted "explicitly set" flag per field, which this pass deliberately
 did not add — TODO.md 8.3's brief was to read what already exists, not grow
-the storage schema. Build verified clean via `ninja -j 24` in `KilnFW/build`.
+the storage schema. Build verified clean via `ninja -j 24` in `firmware/KilnFW/build`.
 
 ### 8.4 Network page: live status, mode switch, and saved networks
 

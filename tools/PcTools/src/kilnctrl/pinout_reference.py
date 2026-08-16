@@ -42,10 +42,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# pc_tools/src/kilnctrl/pinout_reference.py -> parents[0]=kilnctrl,
-# [1]=src, [2]=pc_tools, [3]=KilnFW (repo root, where docs/ lives).
-# Verified against the actual directory layout, not assumed.
-HARDWARE_MD_PATH = Path(__file__).resolve().parents[3] / "docs" / "HARDWARE.md"
+# tools/PcTools/src/kilnctrl/pinout_reference.py -> parents[0]=kilnctrl,
+# [1]=src, [2]=PcTools, [3]=tools, [4]=repo root.
+# These tools moved out of KilnFW/ because they serve both processors, so the
+# main firmware's docs are now reached explicitly rather than by walking up to
+# the parent project. Verified against the actual directory layout, not assumed.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+HARDWARE_MD_PATH = _REPO_ROOT / "firmware" / "KilnFW" / "docs" / "HARDWARE.md"
 
 # -- status classification ---------------------------------------------------
 #

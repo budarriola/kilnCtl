@@ -52,7 +52,7 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   wins" is fully implemented; it is implemented for the cases listed there
   and nowhere else yet.
 - **Datasheets curated** to comm-interface parts only (I2C/SPI/UART) in
-  `KilnFW/Datasheets/`.
+  `firmware/KilnFW/Datasheets/`.
 - **Build**: `idf.py build` from a full clean, ESP-IDF v6.0.2, target
   `esp32s3`, succeeds with zero warnings under this project's
   `-Wall -Wextra -Werror`. `KilnCtrl.bin` ≈ 0x497e0 bytes, ~71% of the app
