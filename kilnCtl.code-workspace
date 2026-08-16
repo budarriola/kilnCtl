@@ -96,17 +96,15 @@
         "problemMatcher": []
       },
       {
+        // Toolchain locations come from environment variables that tools/setup.ps1
+        // discovers and sets, so this file stays the same on every machine.
+        // A bare `idf.py build` is deliberately not used: the ESP-IDF launcher
+        // is not reliably on PATH here, and it would pick up whichever project
+        // the shell happens to be sitting in.
         "label": "KilnFW: Build",
         "type": "shell",
-        "command": "C:\\Users\\budar\\.espressif\\python_env\\idf6.0_py3.14_env\\Scripts\\python.exe",
-        "args": ["C:\\esp\\v6.0.2\\esp-idf\\tools\\idf.py", "-C", "${workspaceFolder:KilnFW}", "build"],
-        "options": {
-          "env": {
-            "IDF_PATH": "C:\\esp\\v6.0.2\\esp-idf",
-            "IDF_TOOLS_PATH": "C:\\Users\\budar\\.espressif",
-            "IDF_PYTHON_ENV_PATH": "C:\\Users\\budar\\.espressif\\python_env\\idf6.0_py3.14_env"
-          }
-        },
+        "command": "${env:IDF_PYTHON_ENV_PATH}/Scripts/python.exe",
+        "args": ["${env:IDF_PATH}/tools/idf.py", "-C", "${workspaceFolder:KilnFW}", "build"],
         "group": "build",
         "presentation": { "reveal": "always", "panel": "dedicated" },
         "problemMatcher": ["$gcc"]

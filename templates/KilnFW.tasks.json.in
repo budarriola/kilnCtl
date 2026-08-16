@@ -4,10 +4,10 @@
     {
       "label": "openocd",
       "type": "shell",
-      "command": "C:\\Espressif\\tools\\openocd-esp32\\v0.12.0-esp32-20260424\\openocd-esp32\\bin\\openocd.exe",
+      "command": "@@OPENOCD@@",
       "args": [
         "-s",
-        "C:\\Espressif\\tools\\openocd-esp32\\v0.12.0-esp32-20260424\\openocd-esp32\\share\\openocd\\scripts",
+        "@@OPENOCD_SCRIPTS@@",
         "-f",
         "board/esp32s3-builtin.cfg"
       ],
@@ -40,10 +40,10 @@
     {
       "label": "Flash device",
       "type": "shell",
-      "command": "C:\\Espressif\\tools\\openocd-esp32\\v0.12.0-esp32-20260424\\openocd-esp32\\bin\\openocd.exe",
+      "command": "@@OPENOCD@@",
       "args": [
         "-s",
-        "C:\\Espressif\\tools\\openocd-esp32\\v0.12.0-esp32-20260424\\openocd-esp32\\share\\openocd\\scripts",
+        "@@OPENOCD_SCRIPTS@@",
         "-f",
         "board/esp32s3-builtin.cfg",
         "-c",

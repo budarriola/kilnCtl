@@ -4,19 +4,17 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.portWin": "COM6",
-  "idf.currentSetup": "C:\\esp\\v6.0.2\\esp-idf",
+  "idf.currentSetup": "@@IDF_PATH@@",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+  "clangd.path": "@@CLANGD@@",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=${workspaceFolder}/build"
   ],
   "idf.flashType": "JTAG",
-  "idf.monitorPort": "COM7",
   "actionButtons": {
     "defaultColor": "#ffffff",
     "commands": [

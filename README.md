@@ -18,6 +18,12 @@ you are about to do, start there.
 
 ## Opening this repository
 
+On a fresh clone, run **[`tools/setup.ps1`](tools/setup.ps1)** first — it
+discovers where ESP-IDF, clangd and OpenOCD live on this machine and generates
+the config files that cannot be committed. Full detail:
+[docs/SETUP.md](docs/SETUP.md).
+
+
 In VS Code, open **`kilnCtl.code-workspace`** rather than the `kilnCtl` folder.
 The ESP-IDF extension treats a workspace folder as one project and needs a
 `CMakeLists.txt` in it; the repository root does not have one. The workspace file

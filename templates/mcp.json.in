@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "kicad": {
+      "command": "mykicadMcp/.venv/Scripts/python.exe",
+      "args": [
+        "mykicadMcp/kicad_mcp_server.py"
+      ]
+    },
+    "pdf-mcp": {
+      "command": "pdfMcp/.venv/Scripts/pdf-mcp.exe"
+    },
+    "saleae": {
+      "type": "http",
+      "url": "http://127.0.0.1:10530/mcp"
+    },
+    "esp-idf": {
+      "command": "@@IDF_PYTHON@@",
+      "args": [
+        "@@IDF_PATH@@\\\\tools\\\\idf.py",
+        "-C",
+        "firmware/KilnFW",
+        "mcp-server"
+      ],
+      "env": {
+        "IDF_PATH": "@@IDF_PATH@@",
+        "IDF_TOOLS_PATH": "@@IDF_TOOLS_PATH@@",
+        "IDF_PYTHON_ENV_PATH": "@@IDF_PYTHON_ENV_PATH@@",
+        "ESP_IDF_VERSION": "6.0.2"
+      }
+    }
+  }
+}

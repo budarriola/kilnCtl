@@ -8,6 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Where to start
 
+Fresh clone: run `tools/setup.ps1`, then open `kilnCtl.code-workspace` (not the
+folder). `docs/SETUP.md` explains what it generates and why those files are
+gitignored — **edit `templates/`, never the generated output.**
+
+
 **ROADMAP.md** at the repo root is the top-level plan spanning both firmwares
 (`KilnFW` on the ESP32-S3, `SaftyFW` on the RP2040). Start tasks from there; it
 links to the per-area plans that own the detail.
