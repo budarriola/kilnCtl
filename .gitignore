@@ -58,3 +58,9 @@ nul
 /firmware/UnitTestFw/.vscode/settings.json
 /firmware/UnitTestFw/UnitTest/.vscode/settings.json
 /firmware/UnitTestFw/UnitTest/.vscode/c_cpp_properties.json
+
+# Claude Code creates a git worktree per subagent that runs with worktree
+# isolation. They are scratch checkouts, not project content -- four of them were
+# swept into a commit by a `git add -A` and became gitlinks with no .gitmodules
+# entry, which broke `git submodule status`. Never commit them.
+/.claude/worktrees/
