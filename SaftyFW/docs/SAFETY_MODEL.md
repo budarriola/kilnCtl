@@ -1,0 +1,791 @@
+# Safety Model
+
+> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Keep this file current.** If a guard, threshold or policy changes, update it
+> in the same commit as the code. If this file and the code disagree, **the code
+> wins** — fix this file and say so in the commit message. A completion
+> checklist is at the bottom; tick items as they are built *and verified*, and
+> keep the two distinct.
+
+What the safety processor is for, what it will actually trip on, and — just as
+important — what it will deliberately **not** trip on.
+
+This is the design document the rest of `SaftyFW` answers to. If a guard in the
+code and a guard in this file disagree, one of them is a bug; check the code
+before assuming the file is right, the way `KilnFW/docs/SAFETY_MODEL.md` asks
+you to.
+
+---
+
+## 1. The job
+
+The main controller (ESP32-S3, `KilnFW`) runs the kiln: PID, profiles, ramps,
+its own seven-guard `thermal_guard` suite. It is a sophisticated,
+network-connected, feature-rich piece of software, and it is where bugs live.
+
+The safety processor exists on the assumption that **the main controller is
+wrong**. Its job is not to control the kiln, improve the firing, or duplicate
+`KilnFW`'s guards. Its job is to notice that something has gone badly wrong and
+open a mechanical contactor.
+
+Three properties follow, and everything else is downstream of them:
+
+**It must be independent.** The safety processor's primary trips use its *own*
+thermocouple, its *own* current sensing, and its *own* E-stop input. It shares
+no sensor, no bus and no ground with the main controller. Information from the
+main controller makes some *secondary* checks smarter, and its **absence must
+never, by itself, trip anything**.
+
+Two deliberate, bounded exceptions, both of which must be understood rather than
+glossed over:
+
+- The frame codecs are shared code (`CommonFW`) — but they are pure,
+  allocation-free, host-tested functions with no I/O and no state. Sharing a
+  serializer is not sharing a failure mode; **re-implementing it twice and
+  letting the two drift is a far larger risk**, and this project already has a
+  documented instance of exactly that drift.
+- `tc_source = BORROWED_ZONE` genuinely does trade away sensor independence, and
+  §3 says so plainly rather than burying it.
+
+**It must be simple.** Every line of code here is a line that can fail in the
+one component whose failure is unmitigated. There is no PID, no profile engine,
+no network stack, no filesystem, no display, and no dynamic allocation after
+init. The guard evaluation is a pure function of a snapshot struct, testable on
+a host with no hardware — the same pattern `KilnFW` already proved with
+`thermal_guard.c` and `pid.c`.
+
+**It must not cry wolf.** See below, because this is the requirement most
+likely to be quietly violated.
+
+---
+
+## 2. The nuisance-trip doctrine
+
+A safety system that trips spuriously gets bypassed. Not maybe — reliably, by a
+reasonable person, at 2 a.m., eleven hours into a twelve-hour glaze firing, with
+a jumper. A guard that fires on a healthy kiln is not "cautious"; it is a guard
+that will be removed, taking with it the protection it was supposed to provide.
+
+So the design rule is:
+
+> **Every trip must clear two independent bars: a magnitude that correct
+> operation cannot reach, and a duration that a transient cannot sustain.**
+> One alone is never enough.
+
+Applied consistently, that produces the following house rules.
+
+**Thresholds sit outside the operating envelope, not at its edge.** The
+absolute over-temperature limit is not "the profile's peak". It is the profile's
+peak plus a margin large enough that a normal overshoot, a thermocouple
+tolerance stack, and a cold-junction error together cannot reach it.
+
+**Durations are measured in the units the physics happens in.** A kiln has a
+thermal time constant of many minutes. Nothing thermally dangerous develops in
+200 ms. Where a guard's evidence is thermal, its window is tens of seconds to
+minutes — and it costs nothing, because the hazard is that slow too. The
+exceptions are the two signals that are *electrically* unambiguous — the E-stop,
+and an explicit fault assertion from the ESP — which are debounced only enough
+to reject contact bounce and noise.
+
+**Two classes of response, and most findings are not trips.**
+
+| Class | Action |
+|---|---|
+| **WARN** | Reported over the link and in the diagnostic frame. **No relay action.** The operator and the main controller find out; the firing continues. |
+| **TRIP** | K4 de-energizes, the contactor opens, and the condition **latches**. |
+
+The default for a new guard is WARN. Promoting one to TRIP requires an argument
+in this document about what physical harm it prevents. "It seemed unsafe" is not
+that argument.
+
+**A failed *sensor* is not the same as a failed *kiln*.** The safety
+thermocouple going open-circuit means the safety processor is blind. Blind is
+bad, but blind is not on fire, and a connector that wiggles for 900 ms should
+not end a firing. Guard S5 handles this with a graduated response rather than
+an instant trip.
+
+**Absence of information is not evidence of danger — except when heat is on.**
+This is the single most useful idea in the whole design. If the link to the main
+controller drops and no current is flowing, nothing hazardous is happening;
+warn and keep watching. If the link drops *while current is flowing*, then
+something is heating the kiln with nobody in charge of it, and that is a trip.
+Guard S6 is built on this distinction, and it is both less twitchy and strictly
+safer than a flat "link lost ⇒ trip" timeout.
+
+**Latching is not auto-recovery.** Once tripped, the safety processor stays
+tripped until an operator explicitly clears it. There is no condition-cleared
+auto-reset, because "the temperature came back down after I cut the power" is
+not evidence that the fault is gone — it is evidence that the trip worked.
+This mirrors `thermal_guard.h`'s "latching, always".
+
+**Startup is not steady state.** No thermal or correlation guard arms until the
+system has been running for `startup_grace_s` (default **60 s**) *and* has
+accumulated enough valid samples to have an opinion. A guard evaluating a
+half-filled rolling window is a guard evaluating noise.
+
+---
+
+## 3. What it is watching
+
+| Input | Source | Owned by |
+|---|---|---|
+| Safety thermocouple temperature + cold junction + fault bits | MAX31856 on J7 daughterboard, SPI0 | `thermo_task` |
+| Three current channels | ADC0/1/2, peak-hold front end | `current_task` |
+| E-stop | GPIO9, active high = stop | `discrete_task` |
+| `mainFault` from the ESP | GPIO10, active **low** | `discrete_task` |
+| Zone setpoints, measured temps, relay commands | ESP, over the isolated UART | `link_task` |
+| Link liveness | derived from frame arrival times | `link_task` |
+
+The last two are **context**, not primary evidence. See §5.
+
+### What the current channels are for — and are not
+
+The three current channels exist to answer exactly two questions:
+
+1. **Is the load actually drawing current right now?**
+2. **Roughly how much power is going into the kiln?** — reported to the ESP for
+   the GUI.
+
+They are **not** an over-current or under-current protection device, and no
+guard trips on a current *magnitude*. Fusing, breaker sizing and element
+protection are the electrical installation's job, and they are much better at
+it than a CT on a 12-bit ADC with a 1 s peak-hold in front of it.
+
+Everything the current channels do is **presence/absence detection** against a
+coarse `i_present_a` threshold, plus a reported estimate that no guard reads.
+That is a deliberate scope limit and it makes the calibration burden much
+lighter: "is there current" needs a threshold accurate to roughly a factor of
+two, not a percent. See `CURRENT_SENSE.md` §2.
+
+### Where the safety temperature comes from
+
+Two commissioning decisions, both required, both statements about physical
+reality rather than preferences. Full driver detail in `THERMOCOUPLE.md` §3.
+
+#### `tc_source` — which sensor
+
+| Value | Meaning |
+|---|---|
+| `OWN_J7` | The Pico's own MAX31856 on the J7 daughterboard. **Fully independent.** |
+| `BORROWED_ZONE` | One of the **main board's** zone thermocouples, arriving in the context frame. `borrowed_zone_index` selects it |
+| `BOTH` | `OWN_J7` is the primary trip sensor; the borrowed channel is a continuous cross-check. **Recommended where both exist** |
+
+> ⚠️ **`BORROWED_ZONE` alone trades away the independence that justifies this
+> board.** The reading is measured by the main board's MAX31856, read by the
+> main board's SPI driver, packed by the main board's firmware, and delivered
+> over a link the main board controls. Every one of those is a component the
+> safety processor exists to distrust.
+>
+> It is a legitimate configuration — a board built without the J7 daughterboard
+> is better off with a borrowed reading than with no temperature at all — but it
+> must be a deliberate choice, and the system must not pretend otherwise. In
+> `BORROWED_ZONE`:
+>
+> - The safety processor reports `SAFETY_FLAG_BORROWED` in every status frame,
+>   and the GUI must label the temperature as borrowed.
+> - **S6 (link dead) becomes the primary temperature protection**, because a
+>   dead ESP now means no temperature at all, not merely no context.
+> - **S13** exists specifically to catch the failure this mode introduces.
+> - `TRIP_INEFFECTIVE` and the current guards are unaffected — they use the
+>   Pico's own ADC and are independent in every mode.
+
+**A borrowed channel is by definition `CHAMBER_AGREED`** and must be: it is one
+of the sensors the zone guards use, measuring the same chamber. `tc_placement_mode`
+is forced to `CHAMBER_AGREED` when `tc_source` is `BORROWED_ZONE`, and a
+configuration that says otherwise is rejected rather than reconciled.
+
+In `BOTH`, the two sources are compared continuously by S10 with the *own*
+sensor as the reference — which is the strongest configuration available,
+because it is the only one where a drifting or frozen sensor on either board is
+visible from the other.
+
+#### `tc_placement_mode` — where it is mounted
+
+Applies to `OWN_J7`. The safety thermocouple is **not** assumed to agree with
+the main board's zone thermocouples; whether it should is a per-kiln decision:
+
+| `tc_placement_mode` | Meaning | Effect |
+|---|---|---|
+| `CHAMBER_AGREED` | Mounted in the chamber, measuring the same thermal space the zone TCs do. Expected to broadly track them | S1's ceiling may be tightened by the firing target. **S2 and S10 active** |
+| `EXTERNAL_OVERHEAT` | An independent overheat sensor — kiln shell, exhaust, element chamber, enclosure, a different zone entirely. **No relationship to the zone readings is expected** | S1 uses a fixed, independently commissioned limit. **S2 and S10 disabled** |
+
+This is not a tuning knob, it is a statement about physical reality, and getting
+it wrong breaks guards in opposite directions:
+
+- Declaring `CHAMBER_AGREED` for a shell-mounted sensor makes S10 trip
+  constantly on a 700 °C disagreement that is entirely correct, and makes S2
+  compare a shell temperature against a chamber setpoint.
+- Declaring `EXTERNAL_OVERHEAT` for a chamber sensor silently discards the only
+  cross-check the system has.
+
+**There is no safe default, so there is no default.** `tc_placement_mode` is a
+required commissioning field; until it is set, S2 and S10 stay off and S1 uses
+the fixed limit — the conservative reading of an unanswered question.
+
+---
+
+## 4. The guard suite
+
+Nine guards. Threshold names are configuration fields, defaults given.
+Every one of them is a bench-tunable number, not a `#define` buried in a `.c`.
+
+### S1 — Absolute over-temperature · **TRIP**
+
+The reason the board exists.
+
+```
+CHAMBER_AGREED:     ceiling = min(abs_max_temp_c, firing_max_c + firing_margin_c)
+EXTERNAL_OVERHEAT:  ceiling = abs_max_temp_c            ← fixed, always
+
+safety_tc_c > ceiling   for  3 consecutive valid readings  (~300 ms)
+```
+
+`abs_max_temp_c` has **no default** and must be commissioned. In
+`CHAMBER_AGREED` it is the highest temperature the kiln furniture and elements
+can survive (of the order of 1300 °C for a cone-10 kiln — above cone 10's
+~1285 °C with margin, and *not* the hottest profile). In `EXTERNAL_OVERHEAT` it
+is whatever that particular sensor's location must never exceed — a shell
+temperature limit, an exhaust limit, an enclosure limit — and it bears no
+relation to any firing temperature at all.
+
+`firing_margin_c` = **100 °C**.
+
+**The firing-target tightening only applies in `CHAMBER_AGREED`.** `firing_max_c`
+is the highest target the running profile will ask for, sent by the ESP at
+profile start (`LINK_PROTOCOL.md` §4). In a chamber-mounted installation it is
+genuinely useful: a single fixed ceiling protects the *hottest firing the kiln
+will ever do*, so a 900 °C bisque otherwise runs with 400 °C of unprotected
+headroom. Taking the profile's own peak into account tightens protection to each
+firing's actual envelope with no threshold editing by anyone.
+
+Applied to an externally-mounted sensor it would be nonsense — a shell
+thermocouple reading 80 °C has no business being compared against a 1250 °C
+firing target — so in `EXTERNAL_OVERHEAT` the field is ignored entirely.
+
+**The ceiling can only ever tighten.** `min()` means a hostile or buggy ESP
+sending `firing_max_c = 5000` gets clamped to `abs_max_temp_c`, not obeyed. The
+main controller is permitted to ask for *more* protection and never for less —
+that asymmetry is the only reason it is safe to accept this number from the
+component under suspicion. When no firing is running, `firing_max_c` is absent
+and the ceiling is simply `abs_max_temp_c`.
+
+This is the one thermal guard with a short debounce, and deliberately so: an
+absolute overtemp is never a transient, three consecutive MAX31856 conversions
+already reject any plausible glitch, and the cost of waiting is measured in
+element life.
+
+**Independent of everything that matters.** Needs no link and no current data;
+context can only make it stricter. If every other guard in this list were
+deleted, S1 alone would justify the board.
+
+### S2 — Sustained excess over setpoint · **TRIP** · *needs context* · **`CHAMBER_AGREED` only**
+
+```
+safety_tc_c > max(active zone setpoints) + overshoot_margin_c
+  continuously for overshoot_time_s
+```
+
+Defaults: `overshoot_margin_c` = **75 °C**, `overshoot_time_s` = **120 s**.
+
+Both numbers are deliberately generous. Real kilns overshoot at the end of a
+ramp, thermocouples disagree with each other by tens of degrees depending on
+placement, and the safety TC is in a different part of the chamber from any
+zone TC. A 40 °C transient overshoot is normal operation. A sustained 75 °C
+excess for two full minutes is a control loop that has lost the plot.
+
+**Inactive when context is stale or absent**, and **inactive entirely in
+`EXTERNAL_OVERHEAT`** — comparing a shell or exhaust reading against a chamber
+setpoint is meaningless. S1 still covers the absolute case in both modes, so
+this guard degrades to "off", never to "trip".
+
+### S3 — Load active with no heat commanded · **TRIP** · *needs context*
+
+The welded-SSR guard, and after S1 the most valuable thing here. A
+**presence/absence** test, not a current-magnitude test.
+
+```
+any channel  I > i_present_a
+  AND  no relay commanded on during the last  correlation_window_s
+  sustained for  stuck_on_time_s
+```
+
+Defaults: `i_present_a` = **2.0 A** (well above the zero-drift floor, well
+below any real element), `correlation_window_s` = **150 s**,
+`stuck_on_time_s` = **20 s**.
+
+`i_present_a` is a **load-active threshold, not a current limit.** It only has
+to sit between "measurement noise" and "an element is conducting", which is a
+gap of one to two orders of magnitude — so it tolerates a badly calibrated CT,
+a wrong-ratio CT, and a mediocre ADC reference without any change in behaviour.
+
+The 150 s window is not padding. `KilnFW` renders duty on a **60 s**
+time-proportioned window (`profile_executor.c:27`), and the current front end
+has a **1 s** peak-hold decay. So the window must cover at least two full
+heater windows plus the decay tail before "no heat was commanded" means
+anything at all. See `CURRENT_SENSE.md` §3.
+
+This guard consumes `relay_recent_mask` — *"was any relay commanded on at any
+point in the last N seconds"* — computed on the ESP, **not** the instantaneous
+mask. Correlating against the instantaneous mask would trip on every healthy
+low-duty firing.
+
+Why this earns a TRIP where its inverse (S4) does not: current flowing with
+nothing commanding it means a switching element has failed closed. The
+temperature has not necessarily risen *yet* — which is exactly the point. This
+catches the failure before `KilnFW`'s own runaway guard 3 would, and it catches
+it even if the main board is the thing that has failed.
+
+### S4 — Heat commanded but load inactive · **WARN only** · *needs context*
+
+```
+relay commanded on throughout the last  correlation_window_s
+  AND  all channels  I < i_present_a
+```
+
+**This never trips, and that is a design decision, not an oversight.** A dead
+element, a blown fuse, or a failed-open SSR ruins a firing and wastes a day. It
+does not start a fire. Tripping the contactor in response would convert a
+recoverable problem into an identical outcome plus an alarm.
+
+It is reported prominently — it is genuinely useful diagnostic information, and
+it is the earliest possible warning of an element approaching end of life — but
+the decision of what to do about it belongs to the operator and to `KilnFW`,
+which has guard 1 (heating-failed) for exactly this and much better context to
+judge it with.
+
+### S5 — Safety thermocouple invalid · **WARN, then TRIP** · graduated
+
+Trips on: SPI transfer failure, `NaN`, or `THERMO_FAULT_OPEN` / `OVUV` /
+`TCRANGE` from the MAX31856's SR register.
+
+Deliberately **not** tripping on `TCHIGH` / `TCLOW` (those are threshold
+comparators, which is S1's job) or `CJHIGH` / `CJLOW` / `CJRANGE` alone (a
+cold-junction complaint means the *board* is too hot or too cold, which is worth
+a WARN and is not a chamber emergency).
+
+```
+bad reads ≥ 10 consecutive AND ≥ 5 s        →  WARN, TEMP_VALID cleared
+condition persists for  blind_grace_s        →  TRIP
+```
+
+Default `blind_grace_s` = **60 s**.
+
+The graduated response is the whole point. A wiggled connector, a
+thermally-induced intermittent, or a single noisy SPI transaction should cost a
+warning and nothing else. But a safety processor that is *permanently* blind
+must not silently preside over an unattended overnight firing while reporting
+that everything is fine. Sixty seconds is long enough to ride out any plausible
+intermittent and short enough that "blind for the whole firing" cannot happen.
+
+While blind, the status frame reports **NaN** temperatures with
+`SAFETY_FLAG_TEMP_VALID` clear — never 0, never the last good reading. An
+explicit not-a-number is much harder to mistake for a cold kiln than a
+plausible-looking stale value. (Same rule `KilnFW/docs/SAFETY_LINK.md` sets for
+this field, and the ESP already parses it that way.)
+
+### S6 — Main controller unhealthy · **TRIP**, conditionally
+
+Two independent signals, treated independently. **They are not redundant
+copies of each other and must never be collapsed into one.**
+
+**(a) The ESP explicitly asserts fault** — `mainFault` (GPIO10) reads LOW.
+
+```
+mainFault asserted, debounced 200 ms   →  TRIP
+```
+
+Unambiguous: the main controller is telling us it has a fault and wants heat
+gone. Cheap to act on, no reason to hesitate. Note the ESP asserts this on PC
+link loss, boot failures, and thermocouple faults (`SAFETY_FAULT_SRC_*` in
+`safety_link.h:151`), so in practice this fires more often than the others.
+
+**(b) The link has gone quiet** — no valid frame within `link_timeout_s`.
+
+Here is where a naive design becomes a nuisance generator, and where the doctrine
+in §2 earns its keep:
+
+```
+no valid frame for  link_timeout_s (default 10 s)
+  AND  any channel I > i_present_a          →  TRIP  (heat with nobody in charge)
+
+no valid frame for  link_dead_hard_s (default 120 s)
+                                            →  TRIP  (unconditional backstop)
+
+no valid frame for  link_timeout_s, no current
+                                            →  WARN, keep watching
+```
+
+A quiet link with a cold kiln is not an emergency. A quiet link with current
+flowing is the definition of one. Keying on the hazard rather than on the
+symptom makes this guard both quieter *and* faster than a flat timeout: it
+responds in 10 s when it matters, and never at all when it does not.
+
+The 120 s unconditional backstop exists because "no current *right now*" is a
+weak statement given the 60 s heater window — the ESP could have died mid-window
+with the SSR off, and come back to life it will not. Two minutes of silence
+means the main controller is gone, current or no current.
+
+> **`mainFault` cannot detect a dead ESP.** With the main board unpowered,
+> U1's LED is dark, R8 pulls GPIO10 high, and it reads *healthy*
+> (`HARDWARE.md` §4). Signal (b), the UART timeout, is the *only* detector of a
+> dead main controller. This is why the two signals are kept separate.
+
+### S7 — E-stop · **TRIP**
+
+```
+GPIO9 HIGH (contact open), debounced 50 ms   →  TRIP
+```
+
+Fastest guard in the set, minimal debounce, no conditions. Requires
+normally-closed wiring so that a pressed button, a cut cable and an
+unterminated input all read identically as *stop* — see `HARDWARE.md` §5, which
+also explains why this must not be "fixed" by inverting it in firmware.
+
+### S8 — Implausible rate of rise · **TRIP** · **ships disabled**
+
+```
+d(safety_tc_c)/dt > max_rate_c_per_min   sustained for  rate_window_s
+```
+
+Defaults: `max_rate_c_per_min` = **0 (disabled)**, `rate_window_s` = 60 s.
+
+Intended to catch a full-power runaway before it reaches S1's absolute limit —
+the difference between stopping at 900 °C and stopping at 1300 °C is the
+difference between a recoverable event and replacing the elements and furniture.
+
+**It ships off** because the correct threshold depends on the kiln's mass,
+element power and insulation, and nobody has ever measured this kiln's
+maximum legitimate ramp rate. A small test kiln on full power can genuinely
+exceed 15 °C/min; a large one struggles past 5. Hard-coding a plausible number
+and calling the guard done is the mistake `thermal_guard.h` explicitly refuses
+to make for its guard 8, and the same discipline applies here.
+
+Enable it after a full-power ramp has been logged and the real maximum rate is
+known — set the threshold at roughly 2 × that, and the guard becomes genuinely
+useful. `TODO.md` phase 6 tracks this.
+
+### S9 — Trip ineffective / contactor welded · **TRIP-ESCALATE** · loudest thing here
+
+After a trip, the current must go away. If it does not, the trip did not work.
+
+```
+tripped (K4 de-energized) for  trip_verify_s
+  AND  any channel  I > i_present_a
+        →  latch TRIP_INEFFECTIVE, and say so as loudly as the system can
+```
+
+Default `trip_verify_s` = **10 s** (comfortably past the 1 s peak-hold decay and
+any contactor drop-out delay).
+
+**This is the single most valuable guard after S1, and it costs nothing to
+build** — the sensors are already there. `SAFETY_MODEL.md` §7 lists "welded line
+contactor" as an unclosable gap, because no firmware on this board can open a
+contactor whose contacts have fused. That is true. But there is an enormous
+difference between *unclosable* and *undetected*:
+
+- Undetected, the operator sees a kiln that "stopped safely" and walks away
+  from a chamber that is still heating at full power with no controller.
+- Detected, the operator gets an unambiguous "**POWER IS STILL FLOWING — REMOVE
+  IT AT THE BREAKER**" and a system that will not stop shouting about it.
+
+So S9 does not prevent the failure. It converts a silent, lethal one into a
+loud one, which is the whole of what is achievable here. Every channel it has —
+the diagnostic frame, the trip event frame, the log — carries a distinct
+`SAFETY_TRIP_INEFFECTIVE` reason, and the ESP should escalate it in the GUI
+differently from every other trip, because the required operator action is
+different: this one means *go to the breaker*, not *investigate the kiln*.
+
+It also catches the much more mundane version: **K4 or Q4 failed, or the
+interlock was wired to the wrong J10 contact.** That last one passes every bench
+test and fails dangerous, and S9 is what finds it on the first real trip.
+
+### S10 — Safety TC disagrees with every zone TC · **WARN** · *needs context* · **`CHAMBER_AGREED` only**
+
+```
+| safety_tc_c − nearest valid zone measured_c |  >  tc_disagreement_c
+  continuously for  tc_disagreement_time_s
+```
+
+Defaults: `tc_disagreement_c` = **200 °C**, `tc_disagreement_time_s` = **300 s**,
+and it **ships as WARN**.
+
+**This guard is entirely off in `EXTERNAL_OVERHEAT`, and that is the normal
+case unless the installation says otherwise.** A safety thermocouple mounted on
+the kiln shell, in the exhaust, in the element chamber, or simply in a part of
+the chamber the zone sensors do not represent has *no obligation whatsoever* to
+agree with them. A 600 °C standing disagreement there is the correct reading,
+not a fault, and a guard that fires on it is precisely the nuisance generator §2
+exists to prevent.
+
+Where it *is* declared `CHAMBER_AGREED`, this becomes the only cross-check a
+single-sensor safety processor can have, and it is free — the zone temperatures
+are already on the wire for S2. Comparing against the **nearest** valid zone
+reading, not the mean, is deliberate even then: kilns stratify by well over
+100 °C top to bottom. Only a disagreement with *every* zone means a sensor has
+left the building.
+
+What it catches that nothing else does: a chamber-mounted safety thermocouple
+that has fallen out, been installed in the wrong port, or drifted badly with
+age. All three leave S1 reading a plausible, comfortable number forever while
+the kiln does whatever it likes.
+
+**WARN, never TRIP by default**, because the honest answer to "which sensor is
+wrong?" is unknowable from here. Promote it to TRIP only after a real firing's
+stratification has been logged and `tc_disagreement_c` set from measured data
+rather than from this paragraph.
+
+**Related commissioning option worth offering in the GUI**: in `CHAMBER_AGREED`,
+a one-shot "capture expected offset" at a soak — record the steady-state
+difference between the safety TC and its nearest zone, and compare against
+*that* rather than against zero. A consistent 120 °C offset from mounting
+position is then normal, and a 200 °C *change* in it is the signal. Strictly
+better than a raw difference, and cheap.
+
+### S11 — Frozen safety reading · **TRIP**
+
+Applies to **whichever source is active** — the Pico's own MAX31856, or a
+borrowed zone channel, or both in `BOTH` mode.
+
+```
+active safety reading identical (to full resolution) for  frozen_window_s
+  AND  current flowing or heat commanded during that window
+```
+
+Default `frozen_window_s` = **600 s**, matching `thermal_guard.c`'s
+`FROZEN_WINDOW_S` for the same failure on the main board.
+
+A stuck reading is the failure mode that quietly disables S1, S2 and S8 all at
+once — a frozen 400 °C never crosses any ceiling, so a blind spot masquerades as
+a healthy kiln. The MAX31856 reports to 19 bits; a genuinely static value at
+that resolution, for ten minutes, while energy is going in, does not happen in a
+real thermal system.
+
+**The "and heat is happening" qualifier is what keeps this from being a nuisance
+guard.** A cold, idle kiln legitimately sits at a constant reading for hours.
+
+On a **borrowed** channel this guard is necessary but not sufficient: it catches
+a frozen *value*, and S13 catches a channel that has stopped producing values at
+all. The two failures look identical from here and are distinguished only by the
+context frame's `sample_counter`.
+
+### S12 — Cold junction / enclosure over-temperature · **WARN, then TRIP**
+
+```
+cj_c > cj_warn_c    →  WARN
+cj_c > cj_max_c     sustained for  cj_time_s   →  TRIP
+```
+
+Defaults: `cj_warn_c` = **60 °C**, `cj_max_c` = **85 °C**, `cj_time_s` = **60 s**.
+
+The MAX31856's cold-junction sensor measures the temperature at the terminal
+block — which is to say, **inside the electronics enclosure**. It is already
+read on every conversion, so this guard is free, and it covers two real
+problems at once:
+
+- **A cooking enclosure is a fire-adjacent condition in its own right.** A
+  blocked vent, a failed fan, or an enclosure mounted somewhere it should not be
+  will get there long before anything else notices.
+- **Cold-junction compensation is only as good as the CJ reading.** Above the
+  part's specified range every thermocouple reading on this board is wrong, in
+  an unknown direction. A safety processor whose sensor has silently gone out of
+  spec is worse than one that admits it.
+
+`THERMO_FAULT_CJRANGE` from the part is treated as an immediate WARN by S5, and
+S12 is the graduated numeric version that acts before the part gives up entirely.
+
+### S13 — Borrowed channel not updating · **WARN, then TRIP** · **`BORROWED_ZONE`/`BOTH` only**
+
+The guard that makes a borrowed thermocouple usable at all.
+
+```
+context frames arriving  AND  zone sample_counter has not advanced
+  for  borrowed_stale_s                    →  WARN, reading treated as invalid
+  for  borrowed_stale_trip_s               →  TRIP
+```
+
+Defaults: `borrowed_stale_s` = **10 s**, `borrowed_stale_trip_s` = **60 s**.
+
+`sample_counter` is a per-zone byte in the context frame that the ESP increments
+**only when it actually consumes a fresh conversion** from that channel — never
+merely because it built a frame (`CommonFW/docs/LINK_PROTOCOL.md` §4).
+
+Without it, the failure is undetectable. A MAX31856 on the main board that stops
+converting keeps returning its last value; the ESP forwards it faithfully every
+500 ms; and from the Pico's side **that is indistinguishable from a kiln holding
+a steady soak** — which is precisely when it is holding still for hours and
+precisely when being blind is most dangerous.
+
+Note the division of labour, which is why both S11 and S13 exist:
+
+| `sample_counter` | value | Verdict |
+|---|---|---|
+| advancing | changing | healthy |
+| advancing | frozen, heat on | **S11** — the sensor is stuck |
+| not advancing | anything | **S13** — the channel stopped converting |
+| frames not arriving at all | — | **S6** — the link, not the sensor |
+
+Three different faults, three different fixes, and collapsing them into one
+"temperature is stale" condition would lose the diagnosis every time.
+
+**A borrowed reading whose `sample_counter` is stale is treated as invalid
+immediately** (feeding S5), not merely warned about — it is not a slightly-old
+number, it is a number of unknown age.
+
+### Runtime configuration integrity · continuous
+
+Not a guard, a background check: the in-RAM threshold/calibration set is
+re-CRC'd against its flash copy every 10 s. A mismatch means RAM corruption,
+which on a safety processor is not something to discover during a trip
+evaluation — reload from flash, report `calibration_missing`, and if it
+recurs, trip.
+
+This is cheap paranoia and it is warranted here specifically because a
+corrupted `abs_max_temp_c` fails silent: a threshold that has quietly become
+`0x7FFFFFFF` never trips, and nothing else in the system would ever notice.
+
+---
+
+## 5. Context from the main controller
+
+The ESP pushes setpoints, measured temperatures and relay state over the
+isolated link (`LINK_PROTOCOL.md` §4). Guards S2, S3 and S4 consume it.
+
+The rules governing it are short and absolute:
+
+1. **Context is never primary evidence.** No guard trips *because of* something
+   the ESP said. S1, S5, S5, S6, S7, S8 do not read it at all.
+2. **Stale context is no context.** Older than `context_max_age_s`
+   (default **5 s**, i.e. 10 poll periods) and the context-consuming guards
+   go inactive, not pessimistic.
+3. **An ESP restart invalidates it.** The context frame carries a boot counter;
+   when it changes, all correlation windows reset. A relay history from before
+   a reboot describes a different program's intentions.
+4. **The ESP is not trusted to be correct, only to be honest about what it
+   commanded.** The Pico uses "which relays did you turn on" — a statement of
+   fact about the ESP's own outputs — and never "is this safe", which would be
+   asking the component under suspicion to grade itself.
+
+---
+
+## 6. Trip semantics
+
+**On trip**, in this order:
+1. `relay_owner` de-energizes K4 — first, before anything else, before logging.
+2. The trip reason and a snapshot of the deciding inputs are latched.
+3. The status frame's `SAFETY_FLAG_ENABLED` clears and `SAFETY_FLAG_RELAY`
+   goes low; the diagnostic frame carries the reason.
+4. It is logged.
+
+**A trip latches.** `SAFETY_CMD_REQUEST_ENABLE` from the ESP is refused while
+latched — it is advisory and the Pico's interlocks always win, which
+`KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
+
+**Clearing requires a deliberate operator act**: an explicit clear command over
+the link, or an E-stop assert-then-release cycle (a physical action, at the
+machine, by someone who has looked at the kiln). A clear is refused while the
+tripping condition is still true — otherwise "clear" becomes a way to spam past
+a real fault.
+
+**Power-on state is de-energized.** K4 is off before `main()` runs, on every
+reset, watchdog or otherwise. Heating is permitted only after every task has
+reported healthy, the startup grace has elapsed, and no guard is tripped.
+
+---
+
+## 7. What this does NOT protect against
+
+Stated plainly, because a safety case that only lists successes is not a safety
+case.
+
+| Failure | Covered? |
+|---|---|
+| Welded/shorted SSR | **Yes** — S3, and K4 is upstream in a different technology |
+| Runaway with the main controller crashed | **Yes** — S1, S6(b) |
+| Main controller commanding nonsense | **Yes** — S1, S2 |
+| Main controller absent, unprogrammed, or dead at boot | **Yes** — the ESP refuses to heat without Pico telemetry, and the Pico refuses to arm without context |
+| Safety TC fallen out of the chamber / wrong port / drifted | **Only in `CHAMBER_AGREED`** — S10 detects it (WARN); S8 and S11 catch some cases in both modes. In `EXTERNAL_OVERHEAT` there is no cross-check at all |
+| Element short / over-current | **No, by design.** Fuses and breakers own this — see §3 |
+| Safety TC frozen at a plausible value | **Yes** — S11 |
+| Enclosure overheating / CJ out of spec | **Yes** — S12 |
+| Corrupted safety threshold in RAM | **Yes** — periodic CRC check |
+| **Welded line contactor** | **Not preventable — but now loudly detected.** S9 escalates to `TRIP_INEFFECTIVE`; the current keeps flowing until someone opens the breaker |
+| **Safety TC and zone TCs all wrong the same way** | **No.** One safety sensor; S10 only catches *disagreement*, not common-mode error |
+| **Pico hardware failure** | **Partly.** Watchdog + fail-safe relay polarity cover hang and reset; a shorted Q4 or welded K4 is caught by S9 only after a trip is attempted |
+| **Fire from a non-electrical cause** | **No.** Not a fire detection system |
+| Loss of `12v_Safty` | **Yes, inherently** — K4 de-energizes, contactor opens |
+
+Two rows still say **No**, and they are the honest limits of a single-channel
+safety processor with one sensor:
+
+- **Common-mode sensor error.** If the safety TC and the zone TCs are all wrong
+  in the same direction, nothing here notices. Only a genuinely independent
+  second sensor fixes that — and in `EXTERNAL_OVERHEAT` mode, where S10 is off,
+  there is no sensor cross-check of any kind. That is an acceptable trade when
+  the external sensor is measuring a genuinely independent physical limit (a
+  shell or exhaust temperature that *cannot* be wrong in the same way a chamber
+  TC is), and a poor one if it is just a chamber TC declared external to silence
+  S10. Choose the mode for the physics, not for the quiet.
+- **A welded contactor.** S9 turns this from silent to loud, which is the whole
+  of what firmware can achieve. Actually *clearing* it needs a second series
+  contactor, or a mirror contact plus an operator who acts on the alarm.
+
+Both want board changes — a **second independent safety thermocouple** and a
+**contactor mirror/feedback contact** — and both are worth having before this
+system is trusted to run unattended overnight. They are tracked in `TODO.md`
+phase 8 rather than quietly omitted.
+
+One further wiring suggestion, free and worth taking: **put the kiln's lid/door
+switch in series with the E-stop's normally-closed loop.** There is no spare
+isolated input for a lid switch, but S7 already treats an open loop as a stop,
+so a series lid switch gets door interlocking for the price of a wire.
+
+
+---
+
+## Completion checklist
+
+Tick **built** and **verified on hardware** separately — they are not the same
+claim, and `KilnFW/docs/PROJECT_STATUS.md` is the model for keeping them apart.
+Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
+
+### Guards
+
+| | Guard | Class | Built | Host-tested | Hardware-verified |
+|---|---|---|---|---|---|
+| S1 | Absolute over-temperature | TRIP | [ ] | [ ] | [ ] |
+| S2 | Sustained excess over setpoint | TRIP | [ ] | [ ] | [ ] |
+| S3 | Load active, no heat commanded | TRIP | [ ] | [ ] | [ ] |
+| S4 | Heat commanded, load inactive | WARN | [ ] | [ ] | [ ] |
+| S5 | Safety thermocouple invalid | WARN→TRIP | [ ] | [ ] | [ ] |
+| S6 | Main controller unhealthy | TRIP | [ ] | [ ] | [ ] |
+| S7 | E-stop | TRIP | [ ] | [ ] | [ ] |
+| S8 | Implausible rate of rise | TRIP, off by default | [ ] | [ ] | [ ] |
+| S9 | Trip ineffective / contactor welded | ESCALATE | [ ] | [ ] | [ ] |
+| S10 | Safety TC vs zone TC disagreement | WARN | [ ] | [ ] | [ ] |
+| S11 | Frozen safety reading | TRIP | [ ] | [ ] | [ ] |
+| S12 | Cold junction / enclosure over-temp | WARN→TRIP | [ ] | [ ] | [ ] |
+| S13 | Borrowed channel not updating | WARN→TRIP | [ ] | [ ] | [ ] |
+| — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] |
+
+### Policy
+
+- [ ] Every trip clears **both** bars: magnitude *and* duration
+- [ ] WARN is the default class; each TRIP has a written argument here
+- [ ] Trips latch; no condition-cleared auto-reset anywhere
+- [ ] `CLEAR_TRIP` refused while the condition holds, and on a `trip_mask` mismatch
+- [ ] E-stop assert/release cycle works as the physical clear path
+- [ ] GRACE state evaluates and reports but never energizes K4
+- [ ] Context-consuming guards go **inactive** on stale context, never pessimistic
+- [ ] `boot_id` change resets every correlation window
+- [ ] `SIM_PLANT` flag disables S2/S3/S4 and warns persistently
+- [ ] Guards with no defensible default ship **disabled**, and say so in telemetry
+- [ ] `tc_placement_mode` and `tc_source` required at commissioning, no defaults
+
+### Honest-gaps register (§7)
+
+- [ ] Summary table re-checked against the code, with per-row verification state
+- [ ] Common-mode sensor error still recorded as **uncovered**
+- [ ] Welded contactor still recorded as **detected, not preventable**
+- [ ] Second independent thermocouple proposed for the next board revision
+- [ ] Contactor mirror/feedback contact proposed for the next board revision
+- [ ] Lid/door switch in series with the E-stop loop suggested in the build docs

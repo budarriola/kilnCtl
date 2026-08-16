@@ -1,5 +1,10 @@
 # TODO — Web UI / Kiln Control Front End
 
+Top-level ordering across both processors lives in [`../ROADMAP.md`](../ROADMAP.md);
+this file owns the main-firmware detail. The cross-processor items — the swapped
+safety-UART pins, `CommonFW`, and the safety-liveness gate on heating — are
+sequenced there and tracked in [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
+
 Planning doc; sections 1 and 4 (Wi-Fi provisioning/network settings) are
 implemented and hardware-verified as of 2026-08-10, everything else below is
 still unbuilt. Only the bare ESP32-S3 board is wired up so far (no

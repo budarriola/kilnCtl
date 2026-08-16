@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **kilnCtl** is a KiCad-based electronics design project for a kiln controller. It includes a hierarchical schematic design, PCB layout, component library, and Python tools for programmatic access to project data.
 
+## Where to start
+
+**ROADMAP.md** at the repo root is the top-level plan spanning both firmwares
+(`KilnFW` on the ESP32-S3, `SaftyFW` on the RP2040). Start tasks from there; it
+links to the per-area plans that own the detail.
+
 ## Project Structure
 
 All main-board KiCad project files live under **mainBoard/** (paths below are relative to that

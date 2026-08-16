@@ -1,0 +1,346 @@
+# The Safety Thermocouple
+
+> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Keep this file current.** If the driver, the register setup or the type
+> guidance changes, update it in the same commit. If it disagrees with the code,
+> **the code wins.** Checklist at the bottom.
+
+One MAX31856 on the `SaftyThermocoupleBoard` daughterboard, reached over the
+Pico's SPI0 through J7. This is the sensor that guards S1, S2, S5, S8, S10, S11
+and S12 all read, so it is the single most consequential component in the
+system.
+
+`KilnFW/docs/MAX31856.md` is the reference for the part itself — registers,
+fixed-point formats, and the traps. **Port that driver rather than rewriting
+it.** This document covers only what differs here, and the decisions that are
+`SaftyFW`'s to make.
+
+---
+
+## 1. What differs from the main board
+
+| | Main board (3 channels) | Safety board (1 channel) |
+|---|---|---|
+| Bus | Shared SPI with the ILI9488 display at a different mode and clock | **SPI0, sole device** |
+| `~CS` | GPIO14/17/18 | **GPIO1**, with a 10 k external pull-up |
+| `~FAULT` | Real ESP GPIOs | **GPIO11**, 10 k pull-up (R1) |
+| `~DRDY` | **SX1509 expander pins** — costs an I2C transfer to read | **GPIO12**, 10 k pull-up (R2) — a real GPIO |
+| Bus contention | Four devices, one owner task, interleaved traffic | None |
+
+**Two of these are outright improvements and the driver should exploit both.**
+
+### `~DRDY` is a real interrupt here
+
+On the main board `~DRDY` lands on the I/O expander, so `MAX31856.c` needs a
+`MAX31856_set_drdy_provider()` hook and degrades to an elapsed-time estimate of
+staleness — which, as that doc says plainly, **cannot detect a part that has
+silently stopped converting.**
+
+Here `~DRDY` is GPIO12 with a pull-up. So:
+
+- Attach a **falling-edge interrupt** and read on the edge. No polling, no
+  elapsed-time guessing.
+- **Staleness becomes a hardware fact**, not an inference. If `~DRDY` has not
+  asserted within ~2× the expected conversion interval, the part has stopped
+  converting — and *that* is the failure `KilnFW` explicitly cannot see. Feed it
+  straight into S5 as a sensor-invalid condition.
+- Keep the ordering `MAX31856.c` already documents: **sample `~DRDY` before the
+  register burst**, because reading `CJTH`/`CJTL` is what releases it high again.
+
+### The bus is not shared
+
+No display, no second thermocouple, no arbitration. `spi_owner` still exists —
+one task owning the interface is the house pattern, and J7 carries an I2C bus
+that may one day gain a device — but it will never block on another driver's
+transaction, which removes a whole class of latency question from the guard
+path.
+
+Clock: the part's limit is 5 MHz. Use **4 MHz**, matching
+`THERMO_SPI_CLOCK_HZ`'s default, in **SPI mode 1** (CPHA must be 1).
+
+---
+
+## 2. Thermocouple type — a real decision, not a default
+
+The MAX31856 supports B/E/J/K/N/R/S/T. `KilnFW` ships **type K** for the zone
+thermocouples. **The safety thermocouple should not automatically match**, and
+which type is right depends on `tc_placement_mode` (`SAFETY_MODEL.md` §3).
+
+### If `CHAMBER_AGREED` and the kiln fires above ~1200 °C, type K is the wrong choice
+
+Type K's practical continuous limit is around **1260 °C** for heavy gauge, and
+considerably lower — 1100 °C or so — for the thin wire usually fitted. Cone 10 is
+**1285–1305 °C**. So a type-K safety thermocouple at cone 10 is operating at or
+past its limit, where it suffers:
+
+- **Drift**, tens of degrees over relatively few firings, always in a direction
+  the reading cannot self-detect;
+- **Green rot** — preferential oxidation of chromium in the positive leg in
+  low-oxygen atmospheres, which is exactly what a loaded, reducing kiln provides.
+  It produces a *low* reading. A safety sensor that reads low as it ages fails in
+  the dangerous direction;
+- Short service life at temperature.
+
+**Type S** (Pt–10 % Rh) or **type R** is the standard choice for high-fire
+ceramics, good to 1450–1600 °C, and the MAX31856 linearizes both natively.
+
+The trade is output level: type S produces roughly **10 µV/°C** against type K's
+**41 µV/°C**, so noise and cold-junction error matter about four times as much,
+and cabling discipline matters correspondingly more. For a *safety* sensor
+whose thresholds carry tens of degrees of margin, that is an easy trade — a
+sensor that reads 30 °C low because it has aged is far worse than one that is
+2 °C noisier.
+
+**Recommendation:**
+
+| Placement | Peak temperature | Type |
+|---|---|---|
+| `CHAMBER_AGREED` | above ~1150 °C | **S or R** |
+| `CHAMBER_AGREED` | below ~1150 °C | K is fine |
+| `EXTERNAL_OVERHEAT` | shell / exhaust / enclosure — a few hundred °C at most | **K**, comfortably |
+
+### The type is configuration, and a mismatch is a silent hazard
+
+`tc_type` must be a commissioning field, and it must match the thermocouple
+physically fitted. **A mismatch does not produce an error — it produces a
+plausible, wrong number.** Feeding a type-S thermocouple's millivolts through the
+type-K linearization reads roughly a quarter of the true temperature: a 1250 °C
+chamber reports around 320 °C, comfortably below every threshold, forever.
+
+Nothing in the electronics can detect this. Two partial mitigations, both worth
+having:
+
+- **`THERMO_FAULT_TCRANGE`** fires when the reading falls outside the configured
+  type's range — which catches a K-configured-as-S mismatch (reading absurdly
+  high) but *not* the dangerous direction above.
+- **S10**, in `CHAMBER_AGREED`, compares against the zone thermocouples and would
+  catch a 900 °C disagreement immediately. This is one of the better arguments
+  for declaring `CHAMBER_AGREED` where it is physically true.
+
+Beyond that it is a commissioning check: at a known soak, the safety reading must
+agree with a reference. Put it in the commissioning list (`TODO.md` phase 8) and
+record the result.
+
+---
+
+## 3. Borrowing a main-board thermocouple
+
+`tc_source` (`SAFETY_MODEL.md` §3) allows the safety processor to use one of the
+**main board's** zone thermocouples instead of, or alongside, its own:
+
+| `tc_source` | Reading comes from | Independence |
+|---|---|---|
+| `OWN_J7` | the Pico's own MAX31856 | **full** |
+| `BORROWED_ZONE` | zone `borrowed_zone_index`, via the context frame | **none** — see below |
+| `BOTH` | own sensor is primary; borrowed is a continuous cross-check | full, plus a cross-check |
+
+### What borrowing costs
+
+A borrowed reading is measured by the main board's MAX31856, read by the main
+board's SPI driver, packed by the main board's firmware and delivered over a
+link the main board controls. **Every one of those is a component the safety
+processor exists to distrust**, and a fault in any of them is now inside the
+safety path.
+
+It is still a reasonable configuration for a board built without the J7
+daughterboard — a borrowed reading beats no temperature at all — but it must be
+chosen deliberately. In `BORROWED_ZONE` the safety processor sets
+`SAFETY_FLAG_BORROWED` in every status frame, and the GUI must label the
+temperature accordingly.
+
+**`BOTH` is the configuration to aim for.** It is the only one where a drifting
+or frozen sensor on *either* board is visible from the other, which directly
+attacks the "six of nine failure modes read low" problem in §5.
+
+### A borrowed channel must be proven to be updating
+
+This is the requirement that shapes the protocol. A MAX31856 on the main board
+that has stopped converting keeps returning its last value; the ESP forwards it
+faithfully every 500 ms; and from the Pico's side **that is indistinguishable
+from a kiln holding a steady soak.**
+
+So the context frame carries a per-zone **`sample_counter`**, incremented by the
+ESP only when it actually consumes a fresh conversion — never merely because it
+built a frame (`CommonFW/docs/LINK_PROTOCOL.md` §4). Three distinct failures then
+become three distinct diagnoses:
+
+| Symptom | Guard | Meaning |
+|---|---|---|
+| `sample_counter` frozen | **S13** | that channel stopped converting |
+| counter advancing, value frozen while heat is on | **S11** | the sensor itself is stuck |
+| no frames arriving | **S6** | the link, not the sensor |
+
+A borrowed reading whose counter is stale is treated as **invalid immediately**,
+not merely old — it is a number of unknown age.
+
+### And it must agree
+
+A borrowed channel is one of the sensors the zone guards already use, measuring
+the same chamber, so it is by definition `CHAMBER_AGREED` — `tc_placement_mode`
+is forced to it, and a configuration that says otherwise is **rejected rather
+than reconciled**. S10 (disagreement) is therefore always active in this mode,
+and in `BOTH` it compares the two sources directly with the own sensor as
+reference. That is the strongest sensor cross-check available anywhere in this
+design.
+
+### Type checking a borrowed channel
+
+The context frame carries each zone's configured `tc_type`. The Pico compares it
+against `borrowed_type_expected` and warns on a change: it means someone
+reconfigured that channel on the main board, and the safety processor's
+plausibility ranges were built for the old one.
+
+---
+
+## 4. Every thermocouple may be a different type
+
+Nothing requires the four thermocouples in this system to match, and §2's
+guidance means they often should not — a chamber safety sensor may want type S
+while the zone sensors stay type K, or a shell-mounted safety sensor stays K
+while a high-fire zone moves to S.
+
+The wire already supports it: `THERMO_CMD_CONFIG_CHANNEL`'s `byte2 = tc_type` is
+per-channel (`KilnFW/App/drivers/uart_task_ids.h`). What does **not** yet support
+it is `KilnFW`'s configuration — all three zone channels are configured
+identically today.
+
+So the plan is:
+
+- **`SaftyFW`**: `tc_type` is a per-sensor commissioning field, applying to the
+  J7 sensor.
+- **`KilnFW`**: `zone_cfg_t` gains a per-zone `tc_type`, exposed on the
+  Thermocouples & Zones page and pushed to the part at init
+  (`SaftyFW/TODO.md` 0.14).
+- **The context frame** carries each zone's type, so the Pico is never guessing
+  what a borrowed reading means.
+
+**Plausibility ranges are per-type, not global.** Type K's range is roughly
+−200…1372 °C; type S is −50…1768 °C; type T tops out near 400 °C. A "temperature
+out of range" check hard-coded to one type will either miss a fault on a
+wider-range sensor or fire spuriously on a narrower one. Drive it from the
+configured type, and let `THERMO_FAULT_TCRANGE` — which the part computes
+against its *own* configured type — be the primary signal.
+
+---
+
+## 5. Configuration
+
+Written once at init, re-asserted if the part is ever seen to reset.
+
+| Register | Setting | Why |
+|---|---|---|
+| `CR0` CMODE | **1 — automatic conversion** | Free-running, ~100 ms/conversion, paired with the `~DRDY` interrupt. One-shot would make the guard path depend on the Pico remembering to ask |
+| `CR0` 50/60 Hz | **match the local mains** | The notch filter is the main defence against mains pickup on a long thermocouple run. Only changeable while conversions are off — stop, write, restart, exactly as `KilnFW` does |
+| `CR0` OCFAULT[1:0] | **enabled**, shortest setting the lead resistance allows | This is what produces `THERMO_FAULT_OPEN`, the detector for a thermocouple that has fallen off |
+| `CR0` CJ disable | **0 — cold junction enabled** | Needed for compensation, and S12 reads it |
+| `CR0` FAULT mode | **comparator** | Bits clear themselves when the condition clears; no `FAULTCLR` handshake to get wrong. Matches `KilnFW` |
+| `CR1` AVGSEL | **4 samples** | ~230 ms/conversion. Quieter than 1, still far faster than any thermal event. 16 would add nothing but latency |
+| `CR1` TC TYPE | **commissioned** (§2) | Not a compile-time constant |
+| `MASK` (02h) | **unmask OPEN, OVUV, TCRANGE, CJRANGE**; mask TCHIGH/TCLOW/CJHIGH/CJLOW | Default is `FFh` = everything masked. The `~FAULT` pin should mean "the sensor is broken", not "a threshold was crossed" — thresholds are the guards' job |
+| `CJTO` (09h) | 0 unless a measured offset exists | ±8 °C range, 0.0625 °C/LSB |
+| `LTHFTH/L`, `LTLFTH/L` | leave wide open | S1 owns the ceiling, in software, where it can be mode-dependent and firing-aware. Duplicating it in the part would create two thresholds to keep in sync |
+
+**Set `MASK` deliberately — the reset default masks everything.** Leaving it at
+`FFh` leaves `~FAULT` permanently inactive, so the pin looks healthy no matter
+what happens, and S5 loses its fastest signal.
+
+### Thresholds live in software, not in the part
+
+Tempting to push S1's ceiling into `LTHFTH/L` and let the part flag it. Don't:
+the ceiling is `min(abs_max, firing_max + margin)` in `CHAMBER_AGREED`, so it
+changes per firing; and a threshold in two places is a threshold that will
+disagree with itself. The part's comparators stay wide open and the guards do
+the comparing.
+
+---
+
+## 6. Accuracy budget — and why the margins are what they are
+
+Worth writing down, because it is the justification for every generous number in
+`SAFETY_MODEL.md`.
+
+| Source | Typical contribution at ~1250 °C |
+|---|---|
+| MAX31856 thermocouple conversion | ±2 °C |
+| Cold-junction sensor | ±0.7 °C, degrading toward the ±125 °C limits |
+| Thermocouple tolerance, class 1 type K (±0.4 %) | **±5 °C** |
+| Thermocouple tolerance, class 1 type S (±0.25 %) | ±3 °C |
+| Drift / ageing over service life | **tens of °C, unbounded and undetectable** |
+| Mounting position vs. the thermal point of interest | tens of °C |
+
+The electronics are the *smallest* term by a wide margin. Everything that
+matters is the sensor and where it is.
+
+Three consequences that shape the design:
+
+- **A threshold set 10 °C above an expected value is meaningless** — it is inside
+  the sensor stack's own uncertainty. Hence S2's 75 °C margin and S1's
+  100 °C firing margin.
+- **Drift is unbounded and silent**, which is why S10 (comparison) and S11
+  (frozen detection) exist at all: they catch sensor failures that no accuracy
+  spec addresses.
+- **Sub-degree resolution is not precision.** The part reports 0.0078125 °C per
+  code. Never display or log the safety temperature to more than **1 decimal
+  place**, or the reading acquires an authority it has not earned.
+
+---
+
+## 7. Failure modes and which guard catches each
+
+| Failure | Detected by | Direction of error |
+|---|---|---|
+| Open circuit / fallen off | `THERMO_FAULT_OPEN` → S5 | reads open, unambiguous |
+| Short across the leads | Reads cold-junction temperature → S10, S11 | **reads low — dangerous** |
+| SPI bus failure | Transfer error → S5 | no reading |
+| Part stopped converting | **`~DRDY` silence → S5** (only possible here, not on the main board) | reading freezes → also S11 |
+| Reversed polarity | Reads backwards; falling reading while heating → S10, and `KilnFW`'s guard 2 logic if ported | **reads low — dangerous** |
+| Wrong `tc_type` configured | S10 in `CHAMBER_AGREED`; commissioning check otherwise | usually **low — dangerous** |
+| Drift / green rot with age | S10 in `CHAMBER_AGREED`; otherwise **nothing** | **reads low — dangerous** |
+| Cold junction out of range | `THERMO_FAULT_CJRANGE` → S5; S12 catches it earlier | reading biased |
+| Extension wire of the wrong type | Nothing, unless S10 | offset, direction depends |
+
+**Six of these fail low, and reading low is the dangerous direction** — a
+too-cold reading never trips a ceiling. That asymmetry is the strongest
+practical argument for declaring `CHAMBER_AGREED` wherever it is physically
+honest, because S10 is the only guard that catches most of them, and it is the
+one that is disabled in `EXTERNAL_OVERHEAT`.
+
+It is also the argument for the **second independent safety thermocouple** in
+`TODO.md` phase 8. Two sensors that disagree tell you something is wrong; one
+sensor reading low tells you nothing at all.
+
+
+---
+
+## Completion checklist
+
+**Driver**
+- [ ] `MAX31856.c` ported from `KilnFW` (ported, not rewritten)
+- [ ] SPI0 mode 1, 4 MHz, `CS0` as a plain GPIO
+- [ ] `~DRDY` (GPIO12) falling-edge **interrupt**, sampled *before* the register burst
+- [ ] **`~DRDY` silence detection** feeding S5 — the stopped-converting failure `KilnFW` cannot see
+- [ ] NaN, never 0, on any invalid reading
+
+**Configuration**
+- [ ] `tc_type` a commissioning field, not a compile-time constant
+- [ ] **`MASK` (02h) set explicitly** — reset default `FFh` masks every fault
+- [ ] `CR0`: auto-convert, 50/60 Hz matching local mains, OCFAULT on, comparator fault mode
+- [ ] `CR1`: AVGSEL = 4 samples
+- [ ] Part thresholds left wide open — S1 owns the ceiling, in software
+- [ ] Per-type plausibility ranges, driven from the configured type
+- [ ] Config re-asserted if the part is ever seen to have reset
+
+**Borrowed source**
+- [ ] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH`
+- [ ] `SAFETY_FLAG_BORROWED` set in status frames when borrowing
+- [ ] `tc_placement_mode` forced to `CHAMBER_AGREED`; contradictory config **rejected**
+- [ ] S13 implemented against `sample_counter`
+- [ ] Borrowed `tc_type` compared against `borrowed_type_expected`
+- [ ] `BOTH` mode cross-compares the two sources via S10
+
+**Commissioning**
+- [ ] Thermocouple type chosen deliberately per §2, per sensor
+- [ ] Known-soak check against a reference instrument — the only way to catch a type mismatch
+- [ ] Open-circuit test reports `THERMO_FAULT_OPEN`, not a plausible number
+- [ ] Accuracy budget (§6) reviewed against the thresholds actually set
+- [ ] Safety temperature displayed to **1 decimal place at most**
