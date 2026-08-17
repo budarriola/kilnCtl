@@ -3015,11 +3015,28 @@ for the board in hand (variant 43784065712285): it is an **N16R8 — 16 MB
 flash, 8 MB PSRAM**. The buy lists (`N8R8`, 8 MB) and 3D model (`N8R2`, 8 MB)
 are both stale and still need correcting at the source — that has not been
 done yet. `sdkconfig` now declares `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` (was
-`_2MB`). `partitions.csv` is unchanged — it still only maps the first 2 MB
-(single `factory` slot); the OTA partitions below still do not exist yet.
-Below this line reflects the pre-2026-08-17 analysis and is otherwise still
-accurate: everything past 2 MB was unaddressable before this fix and, until
-`partitions.csv` is extended, is simply unused rather than unaddressable now.
+`_2MB`).
+
+**Update 2026-08-17 (later same day): partition table extended, rollback
+enabled, host-build-verified.** `firmware/KilnFW/partitions.csv` now carries
+`otadata` (8K) + `ota_0`/`ota_1` (2048K each) + `pico_img` (896K), all placed
+at `0x200000` and above, exactly as this section proposed — see the file's own
+header comment for the full offset arithmetic and the reasoning behind each
+size. The six pre-existing entries (`nvs`, `phy_init`, `factory`, `wifi_nvs`,
+`kiln_nvs`, `profiles_nvs`) are byte-identical to before this change (verified
+by diff — the only lines removed were in the header comment's prose, not the
+table itself). One correction versus the original proposal: `pico_img` is
+**896K, not 512K** — `SaftyFW/bootloader/flash_layout.h`'s
+`BOOTLOADER_SLOT_FLASH_SIZE` is 0xD0000 (832K) per Pico app slot, so 512K
+cannot hold a full Pico image at all. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`
+is now set (was off). `firmware/KilnFW/App/main.c` now calls
+`esp_ota_mark_app_valid_cancel_rollback()` from a background task gated on all
+three of NVS-readable / safety-link-exchanging-frames / web-server-up — see
+9.2 below. `idf.py -C firmware/KilnFW build` completes clean, and
+`gen_esp32part.py`/`check_sizes.py` validated the new table with no
+overlap/overflow (`KilnCtrl.bin` is 0x1273e0 bytes, 21% free in `factory`).
+**None of this has touched physical hardware yet** — see the still-open items
+below, which are unchanged by this pass.
 
 The module was built with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB` (now `_16MB`, see
 above), and everything past 2 MB is unused. Either way the OTA partitions go
@@ -3033,11 +3050,11 @@ more room after it on a 16 MB part.
       by the LonelyBinary product page (N16R8) rather than `esptool flash_id`,
       but the buy-list and 3D-model records still need correcting, so this
       stays open
-- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE` set to the **confirmed** size (done,
-      2026-08-17), **and reflash
-      the bootloader** — the flash size is in its header, so a new table alone
-      does nothing. The bootloader reflash has NOT happened yet (no toolchain/
-      hardware access in this pass)
+- [x] `CONFIG_ESPTOOLPY_FLASHSIZE` set to the **confirmed** size (done,
+      2026-08-17)
+- [ ] **Reflash the bootloader on the physical board** — the flash size is in
+      its header, so a new table alone does nothing. This is still a one-time
+      USB/serial step against real hardware that this pass could not perform
 ### 9.1a PSRAM — decided: stays off
 
 **Decision (2026-08-16): leave `CONFIG_SPIRAM` unset. Do not enable PSRAM.**
@@ -3090,27 +3107,51 @@ until something concrete needs it is the cheap ordering.
 - [ ] Note for sourcing: the **flash** is what earns the module's keep, since OTA
       needs it. The PSRAM on an R8 part is being paid for and not used. That is an
       acceptable trade for a one-off, not a reason to specify R8 on a reorder
-- [ ] `otadata` at `0x200000`, `ota_0`/`ota_1` 2 MB each above it, optional
-      512 K `pico_img` staging partition. Full layout in
+- [x] `otadata` at `0x200000`, `ota_0`/`ota_1` 2 MB each above it, `pico_img`
+      staging partition (896K, corrected up from the originally-proposed 512K
+      — too small for SaftyFW's 832K app slot). Full layout in
       [`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md) §3
-- [ ] **`factory` kept**, not reclaimed — with `otadata` erased the bootloader
+      and `partitions.csv`'s own header comment (2026-08-17)
+- [x] **`factory` kept**, not reclaimed — with `otadata` erased the bootloader
       falls back to it, which is the only recovery path that needs no cable
-- [ ] Offsets confirmed against the live table before flashing — getting this
-      wrong erases `profiles_nvs`
+- [x] Offsets confirmed against the live table before flashing (host-build
+      verified: `gen_esp32part.py` validated no overlap/overflow, and the six
+      pre-existing entries are byte-identical to before) — **not yet confirmed
+      against the physical board**, which is still a one-time serial step
 - [ ] Pre-change table archived so a rollback to pre-OTA firmware is possible
-- [ ] Slot size re-checked against a **measured** image whenever 6A or 8 lands
+      (nothing to archive from yet — no physical flash has happened)
+- [x] Slot size checked against the **measured** 2026-08-16 image (1167 KB);
+      2048K slots leave 1.75x headroom
 - [ ] One-time serial flash documented as a prerequisite step, not a footnote
+      — still outstanding, this pass is build-verification only
+- [ ] **`nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` read out and archived from
+      the physical board with `esptool read_flash` before the new table is
+      ever flashed for real.** The one irreversible step in this whole plan;
+      this pass has no hardware access and could not perform it
 
 ### 9.2 Rollback
 
-- [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` (currently off)
-- [ ] `esp_ota_mark_app_valid_cancel_rollback()` called **only** after NVS
-      partitions read, the safety link is exchanging frames, and the web server
-      is answering — never at the end of `app_main()`. An image that boots but
-      cannot reach the safety processor is exactly the one that must roll back,
-      and it would pass a "we reached the end of main" check
-- [ ] `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` left off unless a security version is
-      actually going to be maintained
+- [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` (was off; flipped 2026-08-17,
+      confirmed by a clean `idf.py build`)
+- [x] `esp_ota_mark_app_valid_cancel_rollback()` wired in, gated on all three
+      preconditions — NOT called at the end of `app_main()`. Implemented as a
+      background FreeRTOS task (`ota_rollback_confirm_task()` in `App/main.c`)
+      started right after `nvs_report_capture()`, which polls until:
+      - **NVS readable**: captured once from `nvs_report_get()`'s `mounted`
+        flags at task-start time (this reflects every NVS-owning module that
+        already ran by that point in `app_main()`)
+      - **safety link exchanging frames**: checked live, every poll, via
+        `safety_link_get_status(&safety, &st)->link_up` — that field is
+        already exactly "a valid status within `SAFETY_LINK_UP_PERIODS`
+        polls", so this is a genuine "currently exchanging", not "ever
+        received one frame". No new `safety_link.h` getter was needed
+      - **web server answering**: captured once from `dashboard_http_start()`'s
+        return value
+      All three fully wired — none of them is a flagged gap. If any is false at
+      boot it stays false (nothing re-derives them), so the image correctly
+      stays `PENDING_VERIFY` rather than being force-confirmed
+- [x] `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` left off — not touched, per the
+      instruction to leave it off unless a security version is maintained
 
 ### 9.3 Authentication — the AP password, not sent over the wire
 

@@ -3,11 +3,14 @@
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
+#include <stdlib.h>
+
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -85,6 +88,88 @@ static void kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool s
          * safety processor. Nothing here can fix it; the log line is so the
          * operator does not have to infer it from silence. */
         ESP_LOGE(TAG, "no safety link: the RP2040 cannot be told the main controller has faulted");
+    }
+}
+
+/* --- OTA rollback confirmation (UPDATE_PROTOCOL.md sec 3, TODO.md 9.2) ----
+ *
+ * With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, an image that just got OTA'd
+ * in boots as PENDING_VERIFY and the bootloader will revert to the previous
+ * slot on the next boot unless esp_ota_mark_app_valid_cancel_rollback() has
+ * been called. UPDATE_PROTOCOL.md is emphatic, twice, that this must NOT be
+ * called at the end of app_main() -- reaching the last line of main proves
+ * nothing about whether the things that matter actually came up. An image
+ * that boots but cannot reach the safety processor is exactly the image that
+ * must roll back, and it would sail past a naive "we got to the end" check.
+ *
+ * So this runs as its own low-priority task, polling until all three of
+ * UPDATE_PROTOCOL.md's preconditions are independently true -- NVS readable,
+ * the safety link exchanging real frames, the web server up -- rather than
+ * being invoked inline from app_main() at a fixed point. NVS and the web
+ * server are booleans captured once, from state app_main already
+ * established (nvs_report_get()'s mounted flags, dashboard_http_start()'s
+ * return); the safety link is the one condition that can only become true
+ * some number of poll periods AFTER boot, so it is checked live via
+ * safety_link_get_status()->link_up on every pass -- that field is already
+ * exactly "a valid status within SAFETY_LINK_UP_PERIODS polls", i.e. frames
+ * are currently being exchanged, not just were once. No new safety_link.h
+ * getter was needed for this.
+ *
+ * If nvs_ok or web_ok is false, it was false at boot and stays false for the
+ * life of this boot, so the loop never confirms and the image is correctly
+ * left PENDING_VERIFY -- that is the rollback doing its job, not a bug. If
+ * safety was NULL (safety_link_start() itself failed), the link condition
+ * can never become true either, for the same reason. */
+typedef struct {
+    SafetyLinkClass *safety; /* NULL if safety_link_start() failed this boot --
+                              * the link condition can then never be satisfied */
+    bool nvs_ok;
+    bool web_ok;
+} ota_confirm_ctx_t;
+
+#define OTA_CONFIRM_POLL_MS   500
+#define OTA_CONFIRM_WARN_MS   10000
+
+static void ota_rollback_confirm_task(void *arg)
+{
+    ota_confirm_ctx_t ctx = *(ota_confirm_ctx_t *)arg;
+    free(arg);
+
+    TickType_t start = xTaskGetTickCount();
+    bool       warned = false;
+
+    for (;;) {
+        bool link_up = false;
+        if (ctx.safety) {
+            safety_link_status_t st;
+            if (safety_link_get_status(ctx.safety, &st) == ESP_OK) {
+                link_up = st.link_up;
+            }
+        }
+
+        if (ctx.nvs_ok && ctx.web_ok && link_up) {
+            esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "OTA rollback confirmed: NVS readable, safety link exchanging "
+                              "frames, web server up -- this image is no longer PENDING_VERIFY");
+            } else {
+                ESP_LOGE(TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s "
+                              "(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE off, or not an OTA slot?)",
+                         esp_err_to_name(err));
+            }
+            vTaskDelete(NULL);
+            return;
+        }
+
+        if (!warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(OTA_CONFIRM_WARN_MS)) {
+            ESP_LOGW(TAG, "OTA rollback not yet confirmed %lu ms after boot: nvs_ok=%d web_ok=%d "
+                          "safety_link_up=%d -- image stays PENDING_VERIFY until all three are true",
+                     (unsigned long)OTA_CONFIRM_WARN_MS, (int)ctx.nvs_ok, (int)ctx.web_ok,
+                     (int)link_up);
+            warned = true;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(OTA_CONFIRM_POLL_MS));
     }
 }
 
@@ -450,6 +535,37 @@ void app_main(void)
     // nvs_partition_init() -- this only observes what those calls established,
     // it does not itself mount or erase anything.
     nvs_report_capture();
+
+    // TODO.md 9.2 / UPDATE_PROTOCOL.md sec 3: kick off OTA rollback
+    // confirmation now that NVS's mounted state and the web server's start
+    // result both exist to capture. See ota_rollback_confirm_task() above
+    // for why this is a background poller and not an inline call here.
+    {
+        size_t                       nvs_section_count = 0;
+        const nvs_report_section_t *nvs_sections = nvs_report_get(&nvs_section_count);
+        bool                         nvs_ok = (nvs_section_count > 0);
+        for (size_t i = 0; i < nvs_section_count; i++) {
+            if (!nvs_sections[i].mounted) {
+                nvs_ok = false;
+            }
+        }
+
+        ota_confirm_ctx_t *ota_ctx = calloc(1, sizeof(*ota_ctx));
+        if (ota_ctx) {
+            ota_ctx->safety = (safety_err == ESP_OK) ? &safety : NULL;
+            ota_ctx->nvs_ok = nvs_ok;
+            ota_ctx->web_ok = (dash_err == ESP_OK);
+            if (xTaskCreate(ota_rollback_confirm_task, "ota_confirm", 3072, ota_ctx,
+                             tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to start OTA rollback confirmation task -- this image "
+                              "will stay PENDING_VERIFY for the rest of this boot");
+                free(ota_ctx);
+            }
+        } else {
+            ESP_LOGE(TAG, "OTA rollback confirmation context alloc failed -- this image "
+                          "will stay PENDING_VERIFY for the rest of this boot");
+        }
+    }
 
     // TODO.md 8.3: the "is this kiln ready to fire?" status page. Read-only
     // aggregator over the getters every module above already exposes --

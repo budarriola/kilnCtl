@@ -1,12 +1,10 @@
 # KilnCtl partition table -- ESP32-S3, N16R8 module (16 MB flash / 8 MB PSRAM,
 # confirmed 2026-08-17 against the LonelyBinary product page for the board in
-# hand). This table intentionally maps only the FIRST 2 MB (0x200000) of that
-# 16 MB chip -- see below. The remaining ~14 MB is unmapped/unused headroom,
-# reserved for a future OTA dual-app-slot partition table (ROADMAP.md M8: "the
-# ESP needs a new partition table with two app slots"). That OTA rework is a
-# separate, unstarted effort -- this pass only corrected the sdkconfig
-# flash-size declaration (CONFIG_ESPTOOLPY_FLASHSIZE, previously wrongly set
-# to 2MB) to match the real chip; it did not touch partition layout.
+# hand). This table maps the first ~7.28 MB of that 16 MB chip: the original
+# 2 MB single-`factory` layout (untouched, see below) plus, as of this pass
+# (2026-08-17), the OTA dual-app-slot layout from
+# ../CommonFW/docs/UPDATE_PROTOCOL.md section 3 (ROADMAP.md M8). The remaining
+# ~8.7 MB above the new partitions is unmapped/unused headroom.
 #
 # Derived from ESP-IDF's stock partitions_singleapp_large.csv. The first three
 # entries are byte-identical to that stock table on purpose: this board has
@@ -66,6 +64,82 @@
 # this one. No partition layout can survive it. See wifi_prov.c's header for
 # the full survival matrix.
 #
+# --- OTA layout, added 2026-08-17 (UPDATE_PROTOCOL.md section 3) ----------
+#
+# Everything above is byte-identical to the pre-OTA table -- verified by diff,
+# not just by eye. Nothing that existed before this pass moved, resized, or
+# changed subtype. The new partitions start at 0x200000, which was unreachable
+# dead flash before CONFIG_ESPTOOLPY_FLASHSIZE was corrected from 2MB to 16MB
+# earlier this session; 0x1FD000..0x200000 (12K) stays unused exactly as
+# before.
+#
+# otadata      data, ota,       0x200000, 0x2000    8K   OTA slot-selection state
+# (pad)                         0x202000..0x210000  56K  see alignment note below
+# ota_0        app,  ota_0,     0x210000, 0x200000  2048K  OTA slot A
+# ota_1        app,  ota_1,     0x410000, 0x200000  2048K  OTA slot B
+# pico_img     data, undefined, 0x610000, 0xE0000   896K  Pico-image relay staging
+# spare                         0x6F0000..0x1000000 ~9.29M unused headroom (16 MB part)
+#
+# Fit arithmetic:
+#   otadata:  0x200000 + 0x002000 = 0x202000
+#   ota_0:    next 64K-aligned offset >= 0x202000 is 0x210000 (see below);
+#             0x210000 + 0x200000 = 0x410000
+#   ota_1:    0x410000 + 0x200000 = 0x610000
+#   pico_img: 0x610000 + 0x0E0000 = 0x6F0000
+#   spare:    0x6F0000 .. 0x1000000 (16 MB) = 0x910000 = 9,502,720 B ~= 9.29 MB
+#   Even against the conservative 8 MB (0x800000) floor this table was
+#   designed for, 0x6F0000 < 0x800000 with ~1.1 MB to spare -- the layout does
+#   not depend on the 16 MB confirmation being right, per UPDATE_PROTOCOL.md.
+#
+# Why the 56K gap between otadata and ota_0: `gen_esp32part.py` requires `app`
+# type partitions (factory/ota_0/ota_1, but not `data` partitions like
+# otadata) to start on a 64 KB (0x10000) boundary. otadata is only 8K, so
+# placing ota_0 immediately after it at 0x202000 would fail partition-table
+# generation. 0x210000 is the next 64K boundary at or after 0x202000, and the
+# 56K between them is simply unused padding -- UPDATE_PROTOCOL.md's proposed
+# offsets already accounted for this, this table just spells out why.
+#
+# ota_0 / ota_1 sized at 2048K (2 MB) each against the confirmed 2026-08-16
+# measured image size of 1167 KB (KilnCtrl.bin) -- 1.75x headroom, matching
+# UPDATE_PROTOCOL.md's own sizing rationale (room for TODO.md 6A/8 growth
+# without another partition-table change). Both offsets and the size are
+# already 64K-aligned (0x200000 = 32 x 0x10000), so both app-partition
+# alignment and the general 4K-sector alignment requirement are satisfied by
+# construction.
+#
+# pico_img sized at 896K (0xE0000), NOT the 512K UPDATE_PROTOCOL.md originally
+# proposed. That figure predated checking it against the RP2040 side: SaftyFW's
+# own bootloader/flash_layout.h defines BOOTLOADER_SLOT_FLASH_SIZE as 0xD0000
+# (832K) per Pico application slot. 512K (0x80000) cannot hold an 832K image at
+# all. 896K gives 64K (~7.7%) of headroom over the real 832K slot size while
+# staying a clean 64K-aligned size; as a `data` partition pico_img only needs
+# 4K-sector alignment to be valid, but 64K keeps the arithmetic simple and costs
+# nothing given the ~9.3 MB still spare above it. This is a *staging* partition
+# for relaying a Pico image through the ESP (UPDATE_PROTOCOL.md section 3,
+# "A staging partition also solves the relay problem") -- it is never mapped,
+# executed, or interpreted as a filesystem by the ESP itself, only read/written
+# as a raw byte range, which is why its subtype is `undefined` (0x06) rather
+# than `fat` (0x81): `fat` tells tooling this partition holds an actual FAT
+# filesystem structure, which would be actively misleading for an opaque blob
+# staging area that nothing ever mounts.
+#
+# `factory` (above) is deliberately KEPT, not reclaimed for OTA space, even
+# though there is no shortage of room at 16 MB: with `otadata` erased or
+# invalid the bootloader falls back to `factory`, the one recovery path that
+# needs no serial cable. See UPDATE_PROTOCOL.md section 3.
+#
+# Still open (see firmware/KilnFW/TODO.md section 9 and
+# ../CommonFW/docs/UPDATE_PROTOCOL.md section 7 for the authoritative list):
+#   - Bootloader has NOT been reflashed against this new table on real
+#     hardware yet -- this pass is host-build-verified only (gen_esp32part.py
+#     validated a clean, non-overlapping table; nothing has touched the board).
+#   - `nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` have NOT been read out and
+#     archived from the physical board. That is a one-time, irreversible-if-
+#     skipped bench step this pass cannot perform.
+#   - The streamed esp_ota_ops POST handler, challenge-response auth, the
+#     UPDATE_* frame relay into pico_img, and the web/MCP surface are all still
+#     unbuilt -- this pass is the partition-table + rollback foundation only.
+#
 # Name,       Type, SubType, Offset,   Size,     Flags
 nvs,          data, nvs,     0x9000,   0x6000,
 phy_init,     data, phy,     0xf000,   0x1000,
@@ -73,3 +147,7 @@ factory,      app,  factory, 0x10000,  0x177000,
 wifi_nvs,     data, nvs,     0x187000, 0x6000,
 kiln_nvs,     data, nvs,     0x18D000, 0x10000,
 profiles_nvs, data, nvs,     0x19D000, 0x60000,
+otadata,      data, ota,       0x200000, 0x2000,
+ota_0,        app,  ota_0,     0x210000, 0x200000,
+ota_1,        app,  ota_1,     0x410000, 0x200000,
+pico_img,     data, undefined, 0x610000, 0xE0000,

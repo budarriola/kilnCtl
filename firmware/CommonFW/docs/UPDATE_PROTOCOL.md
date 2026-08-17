@@ -1,6 +1,9 @@
 # Firmware Update Protocol — both processors, one password
 
-> **Status:** planning, nothing built · **Last reviewed:** 2026-08-16
+> **Status:** planning, mostly nothing built — **exception:** section 3's ESP
+> partition-table + rollback foundation landed 2026-08-17 (host-build-verified,
+> not yet flashed to physical hardware). Sections 2, 4, 5, 6 are all still
+> planning only. · **Last reviewed:** 2026-08-17
 > **Keep this file current.** This is a contract between two firmwares and a web
 > UI. If any one of the three changes shape, edit this file in the same change —
 > a stale update protocol is the kind of thing that is only discovered while
@@ -176,21 +179,36 @@ identical and the spare region at the end simply grows.
 
 ```
 # unchanged, live data, do not touch
-nvs           data, nvs,     0x009000, 0x006000    24K
-phy_init      data, phy,     0x00F000, 0x001000     4K
-factory       app,  factory, 0x010000, 0x177000  1500K   <- kept as recovery image
-wifi_nvs      data, nvs,     0x187000, 0x006000    24K
-kiln_nvs      data, nvs,     0x18D000, 0x010000    64K
-profiles_nvs  data, nvs,     0x19D000, 0x060000   384K
+nvs           data, nvs,      0x009000, 0x006000    24K
+phy_init      data, phy,      0x00F000, 0x001000     4K
+factory       app,  factory,  0x010000, 0x177000  1500K   <- kept as recovery image
+wifi_nvs      data, nvs,      0x187000, 0x006000    24K
+kiln_nvs      data, nvs,      0x18D000, 0x010000    64K
+profiles_nvs  data, nvs,      0x19D000, 0x060000   384K
 
-# new, entirely inside the previously unreachable 6 MB
-otadata       data, ota,     0x200000, 0x002000     8K
-ota_0         app,  ota_0,   0x210000, 0x200000  2048K   <- 1.75x the current image
-ota_1         app,  ota_1,   0x410000, 0x200000  2048K
-pico_img      data, fat,     0x610000, 0x080000   512K   <- staging, see below
-# spare                      0x690000..0x800000 ~1.4M   (8 MB part)
-#                            0x690000..0x1000000 ~9.4M  (16 MB part)
+# new, entirely inside the previously unreachable 6 MB (IMPLEMENTED 2026-08-17)
+otadata       data, ota,      0x200000, 0x002000     8K
+# pad to the next 64K app-partition-alignment boundary  56K (gen_esp32part.py
+# requires app-type partitions on a 0x10000 boundary; otadata is data-type
+# and only needed 4K, so this gap is unavoidable, not wasted planning)
+ota_0         app,  ota_0,    0x210000, 0x200000  2048K   <- 1.75x the measured 1167K image
+ota_1         app,  ota_1,    0x410000, 0x200000  2048K
+pico_img      data, undefined,0x610000, 0x0E0000   896K   <- staging, see below (corrected
+#                                                            up from 512K, see note)
+# spare                       0x6F0000..0x1000000 ~9.29M  (16 MB part; still comfortably
+#                                                           under the 8 MB floor too)
 ```
+
+**Corrected from the original proposal, both against real numbers rather than
+guesses:** `pico_img` is **896K, not 512K**. `SaftyFW/bootloader/flash_layout.h`
+defines `BOOTLOADER_SLOT_FLASH_SIZE` as `0xD0000` (832K) per RP2040 application
+slot — 512K cannot hold a full Pico image at all. 896K gives ~7.7% headroom over
+832K while staying 64K-aligned. Subtype is `undefined` (0x06), not `fat`
+(0x81): this partition is never mounted as a filesystem, only read/written as
+an opaque byte range, and `fat` would misdescribe that. Implemented, host-
+build-verified (`idf.py -C firmware/KilnFW build` clean, `gen_esp32part.py`
+reports no overlap/overflow) in `firmware/KilnFW/partitions.csv` 2026-08-17 —
+**not yet flashed to physical hardware.**
 
 Why this shape rather than re-carving the existing app region:
 
@@ -206,16 +224,23 @@ Why this shape rather than re-carving the existing app region:
   sections 6A and 8 of `KilnFW/TODO.md` still intend to add. The previous 704 KB
   proposal had already been overtaken before it was written down.
 
-- [ ] **Confirm the physical flash with `esptool flash_id` before trusting any
-      of the three records above.** A table that addresses memory the chip does
-      not have will not boot.
-- [ ] Set `CONFIG_ESPTOOLPY_FLASHSIZE` to the **confirmed** size, and **reflash
-      the bootloader** — the flash size lives in the bootloader header, so a new
-      table alone is not enough.
-- [ ] Confirm the offsets against the real table before flashing. Getting this
-      wrong erases `profiles_nvs`.
+- [x] **Confirm the physical flash size** — done 2026-08-17 via the LonelyBinary
+      product page for the board in hand (N16R8, 16 MB/8 MB), not `esptool
+      flash_id` directly; the buy-list and 3D-model records are still stale and
+      not yet corrected at the source (separate, tracked in `KilnFW/TODO.md` 9.1).
+- [x] Set `CONFIG_ESPTOOLPY_FLASHSIZE` to the **confirmed** size — done
+      2026-08-17 (`CONFIG_ESPTOOLPY_FLASHSIZE_16MB`).
+- [ ] **Reflash the bootloader** — the flash size lives in the bootloader
+      header, so a new table alone is not enough. Still outstanding: this needs
+      the physical board over serial, which this pass did not have.
+- [x] Confirm the offsets against the real table before flashing. Host-build
+      verified 2026-08-17: `gen_esp32part.py`/`check_sizes.py` reports no
+      overlap/overflow, and the six pre-existing entries are byte-identical to
+      before (diffed, not just eyeballed). **Not yet confirmed against the
+      physical board** — that is still a one-time serial step.
 - [ ] Archive the pre-change table, and read out all four NVS partitions with
-      `esptool read_flash` first. This is the one irreversible step in the plan.
+      `esptool read_flash` first. This is the one irreversible step in the plan,
+      and this pass has no hardware access to perform it.
 
 #### A staging partition also solves the relay problem
 
@@ -232,15 +257,25 @@ happens afterwards — resumable, restartable, and immune to an HTTP timeout.
 
 ### Rollback is not optional
 
-`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is currently **off**. With it on, a new
-image boots as `PENDING_VERIFY` and the bootloader reverts to the previous slot
-unless the app calls `esp_ota_mark_app_valid_cancel_rollback()`.
+**Implemented 2026-08-17.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is now
+**on** (was off). With it on, a new image boots as `PENDING_VERIFY` and the
+bootloader reverts to the previous slot unless the app calls
+`esp_ota_mark_app_valid_cancel_rollback()`.
 
 Do not call it at the end of `app_main()`. Call it only once the things that
 matter have actually come up: NVS partitions readable, safety link exchanging
 frames, web server answering. An image that boots but cannot talk to the safety
 processor is exactly the image that must be rolled back automatically, and it
 would pass a naive "we reached the end of main" check.
+
+`App/main.c`'s `ota_rollback_confirm_task()` implements exactly this: a
+low-priority FreeRTOS task, started once `nvs_report_capture()` has run and
+`dashboard_http_start()`'s result is known, that polls
+`safety_link_get_status()->link_up` until all three preconditions hold and only
+then calls `esp_ota_mark_app_valid_cancel_rollback()`. All three preconditions
+are wired in — none is a flagged gap, since `link_up` already meant "a valid
+status within `SAFETY_LINK_UP_PERIODS` polls" and needed no new
+`safety_link.h` getter.
 
 Also enable `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` only if a security version is
 going to be maintained; otherwise it will one day refuse a legitimate downgrade
@@ -532,23 +567,37 @@ during development will be driven by an agent:
 - [ ] ESP image magic and chip ID checked before `esp_ota_begin()`
 
 **ESP OTA**
-- [ ] **Physical flash size confirmed with `esptool flash_id`** — the BOM says
-      8 MB (N8R8) and the build says 2 MB; the plan depends on the BOM being right
-- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE_8MB` **and the bootloader reflashed** — flash
-      size lives in the bootloader header
-- [ ] New partitions placed entirely above `0x200000`, so **nothing existing moves**
-- [ ] `factory` retained as the serial-free recovery image
-- [ ] Slot size checked against a **measured** image, not a remembered one. It was
-      1167 KB on 2026-08-16, not the 301 KB this plan was first written around
-- [ ] Offsets confirmed against the live table before the one-time serial flash
-- [ ] Pre-change table archived for rollback
+- [x] **Physical flash size confirmed** — done 2026-08-17 via the LonelyBinary
+      product page for the board in hand (N16R8, 16 MB), not `esptool flash_id`
+      directly. Buy-list/3D-model records are still stale and separately tracked.
+- [x] `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` set (2026-08-17). **Bootloader reflash
+      still outstanding** — that is a one-time serial step against physical
+      hardware this pass did not have access to; leave unchecked.
+- [x] New partitions placed entirely above `0x200000`, so **nothing existing
+      moves** — implemented in `firmware/KilnFW/partitions.csv` 2026-08-17,
+      diffed to confirm the six pre-existing entries are byte-identical
+- [x] `factory` retained as the serial-free recovery image
+- [x] Slot size checked against a **measured** image, not a remembered one. It was
+      1167 KB on 2026-08-16, not the 301 KB this plan was first written around —
+      `ota_0`/`ota_1` are 2048K each, 1.75x headroom
+- [x] Offsets confirmed against the live table — **host-build-verified only**
+      (`gen_esp32part.py`/`check_sizes.py` reports no overlap/overflow). The
+      one-time serial flash against the physical board has NOT happened.
+- [ ] Pre-change table archived for rollback — nothing to archive yet, since no
+      physical flash has occurred
 - [ ] **`nvs`, `wifi_nvs`, `kiln_nvs` and `profiles_nvs` read out with esptool and
       saved before the table is flashed.** The one irreversible step in this whole
-      plan is writing a wrong partition table over live config
-- [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`
-- [ ] `esp_ota_mark_app_valid_cancel_rollback()` called only after NVS, safety link
-      and web server are all confirmed up — never at the end of `app_main()`
-- [ ] Streamed `esp_ota_ops` POST handler, no whole-image buffering
+      plan is writing a wrong partition table over live config. This pass has no
+      hardware access and could not perform it — stays unchecked.
+- [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — set 2026-08-17, confirmed by a
+      clean `idf.py build`
+- [x] `esp_ota_mark_app_valid_cancel_rollback()` called only after NVS, safety link
+      and web server are all confirmed up — never at the end of `app_main()`.
+      Implemented as a background task in `App/main.c`
+      (`ota_rollback_confirm_task()`); all three preconditions are genuinely
+      wired in, none is a placeholder
+- [ ] Streamed `esp_ota_ops` POST handler, no whole-image buffering — **not
+      built this pass**, deliberately out of scope (see `KilnFW/TODO.md` 9.5)
 
 **Pico update**
 - [ ] Five frames added to `LINK_PROTOCOL.md` and to `CommonFW`'s codecs
