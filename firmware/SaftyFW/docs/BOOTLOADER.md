@@ -211,13 +211,34 @@ is a bench visit to every board.
 - [ ] DEBUG header fitted — the recovery path underneath the recovery path
 
 **Bootloader**
-- [ ] GPIO6 driven low as the first statement
-- [ ] Metadata double-buffered and CRC'd; survives power loss mid-write
-- [ ] Active slot CRC'd on **every** boot
-- [ ] `boot_attempts` limit falls back to the other slot
-- [ ] Never writes its own region or the config partition
-- [ ] Recovery mode: UART1 only, GPIO6 low, no timeout out
-- [ ] Bootloader-only build flashed over SWD, verified independently of any app
+- [x] GPIO6 driven low as the first statement — `bootloader/main.c`'s `main()`,
+      literal first three statements, before the flash-capacity check or any
+      metadata read.
+- [x] Metadata double-buffered and CRC'd; survives power loss mid-write — via
+      the append-only log scheme (`bootloader/metadata.h`'s header comment
+      supersedes this section's original "two copies... written alternately"
+      wording; same offset/size, power-loss-safe by construction since a torn
+      write only corrupts the in-progress slot, never a previously-written
+      one). `main.c`'s `persist_metadata()` calls the frozen
+      `bootloader_metadata_pack()`/`_next_write_slot()`/
+      `_next_write_needs_erase()` API exactly as designed.
+- [x] Active slot CRC'd on **every** boot — `main.c`'s step 5, `bootloader_crc32()`
+      over the chosen slot's `[0, length)`, every boot, not just after an update.
+- [x] `boot_attempts` limit falls back to the other slot — via
+      `bootloader_decide_boot()` (frozen, host-tested, unmodified).
+- [x] Never writes its own region or the config partition — `main.c` only ever
+      calls `flash_range_erase()`/`flash_range_program()` against
+      `BOOTLOADER_METADATA_FLASH_OFFSET`/`_SIZE`.
+- [x] Recovery mode: UART1 only, GPIO6 low, no timeout out — **but beacon only
+      this pass.** `enter_recovery()` brings up UART1 at 115200 8N1 and sends a
+      raw distinctive marker byte sequence every ~1s, forever. It does **not**
+      implement `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT` frame
+      handling, and the beacon is not a framed `UPDATE_STATUS` — both remain
+      follow-on work (see section 4 above and
+      `../../CommonFW/docs/UPDATE_PROTOCOL.md` section 4).
+- [ ] Bootloader-only build flashed over SWD, verified independently of any
+      app — **not done**; build-verified only (see TODO.md Phase 10 item
+      10.5), no hardware/probe available to this pass.
 
 **Application side**
 - [ ] Staged writes to the inactive slot only

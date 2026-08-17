@@ -686,18 +686,58 @@ metadata format and the slot boundaries are effectively permanent.
       ESP32-S3 third-party module's flash was. **Distinct from 10.0** (measuring
       the isolated link's *error rate* over UART), which still requires
       physical bench hardware and remains unstarted.
-- [ ] 10.2 Freeze the flash layout and the metadata format, with a
+- [x] 10.2 Freeze the flash layout and the metadata format, with a
       `format_version` that refuses the unrecognised. Reserve the signature
       field and public-key space now even though signing ships off —
-      `BOOTLOADER.md` §6.
-- [ ] 10.3 Bootloader: GPIO6 low as the first statement; double-buffered CRC'd
+      `BOOTLOADER.md` §6. **2026-08-17**: `bootloader/flash_layout.h` and
+      `bootloader/metadata.h`/`.c` frozen and host-tested (204/204,
+      `test/test_bootloader_metadata.c`) earlier this session; `bootloader/main.c`
+      now implements against that frozen layout/format rather than just
+      declaring it. Signature/public-key space reservation itself is
+      unchanged from before this pass — still a §6 TODO, not newly addressed
+      here.
+- [~] 10.3 Bootloader: GPIO6 low as the first statement; double-buffered CRC'd
       metadata; active-slot CRC on **every** boot; `boot_attempts` fallback.
-      Never writes its own region or the config partition.
-- [ ] 10.4 Recovery mode: UART1 only, GPIO6 low, minimal frame subset, no
+      Never writes its own region or the config partition. **2026-08-17,
+      `bootloader/main.c`**: GPIO6 low as the literal first statement;
+      metadata read via XIP and validated with the frozen
+      `bootloader_metadata_find_latest()`; `bootloader_decide_boot()`/
+      `bootloader_decide_after_crc_fail()` drive the `boot_attempts`-fallback
+      and CRC-retry logic; `persist_metadata()` writes through the frozen
+      log-append API, `seq` incremented exactly once outside the pure
+      decision functions; never touches anything but
+      `BOOTLOADER_METADATA_FLASH_OFFSET`/`_SIZE`. Build-verified
+      (arm-none-eabi-gcc 14.2.1 / pico-sdk 2.1.1, bare Ninja build, zero
+      warnings under `-Wall -Wextra -Werror`), **not hardware-verified** — no
+      RP2040/probe attached to the build machine. Marked `[~]` rather than
+      `[x]` because recovery mode (10.4) is beacon-only, not the full frame
+      subset this item's own wording implies is complete end to end.
+- [~] 10.4 Recovery mode: UART1 only, GPIO6 low, minimal frame subset, no
       timeout out of it. This is what makes a failed update recoverable without
-      a probe.
-- [ ] 10.5 Bootloader-only build, flashed and verified over SWD independently of
-      any application.
+      a probe. **2026-08-17, `bootloader/main.c`'s `enter_recovery()`**: UART1
+      brought up at 115200 8N1 (plain `hardware/uart.h`, no PIO/inversion,
+      mirroring `src/tasks/uart_owner.c`'s init pattern), GPIO6 left low and
+      never re-touched, loops forever with no timeout out. **Beacon only** —
+      sends a raw distinctive marker byte sequence every ~1s, not a framed
+      `UPDATE_STATUS`. Does **not** implement `UPDATE_BEGIN`/`UPDATE_DATA`/
+      `UPDATE_END`/`UPDATE_ABORT` frame handling (receiving/writing image data
+      into flash) — deliberately out of scope this pass per the coordinator's
+      scope decision; that is real streaming-flash-write logic for its own
+      dedicated pass. Marked `[~]`, not `[x]`, for exactly that reason.
+- [~] 10.5 Bootloader-only build, flashed and verified over SWD independently of
+      any application. **Build only** — **2026-08-17**: `cmake -G Ninja -B build`
+      + `cmake --build build` from `firmware/SaftyFW/bootloader/` succeeds
+      clean (arm-none-eabi-gcc 14.2.1, pico-sdk 2.1.1, Ninja), producing
+      `saftyfw_bootloader.elf` / `.bin` — **9764 bytes** of flash `text`
+      against the ~64K (`BOOTLOADER_FLASH_SIZE` = 65280 B) budget, ~15% used.
+      `pico_add_extra_outputs()` left disabled in `bootloader/CMakeLists.txt`
+      for the same reason `../CMakeLists.txt` disables it (no host C/C++
+      compiler available to build `picotool` from source in this
+      environment) — the plain `.elf` is what OpenOCD flashes anyway.
+      **Not flashed or verified over SWD** — no debug probe or RP2040
+      hardware attached to the machine this was built on. Checked off for the
+      build half only; the "flashed and verified over SWD" half of this
+      item's own wording is still open.
 - [ ] 10.6 Application side: staged writes to the inactive slot, flash routines
       and interruptible ISRs in RAM, core 1 parked, watchdog handled across
       multi-hundred-millisecond erases.
