@@ -13,6 +13,7 @@ if (-not (Test-Path $vcvars)) {
 $testDir = $PSScriptRoot
 $srcDir = Join-Path $testDir "..\src"
 $bootDir = Join-Path $testDir "..\bootloader"
+$updateDir = Join-Path $testDir "..\src\update"
 $outDir = Join-Path $testDir "build"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -22,14 +23,19 @@ $sources = @(
     (Join-Path $testDir "test_safety_guards.c"),
     (Join-Path $testDir "test_link_frame.c"),
     (Join-Path $testDir "test_bootloader_metadata.c"),
+    (Join-Path $testDir "test_update.c"),
     (Join-Path $srcDir "safety_guards.c"),
     (Join-Path $srcDir "tasks\link_frame.c"),
     (Join-Path $bootDir "crc32.c"),
-    (Join-Path $bootDir "metadata.c")
+    (Join-Path $bootDir "metadata.c"),
+    (Join-Path $updateDir "image_header.c"),
+    (Join-Path $updateDir "received_ranges.c"),
+    (Join-Path $updateDir "update_receiver.c"),
+    (Join-Path $updateDir "confirm.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
-$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$bootDir`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
+$cmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /EHsc /I `"$srcDir`" /I `"$bootDir`" /I `"$updateDir`" /Fo:`"$outDir\\`" /Fe:`"$exe`" $sourceArgs"
 
 cmd.exe /c $cmd
 if ($LASTEXITCODE -ne 0) {
