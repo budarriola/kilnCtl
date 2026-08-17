@@ -12,6 +12,10 @@
 // power-on-uninitialised SRAM by chance.
 #define SAFTYFW_TRIP_MAGIC_WORD       0x53414654u // 'SAFT'
 
+// Written once, by boot_reason_read(), before the scheduler starts (main.c
+// step 3) -- see boot_reason.h's doc comment on boot_reason_get_cached().
+static saftyfw_boot_reason_t s_cached;
+
 saftyfw_boot_reason_t boot_reason_read(bool wd_caused_reboot, bool wd_enable_caused_reboot)
 {
     saftyfw_boot_reason_t out = {
@@ -26,7 +30,13 @@ saftyfw_boot_reason_t boot_reason_read(bool wd_caused_reboot, bool wd_enable_cau
         out.trip_reason = watchdog_hw->scratch[SAFTYFW_TRIP_REASON_SCRATCH];
     }
 
+    s_cached = out;
     return out;
+}
+
+saftyfw_boot_reason_t boot_reason_get_cached(void)
+{
+    return s_cached;
 }
 
 void boot_reason_latch_trip(uint32_t trip_reason)

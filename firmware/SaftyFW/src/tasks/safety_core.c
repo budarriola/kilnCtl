@@ -129,6 +129,45 @@ void safety_core_get_output_status(bool *out_relay_energized, bool *out_heating_
     }
 }
 
+void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_active,
+                                  uint8_t *out_diag_state)
+{
+    // s_guard_state is this task's own local static -- safe to read from any
+    // task the same way relay_owner's state is (single-word/small-struct
+    // reads of fields only this task's own tick ever writes; no torn-read
+    // hazard worse than the volatile-read pattern relay_owner.h already
+    // documents for the same reason, and a stale-by-one-tick (100ms) read is
+    // immaterial for a diagnostic frame).
+    bool warn_active = s_guard_state.s5_warn || s_guard_state.s12_warn;
+
+    if (out_trip_reason) {
+        *out_trip_reason = s_guard_state.is_tripped ? s_guard_state.reason : SAFETY_TRIP_NONE;
+    }
+    if (out_warn_active) {
+        *out_warn_active = warn_active;
+    }
+    if (out_diag_state) {
+        relay_owner_state_t relay_state = relay_owner_get_state();
+        uint8_t state;
+        if (s_guard_state.is_tripped) {
+            state = 4; // tripped -- takes priority over everything else
+        } else if (warn_active) {
+            state = 3; // warn -- a guard is warning but hasn't tripped; not a
+                       // relay_owner_state_t value at all (see this
+                       // function's header comment), so it must be decided
+                       // here rather than by mapping relay_state alone
+        } else if (relay_state == RELAY_OWNER_STATE_ARMED) {
+            state = 2;
+        } else if (relay_state == RELAY_OWNER_STATE_GRACE) {
+            state = 1;
+        } else {
+            state = 0; // RELAY_OWNER_STATE_INIT, or any future value --
+                       // conservative default rather than guessing
+        }
+        *out_diag_state = state;
+    }
+}
+
 bool safety_core_start(void)
 {
     BaseType_t ok = xTaskCreate(safety_core_task, "safety_core", SAFETY_CORE_STACK_WORDS, NULL,

@@ -72,6 +72,22 @@ target_include_directories(SaftyFW PRIVATE
 
 target_compile_options(SaftyFW PRIVATE -Wall -Wextra -Werror)
 
+# SAFTYFW_ENABLE_USB_STDIO -- TODO.md Phase 2/8, docs/ARCHITECTURE.md section
+# 1: "SAFTYFW_ENABLE_USB_STDIO, compile-time, default off, debug builds
+# only... a build flag and *cannot* be a runtime GUI toggle -- TinyUSB is
+# either linked in or it is not." No Kconfig on this side (that is KilnFW's
+# ESP-IDF world); a plain CMake option is the idiomatic pico-sdk equivalent --
+# `-DSAFTYFW_ENABLE_USB_STDIO=ON` at configure time is this project's whole
+# "Kconfig". Bench-only: docs/HARDWARE.md section 7's 3V3-back-feed caveat
+# still applies and is not solved by this flag, only gated by it.
+option(SAFTYFW_ENABLE_USB_STDIO "Mirror log_task output to stdio_usb (bench-only, see docs/ARCHITECTURE.md section 1 and docs/HARDWARE.md section 7)" OFF)
+if(SAFTYFW_ENABLE_USB_STDIO)
+    target_compile_definitions(SaftyFW PRIVATE SAFTYFW_ENABLE_USB_STDIO=1)
+endif()
+# pico_enable_stdio_usb() itself is called once, below, after
+# target_link_libraries -- see that call site's comment for why it is
+# conditional on this same option rather than a second, separate call here.
+
 target_link_libraries(SaftyFW PRIVATE
     pico_stdlib
     hardware_gpio
@@ -91,9 +107,13 @@ target_link_libraries(SaftyFW PRIVATE
 # SWD/probe flashing only (docs/ARCHITECTURE.md section 1: "Not USB" -- A1's
 # 3V3 is back-fed, see docs/HARDWARE.md section 7), and no UART0 stdio by
 # default -- the console path is the debug probe's UART bridge on GP16/GP17,
-# not stdio_usb. SAFTYFW_ENABLE_USB_STDIO (TODO.md Phase 2) will one day gate
-# a debug-build-only stdio_usb option; nothing wires that up yet.
-pico_enable_stdio_usb(SaftyFW 0)
+# not stdio_usb. SAFTYFW_ENABLE_USB_STDIO (option above, default OFF) gates
+# this on: log_task.c only compiles in its stdio_usb mirror
+# (#ifdef SAFTYFW_ENABLE_USB_STDIO) when the option is set, and this is the
+# one call site that must agree with it -- pico_enable_stdio_usb() actually
+# links TinyUSB in, so calling it unconditionally here would silently
+# override the option above regardless of what log_task.c does.
+pico_enable_stdio_usb(SaftyFW ${SAFTYFW_ENABLE_USB_STDIO})
 pico_enable_stdio_uart(SaftyFW 0)
 
 # pico_add_extra_outputs(SaftyFW) would generate .uf2/.bin/.hex/.dis and embed

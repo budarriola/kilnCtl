@@ -35,7 +35,22 @@ typedef struct {
 // previous boot left behind. Does not itself call watchdog_caused_reboot();
 // the caller passes those two SDK facts in, so this module has no pico-sdk
 // watchdog.h dependency beyond the scratch registers it already needs.
+//
+// Also caches its result (see boot_reason_get_cached() below) -- main.c calls
+// this exactly once, at step 3 of the boot sequence, and nothing else in the
+// build has another opportunity to read the scratch registers before
+// boot_reason_clear_trip() (also called once, from main.c) zeroes the magic
+// word. Caching here, rather than main.c threading the struct through every
+// task's start function, is what lets link_task's Frame B (SAFETY_CMD_DIAG,
+// TODO.md Phase 8) report boot_reason without a new coupling.
 saftyfw_boot_reason_t boot_reason_read(bool wd_caused_reboot, bool wd_enable_caused_reboot);
+
+// Returns whatever the one boot_reason_read() call this boot passed in,
+// zeroed/false in every field if boot_reason_read() has not run yet (should
+// not happen in practice -- main.c calls it at step 3, before any task that
+// could call this starts). Safe to call from any task: the cached struct is
+// written once, at boot, before the scheduler starts, and never again.
+saftyfw_boot_reason_t boot_reason_get_cached(void);
 
 // Latches a trip reason into the scratch registers with the magic word, so it
 // survives a subsequent watchdog reset. Called by safety_core when a guard

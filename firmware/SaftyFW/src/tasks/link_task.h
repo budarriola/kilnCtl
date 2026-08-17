@@ -12,6 +12,7 @@
 #define SAFTYFW_TASKS_LINK_TASK_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,26 @@ bool link_task_start(void);
 // reader, once they exist; it is published now so that work has something to
 // read from day one.
 bool link_task_get_degraded_no_context(void);
+
+// Hands a pre-built LOG payload (byte0 = level, rest ASCII "TAG: message" --
+// see CommonFW/docs/LINK_PROTOCOL.md section 6 "Frame F") to uart_owner as a
+// BROADCAST addressed to task_id 5, the same wire shape KilnFW's own
+// uart_log_bridge.c uses for its ESP_LOGx output. log_task is the only
+// intended caller (docs/ARCHITECTURE.md section 1: log frames go through
+// log_task, never direct from an arbitrary task into the link). Non-blocking,
+// same contract as uart_owner_send(): returns false if the frame was dropped
+// (TX ring had no room), true if it was queued. Does not itself count
+// drops -- log_task owns that counter, see log_task.h.
+bool link_task_send_log(const uint8_t *payload, uint8_t length);
+
+// Fraction (0.0..1.0) of the TX ring currently in use -- a snapshot for
+// log_task's TX-reserve watermark check (docs/ARCHITECTURE.md section 1:
+// "reserve TX ring capacity for telemetry... log frames are dropped at
+// enqueue once the ring is above a reserve watermark"). Wraps uart_owner's
+// fill query so log_task does not need its own uart_owner.h dependency for
+// one number -- link_task already owns the "how is the TX ring doing"
+// question for everything else.
+float link_task_get_tx_ring_fill_fraction(void);
 
 #ifdef __cplusplus
 }

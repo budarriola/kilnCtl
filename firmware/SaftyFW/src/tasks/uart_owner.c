@@ -168,3 +168,17 @@ uint32_t uart_owner_get_tx_dropped(void)
 {
     return s_tx_dropped;
 }
+
+size_t uart_owner_get_tx_used(void)
+{
+    uint32_t save = save_and_disable_interrupts();
+    uint32_t head = s_tx_head;
+    uint32_t tail = s_tx_tail;
+    restore_interrupts(save);
+    return ring_used(head, tail, UART_OWNER_TX_RING_SIZE);
+}
+
+size_t uart_owner_get_tx_capacity(void)
+{
+    return UART_OWNER_TX_RING_SIZE;
+}

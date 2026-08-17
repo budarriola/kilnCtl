@@ -39,6 +39,7 @@
 #include "uart_owner.h"
 #include "link_frame.h"
 
+#include "boot_reason.h"
 #include "current_task.h"
 #include "discrete_task.h"
 #include "safety_core.h"
@@ -54,6 +55,17 @@
 // ring on a short period rather than blocking on a queue receive.
 #define LINK_TASK_POLL_MS          100
 #define LINK_STATUS_TX_PERIOD_MS   500
+// Frame B (SAFETY_CMD_DIAG) cadence: slower than Frame A, deliberately.
+// LINK_PROTOCOL.md's own text on Frame B: "additive... can ship before the
+// ESP knows what to do with it" -- nothing on the ESP side gates on it yet
+// (an unmodified KilnFW discards an unrecognised command byte), and Frame A
+// is the one the ESP's liveness detection actually depends on (section 8:
+// blocks heating at 1.5s, aborts a firing at 30s of silence). Giving Frame B
+// a 2s period rather than matching Frame A's 500ms keeps the TX ring lighter
+// for exactly the frame that has no deadline riding on it, without making
+// the diagnostics stale on any timescale a human bench-watching them would
+// notice.
+#define LINK_DIAG_TX_PERIOD_MS     2000
 
 // Addressing (CommonFW/docs/LINK_PROTOCOL.md section 3, firmware/KilnFW/App/
 // drivers/espInterfaces/uart_protocol.h and uart_task_ids.h). Mirrored here
@@ -65,6 +77,12 @@
 #define LINK_DEVICE_ESP     0u // UART_PROTO_DEVICE_ESP
 #define LINK_DEVICE_SAFETY  2u // UART_PROTO_DEVICE_SAFETY
 #define LINK_TASK_ID_SAFETY 7u // UART_TASK_ID_SAFETY
+// LOG relay (LINK_PROTOCOL.md section 6, "Frame F"): the Pico's log_task
+// addresses ordinary BROADCAST frames to this task id, same as KilnFW's own
+// log lines (firmware/KilnFW/App/drivers/uart_task_ids.h:58,
+// UART_TASK_ID_LOG) -- "no new task id, no new payload format" is the
+// document's own framing for why this is not a fresh protocol addition.
+#define LINK_TASK_ID_LOG    5u
 
 // Bounds for the RX frame assembler below. Sized the same as uart_owner's own
 // TX ring (link_frame.h's largest payload is well under 128 bytes raw); an
@@ -90,7 +108,16 @@ static bool s_rx_collecting = false;
 
 // --- TX ----------------------------------------------------------------
 
-static void link_task_send_broadcast(const uint8_t *payload, uint8_t length)
+// dst_task-general version -- link_task_send_broadcast() below is the
+// existing SAFETY-task-id wrapper every Frame A/B/C call site already used
+// before this function existed; link_task_send_log() (added for log_task,
+// see link_task.h) is the other caller, addressing LINK_TASK_ID_LOG instead.
+// Returns true iff uart_owner_send() accepted the frame (room in the TX
+// ring) -- the caller decides what "false" means for its own counters
+// (log_task counts it as a dropped log line; the Frame A/B/C call sites
+// below still discard it, matching their pre-existing behaviour, since
+// telemetry's own drop accounting already lives in uart_owner's counter).
+static bool link_task_send_broadcast_to(uint8_t dst_task, const uint8_t *payload, uint8_t length)
 {
     kilnlink_frame_t frame = {
         .msg_type = KILNLINK_MSG_BROADCAST,
@@ -98,7 +125,7 @@ static void link_task_send_broadcast(const uint8_t *payload, uint8_t length)
         .src_device = LINK_DEVICE_SAFETY,
         .src_task = LINK_TASK_ID_SAFETY,
         .dst_device = LINK_DEVICE_ESP,
-        .dst_task = LINK_TASK_ID_SAFETY,
+        .dst_task = dst_task,
         .length = length,
         .payload = payload,
     };
@@ -107,19 +134,24 @@ static void link_task_send_broadcast(const uint8_t *payload, uint8_t length)
     kilnlink_frame_status_t status;
     size_t raw_len = kilnlink_frame_encode_raw(&frame, raw, sizeof(raw), &status);
     if (raw_len == 0) {
-        return; // encode failure -- shouldn't happen for a well-formed frame we built ourselves
+        return false; // encode failure -- shouldn't happen for a well-formed frame we built ourselves
     }
 
     uint8_t stuffed[KILNLINK_FRAME_STUFFED_MAX];
     size_t stuffed_len = kilnlink_stuff(raw, raw_len, stuffed, sizeof(stuffed));
     if (stuffed_len == 0) {
-        return;
+        return false;
     }
 
     // uart_owner_send() is itself non-blocking and drops the WHOLE frame if
     // the TX ring has no room (its own counter tracks that) -- exactly
     // LINK_PROTOCOL.md section 2 rule 3. Nothing here retries or escalates.
-    (void)uart_owner_send(stuffed, stuffed_len);
+    return uart_owner_send(stuffed, stuffed_len);
+}
+
+static void link_task_send_broadcast(const uint8_t *payload, uint8_t length)
+{
+    (void)link_task_send_broadcast_to(LINK_TASK_ID_SAFETY, payload, length);
 }
 
 static void link_task_send_status(void)
@@ -169,6 +201,71 @@ static void link_task_send_fw_version(void)
     }
 
     link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+static void link_task_send_diag(void)
+{
+    safety_trip_t trip_reason = SAFETY_TRIP_NONE;
+    bool warn_active = false;
+    uint8_t diag_state = 0;
+    safety_core_get_diag_status(&trip_reason, &warn_active, &diag_state);
+
+    // warn_mask/trip_mask: LINK_PROTOCOL.md documents these as "one bit per
+    // guard" across the full 13-guard suite. This build's safety_guards.c
+    // only tracks ONE is_tripped/reason pair for the whole module (5 of 13
+    // guards implemented, see safety_guards.h's own header comment) and,
+    // similarly, only an OR of the two WARN-capable guards' flags (S5/S12) --
+    // there is no per-guard bitmask anywhere in this codebase to report a
+    // real 13-bit mask from. Rather than inventing one, this synthesizes a
+    // single-bit degraded approximation: trip_mask sets bit (reason-1) when
+    // tripped (matching safety_trip_t's own numbering, so the one bit that IS
+    // set at least identifies the right guard), and warn_mask sets bit 0 as
+    // an aggregate "something is warning" signal when warn_active is true,
+    // since no per-guard identity is available for WARN at all. TODO.md
+    // records this as the honest state of Frame B, not a placeholder to
+    // silently upgrade later.
+    uint16_t trip_mask = 0;
+    if (trip_reason != SAFETY_TRIP_NONE) {
+        trip_mask = (uint16_t)(1u << ((uint8_t)trip_reason - 1u));
+    }
+    uint16_t warn_mask = warn_active ? 0x0001u : 0u;
+
+    uint32_t uptime_ms = to_ms_since_boot(get_absolute_time());
+
+    // boot_reason: bit1 (watchdog) is real, from the cached
+    // watchdog_caused_reboot fact main.c read at boot step 3. bit0 (power-on)
+    // is the honest complement of that -- this build has no separate true-
+    // power-on-reset detection distinct from "some other, non-watchdog
+    // reset" (RUN pin, debugger, etc.), so bit0 means "not a watchdog reset"
+    // rather than a verified power-on event; that is the best this codebase
+    // can report without inventing a detector it does not have. bit2
+    // (brownout) has no source at all here and is always 0 -- see
+    // link_frame.h's LINK_DIAG_BOOT_BROWNOUT comment.
+    saftyfw_boot_reason_t boot = boot_reason_get_cached();
+    uint8_t boot_reason_byte = 0;
+    if (boot.watchdog_caused_reboot) {
+        boot_reason_byte |= LINK_DIAG_BOOT_WATCHDOG;
+    } else {
+        boot_reason_byte |= LINK_DIAG_BOOT_POWERON;
+    }
+
+    // context_age_100ms: 255 (never received) is correct, not a placeholder
+    // -- context-frame parsing (SAFETY_CMD_PUSH_CONTEXT) is Phase 7's unbuilt
+    // half; nothing in this build ever sets any other value.
+    // context_frames_ok/bad: genuinely always 0 for the same reason.
+    uint8_t payload[LINK_FRAME_DIAG_LEN];
+    link_frame_pack_diag(payload, (uint8_t)trip_reason, warn_mask, trip_mask, uptime_ms,
+                          boot_reason_byte, /* context_age_100ms = */ 255,
+                          /* context_frames_ok = */ 0, /* context_frames_bad = */ 0,
+                          uart_owner_get_tx_dropped(), diag_state,
+                          /* flags: bit0 sim_context_seen = 0 (no context parsing),
+                             bit1 calibration_missing = 1 (no config_store, Phase 9 --
+                             this is the honest current state, not a bug),
+                             bit2 estop_unwired_suspect = 0 (no detection heuristic
+                             specified in SAFETY_MODEL.md/HARDWARE.md or built) */
+                          LINK_DIAG_FLAG_CALIBRATION_MISSING);
+
+    link_task_send_broadcast(payload, LINK_FRAME_DIAG_LEN);
 }
 
 // --- RX ------------------------------------------------------------------
@@ -287,6 +384,7 @@ static void link_task_fn(void *arg)
     link_task_send_fw_version();
 
     TickType_t last_status_tx = xTaskGetTickCount();
+    TickType_t last_diag_tx = xTaskGetTickCount();
 
     for (;;) {
         uint8_t rx_buf[LINK_RX_POLL_BUF];
@@ -299,6 +397,10 @@ static void link_task_fn(void *arg)
         if ((now - last_status_tx) >= pdMS_TO_TICKS(LINK_STATUS_TX_PERIOD_MS)) {
             link_task_send_status();
             last_status_tx = now;
+        }
+        if ((now - last_diag_tx) >= pdMS_TO_TICKS(LINK_DIAG_TX_PERIOD_MS)) {
+            link_task_send_diag();
+            last_diag_tx = now;
         }
 
         vTaskDelay(pdMS_TO_TICKS(LINK_TASK_POLL_MS));
@@ -336,4 +438,26 @@ bool link_task_start(void)
 bool link_task_get_degraded_no_context(void)
 {
     return s_degraded_no_context;
+}
+
+bool link_task_send_log(const uint8_t *payload, uint8_t length)
+{
+    // Thin wrapper: the only difference from the Frame A/B/C call sites is
+    // the destination task id (LOG, not SAFETY) -- see
+    // link_task_send_broadcast_to()'s comment for why both share the same
+    // encode/stuff/send path. log_task is the caller, and it -- not this
+    // function -- owns the dropped-log-frame counter (docs/ARCHITECTURE.md
+    // section 1: "count the drops"), since log_task also drops lines before
+    // ever reaching here (its own queue-full and TX-reserve-watermark
+    // checks) and wants one counter covering every drop point, not several.
+    return link_task_send_broadcast_to(LINK_TASK_ID_LOG, payload, length);
+}
+
+float link_task_get_tx_ring_fill_fraction(void)
+{
+    size_t cap = uart_owner_get_tx_capacity();
+    if (cap == 0) {
+        return 1.0f; // defensive -- treat "no capacity info" as "full", never as "empty"
+    }
+    return (float)uart_owner_get_tx_used() / (float)cap;
 }

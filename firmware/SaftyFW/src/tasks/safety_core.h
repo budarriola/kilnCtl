@@ -10,6 +10,9 @@
 #define SAFTYFW_TASKS_SAFETY_CORE_H
 
 #include <stdbool.h>
+#include <stdint.h>
+
+#include "safety_guards.h" // safety_trip_t -- not link/uart-shaped, fine for check_isolation.ps1
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +34,39 @@ bool safety_core_start(void);
 // documented bit semantics ("heating currently permitted", not "currently
 // heating"). Safe to call from any task.
 void safety_core_get_output_status(bool *out_relay_energized, bool *out_heating_enabled);
+
+// Diagnostics pull for link_task's Frame B (SAFETY_CMD_DIAG,
+// CommonFW/docs/LINK_PROTOCOL.md section 6, TODO.md Phase 8). Same channel
+// pattern as safety_core_get_output_status() above -- link_task cannot see
+// s_guard_state (safety_core.c's local static) or relay_owner's state
+// directly without violating the isolation rule, so this is the legal path
+// for both.
+//
+//   out_trip_reason: the latched guard's reason, SAFETY_TRIP_NONE if nothing
+//     has tripped. Real, not degraded -- safety_guards_tick() only ever
+//     tracks one reason for the whole module in this build (5 of 13 guards
+//     implemented, see safety_guards.h), so there is exactly one to report.
+//
+//   out_warn_active: true if S5 or S12 is currently in its WARN state
+//     (safety_guard_state_t.s5_warn / .s12_warn) without having tripped.
+//     This is an OR of the only two guards in this build that have a WARN
+//     concept at all -- it cannot say *which* guard is warning, because
+//     safety_guards.c has no per-guard identity to report beyond that,
+//     honesty preferred over inventing one (see link_frame.h's warn_mask
+//     doc comment for how the caller turns this into the wire field).
+//
+//   out_diag_state: DIAG byte 24 (LINK_PROTOCOL.md: 0 init/1 grace/2 armed/
+//     3 warn/4 tripped), computed here because only safety_core can see both
+//     relay_owner_get_state() and the guard warn flags needed to tell
+//     "ARMED" apart from "ARMED but a guard is warning" -- relay_owner_state_t
+//     itself has no WARN state (INIT/GRACE/ARMED/TRIPPED only; see
+//     relay_owner.h), so this function is what maps the two together rather
+//     than link_task or relay_owner trying to.
+//
+// Any output pointer may be NULL if the caller does not need it. Safe to
+// call from any task.
+void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_active,
+                                  uint8_t *out_diag_state);
 
 #ifdef __cplusplus
 }

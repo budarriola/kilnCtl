@@ -76,10 +76,25 @@ bool uart_owner_send(const uint8_t *data, size_t len);
 size_t uart_owner_rx_read(uint8_t *out, size_t max);
 
 // Total number of frames uart_owner_send() has refused because the TX ring
-// did not have room. Diagnostic only -- intended for a future SAFETY_CMD_DIAG
-// tx_frames_dropped field (LINK_PROTOCOL.md section 6, Frame B); nothing
-// consumes it yet.
+// did not have room. Diagnostic only -- consumed by link_task's Frame B
+// (SAFETY_CMD_DIAG, tx_frames_dropped, LINK_PROTOCOL.md section 6).
 uint32_t uart_owner_get_tx_dropped(void);
+
+// Bytes currently queued in the TX ring, waiting to drain to the UART
+// hardware FIFO. A snapshot, not a guarantee -- the IRQ handler is draining
+// concurrently, same as every other read in this file -- but adequate for a
+// capacity check that only needs "roughly how full", not an exact count.
+// Added for log_task's TX-reserve watermark (docs/ARCHITECTURE.md section 1:
+// "reserve TX ring capacity for telemetry"; log_task checks this, via
+// link_task's wrapper, before handing a LOG frame to uart_owner_send() --
+// see link_task_get_tx_ring_fill_fraction()).
+size_t uart_owner_get_tx_used(void);
+
+// Total TX ring capacity in bytes (UART_OWNER_TX_RING_SIZE), for a caller to
+// turn uart_owner_get_tx_used() into a fraction without duplicating the
+// constant. Fixed at compile time; exposed as a function rather than a
+// #define so this file stays the one place that constant is spelled.
+size_t uart_owner_get_tx_capacity(void);
 
 #ifdef __cplusplus
 }

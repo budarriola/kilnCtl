@@ -176,17 +176,32 @@ header comment, so the build is reproducible elsewhere.
 - [ ] Blink-equivalent proof of life over SWD/RTT — **not verified**; no
       RP2040 hardware and no debug probe attached to the machine this was
       built on, so nothing here has ever run.
-- [ ] **Log transport**: `kilnlink` LOG frames as primary, RTT as secondary —
-      **not started**; `log_task.c` is a shell with no ring, no drain, no
-      transport (Phase 8).
-- [ ] `SAFTYFW_ENABLE_USB_STDIO` compile flag — **not started**.
-      `pico_enable_stdio_usb`/`pico_enable_stdio_uart` are both explicitly
-      disabled in `CMakeLists.txt` for now (no stdio backend at all yet,
-      which is a safe default, just not the flag itself).
-- [ ] Reserve TX ring capacity for telemetry — **not started** (Phase 8,
-      needs `link_task`'s real TX ring first).
-- [ ] Dropped-log-frame counter — **not started** (Phase 8).
-- [ ] Runtime log-level command over the link — **not started** (Phase 8).
+- [x] **Log transport**: `kilnlink` LOG frames as primary (2026-08-17) —
+      `log_task.c` owns a bounded FreeRTOS queue (16 entries, 96 bytes each,
+      allocated once at `log_task_start()`), drains it, and hands entries to
+      `link_task_send_log()` (task id 5, same as `KilnFW`'s existing `LOG`
+      task) as kilnlink BROADCAST frames. RTT secondary transport **not
+      built** — needs the debug probe wiring, no hardware to develop against.
+- [x] `SAFTYFW_ENABLE_USB_STDIO` compile flag (2026-08-17) — a CMake
+      `option()`, default OFF, gating a `stdio_usb` mirror in `log_task.c`
+      behind `#ifdef`. Build-verified both ways; never exercised on hardware
+      (`docs/ARCHITECTURE.md` section 1's 3V3 back-feed caveat still applies
+      and is not this code's problem to solve).
+- [x] Reserve TX ring capacity for telemetry (2026-08-17) — `log_task.c`
+      checks `link_task_get_tx_ring_fill_fraction()` before enqueueing a log
+      frame and drops (counted) rather than sends once the ring is at/above
+      50% full, so a log burst can never be the thing that displaces a Frame
+      A/B send; Frame A/B's own TX calls never consult this at all.
+- [x] Dropped-log-frame counter (2026-08-17) — `log_task_get_dropped()`,
+      cross-core-safe (`taskENTER_CRITICAL`-guarded increment, since
+      `log_task_log()` is called from any task on either core). Not yet
+      folded into a wire frame's spare field — exposed but unconsumed.
+- [ ] Runtime log-level command over the link — **not started**.
+      `log_task_set_level()`/`_get_level()` exist and are used internally
+      (`LOG_LEVEL_WARN` default per `docs/ARCHITECTURE.md` section 1), but
+      `link_task.c` has no RX handler wiring a wire command to them yet —
+      deliberately deferred (lower priority than Frame B, per this pass's
+      own scoping) rather than rushed.
 - [x] **CI grep check: `safety_core.c` must not include the link header, and
       `link_task.c` must not reference GPIO6.** `tools/check_isolation.ps1`,
       comment-stripping so the rule can be documented in prose inside those
@@ -469,8 +484,20 @@ The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCO
       `link_task_send_status()`, byte layout cross-checked by hand against
       `firmware/KilnFW/App/drivers/safety_link.h` and by a standalone host
       sanity check (round-tripped through the real `kilnlink_frame` codec).
-- [ ] Emit `SAFETY_CMD_DIAG` (0x08), additive; an old ESP ignores it. **Not
-      this pass** — explicitly lower priority than Frame A/version handshake.
+- [x] Emit `SAFETY_CMD_DIAG` (0x08), additive (2026-08-17) —
+      `link_task_send_diag()`, 2s cadence (deliberately slower than Frame A's
+      500ms; nothing on the ESP side gates on this frame yet). `trip_reason`
+      and `state` are real (via a new `safety_core_get_diag_status()`
+      channel, same isolation-respecting pattern as the output-status one);
+      `warn_mask`/`trip_mask` are honestly degraded to a single bit each —
+      `safety_guards.c` tracks one `reason` for the whole module, not a
+      13-guard bitmask, so a fuller mask has no data source yet.
+      `context_age_100ms` is always 255 (never received — no context-frame
+      parsing exists), `context_frames_ok`/`bad` always 0 (same reason),
+      `tx_frames_dropped` is real. `flags` bit1 `calibration_missing` is
+      always 1 (true — no `config_store` yet, Phase 9); bit0
+      `sim_context_seen` and bit2 `estop_unwired_suspect` are always 0, no
+      detection heuristic exists for either.
 - [ ] `build_info.h` generated on every build (git commit, dirty, timestamp).
       **Unknown must map to `dirty = 1`** — an uncommitted build must never
       report itself clean. **Not built this pass**: `link_task_send_fw_version()`
