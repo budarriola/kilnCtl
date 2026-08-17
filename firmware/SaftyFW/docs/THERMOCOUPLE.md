@@ -315,20 +315,56 @@ sensor reading low tells you nothing at all.
 ## Completion checklist
 
 **Driver**
-- [ ] `MAX31856.c` ported from `KilnFW` (ported, not rewritten)
-- [ ] SPI0 mode 1, 4 MHz, `CS0` as a plain GPIO
-- [ ] `~DRDY` (GPIO12) falling-edge **interrupt**, sampled *before* the register burst
-- [ ] **`~DRDY` silence detection** feeding S5 — the stopped-converting failure `KilnFW` cannot see
-- [ ] NaN, never 0, on any invalid reading
+- [x] `max31856.c`/`.h` ported from `KilnFW`'s `MAX31856.c`/`.h` (ported, not
+      rewritten — same register map, same four fixed-point conversions, same
+      comparator-fault-mode logic, same failure-honesty discipline; single
+      channel, no bus-sharing machinery, per §1's "the bus is not shared").
+      2026-08-16
+- [x] SPI0 mode 1, 4 MHz, `CS0` (GPIO1) as a plain GPIO — `src/spi_owner.c`
+- [x] `~DRDY` (GPIO12) falling-edge **interrupt**, sampled *before* the
+      register burst — `src/tasks/thermo_task.c`'s `thermo_drdy_isr()`
+      wakes the task via a task notification; the burst read happens on wake,
+      before anything else, so ~DRDY is released promptly
+- [x] **`~DRDY` silence detection** feeding S5 — `thermo_task.c` waits on the
+      notification with a timeout of 2× `max31856_conversion_time_ms()`; a
+      timeout publishes `thermo_snapshot_t.valid = false` without even
+      attempting a burst read, which `safety_core.c` maps straight onto
+      `safety_guard_input_t.tc_valid = false` — the stopped-converting
+      failure `KilnFW` cannot see. **Build-verified only** — no MAX31856 is
+      attached to the build machine, so the silence path has not been
+      observed against real hardware
+- [x] NaN, never 0, on any invalid reading — `max31856_read()` fills the
+      output struct first with NaN/`spi_failed = true` before anything can
+      fail, same discipline as the KilnFW original
 
 **Configuration**
-- [ ] `tc_type` a commissioning field, not a compile-time constant
-- [ ] **`MASK` (02h) set explicitly** — reset default `FFh` masks every fault
-- [ ] `CR0`: auto-convert, 50/60 Hz matching local mains, OCFAULT on, comparator fault mode
-- [ ] `CR1`: AVGSEL = 4 samples
-- [ ] Part thresholds left wide open — S1 owns the ceiling, in software
-- [ ] Per-type plausibility ranges, driven from the configured type
-- [ ] Config re-asserted if the part is ever seen to have reset
+- [x] `tc_type` a commissioning field (runtime parameter of
+      `max31856_configure()`), not a compile-time constant — currently
+      supplied by `main.c` as `MAX31856_TC_TYPE_PLACEHOLDER` (type K) because
+      no `config_store` exists yet (Phase 9) to source the real
+      per-installation decision from §2. **This is not a decision that K is
+      correct for this kiln** — whoever wires `config_store` must replace
+      that call site
+- [x] **`MASK` (02h) set explicitly** — `MAX31856_DEFAULT_FAULT_MASK` (0xFC:
+      OPEN + OVUV unmasked, the four threshold faults masked; TCRANGE/CJRANGE
+      have no mask bit at all, so they are unmaskable by construction) —
+      `max31856.c`
+- [x] `CR0`: auto-convert, 60 Hz notch, OCFAULT mode 1, comparator fault mode
+      — `max31856_configure()`. **50/60 Hz is currently hardcoded to 60 Hz**,
+      the same placeholder status as `tc_type` (not yet a `config_store`
+      field); update this line if that changes
+- [x] `CR1`: AVGSEL = 4 samples (`MAX31856_AVGSEL_4_SAMPLES`)
+- [x] Part thresholds left wide open — `max31856_configure()` never touches
+      `CJHF/CJLF`/`LTHFTH/L`/`LTLFTH/L`, so they stay at their power-on
+      full-scale defaults; S1 owns the ceiling, in software
+- [ ] Per-type plausibility ranges, driven from the configured type — **not
+      done this phase**. `safety_guards.c`'s S1/S5 do not yet vary any
+      threshold by `tc_type`; this needs a real commissioning field to be
+      meaningful and is deferred alongside it
+- [ ] Config re-asserted if the part is ever seen to have reset — **not
+      done**. `max31856_configure()` can be called again to re-assert, but
+      nothing yet detects a part reset (e.g. CR1 read-back disagreeing with
+      the shadow) and calls it automatically
 
 **Borrowed source**
 - [ ] `tc_source` implemented: `OWN_J7` / `BORROWED_ZONE` / `BOTH`

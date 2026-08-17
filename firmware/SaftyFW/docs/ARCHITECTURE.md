@@ -524,27 +524,91 @@ works in reverse too: a PC-side stub *emitting* context frames is how
 
 ## Completion checklist
 
+Phase 2 ("Skeleton") items below were done and **build-verified under the real
+toolchain** 2026-08-16 (arm-none-eabi-gcc 14.2.1, pico-sdk 2.1.1,
+FreeRTOS-Kernel's RP2040 SMP port, Ninja) — a from-scratch `cmake --build`
+produces `SaftyFW.elf` with zero warnings under `-Wall -Wextra -Werror`. **Not
+run on hardware** — no RP2040 or debug probe was attached to the build
+machine, so nothing below claims more than "compiles clean." See `TODO.md`
+Phase 2 for the itemised done/not-done breakdown this summarizes.
+
 **Structure**
-- [ ] pico-sdk + FreeRTOS-Kernel SMP, CMake, `-Wall -Wextra -Werror`
-- [ ] `CommonFW` linked as `kilnlink`; **no protocol code duplicated here**
-- [ ] One task per hardware interface, per §3
-- [ ] `safety_guards.c` pure: no RTOS, no SDK, no I/O, `dt_s` passed in
-- [ ] **CI grep: `safety_core.c` does not include the link header; `link_task.c` does not touch GPIO6**
+- [x] pico-sdk + FreeRTOS-Kernel SMP, CMake, `-Wall -Wextra -Werror`
+- [x] `CommonFW` linked as `kilnlink`; **no protocol code duplicated here** —
+      linked but not yet called from any SaftyFW source, same as `KilnFW`'s
+      own component wrapper
+- [x] One task per hardware interface, per §3 — task **shells** exist at the
+      right priority/affinity; the interface-owning bodies (SPI/ADC/UART
+      request queues) are Phases 3/6/7's job, not done here
+- [x] `safety_guards.c` pure: no RTOS, no SDK, no I/O, `dt_s` passed in —
+      done by a parallel Phase 4 effort (`src/safety_guards.c`), verified
+      here only in that it includes nothing but `<math.h>`/`<stdarg.h>`/
+      `<stdio.h>`/`<string.h>`. **Not yet wired into any SaftyFW task** —
+      integrating it into `safety_core.c` is explicitly out of this phase's
+      scope
+- [x] **CI grep: `safety_core.c` does not include the link header; `link_task.c` does not touch GPIO6** —
+      `tools/check_isolation.ps1`, comment-aware so the rule can be documented
+      in the files it checks without self-triggering. Verified against both
+      the real files and a deliberately-introduced violation. Not wired into
+      an actual CI pipeline (none exists in this repo yet)
 
 **Runtime**
-- [ ] Priorities and core affinity as §4; link work on core 0, trip path on core 1
-- [ ] `configUSE_CORE_AFFINITY` asserted at build time
-- [ ] Boot order per §5, **GPIO6 low as the first statement of `main()`**
-- [ ] GRACE → ARMED after `startup_grace_s`
-- [ ] Watchdog fed only when every task has checked in
-- [ ] Trip reason latched in watchdog scratch registers, magic-word validated
-- [ ] `pause_on_debug` true in dev builds, **false in release**
+- [x] Priorities and core affinity as §4; link work on core 0, trip path on core 1
+- [x] `configUSE_CORE_AFFINITY` asserted at build time — `#error` in
+      `src/task_priorities.h`, both it and `configNUMBER_OF_CORES` also set
+      correctly in `FreeRTOSConfig.h` (the assert only compiles because they are)
+- [x] Boot order per §5, **GPIO6 low as the first statement of `main()`** —
+      steps 1–3 and 7 of the nine-step sequence are real; steps 4–6 and 8–9
+      are TODO-commented in `src/main.c` for their respective later phases
+- [x] GRACE → ARMED after `startup_grace_s` — built 2026-08-16
+      (`src/tasks/relay_owner.c`): the `INIT`/`GRACE`/`ARMED`/`TRIPPED` state
+      machine lives in `relay_owner`, with the GRACE timer starting the
+      moment `relay_owner_task()` begins running rather than via a separate
+      call from `main.c` (a judgement call documented in that file's header
+      comment). `relay_owner_command_energize()` never drives GPIO6 high
+      while `GRACE` or `TRIPPED`; only `ARMED` honours it.
+      `safety_core.c` now calls `relay_owner_command_trip()` (de-energize +
+      latch) on a new guard trip. Build- and host-test-verified; **not
+      hardware-verified** — no RP2040 attached to the build machine
+- [x] Watchdog fed only when every task has checked in — real
+      bitmask-of-registered-tasks gate in `src/tasks/watchdog_task.c`, not a
+      stub that always feeds
+- [x] Trip reason latched in watchdog scratch registers, magic-word validated —
+      `src/boot_reason.c` (scratch[0]/[1], deliberately not scratch[4], which
+      pico-sdk's own `watchdog_enable_caused_reboot()` uses). The
+      read/validate/clear path runs every boot. **The latch-on-trip call is
+      now wired**, 2026-08-16: `safety_core.c` calls `boot_reason_latch_trip()`
+      immediately after `relay_owner_command_trip()` whenever
+      `safety_guards_tick()` returns a new trip. Build- and
+      host-test-verified that the wiring compiles and the untouched
+      `safety_guards.c` host tests still pass; **not hardware-verified** —
+      no RP2040 attached, so the scratch-register write itself has never
+      run on real silicon
+- [ ] `pause_on_debug` true in dev builds, **false in release** — true is
+      hardcoded (`main.c`); there is no release/debug build distinction in
+      this CMake project yet to switch on, so the "false in release" half is
+      not implemented
 
 **RP2040 specifics (§8)**
-- [ ] `flash_safe_execute()` for every config write
-- [ ] ISRs that can fire during a flash write are `__not_in_flash_func`
-- [ ] `adc_gpio_init()` called; ADC3/VSYS **not** sampled
-- [ ] Round-robin via `adc_set_round_robin()`
+- [ ] `flash_safe_execute()` for every config write — **not started**, no
+      config store exists yet (Phase 9)
+- [ ] ISRs that can fire during a flash write are `__not_in_flash_func` —
+      **not started**, no such ISR exists yet (the `~DRDY`/UART ISRs are
+      Phase 3/7)
+- [x] `adc_gpio_init()` called; ADC3/VSYS **not** sampled — `adc_gpio_init()`
+      is called for ADC0/1/2 in `src/tasks/current_task.c`; `src/current_sense.c`
+      only ever selects channels 0/1/2, ADC3 is never sampled. Build-verified
+      2026-08-16, not hardware-verified.
+- [~] Round-robin across ADC0/1/2 — built via manual `adc_select_input()` +
+      single-shot `adc_read()` polling in `src/current_sense.c`, **not**
+      `adc_set_round_robin()`/hardware free-running capture. Deliberate
+      deviation, documented in `current_sense.c`'s header comment:
+      `docs/CURRENT_SENSE.md` §4's "no DMA, no free-running capture" is more
+      specific to this module than this section's general round-robin
+      guidance, and the two read as being in tension until you notice that.
+      Marked partial rather than checked because the letter of this bullet
+      (`adc_set_round_robin()`) is not what got built, even though the
+      three-channel round-robin behaviour it describes is.
 
 **Tests (§10)**
 - [ ] Host harness building without the SDK

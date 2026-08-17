@@ -39,29 +39,40 @@ Nothing downstream works until 0.1 and 0.2 land.
       *both* processors plus the PC script that drives them, reaching each by a
       path that is **not** the link under test (ESP over USB serial, Pico over
       SWD). `../../tools/PcTools/TODO.md` §1/§1b/§1c.
-- [ ] **0.1 Fix the swapped safety-UART pins in `KilnFW`.** `KILNCTL_SAFETY_TX_IO`
+- [x] **0.1 Fix the swapped safety-UART pins in `KilnFW`.** `KILNCTL_SAFETY_TX_IO`
       must become **4** and `KILNCTL_SAFETY_RX_IO` must become **5**
       (`firmware/KilnFW/App/drivers/Kconfig:189-200`, plus `sdkconfig`). Move the internal
       pull-up to GPIO5. **The link cannot work in either direction until this is
       done.** Full trace and the independent R15 confirmation: `docs/HARDWARE.md` §1.
-- [ ] **0.2 Add `UART_PROTO_MSG_BROADCAST = 0x04`** to
+      Done 2026-08-16, `idf.py build` verified clean. Still needs the §1 bench
+      measurement — this was the code-side fix, not the hardware proof.
+- [x] **0.2 Add `UART_PROTO_MSG_BROADCAST = 0x04`** to
       `firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.{c,h}` — send without
       waiting for an ACK, receive without sending one. Required because the
       safety processor never transmits an ACK; without it every ESP push costs
       10 retries × 50 ms. See `../CommonFW/docs/LINK_PROTOCOL.md` §1.
-- [ ] **0.3 Correct `firmware/KilnFW/docs/SAFETY_LINK.md` and `firmware/KilnFW/docs/HARDWARE.md`.**
+      Done 2026-08-16: `uart_protocol_send_broadcast()` added, RX path delivers
+      BROADCAST frames without ACK/dedup. `UART_PROTOCOL_VERSION` left at 4 —
+      not bumped, since nothing consumes BROADCAST yet (no `SaftyFW` peer
+      exists); revisit when M5 actually wires this frame type to a consumer.
+- [x] **0.3 Correct `firmware/KilnFW/docs/SAFETY_LINK.md` and `firmware/KilnFW/docs/HARDWARE.md`.**
       Both describe the optocoupler data directions backwards (U3 is drawn
       mirrored relative to U1/U2). Do this *with* 0.1, or the next person will
-      "fix" 0.1 back.
-- [ ] **0.4 Regenerate or delete `hardware/mainBoard/kiln.net`.** Dated 2026-07-19,
+      "fix" 0.1 back. Done 2026-08-16.
+- [x] **0.4 Regenerate or delete `hardware/mainBoard/kiln.net`.** Dated 2026-07-19,
       sources a pre-move path, and disagrees with the current schematic in at
       least three places. It is the likely origin of the errors in 0.3.
-      See `docs/HARDWARE.md` §10.
-- [ ] **0.4b Move `tools/PcTools/` → `PcTools/`** and add the **GPIO probe**
+      See `docs/HARDWARE.md` §10. Already deleted from the tree.
+- [x] **0.4b Move `tools/PcTools/` → `PcTools/`** and add the **GPIO probe**
       (`../../tools/PcTools/TODO.md` §1). The probe is what makes 0.0 runnable without
       building a one-off firmware, and it is reusable for every future
       "is this net where the schematic says" question. Default off, hard
       deny-list including **GPIO6**.
+      Move was already done (`tools/PcTools/`, `docs/REPO_LAYOUT.md`). GPIO
+      probe done 2026-08-16 (`App/drivers/gpio_probe.{c,h}`,
+      `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` default off, `tools/PcTools`'s
+      `probe.py` + MCP tools). **0.0 itself still needs the Pico side** (§1b
+      below) before the coordinated two-board test in 0.0 can actually run.
 - [x] **0.5 Flashing and console path — DECIDED (2026-08-16): Raspberry Pi Debug
       Probe over SWD, plus the probe's UART bridge on GP16/GP17. The Pico's own
       USB is not used.** One cable covers programming, reset, halt/step, memory
@@ -96,89 +107,207 @@ The link contract is shared code, implemented once. See
 [`../CommonFW/README.md`](../CommonFW/README.md) for the full checklist; the
 gating items are:
 
-- [ ] `firmware/CommonFW/` created; `kilnlink` CMake target consumable by pico-sdk
-- [ ] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
-- [ ] `kilnlink_version.h` owns `KILNLINK_PROTOCOL_VERSION`; `KilnFW`'s
-      `UART_PROTOCOL_VERSION` becomes an alias, not a second number
+- [x] `firmware/CommonFW/` created; `kilnlink` CMake target consumable by pico-sdk
+      (2026-08-16 — target builds under MSVC; not yet actually pulled into a
+      pico-sdk project, since `SaftyFW` has no CMake project at all yet)
+- [x] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
+      (2026-08-16, `idf.py build` verified clean, linked-but-unused so far)
+- [x] `kilnlink_version.h` owns `KILNLINK_PROTOCOL_VERSION` (2026-08-16);
+      `KilnFW`'s `UART_PROTOCOL_VERSION` **not yet** switched to alias it
 - [ ] Shared ids split out of `uart_task_ids.h`; PC-link ids left behind
-- [ ] `kilnlink_frame` / `_context` / `_status` codecs, all pure and bounds-checked
-- [ ] Host tests + `test/vectors/`, including hostile inputs
-- [ ] `pc_tools` consuming the same vectors — it is the **third** implementation
+- [~] `kilnlink_frame` / `_context` / `_status` codecs, all pure and
+      bounds-checked — **`kilnlink_frame` done** 2026-08-16 (delimiter,
+      stuffing, CRC16/CCITT-FALSE); `_context`/`_status` not started, their
+      payload layout is still being decided in `../CommonFW/docs/LINK_PROTOCOL.md`
+- [x] Host tests + `test/vectors/`, including hostile inputs — for
+      `kilnlink_frame`: `test/test_frame.c` (MSVC+CMake+Ninja+CTest, all
+      passing) plus `test/vectors/frame_vectors.json` (3 valid + 6 hostile).
+      Context/status vectors don't exist yet, same reason as above
+- [x] `pc_tools` consuming the same vectors — it is the **third**
+      implementation (2026-08-16, `tools/PcTools/selfcheck.py`)
 - [ ] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
       to the pre-refactor output **before** the old code is deleted
 - [ ] CI grep: no CRC or byte-stuffing implementation outside `CommonFW`
 
 ## Phase 2 — Skeleton
 
-- [ ] pico-sdk + FreeRTOS-Kernel (SMP) CMake project, `-Wall -Wextra -Werror`.
-- [ ] `main()` drives **GPIO6 low as its first statement**, before any init.
-- [ ] Hardware watchdog, 1 s, fed by `watchdog_task` only when all tasks check in.
-      **`pause_on_debug` true in dev builds, false in release.**
-- [ ] `boot_reason` captured and latched at startup; **latch the trip reason in
-      the watchdog scratch registers** so a watchdog reset does not lose why.
-- [ ] `flash_safe_execute()` for every config write, with the multicore lockout,
-      and `__not_in_flash_func` on any ISR that can fire during one.
-      `docs/ARCHITECTURE.md` §8.
-- [ ] **Assert `configUSE_CORE_AFFINITY` at build time** — without it
-      `vTaskCoreAffinitySet()` silently does nothing and the core isolation
-      quietly evaporates.
-- [ ] Task skeletons at the priorities and core affinities in
-      `docs/ARCHITECTURE.md` §4 — link work on core 0, everything that can trip
-      on core 1.
-- [ ] Blink-equivalent proof of life over SWD/RTT.
-- [ ] **Log transport**: `kilnlink` LOG frames (task 5) as primary, RTT over SWD
-      as secondary. `docs/ARCHITECTURE.md` §1.
-- [ ] `SAFTYFW_ENABLE_USB_STDIO` compile flag, **default off, debug builds
-      only** — it is a build option, not a runtime GUI toggle.
-- [ ] **Reserve TX ring capacity for telemetry**; log frames may only use what
-      remains, and are dropped at enqueue above the watermark. A verbose log
-      must never be able to displace telemetry and stop a firing.
-- [ ] Dropped-log-frame counter in the diagnostic frame.
-- [ ] Runtime log-level command over the link, **default warnings+errors only**.
-- [ ] **CI grep check: `safety_core.c` must not include the link header, and
-      `link_task.c` must not reference GPIO6.** Cheap, and it keeps the isolation
-      property from eroding.
+Done 2026-08-16, and **build-verified under the real toolchain** (arm-none-eabi-gcc
+14.2.1 / pico-sdk 2.1.1 / FreeRTOS-Kernel's RP2040 SMP port, Ninja) — a clean
+`cmake --build` produces `build/SaftyFW.elf` with zero warnings under
+`-Wall -Wextra -Werror`, from a from-scratch reconfigure. **Never flashed or run
+on real hardware** — no RP2040 is attached to the machine this was built on; see
+`docs/ARCHITECTURE.md`'s completion checklist for the same caveat spelled out
+per item. Toolchain paths and the exact commands are in `CMakeLists.txt`'s
+header comment, so the build is reproducible elsewhere.
+
+- [x] pico-sdk + FreeRTOS-Kernel (SMP) CMake project, `-Wall -Wextra -Werror`.
+      `CMakeLists.txt`, `FreeRTOSConfig.h`. `kilnlink` linked in (unused so
+      far, same "linked but not yet called" state as `KilnFW`'s own component
+      wrapper).
+- [x] `main()` drives **GPIO6 low as its first statement**, before any init.
+      `src/main.c`.
+- [x] Hardware watchdog, 1 s, fed by `watchdog_task` only when all tasks check
+      in — real bitmask-of-registered-tasks gate, not a stub.
+      `src/tasks/watchdog_task.c`. **`pause_on_debug` hardcoded true** — there
+      is no release/debug build distinction in this CMake project yet; TODO
+      left in both `main.c` and `watchdog_task.c` to add one and flip it for
+      release, per `docs/ARCHITECTURE.md` §8.
+- [x] `boot_reason` read and cleared at startup, via two watchdog scratch
+      registers (deliberately not scratch[4], which pico-sdk's own
+      `watchdog_enable()`/`watchdog_enable_caused_reboot()` already use),
+      magic-word validated. `src/boot_reason.{c,h}`. **Latching itself is not
+      yet wired to a real trip** — `boot_reason_latch_trip()` exists and is
+      called by nothing, because nothing in this phase evaluates a guard
+      (that integration is Phase 4/5's job, deliberately left undone per this
+      phase's brief).
+- [ ] `flash_safe_execute()` for every config write — **not started**; there
+      is no config store yet (Phase 9).
+- [x] **`configUSE_CORE_AFFINITY` and `configNUMBER_OF_CORES` asserted at
+      build time** — `#error` in `src/task_priorities.h`, and the build above
+      only succeeds because both are set correctly in `FreeRTOSConfig.h`.
+- [x] Task skeletons at the priorities and core affinities in
+      `docs/ARCHITECTURE.md` §4 — link work (`link_task`, `log_task`) on core
+      0, everything that can trip (`relay_owner`, `watchdog_task`,
+      `safety_core`, `discrete_task`, `thermo_task`, `current_task`) on core
+      1. `src/tasks/*.c`. Every task's real work (thermocouple reads, ADC
+      sampling, framing, guard evaluation) is a TODO comment for its own
+      later phase — this phase proves the task/priority/affinity/watchdog-
+      checkin shell compiles and links, not that any of them do anything yet.
+- [ ] Blink-equivalent proof of life over SWD/RTT — **not verified**; no
+      RP2040 hardware and no debug probe attached to the machine this was
+      built on, so nothing here has ever run.
+- [ ] **Log transport**: `kilnlink` LOG frames as primary, RTT as secondary —
+      **not started**; `log_task.c` is a shell with no ring, no drain, no
+      transport (Phase 8).
+- [ ] `SAFTYFW_ENABLE_USB_STDIO` compile flag — **not started**.
+      `pico_enable_stdio_usb`/`pico_enable_stdio_uart` are both explicitly
+      disabled in `CMakeLists.txt` for now (no stdio backend at all yet,
+      which is a safe default, just not the flag itself).
+- [ ] Reserve TX ring capacity for telemetry — **not started** (Phase 8,
+      needs `link_task`'s real TX ring first).
+- [ ] Dropped-log-frame counter — **not started** (Phase 8).
+- [ ] Runtime log-level command over the link — **not started** (Phase 8).
+- [x] **CI grep check: `safety_core.c` must not include the link header, and
+      `link_task.c` must not reference GPIO6.** `tools/check_isolation.ps1`,
+      comment-stripping so the rule can be documented in prose inside those
+      same files without tripping its own check. Verified to both pass on the
+      real files and fail loudly when a violation is deliberately introduced.
+      Not yet wired into an actual CI pipeline (this repo doesn't have one
+      yet) — it is a script to be run, not an automated gate.
 
 ## Phase 3 — Thermocouple
 
-- [ ] Port `firmware/KilnFW/App/drivers/MAX31856.c`. **Port it, do not rewrite it** — same
+- [x] Port `firmware/KilnFW/App/drivers/MAX31856.c`. **Port it, do not rewrite it** — same
       part, same registers, and `firmware/KilnFW/docs/MAX31856.md` already documents the
-      traps.
-- [ ] `spi_owner` request-queue task; `CS0` driven as a plain GPIO.
-- [ ] `~DRDY` (GPIO12) as a real **interrupt** — unlike the main board, this is a
-      direct Pico GPIO, so do not poll it.
-- [ ] `thermo_task` publishing `thermo_snapshot_t`; **NaN, never 0, when invalid**.
-- [ ] **Choose `tc_type` deliberately, per sensor** — type K is marginal above
+      traps. `src/max31856.{c,h}`, 2026-08-16 — single channel, no bus-sharing
+      machinery (this board has one device, THERMOCOUPLE.md §1), same
+      register map / fixed-point conversions / comparator-fault-mode logic /
+      failure-honesty discipline as the original.
+- [x] `spi_owner`; `CS0` driven as a plain GPIO. `src/spi_owner.{c,h}` — a
+      mutex-guarded direct-call module, deliberately **not** a request-queue
+      task: THERMOCOUPLE.md §1 says this bus has exactly one device and will
+      never contend, and ARCHITECTURE.md §4's task table has no separate
+      spi_owner row, only `thermo_task`. See `spi_owner.h`'s header comment
+      for the full reasoning. Judgement call — revisit if a real second
+      device ever lands on this bus.
+- [x] `~DRDY` (GPIO12) as a real **interrupt** — unlike the main board, this is a
+      direct Pico GPIO, so do not poll it. `src/tasks/thermo_task.c`:
+      `gpio_set_irq_enabled_with_callback()`, falling edge,
+      `vTaskNotifyGiveFromISR()` + `portYIELD_FROM_ISR()`.
+- [x] `thermo_task` publishing `thermo_snapshot_t`; **NaN, never 0, when invalid**.
+      `src/snapshots.h` (shared with `current_snapshot_t`), published under a
+      mutex, read via `thermo_task_get_snapshot()`. `src/tasks/safety_core.c`
+      now pulls the real snapshot instead of the Phase 2 hardcoded
+      `tc_valid = false` stub.
+- [~] **Choose `tc_type` deliberately, per sensor** — type K is marginal above
       ~1150 °C and green-rots *low* in reduction. Type S/R for a chamber-mounted
-      sensor on a cone-10 kiln. `docs/THERMOCOUPLE.md` §2.
+      sensor on a cone-10 kiln. `docs/THERMOCOUPLE.md` §2. **Not decided this
+      phase** — `tc_type` is correctly a runtime parameter of
+      `max31856_configure()` (not a compile-time constant), but `main.c`
+      currently passes `MAX31856_TC_TYPE_PLACEHOLDER` (type K) because no
+      `config_store` exists yet (Phase 9) to source the real per-installation
+      decision from. Explicitly not a claim that K is correct for this kiln.
 - [ ] **Per-type plausibility ranges**, driven from the configured type — a
-      range hard-coded to type K misfires on every other type.
-- [ ] Set the `MASK` register explicitly — **reset default `FFh` masks every
-      fault**, leaving `~FAULT` permanently inactive.
-- [ ] **`~DRDY` silence detection** → S5. This is the stopped-converting failure
-      `KilnFW` structurally cannot see.
+      range hard-coded to type K misfires on every other type. **Not started**
+      — needs a real commissioned `tc_type` (above) to be meaningful.
+- [x] Set the `MASK` register explicitly — **reset default `FFh` masks every
+      fault**, leaving `~FAULT` permanently inactive. `max31856_configure()`
+      writes `MAX31856_DEFAULT_FAULT_MASK` (0xFC) every time.
+- [x] **`~DRDY` silence detection** → S5. This is the stopped-converting failure
+      `KilnFW` structurally cannot see. `thermo_task.c` waits on the DRDY
+      notification with a timeout of 2× `max31856_conversion_time_ms()`; a
+      timeout publishes `thermo_snapshot_t.valid = false` directly, without
+      attempting a stale burst read, which `safety_core.c` maps onto
+      `tc_valid = false` for S5. **Build-verified only, not hardware-verified**
+      — no MAX31856 is attached to the build machine.
 - [ ] Bench: read ambient with the thermocouple attached; confirm open-circuit
-      reports `THERMO_FAULT_OPEN` rather than a plausible number.
+      reports `THERMO_FAULT_OPEN` rather than a plausible number. **Not
+      possible this phase** — no hardware attached to the build machine; this
+      is Phase 9 commissioning work, per this file's own task brief.
 
 ## Phase 4 — Guards, host-tested, no relay yet
 
-- [ ] `safety_guards.c` as a **pure function** — no RTOS, no SDK, no I/O,
-      `dt_s` passed in.
-- [ ] Implement **S1** (absolute over-temp), **S5** (sensor invalid, graduated),
+- [x] `safety_guards.c` as a **pure function** — no RTOS, no SDK, no I/O,
+      `dt_s` passed in. `src/safety_guards.{c,h}`, 2026-08-16. No `#include`
+      of anything RTOS/SDK/link-shaped; `safety_guard_input_t` carries no
+      link-derived field (verified by the independence-invariant test).
+- [x] Implement **S1** (absolute over-temp), **S5** (sensor invalid, graduated),
       **S7** (E-stop), **S11** (frozen TC), **S12** (cold junction / enclosure).
       These need no link and no current calibration, and S1 alone justifies the
       board. S11 and S12 are free — both read data S1 already fetches.
-- [ ] `discrete_task`: debounce E-stop (50 ms) and `mainFault` (200 ms).
-- [ ] Host test harness (MSVC, no SDK), mirroring `firmware/KilnFW/App/test/`.
-- [ ] **Write the nuisance-rejection tests before the trip tests.** A 900 ms
+      2026-08-16. S11's "heat commanded" qualifier has no real source yet
+      (no current sense, no link context) — `heat_commanded` is a plain bool
+      the caller supplies, defaulting to false, which keeps S11 correctly
+      dormant on an idle kiln until Phase 6/7 wire a real signal into it.
+- [x] `discrete_task`: debounce E-stop (50 ms) and `mainFault` (200 ms).
+      Built in the relay-authority pass, 2026-08-16: a standard
+      consecutive-sample debounce in `src/tasks/discrete_task.c`, sample
+      count derived from `SAFTYFW_PERIOD_DISCRETE_TASK_MS` (ceiling divide)
+      rather than hardcoded, so the window stays 50 ms / 200 ms regardless
+      of the task's actual period. `safety_guards.c` receives
+      `estop_pressed` already debounced, as designed. Build- and
+      host-test-verified, not hardware-verified.
+- [x] Host test harness (MSVC, no SDK), mirroring `firmware/KilnFW/App/test/`.
+      `test/test_common.h` (copied verbatim), `test/test_main.c`,
+      `test/test_safety_guards.c`, `test/build_host_tests.ps1`. Builds and
+      passes clean under `/W4 /WX`, 80/80 checks, 2026-08-16.
+- [x] **Write the nuisance-rejection tests before the trip tests.** A 900 ms
       sensor dropout must *not* trip S5; a single noisy SPI read must not either.
+      Both cases are explicit tests in `test/test_safety_guards.c`, ahead of
+      every guard's trip case.
 - [ ] Reuse `firmware/KilnFW/App/test/sim_plant.c` for realistic thermal traces.
+      Not done — this phase's tests use synthetic step/ramp sequences
+      instead, which were enough to prove each guard's boundary; wiring
+      `sim_plant.c` in is left for whenever a later phase needs a full
+      closed-loop trace (e.g. S2/S8 tuning).
 
 ## Phase 5 — Relay authority
 
-- [ ] `relay_owner` — the **only** code in the build that writes GPIO6.
-- [ ] Latching trip semantics; clear refused while the condition still holds.
-- [ ] GRACE → ARMED state machine, `startup_grace_s` = 60 s.
+- [x] `relay_owner` — the **only** code in the build that writes GPIO6. True
+      since Phase 2; unchanged by this pass.
+- [~] Latching trip semantics; clear refused while the condition still holds.
+      Latching itself is built and wired, 2026-08-16:
+      `relay_owner_command_trip()` de-energizes GPIO6 and enters a latched
+      `TRIPPED` state in one step; `relay_owner_command_energize()` is
+      refused (returns `false`, no-op) while `TRIPPED`; `safety_core.c`
+      calls `relay_owner_command_trip()` then `boot_reason_latch_trip()` on
+      a new `safety_guards_tick()` trip, matching `SAFETY_MODEL.md` section
+      6's 4-step order. **"Clear refused while the condition still holds"
+      is NOT built** — `relay_owner_clear_trip()` exists and unconditionally
+      transitions `TRIPPED` -> `ARMED` if called, but nothing calls it yet
+      (that enforcement needs a caller with guard state to re-check against,
+      e.g. `safety_core.c` re-running `safety_guards_tick()` before honouring
+      a clear request — Phase 7's link_task/GUI clear-command job). Marked
+      partial rather than checked for that reason.
+- [x] GRACE → ARMED state machine, `startup_grace_s` = 60 s. Built
+      2026-08-16 in `src/tasks/relay_owner.c`: the GRACE timer starts the
+      instant `relay_owner_task()` itself begins running (a judgement call —
+      see that file's header comment for why this was chosen over a
+      separate "enter grace" call from `main.c`), and transitions to `ARMED`
+      automatically once `SAFTYFW_STARTUP_GRACE_MS` (60000) has elapsed,
+      checked every loop iteration. While `GRACE`, `relay_owner_command_energize()`
+      is accepted and tracked but GPIO6 is never driven high. Build- and
+      host-test-verified; **not hardware-verified** — no RP2040 attached.
 - [ ] **Bench-verify the safe state four ways**: power-on, watchdog reset,
       brownout, and firmware halted at a breakpoint. K4 must be de-energized in
       all four.
@@ -188,39 +317,69 @@ gating items are:
 
 ## Phase 6 — Current sensing
 
-- [ ] `adc_owner`: round-robin ADC0/1/2, 16× oversample, 20 Hz/channel.
-- [ ] Peak-envelope conversion per `docs/CURRENT_SENSE.md` §2. **No RMS
-      accumulator, no DMA capture** — the front end has already demodulated.
-- [ ] Clip detection → `CURRENT_FLAG_CLIPPED`, reported as a state, never as a
-      number.
-- [ ] `zero_counts` measured at runtime after ≥ 5 min with no relay commanded on;
-      drift reported as a diagnostic.
+Sampling/conversion/snapshot-publishing built and build-verified 2026-08-16
+(arm-none-eabi-gcc 14.2.1, pico-sdk 2.1.1, FreeRTOS-Kernel RP2040 SMP,
+Ninja) — a from-scratch `cmake --build` produces `SaftyFW.elf` with zero
+warnings under `-Wall -Wextra -Werror`. **Not hardware-verified** — no
+RP2040/CT hardware attached to the build machine, so nothing below claims a
+real current reading. The guards that would consume this output (S3, S4,
+S9) are explicitly out of scope for this pass — they need `link_task`'s
+`relay_recent_mask` context, which is Phase 7.
+
+- [x] `adc_owner`: round-robin ADC0/1/2, 16× oversample, 20 Hz/channel
+      (`src/current_sense.c`, called from `src/tasks/current_task.c` at
+      `SAFTYFW_PERIOD_CURRENT_TASK_MS` = 50 ms). Manual `adc_select_input()` +
+      single-shot `adc_read()` polling rather than hardware round-robin/FIFO
+      capture — a deliberate deviation from `ARCHITECTURE.md` §8's general
+      round-robin guidance, documented in `current_sense.c`'s header comment,
+      because `CURRENT_SENSE.md` §4's more specific "no free-running capture"
+      rules out `adc_run(true)`. First conversion after each mux switch is
+      discarded per §4/§8.
+- [x] Peak-envelope conversion per `docs/CURRENT_SENSE.md` §2, exact formula
+      (`cs_counts_to_amps()`). **No RMS accumulator, no DMA capture.**
+- [x] Clip detection — within ~50 mV of the rail, compared in the native
+      12-bit count domain. Reported as `current_snapshot_t.clipped[n]`, a
+      state, never folded into the amps number. **Not a trip condition** —
+      still counts as load-active.
+- [~] `zero_counts` re-measurement — the **mechanism** exists
+      (`current_sense_recalibrate_zero()`), but it has no visibility into
+      relay state by design (module isolation) and nothing calls it yet; the
+      ">= 5 min idle, no relay commanded on" precondition and the drift
+      report are Phase 9's `config_store`/commissioning-flow job.
 - [ ] **Run the full commissioning check in `docs/CURRENT_SENSE.md` §5** — in
       particular step 2, one relay at a time, confirming each CT maps to the
-      channel you think it does.
-- [ ] **No over-current / under-current guard**, by design — these channels are
-      a load-active detector and a power estimator. Fuses and breakers own
-      over-current (`docs/SAFETY_MODEL.md` §3).
-- [ ] Power estimate: `i_conducting_a`, `conduction_fraction` over a 120 s
-      window, and `p_avg_w` when `mains_voltage_v` is configured. **No guard may
-      read any of it** (`docs/CURRENT_SENSE.md` §3b).
-- [ ] Implement **S9** (trip ineffective / contactor welded). Needs only the
-      current channels and the relay state, so it lands here — and it is the
-      guard that catches an interlock wired to the wrong J10 contact, which
-      passes every other test.
+      channel you think it does. Needs real hardware; not done.
+- [x] **No over-current / under-current guard**, by design — these channels
+      are a load-active detector and a power estimator. Fuses and breakers
+      own over-current (`docs/SAFETY_MODEL.md` §3). Nothing in this pass adds
+      one.
+- [x] Power estimate: `i_conducting_a`, `conduction_fraction` over a 120 s
+      rolling window, and `p_avg_w` (`NAN` unless `mains_voltage_v` is
+      configured) — `current_sense_power_t`, kept in a struct deliberately
+      separate from `current_snapshot_t` so no guard can end up consuming the
+      filtered value. **No guard reads any of it** — nothing calls
+      `current_task_get_power()`/`current_task_get_snapshot()` yet.
+- [ ] Implement **S9** (trip ineffective / contactor welded). Out of scope for
+      this pass — needs `link_task`'s relay context (Phase 7).
 - [ ] ⚠️ **S3 and S4 stay disabled until the CT channel mapping is confirmed.**
       A correlation guard fed by a mis-mapped CT trips on healthy firings and
-      stays quiet on the failure it exists to catch.
+      stays quiet on the failure it exists to catch. Not implemented in this
+      pass (Phase 7).
 
 ## Phase 7 — The link
 
-- [ ] `uart_frame.c`: `0x7E` framing, `0x7D`/`^0x20` stuffing,
-      CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF, MSB-first, no reflect/xorout).
-      Byte-compatible with `uart_protocol.c`.
-- [ ] **Plain hardware UART, no inversion, no PIO.** The ESP inverts; adding a
-      second inversion here kills the link.
-- [ ] Receiver hardening: resync on `0x7E` from any state, bounded buffers,
-      break tolerated as "peer not up", **no allocation**.
+- [x] `0x7E` framing, `0x7D`/`^0x20` stuffing, CRC16/CCITT-FALSE now actually
+      wired to real traffic: `link_task.c` calls the existing, host-tested
+      `kilnlink_frame_encode_raw()`/`kilnlink_stuff()`/`kilnlink_unstuff()`/
+      `kilnlink_frame_decode()` (`CommonFW/src/kilnlink_frame.c`) rather than
+      a separate `uart_frame.c` — that library already **is** this item,
+      "linked but unused" until this pass. Byte-compatible with
+      `uart_protocol.c` by construction (same library backs both).
+- [x] **Plain hardware UART, no inversion, no PIO.** `uart_owner.c`: plain
+      `hardware/uart.h`, `uart_set_hw_flow(..., false, false)`, no PIO.
+- [x] Receiver hardening: resync on `0x7E` from any state, bounded buffers,
+      break tolerated as "peer not up", **no allocation**. `link_task.c`'s
+      `link_task_rx_process_byte()`/`link_task_handle_raw_frame()`.
 - [ ] Parse `SAFETY_CMD_PUSH_CONTEXT` (0x07) → `context_snapshot_t`.
 - [ ] `boot_id` change resets every correlation window.
 - [ ] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently.
@@ -261,17 +420,34 @@ Both processors must check each other. Design:
 every later frame safe to parse.
 
 - [ ] 7b.1 `KILNLINK_PROTOCOL_VERSION` and `KILNLINK_MIN_COMPATIBLE` in
-      `CommonFW`, one definition, both firmwares including it
+      `CommonFW`, one definition, both firmwares including it -- **half done**:
+      `KILNLINK_MIN_COMPATIBLE` added to `CommonFW/include/kilnlink/kilnlink_version.h`
+      and `SaftyFW` includes/uses both; `KilnFW` does not include it yet
+      (out of scope this pass, `firmware/KilnFW/` untouched)
 - [ ] 7b.2 `ANNOUNCE_VERSION` = `0x0F` sent by the ESP unprompted at boot, on
-      retry, and on every `boot_id` change (`KilnFW` work)
-- [ ] 7b.3 `min_compatible` added to `FW_VERSION` at a fixed offset; version
-      fields read and compared **before** anything after them is parsed
-- [ ] 7b.4 Compatibility evaluated in **both** directions
+      retry, and on every `boot_id` change (`KilnFW` work -- not this pass)
+- [x] 7b.3 `min_compatible` added to `FW_VERSION` at a fixed offset; version
+      fields read and compared **before** anything after them is parsed --
+      `link_frame_pack_fw_version()` (bytes 3..4) and
+      `link_task_handle_announce_version()` (reads bytes 1..4 before anything
+      else, bails on `frame->length < 5`)
+- [x] 7b.4 Compatibility evaluated in **both** directions --
+      `link_frame_versions_compatible()`, host-sanity-checked against five
+      combinations (equal, newer self, self-raised-floor, peer-below-floor,
+      self-below-peer's-floor)
 - [ ] 7b.5 Mismatch sets `DEGRADED_NO_CONTEXT`: context frames discarded
       unparsed, context-free guards still commanding the relay, context-dependent
-      guards reported disabled, **no trip latched**
-- [ ] 7b.6 Telemetry keeps flowing during a mismatch — it is the only way the ESP
-      can display the problem or push the fix
+      guards reported disabled, **no trip latched** -- **partial**: the flag
+      (`link_task_get_degraded_no_context()`) is set/cleared correctly and
+      never touches `relay_owner`/`boot_reason` (verified: no such call
+      exists in `link_task.c`, and `tools/check_isolation.ps1` passes). Left
+      unchecked because there is nothing yet to discard (`PUSH_CONTEXT`
+      unparsed) or disable (no context-dependent guard exists — Phase 4 only
+      built S1/S5/S7/S11/S12) — the mechanism exists, the wiring it feeds
+      does not yet.
+- [x] 7b.6 Telemetry keeps flowing during a mismatch — it is the only way the ESP
+      can display the problem or push the fix. `link_task`'s TX cadence
+      (status + `FW_VERSION`) never checks `s_degraded_no_context`.
 - [ ] 7b.7 **Compatibility floor**: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
       the `UPDATE_*` frames work regardless of version. Ids `0x00`–`0x0F`
       reserved; those layouts may be appended to, never reordered or resized.
@@ -284,15 +460,29 @@ every later frame safe to parse.
 
 The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCOL.md` §8.
 
-- [ ] Non-blocking TX ring. **Drop on full, increment a counter, never block.**
-- [ ] Emit the **existing 23-byte** status frame unchanged, every 500 ms — this
+- [x] Non-blocking TX ring. **Drop on full, increment a counter, never block.**
+      `uart_owner.c`: `uart_owner_send()` drops the whole frame and increments
+      `s_tx_dropped` (`uart_owner_get_tx_dropped()`) if the ring lacks room;
+      never blocks, never waits on the ISR.
+- [x] Emit the **existing 23-byte** status frame unchanged, every 500 ms — this
       is what lets the Pico be validated against an unmodified `KilnFW`.
-- [ ] Emit `SAFETY_CMD_DIAG` (0x08), additive; an old ESP ignores it.
+      `link_task_send_status()`, byte layout cross-checked by hand against
+      `firmware/KilnFW/App/drivers/safety_link.h` and by a standalone host
+      sanity check (round-tripped through the real `kilnlink_frame` codec).
+- [ ] Emit `SAFETY_CMD_DIAG` (0x08), additive; an old ESP ignores it. **Not
+      this pass** — explicitly lower priority than Frame A/version handshake.
 - [ ] `build_info.h` generated on every build (git commit, dirty, timestamp).
       **Unknown must map to `dirty = 1`** — an uncommitted build must never
-      report itself clean.
-- [ ] Emit `SAFETY_CMD_FW_VERSION` (0x0B) on request **and unsolicited at boot**;
+      report itself clean. **Not built this pass**: `link_task_send_fw_version()`
+      currently hardcodes `dirty = 1` and empty commit/datetime fields, which
+      is honest (unknown maps to dirty, per the rule) but not the real
+      generated build identity.
+- [x] Emit `SAFETY_CMD_FW_VERSION` (0x0B) on request **and unsolicited at boot**;
       include `boot_id`, `config_version` and the **active config CRC**.
+      `boot_id` is a real (pseudo-random, time-derived) per-boot value;
+      `config_version`/`config_crc` are 0 — honest, since `config_store`
+      (Phase 9) doesn't exist yet and the spec documents 0 as exactly that
+      case ("running on compiled-in defaults that were never commissioned").
 - [ ] Emit `SAFETY_CMD_TRIP_EVENT` (0x0D) **immediately on trip**, repeated a
       few times, carrying the deciding values at the moment of the trip. Half a
       second later that evidence is gone.

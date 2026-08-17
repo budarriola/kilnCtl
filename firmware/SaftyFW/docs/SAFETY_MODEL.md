@@ -813,18 +813,18 @@ Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 
 | | Guard | Class | Built | Host-tested | Hardware-verified |
 |---|---|---|---|---|---|
-| S1 | Absolute over-temperature | TRIP | [ ] | [ ] | [ ] |
+| S1 | Absolute over-temperature | TRIP | [x] | [x] | [ ] |
 | S2 | Sustained excess over setpoint | TRIP | [ ] | [ ] | [ ] |
 | S3 | Load active, no heat commanded | TRIP | [ ] | [ ] | [ ] |
 | S4 | Heat commanded, load inactive | WARN | [ ] | [ ] | [ ] |
-| S5 | Safety thermocouple invalid | WARN→TRIP | [ ] | [ ] | [ ] |
+| S5 | Safety thermocouple invalid | WARN→TRIP | [x] | [x] | [ ] |
 | S6 | Main controller unhealthy | TRIP | [ ] | [ ] | [ ] |
-| S7 | E-stop | TRIP | [ ] | [ ] | [ ] |
+| S7 | E-stop | TRIP | [x] | [x] | [ ] |
 | S8 | Implausible rate of rise | TRIP, off by default | [ ] | [ ] | [ ] |
 | S9 | Trip ineffective / contactor welded | ESCALATE | [ ] | [ ] | [ ] |
 | S10 | Safety TC vs zone TC disagreement | WARN | [ ] | [ ] | [ ] |
-| S11 | Frozen safety reading | TRIP | [ ] | [ ] | [ ] |
-| S12 | Cold junction / enclosure over-temp | WARN→TRIP | [ ] | [ ] | [ ] |
+| S11 | Frozen safety reading | TRIP | [x] | [x] | [ ] |
+| S12 | Cold junction / enclosure over-temp | WARN→TRIP | [x] | [x] | [ ] |
 | S13 | Borrowed channel not updating | WARN→TRIP | [ ] | [ ] | [ ] |
 | — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] |
 

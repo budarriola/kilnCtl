@@ -372,13 +372,33 @@ also guard-relevant (zero, and decay behaviour). Step 3 is cosmetic.
 
 ## Completion checklist
 
-- [ ] `adc_owner`: round-robin ADC0/1/2, 16× oversample, 20 Hz/channel, first-after-mux sample discarded
-- [ ] Peak-envelope conversion per §2 — **no RMS accumulator, no DMA capture**
-- [ ] `zero_counts` measured at runtime after ≥5 min idle; drift reported
-- [ ] Clip detection → `CURRENT_FLAG_CLIPPED` = "power estimate invalid", **not a trip**
-- [ ] `i_conducting_a` and `conduction_fraction` reported separately (§3b)
-- [ ] `p_avg_w` only when `mains_voltage_v` is configured; `—` otherwise
-- [ ] Commissioning §5 run in full and results recorded
-- [ ] **§5 step 2 (one relay at a time) passed on all three channels** — gates S3/S4
-- [ ] Decay verified <5 % within ~4 s
-- [ ] Low-duty soak: 15 % duty, 60 s window, 1 h, **no S4 warning storm**
+Sampling/conversion/snapshot-publishing built and build-verified 2026-08-16
+(`src/current_sense.{c,h}`, `src/tasks/current_task.{c,h}`) — zero-warning
+build under `-Wall -Wextra -Werror`. **Not hardware-verified** — no
+RP2040/CT hardware attached to the build machine.
+
+- [x] `adc_owner`: round-robin ADC0/1/2, 16× oversample, 20 Hz/channel, first-after-mux sample discarded — manual `adc_select_input()`/`adc_read()` polling (no free-running FIFO capture, per this doc's own "no DMA, no free-running capture" in §4), documented as a deliberate deviation from `ARCHITECTURE.md` §8's general round-robin guidance
+- [x] Peak-envelope conversion per §2 — **no RMS accumulator, no DMA capture**
+- [~] `zero_counts` measured at runtime after ≥5 min idle; drift reported — mechanism only (`current_sense_recalibrate_zero()`); no caller enforces the idle/no-relay precondition or reports drift yet (Phase 9, config_store)
+- [x] Clip detection → reported per-channel via `current_snapshot_t.clipped[n]` = "power estimate invalid", **not a trip**
+- [x] `i_conducting_a` and `conduction_fraction` reported separately (§3b), in `current_sense_power_t`
+- [x] `p_avg_w` only when `mains_voltage_v` is configured; `NAN` otherwise
+- [ ] Commissioning §5 run in full and results recorded — needs real hardware, not done
+- [ ] **§5 step 2 (one relay at a time) passed on all three channels** — gates S3/S4 — needs real hardware, not done
+- [ ] Decay verified <5 % within ~4 s — needs real hardware, not done
+- [ ] Low-duty soak: 15 % duty, 60 s window, 1 h, **no S4 warning storm** — needs S4 (Phase 7) and real hardware, not done
+
+### Known limitation: uncalibrated defaults are a nuisance, not a hazard
+
+With the current zero-initialized placeholder (`zero_counts = 0`,
+`i_present_a = 0`, `calibrated = false`) and a hypothetically-configured
+`k_ct_v_per_a` (a partial-commissioning state), the op-amp/ADC's genuine
+small positive zero-current floor (§5: "op-amp Vos and D14 leakage, not 0")
+would compute as a nonzero phantom current, and `i_present_a = 0` sets the
+load-active bar at "any current at all" — so this combination would read
+**load active from noise alone**. This is the safe-direction failure: it
+over-reports presence rather than under-reporting it, so a future guard
+built on top would be more likely to nuisance-trip on a healthy idle kiln
+than to miss a real fault, which is the same direction §0 already prefers.
+`current_snapshot_t.calibrated` is `false` throughout this state, which is
+the intended signal that none of this should be trusted yet.

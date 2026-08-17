@@ -1,16 +1,22 @@
 # SaftyFW — kiln safety processor firmware
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** early implementation (Phase 2 skeleton) · **Last reviewed:** 2026-08-16
 > **Keep this file current.** It is the entry point; if the document set or the
 > headline facts change, update it in the same commit.
 
 FreeRTOS firmware for the **Raspberry Pi Pico (RP2040)**, designator **A1** on
 the kilnCtl main board, running in the isolated `GND_Safty` domain.
 
-**Status: planning only.** No code exists yet. This directory currently holds
-the design documents below, written before implementation so the thresholds,
-the wire protocol and the failure analysis can be argued about while they are
-still cheap to change.
+**Status: Phase 2 skeleton only, build-verified, never run on hardware.** The
+pico-sdk + FreeRTOS-Kernel (SMP) CMake project, the boot sequence, the
+task/priority/core-affinity shells and the isolation CI grep check exist under
+`src/` and compile clean under the real arm-none-eabi-gcc/pico-sdk toolchain —
+see `TODO.md` Phase 2 for exactly what that does and does not include. No task
+does its real work yet (no thermocouple reads, no ADC sampling, no relay
+authority, no link framing) — that is Phases 3 onward. This directory also
+still holds the design documents below, written before implementation so the
+thresholds, the wire protocol and the failure analysis could be argued about
+while they were still cheap to change.
 
 ## What it does
 
@@ -83,11 +89,11 @@ or crashed safety processor means a kiln that will not fire
 
 ## Three things to know before touching this
 
-**The isolated UART pins are swapped in `KilnFW` today.** Traced from the
-current schematic, ESP TX is **GPIO4** (`DataToSafty`) and ESP RX is **GPIO5**
-(`DataFromSafty`) — the opposite of `KILNCTL_SAFETY_TX_IO`/`RX_IO`'s defaults,
-and the opposite of what `firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 1" claims. R15's
-placement confirms the trace. Nothing works until this is fixed
+**The isolated UART pins were swapped in `KilnFW`, fixed 2026-08-16.** Traced
+from the schematic, ESP TX is **GPIO4** (`DataToSafty`) and ESP RX is **GPIO5**
+(`DataFromSafty`); `KILNCTL_SAFETY_TX_IO`/`RX_IO` now default to that, and
+`firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 1" is corrected to match. R15's
+placement is the independent confirmation
 ([`docs/HARDWARE.md`](docs/HARDWARE.md) §1, `TODO.md` 0.1).
 
 **Every relay on this board is a pilot relay, for galvanic isolation only** —
@@ -127,7 +133,9 @@ High-level only — each document carries its own. Phases refer to [`TODO.md`](T
 
 - [ ] **Phase 0** blockers cleared, including the swapped safety-UART pins in `KilnFW`
 - [ ] **Phase 1** `CommonFW` extracted and linked by both firmwares
-- [ ] **Phase 2** skeleton: GPIO6 low first, watchdog, task/core layout
+- [x] **Phase 2** skeleton: GPIO6 low first, watchdog, task/core layout —
+      done 2026-08-16, build-verified clean under the real toolchain, never
+      run on hardware
 - [ ] **Phase 3** thermocouple, with `~DRDY` interrupt and silence detection
 - [ ] **Phase 4** guards as a pure function, host-tested, nuisance tests first
 - [ ] **Phase 5** relay authority, safe state proven four ways, interlock polarity confirmed

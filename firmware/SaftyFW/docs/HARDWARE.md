@@ -64,22 +64,23 @@ reading is right.
 
 ### What this means for `KilnFW`
 
-`KilnFW`'s `Kconfig` defaults are `KILNCTL_SAFETY_TX_IO = GPIO5` and
+`KilnFW`'s `Kconfig` defaults **were** `KILNCTL_SAFETY_TX_IO = GPIO5` and
 `KILNCTL_SAFETY_RX_IO = GPIO4` — **swapped** with respect to this board. As
-shipped, the ESP transmits into U3's collector and listens on U2's LED drive.
-The link cannot work in either direction.
+shipped, the ESP transmitted into U3's collector and listened on U2's LED
+drive, so the link could not work in either direction. **Fixed 2026-08-16**:
+defaults are now `TX_IO = GPIO4`, `RX_IO = GPIO5`.
 
-This is a `KilnFW` bug, not a `SaftyFW` one, but it is listed as
+This was a `KilnFW` bug, not a `SaftyFW` one, but it was listed as
 **TODO.md item 0.1 (blocking)** because no amount of correct RP2040 firmware
-will bring the link up until it is fixed. Two consequences follow from the
-corrected map, both of which also need changing on the ESP side:
+would bring the link up until it was fixed. Two consequences followed from the
+corrected map, both also changed on the ESP side:
 
 - The ESP's **internal pull-up belongs on GPIO5** (RX, U3's bare collector),
-  not GPIO4. R15 already pulls GPIO5 up externally, so the internal one is now
-  belt-and-braces rather than load-bearing — but `safety_link_start()`
-  currently enables it on the wrong pin.
+  not GPIO4. R15 already pulls GPIO5 up externally, so the internal one is
+  belt-and-braces rather than load-bearing — `safety_link_start()` now enables
+  it on the correct pin.
 - `SAFETY_LINK.md`'s boot-time note ("R15 idles the TX net high, which lights
-  U2's LED and holds the Pico's RX low — a continuous break") is **wrong for
+  U2's LED and holds the Pico's RX low — a continuous break") was **wrong for
   this revision, in the safe direction**. R15 is on the ESP's RX, not its TX,
   and nothing on the main board pulls `DataToSafty` anywhere. With the ESP in
   reset, GPIO4 is high-impedance, U2's LED is dark, and R9 holds the Pico's RX
@@ -318,10 +319,23 @@ Two things this topology does and does not buy you, stated plainly:
   That is a real, unclosable-in-firmware gap and it belongs in the safety case,
   not buried in a comment.
 
-**Verify at bring-up which J10 pin is NO and which is NC**, and wire the
-contactor coil through the pair that is *open* when the coil is de-energized.
-Getting this backwards produces a system that looks fine on the bench and
-fails dangerous.
+**J10 pin identification (traced 2026-08-16, from the K4 symbol's drawn rest
+position in `SSD.kicad_sch` — pin 9 is the common/armature, and the drawn
+contact blade rests on pin 10):**
+
+| K4 pin | Function | J10 pin |
+|---|---|---|
+| 8 | NO | 1 |
+| 9 | COM | 2 |
+| 10 | NC | 3 |
+
+**Wire the line contactor's coil through J10 pins 1 (NO) + 2 (COM).** J10 pin 3
+(NC) must not be used for the coil — that pairing stays energized whenever K4
+is dead, which is the exact failure this interlock exists to prevent. This
+reading comes from the symbol's drawing convention (no NC/NO/COM silkscreen or
+schematic text label exists on J10 itself), so it is schematic evidence, not a
+measurement — **confirm with a continuity check on the physical board before
+final wiring.**
 
 ---
 
@@ -367,7 +381,10 @@ what `SaftyFW` assumes.
 
 **On an unwired board GPIO9 floats high and the E-stop reads permanently
 asserted**, which is why bring-up needs either the button fitted or a
-deliberate jumper to `GND_Safty`. Do not "fix" this by inverting the sense in
+deliberate jumper to `GND_Safty`. Checked 2026-08-16: **no jumper is currently
+fitted anywhere on the `estop` net** in the schematic, so an as-built board
+with no switch attached will read STOP until one of the two is added. Do not
+"fix" this by inverting the sense in
 firmware; inverting it makes the broken-wire case read as *healthy*, which
 converts the one thing on this board that is honestly fail-safe into one that
 is not. If a build genuinely has no E-stop, fit the jumper — a physical,
@@ -631,14 +648,14 @@ Recorded so the next person does not repeat the trace:
 |---|---|---|
 | `hardware/mainBoard/output/kiln.pdf` | **current** | KiCad 10.0.4; values match the `.kicad_sch` sources; added by commit `c50cded` |
 | `hardware/mainBoard/*.kicad_sch` | **current** | spot-checked `CurrentSense.kicad_sch` — R43 10k, R46 7.15k, U8 AD8542, matches the PDF |
-| `hardware/mainBoard/kiln.net` | **STALE — do not use** | dated 2026-07-19; `(source)` is the pre-move `kilnCtl\kiln.kicad_sch`; says U10–U12 are LMV321 with 47k/475k (board has AD8542 with 10k/7.15k), puts the safety MAX31856 on the main board (it is on the daughterboard via J7), and puts `thermoFault`/`thermoDrdy` on GPIO7/8 (they are on GPIO11/12) |
-| `firmware/KilnFW/docs/HARDWARE.md` | correct except §"Isolation barrier" | Pico pin map, J7 table and power notes all match. The three-optocoupler table has U2/U3 reversed |
-| `firmware/KilnFW/docs/SAFETY_LINK.md` | "Trap 1" and the R15 boot note are wrong | see §1 |
+| `hardware/mainBoard/kiln.net` | **deleted 2026-08-16** | was dated 2026-07-19; `(source)` was the pre-move `kilnCtl\kiln.kicad_sch`; said U10–U12 are LMV321 with 47k/475k (board has AD8542 with 10k/7.15k), put the safety MAX31856 on the main board (it is on the daughterboard via J7), and put `thermoFault`/`thermoDrdy` on GPIO7/8 (they are on GPIO11/12) |
+| `firmware/KilnFW/docs/HARDWARE.md` | **corrected 2026-08-16** | Pico pin map, J7 table and power notes all matched already. The three-optocoupler table's U2/U3 reversal is fixed |
+| `firmware/KilnFW/docs/SAFETY_LINK.md` | **corrected 2026-08-16** | "Trap 1" and the R15 boot note were wrong, see §1 |
 | `ltspice/currentMon.asc` | **matches the built circuit** | same topology and same 10k/7.15k/1M/1µF values as the schematic; a genuinely useful model, see `CURRENT_SENSE.md` |
 
-**`kiln.net` should be regenerated or deleted** — `TODO.md` item 0.4. Leaving a
-stale netlist in the tree next to a correct schematic is how the two errors in
-§1 got into the documentation in the first place.
+**`kiln.net` was deleted** — `TODO.md` item 0.4, done. Leaving a stale netlist
+in the tree next to a correct schematic is how the two errors in §1 got into
+the documentation in the first place.
 
 
 ---
@@ -647,10 +664,10 @@ stale netlist in the tree next to a correct schematic is how the two errors in
 
 **Verify before writing firmware**
 - [ ] §1 bench check run: GPIO5 pulled up by R15, GPIO4 floating, Pico GPIO4 drives ESP GPIO5
-- [ ] `KilnFW` safety-UART pins corrected (TX→4, RX→5) and its docs fixed
-- [ ] K4 interlock topology confirmed; **J10 NO vs NC identified on the physical part**
+- [x] `KilnFW` safety-UART pins corrected (TX→4, RX→5) and its docs fixed (2026-08-16)
+- [x] K4 interlock topology identified from the schematic (J10: 1=NO, 2=COM, 3=NC; §3) — [ ] **still needs confirming on the physical part**, the symbol-drawing convention this reading rests on is not a silkscreened label
 - [ ] De-energized K4 proven to open the contactor on the real wiring
-- [ ] E-stop confirmed normally-closed, or a deliberate jumper fitted
+- [x] E-stop circuit confirmed normally-closed by design (§5) — [ ] switch or deliberate jumper still needs physically fitting, neither is present today
 - [ ] Pico power/flash path decided; **USB-vs-back-fed-3V3 contention checked**
 - [ ] Debug probe obtained (Raspberry Pi Debug Probe or a spare Pico running `debugprobe`)
 - [ ] **DEBUG pads accessible** — 3-pin header fitted before A1 is soldered down
@@ -659,7 +676,7 @@ stale netlist in the tree next to a correct schematic is how the two errors in
 - [ ] RUN (pin 30) reset wire considered at build time
 - [ ] **Ground-bonding understood**: any PC debug connection bypasses the isolation barrier; no mains-referenced load wiring attached while debugging
 - [ ] CT type confirmed voltage-output (R72 is DNP)
-- [ ] `hardware/mainBoard/kiln.net` regenerated or deleted
+- [x] `hardware/mainBoard/kiln.net` regenerated or deleted (deleted, 2026-08-16)
 
 **Record**
 - [ ] Board revision this trace corresponds to, written at the top

@@ -64,18 +64,28 @@ Four facts set the order. Everything else can be shuffled.
 
 Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
 
-- [ ] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1)
-- [ ] `KILNCTL_SAFETY_TX_IO` = 4, `RX_IO` = 5, pull-up moved to GPIO5
-- [ ] `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` corrected in the same change
-- [ ] `UART_PROTO_MSG_BROADCAST = 0x04` added to `uart_protocol.{c,h}`
-- [ ] `hardware/mainBoard/kiln.net` regenerated or deleted — it is stale and misleading
+- [ ] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) — still
+      needs the Pico physically attached; the code-side fix below is not this
+- [x] `KILNCTL_SAFETY_TX_IO` = 4, `RX_IO` = 5, pull-up moved to GPIO5 (2026-08-16,
+      `Kconfig` + `sdkconfig`; `idf.py build` clean)
+- [x] `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` corrected in the same change (2026-08-16)
+- [x] `UART_PROTO_MSG_BROADCAST = 0x04` added to `uart_protocol.{c,h}` (2026-08-16,
+      send/receive implemented; version not bumped, nothing consumes it yet)
+- [x] `hardware/mainBoard/kiln.net` regenerated or deleted — was already gone; confirmed 2026-08-16
 - [x] Bench path decided: Debug Probe SWD + probe UART bridge on GP16/GP17; no Pico USB
 - [ ] DEBUG header and GP16/GP17 access provided before A1 is soldered down
 
 System-wiring decisions that gate any bench trip test, and are not firmware work:
 
-- [ ] K4 → line-contactor interlock topology confirmed; J10 NO vs NC identified
-- [ ] E-stop confirmed normally-closed, or a deliberate jumper fitted
+- [x] K4 → line-contactor interlock topology identified from the schematic
+      (2026-08-16): J10 pin 1 = NO, pin 2 = COM, pin 3 = NC — wire the contactor
+      coil to pins 1+2. Read from the K4 symbol's drawn rest position, not a
+      silkscreen label, so **still wants a continuity check against the
+      physical part** before final wiring (`firmware/SaftyFW/docs/HARDWARE.md` §3)
+- [x] E-stop circuit confirmed normally-closed by design (2026-08-16) — no jumper
+      is fitted anywhere on the `estop` net today, so an as-built board reads
+      permanent STOP until a switch or a deliberate jumper is physically added
+      (`firmware/SaftyFW/docs/HARDWARE.md` §5)
 
 ## M1 — Tooling that makes everything after it cheaper
 
@@ -84,7 +94,9 @@ because it is what turns later hardware questions into a script instead of a
 soldering session.
 
 - [x] `KilnFW/pc_tools/` → `tools/PcTools/`, package still `kilnctrl`
-- [ ] GPIO probe on the ESP, default off, deny-list including GPIO6
+- [x] GPIO probe on the ESP, default off, deny-list including GPIO6 (2026-08-16,
+      `firmware/KilnFW/App/drivers/gpio_probe.{c,h}` + `tools/PcTools`; not yet
+      bench-tested, see `tools/PcTools/TODO.md`)
 - [ ] GPIO probe on the Pico over SWD, GPIO6 never writable
 - [ ] Coordinated two-board test script, reaching each side by a path that is
       **not** the link under test
@@ -96,10 +108,21 @@ soldering session.
 Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating items repeated in
 [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 1.
 
-- [ ] `kilnlink` target consumable by both pico-sdk and ESP-IDF
-- [ ] `KILNLINK_PROTOCOL_VERSION` the single source; `UART_PROTOCOL_VERSION` an alias
-- [ ] Codecs pure and bounds-checked; host tests and `test/vectors/`
-- [ ] `pc_tools` consuming the same vectors as the third implementation
+- [~] `kilnlink` target consumable by both pico-sdk and ESP-IDF — builds
+      clean under MSVC and, as of 2026-08-16, under `KilnFW`'s real
+      xtensa-gcc build too (`components/kilnlink/` wrapper, auto-discovered,
+      linked-but-unused so far — `KilnCtrl.bin` size unchanged). **Not yet
+      tried under pico-sdk/arm-none-eabi-gcc**, since `SaftyFW` has no CMake
+      project; **not yet actually called** by `uart_protocol.c`
+- [x] `KILNLINK_PROTOCOL_VERSION` the single source (2026-08-16); `KilnFW`'s
+      `UART_PROTOCOL_VERSION` **not yet** switched to alias it — that edit
+      belongs with the migration item below, not before it
+- [~] Codecs pure and bounds-checked; host tests and `test/vectors/` — **done
+      for the framing layer only** (`kilnlink_frame`/`kilnlink_crc`); the
+      context/status codecs don't exist, their payload layout is still
+      "planning" in `LINK_PROTOCOL.md`
+- [x] `pc_tools` consuming the same vectors as the third implementation
+      (2026-08-16, `selfcheck.py`)
 - [ ] `KilnFW` delegating framing and CRC, proven byte-identical **before** the
       old code is deleted
 - [ ] CI grep: no CRC or byte-stuffing implementation outside `CommonFW`
@@ -109,12 +132,17 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
 Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 2–4. Independent of the
 link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 
-- [ ] FreeRTOS SMP skeleton, tasks at the planned priorities and core affinities
-- [ ] `main()` drives GPIO6 low as its first statement
-- [ ] Watchdog with the trip reason latched in scratch registers
+- [x] FreeRTOS SMP skeleton, tasks at the planned priorities and core affinities —
+      done 2026-08-16, build-verified clean under the real arm-none-eabi-gcc/pico-sdk
+      toolchain (task bodies are still TODO shells; Phases 3/6/7 fill them in)
+- [x] `main()` drives GPIO6 low as its first statement — done 2026-08-16
+- [x] Watchdog, fed only when every task checks in, trip reason latched in
+      scratch registers — done 2026-08-16; the latch call itself is unwired
+      until a guard exists to trigger it (Phase 4/5)
 - [ ] MAX31856 on J7, with per-thermocouple type configuration
 - [ ] Guards implemented and **host-tested against synthetic inputs**, no relay yet
-- [ ] CI grep: `safety_core.c` never includes the link header
+- [x] CI grep: `safety_core.c` never includes the link header — done 2026-08-16,
+      `firmware/SaftyFW/tools/check_isolation.ps1`
 
 ## M4 — Relay authority
 
