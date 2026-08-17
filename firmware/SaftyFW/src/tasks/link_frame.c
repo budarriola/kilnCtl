@@ -32,6 +32,23 @@ static void pack_u16_le(uint8_t *out, uint16_t v)
     out[1] = (uint8_t)((v >> 8) & 0xFFu);
 }
 
+// Mirror-image reads of the pack_* helpers above, for the ESP->Pico
+// direction (link_frame_unpack_context()). Same house style: no assumption
+// about the host's own endianness, no union-based type punning.
+static uint32_t unpack_u32_le(const uint8_t *in)
+{
+    return (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16) |
+           ((uint32_t)in[3] << 24);
+}
+
+static float unpack_f32_le(const uint8_t *in)
+{
+    uint32_t bits = unpack_u32_le(in);
+    float v;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
 void link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN], bool estop, bool relay_energized,
                              bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
                              uint8_t tc_fault_bits, float amps1, float amps2, float amps3)
@@ -119,6 +136,53 @@ size_t link_frame_pack_fw_version(uint8_t *out, size_t out_cap, uint16_t protoco
     i += 2;
 
     return i;
+}
+
+bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_snapshot_t *out)
+{
+    if (payload == NULL || out == NULL) {
+        return false;
+    }
+    if (length < LINK_FRAME_CONTEXT_MIN_LEN) {
+        return false;
+    }
+
+    // Safe to read: length >= LINK_FRAME_CONTEXT_MIN_LEN (15) guarantees
+    // offset 14 is present.
+    uint8_t zone_count = payload[14];
+    if (zone_count > CONTEXT_SNAPSHOT_MAX_ZONES) {
+        return false;
+    }
+    if (length != LINK_FRAME_CONTEXT_MIN_LEN + (uint16_t)zone_count * LINK_FRAME_CONTEXT_ZONE_LEN) {
+        return false;
+    }
+
+    // Frame is well-formed -- only now do we touch `*out`. Deliberately not
+    // touching out->timestamp_ms (see link_frame.h).
+    out->valid = true;
+    out->flags = payload[1];
+    out->boot_id = payload[2];
+    out->seq = unpack_u32_le(&payload[3]);
+    out->uptime_ms = unpack_u32_le(&payload[7]);
+    out->relay_now_mask = payload[11];
+    out->relay_recent_mask = payload[12];
+    out->recent_window_s = payload[13];
+    out->zone_count = zone_count;
+
+    for (uint8_t i = 0; i < zone_count; i++) {
+        const uint8_t *zp = &payload[LINK_FRAME_CONTEXT_MIN_LEN + (uint16_t)i * LINK_FRAME_CONTEXT_ZONE_LEN];
+        context_zone_t *z = &out->zones[i];
+        z->zone_index = zp[0];
+        z->flags = zp[1];
+        z->setpoint_c = unpack_f32_le(&zp[2]);
+        z->measured_c = unpack_f32_le(&zp[6]);
+        z->sample_counter = zp[10];
+        z->tc_type = zp[11];
+        z->tc_fault = zp[12];
+        // zp[13] reserved, ignored.
+    }
+
+    return true;
 }
 
 bool link_frame_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,

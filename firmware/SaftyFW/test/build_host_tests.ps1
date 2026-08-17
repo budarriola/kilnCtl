@@ -19,7 +19,9 @@ $exe = Join-Path $outDir "saftyfw_host_tests.exe"
 $sources = @(
     (Join-Path $testDir "test_main.c"),
     (Join-Path $testDir "test_safety_guards.c"),
-    (Join-Path $srcDir "safety_guards.c")
+    (Join-Path $testDir "test_link_frame.c"),
+    (Join-Path $srcDir "safety_guards.c"),
+    (Join-Path $srcDir "tasks\link_frame.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

@@ -1,10 +1,15 @@
 // link_task.c -- Phase 7/7b/8 (partial): kilnlink BROADCAST TX of the
-// existing 23-byte status frame and SAFETY_CMD_FW_VERSION, RX handling of
-// ANNOUNCE_VERSION and GET_FW_VERSION, and the receiver hardening
-// (resync-on-0x7E, bounded buffers, no allocation) LINK_PROTOCOL.md section 3
-// requires. Context-frame parsing (SAFETY_CMD_PUSH_CONTEXT), SET_FIRING_
-// CEILING, CLEAR_TRIP, SET_CLOCK and SAFETY_CMD_DIAG are explicitly out of
-// scope for this pass -- see docs/TODO.md Phase 7/8's remaining checkboxes.
+// existing 23-byte status frame, SAFETY_CMD_FW_VERSION and SAFETY_CMD_DIAG
+// (Frame B), RX handling of ANNOUNCE_VERSION, GET_FW_VERSION and now
+// SAFETY_CMD_PUSH_CONTEXT (0x07) -> context_snapshot_t, and the receiver
+// hardening (resync-on-0x7E, bounded buffers, no allocation)
+// LINK_PROTOCOL.md section 3 requires. SET_FIRING_CEILING, CLEAR_TRIP and
+// SET_CLOCK are still explicitly out of scope for this pass -- see
+// docs/TODO.md Phase 7's remaining checkboxes. Parsing the context frame is
+// only half of Phase 7: nothing here yet acts on it (no S2/S3/S4/S6/S10
+// guard exists to disable on SIM_PLANT or reset on a boot_id change -- see
+// the comments at the PUSH_CONTEXT case below and TODO.md's own notes on
+// what remains).
 //
 // THE ONE RULE THAT MATTERS (docs/ARCHITECTURE.md section 2): this file must
 // never reference GPIO6 or the relay, by name, number or symbol -- not even
@@ -29,6 +34,7 @@
 #include <string.h>
 
 #include "FreeRTOS.h"
+#include "semphr.h"
 #include "task.h"
 
 #include "pico/time.h"
@@ -105,6 +111,38 @@ static uint8_t s_boot_id = 0;
 static uint8_t s_rx_assembly[LINK_RX_ASSEMBLY_MAX];
 static size_t s_rx_assembly_len = 0;
 static bool s_rx_collecting = false;
+
+// Context snapshot, mutex-guarded exactly like thermo_task.c's
+// s_snapshot_lock/s_snapshot/s_snapshot_published pattern (see that file --
+// link_task_get_context_snapshot()/link_task_publish_context() below mirror
+// thermo_task_get_snapshot()/thermo_task_publish() call-for-call).
+static SemaphoreHandle_t s_context_lock = NULL;
+static context_snapshot_t s_context_snapshot; // guarded by s_context_lock
+static bool s_context_published = false;
+
+// Single-writer bookkeeping: touched only from link_task_fn / functions it
+// calls (all running on this task), read back only by link_task_send_diag()
+// (also this task) -- no lock needed, same reasoning as s_degraded_no_context
+// above but for a handful of scalars instead of one bool.
+static uint32_t s_context_frames_ok = 0;
+static uint32_t s_context_frames_bad = 0;
+// Tick of the last SUCCESSFUL parse. Never read until s_context_frames_ok > 0
+// (see link_task_send_diag()), so its zero-initialised value before the
+// first frame never gets treated as a real timestamp -- DIAG keeps sending
+// 255 ("never received") until then, per LINK_PROTOCOL.md section 4.
+static TickType_t s_last_context_rx_tick = 0;
+// Latches true the first time a successfully-parsed context frame carries
+// CONTEXT_FLAG_SIM_PLANT. LINK_PROTOCOL.md section 4: "a safety processor
+// correlating against fabricated temperatures is worse than one with no
+// context at all" -- this is a persistent warning, not a live indicator, so
+// it is never cleared once set, even if a later frame omits the bit.
+static bool s_context_sim_seen = false;
+// boot_id change detection (LINK_PROTOCOL.md section 4: "boot_id invalidates
+// history... the Pico resets every correlation window"). Tracked here so the
+// detection exists from day one; see the PUSH_CONTEXT case in
+// link_task_handle_raw_frame() for why acting on a change is still a no-op.
+static uint8_t s_last_context_boot_id = 0;
+static bool s_context_boot_id_known = false;
 
 // --- TX ----------------------------------------------------------------
 
@@ -249,26 +287,111 @@ static void link_task_send_diag(void)
         boot_reason_byte |= LINK_DIAG_BOOT_POWERON;
     }
 
-    // context_age_100ms: 255 (never received) is correct, not a placeholder
-    // -- context-frame parsing (SAFETY_CMD_PUSH_CONTEXT) is Phase 7's unbuilt
-    // half; nothing in this build ever sets any other value.
-    // context_frames_ok/bad: genuinely always 0 for the same reason.
+    // context_age_100ms: 255 ("never received") is real now, not a
+    // placeholder default -- it is the honest answer whenever
+    // s_context_frames_ok == 0, i.e. no well-formed PUSH_CONTEXT has ever
+    // been parsed this boot. Once one has, the age is computed from
+    // s_last_context_rx_tick and clamped to 254 max so a genuinely stale
+    // (but received) context can never be misread as "never received" by
+    // reusing the sentinel -- LINK_PROTOCOL.md doesn't specify the clamp
+    // explicitly, but 254*100ms = 25.4s is well past where the exact value
+    // still matters downstream.
+    // context_frames_ok/bad: real running counts from
+    // link_task_handle_push_context(), one increment per successful/rejected
+    // PUSH_CONTEXT payload respectively.
+    uint8_t context_age_100ms = 255;
+    if (s_context_frames_ok > 0) {
+        TickType_t age_ticks = xTaskGetTickCount() - s_last_context_rx_tick;
+        uint32_t age_ms = (uint32_t)age_ticks * portTICK_PERIOD_MS;
+        uint32_t age_100ms = age_ms / 100u;
+        context_age_100ms = (age_100ms > 254u) ? 254u : (uint8_t)age_100ms;
+    }
+
+    // flags bit0 sim_context_seen: real now, from s_context_sim_seen (see
+    // that variable's declaration for the "latched, never cleared" contract).
+    uint8_t diag_flags = LINK_DIAG_FLAG_CALIBRATION_MISSING;
+    if (s_context_sim_seen) {
+        diag_flags |= LINK_DIAG_FLAG_SIM_CONTEXT_SEEN;
+    }
+    // flags: bit1 calibration_missing = 1 (no config_store, Phase 9 -- this
+    // is the honest current state, not a bug); bit2 estop_unwired_suspect = 0
+    // (no detection heuristic specified in SAFETY_MODEL.md/HARDWARE.md or
+    // built). Note what parsing PUSH_CONTEXT does NOT yet mean: there is
+    // still no context-consuming correlation guard (S2/S3/S4/S6/S10) to
+    // disable on sim_context_seen or reset on a boot_id change -- this frame
+    // reports that the fact is known, not that anything downstream acts on
+    // it yet.
     uint8_t payload[LINK_FRAME_DIAG_LEN];
     link_frame_pack_diag(payload, (uint8_t)trip_reason, warn_mask, trip_mask, uptime_ms,
-                          boot_reason_byte, /* context_age_100ms = */ 255,
-                          /* context_frames_ok = */ 0, /* context_frames_bad = */ 0,
-                          uart_owner_get_tx_dropped(), diag_state,
-                          /* flags: bit0 sim_context_seen = 0 (no context parsing),
-                             bit1 calibration_missing = 1 (no config_store, Phase 9 --
-                             this is the honest current state, not a bug),
-                             bit2 estop_unwired_suspect = 0 (no detection heuristic
-                             specified in SAFETY_MODEL.md/HARDWARE.md or built) */
-                          LINK_DIAG_FLAG_CALIBRATION_MISSING);
+                          boot_reason_byte, context_age_100ms, s_context_frames_ok,
+                          s_context_frames_bad, uart_owner_get_tx_dropped(), diag_state,
+                          diag_flags);
 
     link_task_send_broadcast(payload, LINK_FRAME_DIAG_LEN);
 }
 
 // --- RX ------------------------------------------------------------------
+
+// Mirrors thermo_task_publish()'s short-bounded-wait discipline exactly
+// (same 50ms rationale: a single struct copy under the lock should never
+// contend long enough to matter, but a finite wait still beats a hang).
+static void link_task_publish_context(const context_snapshot_t *snap)
+{
+    if (!s_context_lock) {
+        return;
+    }
+    if (xSemaphoreTake(s_context_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    s_context_snapshot = *snap;
+    s_context_published = true;
+    xSemaphoreGive(s_context_lock);
+}
+
+static void link_task_handle_push_context(const kilnlink_frame_t *frame)
+{
+    context_snapshot_t snap;
+    if (!link_frame_unpack_context(frame->payload, frame->length, &snap)) {
+        // Untrusted wire input rejected by link_frame_unpack_context()'s own
+        // validation (short/truncated/oversized zone_count/length mismatch).
+        // LINK_PROTOCOL.md section 3's "newer context is strictly more
+        // useful than older context" is about the RX assembly path
+        // overwriting an unread-but-good frame, not license to publish a
+        // rejected one -- a rejected frame is noise, not "older good
+        // context", and must never overwrite the last good snapshot.
+        s_context_frames_bad++;
+        return;
+    }
+
+    // link_frame_unpack_context() deliberately never sets timestamp_ms (it
+    // is pure/RTOS-free and has no notion of the local clock) -- this is the
+    // one field only the caller can fill in, same split thermo_task.c uses
+    // for its own snapshot's timestamp.
+    snap.timestamp_ms = to_ms_since_boot(get_absolute_time());
+
+    // boot_id change detection (LINK_PROTOCOL.md section 4: "the Pico resets
+    // every correlation window" on a boot_id change). Tracking the change is
+    // built; acting on it is not -- there is no context-consuming
+    // correlation guard anywhere in this codebase yet (S2/S3/S4/S6/S10 are
+    // all still TODO.md Phase 7 checkboxes), so there is nothing to reset.
+    // This is deliberately NOT wired to a reset call that does not exist;
+    // when S2/S6/S10 land, this is where their window-reset call belongs --
+    // `boot_id_changed` is computed and immediately unused beyond that
+    // future hook, on purpose.
+    bool boot_id_changed = s_context_boot_id_known && snap.boot_id != s_last_context_boot_id;
+    (void)boot_id_changed;
+    s_last_context_boot_id = snap.boot_id;
+    s_context_boot_id_known = true;
+
+    if (snap.flags & CONTEXT_FLAG_SIM_PLANT) {
+        s_context_sim_seen = true; // latched, never cleared -- see the declaration's comment
+    }
+
+    link_task_publish_context(&snap);
+
+    s_context_frames_ok++;
+    s_last_context_rx_tick = xTaskGetTickCount();
+}
 
 static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
 {
@@ -328,11 +451,14 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
             link_task_send_fw_version();
         }
         break;
+    case LINK_FRAME_PUSH_CONTEXT_CMD:
+        link_task_handle_push_context(&frame);
+        break;
     default:
-        // Everything else (context frames, CLEAR_TRIP, SET_FIRING_CEILING,
-        // SET_CLOCK, ...) is genuinely out of scope this pass -- see this
-        // file's header comment and TODO.md Phase 7's remaining checkboxes.
-        // An unrecognised type is silently discarded, matching
+        // Everything else (CLEAR_TRIP, SET_FIRING_CEILING, SET_CLOCK, ...)
+        // is genuinely out of scope this pass -- see this file's header
+        // comment and TODO.md Phase 7's remaining checkboxes. An
+        // unrecognised type is silently discarded, matching
         // LINK_PROTOCOL.md's own additive-compatibility principle: "a peer
         // that has never heard of it discards it."
         break;
@@ -425,6 +551,21 @@ bool link_task_start(void)
     s_rx_assembly_len = 0;
     s_rx_collecting = false;
 
+    s_context_frames_ok = 0;
+    s_context_frames_bad = 0;
+    s_last_context_rx_tick = 0;
+    s_context_sim_seen = false;
+    s_last_context_boot_id = 0;
+    s_context_boot_id_known = false;
+    s_context_published = false;
+
+    // Mutex-guarded snapshot, same pattern/failure handling as
+    // thermo_task_start()'s s_snapshot_lock.
+    s_context_lock = xSemaphoreCreateMutex();
+    if (!s_context_lock) {
+        return false;
+    }
+
     BaseType_t ok = xTaskCreate(link_task_fn, "link_task", LINK_TASK_STACK_WORDS, NULL,
                                  SAFTYFW_PRIO_LINK_TASK, &s_task_handle);
     if (ok != pdPASS) {
@@ -438,6 +579,33 @@ bool link_task_start(void)
 bool link_task_get_degraded_no_context(void)
 {
     return s_degraded_no_context;
+}
+
+bool link_task_get_context_snapshot(context_snapshot_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    out->timestamp_ms = 0;
+    out->valid = false;
+    out->flags = 0;
+    out->boot_id = 0;
+    out->seq = 0;
+    out->uptime_ms = 0;
+    out->relay_now_mask = 0;
+    out->relay_recent_mask = 0;
+    out->recent_window_s = 0;
+    out->zone_count = 0;
+
+    if (!s_context_lock || !s_context_published) {
+        return false;
+    }
+    if (xSemaphoreTake(s_context_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    *out = s_context_snapshot;
+    xSemaphoreGive(s_context_lock);
+    return true;
 }
 
 bool link_task_send_log(const uint8_t *payload, uint8_t length)

@@ -395,11 +395,35 @@ S9) are explicitly out of scope for this pass — they need `link_task`'s
 - [x] Receiver hardening: resync on `0x7E` from any state, bounded buffers,
       break tolerated as "peer not up", **no allocation**. `link_task.c`'s
       `link_task_rx_process_byte()`/`link_task_handle_raw_frame()`.
-- [ ] Parse `SAFETY_CMD_PUSH_CONTEXT` (0x07) → `context_snapshot_t`.
-- [ ] `boot_id` change resets every correlation window.
-- [ ] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently.
-      A safety processor correlating against fabricated temperatures is worse
-      than one with no context at all.
+- [x] Parse `SAFETY_CMD_PUSH_CONTEXT` (0x07) → `context_snapshot_t` (2026-08-17,
+      `link_task.c`): `link_task_handle_push_context()` calls the (separately
+      landed) `link_frame_unpack_context()`, stamps `timestamp_ms` locally
+      (the unpacker deliberately never touches it), publishes under a new
+      mutex-guarded `s_context_lock`/`s_context_snapshot` pair matching
+      `thermo_task.c`'s publish/get pattern exactly, and exposes it via the
+      new `link_task_get_context_snapshot()`. A rejected/malformed payload
+      only increments `s_context_frames_bad` and never overwrites the last
+      good snapshot. `link_task_send_diag()`'s `context_age_100ms`/
+      `context_frames_ok`/`context_frames_bad` are real now instead of the
+      old hardcoded 255/0/0.
+- [~] `boot_id` change resets every correlation window (2026-08-17,
+      `link_task.c`): the **tracking** exists --
+      `link_task_handle_push_context()` detects `snap.boot_id !=
+      s_last_context_boot_id` and updates it every frame -- but there is
+      genuinely no correlation guard anywhere in this codebase yet for a
+      detected change to reset (S2/S6/S10 below are still unchecked), so the
+      detection is currently a documented no-op. Left partial rather than
+      checked off outright, matching how `zero_counts` and the latching-trip
+      entries elsewhere in this file mark "mechanism exists, not yet wired
+      to a consumer."
+- [~] **Honour the `SIM_PLANT` flag**: disable S2/S3/S4 and warn persistently
+      (2026-08-17, `link_task.c`): the **seen-tracking and warning** are real
+      -- `s_context_sim_seen` latches true on the first successfully-parsed
+      frame with `CONTEXT_FLAG_SIM_PLANT` set and never clears, and DIAG's
+      `sim_context_seen` flag bit reports it persistently. S2/S3/S4
+      themselves do not exist yet to be disabled (see this phase's own S2/S6/
+      S10 and S3/S4-enable items below, still unchecked) -- so this is
+      honestly a partial, not a completed feature.
 - [ ] Handle `SET_FIRING_CEILING` (0x09) → S1's `effective_ceiling`.
       **Clamp with `min()`** — the ESP may only ever tighten it.
 - [ ] Handle `CLEAR_TRIP` (0x0A), refused while the condition holds and

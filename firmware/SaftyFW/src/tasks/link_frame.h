@@ -21,6 +21,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "snapshots.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -83,7 +85,7 @@ size_t link_frame_pack_fw_version(uint8_t *out, size_t out_cap, uint16_t protoco
 #define LINK_DIAG_BOOT_BROWNOUT 0x04u // never set in this build -- no source
 
 // flags byte (offset 25).
-#define LINK_DIAG_FLAG_SIM_CONTEXT_SEEN      0x01u // always 0 -- no context-frame parsing yet (Phase 7)
+#define LINK_DIAG_FLAG_SIM_CONTEXT_SEEN      0x01u // set once a context frame with CONTEXT_FLAG_SIM_PLANT has been seen (latched for the boot, link_task.c)
 #define LINK_DIAG_FLAG_CALIBRATION_MISSING   0x02u // always 1 -- no config_store yet (Phase 9)
 #define LINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT 0x04u // always 0 -- no detection heuristic specified/built
 
@@ -100,6 +102,30 @@ void link_frame_pack_diag(uint8_t out[LINK_FRAME_DIAG_LEN], uint8_t trip_reason,
                            uint8_t boot_reason, uint8_t context_age_100ms,
                            uint32_t context_frames_ok, uint32_t context_frames_bad,
                            uint32_t tx_frames_dropped, uint8_t state, uint8_t flags);
+
+// --- ESP -> Pico: SAFETY_CMD_PUSH_CONTEXT (0x07) -----------------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Untrusted-wire input: every
+// length and count is validated before any field is read, and nothing is
+// written to `*out` unless the whole frame is well-formed (a caller must
+// never merge a partially-unpacked snapshot with the previous one).
+#define LINK_FRAME_PUSH_CONTEXT_CMD  0x07u
+#define LINK_FRAME_CONTEXT_ZONE_LEN  14u
+// Header only (offsets 0..14 inclusive), zone_count == 0.
+#define LINK_FRAME_CONTEXT_MIN_LEN   15u
+
+// Unpacks a SAFETY_CMD_PUSH_CONTEXT payload of `length` bytes (payload[0] is
+// expected to already be LINK_FRAME_PUSH_CONTEXT_CMD -- callers dispatch on
+// that before calling this). Returns true iff:
+//   - length >= LINK_FRAME_CONTEXT_MIN_LEN,
+//   - the header's zone_count (offset 14) is <= CONTEXT_SNAPSHOT_MAX_ZONES,
+//   - length == LINK_FRAME_CONTEXT_MIN_LEN + zone_count * LINK_FRAME_CONTEXT_ZONE_LEN
+//     exactly (no trailing garbage, no truncation).
+// On success, `out->valid` is set true and every other field is populated;
+// `out->timestamp_ms` is left untouched (the caller stamps local receive
+// time, which this pure function -- deliberately RTOS/SDK-free, host-
+// testable like the rest of link_frame.c -- has no way to know). On failure,
+// `*out` is left completely unmodified.
+bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_snapshot_t *out);
 
 // --- Mutual version compatibility --------------------------------------------
 // LINK_PROTOCOL.md section 4's exact formula, both directions:

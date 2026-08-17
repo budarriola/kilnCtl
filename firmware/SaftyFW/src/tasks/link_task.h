@@ -14,6 +14,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "snapshots.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +38,23 @@ bool link_task_start(void);
 // reader, once they exist; it is published now so that work has something to
 // read from day one.
 bool link_task_get_degraded_no_context(void);
+
+// Copies the newest well-formed SAFETY_CMD_PUSH_CONTEXT (0x07) snapshot into
+// `*out`, mutex-guarded (same short-bounded-wait discipline as
+// thermo_task_get_snapshot() -- see thermo_task.c). `*out` is always
+// zero/false-initialised first (out->valid = false, out->zone_count = 0,
+// etc.), then overwritten from the locked snapshot only if one has ever been
+// published; the "nothing received yet" default is therefore always safe to
+// read even on a false return. Returns false if `out` is NULL, no context
+// frame has ever been successfully parsed this boot, or the lock could not
+// be taken within its timeout.
+//
+// Has no caller yet in this codebase -- Phase 7's context-dependent guards
+// (S2/S6/S10, TODO.md) are the intended future reader, once they exist; it
+// is published now so that work has something to read from day one, the
+// same "exposed but unconsumed" state several of Phase 4/6's own getters are
+// already in.
+bool link_task_get_context_snapshot(context_snapshot_t *out);
 
 // Hands a pre-built LOG payload (byte0 = level, rest ASCII "TAG: message" --
 // see CommonFW/docs/LINK_PROTOCOL.md section 6 "Frame F") to uart_owner as a
