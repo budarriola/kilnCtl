@@ -15,8 +15,8 @@ repository.
 
 | GPIO | Signal (schematic net) | Direction | What it is |
 |------|------------------------|-----------|------------|
-| 4  | `DataToSafty`        | in  | Safety link **RX** (U3 collector). Inverted, no external pull-up. |
-| 5  | `DataFromSafty`      | out | Safety link **TX** (drives U2's LED). Inverted. |
+| 4  | `DataToSafty`        | out | Safety link **TX** (drives U2's LED). Inverted. |
+| 5  | `DataFromSafty`      | in  | Safety link **RX** (U3 collector). Inverted, R15 1k external pull-up. |
 | 6  | `Fault`              | out | Isolated fault line to the safety processor (drives U1's LED). |
 | 7  | `IO_Expander_IRQ`    | in  | SX1509 `~INT`, active low. |
 | 8  | `SDA`                | i/o | I2C data (SX1509, and J2/J6 pass-through). |
@@ -137,14 +137,18 @@ Three TCMT1109 optocouplers, and nothing else, cross between `GND_Main` and
 
 | Part | LED driven by | Collector (output) | Meaning |
 |------|---------------|--------------------|---------|
-| U3 | Pico `PicoTx` (GPIO4) via R7 390R | ESP GPIO4 (`DataToSafty`) | Pico -> ESP data |
-| U2 | ESP GPIO5 (`DataFromSafty`) via R12 390R | Pico `PicoRx` (GPIO5), R9 1k pull-up | ESP -> Pico data |
+| U3 | Pico `PicoTx` (GPIO4, safety side) via R7 390R | ESP GPIO5 (`DataFromSafty`), R15 1k pull-up | Pico -> ESP data |
+| U2 | ESP GPIO4 (`DataToSafty`) via R12 390R | Pico `PicoRx` (GPIO5), R9 1k pull-up | ESP -> Pico data |
 | U1 | ESP GPIO6 (`Fault`) via R11 390R | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault assert |
 
 Three things follow, and all three are easy to get wrong:
 
-1. **The data net names are backwards.** `DataToSafty` is the ESP's receive and
-   `DataFromSafty` is its transmit. Trace U2/U3 above if this ever looks wrong.
+1. **U3 is drawn mirrored relative to U1/U2**, LED on the *safety* side instead
+   of the *main* side — reading it with U1/U2's orientation is what produces a
+   swapped pin assignment. Read straightforwardly, the net names actually match
+   the ESP's direction here: `DataToSafty` (GPIO4) is TX, `DataFromSafty`
+   (GPIO5) is RX. The independent check is R15: a 1k pull-up only belongs on an
+   open collector, and R15 sits on GPIO5, confirming it as the RX pin.
 2. **Both data directions are logically inverted.** A high on the driving side
    lights the LED, which pulls the receiving collector low. An idle-high UART
    line therefore arrives idle-low; the firmware calls
@@ -154,8 +158,10 @@ Three things follow, and all three are easy to get wrong:
    There is no hardware path for the Pico to signal the ESP — everything coming
    back does so over the isolated UART.
 
-R15 (1k to 3.3V_Main) idles the TX net high; GPIO4 has no external pull-up, so
-the internal one must be enabled.
+R15 (1k to 3.3V_Main) sits on GPIO5, the RX net, not TX — with the ESP in
+reset, GPIO4 (TX) is high-impedance and nothing pulls it, so U2's LED is dark
+and the Pico's RX reads a clean idle-high, not a break. GPIO5 has no other
+external pull-up besides R15; the driver's internal one is belt-and-braces.
 
 ## Safety processor (A1, RP2040) — for reference
 
