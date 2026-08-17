@@ -49,21 +49,35 @@ typedef enum {
 } thermal_guard_trip_t;
 
 /* Per-zone thresholds. max_temp_c/min_temp_c come from zone_cfg_t
- * (user-configurable); everything else is a firmware-wide default for this
- * pass -- TODO.md 6A.3's "every threshold above is config, not a constant"
- * is the target, but exposing all of these on the settings page in one
- * change makes it unmanageable (6A.9 already flags the page needs to
- * become collapsible for this reason). Per-zone override for the rest is
- * future work, tracked in TODO.md, not silently dropped. Guard 4's own
- * settle/drift band is DRIFT_HYSTERESIS_C (thermal_guard.c) -- deliberately
- * NOT the bang-bang hysteresis (heater_output.h owns that one; it's too
- * tight for this guard, see thermal_guard.c's guard-4 comment). */
+ * (user-configurable), as do every field below through the rest of the
+ * struct (TODO.md 6A.3's "every threshold above is config, not a constant" --
+ * closed 2026-08-16 for the thresholds it names explicitly: wrong-dir
+ * rate/window, off-settle, runaway rate/margin, drift period, sensor
+ * debounce count, frozen window). Every one of these follows the same
+ * "0 means not configured, thermal_guard.c substitutes its own firmware-wide
+ * default" convention as sanity_rate_c_per_min -- unlike cross_zone_max_delta_c
+ * below, 0 here does NOT disable the guard, since these protect against
+ * failures a kiln can hit with no operator tuning at all and must stay armed
+ * by default. Guard 4's own settle/drift band is DRIFT_HYSTERESIS_C
+ * (thermal_guard.c, still a firmware constant -- not asked for by TODO.md's
+ * list) -- deliberately NOT the bang-bang hysteresis (heater_output.h owns
+ * that one; it's too tight for this guard, see thermal_guard.c's guard-4
+ * comment). Guard 1's PROGRESS_WINDOW_S/PROGRESS_DUTY_MIN are likewise still
+ * firmware constants -- also not named in TODO.md's list. */
 typedef struct {
     float max_temp_c;              /* guard 5 -- mandatory in spirit; 0 means "not set", treated as no ceiling */
     float min_temp_c;               /* guard 5 -- default -20 */
     float sanity_rate_c_per_min;    /* guards 1/2's rate threshold -- zone_cfg_t.sanity_rate_c_per_min,
                                      * 0 substituted with a default by the caller (same rule
                                      * profile_executor.c already applies elsewhere) */
+    float wrong_dir_window_s;       /* guard 2's rolling window; 0 -> WRONG_DIR_WINDOW_S */
+    float wrong_dir_rate_c_per_min; /* guard 2's falling-rate trip threshold; 0 -> WRONG_DIR_RATE_C_PER_MIN */
+    float off_settle_s;             /* guard 3's settle time before the rate/margin checks start; 0 -> OFF_SETTLE_S */
+    float runaway_rate_c_per_min;   /* guard 3's rate trip threshold; 0 -> RUNAWAY_RATE_C_PER_MIN */
+    float runaway_margin_c;         /* guard 3's absolute-rise trip threshold; 0 -> RUNAWAY_MARGIN_C */
+    float drift_period_s;           /* guard 4's sustained-excursion window; 0 -> DRIFT_PERIOD_S */
+    float sensor_fault_debounce_ticks; /* guard 6's consecutive-bad-read count; 0 -> SENSOR_FAULT_DEBOUNCE_TICKS */
+    float frozen_window_s;          /* guard 7's value-identity window; 0 -> FROZEN_WINDOW_S */
     /* Guard 8. **0 disables the check**, and that is the shipped default:
      * TODO.md 6A.5's last bullet is explicit that this threshold should be
      * informed by the measured cross-gain matrix K, and no real K has ever

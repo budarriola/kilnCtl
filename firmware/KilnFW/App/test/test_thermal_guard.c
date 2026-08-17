@@ -298,6 +298,66 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped, "guard 7 does not trip when the reading is actually moving");
     }
 
+    /* TODO.md 6A.3's remaining named thresholds, per-zone override (2026-08-16):
+     * a zone that sets sensor_fault_debounce_ticks=1 trips guard 6 on the
+     * very first bad read, not the third -- and a zone that leaves it at 0
+     * still gets the firmware default (3), covered by the debounce test
+     * above using the same all-zero cfg every other pre-existing test uses. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f,
+                                    .sensor_fault_debounce_ticks = 1.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.sensor_ok = false;
+        TEST_CHECK(thermal_guard_tick(&s, &cfg, &in) == true, "debounce override=1 trips guard 6 on the 1st bad read");
+    }
+
+    /* frozen_window_s override: a zone that sets it to 20s trips guard 7
+     * after 3 ticks (30s) at dt_s=10, not the 65 ticks the firmware default
+     * (600s) needs -- same input pattern as the unmodified-cfg guard 7 test
+     * above, just faster. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.0f,
+                                    .frozen_window_s = 20.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 1.0f;
+        in.measurement_c = 300.0f;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) {
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "frozen_window_s override=20 trips guard 7 well before the 600s default would");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_FROZEN, "reason is FROZEN");
+    }
+
+    /* runaway_margin_c override: a zone that tightens the margin to 5C trips
+     * guard 3 on a rise the firmware default (20C) would still be quiet
+     * about at the same point in the same rise used by the "does not trip on
+     * a normal cooldown/idle hold" test above (which never rises at all --
+     * this uses a small, steady rise instead so the tighter margin, not the
+     * rate check, is what fires). */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f,
+                                    .runaway_margin_c = 5.0f, .runaway_rate_c_per_min = 1000.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.commanded_duty = 0.0f;
+        in.measurement_c = 200.0f;
+        bool tripped = false;
+        /* 0.05C/tick x 10s dt -> 0.3C/min, well under even a very loose rate
+         * threshold -- isolates the margin check, which crosses 5C at tick 100. */
+        for (int i = 0; i < 150 && !tripped; i++) {
+            in.measurement_c += 0.05f;
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "runaway_margin_c override=5 trips guard 3 on a rise the 20C default would still tolerate");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_RUNAWAY, "reason is RUNAWAY");
+    }
+
     /* thermal_guard_clear() fully un-latches and resets windows. */
     {
         thermal_guard_state_t s;

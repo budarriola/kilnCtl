@@ -952,6 +952,35 @@ static bool reload_zone_config(uint8_t zi)
         }
     }
 
+    /* TODO.md 6A.3's remaining named thresholds -- same "raw pass-through,
+     * thermal_guard.c owns the 0->default substitution" reasoning as run()'s
+     * own guard_cfg build above, and the same loud-logging-per-field
+     * discipline as every other guard threshold in this function. */
+    {
+        float wd_window_s = 0.0f, wd_rate = 0.0f, off_settle_s = 0.0f, runaway_rate = 0.0f;
+        float runaway_margin = 0.0f, drift_period_s = 0.0f, debounce_ticks = 0.0f, frozen_window_s = 0.0f;
+        if (zones_config_get_guard_thresholds(zi, &wd_window_s, &wd_rate, &off_settle_s, &runaway_rate,
+                                              &runaway_margin, &drift_period_s, &debounce_ticks,
+                                              &frozen_window_s)) {
+#define RELOAD_GUARD_FIELD(field, new_val, fmt)                                                          \
+            if ((new_val) != z->guard_cfg.field) {                                                       \
+                ESP_LOGW(TAG, "OPERATOR ACTION MID-FIRING: zone %u guard " #field " " fmt " -> " fmt,     \
+                         zi, (double)z->guard_cfg.field, (double)(new_val));                              \
+                z->guard_cfg.field = (new_val);                                                           \
+                changed = true;                                                                           \
+            }
+            RELOAD_GUARD_FIELD(wrong_dir_window_s, wd_window_s, "%.1f")
+            RELOAD_GUARD_FIELD(wrong_dir_rate_c_per_min, wd_rate, "%.3f")
+            RELOAD_GUARD_FIELD(off_settle_s, off_settle_s, "%.1f")
+            RELOAD_GUARD_FIELD(runaway_rate_c_per_min, runaway_rate, "%.3f")
+            RELOAD_GUARD_FIELD(runaway_margin_c, runaway_margin, "%.1f")
+            RELOAD_GUARD_FIELD(drift_period_s, drift_period_s, "%.1f")
+            RELOAD_GUARD_FIELD(sensor_fault_debounce_ticks, debounce_ticks, "%.0f")
+            RELOAD_GUARD_FIELD(frozen_window_s, frozen_window_s, "%.1f")
+#undef RELOAD_GUARD_FIELD
+        }
+    }
+
     float cross_zone_delta_c = 0.0f;
     if (zones_config_get_cross_zone_delta(zi, &cross_zone_delta_c) &&
         cross_zone_delta_c != z->guard_cfg.cross_zone_max_delta_c) {
@@ -1714,9 +1743,28 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         zones_config_get_temp_limits(zi, &max_temp_c, &min_temp_c);
         zones_config_get_sanity_rate(zi, &sanity_rate);
         zones_config_get_cross_zone_delta(zi, &cross_zone_delta_c);
+        /* TODO.md 6A.3's remaining named thresholds: raw pass-through, 0 and
+         * all, straight from zones_config_get_guard_thresholds() -- unlike
+         * sanity_rate_c_per_min above (whose 0->default substitution happens
+         * HERE, at the caller), these substitute inside thermal_guard.c
+         * itself (effective_f()/effective_ticks()), so there is exactly one
+         * place that owns each fallback constant rather than two copies that
+         * can drift apart. */
+        float wd_window_s = 0.0f, wd_rate = 0.0f, off_settle_s = 0.0f, runaway_rate = 0.0f;
+        float runaway_margin = 0.0f, drift_period_s = 0.0f, debounce_ticks = 0.0f, frozen_window_s = 0.0f;
+        zones_config_get_guard_thresholds(zi, &wd_window_s, &wd_rate, &off_settle_s, &runaway_rate,
+                                          &runaway_margin, &drift_period_s, &debounce_ticks, &frozen_window_s);
         z->guard_cfg = (thermal_guard_cfg_t){
             .max_temp_c = max_temp_c, .min_temp_c = min_temp_c,
             .sanity_rate_c_per_min = (sanity_rate > 0.0f) ? sanity_rate : PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN,
+            .wrong_dir_window_s = wd_window_s,
+            .wrong_dir_rate_c_per_min = wd_rate,
+            .off_settle_s = off_settle_s,
+            .runaway_rate_c_per_min = runaway_rate,
+            .runaway_margin_c = runaway_margin,
+            .drift_period_s = drift_period_s,
+            .sensor_fault_debounce_ticks = debounce_ticks,
+            .frozen_window_s = frozen_window_s,
             /* Guard 8: whatever the operator entered on the zones page, and
              * 0 (the default) still means disabled. No substituted default
              * here on purpose -- the number is supposed to come from a

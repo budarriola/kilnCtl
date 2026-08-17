@@ -32,16 +32,19 @@ These block sequencing, not just polish — get them settled first.
       the dashboard/profile pages (sections 2/3/5/6) reuse this same server
       or need WebSocket/SSE push is still open; this only settled the
       Wi-Fi-config slice.
-- [ ] **Who drives relays for a running profile?** A new on-device
-      profile-executor task, distinct from the UART bridge's `SET_RELAY`
-      path but subject to the *same* gate (now `relay_authority_on_blocked()`,
-      see below) — a profile must not be able to
-      energize a relay that a safety fault is blocking. Needs a shared
-      "who's allowed to turn this relay on right now" chokepoint rather
-      than two independent callers of `kiln_io_set_relay`. The chokepoint
-      itself now exists (see the sub-item below); the profile executor that
-      would be its second caller is still unbuilt — needs the relay/expander
-      hardware, not present yet.
+- [x] **Who drives relays for a running profile?** `profile_executor.c` is
+      the on-device profile-executor task, distinct from the UART bridge's
+      `SET_RELAY` path but subject to the *same* gate
+      (`relay_authority_on_blocked()`/`relay_authority_zone_blocked()`) —
+      built, see section 6. The ownership arbitration below (which caller
+      wins when a manual command and a running profile want the same relay)
+      is also built: `relay_authority_claim_mask()`/`_release_mask()` at
+      profile start/pause/resume/halt, checked by
+      `relay_authority_manual_blocked_by_owner()` in `uart_bridge.c`'s
+      `SX_SET_RELAY`/`SET_RELAY_MASK` and `dashboard_http.c`'s `/api/relay`.
+      Logic-verified only (host build + `idf.py build` clean, `-Wall -Wextra
+      -Werror`) — no relay/expander hardware is attached yet to observe a
+      manual command actually get refused against a live claimed relay.
   - [x] Decide: does the profile executor call `kiln_io_set_relay`
         directly, or through the same bridge-level gate function refactored
         into `kiln_io`/a new `relay_authority` module so *every* caller
@@ -1327,19 +1330,36 @@ Common trip semantics — these are not per-check decisions:
       stale about one zone dropping out; and a transition write that fails
       makes the record lie (a DONE that did not land reads back as
       interrupted), which is unfixable at that layer and logs at ERROR.
-- [ ] **Every threshold above is config, not a constant.** Kconfig supplies
+- [~] **Every threshold above is config, not a constant.** Kconfig supplies
       the compile-time defaults (matching how the rest of this firmware does
       hardware config), `zone_cfg_t` holds the per-zone overrides, and the
       Settings → Thermocouples & Zones page edits them. The request explicitly
       deferred picking the sanity rate ("I will determine later"), and every
       other number above is a first guess that a real firing will correct.
-      Partial: only `max_temp_c`, `min_temp_c`, and the pre-existing
-      `sanity_rate_c_per_min` made it onto `zone_cfg_t`/the settings page
-      this pass. Every other guard threshold (wrong-dir rate/window,
-      off-settle, runaway rate/margin, drift period, sensor debounce count,
-      frozen window) is still a firmware-wide constant in `thermal_guard.c`.
-      Left unchecked because most thresholds are still constants, not
-      per-zone config.
+      **The per-zone-override half closed 2026-08-16** (the Kconfig-defaults
+      half did not -- the fallback numbers stay `#define`s in
+      `thermal_guard.c`, same as before this pass; nothing asked for them to
+      become tunable at compile time, only per-zone at runtime). The
+      remaining named thresholds (wrong-dir
+      rate/window, off-settle, runaway rate/margin, drift period, sensor
+      debounce count, frozen window) are now per-zone overrides too --
+      `thermal_guard_cfg_t` grew the 8 fields, `zone_cfg_t`
+      (`ZONES_CFG_VERSION` 2->3) stores them, a new bundled getter
+      `zones_config_get_guard_thresholds()` reads them, `profile_executor.c`
+      and `autotune_engine.c` both wire them into every `guard_cfg` they
+      build (including the loud per-field mid-firing reload path, same
+      discipline as every other guard threshold there), and
+      `zones_page.html` exposes them behind a `<details>` "Advanced guard
+      thresholds" disclosure per 6A.9's own note that the page needs to
+      become collapsible for this reason. Same "0 = firmware default"
+      convention as `sanity_rate_c_per_min` throughout -- unlike
+      `cross_zone_max_delta_c`, 0 does not disable a guard. Host-tested (3
+      new checks in `test_thermal_guard.c`, 221/221 passing) and
+      `idf.py build` clean; **no hardware to observe an override actually
+      change a trip on a real firing** -- same caveat as the ownership item
+      above. Guard 1's `PROGRESS_WINDOW_S`/`PROGRESS_DUTY_MIN` and guard 4's
+      `DRIFT_HYSTERESIS_C` remain firmware constants -- TODO.md's list above
+      never named them.
 - [ ] **A guard must never be disable-able from the web UI without an
       explicit, logged, per-firing acknowledgement.** If a "disable thermal
       protection" affordance exists at all it belongs behind a Kconfig option

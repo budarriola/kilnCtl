@@ -5,9 +5,11 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Firmware-wide defaults for the thresholds not yet promoted to per-zone
- * config -- see thermal_guard.h's doc comment. Values and rationale are
- * TODO.md 6A.3's own first-pass numbers, carried over verbatim. */
+/* Fallback defaults, substituted by effective_f()/effective_ticks() below
+ * whenever a zone's thermal_guard_cfg_t field is 0 ("not configured") --
+ * see thermal_guard.h's doc comment. Values and rationale are TODO.md 6A.3's
+ * own first-pass numbers, carried over verbatim from when these were the
+ * only values that existed. */
 #define PROGRESS_DUTY_MIN 0.5f
 #define PROGRESS_WINDOW_S 300.0f
 #define WRONG_DIR_RATE_C_PER_MIN 1.0f
@@ -43,9 +45,16 @@ static void trip(thermal_guard_state_t *state, thermal_guard_trip_t reason, cons
     va_end(ap);
 }
 
-static float effective_rate(float cfg_rate_c_per_min, float fallback)
+/* Generic "0 means not configured" substitution -- used for every
+ * thermal_guard_cfg_t threshold field, not just rates, hence the name. */
+static float effective_f(float cfg_val, float fallback)
 {
-    return (cfg_rate_c_per_min > 0.0f) ? cfg_rate_c_per_min : fallback;
+    return (cfg_val > 0.0f) ? cfg_val : fallback;
+}
+
+static uint8_t effective_ticks(float cfg_val, uint8_t fallback)
+{
+    return (cfg_val > 0.0f) ? (uint8_t)cfg_val : fallback;
 }
 
 bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t *cfg,
@@ -58,7 +67,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     /* --- Guard 6: sensor validity, debounced ------------------------------ */
     if (!in->sensor_ok) {
         state->sensor_fault_streak++;
-        if (state->sensor_fault_streak >= SENSOR_FAULT_DEBOUNCE_TICKS) {
+        if (state->sensor_fault_streak >= effective_ticks(cfg->sensor_fault_debounce_ticks, SENSOR_FAULT_DEBOUNCE_TICKS)) {
             trip(state, THERMAL_GUARD_TRIP_SENSOR_INVALID,
                  "sensor invalid for %u consecutive reads", (unsigned)state->sensor_fault_streak);
             return true;
@@ -90,7 +99,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
             state->frozen_elapsed_s = 0.0f;
         } else {
             state->frozen_elapsed_s += in->dt_s;
-            if (state->frozen_elapsed_s >= FROZEN_WINDOW_S) {
+            if (state->frozen_elapsed_s >= effective_f(cfg->frozen_window_s, FROZEN_WINDOW_S)) {
                 trip(state, THERMAL_GUARD_TRIP_FROZEN, "reading unchanged at %.1fC for %.0fs while duty > 0",
                      (double)in->measurement_c, (double)state->frozen_elapsed_s);
                 return true;
@@ -100,7 +109,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         state->frozen_window_active = false;
     }
 
-    float rate_cfg = effective_rate(cfg->sanity_rate_c_per_min, 0.5f);
+    float rate_cfg = effective_f(cfg->sanity_rate_c_per_min, 0.5f);
 
     /* --- Guards 1 & 2: heating-failed / wrong-direction --------------------
      * Both share one rolling window over "duty is at/above the progress
@@ -114,7 +123,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
             state->progress_window_elapsed_s = 0.0f;
         } else {
             state->progress_window_elapsed_s += in->dt_s;
-            float window_s = (error > 0.0f) ? PROGRESS_WINDOW_S : WRONG_DIR_WINDOW_S;
+            float window_s = (error > 0.0f) ? PROGRESS_WINDOW_S : effective_f(cfg->wrong_dir_window_s, WRONG_DIR_WINDOW_S);
             if (state->progress_window_elapsed_s >= window_s) {
                 float delta = in->measurement_c - state->progress_window_start_c;
                 float elapsed_min = state->progress_window_elapsed_s / 60.0f;
@@ -133,7 +142,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                      * a miswired zone driving full output making things
                      * worse. */
                     float falling_c_per_min = -delta / elapsed_min;
-                    if (falling_c_per_min > WRONG_DIR_RATE_C_PER_MIN) {
+                    if (falling_c_per_min > effective_f(cfg->wrong_dir_rate_c_per_min, WRONG_DIR_RATE_C_PER_MIN)) {
                         trip(state, THERMAL_GUARD_TRIP_WRONG_DIRECTION,
                              "heating commanded but temperature falling %.2fC/min", (double)falling_c_per_min);
                         return true;
@@ -152,13 +161,18 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
 
     /* --- Guard 3: runaway with heat off (welded contact) ------------------- */
     if (in->commanded_duty <= 0.0f) {
+        /* Computed once per tick so the settle threshold and the "sample too
+         * short to rate" cutoff below always agree on the same window,
+         * whatever this zone's override is -- the false positive this guard
+         * fixed on hardware (see below) was exactly a mismatch of this kind. */
+        float off_settle_s = effective_f(cfg->off_settle_s, OFF_SETTLE_S);
         if (!state->off_window_active) {
             state->off_window_active = true;
             state->off_window_elapsed_s = 0.0f;
             state->runaway_baseline_c = in->measurement_c;
         } else {
             state->off_window_elapsed_s += in->dt_s;
-            if (state->off_window_elapsed_s >= OFF_SETTLE_S) {
+            if (state->off_window_elapsed_s >= off_settle_s) {
                 /* Re-baseline exactly once, at the instant the settle window
                  * ends, so the rise and the time it is divided by cover the
                  * SAME interval.
@@ -189,8 +203,10 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                 float elapsed_min = state->runaway_rate_elapsed_s / 60.0f;
                 /* Below ~a third of the settle window the sample is too short
                  * to divide by; the margin check still applies meanwhile. */
-                float rate = (elapsed_min >= (OFF_SETTLE_S / 3.0f) / 60.0f) ? rate_delta / elapsed_min : 0.0f;
-                if (rate > RUNAWAY_RATE_C_PER_MIN || delta > RUNAWAY_MARGIN_C) {
+                float rate = (elapsed_min >= (off_settle_s / 3.0f) / 60.0f) ? rate_delta / elapsed_min : 0.0f;
+                float runaway_rate_cfg = effective_f(cfg->runaway_rate_c_per_min, RUNAWAY_RATE_C_PER_MIN);
+                float runaway_margin_cfg = effective_f(cfg->runaway_margin_c, RUNAWAY_MARGIN_C);
+                if (rate > runaway_rate_cfg || delta > runaway_margin_cfg) {
                     trip(state, THERMAL_GUARD_TRIP_RUNAWAY,
                          "heat commanded off %.0fs but temperature rose %.1fC (rate %.2fC/min) -- possible welded relay",
                          (double)state->off_window_elapsed_s, (double)delta, (double)rate);
@@ -222,7 +238,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         state->at_setpoint_elapsed_s = 0.0f;
     } else if (state->at_setpoint_window_active) {
         state->at_setpoint_elapsed_s += in->dt_s;
-        if (state->at_setpoint_elapsed_s >= DRIFT_PERIOD_S) {
+        if (state->at_setpoint_elapsed_s >= effective_f(cfg->drift_period_s, DRIFT_PERIOD_S)) {
             trip(state, THERMAL_GUARD_TRIP_DRIFT, "drifted >%.0fC from setpoint for %.0fs after settling",
                  (double)DRIFT_HYSTERESIS_C, (double)state->at_setpoint_elapsed_s);
             return true;

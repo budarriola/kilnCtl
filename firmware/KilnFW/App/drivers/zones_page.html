@@ -265,6 +265,33 @@ function zoneBlock(z, i, relayCount) {
     'kiln\'s zones legitimately drift apart -- real kilns stratify, and a too-tight value ' +
     'here stops a good firing</label>' +
     '<input type="number" step="5" class="xzone" value="' + (z.cross_zone_max_delta_c || 0) + '">' +
+    '<details class="advguards"><summary>Advanced guard thresholds (0 = firmware default -- ' +
+    'leave alone unless you know why)</summary>' +
+      '<div class="row2">' +
+        '<div><label>Wrong-direction window (s)</label>' +
+        '<input type="number" step="10" class="wdwindow" value="' + (z.guard_wrong_dir_window_s || 0) + '"></div>' +
+        '<div><label>Wrong-direction rate (&deg;C/min)</label>' +
+        '<input type="number" step="0.1" class="wdrate" value="' + (z.guard_wrong_dir_rate_c_per_min || 0) + '"></div>' +
+      '</div>' +
+      '<div class="row2">' +
+        '<div><label>Runaway off-settle (s)</label>' +
+        '<input type="number" step="10" class="offsettle" value="' + (z.guard_off_settle_s || 0) + '"></div>' +
+        '<div><label>Runaway rate (&deg;C/min)</label>' +
+        '<input type="number" step="0.1" class="runrate" value="' + (z.guard_runaway_rate_c_per_min || 0) + '"></div>' +
+      '</div>' +
+      '<div class="row2">' +
+        '<div><label>Runaway margin (&deg;C)</label>' +
+        '<input type="number" step="1" class="runmargin" value="' + (z.guard_runaway_margin_c || 0) + '"></div>' +
+        '<div><label>Drift period (s)</label>' +
+        '<input type="number" step="10" class="driftperiod" value="' + (z.guard_drift_period_s || 0) + '"></div>' +
+      '</div>' +
+      '<div class="row2">' +
+        '<div><label>Sensor debounce (reads)</label>' +
+        '<input type="number" step="1" class="debounce" value="' + (z.guard_sensor_fault_debounce_ticks || 0) + '"></div>' +
+        '<div><label>Frozen-sensor window (s)</label>' +
+        '<input type="number" step="10" class="frozenwindow" value="' + (z.guard_frozen_window_s || 0) + '"></div>' +
+      '</div>' +
+    '</details>' +
     modelHtml;
   return div;
 }
@@ -279,7 +306,7 @@ function renderZones() {
     return;
   }
   for (var i = 0; i < thermoCount; i++) {
-    var z = current.zones[i] || { name: '', relay_mask: 0, cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0 };
+    var z = current.zones[i] || { name: '', relay_mask: 0, cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0 };
     el.appendChild(zoneBlock(z, i, relayCount));
   }
 }
@@ -332,6 +359,14 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_minon=' + div.querySelector('.minon').value);
     params.push('z' + i + '_minoff=' + div.querySelector('.minoff').value);
     params.push('z' + i + '_xzone=' + div.querySelector('.xzone').value);
+    params.push('z' + i + '_wrongdirwindow=' + div.querySelector('.wdwindow').value);
+    params.push('z' + i + '_wrongdirrate=' + div.querySelector('.wdrate').value);
+    params.push('z' + i + '_offsettle=' + div.querySelector('.offsettle').value);
+    params.push('z' + i + '_runawayrate=' + div.querySelector('.runrate').value);
+    params.push('z' + i + '_runawaymargin=' + div.querySelector('.runmargin').value);
+    params.push('z' + i + '_driftperiod=' + div.querySelector('.driftperiod').value);
+    params.push('z' + i + '_debounce=' + div.querySelector('.debounce').value);
+    params.push('z' + i + '_frozenwindow=' + div.querySelector('.frozenwindow').value);
     /* Echoed back exactly as loaded. There is no input for these -- this is
        purely to stop a whole-page save from clearing a stored model, since
        the server treats an omitted field as "set it to zero" and zero is

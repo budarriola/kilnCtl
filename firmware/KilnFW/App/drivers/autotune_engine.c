@@ -751,9 +751,27 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     float max_temp_c = 0.0f, min_temp_c = -20.0f, sanity_rate = 0.0f;
     zones_config_get_temp_limits(zone_index, &max_temp_c, &min_temp_c);
     zones_config_get_sanity_rate(zone_index, &sanity_rate);
+    /* TODO.md 6A.3's remaining named thresholds -- an autotune run arms the
+     * full thermal_guard suite (this file's own doc note) exactly like a
+     * firing does, so it must honour the same per-zone overrides a firing
+     * would, not fall back to firmware-wide constants a running profile no
+     * longer uses. Raw pass-through, same reasoning as profile_executor.c's
+     * identical block: thermal_guard.c owns the 0->default substitution. */
+    float wd_window_s = 0.0f, wd_rate = 0.0f, off_settle_s = 0.0f, runaway_rate = 0.0f;
+    float runaway_margin = 0.0f, drift_period_s = 0.0f, debounce_ticks = 0.0f, frozen_window_s = 0.0f;
+    zones_config_get_guard_thresholds(zone_index, &wd_window_s, &wd_rate, &off_settle_s, &runaway_rate,
+                                      &runaway_margin, &drift_period_s, &debounce_ticks, &frozen_window_s);
     s_at.guard_cfg = (thermal_guard_cfg_t){
         .max_temp_c = max_temp_c, .min_temp_c = min_temp_c,
         .sanity_rate_c_per_min = (sanity_rate > 0.0f) ? sanity_rate : PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN,
+        .wrong_dir_window_s = wd_window_s,
+        .wrong_dir_rate_c_per_min = wd_rate,
+        .off_settle_s = off_settle_s,
+        .runaway_rate_c_per_min = runaway_rate,
+        .runaway_margin_c = runaway_margin,
+        .drift_period_s = drift_period_s,
+        .sensor_fault_debounce_ticks = debounce_ticks,
+        .frozen_window_s = frozen_window_s,
     };
     thermal_guard_reset(&s_at.guard_state);
 

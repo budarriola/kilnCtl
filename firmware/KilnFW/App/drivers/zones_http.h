@@ -186,6 +186,21 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
  * single-zone kiln whatever this is set to. */
 bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_c);
 
+/* TODO.md 6A.3's remaining named thresholds (wrong-dir rate/window,
+ * off-settle, runaway rate/margin, drift period, sensor debounce count,
+ * frozen window) -- one getter, matching zones_config_get_heater_cfg()'s
+ * "bundle the related group" precedent rather than eight single-field
+ * getters. Same "false/0 means cannot answer, not answer is zero" convention
+ * as every getter above, and 0 in an output does NOT disable the
+ * corresponding guard -- thermal_guard.c substitutes its own firmware
+ * default for a 0, same rule as sanity_rate_c_per_min (the opposite
+ * convention to cross_zone_max_delta_c, which 0 genuinely disables). */
+bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_window_s,
+                                       float *out_wrong_dir_rate_c_per_min, float *out_off_settle_s,
+                                       float *out_runaway_rate_c_per_min, float *out_runaway_margin_c,
+                                       float *out_drift_period_s, float *out_sensor_fault_debounce_ticks,
+                                       float *out_frozen_window_s);
+
 /* Monotonic counter, incremented every time the stored zone config
  * changes -- TODO.md 6A.7's "config reload while running". A consumer
  * (profile_executor.c) caches the value it last read its zone settings at

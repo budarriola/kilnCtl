@@ -29,7 +29,7 @@ static const char *TAG = "zones_http";
 #define KILN_NVS_PARTITION "kiln_nvs"
 
 /* Bump whenever zones_cfg_t's on-flash layout changes; see nvs_load_from(). */
-#define ZONES_CFG_VERSION 2
+#define ZONES_CFG_VERSION 3
 
 #define ZONE_NAME_MAX_LEN 15
 
@@ -83,6 +83,23 @@ typedef struct {
     float heater_window_ms;
     float heater_min_on_ms;
     float heater_min_off_ms;
+    /* TODO.md 6A.3's remaining named guard thresholds, promoted from
+     * firmware-wide constants to per-zone override (2026-08-16) -- see
+     * thermal_guard.h's doc comment for the full "0 substitutes a firmware
+     * default, does NOT disable the guard" convention these all share.
+     * OPTIONAL on POST, same reason z%u_xzone below is (see
+     * parse_zone_fields()): an operator who never touches these keeps the
+     * firmware defaults, and older clients (pc_tools/MCP, the test
+     * harnesses) must not start getting 400s for fields they've never heard
+     * of. */
+    float guard_wrong_dir_window_s;
+    float guard_wrong_dir_rate_c_per_min;
+    float guard_off_settle_s;
+    float guard_runaway_rate_c_per_min;
+    float guard_runaway_margin_c;
+    float guard_drift_period_s;
+    float guard_sensor_fault_debounce_ticks;
+    float guard_frozen_window_s;
     /* Guard 8, cross-zone plausibility (TODO.md 6A.3): degC this zone's raw
      * reading may differ from its worst-disagreeing peer's before the guard
      * trips. 0 = "not configured", which DISABLES the guard rather than
@@ -140,18 +157,19 @@ typedef struct {
 } zones_cfg_t;
 
 /* application/x-www-form-urlencoded whole-page submit: thermo_count,
- * relay_count, and 18 fields per zone (name/relay_mask/cal/kp/ki/kd/ramp/
- * sanity/mode/maxtemp/mintemp/window/minon/minoff/xzone/k/tau/deadtime)
- * across up to MAX31856_CHANNEL_COUNT zones. Generous headroom over what a
- * legitimate 3-zone submission needs -- checked against Content-Length
- * before a single byte is read, same discipline as every other handler in
- * this codebase.
+ * relay_count, and 26 fields per zone (name/relay_mask/cal/kp/ki/kd/ramp/
+ * sanity/mode/maxtemp/mintemp/window/minon/minoff/xzone/k/tau/deadtime plus
+ * the 8 guard-threshold overrides below) across up to MAX31856_CHANNEL_COUNT
+ * zones. Generous headroom over what a legitimate 3-zone submission needs --
+ * checked against Content-Length before a single byte is read, same
+ * discipline as every other handler in this codebase.
  * Bumped 2048->2560 when heater_window_ms/min_on_ms/min_off_ms were added,
  * 2560->2816 when cross_zone_max_delta_c was, 2816->3200 when the three
- * plant-model fields were: worst case those add "z0_k=" + "z0_tau=" +
- * "z0_deadtime=" plus separators and up to parse_float_field()'s 23-char
- * value each, ~96 bytes a zone, ~288 across three. */
-#define ZONES_BODY_MAX 3200
+ * plant-model fields were, 3200->4096 when the 8 guard-threshold overrides
+ * were: worst case those add 8 "z0_<name>=" keys plus separators and up to
+ * parse_float_field()'s 23-char value each, ~250 bytes a zone, ~750 across
+ * three. */
+#define ZONES_BODY_MAX 4096
 
 static struct {
     zones_cfg_t cfg;
@@ -520,6 +538,29 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
     return true;
 }
 
+bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_window_s,
+                                       float *out_wrong_dir_rate_c_per_min, float *out_off_settle_s,
+                                       float *out_runaway_rate_c_per_min, float *out_runaway_margin_c,
+                                       float *out_drift_period_s, float *out_sensor_fault_debounce_ticks,
+                                       float *out_frozen_window_s)
+{
+    if (!out_wrong_dir_window_s || !out_wrong_dir_rate_c_per_min || !out_off_settle_s ||
+        !out_runaway_rate_c_per_min || !out_runaway_margin_c || !out_drift_period_s ||
+        !out_sensor_fault_debounce_ticks || !out_frozen_window_s || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    *out_wrong_dir_window_s = z->guard_wrong_dir_window_s;
+    *out_wrong_dir_rate_c_per_min = z->guard_wrong_dir_rate_c_per_min;
+    *out_off_settle_s = z->guard_off_settle_s;
+    *out_runaway_rate_c_per_min = z->guard_runaway_rate_c_per_min;
+    *out_runaway_margin_c = z->guard_runaway_margin_c;
+    *out_drift_period_s = z->guard_drift_period_s;
+    *out_sensor_fault_debounce_ticks = z->guard_sensor_fault_debounce_ticks;
+    *out_frozen_window_s = z->guard_frozen_window_s;
+    return true;
+}
+
 bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_c)
 {
     if (!out_max_delta_c || zone_index >= s_zones.cfg.thermo_count) {
@@ -612,10 +653,11 @@ static void json_escape(const char *src, char *out, size_t out_cap)
 
 static esp_err_t zones_get_handler(httpd_req_t *req)
 {
-    char json[2048]; /* 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
+    char json[2560]; /* 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
                       * 1536 -> 1792 with cross_zone_max_delta_c,
                       * 1792 -> 2048 with the three plant-model fields (their
-                      * key names alone are ~50 bytes a zone before values) */
+                      * key names alone are ~50 bytes a zone before values),
+                      * 2048 -> 2560 with the 8 guard-threshold overrides */
     size_t o = 0;
     int n;
 
@@ -641,7 +683,12 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             "\"pid_kp\":%.4f,\"pid_ki\":%.4f,\"pid_kd\":%.4f,\"max_ramp_c_per_hr\":%.2f,"
             "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,\"max_temp_c\":%.1f,"
             "\"min_temp_c\":%.1f,\"heater_window_ms\":%.0f,\"heater_min_on_ms\":%.0f,"
-            "\"heater_min_off_ms\":%.0f,\"cross_zone_max_delta_c\":%.1f,"
+            "\"heater_min_off_ms\":%.0f,"
+            "\"guard_wrong_dir_window_s\":%.1f,\"guard_wrong_dir_rate_c_per_min\":%.3f,"
+            "\"guard_off_settle_s\":%.1f,\"guard_runaway_rate_c_per_min\":%.3f,"
+            "\"guard_runaway_margin_c\":%.1f,\"guard_drift_period_s\":%.1f,"
+            "\"guard_sensor_fault_debounce_ticks\":%.0f,\"guard_frozen_window_s\":%.1f,"
+            "\"cross_zone_max_delta_c\":%.1f,"
             /* Emitted for every zone whether or not a model exists -- an
              * absent key and a zero would mean the same thing to a client,
              * and always emitting keeps the page's read-back-and-repost
@@ -654,7 +701,12 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
             (double)z->min_temp_c, (double)z->heater_window_ms, (double)z->heater_min_on_ms,
-            (double)z->heater_min_off_ms, (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
+            (double)z->heater_min_off_ms,
+            (double)z->guard_wrong_dir_window_s, (double)z->guard_wrong_dir_rate_c_per_min,
+            (double)z->guard_off_settle_s, (double)z->guard_runaway_rate_c_per_min,
+            (double)z->guard_runaway_margin_c, (double)z->guard_drift_period_s,
+            (double)z->guard_sensor_fault_debounce_ticks, (double)z->guard_frozen_window_s,
+            (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
             (double)z->model_tau_s, (double)z->model_dead_time_s);
     }
     APPEND("]}");
@@ -713,7 +765,9 @@ static bool parse_float_field(const char *body, const char *key, float min, floa
 static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count, uint8_t relay_count,
                               zone_cfg_t *z, const char **err_reason)
 {
-    char key[16];
+    char key[24]; /* 16 -> 24 when the 8 guard-threshold override keys were
+                   * added -- "z0_wrongdirwindow" is the longest at 18 chars
+                   * plus terminator. */
 
     snprintf(key, sizeof(key), "z%u_name", i);
     char name[ZONE_NAME_MAX_LEN + 1];
@@ -824,6 +878,95 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     if (!parse_float_field(body, key, 0.0f, 60000.0f, &z->heater_min_off_ms)) {
         *err_reason = "zone heater_min_off_ms missing or out of range";
         return false;
+    }
+    /* TODO.md 6A.3's remaining named guard thresholds. OPTIONAL, same reason
+     * z%u_xzone below is: a submission that omits one leaves the
+     * corresponding firmware default in force (z is zero-initialized by the
+     * caller, and 0 is thermal_guard.c's own "substitute the default" value
+     * for every one of these -- unlike z%u_xzone, omitting one of these does
+     * NOT disable its guard). Bounds are generous sanity ceilings against a
+     * typo, not real per-field tuning limits: rates 0-20C/min matches
+     * z%u_sanity's own ceiling, windows/periods 0-7200s (2h) covers any
+     * kiln's plausible time constant, debounce ticks 0-100, margin 0-500C. */
+    snprintf(key, sizeof(key), "z%u_wrongdirwindow", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_wrong_dir_window_s)) {
+                *err_reason = "zone guard_wrong_dir_window_s out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_wrongdirrate", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 20.0f, &z->guard_wrong_dir_rate_c_per_min)) {
+                *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_offsettle", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_off_settle_s)) {
+                *err_reason = "zone guard_off_settle_s out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_runawayrate", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 20.0f, &z->guard_runaway_rate_c_per_min)) {
+                *err_reason = "zone guard_runaway_rate_c_per_min out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_runawaymargin", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 500.0f, &z->guard_runaway_margin_c)) {
+                *err_reason = "zone guard_runaway_margin_c out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_driftperiod", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_drift_period_s)) {
+                *err_reason = "zone guard_drift_period_s out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_debounce", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 100.0f, &z->guard_sensor_fault_debounce_ticks)) {
+                *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
+                return false;
+            }
+        }
+    }
+    snprintf(key, sizeof(key), "z%u_frozenwindow", i);
+    {
+        char probe[16];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_frozen_window_s)) {
+                *err_reason = "zone guard_frozen_window_s out of range";
+                return false;
+            }
+        }
     }
     /* Guard 8. OPTIONAL, unlike every field above: a submission that omits
      * it means "leave the guard disabled" (z is zero-initialized by the

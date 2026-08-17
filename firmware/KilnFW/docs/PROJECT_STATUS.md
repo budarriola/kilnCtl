@@ -16,12 +16,14 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
 ## Done and verified
 
 - **Board wiring traced from the schematics**, not assumed — `docs/HARDWARE.md`.
-  Caught three things that would have cost real bench time: the safety
-  link's `DataToSafty`/`DataFromSafty` net names are backwards from the
-  ESP's TX/RX, both isolated data directions are logically inverted by the
-  optocouplers (fixed via `uart_set_line_inverse`; the RP2040 side needs
-  **no** inversion of its own — see `docs/SAFETY_LINK.md`), and the isolated
-  `Fault` line is an ESP **output**, not an input.
+  Caught three things that would have cost real bench time: the safety link's
+  pin assignment was swapped in `KilnFW`'s `Kconfig` defaults relative to the
+  board (`DataToSafty`/GPIO4 is the ESP's TX, `DataFromSafty`/GPIO5 is its RX —
+  fixed 2026-08-16, see `../SaftyFW/docs/HARDWARE.md` §1), both isolated data
+  directions are logically inverted by the optocouplers (fixed via
+  `uart_set_line_inverse`; the RP2040 side needs **no** inversion of its own —
+  see `docs/SAFETY_LINK.md`), and the isolated `Fault` line is an ESP
+  **output**, not an input.
 - **Wire protocol v2** — `App/drivers/uart_task_ids.h` — replaces the
   fixture's DAC/AD9833/OLED/PCF8575 tasks with THERMO/IO/DISPLAY/SAFETY.
   Framing, CRC, ACK/retry/dedup are unchanged from the fixture.
@@ -954,3 +956,31 @@ code:
   hardware. `docs/SAFETY_MODEL.md` was updated in the same pass to match
   (relay-authority's real caller count, `relay_authority_zone_blocked()`,
   and this policy).
+- **TODO.md 6A.3's remaining named guard thresholds promoted to per-zone
+  override (2026-08-16)**: `thermal_guard_cfg_t` grew 8 fields (wrong-dir
+  rate/window, off-settle, runaway rate/margin, drift period, sensor
+  debounce count, frozen window), each following the existing
+  `sanity_rate_c_per_min` convention — 0 substitutes `thermal_guard.c`'s own
+  firmware-wide default (`effective_f()`/`effective_ticks()`), not the
+  opposite disable-on-zero convention `cross_zone_max_delta_c` uses.
+  `zone_cfg_t` stores them (`ZONES_CFG_VERSION` 2→3, same auto-migrating
+  zero-fill as every prior blob growth), a new bundled getter
+  `zones_config_get_guard_thresholds()` reads them, and both
+  `profile_executor.c` (run start, and the loud per-field mid-firing reload
+  path) and `autotune_engine.c` (an autotune run arms the full guard suite
+  too) wire them in. `zones_page.html` gained a `<details>` "Advanced guard
+  thresholds" disclosure per 6A.9's own note about the page needing to
+  become collapsible for this reason.
+  Also found while wiring this: `relay_authority`'s per-relay ownership
+  arbitration (TODO.md section 0's "does a manual command fight a running
+  profile over the same relay") was already fully implemented —
+  `relay_authority_claim_mask()`/`_release_mask()` at profile
+  start/pause/resume/halt, checked by
+  `relay_authority_manual_blocked_by_owner()` in both `uart_bridge.c` and
+  `dashboard_http.c` — but TODO.md's checkbox for it was stale, still
+  reading unbuilt. Corrected the checkbox rather than re-doing the work.
+  **Status**: host-tested (`test_thermal_guard.c` grew 3 checks covering the
+  debounce/frozen-window/runaway-margin overrides, 221/221 passing) and
+  `idf.py -C firmware/KilnFW build` clean. **Not flashed, not exercised on
+  hardware** — no thermocouple/relay hardware attached to observe an
+  override actually change what trips a real firing.
