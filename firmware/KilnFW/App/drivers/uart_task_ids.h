@@ -1,6 +1,8 @@
 #ifndef UART_TASK_IDS_H
 #define UART_TASK_IDS_H
 
+#include "kilnlink/kilnlink_version.h"
+
 /* Shared uart_protocol task_id numbering. Both the ESP firmware and the PC
  * side must agree on these -- see pc_tools/src/kilnctrl/protocol.py for the
  * matching Python constants and command payload (de)serialization. */
@@ -48,8 +50,20 @@
  * otherwise report a false "compatible" against firmware whose new commands
  * it cannot use, which is exactly the kind of silent skew
  * INFO_CMD_GET_FW_VERSION's exact-match policy exists to catch. See
- * docs/UART_PROTOCOL.md for the new task/command tables. */
-#define UART_PROTOCOL_VERSION 4u
+ * docs/UART_PROTOCOL.md for the new task/command tables.
+ *
+ * TODO.md Phase 7b.1 (2026-08-17): this is now an alias of CommonFW's
+ * KILNLINK_PROTOCOL_VERSION (firmware/CommonFW/include/kilnlink/
+ * kilnlink_version.h) rather than a second, independently-maintained number
+ * -- that header's own doc comment says exactly this: "KilnFW's
+ * UART_PROTOCOL_VERSION becomes an alias of this rather than a second
+ * number", because kilnlink's framing layer is byte-for-byte the same
+ * envelope uart_protocol.c already speaks for the PC link. If the isolated
+ * safety link's contract ever changes independently of the PC link's, that
+ * header's own comment says it becomes its own number at that point -- this
+ * define does not need to move when that happens, only the value it aliases
+ * does. */
+#define UART_PROTOCOL_VERSION ((uint16_t)KILNLINK_PROTOCOL_VERSION)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */
@@ -413,6 +427,26 @@
  *   bytes9..12 = CRC/framing errors, u32 LE
  *   bytes13..16= timeouts, u32 LE
  *   bytes17..18= poll period, u16 LE, ms
+ *
+ * SAFETY_CMD_FW_VERSION (0x0B, Pico -> ESP) and SAFETY_CMD_ANNOUNCE_VERSION
+ * (0x0F, ESP -> Pico) share one layout (CommonFW/docs/LINK_PROTOCOL.md
+ * section 4/6), truncated at boot_id for the ESP's outbound ANNOUNCE_VERSION
+ * (no config_version/config_crc -- those describe the Pico's own active
+ * config, which the ESP has none of to report):
+ *   byte0       = 0x0B or 0x0F
+ *   bytes1..2   = KILNLINK_PROTOCOL_VERSION, u16 LE -- fixed offset, read
+ *                 before anything else
+ *   bytes3..4   = KILNLINK_MIN_COMPATIBLE, u16 LE -- fixed offset
+ *   byte5       = dirty (0 clean, 1 dirty OR unknown)
+ *   byte6       = commit_len (N1)
+ *   bytes7..    = git commit hash, ASCII, N1 bytes
+ *   next byte   = datetime_len (N2)
+ *   next N2     = build date+time, ASCII
+ *   next byte   = boot_id
+ *   [FW_VERSION only, from here]
+ *   next byte   = config_version
+ *   next 2      = config_crc, u16 LE
+ * See safety_link.c's ANNOUNCE_VERSION payload builder / FW_VERSION parser.
  */
 #define SAFETY_CMD_GET_STATUS     0x01u
 #define SAFETY_CMD_REQUEST_ENABLE 0x02u
@@ -420,6 +454,15 @@
 #define SAFETY_CMD_GET_LINK_STATS 0x04u
 #define SAFETY_CMD_SET_POLL_PERIOD 0x05u
 #define SAFETY_CMD_SET_FAULT_OUT   0x06u
+/* Ids reserved by CommonFW/docs/LINK_PROTOCOL.md section 4/6 as part of the
+ * "compatibility floor": both sides must parse/emit these regardless of
+ * whether KILNLINK_PROTOCOL_VERSION agrees, because they are how a mismatch
+ * gets discovered and fixed in the first place. 0x0B is Pico->ESP (also
+ * pushed unsolicited at Pico boot); 0x0F is ESP->Pico only (this firmware
+ * never expects to receive it). Both share the same byte layout, see
+ * safety_link.c's ANNOUNCE_VERSION payload builder and FW_VERSION parser. */
+#define SAFETY_CMD_FW_VERSION      0x0Bu
+#define SAFETY_CMD_ANNOUNCE_VERSION 0x0Fu
 
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u

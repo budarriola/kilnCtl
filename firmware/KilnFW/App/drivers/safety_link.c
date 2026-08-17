@@ -6,8 +6,19 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "settings.h"
 #include "uart_task_ids.h"
+
+#include "kilnlink/kilnlink_version.h"
+
+/* Real build identity (git commit/dirty/build timestamp), generated fresh
+ * every build by gen_build_info.cmake into this component's binary dir --
+ * see uart_bridge.c's build_fw_version_reply() for the PC-link twin of the
+ * payload builder below. Unlike SaftyFW (TODO.md Phase 8: "build_info.h
+ * generated on every build... not built this pass"), KilnFW already has
+ * this, so the ANNOUNCE_VERSION frame reports real values, not a stub. */
+#include "build_info.h"
 
 static const char *TAG = "safety_link";
 
@@ -44,6 +55,15 @@ static const char *TAG = "safety_link";
  * would let a stuck safety link take out whatever task asked it a question --
  * including the bridge task that answers the PC. */
 #define SAFETY_XACT_LOCK_TIMEOUT_MS 5000u
+
+/* ANNOUNCE_VERSION is sent BROADCAST (fire-and-forget, per LINK_PROTOCOL.md
+ * sec 1/2), so "retry" here means "send it more than once", not "retry an
+ * ACK". LINK_PROTOCOL.md sec 4: "repeated a few times against loss" -- same
+ * spirit as Frame D (TRIP_EVENT) on the Pico side, "repeated a few times
+ * over the next second in case the first copy is lost" (sec 6). Four sends,
+ * three 250ms gaps between them, spans ~750ms. */
+#define SAFETY_ANNOUNCE_VERSION_REPEATS 4u
+#define SAFETY_ANNOUNCE_VERSION_REPEAT_GAP_MS 250u
 
 /* ------------------------------------------------------------------------ */
 /* Small helpers                                                            */
@@ -142,6 +162,187 @@ static void safety_apply_fault_locked(SafetyLinkClass *link)
 }
 
 /* ------------------------------------------------------------------------ */
+/* Phase 7b -- mutual version compatibility (ANNOUNCE_VERSION/FW_VERSION)   */
+/* ------------------------------------------------------------------------ */
+
+/* Same formula as SaftyFW's link_frame_versions_compatible()
+ * (firmware/SaftyFW/src/tasks/link_frame.c) -- ported rather than shared
+ * via CommonFW, since kilnlink today carries only the framing/CRC layer
+ * (CommonFW/README.md's "Integration" section), not frame-payload logic,
+ * and this is one boolean formula, not a codec. CommonFW/docs/LINK_PROTOCOL.md
+ * sec 4, "What 'compatible' means": both directions matter, because "I can
+ * read you" and "you can read me" are different claims. */
+static bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
+                                             uint16_t peer_protocol, uint16_t peer_min_compatible)
+{
+    return (peer_protocol >= self_min_compatible) && (self_protocol >= peer_min_compatible);
+}
+
+/* Mirrors uart_bridge.c's own _Static_assert on build_fw_version_reply():
+ * cmd(1) + protocol(2) + min_compatible(2) + dirty(1) + commit_len(1) +
+ * commit + datetime_len(1) + datetime + boot_id(1) = 9 fixed bytes, must fit
+ * SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX below (sizeof() includes each string's
+ * implicit '\0', so this is intentionally a byte or two more conservative
+ * than the true payload size). */
+#define SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX 48u
+_Static_assert(9u + sizeof(FW_GIT_COMMIT) + sizeof(FW_BUILD_DATE " " FW_BUILD_TIME) <=
+                   SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX,
+               "ANNOUNCE_VERSION payload no longer fits its send buffer");
+
+/* Builds the ESP's outbound ANNOUNCE_VERSION (0x0F) payload -- same layout as
+ * Frame C (SAFETY_CMD_FW_VERSION), truncated at boot_id (LINK_PROTOCOL.md
+ * sec 4's table: no config_version/config_crc, those describe the Pico's own
+ * active config). Real build identity from build_info.h, same source
+ * uart_bridge.c's build_fw_version_reply() uses for the PC link's
+ * INFO_CMD_GET_FW_VERSION -- see this file's build_info.h include comment
+ * for why this can be real data rather than SaftyFW's current honest stub.
+ * Returns bytes written, 0 if out_cap is too small. */
+static size_t safety_build_announce_version_payload(const SafetyLinkClass *link, uint8_t *out,
+                                                      size_t out_cap)
+{
+    static const char commit[] = FW_GIT_COMMIT;
+    static const char datetime[] = FW_BUILD_DATE " " FW_BUILD_TIME;
+    size_t commit_len = sizeof(commit) - 1u;   /* drop the implicit '\0' */
+    size_t datetime_len = sizeof(datetime) - 1u;
+
+    size_t needed = 1u + 2u + 2u + 1u + 1u + commit_len + 1u + datetime_len + 1u;
+    if (!out || out_cap < needed) {
+        return 0;
+    }
+
+    size_t i = 0;
+    out[i++] = SAFETY_CMD_ANNOUNCE_VERSION;
+    safety_put_u16_le(&out[i], (uint16_t)KILNLINK_PROTOCOL_VERSION);
+    i += 2;
+    safety_put_u16_le(&out[i], (uint16_t)KILNLINK_MIN_COMPATIBLE);
+    i += 2;
+    out[i++] = FW_GIT_DIRTY ? 1u : 0u;
+    out[i++] = (uint8_t)commit_len;
+    memcpy(&out[i], commit, commit_len);
+    i += commit_len;
+    out[i++] = (uint8_t)datetime_len;
+    memcpy(&out[i], datetime, datetime_len);
+    i += datetime_len;
+    out[i++] = link->esp_boot_id;
+    return i;
+}
+
+/* One-shot BROADCAST send -- no ACK, no blocking beyond handing the bytes to
+ * the UART (uart_protocol_send_broadcast's own contract). Safe to call from
+ * any task that holds a valid, initialized link. */
+static void safety_link_send_announce_version_once(SafetyLinkClass *link)
+{
+    uint8_t payload[SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX];
+    size_t len = safety_build_announce_version_payload(link, payload, sizeof(payload));
+    if (len == 0) {
+        return;
+    }
+    (void)uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                        UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* LINK_PROTOCOL.md sec 4: sent "at ESP boot, repeated a few times against
+ * loss, and re-sent whenever the Pico's boot_id changes". This function is
+ * both call sites -- link_task_start's boot push (safety_poll_task's own
+ * startup, mirroring SaftyFW's link_task_fn boot push) and the boot_id-change
+ * path in safety_apply_fw_version() below. */
+static void safety_link_send_announce_version_burst(SafetyLinkClass *link)
+{
+    for (unsigned n = 0; n < SAFETY_ANNOUNCE_VERSION_REPEATS; n++) {
+        safety_link_send_announce_version_once(link);
+        if (n + 1u < SAFETY_ANNOUNCE_VERSION_REPEATS) {
+            vTaskDelay(pdMS_TO_TICKS(SAFETY_ANNOUNCE_VERSION_REPEAT_GAP_MS));
+        }
+    }
+}
+
+/* Parses as much of a Pico FW_VERSION (0x0B) frame as is present, per
+ * LINK_PROTOCOL.md sec 4's "read bytes 1-4 first" floor rule: protocol/
+ * min_compatible are read and returned whenever the frame is at least 5
+ * bytes, independent of whether the variable-length commit/datetime/boot_id
+ * tail parses cleanly. *out_have_boot_id is only set true if boot_id was
+ * actually reachable -- a truncated or old-format frame that stops short of
+ * it must not report a stale/zero boot_id as real. Returns false only if
+ * bytes 1-4 themselves aren't present (frame too short to say anything). */
+static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out_protocol,
+                                     uint16_t *out_min_compatible, uint8_t *out_boot_id,
+                                     bool *out_have_boot_id)
+{
+    *out_have_boot_id = false;
+    if (len < 5u) {
+        return false;
+    }
+    *out_protocol = (uint16_t)(p[1] | ((uint16_t)p[2] << 8));
+    *out_min_compatible = (uint16_t)(p[3] | ((uint16_t)p[4] << 8));
+
+    if (len < 7u) {
+        return true; /* no dirty/commit_len byte to even start the tail */
+    }
+    size_t i = 6; /* byte5 = dirty, not needed here */
+    uint8_t commit_len = p[i++];
+    if ((size_t)commit_len + i > (size_t)len) {
+        return true; /* truncated commit -- the two fields we need are already set */
+    }
+    i += commit_len;
+    if (i >= (size_t)len) {
+        return true;
+    }
+    uint8_t datetime_len = p[i++];
+    if ((size_t)datetime_len + i > (size_t)len) {
+        return true;
+    }
+    i += datetime_len;
+    if (i >= (size_t)len) {
+        return true;
+    }
+    *out_boot_id = p[i];
+    *out_have_boot_id = true;
+    return true;
+}
+
+/* Applies one Pico FW_VERSION frame: updates the tracked peer-compatibility
+ * verdict and boot_id, and re-announces ourselves (a burst, not just one
+ * frame -- same loss-tolerance reasoning as the boot push) if the boot_id
+ * changed, since a Pico that just rebooted has forgotten who it was talking
+ * to (LINK_PROTOCOL.md sec 4). Never touches the isolated fault line
+ * directly -- see safety_update_health(), the one place that reads
+ * peer_version_known/peer_version_compatible and decides what to do about a
+ * mismatch (Phase 7b.5). */
+static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *msg)
+{
+    uint16_t peer_protocol = 0;
+    uint16_t peer_min_compatible = 0;
+    uint8_t peer_boot_id = 0;
+    bool have_boot_id = false;
+
+    if (!safety_parse_fw_version(msg->payload, msg->length, &peer_protocol, &peer_min_compatible,
+                                  &peer_boot_id, &have_boot_id)) {
+        return; /* too short to read even bytes 1-4 -- malformed, discard */
+    }
+
+    bool compatible = safety_link_versions_compatible((uint16_t)KILNLINK_PROTOCOL_VERSION,
+                                                        (uint16_t)KILNLINK_MIN_COMPATIBLE,
+                                                        peer_protocol, peer_min_compatible);
+
+    bool boot_id_changed = false;
+    if (!safety_lock(link)) {
+        return;
+    }
+    link->peer_version_known = true;
+    link->peer_version_compatible = compatible;
+    if (have_boot_id) {
+        boot_id_changed = (!link->pico_boot_id_known) || (peer_boot_id != link->pico_boot_id);
+        link->pico_boot_id = peer_boot_id;
+        link->pico_boot_id_known = true;
+    }
+    safety_unlock(link);
+
+    if (boot_id_changed) {
+        safety_link_send_announce_version_burst(link);
+    }
+}
+
+/* ------------------------------------------------------------------------ */
 /* Frame handling                                                           */
 /* ------------------------------------------------------------------------ */
 
@@ -198,7 +399,22 @@ static bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_
 /* Drains the inbox for up to wait_ms, applying every status frame found.
  * Returns true if at least one was applied. Waiting on the *first* message
  * only -- once something has arrived the rest of the queue is taken without
- * blocking, so a burst is absorbed in one pass. */
+ * blocking, so a burst is absorbed in one pass.
+ *
+ * Dispatches by subcommand byte rather than assuming every frame is a
+ * status reply: this inbox now also receives unsolicited BROADCAST pushes
+ * (FW_VERSION at Pico boot, per LINK_PROTOCOL.md sec 6's Frame C), which
+ * safety_apply_status() would otherwise have logged as an "unexpected
+ * frame" wire error. Phase 7b.7 (compatibility floor): ids 0x00-0x0F --
+ * GET_STATUS, FW_VERSION and anything else added to this switch in that
+ * range -- must stay reachable here regardless of what
+ * safety_apply_fw_version() concludes about peer_version_compatible; this
+ * dispatch never checks that verdict before routing a frame, on purpose.
+ * A subcommand this build doesn't recognise at all falls to the default
+ * case and is silently discarded (LINK_PROTOCOL.md's own
+ * additive-compatibility principle: "a peer that has never heard of it
+ * discards it"), not counted as a frame error the way a genuinely malformed
+ * GET_STATUS payload still is (inside safety_apply_status() itself). */
 static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
 {
     uart_proto_message_t msg;
@@ -206,8 +422,19 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
     TickType_t wait = pdMS_TO_TICKS(wait_ms);
 
     while (uart_protocol_receive(link->inbox, &msg, wait) == ESP_OK) {
-        if (msg.length >= 1 && safety_apply_status(link, &msg)) {
-            got_status = true;
+        if (msg.length >= 1) {
+            switch (msg.payload[0]) {
+            case SAFETY_CMD_GET_STATUS:
+                if (safety_apply_status(link, &msg)) {
+                    got_status = true;
+                }
+                break;
+            case SAFETY_CMD_FW_VERSION:
+                safety_apply_fw_version(link, &msg);
+                break;
+            default:
+                break;
+            }
         }
         wait = 0; /* only the first receive is allowed to block */
     }
@@ -285,17 +512,30 @@ static esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, 
 
 /* Rate-limited link-state logging plus the one fault source this driver
  * raises on its own. Only ever called from the poll task, which is why
- * down_logged/down_log_tick need no locking. */
+ * down_logged/version_mismatch_logged/down_log_tick need no locking.
+ *
+ * Phase 7b.5 (LINK_PROTOCOL.md sec 4, "What each side does about a
+ * mismatch"): "The ESP: treats it exactly like a dead link --
+ * SAFETY_FAULT_SRC_SAFETY_LINK asserts, every heater-on is blocked, a
+ * running firing aborts." Rather than inventing a second fault source, a
+ * known incompatible peer is folded into the same assert-if-any-reason
+ * calculation as link staleness, and both are gated by the *same*
+ * fault_on_link_loss policy switch -- "exactly like a dead link" reads as
+ * "governed the same way a dead link is," including the bench override
+ * (safety_link_fault_on_link_loss(link, false)) that already exists for
+ * boards with no Pico fitted. */
 static void safety_update_health(SafetyLinkClass *link)
 {
     bool up = false;
     bool policy = false;
+    bool version_mismatch = false;
     uint16_t age = SAFETY_LINK_AGE_NEVER;
 
     if (safety_lock(link)) {
         up = safety_link_up_locked(link);
         age = safety_age_ms_locked(link);
         policy = link->fault_on_link_loss;
+        version_mismatch = link->peer_version_known && !link->peer_version_compatible;
         safety_unlock(link);
     }
 
@@ -316,8 +556,18 @@ static void safety_update_health(SafetyLinkClass *link)
         link->down_log_tick = xTaskGetTickCount();
     }
 
+    if (version_mismatch != link->version_mismatch_logged) {
+        if (version_mismatch) {
+            ESP_LOGE(TAG, "safety processor protocol version incompatible -- treating link as "
+                          "down (Phase 7b.5, LINK_PROTOCOL.md sec 4)");
+        } else {
+            ESP_LOGI(TAG, "safety processor protocol version now compatible");
+        }
+        link->version_mismatch_logged = version_mismatch;
+    }
+
     if (policy) {
-        safety_link_set_fault_source(link, SAFETY_FAULT_SRC_SAFETY_LINK, !up);
+        safety_link_set_fault_source(link, SAFETY_FAULT_SRC_SAFETY_LINK, !up || version_mismatch);
     }
 }
 
@@ -325,6 +575,14 @@ static void safety_poll_task(void *arg)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)arg;
     const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
+
+    /* Boot push, unsolicited, before entering the steady loop -- mirrors
+     * SaftyFW's link_task_fn's own FW_VERSION boot push (Phase 7b.2,
+     * LINK_PROTOCOL.md sec 4: "Sent as BROADCAST at ESP boot, repeated a few
+     * times against loss"). This is what lets a Pico that boots *after* the
+     * ESP still learn our version promptly instead of waiting for its own
+     * boot_id to first appear on a FW_VERSION frame we have to receive. */
+    safety_link_send_announce_version_burst(link);
 
     while (true) {
         uint16_t period = 0;
@@ -383,6 +641,14 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
     link->fault_io = SAFETY_FAULT_IO;
     link->poll_period_ms = (uint16_t)SAFETY_POLL_PERIOD_MS;
     link->fault_on_link_loss = true; /* fail-safe; see safety_link.h */
+    /* Diagnostic identity only (Phase 7b.2), same spirit as SaftyFW's own
+     * s_boot_id (link_task.c: "not a security or safety value, so true
+     * entropy is not required") -- but the ESP has a real hardware RNG
+     * (esp_random(), backed by the SAR ADC/RF noise per esp_random.h), so
+     * there is no reason to fall back to a time-derived pseudo-random value
+     * the way the Pico does. Lets the Pico notice "the ESP just rebooted"
+     * from ANNOUNCE_VERSION alone, without polling for it. */
+    link->esp_boot_id = (uint8_t)esp_random();
     /* No reading has ever arrived, and NaN is the only honest value for that.
      * Zero would read as a stone-cold kiln, which is exactly the wrong
      * direction to be wrong in. */
@@ -646,6 +912,24 @@ esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out)
      * outside the lock -- it's a plain volatile counter owned by the UART
      * event task. */
     out->frame_errors += uart_owner_get_rx_error_count(&link->owner);
+    return ESP_OK;
+}
+
+esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_known,
+                                               bool *out_compatible)
+{
+    if (!link || !out_known || !out_compatible) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    *out_known = link->peer_version_known;
+    *out_compatible = link->peer_version_compatible;
+    safety_unlock(link);
     return ESP_OK;
 }
 

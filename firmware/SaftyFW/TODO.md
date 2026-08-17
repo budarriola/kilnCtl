@@ -458,13 +458,45 @@ Both processors must check each other. Design:
 `ANNOUNCE_VERSION`. This lands with the link, not with updates — it is what makes
 every later frame safe to parse.
 
-- [ ] 7b.1 `KILNLINK_PROTOCOL_VERSION` and `KILNLINK_MIN_COMPATIBLE` in
-      `CommonFW`, one definition, both firmwares including it -- **half done**:
-      `KILNLINK_MIN_COMPATIBLE` added to `CommonFW/include/kilnlink/kilnlink_version.h`
-      and `SaftyFW` includes/uses both; `KilnFW` does not include it yet
-      (out of scope this pass, `firmware/KilnFW/` untouched)
-- [ ] 7b.2 `ANNOUNCE_VERSION` = `0x0F` sent by the ESP unprompted at boot, on
-      retry, and on every `boot_id` change (`KilnFW` work -- not this pass)
+- [x] 7b.1 `KILNLINK_PROTOCOL_VERSION` and `KILNLINK_MIN_COMPATIBLE` in
+      `CommonFW`, one definition, both firmwares including it -- **done
+      2026-08-17**: `KilnFW` now includes it too.
+      `firmware/KilnFW/App/drivers/uart_task_ids.h` includes
+      `kilnlink/kilnlink_version.h` and `UART_PROTOCOL_VERSION` is now
+      `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, an alias rather than a second
+      number -- exactly what that header's own doc comment already asked
+      for. The `kilnlink` ESP-IDF component wrapper
+      (`firmware/KilnFW/components/kilnlink/CMakeLists.txt`) and
+      `App/drivers/CMakeLists.txt`'s `REQUIRES ... kilnlink` were already in
+      place from an earlier pass (M2); this pass only needed the include and
+      the alias. `idf.py build` verified clean.
+- [x] 7b.2 `ANNOUNCE_VERSION` = `0x0F` sent by the ESP unprompted at boot, on
+      retry, and on every `boot_id` change -- **done 2026-08-17**,
+      `firmware/KilnFW/App/drivers/safety_link.c`:
+      `safety_link_send_announce_version_burst()` sends
+      `SAFETY_CMD_ANNOUNCE_VERSION` (0x0F) as a `uart_protocol_send_broadcast()`
+      four times, 250ms apart (~750ms, matching Frame D's "repeated a few
+      times over the next second" spirit), called once from
+      `safety_poll_task()` before its steady loop (the boot push) and again
+      from `safety_apply_fw_version()` whenever a Pico `FW_VERSION` (0x0B)
+      frame reports a `boot_id` different from the last one seen. Build
+      identity is real, not a stub: `safety_build_announce_version_payload()`
+      reads `FW_GIT_COMMIT`/`FW_GIT_DIRTY`/`FW_BUILD_DATE`/`FW_BUILD_TIME`
+      from `build_info.h` (generated fresh every build by
+      `App/drivers/gen_build_info.cmake`, already existed before this pass
+      and already fed the PC-link's own `GET_FW_VERSION` reply in
+      `uart_bridge.c`) -- unlike `SaftyFW`, `KilnFW` did not need an honest
+      stub here. `esp_boot_id` is generated once at `safety_link_start()` via
+      `esp_random()` (the ESP's hardware RNG, simpler than `SaftyFW`'s
+      time-derived pseudo-random fallback). Receiving and parsing `FW_VERSION`
+      itself needed building too (Phase 0.6b was unstarted): `safety_parse_fw_version()`
+      reads bytes 1-4 before anything else per the floor rule, and
+      `safety_drain_inbox()` now dispatches incoming frames by subcommand
+      byte instead of assuming every inbox message is a status reply. This is
+      a minimal slice of 0.6b (parsing an unsolicited `FW_VERSION` push), not
+      all of it -- there is still no explicit ESP-side `GET_FW_VERSION`
+      *request* with retry, and no GUI/dashboard surface for build identity +
+      config CRC; both remain open under 0.6b.
 - [x] 7b.3 `min_compatible` added to `FW_VERSION` at a fixed offset; version
       fields read and compared **before** anything after them is parsed --
       `link_frame_pack_fw_version()` (bytes 3..4) and
@@ -474,24 +506,59 @@ every later frame safe to parse.
       `link_frame_versions_compatible()`, host-sanity-checked against five
       combinations (equal, newer self, self-raised-floor, peer-below-floor,
       self-below-peer's-floor)
-- [ ] 7b.5 Mismatch sets `DEGRADED_NO_CONTEXT`: context frames discarded
+- [~] 7b.5 Mismatch sets `DEGRADED_NO_CONTEXT`: context frames discarded
       unparsed, context-free guards still commanding the relay, context-dependent
-      guards reported disabled, **no trip latched** -- **partial**: the flag
-      (`link_task_get_degraded_no_context()`) is set/cleared correctly and
-      never touches `relay_owner`/`boot_reason` (verified: no such call
-      exists in `link_task.c`, and `tools/check_isolation.ps1` passes). Left
-      unchecked because there is nothing yet to discard (`PUSH_CONTEXT`
-      unparsed) or disable (no context-dependent guard exists — Phase 4 only
-      built S1/S5/S7/S11/S12) — the mechanism exists, the wiring it feeds
-      does not yet.
+      guards reported disabled, **no trip latched** -- **partial, both sides**:
+      the Pico half is as previously documented (`link_task_get_degraded_no_context()`
+      set/cleared correctly, never touches `relay_owner`/`boot_reason`,
+      mechanism exists but nothing to discard/disable yet). The ESP half is
+      new this pass (2026-08-17), `firmware/KilnFW/App/drivers/safety_link.c`:
+      "The ESP: treats it exactly like a dead link -- `SAFETY_FAULT_SRC_SAFETY_LINK`
+      asserts, every heater-on is blocked, a running firing aborts"
+      (`LINK_PROTOCOL.md` sec 4) is now real -- `safety_apply_fw_version()`
+      computes `link_frame_versions_compatible()`'s exact formula (ported into
+      `safety_link_versions_compatible()`, since `kilnlink` today carries only
+      framing/CRC, not frame-payload logic, per `CommonFW/README.md`'s
+      Integration section) against the Pico's announced protocol/min_compatible,
+      and `safety_update_health()` folds a known mismatch into the *same*
+      `SAFETY_FAULT_SRC_SAFETY_LINK` bit link-staleness already uses
+      (`assert = !up || version_mismatch`), gated by the same
+      `fault_on_link_loss` policy switch the existing dead-link path already
+      had -- no new mechanism invented, `SAFETY_FAULT_SRC_SAFETY_LINK` and
+      `safety_link_set_fault_source()` both already existed. Marked `[~]`
+      rather than `[x]` for two honest reasons: (1) the Pico side is still
+      partial as above -- this checkbox covers both sides' behaviour and only
+      one half is more complete now; (2) Phase 0.6's full "no telemetry within
+      1.5s, feeding `relay_authority_on_blocked()`, plus a 30s firing-abort"
+      redefinition is still unbuilt on the ESP side -- this pass reused the
+      *existing* link-staleness check (`safety_link_up_locked()`,
+      `SAFETY_LINK_UP_PERIODS` poll periods) rather than building 0.6 as a
+      prerequisite, since 0.6 is its own listed item and out of this pass's
+      scope. "Every heater-on is blocked, a running firing aborts" is
+      therefore only as true today as the existing link-loss fault path
+      already made it -- this pass did not change that scope.
 - [x] 7b.6 Telemetry keeps flowing during a mismatch — it is the only way the ESP
       can display the problem or push the fix. `link_task`'s TX cadence
       (status + `FW_VERSION`) never checks `s_degraded_no_context`.
-- [ ] 7b.7 **Compatibility floor**: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
+- [x] 7b.7 **Compatibility floor**: framing, `ANNOUNCE_VERSION`, `FW_VERSION` and
       the `UPDATE_*` frames work regardless of version. Ids `0x00`–`0x0F`
       reserved; those layouts may be appended to, never reordered or resized.
       Without this a mismatch makes the field-update path unusable and every fix
-      needs a debug probe
+      needs a debug probe -- **ESP side audited and confirmed 2026-08-17**:
+      `safety_link.c`'s RX dispatch (`safety_drain_inbox()`) never consulted
+      `peer_version_compatible` before this pass either, so there was no
+      gating bug to fix -- `GET_STATUS` and (new) `FW_VERSION` are routed by
+      subcommand byte alone, unconditionally. A one-line comment was added at
+      the dispatch switch stating the floor constraint explicitly (mirroring
+      how `link_task.c` documents its own isolation rule in comments), and
+      the default case for an unrecognised subcommand was changed to silently
+      discard rather than log a frame error, matching
+      `LINK_PROTOCOL.md`'s own additive-compatibility principle ("a peer that
+      has never heard of it discards it") -- previously any non-`GET_STATUS`
+      frame (which did not exist on the wire yet, so this never fired in
+      practice) would have been logged as an "unexpected frame" wire error.
+      `SaftyFW`-side floor compliance is that project's own concern and not
+      re-audited here.
 - [ ] 7b.8 Host test: every combination of older/newer/equal on both sides,
       including a peer that announces a `min_compatible` above its own version
 
@@ -609,7 +676,16 @@ metadata format and the slot boundaries are effectively permanent.
       multi-megabyte transfer. The TCMT1109 optocouplers are the bandwidth limit
       and nobody has characterised them. A 5 % frame loss turns a 35 s update
       into minutes, because retries cost 200 ms each up to ten times.
-- [ ] 10.1 Confirm the module's actual flash size on real hardware.
+- [x] 10.1 Confirm the module's actual flash size on real hardware. **2026-08-17:**
+      2MB, from `PICO_BOARD=pico`'s pico-sdk board definition
+      (`PICO_FLASH_SIZE_BYTES = 2 * 1024 * 1024`, `boards/pico.h`) — not a
+      bench measurement. A1 is a stock Raspberry Pi Pico
+      (`firmware/SaftyFW/CMakeLists.txt`, confirmed `PICO_BOARD=pico`, not
+      `pico_w`/`pico2`/a custom board file), so its onboard flash size is a
+      fixed hardware fact of that board, not a sourcing ambiguity like the
+      ESP32-S3 third-party module's flash was. **Distinct from 10.0** (measuring
+      the isolated link's *error rate* over UART), which still requires
+      physical bench hardware and remains unstarted.
 - [ ] 10.2 Freeze the flash layout and the metadata format, with a
       `format_version` that refuses the unrecognised. Reserve the signature
       field and public-key space now even though signing ships off —

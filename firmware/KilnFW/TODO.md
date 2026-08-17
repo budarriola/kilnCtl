@@ -3009,20 +3009,35 @@ depend on it, so it is tracked here as a gate. Design:
 claim. Two copies of that do not fit in the 1500 KB app region, so dual-slot OTA
 is impossible in the 2 MB the firmware is configured for.
 
-The module is built with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB`, and everything past
-2 MB is unaddressable and unused. **How much is past it is unresolved**: the buy
-lists say `N8R8` (8 MB), the 3D model says `N8R2` (8 MB), and the board actually
-in use is a Lonely Binary `N16R8` (16 MB). The supplier does not even offer an
-N8R8. Either way the OTA partitions go **above `0x200000`, where nothing
+**Update 2026-08-17: flash size confirmed, sdkconfig fixed, bootloader
+reflash still outstanding.** Confirmed against the LonelyBinary product page
+for the board in hand (variant 43784065712285): it is an **N16R8 — 16 MB
+flash, 8 MB PSRAM**. The buy lists (`N8R8`, 8 MB) and 3D model (`N8R2`, 8 MB)
+are both stale and still need correcting at the source — that has not been
+done yet. `sdkconfig` now declares `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` (was
+`_2MB`). `partitions.csv` is unchanged — it still only maps the first 2 MB
+(single `factory` slot); the OTA partitions below still do not exist yet.
+Below this line reflects the pre-2026-08-17 analysis and is otherwise still
+accurate: everything past 2 MB was unaddressable before this fix and, until
+`partitions.csv` is extended, is simply unused rather than unaddressable now.
+
+The module was built with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB` (now `_16MB`, see
+above), and everything past 2 MB is unused. Either way the OTA partitions go
+**above `0x200000`, where nothing
 exists**, so no live data moves — the layout is sized for 8 MB and simply has
 more room after it on a 16 MB part.
 
 - [ ] **`esptool flash_id` first**, and then correct the buy lists and the 3D
       model reference. Three records disagreeing is worse than one being wrong,
-      because each looks authoritative alone
-- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE` set to the **confirmed** size, **and reflash
+      because each looks authoritative alone — size itself confirmed 2026-08-17
+      by the LonelyBinary product page (N16R8) rather than `esptool flash_id`,
+      but the buy-list and 3D-model records still need correcting, so this
+      stays open
+- [ ] `CONFIG_ESPTOOLPY_FLASHSIZE` set to the **confirmed** size (done,
+      2026-08-17), **and reflash
       the bootloader** — the flash size is in its header, so a new table alone
-      does nothing
+      does nothing. The bootloader reflash has NOT happened yet (no toolchain/
+      hardware access in this pass)
 ### 9.1a PSRAM — decided: stays off
 
 **Decision (2026-08-16): leave `CONFIG_SPIRAM` unset. Do not enable PSRAM.**

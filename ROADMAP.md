@@ -222,12 +222,23 @@ path. Two facts set the shape of this milestone:
 
 - [ ] **Measure the isolated link's real error rate at 115200 first.** Nobody has
       characterised the optocouplers; retry cost is 200 ms × up to 10
-- [ ] **Establish the real flash size, then switch to it.** Three records in the
-      repo disagree — buy lists say N8R8 (8 MB), the 3D model says N8R2 (8 MB),
-      the board in hand is an N16R8 (16 MB) — while the build says 2 MB. The real
+- [x] **Establish the real flash size, then switch to it (2026-08-17).** Confirmed
+      against the LonelyBinary product page for the board in hand
+      (variant 43784065712285): it is an **N16R8 — 16 MB flash, 8 MB PSRAM**,
+      resolving the three-way disagreement (buy lists said N8R8/8 MB, the 3D
+      model said N8R2/8 MB). `firmware/KilnFW/sdkconfig` now declares
+      `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` / `CONFIG_ESPTOOLPY_FLASHSIZE="16MB"`
+      (was wrongly `_2MB`/`"2MB"`). **Scope of this pass: the sdkconfig
+      flash-size declaration only.** `partitions.csv` is UNCHANGED — it still
+      maps only the first 2 MB (single `factory` app slot, no OTA), with a
+      header comment now noting the remaining ~14 MB is unmapped headroom for
+      the item below. The real
       image is 1167 KB, so two copies do not fit in the 1500 KB app region. The
-      layout is sized for 8 MB and puts everything above `0x200000` where nothing
-      exists, so no live data moves. Bootloader must be reflashed
+      new two-app-slot OTA partition table this milestone describes is still a
+      separate, unstarted item — see the next checklist entries. The bootloader
+      must still be reflashed for the corrected header flash-size to take
+      effect on the physical board; this pass is config/doc-only and has not
+      been flashed or build-verified against real hardware
 - [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, and the app confirms itself only
       after NVS, safety link and web server are up
 - [ ] Pico flash layout and metadata format frozen before the first board is

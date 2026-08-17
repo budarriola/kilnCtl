@@ -269,10 +269,81 @@ static void test_nan_survives(void)
     TEST_CHECK_NEAR(out.zones[0].setpoint_c, 55.0f, 0.0001, "setpoint_c in the same zone is unaffected by the NaN");
 }
 
+// Host tests for link_frame_versions_compatible() -- TODO.md Phase 7b, item
+// 7b.8: "every combination of older/newer/equal on both sides, including a
+// peer that announces a min_compatible above its own version." Uses
+// distinct, realistic version numbers (not 0/1) so an off-by-one or a
+// swapped operand would actually be caught.
+//
+// This is a read-only sanity pass over the existing implementation
+// (link_frame.c:188-192) -- deliberately not touched by this test file.
+static void test_versions_compatible(void)
+{
+    TEST_SECTION("link_frame_versions_compatible -- combination matrix");
+
+    /* Equal versions both sides. */
+    TEST_CHECK(link_frame_versions_compatible(5, 3, 5, 3),
+                "equal protocol and min_compatible on both sides -> compatible");
+
+    /* Peer newer than self, but still within self's floor, and self within
+     * peer's floor -- the "newer peer, still backward compatible" case. */
+    TEST_CHECK(link_frame_versions_compatible(5, 3, 6, 4),
+                "peer newer (6) than self (5), both floors satisfied -> compatible");
+
+    /* Peer older than self, but still >= self's min_compatible, and self's
+     * protocol >= peer's min_compatible. */
+    TEST_CHECK(link_frame_versions_compatible(6, 4, 5, 3),
+                "peer older (5) than self (6), both floors satisfied -> compatible");
+
+    /* Self has raised its own min_compatible above what an older peer
+     * offers: peer.protocol (4) < self.min_compatible (5) -> self refuses. */
+    TEST_CHECK(!link_frame_versions_compatible(6, 5, 4, 3),
+                "self min_compatible (5) above peer protocol (4) -> NOT compatible");
+
+    /* Peer has raised ITS min_compatible above self's protocol: self.protocol
+     * (4) < peer.min_compatible (5) -> peer would refuse self. */
+    TEST_CHECK(!link_frame_versions_compatible(4, 3, 6, 5),
+                "peer min_compatible (5) above self protocol (4) -> NOT compatible");
+
+    /* Peer claims a min_compatible above its own protocol (a self-inconsistent
+     * / malformed peer claim: peer_min_compatible > peer_protocol). The
+     * function should still evaluate the plain formula, not special-case it.
+     * peer_protocol=4, peer_min_compatible=7 (peer claims to require a floor
+     * newer than itself). Against self_protocol=6 >= peer_min_compatible(7)?
+     * No -- 6 < 7, so self.protocol >= peer_min_compatible fails ->
+     * NOT compatible, confirming the formula is applied literally. */
+    TEST_CHECK(!link_frame_versions_compatible(6, 3, 4, 7),
+                "peer_min_compatible (7) > peer_protocol (4), self (6) still below that "
+                "floor -> NOT compatible (formula applied literally, no special-casing)");
+
+    /* Same malformed-peer shape, but push self_protocol above the peer's
+     * nonsensical floor to confirm the *other* half of the formula
+     * (peer.protocol >= self.min_compatible) is what actually gates it here:
+     * self_protocol=8 >= peer_min_compatible=7 passes, but peer_protocol=4 <
+     * self_min_compatible=5 still fails on the first half. */
+    TEST_CHECK(!link_frame_versions_compatible(8, 5, 4, 7),
+                "malformed peer (min_compatible 7 > own protocol 4), self.min_compatible (5) "
+                "above peer.protocol (4) -> NOT compatible on the other half of the formula");
+
+    /* Self below peer's min_compatible (peer requires newer than self has). */
+    TEST_CHECK(!link_frame_versions_compatible(3, 3, 5, 4),
+                "self.protocol (3) < peer.min_compatible (4) -> NOT compatible");
+
+    /* Both directions simultaneously fail. */
+    TEST_CHECK(!link_frame_versions_compatible(4, 6, 3, 8),
+                "self too old for peer's floor AND peer too old for self's floor -> NOT compatible");
+
+    /* Degenerate/boundary case: everyone at floor exactly -- >= is inclusive
+     * both ways per the formula. */
+    TEST_CHECK(link_frame_versions_compatible(5, 5, 5, 5),
+                "self_protocol==self_min_compatible==peer_protocol==peer_min_compatible -> compatible");
+}
+
 void run_test_link_frame(void)
 {
     test_zero_zones();
     test_three_zones();
     test_hostile_inputs();
     test_nan_survives();
+    test_versions_compatible();
 }

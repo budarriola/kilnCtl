@@ -72,16 +72,19 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   the ESP-IDF python directly also works but needs `ESP_IDF_VERSION`,
   `IDF_PATH`, `IDF_TOOLS_PATH` and `IDF_PYTHON_ENV_PATH` all set, plus cmake
   and ninja on `PATH` — the profile script is the shorter route.
-- **Flash and PSRAM — unresolved, three records disagree.** The buy lists say
-  `ESP32-S3-DevKitC-1U-N8R8` (8 MB / 8 MB), the footprint library's 3D model says
-  `N8R2` (8 MB / 2 MB), and the board actually in use is a Lonely Binary
-  `N16R8` (16 MB / 8 MB) — a supplier who does not offer an N8R8 at all.
-  **Settle it with `esptool flash_id` and fix the other two records.**
+- **Flash and PSRAM — resolved 2026-08-17.** Confirmed against the LonelyBinary
+  product page for the board in hand (variant 43784065712285): it is an
+  **N16R8 — 16 MB flash, 8 MB PSRAM**. The buy lists (`N8R8`, 8 MB / 8 MB) and
+  the footprint library's 3D model (`N8R2`, 8 MB / 2 MB) are both stale and
+  still need fixing at the source (BOM / 3D model), which is separate,
+  unstarted work.
 
-  Regardless of which: the firmware is configured for **2 MB**
-  (`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`), so at minimum 6 MB of flash is
-  unreachable. That is the deciding constraint for OTA — see
-  `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3, and it needs fixing.
+  The firmware's sdkconfig now declares **16 MB**
+  (`CONFIG_ESPTOOLPY_FLASHSIZE_16MB`, was wrongly `_2MB`). `partitions.csv`
+  itself is unchanged and still only maps the first 2 MB (single `factory`
+  slot) — see ROADMAP.md M8 for the still-open two-app-slot OTA partition
+  table work; `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3 is the design doc
+  for that.
 - **PSRAM: deliberately off**, and staying off (decision 2026-08-16,
   `TODO.md` 9.1a). `# CONFIG_SPIRAM is not set`. Nothing on this board needs it:
   the only candidate workload is a display framebuffer, and `docs/ILI9488.md`

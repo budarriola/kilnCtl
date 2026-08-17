@@ -48,7 +48,9 @@ partition. They are in `wifi_nvs`, a second NVS partition declared by
 `partitions.csv` at the KilnFW root and selected by `sdkconfig`
 (`CONFIG_PARTITION_TABLE_CUSTOM=y`,
 `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"`,
-`CONFIG_PARTITION_TABLE_OFFSET=0x8000`, `CONFIG_ESPTOOLPY_FLASHSIZE="2MB"`).
+`CONFIG_PARTITION_TABLE_OFFSET=0x8000`, `CONFIG_ESPTOOLPY_FLASHSIZE="16MB"` as
+of 2026-08-17 — the partition *table* itself is unaffected and still only maps
+the first 2 MB of flash; see `partitions.csv`'s header).
 
 | Name | Type/SubType | Offset | Size | Holds |
 |---|---|---|---|---|

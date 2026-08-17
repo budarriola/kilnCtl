@@ -868,7 +868,18 @@ Two more, driven by the borrowed-thermocouple option:
 - [x] 0.1 Safety-UART pins swapped in `KilnFW` (TX→4, RX→5), pull-up moved to GPIO5
 - [x] 0.2 `UART_PROTO_MSG_BROADCAST = 0x04` added (send + receive path; not yet called from `safety_link.c`)
 - [x] 0.3 `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
-- [ ] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped to 5, `UART_PROTOCOL_VERSION` aliased to it
+- [~] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped to 5, `UART_PROTOCOL_VERSION` aliased to it
+      -- **half done (2026-08-17)**: the alias is real,
+      `firmware/KilnFW/App/drivers/uart_task_ids.h`'s `UART_PROTOCOL_VERSION`
+      is now `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, not a second number.
+      The bump to 5 was deliberately **not** done this pass: it is a
+      cross-firmware wire-compatibility decision (both `KilnFW` and `SaftyFW`
+      must agree on the same number in the same commit) and `SaftyFW` was
+      being worked on in parallel by a different pass when this one landed --
+      bumping the shared `CommonFW/include/kilnlink/kilnlink_version.h`
+      constant unilaterally risked stepping on that work. Revisit together,
+      in one commit touching both firmwares, per this file's own header
+      guidance ("bump `KILNLINK_PROTOCOL_VERSION` if a peer would break").
 
 **ESP → Pico**
 - [ ] `SAFETY_CMD_PUSH_CONTEXT` (0x07) built and broadcast at 500 ms

@@ -78,6 +78,35 @@
 // lights U1's LED and pulls the Pico's mainFault input LOW. It is not part of
 // this protocol and keeps working with the UART completely dead, which is the
 // entire point of it being a wire and not a message.
+//
+// Phase 7b -- mutual version compatibility (CommonFW/docs/LINK_PROTOCOL.md
+// sec 4/6), the newer, BROADCAST-carried half of this contract, layered on
+// top of everything above rather than replacing it:
+//   0x0F SAFETY_CMD_ANNOUNCE_VERSION (ESP -> Pico, BROADCAST, unrequested)
+//                                   Sent at ESP boot (a few repeats against
+//                                   loss) and again whenever a Pico
+//                                   FW_VERSION frame reports a new boot_id.
+//                                   Same byte layout as FW_VERSION below,
+//                                   truncated at boot_id (no config_version/
+//                                   config_crc -- the ESP has none of its
+//                                   own to report). Built by
+//                                   safety_build_announce_version_payload().
+//   0x0B SAFETY_CMD_FW_VERSION      (Pico -> ESP, BROADCAST, unsolicited at
+//                                   Pico boot and on request). This driver
+//                                   only *parses* it today (no explicit
+//                                   0x0B request-with-retry yet -- Phase
+//                                   0.6b remains open): bytes1..2 protocol,
+//                                   bytes3..4 min_compatible (read before
+//                                   anything else, per the wire spec's
+//                                   floor rule), then dirty/commit/datetime/
+//                                   boot_id. safety_apply_fw_version()
+//                                   updates the tracked compatibility
+//                                   verdict and re-announces on a boot_id
+//                                   change.
+// A version mismatch (peer_version_known && !peer_version_compatible) is
+// folded into the *same* SAFETY_FAULT_SRC_SAFETY_LINK bit link staleness
+// already uses -- LINK_PROTOCOL.md sec 4: "The ESP treats it exactly like a
+// dead link." See safety_update_health() in safety_link.c.
 #ifndef SAFETY_LINK_H
 #define SAFETY_LINK_H
 
@@ -220,11 +249,34 @@ typedef struct {
 
     uint32_t fault_sources;        /* bitwise OR of safety_fault_source_t */
     bool     fault_on_link_loss;   /* policy: raise SAFETY_FAULT_SRC_SAFETY_LINK
-                                    * from the poll task when this link is down */
+                                    * from the poll task when this link is down
+                                    * OR a peer version mismatch is known (see
+                                    * peer_version_compatible below) -- Phase
+                                    * 7b.5, "the ESP treats it exactly like a
+                                    * dead link" (LINK_PROTOCOL.md sec 4). */
     int      fault_io;
+
+    /* Phase 7b (LINK_PROTOCOL.md sec 4, ANNOUNCE_VERSION/FW_VERSION):
+     * mutual version handshake. esp_boot_id is generated once at
+     * safety_link_start() and sent in every outbound ANNOUNCE_VERSION.
+     * pico_boot_id/pico_boot_id_known come from the last FW_VERSION frame
+     * the Pico pushed; a change re-sends ANNOUNCE_VERSION (a Pico that just
+     * rebooted has forgotten everything, including who it was talking to).
+     * peer_version_known/peer_version_compatible come from the same frame:
+     * "known" gates whether a mismatch is asserted at all (no opinion until
+     * the Pico has actually announced itself), "compatible" is the result of
+     * the same two-way formula SaftyFW's link_frame_versions_compatible()
+     * uses on its side. */
+    uint8_t esp_boot_id;
+    uint8_t pico_boot_id;
+    bool    pico_boot_id_known;
+    bool    peer_version_known;
+    bool    peer_version_compatible;
 
     bool       down_logged;      /* rate limiting for the "link is down" warning */
     TickType_t down_log_tick;
+    bool       version_mismatch_logged; /* edge-detect for the Phase 7b.5 mismatch log line;
+                                          * poll-task-only, same no-lock reasoning as down_logged */
     bool       initialized;
 } SafetyLinkClass;
 
@@ -265,6 +317,15 @@ esp_err_t safety_link_ping(SafetyLinkClass *link);
 esp_err_t safety_link_set_poll_period(SafetyLinkClass *link, uint16_t period_ms);
 
 esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out);
+
+/* Phase 7b (LINK_PROTOCOL.md sec 4): reports what the last FW_VERSION frame
+ * from the Pico said about compatibility. *out_known is false, and
+ * *out_compatible is meaningless, until the Pico has pushed at least one
+ * FW_VERSION frame (its own boot push, or a reply to SAFETY_CMD_GET_STATUS's
+ * eventual GET_FW_VERSION request -- Phase 0.6b, not built this pass). Never
+ * blocks on the far side. */
+esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_known,
+                                               bool *out_compatible);
 
 /* --- Isolated fault line (GPIO6, an ESP OUTPUT) ---
  * High asserts: it lights U1's LED, which pulls the Pico's mainFault input

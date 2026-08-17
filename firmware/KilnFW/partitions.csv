@@ -1,4 +1,12 @@
-# KilnCtl partition table -- 2 MB flash (ESP32-S3).
+# KilnCtl partition table -- ESP32-S3, N16R8 module (16 MB flash / 8 MB PSRAM,
+# confirmed 2026-08-17 against the LonelyBinary product page for the board in
+# hand). This table intentionally maps only the FIRST 2 MB (0x200000) of that
+# 16 MB chip -- see below. The remaining ~14 MB is unmapped/unused headroom,
+# reserved for a future OTA dual-app-slot partition table (ROADMAP.md M8: "the
+# ESP needs a new partition table with two app slots"). That OTA rework is a
+# separate, unstarted effort -- this pass only corrected the sdkconfig
+# flash-size declaration (CONFIG_ESPTOOLPY_FLASHSIZE, previously wrongly set
+# to 2MB) to match the real chip; it did not touch partition layout.
 #
 # Derived from ESP-IDF's stock partitions_singleapp_large.csv. The first three
 # entries are byte-identical to that stock table on purpose: this board has
@@ -20,7 +28,7 @@
 #   - It also makes "reset the kiln config" (erase `nvs`) a survivable
 #     operation that does not strand the board off Wi-Fi.
 #
-# Layout of the 2 MB (0x200000) flash:
+# Layout of the first 2 MB (0x200000) of the 16 MB flash mapped by this table:
 #   0x000000..0x008000  bootloader (implicit, below the table offset)
 #   0x008000..0x009000  partition table itself (CONFIG_PARTITION_TABLE_OFFSET)
 #   0x009000..0x00F000  nvs         24K   default NVS: legacy home of zones/rules/

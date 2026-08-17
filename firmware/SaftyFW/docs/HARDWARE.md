@@ -259,6 +259,13 @@ default state for MISO/CLK/MOSI.
 SDA/SCL, GPIO11/12 = thermoFault/thermoDrdy). The stale `kiln.net` disagrees;
 ignore it.
 
+**On-board flash: 2MB.** A1 is a stock Raspberry Pi Pico (`PICO_BOARD=pico` in
+`firmware/SaftyFW/CMakeLists.txt`, not `pico_w`/`pico2`/a custom board file),
+so its onboard QSPI flash is fixed by Raspberry Pi's own board design at
+`PICO_FLASH_SIZE_BYTES = 2 * 1024 * 1024` (pico-sdk's
+`src/boards/include/boards/pico.h`) — a hardware fact of the stock board, not
+a sourcing ambiguity like the ESP32-S3 module's flash was. TODO.md item 10.1.
+
 ---
 
 ## 3. Safety relay K4 — the most important system-level constraint
