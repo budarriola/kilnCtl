@@ -47,7 +47,7 @@ main board's, so the directory moved and the package did not.
 | `protocol.py` | SLIP framing, CRC-16/CCITT-FALSE, `Frame`, enums, task ids, every subcommand constant |
 | `serial_link.py` | `UartLink` (reader thread, retry/ACK logic), port discovery |
 | `link_hub.py` | Lets several `kilnctrl` processes share one physical port |
-| `devices.py` | Payload builders + response parsers for all eleven tasks |
+| `devices.py` | Payload builders + response parsers for all twelve tasks |
 | `thermo.py` | `ThermoClient`: owns task 1, MAX31856 queries + the auto-report push |
 | `io_expander.py` | `IoClient`: owns task 2, SX1509 queries + the auto-report push |
 | `info.py` | `InfoClient`: owns task 3, pin config / FW version, spots boot pushes |
@@ -58,6 +58,7 @@ main board's, so the directory moved and the package did not.
 | `profiles.py` | `ProfilesClient`: owns task 9, fire profile CRUD + execution control |
 | `autotune.py` | `AutotuneClient`: owns task 10, PID autotune status/start/abort/accept |
 | `wifi_uart.py` | `WifiUartClient`: owns task 11, Wi-Fi status/scan/provision/forget over UART |
+| `probe.py` | `ProbeClient`: owns task 12, raw ESP32 GPIO probe (only on a `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` build, default off) |
 | `pin_overlay.py` | Badge coordinates in `assets/pinout.png` + overlay drawing |
 | `session_log.py` | Per-session log files, semantic rollover, retention setting |
 | `settings.py` | Persisted app settings (`settings.json`): last-used port, log retention |

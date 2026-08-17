@@ -73,9 +73,13 @@ typedef enum {
 } uart_proto_device_t;
 
 typedef enum {
-    UART_PROTO_MSG_DATA = 0x01,
-    UART_PROTO_MSG_ACK  = 0x02,
-    UART_PROTO_MSG_NACK = 0x03, /* destination task not registered ("undeliverable") */
+    UART_PROTO_MSG_DATA      = 0x01,
+    UART_PROTO_MSG_ACK       = 0x02,
+    UART_PROTO_MSG_NACK      = 0x03, /* destination task not registered ("undeliverable") */
+    UART_PROTO_MSG_BROADCAST = 0x04, /* fire-and-forget: no ACK, no retry, no dedup. See
+                                       * CommonFW/docs/LINK_PROTOCOL.md sec 1 -- required for the
+                                       * safety link, where the far end must never be obliged to
+                                       * transmit in reply. */
 } uart_proto_msg_type_t;
 
 typedef struct {
@@ -168,6 +172,21 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto,
                               const uint8_t *payload,
                               size_t length,
                               uint32_t ack_timeout_ms);
+
+/* Sends payload to (dst_device, dst_task) as a BROADCAST frame: one shot, no
+ * ACK wait, no retry, no dedup on the receiving side. Returns as soon as the
+ * bytes are handed to the UART. A peer that never replies -- the safety
+ * processor's normal, required behaviour -- costs nothing here, unlike
+ * uart_protocol_send's ten-retry timeout. Returns:
+ *   ESP_OK               - handed to the UART
+ *   ESP_ERR_INVALID_ARG  - length > UART_PROTO_MAX_PAYLOAD, etc.
+ *   ESP_FAIL             - the UART write itself failed */
+esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto,
+                                        uart_proto_device_t dst_device,
+                                        uint8_t dst_task,
+                                        uint8_t src_task,
+                                        const uint8_t *payload,
+                                        size_t length);
 
 #ifdef __cplusplus
 }

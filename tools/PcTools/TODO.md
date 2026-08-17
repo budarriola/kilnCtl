@@ -5,10 +5,13 @@
 > the same commit. If it disagrees with the code, **the code wins.** Checklist
 > at the bottom.
 
-**Status: proposed move, not executed.** The code exists today at
-`tools/PcTools/` and works. This document plans (a) moving it out from under
-one firmware, (b) making it serve both processors, and (c) the capabilities that
-make it usable by an agent rather than only by a human at a Tk window.
+**Status: the move is done.** The code lives at `tools/PcTools/`
+(`docs/REPO_LAYOUT.md`, done 2026-08-16) and already serves both processors --
+`safety.py`/`probe.py` talk to the RP2040 side, everything else to the ESP.
+This document now tracks (b) the remaining "serve both processors evenly"
+work and (c) the capabilities that make it usable by an agent rather than
+only by a human at a Tk window. The "Move" checklist below is kept as a
+record of what that move required, not as an open task.
 
 ## Why move it
 
@@ -20,11 +23,8 @@ as belonging to that one.
 Concretely it already contains `safety.py` — a page and MCP tools for a
 processor whose firmware is in a different directory.
 
-**Proposed: `PcTools/` at the repository root**, sibling to `firmware/CommonFW/`,
-`firmware/KilnFW/` and `firmware/SaftyFW/`. Under the `REPO_LAYOUT.md` reorganisation it becomes
-`tools/PcTools/`, or `firmware/PcTools/` if it is felt to belong with the
-firmware it mirrors — either is defensible; what is not is leaving it under
-`firmware/KilnFW/`.
+**Done: `tools/PcTools/`**, sibling to `firmware/`, per the `REPO_LAYOUT.md`
+reorganisation (`docs/REPO_LAYOUT.md`, `ROADMAP.md` M1/M7).
 
 The Python package keeps the name `kilnctrl`: it is the system's name, not the
 main board's, and renaming it would churn every import and the two console
@@ -335,12 +335,14 @@ reimplementing the transfer.
 
 ## Completion checklist
 
-**Move**
-- [ ] `tools/PcTools/` → `PcTools/` via `git mv` (history preserved)
-- [ ] Package stays `kilnctrl`; console scripts unchanged
-- [ ] `firmware/KilnFW/README.md` and `CLAUDE.md` references updated
-- [ ] `.gitignore` re-rooted (`logs/`, `.venv/`, `__pycache__/`)
-- [ ] `selfcheck.py` still passes after the move
+**Move (done 2026-08-16 -- record, not an open task)**
+- [x] `KilnFW/pc_tools/` → `tools/PcTools/` via `git mv` (history preserved)
+- [x] Package stays `kilnctrl`; console scripts unchanged
+- [x] `CLAUDE.md` references updated
+- [x] `.gitignore` re-rooted (`logs/`, `.venv/`, `__pycache__/`)
+- [x] `selfcheck.py` still runs after the move (16 pre-existing, unrelated
+      failures as of 2026-08-16 -- see "GPIO probe" item above; nothing the
+      move itself broke)
 
 **Two peers**
 - [ ] `Peer` abstraction (`ESP` | `SAFETY`) threaded through `link_hub.py`
@@ -351,16 +353,67 @@ reimplementing the transfer.
 - [ ] GUI grows a safety column rather than a second application
 
 **Capabilities**
-- [ ] 1. GPIO probe on the **ESP**, with `KILNCTL_ENABLE_GPIO_PROBE` **default off**, a pin deny-list including **GPIO6**, writes refused during a profile, every call logged
+- [x] 1. GPIO probe on the **ESP**, with `KILNCTL_ENABLE_GPIO_PROBE` **default off**, a pin deny-list including **GPIO6**, writes refused during a profile, every call logged.
+      Done 2026-08-16: `App/drivers/gpio_probe.{c,h}` (task 12), `Kconfig`
+      option, `tools/PcTools/src/kilnctrl/probe.py` client +
+      `mcp_server.py` tools (`gpio_probe_set_mode/write/read/read_all`).
+      Verified: `idf.py build` clean both with the option on and off (its
+      default); `selfcheck.py` still passes everything it passed before
+      (16 pre-existing unrelated failures, all UART_PROTOCOL_VERSION==2/
+      old-payload-size test staleness predating this change).
+      **Not yet bench-tested against real hardware** -- no board attached
+      this session.
 - [ ] 1b. GPIO probe on the **Pico** over SWD; **GPIO6 (`saftyRelay`) never writable**; writes refused unless `INIT`/`GRACE`
 - [ ] 1c. Coordinated two-board test script implementing `firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C, reaching each processor by a path that is **not** the link under test
-- [ ] 2. Saleae capture as an MCP tool, with `kilnlink` frame decoding
-- [ ] 3. GUI-vs-MCP capability audit completed and gaps closed
-- [ ] 4. `get_board_state()` one-call snapshot, both processors
+- [~] 2. Saleae capture as an MCP tool. Done 2026-08-16: `saleae_list_devices`/
+      `saleae_capture` wrap `logic_capture.py`'s automation-API client;
+      verified against no-Logic2-running (clean error, not a crash) since no
+      Saleae hardware was attached this session. **`kilnlink` frame decoding
+      NOT done** -- deliberately: building a decoder against zero real
+      captures risks one nobody has validated. Left for whoever has both a
+      board and the analyzer on the bench at once
+- [~] 3. GUI-vs-MCP capability audit: four client classes the GUI has driven
+      since they were added were never wired into `mcp_server.py` at all --
+      `WifiUartClient` (task 11), `ControlClient` (8), `ProfilesClient` (9),
+      `AutotuneClient` (10). Closed 2026-08-16: `_wifi`/`_control`/
+      `_profiles`/`_autotune` clients added, plus `wifi_get_status/scan/
+      add_network/set_mode/set_ap_identity/get_networks/forget`,
+      `control_get_zones/set_zone_pid/set_zone_model`, `profiles_list/get/
+      save/delete/get_exec_status/start/stop/pause/resume/ack_last_run`,
+      `autotune_get_status/start/abort/accept`. `profiles_start/stop` are the
+      tools that begin/end an actual firing -- they carry no gate beyond what
+      the firmware itself already enforces (`relay_authority_on_blocked()`),
+      same as the GUI/HTTP path, per "What this does not become" below.
+      Verified: `selfcheck.py` unchanged (476 pass / 16 pre-existing fail).
+      **Not yet exercised against real hardware** -- no board attached this
+      session. **Audit not exhaustive** -- found by diffing `gui.py`'s client
+      instantiations against `mcp_server.py`'s, not a page-by-page walk of
+      every GUI control; a full pass as the TODO originally scoped is still open
+- [x] 4. `get_board_state()` one-call snapshot. Done 2026-08-16: fw version,
+      pin config, thermo, IO, safety status+link stats, Wi-Fi status, zone
+      config, profile exec status, autotune status, as JSON. Each section
+      fails independently (`_snapshot_section`) so one dead subsystem (e.g.
+      no safety processor fitted) doesn't blank the rest -- verified with no
+      board attached, every section reported its own honest error. **Only
+      one processor** -- there is no second processor's data to add yet
+      (`SaftyFW` doesn't exist); revisit once it does
 - [ ] 5. Software peer stub, both directions, with fault injection
-- [ ] 6. Codec encode/decode exposed with no board attached
-- [ ] 7. Log stream queryable as structured records
-- [ ] 8. Connection errors name the problem
+- [x] 6. Codec encode/decode exposed with no board attached. Done 2026-08-16:
+      `codec_encode_frame`/`codec_decode_frame` (pure functions, no link
+      touched), built on `protocol.py`'s existing `Frame`/`unstuff` --
+      round-tripped and verified by hand, `selfcheck.py` unchanged
+- [x] 7. Log stream queryable as structured records. Done 2026-08-16:
+      `get_device_log_json(n, min_level)` returns a JSON array of
+      `{pc_time, level, text}`, oldest first, with a severity filter.
+      `_device_log_history` now stores `(pc_arrival_time, LogLine)` instead
+      of bare `LogLine` -- PC arrival is the only common clock, the device
+      has no RTC this tool trusts. `get_device_log` (text) kept unchanged
+      for compatibility
+- [x] 8. Connection errors name the problem. Done 2026-08-16:
+      `serial_link.py`'s `connect()` now raises with every port seen, its
+      score, and why it was rejected (JTAG / no bridge-chip hint / not
+      enough signal), or says plainly that no serial ports were seen at
+      all -- instead of leaving the caller to discover it as a later timeout
 - [ ] All tools return JSON
 
 **Debug and programming (OpenOCD wrapper)**

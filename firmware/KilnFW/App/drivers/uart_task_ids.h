@@ -62,6 +62,7 @@
 #define UART_TASK_ID_PROFILES 9u  /* fire profile CRUD + execution -- mirrors profiles_http.c/dashboard_http.c */
 #define UART_TASK_ID_AUTOTUNE 10u /* PID autotune -- mirrors dashboard_http.c's /api/autotune* */
 #define UART_TASK_ID_WIFI     11u /* Wi-Fi status/scan/provision -- mirrors wifi_provision_http.c */
+#define UART_TASK_ID_GPIO_PROBE 12u /* raw ESP32 GPIO probe -- CONFIG_KILNCTL_ENABLE_GPIO_PROBE, default off */
 
 /* --- THERMO (task_id = UART_TASK_ID_THERMO) ---
  * Three MAX31856 cold-junction-compensated thermocouple front ends living on
@@ -346,19 +347,20 @@
  * Pico -- not the ESP -- owns the safety thermocouple board on J7, the three
  * current-sense channels, the E-stop input and the safety relay K4.
  *
- * Two things about that barrier that the schematic's net names hide, both
- * traced from the netlist (see docs/HARDWARE.md for the full trace):
- *   - The net called DataToSafty is the ESP's *RX* (GPIO4, collector of U3,
- *     whose LED is driven by the Pico's TX) and DataFromSafty is the ESP's
- *     *TX* (GPIO5, feeding U2's LED, whose collector is the Pico's RX). The
- *     names read backwards; the silicon does not.
+ * Two things about that barrier that are easy to get backwards, both traced
+ * from the schematic (see docs/HARDWARE.md for the full trace):
+ *   - DataToSafty is the ESP's *TX* (GPIO4, feeding U2's LED, whose collector
+ *     is the Pico's RX) and DataFromSafty is the ESP's *RX* (GPIO5, collector
+ *     of U3, whose LED is driven by the Pico's TX). U3 is drawn mirrored
+ *     relative to U1/U2 -- reading it with their orientation is what makes
+ *     this look backwards when it is not.
  *   - Both directions are logically INVERTED. The driving side's LED is on
  *     when its line is high, which pulls the receiving side's collector low,
  *     so an idle-high UART line arrives as idle-low. The firmware fixes this
  *     with uart_set_line_inverse(TXD_INV | RXD_INV) rather than in software.
- *     GPIO4 also has no external pull-up on the collector (U3 pin 4 is the
- *     only thing on that net besides the ESP), so the internal pull-up must
- *     be enabled or the line floats.
+ *     GPIO5's only external pull-up is R15 (U3's collector has nothing else
+ *     on that net besides the ESP); the internal pull-up is enabled too, as
+ *     belt-and-braces.
  *   - The Fault line (GPIO6) is an ESP *output*: driving it high lights U1's
  *     LED, which pulls the Pico's mainFault input low. There is no hardware
  *     path for the Pico to signal the ESP outside the UART.
@@ -905,5 +907,60 @@
 
 #define WIFI_WIRE_MAX_SCAN_ENTRIES 6u
 #define WIFI_WIRE_MAX_NETWORK_ENTRIES 5u
+
+/* --- GPIO_PROBE (task_id = UART_TASK_ID_GPIO_PROBE) ---
+ * Raw ESP32-S3 pin control for answering "is this net actually where the
+ * schematic says" without building and flashing a one-off firmware --
+ * tools/PcTools/TODO.md capability 1. Compiled in only when
+ * CONFIG_KILNCTL_ENABLE_GPIO_PROBE is set (default off, gpio_probe.c); on a
+ * build without it this task is never registered and every subcommand below
+ * goes unanswered, same as any other unregistered task_id.
+ *
+ * This is deliberately NOT a general escape hatch:
+ *   - A hard deny-list refuses the SPI bus, the I2C bus, the SX1509 IRQ/RESET
+ *     pins, the display CS, the PC-link UART pins and -- above all -- the
+ *     three safety-link pins (SAFETY_TX_IO, SAFETY_RX_IO, and especially
+ *     SAFETY_FAULT_IO/GPIO6, the isolated line the safety processor reads as
+ *     "main controller faulted"). See gpio_probe.c's deny-list table.
+ *   - WRITE and SET_MODE are refused outright while a profile is
+ *     RUNNING or PAUSED (profile_executor_get_status()), so this cannot
+ *     become a second, ungoverned relay control path.
+ *   - Every accepted and every refused call is logged at the point of
+ *     refusal, with the reason.
+ *
+ * byte0 = subcommand:
+ *   0x01 SET_MODE   byte1=gpio_num  byte2=mode (GPIO_PROBE_MODE_*)
+ *   0x02 WRITE      byte1=gpio_num  byte2=level(0/1)
+ *   0x03 READ       byte1=gpio_num                        -- QUERY
+ *   0x04 READ_ALL   (no args)                              -- QUERY
+ *
+ * SET_MODE / WRITE reply (echoed on every call, success or refusal):
+ *   byte0 = subcommand
+ *   byte1 = ok (0/1)
+ *   [if !ok] byte2 = length-prefixed ASCII reason (1-byte length + bytes)
+ *
+ * READ reply:
+ *   byte0 = GPIO_PROBE_CMD_READ
+ *   byte1 = ok (0/1)
+ *   [if ok]  byte2 = level (0/1)
+ *   [if !ok] byte2 = length-prefixed ASCII reason
+ *
+ * READ_ALL reply -- every pin this connection has SET_MODE'd since boot or
+ * since the probe's own reset, up to GPIO_PROBE_MAX_TRACKED entries:
+ *   byte0 = GPIO_PROBE_CMD_READ_ALL
+ *   byte1 = count (N)
+ *   N * 3 bytes: gpio_num, mode, level
+ */
+#define GPIO_PROBE_CMD_SET_MODE  0x01u
+#define GPIO_PROBE_CMD_WRITE     0x02u
+#define GPIO_PROBE_CMD_READ      0x03u
+#define GPIO_PROBE_CMD_READ_ALL  0x04u
+
+#define GPIO_PROBE_MODE_INPUT          0u
+#define GPIO_PROBE_MODE_INPUT_PULLUP   1u
+#define GPIO_PROBE_MODE_INPUT_PULLDOWN 2u
+#define GPIO_PROBE_MODE_OUTPUT         3u
+
+#define GPIO_PROBE_MAX_TRACKED 16u
 
 #endif // UART_TASK_IDS_H

@@ -193,6 +193,34 @@ def recommend_port() -> Optional[str]:
     return None
 
 
+def _no_port_found_message() -> str:
+    """Names the problem instead of leaving the caller to discover it as a
+    later timeout: "no USB-UART bridge port found" alone doesn't say whether
+    no ports exist at all, a plausible one was seen but scored too low, or
+    the board is plugged in but only exposing its native USB-Serial-JTAG
+    port (which is not this UART -- see the module docstring)."""
+    infos = list_ports()
+    if not infos:
+        return (
+            "no USB-UART bridge port found: no serial ports were seen on this "
+            "machine at all (nothing in serial.tools.list_ports.comports()). "
+            "Check the board is powered and the USB cable carries data, not "
+            "power only."
+        )
+    lines = [
+        "no USB-UART bridge port found; pass an explicit port "
+        "(note: the ESP32-S3 native USB-Serial-JTAG port is not this UART). "
+        f"{len(infos)} serial port(s) were seen and rejected:"
+    ]
+    for info in infos:
+        reason = "JTAG port (not this UART)" if info.score <= -80 else (
+            f"score {info.score} (no bridge-chip hint matched)" if info.score <= 0
+            else f"score {info.score}"
+        )
+        lines.append(f"  {info.label} [{reason}]")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # link
 # ---------------------------------------------------------------------------
@@ -271,10 +299,7 @@ class UartLink:
         if port is None:
             port = recommend_port()
             if port is None:
-                raise RuntimeError(
-                    "no USB-UART bridge port found; pass an explicit port "
-                    "(note: the ESP32-S3 native USB-Serial-JTAG port is not this UART)"
-                )
+                raise RuntimeError(_no_port_found_message())
 
         # Constructed *without* a port so it stays closed, then opened
         # explicitly below. This matters: the board's USB-UART bridge straps

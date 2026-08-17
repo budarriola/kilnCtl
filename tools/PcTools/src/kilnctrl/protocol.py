@@ -94,6 +94,14 @@ class MsgType(enum.IntEnum):
     DATA = 0x01
     ACK = 0x02
     NACK = 0x03  # destination task not registered ("undeliverable")
+    #: Fire-and-forget: no ACK, no retry, no dedup. Added to
+    #: uart_protocol.{c,h} 2026-08-16 for the safety link (the RP2040 must
+    #: never be obliged to transmit in reply -- CommonFW/docs/LINK_PROTOCOL.md
+    #: sec 1). UartLink.send() below does not build or accept this type yet --
+    #: nothing on the PC<->ESP link uses it today -- so this constant exists
+    #: for parity with the firmware enum and for decoding a capture, not as a
+    #: send path.
+    BROADCAST = 0x04
 
 
 # --- task ids (Python side of App/drivers/uart_task_ids.h) -----------------
@@ -108,6 +116,7 @@ UART_TASK_ID_CONTROL = 8  # zone config (PID/model/read-back) + manual relay con
 UART_TASK_ID_PROFILES = 9  # fire profile CRUD + execution control
 UART_TASK_ID_AUTOTUNE = 10  # PID autotune (step/relay methods)
 UART_TASK_ID_WIFI = 11  # Wi-Fi status/scan/provision/forget
+UART_TASK_ID_GPIO_PROBE = 12  # raw ESP32 GPIO probe -- CONFIG_KILNCTL_ENABLE_GPIO_PROBE, default off
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged
@@ -286,6 +295,25 @@ WIFI_WIRE_MAX_NETWORK_ENTRIES = 5
 #: SET_MODE's mode byte.
 WIFI_MODE_HOME = 0
 WIFI_MODE_AP = 1
+
+# --- GPIO_PROBE subcommands (task_id = UART_TASK_ID_GPIO_PROBE) -------------
+# Only answered when the board was built with CONFIG_KILNCTL_ENABLE_GPIO_PROBE
+# (default off) -- see gpio_probe.c and uart_task_ids.h for the deny-list and
+# the profile-running refusal. On a build without it, every call here times
+# out exactly like any other unregistered task_id; that is not a bug in this
+# client, it means the capability was not compiled in.
+GPIO_PROBE_CMD_SET_MODE = 0x01
+GPIO_PROBE_CMD_WRITE = 0x02
+GPIO_PROBE_CMD_READ = 0x03
+GPIO_PROBE_CMD_READ_ALL = 0x04
+
+#: SET_MODE's mode byte.
+GPIO_PROBE_MODE_INPUT = 0
+GPIO_PROBE_MODE_INPUT_PULLUP = 1
+GPIO_PROBE_MODE_INPUT_PULLDOWN = 2
+GPIO_PROBE_MODE_OUTPUT = 3
+
+GPIO_PROBE_MAX_TRACKED = 16
 
 
 class LogLevel(enum.IntEnum):

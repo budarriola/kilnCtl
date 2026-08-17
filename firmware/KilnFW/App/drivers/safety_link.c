@@ -449,9 +449,10 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         goto fail_owner;
     }
 
-    /* GPIO4 is the bare collector of U3 -- R15's pull-up is on the *other*
-     * net (the TX side), and nothing else sits on this one. With the
-     * phototransistor off the pin would float, so the internal pull-up is what
+    /* GPIO5 is the bare collector of U3, on net DataFromSafty -- R15's 1k
+     * pull-up to 3.3V_Main is already fitted on this net, and nothing else
+     * sits on it. With the phototransistor off the pin would float, so the
+     * internal pull-up is what
      * defines the LED-off level (high at the pad = low after RXD_INV = the
      * space/break level). uart_set_pin already asks for this, but it is
      * restated because it is load-bearing rather than incidental: without it

@@ -148,6 +148,30 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
         return;
     }
 
+    if (type == UART_PROTO_MSG_BROADCAST) {
+        if (dst_device != proto->own_device) {
+            return; /* not for us */
+        }
+        xSemaphoreTake(proto->tasks_lock, portMAX_DELAY);
+        uart_proto_task_slot_t *bslot = find_slot(proto, dst_task);
+        if (!bslot) {
+            xSemaphoreGive(proto->tasks_lock);
+            return; /* fire-and-forget: no NACK, unregistered task is just dropped */
+        }
+        uart_proto_message_t bmsg = {
+            .device = src_device,
+            .task_id = src_task,
+            .msg_index = msg_index,
+            .length = length,
+        };
+        memcpy(bmsg.payload, &raw[HEADER_LEN], length);
+        /* No dedup, no reply either way: a lost or duplicated broadcast is
+         * the sender's problem to notice (staleness), never this layer's. */
+        xQueueSend(bslot->inbox, &bmsg, 0);
+        xSemaphoreGive(proto->tasks_lock);
+        return;
+    }
+
     if (type != UART_PROTO_MSG_DATA) {
         return;
     }
@@ -471,6 +495,46 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto,
             proto->suppressed_retry_logs++;
         }
     }
+
+    xSemaphoreGive(proto->tx_lock);
+    return result;
+}
+
+esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto,
+                                        uart_proto_device_t dst_device,
+                                        uint8_t dst_task,
+                                        uint8_t src_task,
+                                        const uint8_t *payload,
+                                        size_t length)
+{
+    if (!proto || !proto->initialized || length > UART_PROTO_MAX_PAYLOAD || (length > 0 && !payload)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(proto->tx_lock, portMAX_DELAY);
+
+    uint16_t msg_index = proto->next_tx_index++;
+
+    uint8_t raw[HEADER_LEN + UART_PROTO_MAX_PAYLOAD + 2];
+    raw[0] = (uint8_t)UART_PROTO_MSG_BROADCAST;
+    raw[1] = (uint8_t)(msg_index >> 8);
+    raw[2] = (uint8_t)(msg_index & 0xFF);
+    raw[3] = (uint8_t)proto->own_device;
+    raw[4] = src_task;
+    raw[5] = (uint8_t)dst_device;
+    raw[6] = dst_task;
+    raw[7] = (uint8_t)length;
+    if (length > 0) {
+        memcpy(&raw[HEADER_LEN], payload, length);
+    }
+    uint16_t crc = crc16_ccitt_false(raw, HEADER_LEN + length);
+    raw[HEADER_LEN + length] = (uint8_t)(crc >> 8);
+    raw[HEADER_LEN + length + 1] = (uint8_t)(crc & 0xFF);
+    size_t raw_len = HEADER_LEN + length + 2;
+
+    /* No ack wait, no retry: the whole point is that the sender never blocks
+     * on the far end replying. */
+    esp_err_t result = (stuff_and_send(proto, raw, raw_len, 1000) != 0) ? ESP_OK : ESP_FAIL;
 
     xSemaphoreGive(proto->tx_lock);
     return result;

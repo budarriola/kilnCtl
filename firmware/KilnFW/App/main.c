@@ -31,6 +31,7 @@
 #include "safety_link.h"
 #include "settings.h"
 #include "sim_backend.h"
+#include "gpio_probe.h"
 #include "uart_bridge.h"
 #include "uart_log_bridge.h"
 #include "uart_owner.h"
@@ -570,6 +571,14 @@ void app_main(void)
     }
     if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start wifi uart bridge task");
+    }
+    // ESP_ERR_NOT_SUPPORTED here just means CONFIG_KILNCTL_ENABLE_GPIO_PROBE
+    // is off (the default) -- not a failure worth an ESP_LOGE. See
+    // gpio_probe.h.
+    esp_err_t gpio_probe_err = uart_bridge_start_gpio_probe_task(&uart_proto);
+    if (gpio_probe_err != ESP_OK && gpio_probe_err != ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGE(TAG, "Failed to start gpio_probe uart bridge task: %s",
+                 esp_err_to_name(gpio_probe_err));
     }
 
     // --- Fail-safe on loss of the PC link -----------------------------------

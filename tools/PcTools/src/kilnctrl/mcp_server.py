@@ -10,6 +10,11 @@ kiln controller's hardware over the hardened UART protocol:
 * **DISPLAY** (task 4) -- the ILI9488 480x320 TFT on J2
 * **SAFETY** (task 7) -- the opto-isolated link to the RP2040 safety processor
 * **INFO/LOG/SYSTEM** (3/5/6) -- pin config, firmware version, console, recovery
+* **CONTROL/PROFILES/AUTOTUNE** (8/9/10) -- zone PID/model config, fire
+  profile CRUD + execution (start/stop/pause/resume a firing), PID autotune
+* **WIFI** (11) -- status/scan/provision/forget, works even with Wi-Fi down
+* **GPIO_PROBE** (12) -- raw ESP32 pin control, only on a firmware built with
+  `CONFIG_KILNCTL_ENABLE_GPIO_PROBE` (default off)
 
 Also exposes ``flash_firmware()``/``kill_openocd_sessions()`` -- unrelated to
 the UART link above, these drive OpenOCD directly over JTAG to (re)flash the
@@ -31,8 +36,10 @@ data.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import glob
+import json
 import logging
 import os
 import subprocess
@@ -49,21 +56,35 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
 from . import actions, devices, settings
+from .autotune import AutotuneClient, AutotuneQueryError
+from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
 from .devices import LogLine
 from .display import BlitError, DisplayClient, DisplayQueryError
 from .info import InfoClient, InfoQueryError
 from .io_expander import IoClient, IoQueryError
 from .link_hub import get_shared_link
+from .profiles import ProfilesClient, ProfilesQueryError
 from .protocol import (
+    PROFILES_SAVE_ID_NEW,
     THERMO_CHANNEL_ALL,
     UART_TASK_ID_DISPLAY,
     UART_TASK_ID_IO,
     UART_TASK_ID_SAFETY,
     UART_TASK_ID_SYSTEM,
     UART_TASK_ID_THERMO,
+    WIFI_MODE_AP,
+    WIFI_MODE_HOME,
+    Device,
+    Frame,
+    FrameError,
     LogLevel,
+    MsgType,
+    unstuff,
 )
+from . import probe
+from .probe import ProbeClient, ProbeQueryError
+from .wifi_uart import WifiUartClient, WifiUartQueryError
 from .safety import SafetyClient, SafetyQueryError
 from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
@@ -114,9 +135,12 @@ _info = InfoClient(_link, on_boot_push=_on_boot_push)
 
 #: Recent firmware log lines (task LOG), for the get_device_log tool below --
 #: an MCP client has no GUI terminal to watch live, so this is the pull-based
-#: equivalent of the GUI's Device Console window.
+#: equivalent of the GUI's Device Console window. Each entry is
+#: (pc_arrival_unix_time, LogLine): the device has no RTC the PC trusts, so
+#: PC arrival is the only common clock, same reasoning as SAFETY_LINK.md's
+#: "age" field -- see get_device_log_json below.
 _DEVICE_LOG_HISTORY = 200
-_device_log_history: "deque[LogLine]" = deque(maxlen=_DEVICE_LOG_HISTORY)
+_device_log_history: "deque[tuple[float, LogLine]]" = deque(maxlen=_DEVICE_LOG_HISTORY)
 
 #: Guards the three history buffers below. They are written from the device
 #: clients' consumer threads and read from whichever thread is serving a tool
@@ -141,7 +165,7 @@ def _on_device_log_line(line: LogLine) -> None:
     """LogClient's consumer thread: buffer for get_device_log, and mirror
     into the persistent session log so it's not lost between MCP calls."""
     with _history_lock:
-        _device_log_history.append(line)
+        _device_log_history.append((time.time(), line))
     method = _DEVICE_LOG_SESSION_METHOD.get(line.level, _session_log.info)
     method("device: %s", line.text)
 
@@ -177,6 +201,30 @@ _thermo = ThermoClient(_link, on_report=_record_report(_thermo_reports))
 _io = IoClient(_link, on_report=_record_report(_io_reports))
 _display = DisplayClient(_link)
 _safety = SafetyClient(_link)
+#: Task 12 -- only answered on a firmware built with
+#: CONFIG_KILNCTL_ENABLE_GPIO_PROBE (default off). Registered unconditionally
+#: like every other client here; on a build without the option every call
+#: just times out, which the tools below report plainly rather than as a
+#: crash.
+_probe = ProbeClient(_link)
+#: Task 11 -- status/scan/provision/forget. The GUI (gui.py) has driven this
+#: since it was added; it was never wired into the MCP server, which left an
+#: agent with no way to configure Wi-Fi at all except the HTTP endpoints
+#: (which need Wi-Fi already up to reach). Closing exactly the kind of gap
+#: capability 3 in tools/PcTools/TODO.md exists to find.
+_wifi = WifiUartClient(_link)
+#: Tasks 8/9/10 -- zone PID/model config, fire profile CRUD + execution
+#: control, and PID autotune. Same gap as _wifi above: the GUI has driven all
+#: three since they were added (control.py/profiles.py/autotune.py), none
+#: were ever wired into the MCP server. profiles.start()/stop() are the ones
+#: that actually begin/end a firing -- exposing them here is not a new,
+#: less-governed path to do that: every relay command downstream of a running
+#: profile still goes through relay_authority_on_blocked() exactly as it does
+#: from the HTTP dashboard or the GUI (tools/PcTools/TODO.md "What this does
+#: not become").
+_control = ControlClient(_link)
+_profiles = ProfilesClient(_link)
+_autotune = AutotuneClient(_link)
 
 #: Backs the generic press_button/list_buttons tools (actions.py) with the
 #: same link/info/clients this module's own bespoke tools use, so both paths
@@ -378,10 +426,36 @@ def get_device_log(n: int = 50) -> str:
     """
     if n <= 0:
         return "error: n must be positive"
-    lines = _snapshot(_device_log_history, n)
-    if not lines:
+    entries = _snapshot(_device_log_history, n)
+    if not entries:
         return "(no device log lines received yet)"
-    return "\n".join(f"{line.letter} {line.text}" for line in lines)
+    return "\n".join(f"{line.letter} {line.text}" for _ts, line in entries)
+
+
+@_tool()
+def get_device_log_json(n: int = 50, min_level: str = "info") -> str:
+    """Structured form of get_device_log: JSON array of
+    {"pc_time": unix seconds, "level": name, "text": ...}, oldest first.
+
+    ``pc_time`` is when this PC process received the line, not a device-side
+    timestamp -- the ESP32 has no RTC this tool trusts, so PC arrival is the
+    only common clock (same reasoning as the safety link's "age" field).
+    ``min_level`` filters to that level and everything more severe (one of
+    "error", "warn", "info", "debug", "verbose" -- ESP-IDF's own ordering).
+    """
+    level_names = {lvl.name.lower(): lvl for lvl in LogLevel}
+    min_lvl = level_names.get(min_level.strip().lower())
+    if min_lvl is None:
+        return f"error: min_level must be one of {sorted(level_names)}, got {min_level!r}"
+    if n <= 0:
+        return "error: n must be positive"
+    entries = _snapshot(_device_log_history, n)
+    records = [
+        {"pc_time": ts, "level": line.level.name.lower(), "text": line.text}
+        for ts, line in entries
+        if line.level <= min_lvl
+    ]
+    return json.dumps(records, indent=2)
 
 
 @_tool()
@@ -399,7 +473,8 @@ def close_server() -> str:
     """
     def _shutdown() -> None:
         time.sleep(0.2)  # let the stdio transport flush this tool's reply first
-        for client in (_info, _device_log, _thermo, _io, _display, _safety):
+        for client in (_info, _device_log, _thermo, _io, _display, _safety, _probe, _wifi,
+                       _control, _profiles, _autotune):
             client.close()
         _link.close()
         _session_log.close()
@@ -567,6 +642,78 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
         "USB power cycle of the board (not just a JTAG reset) has resolved a "
         "flash-write-protect-stuck state before."
     )
+
+
+# ---------------------------------------------------------------------------
+# Saleae Logic 2 -- independent wire-level capture, not the UART link above
+#
+# logic_capture.py wraps the Logic 2 automation gRPC API (127.0.0.1:10430,
+# Preferences -> Enable automation server). Logic 2 also exposes its own MCP
+# server on 127.0.0.1:10530 (registered as "saleae" in .mcp.json) for
+# interactive capture -- use these instead when a capture has to be scripted
+# alongside driving the board through the tools above, since the timing
+# between "arm" and "start talking to the DUT" then lives in one process.
+#
+# tools/PcTools/TODO.md capability 2 also wants captures decoded as
+# kilnlink frames, not raw transitions -- that decode step is NOT done here.
+# Building it blind (no capture ever taken this session -- no Saleae
+# hardware attached) risks a decoder nobody has run against a real capture,
+# so this wraps arm/capture/list only; decode is left as an explicit
+# follow-on for whoever has a board and a Logic analyzer both on the bench.
+# ---------------------------------------------------------------------------
+@_tool()
+def saleae_list_devices() -> str:
+    """List Saleae devices Logic 2's automation server can see.
+
+    Requires Logic 2 running with Preferences -> Enable automation server on;
+    a clean "not running" error here (rather than a raw gRPC failure) means
+    exactly that, not a hardware problem.
+    """
+    from . import logic_capture
+
+    try:
+        devs = logic_capture.list_devices()
+    except logic_capture.LogicNotRunning as exc:
+        return f"error: {exc}"
+    if not devs:
+        return "no Saleae devices connected"
+    return "\n".join(
+        f"{d.device_id}: {d.device_type}{' (sim)' if d.is_simulation else ''}" for d in devs
+    )
+
+
+@_tool()
+def saleae_capture(
+    channels: str = "0,1", duration_seconds: float = 1.0,
+    sample_rate: int = 25_000_000,
+    out_dir: str = "logs/saleae", filename: str = "capture.sal",
+) -> str:
+    """Arm a timed digital capture on the given channels and save it as a
+    ``.sal`` file (open in Logic 2 to view/export).
+
+    ``channels`` is comma-separated digital channel numbers. ``sample_rate``
+    must be one of the values reported for this channel count -- an
+    unsupported rate comes back as a firmware-reported error listing the
+    legal set, not a bare rejection.
+    """
+    from . import logic_capture
+
+    try:
+        chans = [int(c) for c in channels.split(",") if c.strip()]
+    except ValueError:
+        return f"error: could not parse channels {channels!r} as comma-separated integers"
+    if not chans:
+        return "error: no channels given"
+    try:
+        path = logic_capture.capture(
+            digital_channels=chans, duration_seconds=duration_seconds,
+            output_dir=out_dir, sample_rate=sample_rate, filename=filename,
+        )
+    except logic_capture.LogicNotRunning as exc:
+        return f"error: {exc}"
+    except Exception as exc:  # noqa: BLE001 - surface the automation API's own error text
+        return f"error: capture failed: {exc}"
+    return f"ok - saved {path}"
 
 
 # ---------------------------------------------------------------------------
@@ -1132,6 +1279,634 @@ def safety_set_fault_out(assert_fault: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# GPIO_PROBE -- raw ESP32-S3 pin control (task 12)
+#
+# Only answered on a firmware built with CONFIG_KILNCTL_ENABLE_GPIO_PROBE
+# (default off). Exists to answer "is this net actually where the schematic
+# says" without a one-off firmware -- tools/PcTools/TODO.md capability 1.
+# The firmware enforces its own deny-list (SPI/I2C/SX1509/display/PC-link/
+# safety-link pins) and refuses writes while a profile is running or paused;
+# this layer only surfaces the refusal reason, it does not re-implement the
+# policy.
+# ---------------------------------------------------------------------------
+@_tool()
+def gpio_probe_set_mode(gpio_num: int, mode: str) -> str:
+    """Configure an ESP32-S3 GPIO as input / input_pullup / input_pulldown / output.
+
+    ``mode`` is one of "input", "input_pullup", "input_pulldown", "output".
+    Refused for any pin on the firmware's deny-list (SPI, I2C, the SX1509
+    IRQ/RESET pins, the display CS, the PC-link UART pins, and every
+    safety-link pin including GPIO6) and while a profile is running or
+    paused. Requires a firmware built with CONFIG_KILNCTL_ENABLE_GPIO_PROBE
+    (default off) -- a timeout here most likely means that option is not set.
+    """
+    mode_map = {
+        "input": probe.MODE_INPUT,
+        "input_pullup": probe.MODE_INPUT_PULLUP,
+        "input_pulldown": probe.MODE_INPUT_PULLDOWN,
+        "output": probe.MODE_OUTPUT,
+    }
+    mode_val = mode_map.get(mode.strip().lower())
+    if mode_val is None:
+        return f"error: mode must be one of {sorted(mode_map)}, got {mode!r}"
+    try:
+        _probe.set_mode(gpio_num, mode_val)
+    except devices.GpioProbeRefused as exc:
+        return f"refused: {exc.reason}"
+    except ProbeQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - gpio{gpio_num} set to {mode}"
+
+
+@_tool()
+def gpio_probe_write(gpio_num: int, level: bool) -> str:
+    """Drive an ESP32-S3 GPIO high or low.
+
+    Refused unless gpio_num was already configured OUTPUT via
+    :func:`gpio_probe_set_mode`, is deny-listed, or a profile is running or
+    paused.
+    """
+    try:
+        _probe.write(gpio_num, level)
+    except devices.GpioProbeRefused as exc:
+        return f"refused: {exc.reason}"
+    except ProbeQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - gpio{gpio_num} = {'high' if level else 'low'}"
+
+
+@_tool()
+def gpio_probe_read(gpio_num: int) -> str:
+    """Read an ESP32-S3 GPIO's current level.
+
+    Does not reconfigure the pin -- safe to call on a pin already owned by
+    another peripheral, though deny-listed pins are still refused outright.
+    """
+    try:
+        level = _probe.read(gpio_num)
+    except devices.GpioProbeRefused as exc:
+        return f"refused: {exc.reason}"
+    except ProbeQueryError as exc:
+        return f"error: {exc}"
+    return f"gpio{gpio_num} = {'high' if level else 'low'}"
+
+
+@_tool()
+def gpio_probe_read_all() -> str:
+    """Read every GPIO this connection has configured via gpio_probe_set_mode.
+
+    Cheap and side-effect-free -- the recommended way to check whether the
+    probe capability exists on this firmware at all: a prompt reply (even
+    "no pins configured yet") means the option is built in, while a timeout
+    means the board almost certainly was not built with
+    CONFIG_KILNCTL_ENABLE_GPIO_PROBE.
+    """
+    try:
+        pins = _probe.read_all()
+    except ProbeQueryError as exc:
+        return f"error: {exc}"
+    if not pins:
+        return "no pins configured yet (call gpio_probe_set_mode first)"
+    return "\n".join(f"gpio{p.gpio_num}: {p.mode_name} = {'high' if p.level else 'low'}" for p in pins)
+
+
+# ---------------------------------------------------------------------------
+# WIFI (task 11) -- status/scan/provision/forget over UART
+#
+# Mirrors wifi_provision_http.c's HTTP endpoints, reachable over a link that
+# still works when Wi-Fi itself is down or unconfigured -- the whole reason
+# this task exists is to get a board onto a network without ever needing a
+# browser pointed at its AP. The GUI has driven this since it was added
+# (gui.py); these tools close the matching MCP-side gap.
+# ---------------------------------------------------------------------------
+@_tool()
+def wifi_get_status() -> str:
+    """Report Wi-Fi mode (home/ap), connection state, SSID(s), IP and RSSI."""
+    try:
+        status = _wifi.get_status()
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    return (
+        f"mode={status.mode_name} state={status.state} "
+        f"sta_connected={status.sta_connected} ssid={status.ssid!r} "
+        f"ap_ssid={status.ap_ssid!r} sta_ip={status.sta_ip!r} "
+        f"sta_rssi={status.sta_rssi} ap_clients={status.ap_clients}"
+    )
+
+
+@_tool()
+def wifi_scan() -> str:
+    """Scan for nearby APs. Slower than the other WIFI tools (~seconds);
+    capped at 6 entries by the firmware, with a truncated flag if more were seen."""
+    try:
+        entries, truncated = _wifi.scan()
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    if not entries:
+        return "no networks found" + (" (truncated)" if truncated else "")
+    lines = [f"{e.ssid!r}: rssi={e.rssi} secure={e.secure}" for e in entries]
+    if truncated:
+        lines.append("(truncated - more networks were seen than fit the reply)")
+    return "\n".join(lines)
+
+
+@_tool()
+def wifi_add_network(ssid: str, password: str = "") -> str:
+    """Save a network to try in home (station) mode. Empty password = open network."""
+    try:
+        ok = _wifi.add_network(ssid, password)
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - saved {ssid!r}" if ok else f"refused - could not save {ssid!r}"
+
+
+@_tool()
+def wifi_set_mode(mode: str) -> str:
+    """Switch between "home" (join a saved network) and "ap" (host the
+    provisioning access point) mode."""
+    mode_map = {"home": WIFI_MODE_HOME, "ap": WIFI_MODE_AP}
+    mode_val = mode_map.get(mode.strip().lower())
+    if mode_val is None:
+        return f"error: mode must be 'home' or 'ap', got {mode!r}"
+    try:
+        ok = _wifi.set_mode(mode_val)
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - mode set to {mode}" if ok else f"refused - could not set mode to {mode}"
+
+
+@_tool()
+def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[str] = None) -> str:
+    """Rename the board's own provisioning AP and/or change its password.
+    Leave either argument unset (None) to keep it unchanged."""
+    try:
+        ok = _wifi.set_ap_identity(ap_ssid, ap_password)
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    return "ok - AP identity updated" if ok else "refused - could not update AP identity"
+
+
+@_tool()
+def wifi_get_networks() -> str:
+    """List saved networks, each with in-range/rssi/secure/connected if seen
+    in the last scan. Capped at 5 entries by the firmware."""
+    try:
+        entries, truncated = _wifi.get_networks()
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    if not entries:
+        return "no saved networks"
+    lines = [
+        f"{e.ssid!r}: saved={e.saved} in_range={e.in_range} rssi={e.rssi} "
+        f"secure={e.secure} connected={e.connected}"
+        for e in entries
+    ]
+    if truncated:
+        lines.append("(truncated - more saved networks exist than fit the reply)")
+    return "\n".join(lines)
+
+
+@_tool()
+def wifi_forget(ssid: str) -> str:
+    """Delete a saved network."""
+    try:
+        ok = _wifi.forget(ssid)
+    except WifiUartQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - forgot {ssid!r}" if ok else f"refused - no such saved network {ssid!r}"
+
+
+# ---------------------------------------------------------------------------
+# CONTROL (task 8) -- zone PID/model config, mirrors zones_http.c
+#
+# Manual relay control is NOT here -- see io_set_relay/io_set_relay_mask.
+# ---------------------------------------------------------------------------
+@_tool()
+def control_get_zones() -> str:
+    """Read every zone's current PID/model config, calibration offset and
+    temperature limits, plus the thermocouple and relay counts."""
+    try:
+        thermo_count, relay_count, zones = _control.get_zones()
+    except ControlQueryError as exc:
+        return f"error: {exc}"
+    header = f"{thermo_count} thermocouple(s), {relay_count} relay(s)"
+    if not zones:
+        return header
+    return header + "\n" + "\n".join(z.describe() for z in zones)
+
+
+@_tool()
+def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> str:
+    """Set a zone's PID gains."""
+    try:
+        ok = _control.set_zone_pid(zone, kp, ki, kd)
+    except ControlQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - zone {zone} PID set" if ok else f"refused - could not set zone {zone} PID"
+
+
+@_tool()
+def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float) -> str:
+    """Set a zone's feedforward thermal model (steady-state gain, time
+    constant, dead time), used for model feedforward and autotune seeding."""
+    try:
+        ok = _control.set_zone_model(zone, k_dc, tau_s, dead_time_s)
+    except ControlQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - zone {zone} model set" if ok else f"refused - could not set zone {zone} model"
+
+
+# ---------------------------------------------------------------------------
+# PROFILES (task 9) -- fire profile CRUD + execution control, mirrors
+# profiles_http.c / dashboard_http.c's /api/profile_exec*
+#
+# start()/stop()/pause()/resume() are the tools that actually begin, end or
+# hold a firing. They carry no extra gate here beyond what the firmware
+# itself enforces (relay_authority_on_blocked(), the safety-link liveness
+# rule once M6 lands) -- this is not a second, weaker control path, it is the
+# same one the GUI and the HTTP dashboard already use.
+# ---------------------------------------------------------------------------
+@_tool()
+def profiles_list() -> str:
+    """List saved profiles: id, name, zone_mask, segment count."""
+    try:
+        summaries = _profiles.list()
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    if not summaries:
+        return "no saved profiles"
+    return "\n".join(
+        f"#{s.id} {s.name!r} zone_mask=0x{s.zone_mask:X} segments={s.segment_count}"
+        for s in summaries
+    )
+
+
+@_tool()
+def profiles_get(profile_id: int) -> str:
+    """Read one profile's full segment list (target_c, ramp_c_per_hr, dwell_min per segment)."""
+    try:
+        detail = _profiles.get(profile_id)
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    if detail is None:
+        return f"no such profile #{profile_id}"
+    lines = [f"#{detail.id} {detail.name!r} zone_mask=0x{detail.zone_mask:X}"]
+    for i, seg in enumerate(detail.segments):
+        lines.append(
+            f"  segment {i}: target={seg.target_c:.1f}C ramp={seg.ramp_c_per_hr:.1f}C/hr "
+            f"dwell={seg.dwell_min}min"
+        )
+    return "\n".join(lines)
+
+
+@_tool()
+def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str) -> str:
+    """Create (profile_id=-1) or overwrite a profile.
+
+    ``segments_json`` is a JSON array of
+    ``{"target_c": .., "ramp_c_per_hr": .., "dwell_min": ..}`` objects, one per
+    segment, in firing order.
+    """
+    try:
+        raw_segments = json.loads(segments_json)
+        if not isinstance(raw_segments, list):
+            return "error: segments_json must be a JSON array"
+        segments = [
+            devices.ProfileSegment(
+                target_c=float(s["target_c"]),
+                ramp_c_per_hr=float(s["ramp_c_per_hr"]),
+                dwell_min=int(s["dwell_min"]),
+            )
+            for s in raw_segments
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        return f"error: could not parse segments_json: {exc}"
+    pid = PROFILES_SAVE_ID_NEW if profile_id < 0 else profile_id
+    try:
+        result = _profiles.save(pid, name, zone_mask, segments)
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    if not result.ok:
+        return f"refused: {result.error}"
+    suffix = f", {result.warning_count} warning(s)" if result.warning_count else ""
+    return f"ok - saved as #{result.id}{suffix}"
+
+
+@_tool()
+def profiles_delete(profile_id: int) -> str:
+    """Delete a saved profile. Refused if it is the one currently running."""
+    try:
+        ok = _profiles.delete(profile_id)
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    return f"ok - deleted #{profile_id}" if ok else f"refused - could not delete #{profile_id}"
+
+
+@_tool()
+def profiles_get_exec_status() -> str:
+    """Read the current (or last) run's state: which profile, which segment,
+    dwell/ramp state, per-zone actuals and any fault."""
+    try:
+        st = _profiles.get_exec_status()
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    lines = [
+        f"state={st.state} profile=#{st.profile_id} {st.name!r} "
+        f"segment={st.segment_index}/{st.segment_count} dwelling={st.dwelling} "
+        f"target={st.target_c:.1f}C elapsed={st.segment_elapsed_s}s "
+        f"dwell_remaining={st.dwell_remaining_s}s ramp_lock={st.ramp_lock_held} "
+        f"fault_guard={st.fault_guard}"
+    ]
+    for z in st.zones:
+        lines.append(
+            f"  zone {z.zone}: mode={z.control_mode} "
+            f"actual={z.actual_c:.1f}C {'(valid)' if z.actual_valid else '(invalid)'} "
+            f"duty={z.duty:.2f} relay={'on' if z.relay_commanded_on else 'off'} "
+            f"faulted={z.faulted}"
+        )
+    return "\n".join(lines)
+
+
+@_tool()
+def profiles_start(profile_id: int) -> str:
+    """Start firing a saved profile. This is the tool that turns on heat --
+    same interlocks as the GUI/HTTP start button, nothing weaker."""
+    try:
+        result = _profiles.start(profile_id)
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    if not result.ok:
+        return f"refused: {result.error}"
+    return f"ok - firing #{profile_id}"
+
+
+@_tool()
+def profiles_stop() -> str:
+    """Stop the current firing. Relays off."""
+    try:
+        ok = _profiles.stop()
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    return "ok - stopped" if ok else "refused - nothing running to stop"
+
+
+@_tool()
+def profiles_pause() -> str:
+    """Pause the current firing (holds state; does not turn off heat outright)."""
+    try:
+        ok = _profiles.pause()
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    return "ok - paused" if ok else "refused - nothing running to pause"
+
+
+@_tool()
+def profiles_resume() -> str:
+    """Resume a paused firing."""
+    try:
+        ok = _profiles.resume()
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    return "ok - resumed" if ok else "refused - nothing paused to resume"
+
+
+@_tool()
+def profiles_ack_last_run() -> str:
+    """Acknowledge the last completed/faulted run, clearing it so a new one can start."""
+    try:
+        ok = _profiles.ack_last_run()
+    except ProfilesQueryError as exc:
+        return f"error: {exc}"
+    return "ok - acknowledged" if ok else "refused - nothing to acknowledge"
+
+
+# ---------------------------------------------------------------------------
+# AUTOTUNE (task 10) -- PID autotune, mirrors dashboard_http.c's /api/autotune*
+# ---------------------------------------------------------------------------
+@_tool()
+def autotune_get_status() -> str:
+    """Read the autotune run's current state, model fit and proposed gains."""
+    try:
+        st = _autotune.get_status()
+    except AutotuneQueryError as exc:
+        return f"error: {exc}"
+    return (
+        f"state={st.state_name} method={st.method} zone={st.zone} "
+        f"elapsed={st.elapsed_s}s samples={st.sample_count} "
+        f"actual={st.actual_c:.1f}C{'(valid)' if st.actual_valid else '(invalid)'} "
+        f"duty={st.duty:.2f} model_valid={st.model_valid} "
+        f"proposed_gains={st.proposed_gains} relay_valid={st.relay_valid}"
+        + (f" abort_reason={st.abort_reason!r}" if st.abort_reason else "")
+    )
+
+
+@_tool()
+def autotune_start(
+    zone: int,
+    method: str,
+    step_duty_or_setpoint_c: float,
+    relay_d: float = -1.0,
+    relay_h_c: float = -1.0,
+    rule: str = "tl",
+) -> str:
+    """Start autotune on a zone.
+
+    ``method`` is "step" or "relay"; ``rule`` (relay method only) is "tl"
+    (Tyreus-Luyben) or "zn" (Ziegler-Nichols). For the step method,
+    ``step_duty_or_setpoint_c`` is the duty step (0..1); for the relay method
+    it is the target setpoint in degC, and ``relay_d``/``relay_h_c`` (duty
+    amplitude / hysteresis band) must also be given.
+    """
+    method_map = {"step": devices.AUTOTUNE_METHOD_STEP, "relay": devices.AUTOTUNE_METHOD_RELAY}
+    rule_map = {"tl": devices.AUTOTUNE_RULE_TL, "zn": devices.AUTOTUNE_RULE_ZN}
+    method_val = method_map.get(method.strip().lower())
+    rule_val = rule_map.get(rule.strip().lower())
+    if method_val is None:
+        return f"error: method must be one of {sorted(method_map)}, got {method!r}"
+    if rule_val is None:
+        return f"error: rule must be one of {sorted(rule_map)}, got {rule!r}"
+    try:
+        ok, err = _autotune.start(zone, method_val, step_duty_or_setpoint_c, relay_d, relay_h_c, rule_val)
+    except AutotuneQueryError as exc:
+        return f"error: {exc}"
+    return "ok - autotune started" if ok else f"refused: {err}"
+
+
+@_tool()
+def autotune_abort() -> str:
+    """Abort the running autotune."""
+    try:
+        ok = _autotune.abort()
+    except AutotuneQueryError as exc:
+        return f"error: {exc}"
+    return "ok - aborted" if ok else "refused - nothing running to abort"
+
+
+@_tool()
+def autotune_accept() -> str:
+    """Accept the finished autotune's proposed gains, writing them into the zone's PID config."""
+    try:
+        ok = _autotune.accept()
+    except AutotuneQueryError as exc:
+        return f"error: {exc}"
+    return "ok - gains accepted" if ok else "refused - nothing to accept"
+
+
+# ---------------------------------------------------------------------------
+# CODEC -- encode/decode a uart_protocol frame from/to JSON, no board attached
+#
+# For reasoning about a byte sequence pulled from a Saleae capture or a log,
+# without guessing -- tools/PcTools/TODO.md capability 6. Pure functions:
+# neither of these touches the link or requires a connection.
+# ---------------------------------------------------------------------------
+_CODEC_MSG_TYPES = {"data": MsgType.DATA, "ack": MsgType.ACK, "nack": MsgType.NACK,
+                    "broadcast": MsgType.BROADCAST}
+_CODEC_DEVICES = {"esp": Device.ESP, "host": Device.HOST}
+
+
+def _codec_parse_device(name: str) -> "Optional[int]":
+    key = name.strip().lower()
+    if key in _CODEC_DEVICES:
+        return int(_CODEC_DEVICES[key])
+    try:
+        return int(name, 0)  # accept a raw numeric device id for an unlisted/future peer
+    except ValueError:
+        return None
+
+
+@_tool()
+def codec_encode_frame(
+    msg_type: str, msg_index: int, src_device: str, src_task: int,
+    dst_device: str, dst_task: int, payload_hex: str = "",
+) -> str:
+    """Build one on-wire ``uart_protocol`` frame (byte-stuffed, delimited,
+    CRC16 appended) and return it as hex.
+
+    ``msg_type`` is one of "data", "ack", "nack", "broadcast" (the last is not
+    sent on the PC<->ESP link today, only decodable -- see protocol.py's
+    MsgType.BROADCAST). ``src_device``/``dst_device`` are "esp" or "host", or
+    a raw integer for an unlisted peer id. ``payload_hex`` is the raw payload
+    bytes as hex, empty for none.
+    """
+    msg_type_val = _CODEC_MSG_TYPES.get(msg_type.strip().lower())
+    if msg_type_val is None:
+        return f"error: msg_type must be one of {sorted(_CODEC_MSG_TYPES)}, got {msg_type!r}"
+    src_dev = _codec_parse_device(src_device)
+    dst_dev = _codec_parse_device(dst_device)
+    if src_dev is None:
+        return f"error: unrecognized src_device {src_device!r}"
+    if dst_dev is None:
+        return f"error: unrecognized dst_device {dst_device!r}"
+    try:
+        payload = bytes.fromhex(payload_hex)
+    except ValueError as exc:
+        return f"error: payload_hex is not valid hex: {exc}"
+    try:
+        frame = Frame(
+            msg_type=msg_type_val, msg_index=msg_index,
+            src_device=src_dev, src_task=src_task,
+            dst_device=dst_dev, dst_task=dst_task,
+            payload=payload,
+        )
+    except ValueError as exc:
+        return f"error: {exc}"
+    return frame.to_wire().hex()
+
+
+@_tool()
+def codec_decode_frame(wire_hex: str) -> str:
+    """Parse one on-wire ``uart_protocol`` frame (hex, delimiters optional --
+    unstuffing accepts the body with or without its surrounding 0x7E bytes)
+    and report every field, including the payload as hex.
+
+    Validates length and CRC exactly like the firmware's ``handle_raw_frame``;
+    a malformed or corrupt frame comes back as an ``error:`` string rather
+    than a traceback, matching how the live RX path silently drops one.
+    """
+    try:
+        raw_wire = bytes.fromhex(wire_hex)
+    except ValueError as exc:
+        return f"error: wire_hex is not valid hex: {exc}"
+    try:
+        raw = unstuff(raw_wire)
+    except (IndexError, ValueError) as exc:
+        return f"error: could not unstuff: {exc}"
+    try:
+        frame = Frame.from_raw(raw)
+    except FrameError as exc:
+        return f"error: {exc}"
+    def dev_name(d) -> str:
+        return d.name if isinstance(d, Device) else str(d)
+    return (
+        f"msg_type={frame.msg_type.name} msg_index={frame.msg_index} "
+        f"src=({dev_name(frame.src_device)}/{frame.src_task}) "
+        f"dst=({dev_name(frame.dst_device)}/{frame.dst_task}) "
+        f"payload[{len(frame.payload)}]={frame.payload.hex()}"
+    )
+
+
+def _json_default(value):
+    """json.dumps(default=...) for the dataclass fields get_board_state
+    collects: bytes -> hex, anything else json doesn't already know -> str().
+    IntEnum members serialize as plain ints without help from this."""
+    if isinstance(value, (bytes, bytearray)):
+        return value.hex()
+    return str(value)
+
+
+def _snapshot_section(fn):
+    """Runs one board_state section, returning its data or an {"error": ...}
+    entry -- one subsystem timing out (e.g. no safety processor attached)
+    must not blank out every other section's data."""
+    try:
+        result = fn()
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
+        return {"error": str(exc)}
+    if dataclasses.is_dataclass(result):
+        return dataclasses.asdict(result)
+    if isinstance(result, list):
+        return [dataclasses.asdict(x) if dataclasses.is_dataclass(x) else x for x in result]
+    return result
+
+
+def _control_zones_dict() -> dict:
+    thermo_count, relay_count, zones = _control.get_zones()
+    return {
+        "thermo_count": thermo_count,
+        "relay_count": relay_count,
+        "zones": [dataclasses.asdict(z) for z in zones],
+    }
+
+
+@_tool()
+def get_board_state() -> str:
+    """One-call snapshot: firmware version, pin config, every thermocouple
+    reading, IO/relay state, safety status + link stats, Wi-Fi status,
+    zone config, profile execution status and autotune status -- as JSON.
+
+    Most diagnosis starts by asking for all of it; one call here replaces
+    calling get_fw_version/get_pin_config/thermo_read/io_read/
+    safety_get_status/... separately. Each section fails independently --
+    e.g. a board with no safety processor fitted still returns a full
+    snapshot, with "safety" reporting its own link_up=false rather than the
+    whole call erroring out.
+    """
+    state = {
+        "fw_version": _snapshot_section(_info.get_fw_version),
+        "pin_config": _snapshot_section(_info.get_pin_config),
+        "thermo": _snapshot_section(_thermo.read),
+        "io": _snapshot_section(_io.read),
+        "safety_status": _snapshot_section(_safety.get_status),
+        "safety_link_stats": _snapshot_section(_safety.get_link_stats),
+        "wifi_status": _snapshot_section(_wifi.get_status),
+        "control_zones": _snapshot_section(_control_zones_dict),
+        "profiles_exec_status": _snapshot_section(_profiles.get_exec_status),
+        "autotune_status": _snapshot_section(_autotune.get_status),
+    }
+    return json.dumps(state, default=_json_default, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # INFO queries (task 3)
 #
 # Unlike the command tools these return real device data: INFO is a query
@@ -1251,7 +2026,8 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        for client in (_info, _device_log, _thermo, _io, _display, _safety):
+        for client in (_info, _device_log, _thermo, _io, _display, _safety, _probe, _wifi,
+                       _control, _profiles, _autotune):
             client.close()
         # close(), not disconnect(): this link may be shared with another
         # process (see link_hub.py) -- exiting shouldn't yank the physical

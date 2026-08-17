@@ -188,20 +188,20 @@ menu "KilnCtrl Hardware Configuration"
     menu "Safety Processor Link (opto-isolated UART to the RP2040)"
         config KILNCTL_SAFETY_TX_IO
             int "Safety UART TX GPIO"
-            default 5
-            range 0 48
-            help
-                Drives U2's optocoupler LED, whose collector is the Pico's
-                RX. Note the schematic calls this net DataFromSafty -- the
-                name reads backwards; this really is the ESP's transmit.
-
-        config KILNCTL_SAFETY_RX_IO
-            int "Safety UART RX GPIO"
             default 4
             range 0 48
             help
-                U3's collector (the Pico's TX drives its LED). No external
-                pull-up is fitted, so the driver enables the internal one.
+                Drives U2's optocoupler LED via net DataToSafty, whose
+                collector is the Pico's RX (GPIO5, PicoRx).
+
+        config KILNCTL_SAFETY_RX_IO
+            int "Safety UART RX GPIO"
+            default 5
+            range 0 48
+            help
+                U3's collector, net DataFromSafty (the Pico's TX, GPIO4,
+                drives its LED). R15 (1k to 3.3V_Main) is fitted externally
+                on this net; the driver's internal pull-up is belt-and-braces.
 
         config KILNCTL_SAFETY_FAULT_IO
             int "Isolated fault line GPIO (output)"
@@ -453,5 +453,24 @@ menu "KilnCtrl Hardware Configuration"
             addressable RGB LED is removed on this build. Left at -1 the
             monitor task still runs and still reports over the log link; it
             just doesn't blink anything.
+
+    config KILNCTL_ENABLE_GPIO_PROBE
+        bool "Enable raw GPIO probe over UART (debug only)"
+        default n
+        help
+            Adds UART_TASK_ID_GPIO_PROBE: set-mode/write/read on ESP32-S3
+            pins from the PC, gated by a hard deny-list (SPI, I2C, the
+            SX1509 IRQ/RESET pins, the display CS, the PC-link UART pins,
+            and every safety-link pin including GPIO6/SAFETY_FAULT_IO) and
+            refused outright while a profile is running. Exists to answer
+            "is this net where the schematic says" without a one-off
+            firmware -- tools/PcTools/TODO.md capability 1.
+
+            Leave this OFF for any build going near a real heater. It is a
+            bench/bring-up tool, not a production capability: a debug tool
+            that can twiddle arbitrary pins on a board that drives mains
+            relays is exactly the hazard docs/SAFETY_MODEL.md exists to
+            avoid, and the deny-list is enforced in this firmware, not by
+            whoever is holding the PC end.
 
 endmenu
