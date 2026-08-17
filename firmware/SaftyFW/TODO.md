@@ -738,7 +738,7 @@ metadata format and the slot boundaries are effectively permanent.
       hardware attached to the machine this was built on. Checked off for the
       build half only; the "flashed and verified over SWD" half of this
       item's own wording is still open.
-- [~] 10.6 Application side: staged writes to the inactive slot, flash routines
+- [x] 10.6 Application side: staged writes to the inactive slot, flash routines
       and interruptible ISRs in RAM, core 1 parked, watchdog handled across
       multi-hundred-millisecond erases. **Link/build prerequisite only —
       2026-08-17**: the application can now be BUILT and LINKED to run from
@@ -787,25 +787,132 @@ metadata format and the slot boundaries are effectively permanent.
       subsection was re-read and left unchanged — it is honestly still all
       open (it is about the write-time mechanics, not the link-time
       capability this pass adds).
-- [ ] 10.7 Whole-slot CRC verified by reading **back from flash** — the only
+      **2026-08-17, follow-on session — the runtime staging half is now
+      built:** `src/tasks/update_task.{h,c}` (new), wired into
+      `SAFTYFW_APP_SOURCES` so all three targets (`SaftyFW`, `SaftyFW_slotA`,
+      `SaftyFW_slotB`) build-verified from scratch, zero warnings under
+      `-Wall -Wextra -Werror` (arm-none-eabi-gcc 14.2.1 / pico-sdk 2.1.1 /
+      Ninja). Real `flash_safe_execute()`-wrapped `flash_range_erase()` in
+      `FLASH_BLOCK_SIZE` (64K) units with a `watchdog_task_checkin()`
+      immediately before and after each block (never during — nothing can
+      run while flash is mid-erase); real `flash_range_program()` for
+      `UPDATE_DATA` chunks via a read-modify-write page buffer (see below);
+      staged writes go ONLY to `update_receiver_handle_begin()`'s own
+      `target_slot` — never the slot this image is itself running from.
+      **The 248-byte chunk / 256-byte flash page mismatch, resolved:**
+      `UPDATE_CHUNK_LEN` (248) is not a multiple of `FLASH_PAGE_SIZE` (256),
+      and successive chunks are 248 bytes apart, so a chunk essentially never
+      lands on a page boundary and can span two pages —
+      `update_task_program_chunk()` reads back the one or two full pages a
+      chunk touches from the XIP alias (valid because the whole target slot
+      was already erased before any `UPDATE_DATA` is accepted), overlays the
+      chunk's bytes at the right sub-page offset, and reprograms the whole
+      page range — never flips a flash bit 0→1 without an erase, since
+      previously-landed neighbour bytes are re-written with their own
+      unchanged value and only genuinely-erased (0xFF) bytes go 1→0 for the
+      first time. See `update_task.c`'s header comment for the full
+      reasoning, including why this did NOT need `__not_in_flash_func()` on
+      the erase/program callbacks themselves — verified against the real
+      vendored `pico-sdk` source (`src/rp2_common/pico_flash/flash.c`) this
+      session: `flash_safe_execute()`'s FreeRTOS-SMP helper disables
+      interrupts on BOTH cores for the whole callback duration (a stronger
+      guarantee than "the ISRs are RAM-resident"), and `hardware/flash.h`'s
+      own erase/program functions carry their own SRAM XIP-reentry
+      trampoline, so ordinary flash-resident calling code is safe by
+      construction. `link_task.c` gained a small non-blocking FreeRTOS queue
+      (`update_task_handle_begin/_data/_end/_abort()`, `xQueueSend` with a
+      zero timeout, drops silently on a full queue) so `link_task`'s own RX
+      loop is never blocked by update_task's flash I/O — see `update_task.h`'s
+      header comment for the full design.
+- [x] 10.7 Whole-slot CRC verified by reading **back from flash** — the only
       check that catches a write that reported success and did not land.
-- [ ] 10.8 `PENDING_VERIFY` cleared only after config CRC, a plausible
+      **2026-08-17:** `update_task_process_end()` reads the target slot back
+      via the XIP-mapped alias and computes `bootloader_crc32()` over
+      `[0, length)`, compared against the BEGIN header's own `crc32` (not
+      against anything the receive-side bitmap merely believes arrived).
+- [~] 10.8 `PENDING_VERIFY` cleared only after config CRC, a plausible
       thermocouple reading, ADC sampling, every task checked in, and one
       acknowledged telemetry frame. **Not at the end of `main()`** — an image
       that boots but cannot read its thermocouple is worse than the old one.
-- [ ] 10.8b Image header validated **before the first erase**: magic, target,
+      **2026-08-17:** the gate is fully wired —
+      `update_task_confirm_tick()` (a periodic tick, not an end-of-`main()`
+      check) gathers real evidence for four of the five items
+      (`thermo_task_get_snapshot()`'s `valid`; a freshness proxy on
+      `current_task_get_snapshot()`'s timestamp, since `current_task.h` has
+      no direct "is sampling running" boolean; the new
+      `watchdog_task_all_checked_in_since_boot()`, a cumulative-since-boot
+      bitmask added this session distinct from `watchdog_task`'s own
+      periodic feed-window mask; and `link_task_get_status_tx_ok_count()`,
+      also added this session, standing in for "acknowledged" — this link's
+      design has no ACK for the Pico to wait on at all, per `confirm.h`'s own
+      header comment) and, once `update_confirm_missing()` returns 0, writes
+      the running slot's metadata to `BOOTLOADER_SLOT_VALID` exactly once via
+      the same `flash_safe_execute()`-wrapped persist pattern `UPDATE_END`
+      uses. **Marked `[~]`, not `[x]`, because `config_crc_ok` is
+      permanently `false`** — no `config_store` exists yet (Phase 9), and
+      `confirm.h`'s own discipline forbids a caller from ever passing `true`
+      for a check it cannot actually perform ("unknown must never read as
+      confirmed-good"). This means `update_confirm_missing()` can never
+      reach 0 and no slot can be marked `VALID` in this build — an honest
+      consequence of wiring the gate against a config store that does not
+      exist yet, not a bug to paper over with a fake CRC check. The gate
+      starts working the moment Phase 9 lands, with no further change needed
+      in `update_task.c`.
+- [x] 10.8b Image header validated **before the first erase**: magic, target,
       header version, protocol version, `min_compatible`, length, CRC32. Without
       it, a `KilnFW` image uploaded to the Pico endpoint erases the staging slot
       before the mistake is noticed.
-- [ ] 10.8c `UPDATE_DATA` unacknowledged, with a received-range bitmap and a gap
+      **2026-08-17:** now validated against real incoming `UPDATE_BEGIN`
+      frames, not just in isolation — `update_task_process_begin()` calls the
+      frozen `update_image_header_unpack()`/`update_receiver_handle_begin()`
+      (which itself checks preconditions, THEN the header, per its own
+      documented order) before `update_task_erase_slot()` is ever reached.
+- [~] 10.8c `UPDATE_DATA` unacknowledged, with a received-range bitmap and a gap
       report every 500 ms — stop-and-wait leaves the wire idle most of every
       round trip and turns a lossy link into a retry storm.
-- [ ] 10.9 The Pico independently enforces its own preconditions: relay open, no
+      **2026-08-17:** `UPDATE_DATA` frames are handled exactly as received —
+      no ACK is ever sent — and `update_task_periodic_status()` emits a
+      `UPDATE_STATUS` (wire layout invented this session, since
+      `UPDATE_PROTOCOL.md` names the frame but never specifies its payload —
+      see `update_task.c`'s header comment for the chosen bytes) every
+      500 ms while a transfer is active, carrying a window of up to 32
+      missing-chunk indices from `update_received_ranges_find_gaps()`,
+      advancing a cursor across calls per that function's own documented
+      scheme. The retransmission-round cap (`update_retransmit_should_continue()`)
+      is wired: a full gap-report cursor pass that still finds a gap counts
+      as one round, and exceeding the cap aborts the transfer (reverts the
+      target slot's metadata to `EMPTY`) and reports it distinctly
+      (`UPDATE_STATUS_ERR_RETRANSMIT_CAP`) rather than looping forever.
+      Marked `[~]` rather than `[x]` for one honest caveat: because a full
+      gap-report pass can take many status-frame periods to cycle through a
+      large image's chunk count, one "round" in this implementation can take
+      significantly longer than the ~2 s cadence `UPDATE_PROTOCOL.md`'s
+      throughput section seems to assume when it talks about retries — the
+      cap (10 rounds) is still a genuine, working backstop, just a slower
+      one than a literal reading of the doc might suggest. Not measured
+      against a real link (item 10.0 is still open).
+- [x] 10.9 The Pico independently enforces its own preconditions: relay open, no
       trip pending, temperature below the ceiling. It does not take the ESP's
       word for any of them.
+      **2026-08-17:** `update_task_gather_preconditions()` pulls real evidence
+      — `safety_core_get_output_status()`'s `!relay_energized`,
+      `safety_core_get_diag_status()`'s `trip_reason == SAFETY_TRIP_NONE`,
+      and `thermo_task_get_snapshot()`'s `valid && !isnan(tc_c) && tc_c <
+      UPDATE_TASK_TEMP_CEILING_C` (100 °C, `UPDATE_PROTOCOL.md` section 1's
+      documented default; no `config_store` yet to source a real
+      per-installation ceiling from, Phase 9) — and
+      `update_task_process_begin()` refuses (with the specific unmet
+      precondition named in the `UPDATE_STATUS` reply, never a generic
+      failure) before the image header is even inspected, matching
+      `update_receiver_handle_begin()`'s own documented check order.
 - [ ] 10.10 Verification: power cut during erase, during streaming, and during
       the metadata write; corrupt slot rejected; bad-but-booting image rolled
       back; both slots invalidated and recovered over the link with no probe.
+      **Explicitly out of scope for the 2026-08-17 follow-on session that
+      built 10.6/10.7/10.8/10.8b/10.8c/10.9's runtime code** — this needs a
+      physical RP2040 board and a debug probe, neither of which exists on
+      the machine that session ran on. Left unchecked deliberately rather
+      than simulated or faked.
 
 ---
 

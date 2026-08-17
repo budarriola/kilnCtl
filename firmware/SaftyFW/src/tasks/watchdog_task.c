@@ -19,6 +19,11 @@
 #define WATCHDOG_CHECKIN_ALL_MASK   ((1u << WATCHDOG_CHECKIN_COUNT) - 1u)
 
 static volatile uint32_t s_checkin_mask = 0;
+// Cumulative-since-boot mask, never cleared by watchdog_task_fn()'s periodic
+// snapshot-and-clear below -- see watchdog_task_all_checked_in_since_boot()'s
+// doc comment in watchdog_task.h for why this needs to be a second,
+// independent bitmask rather than reusing s_checkin_mask.
+static volatile uint32_t s_ever_checkin_mask = 0;
 static TaskHandle_t s_task_handle = NULL;
 
 static void watchdog_task_fn(void *arg)
@@ -54,6 +59,7 @@ static void watchdog_task_fn(void *arg)
 bool watchdog_task_start(void)
 {
     s_checkin_mask = 0;
+    s_ever_checkin_mask = 0;
 
     // pause_on_debug = true: hardcoded for now, no release/debug distinction
     // in this build yet. TODO: flip to false for a release build --
@@ -81,5 +87,14 @@ void watchdog_task_checkin(watchdog_checkin_id_t id)
     // other core. Cheap and never blocks the caller.
     taskENTER_CRITICAL();
     s_checkin_mask |= (1u << id);
+    s_ever_checkin_mask |= (1u << id);
     taskEXIT_CRITICAL();
+}
+
+bool watchdog_task_all_checked_in_since_boot(void)
+{
+    taskENTER_CRITICAL();
+    uint32_t mask = s_ever_checkin_mask;
+    taskEXIT_CRITICAL();
+    return mask == WATCHDOG_CHECKIN_ALL_MASK;
 }

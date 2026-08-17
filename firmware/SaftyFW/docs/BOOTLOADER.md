@@ -144,11 +144,28 @@ with the ESP, that call must not be at the end of `main()`.
 
 The safety processor's bar for a working image:
 
-- [ ] Configuration loaded and its CRC verified
-- [ ] Thermocouple front end returning a plausible reading
-- [ ] ADC sampling
-- [ ] All tasks checked in with the watchdog at least once
-- [ ] At least one telemetry frame acknowledged by the ESP
+- [ ] Configuration loaded and its CRC verified — **wired but permanently
+      false**: `src/tasks/update_task.c`'s `update_task_confirm_tick()` calls
+      `update_confirm_missing()` (`src/update/confirm.h`) with real evidence
+      for every item below except this one, which is hardcoded `false` since
+      no `config_store` exists yet (Phase 9) — `confirm.h`'s own discipline
+      is "a caller with nothing to check should pass false, never true", so
+      this item is the one thing standing between the gate and actually
+      reaching `VALID` today. Not a bug; an honest, documented gap.
+- [x] Thermocouple front end returning a plausible reading —
+      `thermo_task_get_snapshot()`'s `valid` field, real.
+- [x] ADC sampling — proxied by `current_task_get_snapshot()`'s timestamp
+      freshness (`current_task.h` has no direct "is sampling running"
+      boolean; see `update_task.c`'s own comment on this choice), real.
+- [x] All tasks checked in with the watchdog at least once —
+      `watchdog_task_all_checked_in_since_boot()` (new this pass, a
+      cumulative-since-boot bitmask distinct from `watchdog_task`'s own
+      periodic feed-window mask), real.
+- [x] At least one telemetry frame acknowledged by the ESP — substituted
+      with "sent and not dropped" (`link_task_get_status_tx_ok_count()`),
+      per `confirm.h`'s own header comment: this link's design has no ACK
+      for the Pico to wait on at all, so "acknowledged" was never buildable
+      as literally written.
 
 An image that boots but cannot read its thermocouple is worse than the old one,
 and it would sail through any check that just proves `main()` ran.
@@ -241,12 +258,42 @@ is a bench visit to every board.
       10.5), no hardware/probe available to this pass.
 
 **Application side**
-- [ ] Staged writes to the inactive slot only
-- [ ] Flash routines and interruptible ISRs in RAM; core 1 parked
-- [ ] Watchdog handled across multi-hundred-millisecond erases
-- [ ] Whole-slot CRC verified by reading **back from flash**
-- [ ] `PENDING_VERIFY` cleared only after config, thermocouple, ADC, watchdog
-      check-in and one acknowledged telemetry frame
+- [x] Staged writes to the inactive slot only — `src/tasks/update_task.c`'s
+      `update_task_process_begin()` always targets `update_receiver_handle_begin()`'s
+      `target_slot` ("whichever slot is not currently active", computed
+      independently of anything the ESP claims), erases and programs only that
+      slot's `BOOTLOADER_SLOT_A/_B_FLASH_OFFSET` range.
+- [x] Flash routines and interruptible ISRs in RAM; core 1 parked —
+      `flash_safe_execute()` (pico-sdk's FreeRTOS-SMP helper, verified against
+      the vendored SDK source this pass, see `update_task.c`'s header comment)
+      disables interrupts on BOTH cores for the whole duration of every erase/
+      program/metadata-write callback and parks core 1 via its own high-
+      priority lockout task — a stronger guarantee than "the ISRs are in RAM",
+      and the reason none of `update_task.c`'s own callbacks need
+      `__not_in_flash_func()` themselves (see that file's header comment for
+      the full reasoning, cited against the real `pico/flash.c` source).
+- [x] Watchdog handled across multi-hundred-millisecond erases —
+      `update_task_erase_slot()` erases the 832K target slot in
+      `FLASH_BLOCK_SIZE` (64K) units, one `flash_safe_execute()` call per
+      block, with `watchdog_task_checkin()` immediately before AND after each
+      block (never during — nothing can run during the erase itself).
+- [x] Whole-slot CRC verified by reading **back from flash** —
+      `update_task_process_end()` (item 10.7): `bootloader_crc32()` over the
+      XIP-mapped target slot's `[0, length)`, compared against the BEGIN
+      header's `crc32`, exactly the "catches a write that reported success
+      and did not land" check this section calls for.
+- [~] `PENDING_VERIFY` cleared only after config, thermocouple, ADC, watchdog
+      check-in and one acknowledged telemetry frame — the confirmation gate
+      itself is fully wired (`update_task_confirm_tick()`, real
+      `thermo_task`/`current_task`/`watchdog_task`/`link_task` evidence for
+      four of the five items), but `config_crc_ok` is **permanently false**
+      in this build (no `config_store`, Phase 9) and `confirm.h`'s own
+      discipline forbids faking it, so `update_confirm_missing()` can never
+      reach 0 and no slot can be marked `VALID` until Phase 9 lands. "One
+      acknowledged telemetry frame" is also honestly substituted with "one
+      telemetry frame handed to the TX ring and not dropped" —
+      `src/update/confirm.h`'s own header comment explains why: this link's
+      design has no ACK for the Pico to wait on at all.
 
 **Verification**
 - [ ] Power cut during erase, during streaming, and during the metadata write —

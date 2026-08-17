@@ -127,6 +127,24 @@ void link_frame_pack_diag(uint8_t out[LINK_FRAME_DIAG_LEN], uint8_t trip_reason,
 // `*out` is left completely unmodified.
 bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_snapshot_t *out);
 
+// --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
+// section 4's frame table. Plain #define ids, same convention as every other
+// command byte in this file -- these are dispatched in src/tasks/link_task.c's
+// switch and handled in src/tasks/update_task.c (flash I/O does not belong on
+// link_task's own priority/stack, see that file's header comment), not packed/
+// unpacked here: UPDATE_BEGIN's payload is src/update/image_header.h's frozen
+// 36-byte layout (that file's header comment explains why it, not this
+// section's original wording, is the real source of truth for the field
+// list), UPDATE_DATA/_END/_ABORT are simple enough to parse inline in
+// update_task.c, and UPDATE_STATUS's wire layout is update_task.c's own
+// invention (UPDATE_PROTOCOL.md section 4 names the frame but never specifies
+// its payload) -- see that file's header comment for the chosen layout.
+#define LINK_FRAME_UPDATE_BEGIN_CMD  0x10u
+#define LINK_FRAME_UPDATE_DATA_CMD   0x11u
+#define LINK_FRAME_UPDATE_END_CMD    0x12u
+#define LINK_FRAME_UPDATE_ABORT_CMD  0x13u
+#define LINK_FRAME_UPDATE_STATUS_CMD 0x14u
+
 // --- Mutual version compatibility --------------------------------------------
 // LINK_PROTOCOL.md section 4's exact formula, both directions:
 //   peer.protocol >= self.min_compatible  &&  self.protocol >= peer.min_compatible

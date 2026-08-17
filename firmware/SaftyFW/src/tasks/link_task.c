@@ -51,11 +51,18 @@
 #include "safety_core.h"
 #include "snapshots.h"
 #include "thermo_task.h"
+#include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
 
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_version.h"
 
-#define LINK_TASK_STACK_WORDS      configMINIMAL_STACK_SIZE
+// Stack bumped from a single configMINIMAL_STACK_SIZE (Phase 10, this pass):
+// LINK_RX_ASSEMBLY_MAX grew from 128 to KILNLINK_FRAME_STUFFED_MAX (~530
+// bytes, see that macro's own comment below) to fit a full UPDATE_DATA frame,
+// and link_task_handle_raw_frame() puts a same-sized `unstuffed[]` buffer on
+// its own stack frame -- two ~530-byte buffers plus the usual call-depth
+// margin no longer comfortably fits configMINIMAL_STACK_SIZE alone.
+#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 3)
 // Bounded wait, not a blocking read: this task also owns the 500 ms TX
 // cadence and must check in with watchdog_task, so it polls uart_owner's RX
 // ring on a short period rather than blocking on a queue receive.
@@ -90,11 +97,18 @@
 // document's own framing for why this is not a fresh protocol addition.
 #define LINK_TASK_ID_LOG    5u
 
-// Bounds for the RX frame assembler below. Sized the same as uart_owner's own
-// TX ring (link_frame.h's largest payload is well under 128 bytes raw); an
-// oversized or malformed run of bytes between delimiters just gets dropped
-// and resynced on the next 0x7E, per LINK_PROTOCOL.md section 3.
-#define LINK_RX_ASSEMBLY_MAX  128u
+// Bounds for the RX frame assembler below. Every command byte defined before
+// Phase 10 (Status/FW_VERSION/DIAG/PUSH_CONTEXT/ANNOUNCE_VERSION) has a
+// payload well under 128 bytes raw, which is what this used to be sized to.
+// Phase 10's UPDATE_DATA (LINK_FRAME_UPDATE_DATA_CMD) does not: its payload
+// is up to 1 (cmd) + 4 (offset) + UPDATE_CHUNK_LEN (248) = 253 bytes, the
+// kilnlink protocol maximum, so this buffer now has to hold a full
+// worst-case STUFFED frame -- KILNLINK_FRAME_STUFFED_MAX (~530 bytes) --
+// rather than an arbitrary round number comfortably above the old frames'
+// sizes. s_rx_assembly (below) collects stuffed wire bytes at this size;
+// link_task_handle_raw_frame()'s local `unstuffed[]` buffer is the same
+// size, since unstuffing never grows a frame.
+#define LINK_RX_ASSEMBLY_MAX  KILNLINK_FRAME_STUFFED_MAX
 #define LINK_RX_POLL_BUF      64u
 
 static TaskHandle_t s_task_handle = NULL;
@@ -144,6 +158,13 @@ static bool s_context_sim_seen = false;
 static uint8_t s_last_context_boot_id = 0;
 static bool s_context_boot_id_known = false;
 
+// Count of successful (accepted-by-the-TX-ring) Frame A sends since
+// link_task_start() -- Phase 10's confirm.h telemetry_sent_ok evidence, see
+// link_task_get_status_tx_ok_count()'s doc comment in link_task.h. Written
+// only from link_task_send_status() (this task); read from any task, same
+// single-writer/plain-read reasoning as s_context_frames_ok/bad above.
+static uint32_t s_status_tx_ok_count = 0;
+
 // --- TX ----------------------------------------------------------------
 
 // dst_task-general version -- link_task_send_broadcast() below is the
@@ -187,9 +208,13 @@ static bool link_task_send_broadcast_to(uint8_t dst_task, const uint8_t *payload
     return uart_owner_send(stuffed, stuffed_len);
 }
 
-static void link_task_send_broadcast(const uint8_t *payload, uint8_t length)
+// Returns uart_owner_send()'s own accepted/dropped result now (previously
+// discarded, `(void)`-cast) -- link_task_send_status() below needs it for
+// s_status_tx_ok_count; the FW_VERSION/DIAG call sites still ignore it,
+// unchanged behaviour for them.
+static bool link_task_send_broadcast(const uint8_t *payload, uint8_t length)
 {
-    (void)link_task_send_broadcast_to(LINK_TASK_ID_SAFETY, payload, length);
+    return link_task_send_broadcast_to(LINK_TASK_ID_SAFETY, payload, length);
 }
 
 static void link_task_send_status(void)
@@ -217,7 +242,9 @@ static void link_task_send_status(void)
     link_frame_pack_status(payload, estop, energized_bit, enabled_bit, temp_valid, tc_c, cj_c,
                             fault_bits, cur.amps[0], cur.amps[1], cur.amps[2]);
 
-    link_task_send_broadcast(payload, LINK_FRAME_STATUS_LEN);
+    if (link_task_send_broadcast(payload, LINK_FRAME_STATUS_LEN)) {
+        s_status_tx_ok_count++;
+    }
 }
 
 static void link_task_send_fw_version(void)
@@ -454,6 +481,30 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     case LINK_FRAME_PUSH_CONTEXT_CMD:
         link_task_handle_push_context(&frame);
         break;
+    // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
+    // call above, except the handler lives in update_task.c rather than
+    // this file: flash I/O does not belong on link_task's priority/stack,
+    // and update_task.c is not subject to this file's GPIO6/relay
+    // isolation rule (it legitimately needs safety_core's relay/trip
+    // status to gather Phase 10's own preconditions -- see that file's
+    // header comment). Each handler copies frame->payload into a bounded
+    // FreeRTOS queue with a zero-timeout xQueueSend and counts (rather than
+    // blocks on) a drop -- link_task's own RX loop must never be delayed by
+    // update_task falling behind. frame->payload/frame->length include the
+    // command byte itself at payload[0], same convention
+    // link_task_handle_push_context() already uses for PUSH_CONTEXT.
+    case LINK_FRAME_UPDATE_BEGIN_CMD:
+        update_task_handle_begin(frame.payload, frame.length);
+        break;
+    case LINK_FRAME_UPDATE_DATA_CMD:
+        update_task_handle_data(frame.payload, frame.length);
+        break;
+    case LINK_FRAME_UPDATE_END_CMD:
+        update_task_handle_end(frame.payload, frame.length);
+        break;
+    case LINK_FRAME_UPDATE_ABORT_CMD:
+        update_task_handle_abort(frame.payload, frame.length);
+        break;
     default:
         // Everything else (CLEAR_TRIP, SET_FIRING_CEILING, SET_CLOCK, ...)
         // is genuinely out of scope this pass -- see this file's header
@@ -558,6 +609,7 @@ bool link_task_start(void)
     s_last_context_boot_id = 0;
     s_context_boot_id_known = false;
     s_context_published = false;
+    s_status_tx_ok_count = 0;
 
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.
@@ -619,6 +671,20 @@ bool link_task_send_log(const uint8_t *payload, uint8_t length)
     // ever reaching here (its own queue-full and TX-reserve-watermark
     // checks) and wants one counter covering every drop point, not several.
     return link_task_send_broadcast_to(LINK_TASK_ID_LOG, payload, length);
+}
+
+bool link_task_send_safety(const uint8_t *payload, uint8_t length)
+{
+    // Thin wrapper, same shape as link_task_send_log() just above -- see
+    // link_task_send_broadcast_to()'s own comment for why both share the
+    // encode/stuff/send path. update_task.c is the only intended caller
+    // (Phase 10's UPDATE_STATUS replies).
+    return link_task_send_broadcast_to(LINK_TASK_ID_SAFETY, payload, length);
+}
+
+uint32_t link_task_get_status_tx_ok_count(void)
+{
+    return s_status_tx_ok_count;
 }
 
 float link_task_get_tx_ring_fill_fraction(void)

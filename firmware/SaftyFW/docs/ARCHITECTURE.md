@@ -179,6 +179,18 @@ Higher number = higher priority.
 | `current_task` | 3 | 1 | 50 ms | Sample ADC0/1/2 |
 | `link_task` | **2** | **0** | event | Frame assembly, context publish, telemetry |
 | `log_task` | 1 | 0 | event | Drain the log ring into the link. Lowest, always droppable |
+| `update_task` | 1 | 0 | event | Phase 10: UPDATE_BEGIN/DATA/END/ABORT flash I/O, UPDATE_STATUS replies |
+
+`update_task` (added Phase 10, TODO.md's field-update work) is tied with
+`log_task` at the lowest priority, also on core 0 -- its work (parsing
+frames link_task hands it over a bounded queue, and the flash writes those
+imply) is link-adjacent, not trip-adjacent, and it never touches
+`relay_owner`. Note core placement does not shield core 1 from an update's
+actual flash erase/program calls: `flash_safe_execute()`'s multicore lockout
+halts BOTH cores for that duration regardless of which one issues the call
+-- see `src/tasks/update_task.c`'s header comment. What core 0 placement
+buys is that `update_task`'s ordinary (non-flash-write) scheduling only ever
+competes with `link_task`/`log_task`, never with the guard-evaluation path.
 
 **The affinity split is deliberate and it is how the no-hang constraint becomes
 structural.** Everything that can trip the relay lives on **core 1**; everything

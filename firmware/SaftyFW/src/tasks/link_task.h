@@ -67,6 +67,30 @@ bool link_task_get_context_snapshot(context_snapshot_t *out);
 // drops -- log_task owns that counter, see log_task.h.
 bool link_task_send_log(const uint8_t *payload, uint8_t length);
 
+// Hands a pre-built payload to uart_owner as a BROADCAST addressed to task_id
+// 7 (SAFETY), the same destination Frame A/B/C already use -- exposed for
+// update_task.c's UPDATE_STATUS (0x14) replies (Phase 10), which need to
+// reach the ESP's SAFETY task the same way telemetry does, but from a task
+// other than link_task itself (flash I/O does not belong on link_task's own
+// priority -- see update_task.c's header comment). Same non-blocking,
+// drop-on-full contract as link_task_send_log(): returns false if the TX
+// ring had no room, true if the frame was queued. update_task.c owns
+// whatever counter it wants for its own drops; this function does not count
+// them, matching link_task_send_log()'s same division of responsibility.
+bool link_task_send_safety(const uint8_t *payload, uint8_t length);
+
+// Total number of times link_task_send_status()'s underlying uart_owner_send()
+// call has returned success since link_task_start() -- i.e. a Frame A status
+// payload was handed to the TX ring and NOT dropped. This is the closest
+// available evidence this link's design has for "telemetry is actually being
+// sent" (src/update/confirm.h's telemetry_sent_ok, Phase 10's confirmation
+// gate): the Pico never receives or waits for an ACK on anything it sends
+// (CommonFW/docs/LINK_PROTOCOL.md section 2), so there is no stronger signal
+// to report than "queued for transmission", and confirm.h's own header
+// comment is explicit that the gap between "sent" and "received by a healthy
+// ESP" stays open here, honestly. Safe to call from any task.
+uint32_t link_task_get_status_tx_ok_count(void);
+
 // Fraction (0.0..1.0) of the TX ring currently in use -- a snapshot for
 // log_task's TX-reserve watermark check (docs/ARCHITECTURE.md section 1:
 // "reserve TX ring capacity for telemetry... log frames are dropped at

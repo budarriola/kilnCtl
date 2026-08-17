@@ -68,6 +68,21 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/link_frame.c
     src/tasks/link_task.c
     src/tasks/log_task.c
+    src/tasks/update_task.c
+    # Phase 10 -- update_task.c's own frame-receive/decision logic. These
+    # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
+    # pure modules from src/update/; bootloader/crc32.c and
+    # bootloader/metadata.c are the SAME frozen files bootloader/main.c
+    # itself builds against (a separate executable, its own CMakeLists.txt)
+    # -- compiled a second time here into the application, not modified, so
+    # the application can persist/read metadata records with the exact same
+    # pack/unpack/CRC logic the bootloader uses to read them back.
+    src/update/image_header.c
+    src/update/received_ranges.c
+    src/update/update_receiver.c
+    src/update/confirm.c
+    bootloader/crc32.c
+    bootloader/metadata.c
 )
 
 add_executable(SaftyFW ${SAFTYFW_APP_SOURCES})
@@ -75,6 +90,8 @@ add_executable(SaftyFW ${SAFTYFW_APP_SOURCES})
 target_include_directories(SaftyFW PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     src
+    src/update
+    bootloader
 )
 
 target_compile_options(SaftyFW PRIVATE -Wall -Wextra -Werror)
@@ -104,6 +121,7 @@ target_link_libraries(SaftyFW PRIVATE
     hardware_uart
     hardware_spi
     hardware_i2c
+    hardware_flash # Phase 10, added this pass -- update_task.c's flash_range_erase()/_program(), same library bootloader/CMakeLists.txt already links
     pico_flash
     pico_multicore
     FreeRTOS-Kernel
@@ -139,14 +157,14 @@ pico_enable_stdio_uart(SaftyFW 0)
 # SaftyFW_slotA / SaftyFW_slotB -- the SAME application, linked to run from
 # inside the bootloader's slot A / slot B (docs/BOOTLOADER.md section 2,
 # bootloader/flash_layout.h's BOOTLOADER_SLOT_A_FLASH_OFFSET /
-# BOOTLOADER_SLOT_B_FLASH_OFFSET). This is the link-time HALF of TODO.md
-# Phase 10 item 10.6 ("staged writes to the inactive slot..."): what an
-# eventual OTA/staging build pipeline will produce and stage into the
-# inactive slot over the link. The actual staging/write logic (flash
-# routines in RAM, core 1 parked, watchdog fed across the erase) is NOT
-# built here -- nothing below calls flash_range_erase()/flash_range_program()
-# from the application. This just makes the two images linkable and capable
-# of booting correctly once something else puts them in flash.
+# BOOTLOADER_SLOT_B_FLASH_OFFSET). Originally (TODO.md item 10.6, first pass)
+# this was link-time-only -- nothing in the application called
+# flash_range_erase()/flash_range_program(). That is no longer true: Phase
+# 10's later pass added src/tasks/update_task.c, which does real,
+# flash_safe_execute()-wrapped erase/program calls to stage an incoming
+# image into the INACTIVE slot (never the one this executable itself is
+# running from) -- see that file's own header comment for the RP2040/
+# FreeRTOS-SMP flash-write rules it follows.
 #
 # The default SaftyFW target above is UNCHANGED and UNAFFECTED by any of
 # this -- it keeps linking at pico-sdk's stock application address (which
@@ -166,6 +184,8 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     target_include_directories(${TARGET_NAME} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         src
+        src/update
+        bootloader
     )
 
     target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Werror)
@@ -186,6 +206,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
         hardware_uart
         hardware_spi
         hardware_i2c
+        hardware_flash
         pico_flash
         pico_multicore
         FreeRTOS-Kernel

@@ -48,6 +48,26 @@
 #define SAFTYFW_PRIO_CURRENT_TASK   3 // 50 ms
 #define SAFTYFW_PRIO_LINK_TASK      2 // event-driven; second-lowest, always droppable under load
 #define SAFTYFW_PRIO_LOG_TASK       1 // event-driven; lowest, always droppable
+// SAFTYFW_PRIO_UPDATE_TASK -- Phase 10 (field updates over the link),
+// added this pass. Pinned to SAFTYFW_CORE_LINK_PATH (core 0), NOT
+// SAFTYFW_CORE_TRIP_PATH: its work (parsing UPDATE_BEGIN/DATA/END/ABORT
+// frames handed to it by link_task, and the flash I/O those imply) is
+// link-adjacent, never trip-adjacent -- it has no path to relay_owner and
+// never commands the relay. Note this does NOT, by itself, protect core 1
+// from an update's flash writes: flash_safe_execute()'s multicore lockout
+// halts BOTH cores for the duration of an erase/program (see
+// src/tasks/update_task.c's header comment, and ARCHITECTURE.md section 8),
+// regardless of which core issues the call -- that stall is unavoidable
+// RP2040 physics, not something core placement can dodge. What core
+// placement DOES buy: outside of an actual flash operation, update_task's
+// queue-draining and status-frame work competes for CPU time only with
+// core 0's other tasks (link_task, log_task), never with safety_core/
+// relay_owner/thermo_task/current_task/discrete_task's guard-evaluation
+// path on core 1. Tied with SAFTYFW_PRIO_LOG_TASK at the lowest priority in
+// the system -- an update transfer is a deliberate, infrequent maintenance
+// operation, not a real-time obligation, and this task should never be the
+// reason a link frame or a log line gets delayed.
+#define SAFTYFW_PRIO_UPDATE_TASK    1 // event-driven; lowest tier, tied with log_task
 
 // Periods, in ticks, for the tasks with a fixed period (ARCHITECTURE.md
 // section 4). configTICK_RATE_HZ is 1000 (FreeRTOSConfig.h), so pdMS_TO_TICKS

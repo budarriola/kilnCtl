@@ -26,6 +26,7 @@ typedef enum {
     WATCHDOG_CHECKIN_CURRENT_TASK,
     WATCHDOG_CHECKIN_LINK_TASK,
     WATCHDOG_CHECKIN_LOG_TASK,
+    WATCHDOG_CHECKIN_UPDATE_TASK, // Phase 10, added this pass -- see update_task.c
     WATCHDOG_CHECKIN_COUNT
 } watchdog_checkin_id_t;
 
@@ -49,6 +50,20 @@ bool watchdog_task_start(void);
 // Never blocks: this just sets a bit in a bitmask watchdog_task reads under a
 // short critical section, so a caller cannot be delayed by this call.
 void watchdog_task_checkin(watchdog_checkin_id_t id);
+
+// True once every registered task has called watchdog_task_checkin() at
+// least once since boot -- CUMULATIVE across the whole run, unlike the
+// internal per-feed-window bitmask watchdog_task_fn() clears every
+// SAFTYFW_PERIOD_WATCHDOG_TASK_MS. Added for Phase 10's PENDING_VERIFY ->
+// VALID confirmation gate (src/update/confirm.h's all_tasks_checked_in),
+// which needs "has every task proven it is alive at least once this boot",
+// not "did every task check in during the last 250 ms window" -- the two
+// questions sound similar but the periodic mask is deliberately reset
+// every window (see watchdog_task.c's watchdog_task_fn()) and would read
+// false almost all the time even on a perfectly healthy system, since not
+// every task's period lines up with every 250 ms window. Safe to call from
+// any task, same critical-section discipline as watchdog_task_checkin().
+bool watchdog_task_all_checked_in_since_boot(void);
 
 #ifdef __cplusplus
 }
