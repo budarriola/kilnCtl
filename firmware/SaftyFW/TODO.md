@@ -738,9 +738,55 @@ metadata format and the slot boundaries are effectively permanent.
       hardware attached to the machine this was built on. Checked off for the
       build half only; the "flashed and verified over SWD" half of this
       item's own wording is still open.
-- [ ] 10.6 Application side: staged writes to the inactive slot, flash routines
+- [~] 10.6 Application side: staged writes to the inactive slot, flash routines
       and interruptible ISRs in RAM, core 1 parked, watchdog handled across
-      multi-hundred-millisecond erases.
+      multi-hundred-millisecond erases. **Link/build prerequisite only —
+      2026-08-17**: the application can now be BUILT and LINKED to run from
+      either slot at all, which nothing produced before this pass (the only
+      prior application build, `SaftyFW`, links at pico-sdk's stock address,
+      which collides with the bootloader's own 0x10000100). Added
+      `firmware/SaftyFW/bootloader/app_slot.ld.in`, a custom linker script
+      template derived from pico-sdk 2.x's own
+      `pico_crt0/rp2040/memmap_default.ld` with the `.boot2` output section
+      removed (`.boot2` input sections explicitly `/DISCARD/`ed rather than
+      left as an orphan-section hazard — there is exactly one boot2 in the
+      whole image, already part of the bootloader's own build at flash
+      offset 0) and `FLASH`'s `ORIGIN` parameterized via a
+      `configure_file()` `@SAFTYFW_APP_FLASH_ORIGIN@` placeholder;
+      `firmware/SaftyFW/CMakeLists.txt` extended with a
+      `saftyfw_add_slot_executable()` function (factoring the application's
+      source list into `SAFTYFW_APP_SOURCES`, shared by all three targets)
+      producing two new targets, `SaftyFW_slotA` (origin `0x10011000` =
+      `XIP_BASE` + `BOOTLOADER_SLOT_A_FLASH_OFFSET`) and `SaftyFW_slotB`
+      (origin `0x100E1000` = `XIP_BASE` + `BOOTLOADER_SLOT_B_FLASH_OFFSET`),
+      linking the exact same sources/libraries as the default `SaftyFW`
+      target, which is unchanged. Build-verified from scratch (arm-none-eabi-
+      gcc 14.2.1 / pico-sdk 2.1.1, Ninja, zero warnings under
+      `-Wall -Wextra -Werror`) and confirmed by reading the linked ELFs
+      (`readelf -l`/`-S`, `nm`): `SaftyFW_slotA.elf`'s `__VECTOR_TABLE` /
+      `__flash_binary_start` sit at exactly `0x10011000`,
+      `SaftyFW_slotB.elf`'s at exactly `0x100e1000`, both with no `.boot2`
+      section present anywhere in the output. Each slot image is ~46.6 KB of
+      flash (`arm-none-eabi-size`: 47752 B `text`), well under the 832 KB
+      (`BOOTLOADER_SLOT_FLASH_SIZE`) budget (~5.6% used).
+      **`*** MANUAL SYNC HAZARD ***`**: `app_slot.ld.in`'s `FLASH` `LENGTH`
+      (hardcoded `0xD0000`) and the two `saftyfw_add_slot_executable()` call
+      sites' origin literals in `CMakeLists.txt` are hand-copied from
+      `bootloader/flash_layout.h`'s `BOOTLOADER_SLOT_FLASH_SIZE` /
+      `_SLOT_A_FLASH_OFFSET` / `_SLOT_B_FLASH_OFFSET` — a linker script
+      cannot `#include` a C header, so nothing enforces these three stay in
+      sync today. A CI check that parses `flash_layout.h`'s macros and
+      asserts the `.ld.in` and `CMakeLists.txt` literals agree would close
+      this gap; not built this pass, flagged for a human. **Still missing,
+      real future work**: the actual runtime flash-write staging logic
+      itself — nothing calls `flash_range_erase()`/`flash_range_program()`
+      from the application yet, no RAM-resident flash routines, no core-1
+      parking, no watchdog-feeding across the erase. This pass is purely a
+      build/link-time capability, not the staging mechanism. `docs/
+      BOOTLOADER.md` section 5's "Writing flash while running from flash"
+      subsection was re-read and left unchanged — it is honestly still all
+      open (it is about the write-time mechanics, not the link-time
+      capability this pass adds).
 - [ ] 10.7 Whole-slot CRC verified by reading **back from flash** — the only
       check that catches a write that reported success and did not land.
 - [ ] 10.8 `PENDING_VERIFY` cleared only after config CRC, a plausible

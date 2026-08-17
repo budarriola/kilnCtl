@@ -46,7 +46,12 @@ include(${CMAKE_CURRENT_LIST_DIR}/FreeRTOS_Kernel_import.cmake)
 # components/kilnlink/CMakeLists.txt.
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW kilnlink)
 
-add_executable(SaftyFW
+# SAFTYFW_APP_SOURCES -- the one source list shared by the default SaftyFW
+# target below AND the two slot-linked targets further down (SaftyFW_slotA /
+# SaftyFW_slotB, docs/BOOTLOADER.md section 2 / TODO.md Phase 10 item 10.6).
+# Factored out so all three executables are provably built from the exact
+# same application sources -- no hand-copied file list to let drift.
+set(SAFTYFW_APP_SOURCES
     src/main.c
     src/boot_reason.c
     src/safety_guards.c
@@ -64,6 +69,8 @@ add_executable(SaftyFW
     src/tasks/link_task.c
     src/tasks/log_task.c
 )
+
+add_executable(SaftyFW ${SAFTYFW_APP_SOURCES})
 
 target_include_directories(SaftyFW PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
@@ -127,3 +134,97 @@ pico_enable_stdio_uart(SaftyFW 0)
 # (`winget install` a host toolchain, or build/install picotool separately
 # and point PICOTOOL_FETCH_FROM_GIT_PATH / find_package(picotool) at it) if a
 # .uf2 is ever wanted for bench convenience.
+
+# =============================================================================
+# SaftyFW_slotA / SaftyFW_slotB -- the SAME application, linked to run from
+# inside the bootloader's slot A / slot B (docs/BOOTLOADER.md section 2,
+# bootloader/flash_layout.h's BOOTLOADER_SLOT_A_FLASH_OFFSET /
+# BOOTLOADER_SLOT_B_FLASH_OFFSET). This is the link-time HALF of TODO.md
+# Phase 10 item 10.6 ("staged writes to the inactive slot..."): what an
+# eventual OTA/staging build pipeline will produce and stage into the
+# inactive slot over the link. The actual staging/write logic (flash
+# routines in RAM, core 1 parked, watchdog fed across the erase) is NOT
+# built here -- nothing below calls flash_range_erase()/flash_range_program()
+# from the application. This just makes the two images linkable and capable
+# of booting correctly once something else puts them in flash.
+#
+# The default SaftyFW target above is UNCHANGED and UNAFFECTED by any of
+# this -- it keeps linking at pico-sdk's stock application address (which
+# happens to collide with the bootloader's own address, 0x10000100; see the
+# task history in TODO.md/BOOTLOADER.md) and remains what ordinary
+# development/debugging builds against.
+#
+# bootloader/main.c's jump_to_app() requires a valid Cortex-M vector table
+# (word 0 = initial SP, word 1 = reset handler) as the very first thing at
+# the slot's start address, with no boot2 stub -- see
+# bootloader/app_slot.ld.in's header comment for the full contract and how
+# this custom linker script (derived from pico-sdk's own
+# pico_crt0/rp2040/memmap_default.ld) satisfies it.
+function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
+    add_executable(${TARGET_NAME} ${SAFTYFW_APP_SOURCES})
+
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        src
+    )
+
+    target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Werror)
+
+    # Same SAFTYFW_ENABLE_USB_STDIO gating as the default SaftyFW target
+    # above -- keeps all three executables' compiled behavior consistent for
+    # whatever value the option was configured with.
+    if(SAFTYFW_ENABLE_USB_STDIO)
+        target_compile_definitions(${TARGET_NAME} PRIVATE SAFTYFW_ENABLE_USB_STDIO=1)
+    endif()
+
+    target_link_libraries(${TARGET_NAME} PRIVATE
+        pico_stdlib
+        hardware_gpio
+        hardware_irq
+        hardware_watchdog
+        hardware_adc
+        hardware_uart
+        hardware_spi
+        hardware_i2c
+        pico_flash
+        pico_multicore
+        FreeRTOS-Kernel
+        FreeRTOS-Kernel-Heap4
+        kilnlink
+    )
+
+    pico_enable_stdio_usb(${TARGET_NAME} ${SAFTYFW_ENABLE_USB_STDIO})
+    pico_enable_stdio_uart(${TARGET_NAME} 0)
+
+    # SAFTYFW_APP_FLASH_ORIGIN is read by configure_file() below via
+    # bootloader/app_slot.ld.in's @SAFTYFW_APP_FLASH_ORIGIN@ placeholder.
+    # This is a per-target, per-call local value (function scope), not a
+    # cache/global -- each call to this function configures its own copy of
+    # the .ld file with its own origin.
+    set(SAFTYFW_APP_FLASH_ORIGIN ${FLASH_ORIGIN})
+    set(_saftyfw_slot_ld ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_app_slot.ld)
+    configure_file(
+        ${CMAKE_CURRENT_LIST_DIR}/bootloader/app_slot.ld.in
+        ${_saftyfw_slot_ld}
+        @ONLY
+    )
+
+    # pico_set_linker_script() is pico-sdk's own documented mechanism for
+    # overriding a target's linker script (pico_standard_link/CMakeLists.txt)
+    # -- used here instead of hand-rolling target_link_options(), so this
+    # keeps working the same way the SDK's own no_flash/copy_to_ram/etc.
+    # binary-type mechanism does.
+    pico_set_linker_script(${TARGET_NAME} ${_saftyfw_slot_ld})
+endfunction()
+
+# BOOTLOADER_SLOT_A_FLASH_OFFSET (0x00011000) / BOOTLOADER_SLOT_B_FLASH_OFFSET
+# (0x000E1000) from bootloader/flash_layout.h, plus XIP_BASE (0x10000000) --
+# see that file's own header comment for why the offsets there are
+# flash-relative rather than XIP-mapped. *** MANUAL SYNC HAZARD: *** these two
+# literals, app_slot.ld.in's hardcoded FLASH LENGTH (0xD0000), and
+# flash_layout.h's macros must be kept in sync by hand; nothing enforces this
+# today (see app_slot.ld.in's header comment for the same note -- a CI check
+# that parses flash_layout.h and asserts these three sources of truth agree
+# would close this gap, not built this pass).
+saftyfw_add_slot_executable(SaftyFW_slotA 0x10011000)
+saftyfw_add_slot_executable(SaftyFW_slotB 0x100E1000)
