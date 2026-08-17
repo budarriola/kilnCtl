@@ -10,11 +10,13 @@ int g_test_count = 0;
 
 void run_test_safety_guards(void);
 void run_test_link_frame(void);
+void run_test_bootloader_metadata(void);
 
 int main(void)
 {
     run_test_safety_guards();
     run_test_link_frame();
+    run_test_bootloader_metadata();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
