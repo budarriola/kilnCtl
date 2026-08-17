@@ -9,7 +9,18 @@ The wire between the ESP32-S3 main controller ([`../KilnFW`](../KilnFW)) and
 the RP2040 safety processor ([`../SaftyFW`](../SaftyFW)), implemented **once**
 and linked into both.
 
-**Status: planning only. No code exists yet.**
+**Status: the framing layer exists and is host-tested.** `kilnlink_frame.{c,h}`
++ `kilnlink_crc.c` are written, byte-exact cross-checked against
+`pc_tools/src/kilnctrl/protocol.py` (the second, already-proven
+implementation of this exact envelope) via `test/vectors/frame_vectors.json`,
+consumed by both `test/test_frame.c` (built and passing with MSVC via CMake +
+Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Not yet
+integrated into either firmware** -- `KilnFW`'s `uart_protocol.c` still has
+its own copy, `SaftyFW` doesn't exist. `kilnlink_context`/`kilnlink_status`
+(the ESP<->Pico payload layouts) are not written -- deliberately: those
+layouts are still "planning" in `docs/LINK_PROTOCOL.md`, and writing codecs
+against a contract that might still move is a worse trade than writing them
+once it settles.
 
 ## Why this exists
 
@@ -163,29 +174,67 @@ applies unchanged and should be carried over with the constant.
 Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
 
 **Structure**
-- [ ] `firmware/CommonFW/` created with the layout above
-- [ ] `CMakeLists.txt` producing a `kilnlink` target consumable by pico-sdk
-- [ ] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
-- [ ] Builds clean under xtensa-gcc, arm-none-eabi-gcc and MSVC at `-Wall -Wextra -Werror`
+- [x] `firmware/CommonFW/` created with the layout above (2026-08-16; `docs/`,
+      `include/kilnlink/`, `src/`, `test/`, `test/vectors/` all exist —
+      `kilnlink_ids.h`/`kilnlink_context.h`/`kilnlink_status.h` not yet, see Codecs)
+- [x] `CMakeLists.txt` producing a `kilnlink` target consumable by pico-sdk
+      (standard `add_library` + `target_include_directories`; not yet actually
+      linked into a pico-sdk build since `SaftyFW` has no CMake project yet)
+- [x] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
+      (2026-08-16). Auto-discovered under `firmware/KilnFW/components/` —
+      ESP-IDF's default search path, no `EXTRA_COMPONENT_DIRS` edit needed.
+      `App/drivers/CMakeLists.txt` lists it in `REQUIRES` purely so
+      `idf.py build` compiles it; nothing calls it yet (see Migration)
+- [~] Builds clean under xtensa-gcc, arm-none-eabi-gcc and MSVC at `-Wall -Wextra -Werror`.
+      **MSVC verified** (cl.exe via CMake+Ninja, `/W4 /WX`) and **xtensa-gcc
+      verified** (`idf.py -C firmware/KilnFW build`, both 2026-08-16 — object
+      files land in `build/esp-idf/kilnlink/`, and since nothing references
+      the symbols yet, the linker's `--gc-sections` strips them from the
+      final binary: `KilnCtrl.bin` size is byte-identical to the
+      pre-`kilnlink` build, confirming zero behavioral impact from adding
+      the component). arm-none-eabi-gcc (pico-sdk) not yet tried — `SaftyFW`
+      has no CMake project to build it against yet
 
 **Contract**
-- [ ] `docs/LINK_PROTOCOL.md` moved here from `firmware/SaftyFW/docs/` and cross-links updated
-- [ ] `kilnlink_version.h` created; `KilnFW`'s `UART_PROTOCOL_VERSION` aliased to it
+- [x] `docs/LINK_PROTOCOL.md` moved here from `firmware/SaftyFW/docs/` and cross-links updated
+      (already done before this session — confirmed 2026-08-16, no stale
+      duplicate remains under `firmware/SaftyFW/docs/`)
+- [x] `kilnlink_version.h` created (2026-08-16); `KilnFW`'s `UART_PROTOCOL_VERSION`
+      **not yet** aliased to it — that's a change to already-shipped `KilnFW`
+      code, left for the actual migration step below
 - [ ] `kilnlink_ids.h` — shared ids split out of `uart_task_ids.h`, PC-link ids left behind
 
 **Codecs**
-- [ ] `kilnlink_frame.{c,h}` — delimiter, stuffing, CRC16/CCITT-FALSE
-- [ ] `kilnlink_context.{c,h}` — ESP → Pico encoders/decoders
-- [ ] `kilnlink_status.{c,h}` — Pico → ESP encoders/decoders
-- [ ] Every decoder bounds-checked and returning a status
-- [ ] No allocation, no I/O, no globals — verified by review, not assumed
+- [x] `kilnlink_frame.{c,h}` — delimiter, stuffing, CRC16/CCITT-FALSE. Done 2026-08-16
+- [ ] `kilnlink_context.{c,h}` — ESP → Pico encoders/decoders (blocked: payload
+      layout still "planning" in `docs/LINK_PROTOCOL.md`)
+- [ ] `kilnlink_status.{c,h}` — Pico → ESP encoders/decoders (same block)
+- [x] Every decoder bounds-checked and returning a status (`kilnlink_frame_decode`/
+      `kilnlink_unstuff` — the only decoders that exist so far)
+- [x] No allocation, no I/O, no globals — verified by review, not assumed
 
 **Tests**
-- [ ] Host test binary, all frame types, round-trip byte equality
-- [ ] Hostile vectors: truncated, over-long length, bad CRC, unterminated escape, out-of-range counts, NaN/Inf floats
-- [ ] `test/vectors/` manifest created
-- [ ] `pc_tools` test suite consuming the same manifest
-- [ ] Fuzz harness over the decoders
+- [x] Host test binary, all frame types, round-trip byte equality
+      (`test/test_frame.c`, MSVC + CMake + Ninja + CTest, 14 checks, all
+      passing 2026-08-16)
+- [x] Hostile vectors: truncated, over-long length, bad CRC, out-of-range
+      counts. **Unterminated escape**: kilnlink itself checks it
+      (`KILNLINK_FRAME_ERR_UNTERMINATED_ESC`); `pc_tools`' one-shot `unstuff()`
+      does not by design (see the vector's own note in the manifest) — a real,
+      documented difference, not an oversight. **NaN/Inf floats**: N/A yet,
+      no float fields exist until `kilnlink_context`/`kilnlink_status` do
+- [x] `test/vectors/` manifest created (`frame_vectors.json`, 3 valid + 6 hostile vectors)
+- [x] `pc_tools` test suite consuming the same manifest
+      (`selfcheck.py`'s `commonfw_vector_checks()`, all passing 2026-08-16)
+- [x] Fuzz harness over the decoders. Done 2026-08-16: `test/test_fuzz.c`,
+      seeded xorshift32 (deterministic/reproducible), both uniform-random and
+      structurally-biased garbage (real delimiter/escape/type bytes dropped
+      at random positions), every length 0 through past the largest legal
+      frame, ~800K inputs against both `kilnlink_frame_decode` and
+      `kilnlink_unstuff` -- asserts only "did not crash or hang", passing.
+      Not coverage-guided (no libFuzzer/AFL) -- good enough to catch an
+      out-of-bounds read or infinite loop, not a substitute for one if this
+      code ever needs deeper scrutiny
 
 **Migration**
 - [ ] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`

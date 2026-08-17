@@ -177,9 +177,9 @@ PIO, or an external inverter — cancels the optocouplers' and the link goes
 dead. See `firmware/SaftyFW/docs/HARDWARE.md` §1.
 
 **Pins: `PicoTx` = GPIO4, `PicoRx` = GPIO5** (`firmware/SaftyFW/docs/HARDWARE.md` §2). On the ESP
-side these land on **GPIO4 = ESP TX** and **GPIO5 = ESP RX**, which is *swapped*
-relative to `KilnFW`'s current `Kconfig` defaults. That is `firmware/SaftyFW/TODO.md` item 0.1
-and it blocks everything else in this document.
+side these land on **GPIO4 = ESP TX** and **GPIO5 = ESP RX**, matching
+`KilnFW`'s `Kconfig` defaults since `firmware/SaftyFW/TODO.md` item 0.1 landed
+(2026-08-16) — it was swapped before that.
 
 ### Receiver robustness — required, not optional
 
@@ -831,8 +831,8 @@ Neither firmware is complete; these are the ESP-side items. Sequenced in
 
 | # | Change | Files |
 |---|---|---|
-| 0.1 | **Swap `KILNCTL_SAFETY_TX_IO` → 4 and `KILNCTL_SAFETY_RX_IO` → 5.** Move the internal pull-up onto the RX pin (GPIO5). Link is dead until this lands | `App/drivers/Kconfig:189-200`, `sdkconfig`, `safety_link.c` |
-| 0.2 | Add `UART_PROTO_MSG_BROADCAST = 0x04` — send without waiting, receive without ACKing | `espInterfaces/uart_protocol.{c,h}` |
+| 0.1 | **Swap `KILNCTL_SAFETY_TX_IO` → 4 and `KILNCTL_SAFETY_RX_IO` → 5.** Move the internal pull-up onto the RX pin (GPIO5). Link is dead until this lands. **Done 2026-08-16.** | `App/drivers/Kconfig:189-200`, `sdkconfig`, `safety_link.c` |
+| 0.2 | Add `UART_PROTO_MSG_BROADCAST = 0x04` — send without waiting, receive without ACKing. **Done 2026-08-16**: the frame type and `uart_protocol_send_broadcast()` exist; nothing in `safety_link.c` calls it yet, that is 0.3 below | `espInterfaces/uart_protocol.{c,h}` |
 | 0.3 | Replace the `GET_STATUS` poll loop with a 500 ms context broadcast; build the frame in §4 | `safety_link.c` |
 | 0.4 | Track `relay_recent_mask` over a ≥150 s window. `relay_authority` already sees every relay command, so this belongs there | `relay_authority.{c,h}` |
 | 0.5 | Accept unsolicited status/diag/version/trip frames with no outstanding request (partly present — the poll cache already accepts unsolicited status) | `safety_link.c` |
@@ -841,7 +841,7 @@ Neither firmware is complete; these are the ESP-side items. Sequenced in
 | 0.8 | Send `SET_FIRING_CEILING` at profile start/edit — the highest target the profile will ask for | `profile_executor.c`, `profiles_http.c` |
 | 0.9 | Surface `DIAG`, `FW_VERSION` (incl. **config CRC**) and `TRIP_EVENT` on the dashboard and over the PC link | `dashboard_http.c`, `uart_bridge.c` |
 | 0.10 | Bump `UART_PROTOCOL_VERSION` 4 → 5 with a note explaining the broadcast type | `uart_task_ids.h:52` |
-| 0.11 | Correct `docs/SAFETY_LINK.md` "Trap 1" and the R15 boot-artefact note; correct `docs/HARDWARE.md`'s optocoupler table | `firmware/KilnFW/docs/` |
+| 0.11 | Correct `docs/SAFETY_LINK.md` "Trap 1" and the R15 boot-artefact note; correct `docs/HARDWARE.md`'s optocoupler table. **Done 2026-08-16.** | `firmware/KilnFW/docs/` |
 | 0.12 | Update `docs/SAFETY_MODEL.md`'s summary table — the "safety processor reports E-stop/fault" row flips from **No** to **Yes** once 0.6 lands | `firmware/KilnFW/docs/` |
 
 Item 0.11 matters more than it looks. Those two documents currently describe the
@@ -865,9 +865,9 @@ Two more, driven by the borrowed-thermocouple option:
 ## 10. Completion checklist
 
 **Blocking (`firmware/SaftyFW/TODO.md` phase 0)**
-- [ ] 0.1 Safety-UART pins swapped in `KilnFW` (TX→4, RX→5), pull-up moved to GPIO5
-- [ ] 0.2 `UART_PROTO_MSG_BROADCAST = 0x04` added
-- [ ] 0.3 `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
+- [x] 0.1 Safety-UART pins swapped in `KilnFW` (TX→4, RX→5), pull-up moved to GPIO5
+- [x] 0.2 `UART_PROTO_MSG_BROADCAST = 0x04` added (send + receive path; not yet called from `safety_link.c`)
+- [x] 0.3 `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
 - [ ] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped to 5, `UART_PROTOCOL_VERSION` aliased to it
 
 **ESP → Pico**
@@ -885,12 +885,16 @@ Two more, driven by the borrowed-thermocouple option:
 - [ ] `GET_STATUS` poll loop removed (no ACK'd `DATA` polls remain)
 
 **Pico → ESP**
-- [ ] 23-byte status frame, byte-identical to the existing layout, at 500 ms
-- [ ] `DIAG` (0x08)
-- [ ] `FW_VERSION` (0x0B) on request **and** unsolicited at boot, with config CRC
+- [x] 23-byte status frame, byte-identical to the existing layout, at 500 ms
+      (`firmware/SaftyFW/src/tasks/link_task.c`, `link_frame.c`)
+- [ ] `DIAG` (0x08) — not this pass, explicitly lower priority than Frame A
+- [x] `FW_VERSION` (0x0B) on request **and** unsolicited at boot, with config CRC
+      (CRC field present and transmitted; value is honestly 0 — no
+      `config_store` yet, Phase 9)
 - [ ] `TRIP_EVENT` (0x0D) pushed immediately, repeated, deduped on `trip_seq`
 - [ ] `POWER` (0x0E)
-- [ ] Non-blocking TX ring: drops on full, counts, never blocks
+- [x] Non-blocking TX ring: drops on full, counts, never blocks
+      (`firmware/SaftyFW/src/tasks/uart_owner.c`)
 
 **Liveness (§8)**
 - [ ] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s"

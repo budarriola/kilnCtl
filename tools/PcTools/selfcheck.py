@@ -18,7 +18,9 @@ answer and are told apart only by "nobody asked".
 
 from __future__ import annotations
 
+import json
 import math
+import pathlib
 import struct
 import sys
 import threading
@@ -1369,6 +1371,81 @@ def _expect_raises(label: str, exc_type, fn) -> None:
         check(f"{label} [did not raise]", False, True)
 
 
+def commonfw_vector_checks() -> None:
+    """Consumes firmware/CommonFW/test/vectors/frame_vectors.json -- the
+    manifest kilnlink's own host test (test/test_frame.c) also asserts
+    against. pc_tools is the *third* implementation of this exact envelope
+    (CommonFW/README.md); this is what keeps it honest rather than trusting
+    that Frame/stuff/protocol.py still agrees with the C side after a change
+    on either end.
+
+    Skips cleanly (not a failure) if the manifest doesn't exist yet or this
+    checkout doesn't have CommonFW -- the manifest is new as of 2026-08-16
+    and this file needs to keep working for anyone on an older checkout.
+    """
+    vectors_path = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "firmware" / "CommonFW" / "test" / "vectors" / "frame_vectors.json"
+    )
+    if not vectors_path.is_file():
+        print(f"\n== CommonFW kilnlink vectors == (skipped: {vectors_path} not found)")
+        return
+
+    manifest = json.loads(vectors_path.read_text(encoding="utf-8"))
+    print(f"\n== CommonFW kilnlink vectors == ({vectors_path.name})")
+
+    def as_device(value: int):
+        # Device only has ESP/HOST -- SAFETY (2) is a real device id on the
+        # isolated link but isn't part of this PC-link-facing enum, same
+        # leniency Frame.from_raw itself uses (protocol.py's _as_device).
+        try:
+            return Device(value)
+        except ValueError:
+            return value
+
+    for v in manifest.get("vectors", []):
+        name = v["name"]
+        frame = Frame(
+            msg_type=MsgType(v["msg_type"]),
+            msg_index=v["msg_index"],
+            src_device=as_device(v["src_device"]),
+            src_task=v["src_task"],
+            dst_device=as_device(v["dst_device"]),
+            dst_task=v["dst_task"],
+            payload=bytes.fromhex(v["payload_hex"]),
+        )
+        raw = frame.to_raw()
+        check(f"{name}: raw_hex matches", raw.hex(), v["raw_hex"])
+        check(f"{name}: wire_hex matches", stuff(raw).hex(), v["wire_hex"])
+        decoded = Frame.from_raw(bytes.fromhex(v["raw_hex"]))
+        check(f"{name}: decode round-trips", decoded, frame)
+
+    for hv in manifest.get("hostile_vectors", []):
+        name = hv["name"]
+        expect = hv["expect_error"]
+        checked_by = hv.get("checked_by", "decode")
+        if checked_by == "unstuff":
+            # pc_tools' protocol.py unstuff() is documented as a one-shot
+            # test/decode convenience, not the live RX path (that's
+            # FrameDecoder) -- it does not raise on every case kilnlink's
+            # stricter kilnlink_unstuff does. See the vector's own
+            # "checked_by_note" in the manifest for which ones apply here.
+            if hv.get("checked_by_note", "").startswith("kilnlink only"):
+                print(f"  (skip) {name}: kilnlink-only case, see manifest note")
+                continue
+            try:
+                unstuff(bytes.fromhex(hv["wire_hex"]))
+                check(f"{name}: raises on {expect}", "did not raise", expect)
+            except (FrameError, IndexError, ValueError):
+                check(f"{name}: raises on {expect}", True, True)
+        else:
+            try:
+                Frame.from_raw(bytes.fromhex(hv["raw_hex"]))
+                check(f"{name}: raises on {expect}", "did not raise", expect)
+            except FrameError:
+                check(f"{name}: raises on {expect}", True, True)
+
+
 def hardening_checks() -> None:
     """Negative paths: malformed bytes off the wire, absurd arguments, and the
     link failing underneath a caller.
@@ -1694,6 +1771,8 @@ def main() -> int:
     crc = crc16_ccitt_false(raw[:-2])
     check("trailing CRC big-endian", raw[-2:], struct.pack(">H", crc))
     check("Frame.from_raw round trip", Frame.from_raw(raw), frame)
+
+    commonfw_vector_checks()
 
     print("\n== FrameDecoder (incremental) ==")
     dec = FrameDecoder()
