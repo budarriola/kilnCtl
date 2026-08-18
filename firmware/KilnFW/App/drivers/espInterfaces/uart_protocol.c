@@ -386,8 +386,55 @@ esp_err_t uart_protocol_register_task(uart_protocol_t *proto,
         return ESP_ERR_NO_MEM;
     }
 
-    QueueHandle_t inbox = xQueueCreate(inbox_len, sizeof(uart_proto_message_t));
+    /* xQueueCreate's storage must come from internal SRAM (FreeRTOS kernel
+     * objects are never satisfied from PSRAM, regardless of how much overall
+     * heap -- PSRAM included -- heap_caps_get_largest_free_block() reports as
+     * free), and that specific pool is what wifi_prov_start()'s STA+AP
+     * bring-up leans on hardest during its first couple of seconds. On the
+     * bench (2026-08-18) that window landed squarely on this call for
+     * whichever task happened to be starting at the time -- THERMO first,
+     * then every task after it in main.c's registration order, all failing
+     * ESP_ERR_NO_MEM back-to-back despite megabytes of PSRAM sitting idle --
+     * and because this function is one-shot, the affected tasks stayed
+     * unregistered (silently NACKing every request) for the rest of that
+     * boot. Retry through the same transient window instead of taking its
+     * outcome as final: a handful of short waits costs at most ~250 ms of
+     * boot time in the failure case, versus a task that never comes up until
+     * the next power cycle. */
+    QueueHandle_t inbox = NULL;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        inbox = xQueueCreate(inbox_len, sizeof(uart_proto_message_t));
+        if (inbox) {
+            break;
+        }
+        if (attempt < 4) {
+            xSemaphoreGive(proto->tasks_lock);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            xSemaphoreTake(proto->tasks_lock, portMAX_DELAY);
+            /* Another task may have taken this task_id or the free slot
+             * while the lock was released; re-check both rather than trust
+             * the ones captured before the delay. */
+            if (find_slot(proto, task_id)) {
+                xSemaphoreGive(proto->tasks_lock);
+                return ESP_ERR_INVALID_STATE;
+            }
+            slot = NULL;
+            for (int i = 0; i < UART_PROTO_MAX_TASKS; ++i) {
+                if (!proto->tasks[i].in_use) {
+                    slot = &proto->tasks[i];
+                    break;
+                }
+            }
+            if (!slot) {
+                xSemaphoreGive(proto->tasks_lock);
+                return ESP_ERR_NO_MEM;
+            }
+        }
+    }
     if (!inbox) {
+        ESP_LOGW(TAG, "task %u: xQueueCreate still failing after 5 attempts (~200ms) -- "
+                       "internal SRAM genuinely exhausted, not just a boot-time WiFi transient",
+                 task_id);
         xSemaphoreGive(proto->tasks_lock);
         return ESP_ERR_NO_MEM;
     }
