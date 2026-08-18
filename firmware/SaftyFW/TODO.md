@@ -176,17 +176,24 @@ header comment, so the build is reproducible elsewhere.
 - [ ] Blink-equivalent proof of life over SWD/RTT — **not verified**; no
       RP2040 hardware and no debug probe attached to the machine this was
       built on, so nothing here has ever run.
-- [ ] **Heartbeat LED, physical, on the safety processor itself.** Requested
-      2026-08-17: the safety processor should blink a heartbeat pattern
-      (steady blink while alive/healthy) so its liveness is visible without
-      a debug probe or the ESP link up — this is distinct from the SWD/RTT
-      proof-of-life above (that's a dev/bench tool; this is a permanent
-      on-board indicator). Owned by whichever task already runs at a fixed
-      cadence on core 1 (watchdog_task is the natural fit, since a stalled
-      task already stops feeding it) — the LED going dark or freezing
-      should track the same "a task stopped checking in" condition the
-      watchdog itself detects, so the light doesn't lie about liveness the
-      watchdog would otherwise catch.
+- [x] **Heartbeat LED, physical, on the safety processor itself** (2026-08-17)
+      — requested this session, built same day. `watchdog_task.c` toggles
+      `SAFTYFW_PIN_HEARTBEAT_LED` (GPIO25) in the exact same
+      `mask == WATCHDOG_CHECKIN_ALL_MASK` branch that feeds the real
+      hardware watchdog, so the LED cannot physically drift from what the
+      watchdog itself is deciding: every task checked in -> feed + toggle
+      (steady 500 ms-period blink); any task missed its window -> neither
+      runs, so the LED freezes at its last level instead of the code
+      choosing a "fault" level for it (this is a side effect of the
+      existing feed decision, not a second liveness check — see the file
+      header comment). GPIO25 is a real pin, not a placeholder: A1 is
+      confirmed `PICO_BOARD=pico` (docs/HARDWARE.md section 2, stock
+      Raspberry Pi Pico module), and GPIO25 is that module's own onboard
+      LED, wired module-internally — it has no A1 schematic net, unlike
+      every other constant in `board_pins.h`, which is why it wasn't in
+      that file before. **Not verified** — same as the SWD/RTT item above,
+      no RP2040 hardware and no debug probe attached to the machine this
+      was built on; the toggle logic has never actually driven a real LED.
 - [x] **Log transport**: `kilnlink` LOG frames as primary (2026-08-17) —
       `log_task.c` owns a bounded FreeRTOS queue (16 entries, 96 bytes each,
       allocated once at `log_task_start()`), drains it, and hands entries to

@@ -6,24 +6,37 @@
 <title>kilnCtl Wi-Fi Setup</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
+  /* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
+     TODO.md 10.6). Same hex values as the LCD side; duplicated verbatim in each of
+     the 6 web pages since they're EMBED_TXTFILES'd independently and there's no
+     shared static-asset route today. Only the DARK variant of the existing
+     --bg/--fg/etc toggle now points at these values; explicit light mode unchanged. */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
   :root {
     --bg: #fff; --fg: #111; --border: #ccc; --input-bg: #fff; --input-border: #999;
     --button-bg: #f2f2f2; --hover-bg: #eee; --link: #06c;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #181818; --fg: #eee; --border: #444; --input-bg: #222; --input-border: #666;
-      --button-bg: #2a2a2a; --hover-bg: #333; --link: #6cf;
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --border: var(--ui-text-secondary);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+      --button-bg: var(--ui-card); --hover-bg: var(--ui-card); --link: var(--ui-accent-3);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #181818; --fg: #eee; --border: #444; --input-bg: #222; --input-border: #666;
-    --button-bg: #2a2a2a; --hover-bg: #333; --link: #6cf;
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --border: var(--ui-text-secondary);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+    --button-bg: var(--ui-card); --hover-bg: var(--ui-card); --link: var(--ui-accent-3);
   }
   body { font-family: sans-serif; max-width: 420px; margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
-               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
                padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
   a { color: var(--link); }
   h1 { font-size: 1.2em; }
@@ -32,12 +45,14 @@
   input[type=text], input[type=password] {
     width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
     background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
   }
   button {
-    margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+    min-height: var(--ui-touch); margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
     background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius); cursor: pointer;
   }
-  #status { margin-top: 1em; padding: 1em; border: 1px solid var(--border); border-radius: 4px;
+  #status { margin-top: 1em; padding: 1em; border: 1px solid var(--border); border-radius: var(--ui-radius);
             background: var(--button-bg); }
   #statusRows { list-style: none; padding: 0; margin: 0; }
   #statusRows li { display: flex; justify-content: space-between; padding: 0.4em 0;
@@ -45,9 +60,11 @@
   #statusRows li:last-child { border-bottom: none; }
   .status-label { font-weight: bold; opacity: 0.8; }
   .status-value { text-align: right; font-family: monospace; }
-  .rssi-excellent { color: #0a0; } .rssi-good { color: #0a0; } .rssi-fair { color: #aa0; } .rssi-weak { color: #a00; }
+  .rssi-excellent { color: var(--ui-accent-4); } .rssi-good { color: var(--ui-accent-4); }
+  .rssi-fair { color: var(--ui-accent-1); } .rssi-weak { color: var(--ui-accent-5); }
   ul#networks { list-style: none; padding: 0; margin-top: 0.5em; }
-  ul#networks li { padding: 0.5em; border: 1px solid var(--border); margin-bottom: 0.3em;
+  ul#networks li { padding: 0.5em; border: 1px solid var(--border); border-radius: var(--ui-radius);
+                    margin-bottom: 0.3em; min-height: var(--ui-touch); box-sizing: border-box;
                     cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   ul#networks li:hover { background: var(--hover-bg); }
   ul#networks li.connected { border-color: var(--link); }
@@ -56,13 +73,13 @@
   ul#networks .net-right { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
   .badge-saved { font-size: 0.75em; padding: 0.1em 0.4em; border-radius: 3px;
                  background: var(--link); color: #fff; flex-shrink: 0; }
-  .forget-btn { margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
+  .forget-btn { min-height: 0; margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
   #connectSection { margin-top: 0.5em; padding: 0.5em; border: 1px solid var(--border);
-                     border-radius: 4px; display: none; }
+                     border-radius: var(--ui-radius); display: none; }
   #connectSection label { margin-top: 0.5em; }
-  .mode-toggle { display: flex; border: 1px solid var(--input-border); border-radius: 4px;
+  .mode-toggle { display: flex; border: 1px solid var(--input-border); border-radius: var(--ui-radius);
                  overflow: hidden; margin-top: 0.5em; }
-  .mode-toggle button { flex: 1; margin: 0; border: none; border-radius: 0; padding: 0.7em 0.5em;
+  .mode-toggle button { flex: 1; min-height: 2.6em; margin: 0; border: none; border-radius: 0; padding: 0.7em 0.5em;
                          background: var(--button-bg); color: var(--fg); }
   .mode-toggle button.active { background: var(--link); color: #fff; }
   .mode-toggle button + button { border-left: 1px solid var(--input-border); }

@@ -6,37 +6,53 @@
 <title>kilnCtl - Relays &amp; Rules</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
+  /* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
+     TODO.md 10.6). Same hex values as the LCD side; duplicated verbatim in each of
+     the 6 web pages since they're EMBED_TXTFILES'd independently and there's no
+     shared static-asset route today. Only the DARK variant of the existing
+     --bg/--fg/etc toggle now points at these values; explicit light mode unchanged. */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c; --warn: #b00;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
-      --card-bg: #232323; --input-bg: #222; --input-border: #666; --link: #6cf; --warn: #ff6b6b;
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --warn: var(--ui-accent-5);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
-    --card-bg: #232323; --input-bg: #222; --input-border: #666; --link: #6cf; --warn: #ff6b6b;
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --warn: var(--ui-accent-5);
   }
   body { font-family: sans-serif; max-width: 560px; margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
-               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
                padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
   a { color: var(--link); }
   h1 { font-size: 1.2em; }
   p { color: var(--muted); }
   .notice { background: var(--card-bg); border: 1px solid var(--warn); color: var(--warn);
-            border-radius: 4px; padding: 0.7em 1em; font-weight: bold; }
-  pre.cheatsheet { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+            border-radius: var(--ui-radius); padding: 0.7em 1em; font-weight: bold; }
+  pre.cheatsheet { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
                     padding: 0.7em 1em; font-size: 0.85em; overflow-x: auto; white-space: pre; }
   textarea { width: 100%; box-sizing: border-box; height: 16em; font-family: monospace; font-size: 0.9em;
              background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
-             padding: 0.5em; }
-  button { margin-top: 1em; margin-right: 0.5em; padding: 0.7em 1.5em; font-size: 1em;
-           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border); }
+             border-radius: var(--ui-radius); padding: 0.5em; }
+  button { min-height: var(--ui-touch); margin-top: 1em; margin-right: 0.5em; padding: 0.7em 1.5em;
+           font-size: 1em; background: var(--button-bg); color: var(--fg);
+           border: 1px solid var(--input-border); border-radius: var(--ui-radius); cursor: pointer; }
   #msg { margin-top: 1em; font-weight: bold; }
 </style>
 </head>

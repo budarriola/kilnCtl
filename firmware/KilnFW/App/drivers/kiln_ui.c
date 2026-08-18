@@ -4,7 +4,9 @@
 
 #include "esp_log.h"
 
+#include "ui_page_config.h"
 #include "ui_page_home.h"
+#include "ui_page_temperature.h"
 
 static const char *TAG = "kiln_ui";
 
@@ -42,6 +44,16 @@ esp_err_t kiln_ui_init(void)
      * is the registry/switcher only, every page's actual widget tree lives in
      * its own ui_page_*.c/.h so no single file accumulates every screen. */
     esp_err_t err = kiln_ui_register_page("home", ui_page_home_build);
+    if (err != ESP_OK) return err;
+
+    /* TODO.md 10.3's "Configuration"/"Temperature" nav items -- stubs for
+     * now (see ui_page_config.c/.h, ui_page_temperature.c/.h), registered
+     * here so ui_page_home.c's nav buttons have somewhere real to
+     * kiln_ui_show() and the page-switching mechanism gets exercised by more
+     * than the one page it's had until now. */
+    err = kiln_ui_register_page("config", ui_page_config_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("temperature", ui_page_temperature_build);
     if (err != ESP_OK) return err;
 
     return kiln_ui_show("home");

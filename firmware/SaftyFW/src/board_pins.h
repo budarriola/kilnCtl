@@ -58,4 +58,17 @@
 #define SAFTYFW_PIN_UART0_TX     17 // GP17 -> probe UART0 RX
 #define SAFTYFW_PIN_UART0_RX     16 // GP16 <- probe UART0 TX
 
+// --- Heartbeat LED (watchdog_task), TODO.md Phase 2 "physical heartbeat" ---
+// GPIO25 is NOT part of A1's own schematic/net list above -- it is never
+// routed off the Pico module, so it has no entry in docs/HARDWARE.md's I/O
+// map the way every other pin here does. It is real hardware nonetheless:
+// docs/HARDWARE.md section 2 confirms A1 is `PICO_BOARD=pico` (a stock
+// Raspberry Pi Pico module, not pico_w/pico2/a custom board file), and on
+// that stock module GPIO25 is hard-wired module-side to the Pico's own
+// onboard LED (pico-sdk's PICO_DEFAULT_LED_PIN for `PICO_BOARD=pico`) --
+// unlike GPIO0-13/16/17/26-28 above, nothing on A1's board needs to agree
+// with this pin for it to work, so there is no "check the schematic" step
+// left to do here the way there was for every other constant in this file.
+#define SAFTYFW_PIN_HEARTBEAT_LED 25 // GP25, Pico module onboard LED, module-internal (no A1 net)
+
 #endif // SAFTYFW_BOARD_PINS_H

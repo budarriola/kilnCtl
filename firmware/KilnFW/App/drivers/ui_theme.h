@@ -26,6 +26,8 @@
  * replaces it.
  */
 
+#include <stdbool.h>
+
 #include "lvgl.h"
 
 /* ---- Backgrounds -------------------------------------------------------
@@ -121,3 +123,55 @@
  * status icon row without eating too much of the 320px height budget the
  * rest of the page (10.3's content) needs. */
 #define UI_THEME_STATUS_BAR_HEIGHT_PX  32
+
+/* ---- Touch hit-area sizing -- TODO.md 10.4 ("Touch hit-testing") ---------
+ *
+ * TODO.md 10.4 asked for "nearest widget-center wins, within a dynamic
+ * offset based on local density/button size." Before building that from
+ * scratch, this pass actually read LVGL v9.5.0's real hit-testing code
+ * (components/lvgl/src/indev/lv_indev.c:lv_indev_search_obj() +
+ * components/lvgl/src/core/lv_obj_pos.c:lv_obj_hit_test()/
+ * lv_obj_get_click_area()) instead of assuming 10.1's evaluation note was
+ * right. It is NOT nearest-center arbitration: lv_indev_search_obj() walks
+ * the widget tree depth-first, children checked topmost-z-order-first
+ * (highest index first, since later siblings draw on top), and returns the
+ * *first* object whose (possibly click-area-expanded) bounding box contains
+ * the point -- plain rectangle containment via lv_area_is_point_on(), no
+ * distance-to-center comparison anywhere, no arbitration between two
+ * overlapping candidate boxes. Whichever object is tested first in z-order
+ * and contains the point wins, full stop.
+ *
+ * What LVGL *does* give for free is lv_obj_set_ext_click_area(obj, size) --
+ * lv_obj_get_click_area() (lv_obj_pos.c) symmetrically expands an object's
+ * own coords by `size` px on every side before that containment test runs.
+ * That's a real, per-widget, density-tunable answer to the *sizing* half of
+ * 10.4 (a sparse layout's buttons can each claim a generous halo; a dense
+ * grid's cells claim little or none) -- ui_theme_apply_touch_area() below is
+ * a thin helper over exactly that call. It is NOT an answer to the
+ * *arbitration* half: if two widgets' expanded boxes ever overlap, z-order
+ * decides, not proximity. See ui_theme.c for the extension amounts chosen
+ * per density case, and TODO.md 10.4 for the open item this leaves. */
+
+/**
+ * Set `widget`'s ext_click_area (see lv_obj_set_ext_click_area() above) to a
+ * size appropriate for its own on-screen size and the density of the layout
+ * it lives in.
+ *
+ * `compact_layout` is 10.4's explicit "dense grid" case (numeric keypad,
+ * settings list row) as opposed to the sparse main-page button case:
+ *   - compact_layout == true:  a small, capped extension -- enough to soften
+ *     the exact pixel edge without the expanded box reaching past the
+ *     midpoint of the standard inter-cell gap (UI_THEME_PADDING_PX) into a
+ *     neighboring cell's own expanded box. See the z-order caveat above:
+ *     letting two compact cells' expanded areas actually overlap is a real
+ *     mis-tap bug on this backend, not a cosmetic rounding error.
+ *   - compact_layout == false: a generous extension, and if the widget's own
+ *     smaller edge is below UI_THEME_MIN_TOUCH_TARGET_PX, extended further
+ *     so the *effective* clickable square reaches that minimum even though
+ *     the drawn widget itself doesn't grow.
+ *
+ * Must be called after `widget`'s size is known (post-layout, or after an
+ * explicit lv_obj_set_size()/similar) -- it reads back lv_obj_get_width()/
+ * _height(), which are meaningless before that.
+ */
+void ui_theme_apply_touch_area(lv_obj_t *widget, bool compact_layout);

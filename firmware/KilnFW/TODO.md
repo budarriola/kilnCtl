@@ -3720,44 +3720,154 @@ pre-10.2 bring-up screen, deliberately left alone), and 10.3's real pages
 
 ### 10.3 Page designs
 
+**Status update (2026-08-17): home page's first real slice built; graph
+explicitly deferred.** `App/drivers/ui_page_home.c` no longer just draws the
+placeholder "kilnCtl" label -- it's a real page now: a scrollable content
+area (480x320 is tight for everything this section asks for at once, and no
+real hardware was available this pass to hand-fit exact pixel sizes, so
+scrolling is the honest fallback rather than a guess) holding one card per
+configured zone (temp + heater on/off), a profile/run-state card (name,
+state, elapsed/remaining time as text + an `lv_bar`), a labeled graph
+placeholder, and Start/Stop + Configuration/Temperature nav buttons.
+`App/drivers/ui_page_config.c`/`.h` and `ui_page_temperature.c`/`.h` are new
+minimal stub pages (title + "Back" button calling `kiln_ui_show("home")`),
+registered from `kiln_ui_init()`, so the nav items have somewhere real to go
+and `kiln_ui_show()` now actually switches between three pages, not one.
+
+Per 10.1a, every number on the page comes from `dashboard_get_status()` (new
+plain-C getter in `dashboard_http.c`/`.h`, extracted from
+`status_get_handler()` -- see 10.1a's own status update) and
+`profile_executor_get_status()`, and Start/Stop call `profile_executor_run()`/
+`profile_executor_halt()` directly -- the exact same functions
+`dashboard_http.c`'s POST handlers call, not a reimplementation.
+
+Explicitly NOT built, and NOT silently skipped:
+- **The desired-vs-actual temperature graph.** Left as a labeled placeholder
+  card ("Temperature graph — not built yet"). It needs a real LVGL chart or
+  canvas widget plotted against `profile_executor_get_history()` (the same
+  ring buffer `GET /api/history.csv` streams) -- real charting work, big
+  enough to be its own follow-up pass, not something to half-build here.
+- **A profile picker.** There is no per-profile selection widget on this page
+  or on the still-stub Configuration page. Start therefore starts whichever
+  `profile_id` is already known this boot (the executor's own `profile_id` if
+  it's DONE/FAULTED from a previous run, else the last boot's
+  `run_state_get_boot_record()`) and logs a warning and no-ops if neither
+  exists. This is a real functional gap, not a cosmetic one -- a kiln that
+  has never run a profile since its last boot and whose Configuration page
+  hasn't grown a picker yet cannot Start from the LCD. Needs a real
+  profile-list page before this is complete.
+- **Zone names.** `zones_http.h` exposes no public getter for a zone's
+  configured name (only its internal config storage has one), so each zone
+  card shows "Zone N" rather than the operator's chosen name. Add a getter
+  and wire it through when a consumer needs it enough to justify the seam
+  (same "extract when the second caller shows up" discipline as 10.1a).
+
+**Not build-verified this pass** — no `idf.py build` was run, and none of
+this has touched the physical ILI9488/NS2009 panel.
+
 **Main / status page** (the default page, mirrors section 2's web
 dashboard but is the touchscreen's home, not a secondary view):
 
-- [ ] Each configured zone, its current temperature, and its heater
+- [x] Each configured zone, its current temperature, and its heater
       on/off status (same data as `GET /api/status`, section 2)
 - [ ] Graph of the current profile's target curve with all zones'
       actual temperature progressing along it (same data/shape as
       section 2's `historyChart` / `GET /api/history.csv` — reuse the
       existing history ring buffer, section 0's "Historical data for the
-      graph" item, rather than a second buffer)
-- [ ] Name of the currently selected/running kiln profile
-- [ ] Time remaining and elapsed time, **shown both as text and as a
-      progress bar**
-- [ ] Stop button
-- [ ] Start button
-- [ ] "Configuration" nav item — opens the deeper config / settings menus
+      graph" item, rather than a second buffer). **Deferred — see status
+      update above; a labeled placeholder card stands in for it.**
+- [x] Name of the currently selected/running kiln profile
+- [x] Time remaining and elapsed time, **shown both as text and as a
+      progress bar** — per-segment (elapsed into the segment / dwell
+      remaining), matching what `profile_executor_get_status()` actually
+      tracks and what section 2's own web dashboard already shows; there is
+      no whole-profile total-remaining figure anywhere in the backend to
+      show instead.
+- [x] Stop button
+- [x] Start button — **see status update above for the profile-picker gap
+      this button still has.**
+- [x] "Configuration" nav item — opens the deeper config / settings menus
       (maps to section 3's Settings pages: Thermocouples & Zones, Relays &
-      Rules, Network)
-- [ ] "Temperature" nav item — individual per-zone manual control (maps to
+      Rules, Network). **Stub page only this pass — see status update.**
+- [x] "Temperature" nav item — individual per-zone manual control (maps to
       section 2's manual relay override / per-zone target, touchscreen
-      equivalent of the dashboard's relay controls)
+      equivalent of the dashboard's relay controls). **Stub page only this
+      pass — see status update.**
 
 ### 10.4 Touch hit-testing
 
-- [ ] Map a raw touch coordinate to the widget the user meant to press:
-      **nearest widget-center wins**, but only within a limited offset —
-      a touch too far from any widget's center hits nothing rather than
-      the nearest-but-still-wrong widget.
-  - [ ] The allowed offset is **dynamic**, based on local widget density
-        and button size — a screen of large, sparse buttons can allow a
-        generous offset; a dense/compact layout (10.5) needs a tighter one
-        so adjacent small buttons don't steal each other's touches.
-  - [ ] If LVGL is adopted (10.1), check whether its indev/hit-testing
-        already implements an equivalent nearest-target-within-tolerance
-        model before building a custom one — this may already be solved.
-- [ ] Explicitly handle **compact button layouts** (e.g. a numeric keypad
-      or a dense settings grid) as their own density case, not just the
-      sparse main-page buttons above.
+**Status update (2026-08-17): LVGL's real hit-test behavior checked (not
+assumed) and infrastructure built on top of it.** 10.1's evaluation note
+flagged "check whether LVGL's own indev/hit-testing already implements an
+equivalent nearest-target-within-tolerance model" as unconfirmed. This pass
+actually read the code instead of taking that note's optimism at face value:
+`components/lvgl/src/indev/lv_indev.c`'s `lv_indev_search_obj()` (the
+function every touch point actually goes through) walks the widget tree
+depth-first, testing children topmost-z-order-first, and returns the *first*
+object whose bounding box contains the point via
+`components/lvgl/src/core/lv_obj_pos.c`'s `lv_obj_hit_test()` ->
+`lv_obj_get_click_area()` -> `lv_area_is_point_on()` — plain rectangle
+containment, no distance-to-center comparison anywhere, no arbitration
+between two candidate boxes that both contain the point. **This is not
+nearest-center-within-tolerance; it is first-match-in-z-order.** The
+optimistic reading in 10.1's note was wrong on the arbitration question.
+
+What LVGL *does* provide, confirmed in the same read: `lv_obj_set_ext_click_area(obj, size)`
+(`lv_obj_pos.c`) symmetrically expands one widget's own bounding box by
+`size` px on every side before that containment test runs — a real,
+built-in, per-widget-tunable answer to the *sizing* half of this section's
+ask (generous halo for sparse buttons, little/none for a dense grid), just
+not the *arbitration* half.
+
+- [x] Map a raw touch coordinate to the widget the user meant to press,
+      **using LVGL's built-in `lv_obj_set_ext_click_area()` rather than a
+      custom nearest-center hit-tester** — see the status update above for
+      why: no custom point-to-widget resolution exists to replace, LVGL's
+      own hit test is what runs today and what any custom layer would have
+      to sit in front of.
+  - [x] The allowed offset is **dynamic**, based on local widget density and
+        button size. Built as `ui_theme_apply_touch_area(lv_obj_t *widget,
+        bool compact_layout)` in the new `App/drivers/ui_theme.c` (`ui_theme.h`
+        gained its first `.c` companion this pass) — reads the widget's own
+        size via `lv_obj_get_width()`/`_height()`, then calls
+        `lv_obj_set_ext_click_area()` with an extension computed from that
+        size and the `compact_layout` flag: a sparse widget gets a generous
+        fixed margin (further extended if the widget itself is smaller than
+        `UI_THEME_MIN_TOUCH_TARGET_PX`, so the effective clickable square
+        still reaches that minimum); a compact widget gets at most half of
+        `UI_THEME_PADDING_PX`, capped there specifically so two adjacent
+        compact cells' expanded boxes can never overlap in their shared gap.
+  - [x] Confirmed by actually reading LVGL's source (see status update
+        above) rather than assumed — done.
+- [x] Explicitly handle **compact button layouts** (e.g. a numeric keypad or
+      a dense settings grid) as their own density case, not just the sparse
+      main-page buttons above. `ui_theme_apply_touch_area()`'s
+      `compact_layout` parameter is exactly this — a caller building a
+      keypad passes `true`, a caller building main-page buttons passes
+      `false`; see the function's own doc comment in `ui_theme.h` for the
+      exact numbers and the reasoning behind the compact cap.
+
+**Nothing calls this yet.** 10.3 (real page/button layouts) doesn't exist —
+only `ui_page_home.c`'s placeholder label — so there is no real button grid
+to size. This is infrastructure for 10.3 to call when it builds one; forcing
+it onto the placeholder label would have nothing meaningful to demonstrate.
+
+**Open item, deliberately not built speculatively:** the z-order-first-match
+behavior confirmed above means that *if* a future dense layout (10.3, once
+built) ever produces two widgets whose extended click areas genuinely
+overlap — the compact-cap math above is sized to prevent that for a regular
+grid with `UI_THEME_PADDING_PX` gaps, but a layout that doesn't fit that
+assumption (irregular spacing, deliberately tight custom placement) could
+still hit it — LVGL will hand the touch to whichever widget is tested first
+in z-order, not whichever the user's finger was actually closer to. That
+specific case needs a custom post-process step on top of `touch_read_cb()`
+in `lvgl_port.c` (e.g. detect the ambiguous-overlap case and re-resolve by
+distance-to-center before forwarding the point to LVGL), which is *not*
+built here — there's no real layout yet to prove it's actually needed, and
+building conflict-arbitration logic against a hypothetical is exactly the
+kind of speculative work this codebase's own conventions (see 10.1a) argue
+against. Revisit this the moment 10.3 produces a layout dense enough to
+actually trip it.
 
 ### 10.5 Web/LCD parity rule
 
@@ -3771,11 +3881,11 @@ dashboard but is the touchscreen's home, not a secondary view):
 
 ### 10.6 Web dashboard restyle to match the LCD
 
-- [ ] Rework the existing web pages (`main_page.html`,
+- [x] Rework the existing web pages (`main_page.html`,
       `zones_page.html`, `rules_page.html`, `profiles_page.html`,
       `wifi_provision_page.html`) to use the same KlipperScreen-derived
       style (10.2) as the LCD, so the two front ends read as one product.
-  - [ ] Look for a small CSS approach rather than a JS framework, given
+  - [x] Look for a small CSS approach rather than a JS framework, given
         this is served from ESP32 flash with no build step today: either
         a hand-written shared `style.css` embedded alongside the existing
         pages (cheapest, no new dependency, matches how the pages are
@@ -3785,6 +3895,66 @@ dashboard but is the touchscreen's home, not a secondary view):
         straight from flash (section 0's web-server decision), and a
         build pipeline would be new infrastructure this project doesn't
         have.
+
+  **Status update (2026-08-17): all six pages restyled, palette pulled
+  verbatim from `docs/UI_THEME.md`, no new files/routes.** Also covers
+  `readiness_page.html`, which this section's page list above missed but
+  which shares the exact same theming structure as the other five and was
+  restyled identically.
+
+  **Approach taken: duplicated `<style>` block, not a shared `theme.css`
+  route.** A 7th `EMBED_TXTFILES`'d file served at its own route was
+  considered (per this section's original note) but each page's HTTP
+  handler lives in a *different* `.c` file (`wifi_provision_http.c`,
+  `zones_http.c`, `rules_http.c`, `profiles_http.c`, `readiness_http.c`)
+  with its own `httpd_register_uri_handler` call and its own extern
+  `_binary_..._start`/`_end` symbols — there's no single hub file that
+  already serves all six. Adding one shared CSS route cleanly would mean
+  touching CMakeLists.txt plus five separate `.c` files' registration
+  code, blind, with no build tool available this pass to verify any of
+  it. That's a bigger, riskier change than this pass should take for a
+  visual-only restyle, so each page keeps (and now duplicates) its own
+  `<style>` block instead, per the section's own fallback guidance.
+
+  Each of the six files' existing light/dark toggle (`--bg`/`--fg`/
+  `--muted`/`--border`/`--button-bg`/`--card-bg`/... custom properties,
+  `#themeBtn`, `localStorage['kilnctl-theme']`, `data-theme` attribute)
+  is untouched and still fully functional. What changed: a new `:root {
+  --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+  --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2:
+  #a15fd6; --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5:
+  #d6555f; --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px;
+  --ui-status-bar: 32px; }` block (exact hex/px values from
+  `docs/UI_THEME.md`, same in all six files) was added, and only the
+  *dark* variant of each page's existing toggle (`@media
+  (prefers-color-scheme: dark) :root:not([data-theme="light"])` and
+  `:root[data-theme="dark"]`) now points its `--bg`/`--fg`/`--muted`/
+  `--card-bg`/etc. at these `--ui-*` values instead of its own
+  hand-picked hex, so default (no stored preference, dark OS) and
+  explicit dark mode match the LCD; explicit light mode is untouched.
+  Page-specific status/verdict colors (`--ok`/`--warn`/`--bad`/`--err`/
+  `--not-done`/`--cannot-yet`/`--off`/`--fault-color`/`--on-color`/
+  `--link`) were remapped onto the five accents in the dark variant only
+  (green=ok/on, orange=warn, teal=link, red=fault/err/not-done, held-back
+  red also doubles as the one `--fault-color`/danger use per the doc's
+  "accent-5 reserved for alarm/stop" note). `border-radius: 4px` became
+  `var(--ui-radius)` (10px) everywhere it appeared. `main_page.html` and
+  `zones_page.html` got `min-height: var(--ui-touch)` (72px) added to
+  their interactive controls (`button`, `.relay-toggle`, `.run-btn`,
+  `.danger-btn`, `a.button`, `select`); the other four pages got it on
+  their generic `button`/list-row selectors too since none of them are
+  meaningfully smaller-touch-target pages than the other two. Zone-group
+  headers on `main_page.html` get a 4-way rotating accent color
+  (`nth-of-type(4n+1..4)`) matching the LCD's per-zone coloring scheme,
+  CSS-only (no JS/element-ID changes).
+
+  No `.c`/`.h` file, no element ID, no `getElementById`/`querySelector`
+  target, no `fetch()`/POST body, and no form field changed — grepped
+  each file's `<script>` block against the diff before finishing to
+  confirm. Not built or run against real hardware/browser this pass (no
+  build tool available); worth a visual check on a phone and the LCD's
+  browser once a build is possible, same caveat as 10.7's status note
+  below it.
 
 ### 10.7 Onboard IC temperature sensors
 

@@ -6,60 +6,87 @@
 <title>kilnCtl</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
+  /* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
+     TODO.md 10.6). Same hex values as the LCD side; duplicated verbatim in each of
+     the 6 web pages since they're EMBED_TXTFILES'd independently and there's no
+     shared static-asset route today. The --bg/--fg/etc names below stay as the
+     existing light/dark toggle's interface (unchanged behaviour); only the DARK
+     variant now points at these values instead of its own hex, so the toggled-dark
+     and default (no preference) look matches the LCD, while explicit light mode is
+     untouched. */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --on-color: #1a7a1a; --off-color: #888; --fault-color: #b00;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
-      --card-bg: #232323; --on-color: #4caf50; --off-color: #999; --fault-color: #ff6b6b;
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --on-color: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --fault-color: var(--ui-accent-5);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
-    --card-bg: #232323; --on-color: #4caf50; --off-color: #999; --fault-color: #ff6b6b;
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --on-color: var(--ui-accent-4); --off-color: var(--ui-text-secondary); --fault-color: var(--ui-accent-5);
   }
   body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
-               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
                padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
   h1 { font-size: 1.2em; }
   h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
   p { color: var(--muted); }
-  a.button { display: inline-block; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
-             border: 1px solid var(--border); border-radius: 4px; text-decoration: none;
+  a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch);
+             box-sizing: border-box; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
+             border: 1px solid var(--border); border-radius: var(--ui-radius); text-decoration: none;
              color: var(--fg); background: var(--button-bg); }
-  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.7em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
           align-items: center; }
   .temp { font-size: 1.1em; font-weight: bold; }
   .fault { color: var(--fault-color); font-size: 0.85em; }
   .stale { color: var(--muted); font-size: 0.85em; }
-  button.relay-toggle { padding: 0.4em 1em; font-size: 0.9em; border-radius: 4px;
+  button.relay-toggle { min-height: var(--ui-touch); min-width: var(--ui-touch); padding: 0.4em 1em;
+                         font-size: 0.9em; border-radius: var(--ui-radius);
                          border: 1px solid var(--border); cursor: pointer; }
   button.relay-on { background: var(--on-color); color: #fff; }
   button.relay-off { background: var(--button-bg); color: var(--fg); }
   .empty { color: var(--muted); font-style: italic; }
-  .zone-group { border: 1px solid var(--border); border-radius: 4px; margin-bottom: 0.7em;
+  .zone-group { border: 1px solid var(--border); border-radius: var(--ui-radius); margin-bottom: 0.7em;
                 overflow: hidden; }
   .zone-group h3 { margin: 0; padding: 0.5em 1em; font-size: 0.9em;
                     background: var(--card-bg); border-bottom: 1px solid var(--border); }
   .zone-group .card { border: none; border-radius: 0; border-bottom: 1px solid var(--border);
                        margin-bottom: 0; }
   .zone-group .card:last-child { border-bottom: none; }
-  select { width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
+  /* Rotating accent per zone group, same idea as the LCD's per-zone/per-metric
+     colouring (docs/UI_THEME.md) -- accent-5 stays reserved for fault/danger use
+     below, not part of this rotation. */
+  .zone-group:nth-of-type(4n+1) h3 { color: var(--ui-accent-1); }
+  .zone-group:nth-of-type(4n+2) h3 { color: var(--ui-accent-2); }
+  .zone-group:nth-of-type(4n+3) h3 { color: var(--ui-accent-3); }
+  .zone-group:nth-of-type(4n+4) h3 { color: var(--ui-accent-4); }
+  select { width: 100%; box-sizing: border-box; min-height: var(--ui-touch); padding: 0.5em; font-size: 1em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
-           border-radius: 4px; margin-bottom: 0.5em; }
-  button.run-btn { padding: 0.6em 1.2em; font-size: 0.95em; border-radius: 4px;
+           border-radius: var(--ui-radius); margin-bottom: 0.5em; }
+  button.run-btn { min-height: var(--ui-touch); padding: 0.6em 1.2em; font-size: 0.95em;
+                    border-radius: var(--ui-radius);
                     border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
                     cursor: pointer; margin-right: 0.5em; margin-top: 0.3em; }
   button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
-  .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 4px;
+  .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
                padding: 0.7em 1em; margin-top: 0.5em; }
-  button.danger-btn { display: block; width: 100%; text-align: left; padding: 0.6em 1em;
-                       font-size: 0.9em; border-radius: 4px; border: 1px solid var(--fault-color);
+  button.danger-btn { display: block; width: 100%; min-height: var(--ui-touch); box-sizing: border-box;
+                       text-align: left; padding: 0.6em 1em;
+                       font-size: 0.9em; border-radius: var(--ui-radius); border: 1px solid var(--fault-color);
                        background: var(--button-bg); color: var(--fault-color); cursor: pointer;
                        margin-bottom: 0.5em; }
   button.danger-btn:hover { background: var(--fault-color); color: #fff; }
@@ -68,13 +95,13 @@
   .exec-state.state-faulted { color: var(--fault-color); }
   .exec-state.state-running { color: var(--on-color); }
   #historyChart { width: 100%; height: 220px; background: var(--card-bg);
-                  border: 1px solid var(--border); border-radius: 4px; display: block; }
+                  border: 1px solid var(--border); border-radius: var(--ui-radius); display: block; }
   /* Previous-run breadcrumb (TODO.md 6A.3). Uses the existing card colours
      rather than a new palette; only the left rule is coloured, so an
      interrupted firing reads as urgent without the page shouting on every
      ordinary boot after a normal firing. */
   .banner { background: var(--card-bg); border: 1px solid var(--border);
-            border-left: 4px solid var(--off-color); border-radius: 4px;
+            border-left: 4px solid var(--off-color); border-radius: var(--ui-radius);
             padding: 0.7em 1em; margin-bottom: 1em; font-size: 0.9em; }
   .banner.interrupted { border-left-color: var(--fault-color); }
   .banner h3 { margin: 0 0 0.4em 0; font-size: 0.95em; }

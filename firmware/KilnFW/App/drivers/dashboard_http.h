@@ -20,6 +20,8 @@
 #define DASHBOARD_HTTP_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "kiln_io.h"
@@ -29,6 +31,53 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* One MAX31856 channel's reading, as reported on /api/status's "channels"
+ * array -- see dashboard_get_status() below. channel is 0-based (MAX31856.h:
+ * "0..2, as used on the wire") and, per this codebase's legacy zone<->channel
+ * mapping (zones_config_apply_cal()'s scope note), doubles as the zone_index
+ * a caller should match it against until TODO.md 10.8's many-to-one mapping
+ * grows a real UI for it. */
+typedef struct {
+    uint8_t channel;
+    float   temp_c;    /* calibration-corrected; meaningless if !valid */
+    float   cj_c;
+    bool    valid;
+    uint8_t fault_status;
+    bool    spi_failed;
+    bool    stale;
+} dashboard_channel_status_t;
+
+/* TODO.md 10.1a's shared-backend seam: everything status_get_handler()
+ * (dashboard_http.c) serializes onto GET /api/status EXCEPT the
+ * "nvs_sections" block (pure boot-time config, not live hardware state --
+ * nvs_report_get() is already its own plain getter, no seam needed there).
+ * Pure data-in-struct-out, zero httpd_req_t/JSON dependency -- both
+ * status_get_handler() and the LCD home page (ui_page_home.c) call this and
+ * read the same snapshot instead of two independent implementations of "is
+ * the IO board ready" drifting apart. Performs the same live hardware reads
+ * status_get_handler() always did (kiln_io_read(), MAX31856_read_all()/
+ * sim_backend_read_all()), so it is not free, but it is exactly as expensive
+ * as the endpoint always was -- calling it from a UI refresh timer is the
+ * same cost profile as an HTTP client polling /api/status. Safe to call even
+ * if dashboard_http_start() was never reached (everything reads as
+ * not-ready/empty). */
+typedef struct {
+    bool     io_ready;
+    bool     relay_on[KILN_IO_RELAY_COUNT];
+    bool     io_read_failed;  /* only meaningful when io_ready */
+    uint32_t relay_cycles[KILN_IO_RELAY_COUNT];
+
+    bool     thermo_ready;
+    size_t   channel_count;   /* <= MAX31856_CHANNEL_COUNT, only this many of
+                                * channels[] are populated */
+    dashboard_channel_status_t channels[MAX31856_CHANNEL_COUNT];
+
+    bool     safety_ready;
+    bool     zones_config_valid;
+} dashboard_status_t;
+
+void dashboard_get_status(dashboard_status_t *out);
 
 /* Registers the dashboard's routes on the server wifi_provision_http.c
  * already started. Any pointer may be NULL (board not attached/not up) --

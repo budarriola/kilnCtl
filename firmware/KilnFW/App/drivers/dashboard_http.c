@@ -31,37 +31,24 @@ static struct {
     SafetyLinkClass *safety;
 } s_dash;
 
-static esp_err_t status_get_handler(httpd_req_t *req)
+/* TODO.md 10.1a: the data-gathering half of GET /api/status, pulled out into
+ * a plain function so the LCD home page (ui_page_home.c) reads the exact
+ * same snapshot this handler serializes, rather than a second reimplementation
+ * against kiln_io/MAX31856_read_all/etc. See dashboard_http.h for the struct
+ * and the "why not nvs_sections too" note. */
+void dashboard_get_status(dashboard_status_t *out)
 {
-    char json[896];
-    size_t o = 0;
-    int n;
+    memset(out, 0, sizeof(*out));
 
-#define APPEND(...)                                                                              \
-    do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
-            goto send;                                                                            \
-        }                                                                                          \
-        o += (size_t)n;                                                                            \
-    } while (0)
-
-    bool io_ready = s_dash.io != NULL;
-    APPEND("{\"io_ready\":%s", io_ready ? "true" : "false");
-
-    if (io_ready) {
+    out->io_ready = s_dash.io != NULL;
+    if (out->io_ready) {
         kiln_io_state_t st;
         memset(&st, 0, sizeof(st));
         esp_err_t err = kiln_io_read(s_dash.io, &st);
-        APPEND(",\"relays\":[");
         for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
-            bool on = (st.relay_shadow & (1u << (relay - 1))) != 0;
-            APPEND("%s{\"relay\":%u,\"on\":%s}", relay == 1 ? "" : ",", relay, on ? "true" : "false");
+            out->relay_on[relay - 1] = (st.relay_shadow & (1u << (relay - 1))) != 0;
         }
-        APPEND("]");
-        if (err != ESP_OK) {
-            APPEND(",\"io_read_failed\":true");
-        }
+        out->io_read_failed = (err != ESP_OK);
     }
 
     /* Lifetime contact-cycle count per relay (TODO.md 6A.1). Reported even
@@ -71,11 +58,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     {
         uint32_t cycles[KILN_IO_RELAY_COUNT];
         relay_cycles_get(cycles);
-        APPEND(",\"relay_cycles\":[");
-        for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
-            APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)cycles[r]);
-        }
-        APPEND("]");
+        memcpy(out->relay_cycles, cycles, sizeof(cycles));
     }
 
     /* thermo_bus->initialized only means the shared SPI bus came up -- it
@@ -93,37 +76,91 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     } else if (s_dash.thermo_bus && s_dash.thermo_bus->initialized) {
         MAX31856_read_all(s_dash.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
     }
-    bool thermo_ready = count > 0;
-    APPEND(",\"thermo_ready\":%s", thermo_ready ? "true" : "false");
-
-    if (thermo_ready) {
-        APPEND(",\"channels\":[");
-        for (size_t i = 0; i < count; i++) {
-            const MAX31856Reading *r = &readings[i];
-            bool valid = !r->spi_failed && !isnan(r->tc_temperature_c);
-            /* NaN has no valid JSON literal -- report 0 alongside valid:false
-             * rather than emit invalid JSON or a string that breaks a naive
-             * client-side parseFloat(). Calibration applied here (zone i <->
-             * channel i, per zones_http.h) -- see zones_config_apply_cal()'s
-             * doc comment for the UART-bridge-side scope gap this leaves. */
-            float temp = isnan(r->tc_temperature_c) ? 0.0f : zones_config_apply_cal(r->channel, r->tc_temperature_c);
-            float cj = isnan(r->cj_temperature_c) ? 0.0f : r->cj_temperature_c;
-            APPEND(
-                "%s{\"channel\":%u,\"temp_c\":%.2f,\"cj_c\":%.2f,\"valid\":%s,\"fault_status\":%u,"
-                "\"spi_failed\":%s,\"stale\":%s}",
-                i == 0 ? "" : ",", r->channel, (double)temp, (double)cj, valid ? "true" : "false",
-                r->fault_status, r->spi_failed ? "true" : "false", r->stale ? "true" : "false");
-        }
-        APPEND("]");
+    out->thermo_ready = count > 0;
+    out->channel_count = count;
+    for (size_t i = 0; i < count; i++) {
+        const MAX31856Reading *r = &readings[i];
+        bool valid = !r->spi_failed && !isnan(r->tc_temperature_c);
+        /* NaN has no valid JSON literal -- report 0 alongside valid:false
+         * rather than emit invalid JSON or a string that breaks a naive
+         * client-side parseFloat(). Calibration applied here (zone i <->
+         * channel i, per zones_http.h) -- see zones_config_apply_cal()'s
+         * doc comment for the UART-bridge-side scope gap this leaves. */
+        float temp = isnan(r->tc_temperature_c) ? 0.0f : zones_config_apply_cal(r->channel, r->tc_temperature_c);
+        float cj = isnan(r->cj_temperature_c) ? 0.0f : r->cj_temperature_c;
+        out->channels[i].channel = r->channel;
+        out->channels[i].temp_c = temp;
+        out->channels[i].cj_c = cj;
+        out->channels[i].valid = valid;
+        out->channels[i].fault_status = r->fault_status;
+        out->channels[i].spi_failed = r->spi_failed;
+        out->channels[i].stale = r->stale;
     }
 
-    APPEND(",\"safety_ready\":%s", s_dash.safety != NULL ? "true" : "false");
+    out->safety_ready = s_dash.safety != NULL;
 
     /* TODO.md 8.2 "Tie it to the guards, not only the UI": surface the same
      * flag profile_executor.c/autotune_engine.c now refuse on, so the
      * dashboard and pc_tools' Zones panel can say "zone config failed to
      * load" explicitly instead of a kiln that just silently won't fire. */
-    APPEND(",\"zones_config_valid\":%s", zones_config_is_valid() ? "true" : "false");
+    out->zones_config_valid = zones_config_is_valid();
+}
+
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    char json[896];
+    size_t o = 0;
+    int n;
+
+#define APPEND(...)                                                                              \
+    do {                                                                                          \
+        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
+        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+            goto send;                                                                            \
+        }                                                                                          \
+        o += (size_t)n;                                                                            \
+    } while (0)
+
+    dashboard_status_t ds;
+    dashboard_get_status(&ds);
+
+    APPEND("{\"io_ready\":%s", ds.io_ready ? "true" : "false");
+
+    if (ds.io_ready) {
+        APPEND(",\"relays\":[");
+        for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
+            bool on = ds.relay_on[relay - 1];
+            APPEND("%s{\"relay\":%u,\"on\":%s}", relay == 1 ? "" : ",", relay, on ? "true" : "false");
+        }
+        APPEND("]");
+        if (ds.io_read_failed) {
+            APPEND(",\"io_read_failed\":true");
+        }
+    }
+
+    APPEND(",\"relay_cycles\":[");
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)ds.relay_cycles[r]);
+    }
+    APPEND("]");
+
+    APPEND(",\"thermo_ready\":%s", ds.thermo_ready ? "true" : "false");
+
+    if (ds.thermo_ready) {
+        APPEND(",\"channels\":[");
+        for (size_t i = 0; i < ds.channel_count; i++) {
+            const dashboard_channel_status_t *r = &ds.channels[i];
+            APPEND(
+                "%s{\"channel\":%u,\"temp_c\":%.2f,\"cj_c\":%.2f,\"valid\":%s,\"fault_status\":%u,"
+                "\"spi_failed\":%s,\"stale\":%s}",
+                i == 0 ? "" : ",", r->channel, (double)r->temp_c, (double)r->cj_c, r->valid ? "true" : "false",
+                r->fault_status, r->spi_failed ? "true" : "false", r->stale ? "true" : "false");
+        }
+        APPEND("]");
+    }
+
+    APPEND(",\"safety_ready\":%s", ds.safety_ready ? "true" : "false");
+    APPEND(",\"zones_config_valid\":%s", ds.zones_config_valid ? "true" : "false");
 
     /* TODO.md 8.2's "one boot-time report": present/mounted per NVS
      * partition, so the wizard (8.3) can say precisely which storage section

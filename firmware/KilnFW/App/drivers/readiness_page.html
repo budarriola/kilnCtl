@@ -6,6 +6,17 @@
 <title>kilnCtl - Ready to fire?</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
+  /* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
+     TODO.md 10.6). Same hex values as the LCD side; duplicated verbatim in each of
+     the 6 web pages since they're EMBED_TXTFILES'd independently and there's no
+     shared static-asset route today. Only the DARK variant of the existing
+     --bg/--fg/etc toggle now points at these values; explicit light mode unchanged. */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --not-done: #b00; --cannot-yet: #888;
@@ -13,26 +24,28 @@
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
-      --card-bg: #232323; --link: #6cf; --ok: #4caf50; --not-done: #ff6b6b; --cannot-yet: #999;
-      --off: #d9a441;
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --not-done: var(--ui-accent-5);
+      --cannot-yet: var(--ui-text-secondary); --off: var(--ui-accent-1);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #181818; --fg: #eee; --muted: #aaa; --border: #555; --button-bg: #2a2a2a;
-    --card-bg: #232323; --link: #6cf; --ok: #4caf50; --not-done: #ff6b6b; --cannot-yet: #999;
-    --off: #d9a441;
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --not-done: var(--ui-accent-5);
+    --cannot-yet: var(--ui-text-secondary); --off: var(--ui-accent-1);
   }
   body { font-family: sans-serif; max-width: 560px; margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
   .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
-               background: var(--button-bg); color: var(--fg); border-radius: 4px;
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
                padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
   a { color: var(--link); }
   h1 { font-size: 1.2em; }
   p { color: var(--muted); }
   .item { display: flex; align-items: flex-start; gap: 0.6em; background: var(--card-bg);
-          border: 1px solid var(--border); border-radius: 4px; padding: 0.6em 0.9em;
+          border: 1px solid var(--border); border-radius: var(--ui-radius); padding: 0.6em 0.9em;
           margin-bottom: 0.5em; }
   .item .mark { font-size: 1.1em; line-height: 1.3em; width: 1.2em; text-align: center; flex-shrink: 0; }
   .item .body { flex: 1; }
