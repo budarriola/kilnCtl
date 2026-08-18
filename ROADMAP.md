@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-17
+> **Status:** planning · **Last reviewed:** 2026-08-18
 > **Keep this file current.** This is the top-level dispatch board: the place to
 > start a task from when you do not already know which plan owns it. It holds
 > *ordering and cross-processor dependencies only* — the detail lives in the
@@ -64,6 +64,12 @@ Four facts set the order. Everything else can be shuffled.
 
 Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
 
+- [ ] **Link confirmed not working end-to-end (2026-08-18). Needs bench
+      measurement, not more code guessing.** Scope pins/logic analyzer TX and RX
+      lines at both opto boundaries during a coordinated GPIO test (`tools/PcTools`
+      coordinated test, M1 below) to find where the byte actually dies — idle
+      level, framing, baud mismatch, or opto polarity. Do not touch pin config
+      again until the trace shows what's wrong
 - [ ] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) — still
       needs the Pico physically attached; the code-side fix below is not this
 - [x] `KILNCTL_SAFETY_TX_IO` = 4, `RX_IO` = 5, pull-up moved to GPIO5 (2026-08-16,
@@ -117,6 +123,13 @@ soldering session.
       touch-driven wake). Owns: schematic net + pin assignment in
       `hardware/mainBoard/`, then `firmware/KilnFW/App/drivers/screen_idle.{c,h}`
       wiring once the pin exists
+- [ ] **HW change: relay status LEDs.** Add indicator LED for each relay (K1–K4,
+      S9), driven from the GPIO that controls the relay coil. Schematic + layout in
+      `hardware/mainBoard/`
+- [ ] **HW change: thermocouple board connectors.** Use different connector types
+      for thermocouple boards (`ThermocoupleBoard`, `SafyThermocoupleBoard`) to
+      distinguish from main board connectors. Schematic + footprints in respective
+      board projects
 
 ## M2 — `CommonFW`, before either firmware depends on it
 
@@ -154,6 +167,10 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 - [x] Watchdog, fed only when every task checks in, trip reason latched in
       scratch registers — done 2026-08-16; the latch call itself is unwired
       until a guard exists to trigger it (Phase 4/5)
+- [ ] **MAX31856 thermocouple ICs not yet connected on the bench (2026-08-18).**
+      Blocks all real-reading work below it — SPI bus verify, per-channel type
+      config, and fault-read all need the parts populated/wired first, not just
+      the schematic net
 - [ ] MAX31856 on J7, with per-thermocouple type configuration
 - [ ] Guards implemented and **host-tested against synthetic inputs**, no relay yet
 - [x] CI grep: `safety_core.c` never includes the link header — done 2026-08-16,
