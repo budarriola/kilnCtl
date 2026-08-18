@@ -25,6 +25,7 @@
     ]
   },
   "enabledMcpjsonServers": [
-    "kicad"
+    "kicad",
+    "kilnctrl"
   ]
 }

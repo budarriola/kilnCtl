@@ -27,6 +27,9 @@
         "IDF_PYTHON_ENV_PATH": "@@IDF_PYTHON_ENV_PATH@@",
         "ESP_IDF_VERSION": "6.0.2"
       }
+    },
+    "kilnctrl": {
+      "command": "tools/PcTools/.venv/Scripts/kilnctrl-mcp-server.exe"
     }
   }
 }
