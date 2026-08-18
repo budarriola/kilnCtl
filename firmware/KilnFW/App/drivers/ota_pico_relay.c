@@ -370,6 +370,13 @@ static void relay_task_fn(void *arg)
     relay_set_phase(OTA_PICO_RELAY_PHASE_BEGIN);
     relay_set_percent(0);
 
+    // TODO.md 9.6: from here until the `done:` label below, the link
+    // legitimately going quiet is an EXPECTED consequence of this relay
+    // (the Pico erases/reboots), not a fault -- see safety_link.h's own
+    // comment on this setter for what it does and does not affect (text
+    // only; SAFETY_FAULT_SRC_SAFETY_LINK keeps asserting, untouched).
+    (void)safety_link_set_update_in_progress(args.link, true);
+
     const esp_partition_t *part = ota_pico_img_partition();
     if (!part) {
         format_reason(reason, sizeof(reason), "pico_img partition not found");
@@ -600,6 +607,11 @@ abort_and_fail:
     relay_send_abort(args.link);
 
 done:
+    // Cleared unconditionally, on every exit path, before anything else --
+    // the point of this flag is that it never outlives the relay it
+    // describes, success or failure alike.
+    (void)safety_link_set_update_in_progress(args.link, false);
+
     relay_set_error(ok ? OTA_PICO_RELAY_PHASE_DONE : OTA_PICO_RELAY_PHASE_FAILED, "%s", reason);
     if (ok) {
         ESP_LOGI(TAG, "Pico relay complete: %u bytes, crc32=0x%08X", (unsigned)args.image_length,

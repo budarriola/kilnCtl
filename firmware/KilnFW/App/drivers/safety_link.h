@@ -332,6 +332,22 @@ typedef struct {
 
     bool       down_logged;      /* rate limiting for the "link is down" warning */
     TickType_t down_log_tick;
+
+    /* TODO.md 9.5/9.6: while a deliberate Pico update is relaying
+     * (ota_pico_relay.c), the link legitimately goes quiet -- UPDATE_
+     * PROTOCOL.md's "the Pico update deliberately trips the liveness rule"
+     * section requires SAFETY_FAULT_SRC_SAFETY_LINK to keep asserting
+     * (correct, untouched by this flag) but asks for the operator-facing
+     * TEXT to say "updating" rather than "not responding". This flag does
+     * exactly that and nothing else: it only affects which ESP_LOG* line
+     * safety_update_health() emits for an already-down link, never whether
+     * the fault bit itself is raised. Set via
+     * safety_link_set_update_in_progress(), which ota_pico_relay.c's relay
+     * task calls at the start and on every exit path -- see that module's
+     * header comment for why this setter (rather than a direct include of
+     * ota_pico_relay.h here) is what keeps this driver from depending on a
+     * higher-level OTA feature it otherwise knows nothing about. */
+    bool       update_in_progress_quiet;
     bool       version_mismatch_logged; /* edge-detect for the Phase 7b.5 mismatch log line;
                                           * poll-task-only, same no-lock reasoning as down_logged */
     bool       initialized;
@@ -417,6 +433,15 @@ uint32_t  safety_link_get_fault_sources(SafetyLinkClass *link);
  * faulted" -- is policy for the caller: raise the matching source bit. This
  * driver supplies the mechanism and one default it can defend. */
 esp_err_t safety_link_fault_on_link_loss(SafetyLinkClass *link, bool enable);
+
+/* TODO.md 9.6: tells the poll task's down-link logging (not its fault-source
+ * assertion, which is untouched) that a deliberate Pico update is currently
+ * relaying, so the link going quiet gets an informational "updating" line
+ * instead of a "not responding" warning. `ota_pico_relay.c`'s relay task is
+ * the intended caller: true when the relay actually starts sending frames,
+ * false again on every exit path (success, refusal, timeout, internal
+ * failure) via its single exit point. Safe to call from any task. */
+esp_err_t safety_link_set_update_in_progress(SafetyLinkClass *link, bool in_progress);
 bool      safety_link_get_fault_on_link_loss(SafetyLinkClass *link);
 
 /* --- Phase 10 (SaftyFW) / TODO.md 9.5: Pico firmware-update relay --------

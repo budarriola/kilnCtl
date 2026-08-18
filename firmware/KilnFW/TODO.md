@@ -3433,20 +3433,16 @@ until something concrete needs it is the cheap ordering.
 
 **Not built this pass, by design** (see the task's own scope statement):
 `SAFETY_CMD_ANNOUNCE_REBOOT` (does not exist in `CommonFW`/`SaftyFW` yet),
-the 9.6 web page, and 9.7's physical-hardware verification (no hardware in
-this environment -- host-build/`idf.py build` verified only). Also not
-built, as a deliberate proportionality call flagged in this pass's own task
-brief rather than half-wired: suppressing the "safety processor not
-responding" alarm TEXT specifically during a deliberate, in-progress Pico
-update (`UPDATE_PROTOCOL.md`'s "an ESP reboot must not look like an ESP
-failure" section makes the analogous point for the ESP's own reboot, and
-the doc's "the Pico update deliberately trips the liveness rule" section
-covers this exact case) -- `dashboard_http.c` has no such flag today, and
-threading `ota_pico_relay_get_status()`'s phase into whatever surfaces that
-alarm text touches more files than this pass's Pico-relay-transport focus
-justified. **The interlock/fault-assertion logic itself is correctly left
-alone** (this task's own instruction: "do NOT suppress the block") -- only
-the operator-facing wording is the open gap.
+the rest of the 9.6 web page, and 9.7's physical-hardware verification (no
+hardware in this environment -- host-build/`idf.py build` verified only).
+
+**Follow-on, same day (2026-08-17):** the alarm-text suppression flagged
+above as an open gap was wired in a small follow-up pass --
+`safety_link_set_update_in_progress()` plus the two `ota_pico_relay.c` call
+sites (see 9.6's checklist entry below for the full description). **The
+interlock/fault-assertion logic itself is correctly left alone** (only the
+`ESP_LOG*` line changes; `SAFETY_FAULT_SRC_SAFETY_LINK` still asserts
+unconditionally on `!up`).
 
 `idf.py -C firmware/KilnFW build` clean (zero new warnings). Host tests
 276/276, unchanged from the previous pass's baseline -- this pass's new
@@ -3464,14 +3460,22 @@ host-tested than it is.
 - [ ] Interlock state shown **before** the file picker, with the blocker named
 - [ ] Progress bar, and a rollback button per processor
 - [ ] Reachable only when the kiln is idle
-- [ ] Suppress the "safety processor not responding" alarm TEXT (not the
-      block) while a Pico relay is genuinely in progress
-      (`ota_pico_relay_get_status()`'s phase is not IDLE/DONE/FAILED) --
-      flagged as an explicit gap by TODO.md 9.5's own pass rather than
-      half-wired: `dashboard_http.c` has no such flag today, and this needs
-      whatever surfaces `SAFETY_FAULT_SRC_SAFETY_LINK`'s alarm text to read
-      that phase. `relay_authority_on_blocked()`/the interlock itself must
-      NOT change -- only the operator-facing wording.
+- [x] Suppress the "safety processor not responding" alarm TEXT (not the
+      block) while a Pico relay is genuinely in progress. **2026-08-17**:
+      `safety_link_set_update_in_progress()` (`App/drivers/safety_link.{h,c}`),
+      called by `ota_pico_relay.c`'s relay task (true at the top of
+      `relay_task_fn()`, false at its single `done:` exit, every outcome).
+      `safety_update_health()`'s down-link branch checks the flag and logs
+      `ESP_LOGI("...Pico update relaying (expected)")` instead of the usual
+      `ESP_LOGW`/`ESP_LOGE` — the line right below it that asserts
+      `SAFETY_FAULT_SRC_SAFETY_LINK` on `!up` is untouched, unconditional,
+      exactly as before. **Reaches only as far as a real operator-facing
+      surface currently exists** — this codebase still has no GUI fault-text
+      display at all (`dashboard_http.c` exposes only the raw bit via
+      `safety_link_get_status()`), so this wiring targets the ESP_LOG*
+      stream, which is the only "alarm text" that exists today. A future GUI
+      fault-text page should read the same `safety_link_get_status()` bits
+      and would need no further change here.
 
 ### 9.7 Verification
 

@@ -600,6 +600,7 @@ static void safety_update_health(SafetyLinkClass *link)
     bool up = false;
     bool policy = false;
     bool version_mismatch = false;
+    bool update_in_progress = false;
     uint16_t age = SAFETY_LINK_AGE_NEVER;
 
     if (safety_lock(link)) {
@@ -607,6 +608,7 @@ static void safety_update_health(SafetyLinkClass *link)
         age = safety_age_ms_locked(link);
         policy = link->fault_on_link_loss;
         version_mismatch = link->peer_version_known && !link->peer_version_compatible;
+        update_in_progress = link->update_in_progress_quiet;
         safety_unlock(link);
     }
 
@@ -617,7 +619,11 @@ static void safety_update_health(SafetyLinkClass *link)
         }
     } else if (!link->down_logged ||
                safety_elapsed_ms(link->down_log_tick) >= SAFETY_LINK_DOWN_LOG_PERIOD_MS) {
-        if (age == SAFETY_LINK_AGE_NEVER) {
+        /* TODO.md 9.6: text only -- the fault bit below still asserts
+         * unconditionally on `!up`, exactly as it always has. */
+        if (update_in_progress) {
+            ESP_LOGI(TAG, "safety processor link quiet -- Pico update relaying (expected)");
+        } else if (age == SAFETY_LINK_AGE_NEVER) {
             ESP_LOGW(TAG, "no reply from the safety processor (never seen one). Expected while "
                           "the RP2040 firmware does not exist; status reports link_up=0.");
         } else {
@@ -1132,6 +1138,22 @@ esp_err_t safety_link_fault_on_link_loss(SafetyLinkClass *link, bool enable)
     } else {
         ESP_LOGI(TAG, "fault-on-link-loss enabled (default, fail-safe)");
     }
+    return ESP_OK;
+}
+
+esp_err_t safety_link_set_update_in_progress(SafetyLinkClass *link, bool in_progress)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    link->update_in_progress_quiet = in_progress;
+    safety_unlock(link);
     return ESP_OK;
 }
 

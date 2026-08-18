@@ -55,18 +55,21 @@
 // - Does not push progress over a WebSocket/SSE channel -- a poller reads
 //   ota_pico_relay_get_status() back, mirroring ota_http.h's
 //   ota_http_get_esp_progress() for the ESP path.
-// - TODO (flagged, not silently skipped -- see TODO.md 9.6's own checklist
-//   item): does not suppress the "safety processor not responding" alarm
-//   TEXT while a relay reported by this module is in progress.
-//   UPDATE_PROTOCOL.md's own "the Pico update deliberately trips the
-//   liveness rule" section requires SAFETY_FAULT_SRC_SAFETY_LINK to keep
-//   asserting (correct, and left alone -- do NOT suppress the block) but
-//   asks for the operator-facing wording to say "updating" instead of "not
-//   responding" while ota_pico_relay_get_status()'s phase is neither IDLE
-//   nor DONE/FAILED. Wiring that requires touching whatever surfaces that
-//   alarm text (dashboard_http.c has no such flag today), which is outside
-//   this module's own scope -- this comment plus TODO.md 9.6's unchecked
-//   item are the deliberate paper trail for that gap.
+// - Alarm-TEXT suppression while relaying: DONE, 2026-08-17. The relay task
+//   calls safety_link_set_update_in_progress(link, true) right before it can
+//   make the link go quiet, and false again at this file's single `done:`
+//   exit point, success or failure alike (see relay_task_fn()). That flag
+//   only changes which ESP_LOG* line safety_link.c's safety_update_health()
+//   emits for an already-down link -- SAFETY_FAULT_SRC_SAFETY_LINK keeps
+//   asserting exactly as before, untouched, per UPDATE_PROTOCOL.md's "the
+//   Pico update deliberately trips the liveness rule" section. There is
+//   still no GUI-facing alarm surface in this codebase at all (dashboard_http.c
+//   exposes no fault-source text today, only the raw bit via
+//   safety_link_get_status()) -- this wiring reaches as far as a real
+//   operator-facing surface currently exists (the ESP_LOG* line an operator
+//   watching the serial console or log stream would see), and will need no
+//   further change once a GUI fault-text surface is eventually built, since
+//   it would presumably read from the same safety_link_get_status() bits.
 #ifndef KILNCTL_OTA_PICO_RELAY_H
 #define KILNCTL_OTA_PICO_RELAY_H
 
