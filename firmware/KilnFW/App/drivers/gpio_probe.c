@@ -36,12 +36,22 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 
 /* Pins this probe may never touch -- not "should not", *may not*. Every one
  * of these is load-bearing for something the probe itself depends on (the PC
- * link), for another peripheral (SPI/I2C/the SX1509/the display), or for the
- * safety domain. SAFETY_FAULT_IO (GPIO6) is the one the TODO calls out by
- * name: a debug tool that can drive it can silently tell the safety
- * processor "the main controller is fine" while nothing of the sort is
- * true. Checked against SET_MODE, WRITE and READ alike -- "never touch"
- * means never touch, not "never write". */
+ * link), for another peripheral (SPI/I2C/the SX1509/the display), or is the
+ * one safety-domain pin whose misuse is silent and one-directional.
+ * SAFETY_FAULT_IO (GPIO6) is the one the TODO calls out by name: a debug
+ * tool that can drive it can silently tell the safety processor "the main
+ * controller is fine" while nothing of the sort is true. Checked against
+ * SET_MODE, WRITE and READ alike -- "never touch" means never touch, not
+ * "never write".
+ *
+ * SAFETY_TX_IO/SAFETY_RX_IO (GPIO4/5) are deliberately *not* on this list,
+ * unlike GPIO6: they carry the safety-link UART data, not a one-way status
+ * claim, so probing them cannot make the safety processor believe something
+ * false -- at worst it collides with UART1 and the link stops responding,
+ * which is self-evident rather than silent. `firmware/SaftyFW/docs/HARDWARE.md`
+ * section 1's coordinated GPIO test (`tools/PcTools/TODO.md` capability 1c)
+ * requires driving/reading exactly these two pins from the probe; denying
+ * them here would make that test impossible to run through this path. */
 static bool gpio_probe_is_denied(int gpio_num)
 {
     const int denied[] = {
@@ -51,7 +61,7 @@ static bool gpio_probe_is_denied(int gpio_num)
         SX1509_IRQ_IO, SX1509_RESET_IO,
         DISPLAY_CS_IO,
         UART_OWNER_TX_IO, UART_OWNER_RX_IO,
-        SAFETY_TX_IO, SAFETY_RX_IO, SAFETY_FAULT_IO,
+        SAFETY_FAULT_IO,
     };
     for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); ++i) {
         if (denied[i] == gpio_num) {

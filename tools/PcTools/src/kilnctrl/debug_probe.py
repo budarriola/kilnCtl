@@ -204,16 +204,31 @@ def step(peer: str) -> "tuple[bool, str]":
 def read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> "tuple[bool, str]":
     """Reads ``count`` ``width``-bit words starting at ``address`` (read-only,
     no ARMED/safety implications). ``count`` is capped at 4096 to stop a
-    runaway dump, not as a safety gate."""
-    cmd = _MEM_WIDTH_READ_CMDS.get(width)
-    if cmd is None:
+    runaway dump, not as a safety gate.
+
+    Uses ``mem2array``/``puts`` rather than ``mdw``/``mdh``/``mdb``: those
+    display commands print through OpenOCD's interactive command-output
+    channel, which a one-shot ``-c`` batch session with no attached telnet/gdb
+    client never surfaces on stdout -- found running this for real,
+    2026-08-18, against the Pico's SIO GPIO_IN register: the call reported
+    success (returncode 0, no ``Error:``) with the OpenOCD banner and shutdown
+    chatter as its entire output, and nothing that looked like a memory dump.
+    ``puts`` is a plain Tcl stdout write and does not have that problem."""
+    if width not in _MEM_WIDTH_READ_CMDS:
         raise ValueError(f"width must be one of {sorted(_MEM_WIDTH_READ_CMDS)}, got {width!r}")
     if count <= 0:
         raise ValueError(f"count must be positive, got {count!r}")
     if count > _MAX_READ_COUNT:
         raise ValueError(f"count {count} exceeds the {_MAX_READ_COUNT}-word cap")
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {cmd} 0x{address:x} {count}; exit"
+    step = width // 8
+    dump = (
+        f"mem2array _kctl_arr {width} 0x{address:x} {count}; "
+        f"for {{set _kctl_i 0}} {{$_kctl_i < {count}}} {{incr _kctl_i}} "
+        f'{{puts [format "MEMRD 0x%08x 0x%0{step * 2}x" '
+        f"[expr {{0x{address:x} + $_kctl_i * {step}}}] $_kctl_arr($_kctl_i)]}}"
+    )
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {dump}; exit"
     return _run(peer, tcl)
 
 
