@@ -1,27 +1,25 @@
 // ota_http.h -- CommonFW/docs/UPDATE_PROTOCOL.md section 2's challenge-
 // response authentication, wired to a real HTTP endpoint, PLUS TODO.md 9.4's
-// interlocks and the single cross-processor update mutex. The pure state
-// machines (nonce lifecycle/lockout in ota_auth.h/.c, the interlock
-// precondition check in ota_interlock.h/.c) are already host-tested; this
-// file is the ESP-IDF/mbedTLS/httpd/FreeRTOS glue around both.
+// interlocks and the single cross-processor update mutex, PLUS TODO.md 9.5's
+// ESP self-update transfer. The pure state machines (nonce lifecycle/lockout
+// in ota_auth.h/.c, the interlock precondition check in ota_interlock.h/.c)
+// are already host-tested; this file is the ESP-IDF/mbedTLS/httpd/FreeRTOS
+// glue around all three.
 //
-// Serves GET /api/ota/challenge only. This file does NOT implement
-// POST /api/ota/esp or POST /api/ota/pico -- those need the actual streamed
-// esp_ota_ops write logic and the Pico-image relay through the pico_img
-// staging partition, both separate, larger, unbuilt pieces of work
-// (UPDATE_PROTOCOL.md sections 3/4, TODO.md 9.5). ota_http_verify_request()
-// and ota_http_check_interlocks() below are written so a future pass can
-// call them as the first two things either POST handler does, without
-// having to touch this file again -- see ota_http_check_interlocks()'s doc
-// comment for which one should run first and why.
+// Serves GET /api/ota/challenge and POST /api/ota/esp. This file does NOT
+// implement POST /api/ota/pico -- that needs the Pico-image relay through
+// the pico_img staging partition and the UPDATE_* frame codecs
+// (UPDATE_PROTOCOL.md section 4), a separate, larger, unbuilt piece of work.
 //
 // The update-in-progress mutex (ota_http_update_try_begin()/_end()) is real
-// in-RAM state, but nothing in this pass ever calls _try_begin(): there is
-// no transfer handler yet to hold it. It is exposed now so TODO.md 9.5's
-// future POST handlers have a mutex to acquire on the first byte of a
-// transfer and release on completion/abort/failure, and so
-// ota_http_check_interlocks() has something real to consult today rather
-// than a placeholder that always reports "no update in progress".
+// in-RAM state and IS now acquired -- by ota_esp_post_handler() (ota_http.c),
+// on the first byte of a transfer, released on every exit path via a single
+// cleanup path (success, failure, or abort all funnel through it -- see
+// ota_http.c's transfer handler for why it is written that way rather than
+// releasing the mutex at each return). Whichever future pass adds
+// POST /api/ota/pico must follow the identical pattern: claim the mutex
+// before reading any body, release it exactly once no matter how the
+// transfer ends.
 #ifndef OTA_HTTP_H
 #define OTA_HTTP_H
 
@@ -161,6 +159,56 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // with a specific, human-readable refusal reason on OTA_INTERLOCK_REFUSED,
 // untouched on OTA_INTERLOCK_OK. May be NULL/0.
 ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap);
+
+// --- POST /api/ota/esp (TODO.md 9.5) -- the ESP's own self-update ---------
+//
+// Wire contract: the client GETs a challenge, computes the MAC per
+// ota_http_verify_request()'s doc comment above (context "esp"), then POSTs
+// the raw ESP-IDF image bytes as the body with the MAC carried in a request
+// header rather than the URL or a form field:
+//
+//   X-Ota-Mac: <64 hex chars -- the 32-byte HMAC-SHA256, hex-encoded>
+//
+// A header keeps the MAC out of the URL (proxy/browser-history exposure,
+// same reasoning UPDATE_PROTOCOL.md section 2 gives for not sending the
+// password itself in a form POST) and leaves the body a pure byte stream --
+// no multipart/form parser standing between the socket and
+// esp_ota_write(), which matters because the body can be over a megabyte
+// and is written to flash as it arrives, never buffered whole (see
+// ota_http.c's handler for the streaming/verification details: image magic
+// and chip ID are checked from the first sizeof(esp_image_header_t) bytes
+// BEFORE esp_ota_begin() is called, per UPDATE_PROTOCOL.md section 3's "ESP
+// image magic and chip ID checked before esp_ota_begin()").
+//
+// Registered by ota_http_start() alongside the challenge handler. No
+// separate public entry point is exposed here -- unlike
+// ota_http_verify_request()/ota_http_check_interlocks(), which future
+// handlers (POST /api/ota/pico) also need to call, this transfer logic is
+// specific to the ESP's own image and has no other caller.
+
+// Phase of the most recent (or currently in-flight) POST /api/ota/esp
+// transfer. Not a push channel (WebSocket/SSE is out of scope this pass,
+// see ota_http.c) -- a poller reads this back via ota_http_get_esp_progress()
+// below, which TODO.md 9.6's future web page can call on an interval.
+typedef enum {
+    OTA_HTTP_ESP_PHASE_IDLE = 0,   // no transfer has been attempted since boot
+    OTA_HTTP_ESP_PHASE_VERIFYING,  // reading/checking the image header, before esp_ota_begin()
+    OTA_HTTP_ESP_PHASE_WRITING,    // streaming the body into the OTA partition
+    OTA_HTTP_ESP_PHASE_FINALIZING, // esp_ota_end() / esp_ota_set_boot_partition()
+    OTA_HTTP_ESP_PHASE_DONE,       // the last transfer succeeded; boot partition set
+    OTA_HTTP_ESP_PHASE_FAILED,     // the last transfer failed, or was refused/aborted
+} ota_http_esp_phase_t;
+
+// Reads back the in-RAM progress snapshot ota_esp_post_handler() updates as
+// it goes. *phase_out and *percent_out (0-100) are always written if
+// non-NULL; percent_out is only meaningful while phase is WRITING or
+// FINALIZING and otherwise holds whatever value the last transfer reached.
+// Safe to call from any task -- both fields are `static volatile`, read
+// without a lock (single-writer -- only ota_esp_post_handler() ever writes
+// them, and torn reads of a phase enum / uint8_t percentage are not a
+// correctness problem the way torn reads of the nonce/lockout state would
+// be).
+void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent_out);
 
 #ifdef __cplusplus
 }

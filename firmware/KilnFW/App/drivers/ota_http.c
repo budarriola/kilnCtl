@@ -1,11 +1,16 @@
 #include "ota_http.h"
 
+#include <stdarg.h>
 #include <string.h>
 
 #include "psa/crypto.h"
 
+#include "esp_app_desc.h"
+#include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -20,6 +25,7 @@
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "ota_auth.h"
+#include "ota_record.h"
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "sim_backend.h"
@@ -103,6 +109,31 @@ typedef enum {
 
 static ota_update_claim_t s_update_claim = OTA_UPDATE_NONE;
 
+// --- POST /api/ota/esp progress (ota_http.h's ota_http_get_esp_progress()) -
+// Single writer (ota_esp_post_handler(), one at a time -- s_update_claim
+// above already guarantees no second transfer overlaps it), arbitrarily
+// many readers -- `volatile` is enough here, no semaphore needed, per
+// ota_http.h's doc comment on why a torn read of a phase enum/percentage
+// isn't a correctness problem the way the nonce/lockout state would be.
+static volatile ota_http_esp_phase_t s_esp_phase = OTA_HTTP_ESP_PHASE_IDLE;
+static volatile uint8_t s_esp_progress_pct = 0;
+
+static void esp_progress_set(ota_http_esp_phase_t phase, uint8_t pct)
+{
+    s_esp_phase = phase;
+    s_esp_progress_pct = pct;
+}
+
+void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent_out)
+{
+    if (phase_out) {
+        *phase_out = s_esp_phase;
+    }
+    if (percent_out) {
+        *percent_out = s_esp_progress_pct;
+    }
+}
+
 static uint32_t now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -116,6 +147,35 @@ static void hex_encode(const uint8_t *in, size_t len, char *out /* 2*len + 1 byt
         out[2 * i + 1] = digits[in[i] & 0xFu];
     }
     out[2 * len] = '\0';
+}
+
+// Inverse of hex_encode() -- decodes exactly `hex_len` hex characters (must
+// be even) into hex_len/2 bytes. Returns false on any non-hex character or
+// odd length, leaving `out` in an unspecified state (callers must check the
+// return value before trusting `out`, same convention as every other
+// parse-and-validate helper in this codebase, e.g. profiles_http.c's field
+// parsers).
+static bool hex_decode(const char *hex, size_t hex_len, uint8_t *out)
+{
+    if (hex_len % 2 != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < hex_len / 2; i++) {
+        int hi = -1, lo = -1;
+        char ch = hex[2 * i];
+        if (ch >= '0' && ch <= '9') hi = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') hi = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') hi = ch - 'A' + 10;
+        ch = hex[2 * i + 1];
+        if (ch >= '0' && ch <= '9') lo = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') lo = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') lo = ch - 'A' + 10;
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
 }
 
 // Client IP for the "log every attempt with the source IP" requirement
@@ -473,6 +533,371 @@ ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason
     return ota_interlock_check(&snap, zones, thermo_count, reason_out, reason_cap);
 }
 
+// --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
+
+static const char *OTA_ESP_MAC_HEADER = "X-Ota-Mac";
+
+// Streamed in fixed-size chunks so the ~1.1-2 MB image never sits in RAM
+// whole (UPDATE_PROTOCOL.md section 3: "a full image will not fit in RAM").
+// 4 KB, matching the doc's own suggested size. This is `static`, NOT a
+// stack buffer -- wifi_provision_http.c's httpd config.stack_size is 8192,
+// already sized against the largest existing handler's *smaller* buffers
+// (zones_post_handler's 2561-byte body, see that file's comment on the hang/
+// reset it caused before being bumped); a 4 KB buffer on top of that same
+// stack would eat half of it just for this one variable. Safe as a single
+// shared buffer because it is only ever touched while s_update_claim (above)
+// is held by THIS transfer -- ota_http_update_try_begin() guarantees no
+// second ESP or Pico transfer can be in flight at the same time to race it.
+#define OTA_ESP_CHUNK_SIZE 4096
+static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
+
+static const char *verify_result_str(ota_http_verify_result_t r)
+{
+    switch (r) {
+        case OTA_HTTP_VERIFY_OK: return "ok";
+        case OTA_HTTP_VERIFY_LOCKED_OUT: return "locked out -- too many recent wrong-password attempts";
+        case OTA_HTTP_VERIFY_NO_VALID_NONCE:
+            return "no valid challenge -- GET /api/ota/challenge first, then POST within 30 s";
+        case OTA_HTTP_VERIFY_BAD_MAC: return "wrong password";
+        default: return "authentication failed";
+    }
+}
+
+// Formats into a comfortably large scratch buffer, then copies (truncating
+// if needed, never overflowing) into the caller's smaller `dst`. Used for
+// every fail_reason assignment below instead of snprintf() directly into
+// fail_reason (OTA_RECORD_REASON_MAX bytes): several of these messages
+// interpolate an esp_err_to_name() string or an int whose width the
+// compiler cannot bound at a small destination, which -Werror=format-
+// truncation (correctly) refuses to build. Formatting into `tmp` first,
+// which is sized generously enough that no realistic message here actually
+// truncates, sidesteps that without shortening the messages themselves.
+static void set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...)
+{
+    char tmp[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    strncpy(dst, tmp, dst_cap - 1);
+    dst[dst_cap - 1] = '\0';
+}
+
+// Everything from "the mutex is held" to "the mutex is released" -- a
+// single function so ota_esp_post_handler() below has exactly one call site
+// for ota_http_update_end(), per TODO.md 9.5's "use a single cleanup path,
+// not duplicated calls at every return" requirement. Every exit -- success,
+// a refused/corrupt image, a mid-transfer read/write failure -- sets
+// `ok`/`fail_reason` and falls through to the one cleanup block at the
+// bottom, which appends the NVS record and updates the progress snapshot
+// exactly once regardless of which path got there.
+static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
+{
+    bool ok = false;
+    char fail_reason[OTA_RECORD_REASON_MAX] = "unknown failure";
+    char version_after[OTA_RECORD_VERSION_STR_MAX] = "";
+    esp_ota_handle_t handle = 0;
+    bool ota_began = false;
+    const esp_partition_t *target = NULL;
+
+    const esp_app_desc_t *running_desc = esp_app_get_description();
+    const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
+
+    size_t content_len = req->content_len;
+    if (content_len == 0) {
+        set_fail_reason(fail_reason, sizeof(fail_reason), "missing Content-Length / empty body");
+        ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
+        goto cleanup;
+    }
+
+    target = esp_ota_get_next_update_partition(NULL);
+    if (!target) {
+        set_fail_reason(fail_reason, sizeof(fail_reason), "no free OTA partition");
+        ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
+        goto cleanup;
+    }
+    if (content_len > target->size) {
+        set_fail_reason(fail_reason, sizeof(fail_reason), "image (%u B) larger than the OTA partition (%u B)",
+                 (unsigned)content_len, (unsigned)target->size);
+        ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
+        goto cleanup;
+    }
+
+    // Per-connection socket timeout, NOT the server-wide default (that
+    // stays whatever wifi_provision_http.c's config sets and applies to
+    // every other endpoint) -- see ota_http.h's doc comment for why a
+    // targeted setsockopt() here is the chosen fix over a global config
+    // bump. This is a PER-RECV timeout (how long to wait for the NEXT
+    // chunk to arrive), not a whole-transfer deadline -- TCP keeps
+    // delivering chunks well inside this window on any link that is
+    // actually making progress, so bounding each individual recv() call
+    // at 30 s is what "covers the whole transfer" means in practice: the
+    // total transfer can take minutes as long as no single gap between
+    // chunks exceeds 30 s. A dead connection still times out and is
+    // cleaned up; a slow-but-alive one is not punished for its aggregate
+    // duration.
+    {
+        int sockfd = httpd_req_to_sockfd(req);
+        if (sockfd >= 0) {
+            struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+            if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+                ESP_LOGW(TAG, "OTA esp update from %s: could not raise the socket receive timeout -- "
+                              "the server-wide default will apply instead",
+                         ip);
+            }
+        }
+    }
+
+    // Buffer just the image header (24 B) before esp_ota_begin() --
+    // UPDATE_PROTOCOL.md section 3: "ESP-IDF images already carry a magic
+    // byte and a chip ID; verify them before calling esp_ota_begin()."
+    esp_progress_set(OTA_HTTP_ESP_PHASE_VERIFYING, 0);
+    {
+        esp_image_header_t hdr;
+        size_t hdr_received = 0;
+        while (hdr_received < sizeof(hdr)) {
+            int ret = httpd_req_recv(req, ((char *)&hdr) + hdr_received, sizeof(hdr) - hdr_received);
+            if (ret <= 0) {
+                set_fail_reason(fail_reason, sizeof(fail_reason), "body read failed/closed while reading the image header (%d)", ret);
+                ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed while reading image header");
+                goto cleanup;
+            }
+            hdr_received += (size_t)ret;
+        }
+
+        if (hdr.magic != ESP_IMAGE_HEADER_MAGIC) {
+            set_fail_reason(fail_reason, sizeof(fail_reason), "not an ESP-IDF image (bad magic 0x%02X)", hdr.magic);
+            ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a valid ESP-IDF image (bad magic)");
+            goto cleanup;
+        }
+        if (hdr.chip_id != ESP_CHIP_ID_ESP32S3) {
+            set_fail_reason(fail_reason, sizeof(fail_reason), "image is for chip id %u, this board is ESP32-S3 (%u)",
+                     (unsigned)hdr.chip_id, (unsigned)ESP_CHIP_ID_ESP32S3);
+            ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "image is built for a different chip");
+            goto cleanup;
+        }
+
+        esp_err_t rc = esp_ota_begin(target, content_len, &handle);
+        if (rc != ESP_OK) {
+            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_begin failed: %s", esp_err_to_name(rc));
+            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_begin failed");
+            goto cleanup;
+        }
+        ota_began = true;
+
+        rc = esp_ota_write(handle, &hdr, sizeof(hdr));
+        if (rc != ESP_OK) {
+            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_write (header) failed: %s", esp_err_to_name(rc));
+            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
+            goto cleanup;
+        }
+    }
+
+    // Stream the rest. Never read ahead of what esp_ota_write() has
+    // consumed -- each loop iteration reads one chunk and writes it before
+    // asking for the next, so TCP flow control (not a read-ahead buffer
+    // with nowhere to go) paces the transfer, per UPDATE_PROTOCOL.md's
+    // "do not read the request body faster than the link drains."
+    {
+        size_t written = sizeof(esp_image_header_t);
+        int last_logged_decile = 0;
+        esp_progress_set(OTA_HTTP_ESP_PHASE_WRITING, 0);
+        while (written < content_len) {
+            size_t want = content_len - written;
+            if (want > sizeof(s_ota_esp_chunk)) {
+                want = sizeof(s_ota_esp_chunk);
+            }
+            int ret = httpd_req_recv(req, (char *)s_ota_esp_chunk, want);
+            if (ret <= 0) {
+                set_fail_reason(fail_reason, sizeof(fail_reason), "body read failed/closed at %u/%u bytes (%d)",
+                         (unsigned)written, (unsigned)content_len, ret);
+                ESP_LOGW(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed mid-transfer");
+                goto cleanup;
+            }
+
+            esp_err_t rc = esp_ota_write(handle, s_ota_esp_chunk, (size_t)ret);
+            if (rc != ESP_OK) {
+                set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_write failed at %u bytes: %s",
+                         (unsigned)written, esp_err_to_name(rc));
+                ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
+                goto cleanup;
+            }
+            written += (size_t)ret;
+
+            // Progress every ~10% (TODO.md 9.5: "progress pushed... at
+            // least every 2 s" -- decile logging on a multi-second/minute
+            // transfer satisfies that cadence without flooding the log on
+            // a fast LAN).
+            int decile = (int)((written * 10u) / content_len);
+            if (decile > last_logged_decile) {
+                last_logged_decile = decile;
+                uint8_t pct = (uint8_t)((written * 100u) / content_len);
+                esp_progress_set(OTA_HTTP_ESP_PHASE_WRITING, pct);
+                ESP_LOGI(TAG, "OTA esp update from %s: %u%% (%u/%u bytes)", ip, pct,
+                         (unsigned)written, (unsigned)content_len);
+            }
+        }
+    }
+
+    esp_progress_set(OTA_HTTP_ESP_PHASE_FINALIZING, 100);
+    {
+        esp_err_t rc = esp_ota_end(handle);
+        // esp_ota_end() frees the handle regardless of its result (see its
+        // own doc comment) -- ota_began must go false here either way so
+        // the cleanup block below never calls esp_ota_abort() on a handle
+        // that no longer exists.
+        ota_began = false;
+        if (rc != ESP_OK) {
+            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_end failed: %s (image validation failed?)",
+                     esp_err_to_name(rc));
+            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "esp_ota_end failed -- image rejected");
+            goto cleanup;
+        }
+
+        rc = esp_ota_set_boot_partition(target);
+        if (rc != ESP_OK) {
+            set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_set_boot_partition failed: %s", esp_err_to_name(rc));
+            ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set boot partition -- "
+                                                                       "old image is still active");
+            goto cleanup;
+        }
+    }
+
+    // Real, not a placeholder: read back the app description from the
+    // partition that was just written, the same way esp_ota_get_partition_
+    // description() is documented to be used for an inactive slot's
+    // version. Best-effort -- a failure here does not undo a successful
+    // update, it just leaves version_after blank in the record.
+    {
+        esp_app_desc_t written_desc;
+        if (esp_ota_get_partition_description(target, &written_desc) == ESP_OK) {
+            strncpy(version_after, written_desc.version, sizeof(version_after) - 1);
+            version_after[sizeof(version_after) - 1] = '\0';
+        }
+    }
+
+    ok = true;
+    strncpy(fail_reason, "ok", sizeof(fail_reason));
+    ESP_LOGI(TAG, "OTA esp update from %s: complete, %u bytes written to '%s', now %s -- "
+                  "reboot required to run it (this image stays PENDING_VERIFY until "
+                  "ota_rollback_confirm_task() in main.c confirms it)",
+             ip, (unsigned)content_len, target->label, version_after[0] ? version_after : "(unknown version)");
+
+cleanup:
+    if (ota_began) {
+        // Any goto above that happens after esp_ota_begin() succeeded but
+        // before esp_ota_end() ran leaves ota_began true -- abort so the
+        // partial write can never be selected as a boot target.
+        esp_ota_abort(handle);
+    }
+
+    esp_progress_set(ok ? OTA_HTTP_ESP_PHASE_DONE : OTA_HTTP_ESP_PHASE_FAILED,
+                      ok ? 100 : s_esp_progress_pct);
+
+    {
+        ota_record_t rec;
+        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
+                         version_after, ok, fail_reason);
+        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
+    }
+
+    if (ok) {
+        char body[128];
+        int n = snprintf(body, sizeof(body), "{\"ok\":true,\"bytes\":%u,\"partition\":\"%s\",\"version\":\"%s\"}",
+                          (unsigned)content_len, target->label, version_after);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, body, n);
+    }
+    // On failure, the specific httpd_resp_send_err() call above (at
+    // whichever goto fired) has already sent the response -- nothing left
+    // to send here.
+
+    // Released exactly once, regardless of which path got here -- the
+    // single-cleanup-path requirement this whole function exists to
+    // satisfy. Idempotent even if something above went wrong before the
+    // claim was actually held, per ota_http_update_end()'s own doc comment.
+    ota_http_update_end();
+}
+
+static esp_err_t ota_esp_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    get_client_ip(req, ip, sizeof(ip));
+
+    // 1. X-Ota-Mac header present and exactly 64 hex chars -- refused
+    // before the body is touched at all, per ota_http.h's documented order.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_ESP_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(TAG, "OTA esp update from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
+                 ip, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return ESP_OK;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_ESP_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return ESP_OK;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(TAG, "OTA esp update from %s: X-Ota-Mac is not valid hex", ip);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return ESP_OK;
+    }
+
+    // 2. Auth -- refuse immediately (403) on anything but OK, still before
+    // the body is read.
+    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP, mac, ip);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return ESP_OK;
+    }
+
+    // 3. Interlocks -- run AFTER auth (see ota_http_check_interlocks()'s own
+    // doc comment for why: an unauthenticated interlock check would leak
+    // live kiln telemetry). esp_http_server's httpd_err_code_t has no 409
+    // entry, so the "409 Conflict" status TODO.md asks for ("409 or
+    // similar") is set directly via httpd_resp_set_status() rather than
+    // httpd_resp_send_err(), which only knows the enum's fixed set.
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+        ESP_LOGW(TAG, "OTA esp update from %s: refused by interlock: %s", ip, reason);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // 4. Single update mutex -- claimed before any body byte is read, so a
+    // second concurrent attempt (another tab, an agent racing a human) is
+    // refused immediately rather than partway through a transfer.
+    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
+        ESP_LOGW(TAG, "OTA esp update from %s: refused, an update is already in progress", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // From here, the mutex is held and ota_esp_do_transfer() owns releasing
+    // it exactly once, on every exit path -- see that function's own doc
+    // comment.
+    ota_esp_do_transfer(req, ip);
+    return ESP_OK;
+}
+
 esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
                           SafetyLinkClass *safety_or_null)
 {
@@ -511,6 +936,17 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/challenge) failed: %s",
                  esp_err_to_name(err));
+        return err;
+    }
+
+    // TODO.md 9.5: the ESP's own self-update transfer -- see ota_http.h's
+    // doc comment on ota_esp_post_handler() for the wire contract.
+    static const httpd_uri_t esp_update_uri = {
+        .uri = "/api/ota/esp", .method = HTTP_POST, .handler = ota_esp_post_handler
+    };
+    err = httpd_register_uri_handler(server, &esp_update_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp) failed: %s", esp_err_to_name(err));
         return err;
     }
 

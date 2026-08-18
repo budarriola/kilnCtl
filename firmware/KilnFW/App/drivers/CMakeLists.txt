@@ -24,6 +24,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "dashboard_http.c"
                        "ota_auth.c"
                        "ota_interlock.c"
+                       "ota_record.c"
                        "ota_http.c"
                        "wifi_prov.c"
                        "wifi_provision_http.c"
@@ -50,7 +51,7 @@ idf_component_register(SRCS "MAX31856.c"
                                       "readiness_page.html"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
-                                esp_partition kilnlink mbedtls lwip)
+                                esp_partition kilnlink mbedtls lwip app_update)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it

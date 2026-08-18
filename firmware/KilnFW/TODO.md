@@ -3253,28 +3253,124 @@ until something concrete needs it is the cheap ordering.
 
 ### 9.5 Transfer
 
-- [ ] Streamed `esp_ota_ops` POST handler; a full image will not fit in RAM
-- [ ] Pico relay: the five `UPDATE_*` frames, codecs living in `CommonFW`
+- [x] Streamed `esp_ota_ops` POST handler; a full image will not fit in RAM.
+      **2026-08-17**: `POST /api/ota/esp` (`ota_esp_post_handler()` +
+      `ota_esp_do_transfer()`, `App/drivers/ota_http.c`), registered in
+      `ota_http_start()` alongside the existing `/api/ota/challenge` GET.
+      MAC carried in a request header (`X-Ota-Mac: <64 hex chars>`, design
+      choice documented in `ota_http.h`), never the URL. Order: header
+      present/well-formed (400) -> `ota_http_verify_request()` (403) ->
+      `ota_http_check_interlocks()` (custom "409 Conflict" status --
+      `httpd_err_code_t` has no 409 entry, so `httpd_resp_set_status()` is
+      used directly rather than `httpd_resp_send_err()`) ->
+      `ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)` (409 if another
+      update is already in progress) -- all four checked before a single
+      body byte is read. The image header (`sizeof(esp_image_header_t)`, 24
+      B) is buffered and validated (magic + chip ID, see the checklist item
+      below) before `esp_ota_begin()`; the rest streams through a 4 KB
+      `static` chunk buffer (not stack -- see `ota_http.c`'s comment on why,
+      given `wifi_provision_http.c`'s existing 8192-byte handler stack
+      budget) straight into `esp_ota_write()`, one `httpd_req_recv()` per
+      `esp_ota_write()`, no read-ahead. Every exit path (success, refused
+      image, mid-transfer read/write failure) funnels through one cleanup
+      block in `ota_esp_do_transfer()` that calls `esp_ota_abort()` if
+      needed, updates the progress snapshot, appends the NVS record
+      (`ota_record_append()`), and calls `ota_http_update_end()` exactly
+      once -- the "single cleanup path" TODO.md asked for.
+- [ ] Pico relay: the five `UPDATE_*` frames, codecs living in `CommonFW`.
+      **Not built this pass** -- explicitly out of scope, see the note below.
 - [ ] **The Pico image is relayed, never staged.** There is no RAM for 200 KB and
       no spare partition — the proposed layout leaves 84 KB. Read the HTTP body no
       faster than the link drains and let TCP flow control do the work; the thing
-      that breaks it is reading ahead into a buffer with nowhere to go
-- [ ] Socket timeout covers the whole ~35 s transfer, not one chunk
+      that breaks it is reading ahead into a buffer with nowhere to go.
+      **Not built this pass** (Pico relay is out of scope) -- the ESP's own
+      transfer above DOES already follow "read no faster than write can
+      consume" (one `httpd_req_recv()` per `esp_ota_write()`), for the same
+      reason, but that is the ESP-image path, not this Pico-relay bullet.
+- [x] Socket timeout covers the whole transfer, not one chunk (ESP path only --
+      the Pico-relay ~35 s case above is not built). **2026-08-17**:
+      `ota_esp_do_transfer()` raises the OTA connection's `SO_RCVTIMEO` to
+      30 s via `setsockopt()` on that one socket, rather than bumping
+      `wifi_provision_http.c`'s server-wide `recv_wait_timeout` (which would
+      also loosen every other endpoint's timeout). This is a per-recv-call
+      timeout, not a whole-transfer deadline: as long as no single gap
+      between chunks exceeds 30 s, a multi-minute transfer is fine -- see
+      `ota_http.c`'s comment on the handler for why that is what "covers the
+      whole transfer" means here, and why 30 s (not the doc's ~35 s Pico-link
+      figure, which is a different link) is the chosen value.
 - [ ] `UPDATE_DATA` sent unacknowledged, retransmitting only the ranges the Pico's
       gap reports name. Stop-and-wait leaves the wire idle for most of every round
-      trip and costs 2 s per persistently-failing frame
-- [ ] ESP image magic and chip ID verified **before** `esp_ota_begin()`
+      trip and costs 2 s per persistently-failing frame. **Not built this
+      pass** -- Pico relay only, out of scope.
+- [x] ESP image magic and chip ID verified **before** `esp_ota_begin()`.
+      **2026-08-17**: `ota_esp_do_transfer()` reads exactly
+      `sizeof(esp_image_header_t)` bytes, checks `hdr.magic ==
+      ESP_IMAGE_HEADER_MAGIC` and `hdr.chip_id == ESP_CHIP_ID_ESP32S3`
+      (`esp_app_format.h`), refuses (400, specific reason) on either
+      mismatch, and only then calls `esp_ota_begin()` -- the buffered header
+      bytes are written first via `esp_ota_write()` so nothing is re-read
+      from the socket.
 - [ ] `SAFETY_CMD_ANNOUNCE_REBOOT` sent before the ESP reboots, so a routine
       update does not trip S6(b) on the safety processor. It suppresses the trip
-      for a bounded window and grants **no** permission to heat
-- [ ] Single update mutex across both processors — a second tab, or an agent
-      racing a human, is refused rather than interleaved
-- [ ] Append-only update record in NVS: timestamp, processor, image SHA-256,
-      version before and after, result
-- [ ] Progress pushed to the GUI at least every 2 s for both paths
+      for a bounded window and grants **no** permission to heat. **Not
+      built** -- explicitly out of scope this pass (the link command does
+      not exist yet in `CommonFW`/`SaftyFW`). The transfer handler above
+      sets the boot partition but does not itself reboot the board; nothing
+      in this pass touches the reboot path or the safety link.
+- [x] Single update mutex across both processors — a second tab, or an agent
+      racing a human, is refused rather than interleaved. **2026-08-17**: now
+      actually acquired -- `ota_esp_post_handler()` calls
+      `ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)` before reading any
+      body byte (409 if refused), and `ota_esp_do_transfer()`'s single
+      cleanup path calls `ota_http_update_end()` on every exit. 9.4 already
+      built and tested the mutex itself; this is the first real caller.
+- [x] Append-only update record in NVS: timestamp, processor, image SHA-256,
+      version before and after, result. **2026-08-17, partial**:
+      `App/drivers/ota_record.{h,c}`, new module mirroring `run_state.c`'s
+      shape (versioned blob, explicit reserved padding, `KILN_NVS_PARTITION`,
+      load-tolerant philosophy) — deliberately NOT a multi-slot rotation:
+      "append-only" is implemented as "the last record persists" (one NVS
+      key, overwritten per update), a documented scope decision (see
+      `ota_record.h`'s header comment) rather than the fuller
+      sequence-number/slot-rotation history. Real fields: `uptime_s`
+      (no wall clock, same reasoning as `run_state.h`), `processor` ("esp"),
+      `version_before` (`esp_app_get_description()->version` of the running
+      image), `version_after` (`esp_ota_get_partition_description()` read
+      back from the partition just written -- real, not a placeholder),
+      `success`, and a specific `reason` string. **Not real**: no
+      `image SHA-256` field -- not built this pass, flagged rather than
+      faked (would need hashing the stream as it passes through
+      `ota_esp_do_transfer()`; mbedTLS/PSA is already linked, see
+      `ota_http.c`'s `hmac_sha256()` for the precedent a future pass can
+      follow). `ota_record.c` is ESP-IDF-coupled throughout and is NOT
+      host-tested, matching `run_state.c`'s/`relay_cycles.c`'s own precedent
+      (neither has a host test file either) -- see `ota_record.h`'s header
+      comment for why splitting out `ota_record_fill()` alone for testing
+      would be process for its own sake.
+- [x] Progress pushed to the GUI at least every 2 s for both paths. **2026-08-17,
+      ESP path only, polled not pushed**: TODO.md's own parenthetical scoped
+      this down from a WebSocket/SSE channel (out of scope) to "log
+      progress... and track it in a small in-RAM state the existing
+      dashboard could poll later" -- `ota_http_get_esp_progress()`
+      (`ota_http.h`) exposes a `static volatile` phase +
+      percentage pair, updated by `ota_esp_do_transfer()` roughly every 10%
+      (also `ESP_LOGI`'d at the same cadence). No poller/dashboard route
+      calls it yet -- the getter is exposed for TODO.md 9.6's future web
+      page, same pattern as 9.4's `ota_http_check_interlocks()` being
+      exposed before anything called it. Pico path: not built, out of scope.
 - [ ] Protocol-version mismatch between the uploaded Pico image and the running
       one warned about, with a second confirmation — that is the case where a
-      successful update leaves the two processors unable to talk
+      successful update leaves the two processors unable to talk. **Not
+      built** -- depends on the Pico relay path, out of scope this pass.
+
+**Not built this pass, by design** (see the task's own scope statement):
+`POST /api/ota/pico` (Pico-image relay through `pico_img`, the `UPDATE_*`
+frame codecs), `SAFETY_CMD_ANNOUNCE_REBOOT` (does not exist in
+`CommonFW`/`SaftyFW` yet), the 9.6 web page, and 9.7's physical-hardware
+verification (no hardware in this environment -- host-build/`idf.py build`
+verified only). `idf.py -C firmware/KilnFW build` clean; host tests
+276/276 (unchanged -- no new pure/host-testable code was added, see
+`ota_record.h`'s header comment for why).
 
 ### 9.6 Web page
 
