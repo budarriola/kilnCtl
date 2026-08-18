@@ -158,7 +158,15 @@ static void escalate_and_abort(thermal_guard_trip_t reason, const char *detail)
     }
     force_relays_off();
     s_at.state = AUTOTUNE_ENGINE_ABORTED;
-    snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "guard tripped: %s", detail);
+    /* Explicit precision (sizeof(abort_reason) - strlen("guard tripped: ") -
+     * 1) rather than a bare %s -- under -Os this call started inlining into
+     * task_entry, and GCC's -Wformat-truncation can't bound an unadorned %s
+     * against a caller-supplied `detail` even though the destination is
+     * fixed-size; found building 2026-08-18 (the -Og build never triggered
+     * this since the call stayed out-of-line there). Genuinely truncating an
+     * overlong detail string here is fine -- abort_reason is a status
+     * readout, not parsed anywhere -- this only silences a false positive. */
+    snprintf(s_at.abort_reason, sizeof(s_at.abort_reason), "guard tripped: %.79s", detail);
     ESP_LOGE(TAG, "autotune zone %u aborted: %s", s_at.zone_index, s_at.abort_reason);
 }
 
