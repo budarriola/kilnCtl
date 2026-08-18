@@ -147,7 +147,16 @@ def program(peer: str, elf_path: Optional[str] = None) -> "tuple[bool, str]":
 
     openocd_util.kill_openocd_sessions_impl()
 
-    tcl = f'{_speed_prefix(peer_cfg)}program "{elf}" verify reset exit'
+    # Tcl only performs backslash escaping (\U, \b, \O, ...) inside a
+    # double-quoted string -- a bare Windows path (C:\Users\...) passed
+    # straight through corrupts itself the moment OpenOCD's Tcl interpreter
+    # parses this -c argument (found flashing for real, 2026-08-18: `\b`
+    # alone silently ate a character, producing a path OpenOCD then reported
+    # as "file not found"). Forward slashes are accepted by both Tcl and
+    # OpenOCD on Windows and sidestep the whole escaping question rather than
+    # trying to double every backslash.
+    elf_tcl = elf.replace("\\", "/")
+    tcl = f'{_speed_prefix(peer_cfg)}program "{elf_tcl}" verify reset exit'
     return _run(peer, tcl, timeout_s=90)
 
 
@@ -157,19 +166,26 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
     if mode not in _RESET_MODES:
         raise ValueError(f"mode must be one of {sorted(_RESET_MODES)}, got {mode!r}")
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}reset {mode}; exit"
+    # `init` first: unlike program() (a built-in Tcl proc that inits itself
+    # internally), a bare target-level command like `reset run` fails with
+    # "invalid command name" against a fresh openocd.exe session that hasn't
+    # examined the target yet -- found running this for real, 2026-08-18,
+    # against the every function below that wasn't program(). None of this
+    # module's non-program() functions had ever been exercised successfully
+    # before that.
+    tcl = f"{_speed_prefix(peer_cfg)}init; reset {mode}; exit"
     return _run(peer, tcl)
 
 
 def halt(peer: str) -> "tuple[bool, str]":
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}halt; exit"
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; exit"
     return _run(peer, tcl)
 
 
 def resume(peer: str) -> "tuple[bool, str]":
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}resume; exit"
+    tcl = f"{_speed_prefix(peer_cfg)}init; resume; exit"
     return _run(peer, tcl)
 
 
@@ -181,7 +197,7 @@ def step(peer: str) -> "tuple[bool, str]":
     not resume after the step, it stays halted at the next instruction.
     """
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}halt; step; exit"
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; step; exit"
     return _run(peer, tcl)
 
 
@@ -197,7 +213,7 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> "tu
     if count > _MAX_READ_COUNT:
         raise ValueError(f"count {count} exceeds the {_MAX_READ_COUNT}-word cap")
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}halt; {cmd} 0x{address:x} {count}; exit"
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {cmd} 0x{address:x} {count}; exit"
     return _run(peer, tcl)
 
 
@@ -214,7 +230,7 @@ def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple
     if cmd is None:
         raise ValueError(f"width must be one of {sorted(_MEM_WIDTH_WRITE_CMDS)}, got {width!r}")
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}halt; {cmd} 0x{address:x} 0x{value:x}; exit"
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {cmd} 0x{address:x} 0x{value:x}; exit"
     return _run(peer, tcl)
 
 
@@ -222,5 +238,5 @@ def read_registers(peer: str) -> "tuple[bool, str]":
     """Reads all core registers. Needs the core halted first to read
     registers, so this halts it as a side effect (``halt; reg; exit``)."""
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}halt; reg; exit"
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; reg; exit"
     return _run(peer, tcl)
