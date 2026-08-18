@@ -17,6 +17,18 @@
 #define CJ_WARN_C_DEFAULT             60.0f   /* S12 */
 #define CJ_MAX_C_DEFAULT              85.0f   /* S12 */
 #define CJ_TIME_S_DEFAULT             60.0f   /* S12 */
+#define BORROWED_STALE_S_DEFAULT      10.0f   /* S13 */
+#define BORROWED_STALE_TRIP_S_DEFAULT 60.0f   /* S13 */
+#define OVERSHOOT_MARGIN_C_DEFAULT    75.0f   /* S2 */
+#define OVERSHOOT_TIME_S_DEFAULT      120.0f  /* S2 */
+#define I_PRESENT_A_DEFAULT           2.0f    /* S3/S4 */
+#define CORRELATION_WINDOW_S_DEFAULT  150.0f  /* S3/S4 -- informational; the window itself is applied by the caller */
+#define STUCK_ON_TIME_S_DEFAULT       20.0f   /* S3 */
+#define LINK_TIMEOUT_S_DEFAULT        10.0f   /* S6b */
+#define LINK_DEAD_HARD_S_DEFAULT      120.0f  /* S6b */
+#define TRIP_VERIFY_S_DEFAULT         10.0f   /* S9 */
+#define TC_DISAGREEMENT_C_DEFAULT     200.0f  /* S10 */
+#define TC_DISAGREEMENT_TIME_S_DEFAULT 300.0f /* S10 */
 
 #define S1_OVER_CEILING_STREAK_TO_TRIP 3u /* ~300ms at safety_core's 100ms tick */
 
@@ -56,7 +68,77 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                          const safety_guard_input_t *in)
 {
     if (state->is_tripped) {
+        /* --- S9: trip ineffective / contactor welded -------------------------
+         * The one guard that must keep evaluating after a trip -- everything
+         * else stops mattering once K4 should be open, but "did it actually
+         * open" is exactly the question this asks (SAFETY_MODEL.md section 4,
+         * S9). Escalates once: trip_ineffective latches independently of
+         * is_tripped (already true) so the caller can tell "tripped" apart
+         * from "tripped AND still conducting", and reason is overwritten to
+         * SAFETY_TRIP_INEFFECTIVE -- ARCHITECTURE.md section 9's trip-code
+         * comment calls this one "escalation, not a cause" for exactly this
+         * reason: once it fires, it is the more urgent fact to report. */
+        if (!state->trip_ineffective) {
+            if (in->relay_deenergized) {
+                state->s9_verify_active = true;
+                state->s9_verify_elapsed_s += in->dt_s;
+                float verify_th = effective_f(cfg->trip_verify_s, TRIP_VERIFY_S_DEFAULT);
+                if (state->s9_verify_elapsed_s >= verify_th && in->any_current_present) {
+                    state->trip_ineffective = true;
+                    trip(state, SAFETY_TRIP_INEFFECTIVE,
+                         "K4 de-energized for %.1fs (>= trip_verify_s %.1fs) but current still present",
+                         (double)state->s9_verify_elapsed_s, (double)verify_th);
+                    return true; /* newly escalated -- caller reacts once, same contract as any new trip */
+                }
+            } else {
+                /* relay_owner has not (yet) reported K4 de-energized -- do
+                 * not start the clock on a verification window that hasn't
+                 * actually begun. */
+                state->s9_verify_active = false;
+                state->s9_verify_elapsed_s = 0.0f;
+            }
+        }
         return false; /* already latched -- caller should have de-energized K4 already */
+    }
+
+    /* --- S6a: main controller explicitly asserts fault -----------------------
+     * mainFault (GPIO10, active low), already debounced 200ms by
+     * discrete_task -- unambiguous, no further conditions (SAFETY_MODEL.md
+     * section 4, S6a). Checked early, alongside S7, because both are
+     * unconditional electrical signals rather than thermal evidence. */
+    if (in->main_fault_asserted) {
+        trip(state, SAFETY_TRIP_MAIN_FAULT, "mainFault asserted (GPIO10 low, debounced)");
+        return true;
+    }
+
+    /* --- S6b: the link has gone quiet -----------------------------------------
+     * Two-tier, hazard-keyed rather than a flat timeout (SAFETY_MODEL.md
+     * section 4, S6b / section 2's "absence of information is not evidence
+     * of danger -- except when heat is on"): a quiet link with current
+     * flowing trips at link_timeout_s; a quiet link with no current only
+     * warns and keeps watching; link_dead_hard_s is an unconditional
+     * backstop regardless of current, because "no current right now" is a
+     * weak statement given a 60s heater window the ESP could have died
+     * inside of. link_up resets the elapsed timer every tick it is true,
+     * matching S12/S2's own "reset on a healthy tick" pattern. */
+    if (in->link_up) {
+        state->s6b_link_down_elapsed_s = 0.0f;
+    } else {
+        state->s6b_link_down_elapsed_s += in->dt_s;
+        float hard = effective_f(cfg->link_dead_hard_s, LINK_DEAD_HARD_S_DEFAULT);
+        if (state->s6b_link_down_elapsed_s >= hard) {
+            trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_dead_hard_s %.1fs), unconditional",
+                 (double)state->s6b_link_down_elapsed_s, (double)hard);
+            return true;
+        }
+        float soft = effective_f(cfg->link_timeout_s, LINK_TIMEOUT_S_DEFAULT);
+        if (state->s6b_link_down_elapsed_s >= soft && in->any_current_present) {
+            trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_timeout_s %.1fs) with current present",
+                 (double)state->s6b_link_down_elapsed_s, (double)soft);
+            return true;
+        }
+        /* Quiet link, no current: WARN territory (reported by the caller
+         * from s6b_link_down_elapsed_s > 0), not a trip. Keep watching. */
     }
 
     /* --- S7: E-stop ---------------------------------------------------------
@@ -207,6 +289,133 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             state->s12_over_max_elapsed_s = 0.0f;
         }
     }
+
+    /* --- Context-dependent guards: S2, S3, S4, S10, S13 -----------------------
+     * SAFETY_MODEL.md section 5, rule 2: "stale context is no context" -- and
+     * ARCHITECTURE.md section 9: context-dependent guards report *inactive*
+     * on stale/absent/mismatched context, never pessimistic (no silent pass,
+     * no silent trip). in->context_valid is the caller's single collapse of
+     * "never received / stale / DEGRADED_NO_CONTEXT" into one fact, so this
+     * module does not need to re-derive any of those conditions itself. When
+     * false, every guard below resets its own timer/level state rather than
+     * merely skipping the check -- an old accumulating window from before
+     * context went stale must not silently resume and trip on its
+     * pre-staleness progress once context returns. */
+    if (!in->context_valid) {
+        state->s2_over_elapsed_s = 0.0f;
+        state->s3_stuck_elapsed_s = 0.0f;
+        state->s4_warn = false;
+        state->s10_warn = false;
+        state->s10_disagree_elapsed_s = 0.0f;
+        state->s13_stale_elapsed_s = 0.0f;
+        state->s13_warn = false;
+    } else {
+        /* --- S2: sustained excess over setpoint --------------------------------
+         * CHAMBER_AGREED only -- comparing a shell/exhaust reading against a
+         * chamber setpoint is meaningless (SAFETY_MODEL.md section 4, S2).
+         * zone_count == 0 means "no active zones this tick", same inactive
+         * treatment as stale context. */
+        if (cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u && in->tc_valid) {
+            float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
+            if (in->tc_c > in->max_zone_setpoint_c + margin) {
+                state->s2_over_elapsed_s += in->dt_s;
+                float time_th = effective_f(cfg->overshoot_time_s, OVERSHOOT_TIME_S_DEFAULT);
+                if (state->s2_over_elapsed_s >= time_th) {
+                    trip(state, SAFETY_TRIP_OVER_SETPOINT,
+                         "%.1fC > max setpoint %.1fC + overshoot_margin_c %.1fC for %.0fs",
+                         (double)in->tc_c, (double)in->max_zone_setpoint_c, (double)margin,
+                         (double)state->s2_over_elapsed_s);
+                    return true;
+                }
+            } else {
+                state->s2_over_elapsed_s = 0.0f;
+            }
+        } else {
+            state->s2_over_elapsed_s = 0.0f;
+        }
+
+        /* --- S3: load active with no heat commanded ----------------------------
+         * Presence/absence, not a current-magnitude test (SAFETY_MODEL.md
+         * section 3/4, S3). relay_commanded_recently is already the ESP's
+         * relay_recent_mask-derived "was anything commanded on in the last
+         * correlation_window_s" fact -- this module trusts it as a
+         * caller-computed input the same way it trusts context_valid. */
+        if (in->any_current_present && !in->relay_commanded_recently) {
+            state->s3_stuck_elapsed_s += in->dt_s;
+            float stuck_th = effective_f(cfg->stuck_on_time_s, STUCK_ON_TIME_S_DEFAULT);
+            if (state->s3_stuck_elapsed_s >= stuck_th) {
+                trip(state, SAFETY_TRIP_LOAD_STUCK_ON,
+                     "current present with nothing commanded on for %.0fs (>= stuck_on_time_s %.1fs)",
+                     (double)state->s3_stuck_elapsed_s, (double)stuck_th);
+                return true;
+            }
+        } else {
+            state->s3_stuck_elapsed_s = 0.0f;
+        }
+
+        /* --- S4: heat commanded but load inactive -- WARN only, never TRIP -----
+         * A design decision, not an oversight (SAFETY_MODEL.md section 4,
+         * S4): a dead element ruins a firing, it does not start one. */
+        state->s4_warn = in->relay_commanded_continuously && !in->any_current_present;
+
+        /* --- S10: safety TC disagrees with every zone TC -- WARN only ----------
+         * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section
+         * 4, S10). Compares against the caller-supplied *nearest* valid zone
+         * reading, never the mean -- kilns stratify. */
+        if (cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u && in->tc_valid) {
+            float disagree_c = effective_f(cfg->tc_disagreement_c, TC_DISAGREEMENT_C_DEFAULT);
+            float diff = in->tc_c - in->nearest_zone_measured_c;
+            if (diff < 0.0f) {
+                diff = -diff;
+            }
+            if (diff > disagree_c) {
+                state->s10_disagree_elapsed_s += in->dt_s;
+                float time_th = effective_f(cfg->tc_disagreement_time_s, TC_DISAGREEMENT_TIME_S_DEFAULT);
+                state->s10_warn = (state->s10_disagree_elapsed_s >= time_th);
+            } else {
+                state->s10_disagree_elapsed_s = 0.0f;
+                state->s10_warn = false;
+            }
+        } else {
+            state->s10_disagree_elapsed_s = 0.0f;
+            state->s10_warn = false;
+        }
+
+        /* --- S13: borrowed channel not updating -- graduated, like S5 ---------
+         * BORROWED_ZONE/BOTH only. sample_counter_advancing is the caller's
+         * already-computed "did the zone's sample_counter move since last
+         * frame" fact (SAFETY_MODEL.md section 4, S13) -- this module only
+         * owns the elapsed-time accumulation and the two thresholds. */
+        if (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE || cfg->tc_source == SAFETY_TC_SOURCE_BOTH) {
+            if (!in->sample_counter_advancing) {
+                state->s13_stale_elapsed_s += in->dt_s;
+                float warn_th = effective_f(cfg->borrowed_stale_s, BORROWED_STALE_S_DEFAULT);
+                float trip_th = effective_f(cfg->borrowed_stale_trip_s, BORROWED_STALE_TRIP_S_DEFAULT);
+                if (state->s13_stale_elapsed_s >= warn_th) {
+                    state->s13_warn = true;
+                    if (state->s13_stale_elapsed_s >= trip_th) {
+                        trip(state, SAFETY_TRIP_BORROWED_STALE,
+                             "borrowed sample_counter stale for %.1fs (>= borrowed_stale_trip_s %.1fs)",
+                             (double)state->s13_stale_elapsed_s, (double)trip_th);
+                        return true;
+                    }
+                }
+            } else {
+                state->s13_stale_elapsed_s = 0.0f;
+                state->s13_warn = false;
+            }
+        } else {
+            state->s13_stale_elapsed_s = 0.0f;
+            state->s13_warn = false;
+        }
+    }
+
+    /* Not tripped this tick -- S9's verification window has nothing to
+     * verify yet (it only means anything once is_tripped is true, handled
+     * at the top of this function). Keep it clean so a stray earlier value
+     * cannot leak into a future trip's verification window. */
+    state->s9_verify_active = false;
+    state->s9_verify_elapsed_s = 0.0f;
 
     return false;
 }

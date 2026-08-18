@@ -814,19 +814,37 @@ Provocation methods are in [`GUARD_TEST_MATRIX.md`](GUARD_TEST_MATRIX.md).
 | | Guard | Class | Built | Host-tested | Hardware-verified |
 |---|---|---|---|---|---|
 | S1 | Absolute over-temperature | TRIP | [x] | [x] | [ ] |
-| S2 | Sustained excess over setpoint | TRIP | [ ] | [ ] | [ ] |
-| S3 | Load active, no heat commanded | TRIP | [ ] | [ ] | [ ] |
-| S4 | Heat commanded, load inactive | WARN | [ ] | [ ] | [ ] |
+| S2 | Sustained excess over setpoint | TRIP | [x] | [x] | [ ] |
+| S3 | Load active, no heat commanded | TRIP | [x] | [x] | [ ] |
+| S4 | Heat commanded, load inactive | WARN | [x] | [x] | [ ] |
 | S5 | Safety thermocouple invalid | WARN→TRIP | [x] | [x] | [ ] |
-| S6 | Main controller unhealthy | TRIP | [ ] | [ ] | [ ] |
+| S6 | Main controller unhealthy | TRIP | [x] | [x] | [ ] |
 | S7 | E-stop | TRIP | [x] | [x] | [ ] |
 | S8 | Implausible rate of rise | TRIP, off by default | [ ] | [ ] | [ ] |
-| S9 | Trip ineffective / contactor welded | ESCALATE | [ ] | [ ] | [ ] |
-| S10 | Safety TC vs zone TC disagreement | WARN | [ ] | [ ] | [ ] |
+| S9 | Trip ineffective / contactor welded | ESCALATE | [x] | [x] | [ ] |
+| S10 | Safety TC vs zone TC disagreement | WARN | [x] | [x] | [ ] |
 | S11 | Frozen safety reading | TRIP | [x] | [x] | [ ] |
 | S12 | Cold junction / enclosure over-temp | WARN→TRIP | [x] | [x] | [ ] |
-| S13 | Borrowed channel not updating | WARN→TRIP | [ ] | [ ] | [ ] |
+| S13 | Borrowed channel not updating | WARN→TRIP | [x] | [x] | [ ] |
 | — | Runtime config integrity | TRIP | [ ] | [ ] | [ ] |
+
+S2/S3/S4/S6/S9/S10/S13 built and host-tested 2026-08-18: `src/safety_guards.c`
+now implements 12 of 13 guards (everything but S8, which ships disabled by
+design per its own section above -- no threshold to build until a real
+kiln's ramp rate is measured). The context/current-sense facts these seven
+need (relay/setpoint/zone data, current presence, link liveness, mainFault,
+borrowed-channel sample counter) are flattened into
+`safety_guard_input_t` as plain scalars with their own validity flags
+(`context_valid`, etc.) rather than by including `link_task`'s or
+`current_task`'s real snapshot types -- `link_task`/`current_task` don't
+publish real producers yet (Phase 6/7), and this keeps the module exactly as
+link-header-free as the original five-guard version (ARCHITECTURE.md
+section 2's "the one rule that matters"). `test/test_safety_guards.c` adds
+48 new checks (320/320 total), nuisance cases first per this file's own
+doctrine, for all seven. **Not hardware-verified** -- no RP2040/MAX31856
+attached to the build machine, so nothing above claims more than "host-tested
+against synthetic inputs." Runtime config integrity is out of scope here --
+it is a `config_store` (Phase 9) concern, not a per-tick guard.
 
 ### Policy
 

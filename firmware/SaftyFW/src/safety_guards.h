@@ -7,20 +7,41 @@
 // every tick, inside the input struct (matching thermal_guard_input_t's own
 // convention).
 //
-// This phase implements exactly 5 of the 13 guards in docs/SAFETY_MODEL.md
-// section 4 -- the ones that need neither the isolated link's context frame
-// nor current-sense calibration, and so can run correctly with nothing more
-// than a thermocouple snapshot and two debounced discretes:
+// This module implements 12 of the 13 guards in docs/SAFETY_MODEL.md
+// section 4. S1/S5/S7/S11/S12 need nothing but a thermocouple snapshot and
+// two debounced discretes. S2/S3/S4/S6/S9/S10/S13 additionally need context
+// from the ESP (relay/setpoint/zone data) and/or current-sense presence --
+// rather than pulling in context_snapshot_t / current_snapshot_t from
+// link_task/current_task (neither of which exist as real producers yet,
+// and this module must never #include the link header per ARCHITECTURE.md
+// section 2's "the one rule that matters"), the exact scalar facts each
+// guard needs are flattened directly into safety_guard_input_t below, each
+// with its own "do you know this?" validity flag. That keeps this module
+// exactly as pure and link-header-free as before -- it is still a
+// synthetic-input pure function, just fed by more fields -- while giving
+// safety_core a one-line mapping job once link_task/current_task are real
+// (Phase 6/7), instead of a redesign.
 //
-//   S1  Absolute over-temperature            TRIP
-//   S5  Safety thermocouple invalid           WARN, then TRIP (graduated)
-//   S7  E-stop                                TRIP
-//   S11 Frozen safety reading                 TRIP
-//   S12 Cold junction / enclosure over-temp    WARN, then TRIP (graduated)
+//   S1  Absolute over-temperature              TRIP
+//   S2  Sustained excess over setpoint         TRIP  (context, CHAMBER_AGREED only)
+//   S3  Load active, no heat commanded         TRIP  (context)
+//   S4  Heat commanded, load inactive          WARN  (context)
+//   S5  Safety thermocouple invalid            WARN, then TRIP (graduated)
+//   S6  Main controller unhealthy              TRIP  (mainFault discrete + link liveness)
+//   S7  E-stop                                  TRIP
+//   S9  Trip ineffective / contactor welded    ESCALATE (post-trip current)
+//   S10 Safety TC vs zone TC disagreement       WARN  (context, CHAMBER_AGREED only)
+//   S11 Frozen safety reading                   TRIP
+//   S12 Cold junction / enclosure over-temp     WARN, then TRIP (graduated)
+//   S13 Borrowed channel not updating           WARN, then TRIP (context, BORROWED_ZONE/BOTH)
 //
-// NOT implemented here: S2, S3, S4, S6, S8, S9, S10, S13 -- they need the
-// context_snapshot_t from link_task, current_snapshot_t from current_task,
-// or both. docs/SAFETY_MODEL.md section 4 has the full guard suite.
+// NOT implemented here: S8 (implausible rate of rise) -- SAFETY_MODEL.md
+// section 4 says it "ships disabled" until a real kiln's maximum ramp rate
+// has been measured on the bench (TODO.md phase 9); hard-coding a plausible
+// threshold now is exactly the mistake that section refuses to make. Also
+// not implemented: the "runtime configuration integrity" background CRC
+// check (SAFETY_MODEL.md section 4) -- that is a config_store concern
+// (Phase 9, no config_store exists yet), not a guard evaluated per tick.
 //
 // Latching, always (SAFETY_MODEL.md section 2's "latching is not
 // auto-recovery"): once tripped, this module reports is_tripped == true on
@@ -52,22 +73,22 @@ extern "C" {
  * values. */
 typedef enum {
     SAFETY_TRIP_NONE = 0,
-    SAFETY_TRIP_OVERTEMP        = 1,  /* S1  -- implemented here */
-    SAFETY_TRIP_OVER_SETPOINT   = 2,  /* S2  -- not this phase */
-    SAFETY_TRIP_LOAD_STUCK_ON   = 3,  /* S3  -- not this phase */
+    SAFETY_TRIP_OVERTEMP        = 1,  /* S1  -- implemented */
+    SAFETY_TRIP_OVER_SETPOINT   = 2,  /* S2  -- implemented */
+    SAFETY_TRIP_LOAD_STUCK_ON   = 3,  /* S3  -- implemented */
     /* 4 reserved: S4 is WARN-only */
-    SAFETY_TRIP_SENSOR_INVALID  = 5,  /* S5  -- implemented here, after blind_grace_s */
-    SAFETY_TRIP_MAIN_FAULT      = 6,  /* S6a -- not this phase */
-    SAFETY_TRIP_LINK_DEAD       = 7,  /* S6b -- not this phase */
-    SAFETY_TRIP_ESTOP           = 8,  /* S7  -- implemented here */
-    SAFETY_TRIP_RATE            = 9,  /* S8  -- not this phase */
-    SAFETY_TRIP_INEFFECTIVE     = 10, /* S9  -- not this phase */
+    SAFETY_TRIP_SENSOR_INVALID  = 5,  /* S5  -- implemented, after blind_grace_s */
+    SAFETY_TRIP_MAIN_FAULT      = 6,  /* S6a -- implemented */
+    SAFETY_TRIP_LINK_DEAD       = 7,  /* S6b -- implemented */
+    SAFETY_TRIP_ESTOP           = 8,  /* S7  -- implemented */
+    SAFETY_TRIP_RATE            = 9,  /* S8  -- not implemented, ships disabled per SAFETY_MODEL.md */
+    SAFETY_TRIP_INEFFECTIVE     = 10, /* S9  -- implemented */
     /* 11 reserved: S10 is WARN-only */
-    SAFETY_TRIP_FROZEN_SENSOR   = 12, /* S11 -- implemented here */
-    SAFETY_TRIP_ENCLOSURE_TEMP  = 13, /* S12 -- implemented here */
-    SAFETY_TRIP_BORROWED_STALE  = 14, /* S13 -- not this phase */
-    SAFETY_TRIP_CONFIG_CORRUPT  = 15, /* not this phase */
-    SAFETY_TRIP_SELF_TEST       = 16, /* not this phase */
+    SAFETY_TRIP_FROZEN_SENSOR   = 12, /* S11 -- implemented */
+    SAFETY_TRIP_ENCLOSURE_TEMP  = 13, /* S12 -- implemented */
+    SAFETY_TRIP_BORROWED_STALE  = 14, /* S13 -- implemented */
+    SAFETY_TRIP_CONFIG_CORRUPT  = 15, /* not this module -- config_store, Phase 9 */
+    SAFETY_TRIP_SELF_TEST       = 16, /* not this module -- watchdog_task's job */
 } safety_trip_t;
 
 /* SAFETY_MODEL.md section 3, "tc_placement_mode". Only S1 cares about it in
@@ -79,6 +100,21 @@ typedef enum {
     SAFETY_TC_CHAMBER_AGREED = 0,
     SAFETY_TC_EXTERNAL_OVERHEAT = 1,
 } safety_tc_placement_mode_t;
+
+/* SAFETY_MODEL.md section 3, "tc_source" -- which sensor is the active
+ * safety reading. Only S13 (borrowed-channel staleness) and S11's "which
+ * source is active" note care about this; S1/S5/S12 above operate on
+ * whatever in->tc_c/cj_c/tc_valid the caller hands them regardless of where
+ * it came from, by design (SAFETY_MODEL.md section 3: those never change
+ * behaviour based on tc_source). No default, same reasoning as
+ * tc_placement_mode -- OWN_J7 is the conservative reading of "not
+ * commissioned yet" because it is the only mode where S13 (which needs a
+ * commissioning decision to even be meaningful) correctly stays off. */
+typedef enum {
+    SAFETY_TC_SOURCE_OWN_J7 = 0,
+    SAFETY_TC_SOURCE_BORROWED_ZONE = 1,
+    SAFETY_TC_SOURCE_BOTH = 2,
+} safety_tc_source_t;
 
 /* MAX31856 SR register bits, mirrored from KilnFW's uart_task_ids.h (same
  * part, same register, ported per ARCHITECTURE.md section 3's "port it, do
@@ -151,6 +187,39 @@ typedef struct {
     float cj_warn_c;
     float cj_max_c;
     float cj_time_s;
+
+    /* S13. tc_source picks whether S13 can be active at all -- WARN/TRIP
+     * (SAFETY_MODEL.md section 4, S13: "BORROWED_ZONE/BOTH only"). 0 ->
+     * borrowed_stale_s=10.0s, borrowed_stale_trip_s=60.0s. */
+    safety_tc_source_t tc_source;
+    float borrowed_stale_s;
+    float borrowed_stale_trip_s;
+
+    /* S2. CHAMBER_AGREED only (tc_placement_mode above gates it). 0 ->
+     * overshoot_margin_c=75.0C, overshoot_time_s=120.0s. */
+    float overshoot_margin_c;
+    float overshoot_time_s;
+
+    /* S3/S4 share the current-presence threshold and the correlation
+     * window (SAFETY_MODEL.md section 4). 0 -> i_present_a=2.0A,
+     * correlation_window_s=150.0s. S3-only: stuck_on_time_s, 0 -> 20.0s. */
+    float i_present_a;
+    float correlation_window_s;
+    float stuck_on_time_s;
+
+    /* S6. 0 -> link_timeout_s=10.0s, link_dead_hard_s=120.0s,
+     * main_fault_debounce_s left to discrete_task (already-debounced input,
+     * same convention as estop_pressed) -- nothing to configure here. */
+    float link_timeout_s;
+    float link_dead_hard_s;
+
+    /* S9. 0 -> trip_verify_s=10.0s. */
+    float trip_verify_s;
+
+    /* S10. CHAMBER_AGREED only. 0 -> tc_disagreement_c=200.0C,
+     * tc_disagreement_time_s=300.0s. */
+    float tc_disagreement_c;
+    float tc_disagreement_time_s;
 } safety_guard_cfg_t;
 
 /* One call's worth of input. tc_c/cj_c/fault_bits/spi_failed follow
@@ -190,6 +259,70 @@ typedef struct {
      * is a one-line change at the call site, not a change to this module. */
     bool heat_commanded;
 
+    /* --- Context from the ESP, over the isolated link (SAFETY_MODEL.md
+     * section 5). context_valid is the single "do you know any of this?"
+     * flag -- staleness/version-mismatch/never-received all collapse to
+     * false here, per ARCHITECTURE.md section 6's "staleness is checked by
+     * the consumer, not the producer" and section 9's DEGRADED_NO_CONTEXT
+     * rule that context-dependent guards report inactive, never
+     * pessimistic, when context is unusable. When false, S2/S3/S4/S10/S13
+     * below are all skipped outright -- the caller does not need to zero
+     * every other context field to make that safe. */
+    bool  context_valid;
+
+    /* S2/S10. The zone setpoint/measurement data S2 and S10 need, already
+     * reduced by the caller (safety_core, once link_task exists) to the two
+     * scalars each guard actually uses -- SAFETY_MODEL.md section 4 is
+     * explicit both compare against "max(active zone setpoints)" (S2) and
+     * "nearest valid zone measured_c" (S10), never the raw per-zone array,
+     * so there is nothing this pure module would do with the array that
+     * the caller cannot do once instead, every tick. zone_count == 0 means
+     * "no active zones this tick" and both guards go inactive, same as
+     * context_valid == false. */
+    uint8_t zone_count;
+    float   max_zone_setpoint_c;    /* S2 */
+    float   nearest_zone_measured_c; /* S10 */
+
+    /* S3/S4. Presence/absence facts only (SAFETY_MODEL.md section 3: "not
+     * an over/under-current guard") -- any_current_present is already the
+     * OR across all three channels against i_present_a, and
+     * relay_commanded_recently/relay_commanded_continuously are already
+     * relay_recent_mask-derived booleans (SAFETY_MODEL.md section 4, S3:
+     * "was any relay commanded on at any point in the last N seconds",
+     * computed on the ESP -- not the instantaneous mask). Kept as two
+     * separate booleans rather than one mask, matching how S3 (recently,
+     * i.e. OR over the window) and S4 (continuously, i.e. AND over the
+     * window) genuinely ask different questions of the same window. */
+    bool any_current_present;
+    bool relay_commanded_recently;
+    bool relay_commanded_continuously;
+
+    /* S13. sample_counter_advancing is already the caller's comparison of
+     * this tick's context frame's per-zone sample_counter against the last
+     * one seen (SAFETY_MODEL.md section 4, S13) -- this module has no
+     * notion of "last frame" to compare against on its own, by design (it
+     * has no I/O and would have to keep frame history to do that itself,
+     * which is exactly the kind of state this module tries not to own). */
+    bool sample_counter_advancing;
+
+    /* S6a. mainFault (GPIO10, active low), already debounced 200ms by
+     * discrete_task -- same division as estop_pressed above. */
+    bool main_fault_asserted;
+
+    /* S6b. link_up is the producer's "a valid frame arrived within
+     * link_timeout_s" fact -- this module still needs its own elapsed-time
+     * accumulator for the two-tier timeout (10s conditional / 120s
+     * unconditional backstop), so it is a level (true/false per tick), not
+     * a duration, deliberately mirroring how estop_pressed is a level too. */
+    bool link_up;
+
+    /* S9. Set by the caller once relay_owner has actually de-energized K4
+     * (SAFETY_MODEL.md section 4, S9: "tripped (K4 de-energized) for
+     * trip_verify_s"). Distinct from state->is_tripped, which this module
+     * already tracks itself -- relay_deenergized answers "did the hardware
+     * actually respond", which only the caller (relay_owner) can know. */
+    bool relay_deenergized;
+
     float dt_s;
 } safety_guard_input_t;
 
@@ -217,6 +350,42 @@ typedef struct {
      * non-timed) cj_warn_c crossing. */
     bool  s12_warn;
     float s12_over_max_elapsed_s;
+
+    /* S2: sustained-over-setpoint timer. */
+    float s2_over_elapsed_s;
+
+    /* S3: sustained "current present, nothing recently commanded" timer. */
+    float s3_stuck_elapsed_s;
+
+    /* S4: WARN only, no timer -- level-tracked for the caller's telemetry. */
+    bool s4_warn;
+
+    /* S6a/S6b: independent elapsed timers -- (a) is a debounce-then-trip
+     * with no further state needed beyond the input already being
+     * debounced upstream, so it needs none here; (b) needs its own
+     * link-down elapsed accumulator, reset on every tick link_up is true. */
+    float s6b_link_down_elapsed_s;
+
+    /* S9: elapsed time since relay_deenergized first went true (tracked
+     * independently of is_tripped, since a trip and a *verified* trip are
+     * different moments -- SAFETY_MODEL.md section 4, S9's own
+     * trip_verify_s window starts at de-energization, not at the original
+     * guard trip). trip_ineffective latches separately from is_tripped so
+     * the caller can distinguish "tripped" from "tripped AND still
+     * conducting", which SAFETY_MODEL.md section 4 says needs its own,
+     * louder, escalation. */
+    bool  s9_verify_active;
+    float s9_verify_elapsed_s;
+    bool  trip_ineffective;
+
+    /* S10: WARN only, sustained-disagreement timer + level. */
+    bool  s10_warn;
+    float s10_disagree_elapsed_s;
+
+    /* S13: graduated exactly like S5 -- elapsed time since
+     * sample_counter_advancing last went true. */
+    float s13_stale_elapsed_s;
+    bool  s13_warn;
 } safety_guard_state_t;
 
 void safety_guards_reset(safety_guard_state_t *state);

@@ -188,7 +188,25 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       config, and fault-read all need the parts populated/wired first, not just
       the schematic net
 - [ ] MAX31856 on J7, with per-thermocouple type configuration
-- [ ] Guards implemented and **host-tested against synthetic inputs**, no relay yet
+- [x] Guards implemented and **host-tested against synthetic inputs**, no relay
+      yet — 2026-08-18, `firmware/SaftyFW/src/safety_guards.c`. 12 of the 13
+      guards in `SAFETY_MODEL.md` section 4 are built as pure functions and
+      host-tested (320/320 checks, MSVC, `/W4 /WX`): S1/S5/S7/S11/S12 landed
+      2026-08-16; this pass adds S2/S3/S4/S6/S9/S10/S13, fed by synthetic
+      context/current-presence/link-liveness facts rather than real
+      `link_task`/`current_task` producers (neither exists yet — Phase 6/7).
+      S8 (rate-of-rise) is the one guard intentionally not built: it ships
+      disabled per `SAFETY_MODEL.md` until a real kiln's ramp rate is
+      measured on the bench, and building a placeholder threshold now is the
+      mistake that section explicitly refuses to make. Build-verified under
+      the real arm-none-eabi-gcc/pico-sdk toolchain too (`safety_guards.c`/
+      `safety_core.c` compile clean, zero warnings under
+      `-Wall -Wextra -Werror`) — the full `SaftyFW.elf` link currently fails
+      on an unrelated, pre-existing, uncommitted bug in
+      `firmware/CommonFW/src/kilnlink_status.c` (untracked in git, not
+      touched by this pass; see `firmware/SaftyFW/TODO.md` Phase 4 for
+      detail). No relay/GPIO6 wiring touched — guards remain evaluated but
+      not commanding hardware, matching this milestone's scope
 - [x] CI grep: `safety_core.c` never includes the link header — done 2026-08-16,
       `firmware/SaftyFW/tools/check_isolation.ps1`
 

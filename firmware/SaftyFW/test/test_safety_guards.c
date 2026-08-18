@@ -20,6 +20,21 @@ static safety_guard_input_t base_input(void)
     in.spi_failed = false;
     in.estop_pressed = false;
     in.heat_commanded = false;
+    /* New-guard fields default to the "nothing is wrong, nothing is known"
+     * shape: no context, link up, no fault, no current, relay not
+     * de-energized (nothing has tripped). Individual tests override what
+     * they need. */
+    in.context_valid = false;
+    in.zone_count = 0;
+    in.max_zone_setpoint_c = 0.0f;
+    in.nearest_zone_measured_c = 0.0f;
+    in.any_current_present = false;
+    in.relay_commanded_recently = false;
+    in.relay_commanded_continuously = false;
+    in.sample_counter_advancing = true;
+    in.main_fault_asserted = false;
+    in.link_up = true;
+    in.relay_deenergized = false;
     in.dt_s = 0.1f; /* safety_core's real tick period, per ARCHITECTURE.md section 4 */
     return in;
 }
@@ -30,9 +45,14 @@ static safety_guard_cfg_t base_cfg(void)
     memset(&cfg, 0, sizeof(cfg));
     cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
     cfg.abs_max_temp_c = 1300.0f;
+    cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
     /* Everything else left 0 -> firmware defaults (firing_margin_c=100,
      * bad_read_count_threshold=10, bad_read_time_s=5, blind_grace_s=60,
-     * frozen_window_s=600, cj_warn_c=60, cj_max_c=85, cj_time_s=60). */
+     * frozen_window_s=600, cj_warn_c=60, cj_max_c=85, cj_time_s=60,
+     * borrowed_stale_s=10, borrowed_stale_trip_s=60, overshoot_margin_c=75,
+     * overshoot_time_s=120, i_present_a=2.0, correlation_window_s=150,
+     * stuck_on_time_s=20, link_timeout_s=10, link_dead_hard_s=120,
+     * trip_verify_s=10, tc_disagreement_c=200, tc_disagreement_time_s=300). */
     return cfg;
 }
 
@@ -625,6 +645,569 @@ static void test_independence_invariant(void)
     TEST_CHECK(memcmp(&s_a, &s_b, sizeof(s_a)) == 0, "final state is bit-identical too -- no hidden nondeterminism");
 }
 
+static void test_s2(void)
+{
+    TEST_SECTION("S2 -- sustained excess over setpoint (context)");
+
+    /* Nuisance: a 40C transient overshoot at ramp-end, well within
+     * overshoot_margin_c (75C default), never trips no matter how long. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 940.0f; /* 40C over, under the 75C margin */
+        in.dt_s = 30.0f;
+        bool tripped = false;
+        for (int i = 0; i < 60 && !tripped; i++) { /* 30 minutes */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "a 40C transient overshoot within overshoot_margin_c never trips S2");
+    }
+
+    /* Nuisance: EXTERNAL_OVERHEAT ignores S2 entirely, even with a huge
+     * excess sustained indefinitely -- comparing a shell temp to a chamber
+     * setpoint is meaningless (SAFETY_MODEL.md section 4). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 950.0f; /* massively over setpoint+margin, but mode disables S2 */
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "EXTERNAL_OVERHEAT disables S2 entirely");
+    }
+
+    /* Nuisance: stale/absent context (context_valid=false) means inactive,
+     * not tripped, even with an extreme excess. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 1000.0f; /* would be a huge S2 excess if context were valid; stays under abs_max_temp_c so S1 doesn't interfere */
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "context_valid==false makes S2 inactive, not pessimistic");
+    }
+
+    /* Trip: a sustained 75C+ excess for overshoot_time_s (120s default). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 990.0f; /* 90C over, above the 75C margin */
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 13 && !tripped; i++) { /* 13*10s = 130s > 120s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "a sustained 90C excess for overshoot_time_s trips S2");
+        TEST_CHECK(s.reason == SAFETY_TRIP_OVER_SETPOINT, "reason is SAFETY_TRIP_OVER_SETPOINT");
+    }
+
+    /* Nuisance: a brief excursion that drops back down resets the timer. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t hot = base_input();
+        hot.context_valid = true;
+        hot.zone_count = 1;
+        hot.max_zone_setpoint_c = 900.0f;
+        hot.tc_c = 990.0f;
+        hot.dt_s = 60.0f;
+        safety_guard_input_t cool = hot;
+        cool.tc_c = 910.0f; /* back under the margin */
+        bool tripped = false;
+        for (int i = 0; i < 3 && !tripped; i++) {
+            tripped |= safety_guards_tick(&s, &cfg, &hot);
+            tripped |= safety_guards_tick(&s, &cfg, &cool);
+        }
+        TEST_CHECK(!tripped, "repeated brief excursions, each reset by a cool tick, never trip S2");
+    }
+}
+
+static void test_s3_s4(void)
+{
+    TEST_SECTION("S3/S4 -- load vs commanded correlation (context)");
+
+    /* Nuisance: current present with a relay recently commanded on --
+     * healthy low-duty firing -- never trips S3. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = true;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "current present with a recently-commanded relay never trips S3");
+    }
+
+    /* Nuisance: stale context makes S3 inactive even with current present
+     * and nothing commanded. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "context_valid==false makes S3 inactive, not pessimistic");
+    }
+
+    /* Trip: current present, nothing commanded recently, sustained for
+     * stuck_on_time_s (20s default) -- the welded-SSR case. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 5 && !tripped; i++) { /* 5*5s = 25s > 20s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "current present, nothing commanded, for stuck_on_time_s trips S3");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LOAD_STUCK_ON, "reason is SAFETY_TRIP_LOAD_STUCK_ON");
+    }
+
+    /* S4 never trips, by design -- only warns (SAFETY_MODEL.md section 4,
+     * S4: "this never trips, and that is a design decision"). Run it for a
+     * very long time to prove there is no hidden escalation path. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = false;
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S4's condition never trips, no matter how long it persists");
+        TEST_CHECK(s.s4_warn, "S4's condition does set the WARN level");
+    }
+
+    /* S4 stays quiet when current is present (element healthy). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = true;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s4_warn, "S4 does not warn when current is present alongside the commanded relay");
+    }
+}
+
+static void test_s6(void)
+{
+    TEST_SECTION("S6 -- main controller unhealthy");
+
+    /* Nuisance: mainFault not asserted, link up, never trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = false;
+        in.link_up = true;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "healthy mainFault + live link never trips S6");
+    }
+
+    /* Trip: S6a, mainFault asserted (already debounced), trips immediately. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "mainFault asserted trips S6a on the first tick");
+        TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "reason is SAFETY_TRIP_MAIN_FAULT");
+    }
+
+    /* Nuisance: S6b, a quiet link with NO current flowing never trips, no
+     * matter how long, short of the unconditional 120s backstop --
+     * SAFETY_MODEL.md section 2's "absence of information is not evidence
+     * of danger -- except when heat is on". */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 23 && !tripped; i++) { /* 23*5=115s, just under the 120s hard backstop */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "quiet link with no current does not trip S6b before the 120s hard backstop");
+    }
+
+    /* Trip: S6b soft path -- quiet link AND current flowing trips at
+     * link_timeout_s (10s default). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = true;
+        in.dt_s = 2.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) { /* 6*2=12s > 10s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "quiet link with current flowing trips S6b at link_timeout_s");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LINK_DEAD, "reason is SAFETY_TRIP_LINK_DEAD");
+    }
+
+    /* Trip: S6b hard backstop -- quiet link, no current, still trips
+     * unconditionally at link_dead_hard_s (120s default). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 13 && !tripped; i++) { /* 13*10=130s > 120s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "quiet link with no current still trips at the 120s unconditional hard backstop");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LINK_DEAD, "reason is SAFETY_TRIP_LINK_DEAD (hard backstop)");
+    }
+
+    /* Nuisance: link_up resets the elapsed timer -- a link that recovers
+     * briefly then goes quiet again does not benefit from the earlier
+     * accumulated silence. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t down = base_input();
+        down.link_up = false;
+        down.any_current_present = true;
+        down.dt_s = 8.0f;
+        safety_guard_input_t up = down;
+        up.link_up = true;
+        bool tripped = false;
+        for (int i = 0; i < 3 && !tripped; i++) { /* 8s down each round, well under 10s timeout, reset each time */
+            tripped |= safety_guards_tick(&s, &cfg, &down);
+            tripped |= safety_guards_tick(&s, &cfg, &up);
+        }
+        TEST_CHECK(!tripped, "link recovering resets S6b's elapsed timer, no accumulation across outages");
+    }
+}
+
+static void test_s9(void)
+{
+    TEST_SECTION("S9 -- trip ineffective / contactor welded (post-trip escalation)");
+
+    /* Nuisance: after a trip, if the relay verifiably de-energized and no
+     * current is present, S9 never escalates. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop); /* trip via S7 */
+        TEST_CHECK(s.is_tripped, "sanity: tripped via S7");
+
+        safety_guard_input_t verify = base_input();
+        verify.relay_deenergized = true;
+        verify.any_current_present = false;
+        verify.dt_s = 5.0f;
+        bool escalated = false;
+        for (int i = 0; i < 10 && !escalated; i++) { /* 50s, past trip_verify_s(10s) */
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+        }
+        TEST_CHECK(!escalated, "K4 verifiably open with no current: S9 never escalates");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false");
+    }
+
+    /* Trip: relay reported de-energized, but current is still present past
+     * trip_verify_s -- the welded-contactor case. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        safety_guard_input_t verify = base_input();
+        verify.relay_deenergized = true;
+        verify.any_current_present = true; /* contacts welded shut -- still conducting */
+        verify.dt_s = 3.0f;
+        bool escalated = false;
+        for (int i = 0; i < 5 && !escalated; i++) { /* 15s > trip_verify_s(10s) */
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+        }
+        TEST_CHECK(escalated, "K4 de-energized but current persists past trip_verify_s escalates to S9");
+        TEST_CHECK(s.trip_ineffective, "trip_ineffective latches");
+        TEST_CHECK(s.reason == SAFETY_TRIP_INEFFECTIVE, "reason escalates to SAFETY_TRIP_INEFFECTIVE");
+    }
+
+    /* Nuisance: the verify window does not start accumulating until
+     * relay_deenergized actually reports true -- an as-yet-unconfirmed
+     * de-energization must not silently count toward the 10s bar. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        safety_guard_input_t not_yet = base_input();
+        not_yet.relay_deenergized = false; /* not yet confirmed */
+        not_yet.any_current_present = true;
+        not_yet.dt_s = 20.0f;
+        bool escalated = false;
+        for (int i = 0; i < 3 && !escalated; i++) {
+            escalated = safety_guards_tick(&s, &cfg, &not_yet);
+        }
+        TEST_CHECK(!escalated, "relay_deenergized==false never accumulates toward S9's verify window");
+    }
+
+    /* Escalation only happens once -- the latched trip_ineffective does not
+     * re-fire "newly true" on subsequent ticks. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        safety_guard_input_t verify = base_input();
+        verify.relay_deenergized = true;
+        verify.any_current_present = true;
+        verify.dt_s = 15.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == true, "first tick past the bar escalates");
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == false, "further ticks do not re-report a new escalation");
+        TEST_CHECK(s.trip_ineffective, "trip_ineffective remains latched true");
+    }
+}
+
+static void test_s10(void)
+{
+    TEST_SECTION("S10 -- safety TC vs zone TC disagreement (WARN only, context)");
+
+    /* Nuisance: a normal mounting-position offset (well under
+     * tc_disagreement_c=200C) never warns, sustained indefinitely. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.tc_c = 900.0f;
+        in.max_zone_setpoint_c = 900.0f; /* keeps S2 from also tripping in this test */
+        in.nearest_zone_measured_c = 850.0f; /* 50C offset, normal */
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S10 never trips (WARN only) regardless of magnitude");
+        TEST_CHECK(!s.s10_warn, "a 50C offset within tc_disagreement_c never warns");
+    }
+
+    /* Nuisance: EXTERNAL_OVERHEAT disables S10 entirely -- a shell TC has
+     * no obligation to agree with the chamber. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_EXTERNAL_OVERHEAT;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.tc_c = 80.0f;
+        in.nearest_zone_measured_c = 900.0f; /* huge disagreement, but disabled by mode */
+        in.dt_s = 600.0f;
+        for (int i = 0; i < 5; i++) safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!s.s10_warn, "EXTERNAL_OVERHEAT disables S10's warning entirely");
+    }
+
+    /* WARN: sustained disagreement past tc_disagreement_c for
+     * tc_disagreement_time_s sets the WARN level, never a trip. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.tc_c = 900.0f;
+        in.max_zone_setpoint_c = 900.0f; /* keeps S2 from also tripping in this test */
+        in.nearest_zone_measured_c = 650.0f; /* 250C, over 200C */
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) { /* 360s > 300s */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "S10 stays WARN, never escalates to a trip");
+        TEST_CHECK(s.s10_warn, "sustained disagreement past both bars sets WARN");
+    }
+}
+
+static void test_s13(void)
+{
+    TEST_SECTION("S13 -- borrowed channel not updating (graduated, context)");
+
+    /* Nuisance: OWN_J7 (not borrowing) never engages S13 at all, no matter
+     * what sample_counter_advancing says. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_OWN_J7;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.sample_counter_advancing = false;
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "OWN_J7 mode never engages S13");
+        TEST_CHECK(!s.s13_warn, "OWN_J7 mode: no WARN either");
+    }
+
+    /* Nuisance: an advancing sample_counter never warns or trips, even
+     * sustained. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.sample_counter_advancing = true;
+        in.dt_s = 60.0f;
+        bool tripped = false;
+        for (int i = 0; i < 20 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "an advancing sample_counter never trips S13");
+        TEST_CHECK(!s.s13_warn, "an advancing sample_counter never warns either");
+    }
+
+    /* Graduated: WARN at borrowed_stale_s (10s), TRIP at
+     * borrowed_stale_trip_s (60s). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.sample_counter_advancing = false;
+        in.dt_s = 5.0f;
+        bool tripped = false;
+        for (int i = 0; i < 2; i++) { /* 10s: reaches borrowed_stale_s exactly */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "10s stale: not yet tripped");
+        TEST_CHECK(s.s13_warn, "10s stale: WARN active (>= borrowed_stale_s)");
+        for (int i = 0; i < 10 && !tripped; i++) { /* continue to 60s total */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "60s stale (>= borrowed_stale_trip_s) trips S13");
+        TEST_CHECK(s.reason == SAFETY_TRIP_BORROWED_STALE, "reason is SAFETY_TRIP_BORROWED_STALE");
+    }
+
+    /* BOTH mode also engages S13. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BOTH;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.sample_counter_advancing = false;
+        in.dt_s = 61.0f;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped, "BOTH mode engages S13 the same as BORROWED_ZONE");
+    }
+
+    /* A resumed sample_counter resets the elapsed timer, clearing WARN. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t stale = base_input();
+        stale.context_valid = true;
+        stale.sample_counter_advancing = false;
+        stale.dt_s = 15.0f;
+        safety_guards_tick(&s, &cfg, &stale); /* 15s stale: WARN */
+        TEST_CHECK(s.s13_warn, "sanity: WARN set");
+        safety_guard_input_t fresh = stale;
+        fresh.sample_counter_advancing = true;
+        safety_guards_tick(&s, &cfg, &fresh);
+        TEST_CHECK(!s.s13_warn, "a resumed sample_counter clears S13's WARN immediately");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -632,5 +1215,11 @@ void run_test_safety_guards(void)
     test_s7();
     test_s11();
     test_s12();
+    test_s2();
+    test_s3_s4();
+    test_s6();
+    test_s9();
+    test_s10();
+    test_s13();
     test_independence_invariant();
 }

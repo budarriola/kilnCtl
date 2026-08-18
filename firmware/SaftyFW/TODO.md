@@ -295,6 +295,35 @@ header comment, so the build is reproducible elsewhere.
       (no current sense, no link context) — `heat_commanded` is a plain bool
       the caller supplies, defaulting to false, which keeps S11 correctly
       dormant on an idle kiln until Phase 6/7 wire a real signal into it.
+- [x] Implement **S2** (sustained over-setpoint), **S3** (load stuck on),
+      **S4** (load inactive, WARN only), **S6** (main controller unhealthy,
+      both signals), **S9** (trip-ineffective escalation), **S10** (safety TC
+      vs zone TC disagreement, WARN), **S13** (borrowed channel stale) —
+      2026-08-18, `src/safety_guards.c`/`.h`. Same pure-function discipline as
+      the first five: no RTOS, no SDK, no I/O, `dt_s` passed in. Rather than
+      pulling in `link_task`'s real `context_snapshot_t` or `current_task`'s
+      `current_snapshot_t` (neither exists as a real producer yet — Phase 6/7),
+      the specific scalar facts each of these seven guards needs (max active
+      zone setpoint, nearest zone measurement, current-presence booleans,
+      relay-recent/continuous booleans, a per-zone sample-counter-advancing
+      flag, mainFault, link-up, post-trip relay-deenergized) are flattened
+      directly into `safety_guard_input_t` with a single `context_valid` gate
+      collapsing "never received / stale / DEGRADED_NO_CONTEXT" per
+      ARCHITECTURE.md section 9's rule that these guards go inactive, never
+      pessimistic, on unusable context. S9 required restructuring
+      `safety_guards_tick()`'s early-return-when-latched path, since it is the
+      one guard that must keep evaluating (whether the relay actually
+      de-energized and current is still present) after every other guard has
+      already stopped mattering — it escalates `state->trip_ineffective`
+      independently of `is_tripped` and overwrites the reported reason to
+      `SAFETY_TRIP_INEFFECTIVE`, matching ARCHITECTURE.md section 9's trip-code
+      comment calling S9 "escalation, not a cause". S8 (implausible rate of
+      rise) remains unimplemented by design — `SAFETY_MODEL.md` section 4 says
+      it ships disabled until a real full-power ramp is logged (Phase 9); there
+      is no defensible threshold to build yet. Runtime configuration integrity
+      (the periodic CRC background check) is also out of scope here — it needs
+      `config_store` (Phase 9), which doesn't exist. This module now implements
+      12 of `SAFETY_MODEL.md` section 4's 13 guards.
 - [x] `discrete_task`: debounce E-stop (50 ms) and `mainFault` (200 ms).
       Built in the relay-authority pass, 2026-08-16: a standard
       consecutive-sample debounce in `src/tasks/discrete_task.c`, sample
@@ -306,7 +335,21 @@ header comment, so the build is reproducible elsewhere.
 - [x] Host test harness (MSVC, no SDK), mirroring `firmware/KilnFW/App/test/`.
       `test/test_common.h` (copied verbatim), `test/test_main.c`,
       `test/test_safety_guards.c`, `test/build_host_tests.ps1`. Builds and
-      passes clean under `/W4 /WX`, 80/80 checks, 2026-08-16.
+      passes clean under `/W4 /WX`, 2026-08-16 (80/80 checks then; now
+      320/320 across the whole host-test suite as of 2026-08-18's S2/S3/S4/
+      S6/S9/S10/S13 pass, 48 of those checks new this pass). Also
+      build-verified 2026-08-18 under the real arm-none-eabi-gcc/pico-sdk
+      toolchain: `safety_guards.c` and `safety_core.c` compile clean with
+      zero warnings under `-Wall -Wextra -Werror` as part of a `cmake --build`
+      — the full link fails, but on a pre-existing, unrelated cause: an
+      **untracked, mid-work `firmware/CommonFW/src/kilnlink_status.c`**
+      (declared functions whose parameter types don't match
+      `kilnlink_status.h`, e.g. `kilnlink_status_get_status_t` vs
+      `kilnlink_status_status_t`) left uncommitted in the tree from a
+      different, unfinished pass. Not touched or fixed here — out of this
+      pass's scope (guard logic, not the status codec), and not something
+      this session introduced (confirmed via `git status`: those
+      `CommonFW` files are `??` untracked, not modified by this change).
 - [x] **Write the nuisance-rejection tests before the trip tests.** A 900 ms
       sensor dropout must *not* trip S5; a single noisy SPI read must not either.
       Both cases are explicit tests in `test/test_safety_guards.c`, ahead of
