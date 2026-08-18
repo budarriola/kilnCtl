@@ -471,13 +471,27 @@ reimplementing the transfer.
 
 **Logging and consoles**
 - [ ] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5), relayed by the ESP — primary path, no new hardware
-- [ ] Probe UART bridge (UART0, GP16/GP17) supported as the bench console — same probe cable as SWD
+- [x] Probe UART bridge (UART0, GP16/GP17) supported as the bench console — same probe cable as SWD.
+      `console_capture.py`'s `add_safety_probe_uart()` reads it as a plain
+      newline-delimited ASCII port (no framing, since the wire-protocol relay
+      above doesn't exist yet). Host-tested only with synthetic queued events
+      (no Pico/probe attached in this environment) — real-port behavior is
+      unverified.
 - [ ] RTT-over-SWD console as the fallback path, for when the link is down or GP16/GP17 are inaccessible
 - [ ] Pico USB CDC **not** offered as a transport; reported as absent unless `SAFTYFW_ENABLE_USB_STDIO` was built in
-- [ ] Separate console window per processor, same format
-- [ ] Separate log file per processor **plus** an interleaved one
-- [ ] PC arrival time as the common clock; each side's uptime recorded alongside
-- [ ] Transport marked per line (relayed / probe-UART / RTT)
+- [x] Separate console window per processor, same format — `console_capture.py`
+      is a CLI capture (`kilnctrl-console-capture` / `python -m kilnctrl.console_capture`),
+      not a Tk window; it reuses `LogClient`/`get_device_log`'s plumbing for
+      ESP and opens the probe UART directly for SAFETY. ROADMAP.md M1 note below.
+- [x] Separate log file per processor **plus** an interleaved one — `esp_*.log`,
+      `safety_*.log`, `interleaved_*.log` under `tools/PcTools/logs/console/`,
+      one timestamped set per capture run (2026-08-18)
+- [x] PC arrival time as the common clock — every `ConsoleEvent.pc_time` is
+      `time.time()` at capture, same reasoning as `get_device_log_json`; each
+      side's own uptime is not recorded (neither LOG payload carries one today)
+- [ ] Transport marked per line (relayed / probe-UART / RTT) — today only the
+      source processor (`ESP`/`SAFETY`) is tagged, since only one transport
+      per processor exists in code yet
 - [ ] Per-peer level filter
 - [ ] Runtime log-level control for the safety processor over the link, default warnings+errors
 - [ ] Transport availability shown honestly; USB console reported as a build-time capability, not a toggle

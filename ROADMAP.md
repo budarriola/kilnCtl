@@ -116,7 +116,17 @@ soldering session.
       — done 2026-08-17, `kilnctrl.debug_probe` + `openocd_util` (`tools/PcTools/TODO.md`
       "Debug and programming"); flashed and verified `firmware/SaftyFW/build/SaftyFW.elf`
       to the Pico over SWD as the first real use
-- [ ] Per-processor console windows and log files, plus an interleaved file
+- [x] Per-processor console windows and log files, plus an interleaved file —
+      `tools/PcTools/src/kilnctrl/console_capture.py` (`kilnctrl-console-capture`
+      CLI, not a Tk window: reuses the existing ESP `LogClient`/`get_device_log`
+      plumbing, adds a raw-serial reader for the Pico's probe UART console),
+      writing `esp_*.log` / `safety_*.log` / `interleaved_*.log` under
+      `tools/PcTools/logs/console/`. Host-verified: the interleave/merge and
+      file-writing logic, with synthetic events (no hardware attached this
+      session). Not verified against real ESP or Pico console traffic; the
+      wire-protocol LOG-relay path for SAFETY (task 5, device SAFETY) is still
+      unimplemented in firmware, so today's SAFETY capture only covers the
+      probe-UART bench path — see `tools/PcTools/TODO.md` "Logging and consoles"
 
 **Bench hardware now present, confirmed 2026-08-17:**
 - [x] Raspberry Pi Debug Probe connected to A1 (Pico), SWD + UART bridge —
