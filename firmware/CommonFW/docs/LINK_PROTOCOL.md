@@ -1,12 +1,23 @@
 # Isolated Link Protocol
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** partially implemented · **Last reviewed:** 2026-08-18
 > **Keep this file current.** This document is the *contract* between two
 > independently-built firmwares — it is owned by `CommonFW`, not by either side.
 > If you change a frame layout, an id, or a timing rule, update it in the same
 > commit as the code and bump `KILNLINK_PROTOCOL_VERSION` if a peer would break.
 > If it disagrees with the code, **the code wins** — fix this file and say so.
 > A completion checklist is at the bottom.
+>
+> **2026-08-18: two of the payload codecs described below now exist and are
+> host-tested** — `firmware/CommonFW/src/kilnlink_context.c` encodes/decodes
+> sec 4's `SAFETY_CMD_PUSH_CONTEXT` (0x07), and
+> `firmware/CommonFW/src/kilnlink_status.c` encodes/decodes sec 6's Frame A
+> `SAFETY_CMD_GET_STATUS` (0x01). See `firmware/CommonFW/README.md`'s
+> Completion checklist for exactly what is and isn't done — the rest of secs
+> 4 and 6 (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`, `SET_CLOCK`,
+> `ANNOUNCE_VERSION`, `DIAG`, `FW_VERSION`, `TRIP_EVENT`, `POWER`) still have
+> only the concrete layouts below, no codec yet. Nothing in this document is
+> wired into either firmware's runtime path.
 
 Implemented **once**, in [`../`](../README.md), and linked into both
 [`../../KilnFW`](../../KilnFW) and [`../../SaftyFW`](../../SaftyFW). Do not
