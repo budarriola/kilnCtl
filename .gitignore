@@ -1,6 +1,10 @@
 # Secrets - never commit. See .env.example for the expected keys.
 /.env
 
+# kilnctrl MCP/GUI Wi-Fi credential cache (tools/PcTools) - local-only, lets the
+# MCP auto-rejoin the board's home network without prompting each session.
+/tools/PcTools/wifi_credentials.json
+
 # Mouser lookup result cache (tools/mykicadMcp/kicad_mouser_tool.py) - local speed-up only.
 /.mouser_cache.json
 

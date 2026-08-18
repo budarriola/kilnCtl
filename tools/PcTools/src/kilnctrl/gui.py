@@ -43,7 +43,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable, Optional
 
-from . import devices, pin_overlay, pinout_reference, settings
+from . import devices, pin_overlay, pinout_reference, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -156,6 +156,12 @@ _DEVICE_LOG_SESSION_METHOD_NAME: dict[LogLevel, str] = {
 #: to a home network. The PC must itself be joined to that AP for requests
 #: here to route, same as a phone doing first-time setup would be.
 _WIFI_AP_DEFAULT_HOST = "192.168.4.1"
+
+#: mDNS hostname the firmware advertises unconditionally at boot (see
+#: app_main's mdns_hostname_set("kiln") in KilnFW/App/main.c) -- resolves in
+#: both AP-fallback and station mode, so it's shown to the user as a
+#: network-independent alternative to the raw IP in the host field.
+_WIFI_MDNS_HOST = "kiln.local"
 
 #: Timeout for the Wi-Fi settings popup's HTTP calls to wifi_provision_http.c
 #: -- generous enough for a scan (which blocks the ESP's handler on the
@@ -1421,6 +1427,13 @@ class KilnCtrlApp:
     # on the same home network once it's provisioned.
     def open_wifi_settings_popup(self) -> None:
         self._popup("wifi_settings", "Wi-Fi Settings", self._build_wifi_settings_popup)
+        # Default to UART whenever we have no evidence of a live Wi-Fi link --
+        # the HTTP path has nothing to talk to before the board has ever
+        # joined a network (or if it's dropped off one), so start on the
+        # link that always works instead of making the user discover the
+        # checkbox after a failed query.
+        wifi_reachable = bool(self.wifi_status and self.wifi_status.connected)
+        self.wifi_use_uart_var.set(not wifi_reachable)
         self.wifi_settings_refresh_status_async()
 
     # -- Firing Status popup -------------------------------------------------
@@ -1459,6 +1472,17 @@ class KilnCtrlApp:
         )
         ttk.Button(
             host_row, text="Refresh Status", command=self.wifi_settings_refresh_status_async
+        ).pack(side="left")
+
+        # Also reachable at kiln.local -- the firmware advertises this over
+        # mDNS unconditionally at boot (both AP-fallback and station mode),
+        # so it works even when the IP above is stale or unknown. Shown as a
+        # copy-pasteable hint, not wired as the host field's default: mDNS
+        # resolution isn't guaranteed on every OS (needs Bonjour/avahi).
+        mdns_row = ttk.Frame(top)
+        mdns_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(
+            mdns_row, text=f"Also reachable at: {_WIFI_MDNS_HOST}", foreground="#555555",
         ).pack(side="left")
 
         # UART toggle: the whole point of task WIFI (11) is provisioning
@@ -1630,8 +1654,16 @@ class KilnCtrlApp:
                 data = self._wifi_http_get("/status")
             except Exception as exc:  # pragma: no cover - network/device dependent
                 text = self._wifi_http_error_text(exc)
-                self.session_log.warning("Wi-Fi settings status query failed: %s", text)
-                self.post(lambda: self._wifi_settings_status_var.set(f"Query failed: {text}"))
+                self.session_log.warning(
+                    "Wi-Fi settings HTTP status query failed (%s), falling back to UART", text
+                )
+                # HTTP is unreachable -- fall back to UART automatically
+                # rather than leaving the user staring at "Query failed".
+                # Flip the checkbox too so every later action in this popup
+                # (scan/connect/mode/AP identity) follows the same path
+                # instead of retrying the dead HTTP link.
+                self.post(lambda: self.wifi_use_uart_var.set(True))
+                self.post(self.wifi_settings_refresh_status_async)
                 return
             self.post(lambda: self._apply_wifi_settings_status(data))
 
@@ -1720,6 +1752,7 @@ class KilnCtrlApp:
             self.wifi_settings_status_var.set("Connect: SSID is required.")
             return
         password = self.wifi_password_var.get()
+        wifi_credentials.save(ssid, password)
         if self._wifi_use_uart():
             self.wifi_settings_status_var.set(f"Sending credentials for {ssid!r} over UART...")
             self.session_log.info("wifi (UART) settings: add network %r", ssid)

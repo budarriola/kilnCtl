@@ -66,7 +66,7 @@ try:
 except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
-from . import actions, debug_probe, devices, openocd_util, settings
+from . import actions, debug_probe, devices, openocd_util, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -1623,10 +1623,29 @@ def wifi_scan() -> str:
 
 
 @_tool()
-def wifi_add_network(ssid: str, password: str = "") -> str:
-    """Save a network to try in home (station) mode. Empty password = open network."""
+def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None) -> str:
+    """Save a network and immediately attempt to join it -- this is the
+    one-step way to connect the board to a specific scanned network; no
+    separate wifi_set_mode() call is needed first. If the board is currently
+    in AP (provisioning) mode, submitting a network switches it to home mode
+    automatically. Empty password = open network.
+
+    Caveat: the firmware re-runs its scan-based tie-break before joining, so
+    if multiple saved networks are in range it may connect to a stronger one
+    instead of the one just added -- "ok" here means "saved and a join was
+    attempted", not "connected to this exact SSID"; call wifi_get_status()
+    afterward to see which network (if any) actually came up.
+
+    Leave ssid unset to auto-connect using the credentials most recently
+    saved from the GUI's Wi-Fi Settings popup (see wifi_credentials.py) --
+    fails with a clear error if nothing has been saved that way yet."""
+    if ssid is None:
+        saved = wifi_credentials.load()
+        if saved is None:
+            return "error: no ssid given and no saved credentials found (set Wi-Fi up once via the GUI first)"
+        ssid, password = saved["ssid"], saved["password"]
     try:
-        ok = _wifi.add_network(ssid, password)
+        ok = _wifi.add_network(ssid, password or "")
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     return f"ok - saved {ssid!r}" if ok else f"refused - could not save {ssid!r}"
