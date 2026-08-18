@@ -82,6 +82,13 @@
   .mode-toggle button.active { background: var(--link); color: #fff; }
   .mode-toggle button + button { border-left: 1px solid var(--input-border); }
   .hint { color: var(--fg); opacity: 0.7; font-size: 0.85em; margin-top: 0.3em; }
+  /* TODO.md 10.9: AP-join QR code, client-side generated -- see the
+     KilnQr IIFE in the script block below (a byte-mode-only port of
+     qrcodegen.c, the same MIT-licensed Nayuki library LVGL's lv_qrcode
+     already vendors for the LCD side of this feature). */
+  #apQrSection { margin-top: 1em; padding: 1em; border: 1px solid var(--border);
+                 border-radius: var(--ui-radius); text-align: center; }
+  #apQrSection canvas { background: #fff; border-radius: 4px; max-width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -118,6 +125,11 @@
 
 <div id="apSection">
   <h2>This board's access point</h2>
+  <div id="apQrSection">
+    <canvas id="apQrCanvas" width="200" height="200"></canvas>
+    <div class="hint">Scan with a phone camera to join this network directly (a second
+      device already on this page doesn't need it).</div>
+  </div>
   <form id="apForm">
     <label for="apSsid">Network name (SSID)</label>
     <input type="text" id="apSsid" name="ap_ssid" maxlength="32" required>
@@ -130,6 +142,481 @@
 </div>
 
 <script>
+/* ---- TODO.md 10.9: client-side QR encoder (no CDN/external requests, per
+   theme.css's own embedding precedent) --------------------------------
+   Minimal QR Code encoder, byte-mode only (sufficient for the WIFI: URI
+   below), ported line-for-line from Project Nayuki's "QR Code generator
+   library (C)" (MIT License) -- the same library already vendored in this
+   repo at components/lvgl/src/libs/qrcode/qrcodegen.c and used by LVGL's
+   lv_qrcode widget for the LCD side of this feature (see qrcodegen.h's
+   header comment for the upstream project). Every ported function mirrors
+   that C source's logic and constant tables (Reed-Solomon generator,
+   function-module placement, format/version info, masking + penalty
+   scoring) exactly; only the numeric/alphanumeric/kanji/ECI segment modes
+   were dropped, since a WIFI:/http: string always needs byte mode anyway.
+   Verified independently: encoded output for several WIFI:/URL strings
+   (short/long SSID+password, escaped special characters, empty password,
+   non-ASCII/emoji) was rendered to an image and round-tripped through
+   OpenCV's cv2.QRCodeDetector (a decoder with no code in common with this
+   encoder) -- all decoded back to the exact original string. See
+   TODO.md 10.9's status note for the verification session.
+   Original copyright notice (applies to the ported logic):
+     Copyright (c) Project Nayuki. (MIT License)
+     https://www.nayuki.io/page/qr-code-generator-library */
+var KilnQr = (function () {
+  'use strict';
+
+  var ECC_CODEWORDS_PER_BLOCK = [
+    [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+    [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+  ];
+  var NUM_ERROR_CORRECTION_BLOCKS = [
+    [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+    [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
+    [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
+    [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81],
+  ];
+  var PENALTY_N1 = 3, PENALTY_N2 = 3, PENALTY_N3 = 40, PENALTY_N4 = 10;
+  var ECC_LOW = 0, ECC_MEDIUM = 1, ECC_HIGH = 3;
+
+  function getNumRawDataModules(ver) {
+    var result = (16 * ver + 128) * ver + 64;
+    if (ver >= 2) {
+      var numAlign = Math.floor(ver / 7) + 2;
+      result -= (25 * numAlign - 10) * numAlign - 55;
+      if (ver >= 7) result -= 36;
+    }
+    return result;
+  }
+
+  function getNumDataCodewords(version, ecl) {
+    return Math.floor(getNumRawDataModules(version) / 8)
+      - ECC_CODEWORDS_PER_BLOCK[ecl][version] * NUM_ERROR_CORRECTION_BLOCKS[ecl][version];
+  }
+
+  function numCharCountBitsByte(version) {
+    return version <= 9 ? 8 : 16;
+  }
+
+  // ---- Bit buffer (MSB-first, matches qrcodegen.c's appendBitsToBuffer) ----
+  function BitBuf() { this.bits = []; }
+  BitBuf.prototype.append = function (val, numBits) {
+    for (var i = numBits - 1; i >= 0; i--) this.bits.push((val >>> i) & 1);
+  };
+  BitBuf.prototype.toBytes = function () {
+    var out = new Uint8Array(Math.ceil(this.bits.length / 8));
+    for (var i = 0; i < this.bits.length; i++) {
+      if (this.bits[i]) out[i >> 3] |= 1 << (7 - (i & 7));
+    }
+    return out;
+  };
+
+  // ---- GF(256) / Reed-Solomon ----
+  function finiteFieldMultiply(x, y) {
+    var z = 0;
+    for (var i = 7; i >= 0; i--) {
+      z = ((z << 1) ^ ((z >>> 7) * 0x11d)) & 0xff;
+      z ^= ((y >>> i) & 1) * x;
+      z &= 0xff;
+    }
+    return z;
+  }
+
+  function calcReedSolomonGenerator(degree) {
+    var result = new Uint8Array(degree);
+    result[degree - 1] = 1;
+    var root = 1;
+    for (var i = 0; i < degree; i++) {
+      for (var j = 0; j < degree; j++) {
+        result[j] = finiteFieldMultiply(result[j], root);
+        if (j + 1 < degree) result[j] ^= result[j + 1];
+      }
+      root = finiteFieldMultiply(root, 0x02);
+    }
+    return result;
+  }
+
+  function calcReedSolomonRemainder(data, generator, degree) {
+    var result = new Uint8Array(degree);
+    for (var i = 0; i < data.length; i++) {
+      var factor = data[i] ^ result[0];
+      for (var k = 0; k < degree - 1; k++) result[k] = result[k + 1];
+      result[degree - 1] = 0;
+      for (var j = 0; j < degree; j++) result[j] ^= finiteFieldMultiply(generator[j], factor);
+    }
+    return result;
+  }
+
+  function addEccAndInterleave(dataCodewords, version, ecl) {
+    var numBlocks = NUM_ERROR_CORRECTION_BLOCKS[ecl][version];
+    var blockEccLen = ECC_CODEWORDS_PER_BLOCK[ecl][version];
+    var rawCodewords = Math.floor(getNumRawDataModules(version) / 8);
+    var dataLen = getNumDataCodewords(version, ecl);
+    if (dataCodewords.length !== dataLen) throw new Error('data length mismatch');
+    var numShortBlocks = numBlocks - (rawCodewords % numBlocks);
+    var shortBlockDataLen = Math.floor(rawCodewords / numBlocks) - blockEccLen;
+
+    var generator = calcReedSolomonGenerator(blockEccLen);
+    var blocks = [];
+    var eccBlocks = [];
+    var offset = 0;
+    var i, j;
+    for (i = 0; i < numBlocks; i++) {
+      var datLen = shortBlockDataLen + (i < numShortBlocks ? 0 : 1);
+      var block = dataCodewords.slice(offset, offset + datLen);
+      offset += datLen;
+      blocks.push(block);
+      eccBlocks.push(calcReedSolomonRemainder(block, generator, blockEccLen));
+    }
+
+    var result = new Uint8Array(rawCodewords);
+    var k = 0;
+    for (j = 0; j < shortBlockDataLen + 1; j++) {
+      for (i = 0; i < numBlocks; i++) {
+        if (j < blocks[i].length) result[k++] = blocks[i][j];
+      }
+    }
+    for (j = 0; j < blockEccLen; j++) {
+      for (i = 0; i < numBlocks; i++) result[k++] = eccBlocks[i][j];
+    }
+    if (k !== rawCodewords) throw new Error('interleave count mismatch');
+    return result;
+  }
+
+  // ---- Alignment pattern positions ----
+  function getAlignmentPatternPositions(version) {
+    if (version === 1) return [];
+    var numAlign = Math.floor(version / 7) + 2;
+    var step = (version === 32) ? 26
+      : Math.floor((version * 4 + numAlign * 2 + 1) / (numAlign * 2 - 2)) * 2;
+    var result = new Array(numAlign);
+    var pos = version * 4 + 10;
+    for (var i = numAlign - 1; i >= 1; i--, pos -= step) result[i] = pos;
+    result[0] = 6;
+    return result;
+  }
+
+  // ---- Grid helpers ----
+  function makeGrid(size, fill) {
+    var g = [];
+    for (var y = 0; y < size; y++) g.push(new Array(size).fill(fill));
+    return g;
+  }
+
+  function fillRect(modules, isFunction, left, top, w, h) {
+    for (var dy = 0; dy < h; dy++) {
+      for (var dx = 0; dx < w; dx++) {
+        modules[top + dy][left + dx] = true;
+        isFunction[top + dy][left + dx] = true;
+      }
+    }
+  }
+
+  function initializeFunctionModules(version, size, modules, isFunction) {
+    fillRect(modules, isFunction, 6, 0, 1, size);
+    fillRect(modules, isFunction, 0, 6, size, 1);
+    fillRect(modules, isFunction, 0, 0, 9, 9);
+    fillRect(modules, isFunction, size - 8, 0, 8, 9);
+    fillRect(modules, isFunction, 0, size - 8, 9, 8);
+
+    var alignPos = getAlignmentPatternPositions(version);
+    var numAlign = alignPos.length;
+    for (var i = 0; i < numAlign; i++) {
+      for (var j = 0; j < numAlign; j++) {
+        if ((i === 0 && j === 0) || (i === 0 && j === numAlign - 1) || (i === numAlign - 1 && j === 0)) continue;
+        fillRect(modules, isFunction, alignPos[i] - 2, alignPos[j] - 2, 5, 5);
+      }
+    }
+    if (version >= 7) {
+      fillRect(modules, isFunction, size - 11, 0, 3, 6);
+      fillRect(modules, isFunction, 0, size - 11, 6, 3);
+    }
+  }
+
+  function setModule(modules, x, y, black) { modules[y][x] = black; }
+  function setModuleBounded(modules, size, x, y, black) {
+    if (x >= 0 && x < size && y >= 0 && y < size) modules[y][x] = black;
+  }
+  function getBit(x, i) { return ((x >>> i) & 1) !== 0; }
+
+  function drawWhiteFunctionModules(modules, size, version) {
+    var i, j, dx, dy;
+    for (i = 7; i < size - 7; i += 2) {
+      setModule(modules, 6, i, false);
+      setModule(modules, i, 6, false);
+    }
+    for (dy = -4; dy <= 4; dy++) {
+      for (dx = -4; dx <= 4; dx++) {
+        var dist = Math.max(Math.abs(dx), Math.abs(dy));
+        if (dist === 2 || dist === 4) {
+          setModuleBounded(modules, size, 3 + dx, 3 + dy, false);
+          setModuleBounded(modules, size, size - 4 + dx, 3 + dy, false);
+          setModuleBounded(modules, size, 3 + dx, size - 4 + dy, false);
+        }
+      }
+    }
+    var alignPos = getAlignmentPatternPositions(version);
+    var numAlign = alignPos.length;
+    for (i = 0; i < numAlign; i++) {
+      for (j = 0; j < numAlign; j++) {
+        if ((i === 0 && j === 0) || (i === 0 && j === numAlign - 1) || (i === numAlign - 1 && j === 0)) continue;
+        for (dy = -1; dy <= 1; dy++) {
+          for (dx = -1; dx <= 1; dx++) {
+            setModule(modules, alignPos[i] + dx, alignPos[j] + dy, dx === 0 && dy === 0);
+          }
+        }
+      }
+    }
+    if (version >= 7) {
+      var rem = version;
+      for (i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+      var bits = (version << 12) | rem;
+      for (i = 0; i < 6; i++) {
+        for (j = 0; j < 3; j++) {
+          var k = size - 11 + j;
+          setModule(modules, k, i, (bits & 1) !== 0);
+          setModule(modules, i, k, (bits & 1) !== 0);
+          bits >>>= 1;
+        }
+      }
+    }
+  }
+
+  function drawFormatBits(ecl, mask, modules, size) {
+    var table = [1, 0, 3, 2];
+    var data = (table[ecl] << 3) | mask;
+    var rem = data;
+    var i;
+    for (i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    var bits = ((data << 10) | rem) ^ 0x5412;
+
+    for (i = 0; i <= 5; i++) setModule(modules, 8, i, getBit(bits, i));
+    setModule(modules, 8, 7, getBit(bits, 6));
+    setModule(modules, 8, 8, getBit(bits, 7));
+    setModule(modules, 7, 8, getBit(bits, 8));
+    for (i = 9; i < 15; i++) setModule(modules, 14 - i, 8, getBit(bits, i));
+
+    for (i = 0; i < 8; i++) setModule(modules, size - 1 - i, 8, getBit(bits, i));
+    for (i = 8; i < 15; i++) setModule(modules, 8, size - 15 + i, getBit(bits, i));
+    setModule(modules, 8, size - 8, true);
+  }
+
+  function drawCodewords(data, dataLen, modules, isFunction, size) {
+    var i = 0;
+    for (var right = size - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      for (var vert = 0; vert < size; vert++) {
+        for (var j = 0; j < 2; j++) {
+          var x = right - j;
+          var upward = ((right + 1) & 2) === 0;
+          var y = upward ? size - 1 - vert : vert;
+          if (!isFunction[y][x] && i < dataLen * 8) {
+            var black = getBit(data[i >> 3], 7 - (i & 7));
+            modules[y][x] = black;
+            i++;
+          }
+        }
+      }
+    }
+    if (i !== dataLen * 8) throw new Error('codeword placement count mismatch');
+  }
+
+  function maskInvert(x, y, mask) {
+    switch (mask) {
+      case 0: return (x + y) % 2 === 0;
+      case 1: return y % 2 === 0;
+      case 2: return x % 3 === 0;
+      case 3: return (x + y) % 3 === 0;
+      case 4: return (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
+      case 5: return (x * y) % 2 + (x * y) % 3 === 0;
+      case 6: return ((x * y) % 2 + (x * y) % 3) % 2 === 0;
+      case 7: return (((x + y) % 2) + (x * y) % 3) % 2 === 0;
+    }
+    throw new Error('bad mask');
+  }
+
+  function applyMask(isFunction, modules, size, mask) {
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        if (isFunction[y][x]) continue;
+        modules[y][x] = modules[y][x] !== maskInvert(x, y, mask);
+      }
+    }
+  }
+
+  function addRunToHistory(run, history) {
+    for (var i = history.length - 1; i > 0; i--) history[i] = history[i - 1];
+    history[0] = run;
+  }
+
+  function hasFinderLikePattern(h) {
+    var n = h[1];
+    return n > 0 && h[2] === n && h[4] === n && h[5] === n &&
+      h[3] === n * 3 && (h[0] >= n * 4 || h[6] >= n * 4);
+  }
+
+  function getPenaltyScore(modules, size) {
+    var result = 0;
+    var y, x;
+    for (y = 0; y < size; y++) {
+      var runHistory = [0, 0, 0, 0, 0, 0, 0];
+      var color = false, runX = 0;
+      for (x = 0; x < size; x++) {
+        if (modules[y][x] === color) {
+          runX++;
+          if (runX === 5) result += PENALTY_N1;
+          else if (runX > 5) result++;
+        } else {
+          addRunToHistory(runX, runHistory);
+          if (!color && hasFinderLikePattern(runHistory)) result += PENALTY_N3;
+          color = modules[y][x];
+          runX = 1;
+        }
+      }
+      addRunToHistory(runX, runHistory);
+      if (color) addRunToHistory(0, runHistory);
+      if (hasFinderLikePattern(runHistory)) result += PENALTY_N3;
+    }
+    for (x = 0; x < size; x++) {
+      var runHistory2 = [0, 0, 0, 0, 0, 0, 0];
+      var color2 = false, runY = 0;
+      for (y = 0; y < size; y++) {
+        if (modules[y][x] === color2) {
+          runY++;
+          if (runY === 5) result += PENALTY_N1;
+          else if (runY > 5) result++;
+        } else {
+          addRunToHistory(runY, runHistory2);
+          if (!color2 && hasFinderLikePattern(runHistory2)) result += PENALTY_N3;
+          color2 = modules[y][x];
+          runY = 1;
+        }
+      }
+      addRunToHistory(runY, runHistory2);
+      if (color2) addRunToHistory(0, runHistory2);
+      if (hasFinderLikePattern(runHistory2)) result += PENALTY_N3;
+    }
+    for (y = 0; y < size - 1; y++) {
+      for (x = 0; x < size - 1; x++) {
+        var c = modules[y][x];
+        if (c === modules[y][x + 1] && c === modules[y + 1][x] && c === modules[y + 1][x + 1]) {
+          result += PENALTY_N2;
+        }
+      }
+    }
+    var black = 0;
+    for (y = 0; y < size; y++) for (x = 0; x < size; x++) if (modules[y][x]) black++;
+    var total = size * size;
+    var k = Math.floor((Math.abs(black * 20 - total * 10) + total - 1) / total) - 1;
+    result += k * PENALTY_N4;
+    return result;
+  }
+
+  // ---- Top level: encode a byte array as a QR code, auto version/mask, boosted ECC ----
+  function encodeBytes(dataBytes, minEcl) {
+    minEcl = (minEcl === undefined) ? ECC_LOW : minEcl;
+    var version, dataUsedBits, ecl = minEcl;
+    for (version = 1; version <= 40; version++) {
+      var dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
+      var ccbits = numCharCountBitsByte(version);
+      if (dataBytes.length >= (1 << ccbits)) { dataUsedBits = -1; }
+      else { dataUsedBits = 4 + ccbits + dataBytes.length * 8; }
+      if (dataUsedBits !== -1 && dataUsedBits <= dataCapacityBits) break;
+      if (version === 40) throw new Error('data too long for any QR version');
+    }
+    for (var e = ECC_MEDIUM; e <= ECC_HIGH; e++) {
+      if (dataUsedBits <= getNumDataCodewords(version, e) * 8) ecl = e;
+    }
+
+    var buf = new BitBuf();
+    buf.append(0x4, 4); // mode indicator: byte mode
+    buf.append(dataBytes.length, numCharCountBitsByte(version));
+    for (var i = 0; i < dataBytes.length; i++) buf.append(dataBytes[i], 8);
+
+    var dataCapacityBits2 = getNumDataCodewords(version, ecl) * 8;
+    var terminatorBits = Math.min(4, dataCapacityBits2 - buf.bits.length);
+    buf.append(0, terminatorBits);
+    buf.append(0, (8 - buf.bits.length % 8) % 8);
+    var padByte = 0xec;
+    while (buf.bits.length < dataCapacityBits2) {
+      buf.append(padByte, 8);
+      padByte ^= 0xec ^ 0x11;
+    }
+
+    var dataCodewords = buf.toBytes();
+    var allCodewords = addEccAndInterleave(dataCodewords, version, ecl);
+
+    var size = version * 4 + 17;
+    var modules = makeGrid(size, false);
+    var isFunction = makeGrid(size, false);
+    initializeFunctionModules(version, size, modules, isFunction);
+    drawCodewords(allCodewords, allCodewords.length, modules, isFunction, size);
+    drawWhiteFunctionModules(modules, size, version);
+
+    var bestMask = 0, bestPenalty = Infinity, bestModules = null;
+    for (var m = 0; m < 8; m++) {
+      var candidate = modules.map(function (row) { return row.slice(); });
+      applyMask(isFunction, candidate, size, m);
+      drawFormatBits(ecl, m, candidate, size);
+      var penalty = getPenaltyScore(candidate, size);
+      if (penalty < bestPenalty) { bestPenalty = penalty; bestMask = m; bestModules = candidate; }
+    }
+
+    return { size: size, version: version, ecl: ecl, mask: bestMask, modules: bestModules };
+  }
+
+  function encodeText(text) {
+    var bytes = new TextEncoder().encode(text);
+    return encodeBytes(bytes);
+  }
+
+  return { encodeBytes: encodeBytes, encodeText: encodeText };
+})();
+
+// Escapes a value for embedding in a WIFI:/MECARD-style QR field, per the
+// format both iOS and Android camera apps parse natively (TODO.md 10.9):
+// backslash-escape the delimiter characters so a literal ';', ',', ':' or
+// '"' inside an SSID/password doesn't get parsed as a field separator.
+function wifiFieldEscape(s) {
+  return String(s).replace(/([\\;,":])/g, '\\$1');
+}
+
+// Renders the AP-join QR code (WIFI:T:WPA;S:<ssid>;P:<password>;;) onto
+// #apQrCanvas. Only called while apSection is visible (mode === 'ap'), per
+// TODO.md 10.9's placement note -- a saved-network password is never sent
+// by the backend, so this only ever encodes the board's own AP identity
+// (same status_get_handler() fields already shown as plain text above).
+function renderApQr(ssid, password) {
+  var canvas = document.getElementById('apQrCanvas');
+  if (!canvas || !ssid) return;
+  var uri = 'WIFI:T:WPA;S:' + wifiFieldEscape(ssid) + ';P:' + wifiFieldEscape(password || '') + ';;';
+  var qr;
+  try {
+    qr = KilnQr.encodeText(uri);
+  } catch (e) {
+    return; // leave any previously-rendered QR in place rather than blanking it
+  }
+  var quiet = 4;
+  var modulesPerSide = qr.size + quiet * 2;
+  var scale = Math.max(2, Math.floor(240 / modulesPerSide));
+  var px = modulesPerSide * scale;
+  canvas.width = px;
+  canvas.height = px;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, px, px);
+  ctx.fillStyle = '#000';
+  for (var y = 0; y < qr.size; y++) {
+    for (var x = 0; x < qr.size; x++) {
+      if (qr.modules[y][x]) {
+        ctx.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);
+      }
+    }
+  }
+}
+
 function rssiClass(rssi) {
   if (rssi >= -50) return 'rssi-excellent';
   if (rssi >= -60) return 'rssi-good';
@@ -216,6 +703,9 @@ function poll() {
      * wifi_prov.h for why this one specifically is shown. */
     if (document.activeElement !== document.getElementById('apPassword')) {
       document.getElementById('apPassword').value = s.ap_password || '';
+    }
+    if (s.mode === 'ap') {
+      renderApQr(s.ap_ssid, s.ap_password);
     }
     document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
     if (s.state === 'connecting' || s.state === 'reconnecting') {
