@@ -315,7 +315,7 @@ static void build_chart_legend_item(lv_obj_t *parent, const char *text, lv_color
 {
     lv_obj_t *item = lv_obj_create(parent);
     lv_obj_set_size(item, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(item, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(item, 0, 0);
     lv_obj_set_style_pad_all(item, 0, 0);
     lv_obj_set_flex_flow(item, LV_FLEX_FLOW_ROW);
@@ -390,7 +390,7 @@ static void build_graph_card(lv_obj_t *parent)
     lv_obj_t *legend = lv_obj_create(card);
     lv_obj_set_width(legend, lv_pct(100));
     lv_obj_set_height(legend, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(legend, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(legend, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(legend, 0, 0);
     lv_obj_set_style_pad_all(legend, 0, 0);
     lv_obj_set_flex_flow(legend, LV_FLEX_FLOW_ROW);
@@ -596,7 +596,13 @@ static void refresh_cb(lv_timer_t *timer)
     if (st.dwelling) {
         char remaining_buf[16];
         format_duration(st.dwell_remaining_s, remaining_buf, sizeof(remaining_buf));
-        char buf[48];
+        /* 64, not 48: "Elapsed " + up to 15 bytes of elapsed_buf + " / Remaining "
+         * + up to 15 bytes of remaining_buf can reach 51 bytes plus the NUL --
+         * -Werror=format-truncation caught this statically (GCC bounds %s by
+         * the source buffer's declared size, not format_duration()'s actual
+         * output, which is much shorter in practice but not something GCC can
+         * prove). Found building 2026-08-18. */
+        char buf[64];
         snprintf(buf, sizeof(buf), "Elapsed %s / Remaining %s", elapsed_buf, remaining_buf);
         lv_label_set_text(s_time_label, buf);
         uint32_t total = st.segment_elapsed_s + st.dwell_remaining_s;
@@ -633,7 +639,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
     lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_t *title = lv_label_create(bar);
@@ -649,7 +655,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_flex_grow(content, 1);
-    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
@@ -719,7 +725,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_t *action_row = lv_obj_create(content);
     lv_obj_set_width(action_row, lv_pct(100));
     lv_obj_set_height(action_row, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(action_row, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(action_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(action_row, 0, 0);
     lv_obj_set_style_pad_all(action_row, 0, 0);
     lv_obj_set_flex_flow(action_row, LV_FLEX_FLOW_ROW);
@@ -731,7 +737,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_t *nav_row = lv_obj_create(content);
     lv_obj_set_width(nav_row, lv_pct(100));
     lv_obj_set_height(nav_row, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(nav_row, 0, 0);
     lv_obj_set_style_pad_all(nav_row, 0, 0);
     lv_obj_set_flex_flow(nav_row, LV_FLEX_FLOW_ROW);

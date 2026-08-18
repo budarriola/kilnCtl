@@ -201,7 +201,7 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
     lv_obj_t *header = lv_obj_create(row);
     lv_obj_set_width(header, lv_pct(100));
     lv_obj_set_height(header, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(header, 0, 0);
     lv_obj_set_style_pad_all(header, 0, 0);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
@@ -226,7 +226,7 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
     lv_obj_t *relay_row = lv_obj_create(row);
     lv_obj_set_width(relay_row, lv_pct(100));
     lv_obj_set_height(relay_row, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(relay_row, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(relay_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(relay_row, 0, 0);
     lv_obj_set_style_pad_all(relay_row, 0, 0);
     lv_obj_set_flex_flow(relay_row, LV_FLEX_FLOW_ROW_WRAP);
@@ -295,7 +295,7 @@ lv_obj_t *ui_page_temperature_build(void)
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
     lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_t *title = lv_label_create(bar);
@@ -306,7 +306,7 @@ lv_obj_t *ui_page_temperature_build(void)
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_flex_grow(content, 1);
-    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);

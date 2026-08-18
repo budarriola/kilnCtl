@@ -35,27 +35,42 @@ endif()
 # per README.md): find_package(Python3) + a one-line `python -c` gzip
 # invocation avoids depending on a Unix `gzip` binary being on PATH, which
 # this project's dev machines cannot assume.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+# CMAKE_BUILD_EARLY_EXPANSION guard: ESP-IDF's build system re-includes every
+# component's CMakeLists.txt in a stripped-down early pass just to harvest
+# REQUIRES/PRIV_REQUIRES (component_get_requirements.cmake sets this variable
+# true for that pass only -- see esp-idf/tools/cmake/scripts/
+# component_get_requirements.cmake). Discovered the hard way, 2026-08-18: with
+# no guard, the execute_process() gzip calls below ran during THAT early pass
+# too, where CMAKE_CURRENT_SOURCE_DIR does not yet point at this directory --
+# every gzip call failed with "FileNotFoundError" reading a nonexistent
+# App/drivers/build/<page>.html. Top-level code in a component's CMakeLists.txt
+# always runs twice for this reason; anything with a real side effect (a file
+# write, a subprocess, anything not just declaring SRCS/REQUIRES) has to check
+# this guard or it silently runs in a context where its own path assumptions
+# are wrong.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-set(KILNCTL_GZIP_ASSETS
-    "wifi_provision_page.html" "main_page.html"
-    "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css")
-set(KILNCTL_GZIP_ASSET_FILES "")
-foreach(asset ${KILNCTL_GZIP_ASSETS})
-    set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
-    set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")
-    execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -c
-            "import gzip, shutil, sys; shutil.copyfileobj(open(sys.argv[1], 'rb'), gzip.open(sys.argv[2], 'wb', 9))"
-            "${kilnctl_gz_src}" "${kilnctl_gz_out}"
-        RESULT_VARIABLE KILNCTL_GZIP_RESULT
-    )
-    if(NOT KILNCTL_GZIP_RESULT EQUAL 0)
-        message(FATAL_ERROR "App/drivers/CMakeLists.txt: failed to gzip ${asset} for EMBED_TXTFILES")
-    endif()
-    list(APPEND KILNCTL_GZIP_ASSET_FILES "${kilnctl_gz_out}")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kilnctl_gz_src}")
-endforeach()
+    set(KILNCTL_GZIP_ASSETS
+        "wifi_provision_page.html" "main_page.html"
+        "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css")
+    set(KILNCTL_GZIP_ASSET_FILES "")
+    foreach(asset ${KILNCTL_GZIP_ASSETS})
+        set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
+        set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -c
+                "import gzip, shutil, sys; shutil.copyfileobj(open(sys.argv[1], 'rb'), gzip.open(sys.argv[2], 'wb', 9))"
+                "${kilnctl_gz_src}" "${kilnctl_gz_out}"
+            RESULT_VARIABLE KILNCTL_GZIP_RESULT
+        )
+        if(NOT KILNCTL_GZIP_RESULT EQUAL 0)
+            message(FATAL_ERROR "App/drivers/CMakeLists.txt: failed to gzip ${asset} for EMBED_TXTFILES")
+        endif()
+        list(APPEND KILNCTL_GZIP_ASSET_FILES "${kilnctl_gz_out}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kilnctl_gz_src}")
+    endforeach()
+endif()
 
 # esp_driver_tsens (driver/temperature_sensor.h, used by board_temps.c for
 # the ESP32-S3 internal die-temperature sensor) is named on the assumption

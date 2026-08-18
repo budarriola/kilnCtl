@@ -37,10 +37,12 @@
 //   still shows as a visible "n/a" row, not a row that silently never
 //   appears.
 
-static const char *TAG = "ui_page_board_health";
-(void)TAG; /* reserved -- no ESP_LOGx call needed yet on this read-only page,
-            * kept for parity with every other ui_page_*.c's TAG convention
-            * in case a future pass adds one. */
+/* reserved -- no ESP_LOGx call needed yet on this read-only page, kept for
+ * parity with every other ui_page_*.c's TAG convention in case a future pass
+ * adds one. __attribute__((unused)) instead of a `(void)TAG;` statement --
+ * that statement is only valid inside a function, not at file scope; found
+ * building 2026-08-18. */
+static const char *TAG __attribute__((unused)) = "ui_page_board_health";
 
 #define UI_PAGE_BOARD_HEALTH_REFRESH_MS 1000
 
@@ -122,7 +124,7 @@ lv_obj_t *ui_page_board_health_build(void)
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
     lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_t *title = lv_label_create(bar);
@@ -133,7 +135,7 @@ lv_obj_t *ui_page_board_health_build(void)
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_flex_grow(content, 1);
-    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);

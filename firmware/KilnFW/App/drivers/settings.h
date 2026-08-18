@@ -142,9 +142,31 @@
  * Raw-to-pixel touch calibration is unproven bench guesswork, same honesty
  * as TOUCH_Z1_MAX_THRESHOLD above -- see the Kconfig help text. */
 #define LVGL_BUF_ROWS          CONFIG_KILNCTL_LVGL_BUF_ROWS
-#define TOUCH_CAL_SWAP_XY      CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY
-#define TOUCH_CAL_INVERT_X     CONFIG_KILNCTL_TOUCH_CAL_INVERT_X
-#define TOUCH_CAL_INVERT_Y     CONFIG_KILNCTL_TOUCH_CAL_INVERT_Y
+
+/* Bool Kconfig options that are OFF generate no CONFIG_* macro at all (not
+ * "defined as 0") -- valid inside an `#if`, but a bare `#define X
+ * CONFIG_KILNCTL_...` alias then leaves X expanding to an undeclared
+ * identifier the moment it's used as a real C token (lvgl_port.c's
+ * `TOUCH_CAL_SWAP_XY ? a : b`), not just inside a preprocessor conditional --
+ * discovered building 2026-08-18. Normalize to a real 0/1 macro instead,
+ * matching DISPLAY_DC_GPIO's #if/#else pattern above. */
+#if CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY
+#define TOUCH_CAL_SWAP_XY 1
+#else
+#define TOUCH_CAL_SWAP_XY 0
+#endif
+
+#if CONFIG_KILNCTL_TOUCH_CAL_INVERT_X
+#define TOUCH_CAL_INVERT_X 1
+#else
+#define TOUCH_CAL_INVERT_X 0
+#endif
+
+#if CONFIG_KILNCTL_TOUCH_CAL_INVERT_Y
+#define TOUCH_CAL_INVERT_Y 1
+#else
+#define TOUCH_CAL_INVERT_Y 0
+#endif
 
 /* --- PC link UART ---
  * GPIO43/44 are the ESP32-S3-DevKitC's own UART0 pins, wired to the module's

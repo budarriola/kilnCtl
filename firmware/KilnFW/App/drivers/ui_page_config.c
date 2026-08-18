@@ -83,7 +83,7 @@ lv_obj_t *ui_page_config_build(void)
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
     lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_t *title = lv_label_create(bar);
@@ -94,7 +94,7 @@ lv_obj_t *ui_page_config_build(void)
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_flex_grow(content, 1);
-    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSPARENT, 0);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
