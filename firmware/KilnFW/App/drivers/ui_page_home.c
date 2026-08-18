@@ -13,6 +13,7 @@
 #include "profiles_http.h"
 #include "run_state.h"
 #include "ui_theme.h"
+#include "wifi_prov.h"
 #include "wifi_status_ui.h"
 #include "zones_http.h"
 
@@ -58,6 +59,24 @@
 // TODO.md 10.9 relocated the actual formatter into wifi_status_ui.c/.h so
 // ui_page_network.c (new this pass) could call the same implementation
 // instead of a second copy of the same switch statement.
+//
+// 2026-08-18: AP-join QR code (s_ap_qr, build_ap_qr_card()) -- TODO.md 10.9's
+// last open bullet. Shown only while the board is actually AP-only
+// (wifi_prov_get_mode() == WIFI_PROV_MODE_AP, or state reports
+// WIFI_PROV_STATE_UNPROVISIONED/AP_MODE -- the exact condition
+// ui_page_network.c's refresh_cb() uses, kept identical on purpose: a QR for
+// a network the phone can't join is dead weight on either page). Same
+// WIFI:T:WPA;S:<ssid>;P:<password>;; payload, same lv_qrcode_create()/
+// lv_qrcode_update() calls, same "only re-encode when the string actually
+// changed" gate as ui_page_network.c's s_ap_qr -- deliberately NOT factored
+// into a shared helper: ui_page_network.c is 10.9's other, already-shipped
+// concern and out of scope to touch this pass, so a "shared" helper today
+// would have exactly one caller and leave ui_page_network.c's copy
+// unconverted anyway -- see this pass's TODO.md 10.9 status note for the
+// call. The card is built once but its LV_OBJ_FLAG_HIDDEN state is
+// re-evaluated every refresh_cb() tick (mode/state can change live, e.g. an
+// operator using ui_page_network.c's own mode toggle while this page sits in
+// the background -- pages are never torn down, kiln_ui.h's header comment).
 
 static const char *TAG = "ui_page_home";
 
@@ -88,6 +107,15 @@ static lv_obj_t *s_stop_btn;
  * header comment for the underlying getters and the TODO.md 10.1a
  * shared-backend rule. */
 static lv_obj_t *s_status_label;
+
+/* AP-join QR card (TODO.md 10.9's last open bullet -- see this file's header
+ * comment). Hidden unless the board is actually AP-only; s_ap_qr_last gates
+ * lv_qrcode_update() on the underlying "WIFI:T:WPA;S:...;P:...;;" string
+ * actually changing, same discipline as ui_page_network.c's s_ap_qr. */
+#define UI_PAGE_HOME_AP_QR_SIZE_PX 90
+static lv_obj_t *s_ap_qr_card;
+static lv_obj_t *s_ap_qr;
+static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN];
 
 /* Graph card (TODO.md 10.3, previously a labeled placeholder -- see this
  * file's header comment). Windowed to the most recent
@@ -276,6 +304,72 @@ static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_color_t bg,
     ui_theme_apply_touch_area(btn, false);
 
     return btn;
+}
+
+/* ---- AP-join QR card (TODO.md 10.9's last open bullet) ----
+ * Mirrors ui_page_network.c's update_qr_if_changed()/AP-QR block exactly
+ * (see this file's header comment for why that isn't factored into a shared
+ * helper this pass). */
+
+static void update_ap_qr_if_changed(const char *new_data)
+{
+    if (strcmp(s_ap_qr_last, new_data) == 0) {
+        return; /* unchanged since the last encode -- don't redo the work */
+    }
+    snprintf(s_ap_qr_last, sizeof(s_ap_qr_last), "%s", new_data);
+    lv_qrcode_update(s_ap_qr, new_data, strlen(new_data));
+}
+
+static void build_ap_qr_card(lv_obj_t *parent)
+{
+    s_ap_qr_card = lv_obj_create(parent);
+    lv_obj_add_flag(s_ap_qr_card, LV_OBJ_FLAG_HIDDEN); /* refresh_cb() reveals it in AP mode */
+    lv_obj_set_width(s_ap_qr_card, lv_pct(100));
+    lv_obj_set_height(s_ap_qr_card, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(s_ap_qr_card, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(s_ap_qr_card, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_ap_qr_card, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(s_ap_qr_card, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_ap_qr_card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(s_ap_qr_card, UI_THEME_PADDING_PX, 0);
+
+    s_ap_qr = lv_qrcode_create(s_ap_qr_card);
+    lv_qrcode_set_size(s_ap_qr, UI_PAGE_HOME_AP_QR_SIZE_PX);
+    s_ap_qr_last[0] = '\0';
+
+    lv_obj_t *caption = lv_label_create(s_ap_qr_card);
+    lv_obj_set_style_text_color(caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(caption, "Scan to join this board's Wi-Fi and set it up --\nsee Configuration > Network for details");
+    lv_obj_set_flex_grow(caption, 1);
+    lv_label_set_long_mode(caption, LV_LABEL_LONG_WRAP);
+}
+
+/* Called every refresh_cb() tick -- cheap (a couple of plain-C getters) even
+ * when hidden, and the underlying mode/state can change live from
+ * ui_page_network.c while this page sits in the background (pages are never
+ * torn down). Same condition ui_page_network.c's refresh_cb() uses for its
+ * own AP-QR visibility -- see this file's header comment. */
+static void refresh_ap_qr(void)
+{
+    wifi_prov_mode_t mode = wifi_prov_get_mode();
+    wifi_prov_state_t state = wifi_prov_get_state();
+    bool ap_active = (mode == WIFI_PROV_MODE_AP) || (state == WIFI_PROV_STATE_UNPROVISIONED) ||
+                     (state == WIFI_PROV_STATE_AP_MODE);
+
+    if (!ap_active) {
+        lv_obj_add_flag(s_ap_qr_card, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_remove_flag(s_ap_qr_card, LV_OBJ_FLAG_HIDDEN);
+
+    const char *ap_ssid = wifi_prov_get_ap_ssid();
+    const char *ap_password = wifi_prov_get_ap_password();
+    char uri[sizeof(s_ap_qr_last)];
+    /* WIFI:T:WPA;S:<ssid>;P:<password>;; -- same payload/comment as
+     * ui_page_network.c's AP-QR block (this project's AP password is never
+     * optional today, so T:nopass is not used). */
+    snprintf(uri, sizeof(uri), "WIFI:T:WPA;S:%s;P:%s;;", ap_ssid, ap_password);
+    update_ap_qr_if_changed(uri);
 }
 
 static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
@@ -554,6 +648,10 @@ static void refresh_cb(lv_timer_t *timer)
     wifi_status_ui_get_text(status_buf, sizeof(status_buf));
     lv_label_set_text(s_status_label, status_buf);
 
+    /* TODO.md 10.9's last open bullet -- see this file's header comment and
+     * build_ap_qr_card()/refresh_ap_qr(). */
+    refresh_ap_qr();
+
     /* Both calls below are the exact same plain-C getters
      * dashboard_http.c's GET /api/status and GET /api/profile_exec handlers
      * call -- TODO.md 10.1a's shared-backend rule, not a reimplementation. */
@@ -692,6 +790,14 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX, 0);
+
+    /* AP-join QR card (TODO.md 10.9's last open bullet) -- first thing in the
+     * scrollable content, right under the status bar; hidden by default,
+     * shown only in AP mode (refresh_ap_qr()). Placed here rather than
+     * inside the 32px-tall status bar itself: a QR small enough to fit that
+     * bar height would not be reliably scannable, so it gets its own
+     * conditional row instead of shrinking below a useful size. */
+    build_ap_qr_card(content);
 
     /* Zones (TODO.md 10.3: "each configured zone, its current temperature,
      * and its heater on/off status"). Widgets built for however many zones

@@ -4296,8 +4296,14 @@ connection.
 **Status update (2026-08-18): built, LCD + web, both committed.**
 `ui_page_network.c`/`.h`, `wifi_status_ui.c`/`.h`, and the web QR encoder
 (`wifi_provision_page.html`) all landed this pass — see the bullets below
-for what shipped vs. what's still open (the LVGL `ui_page_home.c` AP-mode
-QR was left as a bullet-level decision, not silently dropped).
+for what shipped vs. what's still open.
+
+**Status update (2026-08-18, later same day): the deferred `ui_page_home.c`
+AP-mode QR is now also built** — see the "QR code: join the board's
+fallback AP from a phone" bullet below for the details (new
+`build_ap_qr_card()`/`refresh_ap_qr()`, not a shared helper with
+`ui_page_network.c`, and why). This closes out the one bullet-level decision
+this section had left open.
 
 **Build-config note:** finishing this section pushed `KilnCtrl.bin` past
 the `factory` app partition's 1500K budget (0x172ba0 used vs. 0x177000
@@ -4348,7 +4354,7 @@ picks it up automatically, no per-builder memory required.
         (`ui_theme_apply_touch_area()`, `UI_THEME_MIN_TOUCH_TARGET_PX`) same
         as every other LCD page.
 
-- [ ] **QR code: join the board's fallback AP from a phone.** When the
+- [x] **QR code: join the board's fallback AP from a phone.** When the
       board is in AP or AP+STA-fallback mode (`wifi_prov_get_mode() ==
       WIFI_PROV_MODE_AP` or `wifi_prov_get_state() ==
       WIFI_PROV_STATE_UNPROVISIONED`/`AP_MODE`), render a QR code encoding
@@ -4362,6 +4368,32 @@ picks it up automatically, no per-builder memory required.
       precisely the state where nothing else on the LCD is more useful to
       show. Not shown when already connected to a home network (a QR code
       for a network the phone can't join is dead weight on the screen).
+      **2026-08-18: the `ui_page_home.c` half landed.** New
+      `build_ap_qr_card()`/`refresh_ap_qr()` in `ui_page_home.c` add a
+      compact (90px, vs. the network page's 140px — this page is already
+      dense, per its own header comment) AP-join QR card, first thing in the
+      scrollable content area right under the status bar, `LV_OBJ_FLAG_HIDDEN`
+      by default and revealed only under the exact same condition
+      `ui_page_network.c`'s `refresh_cb()` uses
+      (`wifi_prov_get_mode() == WIFI_PROV_MODE_AP` or
+      `wifi_prov_get_state() == WIFI_PROV_STATE_UNPROVISIONED`/`AP_MODE`),
+      re-evaluated every refresh tick since the operator could flip mode from
+      `ui_page_network.c` while this page sits in the background (pages are
+      never torn down). Same `WIFI:T:WPA;S:<ssid>;P:<password>;;` payload,
+      same `lv_qrcode_create()`/`lv_qrcode_update()` calls, same
+      "only re-encode when the string actually changed" gate
+      (`s_ap_qr_last`) as `ui_page_network.c`'s copy. **Not factored into a
+      shared helper** (e.g. in `wifi_status_ui.c`, which already holds the
+      one shared "WiFi state to text" formatter this section's first bullet
+      asked for): `ui_page_network.c` is out of scope to touch this pass
+      (a separate, already-shipped concern), so a shared QR-building helper
+      today would have exactly one real caller (`ui_page_home.c`) and leave
+      `ui_page_network.c`'s copy unconverted regardless — that's not the
+      "one implementation instead of two copies" outcome a shared helper is
+      for, just a relocation with a detour. Revisit if `ui_page_network.c`
+      is ever touched again for an unrelated reason. Build: clean,
+      `-Wall -Wextra -Werror`, zero new warnings; flash partition free space
+      unchanged at 10%.
 - [ ] **QR code: open the web dashboard from a phone.** When `sta_connected`
       is true, render a second QR code encoding a plain URL — prefer
       `http://kiln.local` (10.3's status line already resolves and shows
