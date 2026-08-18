@@ -161,12 +161,25 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
 - [x] `KILNLINK_PROTOCOL_VERSION` the single source (2026-08-16); `KilnFW`'s
       `UART_PROTOCOL_VERSION` **not yet** switched to alias it — that edit
       belongs with the migration item below, not before it
-- [~] Codecs pure and bounds-checked; host tests and `test/vectors/` — **done
-      for the framing layer only** (`kilnlink_frame`/`kilnlink_crc`); the
-      context/status codecs don't exist, their payload layout is still
-      "planning" in `LINK_PROTOCOL.md`
+- [~] Codecs pure and bounds-checked; host tests and `test/vectors/` — **the
+      framing layer (`kilnlink_frame`/`kilnlink_crc`) and two of the payload
+      codecs are done** (2026-08-18): `kilnlink_context.{c,h}` (ESP→Pico
+      `SAFETY_CMD_PUSH_CONTEXT` 0x07, `LINK_PROTOCOL.md` sec 4, including
+      `relay_recent_mask`) and `kilnlink_status.{c,h}` (Pico→ESP Frame A
+      `SAFETY_CMD_GET_STATUS` 0x01, sec 6, the existing 23-byte layout). Host
+      tests (`test_context.c`, `test_status.c`) and byte-exact vectors
+      (`test/vectors/context_vectors.json`, `status_vectors.json`) pass under
+      MSVC+CMake+Ninja. **Still not done**: sec 4's other ESP→Pico commands
+      (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`, `SET_CLOCK`,
+      `ANNOUNCE_VERSION`) and sec 6's other Pico→ESP frames (`DIAG`,
+      `FW_VERSION`, `TRIP_EVENT`, `POWER`) -- their layouts are concrete in
+      `LINK_PROTOCOL.md` too but weren't coded this pass. Not wired into
+      either firmware yet (`uart_protocol.c`/`SaftyFW` migration is a
+      separate item below)
 - [x] `pc_tools` consuming the same vectors as the third implementation
-      (2026-08-16, `selfcheck.py`)
+      (2026-08-16, `selfcheck.py`, framing layer only) — **not yet extended**
+      to `context_vectors.json`/`status_vectors.json`, left for a follow-on
+      pass since `selfcheck.py` wasn't touched this session
 - [ ] `KilnFW` delegating framing and CRC, proven byte-identical **before** the
       old code is deleted
 - [ ] CI grep: no CRC or byte-stuffing implementation outside `CommonFW`

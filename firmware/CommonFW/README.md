@@ -16,11 +16,24 @@ implementation of this exact envelope) via `test/vectors/frame_vectors.json`,
 consumed by both `test/test_frame.c` (built and passing with MSVC via CMake +
 Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Not yet
 integrated into either firmware** -- `KilnFW`'s `uart_protocol.c` still has
-its own copy, `SaftyFW` doesn't exist. `kilnlink_context`/`kilnlink_status`
-(the ESP<->Pico payload layouts) are not written -- deliberately: those
-layouts are still "planning" in `docs/LINK_PROTOCOL.md`, and writing codecs
-against a contract that might still move is a worse trade than writing them
-once it settles.
+its own copy, `SaftyFW` doesn't exist.
+
+**2026-08-18: two of the payload codecs now exist too**, now that
+`docs/LINK_PROTOCOL.md` sections 4 and 6 have concrete byte layouts rather
+than "planning": `kilnlink_context.{c,h}` encodes/decodes the ESP→Pico
+`SAFETY_CMD_PUSH_CONTEXT` (0x07) frame (sec 4, including `relay_recent_mask`
+and the per-zone block), and `kilnlink_status.{c,h}` encodes/decodes the
+Pico→ESP Frame A `SAFETY_CMD_GET_STATUS` (0x01) telemetry frame (sec 6, the
+existing 23-byte layout). Host-tested (`test/test_context.c`,
+`test/test_status.c`, MSVC+CMake+Ninja, all passing) with byte-exact vectors
+in `test/vectors/context_vectors.json` and `status_vectors.json` -- **not
+yet** consumed by `tools/PcTools/selfcheck.py` the way `frame_vectors.json`
+is, that's a follow-on. The rest of sections 4 and 6 (`SET_FIRING_CEILING`,
+`CLEAR_TRIP`, `GET_FW_VERSION`, `SET_CLOCK`, `ANNOUNCE_VERSION` on the ESP→
+Pico side; `DIAG`, `FW_VERSION`, `TRIP_EVENT`, `POWER` on the Pico→ESP side)
+also have concrete layouts in `docs/LINK_PROTOCOL.md` now but are not yet
+coded. Nothing here is wired into either firmware's runtime path yet -- see
+Migration below.
 
 ## Why this exists
 
@@ -176,7 +189,8 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 **Structure**
 - [x] `firmware/CommonFW/` created with the layout above (2026-08-16; `docs/`,
       `include/kilnlink/`, `src/`, `test/`, `test/vectors/` all exist —
-      `kilnlink_ids.h`/`kilnlink_context.h`/`kilnlink_status.h` not yet, see Codecs)
+      `kilnlink_context.h`/`kilnlink_status.h` added 2026-08-18, see Codecs.
+      `kilnlink_ids.h` still not created, see Contract)
 - [x] `CMakeLists.txt` producing a `kilnlink` target consumable by pico-sdk
       (standard `add_library` + `target_include_directories`; not yet actually
       linked into a pico-sdk build since `SaftyFW` has no CMake project yet)
@@ -206,11 +220,15 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 
 **Codecs**
 - [x] `kilnlink_frame.{c,h}` — delimiter, stuffing, CRC16/CCITT-FALSE. Done 2026-08-16
-- [ ] `kilnlink_context.{c,h}` — ESP → Pico encoders/decoders (blocked: payload
-      layout still "planning" in `docs/LINK_PROTOCOL.md`)
-- [ ] `kilnlink_status.{c,h}` — Pico → ESP encoders/decoders (same block)
+- [~] `kilnlink_context.{c,h}` — ESP → Pico encoders/decoders. **Done for
+      `SAFETY_CMD_PUSH_CONTEXT` (0x07)** (2026-08-18, `LINK_PROTOCOL.md` sec 4)
+      -- `SET_FIRING_CEILING`/`CLEAR_TRIP`/`GET_FW_VERSION`/`SET_CLOCK`/
+      `ANNOUNCE_VERSION` not yet coded, though their layouts are concrete now too
+- [~] `kilnlink_status.{c,h}` — Pico → ESP encoders/decoders. **Done for Frame A,
+      `SAFETY_CMD_GET_STATUS` (0x01)** (2026-08-18, `LINK_PROTOCOL.md` sec 6) --
+      `DIAG`/`FW_VERSION`/`TRIP_EVENT`/`POWER` not yet coded
 - [x] Every decoder bounds-checked and returning a status (`kilnlink_frame_decode`/
-      `kilnlink_unstuff` — the only decoders that exist so far)
+      `kilnlink_unstuff`/`kilnlink_context_decode`/`kilnlink_status_decode`)
 - [x] No allocation, no I/O, no globals — verified by review, not assumed
 
 **Tests**

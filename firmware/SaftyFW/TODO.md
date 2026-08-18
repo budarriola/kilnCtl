@@ -120,12 +120,27 @@ gating items are:
 - [ ] Shared ids split out of `uart_task_ids.h`; PC-link ids left behind
 - [~] `kilnlink_frame` / `_context` / `_status` codecs, all pure and
       bounds-checked — **`kilnlink_frame` done** 2026-08-16 (delimiter,
-      stuffing, CRC16/CCITT-FALSE); `_context`/`_status` not started, their
-      payload layout is still being decided in `../CommonFW/docs/LINK_PROTOCOL.md`
+      stuffing, CRC16/CCITT-FALSE). **2026-08-18: `_context` and `_status`
+      now exist too**, now that `../CommonFW/docs/LINK_PROTOCOL.md` secs 4
+      and 6 have concrete layouts — `kilnlink_context.{c,h}` covers
+      `SAFETY_CMD_PUSH_CONTEXT` (0x07, including `relay_recent_mask`) and
+      `kilnlink_status.{c,h}` covers Frame A `SAFETY_CMD_GET_STATUS` (0x01,
+      the existing 23-byte layout). This also resolves the untracked,
+      mismatched-type `kilnlink_status.c` noted below (2026-08-18's
+      guard-test pass) -- that stray file was deleted and replaced with a
+      version whose signatures actually match `kilnlink_status.h`. The rest
+      of secs 4/6 (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`,
+      `SET_CLOCK`, `ANNOUNCE_VERSION`, `DIAG`, `FW_VERSION`, `TRIP_EVENT`,
+      `POWER`) are documented with concrete layouts too but not yet coded
 - [x] Host tests + `test/vectors/`, including hostile inputs — for
       `kilnlink_frame`: `test/test_frame.c` (MSVC+CMake+Ninja+CTest, all
       passing) plus `test/vectors/frame_vectors.json` (3 valid + 6 hostile).
-      Context/status vectors don't exist yet, same reason as above
+      **2026-08-18**: `test/test_context.c` and `test/test_status.c` added
+      the same way, with `test/vectors/context_vectors.json` and
+      `status_vectors.json` (byte-exact vectors plus hostile inputs: too
+      short, wrong command byte, out-of-range/length-mismatched counts).
+      All passing under MSVC+CMake+Ninja+CTest. Not yet consumed by
+      `tools/PcTools/selfcheck.py` the way `frame_vectors.json` is
 - [x] `pc_tools` consuming the same vectors — it is the **third**
       implementation (2026-08-16, `tools/PcTools/selfcheck.py`)
 - [ ] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
