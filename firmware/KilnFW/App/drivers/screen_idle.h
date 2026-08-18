@@ -62,7 +62,9 @@ esp_err_t screen_idle_init(screen_idle_t *idle, ILI9488Class *display, NS2009Cla
 /* Starts screen_idle_task, which polls `touch` (if not NULL) roughly every
  * NS2009 conversion's worth of time, wakes the screen on any press edge or
  * injected touch, and blanks it after CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS
- * of no activity from either source. */
+ * of no activity from either source. CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS ==
+ * 0 (the default) disables the blank step entirely -- activity tracking and
+ * wake-on-touch still run, the screen just never goes black. */
 esp_err_t screen_idle_start(screen_idle_t *idle);
 
 /* Feeds the idle timer and wakes the screen if it is currently blanked, same

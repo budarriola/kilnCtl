@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "esp_log.h"
+#include "mdns.h"
 
 #include "MAX31856.h"
 #include "dashboard_http.h"
@@ -13,6 +14,7 @@
 #include "profiles_http.h"
 #include "run_state.h"
 #include "ui_theme.h"
+#include "wifi_prov.h"
 #include "zones_http.h"
 
 // TODO.md 10.3's real main/status page -- replaces the pre-10.2 placeholder
@@ -48,6 +50,12 @@
 //   a form this page could reuse directly). Start now uses the picker's
 //   selection when the operator has touched it; falls back to the previous
 //   boot-state logic otherwise -- see start_btn_cb()'s comment.
+//
+// 2026-08-18: status bar WiFi/IP/mDNS readout (s_status_label, see
+// wifi_status_text()) -- connection state, station IP, and kiln.local
+// reachability, all via wifi_prov.h getters wifi_provision_http.c's
+// status_get_handler() already calls plus the mdns component's own
+// mdns_hostname_get() (TODO.md 10.1a's shared-backend rule).
 
 static const char *TAG = "ui_page_home";
 
@@ -72,6 +80,18 @@ static lv_obj_t *s_time_label;
 static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_start_btn;
 static lv_obj_t *s_stop_btn;
+
+/* WiFi/IP/mDNS status readout, added to the status bar this pass. Every
+ * value it shows comes from the SAME plain-C getters wifi_provision_http.c's
+ * status_get_handler() already calls (wifi_prov_get_mode()/_get_state()/
+ * _is_sta_connected()/_get_sta_ip(), wifi_prov.h) -- TODO.md 10.1a's
+ * shared-backend rule, no parallel read of wifi_prov.c's internals. The
+ * mDNS hostname piece uses the espressif mdns component's OWN
+ * mdns_hostname_get() (mdns.h) rather than a new tracking flag: it already
+ * answers "did mdns_init()/mdns_hostname_set() succeed" (ESP_ERR_INVALID_STATE
+ * if not), which is exactly what's needed to know whether kiln.local is live
+ * without adding a getter next to main.c's mdns_init() call. */
+static lv_obj_t *s_status_label;
 
 /* Graph card (TODO.md 10.3, previously a labeled placeholder -- see this
  * file's header comment). Windowed to the most recent
@@ -526,9 +546,56 @@ static void build_profile_picker(lv_obj_t *parent)
     ui_theme_apply_touch_area(s_profile_picker, false);
 }
 
+/* Builds the status-bar WiFi/IP/mDNS text. mode==AP mirrors
+ * wifi_provision_http.c's mode_name()/state_name() mapping (AP-fallback is
+ * reported as its own case, not folded into "disconnected") but in short
+ * human text instead of the JSON tokens the HTTP status endpoint sends. */
+static void wifi_status_text(char *out, size_t out_cap)
+{
+    if (wifi_prov_get_mode() == WIFI_PROV_MODE_AP) {
+        snprintf(out, out_cap, "WiFi: AP mode");
+        return;
+    }
+
+    switch (wifi_prov_get_state()) {
+    case WIFI_PROV_STATE_CONNECTED: {
+        char ip[16];
+        if (wifi_prov_get_sta_ip(ip, sizeof(ip)) != ESP_OK) {
+            ip[0] = '\0';
+        }
+        char mdns_host[MDNS_NAME_BUF_LEN];
+        if (mdns_hostname_get(mdns_host) == ESP_OK) {
+            snprintf(out, out_cap, "WiFi: %s (%s.local)", ip, mdns_host);
+        } else {
+            snprintf(out, out_cap, "WiFi: %s", ip);
+        }
+        break;
+    }
+    case WIFI_PROV_STATE_CONNECTING:
+        snprintf(out, out_cap, "WiFi: connecting...");
+        break;
+    case WIFI_PROV_STATE_RECONNECTING:
+        snprintf(out, out_cap, "WiFi: reconnecting...");
+        break;
+    case WIFI_PROV_STATE_UNPROVISIONED:
+        snprintf(out, out_cap, "WiFi: not set up (AP fallback)");
+        break;
+    case WIFI_PROV_STATE_AP_MODE:
+        snprintf(out, out_cap, "WiFi: AP mode");
+        break;
+    default:
+        snprintf(out, out_cap, "WiFi: unknown");
+        break;
+    }
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    char status_buf[64];
+    wifi_status_text(status_buf, sizeof(status_buf));
+    lv_label_set_text(s_status_label, status_buf);
 
     /* Both calls below are the exact same plain-C getters
      * dashboard_http.c's GET /api/status and GET /api/profile_exec handlers
@@ -646,6 +713,14 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(title, "kilnCtl");
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+
+    /* WiFi/IP/mDNS status readout (see wifi_status_text()'s comment) --
+     * right side of the same status bar, kept to one line at this bar's
+     * UI_THEME_STATUS_BAR_HEIGHT_PX height. */
+    s_status_label = lv_label_create(bar);
+    lv_obj_set_style_text_color(s_status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_status_label, "WiFi: --");
+    lv_obj_align(s_status_label, LV_ALIGN_RIGHT_MID, 0, 0);
 
     /* Scrollable content area -- 480x320 is tight for zones + profile/time +
      * graph placeholder + buttons all at once, and this page's exact widget

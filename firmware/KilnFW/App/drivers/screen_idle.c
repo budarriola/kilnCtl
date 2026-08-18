@@ -80,6 +80,21 @@ static void screen_idle_task(void *arg)
 
         if (!screen_on) continue;
 
+/* CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS == 0 (Kconfig default as of
+ * 2026-08-18, user request) means auto-blank is disabled: the panel just
+ * stays on. This is a compile-time #if, not a runtime `if (... == 0)`
+ * check, for two reasons -- both of the blank-after-idle block below become
+ * dead code when the timeout is 0, so there's no reason to pay for it in
+ * the built image; and a runtime `elapsed_ticks < pdMS_TO_TICKS(0)`
+ * comparison is a `TickType_t < 0` in disguise once the macro is
+ * substituted, which -Werror=type-limits correctly flags as always-false
+ * regardless of whether it's reachable (found building 2026-08-18).
+ * Activity tracking above still runs either way -- last_activity_tick keeps
+ * updating from real and injected touches, and TOUCH_CMD_GET_STATE's
+ * idle_ms still reports it -- only the blank decision itself is compiled
+ * out. The feature is untouched and stays toggleable via menuconfig
+ * (setting it back above 0 and rebuilding restores the old behavior). */
+#if CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS > 0
         /* Unsigned subtraction on TickType_t wraps correctly across the tick
          * counter's ~49-day rollover, same reasoning as
          * uart_bridge.c's link_watchdog_task. */
@@ -107,6 +122,9 @@ static void screen_idle_task(void *arg)
             screen_idle_unlock(idle);
         }
         ESP_LOGI(TAG, "screen blanked after %lu ms idle", (unsigned long)(TOUCH_IDLE_TIMEOUT_MS));
+#else
+        (void)last_activity_tick; /* only consumed by the elapsed_ticks calc above, compiled out here */
+#endif
     }
 }
 

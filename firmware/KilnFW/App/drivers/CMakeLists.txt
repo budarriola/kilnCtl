@@ -136,7 +136,7 @@ idf_component_register(SRCS "MAX31856.c"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_driver_tsens
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
-                                esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl)
+                                esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it

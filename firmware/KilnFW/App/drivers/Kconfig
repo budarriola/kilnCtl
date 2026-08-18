@@ -187,9 +187,9 @@ menu "KilnCtrl Hardware Configuration"
 
     menu "NS2009 Touch Controller (on the TFT35 SPI panel, J2)"
         config KILNCTL_TOUCH_IDLE_TIMEOUT_MS
-            int "Screen auto-blank timeout (ms)"
-            default 60000
-            range 1000 3600000
+            int "Screen auto-blank timeout (ms, 0 = disabled)"
+            default 0
+            range 0 3600000
             help
                 How long the panel goes with no touch -- real, from the
                 NS2009, or synthetic, injected over the UART bridge's
@@ -202,6 +202,13 @@ menu "KilnCtrl Hardware Configuration"
                 touch of either kind wakes it again immediately (screen_on
                 goes back to true; repainting real content is the PC/
                 dashboard's job, same as any other redraw).
+
+                Set to 0 to disable auto-blank entirely -- the screen simply
+                stays on (2026-08-18: made the default per user request).
+                screen_idle_task still polls the touch controller and still
+                services injected touches harmlessly when disabled; it just
+                never blanks. Touch activity tracking (TOUCH_CMD_GET_STATE's
+                idle_ms) keeps working either way.
 
         config KILNCTL_TOUCH_Z1_MAX_THRESHOLD
             int "Touch pressure threshold (raw NS2009 Z1 ADC counts, 0-4095)"
