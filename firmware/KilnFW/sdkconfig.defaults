@@ -1,0 +1,14 @@
+# Applied on a fresh `idf.py` reconfigure/fullclean when no local `sdkconfig`
+# exists yet (sdkconfig itself is gitignored -- generated, machine-local).
+#
+# CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os, not the ESP-IDF default -Og debug
+# build): the `factory` app partition is fixed at 1500K (partitions.csv --
+# resizing it means touching the offsets of every partition after it, which
+# holds live NVS data on a real board, so it stays fixed rather than growing
+# to fit the binary). Under -Og, KilnCtrl.bin already fills that partition to
+# ~1% free before TODO.md 10.9 (LCD network page + QR codes); with 10.9's code
+# added it overflows outright. -Os alone reclaims ~125K, landing at ~9% free
+# with 10.9 included -- see TODO.md 10.9's "Build-config note" for the full
+# story. Without this file, a fresh checkout silently regresses to -Og and
+# fails to build once 10.9's code is present.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

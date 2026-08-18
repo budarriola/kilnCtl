@@ -4293,6 +4293,24 @@ mirroring what `wifi_provision_page.html` already does on the web (section
 identity display) — plus a QR code, on both surfaces, for easy phone
 connection.
 
+**Status update (2026-08-18): built, LCD + web, both committed.**
+`ui_page_network.c`/`.h`, `wifi_status_ui.c`/`.h`, and the web QR encoder
+(`wifi_provision_page.html`) all landed this pass — see the bullets below
+for what shipped vs. what's still open (the LVGL `ui_page_home.c` AP-mode
+QR was left as a bullet-level decision, not silently dropped).
+
+**Build-config note:** finishing this section pushed `KilnCtrl.bin` past
+the `factory` app partition's 1500K budget (0x172ba0 used vs. 0x177000
+available, ~1% free before this pass even started — see partitions.csv's
+own sizing comment). Rather than touch `partitions.csv` (live NVS data
+sits on the partitions after `factory`, per that file's own repeated
+warnings against resizing anything without a bench read-out first),
+switched to `CONFIG_COMPILER_OPTIMIZATION_SIZE=y` (`-Os`, was
+`_DEBUG`/`-Og`) — reclaimed ~125K, landing at 9% free. `sdkconfig` itself
+is gitignored (generated, machine-local), so this is pinned in the new,
+committed `sdkconfig.defaults` instead — a fresh checkout/reconfigure
+picks it up automatically, no per-builder memory required.
+
 - [ ] **`ui_page_network.c`/`.h`** — new LCD page, reachable from
       `ui_page_config.c`'s settings hub (same nav pattern as `zones`/
       `relays`/`board_health`). Per 10.1a's shared-backend rule, every
