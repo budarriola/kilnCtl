@@ -3813,6 +3813,31 @@ dashboard but is the touchscreen's home, not a secondary view):
       section 2's manual relay override / per-zone target, touchscreen
       equivalent of the dashboard's relay controls). **Stub page only,
       unchanged this pass.**
+- [x] WiFi connection state / station IP / mDNS hostname readout in the
+      status bar. **Added 2026-08-18 (separate follow-up within this same
+      pass, see status update below) — not in the original page-designs
+      list, added on explicit request.**
+
+**Status update (2026-08-18, follow-up): WiFi/IP/mDNS status readout added to
+the home page's status bar.** `s_status_label` (right-aligned, next to the
+"kilnCtl" title) now shows connection state text, the station IP when
+connected, and `kiln.local` when mDNS is up — built by `wifi_status_text()`
+in `App/drivers/ui_page_home.c`. Per 10.1a's shared-backend rule, every piece
+of this comes from getters `wifi_provision_http.c`'s `status_get_handler()`
+already calls: `wifi_prov_get_mode()`, `wifi_prov_get_state()`,
+`wifi_prov_is_sta_connected()`, `wifi_prov_get_sta_ip()` (all `wifi_prov.h`,
+unchanged). The mDNS half needed no new getter at all — `main.c` sets the
+hostname unconditionally (`mdns_hostname_set("kiln")`, ~line 243) whenever
+`mdns_init()` succeeds, and the espressif `mdns` component's own
+`mdns_hostname_get()` (`managed_components/espressif__mdns/include/mdns.h`)
+already answers "did that succeed" (`ESP_ERR_INVALID_STATE` if mDNS was never
+initialized/hostnamed), so this page calls that directly instead of adding a
+tracking flag next to `main.c`'s `mdns_init()` call. `App/drivers/CMakeLists.txt`
+now lists `mdns` under the `drivers` component's `REQUIRES` (it wasn't
+previously a `drivers`-component dependency, only an `App`/`main`-component
+one) so `ui_page_home.c` can include `mdns.h` at all — `main.c` can't export a
+header back to `drivers` the other way (that component already `REQUIRES
+drivers`, so the reverse would be circular).
 
 ### 10.4 Touch hit-testing
 
@@ -4257,3 +4282,107 @@ file carries).
         host-tested (`test_pid_autotune.c`, `test_sim_kiln.c`), and neither
         references channels, zones, or `thermo_mask`, so neither needed any
         change for this to stay correct.
+
+### 10.9 LCD network settings page + QR codes for AP/site connect
+
+**2026-08-18, added to plan (not yet built).** The LCD only has a read-only
+WiFi/IP/mDNS status line on the home page (10.3's status-bar readout, added
+this session). The user wants a real network settings page on the LCD
+mirroring what `wifi_provision_page.html` already does on the web (section
+1 / 8.4: mode toggle, scan, connect, saved-network list with forget, AP
+identity display) — plus a QR code, on both surfaces, for easy phone
+connection.
+
+- [ ] **`ui_page_network.c`/`.h`** — new LCD page, reachable from
+      `ui_page_config.c`'s settings hub (same nav pattern as `zones`/
+      `relays`/`board_health`). Per 10.1a's shared-backend rule, every
+      control on this page calls the exact same `wifi_prov.h` getters/
+      setters `wifi_provision_http.c`'s handlers already call — no parallel
+      read of `wifi_prov.c` internals:
+      - Mode + state readout: `wifi_prov_get_mode()`/`_get_state()`/
+        `_is_sta_connected()`/`_get_sta_ip()`/`_get_sta_rssi()` (same set
+        `status_get_handler()` uses, and the same set `ui_page_home.c`'s
+        new `wifi_status_text()` already calls — factor the common
+        "human-readable WiFi state" formatting out of `ui_page_home.c` into
+        a small shared helper both pages call, rather than a second copy of
+        that switch statement).
+      - Scan: `wifi_prov_scan()` — LVGL list of results (`ssid`/`rssi`/
+        `secure`), tap-to-select feeding a saved-network add flow. Mind
+        `wifi_prov_scan()`'s existing `ESP_ERR_NOT_SUPPORTED` refusal in
+        AP-only mode (section on `scan_get_handler`) — the LCD page needs
+        the same "scanning disabled in AP mode" messaging the web page
+        shows, not a silent empty list.
+      - Saved networks: `wifi_prov_get_saved_networks()` / `_forget()` —
+        list with a per-row forget button, mirroring
+        `wifi_provision_page.html`'s `renderNetworkList()`/`forgetNetwork()`.
+      - AP identity (SSID/password the board's own fallback AP presents):
+        `wifi_prov_get_ap_ssid()`/`_get_ap_password()` — same values
+        `status_get_handler()` already exposes (that handler's own comment
+        explains why the board's OWN AP password is fine to show on a
+        settings surface, unlike any saved network's password, which this
+        codebase never surfaces anywhere).
+      - Add-network / mode-switch forms: on-screen keyboard for SSID/
+        password entry (LVGL's `lv_keyboard` widget) — this is the one
+        piece with no direct web-page equivalent to mirror (the web page
+        gets free text entry from the browser), so it needs its own design
+        pass when this gets built, not just a port.
+      - Touch targets follow `ui_theme.h`'s existing conventions
+        (`ui_theme_apply_touch_area()`, `UI_THEME_MIN_TOUCH_TARGET_PX`) same
+        as every other LCD page.
+
+- [ ] **QR code: join the board's fallback AP from a phone.** When the
+      board is in AP or AP+STA-fallback mode (`wifi_prov_get_mode() ==
+      WIFI_PROV_MODE_AP` or `wifi_prov_get_state() ==
+      WIFI_PROV_STATE_UNPROVISIONED`/`AP_MODE`), render a QR code encoding
+      the standard WiFi-join URI format phones already recognize natively
+      (no app needed — both iOS and Android camera apps parse this):
+      `WIFI:T:WPA;S:<ap_ssid>;P:<ap_password>;;` (or `T:nopass;` if the AP
+      password is ever made optional — it currently is not, per section 1).
+      Shown on `ui_page_network.c` (this page is exactly where an operator
+      standing at the kiln needs it) and worth considering for
+      `ui_page_home.c` too when the board is in AP mode, since that is
+      precisely the state where nothing else on the LCD is more useful to
+      show. Not shown when already connected to a home network (a QR code
+      for a network the phone can't join is dead weight on the screen).
+- [ ] **QR code: open the web dashboard from a phone.** When `sta_connected`
+      is true, render a second QR code encoding a plain URL — prefer
+      `http://kiln.local` (10.3's status line already resolves and shows
+      this) with the raw `sta_ip` as a fallback/second QR if mDNS isn't
+      guaranteed to work on the phone's network (some Android versions and
+      most enterprise/guest WiFi don't do mDNS reliably — worth showing
+      both rather than picking one). Same placement question as above:
+      `ui_page_network.c` for sure, `ui_page_home.c` optionally once
+      connected.
+- [ ] **Web side**: `wifi_provision_page.html` already shows the AP SSID/
+      password as text (`status_get_handler()`'s `ap_ssid`/`ap_password`
+      fields) but has no QR code either — a phone that's already
+      Wi-Fi-connected enough to load this page doesn't need the AP-join QR,
+      but a *second* phone/device someone wants to hand the AP credentials
+      to would. Low priority relative to the LCD QR (the LCD is reachable
+      with zero network connectivity at all, which is exactly the
+      bootstrapping problem a QR code solves; a browser already implies
+      connectivity exists somewhere), but worth the small addition once the
+      LCD version exists, generating from the same WIFI: URI string so
+      there's one format to test instead of two.
+- [ ] **QR rendering**: LVGL v9.5.0 (vendored submodule, section 10.1)
+      ships `lv_qrcode` (`LV_USE_QRCODE` in `lv_conf.h`/Kconfig) — confirm
+      it's enabled in this project's LVGL config (it is off by default in
+      upstream LVGL) before assuming it's available; if off, this is a
+      one-line Kconfig/`lv_conf.h` flip, not a new dependency. `lv_qrcode_create()`
+      + `lv_qrcode_update()` take a size and a raw byte string (the `WIFI:`
+      or `http://` string above) and render directly to an `lv_obj_t` — no
+      external QR-encoding library needed for the LCD side. For the web
+      side, no server-side QR library exists in this codebase yet; either
+      generate the WIFI:/URL string server-side and render client-side with
+      a small embedded JS QR library (matching this project's "no CDN,
+      everything embedded" convention — `theme.css`'s own embedding
+      precedent), or skip the web QR entirely per the above priority note
+      and revisit later.
+- [ ] Cross-reference 10.5 (web/LCD parity rule) once built: if the LCD
+      gets a real network settings page, the "any time changes to either
+      the screen or the web interface are made it should be considered
+      whether to change the other" rule from the original LCD plan request
+      applies here directly — the AP-join QR code in particular is a place
+      the LCD is now strictly ahead of the web page, which is fine (the web
+      page's equivalent gap is called out above, low priority, not a
+      silent omission).
