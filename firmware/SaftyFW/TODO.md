@@ -35,10 +35,13 @@ Nothing downstream works until 0.1 and 0.2 land.
       Needs no safety-domain power, no Pico, no probe. ⚠️ **Driving one pin and
       reading the other proves nothing** — they are not connected to each other.
       Three lines of schematic evidence already agree; this is the measurement.
-- [ ] **0.0b Build the coordinated two-board GPIO test rig** — a GPIO probe on
+- [x] **0.0b Build the coordinated two-board GPIO test rig** — a GPIO probe on
       *both* processors plus the PC script that drives them, reaching each by a
       path that is **not** the link under test (ESP over USB serial, Pico over
-      SWD). `../../tools/PcTools/TODO.md` §1/§1b/§1c.
+      SWD). `../../tools/PcTools/TODO.md` §1/§1b/§1c. Pico-side probe and the
+      coordinated script both done 2026-08-18 (`tools/PcTools/src/kilnctrl/
+      pico_gpio_probe.py`, `tools/PcTools/scripts/coordinated_gpio_test.py`);
+      **not yet run against real hardware** this session.
 - [x] **0.1 Fix the swapped safety-UART pins in `KilnFW`.** `KILNCTL_SAFETY_TX_IO`
       must become **4** and `KILNCTL_SAFETY_RX_IO` must become **5**
       (`firmware/KilnFW/App/drivers/Kconfig:189-200`, plus `sdkconfig`). Move the internal

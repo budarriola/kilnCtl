@@ -363,7 +363,27 @@ reimplementing the transfer.
       old-payload-size test staleness predating this change).
       **Not yet bench-tested against real hardware** -- no board attached
       this session.
-- [ ] 1b. GPIO probe on the **Pico** over SWD; **GPIO6 (`saftyRelay`) never writable**; writes refused unless `INIT`/`GRACE`
+- [x] 1b. GPIO probe on the **Pico** over SWD; **GPIO6 (`saftyRelay`) never writable**; writes refused unless `INIT`/`GRACE`.
+      Done 2026-08-18: `tools/PcTools/src/kilnctrl/pico_gpio_probe.py`, no
+      firmware agent needed (RP2040 GPIO is memory-mapped: SIO + IO_BANK0 +
+      PADS_BANK0, poked directly over the existing `debug_probe.py`/OpenOCD
+      SWD connection, register addresses confirmed against the RP2040
+      datasheet and matching the ones `coordinated_gpio_test.py` already
+      exercised against real hardware this session). `set_mode()`/`write()`
+      refuse GPIO6 unconditionally, no override -- enforced in this module,
+      not delegated to firmware, since SWD sees the chip's memory directly
+      with no firmware in the loop to ask permission of. `read()` is allowed
+      on GPIO6 (passive `SIO_GPIO_IN` read only). MCP tools
+      `pico_gpio_set_mode/write/read/read_all` added to `mcp_server.py`.
+      **The `INIT`/`GRACE` gate from this item's own wording is NOT
+      implemented** -- SaftyFW exposes no protocol yet for the PC to query
+      relay_owner's state (same honest gap `debug_probe.py`'s
+      `write_memory()` already documents), so there is nothing to query;
+      GPIO6's hard, unconditional deny stands in for that guard rail today,
+      stricter but not equivalent. **Not bench-verified** -- no RP2040/debug
+      probe attached this session; deny-list and precondition logic verified
+      by unit-level calls (refusal paths raise before any SWD traffic), the
+      register-poke paths themselves are unverified against real silicon.
 - [ ] 1c. Coordinated two-board test script implementing `firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C, reaching each processor by a path that is **not** the link under test
 - [~] 2. Saleae capture as an MCP tool. Done 2026-08-16: `saleae_list_devices`/
       `saleae_capture` wrap `logic_capture.py`'s automation-API client;

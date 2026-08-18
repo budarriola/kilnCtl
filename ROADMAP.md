@@ -103,9 +103,15 @@ soldering session.
 - [x] GPIO probe on the ESP, default off, deny-list including GPIO6 (2026-08-16,
       `firmware/KilnFW/App/drivers/gpio_probe.{c,h}` + `tools/PcTools`; not yet
       bench-tested, see `tools/PcTools/TODO.md`)
-- [ ] GPIO probe on the Pico over SWD, GPIO6 never writable
-- [ ] Coordinated two-board test script, reaching each side by a path that is
-      **not** the link under test
+- [x] GPIO probe on the Pico over SWD, GPIO6 never writable (2026-08-18,
+      `tools/PcTools/src/kilnctrl/pico_gpio_probe.py`, no firmware agent
+      needed -- RP2040 GPIO is memory-mapped, poked via the existing
+      `debug_probe.py`/OpenOCD SWD connection; GPIO6 refused unconditionally
+      for SET_MODE/WRITE, READ allowed; not yet bench-tested, see
+      `tools/PcTools/TODO.md` §1b)
+- [x] Coordinated two-board test script, reaching each side by a path that is
+      **not** the link under test (`tools/PcTools/scripts/
+      coordinated_gpio_test.py`; not yet run against real hardware)
 - [x] OpenOCD wrapper covering both chips: program, reset, halt, read/write memory
       — done 2026-08-17, `kilnctrl.debug_probe` + `openocd_util` (`tools/PcTools/TODO.md`
       "Debug and programming"); flashed and verified `firmware/SaftyFW/build/SaftyFW.elf`
