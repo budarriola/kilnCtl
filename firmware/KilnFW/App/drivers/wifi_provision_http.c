@@ -520,8 +520,28 @@ esp_err_t wifi_provision_http_start(void)
      * (logged, not fatal) and /profiles + /api/profiles came back 404
      * against the live board. Bumped to 40 -- headroom over the current 30,
      * not tuned to it, same reasoning as every bump before this one, so the
-     * next route added anywhere doesn't quietly repeat this exact bug. */
-    config.max_uri_handlers = 40;
+     * next route added anywhere doesn't quietly repeat this exact bug.
+     *
+     * **Found the hard way again (2026-08-18)**: 40 was itself exactly one
+     * short. Full current count, in main.c's registration order: wifi_prov
+     * (this file, 8: index/wifi_page/status/scan/provision/networks/forget/
+     * theme.css) + dashboard_http.c (14) + board_temps.c (1) + zones_http.c
+     * (3) + rules_http.c (3) + profiles_http.c (5) + factory_reset.c (1) +
+     * readiness_http.c (2) + ota_http.c (4) = 41 -- one over the 40 cap, in
+     * a normal (non-sim) build, no Kconfig option required to hit it. Since
+     * ota_http.c registers last (main.c, after readiness_http_start()), and
+     * /api/ota/pico/status is the last of its 4 routes, THAT is the handler
+     * that silently lost the race: httpd_register_uri_handler returned an
+     * error ota_http_start() does check and log (ota_http.c logs
+     * ESP_LOGE and bails), so this one was not silent, but the next route
+     * added anywhere past 41 would be. Bumped to 56 -- generous headroom
+     * over 41, not tuned to it, same reasoning as every bump before this
+     * one. This did NOT explain a hang on /status or /scan (both register
+     * within this file's first 8, far under either cap) -- see the
+     * still-missing-error-check note on this file's own
+     * httpd_register_uri_handler() calls just below for the other half of
+     * this pass's fix. */
+    config.max_uri_handlers = 56;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever
@@ -568,14 +588,39 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t theme_css_uri = {
         .uri = "/theme.css", .method = HTTP_GET, .handler = theme_css_get_handler,
     };
-    httpd_register_uri_handler(s_server, &index_uri);
-    httpd_register_uri_handler(s_server, &wifi_page_uri);
-    httpd_register_uri_handler(s_server, &status_uri);
-    httpd_register_uri_handler(s_server, &scan_uri);
-    httpd_register_uri_handler(s_server, &provision_uri);
-    httpd_register_uri_handler(s_server, &networks_uri);
-    httpd_register_uri_handler(s_server, &forget_uri);
-    httpd_register_uri_handler(s_server, &theme_css_uri);
+    /* Unlike every other *_http.c module's registration block, these 8 were
+     * firing-and-forgetting httpd_register_uri_handler()'s return value --
+     * the one gap in the codebase's own convention (see e.g. ota_http.c's
+     * ESP_LOGE-and-bail after every one of its calls). That gap is exactly
+     * how the max_uri_handlers overflow above stayed invisible until it was
+     * chased down by hand: a route that loses the registration race here
+     * (this module's own 8, or a later module's, since they all share this
+     * one table) still 404s cleanly against a real client (esp_http_server's
+     * own not-found handler answers anything it never matched) -- but the
+     * failure itself was never logged anywhere, so diagnosing "this one path
+     * came back 404, all its siblings work" meant re-deriving this exact
+     * headcount by hand instead of reading one ESP_LOGE line. Checked and
+     * logged now, matching every other module, so the next overflow says so
+     * instead of just going quiet. */
+#define REGISTER_OR_LOG(uri_ptr)                                                                \
+    do {                                                                                        \
+        esp_err_t reg_err = httpd_register_uri_handler(s_server, (uri_ptr));                    \
+        if (reg_err != ESP_OK) {                                                                \
+            ESP_LOGE(TAG, "httpd_register_uri_handler(%s) failed: %s", (uri_ptr)->uri,          \
+                     esp_err_to_name(reg_err));                                                 \
+        }                                                                                        \
+    } while (0)
+
+    REGISTER_OR_LOG(&index_uri);
+    REGISTER_OR_LOG(&wifi_page_uri);
+    REGISTER_OR_LOG(&status_uri);
+    REGISTER_OR_LOG(&scan_uri);
+    REGISTER_OR_LOG(&provision_uri);
+    REGISTER_OR_LOG(&networks_uri);
+    REGISTER_OR_LOG(&forget_uri);
+    REGISTER_OR_LOG(&theme_css_uri);
+
+#undef REGISTER_OR_LOG
 
     ESP_LOGI(TAG, "provisioning HTTP server up");
     return ESP_OK;
