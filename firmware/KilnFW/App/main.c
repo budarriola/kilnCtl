@@ -26,6 +26,7 @@
 #include "mdns.h"
 #include "monitor_task.h"
 #include "nvs_report.h"
+#include "ota_http.h"
 #include "profile_executor.h"
 #include "profiles_http.h"
 #include "readiness_http.h"
@@ -576,6 +577,18 @@ void app_main(void)
     if (readiness_err != ESP_OK) {
         ESP_LOGW(TAG, "readiness_http_start failed: %s -- no readiness page this boot",
                  esp_err_to_name(readiness_err));
+    }
+
+    // CommonFW/docs/UPDATE_PROTOCOL.md section 2: GET /api/ota/challenge
+    // only. Auth logic (nonce lifecycle, lockout) is real and host-tested
+    // (App/test/test_ota_auth.c); the streamed OTA upload handlers
+    // themselves (POST /api/ota/esp, POST /api/ota/pico) are not built yet
+    // -- ota_http_verify_request() is exposed for whichever future pass
+    // adds them.
+    esp_err_t ota_http_err = ota_http_start();
+    if (ota_http_err != ESP_OK) {
+        ESP_LOGW(TAG, "ota_http_start failed: %s -- no /api/ota/challenge this boot",
+                 esp_err_to_name(ota_http_err));
     }
 
     // Development-only /api/sim (fault injection into the simulated plant).

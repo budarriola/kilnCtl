@@ -538,11 +538,46 @@ during development will be driven by an agent:
 - [ ] Temperature ceiling configurable, default 100 °C
 
 **Authentication**
-- [ ] Nonce endpoint: 16 random bytes, single use, 30 s expiry
-- [ ] `HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"), nonce || context)`
-- [ ] Constant-time comparison; nonce invalidated on both paths
-- [ ] Lockout after 3 failures, doubling to 15 minutes, every attempt logged
-- [ ] Documented: this does not defend against someone who knows the AP password
+- [x] Nonce endpoint: 16 random bytes, single use, 30 s expiry. **2026-08-17**:
+      `GET /api/ota/challenge` (`firmware/KilnFW/App/drivers/ota_http.c`),
+      `esp_fill_random()` for entropy, backed by the host-tested
+      `ota_auth_nonce_issue()`/`_check()` state machine
+      (`App/drivers/ota_auth.{h,c}`, 246/246 host tests,
+      `App/test/test_ota_auth.c`).
+- [x] `HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"), nonce || context)`.
+      **2026-08-17**: `ota_http_verify_request()`'s `hmac_sha256()` helper, via
+      the PSA Crypto API (`psa_import_key()` + `psa_mac_compute()`) rather
+      than mbedtls's classic `mbedtls_md_hmac()` family -- that whole API is
+      gated behind `MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS` in this vendored
+      mbedtls 4.x/TF-PSA-Crypto build, and upstream's own migration guide
+      recommends against defining that macro. `context` is the exact `"esp"`
+      or `"pico"` literal per `ota_http_context_t`.
+- [x] Constant-time comparison; nonce invalidated on both paths. **2026-08-17**:
+      `ota_auth_constant_time_equal()` (inspects every byte regardless of
+      where the first mismatch is); `ota_auth_nonce_invalidate()` is called
+      on both the match and mismatch paths in `ota_http_verify_request()`.
+- [x] Lockout after 3 failures, doubling to 15 minutes, every attempt logged.
+      **2026-08-17**: `ota_auth_lockout_record_failure()`/`_record_success()`,
+      two independent instances (one per context, "counted per-endpoint").
+      Every challenge issue and every verify attempt logs the source IP
+      (`get_client_ip()`, `httpd_req_to_sockfd()` + `getpeername()`) via
+      `ESP_LOGI`/`ESP_LOGW`. **Not yet true**: a stale/expired/never-issued
+      nonce does NOT count as a lockout failure (deliberate -- see
+      `ota_http.h`'s doc comment: that is the client's timing, not a
+      wrong-password guess), so only an actual bad-MAC attempt against a
+      valid nonce increments the counter -- this is a considered
+      interpretation of "failure," not an oversight, but worth flagging
+      since the doc text doesn't make the distinction explicit.
+- [ ] Documented: this does not defend against someone who knows the AP
+      password. Still just prose in this file (section 2, "What this does
+      and does not defend against") -- no code checkbox to earn here, but
+      leaving unchecked since nothing new was added to say so anywhere a
+      user would see it (e.g. the eventual OTA web page, not yet built).
+
+**Not built this pass**: `POST /api/ota/esp` and `POST /api/ota/pico`
+themselves -- `ota_http_verify_request()` is exposed and host-buildable but
+has no caller yet. Those need the actual streamed `esp_ota_ops` write path
+and the Pico-image relay through `pico_img`, both still open (sections 3/4).
 
 **Version compatibility** (`LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`)
 - [ ] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
