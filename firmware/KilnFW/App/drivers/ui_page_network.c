@@ -1,0 +1,776 @@
+#include "ui_page_network.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "mdns.h"
+
+#include "kiln_ui.h"
+#include "ui_theme.h"
+#include "wifi_prov.h"
+#include "wifi_status_ui.h"
+
+// TODO.md 10.9's LCD-side network settings page, linked from
+// ui_page_config.c's "Network / Wi-Fi" nav item (previously a "not built
+// yet" placeholder row -- see ui_page_config.c's header comment). Mirrors
+// what wifi_provision_page.html already does on the web, per 10.9's own
+// bullet list. Per TODO.md 10.1a's shared-backend rule, every control here
+// calls the exact same wifi_prov.h getters/setters wifi_provision_http.c's
+// handlers already call -- no parallel read of wifi_prov.c's internals:
+//   - Mode + state readout: wifi_status_ui_get_text() (shared with
+//     ui_page_home.c's status bar, TODO.md 10.9's explicit ask -- see
+//     wifi_status_ui.c) plus wifi_prov_get_mode()/_get_state()/
+//     _is_sta_connected()/_get_sta_rssi() directly for the parts that
+//     formatter doesn't expose (RSSI, AP client count).
+//   - Scan: wifi_prov_scan() -- same call scan_get_handler() makes, same
+//     ESP_ERR_NOT_SUPPORTED-in-AP-mode refusal shown as a status message
+//     rather than a silent empty list.
+//   - Saved networks: wifi_prov_get_saved_networks()/_forget() -- same
+//     calls networks_get_handler()/forget_post_handler() make.
+//   - AP identity: wifi_prov_get_ap_ssid()/_get_ap_password() -- same
+//     values status_get_handler() already exposes on the web status JSON.
+//   - Add-network: wifi_prov_add_network() -- same call
+//     provision_post_handler() makes for a plain ssid/password POST body.
+//   - Mode switch: wifi_prov_set_mode() -- same call provision_post_handler()
+//     makes for a "mode" POST body.
+//
+// QR codes (TODO.md 10.9's second/third bullets): LV_USE_QRCODE was off in
+// this project's LVGL Kconfig (confirmed via sdkconfig -- "# CONFIG_LV_USE_
+// QRCODE is not set") and is now flipped on (sdkconfig is gitignored/
+// per-checkout generated in this project, no sdkconfig.defaults exists to
+// carry the flip forward -- see this pass's status note in TODO.md 10.9 for
+// what that means for a fresh clone). Two mutually-exclusive QR states,
+// matching the AP-vs-STA-connected split the rest of this page already makes:
+//   - AP/AP-fallback (wifi_prov_get_mode() == WIFI_PROV_MODE_AP or
+//     wifi_prov_get_state() == WIFI_PROV_STATE_UNPROVISIONED/AP_MODE):
+//     WIFI:T:WPA;S:<ap_ssid>;P:<ap_password>;; -- both iOS and Android
+//     camera apps parse this natively, no app needed.
+//   - sta_connected: http://kiln.local (mDNS hostname read the same way
+//     wifi_status_ui.c does) plus a second QR for the raw IP, since mDNS
+//     isn't reliable on every phone/network.
+// Neither lv_qrcode_update() call runs on every UI_PAGE_NETWORK_REFRESH_MS
+// tick -- each is gated on the underlying string actually having changed
+// (s_ap_qr_last/s_dashboard_qr_last/s_ip_qr_last), since re-encoding a QR
+// code is real work the panel doesn't need to repeat every second for data
+// that changes on the order of minutes, if ever, during one boot.
+//
+// Known gap, documented rather than silently missing (TODO.md 10.9's own
+// "needs its own design pass" note): the board's own AP identity
+// (SSID/password) is READ-ONLY on this page. 10.9's bullet list only asks
+// for AP identity "display", not an edit form, and unlike the scan-then-
+// connect flow (SSID pre-filled from the tap, only the password needs a
+// keyboard) editing the AP's own SSID would need free-text SSID entry with
+// no scan result to pre-fill it from -- a second keyboard flow this pass
+// does not build. wifi_provision_page.html remains the only way to change
+// the board's own AP identity.
+static const char *TAG __attribute__((unused)) = "ui_page_network";
+
+#define UI_PAGE_NETWORK_REFRESH_MS 1000
+#define UI_PAGE_NETWORK_SCAN_MAX 20
+#define UI_PAGE_NETWORK_SAVED_MAX 8
+#define UI_PAGE_NETWORK_QR_SIZE_PX 140
+
+/* ---- Top status readout ---- */
+static lv_obj_t *s_status_label;
+static lv_obj_t *s_detail_label; /* RSSI when connected, AP client count in AP mode */
+
+/* ---- Mode toggle ---- */
+static lv_obj_t *s_mode_home_btn;
+static lv_obj_t *s_mode_ap_btn;
+
+/* ---- Home-mode section: scan + saved networks + STA-connected QRs ---- */
+static lv_obj_t *s_home_section;
+static lv_obj_t *s_scan_status_label;
+static lv_obj_t *s_scan_list;
+static lv_obj_t *s_saved_list;
+static lv_obj_t *s_sta_qr_row;
+static lv_obj_t *s_dashboard_qr;
+static lv_obj_t *s_dashboard_qr_caption;
+static lv_obj_t *s_ip_qr;
+static lv_obj_t *s_ip_qr_caption;
+static char s_dashboard_qr_last[80];
+static char s_ip_qr_last[40];
+
+/* Last wifi_prov_scan() results -- kept alive as long as s_scan_list's
+ * buttons exist (their LV_EVENT_CLICKED user_data points into this array by
+ * index), overwritten only by the next Scan tap, which also rebuilds the
+ * list itself. */
+static wifi_prov_scan_result_t s_scan_results[UI_PAGE_NETWORK_SCAN_MAX];
+
+/* ---- AP-mode section: identity display + AP-join QR ---- */
+static lv_obj_t *s_ap_section;
+static lv_obj_t *s_ap_ssid_label;
+static lv_obj_t *s_ap_password_label;
+static lv_obj_t *s_ap_qr;
+static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN];
+
+/* ---- Connect modal (scan-tap -> password entry -> wifi_prov_add_network()) ----
+ * Built once, hidden, matching every other page's "pages are never torn
+ * down" widget lifetime (kiln_ui.h's header comment) -- this is a full-page
+ * overlay, not a separate kiln_ui page, since it only ever makes sense on
+ * top of this one. */
+static lv_obj_t *s_connect_modal;
+static lv_obj_t *s_connect_title;
+static lv_obj_t *s_connect_ta;
+static lv_obj_t *s_connect_status_label;
+static lv_obj_t *s_connect_kb;
+static char s_connect_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+
+/* ---- Pending-forget context, for the confirm msgbox's footer button cb.
+ * Only one confirm dialog can be open at a time, so a single static buffer
+ * is enough -- set right before lv_msgbox_create() below. */
+static char s_pending_forget_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+
+static void back_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("config");
+}
+
+static void refresh_saved_list(void);
+static void refresh_cb(lv_timer_t *timer);
+
+/* ---- Mode toggle ---- */
+
+static void apply_mode_button_style(lv_obj_t *btn, bool active)
+{
+    lv_obj_set_style_bg_color(btn, active ? UI_THEME_ACCENT_3 : UI_THEME_COLOR_CARD, 0);
+}
+
+static void mode_home_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = wifi_prov_set_mode(WIFI_PROV_MODE_HOME);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_set_mode(HOME) failed: %s", esp_err_to_name(err));
+    }
+    refresh_cb(NULL); /* repaint immediately instead of waiting one tick */
+}
+
+static void mode_ap_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t err = wifi_prov_set_mode(WIFI_PROV_MODE_AP);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_set_mode(AP) failed: %s", esp_err_to_name(err));
+    }
+    refresh_cb(NULL);
+}
+
+/* ---- Connect modal ---- */
+
+static void connect_modal_open(const char *ssid)
+{
+    snprintf(s_connect_ssid, sizeof(s_connect_ssid), "%s", ssid);
+    char title[48];
+    snprintf(title, sizeof(title), "Connect to %s", s_connect_ssid);
+    lv_label_set_text(s_connect_title, title);
+    lv_textarea_set_text(s_connect_ta, "");
+    lv_label_set_text(s_connect_status_label, "");
+    lv_obj_remove_flag(s_connect_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void connect_modal_close(void)
+{
+    lv_obj_add_flag(s_connect_modal, LV_OBJ_FLAG_HIDDEN);
+    lv_textarea_set_text(s_connect_ta, "");
+}
+
+static void connect_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    connect_modal_close();
+}
+
+static void connect_submit_cb(lv_event_t *e)
+{
+    (void)e;
+    const char *password = lv_textarea_get_text(s_connect_ta);
+    size_t ssid_len = strlen(s_connect_ssid);
+    size_t password_len = strlen(password);
+
+    /* Same call provision_post_handler() makes for a plain ssid/password
+     * POST body -- TODO.md 10.1a. */
+    esp_err_t err = wifi_prov_add_network(s_connect_ssid, ssid_len, password, password_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_add_network(%s) failed: %s", s_connect_ssid, esp_err_to_name(err));
+        const char *msg = (err == ESP_ERR_NO_MEM) ? "Saved network list is full" : "Could not save credentials";
+        lv_label_set_text(s_connect_status_label, msg);
+        return;
+    }
+    connect_modal_close();
+    refresh_saved_list();
+}
+
+static void scan_row_clicked_cb(lv_event_t *e)
+{
+    wifi_prov_scan_result_t *result = (wifi_prov_scan_result_t *)lv_event_get_user_data(e);
+    connect_modal_open(result->ssid);
+}
+
+/* ---- Forget confirmation ---- */
+
+static void forget_confirm_yes_cb(lv_event_t *e)
+{
+    lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
+    esp_err_t err = wifi_prov_forget_network(s_pending_forget_ssid, strlen(s_pending_forget_ssid));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_forget_network(%s) failed: %s", s_pending_forget_ssid, esp_err_to_name(err));
+    }
+    lv_msgbox_close(mbox);
+    refresh_saved_list();
+}
+
+static void forget_confirm_no_cb(lv_event_t *e)
+{
+    lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
+    lv_msgbox_close(mbox);
+}
+
+static void forget_row_clicked_cb(lv_event_t *e)
+{
+    const char *ssid = (const char *)lv_event_get_user_data(e);
+    snprintf(s_pending_forget_ssid, sizeof(s_pending_forget_ssid), "%s", ssid);
+
+    /* Fresh read, not a cached count -- same "don't trust stale widget
+     * state" discipline as ui_page_temperature.c's relay_toggle_cb(). Only
+     * the count is needed here, so a small on-stack scratch array is fine. */
+    wifi_prov_saved_network_t saved[UI_PAGE_NETWORK_SAVED_MAX];
+    size_t saved_count = 0;
+    wifi_prov_get_saved_networks(saved, UI_PAGE_NETWORK_SAVED_MAX, &saved_count);
+
+    lv_obj_t *mbox = lv_msgbox_create(NULL);
+    lv_msgbox_add_title(mbox, "Forget network");
+    if (saved_count <= 1) {
+        lv_msgbox_add_text(mbox, "This is the last saved network. Forgetting it will switch this "
+                                  "board to Access Point mode. Continue?");
+    } else {
+        lv_msgbox_add_text_fmt(mbox, "Forget \"%s\"?", s_pending_forget_ssid);
+    }
+    lv_obj_t *yes = lv_msgbox_add_footer_button(mbox, "Forget");
+    lv_obj_add_event_cb(yes, forget_confirm_yes_cb, LV_EVENT_CLICKED, mbox);
+    lv_obj_t *no = lv_msgbox_add_footer_button(mbox, "Cancel");
+    lv_obj_add_event_cb(no, forget_confirm_no_cb, LV_EVENT_CLICKED, mbox);
+}
+
+/* ---- Scan ---- */
+
+static void scan_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_clean(s_scan_list);
+    lv_label_set_text(s_scan_status_label, "Scanning...");
+
+    size_t count = 0;
+    /* Same call scan_get_handler() makes -- TODO.md 10.1a. Blocking, runs on
+     * this (UI) task's stack -- wifi_prov_scan()'s own doc comment says
+     * this is expected for an HTTP-handler-style caller, and LVGL's timer
+     * task tick is the same kind of caller here. */
+    esp_err_t err = wifi_prov_scan(s_scan_results, UI_PAGE_NETWORK_SCAN_MAX, &count);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        lv_label_set_text(s_scan_status_label, "Scanning disabled in AP mode");
+        return;
+    }
+    if (err != ESP_OK) {
+        lv_label_set_text(s_scan_status_label, "Scan failed");
+        return;
+    }
+    if (count == 0) {
+        lv_label_set_text(s_scan_status_label, "No networks found");
+        return;
+    }
+
+    char status[32];
+    snprintf(status, sizeof(status), "%u network%s found", (unsigned)count, count == 1 ? "" : "s");
+    lv_label_set_text(s_scan_status_label, status);
+
+    for (size_t i = 0; i < count; i++) {
+        /* Explicit %.*s width (WIFI_PROV_SSID_MAX_LEN, the field's real max)
+         * rather than a bare %s -- GCC's -Wformat-truncation can't otherwise
+         * bound ssid's contribution and assumes worst-case, warning under
+         * -Werror even though the field is fixed-size (found building
+         * 2026-08-18). */
+        char text[WIFI_PROV_SSID_MAX_LEN + 16];
+        snprintf(text, sizeof(text), "%.*s%s  %d dBm", WIFI_PROV_SSID_MAX_LEN, s_scan_results[i].ssid,
+                 s_scan_results[i].secure ? " *" : "", (int)s_scan_results[i].rssi);
+        lv_obj_t *btn = lv_list_add_button(s_scan_list, NULL, text);
+        lv_obj_add_event_cb(btn, scan_row_clicked_cb, LV_EVENT_CLICKED, &s_scan_results[i]);
+        lv_obj_update_layout(btn);
+        ui_theme_apply_touch_area(btn, true);
+    }
+}
+
+/* ---- Saved networks ---- */
+
+static void refresh_saved_list(void)
+{
+    lv_obj_clean(s_saved_list);
+
+    static wifi_prov_saved_network_t saved[UI_PAGE_NETWORK_SAVED_MAX];
+    /* Copies of each SSID that outlive this function -- the forget button's
+     * event user_data points into this array, and it must still be valid
+     * the next time the operator taps Forget, arbitrarily long after this
+     * call returns (pages are never torn down, kiln_ui.h's header
+     * comment). Overwritten in place on every rebuild, which is fine: a
+     * button whose row no longer exists can't be tapped again. */
+    static char ssid_ctx[UI_PAGE_NETWORK_SAVED_MAX][WIFI_PROV_SSID_MAX_LEN + 1];
+    size_t count = 0;
+    wifi_prov_get_saved_networks(saved, UI_PAGE_NETWORK_SAVED_MAX, &count);
+
+    if (count == 0) {
+        lv_list_add_text(s_saved_list, "No saved networks");
+        return;
+    }
+
+    const char *active_ssid = wifi_prov_get_saved_ssid();
+    bool sta_connected = wifi_prov_is_sta_connected();
+
+    for (size_t i = 0; i < count; i++) {
+        snprintf(ssid_ctx[i], sizeof(ssid_ctx[i]), "%s", saved[i].ssid);
+
+        bool connected = sta_connected && strcmp(saved[i].ssid, active_ssid) == 0;
+        char text[48];
+        snprintf(text, sizeof(text), "%s%s", saved[i].ssid, connected ? "  (connected)" : "");
+
+        lv_obj_t *row = lv_obj_create(s_saved_list);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+        lv_obj_set_style_radius(row, 0, 0);
+        lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        lv_obj_t *label = lv_label_create(row);
+        lv_obj_set_style_text_color(label, connected ? UI_THEME_ACCENT_4 : UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_label_set_text(label, text);
+
+        lv_obj_t *forget_btn = lv_button_create(row);
+        lv_obj_set_style_bg_color(forget_btn, UI_THEME_ACCENT_5, 0);
+        lv_obj_set_style_radius(forget_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+        lv_obj_add_event_cb(forget_btn, forget_row_clicked_cb, LV_EVENT_CLICKED, ssid_ctx[i]);
+        lv_obj_t *forget_label = lv_label_create(forget_btn);
+        lv_obj_set_style_text_color(forget_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_label_set_text(forget_label, "Forget");
+        lv_obj_center(forget_label);
+        lv_obj_update_layout(forget_btn);
+        ui_theme_apply_touch_area(forget_btn, true);
+    }
+}
+
+/* ---- QR helpers -- gated on the underlying string actually changing, see
+ * this file's header comment. ---- */
+
+static void update_qr_if_changed(lv_obj_t *qr, char *last, size_t last_cap, const char *new_data)
+{
+    if (strcmp(last, new_data) == 0) {
+        return; /* unchanged since the last encode -- don't redo the work */
+    }
+    snprintf(last, last_cap, "%s", new_data);
+    lv_qrcode_update(qr, new_data, strlen(new_data));
+}
+
+/* ---- Refresh ---- */
+
+static void refresh_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
+    char status_buf[64];
+    wifi_status_ui_get_text(status_buf, sizeof(status_buf));
+    lv_label_set_text(s_status_label, status_buf);
+
+    wifi_prov_mode_t mode = wifi_prov_get_mode();
+    wifi_prov_state_t state = wifi_prov_get_state();
+    bool sta_connected = wifi_prov_is_sta_connected();
+
+    apply_mode_button_style(s_mode_home_btn, mode != WIFI_PROV_MODE_AP);
+    apply_mode_button_style(s_mode_ap_btn, mode == WIFI_PROV_MODE_AP);
+
+    /* TODO.md 10.9's exact AP-QR condition -- see this file's header
+     * comment for why WIFI_PROV_STATE_AP_MODE is listed even though it only
+     * occurs when mode == WIFI_PROV_MODE_AP already (kept for fidelity to
+     * the plan's own wording rather than simplified away). */
+    bool ap_active = (mode == WIFI_PROV_MODE_AP) || (state == WIFI_PROV_STATE_UNPROVISIONED) ||
+                     (state == WIFI_PROV_STATE_AP_MODE);
+
+    if (mode == WIFI_PROV_MODE_AP) {
+        lv_obj_add_flag(s_home_section, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_ap_section, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(s_home_section, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_ap_section, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (sta_connected) {
+        int8_t rssi = wifi_prov_get_sta_rssi();
+        char detail[32];
+        snprintf(detail, sizeof(detail), "Signal: %d dBm", (int)rssi);
+        lv_label_set_text(s_detail_label, detail);
+        lv_obj_remove_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+
+        char ip[16];
+        if (wifi_prov_get_sta_ip(ip, sizeof(ip)) != ESP_OK) {
+            ip[0] = '\0';
+        }
+        char mdns_host[MDNS_NAME_BUF_LEN];
+        char dashboard_url[80];
+        if (mdns_hostname_get(mdns_host) == ESP_OK) {
+            snprintf(dashboard_url, sizeof(dashboard_url), "http://%s.local", mdns_host);
+        } else {
+            snprintf(dashboard_url, sizeof(dashboard_url), "http://kiln.local");
+        }
+        update_qr_if_changed(s_dashboard_qr, s_dashboard_qr_last, sizeof(s_dashboard_qr_last), dashboard_url);
+        lv_label_set_text(s_dashboard_qr_caption, dashboard_url);
+
+        char ip_url[40];
+        snprintf(ip_url, sizeof(ip_url), "http://%s", ip[0] ? ip : "?");
+        update_qr_if_changed(s_ip_qr, s_ip_qr_last, sizeof(s_ip_qr_last), ip_url);
+        lv_label_set_text(s_ip_qr_caption, ip_url);
+    } else if (mode == WIFI_PROV_MODE_AP) {
+        uint8_t clients = wifi_prov_get_ap_client_count();
+        char detail[32];
+        snprintf(detail, sizeof(detail), "Clients: %u", (unsigned)clients);
+        lv_label_set_text(s_detail_label, detail);
+        lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text(s_detail_label, "");
+        lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (ap_active) {
+        const char *ap_ssid = wifi_prov_get_ap_ssid();
+        const char *ap_password = wifi_prov_get_ap_password();
+        lv_label_set_text(s_ap_ssid_label, ap_ssid);
+        lv_label_set_text(s_ap_password_label, ap_password[0] ? ap_password : "(open network)");
+
+        char uri[sizeof(s_ap_qr_last)];
+        /* WIFI:T:WPA;S:<ssid>;P:<password>;; -- password may be empty per
+         * an open AP, T:nopass is not used since section 1's AP password is
+         * never optional today (see this file's header comment). */
+        snprintf(uri, sizeof(uri), "WIFI:T:WPA;S:%s;P:%s;;", ap_ssid, ap_password);
+        update_qr_if_changed(s_ap_qr, s_ap_qr_last, sizeof(s_ap_qr_last), uri);
+    }
+
+    /* Saved-network list churn is cheap (<=8 rows) and this rebuild keeps
+     * the "connected" highlight and any change made from the web page in
+     * sync without a separate diff -- unlike the QR codes above, re-drawing
+     * a handful of list rows is not expensive enough to need gating. */
+    refresh_saved_list();
+}
+
+/* ---- Build ---- */
+
+static lv_obj_t *build_ap_stat_row(lv_obj_t *parent, const char *name)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(label, name);
+
+    lv_obj_t *value = lv_label_create(row);
+    lv_obj_set_style_text_color(value, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(value, "--");
+
+    return value;
+}
+
+static void build_connect_modal(lv_obj_t *scr)
+{
+    s_connect_modal = lv_obj_create(scr);
+    lv_obj_add_flag(s_connect_modal, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(s_connect_modal, lv_pct(100), lv_pct(100));
+    lv_obj_set_pos(s_connect_modal, 0, 0);
+    lv_obj_set_style_bg_color(s_connect_modal, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_connect_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_connect_modal, 0, 0);
+    lv_obj_set_style_pad_all(s_connect_modal, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(s_connect_modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(s_connect_modal, UI_THEME_PADDING_PX / 2, 0);
+
+    s_connect_title = lv_label_create(s_connect_modal);
+    lv_obj_set_style_text_color(s_connect_title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_connect_title, "Connect");
+
+    lv_obj_t *pw_label = lv_label_create(s_connect_modal);
+    lv_obj_set_style_text_color(pw_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(pw_label, "Password (blank for open network):");
+
+    s_connect_ta = lv_textarea_create(s_connect_modal);
+    lv_obj_set_width(s_connect_ta, lv_pct(100));
+    lv_textarea_set_one_line(s_connect_ta, true);
+    lv_textarea_set_password_mode(s_connect_ta, true);
+    lv_textarea_set_max_length(s_connect_ta, WIFI_PROV_PASSWORD_MAX_LEN);
+
+    s_connect_status_label = lv_label_create(s_connect_modal);
+    lv_obj_set_style_text_color(s_connect_status_label, UI_THEME_ACCENT_5, 0);
+    lv_label_set_text(s_connect_status_label, "");
+
+    lv_obj_t *btn_row = lv_obj_create(s_connect_modal);
+    lv_obj_set_width(btn_row, lv_pct(100));
+    lv_obj_set_height(btn_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_all(btn_row, 0, 0);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_gap(btn_row, UI_THEME_PADDING_PX, 0);
+
+    lv_obj_t *connect_btn = lv_button_create(btn_row);
+    lv_obj_set_height(connect_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_flex_grow(connect_btn, 1);
+    lv_obj_set_style_bg_color(connect_btn, UI_THEME_ACCENT_4, 0);
+    lv_obj_add_event_cb(connect_btn, connect_submit_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *connect_label = lv_label_create(connect_btn);
+    lv_label_set_text(connect_label, "Connect");
+    lv_obj_center(connect_label);
+    lv_obj_update_layout(connect_btn);
+    ui_theme_apply_touch_area(connect_btn, false);
+
+    lv_obj_t *cancel_btn = lv_button_create(btn_row);
+    lv_obj_set_height(cancel_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_flex_grow(cancel_btn, 1);
+    lv_obj_set_style_bg_color(cancel_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_add_event_cb(cancel_btn, connect_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel_label = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_center(cancel_label);
+    lv_obj_update_layout(cancel_btn);
+    ui_theme_apply_touch_area(cancel_btn, false);
+
+    s_connect_kb = lv_keyboard_create(s_connect_modal);
+    lv_keyboard_set_textarea(s_connect_kb, s_connect_ta);
+}
+
+lv_obj_t *ui_page_network_build(void)
+{
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX, 0);
+
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_width(bar, lv_pct(100));
+    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_t *title = lv_label_create(bar);
+    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(title, "Network / Wi-Fi");
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *content = lv_obj_create(scr);
+    lv_obj_set_width(content, lv_pct(100));
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, 0, 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX, 0);
+
+    /* Status card. */
+    lv_obj_t *status_card = lv_obj_create(content);
+    lv_obj_set_width(status_card, lv_pct(100));
+    lv_obj_set_height(status_card, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(status_card, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(status_card, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(status_card, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(status_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(status_card, UI_THEME_PADDING_PX / 4, 0);
+
+    s_status_label = lv_label_create(status_card);
+    lv_obj_set_style_text_color(s_status_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_status_label, "WiFi: --");
+
+    s_detail_label = lv_label_create(status_card);
+    lv_obj_set_style_text_color(s_detail_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_detail_label, "");
+
+    /* Mode toggle. */
+    lv_obj_t *mode_row = lv_obj_create(content);
+    lv_obj_set_width(mode_row, lv_pct(100));
+    lv_obj_set_height(mode_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(mode_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(mode_row, 0, 0);
+    lv_obj_set_style_pad_all(mode_row, 0, 0);
+    lv_obj_set_flex_flow(mode_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_gap(mode_row, UI_THEME_PADDING_PX, 0);
+
+    s_mode_home_btn = lv_button_create(mode_row);
+    lv_obj_set_height(s_mode_home_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_flex_grow(s_mode_home_btn, 1);
+    lv_obj_set_style_radius(s_mode_home_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_mode_home_btn, mode_home_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *home_label = lv_label_create(s_mode_home_btn);
+    lv_obj_set_style_text_color(home_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(home_label, "Home Wi-Fi");
+    lv_obj_center(home_label);
+    lv_obj_update_layout(s_mode_home_btn);
+    ui_theme_apply_touch_area(s_mode_home_btn, false);
+
+    s_mode_ap_btn = lv_button_create(mode_row);
+    lv_obj_set_height(s_mode_ap_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_flex_grow(s_mode_ap_btn, 1);
+    lv_obj_set_style_radius(s_mode_ap_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_mode_ap_btn, mode_ap_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ap_label = lv_label_create(s_mode_ap_btn);
+    lv_obj_set_style_text_color(ap_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(ap_label, "Access Point");
+    lv_obj_center(ap_label);
+    lv_obj_update_layout(s_mode_ap_btn);
+    ui_theme_apply_touch_area(s_mode_ap_btn, false);
+
+    /* Home-mode section: scan + saved networks + STA-connected QRs. */
+    s_home_section = lv_obj_create(content);
+    lv_obj_set_width(s_home_section, lv_pct(100));
+    lv_obj_set_height(s_home_section, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_home_section, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_home_section, 0, 0);
+    lv_obj_set_style_pad_all(s_home_section, 0, 0);
+    lv_obj_set_flex_flow(s_home_section, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(s_home_section, UI_THEME_PADDING_PX, 0);
+
+    lv_obj_t *scan_btn = lv_button_create(s_home_section);
+    lv_obj_set_width(scan_btn, lv_pct(100));
+    lv_obj_set_height(scan_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_style_bg_color(scan_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(scan_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(scan_btn, scan_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *scan_label = lv_label_create(scan_btn);
+    lv_obj_set_style_text_color(scan_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(scan_label, "Scan for networks");
+    lv_obj_center(scan_label);
+    lv_obj_update_layout(scan_btn);
+    ui_theme_apply_touch_area(scan_btn, false);
+
+    s_scan_status_label = lv_label_create(s_home_section);
+    lv_obj_set_style_text_color(s_scan_status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_scan_status_label, "Tap Scan to search for networks");
+
+    s_scan_list = lv_list_create(s_home_section);
+    lv_obj_set_width(s_scan_list, lv_pct(100));
+    lv_obj_set_height(s_scan_list, 140);
+
+    lv_obj_t *saved_title = lv_label_create(s_home_section);
+    lv_obj_set_style_text_color(saved_title, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(saved_title, "Saved networks:");
+
+    s_saved_list = lv_list_create(s_home_section);
+    lv_obj_set_width(s_saved_list, lv_pct(100));
+    lv_obj_set_height(s_saved_list, 120);
+
+    /* STA-connected QR row -- dashboard (kiln.local) and raw-IP QRs, hidden
+     * until sta_connected (this file's header comment). */
+    s_sta_qr_row = lv_obj_create(s_home_section);
+    lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(s_sta_qr_row, lv_pct(100));
+    lv_obj_set_height(s_sta_qr_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(s_sta_qr_row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(s_sta_qr_row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_sta_qr_row, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(s_sta_qr_row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(s_sta_qr_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(s_sta_qr_row, UI_THEME_PADDING_PX, 0);
+
+    lv_obj_t *dash_col = lv_obj_create(s_sta_qr_row);
+    lv_obj_set_size(dash_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(dash_col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(dash_col, 0, 0);
+    lv_obj_set_style_pad_all(dash_col, 0, 0);
+    lv_obj_set_flex_flow(dash_col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(dash_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(dash_col, UI_THEME_PADDING_PX / 4, 0);
+    s_dashboard_qr = lv_qrcode_create(dash_col);
+    lv_qrcode_set_size(s_dashboard_qr, UI_PAGE_NETWORK_QR_SIZE_PX);
+    s_dashboard_qr_caption = lv_label_create(dash_col);
+    lv_obj_set_style_text_color(s_dashboard_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_dashboard_qr_caption, "http://kiln.local");
+    s_dashboard_qr_last[0] = '\0';
+
+    lv_obj_t *ip_col = lv_obj_create(s_sta_qr_row);
+    lv_obj_set_size(ip_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(ip_col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ip_col, 0, 0);
+    lv_obj_set_style_pad_all(ip_col, 0, 0);
+    lv_obj_set_flex_flow(ip_col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ip_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(ip_col, UI_THEME_PADDING_PX / 4, 0);
+    s_ip_qr = lv_qrcode_create(ip_col);
+    lv_qrcode_set_size(s_ip_qr, UI_PAGE_NETWORK_QR_SIZE_PX);
+    s_ip_qr_caption = lv_label_create(ip_col);
+    lv_obj_set_style_text_color(s_ip_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_ip_qr_caption, "http://--");
+    s_ip_qr_last[0] = '\0';
+
+    /* AP-mode section: identity display + AP-join QR. */
+    s_ap_section = lv_obj_create(content);
+    lv_obj_add_flag(s_ap_section, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(s_ap_section, lv_pct(100));
+    lv_obj_set_height(s_ap_section, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(s_ap_section, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(s_ap_section, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_ap_section, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(s_ap_section, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_ap_section, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(s_ap_section, UI_THEME_PADDING_PX / 2, 0);
+
+    lv_obj_t *ap_title = lv_label_create(s_ap_section);
+    lv_obj_set_style_text_color(ap_title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(ap_title, "This board's access point");
+    lv_obj_set_width(ap_title, lv_pct(100));
+
+    lv_obj_t *ap_rows = lv_obj_create(s_ap_section);
+    lv_obj_set_width(ap_rows, lv_pct(100));
+    lv_obj_set_height(ap_rows, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(ap_rows, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ap_rows, 0, 0);
+    lv_obj_set_style_pad_all(ap_rows, 0, 0);
+    lv_obj_set_flex_flow(ap_rows, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(ap_rows, UI_THEME_PADDING_PX / 4, 0);
+    s_ap_ssid_label = build_ap_stat_row(ap_rows, "SSID");
+    s_ap_password_label = build_ap_stat_row(ap_rows, "Password");
+
+    s_ap_qr = lv_qrcode_create(s_ap_section);
+    lv_qrcode_set_size(s_ap_qr, UI_PAGE_NETWORK_QR_SIZE_PX);
+    s_ap_qr_last[0] = '\0';
+    lv_obj_t *ap_qr_caption = lv_label_create(s_ap_section);
+    lv_obj_set_style_text_color(ap_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(ap_qr_caption, "Scan to join from a phone");
+
+    /* Back. */
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *back_label = lv_label_create(back);
+    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(back_label, "Back");
+    lv_obj_center(back_label);
+    lv_obj_update_layout(back);
+    ui_theme_apply_touch_area(back, false);
+
+    /* Connect modal -- built last so it's the topmost child in z-order
+     * (LVGL's hit-test walks children highest-index-first, ui_theme.h's
+     * header comment), covering the whole screen while shown. */
+    build_connect_modal(scr);
+
+    /* Pages are never torn down (kiln_ui.h's header comment) -- same
+     * "create once, keep refreshing forever" timer lifetime as every other
+     * page. */
+    lv_timer_create(refresh_cb, UI_PAGE_NETWORK_REFRESH_MS, NULL);
+    refresh_cb(NULL); /* paint real numbers immediately instead of waiting one tick */
+
+    return scr;
+}

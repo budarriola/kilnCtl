@@ -11,18 +11,21 @@
 //
 // Four list items, matching section 3's Settings pages plus TODO.md 10.7's
 // board-health surface:
-//   - Zones & Thermocouples, Relays & Rules, Network/Wi-Fi -- all three
-//     still "not built yet" placeholders this pass (non-clickable list
-//     rows, dimmed text) rather than dead navigation to a page that doesn't
-//     exist yet or a half-built editor. Building a real one of these (e.g.
-//     zone name/thermo_mask editing, since zones_http.h already exposes the
-//     getters/setters) is reasonable future scope but was not attempted
-//     this pass in favor of a working hub plus one other real page
-//     (Temperature, see ui_page_temperature.c) and the new Board Health
-//     page below.
-//   - Board Health -- real navigation to ui_page_board_health.c/.h, new
-//     this pass, itself reading board_temps_get_live() (extracted from
+//   - Zones & Thermocouples, Relays & Rules -- still "not built yet"
+//     placeholders (non-clickable list rows, dimmed text) rather than dead
+//     navigation to a page that doesn't exist yet or a half-built editor.
+//     Building a real one of these (e.g. zone name/thermo_mask editing,
+//     since zones_http.h already exposes the getters/setters) is
+//     reasonable future scope but was not attempted this pass in favor of
+//     a working hub plus the real pages below.
+//   - Board Health -- real navigation to ui_page_board_health.c/.h, added
+//     TODO.md 10.7, itself reading board_temps_get_live() (extracted from
 //     board_temps.c's HTTP handler, TODO.md 10.1a).
+//   - Network / Wi-Fi -- real navigation to ui_page_network.c/.h, new this
+//     pass (TODO.md 10.9), replacing what used to be a "not built yet"
+//     placeholder row. See ui_page_network.c's header comment for what it
+//     builds (mode toggle, scan/connect, saved networks with forget, AP
+//     identity display, QR codes) and its own 10.1a shared-backend list.
 static void back_btn_cb(lv_event_t *e)
 {
     (void)e;
@@ -33,6 +36,12 @@ static void board_health_nav_cb(lv_event_t *e)
 {
     (void)e;
     kiln_ui_show("board_health");
+}
+
+static void network_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("network");
 }
 
 /* A real, clickable nav row (cb non-NULL) or an honest "not built yet"
@@ -102,7 +111,7 @@ lv_obj_t *ui_page_config_build(void)
 
     build_nav_item(content, "Zones & Thermocouples (not built yet)", NULL);
     build_nav_item(content, "Relays & Rules (not built yet)", NULL);
-    build_nav_item(content, "Network / Wi-Fi (not built yet)", NULL);
+    build_nav_item(content, "Network / Wi-Fi", network_nav_cb);
     build_nav_item(content, "Board Health", board_health_nav_cb);
 
     lv_obj_t *back = lv_button_create(content);

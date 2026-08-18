@@ -7,6 +7,7 @@
 #include "ui_page_board_health.h"
 #include "ui_page_config.h"
 #include "ui_page_home.h"
+#include "ui_page_network.h"
 #include "ui_page_temperature.h"
 
 static const char *TAG = "kiln_ui";
@@ -65,6 +66,12 @@ esp_err_t kiln_ui_init(void)
      * ESP_ERR_NOT_FOUND and does nothing) rather than crash, but the page
      * would never actually be reachable. */
     err = kiln_ui_register_page("board_health", ui_page_board_health_build);
+    if (err != ESP_OK) return err;
+
+    /* TODO.md 10.9's LCD-side Wi-Fi settings page, linked from
+     * ui_page_config.c's "Network / Wi-Fi" nav item (previously a
+     * "not built yet" placeholder row). */
+    err = kiln_ui_register_page("network", ui_page_network_build);
     if (err != ESP_OK) return err;
 
     return kiln_ui_show("home");

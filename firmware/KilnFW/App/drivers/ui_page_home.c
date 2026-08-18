@@ -4,7 +4,6 @@
 #include <stdio.h>
 
 #include "esp_log.h"
-#include "mdns.h"
 
 #include "MAX31856.h"
 #include "dashboard_http.h"
@@ -14,7 +13,7 @@
 #include "profiles_http.h"
 #include "run_state.h"
 #include "ui_theme.h"
-#include "wifi_prov.h"
+#include "wifi_status_ui.h"
 #include "zones_http.h"
 
 // TODO.md 10.3's real main/status page -- replaces the pre-10.2 placeholder
@@ -52,10 +51,13 @@
 //   boot-state logic otherwise -- see start_btn_cb()'s comment.
 //
 // 2026-08-18: status bar WiFi/IP/mDNS readout (s_status_label, see
-// wifi_status_text()) -- connection state, station IP, and kiln.local
-// reachability, all via wifi_prov.h getters wifi_provision_http.c's
-// status_get_handler() already calls plus the mdns component's own
-// mdns_hostname_get() (TODO.md 10.1a's shared-backend rule).
+// wifi_status_ui_get_text(), wifi_status_ui.c) -- connection state, station
+// IP, and kiln.local reachability, all via wifi_prov.h getters
+// wifi_provision_http.c's status_get_handler() already calls plus the mdns
+// component's own mdns_hostname_get() (TODO.md 10.1a's shared-backend rule).
+// TODO.md 10.9 relocated the actual formatter into wifi_status_ui.c/.h so
+// ui_page_network.c (new this pass) could call the same implementation
+// instead of a second copy of the same switch statement.
 
 static const char *TAG = "ui_page_home";
 
@@ -81,16 +83,10 @@ static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_start_btn;
 static lv_obj_t *s_stop_btn;
 
-/* WiFi/IP/mDNS status readout, added to the status bar this pass. Every
- * value it shows comes from the SAME plain-C getters wifi_provision_http.c's
- * status_get_handler() already calls (wifi_prov_get_mode()/_get_state()/
- * _is_sta_connected()/_get_sta_ip(), wifi_prov.h) -- TODO.md 10.1a's
- * shared-backend rule, no parallel read of wifi_prov.c's internals. The
- * mDNS hostname piece uses the espressif mdns component's OWN
- * mdns_hostname_get() (mdns.h) rather than a new tracking flag: it already
- * answers "did mdns_init()/mdns_hostname_set() succeed" (ESP_ERR_INVALID_STATE
- * if not), which is exactly what's needed to know whether kiln.local is live
- * without adding a getter next to main.c's mdns_init() call. */
+/* WiFi/IP/mDNS status readout, added to the status bar this pass. Text comes
+ * from wifi_status_ui_get_text() (wifi_status_ui.c) -- see that module's
+ * header comment for the underlying getters and the TODO.md 10.1a
+ * shared-backend rule. */
 static lv_obj_t *s_status_label;
 
 /* Graph card (TODO.md 10.3, previously a labeled placeholder -- see this
@@ -546,55 +542,16 @@ static void build_profile_picker(lv_obj_t *parent)
     ui_theme_apply_touch_area(s_profile_picker, false);
 }
 
-/* Builds the status-bar WiFi/IP/mDNS text. mode==AP mirrors
- * wifi_provision_http.c's mode_name()/state_name() mapping (AP-fallback is
- * reported as its own case, not folded into "disconnected") but in short
- * human text instead of the JSON tokens the HTTP status endpoint sends. */
-static void wifi_status_text(char *out, size_t out_cap)
-{
-    if (wifi_prov_get_mode() == WIFI_PROV_MODE_AP) {
-        snprintf(out, out_cap, "WiFi: AP mode");
-        return;
-    }
-
-    switch (wifi_prov_get_state()) {
-    case WIFI_PROV_STATE_CONNECTED: {
-        char ip[16];
-        if (wifi_prov_get_sta_ip(ip, sizeof(ip)) != ESP_OK) {
-            ip[0] = '\0';
-        }
-        char mdns_host[MDNS_NAME_BUF_LEN];
-        if (mdns_hostname_get(mdns_host) == ESP_OK) {
-            snprintf(out, out_cap, "WiFi: %s (%s.local)", ip, mdns_host);
-        } else {
-            snprintf(out, out_cap, "WiFi: %s", ip);
-        }
-        break;
-    }
-    case WIFI_PROV_STATE_CONNECTING:
-        snprintf(out, out_cap, "WiFi: connecting...");
-        break;
-    case WIFI_PROV_STATE_RECONNECTING:
-        snprintf(out, out_cap, "WiFi: reconnecting...");
-        break;
-    case WIFI_PROV_STATE_UNPROVISIONED:
-        snprintf(out, out_cap, "WiFi: not set up (AP fallback)");
-        break;
-    case WIFI_PROV_STATE_AP_MODE:
-        snprintf(out, out_cap, "WiFi: AP mode");
-        break;
-    default:
-        snprintf(out, out_cap, "WiFi: unknown");
-        break;
-    }
-}
-
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
 
+    /* wifi_status_ui.h -- TODO.md 10.9 factored this formatter out of this
+     * file into its own shared module so ui_page_network.c can call the
+     * exact same "human-readable WiFi state" text instead of a second copy
+     * of the switch statement that used to live here. */
     char status_buf[64];
-    wifi_status_text(status_buf, sizeof(status_buf));
+    wifi_status_ui_get_text(status_buf, sizeof(status_buf));
     lv_label_set_text(s_status_label, status_buf);
 
     /* Both calls below are the exact same plain-C getters
