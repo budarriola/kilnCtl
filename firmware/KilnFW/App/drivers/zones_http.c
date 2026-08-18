@@ -514,6 +514,16 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return true;
 }
 
+bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0 || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    strncpy(out, s_zones.cfg.zones[zone_index].name, out_cap - 1);
+    out[out_cap - 1] = '\0';
+    return true;
+}
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (!out_kp || !out_ki || !out_kd || zone_index >= s_zones.cfg.thermo_count) {

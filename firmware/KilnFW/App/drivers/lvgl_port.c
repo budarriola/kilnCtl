@@ -12,6 +12,7 @@
 
 #include "kiln_ui.h"
 #include "settings.h"
+#include "ui_theme.h"
 
 static const char *TAG = "lvgl_port";
 
@@ -145,6 +146,35 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->point.x = px;
     data->point.y = py;
     data->state = LV_INDEV_STATE_PRESSED;
+
+    /* Touch-group arbitration -- TODO.md 10.4's open item, ui_theme.h's
+     * "Touch-group arbitration" block comment has the full design writeup.
+     * ui_theme_touch_groups_active() is a single flag check, so this costs
+     * nothing on every build that never calls
+     * ui_theme_register_touch_group() (true of every page today -- no dense
+     * grid layout exists yet). When a group IS registered: re-run LVGL's own
+     * public lv_indev_search_obj() against the raw point to get the same
+     * answer LVGL's real pipeline is about to compute anyway, hand it to
+     * ui_theme_resolve_touch_target() to arbitrate within that widget's
+     * group (a no-op if the widget isn't in a group), and if arbitration
+     * picked a different widget, overwrite data->point with THAT widget's
+     * own center. LVGL's indev core (lv_indev.c's _lv_indev_read()) copies
+     * data->point into indev->pointer.act_point right after this callback
+     * returns, and indev_proc_press() re-resolves the press from that exact
+     * point through the same public search path -- so rewriting the point
+     * here is sufficient to redirect the press; nothing about LVGL's own
+     * press/release/drag state machine needs to be touched or duplicated. */
+    if (ui_theme_touch_groups_active()) {
+        lv_point_t raw_point = { .x = px, .y = py };
+        lv_obj_t *default_hit = lv_indev_search_obj(lv_screen_active(), &raw_point);
+        lv_obj_t *target = ui_theme_resolve_touch_target(default_hit, raw_point);
+        if (target && target != default_hit) {
+            lv_area_t coords;
+            lv_obj_get_coords(target, &coords);
+            data->point.x = (coords.x1 + coords.x2) / 2;
+            data->point.y = (coords.y1 + coords.y2) / 2;
+        }
+    }
 
     if (p->idle) {
         screen_idle_inject_touch(p->idle, (uint16_t)px, (uint16_t)py, true);

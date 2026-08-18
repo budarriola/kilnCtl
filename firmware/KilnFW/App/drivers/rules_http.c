@@ -34,9 +34,11 @@ static const char *TAG = "rules_http";
 #define RULES_MAX_RULES_PER_RELAY 3
 #define RULES_MAX_CONDITIONS_PER_RULE 3
 
-/* Embedded via EMBED_TXTFILES in CMakeLists.txt. */
-extern const uint8_t rules_page_html_start[] asm("_binary_rules_page_html_start");
-extern const uint8_t rules_page_html_end[] asm("_binary_rules_page_html_end");
+/* Embedded via EMBED_TXTFILES in CMakeLists.txt. TODO.md 10.6a: embedded
+ * pre-gzipped (gzip'd at configure time before idf_component_register
+ * runs), hence the "_gz" in both the filename and the generated symbol. */
+extern const uint8_t rules_page_html_gz_start[] asm("_binary_rules_page_html_gz_start");
+extern const uint8_t rules_page_html_gz_end[] asm("_binary_rules_page_html_gz_end");
 
 /* Raw request body cap for POST /api/rules -- this is a hand-typed DSL in a
  * <textarea>, not a generated form, but the same defensive discipline
@@ -248,11 +250,30 @@ static esp_err_t nvs_save(void)
 
 /* ---- HTML page ------------------------------------------------------------ */
 
+/* TODO.md 10.6a: defensive Accept-Encoding check -- see
+ * wifi_provision_http.c's client_accepts_gzip() for the fuller rationale;
+ * duplicated per file rather than shared, matching this codebase's existing
+ * convention (e.g. json_escape() elsewhere). No uncompressed fallback is
+ * embedded this pass (named gap, TODO.md 10.6a). */
+static bool client_accepts_gzip(httpd_req_t *req)
+{
+    char enc[32];
+    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
+        return false;
+    }
+    return strstr(enc, "gzip") != NULL;
+}
+
 static esp_err_t page_get_handler(httpd_req_t *req)
 {
+    if (!client_accepts_gzip(req)) {
+        ESP_LOGW(TAG, "rules_page.html: client did not advertise Accept-Encoding: gzip; serving gzip "
+                      "body anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    }
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, (const char *)rules_page_html_start,
-                           (size_t)(rules_page_html_end - rules_page_html_start));
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)rules_page_html_gz_start,
+                           (size_t)(rules_page_html_gz_end - rules_page_html_gz_start));
 }
 
 /* ---- GET /api/rules: regenerate the DSL text from the in-RAM config ------

@@ -1,5 +1,7 @@
 #include "ui_theme.h"
 
+#include <stdint.h>
+
 /* ui_theme.c -- companion to ui_theme.h's constants, TODO.md 10.4 ("Touch
  * hit-testing"). See ui_theme.h's "Touch hit-area sizing" comment block for
  * why this leans on LVGL's own lv_obj_set_ext_click_area() rather than a
@@ -54,4 +56,97 @@ void ui_theme_apply_touch_area(lv_obj_t *widget, bool compact_layout)
     }
 
     lv_obj_set_ext_click_area(widget, ext);
+}
+
+/* --- Touch-group arbitration -- see ui_theme.h's block comment for the full
+ * design writeup (why this exists, what it does and doesn't replace, and
+ * exactly how lvgl_port.c's touch_read_cb() gets its override to "take" by
+ * rewriting data->point rather than fighting LVGL's indev state machine). */
+
+typedef struct {
+    lv_obj_t *widgets[UI_THEME_TOUCH_GROUP_MAX_WIDGETS];
+    size_t count;
+} touch_group_t;
+
+static touch_group_t s_touch_groups[UI_THEME_TOUCH_GROUP_MAX_GROUPS];
+static size_t s_touch_group_count = 0;
+
+void ui_theme_register_touch_group(lv_obj_t **widgets, size_t count)
+{
+    if (!widgets || count < 2) return; /* nothing to arbitrate between */
+    if (s_touch_group_count >= UI_THEME_TOUCH_GROUP_MAX_GROUPS) return;
+    if (count > UI_THEME_TOUCH_GROUP_MAX_WIDGETS) return;
+
+    touch_group_t *g = &s_touch_groups[s_touch_group_count];
+    for (size_t i = 0; i < count; i++) {
+        g->widgets[i] = widgets[i];
+    }
+    g->count = count;
+    s_touch_group_count++;
+}
+
+bool ui_theme_touch_groups_active(void)
+{
+    return s_touch_group_count > 0;
+}
+
+/* Point-in-click-area test using LVGL's own already-expanded box
+ * (lv_obj_get_click_area() = the widget's real coords plus whatever
+ * ext_click_area ui_theme_apply_touch_area() gave it) rather than
+ * re-deriving the extension amount here -- this file doesn't need to track
+ * ext_click_area itself; LVGL already does, and hands it back. */
+static bool point_in_click_area(lv_obj_t *widget, lv_point_t point)
+{
+    lv_area_t area;
+    lv_obj_get_click_area(widget, &area);
+    return point.x >= area.x1 && point.x <= area.x2 && point.y >= area.y1 && point.y <= area.y2;
+}
+
+lv_obj_t *ui_theme_resolve_touch_target(lv_obj_t *default_target, lv_point_t point)
+{
+    if (!default_target) return default_target;
+
+    for (size_t gi = 0; gi < s_touch_group_count; gi++) {
+        touch_group_t *g = &s_touch_groups[gi];
+
+        bool is_member = false;
+        for (size_t i = 0; i < g->count; i++) {
+            if (g->widgets[i] == default_target) {
+                is_member = true;
+                break;
+            }
+        }
+        if (!is_member) continue;
+
+        /* default_target is in this group -- find whichever member's real
+         * (unexpanded) center is closest to the touch point, among members
+         * whose expanded click area actually contains the point. Squared
+         * distance: only the ordering matters, no need for sqrt(). */
+        lv_obj_t *best = default_target;
+        int64_t best_dist_sq = -1;
+        for (size_t i = 0; i < g->count; i++) {
+            lv_obj_t *w = g->widgets[i];
+            if (!point_in_click_area(w, point)) continue;
+
+            lv_area_t coords;
+            lv_obj_get_coords(w, &coords);
+            int32_t cx = (coords.x1 + coords.x2) / 2;
+            int32_t cy = (coords.y1 + coords.y2) / 2;
+            int64_t dx = (int64_t)point.x - cx;
+            int64_t dy = (int64_t)point.y - cy;
+            int64_t dist_sq = dx * dx + dy * dy;
+
+            if (best_dist_sq < 0 || dist_sq < best_dist_sq) {
+                best_dist_sq = dist_sq;
+                best = w;
+            }
+        }
+        /* default_target's own click area is guaranteed to contain point
+         * (that's how LVGL picked it in the first place), so best_dist_sq
+         * is always set by the loop above -- `best` never falls back to an
+         * uninitialized choice. */
+        return best;
+    }
+
+    return default_target; /* not in any registered group -- LVGL's pick stands */
 }

@@ -211,6 +211,51 @@ void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, boo
     }
 }
 
+/* See dashboard_http.h's doc comment -- the plain-C action function
+ * extracted from relay_post_handler() so a non-HTTP caller (ui_page_temperature.c)
+ * goes through the same ownership/safety gate and the same kiln_io write,
+ * not a reimplementation of either. relay_post_handler() below is now a thin
+ * wrapper: parse the HTTP body, call this, translate the result to an HTTP
+ * status. */
+dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint32_t *out_safety_sources)
+{
+    if (!s_dash.io) {
+        return DASHBOARD_RELAY_ERR_NO_BOARD;
+    }
+    if (relay_index < 1 || relay_index > KILN_IO_RELAY_COUNT) {
+        return DASHBOARD_RELAY_ERR_RANGE;
+    }
+
+    /* TODO.md section 0's ownership decision: a relay a running (or paused,
+     * pre-resume) profile claimed is refused to a manual command in either
+     * direction -- not just ON -- since a de-energize mid-window fights the
+     * executor's own time-proportioning exactly as much as an unwanted
+     * energize does. */
+    if (relay_authority_manual_blocked_by_owner(relay_index)) {
+        ESP_LOGW(TAG, "dashboard: relay %u refused -- owned by a running profile", (unsigned)relay_index);
+        return DASHBOARD_RELAY_ERR_OWNED;
+    }
+
+    if (on) {
+        uint32_t sources = 0;
+        if (relay_authority_on_blocked(s_dash.safety, &sources)) {
+            ESP_LOGW(TAG, "dashboard: relay %u ON refused -- safety fault sources 0x%02X",
+                     (unsigned)relay_index, (unsigned)sources);
+            if (out_safety_sources) {
+                *out_safety_sources = sources;
+            }
+            return DASHBOARD_RELAY_ERR_SAFETY;
+        }
+    }
+
+    esp_err_t err = kiln_io_set_relay(s_dash.io, relay_index, on);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "kiln_io_set_relay failed: %s", esp_err_to_name(err));
+        return DASHBOARD_RELAY_ERR_IO_FAIL;
+    }
+    return DASHBOARD_RELAY_OK;
+}
+
 static esp_err_t relay_post_handler(httpd_req_t *req)
 {
     if (!s_dash.io) {
@@ -251,34 +296,30 @@ static esp_err_t relay_post_handler(httpd_req_t *req)
     }
     bool want_on = on_val[0] == '1';
 
-    /* TODO.md section 0's ownership decision: a relay a running (or paused,
-     * pre-resume) profile claimed is refused to a manual command in either
-     * direction -- not just ON -- since a de-energize mid-window fights the
-     * executor's own time-proportioning exactly as much as an unwanted
-     * energize does. */
-    if (relay_authority_manual_blocked_by_owner((uint8_t)relay)) {
-        ESP_LOGW(TAG, "dashboard: relay %ld refused -- owned by a running profile", relay);
+    /* dashboard_set_relay() -- see this file's definition above and
+     * dashboard_http.h's doc comment -- is now the one place the
+     * ownership/safety gate and the kiln_io write happen; this handler only
+     * translates its result to an HTTP status. */
+    switch (dashboard_set_relay((uint8_t)relay, want_on, NULL)) {
+    case DASHBOARD_RELAY_OK:
+        return httpd_resp_sendstr(req, "ok");
+    case DASHBOARD_RELAY_ERR_NO_BOARD:
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no relay board attached");
+        return ESP_OK;
+    case DASHBOARD_RELAY_ERR_RANGE:
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range");
+        return ESP_OK;
+    case DASHBOARD_RELAY_ERR_OWNED:
         httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "relay owned by a running profile");
         return ESP_OK;
-    }
-
-    if (want_on) {
-        uint32_t sources = 0;
-        if (relay_authority_on_blocked(s_dash.safety, &sources)) {
-            ESP_LOGW(TAG, "dashboard: relay %ld ON refused -- safety fault sources 0x%02X",
-                     relay, (unsigned)sources);
-            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "blocked by safety fault");
-            return ESP_OK;
-        }
-    }
-
-    esp_err_t err = kiln_io_set_relay(s_dash.io, (uint8_t)relay, want_on);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "kiln_io_set_relay failed: %s", esp_err_to_name(err));
+    case DASHBOARD_RELAY_ERR_SAFETY:
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "blocked by safety fault");
+        return ESP_OK;
+    case DASHBOARD_RELAY_ERR_IO_FAIL:
+    default:
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "relay command failed");
         return ESP_OK;
     }
-    return httpd_resp_sendstr(req, "ok");
 }
 
 /* ---- Profile executor (TODO.md section 6) --------------------------------- */

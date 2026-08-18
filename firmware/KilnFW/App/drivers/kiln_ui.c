@@ -4,6 +4,7 @@
 
 #include "esp_log.h"
 
+#include "ui_page_board_health.h"
 #include "ui_page_config.h"
 #include "ui_page_home.h"
 #include "ui_page_temperature.h"
@@ -54,6 +55,16 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("config", ui_page_config_build);
     if (err != ESP_OK) return err;
     err = kiln_ui_register_page("temperature", ui_page_temperature_build);
+    if (err != ESP_OK) return err;
+
+    /* TODO.md 10.7's LCD-side board-health nav item, linked from
+     * ui_page_config.c's "Board Health" button (kiln_ui_show("board_health")).
+     * Registration was the one piece left undone when the pass that built
+     * ui_page_board_health.c was cut off mid-task (session limit) -- without
+     * this, that nav button would fail soft (kiln_ui_show() logs
+     * ESP_ERR_NOT_FOUND and does nothing) rather than crash, but the page
+     * would never actually be reachable. */
+    err = kiln_ui_register_page("board_health", ui_page_board_health_build);
     if (err != ESP_OK) return err;
 
     return kiln_ui_show("home");

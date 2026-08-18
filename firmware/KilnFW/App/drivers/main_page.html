@@ -4,22 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kilnCtl</title>
+<link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
-  /* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
-     TODO.md 10.6). Same hex values as the LCD side; duplicated verbatim in each of
-     the 6 web pages since they're EMBED_TXTFILES'd independently and there's no
-     shared static-asset route today. The --bg/--fg/etc names below stay as the
-     existing light/dark toggle's interface (unchanged behaviour); only the DARK
-     variant now points at these values instead of its own hex, so the toggled-dark
-     and default (no preference) look matches the LCD, while explicit light mode is
-     untouched. */
-  :root {
-    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
-    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
-    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
-    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
-  }
+  /* Page-local palette (docs/UI_THEME.md / App/drivers/ui_theme.h, TODO.md
+     10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
+     /theme.css (linked above, EMBED_TXTFILES'd from App/drivers/theme.css) --
+     this block keeps only what's specific to this page: the --bg/--fg/etc
+     names the existing light/dark toggle uses as its interface (unchanged
+     behaviour); only the DARK variant points at the --ui-* values instead of
+     its own hex, so toggled-dark and default (no preference) match the LCD,
+     while explicit light mode is untouched. */
   :root {
     --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
     --card-bg: #f7f7f7; --on-color: #1a7a1a; --off-color: #888; --fault-color: #b00;

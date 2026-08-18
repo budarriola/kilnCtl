@@ -1,5 +1,6 @@
 #include "wifi_provision_http.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -19,23 +20,72 @@ static const char *TAG = "wifi_prov_http";
 
 /* Embedded via EMBED_TXTFILES in CMakeLists.txt -- symbol names are the
  * filename with non-alnum characters replaced by '_', plus a NUL the build
- * system appends for a text file. */
-extern const uint8_t wifi_provision_page_html_start[] asm("_binary_wifi_provision_page_html_start");
-extern const uint8_t wifi_provision_page_html_end[] asm("_binary_wifi_provision_page_html_end");
-extern const uint8_t main_page_html_start[] asm("_binary_main_page_html_start");
-extern const uint8_t main_page_html_end[] asm("_binary_main_page_html_end");
+ * system appends for a text file. TODO.md 10.6a: these three are embedded
+ * pre-gzipped (CMakeLists.txt gzips them at configure time before
+ * idf_component_register runs), so the filename -- and therefore the
+ * symbol -- carries a trailing "_gz". theme.css is the new shared-palette
+ * route from TODO.md 10.6's follow-up pass; it lives here (not a 7th .c
+ * file) because this module is the one that calls httpd_start() and owns
+ * the single httpd_handle_t every other *_http.c module registers routes
+ * onto (see wifi_provision_http_get_server() below) -- registering it here
+ * means it's reachable on the SAME server instance regardless of whether
+ * the device is in AP-only provisioning mode or fully provisioned, so a
+ * phone on the fallback AP during first-boot setup can load it same as a
+ * browser on the home network. */
+extern const uint8_t wifi_provision_page_html_gz_start[] asm("_binary_wifi_provision_page_html_gz_start");
+extern const uint8_t wifi_provision_page_html_gz_end[] asm("_binary_wifi_provision_page_html_gz_end");
+extern const uint8_t main_page_html_gz_start[] asm("_binary_main_page_html_gz_start");
+extern const uint8_t main_page_html_gz_end[] asm("_binary_main_page_html_gz_end");
+extern const uint8_t theme_css_gz_start[] asm("_binary_theme_css_gz_start");
+extern const uint8_t theme_css_gz_end[] asm("_binary_theme_css_gz_end");
 
 static httpd_handle_t s_server;
 
-static esp_err_t send_embedded_html(httpd_req_t *req, const uint8_t *start, const uint8_t *end)
+/* TODO.md 10.6a: defensive check before relying on a client to have asked
+ * for gzip -- every real browser sends Accept-Encoding: gzip, but this
+ * codebase's convention is to never trust a client to be well-behaved
+ * (see e.g. every POST handler's Content-Length bound in this file) rather
+ * than assume. There is no uncompressed fallback blob embedded alongside
+ * the gzip one (named gap, see TODO.md 10.6a's status note) -- a client
+ * that doesn't advertise support still gets the gzip body, just with a
+ * warning logged rather than silently mis-served. */
+static bool client_accepts_gzip(httpd_req_t *req)
 {
+    char enc[32];
+    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
+        return false; /* header absent, or longer than this buffer -- treat as "no" either way */
+    }
+    return strstr(enc, "gzip") != NULL;
+}
+
+static esp_err_t send_embedded_gzip_html(httpd_req_t *req, const char *page_name,
+                                          const uint8_t *start, const uint8_t *end)
+{
+    if (!client_accepts_gzip(req)) {
+        ESP_LOGW(TAG, "%s: client did not advertise Accept-Encoding: gzip; serving gzip body anyway "
+                      "(TODO.md 10.6a: no uncompressed fallback embedded this pass)", page_name);
+    }
     httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     return httpd_resp_send(req, (const char *)start, (size_t)(end - start));
+}
+
+static esp_err_t theme_css_get_handler(httpd_req_t *req)
+{
+    if (!client_accepts_gzip(req)) {
+        ESP_LOGW(TAG, "theme.css: client did not advertise Accept-Encoding: gzip; serving gzip body "
+                      "anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    }
+    httpd_resp_set_type(req, "text/css");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)theme_css_gz_start,
+                           (size_t)(theme_css_gz_end - theme_css_gz_start));
 }
 
 static esp_err_t wifi_page_get_handler(httpd_req_t *req)
 {
-    return send_embedded_html(req, wifi_provision_page_html_start, wifi_provision_page_html_end);
+    return send_embedded_gzip_html(req, "wifi_provision_page.html",
+                                   wifi_provision_page_html_gz_start, wifi_provision_page_html_gz_end);
 }
 
 /* "/" is the landing page a client actually lands on -- both a phone
@@ -46,9 +96,10 @@ static esp_err_t wifi_page_get_handler(httpd_req_t *req)
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
     if (wifi_prov_is_sta_connected()) {
-        return send_embedded_html(req, main_page_html_start, main_page_html_end);
+        return send_embedded_gzip_html(req, "main_page.html", main_page_html_gz_start, main_page_html_gz_end);
     }
-    return send_embedded_html(req, wifi_provision_page_html_start, wifi_provision_page_html_end);
+    return send_embedded_gzip_html(req, "wifi_provision_page.html",
+                                   wifi_provision_page_html_gz_start, wifi_provision_page_html_gz_end);
 }
 
 static const char *state_name(wifi_prov_state_t s)
@@ -509,6 +560,14 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t forget_uri = {
         .uri = "/forget", .method = HTTP_POST, .handler = forget_post_handler,
     };
+    /* TODO.md 10.6's shared-theme follow-up: registered here, not a 7th
+     * *_http.c file, because this is the module that owns s_server -- see
+     * the extern-symbol block's comment above for why that also makes it
+     * reachable during AP-only provisioning, not just once fully
+     * provisioned. */
+    static const httpd_uri_t theme_css_uri = {
+        .uri = "/theme.css", .method = HTTP_GET, .handler = theme_css_get_handler,
+    };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &wifi_page_uri);
     httpd_register_uri_handler(s_server, &status_uri);
@@ -516,6 +575,7 @@ esp_err_t wifi_provision_http_start(void)
     httpd_register_uri_handler(s_server, &provision_uri);
     httpd_register_uri_handler(s_server, &networks_uri);
     httpd_register_uri_handler(s_server, &forget_uri);
+    httpd_register_uri_handler(s_server, &theme_css_uri);
 
     ESP_LOGI(TAG, "provisioning HTTP server up");
     return ESP_OK;

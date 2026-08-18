@@ -55,8 +55,11 @@ static const char *TAG = "profiles_http";
 /* The 20%-margin warning rule, explicit in TODO.md section 5. */
 #define PROFILE_RAMP_WARN_FRACTION 0.8f
 
-extern const uint8_t profiles_page_html_start[] asm("_binary_profiles_page_html_start");
-extern const uint8_t profiles_page_html_end[] asm("_binary_profiles_page_html_end");
+/* TODO.md 10.6a: embedded pre-gzipped (CMakeLists.txt gzips it at configure
+ * time before idf_component_register runs), hence the "_gz" in both the
+ * filename and the symbol it generates. */
+extern const uint8_t profiles_page_html_gz_start[] asm("_binary_profiles_page_html_gz_start");
+extern const uint8_t profiles_page_html_gz_end[] asm("_binary_profiles_page_html_gz_end");
 
 /* All 8 slots kept resident -- each is well under 200 bytes, so loading all
  * 8 at boot (rather than lazily per-request) is simpler and cheap enough
@@ -473,11 +476,33 @@ bool profiles_http_delete(uint8_t id)
 
 /* ---- HTML page ------------------------------------------------------------ */
 
+/* TODO.md 10.6a: defensive Accept-Encoding check before relying on a client
+ * to have asked for gzip -- see wifi_provision_http.c's
+ * client_accepts_gzip() for the fuller rationale (this file duplicates the
+ * small helper rather than sharing it, matching this codebase's existing
+ * per-file-duplication convention, e.g. json_escape() elsewhere). No
+ * uncompressed fallback is embedded this pass (named gap, TODO.md 10.6a) --
+ * a client that doesn't advertise support still gets served the gzip body,
+ * just with a warning logged instead of silently mis-serving it. */
+static bool client_accepts_gzip(httpd_req_t *req)
+{
+    char enc[32];
+    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
+        return false;
+    }
+    return strstr(enc, "gzip") != NULL;
+}
+
 static esp_err_t page_get_handler(httpd_req_t *req)
 {
+    if (!client_accepts_gzip(req)) {
+        ESP_LOGW(TAG, "profiles_page.html: client did not advertise Accept-Encoding: gzip; serving "
+                      "gzip body anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    }
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, (const char *)profiles_page_html_start,
-                           (size_t)(profiles_page_html_end - profiles_page_html_start));
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)profiles_page_html_gz_start,
+                           (size_t)(profiles_page_html_gz_end - profiles_page_html_gz_start));
 }
 
 /* ---- JSON ------------------------------------------------------------------ */

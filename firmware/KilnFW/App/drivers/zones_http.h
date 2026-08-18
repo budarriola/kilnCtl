@@ -29,6 +29,7 @@
 #define ZONES_HTTP_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -123,6 +124,23 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask);
  * reasons every getter here does -- an out-of-range or unconfigured
  * zone_index. */
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask);
+
+/* TODO.md 10.3: the operator-chosen name a zone_cfg_t already stores
+ * (ZONE_NAME_MAX_LEN, currently 15 chars) but which, until now, had no
+ * public accessor -- zones_http.c's own JSON responses read it straight off
+ * the struct, and no other consumer had asked for it. ui_page_home.c is
+ * that second caller, needing something better than "Zone N" for its
+ * per-zone cards, hence this getter now existing (same "extract when the
+ * second caller shows up" discipline as every other getter in this file).
+ *
+ * Copies at most out_cap-1 bytes plus a NUL terminator into *out. Returns
+ * false (leaving *out untouched) for an out-of-range or unconfigured
+ * zone_index, or a NULL/zero-capacity out buffer -- same "cannot answer"
+ * convention as every getter above. A TRUE return with an empty string is
+ * a real, different case: a configured zone that has never been given a
+ * name. Callers must treat that the same as "no name" (e.g. fall back to a
+ * generated "Zone N" label), not as a getter failure. */
+bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap);
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd);
 

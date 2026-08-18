@@ -1,0 +1,25 @@
+/* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
+   TODO.md 10.6/10.6a). Same hex values as the LCD side. Served at GET /theme.css
+   from wifi_provision_http.c (the module that owns httpd_start() / the one
+   httpd_handle_t every other *_http.c module registers routes onto -- see
+   wifi_provision_http_get_server()), so it's reachable from every page
+   regardless of mode: a phone on the fallback AP during first-boot
+   provisioning hits the same server instance as a browser on the home
+   network hitting the dashboard post-provisioning.
+
+   Only what was byte-identical across all six pages' old inline <style>
+   blocks was pulled out here -- the --bg/--fg/etc light-mode defaults and
+   their dark-mode overrides stayed page-local (each page maps a different
+   subset of those named variables onto this palette, e.g. --ok/--warn/--bad
+   on some pages vs --on-color/--off-color/--fault-color on others), only the
+   --ui-* palette itself and .theme-btn (verified identical byte-for-byte via
+   md5sum across all six files) were truly shared. */
+:root {
+  --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+  --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+  --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+  --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+}
+.theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+             background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
+             padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }

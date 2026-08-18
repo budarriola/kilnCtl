@@ -3720,62 +3720,82 @@ pre-10.2 bring-up screen, deliberately left alone), and 10.3's real pages
 
 ### 10.3 Page designs
 
-**Status update (2026-08-17): home page's first real slice built; graph
-explicitly deferred.** `App/drivers/ui_page_home.c` no longer just draws the
-placeholder "kilnCtl" label -- it's a real page now: a scrollable content
-area (480x320 is tight for everything this section asks for at once, and no
-real hardware was available this pass to hand-fit exact pixel sizes, so
-scrolling is the honest fallback rather than a guess) holding one card per
-configured zone (temp + heater on/off), a profile/run-state card (name,
-state, elapsed/remaining time as text + an `lv_bar`), a labeled graph
-placeholder, and Start/Stop + Configuration/Temperature nav buttons.
-`App/drivers/ui_page_config.c`/`.h` and `ui_page_temperature.c`/`.h` are new
-minimal stub pages (title + "Back" button calling `kiln_ui_show("home")`),
-registered from `kiln_ui_init()`, so the nav items have somewhere real to go
-and `kiln_ui_show()` now actually switches between three pages, not one.
+**Status update (2026-08-18): home page's three previously-deferred items now
+built -- zone names, the desired-vs-actual graph, and a profile picker.**
+Building on the 2026-08-17 pass (scrollable content area with one card per
+configured zone, a profile/run-state card, and Start/Stop +
+Configuration/Temperature nav buttons -- see git history for that pass's own
+detail), `App/drivers/ui_page_home.c` now also has:
 
-Per 10.1a, every number on the page comes from `dashboard_get_status()` (new
-plain-C getter in `dashboard_http.c`/`.h`, extracted from
-`status_get_handler()` -- see 10.1a's own status update) and
-`profile_executor_get_status()`, and Start/Stop call `profile_executor_run()`/
-`profile_executor_halt()` directly -- the exact same functions
+- **Zone names.** `zones_config_get_name()` (new getter, `zones_http.c`/`.h`)
+  reads the operator-chosen name `zone_cfg_t::name` already stored -- the
+  JSON API (`GET /api/zones`) could already show it, but nothing plain-C
+  could read it before this pass. Each zone card now shows that name, falling
+  back to "Zone N" only for a zone that has genuinely never been named (an
+  empty string is a valid, different case from "getter failed" -- see the
+  getter's doc comment in `zones_http.h`).
+- **The desired-vs-actual temperature graph.** A real `lv_chart` (LVGL v9's
+  built-in chart widget) replaces the placeholder card: two line series
+  (actual, desired), windowed to the most recent 60 ring-buffer samples (30
+  minutes at the buffer's 30s/sample cadence -- legible on a 480px-wide
+  panel; the buffer itself holds up to 24h/2880 samples but that's not
+  something a small LCD can show usefully all at once).  **One combined
+  chart, not one per zone** -- `profile_executor.h`'s history ring buffer is
+  itself single-series ("scoped to a single representative zone," not
+  per-zone data), so a per-zone chart would just be N-1 empty charts and one
+  real one; see `build_graph_card()`'s comment. Data comes from
+  `profile_executor_get_history()`/`_get_history_count()`, which already
+  existed as the exact plain-C getters `GET /api/history.csv`
+  (`history_csv_get_handler()`) streams from -- no new getter was needed
+  here, TODO.md section 0's ring buffer was already extracted correctly.
+  The chart only repaints when `profile_executor_get_history_count()` has
+  actually advanced since the last `UI_PAGE_HOME_REFRESH_MS` tick (tracked
+  via a last-seen-count static), not every tick, since the buffer itself
+  only gains a new sample every 30s. Y-axis range is computed dynamically
+  from the plotted window each repaint (min/max +/-10% padding) rather than
+  a guessed fixed ceiling.
+- **A profile picker.** An `lv_dropdown` on the profile/run-state card, above
+  Start/Stop, populated by looping the 8 fixed NVS slots through
+  `profiles_http_get()` -- the same read-only accessor `profile_executor.c`
+  already calls; no new `profiles_http.c` getter was needed, this page is
+  just the second caller of an existing one.  `start_btn_cb()` now prefers
+  the picker's selection (tracked via a "has the operator actually touched
+  the dropdown" flag, set only by `LV_EVENT_VALUE_CHANGED`, not by the
+  initial populate) and falls back to the previous pass's "whatever's
+  already known this boot" logic only when the picker was never touched --
+  documented in `start_btn_cb()`'s comment as an intentional behavior split,
+  not a placeholder.
+
+Per 10.1a, every number on the page comes from `dashboard_get_status()`,
+`profile_executor_get_status()`, and now `profile_executor_get_history()`/
+`_get_history_count()` and `profiles_http_get()` -- all plain-C getters the
+HTTP handlers already used or use themselves -- and every button (Start,
+Stop) calls the exact same `profile_executor_run()`/`profile_executor_halt()`
 `dashboard_http.c`'s POST handlers call, not a reimplementation.
 
-Explicitly NOT built, and NOT silently skipped:
-- **The desired-vs-actual temperature graph.** Left as a labeled placeholder
-  card ("Temperature graph — not built yet"). It needs a real LVGL chart or
-  canvas widget plotted against `profile_executor_get_history()` (the same
-  ring buffer `GET /api/history.csv` streams) -- real charting work, big
-  enough to be its own follow-up pass, not something to half-build here.
-- **A profile picker.** There is no per-profile selection widget on this page
-  or on the still-stub Configuration page. Start therefore starts whichever
-  `profile_id` is already known this boot (the executor's own `profile_id` if
-  it's DONE/FAULTED from a previous run, else the last boot's
-  `run_state_get_boot_record()`) and logs a warning and no-ops if neither
-  exists. This is a real functional gap, not a cosmetic one -- a kiln that
-  has never run a profile since its last boot and whose Configuration page
-  hasn't grown a picker yet cannot Start from the LCD. Needs a real
-  profile-list page before this is complete.
-- **Zone names.** `zones_http.h` exposes no public getter for a zone's
-  configured name (only its internal config storage has one), so each zone
-  card shows "Zone N" rather than the operator's chosen name. Add a getter
-  and wire it through when a consumer needs it enough to justify the seam
-  (same "extract when the second caller shows up" discipline as 10.1a).
-
-**Not build-verified this pass** — no `idf.py build` was run, and none of
-this has touched the physical ILI9488/NS2009 panel.
+**Not build-verified this pass** — no `idf.py build` was run (none is
+available in this environment), and none of this has touched the physical
+ILI9488/NS2009 panel or the real LVGL v9.5.0 chart/dropdown widgets at
+runtime. The chart code was written against a direct read of
+`components/lvgl/src/widgets/chart/lv_chart.h`/`.c` (point-count-before-
+ext-array ordering, `lv_chart_set_series_ext_y_array()`'s ownership
+semantics, `LV_CHART_POINT_NONE`'s value) rather than guessed API, but that
+is not the same as having compiled or run it.
 
 **Main / status page** (the default page, mirrors section 2's web
 dashboard but is the touchscreen's home, not a secondary view):
 
 - [x] Each configured zone, its current temperature, and its heater
-      on/off status (same data as `GET /api/status`, section 2)
-- [ ] Graph of the current profile's target curve with all zones'
+      on/off status (same data as `GET /api/status`, section 2), **now
+      labeled with the zone's configured name, not just "Zone N" — see
+      status update above.**
+- [x] Graph of the current profile's target curve with all zones'
       actual temperature progressing along it (same data/shape as
-      section 2's `historyChart` / `GET /api/history.csv` — reuse the
+      section 2's `historyChart` / `GET /api/history.csv` — reuses the
       existing history ring buffer, section 0's "Historical data for the
-      graph" item, rather than a second buffer). **Deferred — see status
-      update above; a labeled placeholder card stands in for it.**
+      graph" item, rather than a second buffer). **Built — see status
+      update above for why it's one combined chart, not "all zones" plural
+      (the ring buffer only ever tracks one representative zone).**
 - [x] Name of the currently selected/running kiln profile
 - [x] Time remaining and elapsed time, **shown both as text and as a
       progress bar** — per-segment (elapsed into the segment / dwell
@@ -3784,15 +3804,15 @@ dashboard but is the touchscreen's home, not a secondary view):
       no whole-profile total-remaining figure anywhere in the backend to
       show instead.
 - [x] Stop button
-- [x] Start button — **see status update above for the profile-picker gap
-      this button still has.**
+- [x] Start button — **profile-picker gap closed this pass, see status
+      update above.**
 - [x] "Configuration" nav item — opens the deeper config / settings menus
       (maps to section 3's Settings pages: Thermocouples & Zones, Relays &
-      Rules, Network). **Stub page only this pass — see status update.**
+      Rules, Network). **Stub page only, unchanged this pass.**
 - [x] "Temperature" nav item — individual per-zone manual control (maps to
       section 2's manual relay override / per-zone target, touchscreen
-      equivalent of the dashboard's relay controls). **Stub page only this
-      pass — see status update.**
+      equivalent of the dashboard's relay controls). **Stub page only,
+      unchanged this pass.**
 
 ### 10.4 Touch hit-testing
 
@@ -3852,22 +3872,67 @@ only `ui_page_home.c`'s placeholder label — so there is no real button grid
 to size. This is infrastructure for 10.3 to call when it builds one; forcing
 it onto the placeholder label would have nothing meaningful to demonstrate.
 
-**Open item, deliberately not built speculatively:** the z-order-first-match
-behavior confirmed above means that *if* a future dense layout (10.3, once
-built) ever produces two widgets whose extended click areas genuinely
-overlap — the compact-cap math above is sized to prevent that for a regular
-grid with `UI_THEME_PADDING_PX` gaps, but a layout that doesn't fit that
-assumption (irregular spacing, deliberately tight custom placement) could
-still hit it — LVGL will hand the touch to whichever widget is tested first
-in z-order, not whichever the user's finger was actually closer to. That
-specific case needs a custom post-process step on top of `touch_read_cb()`
-in `lvgl_port.c` (e.g. detect the ambiguous-overlap case and re-resolve by
-distance-to-center before forwarding the point to LVGL), which is *not*
-built here — there's no real layout yet to prove it's actually needed, and
-building conflict-arbitration logic against a hypothetical is exactly the
-kind of speculative work this codebase's own conventions (see 10.1a) argue
-against. Revisit this the moment 10.3 produces a layout dense enough to
-actually trip it.
+**Status update (2026-08-18): the open item below is now built, as opt-in
+infrastructure, ahead of a real consumer.** The user explicitly asked for it
+ahead of a real dense layout, the same position `ui_theme_apply_touch_area()`
+itself was in when it was written last pass (nothing called it yet either,
+at the time).
+
+- [x] Custom post-process step for the ambiguous-overlap case, built on top
+      of `touch_read_cb()` in `lvgl_port.c`, opt-in via a new registry in
+      `ui_theme.c`/`.h` (same file `ui_theme_apply_touch_area()` lives in):
+  - **Registration**: `ui_theme_register_touch_group(lv_obj_t **widgets,
+        size_t count)` lets a page opt a specific cluster of widgets (e.g. a
+        future dense keypad/settings-grid page) into nearest-center
+        arbitration with each other. Widgets never registered in a group are
+        completely unaffected — they keep relying on LVGL's default
+        z-order-first-match hit-test alone, which is correct for the
+        overwhelming majority of layouts (sparse buttons, non-overlapping
+        extended click areas). Small fixed-size registry
+        (`UI_THEME_TOUCH_GROUP_MAX_GROUPS` = 4,
+        `UI_THEME_TOUCH_GROUP_MAX_WIDGETS` = 16 per group) — deliberately not
+        a dynamic allocation for a mechanism meant to serve one or two dense
+        clusters at a time.
+  - **Arbitration**: `ui_theme_resolve_touch_target(lv_obj_t *default_target,
+        lv_point_t point)` — given the widget LVGL's own
+        `lv_indev_search_obj()` picked, returns it unchanged unless it's a
+        member of a registered group, in which case it checks every group
+        member whose `lv_obj_get_click_area()` (LVGL's own already-extended
+        box — the exact box `ui_theme_apply_touch_area()` sized, read back
+        rather than re-derived) contains the touch point, and returns
+        whichever candidate's real (unexpanded, `lv_obj_get_coords()`)
+        center is closest to the point (squared-distance comparison, no
+        `sqrt` needed).
+  - **How the redirect actually reaches LVGL** — read `lv_indev.c` to confirm
+        rather than guess, per this section's own established habit:
+        `touch_read_cb()` calls the public `lv_indev_search_obj()` itself
+        against the raw point (the same call LVGL's real pipeline is about
+        to make), passes the result through
+        `ui_theme_resolve_touch_target()`, and if arbitration picked a
+        *different* widget, overwrites `data->point` with that widget's own
+        center before returning. `_lv_indev_read()`
+        (`components/lvgl/src/indev/lv_indev.c` ~line 765) copies
+        `data->point` straight into `indev->pointer.act_point` right after
+        the read callback returns, and `indev_proc_press()`
+        (~line 1264/1270, via `pointer_search_obj()` ~line 1656) re-resolves
+        the press from that exact point through LVGL's own public search
+        path. So the override only has to correct the *point* the next
+        official search will use — it never needs to touch
+        `indev_obj_act`/`act_obj` directly, synthesize an event, or
+        duplicate any part of LVGL's press/release/drag state machine.
+  - **Cost when unused**: `ui_theme_touch_groups_active()` is one flag check;
+        `touch_read_cb()` skips the extra `lv_indev_search_obj()` call
+        entirely unless at least one group is registered — true of every
+        page today, so this costs nothing yet.
+
+**Nothing calls `ui_theme_register_touch_group()` yet** — same situation as
+`ui_theme_apply_touch_area()` when it was written: no dense grid page (10.3)
+exists yet to have overlapping extended click areas in the first place. A
+future dense layout opts in by building its widget array as usual, calling
+`ui_theme_apply_touch_area(widget, true /* compact */)` per widget as
+10.3-style pages already would, and then passing that same array to
+`ui_theme_register_touch_group()` once — no change to widget creation itself
+is required.
 
 ### 10.5 Web/LCD parity rule
 
@@ -3956,6 +4021,50 @@ actually trip it.
   browser once a build is possible, same caveat as 10.7's status note
   below it.
 
+### 10.6a Gzip the embedded web pages
+
+Added 2026-08-17, evaluating an outside suggestion against this project's
+actual architecture rather than applying it as-is: the standard "ESP32 web
+server is slow" advice (SPIFFS/LittleFS with many small `.css`/`.js` files,
+serve gzipped, bundle into an SPA) mostly does not apply here — every page is
+already a single self-contained HTML file with inline `<style>`/`<script>`,
+`EMBED_TXTFILES`'d straight from flash (section 0's web-server decision), so
+there is no multi-file-request problem to solve and no SPA rewrite is
+justified. The one piece worth taking: **gzip the embedded HTML blobs**,
+since `esp_http_server` can serve a pre-gzipped body directly with a
+`Content-Encoding: gzip` header, no runtime compression cost, and it shrinks
+both flash usage and transfer time for free on any client that sends
+`Accept-Encoding: gzip` (every real browser does).
+
+The "compile CSS/JS to native C++ for the LCD display" half of that same
+suggestion (Gaya-style build-time CSS→struct compilation, JS→bytecode/QuickJS
+for on-glass UI) is NOT adopted — it would replace the LVGL work this project
+already built and reviewed (`kiln_ui.c`, `ui_theme.c`, `lvgl_port.c`, every
+`ui_page_*.c`) with an unproven, much smaller-ecosystem toolchain for no
+concrete problem it solves. Recorded here as a decision, not silently
+ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
+
+- [ ] CMake step (likely in `App/drivers/CMakeLists.txt`, alongside the
+      existing `EMBED_TXTFILES` list) that gzips each of the six HTML pages
+      at build time before embedding, OR embeds them raw and gzips is
+      pre-generated and checked in -- decide which based on whether this
+      project's build already has a `gzip`-capable tool on PATH in every dev
+      environment (Windows dev machines are the wrinkle here -- CMake's
+      `find_program(GZIP)` or a Python-based `gzip` module call avoids
+      depending on a Unix tool being installed)
+- [ ] Each HTTP handler that currently does
+      `httpd_resp_set_type(req, "text/html"); httpd_resp_send(req, page, len)`
+      needs `httpd_resp_set_hdr(req, "Content-Encoding", "gzip")` added, and
+      must not be sent to a client that didn't advertise
+      `Accept-Encoding: gzip` in its request (check the request header;
+      fall back to serving the uncompressed blob for a client that doesn't
+      support it, or keep both blobs embedded and pick one at request time --
+      decide which based on how much flash headroom this actually costs)
+- [ ] Re-verify byte-for-byte that nothing about the *content* changes --
+      this is a transport-encoding change only, same risk shape as 10.1a's
+      `dashboard_get_status()` extraction (behavior-preserving refactor,
+      verify by comparison rather than trust)
+
 ### 10.7 Onboard IC temperature sensors
 
 - [ ] Several ICs on the board (MAX31856s, the ESP32-S3 itself, and any
@@ -4011,11 +4120,18 @@ actually trip it.
 combining function, and the control/guard read paths this section names are
 all wired end to end. Not yet done: `zones_page.html` has no UI for
 assigning more than one channel to a zone (server-side default keeps every
-existing/UI-driven zone on its legacy single channel — see below), and
-`autotune_engine.c`'s step-test read path still reads its zone's legacy
-single channel directly rather than through the combiner. Nothing here has
-run against real hardware (no thermocouples attached this session, same
-caveat every other guard/control item in this file carries).
+existing/UI-driven zone on its legacy single channel — see below).
+
+**Status update (2026-08-18): the two remaining gaps from the above closed.**
+`thermo_combine.c`/`.h` is now wired into the host test suite
+(`App/test/build_host_tests.ps1`, `test_thermo_combine.c`), and
+`autotune_engine.c`'s step-test read path now reads its zone's combined
+multi-channel value through `thermo_combine()` rather than the legacy single
+channel — see both bullets below for detail. `zones_page.html`'s missing
+multi-assign UI is still open, untouched this pass (out of this pass's named
+scope). Nothing here has run against real hardware (no thermocouples
+attached this session, same caveat every other guard/control item in this
+file carries).
 
 - [x] Section 3's zone model is currently one thermocouple channel per
       zone (`zones_http.h`'s scope note, section 3's "Named zones" item).
@@ -4064,10 +4180,20 @@ caveat every other guard/control item in this file carries).
         not guessed at, matching this item's own instruction.
         `App/drivers/thermo_combine.c`/`.h` (new): pure C, no FreeRTOS, no
         ESP-IDF, no logging, no I/O, same discipline pid.h documents and for
-        the same reason (host-unit-testable, though a host-test build wiring
-        for it was NOT added this pass — `App/test/build_host_tests.ps1`
-        still only builds pid.c/thermal_guard.c/heater_output.c — left as an
-        open item rather than done).
+        the same reason (host-unit-testable).
+        **Host-test wiring done (2026-08-18)**: `App/test/build_host_tests.ps1`
+        now builds `thermo_combine.c` alongside pid.c/thermal_guard.c/
+        heater_output.c, and `App/test/test_thermo_combine.c` (new, wired
+        into `test_main.c` matching `test_pid.c`'s pattern exactly — same
+        `test_common.h` `TEST_CHECK`/`TEST_CHECK_NEAR` macros, one
+        `run_test_thermo_combine(void)` entry point) covers: all-valid-
+        channels mean; one masked-in channel faulted and dropped (not
+        zeroed — mean of the survivors, not skewed toward 0); all masked-in
+        channels faulted returning NaN with `out_valid=false`; a channel
+        excluded by the mask never contributing even when its own
+        `channel_ok` is true; and the mask/validity independence and
+        past-`channel_count`-bits-ignored cases the header comment
+        documents but the first pass's own tests never exercised.
   - [x] A thermocouple that faults (open/short, per `MAX31856_read_all()`)
         must not silently corrupt the combined value — drop it from the
         combination and fall back per however many remain; zero
@@ -4102,8 +4228,32 @@ caveat every other guard/control item in this file carries).
         know how many channels fed it — no code changed inside
         `thermal_guard.c` itself, only its and `thermal_guard_input_t`'s doc
         comments, to say explicitly that `sensor_ok` is now the zone's
-        combined verdict. `autotune_engine.c`'s step-test read (a separate,
-        narrower per-zone read path from the main control tick) was NOT
-        touched this pass — still reads its zone's legacy single channel
-        directly — left as a named open item rather than folded in, to keep
-        this pass to the paths the section explicitly named.
+        combined verdict.
+        **Done for `autotune_engine.c`'s step-test read path (2026-08-18)**:
+        this was the one read path the 2026-08-17 pass explicitly named as
+        left out. `task_entry()`'s per-tick read now follows
+        `profile_executor.c`'s exact split — read every physical channel's
+        raw value/validity into `ch_raw_c`/`ch_ok` first, then combine.
+        Because this file's `zone_baseline_c`/`zone_trace`/coupling-matrix
+        arrays are indexed by physical channel standing in for zone (the
+        pre-10.8 channel-i-is-zone-i mapping, still load-bearing for the
+        cross-gain fit against every OTHER configured zone — 6A.5(b) scope,
+        untouched), only the slot for `s_at.zone_index` itself — the zone
+        actually under test — is overwritten with
+        `thermo_combine(ch_raw_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask,
+        &combined_valid)` against that zone's live `thermo_mask`; every peer
+        zone's slot keeps the legacy single-channel reading it always had.
+        That combined value is what `actual_c`/`actual_valid`, the SETTLING
+        baseline, the recorded trace, and the guard's raw `measurement_c`
+        input all read from this tick forward — the step, the guards, and
+        the eventual FOPDT fit are now driven by the same multi-channel
+        number a running profile would use for this zone, not a stale
+        single-channel proxy. Sample cadence and every fitting/guard
+        equation are unchanged; only the temperature this file feeds them
+        moved from single-channel to combined. Not host-tested: this file
+        depends on FreeRTOS/ESP-IDF (task, semaphore, `esp_log`) and was
+        never in `build_host_tests.ps1`'s source list before this pass
+        either — only the pure-math `pid_autotune.c` fitting module is
+        host-tested (`test_pid_autotune.c`, `test_sim_kiln.c`), and neither
+        references channels, zones, or `thermo_mask`, so neither needed any
+        change for this to stay correct.

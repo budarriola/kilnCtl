@@ -7,6 +7,56 @@ if(CONFIG_KILNCTL_SIM_PLANT)
     set(SIM_SRCS "sim_backend.c" "../test/sim_plant.c")
 endif()
 
+# TODO.md 10.6a: pre-gzip the embedded web pages (+ theme.css) so
+# esp_http_server can serve the compressed body straight from flash with a
+# Content-Encoding: gzip header -- no runtime compression cost, smaller flash
+# usage, faster transfer for any client sending Accept-Encoding: gzip (every
+# real browser does; the corresponding *_http.c handlers check the header
+# defensively before relying on that -- see TODO.md 10.6a's status note).
+#
+# zones_page.html is deliberately EXCLUDED from this list and stays embedded
+# raw: its handler lives in zones_http.c, which is owned by parallel work
+# this same session and is off-limits here. Gzipping it would rename its
+# embedded symbol (_binary_zones_page_html_start -> ..._html_gz_start) and
+# require editing zones_http.c's page_get_handler to match, which this pass
+# does not do. Named gap, recorded in TODO.md 10.6a.
+#
+# execute_process (configure-time), not add_custom_command (build-time):
+# idf_component_register's EMBED_TXTFILES list below is evaluated as soon as
+# CMake reaches that call, so the .gz files must already exist on disk by
+# then -- a build-time custom command's COMMAND wouldn't have run yet at
+# that point. set_property(... CMAKE_CONFIGURE_DEPENDS ...) below makes
+# editing any one of these source files force a CMake reconfigure (and so a
+# re-gzip) on the next build, so this doesn't silently embed a stale
+# compressed blob after a source edit the way a one-shot configure-time step
+# alone would.
+#
+# Windows dev-machine compatibility (this project is developed on Windows,
+# per README.md): find_package(Python3) + a one-line `python -c` gzip
+# invocation avoids depending on a Unix `gzip` binary being on PATH, which
+# this project's dev machines cannot assume.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(KILNCTL_GZIP_ASSETS
+    "wifi_provision_page.html" "main_page.html"
+    "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css")
+set(KILNCTL_GZIP_ASSET_FILES "")
+foreach(asset ${KILNCTL_GZIP_ASSETS})
+    set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
+    set(kilnctl_gz_out "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c
+            "import gzip, shutil, sys; shutil.copyfileobj(open(sys.argv[1], 'rb'), gzip.open(sys.argv[2], 'wb', 9))"
+            "${kilnctl_gz_src}" "${kilnctl_gz_out}"
+        RESULT_VARIABLE KILNCTL_GZIP_RESULT
+    )
+    if(NOT KILNCTL_GZIP_RESULT EQUAL 0)
+        message(FATAL_ERROR "App/drivers/CMakeLists.txt: failed to gzip ${asset} for EMBED_TXTFILES")
+    endif()
+    list(APPEND KILNCTL_GZIP_ASSET_FILES "${kilnctl_gz_out}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kilnctl_gz_src}")
+endforeach()
+
 # esp_driver_tsens (driver/temperature_sensor.h, used by board_temps.c for
 # the ESP32-S3 internal die-temperature sensor) is named on the assumption
 # that this IDF version keeps the same per-peripheral esp_driver_* component
@@ -25,6 +75,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "ui_page_home.c"
                        "ui_page_config.c"
                        "ui_page_temperature.c"
+                       "ui_page_board_health.c"
                        "ui_theme.c"
                        "NS2009.c"
                        "screen_idle.c"
@@ -66,9 +117,7 @@ idf_component_register(SRCS "MAX31856.c"
                        ${SIM_SRCS}
                        INCLUDE_DIRS "." "espInterfaces"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
-                       EMBED_TXTFILES "wifi_provision_page.html" "main_page.html"
-                                      "zones_page.html" "rules_page.html" "profiles_page.html"
-                                      "readiness_page.html"
+                       EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES} "zones_page.html"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_driver_tsens
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer

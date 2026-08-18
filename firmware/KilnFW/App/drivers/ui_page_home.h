@@ -1,11 +1,11 @@
-// The "home" page -- TODO.md 10.3's main/status page: per-zone temp/heater
+// The "home" page -- TODO.md 10.3's main/status page: per named zone
+// (zones_config_get_name(), falling back to "Zone N") its temp/heater
 // status, running profile name/state, segment elapsed/remaining time (text +
-// progress bar), Start/Stop, and Configuration/Temperature nav buttons. Data
-// and actions go through the same plain-C getters/actions dashboard_http.c's
-// HTTP handlers use (TODO.md 10.1a) -- see ui_page_home.c's header comment.
-// The desired-vs-actual temperature graph is explicitly deferred (labeled
-// placeholder only) -- see ui_page_home.c. One page one file (see
-// kiln_ui.h's header comment on why pages are split out this way).
+// progress bar), a profile picker, a desired-vs-actual temperature chart,
+// Start/Stop, and Configuration/Temperature nav buttons. Data and actions go
+// through the same plain-C getters/actions dashboard_http.c's HTTP handlers
+// use (TODO.md 10.1a) -- see ui_page_home.c's header comment. One page one
+// file (see kiln_ui.h's header comment on why pages are split out this way).
 #ifndef UI_PAGE_HOME_H
 #define UI_PAGE_HOME_H
 

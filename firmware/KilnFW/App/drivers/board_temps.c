@@ -106,6 +106,24 @@ static struct {
     MAX31856BusClass *thermo_bus;
 } s_bt;
 
+/* See board_temps.h's doc comment -- the plain-C getter extracted from
+ * api_board_temps_get_handler() so a non-HTTP consumer (ui_page_board_health.c)
+ * can get the same live snapshot without going through the JSON layer. */
+void board_temps_get_live(board_temps_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t count = 0;
+    if (s_bt.thermo_bus && s_bt.thermo_bus->initialized) {
+        MAX31856_read_all(s_bt.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+    }
+
+    board_temps_get(out, count > 0 ? readings : NULL, count);
+}
+
 /* {"esp32_c": <float or null>, "thermo_cj_c": [<float or null>, ...]} --
  * null (not 0) for a field that has no valid reading, unlike
  * dashboard_http.c's status_get_handler() which reports 0 alongside a
@@ -116,14 +134,8 @@ static struct {
  * a second field to cross-reference. */
 static esp_err_t api_board_temps_get_handler(httpd_req_t *req)
 {
-    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-    size_t count = 0;
-    if (s_bt.thermo_bus && s_bt.thermo_bus->initialized) {
-        MAX31856_read_all(s_bt.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
-    }
-
     board_temps_t bt;
-    board_temps_get(&bt, count > 0 ? readings : NULL, count);
+    board_temps_get_live(&bt);
 
     char json[256];
     size_t o = 0;

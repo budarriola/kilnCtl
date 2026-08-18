@@ -1,9 +1,12 @@
 // The "temperature" page -- TODO.md 10.3's "Temperature" nav item
-// destination (individual per-zone manual control, touchscreen equivalent of
-// the web dashboard's manual relay override / per-zone target). Minimal stub
-// for this pass: a title and a back-to-home button, same status as
-// ui_page_config.h -- the real content is future work. One page one file,
-// see kiln_ui.h's header comment.
+// destination: real per-zone manual relay control, the touchscreen
+// equivalent of section 2's web dashboard manual relay override
+// (dashboard_http.c's POST /api/relay). Per TODO.md 10.1a, every write here
+// goes through dashboard_set_relay() -- the exact same ownership/safety gate
+// and kiln_io write POST /api/relay uses, extracted from relay_post_handler()
+// this pass -- not a reimplementation. See ui_page_temperature.c's header
+// comment for what's real vs. still a known gap. One page one file, see
+// kiln_ui.h's header comment.
 #ifndef UI_PAGE_TEMPERATURE_H
 #define UI_PAGE_TEMPERATURE_H
 

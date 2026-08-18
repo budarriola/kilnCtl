@@ -13,6 +13,7 @@
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "sim_backend.h"
+#include "thermo_combine.h"
 #include "zones_http.h"
 
 static const char *TAG = "autotune_engine";
@@ -444,7 +445,21 @@ static void task_entry(void *arg)
         /* TODO.md 6A.5(b): every channel's reading is captured this tick,
          * not just the zone under test -- MAX31856_read_all() already reads
          * the whole bus, so logging every zone's response is free (no extra
-         * SPI traffic). */
+         * SPI traffic).
+         *
+         * ch_raw_c/ch_ok are indexed by physical MAX31856 channel, exactly
+         * like profile_executor.c's identical split (TODO.md 10.8). Every
+         * OTHER slot of raw_by_zone/ok_by_zone below still means what it
+         * always has here -- "physical channel z's own reading", because the
+         * coupling-matrix cross-fit in finalize_fit() is unchanged 6A.5(b)
+         * scope and still assumes channel i == zone i for the peer zones.
+         * Only index s_at.zone_index -- the zone actually under test, whose
+         * baseline/trace/actual_c this tick's control math reads -- is
+         * overwritten with thermo_combine()'s result across every channel
+         * that zone's thermo_mask names, same pattern profile_executor.c's
+         * control tick uses for every active zone. TODO.md 10.8 called this
+         * file out by name as the one read path a previous pass left on the
+         * legacy single-channel mapping. */
         float raw_by_zone[MAX31856_CHANNEL_COUNT];
         bool  ok_by_zone[MAX31856_CHANNEL_COUNT];
         for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
@@ -452,6 +467,12 @@ static void task_entry(void *arg)
             ok_by_zone[z] = false;
         }
         if (sim_backend_enabled() || (s_at.thermo_bus && s_at.thermo_bus->initialized)) {
+            float ch_raw_c[MAX31856_CHANNEL_COUNT];
+            bool  ch_ok[MAX31856_CHANNEL_COUNT];
+            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+                ch_raw_c[z] = NAN;
+                ch_ok[z] = false;
+            }
             MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
             size_t count = 0;
             if (sim_backend_enabled()) {
@@ -464,13 +485,26 @@ static void task_entry(void *arg)
                 if (ch >= MAX31856_CHANNEL_COUNT) continue;
                 bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
                 bool ok = !readings[i].spi_failed && !isnan(readings[i].tc_temperature_c) && !fault_bits_bad;
-                raw_by_zone[ch] = readings[i].tc_temperature_c;
-                ok_by_zone[ch] = ok;
-                if (ch == s_at.zone_index) {
-                    raw_c = readings[i].tc_temperature_c;
-                    sensor_ok = ok;
-                }
+                ch_raw_c[ch] = readings[i].tc_temperature_c;
+                ch_ok[ch] = ok;
             }
+            /* Peer zones (finalize_fit()'s cross-gain rows): legacy
+             * channel-equals-zone mapping, unchanged from before 10.8. */
+            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+                raw_by_zone[z] = ch_raw_c[z];
+                ok_by_zone[z] = ch_ok[z];
+            }
+            /* The zone actually under test: its real thermo_mask, combined,
+             * is what drives the step, the guards, and the fit. */
+            uint8_t tmask = 0;
+            zones_config_get_thermo_mask(s_at.zone_index, &tmask);
+            bool combined_valid = false;
+            float combined_c =
+                thermo_combine(ch_raw_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask, &combined_valid);
+            raw_by_zone[s_at.zone_index] = combined_c;
+            ok_by_zone[s_at.zone_index] = combined_valid;
+            raw_c = combined_c;
+            sensor_ok = combined_valid;
         }
         s_at.actual_valid = sensor_ok;
         s_at.actual_c = sensor_ok ? zones_config_apply_cal(s_at.zone_index, raw_c) : NAN;

@@ -1,6 +1,7 @@
 # Builds and runs the host-side unit tests for pid.c / thermal_guard.c /
-# heater_output.c (+ the sim_plant.c closed-loop check) with MSVC, entirely
-# off-target -- no ESP-IDF, no hardware. TODO.md 6A.8.
+# heater_output.c / thermo_combine.c (+ the sim_plant.c closed-loop check)
+# with MSVC, entirely off-target -- no ESP-IDF, no hardware. TODO.md 6A.8,
+# 10.8.
 #
 # Usage: powershell -File App\test\build_host_tests.ps1
 $ErrorActionPreference = "Stop"
@@ -26,13 +27,15 @@ $sources = @(
     (Join-Path $testDir "test_sim_kiln.c"),
     (Join-Path $testDir "test_ota_auth.c"),
     (Join-Path $testDir "test_ota_interlock.c"),
+    (Join-Path $testDir "test_thermo_combine.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
     (Join-Path $driversDir "heater_output.c"),
     (Join-Path $driversDir "pid_autotune.c"),
     (Join-Path $driversDir "ota_auth.c"),
-    (Join-Path $driversDir "ota_interlock.c")
+    (Join-Path $driversDir "ota_interlock.c"),
+    (Join-Path $driversDir "thermo_combine.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

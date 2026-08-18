@@ -79,6 +79,39 @@ typedef struct {
 
 void dashboard_get_status(dashboard_status_t *out);
 
+/* Outcome of dashboard_set_relay() below -- one variant per distinct refusal
+ * reason relay_post_handler's HTTP status codes already distinguished
+ * (400 for a missing board or an out-of-range relay, 403 for the two
+ * relay_authority.h refusals, 500 for a kiln_io write failure), kept as an
+ * enum instead of a bool+err_msg pair (profile_executor_run()'s style)
+ * because the caller needs to pick between four *different* HTTP status
+ * codes / user-facing messages, not just show one string. */
+typedef enum {
+    DASHBOARD_RELAY_OK = 0,
+    DASHBOARD_RELAY_ERR_NO_BOARD,     /* s_dash.io is NULL -- no relay board attached */
+    DASHBOARD_RELAY_ERR_RANGE,        /* relay_index outside 1..KILN_IO_RELAY_COUNT */
+    DASHBOARD_RELAY_ERR_OWNED,        /* relay_authority_manual_blocked_by_owner() */
+    DASHBOARD_RELAY_ERR_SAFETY,       /* relay_authority_on_blocked() (only checked for on==true) */
+    DASHBOARD_RELAY_ERR_IO_FAIL,      /* kiln_io_set_relay() itself returned non-ESP_OK */
+} dashboard_relay_result_t;
+
+/* TODO.md 10.1a's shared-backend seam, extracted from relay_post_handler()
+ * (POST /api/relay) the same way dashboard_get_status() was pulled out of
+ * status_get_handler() -- so ui_page_temperature.c's per-zone manual relay
+ * toggle goes through the exact same ownership/safety-fault gating the web
+ * dashboard's manual override does (relay_authority_manual_blocked_by_owner(),
+ * relay_authority_on_blocked() for on==true only -- turning OFF is never
+ * gated, see relay_authority.h) and the exact same write (kiln_io_set_relay()),
+ * not a second copy of either check.
+ *
+ * relay_index is 1-based (kiln_io_set_relay's convention, matches
+ * zone_cfg_t::relay_mask's bit-N-1-is-relay-N numbering). out_safety_sources,
+ * if non-NULL, is set to the fault-source bitmask backing a
+ * DASHBOARD_RELAY_ERR_SAFETY result (for logging/reporting) and left
+ * untouched otherwise. Safe to call even if dashboard_http_start() was never
+ * reached (reads as DASHBOARD_RELAY_ERR_NO_BOARD). */
+dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint32_t *out_safety_sources);
+
 /* Registers the dashboard's routes on the server wifi_provision_http.c
  * already started. Any pointer may be NULL (board not attached/not up) --
  * GET /api/status reports that honestly rather than faking data, matching

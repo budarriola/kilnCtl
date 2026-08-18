@@ -27,6 +27,7 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "lvgl.h"
 
@@ -175,3 +176,107 @@
  * _height(), which are meaningless before that.
  */
 void ui_theme_apply_touch_area(lv_obj_t *widget, bool compact_layout);
+
+/* ---- Touch-group arbitration -- TODO.md 10.4's "open item" -------------
+ *
+ * ui_theme_apply_touch_area() above answers 10.4's *sizing* question, not
+ * its *arbitration* question: if two widgets' expanded click areas genuinely
+ * overlap, LVGL's own lv_indev_search_obj() (components/lvgl/src/indev/
+ * lv_indev.c) hands the touch to whichever is tested first in z-order --
+ * plain rectangle containment via lv_obj_hit_test()/lv_area_is_point_on(),
+ * no distance-to-center comparison anywhere in that path. 10.4's status
+ * update left that case as a deliberately-unbuilt open item: no dense grid
+ * existed yet to prove the arbitration logic was actually needed.
+ *
+ * This section builds that arbiter, opt-in, as infrastructure ahead of a
+ * real consumer (same position ui_theme_apply_touch_area() itself was in
+ * when it was written -- nothing called it yet either). It does NOT replace
+ * LVGL's default hit-test: lv_indev_search_obj() still runs first and is
+ * correct for the overwhelming majority of layouts (sparse buttons,
+ * non-overlapping extended click areas). It only matters for a widget that
+ * opts into a registered *group*: if LVGL's normal search resolves a touch
+ * to a widget that is a member of a registered group, every group member
+ * whose own (already-extended, via lv_obj_get_click_area()) click area
+ * contains the touch point becomes a candidate, and whichever candidate's
+ * *actual* (unexpanded, lv_obj_get_coords()) center is closest to the touch
+ * point wins -- overriding LVGL's z-order pick with a proximity pick, but
+ * only within that one group.
+ *
+ * How the override actually reaches LVGL: lv_indev.c's _lv_indev_read()
+ * copies the read callback's `data->point` straight into
+ * `indev->pointer.act_point` (lv_indev.c ~line 765) before indev_proc_press()
+ * calls lv_indev_search_obj() again, for real, off of that exact point
+ * (lv_indev.c's pointer_search_obj(), ~line 1656, walks sys/top/screen/
+ * bottom layers with the same function). So touch_read_cb() doesn't need to
+ * fight LVGL's press/release state machine, synthesize an LV_EVENT_CLICKED,
+ * or reach into any private indev field: it only needs to rewrite
+ * `data->point` to the arbitration winner's own center *before returning*.
+ * LVGL's normal pipeline then re-resolves that (now-corrected) point on its
+ * own, through its own public search path, and every other behavior --
+ * press/release edges, dragging, long-press, scrolling -- keeps working
+ * exactly as LVGL implements it, because nothing about that state machine
+ * was touched.
+ *
+ * Nothing calls ui_theme_register_touch_group() yet -- same situation
+ * ui_theme_apply_touch_area() was in when it was first written: no dense
+ * grid page (10.3) exists yet to have overlapping extended click areas in
+ * the first place. This is reusable infrastructure for the day one does.
+ */
+
+/* Registry capacity. Small and fixed on purpose -- this is meant for one or
+ * two genuinely-dense clusters (a keypad, a tightly packed settings row),
+ * not a general-purpose replacement for LVGL's own tree search. */
+#define UI_THEME_TOUCH_GROUP_MAX_GROUPS    4
+#define UI_THEME_TOUCH_GROUP_MAX_WIDGETS   16
+
+/**
+ * Register a group of widgets that should arbitrate touches between
+ * themselves by nearest-center, instead of relying solely on LVGL's
+ * z-order-first-match default (see the block comment above for exactly how
+ * and when this kicks in).
+ *
+ * `widgets` is copied into an internal fixed-size slot -- the caller's array
+ * itself does not need to outlive the call, but the `lv_obj_t *` pointers it
+ * contains must outlive the group's registration (i.e. don't register a
+ * group of widgets and then delete one of them without also caring that
+ * this registry still points at freed memory; there is no unregister call
+ * today because nothing needs one yet).
+ *
+ * A group of fewer than 2 widgets is a no-op (arbitration between fewer than
+ * two candidates is meaningless) and is silently ignored, as is registering
+ * past UI_THEME_TOUCH_GROUP_MAX_GROUPS or a `count` past
+ * UI_THEME_TOUCH_GROUP_MAX_WIDGETS -- deliberately loud limits (small,
+ * `#define`d, greppable) rather than a dynamic allocation for a mechanism
+ * that only exists to serve one or two dense clusters at a time.
+ *
+ * Widgets NOT registered in any group are entirely unaffected -- they keep
+ * relying on LVGL's normal hit-test alone, exactly as before this existed.
+ */
+void ui_theme_register_touch_group(lv_obj_t **widgets, size_t count);
+
+/**
+ * True once at least one group has been registered. lvgl_port.c's
+ * touch_read_cb() checks this before doing any of the extra work below, so
+ * the common case (no dense grid page built yet, or a build that never
+ * calls ui_theme_register_touch_group() at all) costs nothing beyond this
+ * one flag check per touch poll.
+ */
+bool ui_theme_touch_groups_active(void);
+
+/**
+ * Given the widget LVGL's own lv_indev_search_obj() resolved a touch point
+ * to (`default_target`, may be NULL if nothing was hit), return the widget
+ * the touch should actually be attributed to.
+ *
+ * If `default_target` is NULL, or is not a member of any registered group,
+ * this returns `default_target` unchanged -- LVGL's own answer stands. If it
+ * IS a member of a registered group, every member of that same group whose
+ * click area (lv_obj_get_click_area(), i.e. its own bounds expanded by
+ * whatever ui_theme_apply_touch_area() gave it) contains `point` becomes a
+ * candidate, and the candidate whose actual on-screen center is closest to
+ * `point` (squared Euclidean distance, no sqrt needed since only the
+ * ordering matters) is returned. `default_target` itself is always a valid
+ * candidate (LVGL already decided its click area contains the point), so
+ * this never returns NULL when `default_target` was non-NULL.
+ */
+lv_obj_t *ui_theme_resolve_touch_target(lv_obj_t *default_target, lv_point_t point);

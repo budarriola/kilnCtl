@@ -17,9 +17,11 @@
 static const char *TAG = "readiness_http";
 
 /* Embedded via EMBED_TXTFILES -- same convention as every other
- * *_page.html in this component. */
-extern const uint8_t readiness_page_html_start[] asm("_binary_readiness_page_html_start");
-extern const uint8_t readiness_page_html_end[] asm("_binary_readiness_page_html_end");
+ * *_page.html in this component. TODO.md 10.6a: embedded pre-gzipped
+ * (gzip'd at configure time before idf_component_register runs), hence the
+ * "_gz" in both the filename and the generated symbol. */
+extern const uint8_t readiness_page_html_gz_start[] asm("_binary_readiness_page_html_gz_start");
+extern const uint8_t readiness_page_html_gz_end[] asm("_binary_readiness_page_html_gz_end");
 
 /* TODO.md 8.3's four required distinctions, as an explicit enum rather than
  * a bool + comment: "not_done" (nothing stops it, nobody has done it yet),
@@ -378,11 +380,30 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, json, o);
 }
 
+/* TODO.md 10.6a: defensive Accept-Encoding check -- see
+ * wifi_provision_http.c's client_accepts_gzip() for the fuller rationale;
+ * duplicated per file rather than shared, matching this codebase's existing
+ * convention (e.g. json_escape() elsewhere). No uncompressed fallback is
+ * embedded this pass (named gap, TODO.md 10.6a). */
+static bool client_accepts_gzip(httpd_req_t *req)
+{
+    char enc[32];
+    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
+        return false;
+    }
+    return strstr(enc, "gzip") != NULL;
+}
+
 static esp_err_t page_get_handler(httpd_req_t *req)
 {
+    if (!client_accepts_gzip(req)) {
+        ESP_LOGW(TAG, "readiness_page.html: client did not advertise Accept-Encoding: gzip; serving "
+                      "gzip body anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    }
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, (const char *)readiness_page_html_start,
-                           (size_t)(readiness_page_html_end - readiness_page_html_start));
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)readiness_page_html_gz_start,
+                           (size_t)(readiness_page_html_gz_end - readiness_page_html_gz_start));
 }
 
 esp_err_t readiness_http_start(void)

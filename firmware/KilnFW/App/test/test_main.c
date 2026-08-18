@@ -15,6 +15,7 @@ void run_test_pid_autotune(void);
 void run_test_sim_kiln(void);
 void run_test_ota_auth(void);
 void run_test_ota_interlock(void);
+void run_test_thermo_combine(void);
 
 int main(void)
 {
@@ -26,6 +27,7 @@ int main(void)
     run_test_sim_kiln();
     run_test_ota_auth();
     run_test_ota_interlock();
+    run_test_thermo_combine();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -1,10 +1,13 @@
-// The "config" page -- TODO.md 10.3's "Configuration" nav item destination.
-// Minimal stub for this pass: a title and a back-to-home button, just enough
-// for ui_page_home.c's nav item to have somewhere real to go and to prove
-// kiln_ui_show() actually switches between more than one page. The real
-// content (Thermocouples & Zones / Relays & Rules / Network, mirroring
-// section 3's web Settings pages) is future work -- one page one file, see
-// kiln_ui.h's header comment.
+// The "config" page -- TODO.md 10.3's "Configuration" nav item destination:
+// a navigation hub to the deeper config/settings menus (section 3's Settings
+// pages: Thermocouples & Zones, Relays & Rules, Network), not a settings
+// editor in itself. Replaces the pre-this-pass title+Back stub (see git
+// history). See ui_page_config.c's header comment for exactly which items
+// are real navigation and which are honest "not built yet" placeholders --
+// this pass built one real destination (Board Health, see
+// ui_page_board_health.c/.h) and left the other three as labeled
+// placeholders rather than half-building a settings editor. One page one
+// file, see kiln_ui.h's header comment.
 #ifndef UI_PAGE_CONFIG_H
 #define UI_PAGE_CONFIG_H
 
