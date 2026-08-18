@@ -3093,11 +3093,37 @@ Turning PSRAM on later is a config change plus that DMA audit. Turning it off
 later, after code has grown to assume 8 MB of heap, is a rewrite. Staying off
 until something concrete needs it is the cheap ordering.
 
+**Reversed 2026-08-17: the named trigger fired, PSRAM turned on.** Section 10's
+LVGL GUI (see 10.1 below) needs draw buffers for the ILI9488, which is exactly
+the "locally-rendered UI" condition named above. `sdkconfig` now carries
+`CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_MODE_OCT=y`, and `CONFIG_SPIRAM_BOOT_INIT=y`
+(hand-edited directly, same as this section's own flash-size fix above — no
+`sdkconfig.defaults` exists in this project). The new
+`firmware/KilnFW/App/drivers/lvgl_port.c`/`.h` allocates LVGL's two draw
+buffers via `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`.
+
+Revisiting the four original reasons against this specific, small (tens of
+KB) use: **#1 (no framebuffer needed) does not apply** — this is a genuine
+new use case the original design excluded, not a violation of it. **#2**
+(determinism/stall risk) **and #3** (new boot failure mode) still stand as
+general PSRAM caveats worth keeping in mind, but are not blockers for a
+tens-of-KB display buffer rather than a full framebuffer. **#4 ("every
+existing DMA buffer needs auditing") turned out not to apply to this use**:
+`ILI9488_blit_data()` (in `ILI9488.c`) reads its caller's buffer with the CPU
+and stages the RGB565->RGB666 conversion into the driver's own internal
+DMA-capable scratch buffer before the actual SPI/DMA transfer, so the LVGL
+PSRAM buffer itself is never touched by DMA and needed no audit. **Not
+build-verified this pass** — no `idf.py build` was run against these
+sdkconfig/driver changes.
+
 - [x] Decision recorded; `# CONFIG_SPIRAM is not set` is deliberate, not an oversight
-- [ ] **Trigger to revisit: a locally-rendered UI on the ILI9488.** If the panel
+      — **superseded 2026-08-17, see "Reversed" above: `CONFIG_SPIRAM=y` now**
+- [x] **Trigger to revisit: a locally-rendered UI on the ILI9488.** If the panel
       ever has to show something the ESP composes itself — needing read-back,
       compositing, or flicker-free partial redraw — that needs ~450 KB and PSRAM
-      becomes required rather than optional. `docs/ILI9488.md` is cross-linked
+      becomes required rather than optional. `docs/ILI9488.md` is cross-linked.
+      **Fired 2026-08-17** — LVGL (10.1) is exactly this case; see
+      `App/drivers/lvgl_port.c`/`.h`
 - [ ] Second trigger, weaker: TLS on the web server, or many concurrent HTTP
       connections. Measure the heap before assuming either needs it
 - [ ] **Keep GPIO 33-37 unassigned.** On an R8 (octal PSRAM) module those pins
@@ -3485,3 +3511,429 @@ host-tested than it is.
 - [ ] Update attempted while firing: refused, blocker named
 - [ ] Wrong password: refused, locked out, logged
 - [ ] Recovery from a deliberately bricked Pico over SWD
+
+## 10. LCD touchscreen GUI (Klipper-style screen)
+
+**Status: planning only, nothing built.** Requested 2026-08-17. The LCD
+(ILI9488, `DISPLAY` task, `firmware/KilnFW`) is physically connected and
+currently shows a static "kilnCtl Ready" string (`ROADMAP.md` M1) — this
+section is the real UI on top of that. Deliberately scoped as its own
+section rather than folded into section 2, since it's a second front end
+(touchscreen, not HTTP) that has to stay in sync with the web dashboard
+rather than duplicate/diverge from it.
+
+### 10.1 Generic screen/page/widget framework
+
+**Status update (2026-08-17): rendering backend decided (LVGL) and first
+slice built.** The evaluation below is resolved — LVGL was chosen — and a
+minimal LVGL bring-up landed the same day: `firmware/KilnFW/App/drivers/
+lvgl_port.c`/`.h` do `lv_init()`, a partial-redraw display driver flushing
+through `ILI9488_blit_begin/data/end`, two `KILNCTL_LVGL_BUF_ROWS`-tall draw
+buffers allocated in PSRAM (Kconfig-configurable; see 9.1a's reversal above),
+a pointer input device reading the NS2009 touch controller (raw-ADC-to-pixel
+mapping via new Kconfig calibration knobs `KILNCTL_TOUCH_CAL_SWAP_XY`/
+`_INVERT_X`/`_INVERT_Y`, explicitly documented as unproven bench guesses
+needing calibration — same honesty as the pre-existing
+`KILNCTL_TOUCH_Z1_MAX_THRESHOLD`), a 1 ms `esp_timer` `lv_tick` source, and a
+task driving `lv_timer_handler()`. **What's actually on screen is only a
+placeholder "kilnCtl" label on a black background** — none of 10.3's page
+content, none of 10.2's KlipperScreen theme, and no generic "simplified
+Tkinter" app-layer on top of LVGL's raw API yet; the "thin app-layer on top
+of LVGL's existing screen/widget/style objects" framing below still applies,
+just now with a settled backend to build it on rather than an open
+evaluation. **Not build-verified this pass** — no `idf.py build` was run.
+
+An architectural decision came with this: **LVGL now owns the ILI9488
+outright, replacing the old UART-remote-drawn `DISPLAY_CMD_*` path**, rather
+than the two coexisting. `main.c`'s normal boot path no longer calls
+`uart_bridge_start_display_task()`. This was an explicit user decision
+(recommended option: "LVGL replaces remote draw") made because two
+independent owners issuing draw calls to the same `ILI9488Class` at the same
+time was an unresolvable race.
+
+This same change fixes a real bug, not a hypothetical one: previously a
+touch woke `screen_idle`'s internal flag but nothing ever repainted the
+panel afterward (`screen_idle.h`'s own comment already said waking "is just
+a flag flip ... whatever owns the UI is responsible for repainting real
+content" — nothing owned the UI, so the screen stayed dark after
+auto-blanking even though a touch registered). `lvgl_port.c`'s flush
+callback now watches for the `screen_idle` off->on edge and calls
+`lv_obj_invalidate(lv_screen_active())` to force a full redraw on wake.
+Touch ownership of the NS2009 also moved from `screen_idle_task`'s own
+polling loop to `lvgl_port.c`'s input-device callback, which forwards real
+presses into `screen_idle_inject_touch()` so `screen_idle`'s idle-timer/wake
+semantics are unchanged, just fed from a different source — `main.c` now
+passes `touch = NULL` to `screen_idle_init()` for this reason.
+
+- [x] A small, generic "screen" abstraction — pages + widgets, roughly a
+      simplified Tkinter: a page owns a widget tree, widgets draw
+      themselves and expose a tap/press callback, the screen manager swaps
+      the active page and handles global chrome (nav bar, back button).
+      Framework-agnostic on paper; decide the rendering backend before
+      building it, since that decision shapes the widget base class.
+      **Rendering backend decided (LVGL, 2026-08-17); app-layer abstraction
+      first slice built the same day — `App/drivers/kiln_ui.c`/`.h` is the
+      page registry/switcher (register-by-name, build-on-first-show, cached
+      thereafter, `lv_screen_load()` to switch). One rule enforced from the
+      start rather than retrofitted later: kiln_ui.c/.h must never contain a
+      page's own widget tree — every page is its own `ui_page_<name>.c`/`.h`
+      pair (see `ui_page_home.c`/`.h`, the first and so far only page,
+      registered as `"home"`), so the UI's page count growing (10.3 wants at
+      least four) never turns kiln_ui.c into the one file every page change
+      touches. `ui_page_home.c` also pulls its colors from the new
+      `ui_theme.h` (10.2) instead of hardcoded `lv_color_black()`/`_white()`,
+      so it's already a real (if trivial) consumer of the theme, not just
+      the theme sitting unused.**
+  - [x] **Evaluate LVGL** as the rendering/widget backend — it already has
+        the object model this section wants (screens, widgets, styles,
+        input devices) and an ESP-IDF component exists
+        (`lvgl/lvgl` + `lvgl/lv_port_esp32` or the IDF component registry
+        `espressif/lvgl` package), so "write a simplified Tkinter" may
+        mean "write a thin app-layer on top of LVGL's existing screen/
+        widget/style objects" rather than a widget toolkit from scratch.
+        Open to alternatives (u8g2 is text/mono-only and too low-level for
+        this; TFT_eSPI has no widget model) — LVGL is the front-runner
+        specifically because it already solves the touch-hit-testing
+        problem (10.4) internally, so evaluate whether its own indev
+        driver can be reused instead of writing a custom one.
+        **Decided 2026-08-17: LVGL chosen, first slice built — see status
+        update above. It also now owns the ILI9488 outright in place of the
+        old UART-remote-drawn path, an explicit user decision (see above),
+        not something this evaluation bullet originally anticipated.**
+  - [ ] Decide the color/asset story once the visual style (10.2) is
+        picked — LVGL widgets are themeable, so the "Klipper screen" look
+        is a theme/style pass on top of stock widgets, not custom-drawn
+        widgets.
+
+### 10.1a Shared backend with the web UI
+
+**Status: decided, not yet executed.** Explicit requirement, 2026-08-17: "use
+the same back end code as the web ui for lcd stuff... i want them to have
+mostly the same functionality just different interfaces." This is a real
+constraint on how every remaining piece of section 10 gets built, not a
+someday-nice-to-have, so it's recorded here before 10.3 writes a single real
+page.
+
+**The problem it's guarding against**: `App/drivers/dashboard_http.c` (and
+`zones_http.c`, `profiles_http.c`, `rules_http.c`, `readiness_http.c`) today
+mix three things in one function per endpoint — reading state out of
+`profile_executor`/`relay_authority`/`zones_http`/etc., applying any request
+action, and serializing the result to JSON — with no seam between them. See
+e.g. `dashboard_http.c`'s `status_get_handler()`: it calls straight into the
+data-owning modules and writes JSON in the same function body. If the LCD
+side (10.3) copies this pattern and calls those same data-owning modules
+directly from its own page code, the "same functionality" the user asked for
+degrades over one release into two independently-maintained readings of the
+same state, which is exactly the drift this repo's own instructions (see
+this file's top and `ROADMAP.md`) already warn about for the web/LCD pair
+specifically — see 10.5.
+
+**The rule going forward**: a page's *data access and actions* — "what is
+zone 0's current temperature and heater state," "start this profile," "set
+this relay" — must go through the same plain-C functions for both interfaces.
+Two front ends (JSON serialization for `esp_http_server`, LVGL widget updates
+for `kiln_ui`) sit on top of one backend, not two backends that happen to
+agree today. Concretely, an existing HTTP handler that isn't already split
+this way gets split *at the point 10.3 first needs the same data* — e.g. when
+the home page (10.3's real replacement for `ui_page_home.c`'s placeholder)
+needs per-zone temp/heater status, `dashboard_http.c`'s `status_get_handler()`
+gets its data-gathering pulled out into a plain function (e.g.
+`dashboard_get_status(dashboard_status_t *out)`) that the HTTP handler then
+serializes and the new LCD page then renders — not reimplemented from
+scratch against `profile_executor`/`zones_http` a second time. This is
+deliberately *not* done as one big mass refactor of every existing handler up
+front: extracting a shared getter nobody consumes yet is speculative work
+against an interface (10.3's pages) that doesn't exist, and this codebase's
+own convention throughout (`TODO.md`'s intro, every "design only" section
+that waited for a real consumer before committing to a shape) is to build
+the seam when the second caller actually shows up, not before.
+
+- [ ] As each 10.3 page is built, extract its backend data access from the
+      matching HTTP handler into a shared plain-C getter/action function
+      (naming pattern: `<module>_get_<thing>()` for reads, reuse the
+      existing action functions directly for writes — e.g.
+      `profile_executor_run()`/`_pause()`/`_halt()`, `relay_authority_*`,
+      already plain C and already the single implementation each HTTP
+      handler calls, so a button on the LCD calling the same function is
+      the *already-correct* pattern for actions; it's specifically the
+      *read* side each handler currently inlines that needs splitting)
+- [ ] Where a handler is split, the HTTP handler must be updated to call the
+      new shared getter too (not left calling the data-owning modules
+      directly while only the LCD gets the new seam) — otherwise this
+      creates the third thing it exists to prevent: two different call paths
+      to the same data, one of which nothing forces to stay in sync with the
+      other's bug fixes
+- [ ] 10.7 (onboard IC temps) and 10.8 (multi-thermocouple-per-zone
+      averaging) were in progress the same day this rule was written —
+      when 10.3 reaches for either, check whether their read paths already
+      landed as plain getters (matching this rule) or as handler-inlined
+      logic (needing the same split described above) rather than assuming
+      either way from this note
+
+### 10.2 Visual style — match KlipperScreen
+
+**Status update (2026-08-17): palette/spacing source of truth first slice
+built.** `firmware/KilnFW/App/drivers/ui_theme.h` (LVGL `lv_color_hex()`
+macros, no `.c` needed) and `firmware/KilnFW/docs/UI_THEME.md` (the same
+palette as a table, plus a "Web dashboard parity" section pointing 10.6 at
+these exact hex values) now exist: a dark-navy background
+(`UI_THEME_COLOR_BG`, `#1a1f2b`) and lighter card background
+(`UI_THEME_COLOR_CARD`, `#242a3a`), near-white primary/secondary text
+(`UI_THEME_COLOR_TEXT_PRIMARY` `#f0f0f0`, `UI_THEME_COLOR_TEXT_SECONDARY`
+`#9aa0ae`), and five named accents (`UI_THEME_ACCENT_1`..`_5`: orange
+`#e8974e`, purple `#a15fd6`, teal `#3ec6c6`, green `#5cc06e`, red/amber
+`#d6555f` held back for alarm/attention use) for 10.3 to assign per
+configured zone/metric without this header knowing about zones itself. Also
+added: a minimum touch target (`UI_THEME_MIN_TOUCH_TARGET_PX`, 72px, budgeted
+against the 480x320 panel), a corner radius (`UI_THEME_CORNER_RADIUS_PX`,
+10px), a padding/gap value (`UI_THEME_PADDING_PX`, 8px), and a status bar
+height (`UI_THEME_STATUS_BAR_HEIGHT_PX`, 32px).
+
+**Explicitly a first-pass, unverified-against-real-hardware palette** — no
+KlipperScreen theme file or physical LCD was in hand this pass, only a
+description of the reference screenshots (dark navy bg, white text, a small
+rotating accent-color set per row/zone/nav-icon). Every constant is commented
+in `ui_theme.h` with that caveat, same honesty as the existing
+`KILNCTL_TOUCH_CAL_SWAP_XY`/`KILNCTL_TOUCH_Z1_MAX_THRESHOLD` guesses — sanity
+-check against the physical ILI9488 once available and correct both files
+together if it's off. **Nothing consumes this yet**: `kiln_ui.c`'s
+placeholder home page still draws `lv_color_black()` untouched (10.1's
+pre-10.2 bring-up screen, deliberately left alone), and 10.3's real pages
+(the ones that would actually apply this theme) are not built.
+
+- [x] Adopt the **KlipperScreen** (the 3D-printer touchscreen UI) layout
+      and color style as the visual reference: dark theme, large
+      touch-friendly buttons, a persistent top status bar, bottom/side nav
+      between pages. Pull concrete values (palette, spacing, font sizes)
+      from KlipperScreen's own theme files rather than reinventing them.
+      **Done as a first-pass approximation — see status update above; no
+      actual KlipperScreen theme file was available this pass, so values
+      are inferred from a description of the reference look, not extracted
+      from KlipperScreen's source.**
+- [x] Whatever theme constants this produces (colors, fonts, spacing)
+      should be a small shared table — 10.6 wants the web dashboard
+      restyled to visually match, and a single source of truth for the
+      palette is what keeps the two from drifting the moment one changes.
+      **Done: `ui_theme.h` + `docs/UI_THEME.md`, see status update above.
+      Font sizes are not yet part of this table — LVGL font selection
+      wasn't scoped into this pass; add it here if/when 10.3 needs one.**
+
+### 10.3 Page designs
+
+**Main / status page** (the default page, mirrors section 2's web
+dashboard but is the touchscreen's home, not a secondary view):
+
+- [ ] Each configured zone, its current temperature, and its heater
+      on/off status (same data as `GET /api/status`, section 2)
+- [ ] Graph of the current profile's target curve with all zones'
+      actual temperature progressing along it (same data/shape as
+      section 2's `historyChart` / `GET /api/history.csv` — reuse the
+      existing history ring buffer, section 0's "Historical data for the
+      graph" item, rather than a second buffer)
+- [ ] Name of the currently selected/running kiln profile
+- [ ] Time remaining and elapsed time, **shown both as text and as a
+      progress bar**
+- [ ] Stop button
+- [ ] Start button
+- [ ] "Configuration" nav item — opens the deeper config / settings menus
+      (maps to section 3's Settings pages: Thermocouples & Zones, Relays &
+      Rules, Network)
+- [ ] "Temperature" nav item — individual per-zone manual control (maps to
+      section 2's manual relay override / per-zone target, touchscreen
+      equivalent of the dashboard's relay controls)
+
+### 10.4 Touch hit-testing
+
+- [ ] Map a raw touch coordinate to the widget the user meant to press:
+      **nearest widget-center wins**, but only within a limited offset —
+      a touch too far from any widget's center hits nothing rather than
+      the nearest-but-still-wrong widget.
+  - [ ] The allowed offset is **dynamic**, based on local widget density
+        and button size — a screen of large, sparse buttons can allow a
+        generous offset; a dense/compact layout (10.5) needs a tighter one
+        so adjacent small buttons don't steal each other's touches.
+  - [ ] If LVGL is adopted (10.1), check whether its indev/hit-testing
+        already implements an equivalent nearest-target-within-tolerance
+        model before building a custom one — this may already be solved.
+- [ ] Explicitly handle **compact button layouts** (e.g. a numeric keypad
+      or a dense settings grid) as their own density case, not just the
+      sparse main-page buttons above.
+
+### 10.5 Web/LCD parity rule
+
+- [ ] **Whenever either the LCD screen or the web interface changes,
+      consider whether the other should change too.** If the answer isn't
+      clear, ask the user rather than guessing; if it's clear-cut (e.g. a
+      new zone field needs to show up in both places), make the matching
+      change without asking. Applies to both directions — a web feature
+      added later needs the same consideration for the LCD, not just LCD
+      to web.
+
+### 10.6 Web dashboard restyle to match the LCD
+
+- [ ] Rework the existing web pages (`main_page.html`,
+      `zones_page.html`, `rules_page.html`, `profiles_page.html`,
+      `wifi_provision_page.html`) to use the same KlipperScreen-derived
+      style (10.2) as the LCD, so the two front ends read as one product.
+  - [ ] Look for a small CSS approach rather than a JS framework, given
+        this is served from ESP32 flash with no build step today: either
+        a hand-written shared `style.css` embedded alongside the existing
+        pages (cheapest, no new dependency, matches how the pages are
+        built now), or a tiny CSS-only utility library if one closely
+        matches KlipperScreen's look. Avoid anything requiring Node/
+        bundling — the existing pages are static files `EMBED_TXTFILES`'d
+        straight from flash (section 0's web-server decision), and a
+        build pipeline would be new infrastructure this project doesn't
+        have.
+
+### 10.7 Onboard IC temperature sensors
+
+- [ ] Several ICs on the board (MAX31856s, the ESP32-S3 itself, and any
+      other part with an on-die/onboard temp sensor) expose their own
+      temperature reading, separate from the thermocouple-measured kiln
+      temperature. Surface these on **a separate menu/page** — both LCD
+      (a nav item alongside 10.3's Configuration/Temperature items) and
+      web (a new route, not mixed into the main dashboard) — since this
+      is board-health diagnostic data, not kiln-process data, and mixing
+      the two would make the main page harder to read at a glance.
+
+  **Status update (2026-08-17): web JSON endpoint built, LCD side not
+  started.** `App/drivers/board_temps.c`/`.h` is a new driver module that
+  surfaces both real onboard sources:
+  - The ESP32-S3's own internal die-temperature sensor, brought up via
+    ESP-IDF's `driver/temperature_sensor.h` (`temperature_sensor_install()`/
+    `_enable()`/`_get_celsius()`), init-once in `board_temps_start()`
+    (called early in `app_main`, independent of every other bus) and read
+    on demand through `board_temps_get()`.
+  - Each active MAX31856's `cj_temperature_c` (its own cold-junction/local
+    temperature, already computed by every `MAX31856_read_all()` call for
+    the thermocouple linearization math) — nothing new read from hardware,
+    `board_temps_get()` just accepts the same `MAX31856Reading` array
+    `dashboard_http.c` already gets and republishes the field under a
+    board-health name.
+
+  `GET /api/board_temps` (registered by `board_temps_http_start()`,
+  wired into `app_main` right after `dashboard_http_start()`, same
+  NULL-tolerant `thermo_bus` pointer) returns
+  `{"esp32_c": <float or null>, "thermo_cj_c": [<float or null>, ...]}` —
+  null (not 0) for whichever field has no valid reading this request.
+
+  **NOT VERIFIED AGAINST THE INSTALLED TOOLCHAIN OR REAL HARDWARE THIS
+  PASS.** The `temperature_sensor.h` API surface (function names/
+  signatures/`TEMPERATURE_SENSOR_CONFIG_DEFAULT`) is written from
+  documented ESP-IDF v5.0+ behavior, not confirmed against this repo's
+  actual installed IDF v6.0.2 headers — no `managed_components/` manifest
+  or installed SDK checkout was reachable to grep from inside the repo
+  this pass. Likewise `esp_driver_tsens` as the CMake `REQUIRES` component
+  name is a best guess by analogy with `esp_driver_i2c`/`esp_driver_spi`
+  above it, not confirmed. **This has never been built** (no build tool
+  available this pass) — the first real build against the actual
+  toolchain may need a component-name or API-signature fix in
+  `App/drivers/CMakeLists.txt`/`board_temps.c`. Still entirely open: the
+  LCD/LVGL nav item this section also asks for (explicitly left to
+  whichever pass owns `kiln_ui.c` next), and any real web *page* for this
+  endpoint (10.7 only asked for the endpoint to exist this pass; a page is
+  future 10.3/10.6-adjacent work).
+
+### 10.8 Multi-thermocouple-per-zone (cross-reference: section 3)
+
+**Status update (2026-08-17): first slice built.** The config model, the
+combining function, and the control/guard read paths this section names are
+all wired end to end. Not yet done: `zones_page.html` has no UI for
+assigning more than one channel to a zone (server-side default keeps every
+existing/UI-driven zone on its legacy single channel — see below), and
+`autotune_engine.c`'s step-test read path still reads its zone's legacy
+single channel directly rather than through the combiner. Nothing here has
+run against real hardware (no thermocouples attached this session, same
+caveat every other guard/control item in this file carries).
+
+- [x] Section 3's zone model is currently one thermocouple channel per
+      zone (`zones_http.h`'s scope note, section 3's "Named zones" item).
+      Extend it to allow **more than one thermocouple assigned to the
+      same heater zone**, with the zone's control temperature computed
+      from a combining function across its assigned thermocouples rather
+      than a single channel.
+      **Done**: `zone_cfg_t::thermo_mask` (`App/drivers/zones_http.c`), a
+      bitfield alongside the existing `relay_mask` — bit N-1 = MAX31856
+      channel N belongs to this zone, same convention `relay_mask` already
+      established, matching this file's own "the natural pattern to follow"
+      framing rather than a second single-index field.
+      `zones_config_get_thermo_mask()` (`zones_http.h`) mirrors
+      `zones_config_get_relay_mask()`'s naming and "false means cannot
+      answer" contract. Validated against `thermo_count` on POST the same
+      way `relay_mask` is validated against `relay_count`.
+      Persistence: `ZONES_CFG_VERSION` bumped 3→4 — this file already had a
+      versioned-blob migration mechanism (`nvs_load_from()`/
+      `migrate_zones_cfg_v1_to_current()`), the same one the 2026-08-12
+      relay_cycles.c note (section 6A.1) says a field addition needs, so
+      this is the "bump the version" branch of that note's two safe options,
+      not the untested one. Unlike every field version 4 could have grown
+      by leaving a migrated blob's new bytes zeroed, thermo_mask=0 is NOT a
+      safe default for an existing zone (it means "no thermocouple
+      assigned," i.e. permanently invalid) — `migrate_zones_cfg_v1_to_current()`
+      explicitly fills bit i for zone i on any migrated blob, reproducing
+      the exact implicit mapping every pre-10.8 zone was already using. The
+      POST handler applies the identical fallback when `z%u_thermo_mask` is
+      simply absent from the submitted body (current `zones_page.html`,
+      `pc_tools`/MCP, the test harnesses) — see `parse_zone_fields()`'s
+      comment for why an absent-means-0 default (`z%u_xzone`'s convention)
+      would have been wrong here specifically. An explicit `0` sent by a
+      client that DOES know the field is honoured as a real "no
+      thermocouple," reaching the combiner as a zero-valid-readings zone.
+  - [x] Decide the combining function — arithmetic mean of all assigned,
+        valid (non-faulted) readings is the default candidate; open
+        question whether outlier rejection or a max/min-biased combiner
+        is ever wanted (e.g. control off the hottest reading, not the
+        average, if the goal is "never let any point in the zone
+        overshoot"). Needs a decision, not just "mean," before building —
+        the terms aren't interchangeable for a safety-adjacent control
+        input.
+        **Decided for this pass: arithmetic mean**, per this section's own
+        stated default. Outlier rejection and a max/min-biased combiner
+        remain undecided and unbuilt — left as an explicit open question,
+        not guessed at, matching this item's own instruction.
+        `App/drivers/thermo_combine.c`/`.h` (new): pure C, no FreeRTOS, no
+        ESP-IDF, no logging, no I/O, same discipline pid.h documents and for
+        the same reason (host-unit-testable, though a host-test build wiring
+        for it was NOT added this pass — `App/test/build_host_tests.ps1`
+        still only builds pid.c/thermal_guard.c/heater_output.c — left as an
+        open item rather than done).
+  - [x] A thermocouple that faults (open/short, per `MAX31856_read_all()`)
+        must not silently corrupt the combined value — drop it from the
+        combination and fall back per however many remain; zero
+        remaining valid readings for a zone is the existing "thermocouple
+        invalid" case, unchanged.
+        **Done**: `thermo_combine()` takes parallel per-channel
+        reading/validity arrays and drops any channel whose validity flag is
+        false rather than including it as 0 or a stale value. The validity
+        check itself is NOT reinvented — `profile_executor.c` still computes
+        it exactly as before (`spi_failed`/`isnan`/`THERMO_FAULT_OPEN|OVUV|
+        TCRANGE`), and just hands the combiner the same array it always
+        built. Zero valid channels among a zone's mask returns NaN with
+        `*out_valid = false`, mirroring `zones_config_apply_cal()`'s
+        NaN-passthrough convention — same "thermocouple invalid" case a
+        single unassigned/faulted channel has always produced, unchanged.
+  - [x] The direction/rate sanity monitor (section 6, "6A" thermal guards)
+        and PID/bang-bang control (6A.1/6A.2) both currently read one
+        `MAX31856Reading` per zone — both need to consume the combined
+        value instead, and thermal_guard's guard 6 (sensor-invalid) needs
+        its own definition of "invalid" extended to "all assigned
+        thermocouples for this zone are invalid," not just one.
+        **Done for the control-tick and run-start baseline read paths in
+        `profile_executor.c`**: the main tick's per-channel raw read is now
+        immediately combined per zone (via `thermo_combine()` against that
+        zone's live `thermo_mask`) before `pid_update_terms()`/bang-bang and
+        `thermal_guard_tick()` ever see it, and the ramp baseline read at run
+        start does the same so a multi-thermocouple zone starts its ramp
+        math from the same combined number the first control tick computes.
+        Guard 6's extended definition falls out for free: `thermal_guard.c`
+        was already written against an opaque caller-supplied `sensor_ok`
+        bool (see `thermal_guard_input_t`'s doc comment) and never needed to
+        know how many channels fed it — no code changed inside
+        `thermal_guard.c` itself, only its and `thermal_guard_input_t`'s doc
+        comments, to say explicitly that `sensor_ok` is now the zone's
+        combined verdict. `autotune_engine.c`'s step-test read (a separate,
+        narrower per-zone read path from the main control tick) was NOT
+        touched this pass — still reads its zone's legacy single channel
+        directly — left as a named open item rather than folded in, to keep
+        this pass to the paths the section explicitly named.

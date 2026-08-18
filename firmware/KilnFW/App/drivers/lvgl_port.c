@@ -1,0 +1,256 @@
+#include "lvgl_port.h"
+
+#include <string.h>
+
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "lvgl.h"
+
+#include "kiln_ui.h"
+#include "settings.h"
+
+static const char *TAG = "lvgl_port";
+
+/* LVGL is not thread-safe: every lv_* call below (flush callback, indev
+ * callback, tick, timer_handler, and the one-time screen build) runs on
+ * lvgl_port_task and nowhere else. Nothing outside this file may touch an
+ * lv_* API. */
+
+typedef struct {
+    ILI9488Class *display;
+    NS2009Class *touch;     /* NULL if no touch hardware */
+    screen_idle_t *idle;    /* NULL if no auto-blank integration */
+
+    lv_display_t *lv_disp;
+    lv_indev_t *lv_indev;
+
+    /* Tracks the screen_idle on/off flag as of the last flush, so the
+     * off->on edge (a wake) can be told apart from "still on" -- see
+     * ili9488_flush_cb's comment. Starts true: screen_idle_init leaves
+     * screen_on true and this module never blanks anything itself. */
+    bool last_screen_on;
+} lvgl_port_t;
+
+static lvgl_port_t s_port;
+
+/* --- lv_tick source -------------------------------------------------------
+ * A 1ms esp_timer periodic callback. Runs in the esp_timer task's context,
+ * not lvgl_port_task -- lv_tick_inc() is documented as safe to call from any
+ * context (it only touches an internal atomic-ish counter LVGL itself
+ * serializes), unlike every other lv_* entry point used in this file. */
+static void lv_tick_timer_cb(void *arg)
+{
+    (void)arg;
+    lv_tick_inc(1);
+}
+
+/* --- Display flush --------------------------------------------------------
+ * ILI9488 has no framebuffer and no read-back (ILI9488.h) -- every flush
+ * goes straight to the panel's own GRAM through the streaming blit, which is
+ * exactly the shape LV_DISPLAY_RENDER_MODE_PARTIAL wants: a small buffer,
+ * flushed as soon as its rectangle is ready, no compositing needed on this
+ * side.
+ *
+ * Skip-while-blanked + wake redraw: screen_idle.h's contract is "blanking
+ * paints the frame black and flips a flag; waking is JUST a flag flip --
+ * whatever owns the UI is responsible for repainting real content once it
+ * sees screen_on go back to true." Before this module existed nothing did
+ * that repaint, which is why a touch woke the flag but the glass stayed
+ * black. This flush callback is that owner: while screen_idle reports
+ * blanked, flushes are skipped (no point drawing under screen_idle's own
+ * black paint, and it saves the SPI traffic); the moment it reports on again
+ * after having been off, the active screen is invalidated so LVGL redraws
+ * everything on the very next cycle instead of only whatever widget next
+ * changes. */
+static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    lvgl_port_t *p = (lvgl_port_t *)lv_display_get_user_data(disp);
+
+    bool screen_on = true;
+    if (p->idle) {
+        uint32_t idle_ms = 0;
+        if (screen_idle_get_state(p->idle, &screen_on, &idle_ms) != ESP_OK) {
+            screen_on = true; /* fail open: draw rather than go permanently dark */
+        }
+        if (screen_on && !p->last_screen_on) {
+            ESP_LOGI(TAG, "screen woke -- forcing a full redraw");
+            lv_obj_invalidate(lv_screen_active());
+        }
+        p->last_screen_on = screen_on;
+    }
+
+    if (screen_on) {
+        uint16_t x = (uint16_t)area->x1;
+        uint16_t y = (uint16_t)area->y1;
+        uint16_t w = (uint16_t)(area->x2 - area->x1 + 1);
+        uint16_t h = (uint16_t)(area->y2 - area->y1 + 1);
+
+        esp_err_t err = ILI9488_blit_begin(p->display, x, y, w, h);
+        if (err == ESP_OK) {
+            err = ILI9488_blit_data(p->display, px_map, (size_t)w * (size_t)h * 2u);
+            esp_err_t end_err = ILI9488_blit_end(p->display);
+            if (err == ESP_OK) err = end_err;
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "flush [%u,%u %ux%u] failed: %s", x, y, w, h, esp_err_to_name(err));
+        }
+    }
+
+    lv_display_flush_ready(disp);
+}
+
+/* --- Touch input device -----------------------------------------------
+ * The one and only NS2009 reader once this module starts (see lvgl_port.h).
+ * A real press is forwarded into screen_idle_inject_touch() so screen_idle's
+ * idle timer / wake logic works exactly as it does for a UART-injected
+ * touch -- screen_idle was built to not care which source a touch came from
+ * (screen_idle.h/.c), and this keeps it that way. */
+static int32_t touch_raw_to_px(uint16_t raw, uint16_t panel_extent, bool invert)
+{
+    if (raw > NS2009_ADC_MAX) raw = NS2009_ADC_MAX;
+    uint32_t px = ((uint32_t)raw * (panel_extent - 1u)) / NS2009_ADC_MAX;
+    if (invert) px = (panel_extent - 1u) - px;
+    return (int32_t)px;
+}
+
+static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    lvgl_port_t *p = (lvgl_port_t *)lv_indev_get_user_data(indev);
+
+    if (!p->touch) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    bool pressed = false;
+    uint16_t raw_x = 0, raw_y = 0;
+    esp_err_t err = NS2009_read(p->touch, &pressed, &raw_x, &raw_y);
+    if (err != ESP_OK || !pressed) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    uint16_t width = 0, height = 0;
+    ILI9488_get_dimensions(p->display, &width, &height);
+
+    uint16_t ax = TOUCH_CAL_SWAP_XY ? raw_y : raw_x;
+    uint16_t ay = TOUCH_CAL_SWAP_XY ? raw_x : raw_y;
+    int32_t px = touch_raw_to_px(ax, width, TOUCH_CAL_INVERT_X);
+    int32_t py = touch_raw_to_px(ay, height, TOUCH_CAL_INVERT_Y);
+
+    data->point.x = px;
+    data->point.y = py;
+    data->state = LV_INDEV_STATE_PRESSED;
+
+    if (p->idle) {
+        screen_idle_inject_touch(p->idle, (uint16_t)px, (uint16_t)py, true);
+    }
+}
+
+/* --- Task: the only thing that ever calls lv_timer_handler() ----------
+ * LVGL's own return value from lv_timer_handler() is how long it's safe to
+ * sleep before the next call is needed -- honoured directly rather than a
+ * fixed poll period, same idea as every other "sleep until there's real
+ * work" task in this codebase. */
+static void lvgl_port_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        uint32_t sleep_ms = lv_timer_handler();
+        if (sleep_ms == LV_NO_TIMER_READY) sleep_ms = 50;
+        if (sleep_ms < 1) sleep_ms = 1;
+        vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+    }
+}
+
+esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle_t *idle)
+{
+    if (!display) return ESP_ERR_INVALID_ARG;
+
+    memset(&s_port, 0, sizeof(s_port));
+    s_port.display = display;
+    s_port.touch = touch;
+    s_port.idle = idle;
+    s_port.last_screen_on = true;
+
+    lv_init();
+
+    const esp_timer_create_args_t tick_args = {
+        .callback = lv_tick_timer_cb,
+        .name = "lv_tick",
+    };
+    esp_timer_handle_t tick_timer = NULL;
+    esp_err_t err = esp_timer_create(&tick_args, &tick_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_timer_create (lv_tick) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_timer_start_periodic(tick_timer, 1000 /* us */);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_timer_start_periodic (lv_tick) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint16_t width = 0, height = 0;
+    ILI9488_get_dimensions(display, &width, &height);
+
+    s_port.lv_disp = lv_display_create(width, height);
+    if (!s_port.lv_disp) {
+        ESP_LOGE(TAG, "lv_display_create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    lv_display_set_user_data(s_port.lv_disp, &s_port);
+    lv_display_set_flush_cb(s_port.lv_disp, ili9488_flush_cb);
+    lv_display_set_color_format(s_port.lv_disp, LV_COLOR_FORMAT_RGB565);
+
+    /* Buffers live in PSRAM -- see TODO.md 9.1a's 2026-08-17 reversal and
+     * lvgl_port.h's header comment for why that's safe on this driver.
+     * Two buffers: LVGL can render into one while the other's flush is still
+     * in flight. The current flush callback is synchronous (ILI9488_blit_*
+     * blocks on the SPI transfer), so this doesn't buy overlap today -- it's
+     * cheap insurance against a future async/DMA-complete-callback flush
+     * path costing nothing to keep now, given how small this is against 8 MB
+     * of PSRAM. */
+    size_t buf_pixels = (size_t)width * (size_t)LVGL_BUF_ROWS;
+    size_t buf_bytes = buf_pixels * 2u; /* RGB565 */
+    void *buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM);
+    void *buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM);
+    if (!buf1 || !buf2) {
+        ESP_LOGE(TAG, "PSRAM draw buffer allocation failed (%u bytes each)", (unsigned)buf_bytes);
+        if (buf1) heap_caps_free(buf1);
+        if (buf2) heap_caps_free(buf2);
+        return ESP_ERR_NO_MEM;
+    }
+    lv_display_set_buffers(s_port.lv_disp, buf1, buf2, buf_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+    s_port.lv_indev = lv_indev_create();
+    if (s_port.lv_indev) {
+        lv_indev_set_type(s_port.lv_indev, LV_INDEV_TYPE_POINTER);
+        lv_indev_set_read_cb(s_port.lv_indev, touch_read_cb);
+        lv_indev_set_user_data(s_port.lv_indev, &s_port);
+        lv_indev_set_display(s_port.lv_indev, s_port.lv_disp);
+    } else {
+        ESP_LOGW(TAG, "lv_indev_create failed -- UI will be view-only");
+    }
+
+    esp_err_t ui_err = kiln_ui_init();
+    if (ui_err != ESP_OK) {
+        ESP_LOGE(TAG, "kiln_ui_init failed: %s", esp_err_to_name(ui_err));
+        return ui_err;
+    }
+
+    BaseType_t created = xTaskCreatePinnedToCore(lvgl_port_task, "lvgl", 8192, NULL, 4, NULL,
+                                                 tskNO_AFFINITY);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start lvgl_port_task");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
+             height, (unsigned)LVGL_BUF_ROWS, touch ? "on" : "off", idle ? "on" : "off");
+    return ESP_OK;
+}

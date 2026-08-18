@@ -28,8 +28,15 @@ static const char *TAG = "zones_http";
  * for firmware rollback. */
 #define KILN_NVS_PARTITION "kiln_nvs"
 
-/* Bump whenever zones_cfg_t's on-flash layout changes; see nvs_load_from(). */
-#define ZONES_CFG_VERSION 3
+/* Bump whenever zones_cfg_t's on-flash layout changes; see nvs_load_from().
+ * 3 -> 4 (2026-08-17, TODO.md 10.8): added zone_cfg_t::thermo_mask. Same
+ * "grows the struct, does not shrink it" case nvs_load_from()'s BUG FIXED
+ * 2026-08-13 comment documents -- a v3 blob is read into a zeroed out_cfg,
+ * so thermo_mask already reads as 0 with no explicit copy needed, and only
+ * the version bump plus migrate_zones_cfg_v1_to_current()'s new
+ * legacy-mapping fill-in (see there) are required to make the growth safe
+ * for an operator's existing saved zones. */
+#define ZONES_CFG_VERSION 4
 
 #define ZONE_NAME_MAX_LEN 15
 
@@ -133,6 +140,15 @@ typedef struct {
     float model_k_dc;        /* static gain, degC per unit duty at steady state */
     float model_tau_s;       /* first-order time constant, seconds */
     float model_dead_time_s; /* transport delay L, seconds */
+    /* TODO.md 10.8 (2026-08-17): which MAX31856 channels combine (mean of
+     * valid readings, thermo_combine.c) into this zone's control
+     * temperature -- bit N-1 = channel N, same convention as relay_mask
+     * above. See zones_config_get_thermo_mask()'s doc comment (zones_http.h)
+     * for the legacy-mapping default a 0 here falls back to when the field
+     * was never explicitly supplied, which is what keeps this addition from
+     * being the kind of silent-wipe field growth TODO.md 6A.1's
+     * relay_cycles.c note (section 6A.1, 2026-08-12) warns against. */
+    uint8_t thermo_mask;
 } zone_cfg_t;
 
 typedef struct {
@@ -157,18 +173,20 @@ typedef struct {
 } zones_cfg_t;
 
 /* application/x-www-form-urlencoded whole-page submit: thermo_count,
- * relay_count, and 26 fields per zone (name/relay_mask/cal/kp/ki/kd/ramp/
- * sanity/mode/maxtemp/mintemp/window/minon/minoff/xzone/k/tau/deadtime plus
- * the 8 guard-threshold overrides below) across up to MAX31856_CHANNEL_COUNT
- * zones. Generous headroom over what a legitimate 3-zone submission needs --
- * checked against Content-Length before a single byte is read, same
- * discipline as every other handler in this codebase.
+ * relay_count, and 27 fields per zone (name/relay_mask/thermo_mask/cal/kp/
+ * ki/kd/ramp/sanity/mode/maxtemp/mintemp/window/minon/minoff/xzone/k/tau/
+ * deadtime plus the 8 guard-threshold overrides below) across up to
+ * MAX31856_CHANNEL_COUNT zones. Generous headroom over what a legitimate
+ * 3-zone submission needs -- checked against Content-Length before a single
+ * byte is read, same discipline as every other handler in this codebase.
  * Bumped 2048->2560 when heater_window_ms/min_on_ms/min_off_ms were added,
  * 2560->2816 when cross_zone_max_delta_c was, 2816->3200 when the three
  * plant-model fields were, 3200->4096 when the 8 guard-threshold overrides
  * were: worst case those add 8 "z0_<name>=" keys plus separators and up to
  * parse_float_field()'s 23-char value each, ~250 bytes a zone, ~750 across
- * three. */
+ * three. z%u_thermo_mask (TODO.md 10.8) is a single 0-255 u8 field, well
+ * under 20 bytes a zone even with its key name -- left inside the existing
+ * 4096 without another bump; the three-zone worst case is nowhere near it. */
 #define ZONES_BODY_MAX 4096
 
 static struct {
@@ -351,10 +369,34 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
  * (2026-08-13) added continue_on_zone_trip as a new trailing field; a v1
  * blob is shorter, but nvs_get_blob() already copied it into a zeroed
  * out_cfg before this runs (see nvs_load_from()), so the new field already
- * reads as 0 -- no explicit conversion needed, just the version bump. */
+ * reads as 0 -- no explicit conversion needed, just the version bump.
+ *
+ * v3 -> v4 (2026-08-17, TODO.md 10.8) added zone_cfg_t::thermo_mask, and
+ * THIS one needs an explicit conversion, unlike every field before it: 0 is
+ * not a safe "not configured yet" default here the way it was for
+ * continue_on_zone_trip. Every pre-10.8 blob's zones were already reading a
+ * real thermocouple, implicitly, through the "zone i <-> channel i" mapping
+ * this module used to hard-code (zones_http.h's old scope note) -- if this
+ * function left thermo_mask at its zeroed default, every existing zone on
+ * every board that has ever saved a config would go dark (thermo_combine.c
+ * sees an empty mask, reports zero valid readings, and that's the same
+ * "thermocouple invalid" state a real sensor fault produces) the moment
+ * this firmware boots, with no operator action and no warning beyond
+ * whatever guard 6 eventually trips. Filling in bit i for zone i
+ * reproduces the exact mapping every migrated zone was already using, so a
+ * migrated board controls off the same channel it always did until an
+ * operator explicitly assigns something else. Bounded by
+ * MAX31856_CHANNEL_COUNT (the zones[] array size), not thermo_count -- an
+ * unconfigured trailing zone slot getting a harmless default bit costs
+ * nothing and keeps this loop from needing to know which zones are "real". */
 static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
 {
     cfg->version = ZONES_CFG_VERSION;
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        if (cfg->zones[i].thermo_mask == 0) {
+            cfg->zones[i].thermo_mask = (uint8_t)(1u << i);
+        }
+    }
 }
 
 /* One-time move of the persisted zones config out of the default partition's
@@ -460,6 +502,15 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
         return false;
     }
     *out_mask = s_zones.cfg.zones[zone_index].relay_mask;
+    return true;
+}
+
+bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
+{
+    if (!out_mask || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_mask = s_zones.cfg.zones[zone_index].thermo_mask;
     return true;
 }
 
@@ -657,7 +708,11 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
                       * 1536 -> 1792 with cross_zone_max_delta_c,
                       * 1792 -> 2048 with the three plant-model fields (their
                       * key names alone are ~50 bytes a zone before values),
-                      * 2048 -> 2560 with the 8 guard-threshold overrides */
+                      * 2048 -> 2560 with the 8 guard-threshold overrides.
+                      * thermo_mask (TODO.md 10.8) added ~20 bytes/zone --
+                      * left inside the existing 2560 headroom rather than
+                      * bumped again, MAX31856_CHANNEL_COUNT zones' worth of
+                      * one small integer key is nowhere near what's left. */
     size_t o = 0;
     int n;
 
@@ -679,7 +734,7 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
         char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
         json_escape(z->name, name_escaped, sizeof(name_escaped));
         APPEND(
-            "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"cal_offset_c\":%.3f,"
+            "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.3f,"
             "\"pid_kp\":%.4f,\"pid_ki\":%.4f,\"pid_kd\":%.4f,\"max_ramp_c_per_hr\":%.2f,"
             "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,\"max_temp_c\":%.1f,"
             "\"min_temp_c\":%.1f,\"heater_window_ms\":%.0f,\"heater_min_on_ms\":%.0f,"
@@ -697,7 +752,7 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
              * zone's fit can land in the fractional range and the
              * feedforward divides by it. */
             "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f}",
-            i == 0 ? "" : ",", i, name_escaped, z->relay_mask, (double)z->cal_offset_c,
+            i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
             (double)z->min_temp_c, (double)z->heater_window_ms, (double)z->heater_min_on_ms,
@@ -798,6 +853,44 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
         return false;
     }
     z->relay_mask = relay_mask_raw;
+
+    /* TODO.md 10.8. Deliberately NOT validated/defaulted the same way as
+     * z%u_xzone/z%u_k above (present-but-omit-means-0/disabled): omitting
+     * this field must mean "this client doesn't know about multi-thermo,
+     * keep controlling off the channel this zone always used", not "no
+     * thermocouple assigned". zones_page.html doesn't send this field yet
+     * (TODO.md 10.8's open item -- see the getter's header comment), and if
+     * an absent field defaulted to 0 here, saving that page's form today
+     * would silently blind every zone on the very next ordinary settings
+     * save. bit i is that legacy mapping (zone i <-> channel i), same as
+     * migrate_zones_cfg_v1_to_current() falls back to for an already-saved
+     * blob that predates this field entirely -- one fallback rule for both
+     * an old blob and a client that just doesn't send the key.
+     *
+     * A client that DOES know this field and sends it explicitly -- including
+     * an explicit 0, deliberately clearing a zone's thermocouple -- is
+     * honoured exactly as sent; present-but-out-of-range is still an error,
+     * same discipline as relay_mask above. */
+    snprintf(key, sizeof(key), "z%u_thermo_mask", i);
+    {
+        char probe[8];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            uint8_t thermo_mask_raw;
+            if (!parse_u8_field(body, key, 0, 0xFF, &thermo_mask_raw)) {
+                *err_reason = "zone thermo_mask missing or invalid";
+                return false;
+            }
+            uint8_t valid_thermo_bits =
+                thermo_count >= 8 ? 0xFF : (uint8_t)((1u << thermo_count) - 1u);
+            if ((thermo_mask_raw & ~valid_thermo_bits) != 0) {
+                *err_reason = "zone thermo_mask references an unconfigured thermocouple channel";
+                return false;
+            }
+            z->thermo_mask = thermo_mask_raw;
+        } else {
+            z->thermo_mask = (uint8_t)(1u << i);
+        }
+    }
 
     /* Sane numeric bounds -- firmware sanity bounds against a malformed/
      * typo'd submission, not real kiln-safety limits (that's the feasibility

@@ -64,7 +64,12 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         return false; /* already latched -- caller should have stopped driving anyway */
     }
 
-    /* --- Guard 6: sensor validity, debounced ------------------------------ */
+    /* --- Guard 6: sensor validity, debounced ------------------------------
+     * TODO.md 10.8: in->sensor_ok is the caller's combined verdict across
+     * every thermocouple channel assigned to this zone (thermo_combine.c),
+     * not necessarily one channel -- see thermal_guard_input_t's doc comment.
+     * No change needed here: this guard was always just consuming whatever
+     * bool the caller decided "the reading" was trustworthy. */
     if (!in->sensor_ok) {
         state->sensor_fault_streak++;
         if (state->sensor_fault_streak >= effective_ticks(cfg->sensor_fault_debounce_ticks, SENSOR_FAULT_DEBOUNCE_TICKS)) {

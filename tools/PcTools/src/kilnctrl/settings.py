@@ -78,3 +78,16 @@ def get_keep_logs(default: int, path: Path = SETTINGS_PATH) -> int:
 
 def set_keep_logs(value: int, path: Path = SETTINGS_PATH) -> None:
     _update("keep_logs", int(value), path)
+
+
+# ---------------------------------------------------------------------------
+# OpenOCD executable path override (openocd_util.py)
+# ---------------------------------------------------------------------------
+def get_openocd_path(path: Path = SETTINGS_PATH) -> Optional[str]:
+    """User-set override for openocd.exe, if autodetection doesn't find it."""
+    value = load(path).get("openocd_exe")
+    return value if isinstance(value, str) and value else None
+
+
+def set_openocd_path(value: str, path: Path = SETTINGS_PATH) -> None:
+    _update("openocd_exe", value, path)

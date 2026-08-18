@@ -200,8 +200,27 @@ Pins 5-10 line up with the main board exactly. Pins 1-4 do not:
 
 Also worth recording: BIGTREETECH's own documentation and hardware repository
 say the touch controller on this module is an **NS2009** (I2C), not the XPT2046
-(SPI) that third-party listings often claim. Either way the firmware drives the
-display only — touch is unsupported.
+(SPI) that third-party listings often claim.
+
+The firmware now drives the NS2009 (App/drivers/NS2009.c) on the same I2C bus
+as the SX1509 expander, polled by screen_idle_task (App/drivers/
+screen_idle.c) to auto-blank the panel after
+`CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS` of no touches (default 60s). There is
+no backlight control line (above), so a true "screen and backlight out" is
+not possible from firmware — `ILI9488_set_power(false)` (display-off +
+sleep-in) was tried first and rejected: on this panel it blanks to a bright
+WHITE page (bench finding, 2026-08-17), the opposite of the goal. "Blank"
+instead means painting the frame solid black (`ILI9488_clear`), which blocks
+far more of the backlight than white without needing a hardware change.
+NS2009_start probes both addresses the part can
+answer at and logs a warning rather than failing boot if neither does, which
+covers both "no touch controller populated" and the SDA/SCL-swap question
+above — check the boot log's `i2c_scan_bus()` output to tell which. Screen
+auto-blank and the UART bridge's TOUCH_CMD_INJECT (synthetic touches, for
+PC/MCP-driven UI testing without the physical glass) both work with no
+NS2009 present; only real touch input is contingent on it answering. The
+touch-pressure threshold (`CONFIG_KILNCTL_TOUCH_Z1_MAX_THRESHOLD`) has not
+been calibrated against real hardware — see its Kconfig help text.
 
 ## Power
 

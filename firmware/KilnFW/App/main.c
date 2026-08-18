@@ -15,11 +15,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "board_temps.h"
 #include "dashboard_http.h"
 #include "factory_reset.h"
 #include "ILI9488.h"
+#include "lvgl_port.h"
 #include "MAX31856.h"
+#include "NS2009.h"
 #include "SX1509.h"
+#include "screen_idle.h"
 #include "autotune_engine.h"
 #include "i2c_scan.h"
 #include "kiln_io.h"
@@ -199,6 +203,20 @@ void app_main(void)
     // no uart_protocol_t until further down); see uart_log_bridge_start()
     // below for when the backlog actually flushes.
     uart_log_bridge_early_init();
+
+    // --- ESP32-S3 internal die-temperature sensor (TODO.md 10.7) -----------
+    // Independent of every other peripheral here -- no bus, no GPIO, nothing
+    // to share or serialize against -- so it comes up this early rather than
+    // waiting on I2C/SPI below. Non-fatal like everything else in app_main:
+    // board_temps_get() reports esp32_valid=false if this fails, same
+    // NULL-tolerant convention as a missing thermo_bus/kiln_io elsewhere in
+    // this file. NOT YET VERIFIED AGAINST THE INSTALLED TOOLCHAIN OR REAL
+    // HARDWARE THIS PASS -- see board_temps.h's doc comment.
+    esp_err_t board_temps_err = board_temps_start();
+    if (board_temps_err != ESP_OK) {
+        ESP_LOGW(TAG, "board_temps_start failed: %s -- no ESP32-S3 die temp this boot",
+                 esp_err_to_name(board_temps_err));
+    }
 
     // --- Wi-Fi (station "home" mode / AP mode, see wifi_prov.h) -------------
     // A third client alongside the UART PC link and the safety processor
@@ -404,6 +422,49 @@ void app_main(void)
                           : "expander unavailable (D/C and/or ~RESET still routed through it)");
     }
 
+    // --- NS2009 touch controller (same J2 panel as the display above) ------
+    // Shares the I2C bus with the SX1509 expander -- see docs/HARDWARE.md,
+    // which also has the two still-open pinout questions (D/C-vs-touch-IRQ
+    // on pin 1, and a possible SDA/SCL swap on pins 2/3) that leave whether
+    // this chip answers at all unsettled on this board revision. NS2009_start
+    // logs and returns ESP_ERR_NOT_FOUND rather than failing app_main if it
+    // doesn't; screen_idle below works fine with touch_ready = false, using
+    // only injected (UART/MCP) touches.
+    static NS2009Class touch;
+    bool touch_ready = false;
+    if (i2c_bus) {
+        esp_err_t touch_err = NS2009_start(&touch, i2c_bus);
+        touch_ready = (touch_err == ESP_OK);
+        if (!touch_ready) {
+            ESP_LOGW(TAG, "NS2009 bring-up failed: %s -- touch input unavailable, synthetic "
+                          "injection over the UART bridge still works",
+                     esp_err_to_name(touch_err));
+        }
+    }
+
+    // --- Screen idle/blank state machine ------------------------------------
+    // TODO.md: auto-blank the panel after CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS
+    // to save its useful life (no backlight control line to switch instead --
+    // see docs/HARDWARE.md). Needs only the display; touch_ready gates
+    // whether it also sees real presses, not whether it runs at all.
+    static screen_idle_t screen_idle;
+    bool screen_idle_ready = false;
+    if (display_ready) {
+        // Always NULL here: once lvgl_port_start() runs below, it becomes the
+        // sole NS2009 reader and forwards real presses into
+        // screen_idle_inject_touch() -- screen_idle must not also poll touch
+        // itself, or the two would race the same I2C device.
+        esp_err_t idle_err = screen_idle_init(&screen_idle, &display, NULL);
+        if (idle_err != ESP_OK) {
+            ESP_LOGE(TAG, "screen_idle_init failed: %s -- no auto-blank this boot",
+                     esp_err_to_name(idle_err));
+        } else if (screen_idle_start(&screen_idle) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start screen_idle task -- no auto-blank this boot");
+        } else {
+            screen_idle_ready = true;
+        }
+    }
+
     // --- Safety processor link (opto-isolated UART1 + the fault line) ------
     // Comes up whether or not an RP2040 is answering; a silent far side is
     // link_up = 0, not a startup failure.
@@ -496,6 +557,20 @@ void app_main(void)
     if (dash_err != ESP_OK) {
         ESP_LOGW(TAG, "dashboard_http_start failed: %s -- no dashboard this boot",
                  esp_err_to_name(dash_err));
+    }
+
+    // TODO.md 10.7: board-health IC temperature JSON, deliberately its own
+    // route rather than folded into /api/status above -- kiln-process temp
+    // and board-health temp are different audiences and mixing them was
+    // exactly what 10.7 said to avoid. Same thermo_bus pointer as
+    // dashboard_http_start() just above (this module borrows it to call
+    // MAX31856_read_all() itself per request rather than owning the bus);
+    // esp32_c is independent of thermo_bus and already came up in
+    // board_temps_start() near the top of app_main.
+    esp_err_t board_temps_http_err = board_temps_http_start(thermo_bus.initialized ? &thermo_bus : NULL);
+    if (board_temps_http_err != ESP_OK) {
+        ESP_LOGW(TAG, "board_temps_http_start failed: %s -- no /api/board_temps this boot",
+                 esp_err_to_name(board_temps_http_err));
     }
 
     // --- Settings/Profiles HTTP pages (TODO.md sections 3 and 5) -----------
@@ -683,8 +758,16 @@ void app_main(void)
             ESP_OK) {
         ESP_LOGE(TAG, "Failed to start io uart bridge task");
     }
-    if (display_ready && uart_bridge_start_display_task(&uart_proto, &display) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start display uart bridge task");
+    // Replaces the UART DISPLAY_CMD_* remote-draw path -- LVGL owns the panel
+    // now (TODO.md 10.1). uart_bridge_start_display_task() is no longer
+    // called here; it stays in uart_bridge.c as dead code for now.
+    if (display_ready &&
+        lvgl_port_start(&display, touch_ready ? &touch : NULL,
+                        screen_idle_ready ? &screen_idle : NULL) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start LVGL display task");
+    }
+    if (screen_idle_ready && uart_bridge_start_touch_task(&uart_proto, &screen_idle) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start touch uart bridge task");
     }
     if (safety_err == ESP_OK &&
         uart_bridge_start_safety_task(&uart_proto, &safety) != ESP_OK) {

@@ -7,6 +7,7 @@
 #include "espInterfaces/uart_protocol.h"
 #include "kiln_io.h"
 #include "safety_link.h"
+#include "screen_idle.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +51,13 @@ esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io, Safet
  * only READ_ID answers. Note BLIT_BEGIN/DATA/END keep panel state open across
  * frames, so this task must be the only writer to the panel. */
 esp_err_t uart_bridge_start_display_task(uart_protocol_t *proto, ILI9488Class *disp);
+
+/* TOUCH (task 13): the PC's window onto screen_idle's touch/idle state --
+ * GET_STATE reads it, INJECT feeds it a synthetic touch that resets the idle
+ * timer and wakes the screen exactly like a real NS2009 press would. `idle`
+ * must already be up (screen_idle_init/_start succeeded); this task owns no
+ * hardware itself. */
+esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *idle);
 
 /* SAFETY (task 7): the PC's window onto the opto-isolated link to the RP2040.
  * GET_STATUS/GET_LINK_STATS answer out of safety_link's cache, so a dead peer

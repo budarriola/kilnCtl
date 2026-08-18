@@ -139,6 +139,8 @@ from .protocol import (
     THERMO_FAULT_ENTRY_LEN,
     THERMO_READ_ENTRY_LEN,
     THERMO_REG_READ_MAX,
+    TOUCH_CMD_GET_STATE,
+    TOUCH_CMD_INJECT,
     UART_PROTO_MAX_PAYLOAD,
     UART_PROTOCOL_VERSION,
     UART_TASK_ID_DISPLAY,
@@ -1551,6 +1553,72 @@ def parse_display_response(payload: bytes) -> "tuple[int, DisplayId]":
     return subcommand, DisplayId(
         ok=bool(ok), id_bytes=bytes(payload[2:5]), width=width, height=height
     )
+
+
+# ---------------------------------------------------------------------------
+# TOUCH -- NS2009 touch controller on the same J2 panel as DISPLAY
+# (task_id = UART_TASK_ID_TOUCH)
+#
+# INJECT is the piece that lets this side "send touches as if from the
+# screen": the firmware's screen_idle state machine treats an injected press
+# exactly like a real NS2009 one -- it resets the auto-blank idle timer and
+# wakes the panel if it is currently blanked. x/y are carried on the wire for
+# a future UI-hit-test use; they do not affect that decision today.
+# ---------------------------------------------------------------------------
+
+
+class TouchResponseError(ValueError):
+    """Raised when a TOUCH response payload does not match its wire layout."""
+
+
+def touch_get_state() -> bytes:
+    """0x01 GET_STATE request (query): no args."""
+    return struct.pack("<B", TOUCH_CMD_GET_STATE)
+
+
+def touch_inject(x: int, y: int, pressed: bool) -> bytes:
+    """0x02 INJECT: fire-and-forget synthetic touch, no reply.
+
+    Feeds the firmware's idle timer and wake logic exactly as a real press
+    would. ``pressed=False`` (a release) is accepted but is a no-op on the
+    firmware side -- there is no "held" state to end.
+    """
+    return struct.pack(
+        "<BHHB", TOUCH_CMD_INJECT, _check_coord(x, "x"), _check_coord(y, "y"), _check_bool_byte(pressed)
+    )
+
+
+@dataclass(frozen=True)
+class TouchState:
+    """Decoded GET_STATE reply."""
+
+    screen_on: bool
+    idle_ms: int
+
+    def describe(self) -> str:
+        state = "on" if self.screen_on else "blanked"
+        return f"screen {state}, idle {self.idle_ms} ms"
+
+
+def parse_touch_response(payload: bytes) -> "tuple[int, TouchState]":
+    """Decode a TOUCH query reply into ``(subcommand, value)``.
+
+    Layout::
+
+        GET_STATE: byte0=0x01, byte1=screen_on(0/1), bytes2..5 = idle_ms u32 LE
+    """
+    if len(payload) < 1:
+        raise TouchResponseError("TOUCH response is empty")
+    subcommand = payload[0]
+    if subcommand != TOUCH_CMD_GET_STATE:
+        raise TouchResponseError(f"unknown TOUCH response subcommand 0x{subcommand:02X}")
+    if len(payload) != 6:
+        raise TouchResponseError(f"GET_STATE response must be 6 bytes, got {len(payload)}")
+    screen_on = payload[1]
+    if screen_on > 1:
+        raise TouchResponseError(f"GET_STATE screen_on flag must be 0 or 1, got {screen_on}")
+    (idle_ms,) = struct.unpack_from("<I", payload, 2)
+    return subcommand, TouchState(screen_on=bool(screen_on), idle_ms=idle_ms)
 
 
 # ---------------------------------------------------------------------------

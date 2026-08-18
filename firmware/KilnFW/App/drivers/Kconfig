@@ -185,6 +185,88 @@ menu "KilnCtrl Hardware Configuration"
             depends on KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
     endmenu
 
+    menu "NS2009 Touch Controller (on the TFT35 SPI panel, J2)"
+        config KILNCTL_TOUCH_IDLE_TIMEOUT_MS
+            int "Screen auto-blank timeout (ms)"
+            default 60000
+            range 1000 3600000
+            help
+                How long the panel goes with no touch -- real, from the
+                NS2009, or synthetic, injected over the UART bridge's
+                TOUCH_CMD_INJECT -- before screen_idle_task paints the frame
+                solid black (ILI9488_clear). This board has no backlight
+                control line, so that -- not ILI9488_set_power(false), which
+                blanks to a bright WHITE page on this panel -- is the closest
+                to "dark" firmware can manage; the backlight itself stays
+                lit. Saving the panel's useful life is still the point. A
+                touch of either kind wakes it again immediately (screen_on
+                goes back to true; repainting real content is the PC/
+                dashboard's job, same as any other redraw).
+
+        config KILNCTL_TOUCH_Z1_MAX_THRESHOLD
+            int "Touch pressure threshold (raw NS2009 Z1 ADC counts, 0-4095)"
+            default 0
+            range 0 4095
+            help
+                NS2009_read treats a Z1 reading below this as "pressed": a
+                touch is expected to drive Z1 low (low resistance between the
+                driven and sensed plates), with an untouched panel floating
+                near full scale. On this board revision that assumption does
+                NOT hold: bench testing 2026-08-17 found Z1 sitting at 0-30
+                continuously with nothing touching the panel -- either a
+                wiring issue (see the SDA/SCL-swap question in
+                docs/HARDWARE.md) or this panel's Z1 behaves differently in
+                the "short driver, auto power-down" mode this driver uses.
+                Defaulted to 0 (nothing ever reads as "pressed") so real
+                touch detection doesn't fight the auto-blank feature with a
+                permanent phantom touch -- screen_idle still auto-blanks and
+                still wakes on a UART-injected touch (TOUCH_CMD_INJECT) with
+                this at 0; only *real* NS2009 presses are disabled until this
+                is recalibrated on the bench (NS2009.c has a rate-limited
+                diagnostic log of the raw Z1 reading to help). If touches are
+                missed or the panel reports phantom presses with nothing
+                touching it, this is the first thing to tune, the same way
+                KILNCTL_DISPLAY_SWAP_DC_RESET is the first thing to flip for
+                a blank panel.
+    endmenu
+
+    menu "LVGL Touchscreen UI (TODO.md section 10)"
+        config KILNCTL_LVGL_BUF_ROWS
+            int "LVGL draw buffer height (panel rows)"
+            default 40
+            range 4 480
+            help
+                Each of LVGL's two draw buffers is this many rows tall (at
+                the panel's current rotated width) x 2 bytes/pixel (RGB565),
+                allocated in PSRAM (see TODO.md 9.1a's 2026-08-17 reversal).
+                Smaller means more, smaller flush calls (finer partial
+                redraws, more SPI transaction overhead); larger means fewer,
+                bigger flushes. 40 rows at 480px wide is 2 x 38.4 KB -- a
+                rounding error against 8 MB of PSRAM, so raise this freely if
+                flush overhead ever shows up as sluggish.
+
+        config KILNCTL_TOUCH_CAL_SWAP_XY
+            bool "Touch: swap raw X/Y axes before mapping to pixels"
+            default n
+            help
+                Resistive touch panels have no fixed relationship between
+                their raw X/Y axes and the panel's rotated pixel axes -- it
+                depends on how the film is oriented under the glass, which is
+                not documented for this module. Like
+                KILNCTL_DISPLAY_SWAP_DC_RESET and KILNCTL_TOUCH_Z1_MAX_THRESHOLD,
+                this is a bench-calibration knob, not a datasheet value: if
+                touches land rotated 90 degrees from where they should,
+                this is the first thing to flip.
+
+        config KILNCTL_TOUCH_CAL_INVERT_X
+            bool "Touch: invert raw X axis"
+            default n
+
+        config KILNCTL_TOUCH_CAL_INVERT_Y
+            bool "Touch: invert raw Y axis"
+            default n
+    endmenu
+
     menu "Safety Processor Link (opto-isolated UART to the RP2040)"
         config KILNCTL_SAFETY_TX_IO
             int "Safety UART TX GPIO"

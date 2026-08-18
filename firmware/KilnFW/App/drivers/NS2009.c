@@ -1,0 +1,200 @@
+#include "NS2009.h"
+
+#include <string.h>
+
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "settings.h"
+
+static const char *TAG = "NS2009";
+
+/* One command byte out, two data bytes back -- nothing here is ever close to
+ * a bus that's momentarily busy with another device's transaction. Same
+ * value and reasoning as SX1509_TIMEOUT_MS. */
+#define NS2009_TIMEOUT_MS 1000
+
+/* Long enough for one START/address/STOP, short enough that a part that
+ * isn't there doesn't stall bring-up -- same as SX1509_PROBE_TIMEOUT_MS. */
+#define NS2009_PROBE_TIMEOUT_MS 50
+
+/* Shared bus clock, same reasoning as SX1509_I2C_CLK_HZ: no device on this
+ * bus gets to quietly re-rate the wires for everyone else. */
+#define NS2009_I2C_CLK_HZ I2C_MASTER_FREQ_HZ
+
+static const uint8_t ns2009_addresses[NS2009_ADDR_COUNT] = {
+    NS2009_ADDR_A0_LOW, NS2009_ADDR_A0_HIGH,
+};
+
+static esp_err_t ns2009_add_device(NS2009Class *t, uint8_t addr)
+{
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = addr,
+        .scl_speed_hz = NS2009_I2C_CLK_HZ,
+    };
+    return i2c_master_bus_add_device(t->bus, &dev_config, &t->dev);
+}
+
+static esp_err_t ns2009_transfer(NS2009Class *t, const uint8_t *tx, size_t tx_len, uint8_t *rx,
+                                 size_t rx_len)
+{
+    if (t->owner_initialized) {
+        return i2c_owner_transfer(&t->owner, t->dev, tx, tx_len, rx, rx_len, NS2009_TIMEOUT_MS);
+    }
+    /* Fallback for an instance whose owner task failed to start: the raw
+     * i2c_master calls still work, they just aren't serialized behind a
+     * queue -- same fallback SX1509 uses. */
+    if (tx && tx_len > 0 && rx && rx_len > 0) {
+        return i2c_master_transmit_receive(t->dev, tx, tx_len, rx, rx_len, NS2009_TIMEOUT_MS);
+    }
+    return i2c_master_transmit(t->dev, tx, tx_len, NS2009_TIMEOUT_MS);
+}
+
+esp_err_t NS2009_init(NS2009Class *t, i2c_master_bus_handle_t bus, uint8_t addr)
+{
+    if (!t || !bus) return ESP_ERR_INVALID_ARG;
+
+    if (t->dev || t->owner_initialized) {
+        ESP_LOGE(TAG, "init called on an instance that is already up (0x%02X)", t->addr);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    memset(t, 0, sizeof(*t));
+    t->bus = bus;
+    t->addr = addr;
+
+    esp_err_t err = ns2009_add_device(t, addr);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_master_bus_add_device(0x%02X) failed: %s", addr, esp_err_to_name(err));
+        return err;
+    }
+
+    /* Independent i2c_owner on the same (already-existing) bus handle --
+     * this driver never creates or destroys the bus itself, same as SX1509. */
+    err = i2c_owner_init(&t->owner, bus, 8, 5, 3072, tskNO_AFFINITY);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_owner_init failed: %s", esp_err_to_name(err));
+        i2c_master_bus_rm_device(t->dev);
+        t->dev = NULL;
+        return err;
+    }
+    t->owner_initialized = true;
+
+    ESP_LOGI(TAG, "NS2009 initialized addr=0x%02X", addr);
+    return ESP_OK;
+}
+
+esp_err_t NS2009_deinit(NS2009Class *t)
+{
+    if (!t) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = ESP_OK;
+
+    i2c_master_dev_handle_t dev = t->dev;
+    t->dev = NULL;
+
+    if (t->owner_initialized) {
+        esp_err_t sub = i2c_owner_deinit(&t->owner);
+        if (sub != ESP_OK) err = sub;
+        t->owner_initialized = false;
+    }
+    if (dev) {
+        esp_err_t sub = i2c_master_bus_rm_device(dev);
+        if (sub != ESP_OK) err = sub;
+    }
+    /* The bus belongs to whoever created it; never delete it here. */
+    return err;
+}
+
+esp_err_t NS2009_start(NS2009Class *t, i2c_master_bus_handle_t bus)
+{
+    if (!t || !bus) return ESP_ERR_INVALID_ARG;
+
+    for (size_t i = 0; i < NS2009_ADDR_COUNT; ++i) {
+        uint8_t addr = ns2009_addresses[i];
+        esp_err_t probe_err = i2c_master_probe(bus, addr, NS2009_PROBE_TIMEOUT_MS);
+        if (probe_err == ESP_OK) {
+            esp_err_t err = NS2009_init(t, bus, addr);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "NS2009_init(0x%02X) failed: %s", addr, esp_err_to_name(err));
+                return err;
+            }
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGW(TAG, "no NS2009 at 0x%02X or 0x%02X -- touch controller absent, or SDA/SCL swapped "
+                  "on J2 (see docs/HARDWARE.md); touch input unavailable this boot",
+             NS2009_ADDR_A0_LOW, NS2009_ADDR_A0_HIGH);
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t NS2009_read_axis(NS2009Class *t, uint8_t cmd, uint16_t *out_value)
+{
+    if (!t || !t->dev || !out_value) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t err = ESP_FAIL;
+    uint8_t rx[2] = { 0, 0 };
+    for (unsigned attempt = 1; attempt <= I2C_WRITE_RETRY_ATTEMPTS; ++attempt) {
+        err = ns2009_transfer(t, &cmd, 1, rx, sizeof(rx));
+        if (err == ESP_OK) {
+            *out_value = (uint16_t)(((uint16_t)rx[0] << 4) | (rx[1] >> 4));
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "measure cmd 0x%02X failed (attempt %u/%u): %s", cmd, attempt,
+                 (unsigned)I2C_WRITE_RETRY_ATTEMPTS, esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y)
+{
+    if (!t || !out_pressed || !out_x || !out_y) return ESP_ERR_INVALID_ARG;
+
+    uint16_t z1 = NS2009_ADC_MAX;
+    esp_err_t err = NS2009_read_axis(t, NS2009_CMD_MEASURE_Z1, &z1);
+    if (err != ESP_OK) return err;
+
+    /* A touch is expected to drive Z1 low; an untouched panel floats near
+     * full scale. That does NOT hold on this board revision -- bench
+     * testing 2026-08-17 found Z1 sitting at 0-30 continuously with nothing
+     * touching the panel, so the Kconfig default is 0 (nothing ever reads
+     * as "pressed") until this is recalibrated. See the Kconfig help text
+     * for KILNCTL_TOUCH_Z1_MAX_THRESHOLD for the full story. */
+    /* Routed through a variable rather than compared against the macro
+     * directly: with the current default (0, see the Kconfig help text)
+     * the literal comparison is a compile-time-constant "always false" that
+     * -Werror=type-limits rejects, even though the threshold is genuinely
+     * runtime-configurable. */
+    uint16_t threshold = (uint16_t)TOUCH_Z1_MAX_THRESHOLD;
+    bool pressed = (z1 < threshold);
+    *out_pressed = pressed;
+
+    /* TEMPORARY bring-up diagnostic (TODO.md touch calibration): the
+     * pressure threshold above is an uncalibrated guess and screen_idle
+     * polls this every ~50ms, so print the raw reading at ~1Hz rather than
+     * flooding the log -- enough to tell a genuinely low/noisy Z1 (needs a
+     * higher threshold, or points at the SDA/SCL-swap question in
+     * docs/HARDWARE.md) from a real touch. Remove once
+     * CONFIG_KILNCTL_TOUCH_Z1_MAX_THRESHOLD is bench-calibrated. */
+    static unsigned diag_counter = 0;
+    if ((diag_counter++ % 20) == 0) {
+        ESP_LOGI(TAG, "Z1=%u threshold=%u pressed=%d", z1, (unsigned)TOUCH_Z1_MAX_THRESHOLD, pressed);
+    }
+
+    if (!pressed) {
+        *out_x = 0;
+        *out_y = 0;
+        return ESP_OK;
+    }
+
+    uint16_t x = 0, y = 0;
+    err = NS2009_read_axis(t, NS2009_CMD_MEASURE_X, &x);
+    if (err != ESP_OK) return err;
+    err = NS2009_read_axis(t, NS2009_CMD_MEASURE_Y, &y);
+    if (err != ESP_OK) return err;
+
+    *out_x = x;
+    *out_y = y;
+    return ESP_OK;
+}

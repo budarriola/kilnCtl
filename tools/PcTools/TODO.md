@@ -417,14 +417,37 @@ reimplementing the transfer.
 - [ ] All tools return JSON
 
 **Debug and programming (OpenOCD wrapper)**
-- [ ] `kilnctrl.debug` module wrapping the OpenOCD TCL port (4444)
-- [ ] One target abstraction; per-chip configs for ESP32-S3 and RP2040
-- [ ] MCP tools taking a `peer` argument: `program`, `reset`, `halt`, `resume`, `step`, `read_mem`, `write_mem`, `read_reg`, `write_reg`
-- [ ] `halt` refused on the ESP while a profile is running
-- [ ] **Any** write refused on the Pico while `ARMED`
-- [ ] Flash writes require an explicit confirm
-- [ ] Every halt, reset and write logged
-- [ ] Documented: halting the ESP stops telemetry, and the Pico will correctly trip S6
+- [x] `kilnctrl.debug_probe` module wrapping OpenOCD -- done 2026-08-17 as
+      one-shot `subprocess.run(openocd -c "cmd1; cmd2; exit")` calls (matching
+      the project's existing `flash_firmware()` convention) rather than a
+      persistent TCL port (4444) connection; shared plumbing factored into
+      `openocd_util.py` (also now backing `flash_firmware()`)
+- [x] One target abstraction (`PeerConfig`); per-chip configs for ESP32-S3
+      (JTAG, `board/esp32s3-builtin.cfg`) and RP2040 (SWD via CMSIS-DAP,
+      `interface/cmsis-dap.cfg` + `target/rp2040.cfg`)
+- [x] MCP tools taking a `peer` argument: `debug_program`, `debug_reset`,
+      `debug_halt`, `debug_resume`, `debug_step`, `debug_read_memory`,
+      `debug_write_memory`, `debug_read_registers` -- no separate `write_reg`
+      (registers aren't individually addressable this way in the current
+      tool set; `debug_write_memory` covers the memory-mapped case)
+- [x] `openocd.exe` path resolution: settings.json override
+      (`set_openocd_path`/`get_openocd_status`) -> `OPENOCD_EXE` env var ->
+      autodetect, so a machine where autodetection fails is never stuck
+- [x] `debug_halt` refused on the ESP while a profile is running or paused
+      (`ProfilesClient.get_exec_status()`); an unreachable ESP does not block
+      the halt
+- [ ] **Any** write refused on the Pico while `ARMED` -- **not implemented,
+      and currently not implementable**: SaftyFW is skeleton-only and exposes
+      no protocol to query ARMED state from the PC. `debug_write_memory`'s
+      `confirm=True` flag is the only gate today, for both peers; its
+      docstring and `debug_probe.py`'s module docstring both say this
+      plainly. Revisit once SaftyFW's link task (Phase 7) exposes real state.
+- [x] Flash writes require an explicit confirm -- `debug_program(confirm=True)`,
+      done 2026-08-17
+- [x] Every halt, reset and write logged -- `_session_log.warning(...)` in
+      every `debug_*` wrapper that changes state (not on refusals)
+- [x] Documented: halting the ESP stops telemetry, and the Pico will correctly
+      trip S6 -- in `debug_halt`'s and `debug_probe.py`'s docstrings
 
 **Logging and consoles**
 - [ ] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5), relayed by the ESP — primary path, no new hardware

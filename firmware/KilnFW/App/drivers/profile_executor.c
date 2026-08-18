@@ -16,6 +16,7 @@
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "sim_backend.h"
+#include "thermo_combine.h"
 #include "zones_http.h"
 
 static const char *TAG = "profile_executor";
@@ -1087,12 +1088,21 @@ static void executor_task_entry(void *arg)
         s_exec.prev_control_tick = now;
         float dt_s = (float)dt_ms / 1000.0f;
 
-        /* --- Read every active zone's channel (raw, then calibrated) ------- */
-        float raw_c[MAX31856_CHANNEL_COUNT];
-        bool sensor_ok[MAX31856_CHANNEL_COUNT];
-        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-            raw_c[zi] = NAN;
-            sensor_ok[zi] = false;
+        /* --- Read every physical channel (raw), then combine per zone
+         * (TODO.md 10.8) into that zone's control temperature ------------
+         * Two index spaces below on purpose: ch_raw_c/ch_sensor_ok are
+         * indexed by physical MAX31856 CHANNEL (whatever the bus/sim
+         * backend answered), raw_c/sensor_ok stay indexed by ZONE like
+         * every downstream consumer of them already expects (ramp-lock,
+         * thermal_guard_input_t below, etc.) -- only their MEANING changed,
+         * from "zone zi's one hard-wired channel" to "zone zi's combined
+         * reading across every channel its thermo_mask names". Nothing
+         * downstream needed to change to pick that up. */
+        float ch_raw_c[MAX31856_CHANNEL_COUNT];
+        bool ch_sensor_ok[MAX31856_CHANNEL_COUNT];
+        for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+            ch_raw_c[ci] = NAN;
+            ch_sensor_ok[ci] = false;
         }
         if (sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized)) {
             MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
@@ -1103,21 +1113,54 @@ static void executor_task_entry(void *arg)
                 MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
             }
             for (size_t i = 0; i < count; i++) {
-                uint8_t zi = readings[i].channel;
-                if (zi >= MAX31856_CHANNEL_COUNT || !s_exec.zones[zi].active) continue;
-                raw_c[zi] = readings[i].tc_temperature_c;
+                uint8_t ci = readings[i].channel;
+                /* Recorded for every physical channel the bus answered,
+                 * regardless of which (if any) zone claims it this tick --
+                 * unlike the pre-10.8 "!s_exec.zones[zi].active continue"
+                 * this loop used to have, filtering by a single zone's
+                 * active flag here would blind every OTHER zone whose
+                 * thermo_mask also names this channel. Per-zone gating
+                 * happens below, once, per zone -- not here, once per
+                 * channel that happens to alias the same index as a zone
+                 * that isn't running. */
+                if (ci >= MAX31856_CHANNEL_COUNT) continue;
+                ch_raw_c[ci] = readings[i].tc_temperature_c;
                 /* THERMO_FAULT_OPEN|OVUV|TCRANGE make the temperature
                  * meaningless per MAX31856Reading's own doc comment --
                  * mirrors thermal_guard.h's sensor_ok contract without
                  * pulling those bit constants into thermal_guard.c. */
                 bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
-                sensor_ok[zi] = !readings[i].spi_failed && !isnan(raw_c[zi]) && !fault_bits_bad;
+                ch_sensor_ok[ci] = !readings[i].spi_failed && !isnan(ch_raw_c[ci]) && !fault_bits_bad;
             }
         }
+        float raw_c[MAX31856_CHANNEL_COUNT];    /* per ZONE: this zone's combined raw reading */
+        bool sensor_ok[MAX31856_CHANNEL_COUNT]; /* per ZONE: true iff >=1 assigned channel is valid --
+                                                  * this IS guard 6's extended "invalid" definition
+                                                  * (TODO.md 10.8: "all assigned thermocouples for
+                                                  * this zone are invalid"), computed once here rather
+                                                  * than inside thermal_guard.c, which already takes
+                                                  * sensor_ok as an opaque caller-decided bool (see
+                                                  * thermal_guard.h's thermal_guard_input_t comment) --
+                                                  * nothing in thermal_guard.c needed to change. */
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            raw_c[zi] = NAN;
+            sensor_ok[zi] = false;
             if (!s_exec.zones[zi].active) continue;
-            s_exec.zones[zi].actual_valid = sensor_ok[zi];
-            s_exec.zones[zi].actual_c = sensor_ok[zi] ? zones_config_apply_cal(zi, raw_c[zi]) : NAN;
+            /* Live read every tick, not cached in zone_runtime_t -- same
+             * "no hardware-safety handover needed" reasoning
+             * zones_config_apply_cal()'s per-tick call already relies on:
+             * unlike relay_mask, a thermo_mask change never needs a
+             * force-off-the-old-mask dance (see reload_zone_config()),
+             * because it only ever affects what this zone READS, never
+             * what it drives. */
+            uint8_t tmask = 0;
+            zones_config_get_thermo_mask(zi, &tmask);
+            bool valid = false;
+            float combined = thermo_combine(ch_raw_c, ch_sensor_ok, MAX31856_CHANNEL_COUNT, tmask, &valid);
+            raw_c[zi] = combined;
+            sensor_ok[zi] = valid;
+            s_exec.zones[zi].actual_valid = valid;
+            s_exec.zones[zi].actual_c = valid ? zones_config_apply_cal(zi, combined) : NAN;
         }
 
         /* --- Config reload (TODO.md 6A.7) ----------------------------------
@@ -1780,7 +1823,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
         /* Ramp baseline: the first active zone's actual (calibrated)
          * reading if we have one, else the segment's own target (makes
-         * ramp math a no-op rather than ramping from a fabricated zero). */
+         * ramp math a no-op rather than ramping from a fabricated zero).
+         * TODO.md 10.8: this must be the same COMBINED reading the very
+         * first control tick will compute for this zone (see the main read
+         * block above), not just its legacy same-index channel -- otherwise
+         * a multi-thermocouple zone would start its ramp math from a
+         * different number than the tick right after it settles on. */
         if ((int8_t)zi == first_active &&
             (sim_backend_enabled() || (s_exec.thermo_bus && s_exec.thermo_bus->initialized))) {
             MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
@@ -1790,11 +1838,25 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             } else {
                 MAX31856_read_all(s_exec.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
             }
+            float base_ch_c[MAX31856_CHANNEL_COUNT];
+            bool base_ch_ok[MAX31856_CHANNEL_COUNT];
+            for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+                base_ch_c[ci] = NAN;
+                base_ch_ok[ci] = false;
+            }
             for (size_t i = 0; i < count; i++) {
-                if (readings[i].channel == zi && !readings[i].spi_failed && !isnan(readings[i].tc_temperature_c)) {
-                    baseline_target_c = zones_config_apply_cal(zi, readings[i].tc_temperature_c);
-                    break;
-                }
+                uint8_t ci = readings[i].channel;
+                if (ci >= MAX31856_CHANNEL_COUNT) continue;
+                base_ch_c[ci] = readings[i].tc_temperature_c;
+                base_ch_ok[ci] = !readings[i].spi_failed && !isnan(base_ch_c[ci]);
+            }
+            uint8_t base_tmask = 0;
+            zones_config_get_thermo_mask(zi, &base_tmask);
+            bool base_valid = false;
+            float base_combined =
+                thermo_combine(base_ch_c, base_ch_ok, MAX31856_CHANNEL_COUNT, base_tmask, &base_valid);
+            if (base_valid) {
+                baseline_target_c = zones_config_apply_cal(zi, base_combined);
             }
 
             /* Feedforward's ambient reference (TODO.md 6A.2), taken from THIS

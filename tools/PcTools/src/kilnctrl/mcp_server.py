@@ -21,6 +21,17 @@ the UART link above, these drive OpenOCD directly over JTAG to (re)flash the
 board. See that section's own comment for why they exist: use them instead
 of improvising raw ``openocd`` commands by hand.
 
+Alongside those, a generic ``debug_*`` tool family (``debug_program``,
+``debug_reset``, ``debug_halt``, ``debug_resume``, ``debug_step``,
+``debug_read_memory``, ``debug_write_memory``, ``debug_read_registers``, plus
+``set_openocd_path``/``get_openocd_status``) covers program/reset/halt/step/
+memory/register access for **both** processors on this board -- the ESP32-S3
+main controller over JTAG and the RP2040 safety processor (A1,
+``firmware/SaftyFW/``) over SWD via a CMSIS-DAP debug probe -- through one
+shared OpenOCD wrapper (``openocd_util.py``/``debug_probe.py``). See
+``tools/PcTools/TODO.md``'s "One substrate covers both: OpenOCD" section for
+the design rationale and guard rails.
+
 Every *command* tool returns the SendResult as text:
   ``ok`` / ``undeliverable`` / ``timeout`` / ``not_connected``.
 
@@ -55,12 +66,13 @@ try:
 except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
-from . import actions, devices, settings
+from . import actions, debug_probe, devices, openocd_util, settings
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
 from .devices import LogLine
 from .display import BlitError, DisplayClient, DisplayQueryError
+from .touch import TouchClient, TouchQueryError
 from .info import InfoClient, InfoQueryError
 from .io_expander import IoClient, IoQueryError
 from .link_hub import get_shared_link
@@ -73,6 +85,7 @@ from .protocol import (
     UART_TASK_ID_SAFETY,
     UART_TASK_ID_SYSTEM,
     UART_TASK_ID_THERMO,
+    UART_TASK_ID_TOUCH,
     WIFI_MODE_AP,
     WIFI_MODE_HOME,
     Device,
@@ -200,6 +213,11 @@ def _record_report(buffer: deque):
 _thermo = ThermoClient(_link, on_report=_record_report(_thermo_reports))
 _io = IoClient(_link, on_report=_record_report(_io_reports))
 _display = DisplayClient(_link)
+#: Task 13 -- the NS2009 touch controller on the same J2 panel, plus the
+#: screen_idle auto-blank state machine it feeds. touch_inject is the tool
+#: that lets an MCP caller send synthetic touches, indistinguishable from a
+#: real press to the firmware's idle timer and wake logic.
+_touch = TouchClient(_link)
 _safety = SafetyClient(_link)
 #: Task 12 -- only answered on a firmware built with
 #: CONFIG_KILNCTL_ENABLE_GPIO_PROBE (default off). Registered unconditionally
@@ -267,6 +285,7 @@ def _tool():
                 ThermoQueryError,
                 IoQueryError,
                 DisplayQueryError,
+                TouchQueryError,
                 SafetyQueryError,
                 InfoQueryError,
                 BlitError,
@@ -473,7 +492,7 @@ def close_server() -> str:
     """
     def _shutdown() -> None:
         time.sleep(0.2)  # let the stdio transport flush this tool's reply first
-        for client in (_info, _device_log, _thermo, _io, _display, _safety, _probe, _wifi,
+        for client in (_info, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
                        _control, _profiles, _autotune):
             client.close()
         _link.close()
@@ -508,54 +527,22 @@ def restart_uart() -> str:
 # never runs a bare full-chip erase.
 # ---------------------------------------------------------------------------
 def _find_openocd_exe() -> Optional[str]:
-    """Locates openocd.exe without relying on `export.ps1` having run in this
-    process's environment (the MCP server is a plain Python process, not a
-    ESP-IDF shell). Checks the actual installed-tools layout on this machine
-    first (~/.espressif/tools/openocd-esp32/<version>/openocd-esp32/bin/), then
-    falls back to the C:\\Espressif path .vscode/tasks.json's "Flash device"
-    task hardcodes (kept only as a fallback since it was found to be stale/
-    wrong for this machine when this tool was written)."""
-    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    candidates = glob.glob(
-        os.path.join(home, ".espressif", "tools", "openocd-esp32", "*", "openocd-esp32", "bin", "openocd.exe")
-    )
-    candidates += glob.glob(r"C:\Espressif\tools\openocd-esp32\*\openocd-esp32\bin\openocd.exe")
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    return None
+    """Thin wrapper -- see openocd_util._find_openocd_exe() for resolution order
+    (settings.json override -> OPENOCD_EXE env var -> autodetect globs)."""
+    return openocd_util._find_openocd_exe()
 
 
 def _kiln_fw_root() -> str:
-    """firmware/KilnFW/ project root.
-
-    This file lives at tools/PcTools/src/kilnctrl/, so the repo root is four
-    levels up. These tools serve both processors and no longer sit inside the
-    main firmware, which is why this is an explicit path rather than a walk up
-    to the parent directory.
-    """
-    repo_root = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-    )
-    return os.path.join(repo_root, "firmware", "KilnFW")
+    """firmware/KilnFW/ project root. See debug_probe._kiln_fw_root() -- kept
+    as a thin wrapper here since flash_firmware() below already refers to it
+    by this name."""
+    return debug_probe._kiln_fw_root()
 
 
 def _run_openocd(openocd_exe: str, board_cfg_relpath: str, tcl_commands: str, cwd: str, timeout_s: int) -> tuple[bool, str]:
-    scripts_dir = os.path.normpath(os.path.join(os.path.dirname(openocd_exe), "..", "share", "openocd", "scripts"))
-    cmd = [openocd_exe, "-s", scripts_dir, "-f", board_cfg_relpath, "-c", tcl_commands]
-    try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        return False, f"openocd timed out after {timeout_s}s\n{exc.stdout or ''}\n{exc.stderr or ''}"
-    output = (proc.stdout or "") + (proc.stderr or "")
-    # A region whose content already matches the file skips straight to
-    # "Resetting Target" without ever printing "Verify OK" -- that's still a
-    # real success (found the hard way: this check originally required
-    # "Verify OK" to appear, which false-negatived on an otherwise-correct
-    # run where nothing needed rewriting). returncode==0 with no failure
-    # marker is what actually signals success here.
-    ok = proc.returncode == 0 and "Verify Failed" not in output and "Error:" not in output
-    return ok, output
+    """Thin wrapper over openocd_util.run_openocd() for a single cfg file,
+    preserving flash_firmware()'s existing call signature."""
+    return openocd_util.run_openocd(openocd_exe, [board_cfg_relpath], tcl_commands, cwd, timeout_s)
 
 
 @_tool()
@@ -568,15 +555,7 @@ def kill_openocd_sessions() -> str:
     device while one is already running, which looks like "the board isn't
     responding" but is actually just this. Safe to call when nothing is
     running (reports that plainly, not an error)."""
-    try:
-        proc = subprocess.run(
-            ["taskkill", "/F", "/IM", "openocd.exe"], capture_output=True, text=True, timeout=10
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"error: could not run taskkill: {exc}"
-    if proc.returncode == 0:
-        return "killed running openocd.exe process(es)"
-    return "no running openocd.exe process found"
+    return openocd_util.kill_openocd_sessions_impl()
 
 
 @_tool()
@@ -642,6 +621,204 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
         "USB power cycle of the board (not just a JTAG reset) has resolved a "
         "flash-write-protect-stuck state before."
     )
+
+
+# ---------------------------------------------------------------------------
+# Generic debug (OpenOCD program/reset/halt/step/memory/registers), both
+# peers. See debug_probe.py's module docstring for the full design rationale
+# (tools/PcTools/TODO.md "One substrate covers both: OpenOCD") and the guard
+# rails that are and are not implemented. This section only adds the MCP
+# tool wrappers + the policy pieces debug_probe.py deliberately doesn't know
+# about (session logging, the ESP-halt-during-profile guard, the
+# write-requires-confirm gate).
+# ---------------------------------------------------------------------------
+@_tool()
+def set_openocd_path(path: str) -> str:
+    """Sets a persisted override for openocd.exe, for machines where
+    autodetection (settings.json override -> OPENOCD_EXE env var ->
+    ~/.espressif/tools/openocd-esp32/ -> C:\\Espressif\\...) doesn't find it.
+
+    Only needed if get_openocd_status() reports "not found". The path is
+    validated (must exist and be a file) then persisted to settings.json and
+    used first on every subsequent flash_firmware()/debug_*() call."""
+    if not path or not os.path.isfile(path):
+        raise ValueError(f"path does not exist or is not a file: {path!r}")
+    settings.set_openocd_path(path)
+    return f"openocd path set to {path} (persisted in settings.json)"
+
+
+@_tool()
+def get_openocd_status() -> str:
+    """Reports the openocd.exe path that will actually be used, where it came
+    from (explicit override / OPENOCD_EXE env var / autodetection / not
+    found), and which peers' default ELF build outputs currently exist on
+    disk -- a quick way to confirm what debug_program() will do before
+    calling it."""
+    override = settings.get_openocd_path()
+    env_path = os.environ.get("OPENOCD_EXE")
+    resolved = openocd_util._find_openocd_exe()
+
+    if resolved is None:
+        source_line = "openocd.exe: not found -- set one with set_openocd_path()"
+    elif override and os.path.isfile(override) and resolved == override:
+        source_line = f"openocd.exe: {resolved} (source: settings.json override)"
+    elif env_path and os.path.isfile(env_path) and resolved == env_path:
+        source_line = f"openocd.exe: {resolved} (source: OPENOCD_EXE env var)"
+    else:
+        source_line = f"openocd.exe: {resolved} (source: autodetected)"
+
+    lines = [source_line]
+    for peer, label, elf_fn in (
+        (debug_probe.PEER_ESP, "esp (KilnFW)", debug_probe._kiln_fw_elf),
+        (debug_probe.PEER_PICO, "pico (SaftyFW)", debug_probe._safty_fw_elf),
+    ):
+        elf = elf_fn()
+        present = "found" if os.path.isfile(elf) else "MISSING -- pass elf_path explicitly or build first"
+        lines.append(f"{label} default elf: {elf} ({present})")
+    return "\n".join(lines)
+
+
+@_tool()
+def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False) -> str:
+    """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
+    Writes flash on a live board -- refused unless `confirm=True` is passed
+    explicitly (tools/PcTools/TODO.md's "flash writes require an explicit
+    confirm" guard rail).
+
+    Uses the peer's default build output (KilnFW/build/KilnCtrl.elf or
+    SaftyFW/build/SaftyFW.elf) unless `elf_path` is given. For the ESP,
+    prefer flash_firmware() instead -- it flashes the full three-image set
+    (bootloader/partition-table/app) this tool does not; this generic path is
+    mainly for the Pico (SaftyFW ships one plain ELF, no bootloader)."""
+    if not confirm:
+        return "error: flash write refused without confirm=True -- this writes flash on a live board"
+    ok, output = debug_probe.program(peer, elf_path)
+    _session_log.warning("debug_program: %s peer=%s ok=%s", "programmed" if ok else "FAILED to program", peer, ok)
+    if ok:
+        return f"programmed {peer} OK, reset and running"
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: program failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_reset(peer: str, mode: str = "run") -> str:
+    """Resets `peer` ("esp"/"pico"). `mode` is "run" (default, resumes
+    execution), "halt" (resets and halts), or "init" (resets and runs any
+    OpenOCD target init sequence, then halts)."""
+    ok, output = debug_probe.reset(peer, mode)
+    _session_log.warning("debug_reset: peer=%s mode=%s ok=%s", peer, mode, ok)
+    if ok:
+        return f"reset {peer} ({mode}) OK"
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: reset failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_halt(peer: str) -> str:
+    """Halts `peer`'s core.
+
+    Guard: for peer="esp", refuses if a fire profile is currently running or
+    paused (halting the ESP mid-profile freezes relay control and stops its
+    telemetry to the Pico, which would correctly read it as a dead main
+    controller and trip -- see debug_probe.py's module docstring). If the ESP
+    doesn't answer the status query at all, the halt is allowed -- a board
+    that isn't reachable over the UART link isn't running a profile you'd be
+    interrupting, so that failure shouldn't block an unrelated JTAG halt.
+    """
+    if peer == debug_probe.PEER_ESP:
+        try:
+            status = _profiles.get_exec_status(timeout=2.0)
+        except Exception:  # noqa: BLE001 - unreachable ESP must not block the halt
+            status = None
+        if status is not None and status.state in (1, 2):
+            return (
+                f"error: refusing to halt ESP while a profile is {status.state_name} -- "
+                "this would freeze relay control mid-firing. Use debug_reset/profiles "
+                "stop tools if you really need to interrupt it."
+            )
+    ok, output = debug_probe.halt(peer)
+    if ok:
+        _session_log.warning("debug_halt: halted %s", peer)
+        return f"halted {peer}"
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: halt failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_resume(peer: str) -> str:
+    """Resumes `peer`'s core from a halt."""
+    ok, output = debug_probe.resume(peer)
+    if ok:
+        _session_log.warning("debug_resume: resumed %s", peer)
+        return f"resumed {peer}"
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: resume failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_step(peer: str) -> str:
+    """Single-steps `peer`'s core one instruction. If it was running, this
+    halts it first (it does not resume running after the step -- it stays
+    halted at the next instruction)."""
+    ok, output = debug_probe.step(peer)
+    if ok:
+        _session_log.warning("debug_step: stepped %s", peer)
+        return f"stepped {peer}:\n{output.strip()}"
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: step failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> str:
+    """Reads `count` `width`-bit (8/16/32) words from `peer`'s memory starting
+    at `address`. Read-only, no guard needed. Halts the core if it wasn't
+    already (OpenOCD requires this for a memory read)."""
+    ok, output = debug_probe.read_memory(peer, address, count, width)
+    if ok:
+        return output.strip()
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: read_memory failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_write_memory(peer: str, address: int, value: int, width: int = 32, confirm: bool = False) -> str:
+    """Writes one `width`-bit (8/16/32) `value` at `address` in `peer`'s
+    memory. Live RAM/flash-mapped memory write on a running board -- refused
+    unless `confirm=True` is passed explicitly.
+
+    NOTE for peer="pico": there is currently no way to query the Pico's
+    ARMED state from the PC (SaftyFW is skeleton-only, no such protocol
+    exists yet), so `confirm=True` is the only gate here -- this is NOT a
+    real ARMED-state safety check, despite tools/PcTools/TODO.md's guard-rail
+    list calling for one. Treat this tool as unrestricted memory access on a
+    board that drives heaters."""
+    if not confirm:
+        return (
+            "error: memory write refused without confirm=True -- this writes live "
+            "RAM/flash-mapped memory on a running board" + (
+                " (and for peer=\"pico\", there is no ARMED-state check available yet -- "
+                "confirm=True is the only gate)" if peer == debug_probe.PEER_PICO else ""
+            )
+        )
+    ok, output = debug_probe.write_memory(peer, address, value, width)
+    _session_log.warning(
+        "debug_write_memory: peer=%s address=0x%x value=0x%x width=%d ok=%s", peer, address, value, width, ok
+    )
+    if ok:
+        return f"wrote 0x{value:x} ({width}-bit) to {peer} 0x{address:x}"
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: write_memory failed for {peer}:\n{tail}"
+
+
+@_tool()
+def debug_read_registers(peer: str) -> str:
+    """Reads all core registers for `peer`. Needs the core halted to read
+    registers, so this halts it as a side effect if it was running."""
+    ok, output = debug_probe.read_registers(peer)
+    if ok:
+        return output.strip()
+    tail = "\n".join(output.strip().splitlines()[-25:])
+    return f"error: read_registers failed for {peer}:\n{tail}"
 
 
 # ---------------------------------------------------------------------------
@@ -1197,6 +1374,41 @@ def display_test_pattern(
     except (BlitError, ValueError) as exc:
         return f"error: {exc}"
     return f"ok - streamed {width}x{height} test pattern in {frames} frames"
+
+
+# ---------------------------------------------------------------------------
+# TOUCH -- NS2009 touch controller on the same J2 panel (task 13)
+#
+# touch_inject is what lets this side "send touches as if from the screen":
+# the firmware's screen_idle state machine treats it exactly like a real
+# NS2009 press, resetting the auto-blank idle timer and waking the panel if
+# it's currently blanked. touch_get_state is the query that shows the effect.
+# ---------------------------------------------------------------------------
+@_tool()
+def touch_get_state() -> str:
+    """Whether the panel is on right now, and how long it's been idle.
+
+    A query answered from the firmware's in-memory screen_idle state, not a
+    touch-controller round trip -- fast even if no NS2009 ever came up.
+    """
+    try:
+        state = _touch.get_state()
+    except TouchQueryError as exc:
+        return f"error: {exc}"
+    return state.describe()
+
+
+@_tool()
+def touch_inject(x: int, y: int, pressed: bool = True) -> str:
+    """Send a synthetic touch at (x, y), as if the physical panel were pressed.
+
+    Fire-and-forget: resets the firmware's screen auto-blank idle timer and
+    wakes the panel if it is currently blanked, exactly as a real touch
+    would. x/y are accepted and carried on the wire for a future UI-hit-test
+    use; they do not affect the idle/wake decision today. pressed=False (a
+    release) is accepted but is a no-op on the firmware side.
+    """
+    return _send(UART_TASK_ID_TOUCH, devices.touch_inject(x, y, pressed))
 
 
 # ---------------------------------------------------------------------------
@@ -2026,7 +2238,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        for client in (_info, _device_log, _thermo, _io, _display, _safety, _probe, _wifi,
+        for client in (_info, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
                        _control, _profiles, _autotune):
             client.close()
         # close(), not disconnect(): this link may be shared with another

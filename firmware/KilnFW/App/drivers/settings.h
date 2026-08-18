@@ -131,6 +131,21 @@
 #define DISPLAY_RESET_GPIO     (-1)
 #endif
 
+/* --- NS2009 touch controller (on the TFT35 SPI panel, J2) ---
+ * No fixed I2C address setting here: NS2009_start probes both addresses the
+ * part can answer at (A0 strapped either way) rather than assuming one, same
+ * reasoning as SX1509_scan sweeping all four of its addresses. */
+#define TOUCH_IDLE_TIMEOUT_MS  CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS
+#define TOUCH_Z1_MAX_THRESHOLD CONFIG_KILNCTL_TOUCH_Z1_MAX_THRESHOLD
+
+/* --- LVGL touchscreen UI (lvgl_port.c, TODO.md section 10) ---
+ * Raw-to-pixel touch calibration is unproven bench guesswork, same honesty
+ * as TOUCH_Z1_MAX_THRESHOLD above -- see the Kconfig help text. */
+#define LVGL_BUF_ROWS          CONFIG_KILNCTL_LVGL_BUF_ROWS
+#define TOUCH_CAL_SWAP_XY      CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY
+#define TOUCH_CAL_INVERT_X     CONFIG_KILNCTL_TOUCH_CAL_INVERT_X
+#define TOUCH_CAL_INVERT_Y     CONFIG_KILNCTL_TOUCH_CAL_INVERT_Y
+
 /* --- PC link UART ---
  * GPIO43/44 are the ESP32-S3-DevKitC's own UART0 pins, wired to the module's
  * USB-UART bridge and its "UART" USB-C port -- distinct from the native

@@ -1264,6 +1264,103 @@ esp_err_t uart_bridge_start_display_task(uart_protocol_t *proto, ILI9488Class *d
 }
 
 /* --------------------------------------------------------------------------
+ * TOUCH (task 13) -- NS2009 touch controller / screen_idle state machine
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+    uart_protocol_t *proto;
+    QueueHandle_t inbox;
+    screen_idle_t *idle;
+} touch_bridge_ctx_t;
+
+static void touch_bridge_task(void *arg)
+{
+    touch_bridge_ctx_t *ctx = (touch_bridge_ctx_t *)arg;
+    uart_proto_message_t msg;
+    uint8_t reply[BRIDGE_REPLY_MAX];
+
+    while (true) {
+        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
+            continue;
+        }
+        if (msg.length < 1) {
+            ESP_LOGW(TAG, "touch: empty payload -- rejected");
+            continue;
+        }
+        bridge_note_link_activity();
+
+        uint8_t subcmd = msg.payload[0];
+        esp_err_t err = ESP_ERR_INVALID_ARG;
+        size_t reply_len = 0;
+        bool rejected = false;
+
+        switch (subcmd) {
+            case TOUCH_CMD_GET_STATE: {
+                bool screen_on = false;
+                uint32_t idle_ms = 0;
+                err = screen_idle_get_state(ctx->idle, &screen_on, &idle_ms);
+                if (err == ESP_OK) {
+                    reply[0] = TOUCH_CMD_GET_STATE;
+                    reply[1] = screen_on ? 1u : 0u;
+                    reply[2] = (uint8_t)(idle_ms & 0xFFu);
+                    reply[3] = (uint8_t)((idle_ms >> 8) & 0xFFu);
+                    reply[4] = (uint8_t)((idle_ms >> 16) & 0xFFu);
+                    reply[5] = (uint8_t)((idle_ms >> 24) & 0xFFu);
+                    reply_len = 6;
+                }
+                break;
+            }
+            case TOUCH_CMD_INJECT: {
+                if (!bridge_args_ok("touch", &msg, 6)) { rejected = true; break; }
+                err = screen_idle_inject_touch(ctx->idle, bridge_u16_le(&msg.payload[1]),
+                                               bridge_u16_le(&msg.payload[3]), msg.payload[5] != 0);
+                break;
+            }
+            default:
+                ESP_LOGW(TAG, "touch: unknown subcmd 0x%02X -- rejected", subcmd);
+                rejected = true;
+                break;
+        }
+
+        if (rejected) {
+            continue; /* the guard above logged the specific reason */
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "touch: subcmd 0x%02X failed: %s", subcmd, esp_err_to_name(err));
+            continue;
+        }
+        if (reply_len > 0) {
+            bridge_reply(ctx->proto, &msg, UART_TASK_ID_TOUCH, reply, reply_len);
+        }
+    }
+}
+
+esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *idle)
+{
+    if (!proto || !idle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    static touch_bridge_ctx_t ctx;
+    ctx.proto = proto;
+    ctx.idle = idle;
+
+    esp_err_t err = uart_protocol_register_task(proto, UART_TASK_ID_TOUCH, BRIDGE_INBOX_LEN,
+                                                &ctx.inbox);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    BaseType_t created = xTaskCreatePinnedToCore(touch_bridge_task, "touch_uart_bridge", 3072,
+                                                 &ctx, 5, NULL, tskNO_AFFINITY);
+    if (created != pdPASS) {
+        uart_protocol_unregister_task(proto, UART_TASK_ID_TOUCH);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+/* --------------------------------------------------------------------------
  * SAFETY (task 7) -- the opto-isolated link to the RP2040
  * ------------------------------------------------------------------------ */
 

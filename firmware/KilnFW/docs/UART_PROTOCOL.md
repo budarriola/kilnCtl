@@ -1,4 +1,4 @@
-# Hardened UART protocol — wire format reference (protocol version 4)
+# Hardened UART protocol — wire format reference (protocol version 5)
 
 The ESP32-S3 firmware and the PC-side `pc_tools` package talk to each other
 over a single UART link using a custom, reliable, addressed message protocol
@@ -48,6 +48,16 @@ payload ceiling has no honest way around them:
   dumps) are HTTP-only — table/CSV data that doesn't fit one frame and has
   no meaningful truncated form (a partial coupling matrix is misleading, not
   merely incomplete).
+
+**Version 5** (2026-08-17): one new task_id, `TOUCH` (13), for the NS2009
+touch controller on the display panel (J2) — `GET_STATE` (screen on/off +
+idle milliseconds) and `INJECT` (a fire-and-forget synthetic touch). The
+firmware's `screen_idle` state machine (`App/drivers/screen_idle.c`) treats
+an injected touch exactly like a real NS2009 press: it resets the auto-blank
+idle timer (`CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS`, default 60s) and wakes
+the panel if it's currently blanked — this is how `pc_tools`' MCP server can
+drive/test the UI ("send a touch as if from the screen") without physical
+hardware. Existing task_ids 1-12 and their payloads are unchanged.
 
 Rules (task `CONTROL` does **not** cover this — see the task table below)
 and full profile-execution history stay HTTP-only for the same reason: the
@@ -164,6 +174,7 @@ their own device (ESP task 1 and HOST task 1 are unrelated).
 | 9 | `UART_TASK_ID_PROFILES` | fire profile CRUD + execution control | `uart_task_ids.h` |
 | 10 | `UART_TASK_ID_AUTOTUNE` | PID autotune (step/relay methods) | `uart_task_ids.h` |
 | 11 | `UART_TASK_ID_WIFI` | Wi-Fi status/scan/provision/forget | `uart_task_ids.h` |
+| 13 | `UART_TASK_ID_TOUCH` | NS2009 touch controller on J2 + screen auto-blank state | `uart_task_ids.h` |
 
 The PC side registers the same numeric IDs for symmetry.
 

@@ -2,3 +2,9 @@ dependencies:
   # mDNS: advertises this board as kiln.local so the web UI/pc_tools don't
   # need the raw station IP -- see mdns_init()/mdns_hostname_set() in main.c.
   espressif/mdns: "^1"
+  # LVGL is NOT listed here -- it's vendored as a git submodule at
+  # firmware/KilnFW/components/lvgl (pinned to v9.5.0), matching how
+  # hardware/mainBoard/parts/TFT35-SPI and mykicadMcp are already vendored in
+  # this repo, rather than fetched by the component manager. ESP-IDF
+  # auto-discovers it there (components/ is a default component search path
+  # -- see firmware/KilnFW/CMakeLists.txt) with no entry needed here.

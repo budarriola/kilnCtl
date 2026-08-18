@@ -78,7 +78,11 @@ DEFAULT_BAUD_RATE = 921600
 #: AUTOTUNE (10), WIFI (11) -- plus SYSTEM_CMD_FACTORY_RESET, so the GUI can
 #: drive everything the HTTP dashboard offers without needing Wi-Fi. See
 #: docs/UART_PROTOCOL.md's "Version 4" section and each task's block below.
-UART_PROTOCOL_VERSION = 4
+#: Version 5 (2026-08-17): one new task_id, TOUCH (13), for the NS2009 touch
+#: controller on the display panel -- GET_STATE plus INJECT, the latter
+#: letting this side feed a synthetic touch the firmware treats exactly like
+#: a real press. See docs/UART_PROTOCOL.md's "Version 5" section.
+UART_PROTOCOL_VERSION = 5
 
 
 class Device(enum.IntEnum):
@@ -117,6 +121,7 @@ UART_TASK_ID_PROFILES = 9  # fire profile CRUD + execution control
 UART_TASK_ID_AUTOTUNE = 10  # PID autotune (step/relay methods)
 UART_TASK_ID_WIFI = 11  # Wi-Fi status/scan/provision/forget
 UART_TASK_ID_GPIO_PROBE = 12  # raw ESP32 GPIO probe -- CONFIG_KILNCTL_ENABLE_GPIO_PROBE, default off
+UART_TASK_ID_TOUCH = 13  # NS2009 touch controller on the display panel (J2)
 
 # SYSTEM subcommands. RESTART_UART is deliberately RX-only on the firmware
 # side (see uart_task_ids.h) -- it flushes the stuck/garbage bytes a wedged
@@ -216,6 +221,16 @@ DISPLAY_CMD_READ_ID = 0x0F
 #: 320x480 in the portrait ones). READ_ID reports the live values.
 DISPLAY_NATIVE_WIDTH = 480
 DISPLAY_NATIVE_HEIGHT = 320
+
+# --- TOUCH subcommands (NS2009 on the same J2 panel as DISPLAY) ------------
+#
+# GET_STATE is the only query. INJECT is fire-and-forget (no reply): it
+# feeds the firmware's screen_idle state machine a synthetic touch that
+# resets the idle timer and wakes the screen exactly like a real NS2009
+# press -- this is what lets an MCP tool "send touches as if from the
+# screen" without physical hardware.
+TOUCH_CMD_GET_STATE = 0x01
+TOUCH_CMD_INJECT = 0x02
 
 # --- SAFETY subcommands (opto-isolated link to the RP2040) ------------------
 #

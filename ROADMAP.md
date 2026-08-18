@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-17
 > **Keep this file current.** This is the top-level dispatch board: the place to
 > start a task from when you do not already know which plan owns it. It holds
 > *ordering and cross-processor dependencies only* — the detail lives in the
@@ -100,8 +100,23 @@ soldering session.
 - [ ] GPIO probe on the Pico over SWD, GPIO6 never writable
 - [ ] Coordinated two-board test script, reaching each side by a path that is
       **not** the link under test
-- [ ] OpenOCD wrapper covering both chips: program, reset, halt, read/write memory
+- [x] OpenOCD wrapper covering both chips: program, reset, halt, read/write memory
+      — done 2026-08-17, `kilnctrl.debug_probe` + `openocd_util` (`tools/PcTools/TODO.md`
+      "Debug and programming"); flashed and verified `firmware/SaftyFW/build/SaftyFW.elf`
+      to the Pico over SWD as the first real use
 - [ ] Per-processor console windows and log files, plus an interleaved file
+
+**Bench hardware now present, confirmed 2026-08-17:**
+- [x] Raspberry Pi Debug Probe connected to A1 (Pico), SWD + UART bridge —
+      programmed and verified `SaftyFW.elf` over it this session
+      (`firmware/SaftyFW/docs/HARDWARE.md` §7b bench path)
+- [x] Main board LCD (ILI9488, `DISPLAY` task) connected, boots, and shows
+      "kilnCtl Ready"
+- [ ] **HW change needed: backlight control.** LCD backlight currently has no
+      GPIO/PWM control path from the board — add one (dim/off on idle,
+      touch-driven wake). Owns: schematic net + pin assignment in
+      `hardware/mainBoard/`, then `firmware/KilnFW/App/drivers/screen_idle.{c,h}`
+      wiring once the pin exists
 
 ## M2 — `CommonFW`, before either firmware depends on it
 

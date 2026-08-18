@@ -176,6 +176,17 @@ header comment, so the build is reproducible elsewhere.
 - [ ] Blink-equivalent proof of life over SWD/RTT — **not verified**; no
       RP2040 hardware and no debug probe attached to the machine this was
       built on, so nothing here has ever run.
+- [ ] **Heartbeat LED, physical, on the safety processor itself.** Requested
+      2026-08-17: the safety processor should blink a heartbeat pattern
+      (steady blink while alive/healthy) so its liveness is visible without
+      a debug probe or the ESP link up — this is distinct from the SWD/RTT
+      proof-of-life above (that's a dev/bench tool; this is a permanent
+      on-board indicator). Owned by whichever task already runs at a fixed
+      cadence on core 1 (watchdog_task is the natural fit, since a stalled
+      task already stops feeding it) — the LED going dark or freezing
+      should track the same "a task stopped checking in" condition the
+      watchdog itself detects, so the light doesn't lie about liveness the
+      watchdog would otherwise catch.
 - [x] **Log transport**: `kilnlink` LOG frames as primary (2026-08-17) —
       `log_task.c` owns a bounded FreeRTOS queue (16 entries, 96 bytes each,
       allocated once at `log_task_start()`), drains it, and hands entries to

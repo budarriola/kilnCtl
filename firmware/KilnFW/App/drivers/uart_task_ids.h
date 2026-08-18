@@ -52,6 +52,15 @@
  * INFO_CMD_GET_FW_VERSION's exact-match policy exists to catch. See
  * docs/UART_PROTOCOL.md for the new task/command tables.
  *
+ * Version 5 (2026-08-17): one new task_id, TOUCH=13, for the NS2009 touch
+ * controller on the display panel (J2) -- GET_STATE plus INJECT, the latter
+ * letting the PC/MCP side feed a synthetic touch that the firmware's idle
+ * timer and wake logic treat exactly like a real press (screen_idle.h).
+ * Existing task_ids 1-12 and their payloads are UNCHANGED; bumped for the
+ * same reason Version 4 was -- an old PC build that has never heard of
+ * task_id 13 would otherwise report a false "compatible" against firmware
+ * whose new command it cannot use. See docs/UART_PROTOCOL.md.
+ *
  * TODO.md Phase 7b.1 (2026-08-17): this is now an alias of CommonFW's
  * KILNLINK_PROTOCOL_VERSION (firmware/CommonFW/include/kilnlink/
  * kilnlink_version.h) rather than a second, independently-maintained number
@@ -77,6 +86,7 @@
 #define UART_TASK_ID_AUTOTUNE 10u /* PID autotune -- mirrors dashboard_http.c's /api/autotune* */
 #define UART_TASK_ID_WIFI     11u /* Wi-Fi status/scan/provision -- mirrors wifi_provision_http.c */
 #define UART_TASK_ID_GPIO_PROBE 12u /* raw ESP32 GPIO probe -- CONFIG_KILNCTL_ENABLE_GPIO_PROBE, default off */
+#define UART_TASK_ID_TOUCH    13u  /* NS2009 touch controller on the display panel (J2) */
 
 /* --- THERMO (task_id = UART_TASK_ID_THERMO) ---
  * Three MAX31856 cold-junction-compensated thermocouple front ends living on
@@ -353,6 +363,34 @@
 #define DISPLAY_CMD_BLIT_DATA       0x0Du
 #define DISPLAY_CMD_BLIT_END        0x0Eu
 #define DISPLAY_CMD_READ_ID         0x0Fu
+
+/* --- TOUCH (task_id = UART_TASK_ID_TOUCH) ---
+ * The NS2009 touch controller on the same J2 panel as DISPLAY -- see
+ * NS2009.h and screen_idle.h. Not wired to any drawing: this task only
+ * reports touch state and lets the host inject synthetic touches, both
+ * against screen_idle's idle/wake state machine, which is what actually
+ * blanks and wakes the panel.
+ *
+ * byte0 = subcommand:
+ *   0x01 GET_STATE  (no args) -- QUERY, see below
+ *   0x02 INJECT      x(u16 LE), y(u16 LE), pressed(u8) -- fire-and-forget,
+ *                    no reply. Feeds screen_idle exactly as a real press
+ *                    would: resets the idle timer and wakes the screen if
+ *                    it is currently blanked. x/y are carried through only
+ *                    for a future UI-hit-test use; today they do not affect
+ *                    the idle/wake decision. pressed=0 (a release) is
+ *                    accepted but changes nothing -- there is no "held"
+ *                    state to end.
+ *
+ * GET_STATE response payload:
+ *   byte0 = TOUCH_CMD_GET_STATE (0x01)
+ *   byte1 = screen_on (0/1)
+ *   bytes2..5 = idle_ms, u32 LE -- milliseconds since the last touch
+ *               activity (real or injected); saturates at UINT32_MAX rather
+ *               than wrapping.
+ */
+#define TOUCH_CMD_GET_STATE 0x01u
+#define TOUCH_CMD_INJECT    0x02u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

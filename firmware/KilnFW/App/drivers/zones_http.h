@@ -3,9 +3,14 @@
 // section 0.5 explicitly settled onto this same page rather than a
 // separate one.
 //
-// Scope: config storage and validation only. One zone per configured
-// thermocouple channel (zone i <-> channel i) -- TODO.md never asks for a
-// many-to-one mapping, so this doesn't build one. cal_offset_c is stored
+// Scope: config storage and validation only. Historically one zone per
+// configured thermocouple channel (zone i <-> channel i); TODO.md 10.8
+// (2026-08-17, first slice) extends this to a many-to-one mapping via
+// thermo_mask below -- a zone's control temperature can now be combined
+// across more than one assigned channel. zones_config_get_thermo_mask()'s
+// doc comment covers the legacy-mapping default this module falls back to
+// when a caller (or an unmodified zones_page.html submission) never sends
+// the field. cal_offset_c is stored
 // here and applied through zones_config_apply_cal() below, which satisfies
 // TODO.md section 3's "applied in firmware" half -- but only for the
 // consumers that call it: dashboard_http.c's display and
@@ -92,6 +97,32 @@ bool zones_config_is_valid(void);
 /* bit N-1 = relay N belongs to this zone (matches zone_cfg_t::relay_mask,
  * the schematic's Relay1..4 numbering per kiln_io.h). */
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask);
+
+/* TODO.md 10.8: bit N-1 = MAX31856 channel N belongs to this zone's control
+ * temperature, N in 1..MAX31856_CHANNEL_COUNT -- same bit-numbering
+ * convention as relay_mask above, deliberately: it is the natural pattern
+ * this codebase already established for "which of a fixed hardware set
+ * belongs to this zone," and following it means a caller that already
+ * groks relay_mask reads this correctly on sight.
+ *
+ * Unlike relay_mask, a saved 0 here is NOT "nothing assigned" for a zone
+ * that predates this field or whose submitter never heard of it -- see
+ * zones_http.c's POST handler and migrate_zones_cfg_v1_to_current(). Both
+ * substitute the legacy single-channel mapping (bit (zone_index) set, i.e.
+ * "zone i reads channel i", matching this module's pre-10.8 behaviour)
+ * whenever the field was never explicitly supplied, so an existing saved
+ * config or an unmodified zones_page.html submission keeps controlling off
+ * the same channel it always did. An explicit POST of 0 (a client that DOES
+ * know this field and deliberately clears it) is honoured as a real "no
+ * thermocouple assigned" and reaches this getter as 0 -- profile_executor.c
+ * then sees the same "thermocouple invalid" state a single unassigned
+ * channel has always produced (TODO.md 10.8: "zero valid readings ... is
+ * the existing thermocouple invalid case, unchanged").
+ *
+ * Returns false (leaving *out_mask untouched) for the same "cannot answer"
+ * reasons every getter here does -- an out-of-range or unconfigured
+ * zone_index. */
+bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask);
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd);
 

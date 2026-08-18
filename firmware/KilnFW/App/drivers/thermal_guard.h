@@ -96,7 +96,17 @@ typedef struct {
  * able to hide an out-of-range sensor from guards 5/6. sensor_ok folds
  * together spi_failed/isnan/THERMO_FAULT_OPEN|OVUV|TCRANGE -- the caller
  * (which already has MAX31856Reading) computes this so thermal_guard.c
- * doesn't need to know that header's bit layout. */
+ * doesn't need to know that header's bit layout.
+ *
+ * TODO.md 10.8 (multi-thermocouple-per-zone, 2026-08-17): with more than one
+ * thermocouple channel assigned to a zone, sensor_ok/measurement_c are the
+ * zone's COMBINED reading (thermo_combine.c's mean of that zone's valid
+ * channels), not one channel's. Guard 6's "invalid" therefore already means
+ * "every channel assigned to this zone is invalid" wherever this struct's
+ * sensor_ok came from a combined read -- the caller (profile_executor.c)
+ * is what changed to produce that; this module's own guard-6 code below is
+ * unchanged, because it was always written against an opaque caller-decided
+ * bool and never needed to know how many channels fed it. */
 typedef struct {
     bool  sensor_ok;
     float measurement_c;

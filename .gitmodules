@@ -4,3 +4,6 @@
 [submodule "mykicadMcp"]
 	path = mykicadMcp
 	url = https://github.com/budarriola/mykicadMcp.git
+[submodule "firmware/KilnFW/components/lvgl"]
+	path = firmware/KilnFW/components/lvgl
+	url = https://github.com/lvgl/lvgl.git
