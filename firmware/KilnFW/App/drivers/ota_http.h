@@ -1,16 +1,27 @@
 // ota_http.h -- CommonFW/docs/UPDATE_PROTOCOL.md section 2's challenge-
-// response authentication, wired to a real HTTP endpoint. The pure state
-// machine (nonce lifecycle, constant-time compare, lockout/backoff) lives in
-// ota_auth.h/.c, already host-tested; this file is the ESP-IDF/mbedTLS/httpd
-// glue around it.
+// response authentication, wired to a real HTTP endpoint, PLUS TODO.md 9.4's
+// interlocks and the single cross-processor update mutex. The pure state
+// machines (nonce lifecycle/lockout in ota_auth.h/.c, the interlock
+// precondition check in ota_interlock.h/.c) are already host-tested; this
+// file is the ESP-IDF/mbedTLS/httpd/FreeRTOS glue around both.
 //
 // Serves GET /api/ota/challenge only. This file does NOT implement
 // POST /api/ota/esp or POST /api/ota/pico -- those need the actual streamed
 // esp_ota_ops write logic and the Pico-image relay through the pico_img
 // staging partition, both separate, larger, unbuilt pieces of work
-// (UPDATE_PROTOCOL.md sections 3/4). ota_http_verify_request() below is
-// written so a future pass can call it as the first thing either POST
-// handler does, without having to touch this file again.
+// (UPDATE_PROTOCOL.md sections 3/4, TODO.md 9.5). ota_http_verify_request()
+// and ota_http_check_interlocks() below are written so a future pass can
+// call them as the first two things either POST handler does, without
+// having to touch this file again -- see ota_http_check_interlocks()'s doc
+// comment for which one should run first and why.
+//
+// The update-in-progress mutex (ota_http_update_try_begin()/_end()) is real
+// in-RAM state, but nothing in this pass ever calls _try_begin(): there is
+// no transfer handler yet to hold it. It is exposed now so TODO.md 9.5's
+// future POST handlers have a mutex to acquire on the first byte of a
+// transfer and release on completion/abort/failure, and so
+// ota_http_check_interlocks() has something real to consult today rather
+// than a placeholder that always reports "no update in progress".
 #ifndef OTA_HTTP_H
 #define OTA_HTTP_H
 
@@ -19,6 +30,11 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+
+#include "MAX31856.h"
+#include "kiln_io.h"
+#include "ota_interlock.h"
+#include "safety_link.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,7 +45,20 @@ extern "C" {
 // wifi_prov_get_ap_password() indirectly through ota_http_verify_request(),
 // so the AP password must already be loaded, though the challenge handler
 // itself does not need the password -- only verification does).
-esp_err_t ota_http_start(void);
+//
+// `io_or_null`/`thermo_bus_or_null`/`safety_or_null` are the same pointers
+// main.c already hands to dashboard_http_start() -- NULL-tolerant, same
+// convention as every other driver's *_start(). ota_http_check_interlocks()
+// below reads them directly (kiln_io_read()/MAX31856_read_all(), the same
+// way dashboard_http.c's /api/status does) rather than through
+// profile_executor_get_status(), so the interlock's per-zone temperature/
+// heater-commanded checks see the kiln's actual current state whether or
+// not a profile happens to be running -- see that function's doc comment
+// for why profile_executor's own zones[] array is the wrong source. With no
+// safety link this boot, the link is treated as down (safe default, matches
+// "no valid data -> refuse" -- see ota_interlock.h), not as an exception.
+esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
+                          SafetyLinkClass *safety_or_null);
 
 // The context a client authenticates for -- CommonFW/docs/UPDATE_PROTOCOL.md
 // section 2 step 2's literal "esp" or "pico" HMAC context string, and also
@@ -66,6 +95,72 @@ typedef enum {
 // OTA_HTTP_VERIFY_OK.
 ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const uint8_t mac[32],
                                                   const char *client_ip);
+
+// --- Single cross-processor update mutex (TODO.md 9.4/9.5) ---------------
+//
+// One update at a time, across BOTH processors -- not one mutex per
+// context. "A second browser tab, or an agent racing a human, must be
+// refused rather than interleaved" (UPDATE_PROTOCOL.md section 4), and
+// TODO.md 9.4 is explicit that starting a Pico update while an ESP update is
+// mid-flight (or vice versa) must be refused exactly like starting a second
+// ESP update while the first is still running -- there is only one slot.
+//
+// In-RAM only (like s_nonce/s_lockout_* above) -- an update in progress
+// cannot survive a reboot in any state worth resuming anyway (see
+// UPDATE_PROTOCOL.md section 5's recovery table: "Power lost mid-transfer:
+// old slot still active, nothing changed"), so there is nothing to persist.
+
+// Attempts to claim the mutex for `ctx`. Returns true and records `ctx` as
+// the in-progress processor if nothing was already claimed; returns false
+// (no state change) if a claim is already held, by either context. Callers
+// (TODO.md 9.5's future transfer handlers) must call ota_http_update_end()
+// exactly once for every successful claim, on every exit path (success,
+// abort, failure, disconnect) -- an unreleased claim would permanently
+// refuse every future update until reboot.
+bool ota_http_update_try_begin(ota_http_context_t ctx);
+
+// Releases whatever claim is held, if any. Idempotent -- calling this with
+// no claim held is a harmless no-op, so a future handler's cleanup path can
+// call it unconditionally rather than tracking whether it actually won the
+// claim.
+void ota_http_update_end(void);
+
+// True if a claim is currently held. If out_ctx is non-NULL and a claim is
+// held, writes which context holds it.
+bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
+
+// --- Interlocks (TODO.md 9.4, UPDATE_PROTOCOL.md section 1) --------------
+//
+// Gathers a live snapshot -- profile_executor_get_status() for run state
+// only, autotune_engine_is_active(), safety_link_get_status() against the
+// pointer passed to ota_http_start(), run_state_boot_record_interrupted(),
+// ota_http_update_in_progress() above, and per-zone temperature/heater-
+// commanded state read directly via MAX31856_read_all()/kiln_io_read()
+// (zones_config_get_thermo_count()/_get_relay_mask() map channels to zones)
+// -- into an ota_interlock_snapshot_t and calls ota_interlock_check()
+// (ota_interlock.h) -- the pure, host-tested precondition logic lives
+// there; this function is purely the ESP-IDF glue that collects the inputs
+// it needs.
+//
+// Deliberately takes no `ctx` parameter: TODO.md 9.4 requires "both update
+// paths refused unless..." the same list, with no per-path variant, so
+// there is nothing for a context argument to change. (The mutex check
+// inside does still correctly refuse a same-context double-start, since
+// ota_http_update_in_progress() reports true regardless of which context
+// holds the claim -- see ota_interlock_snapshot_t::other_update_in_progress'
+// doc comment.)
+//
+// A future POST /api/ota/{esp,pico} handler should call this AFTER
+// ota_http_verify_request() succeeds, not before -- see ota_interlock.h's
+// header comment for why (an unauthenticated interlock check would leak
+// live kiln telemetry, e.g. "zone 2 is at 340 C", to anyone who can reach
+// the endpoint, which is a worse leak than this design already accepts for
+// a wrong password).
+//
+// reason_out/reason_cap: same contract as ota_interlock_check() -- filled
+// with a specific, human-readable refusal reason on OTA_INTERLOCK_REFUSED,
+// untouched on OTA_INTERLOCK_OK. May be NULL/0.
+ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap);
 
 #ifdef __cplusplus
 }

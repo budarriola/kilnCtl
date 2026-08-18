@@ -14,9 +14,18 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
+#include <math.h>
+
+#include "autotune_engine.h"
+#include "kiln_io.h"
+#include "MAX31856.h"
 #include "ota_auth.h"
+#include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
+#include "run_state.h"
+#include "sim_backend.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
+#include "zones_http.h"
 
 static const char *TAG = "ota_http";
 
@@ -73,6 +82,26 @@ static SemaphoreHandle_t s_ota_lock;
 static ota_auth_nonce_state_t s_nonce;
 static ota_auth_lockout_state_t s_lockout_esp;
 static ota_auth_lockout_state_t s_lockout_pico;
+
+// The hardware pointers main.c hands to ota_http_start(), same pattern (and
+// same NULL-tolerant meaning) as dashboard_http.c's s_dash struct. Read-only
+// after ota_http_start(), so no lock needed to read them.
+static kiln_io_t *s_io;
+static MAX31856BusClass *s_thermo_bus;
+static SafetyLinkClass *s_safety;
+
+// --- Single cross-processor update mutex (ota_http.h) ---------------------
+// Guarded by s_ota_lock, same as the nonce/lockout state above -- this is
+// genuinely mutated from whatever future task handles a POST
+// /api/ota/{esp,pico} upload, so it needs the same discipline as everything
+// else in this file that more than one httpd worker could touch at once.
+typedef enum {
+    OTA_UPDATE_NONE = 0,
+    OTA_UPDATE_ESP,
+    OTA_UPDATE_PICO,
+} ota_update_claim_t;
+
+static ota_update_claim_t s_update_claim = OTA_UPDATE_NONE;
 
 static uint32_t now_ms(void)
 {
@@ -257,8 +286,200 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     return match ? OTA_HTTP_VERIFY_OK : OTA_HTTP_VERIFY_BAD_MAC;
 }
 
-esp_err_t ota_http_start(void)
+bool ota_http_update_try_begin(ota_http_context_t ctx)
 {
+    ota_update_claim_t want = (ctx == OTA_HTTP_CONTEXT_ESP) ? OTA_UPDATE_ESP : OTA_UPDATE_PICO;
+
+    if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        // Cannot safely check/mutate the claim -- refuse rather than risk
+        // two callers both believing they won it, same reasoning as
+        // ota_http_verify_request()'s lock-timeout path above.
+        ESP_LOGW(TAG, "OTA update claim(%s): internal lock timeout, refused",
+                 ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
+        return false;
+    }
+
+    bool won = (s_update_claim == OTA_UPDATE_NONE);
+    if (won) {
+        s_update_claim = want;
+    }
+    xSemaphoreGive(s_ota_lock);
+
+    if (won) {
+        ESP_LOGI(TAG, "OTA update claim(%s): acquired", ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
+    } else {
+        ESP_LOGW(TAG, "OTA update claim(%s): refused, an update is already in progress",
+                 ctx == OTA_HTTP_CONTEXT_ESP ? "esp" : "pico");
+    }
+    return won;
+}
+
+void ota_http_update_end(void)
+{
+    if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (s_update_claim != OTA_UPDATE_NONE) {
+            ESP_LOGI(TAG, "OTA update claim released");
+        }
+        s_update_claim = OTA_UPDATE_NONE;
+        xSemaphoreGive(s_ota_lock);
+    } else {
+        // Defensive: could not take the lock to release. Logged loudly
+        // because an unreleased claim permanently refuses every future
+        // update until reboot -- this must never happen silently.
+        ESP_LOGE(TAG, "OTA update claim release: lock timeout -- claim may remain held");
+    }
+}
+
+bool ota_http_update_in_progress(ota_http_context_t *out_ctx)
+{
+    bool in_progress = false;
+    ota_update_claim_t claim = OTA_UPDATE_NONE;
+
+    if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        claim = s_update_claim;
+        xSemaphoreGive(s_ota_lock);
+    } else {
+        // Cannot confirm the claim is free -- treat contention as "in
+        // progress" rather than risk telling a caller it's safe to start a
+        // second update when we simply couldn't check.
+        ESP_LOGW(TAG, "OTA update claim query: internal lock timeout, reporting in-progress");
+        return true;
+    }
+
+    in_progress = (claim != OTA_UPDATE_NONE);
+    if (in_progress && out_ctx) {
+        *out_ctx = (claim == OTA_UPDATE_ESP) ? OTA_HTTP_CONTEXT_ESP : OTA_HTTP_CONTEXT_PICO;
+    }
+    return in_progress;
+}
+
+ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap)
+{
+    ota_interlock_snapshot_t snap = { 0 };
+
+    // Profile executor state -- one-for-one map onto ota_interlock.h's own
+    // enum (see that header's comment on why it can't just reuse
+    // profile_exec_state_t directly: this file CAN include profile_executor.h,
+    // but ota_interlock.c must stay host-buildable and cannot). Only the
+    // .state field is used here -- see the per-zone loop below for why
+    // pstat.zones[] itself is the WRONG source for temperature/heater-
+    // commanded data.
+    profile_exec_status_t pstat;
+    profile_executor_get_status(&pstat);
+    switch (pstat.state) {
+        case PROFILE_EXEC_RUNNING: snap.profile_state = OTA_INTERLOCK_PROFILE_RUNNING; break;
+        case PROFILE_EXEC_PAUSED:  snap.profile_state = OTA_INTERLOCK_PROFILE_PAUSED; break;
+        case PROFILE_EXEC_DONE:    snap.profile_state = OTA_INTERLOCK_PROFILE_DONE; break;
+        case PROFILE_EXEC_FAULTED: snap.profile_state = OTA_INTERLOCK_PROFILE_FAULTED; break;
+        case PROFILE_EXEC_IDLE:
+        default:                   snap.profile_state = OTA_INTERLOCK_PROFILE_IDLE; break;
+    }
+
+    snap.autotune_active = autotune_engine_is_active();
+
+    // Safety link: NULL (no link this boot) is treated as down, same
+    // fail-safe default as every other consumer of this pointer.
+    if (s_safety) {
+        safety_link_status_t link_status;
+        snap.safety_link_up = (safety_link_get_status(s_safety, &link_status) == ESP_OK)
+                                   ? link_status.link_up
+                                   : false;
+    } else {
+        snap.safety_link_up = false;
+    }
+
+    // run_state's boot-record breadcrumb -- catches a firing that survived a
+    // reboot without a clean ending, which profile_state alone (always IDLE
+    // on a fresh boot) cannot see. Purely informational per run_state.h's
+    // own contract, which is exactly the read-only use this is.
+    snap.run_state_interrupted = run_state_boot_record_interrupted();
+
+    snap.other_update_in_progress = ota_http_update_in_progress(NULL);
+
+    snap.temp_ceiling_c = OTA_INTERLOCK_TEMP_CEILING_C;
+
+    // Per-zone temperature and relay-commanded state, read the SAME way
+    // dashboard_http.c's /api/status does -- directly from the thermo bus
+    // and kiln_io, NOT from profile_executor_get_status()'s zones[] array.
+    // profile_exec_zone_status_t.active only means "this zone participated
+    // in the last/current RUN" (see profile_executor.h's own doc comment);
+    // when the executor is IDLE (the exact case this interlock exists to
+    // catch -- "a cooling kiln is still a hot kiln" even with nothing
+    // running), every zones[i].active there is false and this loop would
+    // silently check NOTHING. Reading zones_config_get_thermo_count()/
+    // MAX31856_read_all()/kiln_io_read() instead means the ceiling and
+    // heater-commanded checks below see the kiln's actual current state
+    // regardless of whether a profile happens to be running.
+    ota_interlock_zone_snapshot_t zones[MAX31856_CHANNEL_COUNT];
+    memset(zones, 0, sizeof(zones));
+
+    uint8_t thermo_count = zones_config_get_thermo_count();
+    if (thermo_count > MAX31856_CHANNEL_COUNT) {
+        thermo_count = MAX31856_CHANNEL_COUNT; /* defensive; zones_http.c already validates this */
+    }
+
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t reading_count = 0;
+    if (sim_backend_enabled()) {
+        sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &reading_count);
+    } else if (s_thermo_bus && s_thermo_bus->initialized) {
+        MAX31856_read_all(s_thermo_bus, readings, MAX31856_CHANNEL_COUNT, &reading_count);
+    }
+
+    kiln_io_state_t io_state;
+    memset(&io_state, 0, sizeof(io_state));
+    bool io_read_ok = false;
+    if (s_io) {
+        io_read_ok = (kiln_io_read(s_io, &io_state) == ESP_OK);
+    }
+
+    for (uint8_t i = 0; i < thermo_count; i++) {
+        zones[i].active = true;
+
+        // Find channel i's reading, if it answered this poll -- readings[]
+        // is not guaranteed to be dense/in-order once a channel is absent,
+        // same reasoning as dashboard_http.c's own loop.
+        const MAX31856Reading *r = NULL;
+        for (size_t j = 0; j < reading_count; j++) {
+            if (readings[j].channel == i) {
+                r = &readings[j];
+                break;
+            }
+        }
+        if (r && !r->spi_failed && !isnan(r->tc_temperature_c)) {
+            zones[i].actual_valid = true;
+            zones[i].actual_c = zones_config_apply_cal(i, r->tc_temperature_c);
+        } else {
+            zones[i].actual_valid = false;
+        }
+
+        // heater_commanded: any relay this zone owns is currently on. NOT
+        // io_read_ok (no io this boot / read failed) is treated as
+        // "commanded" too -- an unreadable relay state cannot be assumed
+        // off, same "no valid data -> refuse" rule the temperature check
+        // above follows.
+        if (!io_read_ok) {
+            zones[i].heater_commanded = true;
+            continue;
+        }
+        uint8_t relay_mask = 0;
+        if (zones_config_get_relay_mask(i, &relay_mask)) {
+            zones[i].heater_commanded = (io_state.relay_shadow & relay_mask) != 0;
+        } else {
+            zones[i].heater_commanded = false; /* zone has no relays assigned -- nothing to command */
+        }
+    }
+
+    return ota_interlock_check(&snap, zones, thermo_count, reason_out, reason_cap);
+}
+
+esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
+                          SafetyLinkClass *safety_or_null)
+{
+    s_io = io_or_null;
+    s_thermo_bus = thermo_bus_or_null;
+    s_safety = safety_or_null;
+
     // Required once before any psa_*() call (hmac_sha256() above) --
     // idempotent per the PSA Crypto API spec, but this is the one place in
     // this codebase that needs it, so it is called here rather than
@@ -276,6 +497,7 @@ esp_err_t ota_http_start(void)
     memset(&s_nonce, 0, sizeof(s_nonce));
     memset(&s_lockout_esp, 0, sizeof(s_lockout_esp));
     memset(&s_lockout_pico, 0, sizeof(s_lockout_pico));
+    s_update_claim = OTA_UPDATE_NONE;
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {

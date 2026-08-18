@@ -3155,29 +3155,101 @@ until something concrete needs it is the cheap ordering.
 
 ### 9.3 Authentication — the AP password, not sent over the wire
 
-- [ ] `GET /api/ota/challenge`: 16 random bytes, single use, 30 s expiry
-- [ ] Client proves knowledge via
+- [x] `GET /api/ota/challenge`: 16 random bytes, single use, 30 s expiry.
+      **2026-08-17**: `App/drivers/ota_http.c`'s `ota_challenge_get_handler()`,
+      `esp_fill_random()` entropy, host-tested state machine in
+      `ota_auth.{h,c}` (246/246, `test_ota_auth.c`).
+- [x] Client proves knowledge via
       `HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"), nonce || context)`
-      where context is `"esp"` or `"pico"`. mbedTLS is already linked in
-- [ ] Constant-time comparison; the nonce is invalidated whether or not it matched
-- [ ] Lockout after 3 failures, doubling to a 15-minute ceiling, per endpoint
-- [ ] Every attempt logged with source IP
-- [ ] The derived key, not the literal PSK, is what gets compared — a bug that
-      leaks the compared bytes must not leak the Wi-Fi password
+      where context is `"esp"` or `"pico"`. **2026-08-17**:
+      `ota_http_verify_request()`'s `hmac_sha256()`, via the PSA Crypto API
+      (`psa_import_key()` + `psa_mac_compute()`, not mbedtls's classic
+      `mbedtls_md_hmac()` family, which is gated behind
+      `MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS` in this vendored mbedtls
+      4.x/TF-PSA-Crypto build).
+- [x] Constant-time comparison; the nonce is invalidated whether or not it matched.
+      **2026-08-17**: `ota_auth_constant_time_equal()`;
+      `ota_auth_nonce_invalidate()` runs on both the match and mismatch paths.
+- [x] Lockout after 3 failures, doubling to a 15-minute ceiling, per endpoint.
+      **2026-08-17**: `ota_auth_lockout_record_failure()`/`_record_success()`,
+      independent `s_lockout_esp`/`s_lockout_pico` instances. A stale/expired/
+      never-issued nonce does **not** count as a failure — deliberate, see
+      `ota_http.h`: that is the client's timing, not a wrong-password guess.
+- [x] Every attempt logged with source IP. **2026-08-17**: `get_client_ip()`
+      (`httpd_req_to_sockfd()` + `getpeername()`) on every challenge issue and
+      every verify attempt, via `ESP_LOGI`/`ESP_LOGW`.
+- [x] The derived key, not the literal PSK, is what gets compared — a bug that
+      leaks the compared bytes must not leak the Wi-Fi password. **2026-08-17**:
+      confirmed, `key = HMAC-SHA256(ap_password, context_string)` is the only
+      thing ever fed to the comparison; `key` is `memset` to zero right after use.
 - [ ] Documented plainly: this does not defend against anyone who already knows
-      the AP password, because that is the credential
+      the AP password, because that is the credential. Prose exists in
+      `UPDATE_PROTOCOL.md` §2; left unchecked since nothing user-visible (the
+      OTA web page, §9.6, not yet built) says it yet.
 
 ### 9.4 Interlocks
 
-- [ ] Both update paths refused unless: no profile or autotune running, no heater
+- [x] Both update paths refused unless: no profile or autotune running, no heater
       commanded, `run_state` idle, every zone below a configured ceiling
-      (default 100 °C), and the safety link healthy
-- [ ] Refusals name the specific unmet precondition — "zone 2 is at 340 °C", not
-      "update failed"
-- [ ] Refuse to start either update while the other is in progress
-- [ ] During a Pico update the link goes quiet, so `SAFETY_FAULT_SRC_SAFETY_LINK`
+      (default 100 °C), and the safety link healthy.
+      **2026-08-17**: `ota_interlock_check()` (`App/drivers/ota_interlock.{h,c}`)
+      is the pure, host-tested precondition logic (mirrors `ota_auth.c`'s
+      pure/impure split, same header-comment reasoning copied over and
+      adapted) -- no ESP-IDF/FreeRTOS dependency, takes a plain
+      `ota_interlock_snapshot_t` + per-zone `ota_interlock_zone_snapshot_t[]`
+      and returns OK or a refusal reason. `ota_http_check_interlocks()`
+      (`App/drivers/ota_http.{h,c}`) is the ESP-IDF glue that builds the
+      snapshot: `profile_executor_get_status()` for run state,
+      `autotune_engine_is_active()`, `safety_link_get_status()`,
+      `run_state_boot_record_interrupted()` for the reboot-survived-a-firing
+      case, and -- deliberately NOT from `profile_executor`'s own `zones[]`
+      array, which only reflects zones in the *last/current run* and reads
+      as empty while IDLE (see the long comment in `ota_http.c` explaining
+      why that would silently skip every zone precisely when this interlock
+      matters most) -- per-zone temperature (`MAX31856_read_all()` +
+      `zones_config_apply_cal()`) and heater-commanded state
+      (`kiln_io_read()`'s `relay_shadow` masked by
+      `zones_config_get_relay_mask()`), the same direct-hardware-read
+      pattern `dashboard_http.c`'s `/api/status` already uses. Default
+      ceiling is `OTA_INTERLOCK_TEMP_CEILING_C` (100.0f) -- no config_store
+      item exists for this yet on the ESP side, same honest gap as
+      SaftyFW's own hardcoded `UPDATE_TASK_TEMP_CEILING_C` (SaftyFW/TODO.md
+      10.9). `ota_http_start()` gained `io_or_null`/`thermo_bus_or_null`
+      parameters (was safety-only) to support the direct hardware reads;
+      `App/main.c`'s call site updated to match `dashboard_http_start()`'s
+      own pointers. 30 new host tests, `App/test/test_ota_interlock.c`
+      (276/276 total, up from 246/246).
+- [x] Refusals name the specific unmet precondition — "zone 2 is at 340 °C", not
+      "update failed". **2026-08-17**: every refusal path in
+      `ota_interlock_check()` names the specific zone (0-based index, matching
+      this codebase's existing `"zone %u"` convention, e.g.
+      `profiles_http.c`'s feasibility-check messages) and value --
+      `"zone 2 is at 340 C"`, `"zone 1 heater is commanded on"`, `"safety
+      link is down"`, `"a profile is running"`/`"...is paused"`, `"an update
+      is already in progress"`, `"a firing was interrupted by a reboot and
+      has not been acknowledged"` -- never a generic string.
+- [x] Refuse to start either update while the other is in progress.
+      **2026-08-17**: single in-RAM mutex, `ota_http_update_try_begin()`/
+      `_update_end()`/`_update_in_progress()` (`App/drivers/ota_http.{h,c}`),
+      guarded by the same `s_ota_lock` the nonce/lockout state already uses.
+      One slot across BOTH processors, not one per processor, per TODO.md's
+      own "single update mutex" phrasing --
+      `ota_interlock_snapshot_t::other_update_in_progress` is checked FIRST
+      in `ota_interlock_check()` (cheapest, and orthogonal to kiln state).
+      **Not built this pass**: no transfer handler exists yet to actually
+      call `ota_http_update_try_begin()`/`_end()` (that's 9.5) -- the mutex
+      is real and tested, but nothing acquires it today. The functions are
+      exposed for 9.5's future POST handlers to call on the first byte of a
+      transfer and release on every exit path.
+- [x] During a Pico update the link goes quiet, so `SAFETY_FAULT_SRC_SAFETY_LINK`
       asserts and blocks heating. **Correct — do not special-case it.** Suppress
-      only the alarm *text*, never the block in `relay_authority_on_blocked()`
+      only the alarm *text*, never the block in `relay_authority_on_blocked()`.
+      **2026-08-17**: nothing in this pass touches `relay_authority.c` --
+      confirmed unmodified. There is no Pico-update transfer handler yet
+      (9.5) to trigger this path at all, so there is nothing to special-case
+      or verify end-to-end; recorded here as "correctly not touched" rather
+      than "verified," since it cannot be exercised without 9.5's code
+      existing.
 
 ### 9.5 Transfer
 

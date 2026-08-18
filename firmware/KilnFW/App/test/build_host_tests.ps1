@@ -25,12 +25,14 @@ $sources = @(
     (Join-Path $testDir "test_pid_autotune.c"),
     (Join-Path $testDir "test_sim_kiln.c"),
     (Join-Path $testDir "test_ota_auth.c"),
+    (Join-Path $testDir "test_ota_interlock.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
     (Join-Path $driversDir "heater_output.c"),
     (Join-Path $driversDir "pid_autotune.c"),
-    (Join-Path $driversDir "ota_auth.c")
+    (Join-Path $driversDir "ota_auth.c"),
+    (Join-Path $driversDir "ota_interlock.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

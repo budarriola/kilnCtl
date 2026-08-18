@@ -579,13 +579,23 @@ void app_main(void)
                  esp_err_to_name(readiness_err));
     }
 
-    // CommonFW/docs/UPDATE_PROTOCOL.md section 2: GET /api/ota/challenge
-    // only. Auth logic (nonce lifecycle, lockout) is real and host-tested
-    // (App/test/test_ota_auth.c); the streamed OTA upload handlers
-    // themselves (POST /api/ota/esp, POST /api/ota/pico) are not built yet
-    // -- ota_http_verify_request() is exposed for whichever future pass
-    // adds them.
-    esp_err_t ota_http_err = ota_http_start();
+    // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:
+    // GET /api/ota/challenge, plus the interlock check and update mutex
+    // (ota_interlock.{h,c}, ota_http_check_interlocks()/_update_try_begin()/
+    // _update_end()). Auth logic (nonce lifecycle, lockout) and the
+    // interlock precondition logic are both real and host-tested
+    // (App/test/test_ota_auth.c, App/test/test_ota_interlock.c); the
+    // streamed OTA upload handlers themselves (POST /api/ota/esp,
+    // POST /api/ota/pico) are not built yet -- ota_http_verify_request()
+    // and ota_http_check_interlocks() are exposed for whichever future pass
+    // adds them. Same io/thermo_bus/safety pointers as
+    // dashboard_http_start() just above, for the same reason: the
+    // interlock's per-zone checks read hardware state directly rather than
+    // through profile_executor, so they see the truth whether or not a
+    // profile happens to be running.
+    esp_err_t ota_http_err = ota_http_start(io_ready ? &kio : NULL,
+                                            thermo_bus.initialized ? &thermo_bus : NULL,
+                                            safety_err == ESP_OK ? &safety : NULL);
     if (ota_http_err != ESP_OK) {
         ESP_LOGW(TAG, "ota_http_start failed: %s -- no /api/ota/challenge this boot",
                  esp_err_to_name(ota_http_err));
