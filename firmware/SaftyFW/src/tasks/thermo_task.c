@@ -116,6 +116,39 @@ static void thermo_task_fn(void *arg)
 {
     (void)arg;
 
+    // ~DRDY: input, external 10k pull-up (R2, THERMOCOUPLE.md section 1) --
+    // no internal pull requested, the board already provides one. Falling
+    // edge: the part drives ~DRDY low when a new conversion result is
+    // available (datasheet; also THERMOCOUPLE.md section 1's "~DRDY problem"
+    // discussion).
+    //
+    // Armed HERE, at the top of the task body, not from thermo_task_start()
+    // (main.c, pre-scheduler) -- deliberately. max31856_configure() (main.c
+    // step 6) leaves CMODE running (automatic conversion), so ~DRDY starts
+    // toggling on the part's own free-running cadence the moment that call
+    // returns, well before main() reaches vTaskStartScheduler() (steps 7's
+    // other _start() calls all still have to run first). Arming the GPIO IRQ
+    // any earlier than this -- e.g. back in thermo_task_start() -- lets
+    // thermo_drdy_isr() fire and call vTaskNotifyGiveFromISR()/
+    // portYIELD_FROM_ISR() while the scheduler has not started yet: on this
+    // SMP port, core1 and the cross-core critical-section locks it and
+    // pxCurrentTCBs[] depend on are not brought up until
+    // vTaskStartScheduler() runs (xPortStartScheduler() in port.c), so an
+    // ISR touching kernel task/notification state ahead of that is exactly
+    // the kind of pre-scheduler FreeRTOS-API-from-ISR call the docs warn
+    // against -- and, on real hardware, corrupts scheduler state badly
+    // enough to double-fault the very first time it matters (observed via
+    // OpenOCD/GDB the first time this firmware ran on a real Pico). This
+    // task function only ever runs once vTaskStartScheduler() has handed it
+    // control, so arming the IRQ as the first thing it does is the same
+    // "task handle must exist before the ISR can fire" discipline the old
+    // comment here described, extended one step further: the *scheduler*
+    // must be running too.
+    gpio_init(SAFTYFW_PIN_THERMO_DRDY);
+    gpio_set_dir(SAFTYFW_PIN_THERMO_DRDY, GPIO_IN);
+    gpio_set_irq_enabled_with_callback(SAFTYFW_PIN_THERMO_DRDY, GPIO_IRQ_EDGE_FALL, true,
+                                        &thermo_drdy_isr);
+
     for (;;) {
         uint32_t conv_ms = max31856_conversion_time_ms();
         uint32_t timeout_ms = (conv_ms > 0)
@@ -183,17 +216,14 @@ bool thermo_task_start(void)
 
     vTaskCoreAffinitySet(s_task_handle, SAFTYFW_CORE_TRIP_PATH);
 
-    // ~DRDY: input, external 10k pull-up (R2, THERMOCOUPLE.md section 1) --
-    // no internal pull requested, the board already provides one. Falling
-    // edge: the part drives ~DRDY low when a new conversion result is
-    // available (datasheet; also THERMOCOUPLE.md section 1's "~DRDY problem"
-    // discussion). gpio_set_irq_enabled_with_callback() must run after
-    // s_task_handle exists, since thermo_drdy_isr() dereferences it the
-    // instant an edge can occur.
-    gpio_init(SAFTYFW_PIN_THERMO_DRDY);
-    gpio_set_dir(SAFTYFW_PIN_THERMO_DRDY, GPIO_IN);
-    gpio_set_irq_enabled_with_callback(SAFTYFW_PIN_THERMO_DRDY, GPIO_IRQ_EDGE_FALL, true,
-                                        &thermo_drdy_isr);
-
+    // The ~DRDY GPIO IRQ is deliberately NOT armed here. s_task_handle is
+    // valid at this point (xTaskCreate() above already set it), but the
+    // *scheduler* is not running yet -- thermo_task_start() is called from
+    // main(), before vTaskStartScheduler(). Arming the IRQ this early lets it
+    // fire (the MAX31856 free-runs ~DRDY once max31856_configure() leaves
+    // CMODE running, main.c step 6, well before step 7 finishes) and call
+    // FreeRTOS ISR-safe APIs before the kernel's SMP state exists yet -- see
+    // thermo_task_fn()'s header comment, where the IRQ is armed instead, for
+    // the full reasoning and the real hardware fault this caused.
     return true;
 }
