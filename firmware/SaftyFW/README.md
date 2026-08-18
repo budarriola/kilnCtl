@@ -1,19 +1,27 @@
 # SaftyFW — kiln safety processor firmware
 
-> **Status:** early implementation (Phase 2 skeleton) · **Last reviewed:** 2026-08-16
+> **Status:** early implementation, first real-hardware boot succeeded · **Last reviewed:** 2026-08-18
 > **Keep this file current.** It is the entry point; if the document set or the
 > headline facts change, update it in the same commit.
 
 FreeRTOS firmware for the **Raspberry Pi Pico (RP2040)**, designator **A1** on
 the kilnCtl main board, running in the isolated `GND_Safty` domain.
 
-**Status: Phase 2 skeleton only, build-verified, never run on hardware.** The
-pico-sdk + FreeRTOS-Kernel (SMP) CMake project, the boot sequence, the
+**2026-08-18: first flash to a real Pico.** Immediately double-faulted at
+boot (`~DRDY` GPIO IRQ armed pre-`vTaskStartScheduler()` called FreeRTOS
+ISR-safe APIs before the SMP port's cross-core scheduler state existed --
+diagnosed via GDB against OpenOCD's gdbserver, fixed in
+`src/tasks/thermo_task.c` by arming the IRQ from inside the task body
+instead of from `main()`). After the fix, confirmed via GDB that the idle
+task runs normally (thread mode, no exception). No CT transformers or
+thermocouple ICs attached yet, so `current_task`/`thermo_task`'s real sensor
+paths are still unverified against real hardware -- only scheduler bring-up
+and the boot sequence itself are hardware-confirmed so far.
+
+The pico-sdk + FreeRTOS-Kernel (SMP) CMake project, the boot sequence, the
 task/priority/core-affinity shells and the isolation CI grep check exist under
 `src/` and compile clean under the real arm-none-eabi-gcc/pico-sdk toolchain —
-see `TODO.md` Phase 2 for exactly what that does and does not include. No task
-does its real work yet (no thermocouple reads, no ADC sampling, no relay
-authority, no link framing) — that is Phases 3 onward. This directory also
+see `TODO.md` for what's built vs. still pending. This directory also
 still holds the design documents below, written before implementation so the
 thresholds, the wire protocol and the failure analysis could be argued about
 while they were still cheap to change.
