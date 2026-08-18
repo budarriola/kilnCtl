@@ -55,6 +55,7 @@
   .zone { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.7em 1em; margin-bottom: 0.7em; }
   .relaybits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
+  .thermobits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
   .row2 { display: flex; gap: 0.7em; }
   .row2 > div { flex: 1; }
   button { min-height: var(--ui-touch); margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
@@ -84,10 +85,13 @@
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 <a href="/">&larr; Dashboard</a>
 <h1>Thermocouples &amp; Zones</h1>
-<p>One zone per configured thermocouple channel. PID tuning lives here too,
-per the project's settled page layout. Calibration offset is stored here
-but not yet applied to live readings anywhere -- that's a separate,
-not-yet-built change to the readout path.</p>
+<p>Each zone reads one or more MAX31856 thermocouple channels -- pick which
+channels feed a zone below; when more than one is checked, the zone's control
+temperature is the average of that channel set's valid readings
+(thermo_combine.c). PID tuning lives here too, per the project's settled page
+layout. Calibration offset is stored here but not yet applied to live
+readings anywhere -- that's a separate, not-yet-built change to the readout
+path.</p>
 <p>A running firing profile drives this zone's relay(s) toward its target using
 whichever control mode is selected below -- PID mode uses these Kp/Ki/Kd
 values, rendered onto the relay as a slow (1-minute) on/off duty cycle, not
@@ -209,7 +213,7 @@ where they are not.</p>
 var RELAY_NAMES = ['Relay1', 'Relay2', 'Relay3', 'Relay4'];
 var current = { thermo_count: 0, relay_count: 0, zones: [] };
 
-function zoneBlock(z, i, relayCount) {
+function zoneBlock(z, i, relayCount, thermoCount) {
   var div = document.createElement('div');
   div.className = 'zone';
   div.dataset.index = i;
@@ -218,6 +222,18 @@ function zoneBlock(z, i, relayCount) {
     var checked = (z.relay_mask & (1 << r)) ? ' checked' : '';
     relayHtml += '<label><input type="checkbox" class="relaybit" data-bit="' + r + '"' + checked + '> ' +
                  RELAY_NAMES[r] + '</label>';
+  }
+  /* Channel range matches zones_http.c's parse_zone_fields() validation
+   * (valid_thermo_bits derived from thermo_count, exactly like relay_mask's
+   * valid_bits is derived from relay_count above) -- channels beyond the
+   * currently configured zone count are rejected by the server, so offering
+   * them here would just be a checkbox that 400s on save. */
+  var thermoMask = z.thermo_mask || 0;
+  var thermoHtml = '';
+  for (var tch = 0; tch < thermoCount; tch++) {
+    var tchecked = (thermoMask & (1 << tch)) ? ' checked' : '';
+    thermoHtml += '<label><input type="checkbox" class="thermobit" data-bit="' + tch + '"' + tchecked + '> ' +
+                  'Channel ' + (tch + 1) + '</label>';
   }
   var mode = z.control_mode || 0;
   var modeHtml = '<select class="mode">' +
@@ -245,9 +261,13 @@ function zoneBlock(z, i, relayCount) {
       : 'not identified yet -- run Autotune below and accept the result') +
     '</p>';
   div.innerHTML =
-    '<h2>Zone ' + i + ' (channel ' + i + ')</h2>' +
+    '<h2>Zone ' + i + '</h2>' +
     '<label>Name</label><input type="text" class="name" maxlength="15" value="' + (z.name || '') + '">' +
     '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
+    '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
+    '<p class="hint">Checking more than one channel averages their valid readings into this ' +
+    'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
+    'same as an unplugged/faulted thermocouple.</p>' +
     '<label>Control mode</label>' + modeHtml +
     '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
     '<div class="row2">' +
@@ -321,8 +341,13 @@ function renderZones() {
     return;
   }
   for (var i = 0; i < thermoCount; i++) {
-    var z = current.zones[i] || { name: '', relay_mask: 0, cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0 };
-    el.appendChild(zoneBlock(z, i, relayCount));
+    /* thermo_mask default (1 << i) mirrors zones_http.c's own legacy-mapping
+     * fallback (migrate_zones_cfg_v1_to_current() / parse_zone_fields()) for
+     * a zone that has never been explicitly configured -- "zone i reads
+     * channel i" -- so a freshly grown thermoCount starts a new zone off
+     * reading a real channel instead of nothing. */
+    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0 };
+    el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
   }
 }
 
@@ -359,8 +384,13 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     div.querySelectorAll('.relaybit').forEach(function (cb) {
       if (cb.checked) mask |= (1 << parseInt(cb.dataset.bit, 10));
     });
+    var thermoMask = 0;
+    div.querySelectorAll('.thermobit').forEach(function (cb) {
+      if (cb.checked) thermoMask |= (1 << parseInt(cb.dataset.bit, 10));
+    });
     params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
     params.push('z' + i + '_relay_mask=' + mask);
+    params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_cal=' + div.querySelector('.cal').value);
     params.push('z' + i + '_kp=' + div.querySelector('.kp').value);
     params.push('z' + i + '_ki=' + div.querySelector('.ki').value);
