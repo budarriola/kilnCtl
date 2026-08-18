@@ -1,9 +1,43 @@
 # Firmware Update Protocol — both processors, one password
 
-> **Status:** planning, mostly nothing built — **exception:** section 3's ESP
+> **Status:** planning, mostly nothing built — **exceptions:** section 3's ESP
 > partition-table + rollback foundation landed 2026-08-17 (host-build-verified,
-> not yet flashed to physical hardware). Sections 2, 4, 5, 6 are all still
-> planning only. · **Last reviewed:** 2026-08-17
+> not yet flashed to physical hardware), and section 4's ESP-side sender half
+> (KilnFW: `App/drivers/ota_pico_relay.{h,c}`, `safety_link.c`'s
+> `UPDATE_STATUS` handling, `POST /api/ota/pico`) landed the same day —
+> host-build-verified only, RP2040 receive side (SaftyFW) was already frozen
+> before this pass and untouched by it. Sections 2, 5, 6 are still planning
+> only. · **Last reviewed:** 2026-08-17
+>
+> **Section 4 deviations from this doc's prose, resolved in code (code wins,
+> fix the doc — see this note):**
+> 1. **`UPDATE_END`'s "4 B: image CRC32 repeated"** is ambiguous prose. Both
+>    firmwares now agree on one reading: the payload is the same 4-byte
+>    crc32 already carried in `UPDATE_BEGIN`, sent again once (not the value
+>    written twice) — SaftyFW's `update_task_process_end()` compares it
+>    against `s_header.crc32` and logs (does not act on) a mismatch; the
+>    read-back-from-flash CRC is what actually gates acceptance either way.
+> 2. **The ESP's retransmission-round accounting is a simplification, not a
+>    mirror**, of SaftyFW's `update_receiver.h` round-counting algorithm:
+>    `ota_pico_relay.c` retries whatever chunks the Pico's gap reports name,
+>    for up to 10 rounds, then always attempts `UPDATE_END` regardless and
+>    lets the Pico's own final CRC verification be the arbiter — consistent
+>    with this section's own "acknowledging each frame is not what makes the
+>    transfer correct — the final verify is," but not an attempt to
+>    reconstruct the Pico's exact per-pass gap-cursor bookkeeping on the ESP
+>    side.
+> 3. **`UPDATE_BEGIN`'s `version` field placeholder**: the ESP has no real
+>    build-identity string available for a raw (non-multipart) browser
+>    upload — no filename, no embedded-version parser for a raw `.bin`. It
+>    sends a fixed 16-byte placeholder (`"esp-relay-upload"`) today; a future
+>    pass may replace this with something more meaningful (a caller-supplied
+>    header, or a filename if a multipart form is adopted).
+> 4. **`POST /api/ota/pico` responds `202 Accepted` immediately** after
+>    staging finishes, rather than holding the HTTP connection open for the
+>    ~35 s+ relay — a design choice this pass made, not something this
+>    section specifies the shape of. `GET /api/ota/pico/status` (new) is the
+>    poll-back endpoint. See `firmware/KilnFW/App/drivers/ota_http.h`'s
+>    header comment on `ota_pico_do_stage()`/`ota_pico_post_handler()`.
 > **Keep this file current.** This is a contract between two firmwares and a web
 > UI. If any one of the three changes shape, edit this file in the same change —
 > a stale update protocol is the kind of thing that is only discovered while
@@ -574,10 +608,9 @@ during development will be driven by an agent:
       leaving unchecked since nothing new was added to say so anywhere a
       user would see it (e.g. the eventual OTA web page, not yet built).
 
-**Not built this pass**: `POST /api/ota/esp` and `POST /api/ota/pico`
-themselves -- `ota_http_verify_request()` is exposed and host-buildable but
-has no caller yet. Those need the actual streamed `esp_ota_ops` write path
-and the Pico-image relay through `pico_img`, both still open (sections 3/4).
+**Built as of 2026-08-17**: both `POST /api/ota/esp` and `POST /api/ota/pico`
+now exist -- `ota_http_verify_request()` has real callers. See the "ESP OTA"
+and "Pico update" sections below for what each actually covers.
 
 **Version compatibility** (`LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`)
 - [ ] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
@@ -635,21 +668,72 @@ and the Pico-image relay through `pico_img`, both still open (sections 3/4).
       built this pass**, deliberately out of scope (see `KilnFW/TODO.md` 9.5)
 
 **Pico update**
-- [ ] Five frames added to `LINK_PROTOCOL.md` and to `CommonFW`'s codecs
-- [ ] **Isolated-link error rate measured at 115200 before this is built**
-- [ ] `UPDATE_DATA` sent unacknowledged; Pico keeps a received-range bitmap and
-      emits a gap report every 500 ms; ESP retransmits only the named ranges
-- [ ] Retransmission rounds capped, with a clean failure rather than a loop
-- [ ] Erase handled asynchronously, not inside a frame handler
-- [ ] Streamed to flash; no whole-image RAM buffer
-- [ ] CRC verified by reading back from flash, not from the received stream
-- [ ] Progress reported at least every 2 s
+- [x] Five frames -- **2026-08-17, mirrored rather than shared**: ids exist in
+      both `SaftyFW/src/tasks/link_frame.h` (frozen, previous pass) and
+      `KilnFW/App/drivers/uart_task_ids.h`/`safety_link.h` (this pass), as
+      matching `#define`s/structs in each codebase rather than one shared
+      `CommonFW` codec -- the two firmwares are separate build targets and
+      `CommonFW`'s own framing layer (`kilnlink_frame.{c,h}`) carries only
+      the envelope, not per-frame payload logic, per that layer's existing
+      scope. Not what this item's exact wording ("to `CommonFW`'s codecs")
+      envisioned; flagged as a deviation, not silently reinterpreted.
+- [ ] **Isolated-link error rate measured at 115200 before this is built** --
+      still not measured; this pass built against the documented frame
+      contracts without that measurement, same gap this item already named.
+- [x] `UPDATE_DATA` sent unacknowledged; Pico keeps a received-range bitmap
+      and emits a gap report every 500 ms (SaftyFW, already frozen);
+      **2026-08-17**: the ESP side (`KilnFW/App/drivers/ota_pico_relay.c`)
+      now retransmits only the named ranges, polling `UPDATE_STATUS` for
+      gap reports.
+- [x] Retransmission rounds capped, with a clean failure rather than a loop
+      -- **2026-08-17, ESP side**: `ota_pico_relay.c` caps at 10 rounds
+      (`RELAY_MAX_RETRANSMIT_ROUNDS`, matching SaftyFW's own
+      `UPDATE_MAX_RETRANSMIT_ROUNDS`) and aborts cleanly on
+      `UPDATE_STATUS_ERR_RETRANSMIT_CAP` from the Pico -- see this file's
+      top-of-document note on how this side's round accounting is a
+      simplification, not an exact mirror, of SaftyFW's own algorithm.
+- [x] Erase handled asynchronously, not inside a frame handler (SaftyFW,
+      already frozen -- `update_task.c`'s block-at-a-time
+      `flash_safe_execute()` with watchdog check-ins before/after each
+      64K block, run from `update_task`'s own task, not `link_task`'s frame
+      handler).
+- [x] Streamed to flash; no whole-image RAM buffer -- true on both sides now:
+      SaftyFW (already frozen) programs 248-byte `UPDATE_DATA` chunks
+      straight to flash; **2026-08-17**, KilnFW's `ota_pico_relay.c` reads
+      the staged image out of `pico_img` one 248-byte chunk at a time via
+      `esp_partition_read()`, never holding the whole image in RAM.
+- [x] CRC verified by reading back from flash, not from the received stream
+      (SaftyFW, already frozen -- `update_task_process_end()` CRCs the
+      XIP-mapped slot itself, not the receive-side bitmap).
+- [x] Progress reported at least every 2 s -- **2026-08-17, polled not
+      pushed** (this section's own honest math already flagged a silent bar
+      as the risk; a poll-back getter addresses the same risk without a
+      push channel): `ota_pico_relay_get_status()` updates at each phase
+      transition and roughly every 10% during streaming/retransmit, backed
+      by a small `GET /api/ota/pico/status` JSON endpoint.
 
 **Relaying through the ESP**
-- [ ] HTTP body read no faster than the link drains — TCP backpressure, no
-      read-ahead buffer with nowhere to go
-- [ ] Socket timeout covers the whole ~35 s transfer, not one chunk
-- [ ] Documented that a browser or proxy may time out where the MCP path will not
+- [x] HTTP body read no faster than the link drains -- **2026-08-17,
+      superseded by staging (section 3)**: the constraint this bullet
+      describes was written for the streaming-through design section 3 later
+      abandoned in favor of `pico_img` staging. `ota_pico_do_stage()` still
+      follows the same "never read ahead of what has been written" discipline
+      for its own (fast, Wi-Fi-speed) write into `pico_img`, for the same
+      underlying reason (nothing downstream has anywhere to put read-ahead
+      data), even though there is no longer a slow link on the other end of
+      that particular write.
+- [x] Socket timeout covers the whole ~35 s transfer, not one chunk --
+      **2026-08-17, moot by design**: the ~35 s+ relay now happens entirely
+      AFTER `POST /api/ota/pico` has already responded (`202 Accepted`) and
+      handed off to a background task, so no HTTP connection stays open for
+      it at all -- see `ota_pico_relay.h`'s header comment. The staging
+      write's own (much shorter) socket timeout is 30 s, same value/reasoning
+      as the ESP self-update path.
+- [x] Documented that a browser or proxy may time out where the MCP path
+      will not -- true of the ESP self-update path (holds the connection
+      open); the Pico path's async `202 Accepted` + poll design sidesteps
+      this specific risk by construction rather than merely documenting it,
+      which is a stronger answer to the same concern this bullet raised.
 
 **Reboots and concurrency**
 - [ ] `SAFETY_CMD_ANNOUNCE_REBOOT` suppresses S6(b) for a bounded grace window

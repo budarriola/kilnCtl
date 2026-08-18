@@ -9,7 +9,9 @@
 #include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_random.h"
+#include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
 #include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
@@ -25,6 +27,7 @@
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "ota_auth.h"
+#include "ota_pico_relay.h"
 #include "ota_record.h"
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
@@ -535,7 +538,7 @@ ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason
 
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
-static const char *OTA_ESP_MAC_HEADER = "X-Ota-Mac";
+static const char *OTA_MAC_HEADER = "X-Ota-Mac"; // shared by both /api/ota/esp and /api/ota/pico
 
 // Streamed in fixed-size chunks so the ~1.1-2 MB image never sits in RAM
 // whole (UPDATE_PROTOCOL.md section 3: "a full image will not fit in RAM").
@@ -838,7 +841,7 @@ static esp_err_t ota_esp_post_handler(httpd_req_t *req)
 
     // 1. X-Ota-Mac header present and exactly 64 hex chars -- refused
     // before the body is touched at all, per ota_http.h's documented order.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_ESP_MAC_HEADER);
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
     if (mac_hex_len != 64) {
         ESP_LOGW(TAG, "OTA esp update from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
                  ip, (unsigned)mac_hex_len);
@@ -846,7 +849,7 @@ static esp_err_t ota_esp_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
     char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, OTA_ESP_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
         return ESP_OK;
     }
@@ -895,6 +898,253 @@ static esp_err_t ota_esp_post_handler(httpd_req_t *req)
     // it exactly once, on every exit path -- see that function's own doc
     // comment.
     ota_esp_do_transfer(req, ip);
+    return ESP_OK;
+}
+
+// --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------
+// See ota_http.h's header comment on this section for the full wire
+// contract and the mutex-ownership handoff to ota_pico_relay.c.
+
+// Same static-not-stack reasoning as OTA_ESP_CHUNK_SIZE/s_ota_esp_chunk
+// above. A SEPARATE buffer rather than reusing s_ota_esp_chunk: the two
+// could technically share one (the cross-processor update mutex guarantees
+// only one of the ESP or Pico transfer is ever in flight at a time), but
+// keeping them distinct keeps each transfer's code readable on its own
+// without a reader having to go verify that cross-file invariant first.
+#define OTA_PICO_CHUNK_SIZE 4096
+static uint8_t s_ota_pico_chunk[OTA_PICO_CHUNK_SIZE];
+
+// Streams the browser upload into `pico_img`, computing a running CRC32
+// alongside it (esp_rom_crc32_le() -- see ota_http.h's header comment for
+// why this, not a second hand-rolled CRC32, is used: it is the same
+// IEEE 802.3/zlib algorithm SaftyFW's bootloader/crc32.c implements,
+// confirmed by reading both this header's own doc comment and that file --
+// same poly 0xEDB88320 reflected, same init/final XOR 0xFFFFFFFF, reached
+// via esp_rom_crc32_le(0xFFFFFFFF, ...) chained across chunks then a final
+// XOR, per esp_rom_crc.h's own "add ~ at the beginning and the end" chaining
+// recipe). On success, hands off to ota_pico_relay_start() and returns
+// without releasing the update mutex (see ota_http.h's header comment for
+// why); on any failure, releases the mutex itself and responds with a
+// specific error.
+static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
+{
+    bool started_relay = false;
+    char fail_reason[256] = "unknown failure";
+    // Declared up here, not at first use, so every goto below (including
+    // the very first check) can jump straight to the single cleanup block
+    // without skipping past an initializer -- same discipline
+    // ota_esp_do_transfer() uses for handle/ota_began/target.
+    size_t content_len = 0;
+    const esp_partition_t *part = NULL;
+    uint32_t crc = 0xFFFFFFFFu; // esp_rom_crc.h's own chaining recipe -- see this function's doc comment
+    size_t written = 0;
+
+    if (!s_safety) {
+        snprintf(fail_reason, sizeof(fail_reason), "no safety link configured this boot -- nothing to relay to");
+        ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
+        goto cleanup;
+    }
+
+    content_len = req->content_len;
+    if (content_len == 0) {
+        snprintf(fail_reason, sizeof(fail_reason), "missing Content-Length / empty body");
+        ESP_LOGW(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
+        goto cleanup;
+    }
+
+    part = ota_pico_img_partition();
+    if (!part) {
+        snprintf(fail_reason, sizeof(fail_reason), "pico_img staging partition not found");
+        ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
+        goto cleanup;
+    }
+    if (content_len > part->size) {
+        snprintf(fail_reason, sizeof(fail_reason), "image (%u B) larger than the pico_img partition (%u B)",
+                 (unsigned)content_len, (unsigned)part->size);
+        ESP_LOGW(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, fail_reason);
+        goto cleanup;
+    }
+
+    // Same per-connection socket timeout rationale as ota_esp_do_transfer()
+    // above -- a per-recv-call bound, not a whole-transfer deadline.
+    {
+        int sockfd = httpd_req_to_sockfd(req);
+        if (sockfd >= 0) {
+            struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+            if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+                ESP_LOGW(TAG, "OTA pico update from %s: could not raise the socket receive timeout", ip);
+            }
+        }
+    }
+
+    // Erase only what this upload needs, rounded up to the flash sector
+    // size esp_partition_write() requires already-erased -- not the whole
+    // 896K partition, which would cost real time for no benefit on a
+    // typical (much smaller) Pico image.
+    {
+        uint32_t sector = esp_partition_get_main_flash_sector_size();
+        size_t erase_len = ((content_len + sector - 1u) / sector) * sector;
+        esp_err_t erc = esp_partition_erase_range(part, 0, erase_len);
+        if (erc != ESP_OK) {
+            snprintf(fail_reason, sizeof(fail_reason), "pico_img erase failed: %s", esp_err_to_name(erc));
+            ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash erase failed");
+            goto cleanup;
+        }
+    }
+
+    // Stream the body into pico_img, one httpd_req_recv() per
+    // esp_partition_write(), same "never read ahead of what has been
+    // consumed" discipline as ota_esp_do_transfer() -- and the same reason
+    // it matters here: UPDATE_PROTOCOL.md's "do not read the request body
+    // faster than the link drains" is about the SLOW isolated-link relay
+    // that happens after this handler returns, but reading the HTTP body
+    // no faster than it can be written to flash is the same principle
+    // applied to this (fast) staging step.
+    int last_logged_decile = 0;
+    while (written < content_len) {
+        size_t want = content_len - written;
+        if (want > sizeof(s_ota_pico_chunk)) {
+            want = sizeof(s_ota_pico_chunk);
+        }
+        int ret = httpd_req_recv(req, (char *)s_ota_pico_chunk, want);
+        if (ret <= 0) {
+            snprintf(fail_reason, sizeof(fail_reason), "body read failed/closed at %u/%u bytes (%d)",
+                     (unsigned)written, (unsigned)content_len, ret);
+            ESP_LOGW(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed mid-transfer");
+            goto cleanup;
+        }
+
+        esp_err_t werr = esp_partition_write(part, written, s_ota_pico_chunk, (size_t)ret);
+        if (werr != ESP_OK) {
+            snprintf(fail_reason, sizeof(fail_reason), "pico_img write failed at %u bytes: %s",
+                     (unsigned)written, esp_err_to_name(werr));
+            ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
+            goto cleanup;
+        }
+        crc = esp_rom_crc32_le(crc, s_ota_pico_chunk, (uint32_t)ret);
+        written += (size_t)ret;
+
+        int decile = (int)((written * 10u) / content_len);
+        if (decile > last_logged_decile) {
+            last_logged_decile = decile;
+            ESP_LOGI(TAG, "OTA pico update from %s: staged %u%% (%u/%u bytes)", ip,
+                     (unsigned)((written * 100u) / content_len), (unsigned)written, (unsigned)content_len);
+        }
+    }
+    crc ^= 0xFFFFFFFFu; // final XOR -- see this function's doc comment
+
+    ESP_LOGI(TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",
+             ip, (unsigned)written, (unsigned)crc);
+
+    if (!ota_pico_relay_start(s_safety, (uint32_t)written, crc, NULL)) {
+        snprintf(fail_reason, sizeof(fail_reason), "image staged, but the relay task could not be started");
+        ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
+        goto cleanup;
+    }
+    started_relay = true;
+
+    {
+        char body[160];
+        int n = snprintf(body, sizeof(body),
+                          "{\"ok\":true,\"status\":\"relay_started\",\"bytes\":%u,\"crc32\":\"0x%08X\"}",
+                          (unsigned)written, (unsigned)crc);
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, body, n);
+    }
+
+cleanup:
+    // Ownership handoff: if the relay task was successfully started, IT now
+    // owns calling ota_http_update_end() (see ota_http.h's header comment
+    // and ota_pico_relay.h's own for the full reasoning) -- calling it here
+    // too would release a claim the relay task is still actively using.
+    // Every OTHER path above (staging never got far enough to start a
+    // relay) still owns cleanup itself, exactly like ota_esp_do_transfer()'s
+    // single cleanup block.
+    if (!started_relay) {
+        ota_http_update_end();
+    }
+}
+
+static esp_err_t ota_pico_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    get_client_ip(req, ip, sizeof(ip));
+
+    // Same four-step order as ota_esp_post_handler() -- see ota_http.h's
+    // documented order and that handler's own comments for why each step
+    // precedes the next.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(TAG, "OTA pico update from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
+                 ip, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return ESP_OK;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return ESP_OK;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(TAG, "OTA pico update from %s: X-Ota-Mac is not valid hex", ip);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return ESP_OK;
+    }
+
+    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_PICO, mac, ip);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return ESP_OK;
+    }
+
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+        ESP_LOGW(TAG, "OTA pico update from %s: refused by interlock: %s", ip, reason);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
+        ESP_LOGW(TAG, "OTA pico update from %s: refused, an update is already in progress", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // From here, ota_pico_do_stage() owns the mutex -- either it releases
+    // it itself (staging failure) or it starts the relay task, which then
+    // owns release. See that function's own doc comment.
+    ota_pico_do_stage(req, ip);
+    return ESP_OK;
+}
+
+static esp_err_t ota_pico_status_get_handler(httpd_req_t *req)
+{
+    ota_pico_relay_status_t st;
+    ota_pico_relay_get_status(&st);
+
+    // last_error is always built by this codebase's own snprintf() calls
+    // (ota_pico_relay.c's relay_set_error()/format_update_error()) -- never
+    // copied verbatim from an external source -- so it cannot contain a
+    // raw '"' or '\' that would need JSON escaping here.
+    char body[256];
+    int n = snprintf(body, sizeof(body), "{\"phase\":\"%s\",\"percent\":%u,\"last_error\":\"%s\"}",
+                      ota_pico_relay_phase_str(st.phase), (unsigned)st.percent, st.last_error);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
     return ESP_OK;
 }
 
@@ -947,6 +1197,27 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &esp_update_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // TODO.md 9.5: the Pico-image relay -- see ota_http.h's doc comment on
+    // this pair of handlers for the wire contract and the async response
+    // shape.
+    static const httpd_uri_t pico_update_uri = {
+        .uri = "/api/ota/pico", .method = HTTP_POST, .handler = ota_pico_post_handler
+    };
+    err = httpd_register_uri_handler(server, &pico_update_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    static const httpd_uri_t pico_status_uri = {
+        .uri = "/api/ota/pico/status", .method = HTTP_GET, .handler = ota_pico_status_get_handler
+    };
+    err = httpd_register_uri_handler(server, &pico_status_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/status) failed: %s", esp_err_to_name(err));
         return err;
     }
 

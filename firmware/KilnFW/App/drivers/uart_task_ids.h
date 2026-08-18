@@ -464,6 +464,36 @@
 #define SAFETY_CMD_FW_VERSION      0x0Bu
 #define SAFETY_CMD_ANNOUNCE_VERSION 0x0Fu
 
+/* Phase 10 (SaftyFW) / TODO.md 9.5's Pico firmware-update relay
+ * (CommonFW/docs/UPDATE_PROTOCOL.md section 4). Ids are byte-for-byte
+ * SaftyFW's own src/tasks/link_frame.h LINK_FRAME_UPDATE_*_CMD values --
+ * mirrored here rather than shared via a header, since SaftyFW is a
+ * separate repository/build target this project cannot #include from. All
+ * five are ESP->Pico except UPDATE_STATUS, which is the reply (also sent
+ * unsolicited, e.g. on refusal or as a periodic gap report while a transfer
+ * is active). All are sent/received as UART_PROTO_MSG_BROADCAST -- "the
+ * Pico never participates in the ACK'd DATA/ACK/NACK transport" for these
+ * frames, see safety_link.c's safety_link_send_update_frame().
+ *   0x10 UPDATE_BEGIN  36 B payload -- see App/drivers/ota_pico_relay.c's
+ *                      header comment for the exact field layout (mirrors
+ *                      SaftyFW's src/update/image_header.h, the frozen
+ *                      source of truth for this frame).
+ *   0x11 UPDATE_DATA   4 B offset (u32 LE) + up to 248 B image data
+ *   0x12 UPDATE_END    4 B: image CRC32 (repeated from UPDATE_BEGIN)
+ *   0x13 UPDATE_ABORT  no args
+ *   0x14 UPDATE_STATUS (Pico -> ESP) 16 B header + up to 32 * 2 B gap chunk
+ *                      indices -- see safety_link.h's
+ *                      safety_link_update_status_t for the parsed layout,
+ *                      mirrored from SaftyFW's src/tasks/update_task.c
+ *                      (that file's own header comment: "invented here
+ *                      since nothing else in this codebase defines it").
+ */
+#define SAFETY_CMD_UPDATE_BEGIN   0x10u
+#define SAFETY_CMD_UPDATE_DATA    0x11u
+#define SAFETY_CMD_UPDATE_END     0x12u
+#define SAFETY_CMD_UPDATE_ABORT   0x13u
+#define SAFETY_CMD_UPDATE_STATUS  0x14u
+
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u
 #define SAFETY_FLAG_ESTOP        0x04u

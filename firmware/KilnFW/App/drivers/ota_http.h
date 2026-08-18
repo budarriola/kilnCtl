@@ -6,10 +6,15 @@
 // are already host-tested; this file is the ESP-IDF/mbedTLS/httpd/FreeRTOS
 // glue around all three.
 //
-// Serves GET /api/ota/challenge and POST /api/ota/esp. This file does NOT
-// implement POST /api/ota/pico -- that needs the Pico-image relay through
-// the pico_img staging partition and the UPDATE_* frame codecs
-// (UPDATE_PROTOCOL.md section 4), a separate, larger, unbuilt piece of work.
+// Serves GET /api/ota/challenge, POST /api/ota/esp, POST /api/ota/pico, and
+// GET /api/ota/pico/status. The Pico path stages the browser upload into
+// the `pico_img` partition here (streamed write + running CRC32), then
+// hands off to App/drivers/ota_pico_relay.c's background task, which speaks
+// the actual UPDATE_BEGIN/UPDATE_DATA/UPDATE_END/UPDATE_ABORT/UPDATE_STATUS
+// protocol over the isolated link (CommonFW/docs/UPDATE_PROTOCOL.md section
+// 4) -- see ota_pico_relay.h's header comment for why that handoff means
+// this file does NOT release the update mutex on the success path for the
+// Pico endpoint, unlike the ESP endpoint below.
 //
 // The update-in-progress mutex (ota_http_update_try_begin()/_end()) is real
 // in-RAM state and IS now acquired -- by ota_esp_post_handler() (ota_http.c),
@@ -209,6 +214,48 @@ typedef enum {
 // correctness problem the way torn reads of the nonce/lockout state would
 // be).
 void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent_out);
+
+// --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------
+//
+// Same auth wire contract as POST /api/ota/esp (X-Ota-Mac header, context
+// "pico"), same check order (header well-formed -> ota_http_verify_request()
+// -> ota_http_check_interlocks() -> ota_http_update_try_begin()), same raw
+// (non-multipart) byte-stream body. The difference is what happens to the
+// body and how the response is shaped:
+//
+//   1. The body streams into the `pico_img` partition (esp_partition_write(),
+//      same 4 KB static-chunk-buffer convention as the ESP path), with a
+//      running CRC32 computed alongside it (esp_rom_crc32_le() -- the same
+//      IEEE 802.3/zlib algorithm SaftyFW's bootloader/crc32.c implements, so
+//      the value this ESP sends in UPDATE_BEGIN/_END is byte-for-byte what
+//      the Pico's own read-back CRC will compute).
+//   2. Once the whole body is staged, ota_pico_relay_start()
+//      (ota_pico_relay.h) is called to kick off the ~35+ second relay as a
+//      BACKGROUND task, and this handler responds immediately -- 202
+//      Accepted with a small JSON status body -- rather than holding the
+//      HTTP connection open for the whole relay (UPDATE_PROTOCOL.md's own
+//      "a browser or proxy may still time out" warning). This is a design
+//      choice this pass made, not something UPDATE_PROTOCOL.md itself
+//      specifies the shape of; a client is expected to poll
+//      GET /api/ota/pico/status afterward.
+//   3. From the moment ota_pico_relay_start() returns true, this handler no
+//      longer owns the update mutex -- see ota_pico_relay.h's header
+//      comment for the full ownership-handoff reasoning. On any staging
+//      failure BEFORE that call (partition write error, oversized body,
+//      etc.), this handler calls ota_http_update_end() itself, exactly
+//      once, immediately, and responds with a specific error -- it never
+//      leaves the mutex held on a path that does not also start the relay
+//      task that would otherwise release it.
+//
+// GET /api/ota/pico/status takes no auth (same precedent as
+// ota_http_get_esp_progress() being a plain unauthenticated getter -- it
+// reveals only relay progress/phase, not kiln telemetry, so
+// ota_interlock.h's reasoning for gating interlock checks behind auth does
+// not apply here) and returns
+// {"phase":"<string>","percent":<0-100>,"last_error":"<string>"} from
+// ota_pico_relay_get_status(). No separate public entry point is exposed
+// here for either handler -- same "specific to this transfer, no other
+// caller" reasoning as the ESP path above.
 
 #ifdef __cplusplus
 }

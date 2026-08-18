@@ -3277,31 +3277,83 @@ until something concrete needs it is the cheap ordering.
       needed, updates the progress snapshot, appends the NVS record
       (`ota_record_append()`), and calls `ota_http_update_end()` exactly
       once -- the "single cleanup path" TODO.md asked for.
-- [ ] Pico relay: the five `UPDATE_*` frames, codecs living in `CommonFW`.
-      **Not built this pass** -- explicitly out of scope, see the note below.
-- [ ] **The Pico image is relayed, never staged.** There is no RAM for 200 KB and
-      no spare partition — the proposed layout leaves 84 KB. Read the HTTP body no
-      faster than the link drains and let TCP flow control do the work; the thing
-      that breaks it is reading ahead into a buffer with nowhere to go.
-      **Not built this pass** (Pico relay is out of scope) -- the ESP's own
-      transfer above DOES already follow "read no faster than write can
-      consume" (one `httpd_req_recv()` per `esp_ota_write()`), for the same
-      reason, but that is the ESP-image path, not this Pico-relay bullet.
-- [x] Socket timeout covers the whole transfer, not one chunk (ESP path only --
-      the Pico-relay ~35 s case above is not built). **2026-08-17**:
-      `ota_esp_do_transfer()` raises the OTA connection's `SO_RCVTIMEO` to
-      30 s via `setsockopt()` on that one socket, rather than bumping
-      `wifi_provision_http.c`'s server-wide `recv_wait_timeout` (which would
-      also loosen every other endpoint's timeout). This is a per-recv-call
-      timeout, not a whole-transfer deadline: as long as no single gap
-      between chunks exceeds 30 s, a multi-minute transfer is fine -- see
-      `ota_http.c`'s comment on the handler for why that is what "covers the
-      whole transfer" means here, and why 30 s (not the doc's ~35 s Pico-link
-      figure, which is a different link) is the chosen value.
-- [ ] `UPDATE_DATA` sent unacknowledged, retransmitting only the ranges the Pico's
-      gap reports name. Stop-and-wait leaves the wire idle for most of every round
-      trip and costs 2 s per persistently-failing frame. **Not built this
-      pass** -- Pico relay only, out of scope.
+- [x] Pico relay: the five `UPDATE_*` frames. **2026-08-17**:
+      `App/drivers/ota_pico_relay.{h,c}` (new module, a FreeRTOS background
+      task) drives `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT`
+      against `SaftyFW`'s already-frozen wire contracts (`src/update/
+      image_header.h`'s 36-byte header, `src/tasks/link_frame.h`'s command
+      ids 0x10-0x14, `src/tasks/update_task.c`'s `UPDATE_STATUS` reply
+      layout) -- mirrored byte-for-byte in comments/#defines rather than
+      shared, since `SaftyFW` is a separate repository/build target this
+      project cannot `#include` from. **Not "codecs living in CommonFW"** as
+      this checklist item originally envisioned -- that would need a shared
+      build target neither firmware currently has; flagged as a scope
+      deviation from the item's exact wording, not silently reinterpreted.
+      `App/drivers/safety_link.{h,c}` gained the sending/receiving halves:
+      `safety_link_send_update_frame()` (thin wrapper over
+      `uart_protocol_send_broadcast()`, same call shape as
+      `ANNOUNCE_VERSION`'s) and `safety_link_get_update_status()` (a new
+      `case LINK_FRAME_UPDATE_STATUS_CMD` in `safety_drain_inbox()` caches
+      the parsed frame, same pattern as `safety_apply_status()`/
+      `safety_apply_fw_version()`). `App/drivers/uart_task_ids.h` gained
+      `SAFETY_CMD_UPDATE_{BEGIN,DATA,END,ABORT,STATUS}` (0x10-0x14).
+      **Ambiguity flagged, not silently resolved**: `UPDATE_END`'s payload
+      is described as "4 B: image CRC32 repeated" -- read here as "the same
+      crc32 sent in `UPDATE_BEGIN`, sent again", i.e. 4 bytes total, matching
+      how `update_task_process_end()` actually reads it (compares against
+      `s_header.crc32`, logs but does not act on a mismatch -- the
+      read-back-from-flash CRC is what really gates acceptance). See
+      `ota_pico_relay.c`'s header comment.
+      **Retransmission-round accounting is a simplification, not an exact
+      mirror** of `update_receiver.h`'s round-counting algorithm: this side
+      retries whatever chunks the Pico's gap reports name, for up to
+      `RELAY_MAX_RETRANSMIT_ROUNDS` (10, matching `UPDATE_MAX_RETRANSMIT_
+      ROUNDS`) rounds, then always attempts `UPDATE_END` regardless and lets
+      the Pico's own final CRC verification be the arbiter of correctness --
+      per `UPDATE_PROTOCOL.md`'s own "acknowledging each frame is not what
+      makes the transfer correct -- the final verify is." If the Pico
+      reports `UPDATE_STATUS_ERR_RETRANSMIT_CAP` (or any other terminal
+      failure) mid-retry, this side aborts immediately rather than
+      exhausting its own round budget separately.
+- [x] **The Pico image is relayed, never staged** -- **superseded, and
+      corrected against real hardware numbers 2026-08-17**: this checklist
+      item's own "no spare partition" premise is exactly what section 3's
+      later 8/16 MB partition-table pass overturned -- `pico_img` (896K)
+      now exists and IS the design this codebase uses (`UPDATE_PROTOCOL.md`
+      section 3: "A staging partition also solves the relay problem").
+      `POST /api/ota/pico` (`ota_http.c`'s `ota_pico_do_stage()`) streams
+      the browser upload straight into `pico_img` at Wi-Fi speed (one
+      `httpd_req_recv()` per `esp_partition_write()`, same "never read
+      ahead" discipline as the ESP path, for the same reason: nothing
+      downstream of the write has anywhere to put read-ahead data), then
+      `ota_pico_relay.c`'s background task does the slow ~35 s+ relay
+      afterward, reading `pico_img` chunk-by-chunk via `esp_partition_read()`
+      -- never holding the whole image in RAM on either side of the split.
+- [x] Socket timeout covers the whole transfer, not one chunk. **2026-08-17,
+      both paths now**: `ota_esp_do_transfer()` raises the OTA connection's
+      `SO_RCVTIMEO` to 30 s via `setsockopt()` on that one socket, rather
+      than bumping `wifi_provision_http.c`'s server-wide `recv_wait_timeout`
+      (which would also loosen every other endpoint's timeout). This is a
+      per-recv-call timeout, not a whole-transfer deadline: as long as no
+      single gap between chunks exceeds 30 s, a multi-minute transfer is
+      fine -- see `ota_http.c`'s comment on the handler for why that is what
+      "covers the whole transfer" means here. `ota_pico_do_stage()` sets the
+      same 30 s per-connection timeout on its own socket for the (fast,
+      Wi-Fi-speed) staging write; the actual ~35 s+ isolated-link relay
+      happens entirely AFTER this handler has already responded and released
+      (or handed off) the HTTP connection, so no HTTP-level timeout applies
+      to it at all -- see `ota_pico_relay.h`'s header comment on why the
+      relay is a background task rather than something the HTTP connection
+      stays open for.
+- [x] `UPDATE_DATA` sent unacknowledged, retransmitting only the ranges the Pico's
+      gap reports name. **2026-08-17**: `ota_pico_relay.c`'s relay task sends
+      the whole image sequentially first (unacknowledged broadcasts, per
+      `safety_link_send_update_frame()`), then polls
+      `safety_link_get_update_status()` for gap reports and retransmits only
+      the named chunk indices, for up to `RELAY_MAX_RETRANSMIT_ROUNDS` (10)
+      rounds -- see the 9.5 Transfer entry above for the "simplification, not
+      an exact mirror of the round-counting algorithm" caveat, and for why
+      that is a deliberate, documented choice rather than an oversight.
 - [x] ESP image magic and chip ID verified **before** `esp_ota_begin()`.
       **2026-08-17**: `ota_esp_do_transfer()` reads exactly
       `sizeof(esp_image_header_t)` bytes, checks `hdr.magic ==
@@ -3348,29 +3400,62 @@ until something concrete needs it is the cheap ordering.
       comment for why splitting out `ota_record_fill()` alone for testing
       would be process for its own sake.
 - [x] Progress pushed to the GUI at least every 2 s for both paths. **2026-08-17,
-      ESP path only, polled not pushed**: TODO.md's own parenthetical scoped
+      both paths now, polled not pushed**: TODO.md's own parenthetical scoped
       this down from a WebSocket/SSE channel (out of scope) to "log
       progress... and track it in a small in-RAM state the existing
-      dashboard could poll later" -- `ota_http_get_esp_progress()`
+      dashboard could poll later" -- ESP path: `ota_http_get_esp_progress()`
       (`ota_http.h`) exposes a `static volatile` phase +
       percentage pair, updated by `ota_esp_do_transfer()` roughly every 10%
-      (also `ESP_LOGI`'d at the same cadence). No poller/dashboard route
-      calls it yet -- the getter is exposed for TODO.md 9.6's future web
-      page, same pattern as 9.4's `ota_http_check_interlocks()` being
-      exposed before anything called it. Pico path: not built, out of scope.
+      (also `ESP_LOGI`'d at the same cadence). Pico path:
+      `ota_pico_relay_get_status()` (`ota_pico_relay.h`) exposes the same
+      shape (phase/percent/last_error), updated by the relay task at each
+      phase transition and roughly every 10% during the streaming/
+      retransmit phases; `GET /api/ota/pico/status` (`ota_http.c`) is a
+      small new JSON endpoint on top of it -- built because it was a small
+      addition given the getter already existed, per this task's own
+      "build this if it's a small addition ... skip if it meaningfully
+      expands scope" guidance. No poller/dashboard route calls either getter
+      yet -- both are exposed for TODO.md 9.6's future web page, same
+      pattern as 9.4's `ota_http_check_interlocks()` being exposed before
+      anything called it.
 - [ ] Protocol-version mismatch between the uploaded Pico image and the running
       one warned about, with a second confirmation — that is the case where a
       successful update leaves the two processors unable to talk. **Not
-      built** -- depends on the Pico relay path, out of scope this pass.
+      built** -- explicitly out of scope this pass (task brief: "do not add
+      ESP-side pre-checking of compatibility beyond what's trivial to read
+      from `safety_link_get_peer_version_status()`"). The Pico itself still
+      refuses an incompatible image on its own
+      (`UPDATE_STATUS_ERR_VERSION_INCOMPATIBLE`, surfaced as a translated
+      string by `ota_pico_relay.c`'s `format_update_error()`), which is the
+      floor UPDATE_PROTOCOL.md's own precondition table requires -- this
+      item is specifically about a proactive, second-confirmation warning
+      BEFORE the relay starts, which is not built.
 
 **Not built this pass, by design** (see the task's own scope statement):
-`POST /api/ota/pico` (Pico-image relay through `pico_img`, the `UPDATE_*`
-frame codecs), `SAFETY_CMD_ANNOUNCE_REBOOT` (does not exist in
-`CommonFW`/`SaftyFW` yet), the 9.6 web page, and 9.7's physical-hardware
-verification (no hardware in this environment -- host-build/`idf.py build`
-verified only). `idf.py -C firmware/KilnFW build` clean; host tests
-276/276 (unchanged -- no new pure/host-testable code was added, see
-`ota_record.h`'s header comment for why).
+`SAFETY_CMD_ANNOUNCE_REBOOT` (does not exist in `CommonFW`/`SaftyFW` yet),
+the 9.6 web page, and 9.7's physical-hardware verification (no hardware in
+this environment -- host-build/`idf.py build` verified only). Also not
+built, as a deliberate proportionality call flagged in this pass's own task
+brief rather than half-wired: suppressing the "safety processor not
+responding" alarm TEXT specifically during a deliberate, in-progress Pico
+update (`UPDATE_PROTOCOL.md`'s "an ESP reboot must not look like an ESP
+failure" section makes the analogous point for the ESP's own reboot, and
+the doc's "the Pico update deliberately trips the liveness rule" section
+covers this exact case) -- `dashboard_http.c` has no such flag today, and
+threading `ota_pico_relay_get_status()`'s phase into whatever surfaces that
+alarm text touches more files than this pass's Pico-relay-transport focus
+justified. **The interlock/fault-assertion logic itself is correctly left
+alone** (this task's own instruction: "do NOT suppress the block") -- only
+the operator-facing wording is the open gap.
+
+`idf.py -C firmware/KilnFW build` clean (zero new warnings). Host tests
+276/276, unchanged from the previous pass's baseline -- this pass's new
+code (`ota_pico_relay.{h,c}`, the `safety_link.{h,c}`/`ota_http.{h,c}`
+additions) is ESP-IDF-coupled throughout (FreeRTOS task, UART broadcast
+send/receive, `esp_partition` flash I/O), the same "little to nothing
+genuinely pure this pass" situation `ota_record.c`'s previous-pass entry
+already named -- no test split was forced to make this look more
+host-tested than it is.
 
 ### 9.6 Web page
 
@@ -3379,6 +3464,14 @@ verified only). `idf.py -C firmware/KilnFW build` clean; host tests
 - [ ] Interlock state shown **before** the file picker, with the blocker named
 - [ ] Progress bar, and a rollback button per processor
 - [ ] Reachable only when the kiln is idle
+- [ ] Suppress the "safety processor not responding" alarm TEXT (not the
+      block) while a Pico relay is genuinely in progress
+      (`ota_pico_relay_get_status()`'s phase is not IDLE/DONE/FAILED) --
+      flagged as an explicit gap by TODO.md 9.5's own pass rather than
+      half-wired: `dashboard_http.c` has no such flag today, and this needs
+      whatever surfaces `SAFETY_FAULT_SRC_SAFETY_LINK`'s alarm text to read
+      that phase. `relay_authority_on_blocked()`/the interlock itself must
+      NOT change -- only the operator-facing wording.
 
 ### 9.7 Verification
 

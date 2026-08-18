@@ -174,6 +174,55 @@ extern "C" {
  * warning per poll (which at the default period would be two per second). */
 #define SAFETY_LINK_DOWN_LOG_PERIOD_MS 60000u
 
+/* --- Phase 10 (SaftyFW) / TODO.md 9.5: Pico firmware-update relay ---------
+ * CommonFW/docs/UPDATE_PROTOCOL.md section 4's UPDATE_STATUS (0x14) reply.
+ * SaftyFW's src/tasks/update_task.c is the actual source of truth for this
+ * wire layout (that file's own header comment: UPDATE_PROTOCOL.md "names
+ * this frame ... but never specifies a byte layout"); mirrored here
+ * byte-for-byte since KilnFW cannot #include SaftyFW's header (a separate
+ * repository/build target). See uart_task_ids.h's SAFETY_CMD_UPDATE_* block
+ * for the five command ids this section works with. */
+#define SAFETY_LINK_UPDATE_STATUS_HEADER_LEN 16u
+#define SAFETY_LINK_UPDATE_STATUS_MAX_GAPS   32u
+
+/* update_task_wire_state_t, SaftyFW src/tasks/update_task.c -- mirrored,
+ * same reasoning as above. */
+typedef enum {
+    SAFETY_LINK_UPDATE_STATE_IDLE      = 0,
+    SAFETY_LINK_UPDATE_STATE_REFUSED   = 1,
+    SAFETY_LINK_UPDATE_STATE_ERASING   = 2,
+    SAFETY_LINK_UPDATE_STATE_RECEIVING = 3,
+    SAFETY_LINK_UPDATE_STATE_VERIFYING = 4,
+    SAFETY_LINK_UPDATE_STATE_COMPLETE  = 5,
+    SAFETY_LINK_UPDATE_STATE_ABORTED   = 6,
+    SAFETY_LINK_UPDATE_STATE_FAILED    = 7,
+} safety_link_update_state_t;
+
+/* UPDATE_STATUS_ERR_* bitmask, SaftyFW src/tasks/update_task.c -- mirrored,
+ * same reasoning as above. */
+#define SAFETY_LINK_UPDATE_ERR_RELAY_CLOSED         (1u << 0)
+#define SAFETY_LINK_UPDATE_ERR_TRIP_PENDING         (1u << 1)
+#define SAFETY_LINK_UPDATE_ERR_TOO_HOT              (1u << 2)
+#define SAFETY_LINK_UPDATE_ERR_HEADER_INVALID       (1u << 3)
+#define SAFETY_LINK_UPDATE_ERR_VERSION_INCOMPATIBLE (1u << 4)
+#define SAFETY_LINK_UPDATE_ERR_RETRANSMIT_CAP       (1u << 5)
+#define SAFETY_LINK_UPDATE_ERR_CRC_MISMATCH         (1u << 6)
+#define SAFETY_LINK_UPDATE_ERR_INTERNAL             (1u << 7)
+
+/* Parsed UPDATE_STATUS. `state`/`last_error` are the raw wire bytes (cast to
+ * safety_link_update_state_t / SAFETY_LINK_UPDATE_ERR_* by the caller) --
+ * kept as plain uint8_t here so an unrecognised future state/bit value from
+ * a newer Pico build round-trips instead of being silently coerced. */
+typedef struct {
+    uint8_t  state;
+    uint8_t  last_error;
+    uint32_t bytes_received;
+    uint32_t total_chunks;
+    uint32_t received_chunks;
+    uint8_t  gap_count; /* how many of gap_chunk_indices[] are valid, <= SAFETY_LINK_UPDATE_STATUS_MAX_GAPS */
+    uint16_t gap_chunk_indices[SAFETY_LINK_UPDATE_STATUS_MAX_GAPS];
+} safety_link_update_status_t;
+
 /* Reasons the isolated fault line may be asserted. The line is driven high
  * (fault) whenever *any* source is set, so no source can clear another's
  * assertion -- see safety_link_set_fault_source(). */
@@ -273,6 +322,14 @@ typedef struct {
     bool    peer_version_known;
     bool    peer_version_compatible;
 
+    /* Phase 10 (SaftyFW) / TODO.md 9.5: last-received UPDATE_STATUS,
+     * applied the same way cached/cached_tick are (safety_apply_status()) --
+     * see safety_apply_update_status() in safety_link.c. Guarded by
+     * state_lock, same as everything else in this struct. */
+    safety_link_update_status_t update_status;
+    TickType_t                  update_status_tick;
+    bool                        update_status_ever_received;
+
     bool       down_logged;      /* rate limiting for the "link is down" warning */
     TickType_t down_log_tick;
     bool       version_mismatch_logged; /* edge-detect for the Phase 7b.5 mismatch log line;
@@ -361,6 +418,35 @@ uint32_t  safety_link_get_fault_sources(SafetyLinkClass *link);
  * driver supplies the mechanism and one default it can defend. */
 esp_err_t safety_link_fault_on_link_loss(SafetyLinkClass *link, bool enable);
 bool      safety_link_get_fault_on_link_loss(SafetyLinkClass *link);
+
+/* --- Phase 10 (SaftyFW) / TODO.md 9.5: Pico firmware-update relay --------
+ * Thin, additive wrappers -- App/drivers/ota_pico_relay.c is the only
+ * caller today, but these are general enough for anything that needs to
+ * drive the Pico's UPDATE_* state machine. Neither of these touches
+ * safety_exchange()'s request/reply machinery: UPDATE_* frames are
+ * fire-and-forget broadcasts on both sides of this exchange (the Pico
+ * "never participates in the ACK'd DATA/ACK/NACK transport" for them, per
+ * SaftyFW's link_task.c), so uart_protocol_send() (ACK'd) is the wrong
+ * primitive here -- see uart_protocol_send_broadcast(). */
+
+/* Sends one UPDATE_* frame (BEGIN/DATA/END/ABORT -- `payload[0]` is the
+ * caller's chosen SAFETY_CMD_UPDATE_* id, uart_task_ids.h) as a broadcast,
+ * same (device, task_id) pair safety_link_send_announce_version_once() uses
+ * for ANNOUNCE_VERSION. Fire-and-forget: returns as soon as the bytes are
+ * handed to the UART, does not wait for or expect any reply -- the caller
+ * polls safety_link_get_update_status() separately for that. `length` must
+ * be <= UART_PROTO_MAX_PAYLOAD (253). */
+esp_err_t safety_link_send_update_frame(SafetyLinkClass *link, const uint8_t *payload,
+                                         size_t length);
+
+/* Copies the last-received UPDATE_STATUS (0x14) out, with *out_age_ms (may
+ * be NULL) set to how long ago it arrived -- same "copy is a snapshot, ages
+ * are computed on read" contract as safety_link_get_status(). Returns
+ * ESP_ERR_NOT_FOUND (out untouched) if no UPDATE_STATUS has ever been
+ * received since boot; this is the expected state for the whole time no
+ * Pico update is in progress, not an error. */
+esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_update_status_t *out,
+                                         uint32_t *out_age_ms);
 
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded

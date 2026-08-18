@@ -79,6 +79,17 @@ static float safety_read_f32_le(const uint8_t *bytes)
     return value;
 }
 
+static uint32_t safety_read_u32_le(const uint8_t *bytes)
+{
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+
+static uint16_t safety_read_u16_le(const uint8_t *bytes)
+{
+    return (uint16_t)(bytes[0] | ((uint16_t)bytes[1] << 8));
+}
+
 static void safety_put_f32_le(uint8_t *out, float value)
 {
     memcpy(out, &value, sizeof(value));
@@ -343,6 +354,63 @@ static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_mess
 }
 
 /* ------------------------------------------------------------------------ */
+/* Phase 10 (SaftyFW) / TODO.md 9.5 -- UPDATE_STATUS (0x14)                 */
+/* ------------------------------------------------------------------------ */
+
+/* Accepts one UPDATE_STATUS frame and replaces the cached update_status
+ * with it -- same shape as safety_apply_status() above (a short/malformed
+ * payload is dropped and counted as a frame error, not partially applied).
+ * Wire layout: SAFETY_LINK_UPDATE_STATUS_HEADER_LEN (16) bytes of fixed
+ * header, then gap_count * 2 bytes of u16 LE gap chunk indices -- see
+ * safety_link.h's header comment on safety_link_update_status_t for the
+ * mirrored-from-SaftyFW field-by-field layout. */
+static bool safety_apply_update_status(SafetyLinkClass *link, const uart_proto_message_t *msg)
+{
+    if (msg->length < SAFETY_LINK_UPDATE_STATUS_HEADER_LEN) {
+        if (safety_lock(link)) {
+            link->stats.frame_errors++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "UPDATE_STATUS from dev%u/task%u: %u bytes, shorter than the %u-byte header",
+                 msg->device, msg->task_id, msg->length, SAFETY_LINK_UPDATE_STATUS_HEADER_LEN);
+        return false;
+    }
+
+    const uint8_t *p = msg->payload;
+    uint8_t gap_count = p[15];
+    if (gap_count > SAFETY_LINK_UPDATE_STATUS_MAX_GAPS) {
+        gap_count = SAFETY_LINK_UPDATE_STATUS_MAX_GAPS; /* defensive clamp -- untrusted wire byte */
+    }
+    size_t needed = (size_t)SAFETY_LINK_UPDATE_STATUS_HEADER_LEN + (size_t)gap_count * 2u;
+    if ((size_t)msg->length < needed) {
+        if (safety_lock(link)) {
+            link->stats.frame_errors++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "UPDATE_STATUS from dev%u/task%u: %u bytes, too short for its own gap_count=%u",
+                 msg->device, msg->task_id, msg->length, gap_count);
+        return false;
+    }
+
+    if (!safety_lock(link)) {
+        return false;
+    }
+    link->update_status.state = p[1];
+    link->update_status.last_error = p[2];
+    link->update_status.bytes_received = safety_read_u32_le(&p[3]);
+    link->update_status.total_chunks = safety_read_u32_le(&p[7]);
+    link->update_status.received_chunks = safety_read_u32_le(&p[11]);
+    link->update_status.gap_count = gap_count;
+    for (uint8_t i = 0; i < gap_count; i++) {
+        link->update_status.gap_chunk_indices[i] = safety_read_u16_le(&p[16 + 2u * i]);
+    }
+    link->update_status_tick = xTaskGetTickCount();
+    link->update_status_ever_received = true;
+    safety_unlock(link);
+    return true;
+}
+
+/* ------------------------------------------------------------------------ */
 /* Frame handling                                                           */
 /* ------------------------------------------------------------------------ */
 
@@ -431,6 +499,9 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
                 break;
             case SAFETY_CMD_FW_VERSION:
                 safety_apply_fw_version(link, &msg);
+                break;
+            case SAFETY_CMD_UPDATE_STATUS:
+                safety_apply_update_status(link, &msg);
                 break;
             default:
                 break;
@@ -929,6 +1000,44 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
     }
     *out_known = link->peer_version_known;
     *out_compatible = link->peer_version_compatible;
+    safety_unlock(link);
+    return ESP_OK;
+}
+
+esp_err_t safety_link_send_update_frame(SafetyLinkClass *link, const uint8_t *payload, size_t length)
+{
+    if (!link || !payload || length == 0 || length > UART_PROTO_MAX_PAYLOAD) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Same (dst_device, dst_task, src_task) triple as ANNOUNCE_VERSION's
+     * own broadcast call site above -- see safety_link_send_announce_version_once(). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, length);
+}
+
+esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_update_status_t *out,
+                                         uint32_t *out_age_ms)
+{
+    if (!link || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    if (!link->update_status_ever_received) {
+        safety_unlock(link);
+        return ESP_ERR_NOT_FOUND;
+    }
+    *out = link->update_status;
+    if (out_age_ms) {
+        *out_age_ms = safety_elapsed_ms(link->update_status_tick);
+    }
     safety_unlock(link);
     return ESP_OK;
 }
