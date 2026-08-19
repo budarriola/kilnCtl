@@ -1,6 +1,6 @@
 # Guard Test Matrix
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-19
 > **Keep this file current.** Add a row whenever a guard is added or a threshold
 > moves, and record results as they are obtained — this file is the evidence
 > that the safety case is real. Checklist at the bottom.
@@ -178,7 +178,51 @@ should say so rather than being listed as coverage.
 
 **Host**
 - [ ] Nuisance-rejection tests written **before** trip tests, all of §1
-- [ ] §2's full provocation table implemented and passing
+- [x] §2's full provocation table implemented and passing, for every row that
+      is a pure function of `safety_guard_input_t`/`safety_guard_cfg_t`
+      (2026-08-19). Audited `test/test_safety_guards.c` row by row against
+      this table. Found and closed two real gaps: S2's exact 119s/121s
+      boundary (`overshoot_time_s` = 120s) wasn't pinned anywhere -- existing
+      coverage proved the sustained-excess trip and the "brief excursion
+      resets the timer" nuisance case, but not the boundary itself -- and
+      S5's "9 bad reads, then a good one" case, which is the near-threshold
+      version of the streak-reset property (one read short of the 10-read
+      count bar) rather than the arbitrary single-bad-read case already
+      covered. Both added as new sub-tests in `test_s2()`/`test_s5()`.
+      Every other row was already covered on inspection: S1 (3rd-consecutive,
+      firing_max_c tightening/clamping/EXTERNAL_OVERHEAT-ignoring), S2
+      (stale-context inactivity, EXTERNAL_OVERHEAT disables), S3 (21s stuck,
+      recently-commanded no-trip -- `relay_recent_mask` arrives pre-windowed
+      as a boolean from the ESP, so "100s ago inside the window" and "any
+      time inside the window" are the same input to this module), S4
+      (WARN-never-TRIP; this guard cannot touch the relay at all -- it has no
+      relay-output field, only `is_tripped`/`reason`, so "relay state
+      untouched" is structurally guaranteed by S4 never setting either), S5
+      (fast-burst count-without-time, graduated WARN-then-TRIP), S6b (soft
+      10s-with-current trip, unconditional 120s backstop, no-current-ever
+      nuisance -- this module has no separate S6b WARN flag, so "WARN only"
+      at 11s-no-current is exactly the existing "never trips" assertion),
+      S8 (correctly out of scope -- see below), S9 (TRIP_INEFFECTIVE
+      escalation and its inverse; "current decays with tau=1s" and "current
+      persists" are the same boolean `any_current_present` at this module's
+      boundary, so both matrix rows collapse to the existing present/absent
+      tests), S10 (EXTERNAL_OVERHEAT disables), S11 (601s frozen with/without
+      heat), all guards' latching and `CLEAR_TRIP`-refused-while-still-true
+      (via `test_try_clear`), and bit-identical TX-stubbed determinism (via
+      `test_independence_invariant`).
+      **Two matrix rows remain genuinely untested** and are **not**
+      pure-function-testable the way `safety_guards.c` is: "All guards during
+      `startup_grace_s`: evaluated and reported, relay never energized, no
+      latch" lives in `relay_owner.c`'s GRACE state machine (FreeRTOS task,
+      `xTaskGetTickCount()`-driven), and "`CLEAR_TRIP` with a mismatched
+      `trip_mask`: refused" lives in `link_task.c`'s command handler (also a
+      FreeRTOS task, reads a queue). `link_frame_trip_mask_for_reason()`
+      itself -- the pure encoding both of those depend on -- is already
+      host-tested in `test_link_frame.c`. Testing the GRACE and
+      trip_mask-refusal *behaviour* would need extracting each into a pure
+      function first, which is a non-test-file change outside this pass's
+      scope; left as an honest gap rather than claimed. 434/434 host checks
+      pass (409 before this pass).
 - [x] Property tests: ceiling monotonicity over the float range incl. NaN/Inf
       (2026-08-19, `test_safety_guards.c`'s `test_s1_ceiling_properties()`).
       Found and fixed a real hole while writing this: S1's ceiling clamp used

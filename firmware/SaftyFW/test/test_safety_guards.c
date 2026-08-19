@@ -264,6 +264,31 @@ static void test_s5(void)
         TEST_CHECK(!s.s5_warn, "time bar alone withholds WARN even once the count bar clears");
     }
 
+    /* GUARD_TEST_MATRIX.md section 2, S5's exact case: "9 bad reads, then a
+     * good one -> No trip, streak resets." This is the near-threshold
+     * version of the streak-reset property (one read short of the 10-read
+     * count bar, not just an arbitrary single bad read) -- confirms the good
+     * read wipes the streak back to 0 rather than merely "not yet at 10". */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.tc_c = (float)NAN;
+        safety_guard_input_t good = base_input();
+        bool tripped = false;
+        for (int i = 0; i < 9 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &bad);
+        }
+        TEST_CHECK(!tripped, "9 bad reads (one short of the 10-read count bar): not tripped");
+        TEST_CHECK(s.s5_bad_streak == 9, "sanity: streak reached 9");
+        tripped = safety_guards_tick(&s, &cfg, &good);
+        TEST_CHECK(!tripped, "9 bad reads then a good one: no trip");
+        TEST_CHECK(s.s5_bad_streak == 0, "9 bad reads then a good one: streak resets to 0");
+        TEST_CHECK(!s.s5_warn, "9 bad reads then a good one: never even reached WARN");
+    }
+
     /* THERMO_FAULT_CJRANGE/CJHIGH/CJLOW alone must NOT count as an S5 bad
      * read -- SAFETY_MODEL.md section 4, S5 is explicit these are a
      * cold-junction complaint (S12's job), not a chamber emergency. */
@@ -750,6 +775,42 @@ static void test_s2(void)
             tripped |= safety_guards_tick(&s, &cfg, &cool);
         }
         TEST_CHECK(!tripped, "repeated brief excursions, each reset by a cool tick, never trip S2");
+    }
+
+    /* GUARD_TEST_MATRIX.md section 2, S2's exact boundary case: "Hold
+     * setpoint+80 for 119s, then 121s: No trip, then trip." overshoot_time_s
+     * defaults to 120s, so 119s must still be under the bar and 121s must be
+     * over it -- exercised as two independent runs (not a continuation of
+     * one run) so each pins its own elapsed time exactly. setpoint+80 clears
+     * the 75C margin bar by 5C, satisfying the "magnitude bar" independently
+     * of the boundary being tested here. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 980.0f; /* setpoint + 80 */
+        in.dt_s = 119.0f; /* single tick, elapsed pinned to exactly 119s */
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == false,
+                   "setpoint+80 held for 119s (just under overshoot_time_s=120s): no trip");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 980.0f; /* setpoint + 80 */
+        in.dt_s = 121.0f; /* single tick, elapsed pinned to exactly 121s */
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true,
+                   "setpoint+80 held for 121s (just over overshoot_time_s=120s): trips");
     }
 }
 

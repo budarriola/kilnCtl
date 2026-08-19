@@ -352,6 +352,14 @@ physically stop a kiln, and the first that can nuisance-trip one.
       see `firmware/SaftyFW/TODO.md` Phase 7 for the item this checks off.
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
 - [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
+      — 2026-08-19: §2's host provocation table audited row by row; two real
+      gaps found and closed (S2's 119s/121s boundary, S5's "9 bad reads then
+      good"), 434/434 host checks pass. S8 correctly excluded (ships
+      disabled by design). Still open: §3 hardware trips (no bench hardware
+      attached), and two host-untestable-as-is rows (GRACE startup timing in
+      `relay_owner.c`, `CLEAR_TRIP` trip_mask-mismatch refusal in
+      `link_task.c` — both live in FreeRTOS task functions, not pure
+      functions, so closing them needs an extraction refactor first).
 
 ## M5 — The link carrying real traffic
 

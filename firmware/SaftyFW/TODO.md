@@ -440,6 +440,26 @@ header comment, so the build is reproducible elsewhere.
       checked every loop iteration. While `GRACE`, `relay_owner_command_energize()`
       is accepted and tracked but GPIO6 is never driven high. Build- and
       host-test-verified; **not hardware-verified** — no RP2040 attached.
+- [x] **`GUARD_TEST_MATRIX.md` §2 audit pass (2026-08-19, ROADMAP.md M4's
+      "Every guard exercised" bullet).** Cross-referenced every row of the
+      matrix's host-provocation table against `test/test_safety_guards.c`.
+      Closed two real gaps: S2's exact 119s/121s `overshoot_time_s` boundary,
+      and S5's "9 bad reads, then a good one" near-threshold streak-reset
+      case (distinct from the single-bad-read case already covered). Every
+      other row was already exercised; several matrix rows collapse to
+      already-existing tests once you account for this module's actual input
+      shape (S3's `relay_recent_mask` arrives pre-windowed as a boolean from
+      the ESP; S9's "current decays" vs "current persists" are both just
+      `any_current_present`; S4 has no relay-output field so "relay
+      untouched" is structural, not separately assertable). S8 correctly
+      left alone — ships disabled by design, no test should assume it exists.
+      **Two matrix rows are genuine, currently-unclosable gaps**: startup
+      GRACE behaviour (`relay_owner.c`) and `CLEAR_TRIP` trip_mask-mismatch
+      refusal (`link_task.c`) both live inside FreeRTOS task functions, not
+      pure functions like `safety_guards.c` — host-testing them needs an
+      extraction refactor first, which is out of scope for a test-only pass.
+      `test/build_host_tests.ps1`: 434/434 checks pass (409 before). No
+      non-test file changed. `tools/check_isolation.ps1` still clean.
 - [ ] **Bench-verify the safe state four ways**: power-on, watchdog reset,
       brownout, and firmware halted at a breakpoint. K4 must be de-energized in
       all four.
