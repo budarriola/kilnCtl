@@ -163,35 +163,53 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, a real alias rather than a
       second number, and both `KILNLINK_PROTOCOL_VERSION` and
       `KILNLINK_MIN_COMPATIBLE` are 5 in `kilnlink_version.h`
-- [~] Codecs pure and bounds-checked; host tests and `test/vectors/` — **the
-      framing layer (`kilnlink_frame`/`kilnlink_crc`) and two of the payload
-      codecs are done** (2026-08-18): `kilnlink_context.{c,h}` (ESP→Pico
-      `SAFETY_CMD_PUSH_CONTEXT` 0x07, `LINK_PROTOCOL.md` sec 4, including
-      `relay_recent_mask`) and `kilnlink_status.{c,h}` (Pico→ESP Frame A
-      `SAFETY_CMD_GET_STATUS` 0x01, sec 6, the existing 23-byte layout). Host
-      tests (`test_context.c`, `test_status.c`) and byte-exact vectors
-      (`test/vectors/context_vectors.json`, `status_vectors.json`) pass under
-      MSVC+CMake+Ninja. **2026-08-18, later same day**: `kilnlink_announce.{c,h}`
-      added (ESP→Pico `SAFETY_CMD_ANNOUNCE_VERSION` 0x0F, sec 4/the
-      compatibility-floor layout shared with Frame C) with host tests
-      (`test_announce.c`) and byte-exact vectors (`test/vectors/announce_vectors.json`);
-      `test_announce` passes under MSVC+CMake+Ninja alongside the other five
-      host tests. **Note:** `KilnFW`'s `safety_link.c` already builds/parses
-      this exact frame inline (see `KilnFW/TODO.md` 9.0 below) and was not
-      migrated onto this codec in this pass -- the two implementations are
+- [x] Codecs pure and bounds-checked; host tests and `test/vectors/` — **every
+      `docs/LINK_PROTOCOL.md` sec 4/6 command that has a concrete byte layout
+      now has a codec** (2026-08-19), on top of the framing layer
+      (`kilnlink_frame`/`kilnlink_crc`). ESP→Pico (sec 4): `kilnlink_context`
+      (`SAFETY_CMD_PUSH_CONTEXT` 0x07, including `relay_recent_mask`),
+      `kilnlink_announce` (`SAFETY_CMD_ANNOUNCE_VERSION` 0x0F, the
+      compatibility-floor layout shared with Frame C, 2026-08-18),
+      `kilnlink_ceiling` (`SAFETY_CMD_SET_FIRING_CEILING` 0x09),
+      `kilnlink_clear_trip` (`SAFETY_CMD_CLEAR_TRIP` 0x0A),
+      `kilnlink_get_fw_version` (`SAFETY_CMD_GET_FW_VERSION` 0x0B, one byte,
+      no fields), `kilnlink_set_clock` (`SAFETY_CMD_SET_CLOCK` 0x0C,
+      optional) -- the last four added 2026-08-19. Pico→ESP (sec 6):
+      `kilnlink_status` (Frame A, `SAFETY_CMD_GET_STATUS` 0x01, the existing
+      23-byte layout), `kilnlink_diag` (Frame B, `SAFETY_CMD_DIAG` 0x08),
+      `kilnlink_trip` (Frame D, `SAFETY_CMD_TRIP_EVENT` 0x0D),
+      `kilnlink_power` (Frame E, `SAFETY_CMD_POWER` 0x0E) -- all four already
+      done as of 2026-08-18. Every one of the ten payload codecs has its own
+      `test_<name>.c` and byte-exact `test/vectors/<name>_vectors.json`; all
+      13 host test binaries (framing + fuzz + uart_protocol_delegate + the
+      ten payload codecs) pass under MSVC+CMake+Ninja as of 2026-08-19.
+      **Note:** `KilnFW`'s `safety_link.c` already builds/parses the
+      `ANNOUNCE_VERSION`-shaped frame inline (see `KilnFW/TODO.md` 9.0 below)
+      and was not migrated onto this codec -- the two implementations are
       independently correct (same field layout, both host- and
       xtensa-gcc-verified) but not yet unified; that consolidation is a
-      follow-on, not a functional gap. **Still not done**: sec 4's other
-      ESP→Pico commands (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`,
-      `SET_CLOCK`) and sec 6's other Pico→ESP frames (`DIAG`, `FW_VERSION`,
-      `TRIP_EVENT`, `POWER`) -- their layouts are concrete in
-      `LINK_PROTOCOL.md` too but weren't coded this pass. Not wired into
-      either firmware yet (`uart_protocol.c`/`SaftyFW` migration is a
-      separate item below)
-- [x] `pc_tools` consuming the same vectors as the third implementation
-      (2026-08-16, `selfcheck.py`, framing layer only) — **not yet extended**
-      to `context_vectors.json`/`status_vectors.json`, left for a follow-on
-      pass since `selfcheck.py` wasn't touched this session
+      follow-on, not a functional gap. **Not wired into either firmware's
+      real send/receive dispatch** (`uart_protocol.c` on `KilnFW`,
+      `link_task.c` on `SaftyFW`) -- that migration is a separate item below,
+      matching how `kilnlink_diag`/`kilnlink_trip` already landed codec-only
+      before their own wiring passes
+- [x] `pc_tools` consuming the same vectors as the third implementation --
+      **now every payload-codec manifest, not just the framing layer**
+      (2026-08-19). `selfcheck.py`'s existing `commonfw_vector_checks()`
+      still covers `frame_vectors.json` (2026-08-16); a new
+      `commonfw_payload_vector_checks()` was added alongside it, driving a
+      new pure-Python `tools/PcTools/src/kilnctrl/kilnlink_codec.py` (encode-
+      only -- nothing in `pc_tools` decodes these frames yet, see that
+      module's docstring) against `context_vectors.json`,
+      `status_vectors.json`, `announce_vectors.json`, `diag_vectors.json`,
+      `trip_vectors.json`, `power_vectors.json`, and the four new
+      `ceiling`/`clear_trip`/`get_fw_version`/`set_clock` manifests -- ten
+      files, proving Python produces byte-identical output to the C encoders
+      for all of them. Found and fixed a real pre-existing bug while wiring
+      this up: `status_vectors.json`'s `too_short` hostile vector had a
+      Python slice expression (`"..."[:-2]`) left inline in the JSON literal
+      instead of the already-sliced string, which is invalid JSON and made
+      `json.loads()` on that file raise -- fixed to the sliced value
 - [x] `KilnFW` delegating framing and CRC, proven byte-identical **before** the
       old code is deleted (2026-08-18). `App/drivers/espInterfaces/uart_protocol.c`
       now calls `kilnlink_crc16_ccitt_false`/`kilnlink_stuff` instead of its own
@@ -377,20 +395,57 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       for the reasoning and the diagnostics-page follow-up this leaves).
       `idf.py -C firmware/KilnFW build` (via ninja, incremental after a full
       configure) is clean, no new warnings, under `-Werror`.
-      **Still open**: neither frame has a send path on `SaftyFW`
-      (guard-trip state would need to reach `link_task.c` from
-      `safety_core.c` through whatever cross-task notification already
-      exists, respecting the link-isolation direction `check_isolation.ps1`
-      enforces — not investigated this pass), and sec 9 item 0.9's other
-      half — mirroring DIAG/TRIP_EVENT onto the PC-link `SAFETY` task in
-      `uart_bridge.c` so `pc_tools`/MCP see the same data without Wi-Fi —
-      is not done. **Not hardware-verified, and cannot be from this
-      environment**: no ESP32-S3/Pico is attached, and M0 already
-      established the isolated link doesn't pass a byte end-to-end on real
-      hardware, so `safety_apply_diag()`/`safety_apply_trip_event()` have
-      never decoded a frame that actually crossed the wire — only
-      host-tested codec vectors on the `SaftyFW`/`CommonFW` side and a
-      clean cross-compile on the `KilnFW` side. Nothing here has crossed a
+      **2026-08-19, same day: `SaftyFW`'s send half now exists too, closing
+      the gap this bullet used to describe as "neither frame has a send
+      path."** Frame B (`SAFETY_CMD_DIAG`): `link_task.c`'s
+      `link_task_send_diag()` was already sending it every 2s since
+      2026-08-17 via a hand-rolled local packer
+      (`link_frame_pack_diag()`) — this pass migrated that send path onto
+      the shared `kilnlink_diag_encode()` codec instead (no field or timing
+      change) and deleted the now-duplicate local packer from
+      `link_frame.{c,h}`, rather than leaving two independent
+      implementations of the identical 26-byte layout in the tree. Frame D
+      (`SAFETY_CMD_TRIP_EVENT`) is genuinely new: the cross-task
+      notification path this bullet flagged as "not investigated" is now
+      built, respecting the isolation direction `check_isolation.ps1`
+      enforces the same way `safety_core_get_output_status()`/
+      `_get_diag_status()` already did — a new
+      `safety_core_get_trip_event()` getter (`safety_core.{c,h}`) captures
+      `trip_seq`/`trip_reason`/`uptime_ms`/`safety_tc_c`/`deciding_threshold`
+      the same tick a trip latches (right after `relay_owner_command_trip()`),
+      lock-free single-writer/plain-read, same pattern as the existing
+      getters. `link_task.c` polls it every ~100ms poll cycle
+      (`link_task_poll_trip_event()`) and, on a new `trip_seq`, fires a
+      4-copy/250ms-apart burst via `kilnlink_trip_encode()`, mirroring the
+      exact burst shape `KilnFW`'s own
+      `safety_link_send_announce_version_burst()` uses for
+      `ANNOUNCE_VERSION` (a scheduled unconditional repeat, not the
+      retransmission-on-failure LINK_PROTOCOL.md sec 2 rule 2 forbids).
+      `deciding_threshold` is real for 6 of 12 implemented guards (a new
+      pure `safety_guards_deciding_threshold_c()`, host-tested,
+      `test_deciding_threshold()`) and honestly `NaN` for the rest, since
+      those guards (S5/S6a/S6b/S7/S9) have no single meaningful magnitude to
+      report. `current_a[]`/`relay_recent_mask`/`context_age_100ms` are
+      pulled by `link_task` from `current_task`/its own context snapshot at
+      trip-*detection* time (≤~1 poll period, ~100ms, after the real trip)
+      rather than the guard-tick instant, since `safety_core`'s guard input
+      carries no raw current or ESP-context data to capture more precisely
+      — see `firmware/SaftyFW/TODO.md` Phase 8 for the full breakdown of
+      which fields are exact vs. approximated. Host-tested where the logic
+      is pure (`test/build_host_tests.ps1`, 422/422, 10 new checks) and a
+      real `cmake --build` (arm-none-eabi-gcc 14.2.1/pico-sdk 2.1.1/Ninja)
+      succeeds clean, zero warnings under `-Wall -Wextra -Werror`, for
+      `SaftyFW`/`_slotA`/`_slotB`. `tools/check_isolation.ps1` re-run clean.
+      **Still open**: sec 9 item 0.9's other half — mirroring DIAG/TRIP_EVENT
+      onto the PC-link `SAFETY` task in `uart_bridge.c` so `pc_tools`/MCP see
+      the same data without Wi-Fi — is not done (not touched by either
+      pass). **Not hardware-verified, and cannot be from this environment**:
+      no ESP32-S3/Pico is attached, and M0 already established the isolated
+      link doesn't pass a byte end-to-end on real hardware, so neither
+      `SaftyFW`'s new send path nor `KilnFW`'s `safety_apply_diag()`/
+      `safety_apply_trip_event()` have ever exchanged a frame that actually
+      crossed the wire — only host-tested codec vectors on both sides and
+      clean builds under each real toolchain. Nothing here has crossed a
       real link (M0's bench-confirmed dead link) regardless.
 - [x] Pico never blocks on the link — all five no-wait rules honoured.
       **Audited 2026-08-18, no violations found** (`firmware/SaftyFW/src/

@@ -21,6 +21,11 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "pico/time.h" // to_ms_since_boot(get_absolute_time()) -- hardware timing, not
+                        // link/uart-shaped, fine for check_isolation.ps1 (same header
+                        // link_task.c uses for its own uptime_ms fields, so
+                        // safety_core_get_trip_event()'s out_uptime_ms shares that clock base)
+
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
@@ -48,6 +53,28 @@ static TaskHandle_t s_task_handle = NULL;
 // permanently the conservative "nothing commissioned" state.
 static safety_guard_cfg_t s_guard_cfg;
 static safety_guard_state_t s_guard_state;
+
+// Trip-event capture (Frame D, SAFETY_CMD_TRIP_EVENT) -- written only from
+// safety_core_task() the instant safety_guards_tick() reports newly_tripped
+// (this task's own thread), read from any task via
+// safety_core_get_trip_event(). Same single-writer/plain-read reasoning
+// link_task.c already documents for its own s_context_frames_ok/bad and
+// s_status_tx_ok_count: one task ever writes these, so no lock is needed for
+// a handful of scalars this small, and a torn read here is no worse than
+// this codebase's existing pattern for the same class of counter.
+// s_trip_seq == 0 means "no trip yet this boot" (matches
+// safety_core_get_trip_event()'s documented return-false contract); the
+// first real trip makes it 1, wrapping uint8_t thereafter -- 255 trips in one
+// boot without a reboot in between is not a case this needs to handle
+// specially, wrapping back to 0 just means the 256th event reports the same
+// sequence number the "never tripped" state would have, which is an
+// acceptable, undocumented edge this shares with any other wrapping counter
+// in this codebase (e.g. link_task's own s_msg_index).
+static uint8_t s_trip_seq = 0;
+static safety_trip_t s_trip_reason = SAFETY_TRIP_NONE;
+static uint32_t s_trip_uptime_ms = 0;
+static float s_trip_tc_c = 0.0f; // meaningless while s_trip_seq == 0 -- the getter
+static float s_trip_deciding_threshold = 0.0f; // never reports these until a real trip sets them
 
 // Builds one tick's worth of safety_guard_input_t from the current live
 // snapshots -- factored out of safety_core_task()'s loop so
@@ -114,6 +141,21 @@ static void safety_core_task(void *arg)
             // ordering is real and not just hoped for.
             (void)relay_owner_command_trip(s_guard_state.reason);
             boot_reason_latch_trip((uint32_t)s_guard_state.reason);
+
+            // Capture Frame D's "at the instant of the trip" values right
+            // here, same tick, before anything else runs -- LINK_PROTOCOL.md
+            // sec 6: "half a second later the temperature has changed... the
+            // evidence is gone." s_trip_seq incrementing LAST is deliberate:
+            // safety_core_get_trip_event() is lock-free, so a reader must
+            // never be able to observe the new seq before the fields it
+            // describes are already written.
+            s_trip_reason = s_guard_state.reason;
+            s_trip_uptime_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
+            s_trip_tc_c = input.tc_valid ? input.tc_c : NAN;
+            s_trip_deciding_threshold = safety_guards_deciding_threshold_c(s_guard_state.reason,
+                                                                            &s_guard_cfg);
+            s_trip_seq++; // wraps uint8_t -- see the variable's own doc comment
+
             // TODO (Phase 8): log_task has no ring/drain/transport yet
             // (task_priorities.h's own shell-only status) -- there is
             // nowhere to log this trip to yet, so step 4 of the 4-step
@@ -176,6 +218,58 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
         }
         *out_diag_state = state;
     }
+}
+
+bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_reason,
+                                 uint32_t *out_uptime_ms, float *out_tc_c,
+                                 float *out_deciding_threshold)
+{
+    // Read s_trip_seq FIRST, matching the write-order comment at the capture
+    // site in safety_core_task() above -- if a trip lands between this read
+    // and the field reads below, the caller sees either the old, fully
+    // consistent set (this seq, these fields) or -- at worst -- reports one
+    // trip event a poll cycle later than it happened. It can never observe a
+    // torn mix of one trip's seq with another trip's fields, because the
+    // writer always finishes writing every field before bumping the seq.
+    uint8_t seq = s_trip_seq;
+
+    if (out_trip_seq) {
+        *out_trip_seq = seq;
+    }
+    if (seq == 0) {
+        // No trip yet this boot -- every other output is meaningless
+        // (matches the header comment's documented "false, everything
+        // zeroed" contract) rather than whatever s_trip_* happen to hold
+        // (their static-storage zero-init, in this case, but that is an
+        // implementation detail the caller must not rely on).
+        if (out_trip_reason) {
+            *out_trip_reason = SAFETY_TRIP_NONE;
+        }
+        if (out_uptime_ms) {
+            *out_uptime_ms = 0;
+        }
+        if (out_tc_c) {
+            *out_tc_c = NAN;
+        }
+        if (out_deciding_threshold) {
+            *out_deciding_threshold = NAN;
+        }
+        return false;
+    }
+
+    if (out_trip_reason) {
+        *out_trip_reason = s_trip_reason;
+    }
+    if (out_uptime_ms) {
+        *out_uptime_ms = s_trip_uptime_ms;
+    }
+    if (out_tc_c) {
+        *out_tc_c = s_trip_tc_c;
+    }
+    if (out_deciding_threshold) {
+        *out_deciding_threshold = s_trip_deciding_threshold;
+    }
+    return true;
 }
 
 // Explicit operator-acknowledged clear -- the only way out of a latched

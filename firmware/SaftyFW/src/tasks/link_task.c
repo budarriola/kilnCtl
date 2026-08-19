@@ -1,15 +1,27 @@
 // link_task.c -- Phase 7/7b/8 (partial): kilnlink BROADCAST TX of the
-// existing 23-byte status frame, SAFETY_CMD_FW_VERSION and SAFETY_CMD_DIAG
-// (Frame B), RX handling of ANNOUNCE_VERSION, GET_FW_VERSION and now
-// SAFETY_CMD_PUSH_CONTEXT (0x07) -> context_snapshot_t, and the receiver
-// hardening (resync-on-0x7E, bounded buffers, no allocation)
-// LINK_PROTOCOL.md section 3 requires. SET_FIRING_CEILING, CLEAR_TRIP and
-// SET_CLOCK are still explicitly out of scope for this pass -- see
-// docs/TODO.md Phase 7's remaining checkboxes. Parsing the context frame is
-// only half of Phase 7: nothing here yet acts on it (no S2/S3/S4/S6/S10
-// guard exists to disable on SIM_PLANT or reset on a boot_id change -- see
-// the comments at the PUSH_CONTEXT case below and TODO.md's own notes on
-// what remains).
+// existing 23-byte status frame, SAFETY_CMD_FW_VERSION, SAFETY_CMD_DIAG
+// (Frame B) and now SAFETY_CMD_TRIP_EVENT (Frame D), RX handling of
+// ANNOUNCE_VERSION, GET_FW_VERSION and SAFETY_CMD_PUSH_CONTEXT (0x07) ->
+// context_snapshot_t, and the receiver hardening (resync-on-0x7E, bounded
+// buffers, no allocation) LINK_PROTOCOL.md section 3 requires.
+// SET_FIRING_CEILING, CLEAR_TRIP and SET_CLOCK are still explicitly out of
+// scope for this pass -- see docs/TODO.md Phase 7's remaining checkboxes.
+// Parsing the context frame is only half of Phase 7: nothing here yet acts
+// on it (no S2/S3/S4/S6/S10 guard exists to disable on SIM_PLANT or reset on
+// a boot_id change -- see the comments at the PUSH_CONTEXT case below and
+// TODO.md's own notes on what remains).
+//
+// ROADMAP.md M5 pass: Frame B's send path now calls the shared
+// kilnlink_diag_encode() codec (CommonFW/src/kilnlink_diag.c, host-tested in
+// CommonFW/test/test_diag.c) instead of this file's own hand-rolled
+// link_frame_pack_diag() -- the two were independent, byte-identical-by-
+// construction implementations of the same 26-byte layout, and this removes
+// the duplication rather than leaving it. Frame D (SAFETY_CMD_TRIP_EVENT) is
+// new this pass: link_task_send_trip_event() below, driven by polling
+// safety_core_get_trip_event() every loop iteration (safety_core.c is the
+// producer, this file the consumer -- see that function's own doc comment
+// for why this is the isolation-legal direction, same pattern
+// safety_core_get_diag_status()/_get_output_status() already established).
 //
 // THE ONE RULE THAT MATTERS (docs/ARCHITECTURE.md section 2): this file must
 // never reference GPIO6 or the relay, by name, number or symbol -- not even
@@ -53,8 +65,10 @@
 #include "thermo_task.h"
 #include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
 
+#include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_power.h"
+#include "kilnlink/kilnlink_trip.h"
 #include "kilnlink/kilnlink_version.h"
 
 // Stack bumped from a single configMINIMAL_STACK_SIZE (Phase 10, this pass):
@@ -87,6 +101,19 @@
 // human-noticeable timescale. Matches Frame B's period rather than inventing
 // a third cadence.
 #define LINK_POWER_TX_PERIOD_MS    2000
+// Frame D (SAFETY_CMD_TRIP_EVENT) repeat burst: LINK_PROTOCOL.md sec 6,
+// "pushed immediately... and repeated a few times over the next second in
+// case the first copy is lost (there is no ACK)". Mirrors the exact burst
+// shape KilnFW's own safety_link_send_announce_version_burst() already uses
+// for ANNOUNCE_VERSION (4 copies, 250ms apart, ~750ms total -- see that
+// function's own comment) rather than inventing a new cadence for the same
+// "loss-tolerant unsolicited burst" idea. This is NOT the retransmission
+// rule 2 of LINK_PROTOCOL.md sec 2 forbids: the burst count and timing are
+// fixed at trip-detection time and fire unconditionally, never conditioned
+// on whether an earlier copy in the same burst was "lost" (nothing here can
+// even tell) or on any signal from the ESP.
+#define LINK_TRIP_REPEAT_COUNT     4u
+#define LINK_TRIP_REPEAT_PERIOD_MS 250
 
 // Addressing (CommonFW/docs/LINK_PROTOCOL.md section 3, firmware/KilnFW/App/
 // drivers/espInterfaces/uart_protocol.h and uart_task_ids.h). Mirrored here
@@ -172,6 +199,23 @@ static bool s_context_boot_id_known = false;
 // only from link_task_send_status() (this task); read from any task, same
 // single-writer/plain-read reasoning as s_context_frames_ok/bad above.
 static uint32_t s_status_tx_ok_count = 0;
+
+// Frame D (TRIP_EVENT) burst state. Touched only from link_task_fn / the
+// functions it calls (all this task) -- no lock, same single-writer
+// reasoning as the counters above. s_trip_last_seq_seen tracks the newest
+// safety_core_get_trip_event() trip_seq this task has already started a
+// burst for, so a trip -> clear -> re-trip pair produces two independent
+// bursts rather than one being silently dropped as "already handled".
+// s_pending_trip is filled ONCE, when a new seq is first observed, and
+// reused unmodified for every repeat in the burst -- a trip event describes
+// one instant, and every copy on the wire must describe the SAME instant,
+// not a fresh live read each time (current_task/context_snapshot values in
+// particular could otherwise drift between repeats of what is supposed to be
+// one event).
+static uint8_t s_trip_last_seq_seen = 0;
+static kilnlink_trip_t s_pending_trip;
+static unsigned s_trip_repeats_pending = 0;
+static TickType_t s_last_trip_tx_tick = 0;
 
 // --- TX ----------------------------------------------------------------
 
@@ -276,6 +320,24 @@ static void link_task_send_fw_version(void)
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
+// Shared by link_task_send_diag() and link_task_send_trip_event(): both
+// frames carry "how long since the last well-formed PUSH_CONTEXT" (DIAG byte
+// 11, TRIP_EVENT byte 28), same sentinel (255 = never received) and same
+// clamp (254 max, so a genuinely-stale-but-received context is never
+// misread as "never received" by colliding with the sentinel). Factored out
+// here rather than left duplicated inline a second time, now that a second
+// call site needs it.
+static uint8_t link_task_context_age_100ms(void)
+{
+    if (s_context_frames_ok == 0) {
+        return 255u;
+    }
+    TickType_t age_ticks = xTaskGetTickCount() - s_last_context_rx_tick;
+    uint32_t age_ms = (uint32_t)age_ticks * portTICK_PERIOD_MS;
+    uint32_t age_100ms = age_ms / 100u;
+    return (age_100ms > 254u) ? 254u : (uint8_t)age_100ms;
+}
+
 static void link_task_send_diag(void)
 {
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
@@ -313,13 +375,13 @@ static void link_task_send_diag(void)
     // rather than a verified power-on event; that is the best this codebase
     // can report without inventing a detector it does not have. bit2
     // (brownout) has no source at all here and is always 0 -- see
-    // link_frame.h's LINK_DIAG_BOOT_BROWNOUT comment.
+    // kilnlink_diag.h's KILNLINK_DIAG_BOOT_BROWNOUT comment.
     saftyfw_boot_reason_t boot = boot_reason_get_cached();
     uint8_t boot_reason_byte = 0;
     if (boot.watchdog_caused_reboot) {
-        boot_reason_byte |= LINK_DIAG_BOOT_WATCHDOG;
+        boot_reason_byte |= KILNLINK_DIAG_BOOT_WATCHDOG;
     } else {
-        boot_reason_byte |= LINK_DIAG_BOOT_POWERON;
+        boot_reason_byte |= KILNLINK_DIAG_BOOT_POWERON;
     }
 
     // context_age_100ms: 255 ("never received") is real now, not a
@@ -334,19 +396,13 @@ static void link_task_send_diag(void)
     // context_frames_ok/bad: real running counts from
     // link_task_handle_push_context(), one increment per successful/rejected
     // PUSH_CONTEXT payload respectively.
-    uint8_t context_age_100ms = 255;
-    if (s_context_frames_ok > 0) {
-        TickType_t age_ticks = xTaskGetTickCount() - s_last_context_rx_tick;
-        uint32_t age_ms = (uint32_t)age_ticks * portTICK_PERIOD_MS;
-        uint32_t age_100ms = age_ms / 100u;
-        context_age_100ms = (age_100ms > 254u) ? 254u : (uint8_t)age_100ms;
-    }
+    uint8_t context_age_100ms = link_task_context_age_100ms();
 
     // flags bit0 sim_context_seen: real now, from s_context_sim_seen (see
     // that variable's declaration for the "latched, never cleared" contract).
-    uint8_t diag_flags = LINK_DIAG_FLAG_CALIBRATION_MISSING;
+    uint8_t diag_flags = KILNLINK_DIAG_FLAG_CALIBRATION_MISSING;
     if (s_context_sim_seen) {
-        diag_flags |= LINK_DIAG_FLAG_SIM_CONTEXT_SEEN;
+        diag_flags |= KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN;
     }
     // flags: bit1 calibration_missing = 1 (no config_store, Phase 9 -- this
     // is the honest current state, not a bug); bit2 estop_unwired_suspect = 0
@@ -356,13 +412,53 @@ static void link_task_send_diag(void)
     // disable on sim_context_seen or reset on a boot_id change -- this frame
     // reports that the fact is known, not that anything downstream acts on
     // it yet.
-    uint8_t payload[LINK_FRAME_DIAG_LEN];
-    link_frame_pack_diag(payload, (uint8_t)trip_reason, warn_mask, trip_mask, uptime_ms,
-                          boot_reason_byte, context_age_100ms, s_context_frames_ok,
-                          s_context_frames_bad, uart_owner_get_tx_dropped(), diag_state,
-                          diag_flags);
+    //
+    // Built via the shared kilnlink_diag_encode() codec (CommonFW/src/
+    // kilnlink_diag.c, host-tested test_diag.c) rather than this file's own
+    // former hand-rolled link_frame_pack_diag() -- ROADMAP.md M5: the two
+    // were duplicate implementations of the identical 26-byte layout, and
+    // this removes the duplication now that the shared codec exists (it
+    // predates this file's own packer having been written before
+    // kilnlink_diag.c landed).
+    kilnlink_diag_t dg = {
+        .trip_reason = (uint8_t)trip_reason,
+        .warn_mask = warn_mask,
+        .trip_mask = trip_mask,
+        .uptime_ms = uptime_ms,
+        .boot_reason = boot_reason_byte,
+        .context_age_100ms = context_age_100ms,
+        .context_frames_ok = s_context_frames_ok,
+        .context_frames_bad = s_context_frames_bad,
+        .tx_frames_dropped = uart_owner_get_tx_dropped(),
+        .state = diag_state,
+        .flags = diag_flags,
+    };
+    uint8_t payload[KILNLINK_DIAG_LEN];
+    kilnlink_diag_status_t status;
+    size_t len = kilnlink_diag_encode(&dg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // can't happen for a fixed sizeof(payload) == KILNLINK_DIAG_LEN buffer
+    }
 
-    link_task_send_broadcast(payload, LINK_FRAME_DIAG_LEN);
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+// Frame D (SAFETY_CMD_TRIP_EVENT, 0x0D) -- CommonFW/docs/LINK_PROTOCOL.md
+// sec 6: "pushed immediately... repeated a few times over the next second."
+// tr must already be fully populated (link_task_fn()'s poll loop below is
+// the only caller, and it fills s_pending_trip once per newly-observed
+// trip_seq, reusing it unmodified for every repeat -- see that struct's own
+// declaration comment for why).
+static void link_task_send_trip_event(const kilnlink_trip_t *tr)
+{
+    uint8_t payload[KILNLINK_TRIP_LEN];
+    kilnlink_trip_status_t status;
+    size_t len = kilnlink_trip_encode(tr, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // can't happen for a fixed sizeof(payload) == KILNLINK_TRIP_LEN buffer
+    }
+
+    link_task_send_broadcast(payload, (uint8_t)len);
 }
 
 // Frame E (SAFETY_CMD_POWER, 0x0E) -- docs/CURRENT_SENSE.md section 3b /
@@ -611,6 +707,77 @@ static void link_task_rx_process_byte(uint8_t b)
     s_rx_assembly[s_rx_assembly_len++] = b;
 }
 
+// --- Frame D (TRIP_EVENT) polling -------------------------------------------
+
+// Called once per link_task_fn() loop iteration (~100ms, LINK_TASK_POLL_MS).
+// Two independent jobs:
+//   1. Notice a NEW trip (safety_core_get_trip_event()'s trip_seq advanced
+//      past what this task has already started a burst for) and, if so,
+//      fill s_pending_trip ONCE from safety_core's own captured-at-the-
+//      instant values plus this task's own best-effort current/context
+//      pulls, then arm a LINK_TRIP_REPEAT_COUNT-copy burst.
+//   2. Send the next copy of an already-armed burst once
+//      LINK_TRIP_REPEAT_PERIOD_MS has elapsed since the last one.
+// Deliberately not folded into the periodic-TX block in link_task_fn() below
+// (which all key off "has this fixed period elapsed") -- a trip event is
+// edge-triggered, not periodic, and mixing the two shapes into one
+// last_*_tx/period pair would make either harder to read than two smaller
+// pieces.
+static void link_task_poll_trip_event(TickType_t now)
+{
+    uint8_t trip_seq = 0;
+    safety_trip_t trip_reason = SAFETY_TRIP_NONE;
+    uint32_t trip_uptime_ms = 0;
+    float trip_tc_c = NAN;
+    float trip_threshold = NAN;
+    bool have_trip = safety_core_get_trip_event(&trip_seq, &trip_reason, &trip_uptime_ms,
+                                                 &trip_tc_c, &trip_threshold);
+
+    if (have_trip && trip_seq != s_trip_last_seq_seen) {
+        s_trip_last_seq_seen = trip_seq;
+
+        // "at the instant of the trip" for uptime_ms/safety_tc_c/
+        // deciding_threshold, straight from safety_core's own capture
+        // (safety_core_get_trip_event()'s doc comment). current_a[]/
+        // relay_recent_mask/context_age_100ms are NOT captured by
+        // safety_core at all (safety_guard_input_t carries no raw current or
+        // ESP-context data in this build -- see that struct's field
+        // comments) -- the best this task can honestly do is pull them here,
+        // "at detection time" rather than the literal trip tick, which is at
+        // most one LINK_TASK_POLL_MS (~100ms) late. Documented here rather
+        // than silently presented as exact.
+        current_snapshot_t cur;
+        current_task_get_snapshot(&cur);
+
+        context_snapshot_t ctx;
+        bool have_ctx = link_task_get_context_snapshot(&ctx);
+
+        s_pending_trip.trip_seq = trip_seq;
+        s_pending_trip.trip_reason = (uint8_t)trip_reason;
+        s_pending_trip.uptime_ms = trip_uptime_ms;
+        s_pending_trip.safety_tc_c = trip_tc_c;
+        s_pending_trip.deciding_threshold = trip_threshold;
+        s_pending_trip.current_a[0] = cur.amps[0];
+        s_pending_trip.current_a[1] = cur.amps[1];
+        s_pending_trip.current_a[2] = cur.amps[2];
+        s_pending_trip.relay_recent_mask = have_ctx ? ctx.relay_recent_mask : 0u;
+        s_pending_trip.context_age_100ms = link_task_context_age_100ms();
+
+        s_trip_repeats_pending = LINK_TRIP_REPEAT_COUNT;
+        // Force the first copy out this same iteration rather than waiting a
+        // full LINK_TRIP_REPEAT_PERIOD_MS -- "pushed immediately on trip" is
+        // the frame's whole point (LINK_PROTOCOL.md sec 6).
+        s_last_trip_tx_tick = now - pdMS_TO_TICKS(LINK_TRIP_REPEAT_PERIOD_MS);
+    }
+
+    if (s_trip_repeats_pending > 0 &&
+        (now - s_last_trip_tx_tick) >= pdMS_TO_TICKS(LINK_TRIP_REPEAT_PERIOD_MS)) {
+        link_task_send_trip_event(&s_pending_trip);
+        s_trip_repeats_pending--;
+        s_last_trip_tx_tick = now;
+    }
+}
+
 // --- Task ------------------------------------------------------------------
 
 static void link_task_fn(void *arg)
@@ -647,6 +814,7 @@ static void link_task_fn(void *arg)
             link_task_send_power();
             last_power_tx = now;
         }
+        link_task_poll_trip_event(now);
 
         vTaskDelay(pdMS_TO_TICKS(LINK_TASK_POLL_MS));
 
@@ -678,6 +846,10 @@ bool link_task_start(void)
     s_context_boot_id_known = false;
     s_context_published = false;
     s_status_tx_ok_count = 0;
+
+    s_trip_last_seq_seen = 0;
+    s_trip_repeats_pending = 0;
+    s_last_trip_tx_tick = 0;
 
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.

@@ -68,40 +68,14 @@ size_t link_frame_pack_fw_version(uint8_t *out, size_t out_cap, uint16_t protoco
                                    uint8_t boot_id, uint8_t config_version, uint16_t config_crc);
 
 // --- Frame B: SAFETY_CMD_DIAG (0x08), 26 bytes -------------------------------
-// CommonFW/docs/LINK_PROTOCOL.md section 6, "Frame B": additive -- a KilnFW
-// build that has never heard of 0x08 discards it (LINK_PROTOCOL.md's own
-// "a peer that has never heard of it discards it" rule), so this can ship
-// without any ESP-side change.
-#define LINK_FRAME_DIAG_CMD 0x08u
-#define LINK_FRAME_DIAG_LEN 26u
-
-// boot_reason byte (offset 10). bit2 (brownout) is always 0 in this build --
-// boot_reason.c only latches watchdog_caused_reboot/watchdog_enable_caused_
-// reboot (RP2040 SDK has no separate brownout-detect API this codebase reads
-// from) -- see link_task.c's call site for how the other two bits are
-// derived from what IS available.
-#define LINK_DIAG_BOOT_POWERON  0x01u
-#define LINK_DIAG_BOOT_WATCHDOG 0x02u
-#define LINK_DIAG_BOOT_BROWNOUT 0x04u // never set in this build -- no source
-
-// flags byte (offset 25).
-#define LINK_DIAG_FLAG_SIM_CONTEXT_SEEN      0x01u // set once a context frame with CONTEXT_FLAG_SIM_PLANT has been seen (latched for the boot, link_task.c)
-#define LINK_DIAG_FLAG_CALIBRATION_MISSING   0x02u // always 1 -- no config_store yet (Phase 9)
-#define LINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT 0x04u // always 0 -- no detection heuristic specified/built
-
-// Packs the 26-byte DIAG payload into `out` (must have room for
-// LINK_FRAME_DIAG_LEN bytes). Pure passthrough of caller-supplied values,
-// same discipline as link_frame_pack_status() -- this function does not
-// decide what any field means, only how it is laid out on the wire.
-// `trip_reason` is a plain uint8_t here (not safety_trip_t) so this header
-// stays free of a safety_guards.h dependency, matching this whole file's
-// "no non-host-buildable dependency" rule -- link_task.c does the cast at
-// the call site.
-void link_frame_pack_diag(uint8_t out[LINK_FRAME_DIAG_LEN], uint8_t trip_reason,
-                           uint16_t warn_mask, uint16_t trip_mask, uint32_t uptime_ms,
-                           uint8_t boot_reason, uint8_t context_age_100ms,
-                           uint32_t context_frames_ok, uint32_t context_frames_bad,
-                           uint32_t tx_frames_dropped, uint8_t state, uint8_t flags);
+// Was hand-packed here (link_frame_pack_diag()); ROADMAP.md M5 migrated
+// link_task.c's send path onto the shared kilnlink_diag_encode() codec
+// (firmware/CommonFW/include/kilnlink/kilnlink_diag.h, host-tested in
+// CommonFW/test/test_diag.c) once that codec existed, removing this file's
+// duplicate implementation of the identical 26-byte layout rather than
+// leaving both around. If a pure/host-buildable DIAG packer is ever needed
+// again independent of kilnlink, look there first before reintroducing one
+// here.
 
 // --- ESP -> Pico: SAFETY_CMD_PUSH_CONTEXT (0x07) -----------------------------
 // CommonFW/docs/LINK_PROTOCOL.md section 4. Untrusted-wire input: every

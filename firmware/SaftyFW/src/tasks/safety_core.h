@@ -85,6 +85,54 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
 // caller is a separate, later pass.
 bool safety_core_request_clear_trip(void);
 
+// Trip-event pull for link_task's Frame D (SAFETY_CMD_TRIP_EVENT,
+// CommonFW/docs/LINK_PROTOCOL.md sec 6). Same channel pattern as
+// safety_core_get_output_status()/safety_core_get_diag_status() above --
+// this is the legal, isolation-respecting path for link_task to learn "a
+// trip just latched" without calling into, or being called by, safety_core:
+// link_task polls this on its own schedule (LINK_PROTOCOL.md sec 2: "link_task
+// is a PRODUCER... never a service anything waits on" applies in reverse
+// here too -- link_task pulls, safety_core never pushes into the link).
+//
+// Returns true iff at least one trip has occurred since safety_core_start()
+// (i.e. *out_trip_seq > 0); false (with every output zeroed/NaN) before the
+// first trip this boot -- link_task must not send Frame D at all in that
+// case, matching the frame's "pushed immediately on trip", not on a cadence.
+//
+//   out_trip_seq: increments (wrapping uint8_t) once per NEWLY-tripped event
+//     (safety_guards_tick()'s own "true exactly once per trip" contract) --
+//     this is the wire's trip_seq / the caller's dedup key. A trip -> clear
+//     -> re-trip sequence produces a new value each time.
+//   out_trip_reason: the reason latched by that trip (SAFETY_TRIP_NONE only
+//     when out_trip_seq == 0, i.e. before any trip).
+//   out_uptime_ms: Pico uptime (pico/time.h clock, same base link_task's own
+//     uptime_ms fields already use) at the instant safety_guards_tick()
+//     reported newly_tripped == true.
+//   out_tc_c: the safety thermocouple reading (input.tc_c, the same value
+//     safety_guards_tick() was evaluating) at that instant. NaN if the
+//     reading was itself invalid at trip time (e.g. an S6/S7 trip with no
+//     requirement that the thermocouple be valid).
+//   out_deciding_threshold: safety_guards_deciding_threshold_c()'s best-effort
+//     answer for that reason -- see its own doc comment for exactly which
+//     guards get a real number vs. an honest NaN.
+//
+// Everything else Frame D needs (current_a[], relay_recent_mask,
+// context_age_100ms) is NOT sourced from here: safety_core has no current-sense
+// or ESP-context data in its guard input in this build (see
+// safety_guard_input_t's own field comments -- only presence booleans, never
+// raw amps; context arrives at link_task, never at safety_core). link_task
+// pulls those directly from current_task/its own context snapshot at the
+// moment it observes a new out_trip_seq, which is an honest "at detection
+// time" (within one link_task poll period, ~100ms, of the real trip instant)
+// rather than the literal guard-tick instant this function's other four
+// fields capture exactly.
+//
+// Any output pointer may be NULL if the caller does not need it. Safe to
+// call from any task.
+bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_reason,
+                                 uint32_t *out_uptime_ms, float *out_tc_c,
+                                 float *out_deciding_threshold);
+
 #ifdef __cplusplus
 }
 #endif

@@ -100,7 +100,7 @@
 
 // UPDATE_PROTOCOL.md section 1: "Measured temperature below a configured
 // ceiling... Default 100 degrees C". No config_store exists yet (Phase 9,
-// the same honest gap link_task.c's LINK_DIAG_FLAG_CALIBRATION_MISSING
+// the same honest gap link_task.c's KILNLINK_DIAG_FLAG_CALIBRATION_MISSING
 // already documents) -- this compile-time constant is what
 // update_task_process_begin() enforces until a real per-installation value
 // exists to source it from.

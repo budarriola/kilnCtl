@@ -71,6 +71,41 @@ static uint16_t effective_u16(uint16_t cfg_val, uint16_t fallback)
     return (cfg_val != 0u) ? cfg_val : fallback;
 }
 
+float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guard_cfg_t *cfg)
+{
+    switch (reason) {
+    case SAFETY_TRIP_OVERTEMP:
+        /* S1. Reports the configured absolute ceiling (abs_max_temp_c), NOT
+         * the possibly-tighter effective_ceiling = min(abs_max_temp_c,
+         * firing_max_c + firing_margin_c) that actually decided a trip
+         * during a firing with a ceiling in effect -- safety_guards_tick()
+         * computes that min() internally and does not expose it. abs_max_temp_c
+         * has no substituted default (safety_guards.h: "0 = not commissioned,
+         * guard never trips"), so if this guard tripped, this value is real
+         * and non-zero -- never a silently-substituted fallback. */
+        return cfg->abs_max_temp_c;
+    case SAFETY_TRIP_OVER_SETPOINT: /* S2 */
+        return effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
+    case SAFETY_TRIP_LOAD_STUCK_ON: /* S3 */
+        return effective_f(cfg->i_present_a, I_PRESENT_A_DEFAULT);
+    case SAFETY_TRIP_FROZEN_SENSOR: /* S11 */
+        return effective_f(cfg->frozen_window_s, FROZEN_WINDOW_S_DEFAULT);
+    case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 */
+        return effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
+    case SAFETY_TRIP_BORROWED_STALE: /* S13 */
+        return effective_f(cfg->borrowed_stale_trip_s, BORROWED_STALE_TRIP_S_DEFAULT);
+    default:
+        /* S5 (dual count+time threshold, no single magnitude), S6a/S7
+         * (boolean conditions, no magnitude at all), S6b (a hard-backstop
+         * *time*, already covered qualitatively by trip_reason itself), S9
+         * (escalation of an existing trip, not a fresh threshold crossing) --
+         * none of these has one meaningful number to report here. NaN, never
+         * a guessed value, matching this whole protocol's "NaN, never 0, when
+         * a field does not apply" discipline. */
+        return NAN;
+    }
+}
+
 bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                          const safety_guard_input_t *in)
 {

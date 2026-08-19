@@ -81,10 +81,10 @@ uint8_t log_task_get_level(void);
 // than the fact, and uart_owner_get_tx_dropped() already exists separately
 // for telemetry's own drop accounting if that finer distinction is ever
 // wanted. Diagnostic only; not yet folded into Frame B (SAFETY_CMD_DIAG,
-// link_frame.h) -- that frame's byte layout is fixed by
+// kilnlink/kilnlink_diag.h) -- that frame's byte layout is fixed by
 // CommonFW/docs/LINK_PROTOCOL.md and has no spare field for it (see
-// link_frame.h's doc comment on LINK_FRAME_DIAG_LEN); this counter is built
-// and exposed for a future consumer, not yet wired into any frame.
+// KILNLINK_DIAG_LEN's own doc comment); this counter is built and exposed
+// for a future consumer, not yet wired into any frame.
 uint32_t log_task_get_dropped(void);
 
 #ifdef __cplusplus

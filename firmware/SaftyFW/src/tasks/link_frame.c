@@ -80,26 +80,6 @@ void link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN], bool estop, bool
     pack_f32_le(&out[19], amps3);
 }
 
-void link_frame_pack_diag(uint8_t out[LINK_FRAME_DIAG_LEN], uint8_t trip_reason,
-                           uint16_t warn_mask, uint16_t trip_mask, uint32_t uptime_ms,
-                           uint8_t boot_reason, uint8_t context_age_100ms,
-                           uint32_t context_frames_ok, uint32_t context_frames_bad,
-                           uint32_t tx_frames_dropped, uint8_t state, uint8_t flags)
-{
-    out[0] = LINK_FRAME_DIAG_CMD;
-    out[1] = trip_reason;
-    pack_u16_le(&out[2], warn_mask);
-    pack_u16_le(&out[4], trip_mask);
-    pack_u32_le(&out[6], uptime_ms);
-    out[10] = boot_reason;
-    out[11] = context_age_100ms;
-    pack_u32_le(&out[12], context_frames_ok);
-    pack_u32_le(&out[16], context_frames_bad);
-    pack_u32_le(&out[20], tx_frames_dropped);
-    out[24] = state;
-    out[25] = flags;
-}
-
 size_t link_frame_pack_fw_version(uint8_t *out, size_t out_cap, uint16_t protocol_version,
                                    uint16_t min_compatible, uint8_t dirty, const char *commit,
                                    uint8_t commit_len, const char *datetime, uint8_t datetime_len,

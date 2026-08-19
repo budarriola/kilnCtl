@@ -1,6 +1,6 @@
 # TODO — Safety Processor Firmware
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-19
 > **Keep this file current.** Tick items as they land, and keep "built" and
 > "verified on hardware" distinct — `firmware/KilnFW/docs/PROJECT_STATUS.md` is the model
 > for that discipline. If a phase changes shape, edit it here rather than
@@ -723,12 +723,23 @@ The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCO
       `warn_mask`/`trip_mask` are honestly degraded to a single bit each —
       `safety_guards.c` tracks one `reason` for the whole module, not a
       13-guard bitmask, so a fuller mask has no data source yet.
-      `context_age_100ms` is always 255 (never received — no context-frame
-      parsing exists), `context_frames_ok`/`bad` always 0 (same reason),
-      `tx_frames_dropped` is real. `flags` bit1 `calibration_missing` is
-      always 1 (true — no `config_store` yet, Phase 9); bit0
-      `sim_context_seen` and bit2 `estop_unwired_suspect` are always 0, no
-      detection heuristic exists for either.
+      `context_age_100ms` is real once at least one context frame has been
+      parsed (255 = "never received" before that), `context_frames_ok`/`bad`
+      are real running counts, `tx_frames_dropped` is real. `flags` bit1
+      `calibration_missing` is always 1 (true — no `config_store` yet, Phase
+      9); bit0 `sim_context_seen` is real (latched once `CONTEXT_FLAG_SIM_PLANT`
+      is seen), bit2 `estop_unwired_suspect` is always 0, no detection
+      heuristic exists. **2026-08-19 (ROADMAP.md M5)**: the send path was
+      migrated off this file's own hand-rolled `link_frame_pack_diag()` onto
+      the shared `kilnlink_diag_encode()` codec
+      (`firmware/CommonFW/src/kilnlink_diag.c`, host-tested
+      `CommonFW/test/test_diag.c`) once that codec existed — the two were
+      independent, byte-identical-by-construction implementations of the
+      same 26-byte layout, and `link_frame_pack_diag()`/`LINK_FRAME_DIAG_*`
+      were deleted from `link_frame.{c,h}` rather than left as dead
+      duplicate code. No field or behavior change, confirmed by the existing
+      host test suite (`test/build_host_tests.ps1`, 422/422) and a real
+      `cmake --build` passing clean.
 - [ ] `build_info.h` generated on every build (git commit, dirty, timestamp).
       **Unknown must map to `dirty = 1`** — an uncommitted build must never
       report itself clean. **Not built this pass**: `link_task_send_fw_version()`
@@ -741,9 +752,66 @@ The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCO
       `config_version`/`config_crc` are 0 — honest, since `config_store`
       (Phase 9) doesn't exist yet and the spec documents 0 as exactly that
       case ("running on compiled-in defaults that were never commissioned").
-- [ ] Emit `SAFETY_CMD_TRIP_EVENT` (0x0D) **immediately on trip**, repeated a
-      few times, carrying the deciding values at the moment of the trip. Half a
-      second later that evidence is gone.
+- [x] Emit `SAFETY_CMD_TRIP_EVENT` (0x0D) **immediately on trip**, repeated a
+      few times, carrying the deciding values at the moment of the trip.
+      **2026-08-19 (ROADMAP.md M5)**. The cross-task path needed for this
+      respects the isolation direction `tools/check_isolation.ps1` enforces
+      (`safety_core.c` never calls into the link, never even knows it
+      exists): a new `safety_core_get_trip_event()` getter
+      (`safety_core.{c,h}`, same lock-free single-writer/plain-read pattern
+      as the existing `safety_core_get_output_status()`/
+      `_get_diag_status()`) captures `trip_seq`/`trip_reason`/`uptime_ms`/
+      `safety_tc_c`/`deciding_threshold` the SAME tick a trip latches, right
+      after `relay_owner_command_trip()`/`boot_reason_latch_trip()` in
+      `safety_core_task()` — before the evidence changes. `link_task.c`
+      polls that getter every loop iteration (~100ms) in a new
+      `link_task_poll_trip_event()`; on a new `trip_seq` it fills a
+      `kilnlink_trip_t` once (adding its own current-sense and
+      `relay_recent_mask`/`context_age_100ms` pulls — see below — to
+      safety_core's four captured fields) and fires a 4-copy, 250ms-apart
+      burst via `kilnlink_trip_encode()` + `link_task_send_broadcast()`,
+      mirroring the exact burst shape `KilnFW`'s own
+      `safety_link_send_announce_version_burst()` already uses for
+      `ANNOUNCE_VERSION` rather than inventing a new cadence. This is a
+      scheduled, unconditional repeat, not the retransmission-on-failure
+      LINK_PROTOCOL.md sec 2 rule 2 forbids: the burst count/timing are
+      fixed at detection time and nothing here can even observe whether an
+      earlier copy was lost.
+      **Two fields are honest approximations, documented at the source
+      rather than silently presented as exact:**
+      (1) `deciding_threshold` — a new pure `safety_guards_deciding_threshold_c()`
+      (`safety_guards.{c,h}`, host-tested, `test_deciding_threshold()` in
+      `test/test_safety_guards.c`) maps `trip_reason` to the one config
+      threshold that guard actually compares against, for the six guards
+      that have a single meaningful magnitude (S1/S2/S3/S11/S12/S13); the
+      rest (S5's dual count+time bar, S6a/S7's boolean conditions, S6b's
+      already-qualitative hard backstop, S9's escalation-not-a-fresh-
+      threshold nature) report NaN rather than a guess. S1 specifically
+      reports the configured `abs_max_temp_c`, not the possibly-tighter
+      runtime `min(abs_max_temp_c, firing_max_c + firing_margin_c)`
+      `safety_guards_tick()` computes internally and does not expose.
+      (2) `current_a[]`/`relay_recent_mask`/`context_age_100ms` — `safety_core`
+      has no raw current-sense or ESP-context data in its guard input in
+      this build (`safety_guard_input_t` carries only presence booleans and
+      no context fields at all, per its own doc comments), so these cannot
+      be captured at the guard-tick instant the way the other four fields
+      are. `link_task_poll_trip_event()` pulls them from `current_task`/its
+      own context snapshot the moment it FIRST observes the new `trip_seq`
+      instead — honestly "at detection time," at most one
+      `LINK_TASK_POLL_MS` (~100ms) after the real trip, not the literal
+      instant. Host-tested: `test_deciding_threshold()` (10 new checks,
+      `test/build_host_tests.ps1`, 422/422 total) covers the pure threshold
+      lookup; the RTOS-dependent capture/burst logic in `safety_core.c`/
+      `link_task.c` itself is not host-testable (FreeRTOS, pico-sdk,
+      uart_owner — same reason `link_task_send_power()` above isn't) and is
+      build-verified only. Real `cmake --build` (arm-none-eabi-gcc 14.2.1,
+      pico-sdk 2.1.1, Ninja) succeeds clean, zero warnings under
+      `-Wall -Wextra -Werror`, for `SaftyFW`/`_slotA`/`_slotB`.
+      `tools/check_isolation.ps1` re-run clean. **Not hardware-verified**:
+      no RP2040 is attached in this environment and the link is
+      bench-confirmed dead (ROADMAP.md M0), so no real trip has ever
+      actually produced a Frame D a KilnFW has decoded — this closes "built
+      and host/build-verified", not "observed on the wire."
 - [x] Emit `SAFETY_CMD_POWER` (0x0E): per-channel conducting amps, conduction
       fraction, watts, plus totals and accumulated Wh. **2026-08-18**:
       `link_task_send_power()`, 2s cadence (same reasoning as Frame B/DIAG

@@ -1565,6 +1565,52 @@ static void test_context_gating(void)
     }
 }
 
+// Host tests for safety_guards_deciding_threshold_c() -- ROADMAP.md M5,
+// SAFETY_CMD_TRIP_EVENT (Frame D)'s `deciding_threshold` field. Pure function
+// of (reason, cfg); the six guards it covers get a real number back (the
+// configured value if set, the compiled default otherwise), the rest get an
+// honest NaN. Not a guard-tripping test -- this never calls
+// safety_guards_tick(), only the standalone threshold lookup.
+static void test_deciding_threshold(void)
+{
+    TEST_SECTION("safety_guards_deciding_threshold_c -- per-reason coverage");
+
+    safety_guard_cfg_t cfg = base_cfg(); /* abs_max_temp_c=1300, everything else 0 -> defaults */
+
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_OVERTEMP, &cfg), 1300.0f,
+                     0.0001, "S1: reports the configured abs_max_temp_c verbatim");
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_OVER_SETPOINT, &cfg), 75.0f,
+                     0.0001, "S2: overshoot_margin_c==0 -> compiled default 75.0");
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_LOAD_STUCK_ON, &cfg), 2.0f,
+                     0.0001, "S3: i_present_a==0 -> compiled default 2.0");
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_FROZEN_SENSOR, &cfg), 600.0f,
+                     0.0001, "S11: frozen_window_s==0 -> compiled default 600.0");
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_ENCLOSURE_TEMP, &cfg), 85.0f,
+                     0.0001, "S12: cj_max_c==0 -> compiled default 85.0");
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_BORROWED_STALE, &cfg), 60.0f,
+                     0.0001, "S13: borrowed_stale_trip_s==0 -> compiled default 60.0");
+
+    /* A non-zero configured value must win over the compiled default -- the
+     * lookup must not just always report the default no matter what cfg says. */
+    cfg.overshoot_margin_c = 42.0f;
+    TEST_CHECK_NEAR(safety_guards_deciding_threshold_c(SAFETY_TRIP_OVER_SETPOINT, &cfg), 42.0f,
+                     0.0001, "S2: a real configured overshoot_margin_c overrides the default");
+
+    /* Guards with no single meaningful magnitude -- honest NaN, not a guess. */
+    TEST_CHECK(isnan(safety_guards_deciding_threshold_c(SAFETY_TRIP_SENSOR_INVALID, &cfg)),
+               "S5 (dual count+time bar): NaN, no single threshold to report");
+    TEST_CHECK(isnan(safety_guards_deciding_threshold_c(SAFETY_TRIP_MAIN_FAULT, &cfg)),
+               "S6a (boolean mainFault): NaN");
+    TEST_CHECK(isnan(safety_guards_deciding_threshold_c(SAFETY_TRIP_LINK_DEAD, &cfg)),
+               "S6b (already-qualitative hard backstop): NaN");
+    TEST_CHECK(isnan(safety_guards_deciding_threshold_c(SAFETY_TRIP_ESTOP, &cfg)),
+               "S7 (boolean estop): NaN");
+    TEST_CHECK(isnan(safety_guards_deciding_threshold_c(SAFETY_TRIP_INEFFECTIVE, &cfg)),
+               "S9 (escalation, not a fresh threshold crossing): NaN");
+    TEST_CHECK(isnan(safety_guards_deciding_threshold_c(SAFETY_TRIP_NONE, &cfg)),
+               "SAFETY_TRIP_NONE: NaN (no trip to describe)");
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -1583,4 +1629,5 @@ void run_test_safety_guards(void)
     test_context_gating();
     test_independence_invariant();
     test_try_clear();
+    test_deciding_threshold();
 }

@@ -424,6 +424,24 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
 bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                               const safety_guard_input_t *in);
 
+// Best-effort "what number decided this trip" for CommonFW/docs/LINK_PROTOCOL.md
+// sec 6 Frame D's `deciding_threshold` field ("Capturing the deciding values
+// at the instant of the trip is the whole point"). Pure function of (reason,
+// cfg) -- deliberately NOT a function of live state, since the caller reads
+// this once, right after safety_guards_tick() returns true, while `reason`
+// still names what just tripped.
+//
+// Honest, partial coverage, not a claim of completeness: covers the six
+// guards (S1/S2/S3/S11/S12/S13) that have one meaningful magnitude threshold
+// each; returns NaN for the rest (S5's dual count+time bar, S6a/S7's boolean
+// conditions, S6b's already-qualitative hard backstop, S9's escalation-not-a-
+// fresh-threshold nature) rather than guessing. S1's abs_max_temp_c is
+// reported as configured, not the possibly-tighter runtime
+// min(abs_max_temp_c, firing_max_c + firing_margin_c) safety_guards_tick()
+// computes internally and does not expose -- see the .c file's doc comment
+// on the SAFETY_TRIP_OVERTEMP case for the exact caveat.
+float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guard_cfg_t *cfg);
+
 #ifdef __cplusplus
 }
 #endif
