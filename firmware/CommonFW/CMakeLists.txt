@@ -22,6 +22,10 @@ add_library(kilnlink STATIC
     src/kilnlink_announce.c
     src/kilnlink_diag.c
     src/kilnlink_trip.c
+    src/kilnlink_ceiling.c
+    src/kilnlink_clear_trip.c
+    src/kilnlink_get_fw_version.c
+    src/kilnlink_set_clock.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -118,4 +122,40 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_trip PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_trip COMMAND test_trip)
+
+    add_executable(test_ceiling test/test_ceiling.c)
+    target_link_libraries(test_ceiling PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_ceiling PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_ceiling PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_ceiling COMMAND test_ceiling)
+
+    add_executable(test_clear_trip test/test_clear_trip.c)
+    target_link_libraries(test_clear_trip PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_clear_trip PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_clear_trip PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_clear_trip COMMAND test_clear_trip)
+
+    add_executable(test_get_fw_version test/test_get_fw_version.c)
+    target_link_libraries(test_get_fw_version PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_fw_version PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_fw_version PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_fw_version COMMAND test_get_fw_version)
+
+    add_executable(test_set_clock test/test_set_clock.c)
+    target_link_libraries(test_set_clock PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_clock PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_clock PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_clock COMMAND test_set_clock)
 endif()

@@ -30,7 +30,7 @@
     {
       "name": "too_short",
       "note": "22 bytes -- one short of the fixed 23-byte frame. This frame has no length field of its own to lie about; the wire length itself is the only signal, so a decoder must reject anything that isn't exactly 23 bytes.",
-      "payload_hex": "013c00e05a440000be41000000c03f0000104000000000"[:-2],
+      "payload_hex": "013c00e05a440000be41000000c03f00001040000000",
       "expect_error": "LENGTH_MISMATCH"
     },
     {

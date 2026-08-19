@@ -1446,6 +1446,69 @@ def commonfw_vector_checks() -> None:
                 check(f"{name}: raises on {expect}", True, True)
 
 
+#: The two vector-file shapes in firmware/CommonFW/test/vectors/. The older
+#: ones (context/status/announce/power) put each vector's fields at the top
+#: level of the vector object and record the expected bytes as
+#: "payload_hex"; the newer ones (diag/trip, and this pass's ceiling/
+#: clear_trip/get_fw_version/set_clock) nest fields under "fields" and
+#: record expected bytes as "bytes_hex" -- see each file's own
+#: "_comment"/"note" for why. Mapping each manifest file name to
+#: (kilnlink_codec function, which key holds the field dict -- None means
+#: "the vector object itself", which key holds the expected hex) lets one
+#: loop below drive every one of them.
+_PAYLOAD_VECTOR_MANIFESTS = (
+    ("context_vectors.json", "encode_context", None, "payload_hex"),
+    ("status_vectors.json", "encode_status", None, "payload_hex"),
+    ("announce_vectors.json", "encode_announce", None, "payload_hex"),
+    ("power_vectors.json", "encode_power", None, "payload_hex"),
+    ("diag_vectors.json", "encode_diag", "fields", "bytes_hex"),
+    ("trip_vectors.json", "encode_trip", "fields", "bytes_hex"),
+    ("ceiling_vectors.json", "encode_ceiling", "fields", "bytes_hex"),
+    ("clear_trip_vectors.json", "encode_clear_trip", "fields", "bytes_hex"),
+    ("get_fw_version_vectors.json", "encode_get_fw_version", "fields", "bytes_hex"),
+    ("set_clock_vectors.json", "encode_set_clock", "fields", "bytes_hex"),
+)
+
+
+def commonfw_payload_vector_checks() -> None:
+    """Consumes every *payload*-codec vector manifest in
+    firmware/CommonFW/test/vectors/ (as opposed to commonfw_vector_checks()
+    above, which only covers frame_vectors.json, the framing layer) against
+    kilnctrl.kilnlink_codec -- pc_tools' pure-Python mirror of the C payload
+    encoders. Proves Python produces byte-identical output to
+    firmware/CommonFW/src/kilnlink_<name>.c for every codec that has host
+    tests and a vectors file, closing the ROADMAP.md M2 gap where
+    selfcheck.py only ever consumed the framing layer.
+
+    Skips a manifest cleanly (not a failure) if it doesn't exist yet, same
+    convention as commonfw_vector_checks() -- this file needs to keep
+    working for anyone on an older checkout that predates a given codec.
+    """
+    from kilnctrl import kilnlink_codec
+
+    vectors_dir = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "firmware" / "CommonFW" / "test" / "vectors"
+    )
+
+    for filename, fn_name, fields_key, hex_key in _PAYLOAD_VECTOR_MANIFESTS:
+        path = vectors_dir / filename
+        if not path.is_file():
+            print(f"\n== CommonFW kilnlink payload vectors: {filename} == (skipped: not found)")
+            continue
+
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        print(f"\n== CommonFW kilnlink payload vectors: {filename} ==")
+        encode = getattr(kilnlink_codec, fn_name)
+
+        for v in manifest.get("vectors", []):
+            name = v["name"]
+            fields = v[fields_key] if fields_key else v
+            expected = v[hex_key]
+            got = encode(fields).hex()
+            check(f"{filename} {name}: bytes match {hex_key}", got, expected)
+
+
 def hardening_checks() -> None:
     """Negative paths: malformed bytes off the wire, absurd arguments, and the
     link failing underneath a caller.
@@ -1773,6 +1836,7 @@ def main() -> int:
     check("Frame.from_raw round trip", Frame.from_raw(raw), frame)
 
     commonfw_vector_checks()
+    commonfw_payload_vector_checks()
 
     print("\n== FrameDecoder (incremental) ==")
     dec = FrameDecoder()

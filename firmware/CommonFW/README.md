@@ -18,22 +18,33 @@ Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Not yet
 integrated into either firmware** -- `KilnFW`'s `uart_protocol.c` still has
 its own copy, `SaftyFW` doesn't exist.
 
-**2026-08-18: two of the payload codecs now exist too**, now that
-`docs/LINK_PROTOCOL.md` sections 4 and 6 have concrete byte layouts rather
-than "planning": `kilnlink_context.{c,h}` encodes/decodes the ESP→Pico
-`SAFETY_CMD_PUSH_CONTEXT` (0x07) frame (sec 4, including `relay_recent_mask`
-and the per-zone block), and `kilnlink_status.{c,h}` encodes/decodes the
-Pico→ESP Frame A `SAFETY_CMD_GET_STATUS` (0x01) telemetry frame (sec 6, the
-existing 23-byte layout). Host-tested (`test/test_context.c`,
-`test/test_status.c`, MSVC+CMake+Ninja, all passing) with byte-exact vectors
-in `test/vectors/context_vectors.json` and `status_vectors.json` -- **not
-yet** consumed by `tools/PcTools/selfcheck.py` the way `frame_vectors.json`
-is, that's a follow-on. The rest of sections 4 and 6 (`SET_FIRING_CEILING`,
-`CLEAR_TRIP`, `GET_FW_VERSION`, `SET_CLOCK`, `ANNOUNCE_VERSION` on the ESP→
-Pico side; `DIAG`, `FW_VERSION`, `TRIP_EVENT`, `POWER` on the Pico→ESP side)
-also have concrete layouts in `docs/LINK_PROTOCOL.md` now but are not yet
-coded. Nothing here is wired into either firmware's runtime path yet -- see
-Migration below.
+**2026-08-19: every command/frame `docs/LINK_PROTOCOL.md` sections 4 and 6 give
+a concrete byte layout for now has a codec.** ESP→Pico (sec 4):
+`kilnlink_context.{c,h}` (`SAFETY_CMD_PUSH_CONTEXT` 0x07, including
+`relay_recent_mask` and the per-zone block), `kilnlink_announce.{c,h}`
+(`SAFETY_CMD_ANNOUNCE_VERSION` 0x0F, the compatibility-floor layout),
+`kilnlink_ceiling.{c,h}` (`SAFETY_CMD_SET_FIRING_CEILING` 0x09),
+`kilnlink_clear_trip.{c,h}` (`SAFETY_CMD_CLEAR_TRIP` 0x0A),
+`kilnlink_get_fw_version.{c,h}` (`SAFETY_CMD_GET_FW_VERSION` 0x0B, one byte,
+no fields), `kilnlink_set_clock.{c,h}` (`SAFETY_CMD_SET_CLOCK` 0x0C, optional).
+Pico→ESP (sec 6): `kilnlink_status.{c,h}` (Frame A, `SAFETY_CMD_GET_STATUS`
+0x01, the existing 23-byte layout), `kilnlink_diag.{c,h}` (Frame B,
+`SAFETY_CMD_DIAG` 0x08), `kilnlink_trip.{c,h}` (Frame D,
+`SAFETY_CMD_TRIP_EVENT` 0x0D), `kilnlink_power.{c,h}` (Frame E,
+`SAFETY_CMD_POWER` 0x0E). All ten are host-tested (one `test_<name>.c` each,
+MSVC+CMake+Ninja, all passing as of 2026-08-19 -- 13 host test binaries
+total including `test_frame`/`test_fuzz`/`test_uart_protocol_delegate`) with
+byte-exact vectors in `test/vectors/`, and as of 2026-08-19 every one of
+those vector manifests is also consumed by `tools/PcTools/selfcheck.py`
+(`commonfw_payload_vector_checks()`, against the new pure-Python
+`kilnctrl/kilnlink_codec.py`) -- not just `frame_vectors.json` as before.
+`kilnlink_codec.py` is encode-only: nothing in `pc_tools` decodes these
+frames yet, so there is no real caller to justify a decode side (see that
+module's own docstring). Nothing here is wired into either firmware's
+runtime path yet -- see Migration below. `KilnFW`'s `safety_link.c` already
+builds/parses the `ANNOUNCE_VERSION`-shaped frame inline and was not migrated
+onto the codec; the two implementations are independently correct (same
+layout, both host- and xtensa-gcc-verified) but not yet unified.
 
 ## Why this exists
 
@@ -220,15 +231,31 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 
 **Codecs**
 - [x] `kilnlink_frame.{c,h}` — delimiter, stuffing, CRC16/CCITT-FALSE. Done 2026-08-16
-- [~] `kilnlink_context.{c,h}` — ESP → Pico encoders/decoders. **Done for
-      `SAFETY_CMD_PUSH_CONTEXT` (0x07)** (2026-08-18, `LINK_PROTOCOL.md` sec 4)
-      -- `SET_FIRING_CEILING`/`CLEAR_TRIP`/`GET_FW_VERSION`/`SET_CLOCK`/
-      `ANNOUNCE_VERSION` not yet coded, though their layouts are concrete now too
-- [~] `kilnlink_status.{c,h}` — Pico → ESP encoders/decoders. **Done for Frame A,
-      `SAFETY_CMD_GET_STATUS` (0x01)** (2026-08-18, `LINK_PROTOCOL.md` sec 6) --
-      `DIAG`/`FW_VERSION`/`TRIP_EVENT`/`POWER` not yet coded
+- [x] `kilnlink_context.{c,h}` — ESP → Pico, `SAFETY_CMD_PUSH_CONTEXT` (0x07,
+      `LINK_PROTOCOL.md` sec 4). 2026-08-18
+- [x] `kilnlink_announce.{c,h}` — ESP → Pico, `SAFETY_CMD_ANNOUNCE_VERSION`
+      (0x0F, sec 4, compatibility-floor layout). 2026-08-18
+- [x] `kilnlink_ceiling.{c,h}` — ESP → Pico, `SAFETY_CMD_SET_FIRING_CEILING`
+      (0x09, sec 4). 2026-08-19
+- [x] `kilnlink_clear_trip.{c,h}` — ESP → Pico, `SAFETY_CMD_CLEAR_TRIP`
+      (0x0A, sec 4). 2026-08-19
+- [x] `kilnlink_get_fw_version.{c,h}` — ESP → Pico, `SAFETY_CMD_GET_FW_VERSION`
+      (0x0B, sec 4, one byte, no fields). 2026-08-19
+- [x] `kilnlink_set_clock.{c,h}` — ESP → Pico, `SAFETY_CMD_SET_CLOCK` (0x0C,
+      sec 4, optional). 2026-08-19
+- [x] `kilnlink_status.{c,h}` — Pico → ESP Frame A, `SAFETY_CMD_GET_STATUS`
+      (0x01, sec 6, the existing 23-byte layout). 2026-08-18
+- [x] `kilnlink_diag.{c,h}` — Pico → ESP Frame B, `SAFETY_CMD_DIAG` (0x08, sec 6). 2026-08-18
+- [x] `kilnlink_trip.{c,h}` — Pico → ESP Frame D, `SAFETY_CMD_TRIP_EVENT` (0x0D, sec 6). 2026-08-18
+- [x] `kilnlink_power.{c,h}` — Pico → ESP Frame E, `SAFETY_CMD_POWER` (0x0E, sec 6). 2026-08-18
+- [x] Every `docs/LINK_PROTOCOL.md` sec 4/6 frame with a concrete byte layout
+      now has a codec (2026-08-19) -- all ten listed above, plus framing.
+      Nothing is wired into either firmware's real send/receive dispatch
+      (`uart_protocol.c` on `KilnFW`, `link_task.c` on `SaftyFW`) -- that
+      remains separate Migration work, matching how `kilnlink_diag`/
+      `kilnlink_trip` already landed codec-only
 - [x] Every decoder bounds-checked and returning a status (`kilnlink_frame_decode`/
-      `kilnlink_unstuff`/`kilnlink_context_decode`/`kilnlink_status_decode`)
+      `kilnlink_unstuff` and every `kilnlink_<name>_decode` above)
 - [x] No allocation, no I/O, no globals — verified by review, not assumed
 
 **Tests**
@@ -239,11 +266,20 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       counts. **Unterminated escape**: kilnlink itself checks it
       (`KILNLINK_FRAME_ERR_UNTERMINATED_ESC`); `pc_tools`' one-shot `unstuff()`
       does not by design (see the vector's own note in the manifest) — a real,
-      documented difference, not an oversight. **NaN/Inf floats**: N/A yet,
-      no float fields exist until `kilnlink_context`/`kilnlink_status` do
-- [x] `test/vectors/` manifest created (`frame_vectors.json`, 3 valid + 6 hostile vectors)
-- [x] `pc_tools` test suite consuming the same manifest
-      (`selfcheck.py`'s `commonfw_vector_checks()`, all passing 2026-08-16)
+      documented difference, not an oversight. **NaN/Inf floats**: covered by
+      `kilnlink_context`/`kilnlink_status`/`kilnlink_power`'s own vectors
+- [x] `test/vectors/` manifest created for every codec above (one
+      `<name>_vectors.json` each, `frame_vectors.json` for framing) --
+      13 host test binaries total as of 2026-08-19 (`ctest`, all passing)
+- [x] `pc_tools` test suite consuming every manifest above, not just
+      `frame_vectors.json` (2026-08-19, `selfcheck.py`'s
+      `commonfw_vector_checks()` for the framing layer plus the new
+      `commonfw_payload_vector_checks()` -- against the new pure-Python
+      `tools/PcTools/src/kilnctrl/kilnlink_codec.py` -- for every payload
+      codec; fixed a pre-existing invalid-JSON bug in `status_vectors.json`'s
+      `too_short` hostile vector found while wiring this up, a stray Python
+      slice expression `[:-2]` left in the JSON literal rather than the
+      sliced string)
 - [x] Fuzz harness over the decoders. Done 2026-08-16: `test/test_fuzz.c`,
       seeded xorshift32 (deterministic/reproducible), both uniform-random and
       structurally-biased garbage (real delimiter/escape/type bytes dropped

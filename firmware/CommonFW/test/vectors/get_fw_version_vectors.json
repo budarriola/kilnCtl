@@ -1,0 +1,12 @@
+{
+  "frame": "SAFETY_CMD_GET_FW_VERSION",
+  "cmd": "0x0B",
+  "vectors": [
+    {
+      "name": "request",
+      "fields": {},
+      "bytes_hex": "0b"
+    }
+  ],
+  "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_get_fw_version.c (mirroring status/power/context/announce/diag/trip's own convention). One byte, no arguments -- LINK_PROTOCOL.md sec 4: 'Sent by the ESP at boot and whenever the Pico's boot_id changes. The ESP retries this; the Pico answers every copy it sees.'"
+}
