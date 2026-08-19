@@ -27,6 +27,7 @@
 #include "hardware/gpio.h"
 
 #include "board_pins.h"
+#include "relay_grace.h" // pure GRACE-timeout/TRIP-latch decisions, host-tested separately
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
@@ -115,7 +116,9 @@ static void relay_owner_task(void *arg)
                 // command can be interleaved between "off" and "latched".
                 gpio_put(SAFTYFW_PIN_RELAY, 0);
                 s_energized = false;
-                s_state = RELAY_OWNER_STATE_TRIPPED;
+                // Unconditional latch -- see relay_grace.h's doc comment on
+                // relay_trip_transition() for why this is not a bug.
+                s_state = relay_trip_transition(s_state);
                 break;
 
             case RELAY_OWNER_CMD_CLEAR_TRIP:
@@ -133,11 +136,8 @@ static void relay_owner_task(void *arg)
         // GRACE -> ARMED, timer-driven, checked every loop iteration
         // (whether or not a command arrived) so a quiet period with no
         // commands still lets the timer expire on schedule.
-        if (s_state == RELAY_OWNER_STATE_GRACE) {
-            if ((xTaskGetTickCount() - grace_start) >= pdMS_TO_TICKS(SAFTYFW_STARTUP_GRACE_MS)) {
-                s_state = RELAY_OWNER_STATE_ARMED;
-            }
-        }
+        s_state = relay_grace_tick(s_state, (uint32_t)(xTaskGetTickCount() - grace_start),
+                                    (uint32_t)pdMS_TO_TICKS(SAFTYFW_STARTUP_GRACE_MS));
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_RELAY_OWNER);
     }

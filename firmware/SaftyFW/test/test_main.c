@@ -14,6 +14,7 @@ void run_test_bootloader_metadata(void);
 void run_test_update(void);
 void run_test_kilnlink_power(void);
 void run_test_tx_watermark(void);
+void run_test_relay_grace(void);
 
 int main(void)
 {
@@ -23,6 +24,7 @@ int main(void)
     run_test_update();
     run_test_kilnlink_power();
     run_test_tx_watermark();
+    run_test_relay_grace();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

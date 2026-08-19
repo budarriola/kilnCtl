@@ -387,11 +387,13 @@ physically stop a kiln, and the first that can nuisance-trip one.
       — 2026-08-19: §2's host provocation table audited row by row; two real
       gaps found and closed (S2's 119s/121s boundary, S5's "9 bad reads then
       good"), 434/434 host checks pass. S8 correctly excluded (ships
-      disabled by design). Still open: §3 hardware trips (no bench hardware
-      attached), and two host-untestable-as-is rows (GRACE startup timing in
-      `relay_owner.c`, `CLEAR_TRIP` trip_mask-mismatch refusal in
-      `link_task.c` — both live in FreeRTOS task functions, not pure
-      functions, so closing them needs an extraction refactor first).
+      disabled by design). Same day, follow-up: the two host-untestable-as-is
+      rows (GRACE startup timing, `CLEAR_TRIP` trip_mask-mismatch refusal)
+      closed too — `relay_grace_tick()`/`relay_trip_transition()` extracted
+      from `relay_owner.c` into new `src/tasks/relay_grace.c`,
+      `link_frame_decide_clear_trip()` extracted from `link_task.c` into
+      `link_frame.c`, both now pure and host-tested, 452/452 host checks
+      pass. Still open: §3 hardware trips (no bench hardware attached).
 
 ## M5 — The link carrying real traffic
 

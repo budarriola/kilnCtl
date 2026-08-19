@@ -178,3 +178,16 @@ uint16_t link_frame_trip_mask_for_reason(safety_trip_t reason)
     }
     return (uint16_t)(1u << ((uint8_t)reason - 1u));
 }
+
+link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
+                                                          uint16_t wire_trip_mask)
+{
+    if (current_trip_reason == SAFETY_TRIP_NONE) {
+        return LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED;
+    }
+    uint16_t current_mask = link_frame_trip_mask_for_reason(current_trip_reason);
+    if (wire_trip_mask != current_mask) {
+        return LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH;
+    }
+    return LINK_CLEAR_TRIP_ACCEPT;
+}

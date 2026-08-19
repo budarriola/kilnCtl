@@ -655,13 +655,16 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     safety_core_get_diag_status(&trip_reason, NULL, NULL);
-    uint16_t current_mask = link_frame_trip_mask_for_reason(trip_reason);
 
-    if (trip_reason == SAFETY_TRIP_NONE) {
+    // link_frame_decide_clear_trip() (src/tasks/link_frame.c) is the pure,
+    // host-tested extraction of the two refusal checks documented above --
+    // this function only acts on its verdict now.
+    link_clear_trip_decision_t decision = link_frame_decide_clear_trip(trip_reason, msg.trip_mask);
+    if (decision == LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED) {
         log_task_log(LOG_LEVEL_INFO, "clear_trip", "ignored, nothing tripped");
         return;
     }
-    if (msg.trip_mask != current_mask) {
+    if (decision == LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH) {
         log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, trip_mask mismatch");
         return;
     }

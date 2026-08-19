@@ -210,19 +210,24 @@ should say so rather than being listed as coverage.
       heat), all guards' latching and `CLEAR_TRIP`-refused-while-still-true
       (via `test_try_clear`), and bit-identical TX-stubbed determinism (via
       `test_independence_invariant`).
-      **Two matrix rows remain genuinely untested** and are **not**
-      pure-function-testable the way `safety_guards.c` is: "All guards during
-      `startup_grace_s`: evaluated and reported, relay never energized, no
-      latch" lives in `relay_owner.c`'s GRACE state machine (FreeRTOS task,
-      `xTaskGetTickCount()`-driven), and "`CLEAR_TRIP` with a mismatched
-      `trip_mask`: refused" lives in `link_task.c`'s command handler (also a
-      FreeRTOS task, reads a queue). `link_frame_trip_mask_for_reason()`
-      itself -- the pure encoding both of those depend on -- is already
-      host-tested in `test_link_frame.c`. Testing the GRACE and
-      trip_mask-refusal *behaviour* would need extracting each into a pure
-      function first, which is a non-test-file change outside this pass's
-      scope; left as an honest gap rather than claimed. 434/434 host checks
-      pass (409 before this pass).
+      **Two matrix rows were flagged as genuinely untested** in the prior
+      pass and are now closed (2026-08-19, extraction follow-up): the
+      GRACE-timeout decision was extracted from `relay_owner.c`'s
+      `relay_owner_task()` into `src/tasks/relay_grace.c`'s pure
+      `relay_grace_tick()` (the exact `(now - grace_start) >= grace_ticks`
+      comparison, unchanged) and `relay_trip_transition()` (the unconditional
+      TRIPPED latch, also unchanged -- confirmed by inspection that the
+      original code really does trip from every state, not just ARMED/GRACE,
+      so this is documented as intentional rather than "fixed"), both
+      host-tested in `test_relay_grace.c`. The `CLEAR_TRIP`
+      trip_mask-mismatch / nothing-tripped refusal was extracted from
+      `link_task.c`'s `link_task_handle_clear_trip()` into
+      `link_frame.c`'s pure `link_frame_decide_clear_trip()`, host-tested in
+      `test_link_frame.c`'s `test_decide_clear_trip()`. Both task files now
+      only gather inputs, call the pure function, and act on the FreeRTOS
+      side (GPIO/log/queue) -- no behavior change, same pattern
+      `link_frame_trip_mask_for_reason()` already established. 452/452 host
+      checks pass (434 before this pass, 409 before that).
 - [x] Property tests: ceiling monotonicity over the float range incl. NaN/Inf
       (2026-08-19, `test_safety_guards.c`'s `test_s1_ceiling_properties()`).
       Found and fixed a real hole while writing this: S1's ceiling clamp used

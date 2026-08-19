@@ -453,13 +453,30 @@ header comment, so the build is reproducible elsewhere.
       `any_current_present`; S4 has no relay-output field so "relay
       untouched" is structural, not separately assertable). S8 correctly
       left alone — ships disabled by design, no test should assume it exists.
-      **Two matrix rows are genuine, currently-unclosable gaps**: startup
+      **Two matrix rows were genuine, currently-unclosable gaps**: startup
       GRACE behaviour (`relay_owner.c`) and `CLEAR_TRIP` trip_mask-mismatch
       refusal (`link_task.c`) both live inside FreeRTOS task functions, not
       pure functions like `safety_guards.c` — host-testing them needs an
       extraction refactor first, which is out of scope for a test-only pass.
       `test/build_host_tests.ps1`: 434/434 checks pass (409 before). No
       non-test file changed. `tools/check_isolation.ps1` still clean.
+      **Follow-up (2026-08-19, same day): both gaps closed.** New pure files
+      `src/tasks/relay_grace.c/.h` extracted `relay_grace_tick()` (the GRACE
+      -> ARMED elapsed-tick comparison, unchanged) and `relay_trip_transition()`
+      (the unconditional TRIPPED latch — confirmed by reading the original
+      code that it really does trip from every state, not a bug) out of
+      `relay_owner_task()`; `relay_owner_task()` now calls them and only does
+      the FreeRTOS/GPIO side. `link_frame.c` gained
+      `link_frame_decide_clear_trip()` (nothing-tripped / mask-mismatch /
+      accept), extracted from `link_task_handle_clear_trip()`, which now
+      dispatches on the verdict and only does the logging/`safety_core`
+      call. New `test_relay_grace.c` and additions to `test_link_frame.c`'s
+      `test_decide_clear_trip()`. `test/build_host_tests.ps1`: 452/452 checks
+      pass (434 before). Real RP2040 `cmake --build` clean under
+      `-Wall -Wextra -Werror` for `SaftyFW`/`_slotA`/`_slotB` (added both new
+      files to `CMakeLists.txt`'s source list — a fresh `cmake -S`/`-B`
+      reconfigure was needed to pick that up, plain `--build` alone linked
+      with undefined references). `tools/check_isolation.ps1` still clean.
 - [ ] **Bench-verify the safe state four ways**: power-on, watchdog reset,
       brownout, and firmware halted at a breakpoint. K4 must be de-energized in
       all four.

@@ -151,6 +151,35 @@ bool link_frame_versions_compatible(uint16_t self_protocol, uint16_t self_min_co
 // numbering.
 uint16_t link_frame_trip_mask_for_reason(safety_trip_t reason);
 
+// --- CLEAR_TRIP validation (link_task_handle_clear_trip() shared logic) ----
+// Factored out of link_task_handle_clear_trip() (src/tasks/link_task.c) so
+// this session's guard-test-matrix pass (commit 9a6d3e9) can host-test the
+// refuse-if-nothing-tripped / refuse-on-mask-mismatch decision added in
+// 62ce6bf, the same way link_frame_trip_mask_for_reason() was already
+// extracted for DIAG/CLEAR_TRIP's shared trip_mask math. This function only
+// covers link_task's OWN validation, checked before safety_core is even
+// asked -- it does not re-implement safety_core_request_clear_trip()'s
+// separate "refused while the tripping condition still holds" retick logic,
+// which is a different check, already host-tested where it lives.
+typedef enum {
+    LINK_CLEAR_TRIP_ACCEPT = 0,             // proceed to safety_core_request_clear_trip()
+    LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED, // current_trip_reason == SAFETY_TRIP_NONE
+    LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,   // wire_trip_mask doesn't match the latched reason's mask
+} link_clear_trip_decision_t;
+
+// `current_trip_reason` is read fresh from safety_core_get_diag_status()
+// immediately before this call (link_task.c, same as before extraction);
+// `wire_trip_mask` is the CLEAR_TRIP frame's own trip_mask field, already
+// decoded by kilnlink_clear_trip_decode(). The "nothing tripped" check is
+// deliberately evaluated first and separately from the mask comparison --
+// LINK_PROTOCOL.md documents both as refusals, but with SAFETY_TRIP_NONE the
+// mask math below would also fail to match (a mask of 0 can't equal any real
+// trip's mask by construction, see link_frame_trip_mask_for_reason()), so this
+// preserves the original code's distinct log line rather than merging the two
+// into one bucket by chance of the math working out.
+link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
+                                                          uint16_t wire_trip_mask);
+
 #ifdef __cplusplus
 }
 #endif

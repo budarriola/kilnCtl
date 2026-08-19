@@ -359,6 +359,40 @@ static void test_trip_mask_for_reason(void)
                 "SAFETY_TRIP_BORROWED_STALE (14) -> bit 13, still within a u16");
 }
 
+// Host tests for link_frame_decide_clear_trip() -- extracted from
+// link_task_handle_clear_trip() (this session's guard-test-matrix pass,
+// commit 9a6d3e9 flagged this as a gap; the refuse checks themselves were
+// added in 62ce6bf). Covers both refusal paths, the accept path, and the
+// boundary where a real trip's mask happens to be 0 (impossible by
+// construction, but proves the ACCEPT path isn't reachable through a
+// mask-of-zero coincidence).
+static void test_decide_clear_trip(void)
+{
+    TEST_SECTION("link_frame_decide_clear_trip -- accept/refuse decision");
+
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u) ==
+                   LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
+               "nothing tripped, wire mask 0 -> REFUSE_NOTHING_TRIPPED");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0x0001u) ==
+                   LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
+               "nothing tripped even with a nonzero wire mask -> still REFUSE_NOTHING_TRIPPED "
+               "(checked before the mask comparison)");
+
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0002u) ==
+                   LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
+               "tripped OVERTEMP (mask 0x0001), wire sends 0x0002 -> REFUSE_MASK_MISMATCH");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0u) ==
+                   LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
+               "tripped OVERTEMP, wire sends 0 (stale clear queued before this trip) -> "
+               "REFUSE_MASK_MISMATCH");
+
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0001u) == LINK_CLEAR_TRIP_ACCEPT,
+               "tripped OVERTEMP, wire mask matches exactly -> ACCEPT");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_ESTOP, (uint16_t)(1u << 7)) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "tripped ESTOP, wire mask matches exactly -> ACCEPT");
+}
+
 void run_test_link_frame(void)
 {
     test_zero_zones();
@@ -367,4 +401,5 @@ void run_test_link_frame(void)
     test_nan_survives();
     test_versions_compatible();
     test_trip_mask_for_reason();
+    test_decide_clear_trip();
 }

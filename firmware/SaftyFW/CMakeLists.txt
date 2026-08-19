@@ -59,6 +59,7 @@ set(SAFTYFW_APP_SOURCES
     src/max31856.c
     src/current_sense.c
     src/tasks/relay_owner.c
+    src/tasks/relay_grace.c
     src/tasks/watchdog_task.c
     src/tasks/safety_core.c
     src/tasks/discrete_task.c
