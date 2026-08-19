@@ -3670,6 +3670,10 @@ section rather than folded into section 2, since it's a second front end
 (touchscreen, not HTTP) that has to stay in sync with the web dashboard
 rather than duplicate/diverge from it.
 
+**Usability/cleanup plan**: see `firmware/KilnFW/docs/UI_PLAN.md` for the
+per-page no-scroll budget audit (LCD) and phone/tablet responsiveness audit
+(web), plus a prioritized, individually-shippable fix queue covering both.
+
 ### 10.1 Generic screen/page/widget framework
 
 **Status update (2026-08-17): rendering backend decided (LVGL) and first
@@ -5117,6 +5121,8 @@ decode these frames", not "the ESP has ever received a real one."
       didn't extend to `uart_bridge.c`. A real follow-up, not forgotten.
 
 ### 10.14 Command queue between every control surface and the tasks that own state
+
+**See `firmware/KilnFW/docs/ARCHITECTURE.md` for the resulting task inventory, ownership doctrine, and honest verification status.**
 
 **2026-08-19, filed from a bench bug, not speculative.** `ui_page_network.c`
 froze the *entire* display (not just that page — every page's refresh timer,

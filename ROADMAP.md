@@ -29,6 +29,8 @@ project rather than two.
 | [`ROADMAP.md`](ROADMAP.md) (this file) | Milestone order, cross-processor dependencies |
 | [`firmware/KilnFW/TODO.md`](firmware/KilnFW/TODO.md) | Main firmware: web UI, profiles, PID, thermal protection, storage |
 | [`firmware/KilnFW/docs/PROJECT_STATUS.md`](firmware/KilnFW/docs/PROJECT_STATUS.md) | What in `KilnFW` is built vs. verified — the honest ledger |
+| [`firmware/KilnFW/docs/UI_PLAN.md`](firmware/KilnFW/docs/UI_PLAN.md) | LCD + web UI usability/cleanup plan — no-scroll LCD audit, phone/tablet web audit, prioritized fix queue |
+| [`firmware/KilnFW/docs/ARCHITECTURE.md`](firmware/KilnFW/docs/ARCHITECTURE.md) | Tasks, priorities, owner-task queues, single-writer ownership doctrine |
 | [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) | Safety firmware, phases 0–10 |
 | [`firmware/SaftyFW/docs/SAFETY_MODEL.md`](firmware/SaftyFW/docs/SAFETY_MODEL.md) | What trips, why, and the anti-nuisance doctrine |
 | [`firmware/SaftyFW/docs/ARCHITECTURE.md`](firmware/SaftyFW/docs/ARCHITECTURE.md) | Tasks, priorities, core affinity, logging transports |
@@ -165,6 +167,10 @@ soldering session.
       for thermocouple boards (`ThermocoupleBoard`, `SafyThermocoupleBoard`) to
       distinguish from main board connectors. Schematic + footprints in respective
       board projects
+
+**Bench state (2026-08-19):**
+- Working: ILI9488 LCD attached, boots, verified live (KilnFW flashed via OpenOCD/JTAG this same day); ESP32-S3 JTAG (OpenOCD) — program/halt/reset verified; Pico SWD via Debug Probe — program + GPIO probe verified (GPIO6 deny-list bench-confirmed 2026-08-19); Saleae logic analyzer available (used 2026-08-18 per bench notes)
+- Broken/absent, blocking work: Pi↔ESP isolated UART link — bench-confirmed dead (M0, still the top blocker); PC↔ESP command UART (USB-serial, COM9) — found dead 2026-08-19 (JTAG proves chip alive; every UART command times out; separate fault from isolated link; blocks console, wifi status, mcp tools); MAX31856 thermocouple ICs — physically not connected (blocks real-reading thermo work and thermo_owner bench verification)
 
 ## M2 — `CommonFW`, before either firmware depends on it
 
