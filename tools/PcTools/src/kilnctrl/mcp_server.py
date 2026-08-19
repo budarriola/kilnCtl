@@ -153,8 +153,15 @@ _info = InfoClient(_link, on_boot_push=_on_boot_push)
 #: (pc_arrival_unix_time, LogLine): the device has no RTC the PC trusts, so
 #: PC arrival is the only common clock, same reasoning as SAFETY_LINK.md's
 #: "age" field -- see get_device_log_json below.
-_DEVICE_LOG_HISTORY = 200
-_device_log_history: "deque[tuple[float, LogLine]]" = deque(maxlen=_DEVICE_LOG_HISTORY)
+#: Byte-budgeted rather than count-limited: a burst of short lines (the
+#: wifi-init/uart_owner spam this board produces at boot) used to evict a
+#: count-capped buffer's useful entries (e.g. NS2009 touch diagnostics)
+#: within a couple of seconds. 1 MiB of line text holds tens of thousands of
+#: lines even during a spam burst, comfortably covering a multi-minute
+#: diagnostic session.
+_DEVICE_LOG_MAX_BYTES = 1024 * 1024
+_device_log_history: "deque[tuple[float, LogLine]]" = deque()
+_device_log_bytes = 0
 
 #: Guards the three history buffers below. They are written from the device
 #: clients' consumer threads and read from whichever thread is serving a tool
@@ -178,8 +185,14 @@ _DEVICE_LOG_SESSION_METHOD = {
 def _on_device_log_line(line: LogLine) -> None:
     """LogClient's consumer thread: buffer for get_device_log, and mirror
     into the persistent session log so it's not lost between MCP calls."""
+    global _device_log_bytes
+    entry_bytes = len(line.text.encode("utf-8", errors="replace"))
     with _history_lock:
         _device_log_history.append((time.time(), line))
+        _device_log_bytes += entry_bytes
+        while _device_log_bytes > _DEVICE_LOG_MAX_BYTES and len(_device_log_history) > 1:
+            _, evicted = _device_log_history.popleft()
+            _device_log_bytes -= len(evicted.text.encode("utf-8", errors="replace"))
     method = _DEVICE_LOG_SESSION_METHOD.get(line.level, _session_log.info)
     method("device: %s", line.text)
 

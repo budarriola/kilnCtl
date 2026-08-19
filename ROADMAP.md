@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-18
+> **Status:** planning · **Last reviewed:** 2026-08-19
 > **Keep this file current.** This is the top-level dispatch board: the place to
 > start a task from when you do not already know which plan owns it. It holds
 > *ordering and cross-processor dependencies only* — the detail lives in the
@@ -447,7 +447,27 @@ because it changes what a bare main board will do.
       `SAFETY_FAULT_SRC_SAFETY_LINK` well before 30 s, so no second assertion
       is needed here. Build clean (`idf.py -C firmware/KilnFW build`). Not
       hardware-timing-verified — no Pico/link attached here.
-- [ ] Boot-time version request with retry, surfaced in the GUI
+- [x] Boot-time version request with retry, surfaced in the GUI (2026-08-19).
+      Distinct from the existing `ANNOUNCE_VERSION` broadcast (that's the ESP
+      telling the Pico who it is, unprompted) — this is the ESP explicitly
+      asking the Pico who *it* is. A Pico already running before this ESP
+      boots has no reason to volunteer `FW_VERSION` on its own
+      (`LINK_PROTOCOL.md` sec 4: unsolicited only "at Pico boot and on
+      request"), so without an explicit request its version would never be
+      learned this boot cycle. `safety_link.c`'s `safety_poll_task()` now
+      sends the `SAFETY_CMD_FW_VERSION` (0x0B) request every poll period
+      (~500 ms) for as long as `peer_version_known` stays false, reusing
+      `safety_exchange()`'s existing ACK/drain machinery
+      (`expect_status=false`, same call shape `REQUEST_ENABLE`-style calls
+      already use) rather than adding a second retry/backoff scheme — the
+      poll loop's own cadence *is* the retry. GUI surfacing was already done
+      in M8 (`ui_page_safety.c`'s "Safety Processor" card, "---" until
+      `link_version_known`); this closes the missing request itself. Build
+      clean (`idf.py -C firmware/KilnFW build`, xtensa-gcc), flashed to the
+      bench ESP32-S3. **Not hardware-verified**: no Pico exists on this
+      bench (M0's bench-confirmed dead link) to confirm a real `FW_VERSION`
+      reply actually lands and stops the retry — this closes the code gap,
+      not the live-Pico-verified gap.
 - [x] Bench escape hatch documented: `safety_link_fault_on_link_loss(link, false)`
       (already implemented — `firmware/KilnFW/App/drivers/safety_link.{h,c}`,
       default `true`/fail-safe, header comment explains the bring-up

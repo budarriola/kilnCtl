@@ -63,7 +63,7 @@ static void screen_idle_task(void *arg)
         if (idle->touch) {
             bool pressed = false;
             uint16_t x = 0, y = 0;
-            esp_err_t err = NS2009_read(idle->touch, &pressed, &x, &y);
+            esp_err_t err = NS2009_read(idle->touch, &pressed, &x, &y, NULL);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "NS2009_read failed: %s", esp_err_to_name(err));
             } else if (pressed) {

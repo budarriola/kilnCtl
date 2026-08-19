@@ -23,7 +23,15 @@
  * link stopped answering afterward and there was no way to tell whether the
  * bump caused it (the link is also the only way to observe the log). Retry
  * this with a working link, and confirm free heap after
- * uart_log_bridge_start() before keeping it. */
+ * uart_log_bridge_start() before keeping it.
+ * NOTE (2026-08-19): retried at 256 -- board hung at the "kilnCtl Ready"
+ * splash, never reaching the home UI. Reverted same session. This CONFIRMS
+ * the 2026-08-12 note's suspicion: this queue's size is a real boot-hang
+ * trigger, not a red herring. Do not raise this again without figuring out
+ * why first (heap exhaustion vs. something in xQueueCreate's allocation
+ * path) -- the PC-side buffer (kilnctrl/mcp_server.py, byte-budgeted to
+ * 1 MiB) is the right place to hold more history; this queue must stay
+ * exactly big enough to survive the boot burst and no bigger. */
 #define UART_LOG_BRIDGE_QUEUE_LEN 64
 
 /* One payload's worth of text: UART_PROTO_MAX_PAYLOAD minus the level byte. */

@@ -914,6 +914,14 @@ static void safety_poll_task(void *arg)
 {
     SafetyLinkClass *link = (SafetyLinkClass *)arg;
     const uint8_t request[] = { SAFETY_CMD_GET_STATUS };
+    /* ROADMAP.md M6 "Boot-time version request with retry" -- distinct from
+     * ANNOUNCE_VERSION above (that's the ESP telling the Pico who it is,
+     * unprompted). This is the ESP asking the Pico who IT is. A Pico that
+     * was already running before this boot has no reason to volunteer
+     * FW_VERSION again on its own (LINK_PROTOCOL.md sec 4: unsolicited only
+     * "at Pico boot and on request") -- without an explicit request, a
+     * same-boot-cycle Pico's version would never be learned at all. */
+    const uint8_t fw_version_request[] = { SAFETY_CMD_FW_VERSION };
 
     /* Boot push, unsolicited, before entering the steady loop -- mirrors
      * SaftyFW's link_task_fn's own FW_VERSION boot push (Phase 7b.2,
@@ -939,6 +947,28 @@ static void safety_poll_task(void *arg)
 
         TickType_t started = xTaskGetTickCount();
         (void)safety_exchange(link, request, sizeof(request), true);
+
+        bool peer_version_known = false;
+        if (safety_lock(link)) {
+            peer_version_known = link->peer_version_known;
+            safety_unlock(link);
+        }
+        if (!peer_version_known) {
+            /* expect_status=false, same as the REQUEST_ENABLE-style calls
+             * this parameter already exists for (safety_exchange's own doc
+             * comment): folds whatever reply lands within
+             * SAFETY_LINK_ACK_TIMEOUT_MS into the cache via safety_drain_inbox
+             * -> safety_apply_fw_version, without the GET_STATUS-specific
+             * got_status bookkeeping mislabeling a successful FW_VERSION
+             * reply as a timeout. A silent Pico (not yet built/attached, per
+             * this repo's current bench state) means this simply repeats
+             * every poll period for as long as the version stays unknown --
+             * that repetition at a bounded, already-existing cadence IS the
+             * "retry" this roadmap item asks for, not a separate backoff
+             * scheme. */
+            (void)safety_exchange(link, fw_version_request, sizeof(fw_version_request), false);
+        }
+
         safety_update_health(link);
         /* ROADMAP.md M5: SAFETY_CMD_PUSH_CONTEXT, same cadence as the
          * GET_STATUS poll above -- LINK_PROTOCOL.md sec 4's "every

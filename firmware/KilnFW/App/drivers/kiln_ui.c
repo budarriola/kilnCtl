@@ -11,6 +11,9 @@
 #include "ui_page_network.h"
 #include "ui_page_safety.h"
 #include "ui_page_temperature.h"
+#include "ui_page_touch_cal.h"
+#include "ui_page_touch_test.h"
+#include "touch_cal_store.h"
 
 static const char *TAG = "kiln_ui";
 
@@ -85,6 +88,32 @@ esp_err_t kiln_ui_init(void)
     if (err != ESP_OK) return err;
     err = kiln_ui_register_page("history", ui_page_history_build);
     if (err != ESP_OK) return err;
+
+    /* NS2009 touch calibration -- see ui_page_touch_cal.c/.h. Linked from
+     * ui_page_config.c's nav hub like every other diagnostic/settings page. */
+    err = kiln_ui_register_page("touch_cal", ui_page_touch_cal_build);
+    if (err != ESP_OK) return err;
+
+    /* ui_page_touch_cal.c's finish_calibration() navigates here right after
+     * a fresh calibration saves -- lets it be checked by eye before trusting
+     * every other page's buttons to it. Not reachable from the config nav
+     * hub (adding a 9th grid item there would blow its documented no-scroll
+     * height budget, see ui_page_config.c's header comment) -- re-running
+     * calibration from Config always passes through here again anyway. */
+    err = kiln_ui_register_page("touch_test", ui_page_touch_test_build);
+    if (err != ESP_OK) return err;
+
+    /* A board that has never been calibrated boots straight into
+     * calibration rather than home -- an uncalibrated touch mapping means
+     * every OTHER page's buttons are unreliable (this session's whole
+     * "back buttons don't work" investigation), so showing them first would
+     * just repeat that. ui_page_touch_cal_build() navigates to "home" on
+     * its own once calibration completes (see its header comment) -- this
+     * is only what happens at boot, before that has ever run. */
+    if (!touch_cal_store_is_calibrated()) {
+        ESP_LOGI(TAG, "no touch calibration on file -- starting calibration instead of home");
+        return kiln_ui_show("touch_cal");
+    }
 
     return kiln_ui_show("home");
 }

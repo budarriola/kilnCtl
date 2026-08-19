@@ -147,7 +147,8 @@ esp_err_t NS2009_read_axis(NS2009Class *t, uint8_t cmd, uint16_t *out_value)
     return err;
 }
 
-esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y)
+esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
+                       uint16_t *out_z1)
 {
     if (!t || !out_pressed || !out_x || !out_y) return ESP_ERR_INVALID_ARG;
 
@@ -155,28 +156,20 @@ esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16
     esp_err_t err = NS2009_read_axis(t, NS2009_CMD_MEASURE_Z1, &z1);
     if (err != ESP_OK) return err;
 
-    /* A touch is expected to drive Z1 low; an untouched panel floats near
-     * full scale. That does NOT hold on this board revision -- bench
-     * testing 2026-08-17 found Z1 sitting at 0-30 continuously with nothing
-     * touching the panel, so the Kconfig default is 0 (nothing ever reads
-     * as "pressed") until this is recalibrated. See the Kconfig help text
-     * for KILNCTL_TOUCH_Z1_MAX_THRESHOLD for the full story. */
-    /* Routed through a variable rather than compared against the macro
-     * directly: with the current default (0, see the Kconfig help text)
-     * the literal comparison is a compile-time-constant "always false" that
-     * -Werror=type-limits rejects, even though the threshold is genuinely
-     * runtime-configurable. */
+    /* NOT "touch drives Z1 low, untouched floats near full scale" as
+     * originally assumed (and as the NS2009 datasheet's typical application
+     * implies) -- bench testing 2026-08-19 (device log, NS2009 diagnostic)
+     * found the opposite on this board revision: untouched floats near
+     * *zero* (0-30 continuously with nothing touching the panel) and a real
+     * firm press drove Z1 to 1047. So the gate compares the other
+     * direction, and the threshold sits between those two measured bands
+     * (KILNCTL_TOUCH_Z1_MAX_THRESHOLD's Kconfig help text has the numbers
+     * and the reasoning for where the default landed). */
     uint16_t threshold = (uint16_t)TOUCH_Z1_MAX_THRESHOLD;
-    bool pressed = (z1 < threshold);
+    bool pressed = (z1 > threshold);
     *out_pressed = pressed;
+    if (out_z1) *out_z1 = z1;
 
-    /* TEMPORARY bring-up diagnostic (TODO.md touch calibration): the
-     * pressure threshold above is an uncalibrated guess and screen_idle
-     * polls this every ~50ms, so print the raw reading at ~1Hz rather than
-     * flooding the log -- enough to tell a genuinely low/noisy Z1 (needs a
-     * higher threshold, or points at the SDA/SCL-swap question in
-     * docs/HARDWARE.md) from a real touch. Remove once
-     * CONFIG_KILNCTL_TOUCH_Z1_MAX_THRESHOLD is bench-calibrated. */
     static unsigned diag_counter = 0;
     if ((diag_counter++ % 20) == 0) {
         ESP_LOGI(TAG, "Z1=%u threshold=%u pressed=%d", z1, (unsigned)TOUCH_Z1_MAX_THRESHOLD, pressed);
@@ -193,6 +186,8 @@ esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16
     if (err != ESP_OK) return err;
     err = NS2009_read_axis(t, NS2009_CMD_MEASURE_Y, &y);
     if (err != ESP_OK) return err;
+
+    ESP_LOGI(TAG, "raw_x=%u raw_y=%u z1=%u", x, y, z1);
 
     *out_x = x;
     *out_y = y;

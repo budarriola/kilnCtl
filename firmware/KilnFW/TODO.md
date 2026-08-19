@@ -3073,6 +3073,23 @@ depend on it, so it is tracked here as a gate. Design:
       `peer_version_compatible` — **not verified end-to-end against a live
       mismatch this pass**, no hardware bring-up with two deliberately
       mismatched builds was run
+- [x] **Explicit `GET_FW_VERSION` (`0x0B`) request, retried until answered**
+      (2026-08-19, `ROADMAP.md` M6). Distinct from `ANNOUNCE_VERSION` above:
+      that's the ESP telling the Pico who it is, unprompted; this is the ESP
+      explicitly asking the Pico who *it* is. A Pico already running before
+      this ESP boots has no reason to volunteer `FW_VERSION` on its own
+      (`LINK_PROTOCOL.md` sec 4: unsolicited only "at Pico boot and on
+      request"), so without this, its version would never be learned within
+      that ESP boot cycle. `safety_link.c`'s `safety_poll_task()` now sends
+      the `0x0B` request every poll period (~500 ms) for as long as
+      `peer_version_known` stays false, via `safety_exchange(...,
+      expect_status=false)` -- the same call shape already used for
+      `REQUEST_ENABLE`-style calls, so no new retry/backoff machinery was
+      added, just a periodic resend riding the poll loop's existing cadence.
+      Build clean (`idf.py -C firmware/KilnFW build`), flashed to the bench
+      ESP32-S3. **Not hardware-verified**: no Pico is attached in this
+      environment (`ROADMAP.md` M0's bench-confirmed dead link) to confirm a
+      real reply lands and the retries stop.
 - [ ] **Refuse to push a Pico image this build could not then talk to.** That one
       action is what creates a lockout. Override must be explicit and separately
       confirmed -- **deferred, OTA-side work, out of scope for this pass**

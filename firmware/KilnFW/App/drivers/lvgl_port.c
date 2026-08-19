@@ -12,6 +12,7 @@
 
 #include "kiln_ui.h"
 #include "settings.h"
+#include "touch_cal_store.h"
 #include "ui_theme.h"
 
 static const char *TAG = "lvgl_port";
@@ -37,6 +38,20 @@ typedef struct {
 } lvgl_port_t;
 
 static lvgl_port_t s_port;
+
+/* Last raw NS2009 sample that produced a press, for
+ * lvgl_port_get_last_raw_touch() -- see lvgl_port.h. Written only from
+ * touch_read_cb (lvgl_port_task), read only from an LV_EVENT_CLICKED handler
+ * (also lvgl_port_task, since that's the only task calling
+ * lv_timer_handler()) -- no lock needed, same single-task rule as every
+ * other lv_* access in this file. */
+static uint16_t s_last_raw_x, s_last_raw_y, s_last_raw_z1;
+
+/* Loaded once in lvgl_port_start(). {.calibrated = false} until
+ * ui_page_touch_cal.c finishes a calibration pass and calls
+ * touch_cal_store_save() -- see touch_read_cb() below for the fallback used
+ * before that ever happens. */
+static touch_cal_t s_touch_cal;
 
 /* --- lv_tick source -------------------------------------------------------
  * A 1ms esp_timer periodic callback. Runs in the esp_timer task's context,
@@ -128,20 +143,36 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     bool pressed = false;
-    uint16_t raw_x = 0, raw_y = 0;
-    esp_err_t err = NS2009_read(p->touch, &pressed, &raw_x, &raw_y);
+    uint16_t raw_x = 0, raw_y = 0, raw_z1 = 0;
+    esp_err_t err = NS2009_read(p->touch, &pressed, &raw_x, &raw_y, &raw_z1);
     if (err != ESP_OK || !pressed) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
+    s_last_raw_x = raw_x;
+    s_last_raw_y = raw_y;
+    s_last_raw_z1 = raw_z1;
 
     uint16_t width = 0, height = 0;
     ILI9488_get_dimensions(p->display, &width, &height);
 
-    uint16_t ax = TOUCH_CAL_SWAP_XY ? raw_y : raw_x;
-    uint16_t ay = TOUCH_CAL_SWAP_XY ? raw_x : raw_y;
-    int32_t px = touch_raw_to_px(ax, width, TOUCH_CAL_INVERT_X);
-    int32_t py = touch_raw_to_px(ay, height, TOUCH_CAL_INVERT_Y);
+    int32_t px, py;
+    if (s_touch_cal.calibrated) {
+        /* Real per-board fit -- see touch_cal_store.h. This is what every
+         * page's hit-testing runs on once calibration has completed. */
+        touch_cal_apply(&s_touch_cal, raw_x, raw_y, width, height, &px, &py);
+    } else {
+        /* Bootstrap-only fallback, before this board has ever been
+         * calibrated: the Kconfig swap/invert guess. Known inaccurate (see
+         * touch_cal_store.h's header comment) -- good enough only for
+         * ui_page_touch_cal.c's full-screen "any press counts" capture
+         * during the forced first-run calibration flow, not for real
+         * button hit-testing. */
+        uint16_t ax = TOUCH_CAL_SWAP_XY ? raw_y : raw_x;
+        uint16_t ay = TOUCH_CAL_SWAP_XY ? raw_x : raw_y;
+        px = touch_raw_to_px(ax, width, TOUCH_CAL_INVERT_X);
+        py = touch_raw_to_px(ay, height, TOUCH_CAL_INVERT_Y);
+    }
 
     data->point.x = px;
     data->point.y = py;
@@ -206,6 +237,8 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
     s_port.touch = touch;
     s_port.idle = idle;
     s_port.last_screen_on = true;
+
+    touch_cal_store_load(&s_touch_cal);
 
     lv_init();
 
@@ -283,4 +316,17 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
     ESP_LOGI(TAG, "LVGL up: %ux%u, %u-row PSRAM buffers, touch %s, idle-integration %s", width,
              height, (unsigned)LVGL_BUF_ROWS, touch ? "on" : "off", idle ? "on" : "off");
     return ESP_OK;
+}
+
+void lvgl_port_get_last_raw_touch(uint16_t *raw_x, uint16_t *raw_y, uint16_t *z1)
+{
+    if (raw_x) *raw_x = s_last_raw_x;
+    if (raw_y) *raw_y = s_last_raw_y;
+    if (z1) *z1 = s_last_raw_z1;
+}
+
+void lvgl_port_reload_touch_cal(void)
+{
+    touch_cal_store_load(&s_touch_cal);
+    ESP_LOGI(TAG, "touch calibration reloaded: calibrated=%d", (int)s_touch_cal.calibrated);
 }

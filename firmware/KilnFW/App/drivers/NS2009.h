@@ -102,12 +102,15 @@ esp_err_t NS2009_read_axis(NS2009Class *t, uint8_t cmd, uint16_t *out_value);
  * (three back-to-back transactions -- there is no way to get all three from
  * the part in fewer, since each command byte selects a single measurement)
  * and applies the CONFIG_KILNCTL_TOUCH_Z1_MAX_THRESHOLD pressure gate (see
- * Kconfig) to decide *out_pressed. A touch reads a LOW Z1 (low resistance
- * between the driven plate and the sensed one); an untouched panel with
- * nothing pulling the sensed plate floats and reads near NS2009_ADC_MAX. No
- * physical unit conversion is attempted -- see the Kconfig help text for why
- * this threshold needs bench calibration against the actual panel. */
-esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y);
+ * Kconfig) to decide *out_pressed. On THIS board revision a touch reads a
+ * HIGH Z1, the opposite of the NS2009 datasheet's typical application --
+ * see the Kconfig help text and NS2009.c's NS2009_read for the bench
+ * measurements behind that. No physical unit conversion is attempted.
+ * `out_z1` may be NULL for a caller that only wants pressed/x/y (screen_idle
+ * doesn't care about the raw pressure count once *out_pressed is decided;
+ * lvgl_port.c's touch calibration diagnostics do). */
+esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16_t *out_y,
+                       uint16_t *out_z1);
 
 #ifdef __cplusplus
 }

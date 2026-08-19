@@ -56,6 +56,21 @@ extern "C" {
  * LVGL is not thread-safe and nothing else may call an lv_* function. */
 esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle_t *idle);
 
+/* Raw NS2009 reading (pre swap/invert transform) behind the press that most
+ * recently drove an LVGL event -- ui_page_touch_cal.c's whole point is
+ * pairing a known on-screen target with the raw ADC counts that produced it,
+ * and correlating that from the general device log (interleaved with
+ * whatever else is logging, timestamp-matched by eye) has proven unreliable
+ * in practice. Reading this from a widget's LV_EVENT_CLICKED handler is
+ * safe: both run on lvgl_port_task, so there's no concurrent writer. */
+void lvgl_port_get_last_raw_touch(uint16_t *raw_x, uint16_t *raw_y, uint16_t *z1);
+
+/* Re-reads the persisted calibration from NVS and swaps it in for
+ * touch_read_cb() to use on the very next press -- called by
+ * ui_page_touch_cal.c right after touch_cal_store_save() so a freshly
+ * completed calibration takes effect immediately, no reboot needed. */
+void lvgl_port_reload_touch_cal(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -92,10 +92,15 @@
 //                                   own to report). Built by
 //                                   safety_build_announce_version_payload().
 //   0x0B SAFETY_CMD_FW_VERSION      (Pico -> ESP, BROADCAST, unsolicited at
-//                                   Pico boot and on request). This driver
-//                                   only *parses* it today (no explicit
-//                                   0x0B request-with-retry yet -- Phase
-//                                   0.6b remains open): bytes1..2 protocol,
+//                                   Pico boot and on request). safety_poll_task()
+//                                   sends the 0x0B request every poll period for
+//                                   as long as peer_version_known stays false
+//                                   (ROADMAP.md M6 "boot-time version request
+//                                   with retry" -- closed 2026-08-19; a Pico
+//                                   already running before this ESP boot has no
+//                                   reason to volunteer FW_VERSION on its own,
+//                                   so without this request its version would
+//                                   never be learned). Reply bytes1..2 protocol,
 //                                   bytes3..4 min_compatible (read before
 //                                   anything else, per the wire spec's
 //                                   floor rule), then dirty/commit/datetime/
@@ -542,8 +547,8 @@ void safety_link_set_context_sources(SafetyLinkClass *link, void *io_or_null,
  * from the Pico said about compatibility. *out_known is false, and
  * *out_compatible, *out_peer_protocol and *out_peer_min_compatible are all
  * meaningless, until the Pico has pushed at least one FW_VERSION frame (its
- * own boot push, or a reply to SAFETY_CMD_GET_STATUS's eventual
- * GET_FW_VERSION request -- Phase 0.6b, not built this pass).
+ * own boot push, or a reply to safety_poll_task()'s explicit 0x0B request,
+ * retried every poll period until known -- ROADMAP.md M6, closed 2026-08-19).
  * out_peer_protocol and out_peer_min_compatible
  * are the peer's own KILNLINK_PROTOCOL_VERSION/KILNLINK_MIN_COMPATIBLE off
  * that frame -- TODO.md 9.0's deferred "GUI names both versions and which one

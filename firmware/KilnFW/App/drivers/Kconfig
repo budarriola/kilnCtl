@@ -212,27 +212,26 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_TOUCH_Z1_MAX_THRESHOLD
             int "Touch pressure threshold (raw NS2009 Z1 ADC counts, 0-4095)"
-            default 0
+            default 200
             range 0 4095
             help
-                NS2009_read treats a Z1 reading below this as "pressed": a
-                touch is expected to drive Z1 low (low resistance between the
-                driven and sensed plates), with an untouched panel floating
-                near full scale. On this board revision that assumption does
-                NOT hold: bench testing 2026-08-17 found Z1 sitting at 0-30
-                continuously with nothing touching the panel -- either a
-                wiring issue (see the SDA/SCL-swap question in
+                NS2009_read treats a Z1 reading above this as "pressed".
+                The NS2009 datasheet's typical application (and this
+                driver's original assumption) has a touch drive Z1 *low*,
+                with an untouched panel floating near full scale -- that
+                does NOT hold on this board revision. Bench testing
+                2026-08-19 (device log, NS2009's raw_x/raw_y/z1 diagnostic)
+                found the opposite: Z1 floats at 0-30 with nothing touching
+                the panel, and a real firm press drove it to 1047 -- either
+                a wiring difference (see the SDA/SCL-swap question in
                 docs/HARDWARE.md) or this panel's Z1 behaves differently in
                 the "short driver, auto power-down" mode this driver uses.
-                Defaulted to 0 (nothing ever reads as "pressed") so real
-                touch detection doesn't fight the auto-blank feature with a
-                permanent phantom touch -- screen_idle still auto-blanks and
-                still wakes on a UART-injected touch (TOUCH_CMD_INJECT) with
-                this at 0; only *real* NS2009 presses are disabled until this
-                is recalibrated on the bench (NS2009.c has a rate-limited
-                diagnostic log of the raw Z1 reading to help). If touches are
-                missed or the panel reports phantom presses with nothing
-                touching it, this is the first thing to tune, the same way
+                The 200 default sits well above the observed idle-noise
+                ceiling (30) and well below the one observed real press
+                (1047), with margin on both sides since only one bench
+                sample of a real press exists so far. If touches are missed
+                or the panel reports phantom presses with nothing touching
+                it, this is the first thing to tune, the same way
                 KILNCTL_DISPLAY_SWAP_DC_RESET is the first thing to flip for
                 a blank panel.
     endmenu

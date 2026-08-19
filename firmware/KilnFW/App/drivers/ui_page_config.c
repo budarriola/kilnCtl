@@ -28,7 +28,9 @@
 // a separate full-width Back row comfortably inside the budget -- see the
 // row-count arithmetic in build_nav_item()'s caller below.
 //
-// Seven items:
+// Eight items (Touch Calibration added after this pass, see
+// ui_page_touch_cal.c/.h -- lands on the same 4-row grid with no height
+// regression since 8 is still an even row count):
 //   - Zones & Thermocouples, Relays & Rules -- still "not built yet"
 //     placeholders (non-clickable, dimmed text), unchanged from before this
 //     pass.
@@ -78,6 +80,12 @@ static void history_nav_cb(lv_event_t *e)
 {
     (void)e;
     kiln_ui_show("history");
+}
+
+static void touch_cal_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("touch_cal");
 }
 
 /* A real, clickable nav cell (cb non-NULL) or an honest "not built yet"
@@ -173,6 +181,7 @@ lv_obj_t *ui_page_config_build(void)
     build_nav_item(grid, "Board Health", board_health_nav_cb);
     build_nav_item(grid, "Safety Processor", safety_nav_cb);
     build_nav_item(grid, "Temperature History", history_nav_cb);
+    build_nav_item(grid, "Touch Calibration", touch_cal_nav_cb);
 
     lv_obj_t *back = lv_button_create(content);
     lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 44);
