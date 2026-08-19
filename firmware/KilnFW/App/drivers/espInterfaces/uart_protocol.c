@@ -5,15 +5,26 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "kilnlink/kilnlink_frame.h"
+
 static const char *TAG = "uart_proto";
 
-#define FRAME_DELIM   0x7Eu
-#define FRAME_ESC     0x7Du
-#define FRAME_ESC_XOR 0x20u
+/* Framing/CRC constants and delegated logic now live in firmware/CommonFW's
+ * kilnlink component (kilnlink_frame.c/kilnlink_crc.c) -- see
+ * CommonFW/README.md rule 7 ("no CRC or byte-stuffing implementation outside
+ * CommonFW") and ROADMAP.md M2's "KilnFW delegating framing and CRC, proven
+ * byte-identical before the old code is deleted" item. Proven byte-identical
+ * against the old local implementation via
+ * firmware/CommonFW/test/test_uart_protocol_delegate.c before this file was
+ * switched over. FRAME_DELIM/FRAME_ESC/FRAME_ESC_XOR/HEADER_LEN are kept as
+ * local aliases so the rest of this file (and its comments) don't need to
+ * spell out the KILNLINK_FRAME_* names everywhere. */
+#define FRAME_DELIM   KILNLINK_FRAME_DELIM
+#define FRAME_ESC     KILNLINK_FRAME_ESC
+#define FRAME_ESC_XOR KILNLINK_FRAME_ESC_XOR
+#define HEADER_LEN    KILNLINK_FRAME_HEADER_LEN
 
 /* Raw (unstuffed) header layout, CRC covers offsets [0, HEADER_LEN+length). */
-#define HEADER_LEN 8u
-/* header(8) + max payload + crc(2), before stuffing */
 #define RAW_FRAME_MAX (HEADER_LEN + UART_PROTO_MAX_PAYLOAD + 2u)
 /* Stuffing can at most double the bytes, plus two delimiters. */
 #define STUFFED_FRAME_MAX (RAW_FRAME_MAX * 2u + 2u)
@@ -23,31 +34,18 @@ static const char *TAG = "uart_proto";
 
 static uint16_t crc16_ccitt_false(const uint8_t *data, size_t len)
 {
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
-        }
-    }
-    return crc;
+    return kilnlink_crc16_ccitt_false(data, len);
 }
 
 static size_t stuff_and_send(uart_protocol_t *proto, const uint8_t *raw, size_t raw_len, uint32_t timeout_ms)
 {
     uint8_t out[STUFFED_FRAME_MAX];
-    size_t o = 0;
-    out[o++] = FRAME_DELIM;
-    for (size_t i = 0; i < raw_len; ++i) {
-        uint8_t b = raw[i];
-        if (b == FRAME_DELIM || b == FRAME_ESC) {
-            out[o++] = FRAME_ESC;
-            out[o++] = (uint8_t)(b ^ FRAME_ESC_XOR);
-        } else {
-            out[o++] = b;
-        }
+    size_t o = kilnlink_stuff(raw, raw_len, out, sizeof(out));
+    if (o == 0) {
+        ESP_LOGW(TAG, "frame stuffing failed (raw_len=%u exceeds STUFFED_FRAME_MAX capacity)",
+                 (unsigned)raw_len);
+        return 0;
     }
-    out[o++] = FRAME_DELIM;
 
     esp_err_t err = uart_owner_transfer(proto->owner, out, o, NULL, 0, NULL, timeout_ms);
     if (err != ESP_OK) {

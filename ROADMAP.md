@@ -180,8 +180,16 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       (2026-08-16, `selfcheck.py`, framing layer only) — **not yet extended**
       to `context_vectors.json`/`status_vectors.json`, left for a follow-on
       pass since `selfcheck.py` wasn't touched this session
-- [ ] `KilnFW` delegating framing and CRC, proven byte-identical **before** the
-      old code is deleted
+- [x] `KilnFW` delegating framing and CRC, proven byte-identical **before** the
+      old code is deleted (2026-08-18). `App/drivers/espInterfaces/uart_protocol.c`
+      now calls `kilnlink_crc16_ccitt_false`/`kilnlink_stuff` instead of its own
+      copies; byte-identical output vs. the old local implementation proven by
+      `firmware/CommonFW/test/test_uart_protocol_delegate.c` (known vectors +
+      528 fuzz cases, incl. delimiter/escape-saturated buffers), and
+      `idf.py -C firmware/KilnFW build` builds clean under xtensa-gcc.
+      `firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c`
+      is a stale fork (not a literal mirror) and was **not** migrated in this
+      pass -- stays on `check_no_duplicate_crc.ps1`'s allowlist
 - [x] CI grep: no CRC or byte-stuffing implementation outside `CommonFW` --
       `tools/check_no_duplicate_crc.ps1` (2026-08-18), matching
       `firmware/SaftyFW/tools/check_isolation.ps1`'s conventions. Greps for

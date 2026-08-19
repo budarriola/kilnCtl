@@ -21,15 +21,26 @@
 # unrelated CRCs of their own (different polynomial, different purpose:
 # file/image integrity, not link framing) and would be pure noise.
 #
-# KNOWN PRE-EXISTING DEBT (as of 2026-08-18): this repo already has three
-# duplicate copies of the link CRC/byte-stuffing logic, predating kilnlink
-# and predating this check:
-#   - firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c
-#     (the legacy ESP-side implementation kilnlink is meant to replace --
-#     tracked by ROADMAP M2's separate, not-yet-started item "KilnFW
-#     delegating framing and CRC, proven byte-identical")
+# KNOWN PRE-EXISTING DEBT (as of 2026-08-18, updated same day):
+# firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c has been migrated
+# to delegate its CRC/framing to kilnlink_crc16_ccitt_false/kilnlink_stuff
+# (proven byte-identical against the old local implementation by
+# firmware/CommonFW/test/test_uart_protocol_delegate.c; see ROADMAP.md M2's
+# "KilnFW delegating framing and CRC" item, now done) and no longer matches
+# the 0x1021 polynomial grep, so it has been removed from the allowlist below.
+#
+# firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c was
+# NOT migrated in that pass: it is a stale fork of the KilnFW file (missing
+# BROADCAST handling, the retry-log rate limiter, and the register_task retry
+# loop the current KilnFW file has), not a literal mirror, so treating it as
+# "the same file, done twice" would be wrong. It stays allowlisted below
+# until it is either resynced with KilnFW's file or migrated on its own
+# terms.
+#
+# Two duplicates remain allowlisted:
 #   - firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c
-#     (a mirrored copy of the above, used for host unit tests)
+#     (stale fork of the now-migrated KilnFW file, used for host unit tests --
+#     see note above)
 #   - tools/PcTools/src/kilnctrl/protocol.py and its UnitTestFw mirror
 #     firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py
 #     (a deliberate, documented pure-Python port -- see its own docstring,
@@ -70,7 +81,6 @@ $excludeDirs = @(
 # Known, already-tracked pre-migration duplicates (see header above).
 # Paths are relative to repo root, forward-slash, case-insensitive compare.
 $allowlist = @(
-    'firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c',
     'firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c',
     'tools/PcTools/src/kilnctrl/protocol.py',
     'firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py'
