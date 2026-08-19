@@ -1024,24 +1024,87 @@ metadata format and the slot boundaries are effectively permanent.
       RP2040/probe attached to the build machine. Marked `[~]` rather than
       `[x]` because recovery mode (10.4) is beacon-only, not the full frame
       subset this item's own wording implies is complete end to end.
-- [~] 10.4 Recovery mode: UART1 only, GPIO6 low, minimal frame subset, no
+- [x] 10.4 Recovery mode: UART1 only, GPIO6 low, minimal frame subset, no
       timeout out of it. This is what makes a failed update recoverable without
-      a probe. **2026-08-17, `bootloader/main.c`'s `enter_recovery()`**: UART1
-      brought up at 115200 8N1 (plain `hardware/uart.h`, no PIO/inversion,
-      mirroring `src/tasks/uart_owner.c`'s init pattern), GPIO6 left low and
-      never re-touched, loops forever with no timeout out. **Beacon only** —
-      sends a raw distinctive marker byte sequence every ~1s, not a framed
-      `UPDATE_STATUS`. Does **not** implement `UPDATE_BEGIN`/`UPDATE_DATA`/
-      `UPDATE_END`/`UPDATE_ABORT` frame handling (receiving/writing image data
-      into flash) — deliberately out of scope this pass per the coordinator's
-      scope decision; that is real streaming-flash-write logic for its own
-      dedicated pass. Marked `[~]`, not `[x]`, for exactly that reason.
+      a probe. **2026-08-19, `bootloader/recovery_update.c`/`.h`
+      (new) + `bootloader/persist.c`/`.h` (new, factored out of `main.c`)**:
+      `enter_recovery()` brings up UART1 (unchanged from the 2026-08-17 pass)
+      then calls `recovery_update_run()`, a bare polling `for(;;)` loop (no
+      RTOS) that now implements the full minimal frame subset —
+      `UPDATE_BEGIN`(0x10)/`UPDATE_DATA`(0x11)/`UPDATE_END`(0x12)/
+      `UPDATE_ABORT`(0x13), plus a real framed `UPDATE_STATUS`(0x14), sent on
+      the same ~1s cadence the old raw beacon used. Reuses, rather than
+      reimplements:
+      - `src/update/image_header.h`/`.c`, `received_ranges.h`/`.c`,
+        `update_receiver.h`/`.c` — the same pure, host-tested decision logic
+        `src/tasks/update_task.c` uses, compiled into the bootloader
+        executable directly (`bootloader/CMakeLists.txt` now lists their
+        `.c` files and adds `../src/update` to the include path).
+      - CommonFW's `kilnlink` library for framing/CRC/stuffing — the
+        bootloader now `add_subdirectory()`s `../../CommonFW` and links
+        `kilnlink`, the *same* library `src/tasks/link_task.c` uses (freestanding
+        C11, no allocation/I/O/globals, so linkable into this bare-metal
+        target with no RTOS pulled in) — not a second framing/CRC
+        implementation (`tools/check_no_duplicate_crc.ps1`'s rule).
+      - `bootloader_persist_metadata()` (`bootloader/persist.c`, new) — the
+        exact body of `main.c`'s former `persist_metadata()`, moved so both
+        the boot path and `recovery_update.c`'s `UPDATE_END` handler call the
+        one metadata writer, not two.
+      Flash writes (slot erase, chunk program) use
+      `save_and_disable_interrupts()`/`restore_interrupts()` directly, same
+      discipline as `persist_metadata()`/item 10.6's bootloader-side
+      metadata writes — correct for this single-core, bare-metal, no-RTOS
+      image (no `flash_safe_execute()`/core-1-parking needed, since there is
+      no second core running anything here to race). Slot erase is done in
+      `FLASH_BLOCK_SIZE` (64K) units and chunk programming uses the same
+      read-modify-write technique as `update_task_program_chunk()`, mirroring
+      that file's shape without copying its FreeRTOS/watchdog-specific
+      pieces (this bootloader has no watchdog armed to feed).
+      **No live preconditions**: `update_receiver_handle_begin()`'s
+      `update_preconditions_t` is deliberately passed as all-satisfied
+      (`relay_open`/`no_trip_pending`/`temp_known_and_low` = `true`) — there
+      is no `safety_core`/`thermo_task` running in a bare-metal recovery
+      image to gather real evidence from (recovery mode by definition means
+      the application never ran), and the struct's own contract offers no
+      "not applicable" value; GPIO6 is already latched low for the whole
+      process lifetime by this point, so there is no live relay state an
+      honest `relay_open` evaluation would need to protect against here.
+      The image header itself (magic/target/version/length) is still fully,
+      independently validated. UPDATE_END's repeated-CRC deviation
+      (CommonFW/docs/UPDATE_PROTOCOL.md's "Section 4 deviations" note) is
+      handled the same way `update_task_process_end()` handles it: logged,
+      not acted on — the read-back-from-flash CRC via `bootloader_crc32()`
+      is what actually gates acceptance. On a verified `UPDATE_END` the
+      target slot is marked `PENDING_VERIFY` (not `VALID`) and `active_slot`
+      flipped to it, exactly mirroring `update_task_process_end()` — the
+      application still has to earn `VALID` via the confirmation gate
+      (section 5); this bootloader does not reboot after the write, same
+      "deliberately NOT rebooting here" choice `update_task.c` makes.
+      GPIO6 is never referenced anywhere in `recovery_update.c`, and the
+      loop has no exit path (`recovery_update_run()` is
+      `__attribute__((noreturn))`), so "no timeout out of it" still holds.
+      **Verification**: `bootloader/` builds clean (arm-none-eabi-gcc
+      14.2.1, pico-sdk 2.1.1, `-Wall -Wextra -Werror`), and the main
+      `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` targets were rebuilt clean
+      afterward to confirm the shared `src/update/*` files were not broken
+      for the application-side consumer. All 459 existing host-test checks
+      (`test/build_host_tests.ps1`) still pass unchanged — no new pure
+      decision logic was added in this pass (everything new is flash/UART
+      I/O glue around the already-host-tested pure modules), so no new host
+      test was needed. **Not exercised**: no real link (no ESP/PC peer sent
+      real frames over a live opto-isolated UART), no real flash-write
+      timing under this bootloader's specific interrupts-disabled window,
+      and no real recovery-mode entry from a genuinely bad application image
+      — build/host-test verified only, no probe or RP2040 hardware attached
+      to the machine this was built on.
 - [~] 10.5 Bootloader-only build, flashed and verified over SWD independently of
       any application. **Build only** — **2026-08-17**: `cmake -G Ninja -B build`
       + `cmake --build build` from `firmware/SaftyFW/bootloader/` succeeds
       clean (arm-none-eabi-gcc 14.2.1, pico-sdk 2.1.1, Ninja), producing
-      `saftyfw_bootloader.elf` / `.bin` — **9764 bytes** of flash `text`
-      against the ~64K (`BOOTLOADER_FLASH_SIZE` = 65280 B) budget, ~15% used.
+      `saftyfw_bootloader.elf` / `.bin` — **12812 bytes** of flash `text`
+      (up from 9764 B before item 10.4's frame-handling pass added
+      `kilnlink` + `src/update/*` + `recovery_update.c`/`persist.c`) against
+      the ~64K (`BOOTLOADER_FLASH_SIZE` = 65280 B) budget, ~20% used.
       `pico_add_extra_outputs()` left disabled in `bootloader/CMakeLists.txt`
       for the same reason `../CMakeLists.txt` disables it (no host C/C++
       compiler available to build `picotool` from source in this

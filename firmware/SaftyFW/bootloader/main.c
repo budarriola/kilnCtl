@@ -44,6 +44,8 @@
 #include "crc32.h"
 #include "flash_layout.h"
 #include "metadata.h"
+#include "persist.h"
+#include "recovery_update.h"
 
 // --- Step 2: flash-capacity sanity check --------------------------------
 //
@@ -105,21 +107,15 @@ static bool flash_capacity_at_least_expected(void)
 
 // --- Recovery mode (docs/BOOTLOADER.md section 4) -----------------------
 //
-// Scoped down per the coordinator's explicit decision this session: UART1
-// bring-up plus a periodic status beacon ONLY.
-//
-// NOT implemented this pass: UPDATE_BEGIN(0x10)/UPDATE_DATA(0x11)/
-// UPDATE_END(0x12)/UPDATE_ABORT(0x13) frame handling (receiving and writing
-// image data into flash), and the beacon below is a raw, distinctive marker
-// byte sequence, NOT a real framed UPDATE_STATUS(0x14) kilnlink frame. Both
-// are real streaming-flash-write / wire-framing logic that deserve their own
-// dedicated, carefully-reviewed pass -- see
-// firmware/CommonFW/docs/UPDATE_PROTOCOL.md section 4 and
-// docs/BOOTLOADER.md section 4 for exactly what that follow-on needs to
-// build.
+// Brings up UART1, drives the recovery_update.c frame-handling loop
+// (UPDATE_BEGIN/UPDATE_DATA/UPDATE_END/UPDATE_ABORT + a periodic
+// UPDATE_STATUS beacon), and never returns -- "no timeout out of it"
+// (TODO.md item 10.4). See recovery_update.h's header comment for exactly
+// what that loop implements and what it deliberately does not.
 //
 // GPIO6 was already driven low as this file's first statement and is never
-// touched again below -- this function does not reference it, by design.
+// touched again below -- neither this function nor recovery_update.c
+// reference it, by design.
 static void enter_recovery(void) __attribute__((noreturn));
 
 static void enter_recovery(void)
@@ -134,60 +130,8 @@ static void enter_recovery(void)
     uart_set_format(uart1, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(uart1, true);
 
-    // Distinctive raw marker, not a kilnlink frame -- 0x7E is kilnlink's own
-    // delimiter (CommonFW/docs/LINK_PROTOCOL.md section 3), reused here only
-    // so a byte-level capture visually brackets the marker; a real listener
-    // must not attempt to parse this as a frame.
-    static const uint8_t recovery_beacon[] = {
-        0x7Eu, 'R', 'E', 'C', 'O', 'V', 0x7Eu,
-    };
-
-    for (;;) {
-        for (size_t i = 0; i < sizeof(recovery_beacon); i++) {
-            uart_putc_raw(uart1, (char)recovery_beacon[i]);
-        }
-        // No timeout out of recovery -- loop forever. "There is nothing
-        // safe to time out into" (docs/BOOTLOADER.md section 4).
-        sleep_ms(1000);
-    }
-}
-
-// --- Step 6: persist metadata --------------------------------------------
-//
-// Writes `*meta` to the next free log slot in the metadata sector,
-// incrementing seq exactly once first -- bootloader_decide_boot() and
-// bootloader_decide_after_crc_fail() are pure and deliberately do not touch
-// seq themselves (metadata.h's own doc comments; confirmed against
-// metadata.c: neither decision_boot() nor decision_not_bootable() assigns
-// updated_meta.seq).
-static void persist_metadata(bootloader_metadata_t *meta, size_t latest_slot_index)
-{
-    meta->seq = meta->seq + 1u;
-
-    size_t next_write_slot = bootloader_metadata_next_write_slot(latest_slot_index);
-    bool needs_erase = bootloader_metadata_next_write_needs_erase(latest_slot_index);
-
-    uint8_t record[BOOTLOADER_METADATA_RECORD_LEN];
-    bootloader_metadata_pack(meta, record); // pure byte packing, no flash I/O
-
-    // flash_range_erase()/flash_range_program() must not race a flash read --
-    // including this very code's own subsequent instruction fetches, since
-    // this bootloader executes from flash (XIP). This is a single-core,
-    // bare-metal image with no ISRs registered, so plain
-    // save_and_disable_interrupts()/restore_interrupts() is sufficient;
-    // flash_safe_execute()'s multicore lockout exists for when core 1 might
-    // be running unrelated code concurrently, which cannot happen here.
-    uint32_t ints = save_and_disable_interrupts();
-    if (needs_erase) {
-        // Whole-sector erase -- 4K is the only erase granularity available
-        // (metadata.h's header comment: this is why the log scheme exists
-        // in the first place).
-        flash_range_erase(BOOTLOADER_METADATA_FLASH_OFFSET, BOOTLOADER_METADATA_FLASH_SIZE);
-    }
-    flash_range_program(BOOTLOADER_METADATA_FLASH_OFFSET +
-                             (uint32_t)next_write_slot * BOOTLOADER_METADATA_RECORD_LEN,
-                         record, BOOTLOADER_METADATA_RECORD_LEN);
-    restore_interrupts(ints);
+    recovery_update_run(); // never returns
+    __builtin_unreachable();
 }
 
 // --- Step 7: jump to the application -------------------------------------
@@ -285,14 +229,14 @@ int main(void)
         // way -- it is valuable for a human debugging over SWD later -- then
         // fall into recovery instead of jumping anywhere.
         if (decision.needs_metadata_update) {
-            persist_metadata(&decision.updated_meta, latest_slot);
+            bootloader_persist_metadata(&decision.updated_meta, latest_slot);
         }
         enter_recovery();
     }
 
     // Step 6.
     if (decision.needs_metadata_update) {
-        persist_metadata(&decision.updated_meta, latest_slot);
+        bootloader_persist_metadata(&decision.updated_meta, latest_slot);
     }
 
     // Step 7 -- never returns.

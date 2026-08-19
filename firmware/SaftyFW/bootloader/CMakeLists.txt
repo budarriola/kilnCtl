@@ -48,17 +48,36 @@ project(saftyfw_bootloader C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# kilnlink -- pulled in for recovery_update.c's frame parsing (item 10.4).
+# Freestanding C11, no allocation/I/O/globals (CommonFW/README.md rules 1-6),
+# so it is exactly as safe to link into this bare-metal target as into the
+# FreeRTOS application (../CMakeLists.txt does the same
+# add_subdirectory(../CommonFW kilnlink)). This is the SAME framing/CRC
+# implementation src/tasks/link_task.c uses -- not a second one
+# (tools/check_no_duplicate_crc.ps1's rule). Only add_subdirectory'd once per
+# CMake configure; giving it a distinct binary dir name here (matching
+# ../CMakeLists.txt's own "kilnlink" binary-dir argument) since this is a
+# wholly separate top-level CMake project from ../CMakeLists.txt, never
+# configured in the same build tree.
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../CommonFW kilnlink)
+
 pico_sdk_init()
 
 add_executable(saftyfw_bootloader
     main.c
     crc32.c
     metadata.c
+    persist.c
+    recovery_update.c
+    ../src/update/image_header.c
+    ../src/update/received_ranges.c
+    ../src/update/update_receiver.c
 )
 
 target_include_directories(saftyfw_bootloader PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/../src
+    ${CMAKE_CURRENT_LIST_DIR}/../src/update
 )
 
 target_compile_options(saftyfw_bootloader PRIVATE -Wall -Wextra -Werror)
@@ -67,6 +86,8 @@ target_link_libraries(saftyfw_bootloader PRIVATE
     pico_stdlib
     hardware_flash
     hardware_sync
+    hardware_uart
+    kilnlink
 )
 
 # SWD/probe flashing only, same as the application (docs/ARCHITECTURE.md

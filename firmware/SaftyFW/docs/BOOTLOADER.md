@@ -1,9 +1,15 @@
 # RP2040 Bootloader — field updates over the isolated link
 
 > **Status:** flash layout and metadata format design frozen (§2); bootloader
-> boot/CRC/fallback logic and a beacon-only recovery mode are built and
-> host-build-verified (`bootloader/main.c`, `metadata.h`/`.c`,
-> `flash_layout.h`). The reserved signature/key-space fields in §2's tables
+> boot/CRC/fallback logic and recovery mode's full minimal frame subset
+> (`UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT`/`UPDATE_STATUS`)
+> are built and host-build-verified (`bootloader/main.c`,
+> `bootloader/recovery_update.c`, `bootloader/persist.c`, `metadata.h`/`.c`,
+> `flash_layout.h`). §4's recovery-mode frame handling reuses the
+> application's own pure `src/update/{image_header,received_ranges,
+> update_receiver}.h`/`.c` and CommonFW's `kilnlink` framing/CRC library, not
+> a second implementation of either — see §4 below for exactly what is and
+> is not exercised. The reserved signature/key-space fields in §2's tables
 > are now reflected in code too: `bootloader_slot_meta_t` declares
 > `signature[64]`/`sig_required` (packed/unpacked, host-test-verified, never
 > consulted by any boot decision) and `flash_layout.h` declares
@@ -164,12 +170,62 @@ speaks a minimal subset of the update protocol: `UPDATE_BEGIN`, `UPDATE_DATA`,
 context frames or anything else.
 
 - GPIO6 stays low the entire time.
-- It emits a distinctive `UPDATE_STATUS` on a slow timer so the ESP can tell
-  "sitting in recovery" from "dead", and the GUI can say so.
+- It emits `UPDATE_STATUS` on a ~1s timer so the ESP can tell "sitting in
+  recovery" from "dead", and the GUI can say so.
 - There is no timeout out of recovery. There is nothing safe to time out *into*.
 
 This is what makes the whole scheme defensible: a failed update lands in a state
 that can be updated again over the same link, without a probe.
+
+**Built, TODO.md item 10.4** (`bootloader/recovery_update.c`/`.h`,
+`bootloader/persist.c`/`.h`): `main.c`'s `enter_recovery()` brings up UART1
+then calls `recovery_update_run()`, a bare `for(;;)` polling loop (no
+RTOS — this is a bare-metal executable) that parses `kilnlink`-framed bytes
+off UART1 and dispatches `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/
+`UPDATE_ABORT` to handlers built on the same pure decision modules
+`src/tasks/update_task.c` uses (`src/update/image_header.h`,
+`received_ranges.h`, `update_receiver.h`), compiled directly into this
+executable rather than pulled in via `src/tasks/update_task.c` itself (that
+file is FreeRTOS/queue-coupled and cannot link here). Framing/CRC/stuffing
+comes from CommonFW's `kilnlink` library, linked into the bootloader for the
+first time this pass (`add_subdirectory(../../CommonFW)`, freestanding C11
+with no allocation/I/O/globals, so no RTOS dependency is pulled in) — the
+same library `src/tasks/link_task.c` uses on the application side, not a
+second framing implementation. `UPDATE_STATUS`'s wire layout is
+byte-identical to `update_task.c`'s own (a fresh, small, standalone packer,
+since that file's own builder is not linkable here either).
+
+Two deliberate departures from the application-side receiver, both
+documented in `recovery_update.h`'s header comment:
+- **No live preconditions.** `update_receiver_handle_begin()`'s
+  `update_preconditions_t` argument is passed as all-satisfied
+  (`relay_open`/`no_trip_pending`/`temp_known_and_low` all `true`) rather
+  than gathered from `safety_core`/`thermo_task`, which do not exist in a
+  bare-metal recovery image — recovery mode is entered specifically because
+  the application, and everything it would have started, never ran. The
+  image header itself is still fully, independently validated.
+- **No reboot after `UPDATE_END`.** The target slot is marked
+  `PENDING_VERIFY` (not `VALID`) and `active_slot` flipped to it, matching
+  `update_task_process_end()`'s own choice — the application still has to
+  earn `VALID` via §5's confirmation gate. The operator/ESP is expected to
+  reset the board afterward, at which point the boot path above picks up
+  the newly-staged slot.
+
+**Verified this pass**: `bootloader/` builds clean under
+`-Wall -Wextra -Werror` (arm-none-eabi-gcc 14.2.1, pico-sdk 2.1.1) at 12812 B
+of flash `text` (~20% of the ~64K budget); the application's
+`SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` targets were rebuilt clean
+afterward to confirm the shared `src/update/*` files were not broken; all
+459 existing host-test checks still pass unchanged (no new pure decision
+logic was added — everything new here is flash/UART I/O glue around
+already-host-tested pure modules).
+
+**Not verified, honestly**: no real ESP/PC peer has sent real frames over a
+live opto-isolated UART1 link to this code; no real flash-erase/program
+timing has been exercised under this bootloader's specific
+interrupts-disabled window; and recovery mode has never actually been
+entered from a genuinely bad/corrupted application image on real hardware.
+No RP2040 or debug probe is attached to the machine this was built on.
 
 ---
 
@@ -315,13 +371,15 @@ is a bench visit to every board.
 - [x] Never writes its own region or the config partition — `main.c` only ever
       calls `flash_range_erase()`/`flash_range_program()` against
       `BOOTLOADER_METADATA_FLASH_OFFSET`/`_SIZE`.
-- [x] Recovery mode: UART1 only, GPIO6 low, no timeout out — **but beacon only
-      this pass.** `enter_recovery()` brings up UART1 at 115200 8N1 and sends a
-      raw distinctive marker byte sequence every ~1s, forever. It does **not**
-      implement `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT` frame
-      handling, and the beacon is not a framed `UPDATE_STATUS` — both remain
-      follow-on work (see section 4 above and
-      `../../CommonFW/docs/UPDATE_PROTOCOL.md` section 4).
+- [x] Recovery mode: UART1 only, GPIO6 low, no timeout out, full minimal frame
+      subset — `enter_recovery()` brings up UART1 at 115200 8N1 then calls
+      `recovery_update.c`'s `recovery_update_run()`, which parses
+      `kilnlink`-framed `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/
+      `UPDATE_ABORT` and emits a real framed `UPDATE_STATUS` every ~1s,
+      forever, reusing the application's own pure `src/update/*` decision
+      modules and CommonFW's `kilnlink` library rather than a second
+      implementation of either. See section 4 above for exactly what is
+      built/host-tested vs. not yet exercised on real hardware.
 - [ ] Bootloader-only build flashed over SWD, verified independently of any
       app — **not done**; build-verified only (see TODO.md Phase 10 item
       10.5), no hardware/probe available to this pass.
