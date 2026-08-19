@@ -5088,7 +5088,7 @@ decode these frames", not "the ESP has ever received a real one."
       to (`dashboard_http.c`/`ui_page_safety.c`, the web/LCD half of 0.9)
       didn't extend to `uart_bridge.c`. A real follow-up, not forgotten.
 
-### 10.14 Command queue between every control surface and the tasks that own state (design only, not started)
+### 10.14 Command queue between every control surface and the tasks that own state
 
 **2026-08-19, filed from a bench bug, not speculative.** `ui_page_network.c`
 froze the *entire* display (not just that page — every page's refresh timer,
@@ -5096,71 +5096,125 @@ touch input, and flush all stopped) whenever the LCD's Scan button was tapped,
 because `scan_btn_cb()` called `wifi_prov_scan()` straight from
 `lvgl_port_task` — a blocking full-channel radio scan running on the one and
 only task that's allowed to call an `lv_*` function
-(`lvgl_port.c`/`kiln_ui.h`'s header comments). Fixed for that one call site
-this pass (moved the scan onto a short-lived worker task, handed the result
-back through a mutex-guarded `scan_job_t`, see `ui_page_network.c`'s
-2026-08-19 header comment) — but it's one instance of a pattern repeated
-everywhere a control surface calls straight into a driver/module function
-that isn't guaranteed fast: `mode_home_btn_cb()`/`mode_ap_btn_cb()` call
-`wifi_prov_set_mode()` (`esp_wifi_set_mode()`/`esp_wifi_start()`, not as slow
-as a scan but not proven bounded either), `connect_submit_cb()` calls
-`wifi_prov_add_network()`, and the same "interface task calls straight into
-an owning module" shape exists on the web side (`dashboard_http.c` and
-friends run handler bodies directly on the HTTP server task) and on the
-debug/PC-link side (`uart_bridge.c`'s command dispatch runs handler bodies
-directly on the UART task) — user's explicit ask, 2026-08-19: the debug UART
-path belongs in this same fix, not just LCD and web.
+(`lvgl_port.c`/`kiln_ui.h`'s header comments). Same session, same file:
+`mode_home_btn_cb()`/`mode_ap_btn_cb()` (`wifi_prov_set_mode()`) and
+`connect_submit_cb()` (`wifi_prov_add_network()`, which can itself trigger a
+blocking `wifi_prov_scan()` internally via its auto-join tie-break) were the
+same bug at two more call sites — found while scoping this section, not
+separately reported.
 
-**The shape this should take, once actually designed** (not decided yet —
-this bullet list is the scope, not the design): every control surface — LCD
-touch events, web HTTP handlers, and the debug/PC-link UART command
-dispatch — becomes a thin producer that posts a command (an enum + small
-payload, not a function pointer) onto a queue owned by whichever task
-actually owns the state being changed (`wifi_prov`'s own task once it has
-one, `profile_executor`, `relay_authority`, etc.), and returns immediately.
-The owning task drains its queue and does the real (possibly slow, possibly
-blocking) work on its own stack, at its own priority, without stalling
-whichever caller's task queued the request. This is the same shape
-`link_task.c`/`relay_owner.c` already use on the `SaftyFW` side
-(`ROADMAP.md`'s "Pico never blocks on the link" rules, cross-task
-notification via bounded queues) — a queue between UI-facing code and the
-task that owns hardware/state is not a new idea in this codebase, just not
-yet applied to `KilnFW`'s UI/HTTP/UART surfaces.
+**Research pass (three parallel Explore agents, 2026-08-19) before deciding
+scope:**
+- `wifi_prov.c`'s module state (`s_wifi`) has **zero locking**. Every caller —
+  the Wi-Fi driver's default-event-loop task, `lvgl_port_task`, the esp_timer
+  service task, and the HTTP server's task via `wifi_provision_http.c` —
+  reads/writes it directly. Not observed to corrupt anything, not proven safe
+  either (already flagged in `ui_page_network.c`'s header comment before this
+  research pass; confirmed, not newly found).
+- `firmware/SaftyFW/src/tasks/relay_owner.c` is the pattern to mirror if/when
+  a real owning-task-per-module design happens: a `<owner>_cmd_type_t` enum +
+  tagged struct, a small `xQueueCreate`d queue (depth 4, "a backlog here means
+  something is wrong upstream"), one `<owner>_command_<verb>()` post-and-return
+  function per command (fast-refuse synchronously if cheaply knowable, else
+  `xQueueSend(queue, &cmd, 0)` — zero-tick, non-blocking, drop-and-report on a
+  full queue), and the owning task drains with a **bounded** `xQueueReceive`
+  timeout (200ms, not `portMAX_DELAY`) so its own periodic duties (here,
+  watchdog checkin and a state-machine tick) aren't starved by an idle queue.
+- `uart_bridge.c` has one FreeRTOS task per subsystem (THERMO/IO/DISPLAY/
+  TOUCH/SAFETY/SYSTEM/INFO) and every one of them runs its command dispatch
+  `switch` inline — no queue anywhere in this file. The risky ones (call
+  straight into blocking SPI/I2C/flash) are **THERMO** (every `MAX31856_*`
+  subcommand), **IO** (`kiln_io_*`/`SX1509_*` relay and I/O-expander writes —
+  the safety-relevant ones), and **DISPLAY** (every `ILI9488_*` subcommand,
+  some full-frame blits). SAFETY (the isolated-link commands) and SYSTEM
+  (`FACTORY_RESET` does a flash erase!) are secondary.
+- `firmware/KilnFW/App/drivers/*_http.c` handlers all run on esp_http_server's
+  **one shared worker task** (`wifi_provision_http_start()` is the only
+  `httpd_start()` call; every other `*_http_start()` just registers URIs
+  against it). The clearly worst blocking handlers are `ota_http.c`'s ESP and
+  Pico transfer handlers (long streamed flash/UART writes) and
+  `wifi_provision_http.c`'s `provision_post_handler()` (can trigger a radio
+  mode switch) — while any of those runs, no other HTTP client (including the
+  dashboard's own polling) gets served.
+- `profile_executor.c` already has two dedicated FreeRTOS tasks
+  (`executor_task_entry`, `watchdog_task_entry`) but **no queue** — HTTP
+  handlers call `profile_executor_run()`/`_halt()`/`_pause()`/`_resume()`
+  directly, synchronized some other way, not via posted commands.
+  `relay_authority.c` has neither a task nor a queue — plain synchronous
+  static-array bookkeeping.
 
-**Explicitly not started.** This is a real architectural change (a new
-task-per-owned-module or a router onto existing ones, a command/result queue
-design, and touching every `*_http.c` handler, every LCD page's event
-callbacks, and `uart_bridge.c`'s dispatch), not a one-file patch — filed here
-per 10.1a's own precedent ("design only" sections wait for a real pass rather
-than being rushed into the bug-fix that surfaced them). The immediate freeze
-this pass fixes narrowly (async scan on `ui_page_network.c` alone) buys time,
-not closure.
+**Scope decision for this pass, given the above:** a full command-queue
+rewrite of `wifi_prov.c`'s internals (routing the Wi-Fi driver's own event
+handlers through the same queue as every caller, for genuine single-writer
+state) is exactly the kind of deep, hardware-unverifiable change this
+environment cannot responsibly ship blind — no board is attached here (see
+this repo's `ROADMAP.md` M0), and a broken Wi-Fi stack change costs an
+operator their only remote-monitoring link. That rewrite, and the web/UART
+surfaces, stay **design-only, not started** — see the checklist below. What
+*is* done this pass is the mechanically safe, directly-diagnosed slice: every
+`ui_page_network.c` call site that was blocking `lvgl_port_task` on a
+`wifi_prov_*()` call now runs it off that task instead, using the same
+worker-task + mutex-guarded job-struct shape the Scan fix already
+established (not a generic reusable abstraction — three small, near-identical
+blocks, deliberately, matching this codebase's "three similar lines beats a
+premature abstraction" convention).
 
-- [ ] Design the command/queue shape: what goes in a command (enum id + fixed
-      payload union, sized for the largest command so no allocation is
-      needed), which task(s) own which state, and whether `wifi_prov` needs
-      its own owning task (it doesn't have one today — see this file's
-      section 1 — everything currently runs on whichever caller's task
-      invoked it, which is exactly the bug)
-- [ ] LCD side: every `ui_page_*.c` `LV_EVENT_CLICKED` handler that currently
-      calls straight into a driver/module function (`wifi_prov_*`,
-      `profile_executor_*`, `relay_authority_*`, etc.) posts a command
-      instead and returns; `lvgl_port_task` never blocks on anything but
-      LVGL's own timer/render/flush work
+- [x] **LCD side, `ui_page_network.c` only (2026-08-19).** `scan_job_t`
+      (Scan button, landed slightly earlier the same session), `mode_job_t`
+      (`mode_home_btn_cb()`/`mode_ap_btn_cb()` → `request_mode_change()`,
+      fire-and-forget since `refresh_cb()` already polls
+      `wifi_prov_get_mode()` every tick regardless of how the change
+      happened), and `connect_job_t` (`connect_submit_cb()`, needs a real
+      done/err result back to close the modal or show an error) — three
+      small worker-task-per-action structs, each with its own
+      `xSemaphoreCreateMutex()`-guarded handoff, each polled from
+      `refresh_cb()`. All three mutexes are created once up front in
+      `ui_page_network_build()`, not lazily on first tap — an earlier
+      version of this same pass created `scan_job_t.lock` lazily inside
+      `scan_btn_cb()`, which meant `refresh_cb()`'s very first tick (called
+      immediately at page build, before any button has ever been tapped)
+      called `xSemaphoreTake()` on a still-NULL handle. Found and fixed in
+      the same session, before it reached a build, let alone hardware —
+      every job-entry point also has a defensive NULL-lock guard (no-op with
+      a log/status message) in case mutex allocation itself ever fails,
+      matching this codebase's existing convention elsewhere (`autotune_engine.c`,
+      `MAX31856.c`, `run_state.c`, etc. — grep `xSemaphoreCreateMutex` for the
+      pattern).
+      **Deliberately left synchronous**: `forget_confirm_yes_cb()`'s
+      `wifi_prov_forget_network()` call — NVS-only, no radio, no internal
+      scan, lowest risk of the four call sites on this page; not worth the
+      same treatment this pass.
+      Build: `idf.py -C firmware/KilnFW build` (ninja, incremental) clean
+      under `-Werror`. **Not hardware-verified** — no ILI9488/board attached
+      in this environment, so none of this has actually been tapped on real
+      glass; this closes "no longer calls blocking Wi-Fi operations from
+      lvgl_port_task," not "confirmed not to freeze on the bench."
+- [ ] **`wifi_prov.c`'s own owning task**, so `s_wifi` gets a genuine single
+      writer (today: zero locking, see the research summary above). Needs the
+      Wi-Fi driver's own event handlers (`on_wifi_event`/`on_ip_event`)
+      rerouted through the same queue as every external caller, not just the
+      external callers — a materially bigger and riskier change than the LCD
+      slice above, and one this environment cannot verify against a real
+      radio. Do not attempt without hardware to test against.
 - [ ] Web side: `dashboard_http.c`/`zones_http.c`/`profiles_http.c`/
-      `rules_http.c`/`readiness_http.c`/`ota_http.c` handlers post commands
-      the same way rather than running the action inline on the HTTP
-      server's task — read-only `GET` handlers are lower risk (per 10.1a
-      they already go through shared getters) but action-taking `POST`
-      handlers have the same blocking-call exposure `ui_page_network.c` had
+      `rules_http.c`/`ota_http.c`/`wifi_provision_http.c` action-taking (POST)
+      handlers post commands instead of running inline on esp_http_server's
+      one shared worker task. `ota_http.c`'s transfer handlers and
+      `wifi_provision_http.c`'s `provision_post_handler()` are the highest-value
+      targets per the research pass above (longest/most blocking).
 - [ ] Debug/PC-link UART side (user's explicit ask, 2026-08-19):
-      `uart_bridge.c`'s command dispatch gets the same treatment — whatever
-      currently runs a handler body directly on the UART task posts a
-      command to the owning task instead, so a slow action requested over
-      the PC link can't stall UART framing/ACK timing the way a slow LCD tap
-      could stall the display
-- [ ] Once the shape is designed, `ui_page_network.c`'s ad hoc
-      `scan_job_t`/mutex/worker-task pattern from this pass is a candidate to
-      migrate onto the real mechanism rather than staying a one-off — flagged
-      here so it isn't forgotten as "already fixed, don't touch again" once
-      10.14 actually lands
+      `uart_bridge.c`'s per-subsystem tasks (THERMO/IO/DISPLAY especially,
+      per the research pass above) post commands to an owning task instead of
+      running the dispatch `switch` body inline, mirroring
+      `relay_owner.c`'s shape (queue + bounded-timeout drain + one
+      `<owner>_command_<verb>()` per command) rather than reinventing it.
+- [ ] `profile_executor.c` (has two tasks, no queue) and `relay_authority.c`
+      (has neither) are candidates to gain the same `relay_owner.c`-style
+      queue once the web/LCD callers that drive them are migrated — not
+      urgent today since their current call pattern hasn't been observed to
+      freeze anything, but worth the same audit once this section's other
+      items land.
+- [ ] Once a real design exists for the non-LCD surfaces,
+      `ui_page_network.c`'s three job structs from this pass are candidates
+      to migrate onto it rather than staying page-local one-offs — flagged
+      here so they aren't mistaken for "already fully solved, don't revisit."

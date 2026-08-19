@@ -190,9 +190,16 @@ static wifi_prov_scan_result_t s_scan_results[UI_PAGE_NETWORK_SCAN_MAX];
  * scan_worker_task runs wifi_prov_scan() (a real blocking radio scan) off
  * lvgl_port_task, so a Scan tap can no longer freeze the whole display.
  * `lock` is the only thing shared between that task and lvgl_port_task;
- * everything it guards is small and copied out promptly on either side. */
+ * everything it guards is small and copied out promptly on either side.
+ * `lock` is created once, up front, in ui_page_network_build() -- NOT
+ * lazily on first Scan tap the way an earlier version of this pass had it:
+ * refresh_cb() (and therefore apply_scan_job_result()) runs from the very
+ * first tick, before any button has ever been tapped, and
+ * xSemaphoreTake(NULL, ...) on a not-yet-created mutex is undefined
+ * behavior -- found and fixed same-session, before it ever reached
+ * hardware. */
 typedef struct {
-    SemaphoreHandle_t lock; /* created once, first Scan tap */
+    SemaphoreHandle_t lock;
     bool busy;              /* worker task is running */
     bool done;               /* worker finished, result below is ready to consume */
     esp_err_t err;
@@ -201,6 +208,87 @@ typedef struct {
 } scan_job_t;
 
 static scan_job_t s_scan_job;
+
+/* ---- Async mode-switch job -- same shape/reasoning as scan_job_t above.
+ * mode_home_btn_cb()/mode_ap_btn_cb() used to call wifi_prov_set_mode()
+ * directly on lvgl_port_task; it does an NVS write and an esp_wifi_set_mode()
+ * radio-mode change, either of which is a real (if usually brief) block on
+ * the one task that also owns every page's redraw. No "done" flag is needed
+ * here -- refresh_cb() already polls wifi_prov_get_mode() every tick
+ * regardless, so the eventual result shows up on its own within
+ * UI_PAGE_NETWORK_REFRESH_MS of the worker finishing; `busy` alone is enough
+ * to stop a second tap from piling up a second worker task. */
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool busy;
+} mode_job_t;
+
+static mode_job_t s_mode_job;
+
+static void mode_worker_task(void *arg)
+{
+    wifi_prov_mode_t mode = (wifi_prov_mode_t)(intptr_t)arg;
+    esp_err_t err = wifi_prov_set_mode(mode);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_set_mode(%d) failed: %s", (int)mode, esp_err_to_name(err));
+    }
+    xSemaphoreTake(s_mode_job.lock, portMAX_DELAY);
+    s_mode_job.busy = false;
+    xSemaphoreGive(s_mode_job.lock);
+    vTaskDelete(NULL);
+}
+
+static void request_mode_change(wifi_prov_mode_t mode)
+{
+    if (!s_mode_job.lock) return;
+    xSemaphoreTake(s_mode_job.lock, portMAX_DELAY);
+    bool already_busy = s_mode_job.busy;
+    if (!already_busy) s_mode_job.busy = true;
+    xSemaphoreGive(s_mode_job.lock);
+    if (already_busy) return; /* one mode switch at a time */
+
+    BaseType_t created =
+        xTaskCreate(mode_worker_task, "wifi_mode_ui", 4096, (void *)(intptr_t)mode, 5, NULL);
+    if (created != pdPASS) {
+        xSemaphoreTake(s_mode_job.lock, portMAX_DELAY);
+        s_mode_job.busy = false;
+        xSemaphoreGive(s_mode_job.lock);
+    }
+}
+
+/* ---- Async connect (add-network) job -- same shape again. connect_submit_cb()
+ * used to call wifi_prov_add_network() directly on lvgl_port_task; that
+ * function can itself trigger a blocking wifi_prov_scan() internally
+ * (select_and_apply_join_candidate()'s auto-join tie-break, see wifi_prov.c),
+ * so this was a second real path to the exact freeze the Scan button had.
+ * Unlike mode-switch, the connect modal needs a real result back (close on
+ * success, show an error message on failure), so this one keeps a done/err
+ * pair like scan_job_t. ssid/password are copied into module statics before
+ * the worker task starts, while still on lvgl_port_task -- the worker never
+ * touches an LVGL widget. */
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool busy;
+    bool done;
+    esp_err_t err;
+} connect_job_t;
+
+static connect_job_t s_connect_job;
+static char s_connect_job_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+static char s_connect_job_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+
+static void connect_worker_task(void *arg)
+{
+    (void)arg;
+    esp_err_t err = wifi_prov_add_network(s_connect_job_ssid, strlen(s_connect_job_ssid),
+                                           s_connect_job_password, strlen(s_connect_job_password));
+    xSemaphoreTake(s_connect_job.lock, portMAX_DELAY);
+    s_connect_job.err = err;
+    s_connect_job.done = true;
+    s_connect_job.busy = false;
+    xSemaphoreGive(s_connect_job.lock);
+    vTaskDelete(NULL);
+}
 
 static void scan_row_clicked_cb(lv_event_t *e);
 
@@ -232,6 +320,7 @@ static void apply_scan_job_result(void)
     esp_err_t err;
     size_t count;
 
+    if (!s_scan_job.lock) return;
     xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
     bool done = s_scan_job.done;
     if (done) {
@@ -278,24 +367,55 @@ static void apply_scan_job_result(void)
     }
 }
 
-/* ---- AP-mode section: identity display + AP-join QR ---- */
-static lv_obj_t *s_ap_section;
-static lv_obj_t *s_ap_ssid_label;
-static lv_obj_t *s_ap_password_label;
-static lv_obj_t *s_ap_qr;
-static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN];
-
 /* ---- Connect modal (scan-tap -> password entry -> wifi_prov_add_network()) ----
  * Built once, hidden, matching every other page's "pages are never torn
  * down" widget lifetime (kiln_ui.h's header comment) -- this is a full-page
  * overlay, not a separate kiln_ui page, since it only ever makes sense on
- * top of this one. */
+ * top of this one. Declared here, ahead of build, rather than down with the
+ * other AP-mode/connect-modal statics below -- apply_connect_job_result()
+ * just below needs s_connect_status_label and this is its first use in the
+ * file. */
 static lv_obj_t *s_connect_modal;
 static lv_obj_t *s_connect_title;
 static lv_obj_t *s_connect_ta;
 static lv_obj_t *s_connect_status_label;
 static lv_obj_t *s_connect_kb;
 static char s_connect_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+
+/* Applies a completed connect_worker_task result -- same "poll from
+ * refresh_cb()" shape as apply_scan_job_result() above. Forward-declares
+ * connect_modal_close()/refresh_saved_list() since both are defined later in
+ * this file (connect_modal_close() with the rest of the modal build code,
+ * refresh_saved_list() with the rest of the saved-list code). */
+static void connect_modal_close(void);
+static void refresh_saved_list(void);
+
+static void apply_connect_job_result(void)
+{
+    if (!s_connect_job.lock) return;
+    xSemaphoreTake(s_connect_job.lock, portMAX_DELAY);
+    bool done = s_connect_job.done;
+    esp_err_t err = s_connect_job.err;
+    if (done) s_connect_job.done = false;
+    xSemaphoreGive(s_connect_job.lock);
+    if (!done) return;
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_add_network(%s) failed: %s", s_connect_job_ssid, esp_err_to_name(err));
+        const char *msg = (err == ESP_ERR_NO_MEM) ? "Saved network list is full" : "Could not save credentials";
+        lv_label_set_text(s_connect_status_label, msg);
+        return;
+    }
+    connect_modal_close();
+    refresh_saved_list();
+}
+
+/* ---- AP-mode section: identity display + AP-join QR ---- */
+static lv_obj_t *s_ap_section;
+static lv_obj_t *s_ap_ssid_label;
+static lv_obj_t *s_ap_password_label;
+static lv_obj_t *s_ap_qr;
+static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN];
 
 /* ---- Pending-forget context, for the confirm msgbox's footer button cb.
  * Only one confirm dialog can be open at a time, so a single static buffer
@@ -321,21 +441,17 @@ static void apply_mode_button_style(lv_obj_t *btn, bool active)
 static void mode_home_btn_cb(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = wifi_prov_set_mode(WIFI_PROV_MODE_HOME);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "wifi_prov_set_mode(HOME) failed: %s", esp_err_to_name(err));
-    }
-    refresh_cb(NULL); /* repaint immediately instead of waiting one tick */
+    /* Async now -- see mode_job_t's header comment. The mode buttons no
+     * longer repaint themselves immediately (there is nothing confirmed yet
+     * to repaint); refresh_cb()'s normal 1s poll picks up the real mode
+     * once wifi_prov_set_mode() actually finishes. */
+    request_mode_change(WIFI_PROV_MODE_HOME);
 }
 
 static void mode_ap_btn_cb(lv_event_t *e)
 {
     (void)e;
-    esp_err_t err = wifi_prov_set_mode(WIFI_PROV_MODE_AP);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "wifi_prov_set_mode(AP) failed: %s", esp_err_to_name(err));
-    }
-    refresh_cb(NULL);
+    request_mode_change(WIFI_PROV_MODE_AP);
 }
 
 /* ---- Scan/Saved toggle (mutually exclusive, see this file's header
@@ -392,21 +508,37 @@ static void connect_cancel_cb(lv_event_t *e)
 static void connect_submit_cb(lv_event_t *e)
 {
     (void)e;
-    const char *password = lv_textarea_get_text(s_connect_ta);
-    size_t ssid_len = strlen(s_connect_ssid);
-    size_t password_len = strlen(password);
-
-    /* Same call provision_post_handler() makes for a plain ssid/password
-     * POST body -- TODO.md 10.1a. */
-    esp_err_t err = wifi_prov_add_network(s_connect_ssid, ssid_len, password, password_len);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "wifi_prov_add_network(%s) failed: %s", s_connect_ssid, esp_err_to_name(err));
-        const char *msg = (err == ESP_ERR_NO_MEM) ? "Saved network list is full" : "Could not save credentials";
-        lv_label_set_text(s_connect_status_label, msg);
+    if (!s_connect_job.lock) {
+        lv_label_set_text(s_connect_status_label, "Could not save credentials");
         return;
     }
-    connect_modal_close();
-    refresh_saved_list();
+
+    /* Async now -- see connect_job_t's header comment. Same
+     * wifi_prov_add_network() call provision_post_handler() makes for a
+     * plain ssid/password POST body (TODO.md 10.1a), just off
+     * lvgl_port_task; apply_connect_job_result() (polled from refresh_cb())
+     * closes the modal or shows the error once the worker task finishes. */
+    xSemaphoreTake(s_connect_job.lock, portMAX_DELAY);
+    bool already_busy = s_connect_job.busy;
+    if (!already_busy) {
+        s_connect_job.busy = true;
+        s_connect_job.done = false;
+    }
+    xSemaphoreGive(s_connect_job.lock);
+    if (already_busy) return;
+
+    const char *password = lv_textarea_get_text(s_connect_ta);
+    snprintf(s_connect_job_ssid, sizeof(s_connect_job_ssid), "%s", s_connect_ssid);
+    snprintf(s_connect_job_password, sizeof(s_connect_job_password), "%s", password);
+    lv_label_set_text(s_connect_status_label, "Connecting...");
+
+    BaseType_t created = xTaskCreate(connect_worker_task, "wifi_connect_ui", 4096, NULL, 5, NULL);
+    if (created != pdPASS) {
+        xSemaphoreTake(s_connect_job.lock, portMAX_DELAY);
+        s_connect_job.busy = false;
+        xSemaphoreGive(s_connect_job.lock);
+        lv_label_set_text(s_connect_status_label, "Could not start");
+    }
 }
 
 static void scan_row_clicked_cb(lv_event_t *e)
@@ -419,6 +551,12 @@ static void scan_row_clicked_cb(lv_event_t *e)
 
 static void forget_confirm_yes_cb(lv_event_t *e)
 {
+    /* Deliberately left synchronous, unlike scan/mode/connect above --
+     * wifi_prov_forget_network() only does an NVS list write, no radio
+     * operation and no internal scan, so its worst case is a brief flash
+     * write rather than seconds of blocking. Flagged in TODO.md 10.14 as
+     * the one wifi_prov.c call site on this page not yet moved off
+     * lvgl_port_task, not silently left inconsistent. */
     lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
     esp_err_t err = wifi_prov_forget_network(s_pending_forget_ssid, strlen(s_pending_forget_ssid));
     if (err != ESP_OK) {
@@ -465,13 +603,9 @@ static void forget_row_clicked_cb(lv_event_t *e)
 static void scan_btn_cb(lv_event_t *e)
 {
     (void)e;
-
     if (!s_scan_job.lock) {
-        s_scan_job.lock = xSemaphoreCreateMutex();
-        if (!s_scan_job.lock) {
-            lv_label_set_text(s_scan_status_label, "Scan failed to start");
-            return;
-        }
+        lv_label_set_text(s_scan_status_label, "Scan failed to start");
+        return;
     }
 
     xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
@@ -577,6 +711,7 @@ static void refresh_cb(lv_timer_t *timer)
     (void)timer;
 
     apply_scan_job_result();
+    apply_connect_job_result();
 
     char status_buf[64];
     wifi_status_ui_get_text(status_buf, sizeof(status_buf));
@@ -800,6 +935,23 @@ static void build_connect_modal(lv_obj_t *scr)
 
 lv_obj_t *ui_page_network_build(void)
 {
+    /* Created up front, before refresh_cb() ever runs -- see scan_job_t's
+     * header comment for why lazy creation on first tap was a bug (the
+     * poll functions run from the very first tick, before any tap). Pages
+     * are built exactly once (kiln_ui.h's header comment), so this never
+     * runs twice. */
+    s_scan_job.lock = xSemaphoreCreateMutex();
+    s_mode_job.lock = xSemaphoreCreateMutex();
+    s_connect_job.lock = xSemaphoreCreateMutex();
+    if (!s_scan_job.lock || !s_mode_job.lock || !s_connect_job.lock) {
+        /* Never observed to actually fail (three tiny allocations, this
+         * late in boot) -- but per this codebase's "never crash on a
+         * resource failure" convention (see wifi_prov.h's header comment),
+         * every job-entry point below checks its own lock for NULL and
+         * no-ops rather than trusting this always succeeds. */
+        ESP_LOGE(TAG, "ui_page_network: mutex allocation failed -- Scan/mode/connect disabled");
+    }
+
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
