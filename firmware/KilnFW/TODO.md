@@ -3699,30 +3699,6 @@ section 6.
       request-construction/JSON-parsing logic on the PC side is
       test-verified, and the C-side JSON-building logic is build-verified
       (compiles, links, matches the documented shape) but not run.
-      **Real gap, surfaced honestly rather than papered over (as of
-      2026-08-18): `ota_status()` could only report the Pico-relay
-      progress** (`GET /api/ota/pico/status`) — the ESP's own self-update
-      progress counter (`ota_http_get_esp_progress()`) and the persisted
-      `ota_record` "last update" NVS blob existed only as in-process C
-      getters, with no HTTP route, so neither `pc_tools` nor
-      `mcp__kilnctrl__ota_status` could see them.
-      **Closed (2026-08-19).** `ota_http.c` now also registers
-      `GET /api/ota/esp/status`, returning
-      `{"phase":"...","percent":N,"last_update":null|{...}}` —
-      `phase`/`percent` from `ota_http_get_esp_progress()`, `last_update`
-      from the new `ota_record_load()` (`App/drivers/ota_record.{h,c}`),
-      `null` (not an error) until the first ESP update has run this NVS
-      lifetime — same nullable-field convention `dashboard_http.c` already
-      uses (e.g. `safety_temp_c`). `ota_http_client.py` gained
-      `get_esp_status()`; `mcp_server.py`'s `ota_status()` now polls both
-      `/api/ota/pico/status` and `/api/ota/esp/status` and reports both,
-      each independently (one endpoint failing does not hide the other's
-      result). Test coverage extended in
-      `tools/PcTools/tests/test_ota_http_client.py` (19 tests total).
-      **Build-verified under `idf.py -C firmware/KilnFW build` with
-      `-Werror`; pc_tools tests pass. No physical ESP32-S3 attached in this
-      environment — not hardware-verified**, same caveat as the rest of
-      this section.
 
 ### 9.7 Verification
 
