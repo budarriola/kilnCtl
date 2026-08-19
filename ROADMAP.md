@@ -383,15 +383,32 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 requirement). `ui_page_home.c` was stacking AP-QR + zones + the safety card +
 profile card + chart + nav onto one scrollable column — the code's own prior
 comment admitted "scrolling is the safe fallback rather than guessing
-pixel-perfect fixed heights." Rewritten to a hard 320x480 no-scroll budget:
-home page trimmed to zones + run state, safety-processor detail moved to a
-new `ui_page_safety.c`, the chart moved to a new `ui_page_history.c`, both
-reachable via nav. `LV_OBJ_FLAG_SCROLLABLE` explicitly cleared on every
-container so a future overflow clips visibly instead of silently becoming
-scrollable again. Real `idf.py build` verified clean. **Not verified**: no
-real ILI9488 panel attached in this environment, so pixel-exact fit on real
-hardware is still unconfirmed — this closes "budgeted and scroll-disabled
-in code," not "confirmed to fit on the physical screen."
+pixel-perfect fixed heights." Rewritten to a hard budget against this
+codebase's actual runtime canvas, 480x320 landscape (the ILI9488 panel is
+natively 320x480, but Kconfig's default startup rotation is landscape, and
+`ui_theme.h`'s own spacing constants were already budgeted against 480x320
+landscape) =~ 264px of real content height after the status bar and outer
+padding: home page trimmed to zones + a compact run-state summary +
+Start/Stop/Menu; the AP-QR card and profile picker were deleted outright
+(duplicate of `ui_page_network.c`'s own QR; picker replaced by the existing
+fallback-profile logic); the safety-processor card moved to a new
+`ui_page_safety.c`, the chart to a new `ui_page_history.c`, both reachable
+via `ui_page_config.c`'s nav hub, which itself grew from 4 to 7
+destinations and switched to a compact 2-column grid to fit the same
+budget. `ui_page_board_health.c`/`ui_page_temperature.c` compacted
+(smaller padding, `ui_page_temperature.c`'s relay buttons 72px→36px).
+`LV_OBJ_FLAG_SCROLLABLE` explicitly cleared on every page's outer
+containers so a future overflow clips visibly instead of silently becoming
+scrollable again. Real `idf.py -C firmware/KilnFW build` verified clean.
+**Two known gaps, not silently claimed solved:** `ui_page_network.c` is
+compacted but its full scan+saved-networks content still likely overflows
+the budget in the worst case (needs a further sub-page split, see TODO.md
+10.3's status note); `ui_page_temperature.c`'s fit depends on how many
+relays are configured per zone at runtime, which this pass couldn't bound
+at compile time. **Not verified on real hardware**: no ILI9488 panel
+attached in this environment, so pixel-exact fit is still unconfirmed for
+every page — this closes "budgeted and scroll-disabled in code, with a real
+computed margin," not "confirmed to fit on the physical screen."
 
 The point at which the two processors become one system. Deliberately separate,
 because it changes what a bare main board will do.

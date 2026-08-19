@@ -3972,6 +3972,88 @@ one) so `ui_page_home.c` can include `mdns.h` at all — `main.c` can't export a
 header back to `drivers` the other way (that component already `REQUIRES
 drivers`, so the reverse would be circular).
 
+**Status update (2026-08-18): no-scroll rewrite -- hard requirement, LCD
+pages must never require scrolling.** `ui_page_home.c`'s own prior comment
+admitted "sizing has never been checked against the real panel... scrolling
+is the safe fallback rather than guessing pixel-perfect fixed heights" --
+that stopped being acceptable. This codebase's actual runtime canvas is
+480x320 landscape (the ILI9488 panel is natively 320x480, but Kconfig's
+default `KILNCTL_DISPLAY_ROTATION` is 1, landscape, and `ui_theme.h`'s own
+spacing constants were already "budgeted against the 480x320 landscape
+panel" -- so that's the resolution this rewrite budgeted against, not the
+panel's native portrait dimensions). Real budget used: 320px tall, minus
+`UI_THEME_STATUS_BAR_HEIGHT_PX` (32), minus `2*UI_THEME_PADDING_PX` outer
+padding (16), minus the bar-to-content gap (~4-8px) =~ 264px of real content
+height to fit into, computed from real constants (`ui_theme.h`) and
+`LV_FONT_DEFAULT`'s real montserrat_14 metrics, not guessed.
+
+- **`ui_page_home.c` rebuilt to fit.** Kept: zone rows (name/temp/heat --
+  the file's own "kiln-process data the operator watches while firing"
+  framing), a compact one-line run-state summary + time/progress line + slim
+  progress bar, and a Start/Stop/Menu action row (Menu replaces the old
+  separate Configuration+Temperature nav buttons). Moved off entirely:
+  - The AP-join QR card (10.9) -- **deleted, not moved**. It duplicated
+    `ui_page_network.c`'s own AP-mode QR card (same payload, same gating
+    condition) -- 10.9's own audit note already flagged this as a
+    duplicate, not unique content.
+  - The Safety Processor card (10.10/ROADMAP.md M6) -- moved to a new page,
+    `ui_page_safety.c`/`.h`, reachable from `ui_page_config.c`'s "Safety
+    Processor" nav item.
+  - The desired-vs-actual temperature chart -- moved to a new page,
+    `ui_page_history.c`/`.h`, reachable from `ui_page_config.c`'s
+    "Temperature History" nav item.
+  - The profile picker dropdown -- **deleted, not moved**. Start now always
+    uses the fallback chain (current non-idle profile, else the last boot
+    record) that already existed for "picker untouched" -- a real,
+    documented capability loss (no more picking an arbitrary saved profile
+    from the LCD; the web dashboard still can) traded for the hard no-scroll
+    requirement.
+  Zone-row padding trimmed (`UI_THEME_PADDING_PX/4`) and the run-state card
+  compacted (one summary line instead of two) to leave a real double-digit
+  margin against the ~264px budget, not a razor-thin fit.
+- **`ui_page_config.c` grew from 4 to 7 nav destinations this pass**
+  (Temperature moved here from home's old dedicated button; Safety Processor
+  and Temperature History are new) and switched from a single-column list to
+  a 2-column flex-wrap grid at a shorter row height (44px, using
+  `ui_theme_apply_touch_area(..., true)`'s documented "extend an undersized
+  widget's effective click area toward `UI_THEME_MIN_TOUCH_TARGET_PX`"
+  behavior) so all 7 destinations plus Back fit the same ~264px budget.
+- **`ui_page_board_health.c`, `ui_page_temperature.c`** compacted (smaller
+  padding/gaps; `ui_page_temperature.c`'s relay buttons shrunk from 72px to
+  36px tall) to fit the same budget. `ui_page_temperature.c`'s fit still
+  depends on how many relays are assigned per zone at runtime
+  (`zones_config_get_relay_mask()`) -- a zone with several relays wrapping
+  onto a second button row could still overflow; this is a real,
+  unresolved risk, not something this pass could rule out without a fixed
+  relays-per-zone cap or real hardware to check against.
+- **`ui_page_network.c` compacted but HONESTLY NOT FULLY FIXED.** Rows/lists
+  shrunk substantially (mode toggle and Scan button 72px->44px, scan/saved
+  list height 140/120px->90px each, QR size 140px->100px, Back 72px->36px),
+  cutting the page's overflow from roughly 600px down to an estimated
+  300-350px -- still over the ~264px budget in the worst case (long scan
+  results + several saved networks, or the STA-connected QR row also
+  visible). The scan/saved `lv_list` widgets are left internally scrollable
+  on purpose (a bounded, fixed-height scrollable list is normal, contained
+  UI, not the "whole page scrolls" problem this rewrite targets), which
+  mitigates but doesn't eliminate the risk. **Follow-up needed:** split Scan
+  and Saved Networks into their own sub-pages via the existing
+  `kiln_ui_show()` pattern, the same way Safety Processor/Temperature
+  History were split out of home this pass.
+- **Every page's `scr` and `content` containers now explicitly clear
+  `LV_OBJ_FLAG_SCROLLABLE`** (`ui_page_home.c`, `ui_page_config.c`,
+  `ui_page_board_health.c`, `ui_page_network.c`, `ui_page_temperature.c`,
+  plus the two new pages) so a future accidental overflow clips visibly
+  instead of silently turning scrollable again.
+- **No real hardware was available to visually confirm any of this.** Every
+  number above was computed against real constants (`ui_theme.h`,
+  `LV_FONT_DEFAULT`), not guessed, and the build (`idf.py -C firmware/KilnFW
+  build`) succeeds clean with all new/changed files compiling -- but nobody
+  has looked at the actual ILI9488 panel to confirm pixel-perfect fit.
+  Treat the "fits" claims above as "computed with a real margin," not
+  "pixel-verified," except `ui_page_network.c` and (for many-relay zones)
+  `ui_page_temperature.c`, which are honestly flagged above as still likely
+  to overflow in some configurations.
+
 ### 10.4 Touch hit-testing
 
 **Status update (2026-08-17): LVGL's real hit-test behavior checked (not
