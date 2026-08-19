@@ -1,0 +1,35 @@
+{
+  "frame": "SAFETY_CMD_TRIP_EVENT",
+  "cmd": "0x0D",
+  "vectors": [
+    {
+      "name": "current_spike",
+      "fields": {
+        "trip_seq": 1,
+        "trip_reason": 9,
+        "uptime_ms": 500000,
+        "safety_tc_c": 245.5,
+        "deciding_threshold": 250.0,
+        "current_a": [1.2, 0.0, 0.3],
+        "relay_recent_mask": 5,
+        "context_age_100ms": 3
+      },
+      "bytes_hex": "0d010920a107000080754300007a439a99993f000000009a99993e0503"
+    },
+    {
+      "name": "wraparound_no_context",
+      "fields": {
+        "trip_seq": 255,
+        "trip_reason": 2,
+        "uptime_ms": 1234567,
+        "safety_tc_c": 999.9,
+        "deciding_threshold": 900.0,
+        "current_a": [0.0, 0.0, 0.0],
+        "relay_recent_mask": 0,
+        "context_age_100ms": 255
+      },
+      "bytes_hex": "0dff0287d612009af979440000614400000000000000000000000000ff"
+    }
+  ],
+  "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_trip.c (mirroring status/power/context/announce/diag's own convention); this file records the field values that produced them for anyone re-deriving the vectors by hand."
+}

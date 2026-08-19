@@ -20,6 +20,8 @@ add_library(kilnlink STATIC
     src/kilnlink_status.c
     src/kilnlink_power.c
     src/kilnlink_announce.c
+    src/kilnlink_diag.c
+    src/kilnlink_trip.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -98,4 +100,22 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_uart_protocol_delegate PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_uart_protocol_delegate COMMAND test_uart_protocol_delegate)
+
+    add_executable(test_diag test/test_diag.c)
+    target_link_libraries(test_diag PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_diag PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_diag PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_diag COMMAND test_diag)
+
+    add_executable(test_trip test/test_trip.c)
+    target_link_libraries(test_trip PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_trip PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_trip PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_trip COMMAND test_trip)
 endif()

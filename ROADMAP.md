@@ -313,11 +313,19 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 - [~] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power.
       **2026-08-18**: status, firmware version, and power (`SAFETY_CMD_POWER`,
       commit `b1fdf46`) are now built and sent by `SaftyFW`'s `link_task.c`
-      and decoded by `KilnFW`'s `safety_link.c`. **Still open**: diagnostics
-      and trip-event frames have no codec or send path on either side yet —
-      not attempted this pass. Nothing here has crossed a real link (M0's
-      bench-confirmed dead link), so this closes "both sides build/send/
-      decode the frames that exist", not "verified received correctly."
+      and decoded by `KilnFW`'s `safety_link.c`. **Also 2026-08-18**: codecs
+      for `SAFETY_CMD_DIAG` (Frame B, `0x08`, 26 bytes) and
+      `SAFETY_CMD_TRIP_EVENT` (Frame D, `0x0D`, 29 bytes) landed in
+      `firmware/CommonFW` — `kilnlink_diag.{c,h}`, `kilnlink_trip.{c,h}`,
+      host-tested (9/9 CommonFW test suites pass, including the two new
+      ones). **Still open**: neither frame has a send path on `SaftyFW`
+      (guard-trip state would need to reach `link_task.c` from
+      `safety_core.c` through whatever cross-task notification already
+      exists, respecting the link-isolation direction `check_isolation.ps1`
+      enforces — not investigated this pass) or a decode/dispatch path on
+      `KilnFW`'s `safety_link.c`. The codec-only half of this closes
+      cleanly; the wiring half is a separate follow-up. Nothing here has
+      crossed a real link (M0's bench-confirmed dead link) regardless.
 - [x] Pico never blocks on the link — all five no-wait rules honoured.
       **Audited 2026-08-18, no violations found** (`firmware/SaftyFW/src/
       tasks/link_task.c`, `uart_owner.c`): (1) never ACKs/expects one —
