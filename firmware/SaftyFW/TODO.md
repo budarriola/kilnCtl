@@ -232,6 +232,15 @@ header comment, so the build is reproducible elsewhere.
       cross-core-safe (`taskENTER_CRITICAL`-guarded increment, since
       `log_task_log()` is called from any task on either core). Not yet
       folded into a wire frame's spare field — exposed but unconsumed.
+- [x] Watermark decision extracted to host-testable pure logic (2026-08-18,
+      ROADMAP.md M5) — `tx_watermark_should_drop_log(fill, reserve_fraction)`
+      in new `src/tasks/tx_watermark.{c,h}`, no pico-sdk/FreeRTOS/uart_owner
+      dependency; `log_task.c` calls it in place of the inline float compare
+      it used before. 8 new checks in
+      `test/test_tx_watermark.c` (`test/build_host_tests.ps1`,
+      367/367 host checks passing). Full `cmake --build build` (arm-none-eabi-gcc
+      14.2.1, pico-sdk 2.1.1, Ninja) still succeeds after wiring the new
+      source into `CMakeLists.txt`.
 - [ ] Runtime log-level command over the link — **not started**.
       `log_task_set_level()`/`_get_level()` exist and are used internally
       (`LOG_LEVEL_WARN` default per `docs/ARCHITECTURE.md` section 1), but

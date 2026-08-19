@@ -357,8 +357,10 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       never touching `safety_core.c` (`check_isolation.ps1` clean). Shared
       `kilnlink_announce` codec added this pass (see M2); `KilnFW`/`SaftyFW`
       still each hand-roll this frame rather than calling into it (M2 note)
-- [ ] TX ring reserves capacity for telemetry; log frames dropped above the
-      watermark and the drops counted
+- [x] TX ring reserves capacity for telemetry; log frames dropped above the
+      watermark and the drops counted (`log_task.c`'s 50% `LOG_TX_RESERVE_FRACTION`,
+      landed 2026-08-17; the pure admit/drop decision was pulled out into
+      host-testable `firmware/SaftyFW/src/tasks/tx_watermark.c` this pass)
 - [ ] Borrowed-thermocouple staleness split correctly across S11 / S13 / S6
 
 ## M6 — Throw the liveness switch

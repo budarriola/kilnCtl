@@ -68,6 +68,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/link_frame.c
     src/tasks/link_task.c
     src/tasks/log_task.c
+    src/tasks/tx_watermark.c
     src/tasks/update_task.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)

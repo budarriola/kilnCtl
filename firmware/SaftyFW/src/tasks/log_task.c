@@ -19,6 +19,7 @@
 #include "watchdog_task.h"
 
 #include "link_task.h"
+#include "tx_watermark.h"
 
 #define LOG_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
 // Bounded wait on the queue receive below, not an indefinite block: this
@@ -139,7 +140,7 @@ static void log_task_fn(void *arg)
             // sends (link_task.c's own TX loop) never consult this at all,
             // by design, so they are never the ones that get held back.
             float fill = link_task_get_tx_ring_fill_fraction();
-            if (fill >= LOG_TX_RESERVE_FRACTION) {
+            if (tx_watermark_should_drop_log(fill, LOG_TX_RESERVE_FRACTION)) {
                 log_task_count_dropped();
             } else {
                 uint8_t payload[1 + LOG_ENTRY_MSG_MAX];
