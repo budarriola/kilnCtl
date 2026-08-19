@@ -383,6 +383,13 @@ RP2040/CT hardware attached to the build machine.
 - [x] Clip detection → reported per-channel via `current_snapshot_t.clipped[n]` = "power estimate invalid", **not a trip**
 - [x] `i_conducting_a` and `conduction_fraction` reported separately (§3b), in `current_sense_power_t`
 - [x] `p_avg_w` only when `mains_voltage_v` is configured; `NAN` otherwise
+- [x] `SAFETY_CMD_POWER` (Frame E) send wired up 2026-08-18
+      (`firmware/SaftyFW/src/tasks/link_task.c`'s `link_task_send_power()`,
+      2s cadence) — `current_sense_power_t` gained `mains_voltage_v`/
+      `calibrated`/`any_clipped`/`p_total_w`/`energy_wh` so the frame can be
+      built without leaking `current_sense_cal_t` into `link_task.c`. Guards
+      S3/S4 are still NOT wired to `any_current_present` — that is correctly
+      gated on step 2 below, not done here.
 - [ ] Commissioning §5 run in full and results recorded — needs real hardware, not done
 - [ ] **§5 step 2 (one relay at a time) passed on all three channels** — gates S3/S4 — needs real hardware, not done
 - [ ] Decay verified <5 % within ~4 s — needs real hardware, not done

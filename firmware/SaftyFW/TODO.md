@@ -707,8 +707,29 @@ The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCO
 - [ ] Emit `SAFETY_CMD_TRIP_EVENT` (0x0D) **immediately on trip**, repeated a
       few times, carrying the deciding values at the moment of the trip. Half a
       second later that evidence is gone.
-- [ ] Emit `SAFETY_CMD_POWER` (0x0E): per-channel conducting amps, conduction
-      fraction, watts, plus totals and accumulated Wh.
+- [x] Emit `SAFETY_CMD_POWER` (0x0E): per-channel conducting amps, conduction
+      fraction, watts, plus totals and accumulated Wh. **2026-08-18**:
+      `link_task_send_power()`, 2s cadence (same reasoning as Frame B/DIAG
+      above -- "no guard reads any of this", kilnlink_power.h). Pulls
+      `current_task_get_power()` (mutex-guarded copy of `current_sense.c`'s
+      Phase 6 output, unchanged this pass) and calls `kilnlink_power_encode()`
+      directly -- `link_task.c` already links the full `kilnlink` static
+      library (unlike `KilnFW`'s ESP-IDF component, which hand-parses the
+      wire layout instead, see that project's `safety_apply_power()`).
+      `current_sense_power_t` gained `mains_voltage_v`/`calibrated`/
+      `any_clipped`/`p_total_w`/`energy_wh` (`current_sense.c`/`.h`) so this
+      function does not need `current_sense_cal_t` visibility across the
+      module boundary. `p_total_w` is NAN whenever any contributing channel's
+      `p_avg_w` is NAN (unset mains voltage); `energy_wh` is a rectangular
+      (not trapezoidal) accumulation of `p_total_w` over wall time since
+      `current_sense_init()`, frozen (not zeroed) on any NaN-total sample
+      pass. Host-tested (`test/test_kilnlink_power.c`: encode/decode
+      round-trip including NaN-survives-the-wire, hostile-input rejection,
+      flag-derivation) since `current_sense.c`/`link_task.c` themselves are
+      not host-testable (hardware/adc.h, FreeRTOS, uart_owner). Real
+      arm-none-eabi-gcc/pico-sdk build verified clean. **Not hardware-verified
+      end to end** -- no RP2040/CT hardware attached to any build machine, so
+      the frame has never actually carried a real ADC reading.
 
 ## Phase 8b — ESP web GUI surface (`KilnFW` work)
 

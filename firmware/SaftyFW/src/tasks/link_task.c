@@ -54,6 +54,7 @@
 #include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
 
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_version.h"
 
 // Stack bumped from a single configMINIMAL_STACK_SIZE (Phase 10, this pass):
@@ -79,6 +80,13 @@
 // the diagnostics stale on any timescale a human bench-watching them would
 // notice.
 #define LINK_DIAG_TX_PERIOD_MS     2000
+// Frame E (SAFETY_CMD_POWER) cadence: "No guard reads any of this. It exists
+// to be displayed" (kilnlink_power.h) -- same reasoning as Frame B above, a
+// GUI readout has no deadline riding on it, so this rides well below Frame
+// A's 500ms without making the wattage/energy figures stale on any
+// human-noticeable timescale. Matches Frame B's period rather than inventing
+// a third cadence.
+#define LINK_POWER_TX_PERIOD_MS    2000
 
 // Addressing (CommonFW/docs/LINK_PROTOCOL.md section 3, firmware/KilnFW/App/
 // drivers/espInterfaces/uart_protocol.h and uart_task_ids.h). Mirrored here
@@ -357,6 +365,61 @@ static void link_task_send_diag(void)
     link_task_send_broadcast(payload, LINK_FRAME_DIAG_LEN);
 }
 
+// Frame E (SAFETY_CMD_POWER, 0x0E) -- docs/CURRENT_SENSE.md section 3b /
+// CommonFW/docs/LINK_PROTOCOL.md section 6. current_task_get_power() is the
+// same mutex/critical-section-guarded pull current_task.c already documents
+// for current_task_get_snapshot() (used above by link_task_send_status());
+// this is the second, independent consumer of that publish, exactly the
+// split current_sense.h's header comment describes (unfiltered snapshot for
+// a future guard, filtered power_t for reporting only -- this function only
+// ever touches the latter). Nothing here reaches into current_sense_cal_t
+// directly -- current_sense_power_t (current_sense.c, this pass) now carries
+// mains_voltage_v/calibrated/any_clipped/p_total_w/energy_wh precisely so
+// this file does not need calibration-struct visibility to build the frame.
+static void link_task_send_power(void)
+{
+    current_sense_power_t pw;
+    current_task_get_power(&pw);
+
+    kilnlink_power_t frame = {
+        .power_window_s = 120u, // docs/CURRENT_SENSE.md section 3b default; current_sense.c's
+                                 // CS_POWER_WINDOW_S is not exposed across the module boundary,
+                                 // so this mirrors the compiled-in constant rather than reading it
+        .mains_voltage_v = pw.mains_voltage_v,
+        .p_total_w = pw.p_total_w,
+        .energy_wh = pw.energy_wh,
+    };
+    for (unsigned ch = 0; ch < KILNLINK_POWER_CHANNELS && ch < 3u; ch++) {
+        frame.i_conducting_a[ch] = pw.i_conducting_a[ch];
+        frame.conduction_fraction[ch] = pw.conduction_fraction[ch];
+        frame.p_avg_w[ch] = pw.p_avg_w[ch];
+    }
+
+    uint8_t flags = 0;
+    if (!isnan(pw.mains_voltage_v)) {
+        flags |= KILNLINK_POWER_FLAG_MAINS_VOLTAGE_CONFIGURED;
+    }
+    if (pw.any_clipped) {
+        flags |= KILNLINK_POWER_FLAG_ANY_CHANNEL_CLIPPED;
+    }
+    if (pw.calibrated) {
+        flags |= KILNLINK_POWER_FLAG_CALIBRATED;
+    }
+    frame.flags = flags;
+
+    uint8_t payload[KILNLINK_POWER_LEN];
+    kilnlink_power_status_t status;
+    size_t len = kilnlink_power_encode(&frame, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // KILNLINK_POWER_ERR_BUFFER_TOO_SMALL -- can't happen for a
+                 // fixed sizeof(payload) == KILNLINK_POWER_LEN buffer, but
+                 // guarded rather than assumed, same discipline as every
+                 // other encode call site in this file.
+    }
+
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
 // --- RX ------------------------------------------------------------------
 
 // Mirrors thermo_task_publish()'s short-bounded-wait discipline exactly
@@ -562,6 +625,7 @@ static void link_task_fn(void *arg)
 
     TickType_t last_status_tx = xTaskGetTickCount();
     TickType_t last_diag_tx = xTaskGetTickCount();
+    TickType_t last_power_tx = xTaskGetTickCount();
 
     for (;;) {
         uint8_t rx_buf[LINK_RX_POLL_BUF];
@@ -578,6 +642,10 @@ static void link_task_fn(void *arg)
         if ((now - last_diag_tx) >= pdMS_TO_TICKS(LINK_DIAG_TX_PERIOD_MS)) {
             link_task_send_diag();
             last_diag_tx = now;
+        }
+        if ((now - last_power_tx) >= pdMS_TO_TICKS(LINK_POWER_TX_PERIOD_MS)) {
+            link_task_send_power();
+            last_power_tx = now;
         }
 
         vTaskDelay(pdMS_TO_TICKS(LINK_TASK_POLL_MS));

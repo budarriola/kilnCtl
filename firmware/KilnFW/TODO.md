@@ -4693,12 +4693,22 @@ existing `GET /api/status` endpoint and the existing LCD home page
       `power_channel_w[3]`, `power_mains_voltage_v`, etc. — extended, not a
       parallel struct). `dashboard_get_status()` now populates
       `power_valid`/`power_w` from that cache instead of hard-coding
-      `false`/`NaN`. **Still reads `null`/"---" on any board without a Pico
-      actually sending Frame E** — including this environment, since no
-      hardware is attached and SaftyFW doesn't build/send Frame E yet — but
-      the gap is now "no peer has sent one," the same honest-null state
-      Frame A has always been in, not "this firmware cannot even parse the
-      wire's answer."
+      `false`/`NaN`. **2026-08-18 update: SaftyFW now sends Frame E too.**
+      `link_task.c` gained `link_task_send_power()` (2 s cadence, same
+      pattern as Frame B/DIAG), pulling `current_task_get_power()` and
+      calling `kilnlink_power_encode()` from CommonFW directly (SaftyFW,
+      unlike this ESP-IDF component, already links the full `kilnlink`
+      static library). `current_sense.c`/`.h` gained `mains_voltage_v`,
+      `calibrated`, `any_clipped`, `p_total_w` and `energy_wh` fields on
+      `current_sense_power_t` so `link_task.c` does not need calibration-
+      struct visibility to build the frame. Guards S3/S4 remain
+      deliberately NOT wired to the current-sense output — SaftyFW's own
+      `docs/CURRENT_SENSE.md` section 5 requires the per-channel CT-mapping
+      commissioning check to pass on real hardware first, and no RP2040/CT
+      hardware is attached to either build machine. So: **this still reads
+      `null`/"---" here**, but the reason has changed again — it is now
+      "no hardware attached to receive/verify a real Frame E against,"
+      not "the sender doesn't exist."
 - [x] `GET /api/status` gained `safety_temp_c`/`enclosure_temp_c`/`power_w`,
       each JSON `null` (not `0`) when its `_valid` flag is false — same
       null-tolerant convention `GET /api/board_temps` (10.7) established,

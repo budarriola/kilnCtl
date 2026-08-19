@@ -268,8 +268,26 @@ physically stop a kiln, and the first that can nuisance-trip one.
 Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, contract in
 [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md).
 
-- [ ] Current sensing: load-active detection and a power estimate — **not** an
-      over/under-current trip
+- [~] Current sensing: load-active detection and a power estimate — **not** an
+      over/under-current trip. **2026-08-18**: the sampling/conversion driver
+      (`current_sense.c`/`.h`, `current_task.c`/`.h`) was already built and
+      build-verified in an earlier pass. This pass wired its output onto the
+      wire: `link_task.c` gained `link_task_send_power()`, sending a real
+      `SAFETY_CMD_POWER` (Frame E) every 2 s via `kilnlink_power_encode()`,
+      and `current_sense_power_t` gained `mains_voltage_v`/`calibrated`/
+      `any_clipped`/`p_total_w`/`energy_wh` so the frame can be built without
+      the module leaking calibration-struct visibility across the file
+      boundary. `KilnFW` already decodes Frame E (`firmware/KilnFW/TODO.md`
+      10.10/10.11), so the GUI power readout is now fed end to end in
+      firmware. **Still open, and gating this from becoming `[x]`:** guards
+      S3/S4 are deliberately NOT wired to `any_current_present` yet — SaftyFW's
+      `docs/CURRENT_SENSE.md` section 5 requires the per-channel CT-to-jack
+      commissioning check ("command one relay, confirm exactly one channel
+      responds") to pass on real hardware first, and no RP2040/CT hardware is
+      attached to any build machine in this environment. Host tests
+      (`test/test_kilnlink_power.c`) and a real arm-none-eabi-gcc/pico-sdk
+      build both pass; nothing here has run against actual current-sense
+      hardware.
 - [x] ESP → Pico context frames, including `relay_recent_mask`. **2026-08-18**:
       `KilnFW`'s `safety_link.c` now builds a real `SAFETY_CMD_PUSH_CONTEXT`
       (0x07) from live board state -- `kiln_io_get_relay_shadow()` for

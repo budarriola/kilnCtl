@@ -89,6 +89,24 @@ typedef struct {
     float    i_conducting_a[3];       // peak-hold amps while conducting
     float    conduction_fraction[3];  // 0..1 over the last power_window_s
     float    p_avg_w[3];              // NAN when mains_voltage_v is unconfigured
+    // Added for SAFETY_CMD_POWER (Frame E, kilnlink_power.h) -- link_task.c's
+    // send path needs these alongside the per-channel arrays above rather
+    // than re-deriving them from current_sense_cal_t (which it has no getter
+    // for, deliberately -- see current_sense_set_cal()'s doc comment: only
+    // config_store, Phase 9, is meant to hold calibration).
+    float    mains_voltage_v; // NAN if unconfigured (cal.mains_voltage_v <= 0)
+    bool     calibrated;      // mirrors current_snapshot_t.calibrated (cal.calibrated)
+    bool     any_clipped;     // OR of current_snapshot_t.clipped[0..2] from the same sample pass
+    // p_total_w: sum of the three p_avg_w[], NAN if ANY contributing channel
+    // is NAN (unconfigured mains or -- not modeled yet -- a clipped channel;
+    // see current_sense.c). energy_wh: trapezoidal-ish accumulation of
+    // p_total_w over time since current_sense_init(), i.e. since last boot
+    // (kilnlink_power.h's documented "resets on reboot" contract). Frozen
+    // (does not advance) on any sample pass where p_total_w is NAN, so a
+    // temporarily-unconfigured mains voltage never silently loses energy
+    // rather than merely pausing accounting for it.
+    float    p_total_w;
+    double   energy_wh;
 } current_sense_power_t;
 
 // Sets calibration state. Not called by anything yet (Phase 9's

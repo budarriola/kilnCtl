@@ -124,6 +124,9 @@ void current_sense_init(void)
     for (int n = 0; n < 3; n++) {
         s_power.p_avg_w[n] = NAN; // mains_voltage_v starts unconfigured
     }
+    s_power.mains_voltage_v = NAN;
+    s_power.p_total_w = NAN;
+    s_power.energy_wh = 0.0;
 
     for (int n = 0; n < 3; n++) {
         s_window[n].head = 0;
@@ -258,6 +261,35 @@ void current_sense_sample(void)
         } else {
             s_power.p_avg_w[n] = NAN; // "otherwise absent" (section 3b)
         }
+    }
+
+    s_power.mains_voltage_v = (s_cal.mains_voltage_v > 0.0f) ? s_cal.mains_voltage_v : NAN;
+    s_power.calibrated = s_cal.calibrated;
+    s_power.any_clipped = snap.clipped[0] || snap.clipped[1] || snap.clipped[2];
+
+    // p_total_w: NAN if any contributing channel's p_avg_w is NAN (unset
+    // mains voltage propagates the same way p_avg_w[n] already does per
+    // channel -- see current_sense.h's KILNLINK_POWER wire contract comment).
+    float total = 0.0f;
+    bool total_valid = true;
+    for (int n = 0; n < 3; n++) {
+        if (isnan(s_power.p_avg_w[n])) {
+            total_valid = false;
+            break;
+        }
+        total += s_power.p_avg_w[n];
+    }
+    s_power.p_total_w = total_valid ? total : NAN;
+
+    // Energy accumulation: trapezoidal-ish (here: rectangular, since
+    // CS_SAMPLE_PERIOD_S is short relative to any load change worth
+    // resolving) integration of p_total_w over wall time, in watt-hours,
+    // since current_sense_init() -- i.e. since last boot, matching
+    // kilnlink_power.h's documented energy_wh contract. Frozen (does not
+    // advance) whenever p_total_w is NAN this pass, per current_sense.h's
+    // doc comment on this field -- never silently treated as a 0 W interval.
+    if (total_valid) {
+        s_power.energy_wh += (double)total * (double)CS_SAMPLE_PERIOD_S / 3600.0;
     }
 
     s_snapshot = snap;
