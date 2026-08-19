@@ -92,15 +92,17 @@ typedef struct {
      * *_valid is exactly !isnan(), computed once here so callers never have
      * to isnan() themselves.
      *
-     * power_w has NO real source yet: LINK_PROTOCOL.md sec 6 Frame E
-     * (SAFETY_CMD_POWER, 0x0E) is the wire's power estimate, but neither
-     * kilnlink_status.c nor safety_link.c parses it today (safety_link.c's
-     * safety_drain_inbox() switch only handles GET_STATUS/FW_VERSION/
-     * UPDATE_STATUS) -- see LINK_PROTOCOL.md sec 6/M5's still-open "Pico ->
-     * ESP telemetry: ... power" bullet. power_valid is therefore always
-     * false today; the field exists so the JSON/LCD shapes are already
-     * correct the day Frame E gets wired up, rather than needing a second
-     * pass through this struct, the HTTP handler, and the LCD page. */
+     * power_w comes from LINK_PROTOCOL.md sec 6 Frame E (SAFETY_CMD_POWER,
+     * 0x0E, p_total_w) via safety_link.c's safety_apply_power() /
+     * safety_drain_inbox() dispatch and firmware/CommonFW's kilnlink_power.h
+     * codec (mirrored by hand in safety_link.c -- see uart_task_ids.h's
+     * SAFETY_CMD_POWER comment for why). power_valid is true once a Pico
+     * that implements Frame E has pushed at least one POWER frame and its
+     * p_total_w is a real number (not NaN, e.g. because mains_voltage_v
+     * isn't configured or a channel clipped); it stays false -- power_w
+     * stays NaN -- for the entire time no such Pico exists, which is the
+     * expected state in this environment (ROADMAP.md M0/M5/M6, TODO.md
+     * 10.10). */
     bool     safety_temp_valid;
     float    safety_temp_c;
     bool     enclosure_temp_valid;

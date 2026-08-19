@@ -4645,14 +4645,28 @@ existing `GET /api/status` endpoint and the existing LCD home page
       never 0, when `TEMP_VALID` is clear or nothing has arrived — `_valid`
       is computed here as `!isnan()`, not re-derived from the flag byte a
       second time.
-      **Power has no real source**: `SAFETY_CMD_POWER` (Frame E, `0x0E`,
-      `LINK_PROTOCOL.md` sec 6) is not parsed anywhere in this firmware —
-      `safety_link.c`'s `safety_drain_inbox()` switch only recognizes
-      `GET_STATUS`/`FW_VERSION`/`UPDATE_STATUS`. Building a Frame E codec
-      was out of scope for this pass (M5's own checklist still lists
-      "Pico → ESP telemetry: ... power" as open); `power_valid` is
-      unconditionally `false` today so the JSON/LCD shapes are already
-      correct once that lands, without a second pass through this struct.
+      **2026-08-18 update: power now has a real codec and dispatch path.**
+      `firmware/CommonFW` gained `kilnlink_power.{c,h}` (Frame E's 55-byte
+      layout, host-tested — `test/test_power.c` + `test/vectors/
+      power_vectors.json`, mirroring `kilnlink_status.c`'s round-trip/
+      byte-exact-vector/hostile-input structure). `safety_link.c` hand-parses
+      the same layout in a new `safety_apply_power()` (mirroring the
+      `kilnlink_power_decode()` byte offsets — this component's ESP-IDF
+      wrapper still compiles only `kilnlink_crc.c`/`kilnlink_frame.c`, same
+      as Frame A, so `safety_link.c` continues the existing
+      hand-rolled-parser convention rather than linking the codec directly)
+      and `safety_drain_inbox()` now dispatches `SAFETY_CMD_POWER` (`0x0E`,
+      newly defined in `uart_task_ids.h`) to it, caching the result in
+      `safety_link_status_t` (`power_ever_received`, `power_total_w`,
+      `power_channel_w[3]`, `power_mains_voltage_v`, etc. — extended, not a
+      parallel struct). `dashboard_get_status()` now populates
+      `power_valid`/`power_w` from that cache instead of hard-coding
+      `false`/`NaN`. **Still reads `null`/"---" on any board without a Pico
+      actually sending Frame E** — including this environment, since no
+      hardware is attached and SaftyFW doesn't build/send Frame E yet — but
+      the gap is now "no peer has sent one," the same honest-null state
+      Frame A has always been in, not "this firmware cannot even parse the
+      wire's answer."
 - [x] `GET /api/status` gained `safety_temp_c`/`enclosure_temp_c`/`power_w`,
       each JSON `null` (not `0`) when its `_valid` flag is false — same
       null-tolerant convention `GET /api/board_temps` (10.7) established,
@@ -4670,12 +4684,18 @@ existing `GET /api/status` endpoint and the existing LCD home page
       0x154190 bytes, 9% of the `factory` partition free (was already at 9%
       free after 10.9; this pass's three extra floats/bools and one LCD
       card did not measurably move it).
+- [x] `idf.py -C firmware/KilnFW build` re-run after the Frame E wiring
+      above: clean, no new warnings. `ctest` in `firmware/CommonFW/build`
+      (Ninja/MSVC, via `vcvars64.bat`): 7/7 host suites pass, including the
+      new `test_power`.
 - [ ] **Not hardware-verified, and cannot be this session.** No ESP32-S3/
       Pico is attached in this environment, and ROADMAP.md M0 already
       established the isolated link doesn't pass a byte end-to-end on the
       real board — so on real hardware today every one of these three
-      fields reads `null`/"---", by design, not by bug. Real verification
-      needs both M0 (link fixed) and a Pico actually emitting Frame A, and
-      Frame E for power specifically needs a new codec that doesn't exist
-      yet (see above). Nothing here can be exercised against live safety
-      telemetry until then.
+      fields still reads `null`/"---", by design, not by bug. Real
+      verification needs both M0 (link fixed) and a Pico actually emitting
+      Frame A/Frame E; SaftyFW does not build or send Frame E yet, so the
+      new `safety_apply_power()` path has never been exercised against a
+      live peer, only against the host codec's own round-trip/vector tests.
+      Nothing here can be exercised against live safety telemetry until
+      then.

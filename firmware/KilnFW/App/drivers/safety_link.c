@@ -464,6 +464,63 @@ static bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_
     return true;
 }
 
+/* Accepts one SAFETY_CMD_POWER (Frame E) frame from the Pico and replaces the
+ * cached power reading with it. Same discard-rather-than-partially-apply
+ * contract as safety_apply_status(): "no guard reads any of this. It exists
+ * to be displayed" (LINK_PROTOCOL.md sec 6), so a malformed frame is simply
+ * dropped -- nothing downstream needs it to fail safe. Byte layout (55
+ * bytes total):
+ *   byte0        cmd (0x0E)
+ *   byte1        power_window_s
+ *   byte2        flags: bit0 mains_voltage_configured, bit1 any_channel_clipped, bit2 calibrated
+ *   bytes3..6    mains_voltage_v, f32 LE (NaN if not configured)
+ *   bytes7..30   3 x (i_conducting_a f32 LE, conduction_fraction f32 LE), 8 bytes each
+ *   bytes31..42  3 x p_avg_w, f32 LE
+ *   bytes43..46  p_total_w, f32 LE
+ *   bytes47..54  energy_wh, f64 LE (accumulated since Pico boot -- not cached
+ *                here; nothing in this build displays it yet)
+ * Mirrors kilnlink_power_decode() in firmware/CommonFW/src/kilnlink_power.c
+ * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_POWER comment for why this
+ * driver hand-parses rather than linking that codec. */
+static bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
+{
+    if (msg->length != SAFETY_LINK_POWER_FRAME_LEN || msg->payload[0] != SAFETY_CMD_POWER) {
+        if (safety_lock(link)) {
+            link->stats.frame_errors++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "unexpected POWER frame from dev%u/task%u: subcmd 0x%02X, %u bytes",
+                 msg->device, msg->task_id, msg->payload[0], msg->length);
+        return false;
+    }
+
+    const uint8_t *p = msg->payload;
+    if (!safety_lock(link)) {
+        return false;
+    }
+    link->cached.power_window_s = p[1];
+    uint8_t flags = p[2];
+    link->cached.power_mains_voltage_configured =
+        (flags & SAFETY_LINK_POWER_FLAG_MAINS_VOLTAGE_CONFIGURED) != 0u;
+    link->cached.power_any_channel_clipped = (flags & SAFETY_LINK_POWER_FLAG_ANY_CHANNEL_CLIPPED) != 0u;
+    link->cached.power_calibrated = (flags & SAFETY_LINK_POWER_FLAG_CALIBRATED) != 0u;
+    link->cached.power_mains_voltage_v = safety_read_f32_le(&p[3]);
+    for (unsigned ch = 0; ch < SAFETY_LINK_POWER_CHANNELS; ch++) {
+        size_t base = 7u + (size_t)ch * 8u;
+        link->cached.power_channel_i_conducting_a[ch] = safety_read_f32_le(&p[base]);
+        link->cached.power_channel_conduction_fraction[ch] = safety_read_f32_le(&p[base + 4u]);
+    }
+    for (unsigned ch = 0; ch < SAFETY_LINK_POWER_CHANNELS; ch++) {
+        link->cached.power_channel_w[ch] = safety_read_f32_le(&p[31u + (size_t)ch * 4u]);
+    }
+    link->cached.power_total_w = safety_read_f32_le(&p[43]);
+    /* bytes47..54 (energy_wh) intentionally not cached -- nothing in this
+     * build's dashboard/LCD reads it yet; add a field here when it does. */
+    link->cached.power_ever_received = true;
+    safety_unlock(link);
+    return true;
+}
+
 /* Drains the inbox for up to wait_ms, applying every status frame found.
  * Returns true if at least one was applied. Waiting on the *first* message
  * only -- once something has arrived the rest of the queue is taken without
@@ -502,6 +559,9 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
                 break;
             case SAFETY_CMD_UPDATE_STATUS:
                 safety_apply_update_status(link, &msg);
+                break;
+            case SAFETY_CMD_POWER:
+                safety_apply_power(link, &msg);
                 break;
             default:
                 break;
@@ -734,6 +794,15 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
     link->cached.current_a[0] = NAN;
     link->cached.current_a[1] = NAN;
     link->cached.current_a[2] = NAN;
+    /* SAFETY_CMD_POWER (Frame E) -- same "NaN, not 0, until a real reading
+     * arrives" reasoning as the temperatures above. */
+    link->cached.power_total_w = NAN;
+    link->cached.power_mains_voltage_v = NAN;
+    for (unsigned ch = 0; ch < SAFETY_LINK_POWER_CHANNELS; ch++) {
+        link->cached.power_channel_w[ch] = NAN;
+        link->cached.power_channel_i_conducting_a[ch] = NAN;
+        link->cached.power_channel_conduction_fraction[ch] = NAN;
+    }
 
     /* Declared up here, not at first use: every failure below lands on the
      * shared cleanup labels, which report it. */

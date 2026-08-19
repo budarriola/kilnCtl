@@ -271,7 +271,15 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 - [ ] Current sensing: load-active detection and a power estimate — **not** an
       over/under-current trip
 - [ ] ESP → Pico context frames, including `relay_recent_mask`
-- [ ] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power
+- [ ] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power.
+      **2026-08-18**: the ESP-side half of power telemetry is done —
+      `firmware/CommonFW/src/kilnlink_power.c` (Frame E's 55-byte codec,
+      host-tested) plus `KilnFW/App/drivers/safety_link.c`'s
+      `safety_apply_power()` dispatch and cache. Still open because `SaftyFW`
+      does not build or send `SAFETY_CMD_POWER` yet — no live current-sensing/
+      power-estimate producer exists on the Pico side (see the "Current
+      sensing" bullet above, also still open), so this frame has never
+      crossed a real link. See `KilnFW/TODO.md` 10.10.
 - [ ] Pico never blocks on the link — all five no-wait rules honoured
 - [x] Mutual version handshake: `ANNOUNCE_VERSION` both ways, `min_compatible`
       checked in both directions, compatibility floor reserved at ids `0x00`–`0x0F`.
@@ -304,16 +312,24 @@ because it changes what a bare main board will do.
       parse. The LCD home page (`ui_page_home.c`) shows the same three
       fields in a new "Safety Processor" card, via the same
       `dashboard_get_status()` call the page already makes (TODO.md 10.1a).
-      **Power has no real source yet**: `SAFETY_CMD_POWER` (Frame E, 0x0E)
-      is not parsed by `safety_link.c` or `kilnlink_status.c` today, so
-      `power_w` is always `null` — this is `dashboard_get_status()`
-      reporting the field honestly, not a bug; wiring Frame E is separate,
-      still-open M5 work. See `KilnFW/TODO.md` 10.10 for detail. Build
-      clean (`idf.py -C firmware/KilnFW build`, `KilnCtrl.bin` 9% free).
-      **Not hardware-verified**: no Pico is attached in this environment and
-      the link itself is bench-confirmed dead (M0), so every field reads
-      "---"/null on a real board today — that is the designed-for state
-      until M0/M5 land, not a defect in this pass.
+      **2026-08-18 update: power now has a real codec and dispatch path**,
+      closing the gap this item originally called out. `SAFETY_CMD_POWER`
+      (Frame E, 0x0E) is decoded by a new `kilnlink_power.{c,h}` in
+      `firmware/CommonFW` (host-tested, mirrors `kilnlink_status.c`'s
+      conventions) and hand-parsed the same way in `safety_link.c`'s new
+      `safety_apply_power()`, dispatched from `safety_drain_inbox()` and
+      cached in `safety_link_status_t`. `dashboard_get_status()` now reads
+      `power_w`/`power_valid` from that cache instead of hard-coding
+      `null`/`NaN`. Build clean (`idf.py -C firmware/KilnFW build`); host
+      `ctest` in `firmware/CommonFW/build` 7/7 green, including the new
+      `test_power`. See `KilnFW/TODO.md` 10.10 for detail.
+      **Still not hardware-verified, and still reads `null`/"---" on any
+      real board today**: no Pico is attached in this environment, the link
+      itself is bench-confirmed dead (M0), and `SaftyFW` does not build or
+      send Frame E yet (M5's "Pico → ESP telemetry ... power" bullet, still
+      open on the Pico side) — so `power_ever_received` never goes true
+      outside the host tests. That is the designed-for state until M0/M5
+      land on the Pico side too, not a defect in this pass.
 
 ## M7 — Repo reorganisation · *done 2026-08-16, three items open*
 

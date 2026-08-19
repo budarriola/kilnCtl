@@ -502,6 +502,17 @@
 #define SAFETY_CMD_FW_VERSION      0x0Bu
 #define SAFETY_CMD_ANNOUNCE_VERSION 0x0Fu
 
+/* Pico -> ESP telemetry, Frame E (CommonFW/docs/LINK_PROTOCOL.md sec 6):
+ * "No guard reads any of this. It exists to be displayed." Pushed
+ * unsolicited by the Pico; this build never requests it. 55-byte fixed
+ * payload -- see safety_link.c's safety_apply_power() for the field-by-field
+ * layout and firmware/CommonFW/include/kilnlink/kilnlink_power.h for the
+ * byte-exact codec this is mirrored from (kilnlink_power.c is not compiled
+ * into this component today -- see this file's kilnlink component
+ * CMakeLists.txt comment -- so this driver hand-parses it the same way it
+ * already hand-parses GET_STATUS, rather than depending on that codec). */
+#define SAFETY_CMD_POWER 0x0Eu
+
 /* Phase 10 (SaftyFW) / TODO.md 9.5's Pico firmware-update relay
  * (CommonFW/docs/UPDATE_PROTOCOL.md section 4). Ids are byte-for-byte
  * SaftyFW's own src/tasks/link_frame.h LINK_FRAME_UPDATE_*_CMD values --

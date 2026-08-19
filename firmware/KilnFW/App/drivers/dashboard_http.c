@@ -113,6 +113,18 @@ void dashboard_get_status(dashboard_status_t *out)
             out->safety_temp_valid = !isnan(sl.tc_temp_c);
             out->enclosure_temp_c = sl.cj_temp_c;
             out->enclosure_temp_valid = !isnan(sl.cj_temp_c);
+
+            /* ROADMAP.md M5/M6, TODO.md 10.10: SAFETY_CMD_POWER (Frame E) now
+             * has a real decode path in safety_link.c's safety_apply_power().
+             * power_ever_received is false, and power_total_w stays NaN, until
+             * a Pico that implements Frame E actually sends one -- same "no
+             * hardware yet, honestly null" state as before, just a real path
+             * instead of a permanent stub (see this file's history / TODO.md
+             * 10.10 for the prior state). */
+            if (sl.power_ever_received) {
+                out->power_w = sl.power_total_w;
+                out->power_valid = !isnan(sl.power_total_w);
+            }
         }
     }
     if (!out->safety_temp_valid) {
@@ -121,13 +133,9 @@ void dashboard_get_status(dashboard_status_t *out)
     if (!out->enclosure_temp_valid) {
         out->enclosure_temp_c = NAN;
     }
-    /* power_w: no SAFETY_CMD_POWER (Frame E) parser exists yet anywhere in
-     * this firmware -- see dashboard_http.h's comment. Always reported
-     * invalid/NaN rather than inventing a number from current_a[] (that
-     * would need mains_voltage_v and a conduction-fraction the wire frame
-     * carries and this build has never decoded). */
-    out->power_valid = false;
-    out->power_w = NAN;
+    if (!out->power_valid) {
+        out->power_w = NAN;
+    }
 
     /* TODO.md 8.2 "Tie it to the guards, not only the UI": surface the same
      * flag profile_executor.c/autotune_engine.c now refuse on, so the

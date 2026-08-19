@@ -18,6 +18,7 @@ add_library(kilnlink STATIC
     src/kilnlink_frame.c
     src/kilnlink_context.c
     src/kilnlink_status.c
+    src/kilnlink_power.c
     src/kilnlink_announce.c
 )
 target_include_directories(kilnlink PUBLIC include)
@@ -70,6 +71,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_status PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_status COMMAND test_status)
+
+    add_executable(test_power test/test_power.c)
+    target_link_libraries(test_power PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_power PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_power PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_power COMMAND test_power)
 
     add_executable(test_announce test/test_announce.c)
     target_link_libraries(test_announce PRIVATE kilnlink)

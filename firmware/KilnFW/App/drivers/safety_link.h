@@ -130,6 +130,21 @@ extern "C" {
 /* Length of the Pico's status frame (see the contract above). */
 #define SAFETY_LINK_STATUS_FRAME_LEN 23u
 
+/* Length of the Pico's power frame (SAFETY_CMD_POWER / Frame E,
+ * CommonFW/docs/LINK_PROTOCOL.md sec 6), byte-for-byte
+ * KILNLINK_POWER_LEN from kilnlink_power.h. Pushed unsolicited, "no guard
+ * reads any of this. It exists to be displayed." -- see
+ * safety_apply_power() in safety_link.c for the field layout. */
+#define SAFETY_LINK_POWER_FRAME_LEN 55u
+#define SAFETY_LINK_POWER_CHANNELS 3u
+
+/* Power frame flags byte (offset 2), kilnlink_power.h's
+ * kilnlink_power_flag_t mirrored here for the same reason SAFETY_CMD_POWER
+ * is hand-parsed rather than calling that codec (see uart_task_ids.h). */
+#define SAFETY_LINK_POWER_FLAG_MAINS_VOLTAGE_CONFIGURED 0x01u
+#define SAFETY_LINK_POWER_FLAG_ANY_CHANNEL_CLIPPED       0x02u
+#define SAFETY_LINK_POWER_FLAG_CALIBRATED                0x04u
+
 /* Length of the PC-facing GET_STATUS payload -- the frame above plus the
  * ESP-measured age -- as specified in uart_task_ids.h. */
 #define SAFETY_LINK_STATUS_PAYLOAD_LEN 25u
@@ -255,6 +270,24 @@ typedef struct {
     uint8_t  tc_fault;       /* THERMO_FAULT_* bits from the safety MAX31856 */
     float    current_a[3];   /* current sense 1..3, amps */
     bool     fault_asserted; /* what this firmware is driving on GPIO6 */
+
+    /* SAFETY_CMD_POWER (Frame E) telemetry -- ROADMAP.md M5/M6, TODO.md
+     * 10.10. NaN/false fields below mean "never received" or "not a valid
+     * reading", same convention as tc_temp_c/cj_temp_c above; a board with
+     * no Pico firmware (or a Pico build that has not yet implemented Frame
+     * E) leaves this permanently at its NaN-initialized state, which is
+     * correct, not a bug -- see safety_link_start()'s init and
+     * dashboard_http.c's dashboard_get_status(). */
+    bool     power_ever_received;             /* at least one POWER frame has arrived */
+    float    power_total_w;                   /* p_total_w; NaN if any contributing channel invalid */
+    float    power_channel_w[SAFETY_LINK_POWER_CHANNELS]; /* p_avg_w per channel */
+    float    power_channel_i_conducting_a[SAFETY_LINK_POWER_CHANNELS];
+    float    power_channel_conduction_fraction[SAFETY_LINK_POWER_CHANNELS];
+    float    power_mains_voltage_v;            /* NaN if not configured */
+    uint8_t  power_window_s;                   /* window the conduction fractions cover */
+    bool     power_mains_voltage_configured;
+    bool     power_any_channel_clipped;
+    bool     power_calibrated;
 } safety_link_status_t;
 
 /* Counters for the PC's GET_LINK_STATS. All monotonic since start. */
