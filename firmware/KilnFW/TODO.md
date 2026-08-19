@@ -5218,3 +5218,78 @@ premature abstraction" convention).
       `ui_page_network.c`'s three job structs from this pass are candidates
       to migrate onto it rather than staying page-local one-offs — flagged
       here so they aren't mistaken for "already fully solved, don't revisit."
+
+**2026-08-19, long-term plan approved (user: "ignoring the size of the
+change what would be best" → "lets plan to do it then as a long term fix").**
+Three parallel research passes (`wifi_prov.c`'s ownership, the HTTP handler
+layer, `uart_bridge.c` + `relay_owner.c`'s existing queue pattern) fed a full
+plan, approved by the user; full text kept at
+`C:\Users\budar\.claude\plans\moonlit-wishing-brook.md` for this machine.
+Summary here so the plan survives independent of that local file:
+
+**The pattern**, copied from `firmware/SaftyFW/src/tasks/relay_owner.c:47-211`
+(already proven on the RP2040 side): per state-owning domain, a
+`<owner>_cmd_type_t` enum + tagged `<owner>_cmd_t` struct, a small
+`xQueueCreate`d queue, one `<owner>_command_<verb>()` producer function per
+command (`xQueueSend(queue, &cmd, 0)`, 0 ticks — never blocks the caller,
+drops and reports on a full queue), and an owner task that drains with a
+**bounded** `xQueueReceive` timeout (not `portMAX_DELAY`) so its own
+periodic/housekeeping duties aren't starved. Two producer shapes: fire-and-
+forget (`bool` return, relay_owner.c's exact shape) where the caller doesn't
+need data back, and request/response (command carries a pointer to a
+caller-owned result struct + a `SemaphoreHandle_t` the caller creates,
+posts, and waits on with a bounded timeout) where it does.
+
+**Ownership map:**
+
+| Owner | Owns | Replaces direct calls from |
+|---|---|---|
+| `kiln_io_owner` (new file) | relay + `SX1509` I/O-expander writes/reads (**not** `kiln_io_lcd_dc()`/`kiln_io_lcd_reset()` — those stay direct from `ILI9488.c`'s hot path, called once per display command from `lvgl_port_task`; queuing them would add latency to every draw for no correctness benefit, and `SX1509.c`'s own internal I2C-bus mutex already makes them safe to interleave with) | `uart_bridge.c`'s `io_bridge_task` `IO_CMD_*`/`SX_*` handlers, `dashboard_http.c`'s `dashboard_set_relay()` (itself called from both `relay_post_handler` and `ui_page_temperature.c`'s LCD button) |
+| `thermo_owner` (new file) | `MAX31856_*` SPI access | `uart_bridge.c`'s `thermo_bridge_task` `THERMO_CMD_*` handlers |
+| `wifi_prov` (add a task inside `wifi_prov.c`) | `s_wifi`, all `esp_wifi_*`/NVS calls, **including the driver's own `on_wifi_event`/`on_ip_event`** — the only way to get a genuine single writer | `ui_page_network.c`'s three job structs (this session's stopgap), `wifi_provision_http.c` |
+| `profile_executor` (extend its two existing tasks) | fire-profile run/pause/halt/resume | `dashboard_http.c`'s `profile_exec_*_post_handler`s (direct calls today, no queue despite the tasks already existing) |
+
+Explicitly out of scope: **DISPLAY** (`uart_bridge.c`'s `display_bridge_task`
+is dead code — confirmed this pass, `main.c:771-773`'s own comment says LVGL
+replaced it and it's never started; delete rather than migrate, separately).
+**OTA** (`ota_http.c`'s transfer handlers legitimately need to hold a
+streaming HTTP body open across the whole transfer — staying on the HTTP
+worker is correct, not a gap). **SAFETY/SYSTEM** UART bridge tasks (lower
+risk — cache reads, fire-and-forget to the isolated link, or a
+`FACTORY_RESET` that reboots immediately after).
+
+**Build order**, each phase independently shippable/buildable:
+1. `kiln_io_owner` (highest safety-relevant value — relay writes race across
+   three callers today with zero coordination, and two independent copies of
+   the ownership/safety-fault check exist and can drift)
+2. `thermo_owner`
+3. `profile_executor` queue (retrofit onto tasks that already exist)
+4. `wifi_prov` owning task, done *last* and separately — the only phase
+   requiring the Wi-Fi driver's own event handlers to be rerouted too, a
+   materially riskier change than "add a queue in front of an existing
+   task," not to be attempted without real hardware to test a Wi-Fi-stack
+   change against. `ui_page_network.c`'s three job structs migrate onto it
+   once it lands.
+5. HTTP handlers move in lockstep with whichever owner (1-4) they call into,
+   not as a separate final phase.
+
+**Design correction found while starting Phase 1, worth recording so it
+isn't relitigated**: `io_bridge_task` is already a dedicated task draining a
+queue set (UART inbox + expander IRQ semaphore, `xQueueSelectFromSet`) — it
+is not a naive "call blocks its own task" handler the way the `wifi_prov`
+call sites were. The actual race Phase 1 closes is that `io_bridge_task`
+(UART), `dashboard_set_relay()` (HTTP +, via `ui_page_temperature.c`, LCD)
+all write relay state today with **no coordination between them**, and the
+`relay_authority_manual_blocked_by_owner()`/`relay_authority_on_blocked()`
+safety gate is duplicated independently in both `io_bridge_task`'s
+switch-case and `dashboard_set_relay()`. User confirmed (2026-08-19,
+`AskUserQuestion`): build the new `kiln_io_owner.c` file per the plan above
+rather than the smaller alternative (extending `io_bridge_task`'s existing
+queue set in place) — full migration, not a patch.
+
+- [ ] Phase 1: `kiln_io_owner.c`/`.h` — in progress
+- [ ] Phase 2: `thermo_owner.c`/`.h`
+- [ ] Phase 3: `profile_executor.c` command queue
+- [ ] Phase 4: `wifi_prov.c` owning task (needs real Wi-Fi hardware to trust
+      before shipping — do not rush this one)
+- [ ] Phase 5: HTTP handler migration, per-domain, alongside 1-4
