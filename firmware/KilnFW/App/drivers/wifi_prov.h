@@ -50,6 +50,40 @@
 //   mode == WIFI_PROV_MODE_HOME,
 //     no credentials             -> AP only (first-boot provisioning state).
 //                                    state reports WIFI_PROV_STATE_UNPROVISIONED.
+// THREADING (2026-08-19, TODO.md 10.14 Phase 4): this module has a single
+// owning task. Every function below except wifi_prov_start() and the direct
+// readers listed next is a thin PRODUCER -- it builds a command, posts it to
+// the owner task's bounded queue, and blocks (bounded) for the answer, which
+// is why every signature here is unchanged from before the conversion and why
+// no caller needed an edit. Callers that must never block (lvgl_port_task)
+// still have to keep these off that task themselves; the queue serializes the
+// work, it does not make a blocking call non-blocking. See wifi_prov.c's
+// "Owning task + command queue" comment for the full design, including why
+// the Wi-Fi driver's own event handlers post here too.
+//
+// READERS THAT STAY DIRECT, and why -- same convention as thermo_owner.h
+// leaving MAX31856_get_config() direct: routing a read that touches no
+// hardware and no compound state through a task hop buys nothing and costs
+// latency on paths that poll every UI tick.
+//   - wifi_prov_get_state(), wifi_prov_get_mode(),
+//     wifi_prov_is_sta_connected(), wifi_prov_get_sta_rssi(): each reads one
+//     naturally-aligned word (an enum, an enum, the same enum compared, an
+//     int8 next to a bool) that the owner task writes with a single store.
+//     There is no read-modify-write and no multi-field invariant to observe
+//     half-applied: the worst a racing reader can see is the value from just
+//     before or just after a transition, which is exactly what it would see
+//     through a queue anyway, one scheduling delay later.
+//   - wifi_prov_get_saved_ssid()/get_ap_ssid()/get_ap_password(): these
+//     return POINTERS into module storage, so a queue could not make them
+//     safe even in principle -- the caller dereferences after any lock would
+//     have been dropped. Unchanged, pre-existing, and bounded by the fact
+//     that the buffers are fixed-size, always NUL-terminated, and only ever
+//     rewritten in place.
+//   - wifi_prov_get_ap_client_count(): reads no s_wifi field at all beyond
+//     the started flag; it is an esp_wifi_ap_get_sta_list() call, and the
+//     Wi-Fi driver's API is internally thread-safe.
+// Everything reading COMPOUND state goes through the queue:
+// wifi_prov_get_saved_networks(), wifi_prov_get_sta_ip(), wifi_prov_scan().
 #ifndef WIFI_PROV_H
 #define WIFI_PROV_H
 

@@ -5189,13 +5189,16 @@ premature abstraction" convention).
       in this environment, so none of this has actually been tapped on real
       glass; this closes "no longer calls blocking Wi-Fi operations from
       lvgl_port_task," not "confirmed not to freeze on the bench."
-- [ ] **`wifi_prov.c`'s own owning task**, so `s_wifi` gets a genuine single
-      writer (today: zero locking, see the research summary above). Needs the
-      Wi-Fi driver's own event handlers (`on_wifi_event`/`on_ip_event`)
-      rerouted through the same queue as every external caller, not just the
-      external callers — a materially bigger and riskier change than the LCD
-      slice above, and one this environment cannot verify against a real
-      radio. Do not attempt without hardware to test against.
+- [x] **`wifi_prov.c`'s own owning task**, so `s_wifi` gets a genuine single
+      writer (was: zero locking, see the research summary above). Landed
+      2026-08-19 as Phase 4 — see that entry at the end of this section for
+      what was built, what stayed direct, and how far verification actually
+      got. The "do not attempt without hardware to test against" caveat this
+      line used to carry was satisfied in the weak sense (a board is now on
+      the bench and the new build boots on it) and NOT in the strong sense
+      (the UART link that would report Wi-Fi state is physically broken) —
+      read the Phase 4 entry's verification paragraph before treating this
+      as settled.
 - [ ] Web side: `dashboard_http.c`/`zones_http.c`/`profiles_http.c`/
       `rules_http.c`/`ota_http.c`/`wifi_provision_http.c` action-taking (POST)
       handlers post commands instead of running inline on esp_http_server's
@@ -5418,6 +5421,150 @@ queue set in place) — full migration, not a patch.
       compiles and can be reasoned about but not observed working) is blocked
       on the daughterboard being connected, a separate hardware readiness gap
       from the no-board-at-all case Phase 1 hit.
+- [~] **Phase 3: `profile_executor` command queue — REVIEWED AND
+      DELIBERATELY SKIPPED (2026-08-19).** Marked `[~]`, not `[x]`: nothing
+      was built, and this is a decision to record, not work to come back to
+      unless the premise changes. The plan's build order put a queue in
+      front of `profile_executor_run()`/`_halt()`/`_pause()`/`_resume()`
+      because the ownership research pass had noted "two tasks already, but
+      **no queue** — HTTP handlers call these directly, synchronized some
+      other way." Reading the code closed that "some other way": all four
+      wrap their entire bodies in `s_exec.lock`
+      (`profile_executor.c:1707`, `:1989`, `:2039`, `:2067`, each an
+      `xSemaphoreTake(s_exec.lock, portMAX_DELAY)` taken before the first
+      state check and released on every return path). That is a correct
+      mutex-guarded API, not an uncoordinated-writer bug — there is no
+      Phase-1-style lost update here and no duplicated safety gate to
+      centralize. Converting a *safety-critical* state machine (the thing
+      that decides whether a kiln is firing) to a command queue would be
+      pure regression risk against zero safety gain, and it would trade a
+      lock whose failure mode is "the caller waits" for a queue whose
+      failure mode is "the command is dropped." Revisit only if Phase 6's
+      system-mode gate turns out to genuinely need a choke point here that
+      the existing lock can't provide.
+- [x] **Phase 4: `wifi_prov.c`'s owning task (2026-08-19).** The riskiest
+      phase, done last per the plan, and the one that is structurally
+      unlike Phases 1 and 2: no new file. `s_wifi` is module-private with
+      nothing to wrap, so the task lives *inside* `wifi_prov.c` per the
+      plan's own ownership map.
+      **The bug being closed is real and was the largest one in this
+      section**: `s_wifi` had ZERO locking and four independent writers —
+      the Wi-Fi driver's default-event-loop task
+      (`on_wifi_event`/`on_ip_event`), the esp_timer service task
+      (`ap_fallback_timer_cb`/`rescan_timer_cb`), `lvgl_port_task` via
+      `ui_page_network.c`, and esp_http_server's worker via
+      `wifi_provision_http.c` (plus `uart_bridge_ext.c`'s wifi bridge task).
+      Unlike Phase 2, this is not consistency work.
+      **What landed**: one task (`wifi_prov_owner`, 4096 stack, prio 5) +
+      bounded queue (depth 6) inside `wifi_prov.c`. Every public entry
+      point's body moved into a `do_*()` static that only ever runs on that
+      task; the public function became a thin producer (build command, post,
+      bounded wait). **Every `wifi_prov_*()` signature is unchanged** — that
+      was the deliberate blast-radius control, and the result is that none of
+      the seven caller modules (`ui_page_network.c`,
+      `wifi_provision_http.c`, `uart_bridge_ext.c`, `wifi_status_ui.c`,
+      `readiness_http.c`, `ota_http.c`, `main.c`) needed a single edit.
+      Migrated through the queue: `add_network`/`set_credentials`,
+      `forget_network`, `get_saved_networks`, `set_mode`, `set_ap_ssid`,
+      `set_ap_password`, `get_sta_ip`, `scan`.
+      **The part that made this phase different from "add a queue in front
+      of an existing task"**: all four of the driver's/timer's own callbacks
+      were rerouted through the same queue. `on_wifi_event`, `on_ip_event`,
+      `ap_fallback_timer_cb` and `rescan_timer_cb` are now each a single
+      `post_event()` call (fire-and-forget, `xQueueSend` with 0 ticks — an
+      event loop must never block on this module's queue); their real bodies
+      became `do_ev_sta_start()`/`do_ev_sta_disconnected()`/`do_ev_got_ip()`/
+      `do_ap_fallback_tick()`/`do_rescan_tick()` on the owner task. A full
+      queue drops the event with a log line, which is safe **because every
+      event this module consumes self-heals** — the driver re-emits
+      disconnects while the link is down, both timers fire again, and a
+      dropped GOT_IP leaves state at CONNECTING one beat too long (the AP
+      stays up: the safe direction, never "reports connected when it
+      isn't"). That reasoning is written out in full in `wifi_prov.c`'s
+      owner-task comment rather than only here.
+      **Deadlock rule, and the one call site that violated it**:
+      `select_and_apply_join_candidate()` called the public
+      `wifi_prov_scan()`. Post-conversion that would have had the owner task
+      post to its own queue and wait for itself forever. It now calls
+      `do_scan()` directly, and a forward declaration of `do_scan()` carries
+      the comment explaining why. Every internal helper works on raw state;
+      only the public boundary posts.
+      **Two timeouts, not one, and sized from the caller side**:
+      `WIFI_OWNER_SCAN_WAIT_MS` 15s for `scan`/`add_network`/`set_mode` (the
+      three that can run a blocking `esp_wifi_scan_start(block=true)`, the
+      latter two via `start_sta_join()`), `WIFI_OWNER_WAIT_MS` 12s for the
+      rest. The 12s is NOT sized by the command's own millisecond-scale work
+      — it is sized by the worst case *ahead of it in the queue*, which is a
+      scan. A `thermo_owner`-style 200ms would spuriously fail any status
+      read that landed behind an operator tapping Scan. Serializing scan
+      against every other Wi-Fi command is the intended behavior (one
+      radio), not a side effect.
+      **Deliberately left as DIRECT reads, documented in `wifi_prov.h` with
+      the same convention `thermo_owner.h` used for `MAX31856_get_config()`**:
+      `wifi_prov_get_state()`, `wifi_prov_get_mode()`,
+      `wifi_prov_is_sta_connected()`, `wifi_prov_get_sta_rssi()` — each
+      reads one naturally-aligned word the owner writes with a single store,
+      with no read-modify-write and no multi-field invariant to catch
+      half-applied; a racing reader sees the value from just before or just
+      after a transition, which is what a queue would give it too, one
+      scheduling delay later. Also direct, and *unfixable* by a queue in
+      principle: `wifi_prov_get_saved_ssid()`/`get_ap_ssid()`/
+      `get_ap_password()`, which return POINTERS into module storage the
+      caller dereferences after any lock would have been dropped
+      (pre-existing, unchanged). And `wifi_prov_get_ap_client_count()`,
+      which touches no `s_wifi` field beyond `started` — it is an
+      `esp_wifi_ap_get_sta_list()` call into a driver API that is itself
+      thread-safe. Everything reading compound state goes through the queue.
+      **Where the task starts**: at the end of `wifi_prov_start()` but
+      specifically *before* `esp_wifi_start()`, not after. `esp_wifi_start()`
+      is what makes the driver begin emitting `WIFI_EVENT_STA_START`;
+      creating the task after it would leave a window where the first event
+      of every boot finds a NULL queue and is dropped, costing the boot's
+      first join attempt. `wifi_prov_start()` itself deliberately stays a
+      plain synchronous init (it cannot be a command — the task can't
+      predate the state it owns). The overlap this leaves is the owner task
+      draining real events while `wifi_prov_start()` finishes
+      `esp_wifi_start()`/`wifi_provision_http_start()`; neither writes
+      `s_wifi`, and the only remaining write is the single `started` bool
+      every producer checks.
+      **Build**: `idf.py -C firmware/KilnFW build` clean under `-Werror`,
+      first try (no new file, so none of Phases 1/2's "forgot the
+      CMakeLists `SRCS` entry" or `*/`-inside-a-doc-comment gotchas). App
+      0x158f40 bytes, 8% of the partition free.
+      **Verification actually reached — build-verified plus a partial boot
+      smoke test, and the gap matters**: flashed over JTAG with OpenOCD
+      (`flash_firmware`, per the repo rule — never esptool/`idf.py flash`);
+      bootloader + partition table + app all programmed and **verified OK**,
+      board reset and running. Liveness confirmed two ways: a subsequent
+      OpenOCD resume attempt reported `[esp32s3.cpu0] not halted`, i.e. the
+      core is running freely rather than sitting in a panic halt, and the
+      one boot log line that did arrive (`temperature_sensor: ... Out of
+      testing range`, at t=1332ms — a pre-existing, unrelated IDF warning)
+      never repeated, which a crash/reboot loop would have made it do.
+      **What could NOT be observed, stated plainly rather than softened**:
+      the board's UART link to the PC is physically broken in this
+      environment (a known pre-existing bench fault, same one that blocks
+      `get_fw_version`), and that link is exactly what carries both the
+      console log (`uart_log_bridge.c`) and `wifi_get_status`. So the boot
+      log is one line, not thirty seconds of it, and **no Wi-Fi behavior was
+      observed at all** — not the owner task announcing itself, not AP
+      bring-up, not a station join attempt. "Boots clean and keeps running
+      with the new Wi-Fi ownership in place" is what this establishes.
+      Everything the phase is actually about — AP fallback, the rescan
+      cadence, a real join, concurrent commands from LCD + HTTP + UART
+      contending on the one owner — remains **unverified** and needs a bench
+      session with a working UART link before this goes near a kiln that
+      depends on remote monitoring.
+      **Named remaining work, not done this pass**: `ui_page_network.c`'s
+      three ad hoc job structs (`scan_job_t`/`mode_job_t`/`connect_job_t`)
+      are still in place and still correct — the producers they call now
+      queue instead of touching state directly, but they are still blocking
+      calls that must stay off `lvgl_port_task`, so the worker tasks are
+      still doing real work. Deleting the page-local duplication in favor of
+      a shared async shape is a separate cleanup pass; leaving them was a
+      deliberate blast-radius choice (this phase changed zero caller files),
+      not an oversight. Also still open, unchanged by this phase: the web
+      and UART surfaces' own queue items above.
 - [ ] Phase 3: `profile_executor.c` command queue
 - [ ] Phase 4: `wifi_prov.c` owning task (needs real Wi-Fi hardware to trust
       before shipping — do not rush this one)

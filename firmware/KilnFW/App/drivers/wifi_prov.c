@@ -7,6 +7,10 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -189,6 +193,232 @@ static struct {
     bool has;
     saved_net_t net;
 } s_legacy_single;
+
+/* ---- Owning task + command queue (2026-08-19, TODO.md 10.14 Phase 4) ----
+ *
+ * Everything above this comment is module state that, until this phase, had
+ * ZERO locking and FOUR independent writers: the Wi-Fi driver's own
+ * default-event-loop task (on_wifi_event()/on_ip_event()), the esp_timer
+ * service task (ap_fallback_timer_cb()/rescan_timer_cb()), lvgl_port_task via
+ * ui_page_network.c, and esp_http_server's worker task via
+ * wifi_provision_http.c -- plus uart_bridge_ext.c's wifi bridge task. Phase 4
+ * gives s_wifi exactly one writer: owner_task() below.
+ *
+ * This is deliberately NOT the shape of Phases 1 and 2 (kiln_io_owner.c /
+ * thermo_owner.c, each a new file wrapping a driver whose own API was already
+ * public). s_wifi is module-private and there is nothing to wrap: the owner
+ * task lives inside this file, and the public wifi_prov_*() API keeps its
+ * EXACT existing signatures so none of the seven caller modules
+ * (ui_page_network.c, wifi_provision_http.c, uart_bridge_ext.c,
+ * wifi_status_ui.c, readiness_http.c, ota_http.c, main.c) needed a single
+ * edit. Each public entry point became a thin producer: build a command, post
+ * it, wait (bounded) for the answer. The real body of each moved into a
+ * do_*() static that only ever runs on owner_task().
+ *
+ * What makes this phase materially riskier than 1 and 2, and why the plan put
+ * it last: the Wi-Fi DRIVER'S OWN callbacks had to be rerouted too. An event
+ * handler registered with esp_event_handler_instance_register() runs on the
+ * event loop's task, and an esp_timer callback runs on the timer service
+ * task; if those kept mutating s_wifi directly, "one writer" would be a
+ * fiction. So on_wifi_event()/on_ip_event()/ap_fallback_timer_cb()/
+ * rescan_timer_cb() are now nothing but post_event() calls -- fire-and-forget,
+ * xQueueSend with a 0-tick timeout, never blocking the event loop or the
+ * timer service on this module's queue.
+ *
+ * DROPPED EVENTS ARE SURVIVABLE BY DESIGN, and that is load-bearing for the
+ * 0-tick post above. If the queue is full the event is logged and discarded;
+ * nothing retries it. Every event this module consumes self-heals:
+ *   - a dropped STA_START: the join it would have kicked off is retried by
+ *     rescan_timer_cb() within WIFI_AP_FALLBACK_RESCAN_INTERVAL_MS.
+ *   - a dropped STA_DISCONNECTED: the driver keeps emitting disconnect
+ *     events while the link is down, and the rescan timer independently
+ *     re-picks a candidate and reconnects.
+ *   - a dropped GOT_IP: state stays CONNECTING/RECONNECTING one beat too
+ *     long (the AP is left up -- the SAFE direction, never "reports
+ *     connected when it isn't"); the next got-ip, disconnect, or rescan tick
+ *     corrects it.
+ *   - a dropped AP-fallback or rescan tick: both timers fire again.
+ * The queue only fills if something upstream is posting far faster than the
+ * radio can act, which is itself the bug worth seeing in the log.
+ *
+ * DEADLOCK RULE, non-negotiable: code running ON owner_task() must never call
+ * a public wifi_prov_*() producer -- it would post to its own queue and then
+ * wait forever for itself to drain it. This bit exactly one call site here
+ * before the conversion: select_and_apply_join_candidate() called
+ * wifi_prov_scan(). It now calls do_scan() directly, and every other internal
+ * helper likewise works on raw state. Only the public boundary posts.
+ *
+ * Consequence of one owner: wifi_prov_scan() is a genuinely blocking radio
+ * scan (esp_wifi_scan_start with block=true, ~50-150ms per channel), and it
+ * now runs ON owner_task(), which serializes it against every other Wi-Fi
+ * command. That is intended -- a scan and a mode switch racing on the radio
+ * is precisely what this phase exists to stop -- but it means a command
+ * posted behind a scan waits for that scan first. Hence two timeouts, not
+ * one, both sized from the caller side rather than the radio side (see
+ * below). It also means the two `static` scratch arrays in this file
+ * (do_scan()'s records[], select_and_apply_join_candidate()'s scan_results[])
+ * are now genuinely single-threaded, where before they were shared statics
+ * reachable from three tasks. */
+
+#define WIFI_OWNER_QUEUE_LEN 6
+
+/* How long a scan's producer waits. A full active scan of every 2.4GHz
+ * channel at 50-150ms dwell is seconds, not milliseconds, and the existing
+ * callers already tolerate exactly that: ui_page_network.c runs it on a
+ * dedicated short-lived worker task (never lvgl_port_task), and
+ * wifi_provision_http.c/uart_bridge_ext.c block their own task on it today.
+ * 15s is "a scan, plus one already-in-flight scan ahead of it in the queue,
+ * plus slack" -- not a radio-derived number. */
+#define WIFI_OWNER_SCAN_WAIT_MS 15000
+
+/* How long every other producer waits. Sized by the WORST CASE AHEAD OF IT
+ * in the queue, which is a scan, not by its own (millisecond-scale) work --
+ * a 200ms timeout of the kind thermo_owner.c uses would spuriously fail any
+ * status poll unlucky enough to land behind an operator tapping Scan. A
+ * producer that does time out fails closed: it returns an error, exactly as
+ * if the operation itself had failed. */
+#define WIFI_OWNER_WAIT_MS 12000
+
+typedef enum {
+    /* External (request/response) -- one per public mutator or compound
+     * reader. See the header for which readers deliberately stayed direct. */
+    CMD_ADD_NETWORK,
+    CMD_FORGET_NETWORK,
+    CMD_GET_SAVED_NETWORKS,
+    CMD_SET_MODE,
+    CMD_SET_AP_SSID,
+    CMD_SET_AP_PASSWORD,
+    CMD_GET_STA_IP,
+    CMD_SCAN,
+
+    /* Internal (fire-and-forget) -- the Wi-Fi driver's and esp_timer's own
+     * callbacks, rerouted here so they mutate s_wifi on the same one task as
+     * everything above rather than on their own. */
+    CMD_EV_STA_START,
+    CMD_EV_STA_DISCONNECTED,
+    CMD_EV_GOT_IP,
+    CMD_TMR_AP_FALLBACK,
+    CMD_TMR_RESCAN,
+} wifi_cmd_type_t;
+
+typedef struct {
+    esp_err_t err;
+    wifi_prov_saved_network_t saved[WIFI_PROV_MAX_SAVED_NETWORKS];
+    size_t saved_count;
+    char sta_ip[16]; /* dotted-quad, matching wifi_prov_get_sta_ip()'s contract */
+    size_t scan_count; /* entries the owner task left in s_scan_stage */
+} wifi_result_t;
+
+typedef struct {
+    wifi_cmd_type_t type;
+    wifi_result_t *result; /* caller-owned; NULL for fire-and-forget events */
+    SemaphoreHandle_t done; /* caller-owned binary semaphore, given last; NULL
+                             * for fire-and-forget events */
+    union {
+        /* CMD_ADD_NETWORK: SSID/password are COPIED into the command rather
+         * than pointed at. The producer's caller is an HTTP handler parsing a
+         * request body it will free the moment it returns -- a pointer into
+         * that would dangle the instant a producer ever stopped waiting.
+         * Fixed-size and small enough (98 bytes) to keep every queue entry
+         * uniform, per the plan's "a tag plus fixed fields, never a
+         * variable-length payload" rule. */
+        struct {
+            char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+            char password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+        } add_network;
+        struct { char ssid[WIFI_PROV_SSID_MAX_LEN + 1]; } forget_network;
+        struct { size_t max_results; } get_saved_networks;
+        struct { wifi_prov_mode_t mode; } set_mode;
+        struct { char ssid[WIFI_PROV_SSID_MAX_LEN + 1]; } set_ap_ssid;
+        struct { char password[WIFI_PROV_PASSWORD_MAX_LEN + 1]; } set_ap_password;
+        struct { size_t out_cap; } get_sta_ip;
+        struct { size_t max_results; } scan;
+    } args;
+} wifi_cmd_t;
+
+static QueueHandle_t s_cmd_queue;
+
+/* Scan results staging. Written ONLY by owner_task(), copied out by the
+ * producer after its semaphore is given. Deliberately module-static rather
+ * than a member of wifi_result_t (which lives on the producer's stack): at 20
+ * entries this is ~720 bytes, and several callers run on 4096-byte worker
+ * task stacks. Nothing is lost by staging here -- only one command is ever
+ * being serviced at a time, and a producer that timed out simply never copies
+ * out, leaving the next one to overwrite it. */
+#define WIFI_OWNER_SCAN_STAGE_MAX 20
+static wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
+
+/* Producer half of the request/response pair -- identical in shape to
+ * kiln_io_owner.c's and thermo_owner.c's helper of the same name, including
+ * the fail-closed default. Returns false if the owner task isn't up, the post
+ * was refused (full queue), or the wait timed out; *result is meaningful only
+ * when it returns true. */
+static bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_ms)
+{
+    memset(result, 0, sizeof(*result));
+    result->err = ESP_ERR_INVALID_STATE; /* fail closed if the owner never answers */
+
+    if (!s_cmd_queue) {
+        return false;
+    }
+
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) {
+        return false;
+    }
+
+    cmd->result = result;
+    cmd->done = done;
+
+    bool ok = false;
+    if (xQueueSend(s_cmd_queue, cmd, 0) == pdTRUE) {
+        ok = xSemaphoreTake(done, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
+        if (!ok) {
+            ESP_LOGW(TAG, "owner task did not answer command %d within %ums -- failing closed",
+                     (int)cmd->type, (unsigned)wait_ms);
+        }
+    } else {
+        ESP_LOGW(TAG, "command queue full -- refusing command %d", (int)cmd->type);
+    }
+
+    vSemaphoreDelete(done);
+    return ok;
+}
+
+/* Fire-and-forget half -- the ONLY thing the Wi-Fi event handlers and
+ * esp_timer callbacks do now. 0-tick post: an event loop that blocks on this
+ * module's queue is an event loop not delivering anyone else's events. See
+ * the "dropped events are survivable" paragraph above for why discarding is
+ * the correct answer to a full queue here. */
+static void post_event(wifi_cmd_type_t type)
+{
+    if (!s_cmd_queue) {
+        /* Between esp_event_handler_instance_register() and the owner task
+         * existing there is no queue yet -- see wifi_prov_start(), which
+         * creates the task BEFORE esp_wifi_start() precisely to keep this
+         * window from covering any event the radio can actually emit. */
+        return;
+    }
+    wifi_cmd_t cmd = { .type = type, .result = NULL, .done = NULL };
+    if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "command queue full -- dropping Wi-Fi event %d (self-heals: see wifi_prov.c's "
+                      "owner-task comment)", (int)type);
+    }
+}
+
+/* Defined down with the rest of the do_*() bodies (next to the public
+ * wifi_prov_scan() producer that posts for it), forward-declared here because
+ * select_and_apply_join_candidate() -- which also runs on the owner task --
+ * has to call it DIRECTLY rather than via wifi_prov_scan(). That call used to
+ * be the public function, which is now a producer: leaving it would have the
+ * owner task post to its own queue and wait for itself. This declaration is
+ * the deadlock rule made mechanical. */
+static esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count);
+
+/* Defined at the very bottom of this file, after every do_*() body it
+ * dispatches to; forward-declared here because wifi_prov_start() (which sits
+ * above them all) is what creates it. */
+static void owner_task(void *arg);
 
 /* ---- NVS -------------------------------------------------------------- */
 
@@ -684,19 +914,20 @@ static void apply_sta_config(void)
  * generalized. This never blocks or skips connecting just because the scan
  * came up empty of matches.
  *
- * CAUTION -- flagged, not resolved, for hardware verification: on_wifi_event()
- * (see the comment atop the "Event handlers" section below) runs on the Wi-Fi
- * driver's own default-event-loop task, not the caller's stack. wifi_prov_scan()
- * is a BLOCKING scan (tens to ~150ms per channel found, plus scan setup/teardown).
- * Calling it from here means every disconnect-triggered reconnect blocks the
- * Wi-Fi driver's own event processing for the scan's duration, not just the
- * user-initiated join from start_sta_join() (which runs on the HTTP handler's
- * task, where blocking is fine). This has NOT been changed to run off-task
- * (e.g. via a dedicated worker task/queue) because that would be a larger
- * structural change than TODO.md 8.4 asked for -- but it needs hardware
- * verification that a blocking scan inside the event handler doesn't stall
- * other Wi-Fi event processing (AP client join/leave, IP event delivery,
- * etc.) for the scan's duration before this ships to real boards. */
+ * 2026-08-19, TODO.md 10.14 Phase 4 -- the CAUTION that used to stand here is
+ * RESOLVED, and the resolution is worth stating because it was the single
+ * largest reason this function was left half-finished by TODO.md 8.4. The old
+ * warning was: this does a genuinely blocking scan, and on_wifi_event() runs
+ * on the Wi-Fi driver's own default-event-loop task, so a disconnect-triggered
+ * reconnect stalled the driver's event processing for the scan's duration.
+ * That can no longer happen: on_wifi_event() does nothing but post a command
+ * now, and this function only ever runs on owner_task(), a task of this
+ * module's own whose whole job is to be the thing that blocks. A scan here
+ * delays other *Wi-Fi commands* (intended -- they contend for one radio), not
+ * the driver's event delivery.
+ *
+ * It calls do_scan() rather than the public wifi_prov_scan() for the deadlock
+ * reason given at do_scan()'s forward declaration. */
 static void select_and_apply_join_candidate(void)
 {
     if (s_wifi.saved_nets.count == 0) {
@@ -709,7 +940,7 @@ static void select_and_apply_join_candidate(void)
     static wifi_prov_scan_result_t scan_results[20];
     size_t scan_count = 0;
     esp_err_t scan_err =
-        wifi_prov_scan(scan_results, sizeof(scan_results) / sizeof(scan_results[0]), &scan_count);
+        do_scan(scan_results, sizeof(scan_results) / sizeof(scan_results[0]), &scan_count);
     if (scan_err == ESP_OK) {
         for (uint8_t i = 0; i < s_wifi.saved_nets.count; i++) {
             for (size_t s = 0; s < scan_count; s++) {
@@ -752,9 +983,10 @@ static void cancel_ap_fallback_timer(void)
     }
 }
 
-static void ap_fallback_timer_cb(void *arg)
+/* Runs on owner_task(), posted for by ap_fallback_timer_cb() below (which runs
+ * on the esp_timer service task and does nothing but post). */
+static void do_ap_fallback_tick(void)
 {
-    (void)arg;
     if (s_wifi.state == WIFI_PROV_STATE_CONNECTED) {
         return; /* reconnected before the timer fired */
     }
@@ -771,21 +1003,30 @@ static void ap_fallback_timer_cb(void *arg)
     s_wifi.state = WIFI_PROV_STATE_RECONNECTING;
 }
 
+static void ap_fallback_timer_cb(void *arg)
+{
+    (void)arg;
+    post_event(CMD_TMR_AP_FALLBACK);
+}
+
 /* TODO.md 8.4: periodically look for a saved network while the board is
  * sitting in AP fallback that the OPERATOR did not choose -- i.e. mode is
  * still WIFI_PROV_MODE_HOME (a deliberate switch to WIFI_PROV_MODE_AP is
  * left alone; that AP is intentional, permanent, and this must never
  * second-guess it) but state isn't WIFI_PROV_STATE_CONNECTED, meaning
  * either no join has landed yet or a previous one dropped and is being
- * retried. Runs on the esp_timer service task, NOT the Wi-Fi driver's
- * event-loop task -- unlike on_wifi_event() (see that section's header
- * comment and the note left in its WIFI_EVENT_STA_DISCONNECTED branch),
- * blocking here in wifi_prov_scan() does not stall Wi-Fi event delivery,
- * which is exactly why this periodic path exists instead of just running
- * the scan-based tie-break from the disconnect handler directly. */
-static void rescan_timer_cb(void *arg)
+ * retried.
+ *
+ * 2026-08-19, Phase 4: this now runs on owner_task() (posted for by
+ * rescan_timer_cb() below), not on the esp_timer service task. The original
+ * reason this path existed at all -- "the timer service task is a safe place
+ * to block on a scan, the Wi-Fi event-loop task is not" -- is subsumed by
+ * there now being ONE task where every blocking Wi-Fi operation happens. The
+ * periodic cadence is still worth keeping for its own sake (it re-picks a
+ * better candidate rather than retrying the same one), so nothing about the
+ * policy changed, only which task executes it. */
+static void do_rescan_tick(void)
 {
-    (void)arg;
     if (s_wifi.mode != WIFI_PROV_MODE_HOME || s_wifi.state == WIFI_PROV_STATE_CONNECTED ||
         s_wifi.saved_nets.count == 0) {
         return;
@@ -793,6 +1034,12 @@ static void rescan_timer_cb(void *arg)
     ESP_LOGI(TAG, "periodic rescan: looking for a saved network while in AP fallback");
     select_and_apply_join_candidate();
     esp_wifi_connect();
+}
+
+static void rescan_timer_cb(void *arg)
+{
+    (void)arg;
+    post_event(CMD_TMR_RESCAN);
 }
 
 static void start_ap_fallback_timer(void)
@@ -831,19 +1078,29 @@ static void start_sta_join(void)
 }
 
 /* ---- Event handlers ----------------------------------------------------
- * Everything here runs on the default event loop's own task, never on a
- * caller's stack -- this is the mechanism that keeps wifi_prov_start()
- * non-blocking. Nothing in this handler touches kiln_io/safety_link. */
+ * The two esp_event handlers below run on the default event loop's own task,
+ * and the two esp_timer callbacks above run on the timer service task. As of
+ * 2026-08-19 (TODO.md 10.14 Phase 4) NONE of the four touches s_wifi: each is
+ * a single post_event() call, and the real work happens in the do_*() bodies
+ * here, on owner_task(). That is the whole point of Phase 4 -- with these left
+ * mutating state directly, "s_wifi has one writer" would have been false no
+ * matter what the public API did.
+ *
+ * Nothing in any of this touches kiln_io/safety_link (unchanged requirement,
+ * see this module's header). */
 
-static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+/* Runs on owner_task(). */
+static void do_ev_sta_start(void)
 {
-    (void)arg;
-    (void)base;
-    if (id == WIFI_EVENT_STA_START) {
-        if (s_wifi.saved_nets.count > 0 && s_wifi.mode == WIFI_PROV_MODE_HOME) {
-            esp_wifi_connect();
-        }
-    } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+    if (s_wifi.saved_nets.count > 0 && s_wifi.mode == WIFI_PROV_MODE_HOME) {
+        esp_wifi_connect();
+    }
+}
+
+/* Runs on owner_task(). */
+static void do_ev_sta_disconnected(void)
+{
+    {
         s_wifi.sta_rssi = -127; /* lost connection */
         if (s_wifi.mode == WIFI_PROV_MODE_AP || s_wifi.saved_nets.count == 0) {
             return; /* not attempting station at all */
@@ -851,21 +1108,17 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         bool was_connected = (s_wifi.state == WIFI_PROV_STATE_CONNECTED);
         s_wifi.state = was_connected ? WIFI_PROV_STATE_RECONNECTING : WIFI_PROV_STATE_CONNECTING;
         ESP_LOGI(TAG, "station disconnected, retrying join");
-        /* Deliberately NOT re-running select_and_apply_join_candidate()'s
-         * scan-based tie-break here (2026-08-13 fix): this handler runs on
-         * the Wi-Fi driver's own default-event-loop task (see this section's
-         * header comment), and that function does a genuinely blocking scan.
-         * Calling it on every disconnect would stall the Wi-Fi driver's own
-         * event processing -- AP client join/leave, IP event delivery, the
-         * next disconnect itself -- for the scan's duration, every time a
-         * flaky link drops. Instead this just retries the SAME
-         * active_ssid/active_password already configured (fast,
-         * non-blocking, matches this handler's pre-8.4 behavior).
-         * Re-picking the best candidate happens on a separate cadence,
-         * off this task -- see rescan_timer_cb(), which runs on the
-         * esp_timer service task and is the only place
-         * select_and_apply_join_candidate() is still called from a path
-         * that isn't a caller's own HTTP-handler/app_main task. */
+        /* Still deliberately NOT re-running select_and_apply_join_candidate()'s
+         * scan-based tie-break here, but for a DIFFERENT reason than the
+         * 2026-08-13 fix this replaces. That reason was "this runs on the
+         * Wi-Fi driver's event-loop task and must not block it" -- no longer
+         * true after Phase 4 (this is owner_task() now). The reason it stays
+         * is behavioral: a flapping link produces disconnect after
+         * disconnect, and running a multi-second scan on each one would keep
+         * the owner task -- and therefore every operator-initiated Wi-Fi
+         * command behind it -- busy scanning instead of reconnecting. Retry
+         * the SAME active_ssid/active_password (fast); let do_rescan_tick()'s
+         * fixed cadence be the thing that re-picks a better candidate. */
         esp_wifi_connect();
         if (!s_wifi.ap_fallback_timer) {
             return;
@@ -880,13 +1133,21 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
-static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)base;
-    if (id != IP_EVENT_STA_GOT_IP) {
-        return;
+    (void)data;
+    if (id == WIFI_EVENT_STA_START) {
+        post_event(CMD_EV_STA_START);
+    } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        post_event(CMD_EV_STA_DISCONNECTED);
     }
+}
+
+/* Runs on owner_task(). */
+static void do_ev_got_ip(void)
+{
     cancel_ap_fallback_timer();
     ESP_LOGI(TAG, "station joined, dropping fallback AP");
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -900,6 +1161,17 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
         s_wifi.sta_rssi = ap_info.rssi;
     }
+}
+
+static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)data;
+    if (id != IP_EVENT_STA_GOT_IP) {
+        return;
+    }
+    post_event(CMD_EV_GOT_IP);
 }
 
 /* ---- Public API --------------------------------------------------------- */
@@ -1084,6 +1356,47 @@ esp_err_t wifi_prov_start(void)
         return err;
     }
 
+    /* The owner task comes up HERE -- after every synchronous bring-up step
+     * above (NVS load/migration, netif, esp_wifi_init, handler registration,
+     * timer creation, the initial mode/config decision) and immediately
+     * BEFORE esp_wifi_start(). Both halves of that placement are deliberate.
+     *
+     * Not earlier: everything above this line mutates s_wifi from THIS task
+     * (app_main's), and wifi_prov_start() deliberately stays a plain
+     * synchronous init rather than becoming its own command -- there is no
+     * one to serialize against yet, and turning bring-up into a queued
+     * command would mean the task had to exist before the state it owns did.
+     *
+     * Not later (e.g. after esp_wifi_start()): esp_wifi_start() is what makes
+     * the driver start emitting WIFI_EVENT_STA_START and friends. Creating
+     * the task after it would open a window where on_wifi_event() fires,
+     * finds s_cmd_queue still NULL, and silently drops a STA_START -- costing
+     * the first join attempt of every boot. Creating it here means the queue
+     * exists before the radio can produce a single event.
+     *
+     * The overlap this leaves is small and harmless: between this line and
+     * `s_wifi.started = true` below, owner_task() may already be draining
+     * real events (legitimate state-machine transitions, exactly what it is
+     * for) while this function does esp_wifi_start() and
+     * wifi_provision_http_start(). Neither of those writes s_wifi; the only
+     * remaining write is the single `started` bool, and every producer
+     * refuses until it is set. If the task fails to create, this returns the
+     * error and `started` is never set, so every producer fails closed rather
+     * than running unserialized. */
+    s_cmd_queue = xQueueCreate(WIFI_OWNER_QUEUE_LEN, sizeof(wifi_cmd_t));
+    if (!s_cmd_queue) {
+        ESP_LOGE(TAG, "xQueueCreate(wifi_owner) failed");
+        return ESP_ERR_NO_MEM;
+    }
+    BaseType_t task_created =
+        xTaskCreatePinnedToCore(owner_task, "wifi_prov_owner", 4096, NULL, 5, NULL, tskNO_AFFINITY);
+    if (task_created != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreatePinnedToCore(wifi_prov_owner) failed");
+        vQueueDelete(s_cmd_queue);
+        s_cmd_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     err = esp_wifi_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(err));
@@ -1134,22 +1447,13 @@ const char *wifi_prov_get_ap_password(void)
     return s_wifi.has_ap_password_override ? s_wifi.ap_password : WIFI_AP_DEFAULT_PASSWORD;
 }
 
-esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *password,
-                                 size_t password_len)
+/* Runs on owner_task(). Both strings are NUL-terminated and already
+ * length-validated by the producer -- validation stays on the CALLER's side
+ * of the queue throughout this file, so a malformed request is refused
+ * immediately and never costs a queue slot or a task hop. */
+static esp_err_t do_add_network(const char *new_ssid, const char *password)
 {
-    if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (!password || password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (!s_wifi.started) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    char new_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
-    memcpy(new_ssid, ssid, ssid_len);
-    new_ssid[ssid_len] = '\0';
+    size_t password_len = strlen(password);
 
     /* Upsert by exact SSID match -- update the password in place if this
      * SSID is already saved, otherwise append a new entry. */
@@ -1207,25 +1511,46 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
     return ESP_OK;
 }
 
-esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const char *password,
-                                    size_t password_len)
-{
-    return wifi_prov_add_network(ssid, ssid_len, password, password_len);
-}
-
-esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
+esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *password,
+                                 size_t password_len)
 {
     if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (!password || password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
     }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    char target[WIFI_PROV_SSID_MAX_LEN + 1];
-    memcpy(target, ssid, ssid_len);
-    target[ssid_len] = '\0';
+    wifi_cmd_t cmd = { .type = CMD_ADD_NETWORK };
+    memcpy(cmd.args.add_network.ssid, ssid, ssid_len);
+    cmd.args.add_network.ssid[ssid_len] = '\0';
+    memcpy(cmd.args.add_network.password, password, password_len);
+    cmd.args.add_network.password[password_len] = '\0';
 
+    wifi_result_t r;
+    /* The generous wait matters most here: do_add_network() calls
+     * start_sta_join(), which re-runs the scan-based tie-break -- a real
+     * blocking scan -- before it returns. This producer's caller is either an
+     * HTTP handler or ui_page_network.c's connect_job_t worker task, both of
+     * which already blocked for exactly this work before Phase 4. */
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
+
+esp_err_t wifi_prov_set_credentials(const char *ssid, size_t ssid_len, const char *password,
+                                    size_t password_len)
+{
+    return wifi_prov_add_network(ssid, ssid_len, password, password_len);
+}
+
+/* Runs on owner_task(). */
+static esp_err_t do_forget_network(const char *target)
+{
     int idx = -1;
     for (uint8_t i = 0; i < s_wifi.saved_nets.count; i++) {
         if (strcmp(s_wifi.saved_nets.nets[i].ssid, target) == 0) {
@@ -1259,6 +1584,48 @@ esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
     return ESP_OK;
 }
 
+esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
+{
+    if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_cmd_t cmd = { .type = CMD_FORGET_NETWORK };
+    memcpy(cmd.args.forget_network.ssid, ssid, ssid_len);
+    cmd.args.forget_network.ssid[ssid_len] = '\0';
+
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
+
+/* Runs on owner_task(). Writes into the result slot rather than the caller's
+ * array -- the whole saved list is at most 8 SSIDs (264 bytes), so copying it
+ * twice is cheaper than the lifetime question a caller pointer would raise. */
+static esp_err_t do_get_saved_networks(size_t max_results, wifi_result_t *r)
+{
+    size_t n = s_wifi.saved_nets.count;
+    if (n > max_results) {
+        n = max_results;
+    }
+    if (n > WIFI_PROV_MAX_SAVED_NETWORKS) {
+        n = WIFI_PROV_MAX_SAVED_NETWORKS; /* defensive; count can never exceed this */
+    }
+    for (size_t i = 0; i < n; i++) {
+        strncpy(r->saved[i].ssid, s_wifi.saved_nets.nets[i].ssid, WIFI_PROV_SSID_MAX_LEN);
+        r->saved[i].ssid[WIFI_PROV_SSID_MAX_LEN] = '\0';
+        /* Password deliberately not copied out -- wifi_prov_saved_network_t
+         * has no field for it, by design; see the .h doc comment. */
+    }
+    r->saved_count = n;
+    return ESP_OK;
+}
+
 esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t max_results, size_t *out_count)
 {
     if (!out || max_results == 0 || !out_count) {
@@ -1269,25 +1636,22 @@ esp_err_t wifi_prov_get_saved_networks(wifi_prov_saved_network_t *out, size_t ma
         return ESP_ERR_INVALID_STATE;
     }
 
-    size_t n = s_wifi.saved_nets.count;
-    if (n > max_results) {
-        n = max_results;
+    wifi_cmd_t cmd = { .type = CMD_GET_SAVED_NETWORKS,
+                       .args.get_saved_networks = { .max_results = max_results } };
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
     }
-    for (size_t i = 0; i < n; i++) {
-        strncpy(out[i].ssid, s_wifi.saved_nets.nets[i].ssid, WIFI_PROV_SSID_MAX_LEN);
-        out[i].ssid[WIFI_PROV_SSID_MAX_LEN] = '\0';
-        /* Password deliberately not copied out -- wifi_prov_saved_network_t
-         * has no field for it, by design; see the .h doc comment. */
+    if (r.err == ESP_OK) {
+        memcpy(out, r.saved, r.saved_count * sizeof(*out));
+        *out_count = r.saved_count;
     }
-    *out_count = n;
-    return ESP_OK;
+    return r.err;
 }
 
-esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
+/* Runs on owner_task(). */
+static esp_err_t do_set_mode(wifi_prov_mode_t mode)
 {
-    if (!s_wifi.started) {
-        return ESP_ERR_INVALID_STATE;
-    }
     s_wifi.mode = mode;
     esp_err_t err = nvs_save_mode();
     if (err != ESP_OK) {
@@ -1319,20 +1683,26 @@ esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
     return ESP_OK;
 }
 
-esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
+esp_err_t wifi_prov_set_mode(wifi_prov_mode_t mode)
 {
-    if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
-        /* The AP always needs to be reachable by something -- an empty
-         * SSID isn't a valid "leave it alone" no-op here the way it can be
-         * for a station password (open network); refuse it outright. */
-        return ESP_ERR_INVALID_SIZE;
-    }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
+    wifi_cmd_t cmd = { .type = CMD_SET_MODE, .args.set_mode = { .mode = mode } };
+    wifi_result_t r;
+    /* Scan-length wait: the HOME branch of do_set_mode() calls
+     * start_sta_join(), which scans. */
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
 
-    memcpy(s_wifi.ap_ssid, ssid, ssid_len);
-    s_wifi.ap_ssid[ssid_len] = '\0';
+/* Runs on owner_task(). NUL-terminated, already length-validated. */
+static esp_err_t do_set_ap_ssid(const char *ssid)
+{
+    strncpy(s_wifi.ap_ssid, ssid, sizeof(s_wifi.ap_ssid) - 1);
+    s_wifi.ap_ssid[sizeof(s_wifi.ap_ssid) - 1] = '\0';
     s_wifi.has_ap_ssid_override = true;
 
     esp_err_t err = nvs_save_ap_ssid();
@@ -1360,26 +1730,37 @@ esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
     return ESP_OK;
 }
 
-esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
+esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
 {
-    if (!password || password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (password_len > 0 && password_len < 8) {
-        /* WPA2-PSK requires 8-63 chars; a non-empty password shorter than
-         * that can never work on real hardware, so refuse it outright here
-         * rather than silently falling back to an open AP the way a bad
-         * compile-time Kconfig default does in apply_ap_config() (there is
-         * no request to fail in that case, just a build to warn about). */
+    if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
+        /* The AP always needs to be reachable by something -- an empty
+         * SSID isn't a valid "leave it alone" no-op here the way it can be
+         * for a station password (open network); refuse it outright. */
         return ESP_ERR_INVALID_SIZE;
     }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    memcpy(s_wifi.ap_password, password, password_len);
-    s_wifi.ap_password[password_len] = '\0';
+    wifi_cmd_t cmd = { .type = CMD_SET_AP_SSID };
+    memcpy(cmd.args.set_ap_ssid.ssid, ssid, ssid_len);
+    cmd.args.set_ap_ssid.ssid[ssid_len] = '\0';
+
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
+
+/* Runs on owner_task(). NUL-terminated, already length-validated (including
+ * the 1-7 char WPA2-PSK refusal, which stays in the producer). */
+static esp_err_t do_set_ap_password(const char *password)
+{
+    strncpy(s_wifi.ap_password, password, sizeof(s_wifi.ap_password) - 1);
+    s_wifi.ap_password[sizeof(s_wifi.ap_password) - 1] = '\0';
     s_wifi.has_ap_password_override = true;
+    size_t password_len = strlen(s_wifi.ap_password);
 
     esp_err_t err = nvs_save_ap_password();
     if (err != ESP_OK) {
@@ -1406,18 +1787,46 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
     return ESP_OK;
 }
 
+esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
+{
+    if (!password || password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (password_len > 0 && password_len < 8) {
+        /* WPA2-PSK requires 8-63 chars; a non-empty password shorter than
+         * that can never work on real hardware, so refuse it outright here
+         * rather than silently falling back to an open AP the way a bad
+         * compile-time Kconfig default does in apply_ap_config() (there is
+         * no request to fail in that case, just a build to warn about). */
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_cmd_t cmd = { .type = CMD_SET_AP_PASSWORD };
+    memcpy(cmd.args.set_ap_password.password, password, password_len);
+    cmd.args.set_ap_password.password[password_len] = '\0';
+
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
+
 bool wifi_prov_is_sta_connected(void)
 {
+    /* Direct read, deliberately -- see wifi_prov.h's "readers that stay
+     * direct" note. One aligned enum word, single-instruction load. */
     return s_wifi.state == WIFI_PROV_STATE_CONNECTED;
 }
 
-esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap)
+/* Runs on owner_task(). Writes the dotted-quad into the result slot; the
+ * producer copies it out. */
+static esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r)
 {
-    if (!out || out_cap < 1) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    out[0] = '\0';
-    if (!s_wifi.started || s_wifi.state != WIFI_PROV_STATE_CONNECTED || !s_wifi.sta_netif) {
+    if (s_wifi.state != WIFI_PROV_STATE_CONNECTED || !s_wifi.sta_netif) {
         return ESP_ERR_INVALID_STATE;
     }
     esp_netif_ip_info_t ip_info;
@@ -1428,19 +1837,45 @@ esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap)
     if (out_cap < 16) {
         return ESP_ERR_INVALID_SIZE;
     }
-    esp_ip4addr_ntoa(&ip_info.ip, out, (uint32_t)out_cap);
+    esp_ip4addr_ntoa(&ip_info.ip, r->sta_ip, (uint32_t)sizeof(r->sta_ip));
     return ESP_OK;
 }
 
-esp_err_t wifi_prov_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count)
+esp_err_t wifi_prov_get_sta_ip(char *out, size_t out_cap)
 {
-    if (!results || max_results == 0 || !out_count) {
+    if (!out || out_cap < 1) {
         return ESP_ERR_INVALID_ARG;
     }
-    *out_count = 0;
+    out[0] = '\0';
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* Compound state (the state enum AND the netif handle AND a driver call
+     * that reads the netif's current lease), so this one goes through the
+     * queue even though it is nominally a getter -- the split rule stated in
+     * wifi_prov.h. */
+    wifi_cmd_t cmd = { .type = CMD_GET_STA_IP, .args.get_sta_ip = { .out_cap = out_cap } };
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (r.err == ESP_OK) {
+        strncpy(out, r.sta_ip, out_cap - 1);
+        out[out_cap - 1] = '\0';
+    }
+    return r.err;
+}
+
+/* Runs on owner_task() -- either drained from a CMD_SCAN posted by
+ * wifi_prov_scan() below, or called straight from
+ * select_and_apply_join_candidate()'s auto-join tie-break, which is already
+ * on this task. This is the blocking part: esp_wifi_scan_start(block=true).
+ * The `started` check lives in the producer; the AP-mode refusal stays here
+ * so the internal caller gets it too. */
+static esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count)
+{
+    *out_count = 0;
     if (s_wifi.mode == WIFI_PROV_MODE_AP) {
         /* AP mode means no station-radio activity at all, and a scan --
          * even though it never joins anything -- still means bringing the
@@ -1507,8 +1942,33 @@ esp_err_t wifi_prov_scan(wifi_prov_scan_result_t *results, size_t max_results, s
     return ESP_OK;
 }
 
+esp_err_t wifi_prov_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count)
+{
+    if (!results || max_results == 0 || !out_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_count = 0;
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_cmd_t cmd = { .type = CMD_SCAN, .args.scan = { .max_results = max_results } };
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_SCAN_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (r.err == ESP_OK && r.scan_count > 0) {
+        size_t n = r.scan_count > max_results ? max_results : r.scan_count;
+        memcpy(results, s_scan_stage, n * sizeof(*results));
+        *out_count = n;
+    }
+    return r.err;
+}
+
 int8_t wifi_prov_get_sta_rssi(void)
 {
+    /* Direct read, same reasoning as wifi_prov_is_sta_connected(): one bool,
+     * one enum word, one int8 -- see wifi_prov.h. */
     if (!s_wifi.started || s_wifi.state != WIFI_PROV_STATE_CONNECTED) {
         return -127; /* not connected */
     }
@@ -1534,4 +1994,85 @@ uint8_t wifi_prov_get_ap_client_count(void)
         return 0;
     }
     return (uint8_t)(sta_list.num > 255 ? 255 : sta_list.num); /* cap at uint8 */
+}
+
+/* ---- The owner task itself ---------------------------------------------
+ * The ONE task that ever writes s_wifi or calls esp_wifi_*() outside
+ * wifi_prov_start()'s synchronous bring-up. Blocks portMAX_DELAY on the queue:
+ * unlike relay_owner.c on the RP2040 side (whose bounded 200ms receive exists
+ * so its watchdog check-in and state tick still run on an idle queue), this
+ * task has no periodic duty of its own -- the two esp_timer callbacks provide
+ * the cadence by posting, which is exactly the same mechanism as any other
+ * command rather than a second path into the state. */
+static void owner_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        wifi_cmd_t cmd;
+        if (xQueueReceive(s_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        wifi_result_t local;
+        wifi_result_t *r = cmd.result ? cmd.result : &local;
+        memset(r, 0, sizeof(*r));
+        r->err = ESP_FAIL;
+
+        switch (cmd.type) {
+        case CMD_ADD_NETWORK:
+            r->err = do_add_network(cmd.args.add_network.ssid, cmd.args.add_network.password);
+            break;
+        case CMD_FORGET_NETWORK:
+            r->err = do_forget_network(cmd.args.forget_network.ssid);
+            break;
+        case CMD_GET_SAVED_NETWORKS:
+            r->err = do_get_saved_networks(cmd.args.get_saved_networks.max_results, r);
+            break;
+        case CMD_SET_MODE:
+            r->err = do_set_mode(cmd.args.set_mode.mode);
+            break;
+        case CMD_SET_AP_SSID:
+            r->err = do_set_ap_ssid(cmd.args.set_ap_ssid.ssid);
+            break;
+        case CMD_SET_AP_PASSWORD:
+            r->err = do_set_ap_password(cmd.args.set_ap_password.password);
+            break;
+        case CMD_GET_STA_IP:
+            r->err = do_get_sta_ip(cmd.args.get_sta_ip.out_cap, r);
+            break;
+        case CMD_SCAN: {
+            size_t max = cmd.args.scan.max_results > WIFI_OWNER_SCAN_STAGE_MAX
+                             ? WIFI_OWNER_SCAN_STAGE_MAX
+                             : cmd.args.scan.max_results;
+            r->err = do_scan(s_scan_stage, max, &r->scan_count);
+            break;
+        }
+
+        /* Fire-and-forget events -- cmd.result/cmd.done are NULL for these,
+         * so the r->err written above goes nowhere, on purpose. */
+        case CMD_EV_STA_START:
+            do_ev_sta_start();
+            break;
+        case CMD_EV_STA_DISCONNECTED:
+            do_ev_sta_disconnected();
+            break;
+        case CMD_EV_GOT_IP:
+            do_ev_got_ip();
+            break;
+        case CMD_TMR_AP_FALLBACK:
+            do_ap_fallback_tick();
+            break;
+        case CMD_TMR_RESCAN:
+            do_rescan_tick();
+            break;
+        }
+
+        if (cmd.done) {
+            /* Given LAST, after the result slot is fully written -- the
+             * producer is blocked on exactly this and reads *result the
+             * instant it is released. */
+            xSemaphoreGive(cmd.done);
+        }
+    }
 }
