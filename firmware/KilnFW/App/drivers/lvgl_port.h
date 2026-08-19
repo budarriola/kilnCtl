@@ -31,6 +31,8 @@
 #ifndef LVGL_PORT_H
 #define LVGL_PORT_H
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 #include "ILI9488.h"
@@ -70,6 +72,14 @@ void lvgl_port_get_last_raw_touch(uint16_t *raw_x, uint16_t *raw_y, uint16_t *z1
  * ui_page_touch_cal.c right after touch_cal_store_save() so a freshly
  * completed calibration takes effect immediately, no reboot needed. */
 void lvgl_port_reload_touch_cal(void);
+
+/* Ignores every touch while disabled -- kiln_ui.c wraps a page switch in
+ * this (disable, load + force a synchronous render/flush, re-enable) so a
+ * tap landing during the switch can't be read against the outgoing screen's
+ * stale layout and fire a click on whatever widget happens to occupy that
+ * same pixel on the incoming page. Only lvgl_port_task calls lv_*, so this
+ * is safe to call from an LV_EVENT_CLICKED handler (same task). */
+void lvgl_port_set_input_enabled(bool enabled);
 
 #ifdef __cplusplus
 }

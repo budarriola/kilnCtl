@@ -5,6 +5,9 @@
 
 #include "esp_log.h"
 #include "mdns.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "kiln_ui.h"
 #include "ui_theme.h"
@@ -71,6 +74,44 @@
 // budget (480x320 landscape -- see ui_page_home.c's header comment for that
 // number's derivation).
 //
+// 2026-08-19 freeze/back-button fix: two bugs reported from the bench.
+// (1) "No visible back button": this page's Back button was the last child
+// of the variable-height `content` column, same as every other page -- but
+// unlike those, this page's content is close enough to its no-scroll budget
+// (see the follow-up-pass note below, "~268px against ~264px, computed not
+// measured") that in the worst-case state (list block visible, one of
+// Scan/Saved populated) Back gets pushed past the bottom of the fixed-height
+// screen with page-level scrolling deliberately disabled -- there's no way
+// to reach it. Fixed by moving Back into the fixed-height title `bar`
+// instead of the variable-height `content` column: it's now always on
+// screen regardless of how tall the content below happens to be, and it
+// also gets content's budget back (one less 36-44px row to fit).
+// (2) "Freezes often": scan_btn_cb() used to call wifi_prov_scan() directly,
+// which calls esp_wifi_scan_start(..., block=true) -- a genuinely blocking
+// full-channel scan that wifi_prov.c's own header comment (see "CAUTION"
+// above wifi_prov_scan()'s definition) already flags as slow. Every lv_*
+// call in this whole firmware runs on the single lvgl_port_task
+// (lvgl_port.c's header comment), so blocking inside an LV_EVENT_CLICKED
+// handler blocks lv_timer_handler() itself -- no redraw, no flush, no touch
+// input, on ANY page, for however long the scan takes (can be seconds).
+// That is the freeze, not a data race in the usual sense (corrupted state) --
+// the whole UI task is simply not running. Fixed by moving the actual
+// wifi_prov_scan() call onto a short-lived worker task; scan_btn_cb only
+// starts it and returns immediately, and refresh_cb (already polled every
+// UI_PAGE_NETWORK_REFRESH_MS) picks up the result once the worker posts it.
+// A small mutex (s_scan_job.lock) guards the handoff since the worker task
+// and lvgl_port_task now genuinely run concurrently -- see scan_worker_task()
+// below.
+// Known, NOT fixed here: wifi_prov.c's own module state (s_wifi) has no
+// lock at all -- every wifi_prov_get_*() call this page makes from
+// lvgl_port_task races against the Wi-Fi driver's event-loop task, which is
+// the writer. Scalars mostly read/write atomically on this hardware, so
+// this has not been observed to corrupt anything, but it's not proven safe
+// either -- flagged as a real follow-up in TODO.md rather than silently
+// left unmentioned. Fixing it properly is a wifi_prov.c-wide change (every
+// getter and every event-handler write), out of scope for this pass, which
+// targets the one call site that reliably freezes the display.
+//
 // 2026-08-18 follow-up pass: the first no-scroll pass left Scan and Saved
 // Networks BOTH stacked at once (90px lists + titles + Scan button/status),
 // which measured out to ~300-350px on its own -- a real overflow even
@@ -84,13 +125,16 @@
 // internally touch-drag-scrollable at their fixed height (this is fine and
 // intended -- a bounded, self-contained list scrolling itself is not "the
 // page scrolling"; only page-level containers must stay fixed).
-// Worst case now: status_card(~40) + mode_row(44) + toggle_row(40) +
-// one list block (title ~18 + list 70 = ~88) + Back(36) = ~248px of content
-// plus ~20px of inter-item gaps ~= 268px against the ~264px budget --
-// close, and NOT verified against real hardware (no ILI9488 panel attached
-// in this environment); the connected-QR state is smaller still
-// (~40+44+~120 QR row+40 manage btn+36 back = ~280, also unverified). Flag
-// remains: this is careful arithmetic against ui_theme.h's real constants,
+// Worst case at the time, with Back still living at the bottom of
+// `content`: status_card(~40) + mode_row(44) + toggle_row(40) + one list
+// block (title ~18 + list 70 = ~88) + Back(36) = ~248px of content plus
+// ~20px of inter-item gaps ~= 268px against the ~264px budget -- already
+// over. The 2026-08-19 pass above moved Back into the fixed-height title
+// bar specifically because this arithmetic never had margin to spare;
+// content's worst case is now the same sum minus Back and its gap, ~228px,
+// with real margin against the ~264px budget for the first time. Still
+// NOT verified against real hardware (no ILI9488 panel attached in this
+// environment) -- this is arithmetic against ui_theme.h's real constants,
 // not a hardware-confirmed fit.
 static const char *TAG __attribute__((unused)) = "ui_page_network";
 
@@ -136,8 +180,103 @@ static bool s_manage_open = false;        /* connected-mode: list view vs QR vie
 /* Last wifi_prov_scan() results -- kept alive as long as s_scan_list's
  * buttons exist (their LV_EVENT_CLICKED user_data points into this array by
  * index), overwritten only by the next Scan tap, which also rebuilds the
- * list itself. */
+ * list itself. Only ever touched from lvgl_port_task (written by
+ * apply_scan_job_result(), read by scan_row_clicked_cb()) -- the worker task
+ * below writes into s_scan_job.results, a separate buffer, precisely so this
+ * one stays single-task-owned like every other LVGL-facing static here. */
 static wifi_prov_scan_result_t s_scan_results[UI_PAGE_NETWORK_SCAN_MAX];
+
+/* ---- Async scan job -- see this file's 2026-08-19 header comment ----
+ * scan_worker_task runs wifi_prov_scan() (a real blocking radio scan) off
+ * lvgl_port_task, so a Scan tap can no longer freeze the whole display.
+ * `lock` is the only thing shared between that task and lvgl_port_task;
+ * everything it guards is small and copied out promptly on either side. */
+typedef struct {
+    SemaphoreHandle_t lock; /* created once, first Scan tap */
+    bool busy;              /* worker task is running */
+    bool done;               /* worker finished, result below is ready to consume */
+    esp_err_t err;
+    size_t count;
+    wifi_prov_scan_result_t results[UI_PAGE_NETWORK_SCAN_MAX];
+} scan_job_t;
+
+static scan_job_t s_scan_job;
+
+static void scan_row_clicked_cb(lv_event_t *e);
+
+static void scan_worker_task(void *arg)
+{
+    (void)arg;
+    esp_err_t err;
+    size_t count = 0;
+    wifi_prov_scan_result_t results[UI_PAGE_NETWORK_SCAN_MAX];
+
+    err = wifi_prov_scan(results, UI_PAGE_NETWORK_SCAN_MAX, &count);
+
+    xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
+    s_scan_job.err = err;
+    s_scan_job.count = count;
+    memcpy(s_scan_job.results, results, count * sizeof(results[0]));
+    s_scan_job.done = true;
+    s_scan_job.busy = false;
+    xSemaphoreGive(s_scan_job.lock);
+
+    vTaskDelete(NULL);
+}
+
+/* Applies a completed scan_worker_task result to the visible list --
+ * called from refresh_cb() on lvgl_port_task once s_scan_job.done is seen,
+ * so every lv_* call here still obeys the single-task rule. */
+static void apply_scan_job_result(void)
+{
+    esp_err_t err;
+    size_t count;
+
+    xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
+    bool done = s_scan_job.done;
+    if (done) {
+        err = s_scan_job.err;
+        count = s_scan_job.count;
+        memcpy(s_scan_results, s_scan_job.results, count * sizeof(s_scan_results[0]));
+        s_scan_job.done = false;
+    }
+    xSemaphoreGive(s_scan_job.lock);
+    if (!done) return;
+
+    lv_obj_clean(s_scan_list);
+
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        lv_label_set_text(s_scan_status_label, "Scanning disabled in AP mode");
+        return;
+    }
+    if (err != ESP_OK) {
+        lv_label_set_text(s_scan_status_label, "Scan failed");
+        return;
+    }
+    if (count == 0) {
+        lv_label_set_text(s_scan_status_label, "No networks found");
+        return;
+    }
+
+    char status[32];
+    snprintf(status, sizeof(status), "%u network%s found", (unsigned)count, count == 1 ? "" : "s");
+    lv_label_set_text(s_scan_status_label, status);
+
+    for (size_t i = 0; i < count; i++) {
+        /* Explicit %.*s width (WIFI_PROV_SSID_MAX_LEN, the field's real max)
+         * rather than a bare %s -- GCC's -Wformat-truncation can't otherwise
+         * bound ssid's contribution and assumes worst-case, warning under
+         * -Werror even though the field is fixed-size (found building
+         * 2026-08-18). */
+        char text[WIFI_PROV_SSID_MAX_LEN + 16];
+        snprintf(text, sizeof(text), "%.*s%s  %d dBm", WIFI_PROV_SSID_MAX_LEN, s_scan_results[i].ssid,
+                 s_scan_results[i].secure ? " *" : "", (int)s_scan_results[i].rssi);
+        lv_obj_t *btn = lv_list_add_button(s_scan_list, NULL, text);
+        lv_obj_add_event_cb(btn, scan_row_clicked_cb, LV_EVENT_CLICKED, &s_scan_results[i]);
+        lv_obj_update_layout(btn);
+        ui_theme_apply_touch_area(btn, true);
+    }
+}
 
 /* ---- AP-mode section: identity display + AP-join QR ---- */
 static lv_obj_t *s_ap_section;
@@ -326,45 +465,38 @@ static void forget_row_clicked_cb(lv_event_t *e)
 static void scan_btn_cb(lv_event_t *e)
 {
     (void)e;
+
+    if (!s_scan_job.lock) {
+        s_scan_job.lock = xSemaphoreCreateMutex();
+        if (!s_scan_job.lock) {
+            lv_label_set_text(s_scan_status_label, "Scan failed to start");
+            return;
+        }
+    }
+
+    xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
+    bool already_busy = s_scan_job.busy;
+    if (!already_busy) {
+        s_scan_job.busy = true;
+        s_scan_job.done = false;
+    }
+    xSemaphoreGive(s_scan_job.lock);
+    if (already_busy) return; /* one scan at a time */
+
     lv_obj_clean(s_scan_list);
     lv_label_set_text(s_scan_status_label, "Scanning...");
 
-    size_t count = 0;
-    /* Same call scan_get_handler() makes -- TODO.md 10.1a. Blocking, runs on
-     * this (UI) task's stack -- wifi_prov_scan()'s own doc comment says
-     * this is expected for an HTTP-handler-style caller, and LVGL's timer
-     * task tick is the same kind of caller here. */
-    esp_err_t err = wifi_prov_scan(s_scan_results, UI_PAGE_NETWORK_SCAN_MAX, &count);
-    if (err == ESP_ERR_NOT_SUPPORTED) {
-        lv_label_set_text(s_scan_status_label, "Scanning disabled in AP mode");
-        return;
-    }
-    if (err != ESP_OK) {
-        lv_label_set_text(s_scan_status_label, "Scan failed");
-        return;
-    }
-    if (count == 0) {
-        lv_label_set_text(s_scan_status_label, "No networks found");
-        return;
-    }
-
-    char status[32];
-    snprintf(status, sizeof(status), "%u network%s found", (unsigned)count, count == 1 ? "" : "s");
-    lv_label_set_text(s_scan_status_label, status);
-
-    for (size_t i = 0; i < count; i++) {
-        /* Explicit %.*s width (WIFI_PROV_SSID_MAX_LEN, the field's real max)
-         * rather than a bare %s -- GCC's -Wformat-truncation can't otherwise
-         * bound ssid's contribution and assumes worst-case, warning under
-         * -Werror even though the field is fixed-size (found building
-         * 2026-08-18). */
-        char text[WIFI_PROV_SSID_MAX_LEN + 16];
-        snprintf(text, sizeof(text), "%.*s%s  %d dBm", WIFI_PROV_SSID_MAX_LEN, s_scan_results[i].ssid,
-                 s_scan_results[i].secure ? " *" : "", (int)s_scan_results[i].rssi);
-        lv_obj_t *btn = lv_list_add_button(s_scan_list, NULL, text);
-        lv_obj_add_event_cb(btn, scan_row_clicked_cb, LV_EVENT_CLICKED, &s_scan_results[i]);
-        lv_obj_update_layout(btn);
-        ui_theme_apply_touch_area(btn, true);
+    /* Same wifi_prov_scan() call scan_get_handler() makes -- TODO.md
+     * 10.1a -- but off lvgl_port_task now (see this file's 2026-08-19
+     * header comment): a blocking radio scan on the LVGL task freezes the
+     * whole display for however long it takes. apply_scan_job_result(),
+     * polled from refresh_cb(), picks the result up once it's ready. */
+    BaseType_t created = xTaskCreate(scan_worker_task, "wifi_scan_ui", 4096, NULL, 5, NULL);
+    if (created != pdPASS) {
+        xSemaphoreTake(s_scan_job.lock, portMAX_DELAY);
+        s_scan_job.busy = false;
+        xSemaphoreGive(s_scan_job.lock);
+        lv_label_set_text(s_scan_status_label, "Scan failed to start");
     }
 }
 
@@ -443,6 +575,8 @@ static void update_qr_if_changed(lv_obj_t *qr, char *last, size_t last_cap, cons
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    apply_scan_job_result();
 
     char status_buf[64];
     wifi_status_ui_get_text(status_buf, sizeof(status_buf));
@@ -686,6 +820,22 @@ lv_obj_t *ui_page_network_build(void)
     lv_label_set_text(title, "Network / Wi-Fi");
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
+    /* Back, in the fixed-height bar rather than at the bottom of the
+     * variable-height content column below -- see this file's 2026-08-19
+     * header comment. Always on screen regardless of how tall content gets. */
+    lv_obj_t *back = lv_button_create(bar);
+    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_STATUS_BAR_HEIGHT_PX);
+    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_align(back, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_t *back_label = lv_label_create(back);
+    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(back_label, "Back");
+    lv_obj_center(back_label);
+    lv_obj_update_layout(back);
+    ui_theme_apply_touch_area(back, false);
+
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_flex_grow(content, 1);
@@ -922,19 +1072,6 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_t *ap_qr_caption = lv_label_create(s_ap_section);
     lv_obj_set_style_text_color(ap_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(ap_qr_caption, "Scan to join from a phone");
-
-    /* Back. */
-    lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 36);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
 
     /* Connect modal -- built last so it's the topmost child in z-order
      * (LVGL's hit-test walks children highest-index-first, ui_theme.h's

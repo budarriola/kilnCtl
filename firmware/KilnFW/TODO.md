@@ -5087,3 +5087,80 @@ decode these frames", not "the ESP has ever received a real one."
       sec 9 item 0.9 both call for this, but the task this pass was scoped
       to (`dashboard_http.c`/`ui_page_safety.c`, the web/LCD half of 0.9)
       didn't extend to `uart_bridge.c`. A real follow-up, not forgotten.
+
+### 10.14 Command queue between every control surface and the tasks that own state (design only, not started)
+
+**2026-08-19, filed from a bench bug, not speculative.** `ui_page_network.c`
+froze the *entire* display (not just that page — every page's refresh timer,
+touch input, and flush all stopped) whenever the LCD's Scan button was tapped,
+because `scan_btn_cb()` called `wifi_prov_scan()` straight from
+`lvgl_port_task` — a blocking full-channel radio scan running on the one and
+only task that's allowed to call an `lv_*` function
+(`lvgl_port.c`/`kiln_ui.h`'s header comments). Fixed for that one call site
+this pass (moved the scan onto a short-lived worker task, handed the result
+back through a mutex-guarded `scan_job_t`, see `ui_page_network.c`'s
+2026-08-19 header comment) — but it's one instance of a pattern repeated
+everywhere a control surface calls straight into a driver/module function
+that isn't guaranteed fast: `mode_home_btn_cb()`/`mode_ap_btn_cb()` call
+`wifi_prov_set_mode()` (`esp_wifi_set_mode()`/`esp_wifi_start()`, not as slow
+as a scan but not proven bounded either), `connect_submit_cb()` calls
+`wifi_prov_add_network()`, and the same "interface task calls straight into
+an owning module" shape exists on the web side (`dashboard_http.c` and
+friends run handler bodies directly on the HTTP server task) and on the
+debug/PC-link side (`uart_bridge.c`'s command dispatch runs handler bodies
+directly on the UART task) — user's explicit ask, 2026-08-19: the debug UART
+path belongs in this same fix, not just LCD and web.
+
+**The shape this should take, once actually designed** (not decided yet —
+this bullet list is the scope, not the design): every control surface — LCD
+touch events, web HTTP handlers, and the debug/PC-link UART command
+dispatch — becomes a thin producer that posts a command (an enum + small
+payload, not a function pointer) onto a queue owned by whichever task
+actually owns the state being changed (`wifi_prov`'s own task once it has
+one, `profile_executor`, `relay_authority`, etc.), and returns immediately.
+The owning task drains its queue and does the real (possibly slow, possibly
+blocking) work on its own stack, at its own priority, without stalling
+whichever caller's task queued the request. This is the same shape
+`link_task.c`/`relay_owner.c` already use on the `SaftyFW` side
+(`ROADMAP.md`'s "Pico never blocks on the link" rules, cross-task
+notification via bounded queues) — a queue between UI-facing code and the
+task that owns hardware/state is not a new idea in this codebase, just not
+yet applied to `KilnFW`'s UI/HTTP/UART surfaces.
+
+**Explicitly not started.** This is a real architectural change (a new
+task-per-owned-module or a router onto existing ones, a command/result queue
+design, and touching every `*_http.c` handler, every LCD page's event
+callbacks, and `uart_bridge.c`'s dispatch), not a one-file patch — filed here
+per 10.1a's own precedent ("design only" sections wait for a real pass rather
+than being rushed into the bug-fix that surfaced them). The immediate freeze
+this pass fixes narrowly (async scan on `ui_page_network.c` alone) buys time,
+not closure.
+
+- [ ] Design the command/queue shape: what goes in a command (enum id + fixed
+      payload union, sized for the largest command so no allocation is
+      needed), which task(s) own which state, and whether `wifi_prov` needs
+      its own owning task (it doesn't have one today — see this file's
+      section 1 — everything currently runs on whichever caller's task
+      invoked it, which is exactly the bug)
+- [ ] LCD side: every `ui_page_*.c` `LV_EVENT_CLICKED` handler that currently
+      calls straight into a driver/module function (`wifi_prov_*`,
+      `profile_executor_*`, `relay_authority_*`, etc.) posts a command
+      instead and returns; `lvgl_port_task` never blocks on anything but
+      LVGL's own timer/render/flush work
+- [ ] Web side: `dashboard_http.c`/`zones_http.c`/`profiles_http.c`/
+      `rules_http.c`/`readiness_http.c`/`ota_http.c` handlers post commands
+      the same way rather than running the action inline on the HTTP
+      server's task — read-only `GET` handlers are lower risk (per 10.1a
+      they already go through shared getters) but action-taking `POST`
+      handlers have the same blocking-call exposure `ui_page_network.c` had
+- [ ] Debug/PC-link UART side (user's explicit ask, 2026-08-19):
+      `uart_bridge.c`'s command dispatch gets the same treatment — whatever
+      currently runs a handler body directly on the UART task posts a
+      command to the owning task instead, so a slow action requested over
+      the PC link can't stall UART framing/ACK timing the way a slow LCD tap
+      could stall the display
+- [ ] Once the shape is designed, `ui_page_network.c`'s ad hoc
+      `scan_job_t`/mutex/worker-task pattern from this pass is a candidate to
+      migrate onto the real mechanism rather than staying a one-off — flagged
+      here so it isn't forgotten as "already fixed, don't touch again" once
+      10.14 actually lands

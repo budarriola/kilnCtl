@@ -330,3 +330,10 @@ void lvgl_port_reload_touch_cal(void)
     touch_cal_store_load(&s_touch_cal);
     ESP_LOGI(TAG, "touch calibration reloaded: calibrated=%d", (int)s_touch_cal.calibrated);
 }
+
+void lvgl_port_set_input_enabled(bool enabled)
+{
+    if (s_port.lv_indev) {
+        lv_indev_enable(s_port.lv_indev, enabled);
+    }
+}

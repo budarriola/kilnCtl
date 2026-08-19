@@ -14,6 +14,7 @@
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
 #include "touch_cal_store.h"
+#include "lvgl_port.h"
 
 static const char *TAG = "kiln_ui";
 
@@ -139,16 +140,38 @@ esp_err_t kiln_ui_show(const char *name)
         return ESP_ERR_NOT_FOUND;
     }
 
+    /* Touch reports the physical panel is slow enough (ILI9488 blit is a
+     * blocking SPI transfer, see lvgl_port.c) that a tap landing right on a
+     * page switch reads against whichever screen is still on the glass at
+     * that instant -- sometimes the outgoing page's stale pixels under the
+     * incoming page's not-yet-drawn ones, sometimes a click firing on the
+     * new page's widget that happens to sit under the old page's button the
+     * user actually meant to press. Locking input for the duration of the
+     * switch and forcing the new screen to finish rendering and flushing
+     * before unlocking closes both: nothing is read as a touch until the
+     * page the user is looking at is actually the page on the glass. */
+    lvgl_port_set_input_enabled(false);
+
     if (!page->screen) {
         page->screen = page->build();
         if (!page->screen) {
             ESP_LOGE(TAG, "page \"%s\" build() returned NULL", page->name);
+            lvgl_port_set_input_enabled(true);
             return ESP_FAIL;
         }
     }
 
     lv_screen_load(page->screen);
     s_current_page_name = page->name;
+
+    /* lv_screen_load() only marks the new screen dirty -- normally the
+     * render+flush happens later in the same lv_timer_handler() call this
+     * runs inside of. Forcing it now, before input is re-enabled, is what
+     * makes the lock above actually cover "until fully loaded" rather than
+     * just "until lv_screen_load() returns". */
+    lv_refr_now(NULL);
+
+    lvgl_port_set_input_enabled(true);
     return ESP_OK;
 }
 
