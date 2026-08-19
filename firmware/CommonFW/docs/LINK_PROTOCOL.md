@@ -8,16 +8,27 @@
 > If it disagrees with the code, **the code wins** — fix this file and say so.
 > A completion checklist is at the bottom.
 >
-> **2026-08-18: two of the payload codecs described below now exist and are
-> host-tested** — `firmware/CommonFW/src/kilnlink_context.c` encodes/decodes
-> sec 4's `SAFETY_CMD_PUSH_CONTEXT` (0x07), and
-> `firmware/CommonFW/src/kilnlink_status.c` encodes/decodes sec 6's Frame A
-> `SAFETY_CMD_GET_STATUS` (0x01). See `firmware/CommonFW/README.md`'s
-> Completion checklist for exactly what is and isn't done — the rest of secs
-> 4 and 6 (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`, `SET_CLOCK`,
-> `ANNOUNCE_VERSION`, `DIAG`, `FW_VERSION`, `TRIP_EVENT`, `POWER`) still have
-> only the concrete layouts below, no codec yet. Nothing in this document is
-> wired into either firmware's runtime path.
+> **2026-08-19: every command in secs 4 and 6 with a concrete byte layout now
+> has a codec** — `kilnlink_context`, `kilnlink_announce`, `kilnlink_ceiling`,
+> `kilnlink_clear_trip`, `kilnlink_get_fw_version`, `kilnlink_set_clock`
+> (ESP→Pico), and `kilnlink_status`, `kilnlink_diag`, `kilnlink_trip`,
+> `kilnlink_power` (Pico→ESP). See `firmware/CommonFW/README.md`'s Completion
+> checklist for the file-by-file detail.
+>
+> **Some of these are now actually wired into runtime dispatch, not just
+> codec-only:** `SaftyFW`'s `link_task.c` decodes and acts on inbound
+> `ANNOUNCE_VERSION` (0x0F, via `kilnlink_announce_decode()`) and `CLEAR_TRIP`
+> (0x0A, via `kilnlink_clear_trip_decode()`, refusing when nothing is tripped
+> or when the wire `trip_mask` doesn't match the currently-latched one —
+> exactly the refusal logic this document's §4 `CLEAR_TRIP` entry describes).
+> `KilnFW`'s `safety_link.c` sends `ANNOUNCE_VERSION` via
+> `kilnlink_announce_encode()`. `SaftyFW`'s `link_task.c` also dispatches the
+> `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT` frames from
+> `UPDATE_PROTOCOL.md` §4 to `update_task.c`. **Still not wired anywhere:**
+> `SET_FIRING_CEILING`, `GET_FW_VERSION`, `SET_CLOCK` on the ESP send side,
+> and `KilnFW` has no `CLEAR_TRIP` send path yet (no GUI trigger built) — see
+> `firmware/CommonFW/README.md`'s checklist and this document's own §10 for
+> the itemised state of each frame.
 
 Implemented **once**, in [`../`](../README.md), and linked into both
 [`../../KilnFW`](../../KilnFW) and [`../../SaftyFW`](../../SaftyFW). Do not

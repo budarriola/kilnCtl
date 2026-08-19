@@ -566,8 +566,11 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       a dead link (`safety_update_health()`); `SaftyFW`'s `link_task.c` parses
       inbound `ANNOUNCE_VERSION`/`GET_FW_VERSION`, all inside the link task,
       never touching `safety_core.c` (`check_isolation.ps1` clean). Shared
-      `kilnlink_announce` codec added this pass (see M2); `KilnFW`/`SaftyFW`
-      still each hand-roll this frame rather than calling into it (M2 note)
+      `kilnlink_announce` codec added this pass (see M2). **2026-08-19:**
+      both firmwares now call into it — `SaftyFW`'s receive side onto
+      `kilnlink_announce_decode()`, `KilnFW`'s send side onto
+      `kilnlink_announce_encode()` — closing the hand-roll gap this bullet
+      used to note
 - [x] TX ring reserves capacity for telemetry; log frames dropped above the
       watermark and the drops counted (`log_task.c`'s 50% `LOG_TX_RESERVE_FRACTION`,
       landed 2026-08-17; the pure admit/drop decision was pulled out into

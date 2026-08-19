@@ -1,6 +1,6 @@
 # Firmware Architecture
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-19
 > **Keep this file current.** Task priorities, core affinity and the boot order
 > are safety properties, not implementation detail — if they change, this file
 > changes in the same commit. If it disagrees with the code, **the code wins.**
@@ -223,6 +223,17 @@ useful than older context.
 ## 5. Boot sequence
 
 Order matters; this one is chosen so that no failure can leave heat on.
+
+**Scope note:** this section describes the *application* boot sequence —
+what runs after `main()` starts. The RP2040 mask ROM has no UART bootloader,
+so a field update writes one (design frozen in [`BOOTLOADER.md`](BOOTLOADER.md):
+flash layout, metadata format, pubkey/signature reservation). That bootloader
+runs **before** any of the tasks or the layering in §2–§4 exist, and it is
+not itself one of the tasks in §3/§4's tables — it is a separate program,
+documented separately, not a component of the running application this file
+describes. §6b covers what the *application* must do to stay safe while an
+update to itself is in flight; the bootloader's own state machine is
+`BOOTLOADER.md`'s concern.
 
 ```
 1.  GPIO6 → output, driven LOW.        ← FIRST, before anything else

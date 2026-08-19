@@ -1,6 +1,6 @@
 # CommonFW — shared control-interface code
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-19
 > **Keep this file current.** If you change anything this document describes,
 > update it in the same commit. If it disagrees with the code, **the code
 > wins** — fix this file and say so in the commit message.
@@ -14,9 +14,16 @@ and linked into both.
 `pc_tools/src/kilnctrl/protocol.py` (the second, already-proven
 implementation of this exact envelope) via `test/vectors/frame_vectors.json`,
 consumed by both `test/test_frame.c` (built and passing with MSVC via CMake +
-Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Not yet
-integrated into either firmware** -- `KilnFW`'s `uart_protocol.c` still has
-its own copy, `SaftyFW` doesn't exist.
+Ninja, verified 2026-08-16) and `tools/PcTools/selfcheck.py`. **Framing is now
+integrated into both firmwares** (as of 2026-08-18): `KilnFW`'s
+`App/drivers/espInterfaces/uart_protocol.c` calls `kilnlink_crc16_ccitt_false`/
+`kilnlink_stuff` instead of its own copies, proven byte-identical against the
+pre-migration implementation (`test/test_uart_protocol_delegate.c`); `SaftyFW`
+now has a real CMake project (`firmware/SaftyFW/CMakeLists.txt`,
+`add_subdirectory(../CommonFW kilnlink)`) linking `kilnlink` into all three of
+its executables, and `link_task.c` calls into several of the payload codecs
+directly (see below). Payload-codec migration is still partial — see
+"2026-08-19" below and the Completion checklist's Migration section.
 
 **2026-08-19: every command/frame `docs/LINK_PROTOCOL.md` sections 4 and 6 give
 a concrete byte layout for now has a codec.** ESP→Pico (sec 4):
@@ -40,11 +47,21 @@ those vector manifests is also consumed by `tools/PcTools/selfcheck.py`
 `kilnctrl/kilnlink_codec.py`) -- not just `frame_vectors.json` as before.
 `kilnlink_codec.py` is encode-only: nothing in `pc_tools` decodes these
 frames yet, so there is no real caller to justify a decode side (see that
-module's own docstring). Nothing here is wired into either firmware's
-runtime path yet -- see Migration below. `KilnFW`'s `safety_link.c` already
-builds/parses the `ANNOUNCE_VERSION`-shaped frame inline and was not migrated
-onto the codec; the two implementations are independently correct (same
-layout, both host- and xtensa-gcc-verified) but not yet unified.
+module's own docstring). **Wiring status, same day (2026-08-19):** most of
+these codecs are still codec-only, not called from either firmware's real
+send/receive dispatch -- see Migration below -- but two are now genuine
+exceptions. `ANNOUNCE_VERSION` (0x0F) is wired on both ends:
+`SaftyFW`'s `link_task.c` decodes inbound frames via
+`kilnlink_announce_decode()`, and `KilnFW`'s `safety_link.c` builds outbound
+ones via `kilnlink_announce_encode()` (its `components/kilnlink/CMakeLists.txt`
+now compiles `kilnlink_announce.c` to make that possible -- still a subset of
+what `SaftyFW`'s CMake links, see the ESP-IDF component wrapper item below).
+`CLEAR_TRIP` (0x0A) is wired on the receive side only: `SaftyFW`'s
+`link_task.c` decodes it via `kilnlink_clear_trip_decode()` and enforces the
+refusal rules `docs/LINK_PROTOCOL.md` §4 describes (refuses if nothing is
+currently tripped, refuses if the wire `trip_mask` doesn't match the
+latched one); `KilnFW` has no send side for it yet -- no GUI trigger exists
+to call `kilnlink_clear_trip_encode()` from.
 
 ## Why this exists
 
@@ -71,18 +88,29 @@ firmware/CommonFW/
 │  └─ LINK_PROTOCOL.md             ← THE contract. Owned here, not by either firmware
 ├─ include/kilnlink/
 │  ├─ kilnlink_version.h           ← KILNLINK_PROTOCOL_VERSION, the single source
-│  ├─ kilnlink_ids.h               ← device ids, task ids, command ids, flag bits
+│  ├─ kilnlink_bytes.h             ← shared LE encode/decode helpers
 │  ├─ kilnlink_frame.h             ← delimiter/stuffing/CRC framing
-│  ├─ kilnlink_context.h           ← ESP → Pico context, ceiling, clear, version req, clock
-│  ├─ kilnlink_status.h            ← Pico → ESP status, diag, power, version, trip event
-│  └─ kilnlink_port.h              ← the (very small) set of things a port must supply
+│  ├─ kilnlink_context.h           ← ESP → Pico, SAFETY_CMD_PUSH_CONTEXT (0x07)
+│  ├─ kilnlink_announce.h          ← ESP → Pico, SAFETY_CMD_ANNOUNCE_VERSION (0x0F)
+│  ├─ kilnlink_ceiling.h           ← ESP → Pico, SAFETY_CMD_SET_FIRING_CEILING (0x09)
+│  ├─ kilnlink_clear_trip.h        ← ESP → Pico, SAFETY_CMD_CLEAR_TRIP (0x0A)
+│  ├─ kilnlink_get_fw_version.h    ← ESP → Pico, SAFETY_CMD_GET_FW_VERSION (0x0B)
+│  ├─ kilnlink_set_clock.h         ← ESP → Pico, SAFETY_CMD_SET_CLOCK (0x0C)
+│  ├─ kilnlink_status.h            ← Pico → ESP, Frame A, SAFETY_CMD_GET_STATUS (0x01)
+│  ├─ kilnlink_diag.h              ← Pico → ESP, Frame B, SAFETY_CMD_DIAG (0x08)
+│  ├─ kilnlink_trip.h              ← Pico → ESP, Frame D, SAFETY_CMD_TRIP_EVENT (0x0D)
+│  └─ kilnlink_power.h             ← Pico → ESP, Frame E, SAFETY_CMD_POWER (0x0E)
+│  (no `kilnlink_ids.h` or `kilnlink_port.h` yet — see the Completion checklist)
 ├─ src/
-│  ├─ kilnlink_crc.c
-│  ├─ kilnlink_frame.c
-│  ├─ kilnlink_context.c
-│  └─ kilnlink_status.c
+│  ├─ kilnlink_crc.c    kilnlink_frame.c     kilnlink_context.c
+│  ├─ kilnlink_announce.c  kilnlink_ceiling.c  kilnlink_clear_trip.c
+│  ├─ kilnlink_get_fw_version.c  kilnlink_set_clock.c
+│  └─ kilnlink_status.c  kilnlink_diag.c  kilnlink_trip.c  kilnlink_power.c
 ├─ test/
-│  ├─ test_frame.c  test_context.c  test_status.c  test_fuzz.c
+│  ├─ test_frame.c  test_fuzz.c  test_uart_protocol_delegate.c
+│  ├─ test_context.c  test_announce.c  test_ceiling.c  test_clear_trip.c
+│  ├─ test_get_fw_version.c  test_set_clock.c
+│  ├─ test_status.c  test_diag.c  test_trip.c  test_power.c
 │  └─ vectors/                     ← shared byte-exact test vectors, see below
 └─ CMakeLists.txt
 ```
@@ -203,30 +231,34 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       `kilnlink_context.h`/`kilnlink_status.h` added 2026-08-18, see Codecs.
       `kilnlink_ids.h` still not created, see Contract)
 - [x] `CMakeLists.txt` producing a `kilnlink` target consumable by pico-sdk
-      (standard `add_library` + `target_include_directories`; not yet actually
-      linked into a pico-sdk build since `SaftyFW` has no CMake project yet)
+      (standard `add_library` + `target_include_directories`). **Now actually
+      linked into a pico-sdk build**: `firmware/SaftyFW/CMakeLists.txt` has
+      `add_subdirectory(../CommonFW kilnlink)` and links it into all three of
+      `SaftyFW`'s executables (`SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB`)
 - [x] ESP-IDF component wrapper in `firmware/KilnFW/components/kilnlink/`
       (2026-08-16). Auto-discovered under `firmware/KilnFW/components/` —
       ESP-IDF's default search path, no `EXTRA_COMPONENT_DIRS` edit needed.
-      `App/drivers/CMakeLists.txt` lists it in `REQUIRES` purely so
-      `idf.py build` compiles it; nothing calls it yet (see Migration)
-- [~] Builds clean under xtensa-gcc, arm-none-eabi-gcc and MSVC at `-Wall -Wextra -Werror`.
-      **MSVC verified** (cl.exe via CMake+Ninja, `/W4 /WX`) and **xtensa-gcc
-      verified** (`idf.py -C firmware/KilnFW build`, both 2026-08-16 — object
-      files land in `build/esp-idf/kilnlink/`, and since nothing references
-      the symbols yet, the linker's `--gc-sections` strips them from the
-      final binary: `KilnCtrl.bin` size is byte-identical to the
-      pre-`kilnlink` build, confirming zero behavioral impact from adding
-      the component). arm-none-eabi-gcc (pico-sdk) not yet tried — `SaftyFW`
-      has no CMake project to build it against yet
+      `App/drivers/CMakeLists.txt` lists it in `REQUIRES` so `idf.py build`
+      compiles it. Framing is now called from `uart_protocol.c` and
+      `kilnlink_announce` from `safety_link.c` (see Migration); it still
+      compiles only a subset of the codecs `SaftyFW`'s CMake links
+      (`kilnlink_crc.c`, `kilnlink_frame.c`, `kilnlink_context.c`,
+      `kilnlink_announce.c` — added 2026-08-19 — not the rest)
+- [x] Builds clean under xtensa-gcc, arm-none-eabi-gcc and MSVC at `-Wall -Wextra -Werror`.
+      **MSVC verified** (cl.exe via CMake+Ninja, `/W4 /WX`), **xtensa-gcc
+      verified** (`idf.py -C firmware/KilnFW build`, real callers now exist so
+      nothing is stripped by `--gc-sections`), and **arm-none-eabi-gcc
+      verified**: `SaftyFW`'s real CMake project (`add_subdirectory(../CommonFW
+      kilnlink)`) builds `kilnlink` clean into all three of its executables
 
 **Contract**
 - [x] `docs/LINK_PROTOCOL.md` moved here from `firmware/SaftyFW/docs/` and cross-links updated
       (already done before this session — confirmed 2026-08-16, no stale
       duplicate remains under `firmware/SaftyFW/docs/`)
 - [x] `kilnlink_version.h` created (2026-08-16); `KilnFW`'s `UART_PROTOCOL_VERSION`
-      **not yet** aliased to it — that's a change to already-shipped `KilnFW`
-      code, left for the actual migration step below
+      (`App/drivers/uart_task_ids.h`) is now `((uint16_t)KILNLINK_PROTOCOL_VERSION)`,
+      a real alias rather than a second number — both it and
+      `KILNLINK_MIN_COMPATIBLE` are 5
 - [ ] `kilnlink_ids.h` — shared ids split out of `uart_task_ids.h`, PC-link ids left behind
 
 **Codecs**
@@ -291,10 +323,32 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       code ever needs deeper scrutiny
 
 **Migration**
-- [ ] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`
-- [ ] Round-trip proven against the *pre-refactor* implementation's output before old code is deleted
-- [ ] `SaftyFW` linking `kilnlink` with no duplicated protocol code
-- [ ] `grep` check in CI: no CRC or stuffing implementation outside `CommonFW`
+- [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`
+      (2026-08-18): `App/drivers/espInterfaces/uart_protocol.c` calls
+      `kilnlink_crc16_ccitt_false`/`kilnlink_stuff` instead of its own copies.
+      `firmware/UnitTestFw`'s fork is a stale mirror, not migrated, and stays
+      on the CI grep's allowlist below
+- [x] Round-trip proven against the *pre-refactor* implementation's output before old code is deleted
+      (`test/test_uart_protocol_delegate.c`, known vectors + 528 fuzz cases)
+- [x] `SaftyFW` linking `kilnlink` with no duplicated protocol code —
+      `firmware/SaftyFW/CMakeLists.txt` has a real
+      `add_subdirectory(../CommonFW kilnlink)` and links `kilnlink` into all
+      three of its executables (`SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB`);
+      `link_task.c` calls into the framing layer plus the
+      `diag`/`trip`/`power`/`clear_trip`/`announce` codecs
+- [x] `grep` check in CI: no CRC or stuffing implementation outside `CommonFW`
+      (`tools/check_no_duplicate_crc.ps1`, 2026-08-18) — not registered in any
+      CI pipeline yet (none exists for it to join), and scoped to an explicit
+      allowlist of the pre-migration copies still in the tree (`KilnFW`'s
+      `uart_protocol.c` mirror under `UnitTestFw`, `pc_tools`' `protocol.py`
+      mirror)
+- [ ] Payload codecs (`context`/`ceiling`/`get_fw_version`/`set_clock`/
+      `status`/`diag`/`trip`/`power`) wired into either firmware's real
+      send/receive dispatch — most are still codec-only. `announce` and
+      `clear_trip` are partial exceptions: `announce` is wired both ways,
+      `clear_trip` is wired receive-only (`SaftyFW`'s `link_task.c`) with no
+      `KilnFW` send side yet. See the 2026-08-19 note above for the exact
+      state of each
 
 ## Related
 

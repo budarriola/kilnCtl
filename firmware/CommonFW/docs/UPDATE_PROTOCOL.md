@@ -7,7 +7,21 @@
 > `UPDATE_STATUS` handling, `POST /api/ota/pico`) landed the same day —
 > host-build-verified only, RP2040 receive side (SaftyFW) was already frozen
 > before this pass and untouched by it. Sections 2, 5, 6 are still planning
-> only. · **Last reviewed:** 2026-08-17
+> only. · **Last reviewed:** 2026-08-19
+>
+> **2026-08-19: the transfer path structurally exists end-to-end and does not
+> touch relay/heating state**, confirmed by code inspection (`git show
+> a7a5653`): `SaftyFW`'s `link_task.c` dispatches inbound
+> `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/`UPDATE_ABORT` to `update_task.c`
+> (`update_task_gather_preconditions()` only *reads*
+> `safety_core_get_output_status()`/`thermo_task_get_snapshot()` to gate
+> `UPDATE_BEGIN`, never writes a relay/GPIO), and `KilnFW`'s
+> `ota_pico_relay.c` has no references to `relay_authority`, `kiln_io_owner`,
+> or any relay/GPIO symbol. Section 1's invariant — the Pico enforces its own
+> relay-open/no-trip-pending/temperature-ceiling preconditions rather than
+> trusting the ESP — holds by inspection. **Not yet exercised on physical
+> hardware**, and the interlock table, authentication, and version-mismatch
+> checks in sections 1–2 remain unbuilt as described below.
 >
 > **Section 4 deviations from this doc's prose, resolved in code (code wins,
 > fix the doc — see this note):**

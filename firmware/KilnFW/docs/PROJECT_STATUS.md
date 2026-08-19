@@ -987,3 +987,114 @@ code:
   `idf.py -C firmware/KilnFW build` clean. **Not flashed, not exercised on
   hardware** — no thermocouple/relay hardware attached to observe an
   override actually change what trips a real firing.
+
+## 2026-08-19 update — single-writer ownership tasks, and the PC-link UART found dead
+
+**New bench fact that changes how to read almost every "verified" claim
+above and below: the PC↔ESP command UART link was found dead this
+session.** This is a *different* break from the already-known Pi↔ESP
+safety-link fault (ROADMAP.md M0) — it is the USB-serial link `pc_tools`/MCP
+use for THERMO/IO/DISPLAY/SAFETY/SYSTEM commands and for the console log
+tee. With the board present, powered, and answering fine over JTAG/OpenOCD
+(chip examines, halts, reports PC normally), every UART command
+(`get_fw_version`, `gpio_probe_read_all`, etc.) timed out with "no reply
+after all retries," even after `disconnect`/`connect` and a JTAG
+`reset(run)`. See `ROADMAP.md` M1 for the bench log. Practical effect: this
+session could build, flash, and boot-smoke-test firmware, but could not
+exercise almost anything over the wire — no console log, no
+`get_fw_version`, no live Wi-Fi status, no THERMO/IO round-trip. Read every
+"flashed" claim below as build-verified plus, at most, a JTAG-observed
+liveness check — not as a UART-confirmed round-trip, regardless of how
+earlier entries in this file used that word.
+
+Also true this session, restated because it changes what "not built" means
+for the thermocouple driver work: **the MAX31856 thermocouple ICs are
+physically not connected** on this bench unit (the daughterboard itself,
+not just the main board) — a narrower and more specific fact than "no
+thermocouple hardware attached," since even a bus without conversions would
+exercise the SPI transaction path differently than a bus with nothing on
+it at all.
+
+**Four pieces of ownership/single-writer architecture landed
+(`firmware/KilnFW/TODO.md` section 10.14, all four phases, commits
+`6aa4adf`/`ea3dbc8`/`1a36155`/`35fcbf2`):**
+
+- **`kiln_io_owner.c`/`.h` (built, Phase 1, commit `6aa4adf`)** — a single
+  task + bounded queue (depth 8) now owns every relay/digital-IO/raw-SX1509
+  write and read. This replaces three previously uncoordinated writers
+  (`uart_bridge.c`'s `io_bridge_task`, `dashboard_http.c`'s
+  `dashboard_set_relay()`, and — found mid-implementation — the
+  `profile_executor.c` control loop and `autotune_engine.c` writing relay
+  state directly) and centralizes a safety/ownership gate that used to be
+  duplicated independently in two places. `idf.py build` clean. **Not
+  hardware-verified**: no board was attached when this landed, and even now
+  the dead PC-link UART blocks confirming SET_RELAY from all three surfaces
+  concurrently or measuring the added queue-hop latency against a real
+  firing.
+- **`thermo_owner.c`/`.h` (built, Phase 2, commit `ea3dbc8`)** — same shape,
+  a single task + bounded queue owning every `MAX31856_*` config/read/write
+  call, migrated off `uart_bridge.c`'s `thermo_bridge_task` and
+  `safety_link.c`'s context-frame builder. Explicitly **not** a bug fix the
+  way Phase 1 was — `MAX31856.c`'s per-channel lock already serialized
+  multi-transfer sequences, so this is architectural consistency (one
+  owning task per hardware subsystem) and a choke point for later
+  system-mode gating. **Not hardware-verified, and cannot be from this
+  bench even later**: the thermocouple daughterboard is physically
+  disconnected, so every channel is expected to fail its own bring-up
+  regardless of this change — the owner's fail-closed behavior on a
+  missing channel is reasoned about, not observed.
+- **Phase 3 (`profile_executor` command queue) — deliberately skipped, not
+  built.** Reviewed and rejected: all four of `run()`/`halt()`/`pause()`/
+  `resume()` already wrap their bodies in a single mutex
+  (`s_exec.lock`), which is a correct mutex-guarded API with no
+  Phase-1-style lost-update bug to fix. Converting a safety-critical state
+  machine to a drop-on-full-queue command path would trade a well-understood
+  failure mode (caller waits) for a worse one (command silently dropped),
+  for no safety gain. Recorded as a decision, not deferred work — revisit
+  only if a later system-mode gate genuinely needs a choke point here.
+- **`wifi_prov.c`'s owning task (built, Phase 4, commit `1a36155`)** — the
+  riskiest phase, done last per the approved plan. Closes a real bug: `s_wifi`
+  previously had zero locking across four independent writers (the Wi-Fi
+  driver's own event-loop task, the esp_timer service task, `lvgl_port_task`
+  via `ui_page_network.c`, and esp_http_server's worker via
+  `wifi_provision_http.c`). Every public `wifi_prov_*()` entry point now
+  posts to a bounded queue drained by one new owner task; every signature is
+  unchanged, so no caller module needed editing. The Wi-Fi driver's and
+  timers' own callbacks (`on_wifi_event`/`on_ip_event`/
+  `ap_fallback_timer_cb`/`rescan_timer_cb`) are also rerouted through the
+  same queue as fire-and-forget posts — the part that makes this materially
+  riskier than "add a queue in front of an existing task," since it touches
+  the Wi-Fi stack's own event delivery.
+  **Verification reached, and its real limit, stated plainly**: `idf.py
+  build` clean; flashed over JTAG/OpenOCD (bootloader + partition table +
+  app all **verified OK**); the board **boots and stays running** —
+  confirmed by a subsequent OpenOCD resume reporting the core running
+  freely (not halted in a panic), and the one boot log line that did arrive
+  (an unrelated, pre-existing IDF warning) never repeated, which a
+  crash/reboot loop would have made it do. **That is the entire extent of
+  verification.** No actual Wi-Fi behavior was observed — not the owner
+  task announcing itself, not an AP coming up, not a station join — because
+  the console log and `wifi_get_status` both depend on the same dead PC-link
+  UART described above. This is boot-smoke-tested, not Wi-Fi-verified;
+  treat it as **built**, not **hardware-verified**, until the UART link is
+  fixed and a real status/log round-trip is observed.
+- **`safety_link.c`'s `ANNOUNCE_VERSION` migrated onto the shared
+  `kilnlink_announce` codec (built, commit `35fcbf2`)** — the send side
+  (`safety_build_announce_version_payload()`) now calls
+  `kilnlink_announce_encode()` instead of hand-writing the byte layout;
+  same fields, same burst cadence. `firmware/KilnFW/components/kilnlink/CMakeLists.txt`
+  now also compiles `kilnlink_announce.c`. `idf.py build` verified. The
+  receive side (`safety_parse_fw_version()`) stays hand-rolled on purpose —
+  it parses the Pico's distinct `FW_VERSION` (`0x0B`) frame, not an inbound
+  `ANNOUNCE_VERSION`, so the codec's fixed layout doesn't apply there. Not
+  independently hardware-verified beyond the existing build/host-test
+  coverage this bullet inherits from — no Pico exists on this bench to
+  receive a real frame (ROADMAP.md M0).
+
+**Net effect on this file's own claims**: none of the four items above
+were previously mentioned in this doc at all — the "Done and verified"
+section above predates all of them (last entry 2026-08-16). None reaches
+**hardware-verified** by this doc's convention; Phases 1–2 and the codec
+migration are **built** only (compiles clean, not exercised on real
+silicon), and Phase 4 is the sole exception that gets a genuine **partial**
+hardware data point (boots and stays running) short of full verification.

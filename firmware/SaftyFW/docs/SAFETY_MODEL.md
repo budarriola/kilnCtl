@@ -1,6 +1,6 @@
 # Safety Model
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-19
 > **Keep this file current.** If a guard, threshold or policy changes, update it
 > in the same commit as the code. If this file and the code disagree, **the code
 > wins** — fix this file and say so in the commit message. A completion
@@ -680,11 +680,35 @@ The rules governing it are short and absolute:
 latched — it is advisory and the Pico's interlocks always win, which
 `firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
 
-**Clearing requires a deliberate operator act**: an explicit clear command over
-the link, or an E-stop assert-then-release cycle (a physical action, at the
+**Clearing requires a deliberate operator act**: `SAFETY_CMD_CLEAR_TRIP` (0x0A)
+over the link, or an E-stop assert-then-release cycle (a physical action, at the
 machine, by someone who has looked at the kiln). A clear is refused while the
 tripping condition is still true — otherwise "clear" becomes a way to spam past
 a real fault.
+
+`CLEAR_TRIP` is code-complete on both sides of the check as of 2026-08-19:
+`link_task.c` decodes the frame, refuses locally (never calling into
+`safety_core`) if nothing is latched or if the wire `trip_mask` doesn't match
+the currently-latched reason, and otherwise calls
+`safety_core_request_clear_trip()`, which wraps the pure `safety_guards_try_clear()`
+below. Host-tested only — **the Pi↔ESP link is bench-confirmed dead this
+session**, and a separate PC↔ESP UART fault was found this session too, so the
+frame has never crossed real wire.
+
+**`safety_guards_try_clear()` has a documented, intentional scope limit.** It
+resets guard state and immediately re-evaluates one tick against fresh input,
+refusing the clear only if that single retick re-trips. That catches
+**unwindowed** guards reliably (S7 E-stop, S6a `mainFault`, S6b's hard
+backstop) — if the condition is still true, the very next tick trips again.
+It does **not** reliably catch a still-present condition on a **windowed /
+graduated** guard (S1, S2, S3, S5, S9, S11, S12, S13): the clear call resets
+the same elapsed-time accumulator the guard needs to re-arm, so one retick
+sees an empty window and reports healthy. The condition is not missed
+forever — the guard re-trips on its own normal timescale once the window
+rebuilds — but the clear is not an *instant* refusal for those guards the way
+it is for the unwindowed ones. This is a stated design trade-off, not a gap
+left silent: rejecting every clear until a full window re-accumulates would
+make `CLEAR_TRIP` effectively unusable for any graduated guard.
 
 **Power-on state is de-energized.** K4 is off before `main()` runs, on every
 reset, watchdog or otherwise. Heating is permitted only after every task has

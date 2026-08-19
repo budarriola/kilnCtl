@@ -6,16 +6,21 @@ safety-UART pins, `CommonFW`, and the safety-liveness gate on heating — are
 sequenced there and tracked in [`../SaftyFW/TODO.md`](../SaftyFW/TODO.md).
 
 Planning doc; sections 1 and 4 (Wi-Fi provisioning/network settings) are
-implemented and hardware-verified as of 2026-08-10, everything else below is
-still unbuilt. Only the bare ESP32-S3 board is wired up so far (no
-thermocouple daughterboard, relays, display, or safety RP2040), which is why
-Wi-Fi — the one piece needing no other hardware — went first. Captures the
-feature request as itemized work so it can be scoped and sequenced before any
-code is written. Cross-references `docs/SAFETY_MODEL.md` and
-`docs/PROJECT_STATUS.md` throughout, since the profile-execution engine this
-introduces is a **new actor that commands relays** and must go through the
-same safety-wins gate as the existing PC/MCP link — not a parallel path
-that bypasses it.
+implemented and hardware-verified as of 2026-08-10. Section 10.14 (command
+queue architecture for control surfaces) — Phases 1 (`kiln_io_owner`), 2
+(`thermo_owner`), and 4 (`wifi_prov` owning task) — completed 2026-08-19;
+Phase 3 deliberately skipped (documented decision). **Critical caveat on
+Phase 4 verification**: the PC↔ESP UART link is physically broken in this
+environment (separate from known Pi↔ESP break), so Wi-Fi behavior was NOT
+observed; Phase 4 booted successfully but needs real Wi-Fi hardware testing
+before shipping. Only the bare ESP32-S3 board is wired up so far (no
+thermocouple daughterboard, relays, display, or safety RP2040). Everything
+else below is still unbuilt. Captures the feature request as itemized work so
+it can be scoped and sequenced before any code is written. Cross-references
+`docs/SAFETY_MODEL.md` and `docs/PROJECT_STATUS.md` throughout, since the
+profile-execution engine this introduces is a **new actor that commands relays**
+and must go through the same safety-wins gate as the existing PC/MCP link —
+not a parallel path that bypasses it.
 
 ## 0. Architecture decisions to make before writing code
 
