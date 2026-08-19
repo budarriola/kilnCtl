@@ -901,11 +901,14 @@ path. Two facts set the shape of this milestone:
       `192.168.4.1`; an explicit `host` always wins). Request construction /
       HMAC signing / response parsing unit-tested against mocked HTTP
       (`tools/PcTools/tests/test_ota_http_client.py`, 15 tests, no live
-      board). **Real gap, surfaced honestly rather than papered over**:
-      `ota_status()` can only report the Pico relay's progress
-      (`GET /api/ota/pico/status`) — there is no HTTP route for the ESP
-      self-update's own progress counter or the persisted `ota_record` "last
-      update" blob, both of which exist only as in-process C getters today.
+      board). **2026-08-19, later pass — the gap closed**:
+      `GET /api/ota/esp/status` added (`ota_http.c`), reporting the ESP
+      self-update's own phase/percent and the persisted `ota_record` "last
+      update" blob via a new `ota_record_load()` getter (previously only
+      `ota_record_append()` existed). `ota_http_client.py` gained
+      `get_esp_status()`; `mcp__kilnctrl__ota_status()` now polls and reports
+      both routes independently. `idf.py -C firmware/KilnFW build` clean;
+      19/19 `test_ota_http_client.py` tests pass (mocked HTTP).
       **Not yet exercised against a physical board** — no hardware attached
       in this pass's environment; live-board verification (real interlock
       refusals, real lockout, a real Pico relay) is still outstanding.
