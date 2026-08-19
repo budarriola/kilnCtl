@@ -509,6 +509,20 @@
 #define SAFETY_CMD_FW_VERSION      0x0Bu
 #define SAFETY_CMD_ANNOUNCE_VERSION 0x0Fu
 
+/* ESP->Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- the GUI's path to
+ * acknowledging a Pico-latched trip. Same value as kilnlink_clear_trip.h's
+ * KILNLINK_CLEAR_TRIP_CMD, defined again here for the same "one place every
+ * subcommand on this wire is enumerated" reason SAFETY_CMD_PUSH_CONTEXT is;
+ * safety_link.c's safety_link_send_clear_trip() encodes the payload through
+ * that shared codec, not by hand.
+ *
+ * Doubles, additively, as the PC->ESP subcommand a future pc_tools MCP tool
+ * can send on UART_TASK_ID_SAFETY (mirroring SAFETY_CMD_REQUEST_ENABLE's own
+ * PC->ESP use above) -- no arguments: the ESP derives trip_mask itself from
+ * its own cached Pico DIAG state rather than trusting one supplied over the
+ * PC link, see safety_link_send_clear_trip()'s doc comment for why. */
+#define SAFETY_CMD_CLEAR_TRIP 0x0Au
+
 /* Pico -> ESP telemetry, Frame B (CommonFW/docs/LINK_PROTOCOL.md sec 6):
  * "Everything the 23-byte [status] frame has no room for" -- trip/warn
  * masks, boot reason, context-frame health counters, the Pico's own

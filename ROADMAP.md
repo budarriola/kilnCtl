@@ -388,6 +388,31 @@ physically stop a kiln, and the first that can nuisance-trip one.
       never been exercised over real wire — this is build- and
       host-test-verified only. This closes the milestone's remaining gap;
       see `firmware/SaftyFW/TODO.md` Phase 7 for the item this checks off.
+      **2026-08-19, later pass — `KilnFW` send side added**: the Pico half
+      above had no ESP-side caller, so a latched trip was clearable only over
+      SWD. `App/drivers/safety_link.c` gained `safety_link_send_clear_trip()`
+      (fire-and-forget BROADCAST, `kilnlink_clear_trip_encode()`, added to
+      `components/kilnlink/CMakeLists.txt`'s SRCS): derives `trip_mask` from
+      its own cached DIAG (Frame B) state — `cached.diag_trip_mask`, the same
+      field `link_frame_trip_mask_for_reason()` synthesizes on the Pico side
+      — rather than trusting a caller-supplied value, and refuses locally
+      (no send) when no DIAG frame has ever arrived, the cached DIAG is
+      stale beyond `SAFETY_LINK_STALE_MS`, or `diag_state` isn't
+      `TRIPPED`. Surfaced two ways: `POST /api/safety/clear_trip`
+      (`dashboard_http.c`) for the web dashboard, and a new
+      `SAFETY_CMD_CLEAR_TRIP` (0x0A) PC→ESP subcommand on the existing
+      `UART_TASK_ID_SAFETY` bridge (`uart_bridge.c`) for a future pc_tools
+      MCP tool, both taking no arguments for the same "ESP derives the mask
+      itself" reason. LCD surface deliberately skipped: `ui_page_safety.c`'s
+      own header comment already declares its ~264px no-scroll budget full
+      ("the only new row that fit... a diagnostics page is the better home"),
+      so a "Clear trip" button was left as remaining work rather than
+      breaking that budget. `idf.py -C firmware/KilnFW build` clean under
+      `-Werror`; flashed and verified booting via JTAG/OpenOCD
+      (`mcp__kilnctrl__flash_firmware`). **Still not command-level
+      verified**: the PC↔ESP UART is dead on this bench (same known issue
+      noted above), so neither the HTTP endpoint nor the new UART subcommand
+      has been exercised against a running Pico — build/flash-verified only.
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
 - [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
       — 2026-08-19: §2's host provocation table audited row by row; two real

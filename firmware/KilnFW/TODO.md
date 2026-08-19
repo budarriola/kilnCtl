@@ -197,6 +197,17 @@ isn't covered by Dashboard/Profiles/Settings/Network today:
   data is the `TRIP_EVENT` frame from `LINK_PROTOCOL.md` sec 6, which M5
   hasn't shipped yet — **blocked on M5**, page only worth building once
   trip events actually arrive over the link rather than being another stub.
+  **2026-08-19: the explicit "clear trip" send path itself is now built**
+  (`safety_link_send_clear_trip()` in `App/drivers/safety_link.c`, `POST
+  /api/safety/clear_trip` in `dashboard_http.c`, `SAFETY_CMD_CLEAR_TRIP`
+  0x0A on the PC-facing `UART_TASK_ID_SAFETY` bridge in `uart_bridge.c` —
+  see ROADMAP.md's M4 trip-latch bullet for the full design). What remains
+  for *this page* is unchanged: a dedicated Safety/Alarm page with trip
+  state + history + a "Clear trip" button is still blocked on M5's
+  `TRIP_EVENT` history; `ui_page_safety.c` today only has room (its own
+  ~264px no-scroll budget) for the single latest-trip row it already
+  shows, not a button, so the LCD surface for this action is still
+  outstanding.
 - **Diagnostics / System info page.** Both processors' firmware versions
   (`GET_FW_VERSION`/`ANNOUNCE_VERSION`, sec 4/6), safety-link stats
   (`safety_get_link_stats`-equivalent: uptime, RX/TX counts, last-seen age),

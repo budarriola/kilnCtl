@@ -1,5 +1,6 @@
 #include "safety_link.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <string.h>
 
@@ -11,6 +12,7 @@
 #include "uart_task_ids.h"
 
 #include "kilnlink/kilnlink_announce.h"
+#include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -1485,6 +1487,62 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
     }
     safety_unlock(link);
     return ESP_OK;
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_CLEAR_TRIP (0x0A) -- see
+ * safety_link.h's doc comment for the full design rationale (staleness
+ * bound, why the mask is derived rather than caller-supplied, why a resend
+ * after conditions change is safe). This function only does the local
+ * fail-closed checks and the encode/send; the actual clear/refuse policy is
+ * entirely SaftyFW's (link_task_handle_clear_trip(), read-only reference). */
+esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    bool diag_known = link->cached.diag_ever_received;
+    uint16_t trip_mask = link->cached.diag_trip_mask;
+    uint8_t diag_state = link->cached.diag_state;
+    uint32_t diag_age_ms = diag_known ? safety_elapsed_ms(link->cached_tick) : 0;
+    safety_unlock(link);
+
+    if (!diag_known) {
+        ESP_LOGW(TAG, "clear_trip: refused locally, no DIAG frame ever received");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (diag_age_ms > SAFETY_LINK_STALE_MS) {
+        ESP_LOGW(TAG, "clear_trip: refused locally, cached DIAG is %" PRIu32
+                       "ms old (stale beyond %ums)",
+                 diag_age_ms, SAFETY_LINK_STALE_MS);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
+        ESP_LOGW(TAG, "clear_trip: refused locally, nothing currently latched (diag_state=%u)",
+                 diag_state);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_clear_trip_t msg = { .trip_mask = trip_mask };
+    uint8_t payload[KILNLINK_CLEAR_TRIP_LEN];
+    kilnlink_clear_trip_status_t status = KILNLINK_CLEAR_TRIP_OK;
+    size_t len = kilnlink_clear_trip_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "clear_trip: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "clear_trip: sending, trip_mask=0x%04X", trip_mask);
+    /* Same (dst_device, dst_task, src_task) triple as ANNOUNCE_VERSION's own
+     * broadcast call site above -- fire-and-forget, no ACK expected
+     * (link_task_handle_clear_trip() never replies on the wire). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
 }
 
 esp_err_t safety_link_send_update_frame(SafetyLinkClass *link, const uint8_t *payload, size_t length)

@@ -732,6 +732,50 @@ esp_err_t safety_link_send_update_frame(SafetyLinkClass *link, const uint8_t *pa
 esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_update_status_t *out,
                                          uint32_t *out_age_ms);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_CLEAR_TRIP (0x0A) -- the
+ * GUI's path to acknowledging a Pico-latched trip (the only other path is
+ * the physical E-stop assert/release cycle, SaftyFW/docs/SAFETY_MODEL.md
+ * sec 6). Fire-and-forget BROADCAST, same as ANNOUNCE_VERSION/PUSH_CONTEXT:
+ * the Pico's link_task.c never ACKs CLEAR_TRIP on the wire (see that file's
+ * link_task_handle_clear_trip()), so there is no reply to wait for here --
+ * success is observed by the caller polling safety_link_get_status() and
+ * watching diag_trip_reason / diag_state fall back to "not tripped" on a
+ * later DIAG (Frame B) frame, exactly like every other outcome-via-telemetry
+ * pattern this driver already uses (REQUEST_ENABLE's own doc comment above).
+ *
+ * The `trip_mask` this sends is NOT a caller-supplied value: it is derived
+ * from this driver's own cached DIAG state (cached.diag_trip_mask), the same
+ * field the Pico's Frame B already reports and the *only* place this ESP
+ * ever learns what the Pico currently has latched. This matters because
+ * link_frame_trip_mask_for_reason() on the Pico side (SaftyFW's link_frame.c,
+ * read-only reference) is exactly the function that produced that mask in
+ * the first place -- echoing the cached value back is guaranteed to match
+ * whatever the Pico is still comparing against, whereas anything computed
+ * independently on this side could drift.
+ *
+ * Refuses locally (returns ESP_ERR_INVALID_STATE, logs why, sends nothing)
+ * when:
+ *   - no DIAG frame has ever been received (cached.diag_ever_received false)
+ *     -- nothing is known to be latched, so there is nothing to echo back;
+ *   - the cached DIAG data is stale beyond SAFETY_LINK_STALE_MS -- sending a
+ *     mask that might no longer describe what the Pico has latched risks
+ *     exactly the "stale clear matches a *different*, newer trip" case the
+ *     mask-echo check exists to prevent (LINK_PROTOCOL.md's own words);
+ *   - cached.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED -- nothing is
+ *     currently latched to clear (the Pico would refuse anyway, but failing
+ *     closed here means the operator gets an explanation immediately instead
+ *     of after a round trip to a Pico that may not even be listening).
+ * A resend after conditions changed (a second, different trip latched, or
+ * the original trip cleared on its own) is safe to attempt again: the Pico's
+ * own mask check is idempotent and simply refuses the mismatch, which is the
+ * designed protection -- this local check is an operator-friendliness
+ * shortcut, not the safety boundary. Returns ESP_ERR_INVALID_STATE if the
+ * driver isn't initialized, ESP_OK once the broadcast has been handed to the
+ * UART (not proof of Pico acceptance). Safe to call from any task (HTTP
+ * handler, UART bridge, LVGL callback) -- broadcasts never block beyond
+ * handing bytes to the UART, same as safety_link_send_update_frame(). */
+esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link);
+
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded
  * in the bridge. `out` must have room for SAFETY_LINK_STATUS_PAYLOAD_LEN /

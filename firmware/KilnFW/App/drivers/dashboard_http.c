@@ -780,6 +780,41 @@ static esp_err_t profile_exec_ack_last_run_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_CLEAR_TRIP (0x0A) --
+ * the GUI's path to acknowledging a Pico-latched trip. No body: the ESP
+ * derives trip_mask itself from its own cached Pico DIAG state rather than
+ * trusting a value supplied by the browser -- see
+ * safety_link_send_clear_trip()'s doc comment in safety_link.h for the full
+ * design (staleness bound, why a resend after conditions change is still
+ * safe). Refusal reasons are reported honestly rather than folded into a
+ * generic error, same convention as profile_exec_pause/resume above: an
+ * operator staring at "refused" with no reason is an operator who reaches
+ * for SWD. Success here only means the broadcast was handed to the UART --
+ * it is not proof the Pico accepted it; the caller must watch the next
+ * /api/status poll for the trip to actually clear, same as everywhere else
+ * this driver observes Pico state via telemetry rather than an ACK. */
+static esp_err_t safety_clear_trip_post_handler(httpd_req_t *req)
+{
+    if (!s_dash.safety) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "safety link not wired up");
+        return ESP_OK;
+    }
+
+    esp_err_t err = safety_link_send_clear_trip(s_dash.safety);
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"error\":\"no trip currently latched, or Pico diagnostics are stale\"}");
+    }
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"send failed\"}");
+    }
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 static const char *autotune_state_name(autotune_engine_state_t s)
 {
     switch (s) {
@@ -1131,6 +1166,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t control_status_uri = {
         .uri = "/api/control", .method = HTTP_GET, .handler = control_status_get_handler,
     };
+    static const httpd_uri_t safety_clear_trip_uri = {
+        .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
+    };
     static const httpd_uri_t history_csv_uri = {
         .uri = "/api/history.csv", .method = HTTP_GET, .handler = history_csv_get_handler,
     };
@@ -1192,6 +1230,10 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/profile_exec/ack_last_run) failed: %s",
                  esp_err_to_name(err));
         return err;
+    }
+    err = httpd_register_uri_handler(server, &safety_clear_trip_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/safety/clear_trip) failed: %s", esp_err_to_name(err));
     }
     err = httpd_register_uri_handler(server, &control_status_uri);
     if (err != ESP_OK) {

@@ -1332,6 +1332,16 @@ static void safety_bridge_task(void *arg)
                 err = safety_link_set_poll_period(ctx->link, bridge_u16_le(&msg.payload[1]));
                 break;
             }
+            case SAFETY_CMD_CLEAR_TRIP: {
+                /* No args: the ESP derives trip_mask itself from its own
+                 * cached Pico DIAG state rather than trusting one supplied
+                 * over the PC link -- see safety_link_send_clear_trip()'s
+                 * doc comment. Fire-and-forget broadcast to the Pico, same
+                 * as PING; the PC observes the outcome via the next
+                 * GET_STATUS/GET_LINK_STATS poll, not an ACK from here. */
+                err = safety_link_send_clear_trip(ctx->link);
+                break;
+            }
             case SAFETY_CMD_SET_FAULT_OUT: {
                 /* A truncated SET_FAULT_OUT must never be guessed at: byte1
                  * decides whether the isolated fault line into the safety
