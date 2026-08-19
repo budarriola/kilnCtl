@@ -826,14 +826,23 @@ path. Two facts set the shape of this milestone:
       set `sig_required` with no signature). Host tests (459/459) and a real
       arm-none-eabi-gcc/pico-sdk bootloader build both pass clean. Not
       flashed or hardware-verified — no RP2040/probe attached here.
-- [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
+- [~] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
       mode over UART1 with no timeout out of it — **substantially built and
       host-build-verified** (GPIO6-first, per-boot CRC, `boot_attempts`
-      fallback, and a beacon-only recovery mode all exist in
-      `bootloader/main.c`; see `SaftyFW/TODO.md` items 10.3–10.5). Stays
-      unchecked because recovery mode is beacon-only (no `UPDATE_*` frame
-      handling yet) and nothing has been flashed or verified over SWD on
-      physical hardware — see `BOOTLOADER.md`'s status header for the exact
+      fallback all exist in `bootloader/main.c`; see `SaftyFW/TODO.md` items
+      10.3–10.5). **2026-08-19, later pass — recovery mode now real, not
+      beacon-only**: new `recovery_update.{c,h}` runs a no-RTOS polling loop
+      parsing kilnlink-framed `UPDATE_BEGIN`/`DATA`/`END`/`ABORT` over UART1
+      and streaming the image into the inactive flash slot, reusing the same
+      host-tested decision modules (`update_receiver`/`image_header`/
+      `received_ranges`) and flash-write pattern the application-side
+      `update_task.c` already uses; `persist.{c,h}` extracts one shared
+      metadata writer for both the boot path and `UPDATE_END`. GPIO6 stays
+      latched low throughout, no timeout out of the loop. Build clean
+      (`-Werror`), 459/459 host tests unaffected (no new pure logic — I/O
+      glue around already-tested modules). Still `[~]`, not `[x]`: nothing
+      flashed or verified over SWD, no real peer has sent a frame over a live
+      UART1 link — see `BOOTLOADER.md`'s status header for the exact
       boundary.
 - [x] **Mutual protocol-version check** (lands with M5, gates this): each side
       verifies the other, a mismatch blocks heating on the ESP
