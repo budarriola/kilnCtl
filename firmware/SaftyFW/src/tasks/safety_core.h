@@ -68,6 +68,23 @@ void safety_core_get_output_status(bool *out_relay_energized, bool *out_heating_
 void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_active,
                                   uint8_t *out_diag_state);
 
+// Explicit operator-acknowledged clear -- the only way out of a latched trip
+// (SAFETY_MODEL.md section 2). Re-evaluates against a fresh input snapshot
+// before honoring the clear (safety_guards_try_clear(), see its own doc
+// comment in safety_guards.h for exactly what this does and does not catch
+// -- in short, an unwindowed guard like S7/S6a/S6b's hard backstop is caught
+// reliably if still active, a graduated guard like S1/S2/S3/S5/S9/S11/S12/S13
+// is not guaranteed to retrip on this single retick even if its underlying
+// condition persists). Returns true if the trip is now clear (or was already
+// not tripped), false if the clear was refused because the guard retripped.
+//
+// NOT YET CALLED FROM ANYWHERE in this build -- same honesty as
+// relay_owner_clear_trip()'s own header comment: the real trigger is Phase
+// 7's link_task CLEAR_TRIP (0x0A) command from the ESP/GUI, which does not
+// exist yet. This function is the policy/API half of that; wiring an actual
+// caller is a separate, later pass.
+bool safety_core_request_clear_trip(void);
+
 #ifdef __cplusplus
 }
 #endif

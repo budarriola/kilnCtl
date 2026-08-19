@@ -1303,6 +1303,90 @@ static void test_s6_s13_split(void)
     }
 }
 
+/* ROADMAP.md M4: "Trip latches; clearing requires an explicit command."
+ * safety_guards_try_clear() is the retick-and-refuse-if-still-tripping half
+ * of that policy (safety_guards.h's own doc comment on it spells out
+ * exactly what it does and does not catch). These tests exercise it
+ * directly, as a pure function, same as every other test in this file. */
+static void test_try_clear(void)
+{
+    TEST_SECTION("safety_guards_try_clear -- refuse a clear while still tripping");
+
+    /* E-stop still pressed at clear time: the retick immediately re-trips
+     * S7 (unwindowed, single-tick condition), so the clear is refused. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t pressed = base_input();
+        pressed.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &pressed);
+        TEST_CHECK(s.is_tripped, "sanity: S7 tripped");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &pressed);
+        TEST_CHECK(!cleared, "E-stop still pressed: try_clear refuses");
+        TEST_CHECK(s.is_tripped, "refused clear: state is re-tripped, is_tripped true");
+        TEST_CHECK(s.reason == SAFETY_TRIP_ESTOP, "refused clear: reason is SAFETY_TRIP_ESTOP");
+    }
+
+    /* E-stop released before the clear attempt: the retick sees a safe
+     * input, does not retrip, and the clear holds. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t pressed = base_input();
+        pressed.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &pressed);
+        TEST_CHECK(s.is_tripped, "sanity: S7 tripped");
+
+        safety_guard_input_t released = base_input();
+        released.estop_pressed = false;
+        bool cleared = safety_guards_try_clear(&s, &cfg, &released);
+        TEST_CHECK(cleared, "E-stop released: try_clear succeeds");
+        TEST_CHECK(!s.is_tripped, "successful clear: is_tripped false");
+    }
+
+    /* A graduated guard (S1, 3-tick over-ceiling streak) still physically
+     * over-ceiling at clear time: this is the documented scope limit, not a
+     * bug. safety_guards_clear() (inside try_clear) resets
+     * s1_over_ceiling_streak to 0 along with everything else, so the single
+     * retick only brings the streak to 1 -- nowhere near
+     * S1_OVER_CEILING_STREAK_TO_TRIP (3) -- and try_clear reports success
+     * even though the underlying condition (reading still above the
+     * ceiling) has not gone away. S1 is not broken by this: left running,
+     * it will re-trip on its own normal timescale (3 more consecutive
+     * over-ceiling ticks) once safety_core keeps calling safety_guards_tick()
+     * afterward. This test documents that real, limited behaviour rather
+     * than asserting a stronger guarantee try_clear does not provide. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t over = base_input();
+        over.tc_c = 1400.0f; /* above abs_max_temp_c (1300) */
+        for (int i = 0; i < 3; i++) safety_guards_tick(&s, &cfg, &over);
+        TEST_CHECK(s.is_tripped, "sanity: S1 tripped via 3 consecutive over-ceiling readings");
+        TEST_CHECK(s.reason == SAFETY_TRIP_OVERTEMP, "sanity: reason is SAFETY_TRIP_OVERTEMP");
+
+        /* Still over-ceiling at clear time. */
+        bool cleared = safety_guards_try_clear(&s, &cfg, &over);
+        TEST_CHECK(cleared, "scope limit: a single retick does not rebuild S1's 3-tick streak, clear holds");
+        TEST_CHECK(!s.is_tripped, "scope limit: is_tripped is false right after the clear, even though still over-ceiling");
+        TEST_CHECK(s.s1_over_ceiling_streak == 1, "scope limit: the retick brought the streak to exactly 1, not 3");
+
+        /* Left running against the same still-over-ceiling input, S1 does
+         * its job and re-trips on its own timescale -- proving this is a
+         * scope limit of try_clear's single retick, not a hole in S1
+         * itself. */
+        bool retripped = false;
+        for (int i = 0; i < 2 && !retripped; i++) {
+            retripped = safety_guards_tick(&s, &cfg, &over);
+        }
+        TEST_CHECK(retripped, "S1 re-trips on its own normal timescale once the streak rebuilds");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -1318,4 +1402,5 @@ void run_test_safety_guards(void)
     test_s13();
     test_s6_s13_split();
     test_independence_invariant();
+    test_try_clear();
 }

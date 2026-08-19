@@ -42,6 +42,13 @@ void safety_guards_clear(safety_guard_state_t *state)
     safety_guards_reset(state);
 }
 
+bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
+                              const safety_guard_input_t *in)
+{
+    safety_guards_clear(state);
+    return !safety_guards_tick(state, cfg, in);
+}
+
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
     state->is_tripped = true;

@@ -258,8 +258,38 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
 Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 5. First milestone that can
 physically stop a kiln, and the first that can nuisance-trip one.
 
-- [ ] Relay owner task is the only writer of GPIO6
-- [ ] Trip latches; clearing requires an explicit command
+- [x] Relay owner task is the only writer of GPIO6 (already true, ROADMAP just
+      hadn't been ticked — confirmed 2026-08-19 by grepping the whole tree:
+      `firmware/SaftyFW/src/tasks/relay_owner.c`'s three `gpio_put` call
+      sites and `main.c`'s one-time pre-scheduler safe-state drive are the
+      only two writers anywhere; `safety_core.c` only ever calls
+      `relay_owner_command_trip()`, never touches the pin)
+- [~] Trip latches; clearing requires an explicit command (2026-08-19). The
+      latch itself already worked (`relay_owner_command_trip()` de-energizes
+      + latches TRIPPED atomically, refuses `energize` while tripped). What
+      was missing: `relay_owner_clear_trip()` existed but cleared
+      **unconditionally** and had zero callers anywhere — "refused while the
+      tripping condition is still true" (`SAFETY_MODEL.md` sec 6) was
+      unenforced. Added `safety_guards_try_clear()` (pure function,
+      `safety_guards.c`/`.h`): resets guard state, immediately re-evaluates
+      one tick against fresh input, refuses (leaves state re-tripped) if
+      that retick re-trips. **Honest scope limit, stated in its own doc
+      comment and exercised by a host test**: this reliably catches
+      unwindowed guards (S7 estop, S6a mainFault, S6b's hard backstop) still
+      active at clear time, but a graduated/windowed guard (S1/S2/S3/S5/S9/
+      S11/S12/S13) has its elapsed-time accumulator reset by the same clear,
+      so a single retick will not necessarily catch a still-present
+      condition — it re-trips on its own normal timescale instead, which is
+      not a safety hole, just not an *instant* refusal for those guards.
+      `safety_core.c` gained `safety_core_request_clear_trip()` wiring this
+      into relay_owner. Host-tested: 391/391 checks pass
+      (`test/build_host_tests.ps1`), including new cases for the estop
+      refuse/succeed paths and the documented S1 scope-limit behavior. Real
+      `cmake --build` for the RP2040 target (`SaftyFW`/`_slotA`/`_slotB`)
+      succeeds clean. **Still open**: `safety_core_request_clear_trip()` has
+      no caller yet — the real trigger is Phase 7's link_task `CLEAR_TRIP`
+      (0x0A) command from the ESP/GUI, which doesn't exist yet. This closes
+      the policy/API half, not the end-to-end wiring.
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
 - [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
 

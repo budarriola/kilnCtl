@@ -406,13 +406,30 @@ header comment, so the build is reproducible elsewhere.
       refused (returns `false`, no-op) while `TRIPPED`; `safety_core.c`
       calls `relay_owner_command_trip()` then `boot_reason_latch_trip()` on
       a new `safety_guards_tick()` trip, matching `SAFETY_MODEL.md` section
-      6's 4-step order. **"Clear refused while the condition still holds"
-      is NOT built** — `relay_owner_clear_trip()` exists and unconditionally
-      transitions `TRIPPED` -> `ARMED` if called, but nothing calls it yet
-      (that enforcement needs a caller with guard state to re-check against,
-      e.g. `safety_core.c` re-running `safety_guards_tick()` before honouring
-      a clear request — Phase 7's link_task/GUI clear-command job). Marked
-      partial rather than checked for that reason.
+      6's 4-step order. **2026-08-19: "clear refused while the condition
+      still holds" now has a real implementation**, though still not a
+      real caller. `safety_guards_try_clear()` (`safety_guards.c`/`.h`,
+      pure function) resets guard state then immediately re-evaluates one
+      tick against fresh input, refusing (leaving state re-tripped) if that
+      retick re-trips. `safety_core.c` gained `safety_core_request_clear_trip()`
+      wrapping it and calling `relay_owner_clear_trip()` only when the
+      retick holds. **Documented scope limit, not a gap left silent**: this
+      reliably catches unwindowed guards (S7 estop, S6a mainFault, S6b's
+      hard backstop) still active at clear time, but every graduated/
+      windowed guard (S1/S2/S3/S5/S9/S11/S12/S13) has its elapsed-time
+      accumulator reset by the same clear call, so a single retick won't
+      necessarily catch a still-present condition for those — it re-trips
+      on its own normal timescale instead once the window rebuilds, which
+      is not a safety hole, just not an *instant* refusal for graduated
+      guards specifically. Host-tested (`test_safety_guards.c`'s new
+      `test_try_clear()`, 3 cases: estop-still-pressed refused,
+      estop-released succeeds, S1's documented scope-limit behavior with a
+      follow-up proving it still re-trips normally): 391/391 checks pass.
+      Real `cmake --build` for `SaftyFW`/`_slotA`/`_slotB` succeeds clean.
+      **Still not checked off**: `safety_core_request_clear_trip()` has no
+      caller anywhere in this build — the real trigger is Phase 7's
+      link_task/GUI `CLEAR_TRIP` (0x0A) command, which doesn't exist yet.
+      This pass closes the policy/API half only.
 - [x] GRACE → ARMED state machine, `startup_grace_s` = 60 s. Built
       2026-08-16 in `src/tasks/relay_owner.c`: the GRACE timer starts the
       instant `relay_owner_task()` itself begins running (a judgement call —

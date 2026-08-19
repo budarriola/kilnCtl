@@ -404,6 +404,26 @@ void safety_guards_clear(safety_guard_state_t *state);
 bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                          const safety_guard_input_t *in);
 
+// Attempts to clear a latched trip: resets guard state (safety_guards_clear),
+// then immediately re-evaluates one tick against `in` (the caller's current
+// input). If that re-evaluation retrips within this single tick, the clear
+// is refused -- `state` is left freshly re-tripped (is_tripped=true, reason
+// set, exactly as if safety_guards_tick() had just been called fresh) and
+// this returns false. Otherwise the clear holds and this returns true.
+//
+// Honest limitation, read before calling this expecting more than it gives:
+// only guards whose trip condition fires from a single tick's raw input with
+// no accumulation window (S6a mainFault, S7 estop, S6b's hard backstop tier)
+// are guaranteed to be caught here if their triggering condition is still
+// present. Every graduated/windowed guard (S1/S2/S3/S5/S9/S11/S12/S13) has
+// its elapsed-time accumulator reset to zero by safety_guards_clear() along
+// with everything else -- if the underlying condition is still present, it
+// will re-trip again once its window re-accumulates on its own normal
+// timescale, not necessarily on this exact call. That is not a safety hole
+// (the guard still does its job), it is a scope limit of THIS function.
+bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
+                              const safety_guard_input_t *in);
+
 #ifdef __cplusplus
 }
 #endif
