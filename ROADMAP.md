@@ -159,8 +159,10 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       tried under pico-sdk/arm-none-eabi-gcc**, since `SaftyFW` has no CMake
       project; **not yet actually called** by `uart_protocol.c`
 - [x] `KILNLINK_PROTOCOL_VERSION` the single source (2026-08-16); `KilnFW`'s
-      `UART_PROTOCOL_VERSION` **not yet** switched to alias it — that edit
-      belongs with the migration item below, not before it
+      `UART_PROTOCOL_VERSION` (`App/drivers/uart_task_ids.h`) is now
+      `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, a real alias rather than a
+      second number, and both `KILNLINK_PROTOCOL_VERSION` and
+      `KILNLINK_MIN_COMPATIBLE` are 5 in `kilnlink_version.h`
 - [~] Codecs pure and bounds-checked; host tests and `test/vectors/` — **the
       framing layer (`kilnlink_frame`/`kilnlink_crc`) and two of the payload
       codecs are done** (2026-08-18): `kilnlink_context.{c,h}` (ESP→Pico
@@ -169,10 +171,20 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       `SAFETY_CMD_GET_STATUS` 0x01, sec 6, the existing 23-byte layout). Host
       tests (`test_context.c`, `test_status.c`) and byte-exact vectors
       (`test/vectors/context_vectors.json`, `status_vectors.json`) pass under
-      MSVC+CMake+Ninja. **Still not done**: sec 4's other ESP→Pico commands
-      (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`, `SET_CLOCK`,
-      `ANNOUNCE_VERSION`) and sec 6's other Pico→ESP frames (`DIAG`,
-      `FW_VERSION`, `TRIP_EVENT`, `POWER`) -- their layouts are concrete in
+      MSVC+CMake+Ninja. **2026-08-18, later same day**: `kilnlink_announce.{c,h}`
+      added (ESP→Pico `SAFETY_CMD_ANNOUNCE_VERSION` 0x0F, sec 4/the
+      compatibility-floor layout shared with Frame C) with host tests
+      (`test_announce.c`) and byte-exact vectors (`test/vectors/announce_vectors.json`);
+      `test_announce` passes under MSVC+CMake+Ninja alongside the other five
+      host tests. **Note:** `KilnFW`'s `safety_link.c` already builds/parses
+      this exact frame inline (see `KilnFW/TODO.md` 9.0 below) and was not
+      migrated onto this codec in this pass -- the two implementations are
+      independently correct (same field layout, both host- and
+      xtensa-gcc-verified) but not yet unified; that consolidation is a
+      follow-on, not a functional gap. **Still not done**: sec 4's other
+      ESP→Pico commands (`SET_FIRING_CEILING`, `CLEAR_TRIP`, `GET_FW_VERSION`,
+      `SET_CLOCK`) and sec 6's other Pico→ESP frames (`DIAG`, `FW_VERSION`,
+      `TRIP_EVENT`, `POWER`) -- their layouts are concrete in
       `LINK_PROTOCOL.md` too but weren't coded this pass. Not wired into
       either firmware yet (`uart_protocol.c`/`SaftyFW` migration is a
       separate item below)
@@ -261,8 +273,16 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 - [ ] ESP → Pico context frames, including `relay_recent_mask`
 - [ ] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power
 - [ ] Pico never blocks on the link — all five no-wait rules honoured
-- [ ] Mutual version handshake: `ANNOUNCE_VERSION` both ways, `min_compatible`
-      checked in both directions, compatibility floor reserved at ids `0x00`–`0x0F`
+- [x] Mutual version handshake: `ANNOUNCE_VERSION` both ways, `min_compatible`
+      checked in both directions, compatibility floor reserved at ids `0x00`–`0x0F`.
+      `KilnFW`'s `safety_link.c` sends `ANNOUNCE_VERSION` unprompted at boot
+      (a burst, loss-tolerant) and on every Pico `boot_id` change, and folds a
+      known-incompatible peer into `SAFETY_FAULT_SRC_SAFETY_LINK` exactly like
+      a dead link (`safety_update_health()`); `SaftyFW`'s `link_task.c` parses
+      inbound `ANNOUNCE_VERSION`/`GET_FW_VERSION`, all inside the link task,
+      never touching `safety_core.c` (`check_isolation.ps1` clean). Shared
+      `kilnlink_announce` codec added this pass (see M2); `KilnFW`/`SaftyFW`
+      still each hand-roll this frame rather than calling into it (M2 note)
 - [ ] TX ring reserves capacity for telemetry; log frames dropped above the
       watermark and the drops counted
 - [ ] Borrowed-thermocouple staleness split correctly across S11 / S13 / S6
@@ -346,12 +366,22 @@ path. Two facts set the shape of this milestone:
       programmed; signature field and key space reserved even though signing is off
 - [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
       mode over UART1 with no timeout out of it
-- [ ] **Mutual protocol-version check** (lands with M5, gates this): each side
-      verifies the other, a mismatch blocks heating on the ESP and puts the Pico
-      in `DEGRADED_NO_CONTEXT` without latching a trip. `ANNOUNCE_VERSION`
-      itself still unbuilt (`KilnFW/TODO.md` 9.0)
-- [ ] **Compatibility floor** frozen so a version mismatch can never disable the
-      update path itself — otherwise every mismatch needs a debug probe
+- [x] **Mutual protocol-version check** (lands with M5, gates this): each side
+      verifies the other, a mismatch blocks heating on the ESP
+      (`safety_link.c`'s `safety_update_health()` asserts
+      `SAFETY_FAULT_SRC_SAFETY_LINK` on `version_mismatch`, same as a dead
+      link) and puts the Pico in `DEGRADED_NO_CONTEXT` without latching a trip
+      (`link_task.c`'s `link_task_handle_announce_version()`). `ANNOUNCE_VERSION`
+      built this pass at the codec layer (`kilnlink_announce.{c,h}`,
+      `KilnFW/TODO.md` 9.0); both firmwares' hand-rolled encode/parse of this
+      frame predate the codec and were not migrated onto it
+- [~] **Compatibility floor** frozen so a version mismatch can never disable the
+      update path itself — otherwise every mismatch needs a debug probe.
+      Frame ids `0x00`-`0x0F` (incl. `ANNOUNCE_VERSION`, `FW_VERSION`) are
+      reserved per `LINK_PROTOCOL.md` sec 4 and neither side's dispatch gates
+      those frames on `peer_version_compatible`; **not verified end-to-end
+      against a live mismatch this pass** — no hardware bring-up with two
+      deliberately-mismatched builds was run
 - [x] Image header validated before the first erase, so a wrong-target upload
       cannot erase a slot (2026-08-17, already on `main` — `ota_esp_do_transfer()`
       checks `esp_image_header_t` magic + chip ID before `esp_ota_begin()`)

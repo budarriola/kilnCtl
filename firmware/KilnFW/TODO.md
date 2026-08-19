@@ -3015,24 +3015,59 @@ depend on it, so it is tracked here as a gate. Design:
 [`../CommonFW/docs/LINK_PROTOCOL.md`](../CommonFW/docs/LINK_PROTOCOL.md),
 `ANNOUNCE_VERSION`.
 
-- [ ] `ANNOUNCE_VERSION` = `0x0F` sent unprompted at boot, repeated against loss,
+- [x] `ANNOUNCE_VERSION` = `0x0F` sent unprompted at boot, repeated against loss,
       and re-sent on every `boot_id` change — a Pico that just rebooted has
-      forgotten who it was talking to
-- [ ] `KILNLINK_MIN_COMPATIBLE` published alongside the protocol version, and
-      compatibility evaluated in **both** directions
-- [ ] A mismatch is treated exactly like a dead link: `SAFETY_FAULT_SRC_SAFETY_LINK`,
-      heating blocked, a running firing aborted
+      forgotten who it was talking to. `safety_link.c`'s
+      `safety_link_send_announce_version_burst()` sends a 4-frame burst
+      (250 ms apart) at `safety_poll_task` startup and again whenever
+      `safety_apply_fw_version()` sees the Pico's `boot_id` change. **2026-08-18,
+      later same day**: the shared `kilnlink_announce.{c,h}` codec for this
+      frame's payload was added to `CommonFW` (host-tested,
+      `test/vectors/announce_vectors.json`) — `safety_link.c` still builds/parses
+      the frame by hand (`safety_build_announce_version_payload()`/
+      `safety_parse_fw_version()`, predating the codec) rather than calling
+      into it; unifying them is a follow-on, not a functional gap
+- [x] `KILNLINK_MIN_COMPATIBLE` published alongside the protocol version, and
+      compatibility evaluated in **both** directions —
+      `safety_link_versions_compatible()` implements
+      `peer.protocol >= self.min_compatible && self.protocol >= peer.min_compatible`
+      per `LINK_PROTOCOL.md` sec 4
+- [x] A mismatch is treated exactly like a dead link: `SAFETY_FAULT_SRC_SAFETY_LINK`,
+      heating blocked. `safety_update_health()` folds `version_mismatch` into
+      the same fault-source assert as link loss. **A running firing being
+      aborted on mismatch specifically was not verified this pass** — that is
+      the same 30 s-silence abort path `ROADMAP.md` M6 tracks separately and
+      was out of scope here
 - [ ] The GUI names **both** versions and which one is older. "Incompatible"
       without saying which side to update generates a question instead of
-      answering one
-- [ ] The compatibility floor — framing, `ANNOUNCE_VERSION`, `FW_VERSION`,
+      answering one -- **deferred, GUI work, out of scope for this pass**
+- [x] The compatibility floor — framing, `ANNOUNCE_VERSION`, `FW_VERSION`,
       `UPDATE_*` — stays functional across any mismatch, so the fix can be pushed
-      over the link rather than needing a debug probe
+      over the link rather than needing a debug probe. Neither side's frame
+      dispatch (`safety_link.c`'s switch on `cmd`, `SaftyFW`'s
+      `link_task.c` equivalent) gates ids `0x00`-`0x0F` on
+      `peer_version_compatible` — **not verified end-to-end against a live
+      mismatch this pass**, no hardware bring-up with two deliberately
+      mismatched builds was run
 - [ ] **Refuse to push a Pico image this build could not then talk to.** That one
       action is what creates a lockout. Override must be explicit and separately
-      confirmed
+      confirmed -- **deferred, OTA-side work, out of scope for this pass**
 - [ ] When both need updating, the GUI states the order: **ESP first**, because
       the ESP is recoverable over USB and the Pico's easy path runs through it
+      -- **deferred, GUI work, out of scope for this pass**
+
+**SaftyFW side (2026-08-18, later same day pass):** intentionally not
+re-touched here. Reading `firmware/SaftyFW/src/tasks/link_task.c` shows this
+side already implements inbound `ANNOUNCE_VERSION` parsing
+(`link_task_handle_announce_version()`) and the `DEGRADED_NO_CONTEXT`
+transition on mismatch, entirely inside the link task -- never inside
+`safety_core.c`, so `firmware/SaftyFW/tools/check_isolation.ps1`'s "the link
+header never appears in `safety_core.c`" rule is respected by construction.
+Nothing about mutual-version-check logic belongs in `safety_core.c` under that
+rule, so there was no isolation-safe SaftyFW-side gap left for this pass to
+fill; the only remaining SaftyFW-side item is the same codec-consolidation
+follow-on noted above (`link_task.c`'s own hand-rolled encode/parse vs. the
+new `kilnlink_announce` codec).
 
 ### 9.1 Partition table
 
