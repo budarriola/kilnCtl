@@ -1507,6 +1507,27 @@ static void watchdog_task_entry(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_PERIOD_MS));
 
+        /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: "30 s silence aborts a
+         * firing" -- distinct from, and much larger than, the 1.5 s
+         * SAFETY_FAULT_SRC_SAFETY_LINK check safety_update_health() already
+         * runs on every poll (that one only blocks *new* relay-on via
+         * relay_authority_on_blocked(); a single dropped frame must not abort
+         * a run already in progress). Queried outside s_exec.lock --
+         * safety_link_get_status() takes its own lock and never blocks on the
+         * far side, same "never talks to the peer" contract everything else
+         * in this driver relies on. safety_link_is_stale() is the same pure
+         * comparison safety_link.c uses for the 1.5 s case, just against the
+         * larger threshold. */
+        uint16_t safety_age_ms = SAFETY_LINK_AGE_NEVER;
+        if (s_exec.safety) {
+            safety_link_status_t safety_status;
+            if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
+                safety_age_ms = safety_status.age_ms;
+            }
+        }
+        bool safety_link_silent_30s = s_exec.safety != NULL &&
+                                       safety_link_is_stale(safety_age_ms, SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+
         bool wdt_faulted = false;
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
@@ -1526,6 +1547,31 @@ static void watchdog_task_entry(void *arg)
                         "control task tick stale for %lums", (unsigned long)since_ms);
                 wdt_faulted = true;
             }
+        } else if (safety_link_silent_30s &&
+                   (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED)) {
+            /* "relays dropped and retried until the write succeeds" --
+             * kiln_io_all_relays_off() is the same fail-toward-off call guard
+             * 9 uses above; this task rechecks it every WATCHDOG_CHECK_
+             * PERIOD_MS as long as the firing stays in this faulted state,
+             * which is the retry LINK_PROTOCOL.md sec 8 asks for. */
+            ESP_LOGE(TAG, "safety processor link silent for >=%lums -- aborting firing",
+                     (unsigned long)SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+            if (s_exec.io) {
+                kiln_io_all_relays_off(s_exec.io);
+            }
+            s_exec.state = PROFILE_EXEC_FAULTED;
+            snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
+                    "safety processor link silent for >=%lums, firing aborted",
+                    (unsigned long)SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+            wdt_faulted = true;
+        } else if (safety_link_silent_30s && s_exec.state == PROFILE_EXEC_FAULTED &&
+                   s_exec.io) {
+            /* Already faulted (this path or another) but the link is still
+             * silent -- keep retrying the relay-off write per sec 8's "dropped
+             * and retried until the write succeeds", without re-triggering
+             * run_state_note() (wdt_faulted stays false: nothing new
+             * happened). */
+            kiln_io_all_relays_off(s_exec.io);
         }
         run_snapshot_buf_t wdt_snap;
         if (wdt_faulted) {

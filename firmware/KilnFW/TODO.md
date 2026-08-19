@@ -4731,3 +4731,59 @@ existing `GET /api/status` endpoint and the existing LCD home page
       live peer, only against the host codec's own round-trip/vector tests.
       Nothing here can be exercised against live safety telemetry until
       then.
+
+### 10.11 Liveness: 1.5 s fault, 30 s firing-abort (ROADMAP.md M6)
+
+**2026-08-18.** `LINK_PROTOCOL.md` sec 8's two-timeout rule: closes both
+open M6 checklist items — `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no
+telemetry within 1.5 s", and 30 s of continued silence aborting a running
+firing. Reuses the existing fault/abort machinery both items point at
+rather than building parallel paths.
+
+- [x] **1.5 s fault, decoupled from the configured poll period.**
+      `safety_link_up_locked()` already worked out to 1.5 s at the default
+      500 ms poll period (`SAFETY_LINK_UP_PERIODS=3`), but that arithmetic is
+      period-relative — reconfiguring the poll period via `SET_POLL_PERIOD`
+      would silently move the safety threshold along with it. Added
+      `SAFETY_LINK_STALE_MS` (1500) and a pure, host-testable
+      `safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)` inline
+      to `safety_link.h`; `safety_update_health()` in `safety_link.c` now
+      ORs `safety_link_is_stale(age, SAFETY_LINK_STALE_MS)` into its `up`
+      computation before the existing `safety_link_set_fault_source(link,
+      SAFETY_FAULT_SRC_SAFETY_LINK, !up || version_mismatch)` call — so a
+      reconfigured poll period can only make the fault fire *sooner* than
+      the period-relative check, never later. At the default config the two
+      agree and this is a no-op; the fixed ceiling is what the ROADMAP item
+      actually asks for.
+- [x] **30 s silence aborts a firing**, wired into the existing guard-9
+      watchdog rather than a new task. `profile_executor.c`'s
+      `watchdog_task_entry()` already runs every `WATCHDOG_CHECK_PERIOD_MS`
+      (2 s) checking for a stuck control task; it now also calls
+      `safety_link_get_status(s_exec.safety, &safety_status)` each tick and
+      checks `safety_link_is_stale(safety_status.age_ms,
+      SAFETY_LINK_FIRING_ABORT_SILENCE_MS)` (new constant, 30000, in
+      `safety_link.h`). If silence exceeds 30 s while a firing is `RUNNING`
+      or `PAUSED`, it faults the run the same way guard 9 does for a stuck
+      control task: `s_exec.state = PROFILE_EXEC_FAULTED`, `fault_reason`
+      set, `kiln_io_all_relays_off()` called, and `run_state_note()` records
+      the ending outside the lock. Sec 8's "relays dropped and retried until
+      the write succeeds" is handled by a third branch: once already
+      faulted, each subsequent tick the link stays silent re-calls
+      `kiln_io_all_relays_off()` without re-triggering `run_state_note()`.
+      Does not separately assert `SAFETY_FAULT_SRC_SAFETY_LINK` — the 1.5 s
+      check above already does that well before 30 s elapses, so a second
+      assertion would be redundant, not additive.
+- [x] `idf.py -C firmware/KilnFW build` (via
+      `Microsoft.v6.0.2.PowerShell_profile.ps1`): clean, no new warnings.
+- [ ] **Not hardware-timing-verified.** No ESP32-S3/Pico is attached in this
+      environment (same gap as 10.10 above and ROADMAP.md M0's dead-link
+      finding), so whether the fault really asserts at 1.5 s and the abort
+      really fires at 30 s on real hardware is unverified — this closes the
+      code gap, not the hardware-timing-verified gap. The comparison logic
+      itself (`safety_link_is_stale()`) is a pure function and could be
+      host-unit-tested the way `kilnlink_power`/`kilnlink_status` are in
+      `firmware/CommonFW`, but it lives in `safety_link.h` (ESP-IDF-only
+      driver, not a CommonFW host-buildable component) so no host test
+      harness exists for it today — left as a follow-up, not attempted this
+      pass to avoid scope creep into restructuring where the comparison
+      lives.

@@ -162,6 +162,32 @@ extern "C" {
  * doesn't flap link_up -- it takes a sustained silence. */
 #define SAFETY_LINK_UP_PERIODS 3u
 
+/* ROADMAP.md M6 / LINK_PROTOCOL.md sec 8: SAFETY_FAULT_SRC_SAFETY_LINK means
+ * "no telemetry frame within 1.5 s", full stop -- a fixed wall-clock ceiling,
+ * not "N poll periods". At the default 500 ms poll period and
+ * SAFETY_LINK_UP_PERIODS=3 the two numbers agree (3*500=1500), which is
+ * deliberate, but this constant is what actually governs the fault: if the
+ * poll period is ever reconfigured (SET_POLL_PERIOD) the safety guarantee
+ * must not silently loosen along with it. safety_link_is_stale() below is
+ * the pure, host-testable comparison against this constant. */
+#define SAFETY_LINK_STALE_MS 1500u
+
+/* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: 30 s of continued silence aborts a
+ * running firing (distinct from, and much larger than, SAFETY_LINK_STALE_MS
+ * above, which only blocks *new* relay-on -- "a single dropped telemetry
+ * frame must not abort a twelve-hour firing"). Consumed by
+ * profile_executor.c's watchdog task, not by this driver directly: this
+ * driver has no notion of "a firing is running". */
+#define SAFETY_LINK_FIRING_ABORT_SILENCE_MS 30000u
+
+/* Pure timeout comparison, no locking/hardware -- host-testable. Mirrors
+ * safety_age_ms_locked()'s SAFETY_LINK_AGE_NEVER convention: "never received"
+ * is always stale. */
+static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
+{
+    return age_ms == SAFETY_LINK_AGE_NEVER || (uint32_t)age_ms > threshold_ms;
+}
+
 /* Per-request ACK timeout handed to uart_protocol_send. Deliberately much
  * shorter than the PC link's 200 ms default: uart_protocol retries up to
  * UART_PROTO_MAX_RETRIES (10) times internally, so with no peer at all every

@@ -674,6 +674,15 @@ static void safety_update_health(SafetyLinkClass *link)
         safety_unlock(link);
     }
 
+    /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: the fault is "no telemetry
+     * within 1.5 s", a fixed ceiling -- OR it into `up` rather than replacing
+     * it, so a reconfigured poll period can only make the fault fire
+     * *sooner* than the period-relative check, never later. At the default
+     * 500 ms period the two agree and this is a no-op. */
+    if (safety_link_is_stale(age, SAFETY_LINK_STALE_MS)) {
+        up = false;
+    }
+
     if (up) {
         if (link->down_logged) {
             ESP_LOGI(TAG, "safety processor link is up again");

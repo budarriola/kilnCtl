@@ -300,8 +300,32 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 The point at which the two processors become one system. Deliberately separate,
 because it changes what a bare main board will do.
 
-- [ ] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s"
-- [ ] 30 s silence aborts a firing
+- [x] `SAFETY_FAULT_SRC_SAFETY_LINK` redefined as "no telemetry within 1.5 s"
+      (2026-08-18). It already worked out to 1.5 s at the default 500 ms
+      poll period (`SAFETY_LINK_UP_PERIODS=3`), but that was period-relative,
+      not the fixed ceiling LINK_PROTOCOL.md sec 8 specifies. Added
+      `SAFETY_LINK_STALE_MS` (1500) and a pure `safety_link_is_stale(age_ms,
+      threshold_ms)` in `safety_link.h`, OR'd into `safety_update_health()`'s
+      `up` computation in `safety_link.c` so a reconfigured poll period
+      (`SET_POLL_PERIOD`) can only make the fault fire *sooner*, never later.
+      No hardware attached in this environment, so the real 1.5 s firing
+      point is unverified against a live Pico — this closes the code gap,
+      not the hardware-timing-verified gap.
+- [x] 30 s silence aborts a firing (2026-08-18). New
+      `SAFETY_LINK_FIRING_ABORT_SILENCE_MS` (30000) in `safety_link.h`.
+      `profile_executor.c`'s existing guard-9 watchdog task (`watchdog_task_
+      entry`, already polling every 2 s for a stuck control task) now also
+      reads `safety_link_get_status()`'s `age_ms` each tick and, if silence
+      exceeds 30 s while a firing is `RUNNING`/`PAUSED`, faults the run
+      (`PROFILE_EXEC_FAULTED`, `fault_reason` set) and forces relays off via
+      `kiln_io_all_relays_off()` — same fail-toward-off call guard 9 uses for
+      a stuck control task — then keeps retrying that relay-off write every
+      tick the link stays silent, per sec 8's "dropped and retried until the
+      write succeeds". Reuses the existing fault/abort machinery rather than
+      a parallel path; the separate 1.5 s check above already asserts
+      `SAFETY_FAULT_SRC_SAFETY_LINK` well before 30 s, so no second assertion
+      is needed here. Build clean (`idf.py -C firmware/KilnFW build`). Not
+      hardware-timing-verified — no Pico/link attached here.
 - [ ] Boot-time version request with retry, surfaced in the GUI
 - [ ] Bench escape hatch documented: `safety_link_fault_on_link_loss(link, false)`
 - [~] GUI shows safety temperature, enclosure temperature and power
