@@ -846,6 +846,22 @@ attached to the build machine, so nothing above claims more than "host-tested
 against synthetic inputs." Runtime config integrity is out of scope here --
 it is a `config_store` (Phase 9) concern, not a per-tick guard.
 
+**S11/S13/S6 borrowed-staleness split audited 2026-08-18** (ROADMAP.md M5):
+confirmed already correct, no code change needed. `safety_guards_tick()`'s
+S6b block reads only `in->link_up`; its S13 block reads only
+`in->context_valid` and `in->sample_counter_advancing`; S11 reads neither --
+three disjoint facts with no cross-reads between the blocks, exactly matching
+this section's own S13 table (`sample_counter` not advancing -> S13; frames
+not arriving at all -> S6; frozen value while advancing -> S11). The split's
+correctness ultimately rests on the caller (`safety_core`, not yet built)
+collapsing `context_valid` to false the moment frames stop arriving, per
+section 5 rule 2 ("stale context is no context") -- this module's own
+boundary is now independence-tested directly: `test_s6_s13_split()` in
+`test/test_safety_guards.c` covers link-dead-not-channel-stale,
+channel-stale-not-link-dead, and both-facts-on-one-tick (verifying S6's
+earlier check order wins and the trip latches so S13 cannot re-attribute it
+on a later tick). 378/378 host checks pass.
+
 ### Policy
 
 - [ ] Every trip clears **both** bars: magnitude *and* duration

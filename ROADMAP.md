@@ -361,7 +361,13 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       watermark and the drops counted (`log_task.c`'s 50% `LOG_TX_RESERVE_FRACTION`,
       landed 2026-08-17; the pure admit/drop decision was pulled out into
       host-testable `firmware/SaftyFW/src/tasks/tx_watermark.c` this pass)
-- [ ] Borrowed-thermocouple staleness split correctly across S11 / S13 / S6
+- [x] Borrowed-thermocouple staleness split correctly across S11 / S13 / S6
+      (audit-confirmed 2026-08-18, no code fix needed: `safety_guards.c`'s S6b
+      block reads only `in->link_up`, S13's block reads only `in->context_valid`
+      / `in->sample_counter_advancing`, and S11 reads neither -- three disjoint
+      input facts, no cross-reads, matching `SAFETY_MODEL.md`'s S13 table
+      verbatim; added `test_s6_s13_split()` in `test/test_safety_guards.c` to
+      exercise the three split scenarios end-to-end, 378/378 host checks pass)
 
 ## M6 — Throw the liveness switch
 

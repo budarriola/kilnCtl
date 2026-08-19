@@ -378,6 +378,17 @@ header comment, so the build is reproducible elsewhere.
       sensor dropout must *not* trip S5; a single noisy SPI read must not either.
       Both cases are explicit tests in `test/test_safety_guards.c`, ahead of
       every guard's trip case.
+- [x] **S11/S13/S6 borrowed-staleness split audited** (ROADMAP.md M5,
+      2026-08-18): confirmed already correct in `safety_guards.c` -- S6b
+      reads only `in->link_up`, S13 reads only `in->context_valid` /
+      `in->sample_counter_advancing`, S11 reads neither, so the three never
+      cross-read each other's facts, matching `SAFETY_MODEL.md`'s S13 table.
+      No code change needed; added `test_s6_s13_split()` to
+      `test/test_safety_guards.c` covering link-dead-not-channel-stale,
+      channel-stale-not-link-dead, and both-on-one-tick (S6 wins by check
+      order and latches, so S13 can't re-attribute it later). 378/378 host
+      checks pass; `SaftyFW/build` already up to date (`ninja`: "no work to
+      do") since only the test file changed.
 - [ ] Reuse `firmware/KilnFW/App/test/sim_plant.c` for realistic thermal traces.
       Not done — this phase's tests use synthetic step/ramp sequences
       instead, which were enough to prove each guard's boundary; wiring

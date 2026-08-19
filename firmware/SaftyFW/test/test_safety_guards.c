@@ -1208,6 +1208,101 @@ static void test_s13(void)
     }
 }
 
+/* ROADMAP.md M5: "borrowed-thermocouple staleness split correctly across
+ * S11 / S13 / S6". S11 (frozen value) is not reachable here at all --
+ * S13/S6 already gate it out structurally: S11 only ever looks at
+ * in->tc_c/tc_valid/heat_commanded (no context, no link fact), so a link
+ * outage or a stalled sample_counter cannot make S11 fire or stay silent
+ * either way; it is orthogonal by construction, not by a check added here.
+ * What *is* worth verifying end-to-end is the S6/S13 split SAFETY_MODEL.md
+ * section 4's S13 table draws: "not advancing -> S13", "frames not arriving
+ * at all -> S6", never both for the same event. safety_guards.c keeps these
+ * on two independent input facts (in->link_up for S6b, in->context_valid +
+ * in->sample_counter_advancing for S13) with no cross-reads between the two
+ * blocks, so the split's correctness is really a claim about how the
+ * *caller* (safety_core, not yet built) is expected to set those facts --
+ * per SAFETY_MODEL.md section 5 rule 2 ("stale context is no context"), a
+ * dead link must collapse context_valid to false too, which is what these
+ * tests assume of the caller. What is safe to assert at this module's own
+ * boundary, and is asserted below: given those facts as SAFETY_MODEL.md's
+ * table says they should look, S6 and S13 never both fire for one event,
+ * and neither guard's accumulator drifts based on what the other is doing. */
+static void test_s6_s13_split(void)
+{
+    TEST_SECTION("S6/S13 split -- borrowed staleness attributed to the right guard");
+
+    /* Link dead, not a single-channel stall: link_up false long enough to
+     * hit S6b's soft (current-present) threshold. A real caller collapses
+     * context_valid to false the moment frames stop arriving (SAFETY_MODEL.md
+     * section 5 rule 2), so S13's block is skipped outright -- verify it
+     * stays fully quiet (no WARN, no elapsed accumulation) while S6 trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.context_valid = false;         /* caller's job: dead link => no context */
+        in.sample_counter_advancing = false; /* even so, must not leak into S13 */
+        in.any_current_present = true;    /* arms S6b's soft (10s) path */
+        in.dt_s = 11.0f;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped, "link-dead-only: S6b trips");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LINK_DEAD, "link-dead-only: reason is SAFETY_TRIP_LINK_DEAD, not S13");
+        TEST_CHECK(!s.s13_warn, "link-dead-only: S13 never warns");
+        TEST_CHECK(s.s13_stale_elapsed_s == 0.0f, "link-dead-only: S13's elapsed timer never accumulates");
+    }
+
+    /* Single channel stale, link healthy: link_up stays true every tick
+     * (so S6b's elapsed timer never leaves zero), context_valid true, but
+     * sample_counter stops advancing. Only S13 should move. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t in = base_input();
+        in.link_up = true;
+        in.context_valid = true;
+        in.sample_counter_advancing = false;
+        in.dt_s = 61.0f;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped, "channel-stale-only: S13 trips");
+        TEST_CHECK(s.reason == SAFETY_TRIP_BORROWED_STALE, "channel-stale-only: reason is SAFETY_TRIP_BORROWED_STALE, not link-dead");
+        TEST_CHECK(s.s6b_link_down_elapsed_s == 0.0f, "channel-stale-only: S6b's elapsed timer never accumulates while link_up is true");
+    }
+
+    /* Both facts look bad on the same tick (link_up false AND, as a
+     * defensive edge case, context_valid still true with a stalled
+     * counter -- e.g. one tick of lag before a caller's own context_valid
+     * catches up to the link outage). S6a/S6b are checked ahead of the
+     * context-dependent block in safety_guards_tick(), so S6 must win and
+     * latch; once latched, S13 never gets a chance to re-attribute the
+     * event on a later tick either. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.context_valid = true;          /* deliberately stale-caller edge case */
+        in.sample_counter_advancing = false;
+        in.any_current_present = true;
+        in.dt_s = 11.0f;
+        bool tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(tripped, "both-simultaneously: trips on this tick");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LINK_DEAD, "both-simultaneously: S6 wins over S13 by check order");
+
+        /* Latched -- a further tick, even one where S13's own condition is
+         * still true, must not re-attribute the trip. */
+        tripped = safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!tripped, "both-simultaneously: second tick is a latched no-op, not a new S13 trip");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LINK_DEAD, "both-simultaneously: reason still S6 after latching, never overwritten by S13");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -1221,5 +1316,6 @@ void run_test_safety_guards(void)
     test_s9();
     test_s10();
     test_s13();
+    test_s6_s13_split();
     test_independence_invariant();
 }
