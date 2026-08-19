@@ -327,7 +327,10 @@ because it changes what a bare main board will do.
       is needed here. Build clean (`idf.py -C firmware/KilnFW build`). Not
       hardware-timing-verified — no Pico/link attached here.
 - [ ] Boot-time version request with retry, surfaced in the GUI
-- [ ] Bench escape hatch documented: `safety_link_fault_on_link_loss(link, false)`
+- [x] Bench escape hatch documented: `safety_link_fault_on_link_loss(link, false)`
+      (already implemented — `firmware/KilnFW/App/drivers/safety_link.{h,c}`,
+      default `true`/fail-safe, header comment explains the bring-up
+      use case; ROADMAP just hadn't been ticked)
 - [~] GUI shows safety temperature, enclosure temperature and power
       (2026-08-18). `GET /api/status` (`dashboard_http.c`) gained
       `safety_temp_c`/`enclosure_temp_c`/`power_w`, null when invalid — read
