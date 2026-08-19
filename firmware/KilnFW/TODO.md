@@ -181,6 +181,38 @@ architecture decisions are settled:
   taps, per the "phone screen" constraint — this is a mobile control
   surface for hitting Stop quickly, not a desktop admin panel.
 
+**2026-08-18, added to plan (not yet built): four more pages worth having,
+web + LCD both.** Surveyed what an operator or debugger reaches for that
+isn't covered by Dashboard/Profiles/Settings/Network today:
+
+- **Safety / Alarm page.** Current trip state (armed/tripped/degraded, which
+  guard from `SAFETY_MODEL.md` §4 fired), a scrollable trip-event history,
+  and the explicit "clear trip" action M4 requires (trips latch, clearing is
+  a deliberate command — never folded into Dashboard's Stop button). Backing
+  data is the `TRIP_EVENT` frame from `LINK_PROTOCOL.md` sec 6, which M5
+  hasn't shipped yet — **blocked on M5**, page only worth building once
+  trip events actually arrive over the link rather than being another stub.
+- **Diagnostics / System info page.** Both processors' firmware versions
+  (`GET_FW_VERSION`/`ANNOUNCE_VERSION`, sec 4/6), safety-link stats
+  (`safety_get_link_stats`-equivalent: uptime, RX/TX counts, last-seen age),
+  ESP heap/flash-free, IC temperatures (section 10.7). One place to look
+  before reaching for a serial console — most of the data already exists
+  from M0/M1 tooling, just not surfaced to the operator. Partly blocked on
+  M5 for the link-stats half; the ESP-only half (heap/flash/IC temps) is
+  buildable now.
+- **Manual zone control page.** Section 2/10.3's "Temperature" nav item is
+  currently a stub. Give it real per-zone content: current reading, manual
+  setpoint override (bypassing the profile, for e.g. drying/venting a kiln
+  without running a full program), and the zone's calibration offset —
+  same data `Settings → Thermocouples & Zones` edits, this is the
+  operate-time view of it rather than the configure-time one.
+- **Backup / restore page.** Export saved profiles + zone/relay/network
+  config as one downloadable blob (web) / to a file over the debug link
+  (LCD is display-only for this, no removable storage), and re-import it —
+  useful before an OTA update (section 9) and for cloning settings across
+  more than one kiln. Depends on nothing else in this plan; buildable
+  whenever picked up.
+
 ## 1. Wi-Fi provisioning and resilience — DONE, verified on hardware (2026-08-10)
 
 Implemented in `App/drivers/wifi_prov.{c,h}` and
@@ -3817,6 +3849,21 @@ dashboard but is the touchscreen's home, not a secondary view):
       status bar. **Added 2026-08-18 (separate follow-up within this same
       pass, see status update below) — not in the original page-designs
       list, added on explicit request.**
+- [ ] **Added to plan 2026-08-18, not yet built:** "Temperature" nav item's
+      stub above becomes the real manual-zone-control page from 0.5's new
+      page list — setpoint override + calibration readout, same getters
+      section 3's zone settings already exposes.
+- [ ] **Added to plan 2026-08-18, not yet built:** Safety / Alarm page
+      (0.5) — trip state, trip-event history, explicit clear-trip action.
+      Blocked on M5's `TRIP_EVENT` frame; do not build against a stub data
+      source.
+- [ ] **Added to plan 2026-08-18, not yet built:** Diagnostics / System info
+      page (0.5) — fw versions both processors, safety-link stats, ESP
+      heap/flash, IC temps (10.7). Link-stats half blocked on M5; the rest
+      is buildable now.
+- [ ] **Added to plan 2026-08-18, not yet built:** Backup / restore page
+      (0.5) — export/import profiles + zone/relay/network config as one
+      blob. No blockers.
 
 **Status update (2026-08-18, follow-up): WiFi/IP/mDNS status readout added to
 the home page's status bar.** `s_status_label` (right-aligned, next to the
@@ -4317,7 +4364,7 @@ is gitignored (generated, machine-local), so this is pinned in the new,
 committed `sdkconfig.defaults` instead — a fresh checkout/reconfigure
 picks it up automatically, no per-builder memory required.
 
-- [ ] **`ui_page_network.c`/`.h`** — new LCD page, reachable from
+- [x] **`ui_page_network.c`/`.h`** — new LCD page, reachable from
       `ui_page_config.c`'s settings hub (same nav pattern as `zones`/
       `relays`/`board_health`). Per 10.1a's shared-backend rule, every
       control on this page calls the exact same `wifi_prov.h` getters/
@@ -4353,7 +4400,29 @@ picks it up automatically, no per-builder memory required.
       - Touch targets follow `ui_theme.h`'s existing conventions
         (`ui_theme_apply_touch_area()`, `UI_THEME_MIN_TOUCH_TARGET_PX`) same
         as every other LCD page.
-
+      **Audited 2026-08-18 (checkbox was stale -- code already did all of
+      this from the 25cbe96 pass, box just never got ticked):** mode
+      readout, scan (with the AP-mode "Scanning disabled in AP mode"
+      message), saved-network list with per-row forget + confirm dialog,
+      AP identity display, and add-network flow are all real, calling the
+      exact `wifi_prov_*` getters/setters this bullet names -- see
+      `ui_page_network.c`'s own header comment for the full call mapping.
+      **On-screen keyboard: built, not stubbed.** The one piece this bullet
+      flagged as needing its own design (no web equivalent) is a real
+      `lv_keyboard_create()` bound to the connect-modal's password
+      `lv_textarea` (`build_connect_modal()`) -- tap a scan result, the
+      SSID is pre-filled from the tap (matching the bullet's own "SSID
+      pre-filled from the tap, only the password needs a keyboard" framing),
+      the keyboard handles password entry, Connect calls
+      `wifi_prov_add_network()`. Mode switch needs no keyboard (two buttons,
+      no free text). **Genuine gap found and fixed this pass**: the
+      `LV_USE_QRCODE` Kconfig flip this page depends on lived only in the
+      gitignored, machine-local `sdkconfig`, not in the committed
+      `sdkconfig.defaults` -- a fresh checkout would fail to build. Added to
+      `sdkconfig.defaults` alongside the existing `-Os`/CLIB-malloc entries.
+      **Still not built**: editing the board's own AP SSID/password from
+      this page (read-only here, per the file's own header comment --
+      `wifi_provision_page.html` remains the only way to change it).
 - [x] **QR code: join the board's fallback AP from a phone.** When the
       board is in AP or AP+STA-fallback mode (`wifi_prov_get_mode() ==
       WIFI_PROV_MODE_AP` or `wifi_prov_get_state() ==
@@ -4394,7 +4463,7 @@ picks it up automatically, no per-builder memory required.
       is ever touched again for an unrelated reason. Build: clean,
       `-Wall -Wextra -Werror`, zero new warnings; flash partition free space
       unchanged at 10%.
-- [ ] **QR code: open the web dashboard from a phone.** When `sta_connected`
+- [x] **QR code: open the web dashboard from a phone.** When `sta_connected`
       is true, render a second QR code encoding a plain URL — prefer
       `http://kiln.local` (10.3's status line already resolves and shows
       this) with the raw `sta_ip` as a fallback/second QR if mDNS isn't
@@ -4402,8 +4471,14 @@ picks it up automatically, no per-builder memory required.
       most enterprise/guest WiFi don't do mDNS reliably — worth showing
       both rather than picking one). Same placement question as above:
       `ui_page_network.c` for sure, `ui_page_home.c` optionally once
-      connected.
-- [ ] **Web side**: `wifi_provision_page.html` already shows the AP SSID/
+      connected. **Audited 2026-08-18, checkbox was stale**: both QRs are
+      real in `ui_page_network.c`'s `refresh_cb()` (`s_dashboard_qr`
+      resolving via `mdns_hostname_get()` with a `kiln.local` fallback,
+      `s_ip_qr` from `wifi_prov_get_sta_ip()`), each gated on
+      `update_qr_if_changed()` so they don't re-encode every tick. Not
+      added to `ui_page_home.c` — this bullet only says "optionally", and
+      that page is already dense per its own header comment.
+- [x] **Web side**: `wifi_provision_page.html` already shows the AP SSID/
       password as text (`status_get_handler()`'s `ap_ssid`/`ap_password`
       fields) but has no QR code either — a phone that's already
       Wi-Fi-connected enough to load this page doesn't need the AP-join QR,
@@ -4413,8 +4488,12 @@ picks it up automatically, no per-builder memory required.
       bootstrapping problem a QR code solves; a browser already implies
       connectivity exists somewhere), but worth the small addition once the
       LCD version exists, generating from the same WIFI: URI string so
-      there's one format to test instead of two.
-- [ ] **QR rendering**: LVGL v9.5.0 (vendored submodule, section 10.1)
+      there's one format to test instead of two. **Audited 2026-08-18,
+      checkbox was stale**: `#apQrSection`/`#apQrCanvas` plus the `KilnQr`
+      IIFE (a byte-mode port of the same `qrcodegen.c` LVGL vendors) are
+      real, embedded client-side per the file's own header comment — no
+      CDN, no server-side QR library needed.
+- [x] **QR rendering**: LVGL v9.5.0 (vendored submodule, section 10.1)
       ships `lv_qrcode` (`LV_USE_QRCODE` in `lv_conf.h`/Kconfig) — confirm
       it's enabled in this project's LVGL config (it is off by default in
       upstream LVGL) before assuming it's available; if off, this is a
@@ -4427,7 +4506,14 @@ picks it up automatically, no per-builder memory required.
       a small embedded JS QR library (matching this project's "no CDN,
       everything embedded" convention — `theme.css`'s own embedding
       precedent), or skip the web QR entirely per the above priority note
-      and revisit later.
+      and revisit later. **Audited 2026-08-18**: `LV_USE_QRCODE` was
+      confirmed off by default and flipped on, but only in the local,
+      gitignored `sdkconfig` — never carried into the committed
+      `sdkconfig.defaults`, so a fresh checkout would silently fail to
+      build (`lv_qrcode_create()` undeclared). Fixed this pass: added
+      `CONFIG_LV_USE_QRCODE=y` to `sdkconfig.defaults`. Web side skipped
+      the "no server-side library" question entirely by generating and
+      rendering client-side instead, per the bullet's own first option.
 - [ ] Cross-reference 10.5 (web/LCD parity rule) once built: if the LCD
       gets a real network settings page, the "any time changes to either
       the screen or the web interface are made it should be considered

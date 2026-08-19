@@ -30,3 +30,12 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # start successfully with this set; without it, the LCD does not
 # initialize at all on this build.
 CONFIG_LV_USE_CLIB_MALLOC=y
+
+# CONFIG_LV_USE_QRCODE: off by default in upstream LVGL. ui_page_network.c
+# and ui_page_home.c (TODO.md 10.9) call lv_qrcode_create()/_update() for the
+# AP-join/dashboard/IP QR codes -- without this, those calls don't exist and
+# the build fails. It was flipped on in the local, gitignored `sdkconfig`
+# during 10.9's original pass but never carried forward into this file, so a
+# fresh checkout silently lost it (found while auditing 10.9 for this pass --
+# see TODO.md 10.9's checklist status note).
+CONFIG_LV_USE_QRCODE=y
