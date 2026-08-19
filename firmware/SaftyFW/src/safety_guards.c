@@ -220,7 +220,15 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
              * buggy ESP asking for more headroom gets clamped, never
              * obeyed (SAFETY_MODEL.md section 4, S1). */
             float requested = cfg->firing_max_c + effective_f(cfg->firing_margin_c, FIRING_MARGIN_C_DEFAULT);
-            ceiling = (requested < cfg->abs_max_temp_c) ? requested : cfg->abs_max_temp_c;
+            /* isfinite() guard: a non-finite requested (NaN OR -Infinity --
+             * garbled/hostile firing_max_c from the link) must fall back to
+             * abs_max_temp_c rather than enter the comparison below. NaN
+             * already fell through by luck of IEEE754 "any compare with NaN
+             * is false" semantics, but -Infinity does NOT -- "-Inf < finite"
+             * is true, so without this guard ceiling would latch to
+             * -Infinity and S1 would trip on every subsequent tick forever
+             * (a permanent nuisance-trip, not a missed-trip risk). */
+            ceiling = (isfinite(requested) && requested < cfg->abs_max_temp_c) ? requested : cfg->abs_max_temp_c;
         } else {
             /* EXTERNAL_OVERHEAT: fixed, always, firing_max_c ignored
              * entirely regardless of firing_max_valid (SAFETY_MODEL.md

@@ -1387,9 +1387,188 @@ static void test_try_clear(void)
     }
 }
 
+/* GUARD_TEST_MATRIX.md: "Property tests: ceiling monotonicity over the float
+ * range incl. NaN/Inf". S1's ceiling is not exposed outside the module, so
+ * these tests probe it the same way test_s1() does -- through the
+ * trip/no-trip behaviour at a reading pinned just above abs_max_temp_c. If
+ * ceiling had been silently raised past abs_max_temp_c by a hostile/garbled
+ * firing_max_c, that reading would fail to trip; the property under test is
+ * that it always does. */
+static void test_s1_ceiling_properties(void)
+{
+    TEST_SECTION("S1 -- ceiling monotonicity property (firing_max_c never raises the ceiling)");
+
+    /* Property: for every firing_max_c below, a reading pinned just above
+     * abs_max_temp_c must still trip S1 within the usual 3-tick streak --
+     * i.e. the effective ceiling never exceeds abs_max_temp_c, regardless of
+     * what firing_max_c claims. */
+    {
+        float firing_max_values[] = {
+            1e30f,             /* large positive, far above abs_max_temp_c */
+            -1e30f,             /* large negative */
+            (float)NAN,         /* NaN */
+            (float)INFINITY,    /* +Infinity */
+            -(float)INFINITY,   /* -Infinity -- the actual bug */
+            900.0f,              /* normal in-range value, ceiling tightens below abs_max_temp_c */
+        };
+        for (size_t i = 0; i < sizeof(firing_max_values) / sizeof(firing_max_values[0]); i++) {
+            safety_guard_state_t s;
+            safety_guards_reset(&s);
+            safety_guard_cfg_t cfg = base_cfg();
+            cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+            cfg.abs_max_temp_c = 1300.0f;
+            cfg.firing_margin_c = 100.0f;
+            cfg.firing_max_valid = true;
+            cfg.firing_max_c = firing_max_values[i];
+            safety_guard_input_t in = base_input();
+            in.tc_c = 1301.0f; /* just above abs_max_temp_c */
+            bool tripped = false;
+            for (int j = 0; j < 3 && !tripped; j++) {
+                tripped = safety_guards_tick(&s, &cfg, &in);
+            }
+            TEST_CHECK(tripped, "ceiling never exceeds abs_max_temp_c regardless of firing_max_c value");
+        }
+    }
+
+    /* The actual bug, isolated: firing_max_c = -Infinity used to leave
+     * ceiling latched at -Infinity (because "-Inf < finite" is true), which
+     * would make S1 trip on every tick forever -- including on a perfectly
+     * safe reading. Regression check: a safe reading well under
+     * abs_max_temp_c must NOT trip, proving the ceiling fell back to
+     * abs_max_temp_c rather than staying at -Infinity. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.abs_max_temp_c = 1300.0f;
+        cfg.firing_margin_c = 100.0f;
+        cfg.firing_max_valid = true;
+        cfg.firing_max_c = -(float)INFINITY;
+        safety_guard_input_t safe = base_input();
+        safe.tc_c = 900.0f; /* well under abs_max_temp_c */
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &safe);
+        }
+        TEST_CHECK(!tripped,
+                   "firing_max_c=-Infinity: safe reading under abs_max_temp_c does not trip "
+                   "(regression check -- old buggy code latched ceiling to -Infinity and would have tripped here)");
+
+        /* And a reading just above abs_max_temp_c still trips, confirming
+         * the fallback ceiling is abs_max_temp_c, not something looser. */
+        safety_guard_state_t s2;
+        safety_guards_reset(&s2);
+        safety_guard_input_t over = base_input();
+        over.tc_c = 1301.0f;
+        tripped = false;
+        for (int i = 0; i < 3 && !tripped; i++) {
+            tripped = safety_guards_tick(&s2, &cfg, &over);
+        }
+        TEST_CHECK(tripped, "firing_max_c=-Infinity: ceiling falls back to abs_max_temp_c, not -Infinity");
+    }
+
+    /* NaN case: already worked before the fix (NaN comparisons are always
+     * false), but covered here so a future change to the comparison can't
+     * silently regress it without a test catching it. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.abs_max_temp_c = 1300.0f;
+        cfg.firing_margin_c = 100.0f;
+        cfg.firing_max_valid = true;
+        cfg.firing_max_c = (float)NAN;
+        safety_guard_input_t safe = base_input();
+        safe.tc_c = 900.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &safe);
+        }
+        TEST_CHECK(!tripped, "firing_max_c=NaN: safe reading under abs_max_temp_c does not trip");
+
+        safety_guard_state_t s2;
+        safety_guards_reset(&s2);
+        safety_guard_input_t over = base_input();
+        over.tc_c = 1301.0f;
+        tripped = false;
+        for (int i = 0; i < 3 && !tripped; i++) {
+            tripped = safety_guards_tick(&s2, &cfg, &over);
+        }
+        TEST_CHECK(tripped, "firing_max_c=NaN: ceiling falls back to abs_max_temp_c, not NaN");
+    }
+}
+
+/* GUARD_TEST_MATRIX.md: "No guard reads a disabled input." safety_guard_input_t's
+ * doc comment on context_valid: "When false, S2/S3/S4/S10/S13 below are all
+ * skipped outright." Feed deliberately provocative/garbage context-dependent
+ * fields -- values that would trip or warn every one of those guards if
+ * context were valid -- with context_valid=false, and confirm none of them
+ * fire. */
+static void test_context_gating(void)
+{
+    TEST_SECTION("context gating -- S2/S3/S4/S10/S13 never read a disabled (context_valid==false) input");
+
+    /* S2, S3, S10, S13 all provoked at once: CHAMBER_AGREED + BORROWED_ZONE
+     * so every guard's mode-gate is open, a huge setpoint/zone-TC
+     * disagreement to provoke S2 and S10, current present with nothing
+     * commanded to provoke S3, and a stalled sample_counter to provoke S13
+     * -- all with context_valid==false. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        cfg.abs_max_temp_c = 1300.0f; /* keep S1 well out of range */
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.tc_c = 900.0f; /* under abs_max_temp_c so S1 doesn't interfere */
+        in.zone_count = 3; /* would arm S2/S10 if context were valid */
+        in.max_zone_setpoint_c = 100.0f; /* tc_c far above setpoint+margin -- would trip S2 */
+        in.nearest_zone_measured_c = 50.0f; /* huge disagreement -- would warn S10 */
+        in.any_current_present = true; /* with nothing commanded -- would trip S3 */
+        in.relay_commanded_recently = false;
+        in.sample_counter_advancing = false; /* would eventually trip S13 */
+        in.dt_s = 61.0f; /* one tick alone exceeds S3's stuck_on_time_s (20s) and S13's borrowed_stale_trip_s (60s) if context were valid */
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "provocative context-dependent inputs never trip anything while context_valid==false");
+        TEST_CHECK(!s.s10_warn, "S10 never warns while context_valid==false");
+        TEST_CHECK(!s.s13_warn, "S13 never warns while context_valid==false");
+        TEST_CHECK(s.s2_over_elapsed_s == 0.0f, "S2's elapsed accumulator never moves while context_valid==false");
+        TEST_CHECK(s.s3_stuck_elapsed_s == 0.0f, "S3's elapsed accumulator never moves while context_valid==false");
+        TEST_CHECK(s.s10_disagree_elapsed_s == 0.0f, "S10's elapsed accumulator never moves while context_valid==false");
+        TEST_CHECK(s.s13_stale_elapsed_s == 0.0f, "S13's elapsed accumulator never moves while context_valid==false");
+    }
+
+    /* S4 provoked separately (its trigger, relay_commanded_continuously &&
+     * !any_current_present, is mutually exclusive with S3's any_current_present
+     * above): a continuously-commanded relay with no current at all, which
+     * would set s4_warn if context were valid. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.context_valid = false;
+        in.relay_commanded_continuously = true;
+        in.any_current_present = false;
+        in.dt_s = 60.0f;
+        for (int i = 0; i < 10; i++) {
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!s.s4_warn, "S4 never warns while context_valid==false, even with its provoking condition held");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
+    test_s1_ceiling_properties();
     test_s5();
     test_s7();
     test_s11();
@@ -1401,6 +1580,7 @@ void run_test_safety_guards(void)
     test_s10();
     test_s13();
     test_s6_s13_split();
+    test_context_gating();
     test_independence_invariant();
     test_try_clear();
 }

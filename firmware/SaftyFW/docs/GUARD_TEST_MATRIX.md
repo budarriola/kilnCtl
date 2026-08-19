@@ -179,7 +179,21 @@ should say so rather than being listed as coverage.
 **Host**
 - [ ] Nuisance-rejection tests written **before** trip tests, all of §1
 - [ ] §2's full provocation table implemented and passing
-- [ ] Property tests: ceiling monotonicity over the float range incl. NaN/Inf
+- [x] Property tests: ceiling monotonicity over the float range incl. NaN/Inf
+      (2026-08-19, `test_safety_guards.c`'s `test_s1_ceiling_properties()`).
+      Found and fixed a real hole while writing this: S1's ceiling clamp used
+      a bare `requested < abs_max_temp_c` comparison — NaN degraded safely by
+      luck of IEEE754 comparison semantics, but `requested = -Infinity`
+      (a garbled/hostile `firing_max_c` off the link) made the comparison
+      true, latching `ceiling = -Infinity` and tripping S1 on every
+      subsequent tick forever (permanent nuisance-trip, not a missed-trip
+      risk, but still a real availability bug). Fixed with an `isfinite()`
+      guard in `safety_guards.c`. Also added `test_context_gating()` for
+      this section's "no guard reads a disabled input" row: with
+      `context_valid=false`, deliberately provocative context fields
+      (huge setpoint disagreement, current with nothing commanded, stalled
+      sample counter) are confirmed to never trip/warn S2/S3/S4/S10/S13.
+      409/409 host checks pass; RP2040 target build clean.
 - [ ] Fuzz over every decoder (`firmware/CommonFW/test`)
 
 **Hardware — safe state first**
