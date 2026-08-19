@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "uart_task_ids.h"
 
+#include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -200,25 +201,29 @@ static bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t sel
     return (peer_protocol >= self_min_compatible) && (self_protocol >= peer_min_compatible);
 }
 
-/* Mirrors uart_bridge.c's own _Static_assert on build_fw_version_reply():
- * cmd(1) + protocol(2) + min_compatible(2) + dirty(1) + commit_len(1) +
- * commit + datetime_len(1) + datetime + boot_id(1) = 9 fixed bytes, must fit
- * SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX below (sizeof() includes each string's
- * implicit '\0', so this is intentionally a byte or two more conservative
- * than the true payload size). */
-#define SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX 48u
-_Static_assert(9u + sizeof(FW_GIT_COMMIT) + sizeof(FW_BUILD_DATE " " FW_BUILD_TIME) <=
-                   SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX,
-               "ANNOUNCE_VERSION payload no longer fits its send buffer");
+/* commit/datetime must each fit the shared codec's fixed caps (kilnlink_announce.h:
+ * KILNLINK_ANNOUNCE_MAX_COMMIT_LEN/MAX_DATETIME_LEN) -- a build identity longer than
+ * that isn't a real build stamp (see that header's own comment), so catch it at
+ * compile time rather than let kilnlink_announce_encode() silently drop the frame
+ * via KILNLINK_ANNOUNCE_ERR_STRING_TOO_LONG. sizeof() includes each string's
+ * implicit '\0', so this is intentionally a byte more conservative than the true
+ * length. */
+#define SAFETY_ANNOUNCE_VERSION_PAYLOAD_MAX KILNLINK_ANNOUNCE_MAX_LEN
+_Static_assert(sizeof(FW_GIT_COMMIT) <= KILNLINK_ANNOUNCE_MAX_COMMIT_LEN,
+               "ANNOUNCE_VERSION commit hash no longer fits kilnlink_announce_t");
+_Static_assert(sizeof(FW_BUILD_DATE " " FW_BUILD_TIME) <= KILNLINK_ANNOUNCE_MAX_DATETIME_LEN,
+               "ANNOUNCE_VERSION build datetime no longer fits kilnlink_announce_t");
 
-/* Builds the ESP's outbound ANNOUNCE_VERSION (0x0F) payload -- same layout as
- * Frame C (SAFETY_CMD_FW_VERSION), truncated at boot_id (LINK_PROTOCOL.md
- * sec 4's table: no config_version/config_crc, those describe the Pico's own
- * active config). Real build identity from build_info.h, same source
- * uart_bridge.c's build_fw_version_reply() uses for the PC link's
- * INFO_CMD_GET_FW_VERSION -- see this file's build_info.h include comment
- * for why this can be real data rather than SaftyFW's current honest stub.
- * Returns bytes written, 0 if out_cap is too small. */
+/* Builds the ESP's outbound ANNOUNCE_VERSION (0x0F) payload via the shared
+ * CommonFW codec (kilnlink_announce_encode) -- same layout as Frame C
+ * (SAFETY_CMD_FW_VERSION), truncated at boot_id (LINK_PROTOCOL.md sec 4's
+ * table: no config_version/config_crc, those describe the Pico's own active
+ * config; kilnlink_announce.h's own comment notes the same truncation). Real
+ * build identity from build_info.h, same source uart_bridge.c's
+ * build_fw_version_reply() uses for the PC link's INFO_CMD_GET_FW_VERSION --
+ * see this file's build_info.h include comment for why this can be real data
+ * rather than SaftyFW's current honest stub. Returns bytes written, 0 if
+ * out_cap is too small or encoding otherwise fails. */
 static size_t safety_build_announce_version_payload(const SafetyLinkClass *link, uint8_t *out,
                                                       size_t out_cap)
 {
@@ -227,26 +232,23 @@ static size_t safety_build_announce_version_payload(const SafetyLinkClass *link,
     size_t commit_len = sizeof(commit) - 1u;   /* drop the implicit '\0' */
     size_t datetime_len = sizeof(datetime) - 1u;
 
-    size_t needed = 1u + 2u + 2u + 1u + 1u + commit_len + 1u + datetime_len + 1u;
-    if (!out || out_cap < needed) {
+    kilnlink_announce_t msg = {0};
+    msg.protocol_version = (uint16_t)KILNLINK_PROTOCOL_VERSION;
+    msg.min_compatible = (uint16_t)KILNLINK_MIN_COMPATIBLE;
+    msg.dirty = FW_GIT_DIRTY ? 1u : 0u;
+    msg.commit_len = (uint8_t)commit_len;
+    memcpy(msg.commit, commit, commit_len);
+    msg.datetime_len = (uint8_t)datetime_len;
+    memcpy(msg.datetime, datetime, datetime_len);
+    msg.boot_id = link->esp_boot_id;
+
+    kilnlink_announce_status_t status;
+    size_t len = kilnlink_announce_encode(&msg, out, out_cap, &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "ANNOUNCE_VERSION encode failed (status=%d)", (int)status);
         return 0;
     }
-
-    size_t i = 0;
-    out[i++] = SAFETY_CMD_ANNOUNCE_VERSION;
-    safety_put_u16_le(&out[i], (uint16_t)KILNLINK_PROTOCOL_VERSION);
-    i += 2;
-    safety_put_u16_le(&out[i], (uint16_t)KILNLINK_MIN_COMPATIBLE);
-    i += 2;
-    out[i++] = FW_GIT_DIRTY ? 1u : 0u;
-    out[i++] = (uint8_t)commit_len;
-    memcpy(&out[i], commit, commit_len);
-    i += commit_len;
-    out[i++] = (uint8_t)datetime_len;
-    memcpy(&out[i], datetime, datetime_len);
-    i += datetime_len;
-    out[i++] = link->esp_boot_id;
-    return i;
+    return len;
 }
 
 /* One-shot BROADCAST send -- no ACK, no blocking beyond handing the bytes to

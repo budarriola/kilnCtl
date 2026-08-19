@@ -23,5 +23,6 @@ idf_component_register(
     SRCS "${KILNLINK_DIR}/src/kilnlink_crc.c"
          "${KILNLINK_DIR}/src/kilnlink_frame.c"
          "${KILNLINK_DIR}/src/kilnlink_context.c"
+         "${KILNLINK_DIR}/src/kilnlink_announce.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

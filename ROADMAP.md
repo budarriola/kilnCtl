@@ -195,17 +195,24 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       `kilnlink_frame.c`, `kilnlink_context.c` — not the
       `announce`/`diag`/`trip`/`power`/`clear_trip`/`ceiling`/
       `get_fw_version`/`set_clock` codecs `SaftyFW` already links), and
-      `KilnFW`'s `safety_link.c` still hand-rolls the `ANNOUNCE_VERSION`
+      `KilnFW`'s `safety_link.c` used to hand-roll the `ANNOUNCE_VERSION`
       frame inline rather than calling `kilnlink_announce` (tracked in the
-      "Codecs pure and bounds-checked" bullet below) — so this stays `[~]`
+      "Codecs pure and bounds-checked" bullet below) — so this stayed `[~]`
       until the ESP-IDF wrapper's codec set and `KilnFW`'s remaining
-      hand-rolled parsing are brought up to parity with `SaftyFW`'s usage.
-      **2026-08-19: `SaftyFW`'s half closed** — `link_task.c`'s
+      hand-rolled parsing were brought up to parity with `SaftyFW`'s usage.
+      **2026-08-19: both halves closed.** `SaftyFW`'s side — `link_task.c`'s
       `link_task_handle_announce_version()` now calls
       `kilnlink_announce_decode()` instead of hand-reading fixed byte
       offsets; same compatibility verdict, same `s_degraded_no_context`
-      effect on mismatch. `KilnFW`'s send-side hand-roll is unchanged (owned
-      separately)
+      effect on mismatch. `KilnFW`'s side — `components/kilnlink/CMakeLists.txt`
+      now also compiles `kilnlink_announce.c`, and `safety_link.c`'s
+      `safety_build_announce_version_payload()` calls `kilnlink_announce_encode()`
+      instead of hand-writing the byte layout; same fields, same burst
+      cadence, `idf.py build` verified. `KilnFW`'s receive side
+      (`safety_parse_fw_version()`) stays hand-rolled on purpose — it parses
+      the Pico's distinct, longer `FW_VERSION` (`0x0B`) frame, not an inbound
+      `ANNOUNCE_VERSION`, so `kilnlink_announce_decode()`'s fixed layout does
+      not apply there
 - [x] `KILNLINK_PROTOCOL_VERSION` the single source (2026-08-16); `KilnFW`'s
       `UART_PROTOCOL_VERSION` (`App/drivers/uart_task_ids.h`) is now
       `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, a real alias rather than a
@@ -777,8 +784,10 @@ path. Two facts set the shape of this milestone:
       `KilnFW/TODO.md` 9.0); both firmwares' hand-rolled encode/parse of this
       frame predate the codec and were not migrated onto it. **2026-08-19:
       `SaftyFW`'s receive-side parse migrated onto `kilnlink_announce_decode()`**
-      (`link_task_handle_announce_version()`) — `KilnFW`'s send-side hand-roll
-      is unchanged (separate item). **2026-08-18,
+      (`link_task_handle_announce_version()`), **and `KilnFW`'s send-side
+      migrated onto `kilnlink_announce_encode()`**
+      (`safety_build_announce_version_payload()`, `KilnFW/TODO.md` 9.0) — both
+      firmwares' halves of this frame are now on the shared codec. **2026-08-18,
       later same day:** the GUI half of this item is done too -- the LCD's
       "Safety Processor" card now shows both sides' protocol versions, marks
       compatibility, names which side is older on a mismatch, and always

@@ -3023,10 +3023,18 @@ depend on it, so it is tracked here as a gate. Design:
       `safety_apply_fw_version()` sees the Pico's `boot_id` change. **2026-08-18,
       later same day**: the shared `kilnlink_announce.{c,h}` codec for this
       frame's payload was added to `CommonFW` (host-tested,
-      `test/vectors/announce_vectors.json`) — `safety_link.c` still builds/parses
-      the frame by hand (`safety_build_announce_version_payload()`/
-      `safety_parse_fw_version()`, predating the codec) rather than calling
-      into it; unifying them is a follow-on, not a functional gap
+      `test/vectors/announce_vectors.json`) — at that point `safety_link.c` still
+      built the frame by hand rather than calling into it. **2026-08-19:** closed —
+      `safety_build_announce_version_payload()` now calls `kilnlink_announce_encode()`
+      (component registered in `components/kilnlink/CMakeLists.txt`'s `SRCS`, which
+      previously omitted `kilnlink_announce.c`); same fields, same burst
+      cadence/timing, verified under `idf.py build`. `safety_parse_fw_version()` is
+      untouched and stays hand-rolled on purpose — it parses the Pico's `FW_VERSION`
+      (`0x0B`) reply, a longer, distinct wire layout (adds `config_version`/
+      `config_crc`) that `kilnlink_announce_decode()`'s fixed length check would
+      reject; the ESP never receives an inbound `ANNOUNCE_VERSION` frame itself
+      (SaftyFW-side inbound parsing note below), so there is no receive-side call
+      site for this codec in KilnFW
 - [x] `KILNLINK_MIN_COMPATIBLE` published alongside the protocol version, and
       compatibility evaluated in **both** directions —
       `safety_link_versions_compatible()` implements
