@@ -400,15 +400,23 @@ budget. `ui_page_board_health.c`/`ui_page_temperature.c` compacted
 `LV_OBJ_FLAG_SCROLLABLE` explicitly cleared on every page's outer
 containers so a future overflow clips visibly instead of silently becoming
 scrollable again. Real `idf.py -C firmware/KilnFW build` verified clean.
-**Two known gaps, not silently claimed solved:** `ui_page_network.c` is
-compacted but its full scan+saved-networks content still likely overflows
-the budget in the worst case (needs a further sub-page split, see TODO.md
-10.3's status note); `ui_page_temperature.c`'s fit depends on how many
-relays are configured per zone at runtime, which this pass couldn't bound
-at compile time. **Not verified on real hardware**: no ILI9488 panel
-attached in this environment, so pixel-exact fit is still unconfirmed for
-every page — this closes "budgeted and scroll-disabled in code, with a real
-computed margin," not "confirmed to fit on the physical screen."
+**One known gap, not silently claimed solved:** `ui_page_temperature.c`'s
+fit depends on how many relays are configured per zone at runtime, which
+this pass couldn't bound at compile time. `ui_page_network.c`'s overflow
+was fixed in a 2026-08-18 follow-up: Scan/Saved made mutually exclusive (one
+70px list visible at a time via a toggle) and, once connected, the whole
+list block hides behind a "Change network" button in favor of the QR row —
+worst case now ~268px against the ~264px budget, computed not measured
+(see `firmware/KilnFW/TODO.md`'s "ui_page_network.c follow-up pass" note).
+Explicit user clarification, same date: page-level touch-drag scrolling
+must never happen, but a fixed-height list widget (like the scan/saved
+lists) scrolling internally via normal touch-drag is fine and is the
+sanctioned way to show a variable-length list — that's not new pagination,
+it's how `lv_list` already worked. **Not verified on real hardware**: no
+ILI9488 panel attached in this environment, so pixel-exact fit is still
+unconfirmed for every page — this closes "budgeted and scroll-disabled in
+code, with a real computed margin," not "confirmed to fit on the physical
+screen."
 
 The point at which the two processors become one system. Deliberately separate,
 because it changes what a bare main board will do.

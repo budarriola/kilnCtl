@@ -4026,19 +4026,29 @@ height to fit into, computed from real constants (`ui_theme.h`) and
   onto a second button row could still overflow; this is a real,
   unresolved risk, not something this pass could rule out without a fixed
   relays-per-zone cap or real hardware to check against.
-- **`ui_page_network.c` compacted but HONESTLY NOT FULLY FIXED.** Rows/lists
-  shrunk substantially (mode toggle and Scan button 72px->44px, scan/saved
-  list height 140/120px->90px each, QR size 140px->100px, Back 72px->36px),
-  cutting the page's overflow from roughly 600px down to an estimated
-  300-350px -- still over the ~264px budget in the worst case (long scan
-  results + several saved networks, or the STA-connected QR row also
-  visible). The scan/saved `lv_list` widgets are left internally scrollable
-  on purpose (a bounded, fixed-height scrollable list is normal, contained
-  UI, not the "whole page scrolls" problem this rewrite targets), which
-  mitigates but doesn't eliminate the risk. **Follow-up needed:** split Scan
-  and Saved Networks into their own sub-pages via the existing
-  `kiln_ui_show()` pattern, the same way Safety Processor/Temperature
-  History were split out of home this pass.
+- **`ui_page_network.c` follow-up pass (2026-08-18): Scan/Saved made mutually
+  exclusive, list block and QR row made mutually exclusive once connected.**
+  The prior pass's remaining overflow came from Scan and Saved both being
+  stacked at once (~300-350px on their own). Fixed by adding a small
+  Scan/Saved toggle row (36px buttons) that shows exactly one 70px list at a
+  time (shrunk further from 90px), and, once connected, hiding the whole
+  list block behind a "Change network" button so the STA-connected QR row
+  gets the space instead -- tapping it swaps back via `s_manage_open`, with
+  a "Show QR" button to return. Worst case now: not-connected ~248px content
+  + ~20px gaps ~= 268px against the ~264px budget (tight, computed not
+  measured); connected-not-managing ~280px (QR row instead of list block).
+  Both are much closer to budget than the prior 300-350px, but still not
+  hardware-confirmed. The scan/saved `lv_list` widgets stay internally
+  touch-drag-scrollable at their fixed height on purpose -- a bounded,
+  self-contained list scrolling itself is normal, contained UI, not the
+  "whole page scrolls" problem this rewrite targets (explicit user
+  direction 2026-08-18: page-level scrolling must never happen, but a
+  fixed-height list widget scrolling internally via touch-drag is fine and
+  is the sanctioned way to show a variable-length list). Real build
+  (`idf.py -C firmware/KilnFW build`) verified clean after this change.
+  **Still open, if the ~268px worst case turns out tight on real hardware:**
+  split Scan and Saved into their own sub-pages via `kiln_ui_show()`, the
+  same pattern Safety Processor/Temperature History already use.
 - **Every page's `scr` and `content` containers now explicitly clear
   `LV_OBJ_FLAG_SCROLLABLE`** (`ui_page_home.c`, `ui_page_config.c`,
   `ui_page_board_health.c`, `ui_page_network.c`, `ui_page_temperature.c`,

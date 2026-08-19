@@ -64,30 +64,34 @@
 // no scan result to pre-fill it from -- a second keyboard flow this pass
 // does not build. wifi_provision_page.html remains the only way to change
 // the board's own AP identity.
-// 2026-08-18 no-scroll pass: `scr`/`content`/the connect modal below now
+// 2026-08-18 no-scroll pass: `scr`/`content`/the connect modal below
 // explicitly clear LV_OBJ_FLAG_SCROLLABLE, and several rows/buttons were
 // shrunk (mode toggle and Scan button from UI_THEME_MIN_TOUCH_TARGET_PX/72px
-// to 44px, scan/saved list heights from 140/120px to 90px each, Back from
-// 72px to 36px) to reduce this page's real overflow against its ~264px
-// content budget (480x320 landscape -- see ui_page_home.c's header comment
-// for that number's derivation). HONESTLY: this page's home_section (status
-// card + mode toggle + Scan button/status/list + Saved-networks
-// title/list), when fully populated, still does not fit inside that budget
-// even after this pass's compaction -- rough arithmetic puts it around
-// 300-350px, i.e. still an overflow, just a much smaller one than the
-// pre-pass ~600px. The scan_list/saved_list lv_list widgets are left
-// internally scrollable on purpose (a fixed-height, bounded scrollable list
-// is a normal, self-contained UI pattern -- the LG_FLAG_SCROLLABLE clears
-// above target the *page-level* containers, not these lists), which
-// mitigates but does not eliminate the risk: with both a longer scan result
-// set and several saved networks, or the STA-connected QR row also visible,
-// this page can still clip content below the Back button (the
-// page-level LV_OBJ_FLAG_SCROLLABLE clears above target `scr`/`content`
-// only, not these bounded internal lists). A real fix needs
-// a further redesign (e.g. splitting Scan and Saved Networks into their own
-// sub-pages via kiln_ui, the same page-manager pattern this file already
-// uses) that this pass did not have room to build -- flagged in TODO.md
-// 10.9's status note as explicit follow-up, not silently left as "solved."
+// to 44px, Back from 72px to 36px) against this page's ~264px content
+// budget (480x320 landscape -- see ui_page_home.c's header comment for that
+// number's derivation).
+//
+// 2026-08-18 follow-up pass: the first no-scroll pass left Scan and Saved
+// Networks BOTH stacked at once (90px lists + titles + Scan button/status),
+// which measured out to ~300-350px on its own -- a real overflow even
+// before the STA-connected QR row was added on top. Fixed here by making
+// Scan/Saved mutually exclusive (a small toggle row picks exactly one list
+// to show at a time, default "Saved") and, once connected, hiding the whole
+// scan/saved section behind a "Change network" button so the QR row (the
+// thing actually useful once connected) gets the space instead -- tapping
+// it swaps back to the list view via the same s_manage_open flag, with a
+// "Show QR" button to swap back. `s_scan_list`/`s_saved_list` remain
+// internally touch-drag-scrollable at their fixed height (this is fine and
+// intended -- a bounded, self-contained list scrolling itself is not "the
+// page scrolling"; only page-level containers must stay fixed).
+// Worst case now: status_card(~40) + mode_row(44) + toggle_row(40) +
+// one list block (title ~18 + list 70 = ~88) + Back(36) = ~248px of content
+// plus ~20px of inter-item gaps ~= 268px against the ~264px budget --
+// close, and NOT verified against real hardware (no ILI9488 panel attached
+// in this environment); the connected-QR state is smaller still
+// (~40+44+~120 QR row+40 manage btn+36 back = ~280, also unverified). Flag
+// remains: this is careful arithmetic against ui_theme.h's real constants,
+// not a hardware-confirmed fit.
 static const char *TAG __attribute__((unused)) = "ui_page_network";
 
 #define UI_PAGE_NETWORK_REFRESH_MS 1000
@@ -103,11 +107,22 @@ static lv_obj_t *s_detail_label; /* RSSI when connected, AP client count in AP m
 static lv_obj_t *s_mode_home_btn;
 static lv_obj_t *s_mode_ap_btn;
 
-/* ---- Home-mode section: scan + saved networks + STA-connected QRs ---- */
+/* ---- Home-mode section: scan + saved networks + STA-connected QRs ----
+ * Scan and Saved are mutually exclusive (s_list_showing_saved picks which
+ * one is visible) and, once connected, the whole list block hides behind
+ * s_manage_open in favor of the QR row -- see this file's header comment
+ * for the height arithmetic this exists to satisfy. */
 static lv_obj_t *s_home_section;
+static lv_obj_t *s_list_toggle_row;
+static lv_obj_t *s_scan_toggle_btn;
+static lv_obj_t *s_saved_toggle_btn;
+static lv_obj_t *s_scan_btn;
 static lv_obj_t *s_scan_status_label;
 static lv_obj_t *s_scan_list;
+static lv_obj_t *s_saved_title;
 static lv_obj_t *s_saved_list;
+static lv_obj_t *s_manage_btn;
+static lv_obj_t *s_manage_btn_label;
 static lv_obj_t *s_sta_qr_row;
 static lv_obj_t *s_dashboard_qr;
 static lv_obj_t *s_dashboard_qr_caption;
@@ -115,6 +130,8 @@ static lv_obj_t *s_ip_qr;
 static lv_obj_t *s_ip_qr_caption;
 static char s_dashboard_qr_last[80];
 static char s_ip_qr_last[40];
+static bool s_list_showing_saved = true;  /* which of Scan/Saved is visible */
+static bool s_manage_open = false;        /* connected-mode: list view vs QR view */
 
 /* Last wifi_prov_scan() results -- kept alive as long as s_scan_list's
  * buttons exist (their LV_EVENT_CLICKED user_data points into this array by
@@ -179,6 +196,32 @@ static void mode_ap_btn_cb(lv_event_t *e)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_set_mode(AP) failed: %s", esp_err_to_name(err));
     }
+    refresh_cb(NULL);
+}
+
+/* ---- Scan/Saved toggle (mutually exclusive, see this file's header
+ * comment on the height budget this satisfies) ---- */
+
+static void scan_toggle_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    s_list_showing_saved = false;
+    refresh_cb(NULL);
+}
+
+static void saved_toggle_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    s_list_showing_saved = true;
+    refresh_cb(NULL);
+}
+
+/* ---- Connected-mode: list view vs QR view (mutually exclusive) ---- */
+
+static void manage_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    s_manage_open = !s_manage_open;
     refresh_cb(NULL);
 }
 
@@ -427,12 +470,58 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_add_flag(s_ap_section, LV_OBJ_FLAG_HIDDEN);
     }
 
+    /* List block (Scan/Saved toggle + whichever list) vs QR row: mutually
+     * exclusive once connected, since both stacked at once is exactly the
+     * overflow this pass fixed (see header comment). Not connected -> QR
+     * row has nothing useful to show anyway, so the list block always wins.
+     * s_manage_open only has an effect while connected. */
+    bool show_list_block = !sta_connected || s_manage_open;
+    bool show_qr_row_slot = sta_connected && !s_manage_open;
+
+    if (show_list_block) {
+        lv_obj_remove_flag(s_list_toggle_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_scan_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_scan_status_label, LV_OBJ_FLAG_HIDDEN);
+        if (s_list_showing_saved) {
+            lv_obj_add_flag(s_scan_list, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_saved_title, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_saved_list, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_scan_list, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_saved_title, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_saved_list, LV_OBJ_FLAG_HIDDEN);
+        }
+        apply_mode_button_style(s_scan_toggle_btn, !s_list_showing_saved);
+        apply_mode_button_style(s_saved_toggle_btn, s_list_showing_saved);
+    } else {
+        lv_obj_add_flag(s_list_toggle_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_scan_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_scan_status_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_scan_list, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_saved_title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_saved_list, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Manage button: only meaningful (and only shown) while connected --
+     * not connected always shows the list block with nothing to toggle. */
+    if (sta_connected) {
+        lv_obj_remove_flag(s_manage_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_manage_btn_label, s_manage_open ? "Show QR" : "Change network");
+    } else {
+        lv_obj_add_flag(s_manage_btn, LV_OBJ_FLAG_HIDDEN);
+        s_manage_open = false; /* reset so reconnecting later defaults to the QR view */
+    }
+
     if (sta_connected) {
         int8_t rssi = wifi_prov_get_sta_rssi();
         char detail[32];
         snprintf(detail, sizeof(detail), "Signal: %d dBm", (int)rssi);
         lv_label_set_text(s_detail_label, detail);
-        lv_obj_remove_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+        if (show_qr_row_slot) {
+            lv_obj_remove_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
+        }
 
         char ip[16];
         if (wifi_prov_get_sta_ip(ip, sizeof(ip)) != ESP_OK) {
@@ -671,34 +760,72 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_pad_gap(s_home_section, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(s_home_section, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *scan_btn = lv_button_create(s_home_section);
-    lv_obj_set_width(scan_btn, lv_pct(100));
-    lv_obj_set_height(scan_btn, 44);
-    lv_obj_set_style_bg_color(scan_btn, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(scan_btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(scan_btn, scan_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *scan_label = lv_label_create(scan_btn);
+    /* Scan/Saved toggle -- mutually exclusive lists, see this file's header
+     * comment on the height budget this satisfies. */
+    s_list_toggle_row = lv_obj_create(s_home_section);
+    lv_obj_set_width(s_list_toggle_row, lv_pct(100));
+    lv_obj_set_height(s_list_toggle_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_list_toggle_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_list_toggle_row, 0, 0);
+    lv_obj_set_style_pad_all(s_list_toggle_row, 0, 0);
+    lv_obj_set_flex_flow(s_list_toggle_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_gap(s_list_toggle_row, UI_THEME_PADDING_PX, 0);
+
+    s_scan_toggle_btn = lv_button_create(s_list_toggle_row);
+    lv_obj_set_height(s_scan_toggle_btn, 36);
+    lv_obj_set_flex_grow(s_scan_toggle_btn, 1);
+    lv_obj_set_style_radius(s_scan_toggle_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_scan_toggle_btn, scan_toggle_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *scan_toggle_label = lv_label_create(s_scan_toggle_btn);
+    lv_obj_set_style_text_color(scan_toggle_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(scan_toggle_label, "Scan");
+    lv_obj_center(scan_toggle_label);
+    lv_obj_update_layout(s_scan_toggle_btn);
+    ui_theme_apply_touch_area(s_scan_toggle_btn, false);
+
+    s_saved_toggle_btn = lv_button_create(s_list_toggle_row);
+    lv_obj_set_height(s_saved_toggle_btn, 36);
+    lv_obj_set_flex_grow(s_saved_toggle_btn, 1);
+    lv_obj_set_style_radius(s_saved_toggle_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_saved_toggle_btn, saved_toggle_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *saved_toggle_label = lv_label_create(s_saved_toggle_btn);
+    lv_obj_set_style_text_color(saved_toggle_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(saved_toggle_label, "Saved");
+    lv_obj_center(saved_toggle_label);
+    lv_obj_update_layout(s_saved_toggle_btn);
+    ui_theme_apply_touch_area(s_saved_toggle_btn, false);
+
+    s_scan_btn = lv_button_create(s_home_section);
+    lv_obj_set_width(s_scan_btn, lv_pct(100));
+    lv_obj_set_height(s_scan_btn, 44);
+    lv_obj_set_style_bg_color(s_scan_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(s_scan_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_scan_btn, scan_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *scan_label = lv_label_create(s_scan_btn);
     lv_obj_set_style_text_color(scan_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(scan_label, "Scan for networks");
     lv_obj_center(scan_label);
-    lv_obj_update_layout(scan_btn);
-    ui_theme_apply_touch_area(scan_btn, false);
+    lv_obj_update_layout(s_scan_btn);
+    ui_theme_apply_touch_area(s_scan_btn, false);
 
     s_scan_status_label = lv_label_create(s_home_section);
     lv_obj_set_style_text_color(s_scan_status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(s_scan_status_label, "Tap Scan to search for networks");
 
+    /* 70px, not 90px -- shrunk further in the Scan/Saved toggle pass since
+     * only one of scan_list/saved_list is ever visible at once now, but the
+     * page-level content budget is still tight (see header comment). */
     s_scan_list = lv_list_create(s_home_section);
     lv_obj_set_width(s_scan_list, lv_pct(100));
-    lv_obj_set_height(s_scan_list, 90); /* see this file's no-scroll-pass header comment */
+    lv_obj_set_height(s_scan_list, 70);
 
-    lv_obj_t *saved_title = lv_label_create(s_home_section);
-    lv_obj_set_style_text_color(saved_title, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(saved_title, "Saved networks:");
+    s_saved_title = lv_label_create(s_home_section);
+    lv_obj_set_style_text_color(s_saved_title, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_saved_title, "Saved networks:");
 
     s_saved_list = lv_list_create(s_home_section);
     lv_obj_set_width(s_saved_list, lv_pct(100));
-    lv_obj_set_height(s_saved_list, 90);
+    lv_obj_set_height(s_saved_list, 70);
 
     /* STA-connected QR row -- dashboard (kiln.local) and raw-IP QRs, hidden
      * until sta_connected (this file's header comment). */
@@ -742,6 +869,23 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_text_color(s_ip_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(s_ip_qr_caption, "http://--");
     s_ip_qr_last[0] = '\0';
+
+    /* Manage-networks toggle -- swaps between the QR row above and the
+     * Scan/Saved list block, connected-mode only (refresh_cb hides this
+     * button entirely while not connected). See header comment. */
+    s_manage_btn = lv_button_create(s_home_section);
+    lv_obj_add_flag(s_manage_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(s_manage_btn, lv_pct(100));
+    lv_obj_set_height(s_manage_btn, 40);
+    lv_obj_set_style_bg_color(s_manage_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(s_manage_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(s_manage_btn, manage_btn_cb, LV_EVENT_CLICKED, NULL);
+    s_manage_btn_label = lv_label_create(s_manage_btn);
+    lv_obj_set_style_text_color(s_manage_btn_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_manage_btn_label, "Change network");
+    lv_obj_center(s_manage_btn_label);
+    lv_obj_update_layout(s_manage_btn);
+    ui_theme_apply_touch_area(s_manage_btn, false);
 
     /* AP-mode section: identity display + AP-join QR. */
     s_ap_section = lv_obj_create(content);
