@@ -51,6 +51,7 @@ import dataclasses
 import functools
 import glob
 import json
+import math
 import logging
 import os
 import subprocess
@@ -2397,6 +2398,27 @@ def _json_default(value):
     return str(value)
 
 
+def _sanitize_nan(value):
+    """Recursively replace NaN/Infinity floats with None (JSON null).
+
+    Firmware readings carry NaN as "no valid reading" (see ThermoReading and
+    SafetyStatus in devices.py -- an SPI-failed thermocouple channel or a
+    safety processor that has never reported both arrive this way).
+    ``json.dumps`` accepts NaN/Infinity by default and emits the invalid
+    (non-standard) ``NaN``/``Infinity`` tokens rather than raising, which a
+    strict JSON client can't parse. This repo's own convention (dashboard
+    fields throughout the C firmware) is "null until valid", so board-state
+    JSON follows the same rule instead of leaking a NaN literal.
+    """
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+    if isinstance(value, dict):
+        return {k: _sanitize_nan(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_nan(v) for v in value]
+    return value
+
+
 def _snapshot_section(fn):
     """Runs one board_state section, returning its data or an {"error": ...}
     entry -- one subsystem timing out (e.g. no safety processor attached)
@@ -2446,7 +2468,7 @@ def get_board_state() -> str:
         "profiles_exec_status": _snapshot_section(_profiles.get_exec_status),
         "autotune_status": _snapshot_section(_autotune.get_status),
     }
-    return json.dumps(state, default=_json_default, indent=2)
+    return json.dumps(_sanitize_nan(state), default=_json_default, indent=2)
 
 
 # ---------------------------------------------------------------------------

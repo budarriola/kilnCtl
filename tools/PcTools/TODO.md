@@ -436,7 +436,18 @@ reimplementing the transfer.
       board attached, every section reported its own honest error. **Only
       one processor** -- there is no second processor's data to add yet
       (`SaftyFW` doesn't exist); revisit once it does
-- [ ] 5. Software peer stub, both directions, with fault injection
+- [x] 5. Software peer stub, both directions, with fault injection. Done
+      2026-08-19: `kilnctrl/fake_peer.py` -- `FakeWire` (byte-queue UART
+      stand-in), `FaultInjector` (drop/corrupt_crc/truncate/duplicate,
+      each tied to a specific `LINK_PROTOCOL.md` rule -- reordering
+      deliberately omitted, the link is a single UART byte stream and
+      nothing in that doc claims frames can arrive out of order), and
+      `FakeEspPeer`/`FakeSaftyPeer` modelling the sec-2 asymmetry (ESP may
+      retry via `request_with_retry`; the Pico stub has no retry method at
+      all, and `send_telemetry` drops-and-counts on a full TX ring instead
+      of blocking). `tests/test_fake_peer.py` (14 tests, pure Python, no
+      board) runs `protocol.py`'s real `Frame`/`FrameDecoder` and
+      `kilnlink_codec`'s real payload encoders over the fake transport.
 - [x] 6. Codec encode/decode exposed with no board attached. Done 2026-08-16:
       `codec_encode_frame`/`codec_decode_frame` (pure functions, no link
       touched), built on `protocol.py`'s existing `Frame`/`unstuff` --
@@ -453,7 +464,39 @@ reimplementing the transfer.
       score, and why it was rejected (JTAG / no bridge-chip hint / not
       enough signal), or says plainly that no serial ports were seen at
       all -- instead of leaving the caller to discover it as a later timeout
-- [ ] All tools return JSON
+- [x] All tools return JSON. Done 2026-08-19: audited every `@_tool()`
+      function in `mcp_server.py` (~135, `-> str` throughout). Only two
+      actually build a JSON document with `json.dumps` -- `get_device_log_json`
+      (plain dicts of str/int, already safe) and `get_board_state` (aggregates
+      dataclasses via `_snapshot_section`/`dataclasses.asdict`, `bytes`/other
+      objects already routed through `_json_default`). Everything else returns
+      a plain human-readable string (f-strings, `.describe()`, `"\n".join`,
+      `.hex()`) built directly, with no intermediate non-JSON-safe object --
+      a `str` is itself JSON-serializable, so those needed no change. Found
+      and fixed one genuine gap: `get_board_state`'s "thermo" and
+      "safety_status" sections carry `ThermoReading.temperature_c` /
+      `cold_junction_c` and `SafetyStatus`'s temperature/cold-junction/current
+      fields, which the firmware legitimately reports as NaN (SPI-failed
+      channel, safety processor never reported) -- `json.dumps` accepts NaN by
+      default and emits the non-standard `NaN` token instead of raising,
+      silently producing invalid JSON for any strict client. Added
+      `_sanitize_nan()` (recursively replaces NaN/Infinity floats with `None`)
+      and applied it to `get_board_state`'s payload before serializing,
+      matching this repo's "null until valid" convention rather than a NaN
+      literal. Verified by hand: imported `mcp_server` under the project's own
+      `.venv`, called `_sanitize_nan` on nested dict/list/tuple NaN/Infinity
+      cases, and round-tripped a `ThermoReading(temperature_c=nan, ...)`
+      through `dataclasses.asdict` -> `_sanitize_nan` -> `json.dumps(...,
+      default=_json_default)` -> `json.loads`, confirming no `NaN` token in
+      the output and no exception. Did not exercise the other ~130 tools
+      end-to-end against real hardware (no board attached this session) --
+      that pass was a manual read of every function's return statement(s)
+      rather than a live/mocked call-and-assert harness; no existing
+      `test_mcp_server.py`-style mocking convention was found in `tests/` to
+      build on (only `test_debug_probe_armed.py`, `test_ota_http_client.py`,
+      `test_fake_peer.py` exist, none of which mock `mcp_server.py`'s tool
+      surface), and standing one up for 130+ functions with live UART/OpenOCD
+      dependencies was out of scope for an audit-and-fix pass.
 
 **Debug and programming (OpenOCD wrapper)**
 - [x] `kilnctrl.debug_probe` module wrapping OpenOCD -- done 2026-08-17 as
