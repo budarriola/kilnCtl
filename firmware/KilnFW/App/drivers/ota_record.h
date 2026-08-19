@@ -97,6 +97,21 @@ void ota_record_fill(ota_record_t *out, uint32_t uptime_s, const char *processor
 // same as run_state.c's own persist failures.
 esp_err_t ota_record_append(const ota_record_t *rec);
 
+// Reads back the single stored record from KILN_NVS_PARTITION. Returns
+// ESP_OK and fills `*out` if a record exists and its size matches
+// sizeof(ota_record_t) exactly (same "load-tolerant, never trust a
+// size-mismatched blob as if it were current" discipline run_state.c's own
+// loader uses -- a layout change bumps OTA_RECORD_VERSION and the old blob
+// is simply treated as absent, not misread). Returns ESP_ERR_NVS_NOT_FOUND
+// if no update has ever run this boot-image's NVS lifetime (nothing has
+// ever called ota_record_append()), or any other nvs_* error verbatim on a
+// genuine read failure -- callers must not treat a non-ESP_OK return as "an
+// update happened but is unreadable," only as "no current record." Never
+// itself logs at error level for the NOT_FOUND case (that is the normal,
+// expected state on a board that has never been updated), unlike
+// ota_record_append()'s failure logging.
+esp_err_t ota_record_load(ota_record_t *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1970,37 +1970,53 @@ def ota_update_pico(image_path: str, password: str, host: Optional[str] = None) 
 
 @_tool()
 def ota_status(host: Optional[str] = None) -> str:
-    """Poll OTA update progress -- GET /api/ota/pico/status, the only
-    HTTP-queryable progress surface that exists today.
+    """Poll OTA update progress -- both GET /api/ota/pico/status and
+    GET /api/ota/esp/status.
 
     Reports the background Pico relay task's phase/percent/last_error
     (ota_pico_relay.c) -- e.g. "sending" at 60%, or "done"/"failed" once the
-    relay has finished.
+    relay has finished -- AND the ESP's own self-update transfer phase/
+    percent (ota_http_get_esp_progress()) plus the persisted "last update"
+    NVS record (ota_record.h: processor, version before/after, result,
+    uptime_s), via the newer /api/ota/esp/status route. Both are queried
+    independently and both are reported even if one of the two calls fails
+    -- a Pico-only or ESP-only failure does not hide the other's result.
 
-    HONEST GAP, not papered over: there is currently no HTTP endpoint for
-    (a) the ESP self-update's own progress
-    (ota_http_get_esp_progress() exists in ota_http.c but has no
-    `/api/ota/esp/status`-style route registered), or (b) the persisted
-    "last update" record (ota_record.h's append-only-of-one NVS blob --
-    timestamp, processor, version before/after, result -- has no HTTP GET
-    route either). Both are real, C-level state that simply isn't exposed
-    over HTTP yet; this tool does not invent a stand-in for either. The ESP
-    path's push result (see ota_update_esp()'s return value) is, today, the
-    only way to learn how an ESP update went, at the moment it happens.
+    Previously an HONEST GAP (through 2026-08-18): /api/ota/esp/status did
+    not exist, so the ESP self-update's own progress and the persisted
+    ota_record were real, C-level state with no HTTP route. That gap is now
+    closed -- see ota_http_client.py's get_esp_status().
 
     NOT YET VERIFIED AGAINST REAL HARDWARE -- response parsing is
     unit-tested with mocked HTTP only.
     """
     resolved = _ota_resolve_host(host)
+
     try:
-        status = ota_http.get_pico_status(resolved)
+        pico = ota_http.get_pico_status(resolved)
+        pico_str = (f"phase={pico.get('phase')!r} percent={pico.get('percent')} "
+                    f"last_error={pico.get('last_error')!r}")
     except ota_http.OtaHttpError as exc:
-        return f"error: {exc} (host={resolved})"
-    return (f"pico relay: phase={status.get('phase')!r} percent={status.get('percent')} "
-            f"last_error={status.get('last_error')!r} (host={resolved}) | "
-            f"NOTE: ESP self-update progress and the persisted ota_record "
-            f"('last update' history) have no HTTP endpoint yet -- not queryable "
-            f"from here, see this tool's own doc comment")
+        pico_str = f"error: {exc}"
+
+    try:
+        esp = ota_http.get_esp_status(resolved)
+        last_update = esp.get("last_update")
+        if last_update is None:
+            last_update_str = "none (no ESP update has run this boot's NVS lifetime)"
+        else:
+            last_update_str = (f"processor={last_update.get('processor')!r} "
+                                f"{last_update.get('version_before')!r}->"
+                                f"{last_update.get('version_after')!r} "
+                                f"success={last_update.get('success')} "
+                                f"reason={last_update.get('reason')!r} "
+                                f"uptime_s={last_update.get('uptime_s')}")
+        esp_str = (f"phase={esp.get('phase')!r} percent={esp.get('percent')} "
+                   f"last_update: {last_update_str}")
+    except ota_http.OtaHttpError as exc:
+        esp_str = f"error: {exc}"
+
+    return f"pico relay: {pico_str} (host={resolved}) | esp self-update: {esp_str} (host={resolved})"
 
 
 # ---------------------------------------------------------------------------

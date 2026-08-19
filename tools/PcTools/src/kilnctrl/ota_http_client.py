@@ -25,19 +25,24 @@ transfer)/section 9.5-era pico staging. Mirrored here, not re-derived:
   POST /api/ota/pico, same header/body shape, image is SaftyFW's raw .bin
        -> 202 {"ok":true,"status":"relay_started","bytes":N,"crc32":"0x..."}
   GET  /api/ota/pico/status    -> 200 {"phase":"...","percent":N,"last_error":"..."}
+  GET  /api/ota/esp/status     -> 200 {"phase":"...","percent":N,"last_update":null|{...}}
 
 Failure responses (400/403/409/500) are PLAIN TEXT
 (httpd_resp_send_err()/httpd_resp_set_status()+httpd_resp_send()), not JSON --
 so this client reads a non-2xx body as text and surfaces it verbatim in
 OtaHttpError.detail rather than trying to json.loads() it.
 
-KNOWN GAP, not invented around here: there is no HTTP endpoint that exposes
-ota_http_get_esp_progress() (the ESP self-update's own progress counter) or
-the persisted ota_record (App/drivers/ota_record.h's "last update" NVS
-blob) -- both are C-level getters with no `/api/ota/...` route registered
-for them in ota_http.c today. get_pico_status() below is the only real
-progress-polling endpoint that exists. See ota_status() in mcp_server.py for
-how this gap is surfaced to a caller instead of being papered over.
+CLOSED GAP (was open through 2026-08-18): there used to be no HTTP endpoint
+exposing ota_http_get_esp_progress() (the ESP self-update's own progress
+counter) or the persisted ota_record (App/drivers/ota_record.h's "last
+update" NVS blob). `GET /api/ota/esp/status` (App/drivers/ota_http.c) now
+covers both -- get_esp_status() below reads it. `last_update` is `null`
+when no update has ever run this NVS lifetime (ota_record_load() found
+nothing), or an object with ota_record_t's fields (processor,
+version_before, version_after, success, reason, uptime_s) when one exists.
+Build/test-verified only -- see ota_status() in mcp_server.py and
+TODO.md 9.6a for the same "no physical board exercised" caveat this whole
+module already carries.
 """
 from __future__ import annotations
 
@@ -259,3 +264,26 @@ def get_pico_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
         return json.loads(body_text)
     except Exception as exc:
         raise OtaHttpError(f"pico status response was not valid JSON: {body_text!r}") from exc
+
+
+def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/ota/esp/status -- unauthenticated poll-back for the ESP's own
+    self-update transfer (ota_http_get_esp_progress()) plus the persisted
+    "last update" NVS record (ota_record.h). Returns
+    {"phase": "...", "percent": 0-100, "last_update": null | {...}} straight
+    from the board; phase is one of "idle"/"verifying"/"writing"/
+    "finalizing"/"done"/"failed" (ota_http.c's esp_phase_str()). last_update
+    is None (JSON null) until the first ESP update has ever run this NVS
+    lifetime; once one has, it is a dict with processor/version_before/
+    version_after/success/reason/uptime_s, mirroring ota_record_t."""
+    req = urllib.request.Request(_url(host, "/api/ota/esp/status"), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"esp status request failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"esp status response was not valid JSON: {body_text!r}") from exc

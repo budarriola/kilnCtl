@@ -215,6 +215,23 @@ typedef enum {
 // be).
 void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent_out);
 
+// GET /api/ota/esp/status -- unauthenticated poll-back endpoint pairing
+// GET /api/ota/pico/status below, closing the gap ota_http_client.py's
+// header comment and mcp_server.py's ota_status() doc comment both flagged:
+// ota_http_get_esp_progress() and the persisted ota_record.h "last update"
+// blob were real, C-level state with no HTTP route. Returns
+// {"phase":"<string>","percent":<0-100>,"last_update":null|{...}} --
+// `phase`/`percent` straight from ota_http_get_esp_progress() above (phase
+// "idle" if no transfer has been attempted since boot, matching
+// OTA_HTTP_ESP_PHASE_IDLE); `last_update` is null when ota_record_load()
+// reports no record (no update has ever run this NVS lifetime), or an
+// object with ota_record_t's fields (processor, version_before,
+// version_after, success, reason, uptime_s) when one exists -- same
+// null-not-absent convention dashboard_http.c's safety_temp_c/
+// enclosure_temp_c fields already use, not a new style invented here. No
+// separate public entry point is exposed here, same "specific to this
+// route, no other caller" reasoning as ota_pico_status_get_handler() below.
+
 // --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------
 //
 // Same auth wire contract as POST /api/ota/esp (X-Ota-Mac header, context

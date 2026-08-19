@@ -1131,6 +1131,69 @@ static esp_err_t ota_pico_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// String form of ota_http_esp_phase_t, same "each getter's phase enum gets
+// exactly one string table, used only by its own status handler" precedent
+// ota_pico_relay_phase_str() sets for the Pico side -- no shared enum/string
+// mapping exists between the two processors' phases, and there is no reason
+// to invent one here.
+static const char *esp_phase_str(ota_http_esp_phase_t phase)
+{
+    switch (phase) {
+        case OTA_HTTP_ESP_PHASE_IDLE:       return "idle";
+        case OTA_HTTP_ESP_PHASE_VERIFYING:  return "verifying";
+        case OTA_HTTP_ESP_PHASE_WRITING:    return "writing";
+        case OTA_HTTP_ESP_PHASE_FINALIZING: return "finalizing";
+        case OTA_HTTP_ESP_PHASE_DONE:       return "done";
+        case OTA_HTTP_ESP_PHASE_FAILED:     return "failed";
+        default:                            return "unknown";
+    }
+}
+
+// GET /api/ota/esp/status -- see ota_http.h's doc comment above
+// ota_http_get_esp_progress() for the full field-by-field contract. Closes
+// the gap ota_http_client.py's module doc comment and mcp_server.py's
+// ota_status() doc comment both flagged: neither the ESP self-update's own
+// progress nor the persisted ota_record.h "last update" blob had an HTTP
+// route before this handler.
+static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
+{
+    ota_http_esp_phase_t phase;
+    uint8_t percent;
+    ota_http_get_esp_progress(&phase, &percent);
+
+    // ota_record_load() is null-tolerant on "no record yet" the same way
+    // safety_link_get_status() is null-tolerant on "no link this boot" --
+    // ESP_ERR_NVS_NOT_FOUND (or any other non-OK, e.g. NVS partition not
+    // yet initialized) means "nothing to report", not an error worth
+    // failing this GET over. last_update stays absent (JSON null) in
+    // exactly that case.
+    ota_record_t rec;
+    bool have_record = (ota_record_load(&rec) == ESP_OK);
+
+    // rec.reason (ota_record_fill()'s callers, ota_esp_do_transfer() above)
+    // is always this codebase's own snprintf() output -- never copied
+    // verbatim from an external source -- so, same as
+    // ota_pico_status_get_handler()'s last_error field below, it cannot
+    // contain a raw '"' or '\' that would need JSON escaping here.
+    char body[384];
+    int n;
+    if (have_record) {
+        n = snprintf(body, sizeof(body),
+                      "{\"phase\":\"%s\",\"percent\":%u,\"last_update\":"
+                      "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
+                      "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u}}",
+                      esp_phase_str(phase), (unsigned)percent, rec.processor, rec.version_before,
+                      rec.version_after, rec.success ? "true" : "false", rec.reason,
+                      (unsigned)rec.uptime_s);
+    } else {
+        n = snprintf(body, sizeof(body), "{\"phase\":\"%s\",\"percent\":%u,\"last_update\":null}",
+                      esp_phase_str(phase), (unsigned)percent);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
 static esp_err_t ota_pico_status_get_handler(httpd_req_t *req)
 {
     ota_pico_relay_status_t st;
@@ -1218,6 +1281,18 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &pico_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/status) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Closes the gap flagged in ota_http_client.py's module doc comment and
+    // mcp_server.py's ota_status() doc comment -- see ota_esp_status_get_handler()'s
+    // own doc comment above for the response shape.
+    static const httpd_uri_t esp_status_uri = {
+        .uri = "/api/ota/esp/status", .method = HTTP_GET, .handler = ota_esp_status_get_handler
+    };
+    err = httpd_register_uri_handler(server, &esp_status_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/status) failed: %s", esp_err_to_name(err));
         return err;
     }
 

@@ -208,5 +208,47 @@ class GetPicoStatusTest(unittest.TestCase):
                 ota.get_pico_status("192.0.2.1")
 
 
+class GetEspStatusTest(unittest.TestCase):
+    def test_parses_status_json_with_no_last_update(self):
+        body = json.dumps({"phase": "idle", "percent": 0, "last_update": None}).encode()
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+                                         return_value=_fake_response(body)):
+            status = ota.get_esp_status("kiln.local")
+        self.assertEqual(status["phase"], "idle")
+        self.assertIsNone(status["last_update"])
+
+    def test_parses_status_json_with_last_update(self):
+        body = json.dumps({
+            "phase": "done",
+            "percent": 100,
+            "last_update": {
+                "processor": "esp",
+                "version_before": "1.0.0",
+                "version_after": "1.1.0",
+                "success": True,
+                "reason": "ok",
+                "uptime_s": 1234,
+            },
+        }).encode()
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+                                         return_value=_fake_response(body)):
+            status = ota.get_esp_status("kiln.local")
+        self.assertEqual(status["phase"], "done")
+        self.assertEqual(status["last_update"]["version_after"], "1.1.0")
+        self.assertTrue(status["last_update"]["success"])
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.get_esp_status("192.0.2.1")
+
+    def test_rejects_non_json_body(self):
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen",
+                                         return_value=_fake_response(b"not json")):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.get_esp_status("kiln.local")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -114,3 +114,46 @@ esp_err_t ota_record_append(const ota_record_t *rec)
     }
     return err;
 }
+
+esp_err_t ota_record_load(ota_record_t *out)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- cannot read update record",
+                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+        return part_err;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        /* ESP_ERR_NVS_NOT_FOUND here means the namespace itself has never
+         * been written -- same "no record yet" case as the blob-not-found
+         * path below, not a real failure. */
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGE(TAG, "nvs_open_from_partition (read) failed: %s", esp_err_to_name(err));
+        }
+        return err;
+    }
+
+    size_t len = sizeof(*out);
+    err = nvs_get_blob(h, NVS_KEY_OTA_RECORD, out, &len);
+    nvs_close(h);
+
+    if (err == ESP_OK && len != sizeof(*out)) {
+        /* Same "a size-mismatched blob is not a current record" tolerance
+         * ota_record.h's doc comment on this function promises -- treat it
+         * as absent rather than hand back a partially-filled struct. */
+        ESP_LOGW(TAG, "stored OTA record is %u bytes, expected %u -- treating as absent",
+                 (unsigned)len, (unsigned)sizeof(*out));
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "nvs_get_blob(ota_record) failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
