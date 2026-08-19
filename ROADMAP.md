@@ -328,26 +328,39 @@ path. Two facts set the shape of this milestone:
       must still be reflashed for the corrected header flash-size to take
       effect on the physical board; this pass is config/doc-only and has not
       been flashed or build-verified against real hardware
-- [ ] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, and the app confirms itself only
-      after NVS, safety link and web server are up
+- [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, and the app confirms itself only
+      after NVS, safety link and web server are up (2026-08-17, already on
+      `main` before this pass — `partitions.csv` two-app-slot table +
+      `ota_rollback_confirm_task()` in `App/main.c` gating on
+      `nvs_ok && web_ok && link_up`; host-build-verified, not yet
+      hardware-flashed)
 - [ ] Pico flash layout and metadata format frozen before the first board is
       programmed; signature field and key space reserved even though signing is off
 - [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
       mode over UART1 with no timeout out of it
 - [ ] **Mutual protocol-version check** (lands with M5, gates this): each side
       verifies the other, a mismatch blocks heating on the ESP and puts the Pico
-      in `DEGRADED_NO_CONTEXT` without latching a trip
+      in `DEGRADED_NO_CONTEXT` without latching a trip. `ANNOUNCE_VERSION`
+      itself still unbuilt (`KilnFW/TODO.md` 9.0)
 - [ ] **Compatibility floor** frozen so a version mismatch can never disable the
       update path itself — otherwise every mismatch needs a debug probe
-- [ ] Image header validated before the first erase, so a wrong-target upload
-      cannot erase a slot
-- [ ] Challenge–response on the AP password, so it never crosses the wire;
-      lockout after 3 failures
-- [ ] Both paths refused unless the kiln is idle and cool, with the specific
-      blocker named
+- [x] Image header validated before the first erase, so a wrong-target upload
+      cannot erase a slot (2026-08-17, already on `main` — `ota_esp_do_transfer()`
+      checks `esp_image_header_t` magic + chip ID before `esp_ota_begin()`)
+- [x] Challenge–response on the AP password, so it never crosses the wire;
+      lockout after 3 failures (2026-08-17, already on `main` —
+      `GET /api/ota/challenge`, PSA Crypto HMAC, `App/drivers/ota_http.c`)
+- [x] Both paths refused unless the kiln is idle and cool, with the specific
+      blocker named (2026-08-17, already on `main` — `ota_interlock_check()`
+      names the zone/reason, e.g. `"zone 2 is at 340 C"`)
 - [ ] Link-loss heating block **not** bypassed during a Pico update — alarm text
-      suppressed, never the block
-- [ ] Four MCP tools, since most development updates will be agent-driven
+      suppressed, never the block. **Correctly untouched, not yet verifiable**:
+      `relay_authority.c` is unmodified (right, per design) but there is no
+      Pico-update transfer path wired up yet to exercise this end-to-end
+      (`KilnFW/TODO.md` 9.4)
+- [ ] Four MCP tools, since most development updates will be agent-driven —
+      HTTP OTA endpoints exist (`/api/ota/challenge`, `/api/ota/esp`,
+      `/api/ota/pico`) but nothing in `tools/PcTools` wraps them yet
 
 ---
 
