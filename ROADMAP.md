@@ -270,7 +270,28 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 
 - [ ] Current sensing: load-active detection and a power estimate — **not** an
       over/under-current trip
-- [ ] ESP → Pico context frames, including `relay_recent_mask`
+- [x] ESP → Pico context frames, including `relay_recent_mask`. **2026-08-18**:
+      `KilnFW`'s `safety_link.c` now builds a real `SAFETY_CMD_PUSH_CONTEXT`
+      (0x07) from live board state -- `kiln_io_get_relay_shadow()` for
+      `relay_now_mask`, a poll-task-owned rolling window
+      (`SAFETY_LINK_CONTEXT_RECENT_WINDOW_S` = 180 s) for `relay_recent_mask`,
+      raw per-channel `MAX31856_read_all()` readings and configured `tc_type`
+      for the per-zone blocks (`sample_counter` incremented only when
+      `MAX31856Reading::stale` is false, i.e. a fresh conversion was actually
+      consumed), and `profile_executor_get_status()` for
+      setpoint/active/relay-on/guard-tripped/PROFILE_RUNNING -- encoded
+      through `kilnlink_context_encode()` (the `kilnlink_context.c` codec
+      landed in the pass above is now an actual build dependency of
+      `KilnFW`, not just linked-but-unused) and sent as a broadcast every poll
+      period, same cadence and same call site
+      (`uart_protocol_send_broadcast`) `ANNOUNCE_VERSION` already uses. Wired
+      via a new `safety_link_set_context_sources()` setter called from
+      `app_main` alongside the other `dashboard_http_start()`-style hardware
+      wiring. Builds clean (`idf.py build`, xtensa-gcc). **Not verified
+      end-to-end**: no Pico exists on this bench (ROADMAP.md M0's
+      bench-confirmed dead link) to confirm the frame decodes correctly on
+      the receiving end -- this closes "the ESP builds and sends the frame",
+      not "a real Pico received and parsed it correctly".
 - [ ] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power.
       **2026-08-18**: the ESP-side half of power telemetry is done —
       `firmware/CommonFW/src/kilnlink_power.c` (Frame E's 55-byte codec,

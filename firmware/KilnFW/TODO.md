@@ -4787,3 +4787,77 @@ rather than building parallel paths.
       harness exists for it today — left as a follow-up, not attempted this
       pass to avoid scope creep into restructuring where the comparison
       lives.
+
+### 10.12 ESP → Pico context broadcast, `SAFETY_CMD_PUSH_CONTEXT` (ROADMAP.md M5)
+
+**2026-08-18.** `LINK_PROTOCOL.md` sec 4's 0x07 frame, built from real
+board state and sent every poll period — closes ROADMAP.md M5's "ESP → Pico
+context frames, including `relay_recent_mask`" item.
+
+- [x] **`components/kilnlink/CMakeLists.txt`** now also compiles
+      `CommonFW/src/kilnlink_context.c` — the codec landed in the earlier
+      2026-08-18 pass was linked-but-unused until now; this is its first
+      real caller.
+- [x] **`safety_link.h`**: `SafetyLinkClass` gained `context_io`/
+      `context_thermo_bus` (`void*` — kept untyped so this header stays free
+      of a hard `kiln_io.h`/`MAX31856.h` dependency, same minimal-include
+      rule `relay_authority.h` documents), `relay_last_on_tick[4]` +
+      `relay_last_on_tick_valid[4]` for the recent-mask rolling window,
+      `context_seq`, and `context_sample_counter[3]`. New public setter
+      `safety_link_set_context_sources(link, io_or_null, thermo_bus_or_null)`
+      and constant `SAFETY_LINK_CONTEXT_RECENT_WINDOW_S` (180 — clears sec
+      4's "≥ 150 s, two heater windows plus decay margin" floor against
+      `HEATER_WINDOW_MS` = 60000 in `profile_executor.c`).
+- [x] **`safety_link.c`**: `safety_build_and_send_context()` builds a
+      `kilnlink_context_t` and sends it via `kilnlink_context_encode()` +
+      `uart_protocol_send_broadcast()` — same broadcast call site
+      `safety_link_send_announce_version_once()` already uses. Field
+      sources:
+      - `relay_now_mask` / `relay_recent_mask`: `kiln_io_get_relay_shadow()`
+        plus `safety_context_update_relay_recent()`, a poll-task-only
+        rolling window keyed on `xTaskGetTickCount()` per relay bit.
+      - Per-zone `measured_c`/`tc_fault`: one `MAX31856_read_all()` burst
+        per push, matched back to `zone_index` via `MAX31856Reading::channel`
+        (readings are packed by *initialized-channel position*, not channel
+        number, per that function's own doc comment).
+      - Per-zone `tc_type`: `MAX31856_get_config()` per channel.
+      - Per-zone `sample_counter`: incremented in
+        `context_sample_counter[i]` only when `MAX31856Reading::stale` is
+        false for that channel's read this push — i.e. only when a fresh
+        conversion was actually consumed at this call site, per sec 4's
+        "Implementation note for KilnFW" (never incremented per-frame).
+      - Per-zone `setpoint_c`/`ACTIVE`/`RELAY_ON`/`GUARD_TRIPPED`, and the
+        top-level `PROFILE_RUNNING`/`ANY_ZONE_FAULTED`/`HEAT_REQUESTED`
+        flags: `profile_executor_get_status()` (the same free accessor
+        `dashboard_http.c` already reads) — `setpoint_c` is the one shared
+        `target_c` for every currently-active zone (`profile_executor.c`'s
+        "detuned decentralized PID against one shared setpoint"; there is no
+        per-zone setpoint to report), `NaN` for an inactive zone, same
+        invalid-value convention as `measured_c`.
+      - `CONTEXT_VALID`: always set once this driver is initialized — an
+        absent `thermo_bus`/`io` empties the numbers (`zone_count = 0`,
+        `relay_now_mask = 0`), it does not make them untrustworthy.
+      - `SIM_PLANT`: `#if CONFIG_KILNCTL_SIM_PLANT`.
+      Called from `safety_poll_task()` right after `safety_update_health()`,
+      every iteration — same `CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS` cadence
+      sec 4 specifies, independent of whether that iteration's `GET_STATUS`
+      exchange got a reply (this is a broadcast, not part of that
+      request/reply pairing).
+- [x] **`uart_task_ids.h`**: added `SAFETY_CMD_PUSH_CONTEXT` (0x07) to the
+      `SAFETY_CMD_*` list for documentation/consistency with
+      `kilnlink_context.h`'s `KILNLINK_CONTEXT_CMD` — `safety_link.c` itself
+      encodes through the shared codec rather than by hand, so it doesn't
+      reference this macro directly.
+- [x] **`main.c`**: `safety_link_set_context_sources(&safety, io_ready ? &kio
+      : NULL, thermo_bus.initialized ? &thermo_bus : NULL)` called right
+      after `profile_executor_start()`, same non-fatal NULL-tolerant wiring
+      convention as every other `*_start()` call in `app_main`.
+- [x] `idf.py -C firmware/KilnFW build` (via
+      `Microsoft.v6.0.2.PowerShell_profile.ps1`): clean, no new warnings.
+- [ ] **Not verified against a real Pico.** No RP2040 is attached in this
+      environment (ROADMAP.md M0's bench-confirmed dead link, same gap as
+      10.10/10.11 above) — the frame is built and broadcast, encoding
+      matches `kilnlink_context_encode()`'s own contract, but nothing here
+      confirms a real `SaftyFW` build decodes it correctly. `SaftyFW`'s
+      receive side for this frame is separately tracked in
+      `firmware/SaftyFW/TODO.md`.

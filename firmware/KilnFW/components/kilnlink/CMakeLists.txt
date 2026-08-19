@@ -22,5 +22,6 @@ set(KILNLINK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../CommonFW")
 idf_component_register(
     SRCS "${KILNLINK_DIR}/src/kilnlink_crc.c"
          "${KILNLINK_DIR}/src/kilnlink_frame.c"
+         "${KILNLINK_DIR}/src/kilnlink_context.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

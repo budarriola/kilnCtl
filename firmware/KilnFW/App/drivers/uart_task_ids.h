@@ -492,6 +492,13 @@
 #define SAFETY_CMD_GET_LINK_STATS 0x04u
 #define SAFETY_CMD_SET_POLL_PERIOD 0x05u
 #define SAFETY_CMD_SET_FAULT_OUT   0x06u
+/* ROADMAP.md M5: ESP->Pico context broadcast, LINK_PROTOCOL.md sec 4.
+ * Same value as kilnlink_context.h's KILNLINK_CONTEXT_CMD -- defined again
+ * here purely so this file's SAFETY_CMD_* list stays the one place every
+ * subcommand on this wire is enumerated; safety_link.c encodes the payload
+ * through the shared codec, not by hand, so it uses KILNLINK_CONTEXT_CMD
+ * directly rather than this macro. */
+#define SAFETY_CMD_PUSH_CONTEXT   0x07u
 /* Ids reserved by CommonFW/docs/LINK_PROTOCOL.md section 4/6 as part of the
  * "compatibility floor": both sides must parse/emit these regardless of
  * whether KILNLINK_PROTOCOL_VERSION agrees, because they are how a mismatch

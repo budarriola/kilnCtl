@@ -10,7 +10,17 @@
 #include "settings.h"
 #include "uart_task_ids.h"
 
+#include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_version.h"
+
+/* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT's live-state sources. safety_link.h
+ * only forward-declares these as void* (kiln_io_t is an anonymous-struct
+ * typedef, MAX31856BusClass a named one) to keep that header dependency-free;
+ * this .c file is where the frame is actually built, so it needs the real
+ * types. */
+#include "MAX31856.h"
+#include "kiln_io.h"
+#include "profile_executor.h"
 
 /* Real build identity (git commit/dirty/build timestamp), generated fresh
  * every build by gen_build_info.cmake into this component's binary dir --
@@ -353,6 +363,187 @@ static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_mess
     if (boot_id_changed) {
         safety_link_send_announce_version_burst(link);
     }
+}
+
+/* ------------------------------------------------------------------------ */
+/* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT (LINK_PROTOCOL.md sec 4)        */
+/* ------------------------------------------------------------------------ */
+
+void safety_link_set_context_sources(SafetyLinkClass *link, void *io_or_null,
+                                      void *thermo_bus_or_null)
+{
+    if (!link) {
+        return;
+    }
+    link->context_io = io_or_null;
+    link->context_thermo_bus = thermo_bus_or_null;
+}
+
+/* Rolls relay_now_mask into the relay_last_on_tick[] bookkeeping and returns
+ * the resulting relay_recent_mask -- "relays commanded on at any point in
+ * the last recent_window_s" (LINK_PROTOCOL.md sec 4). Poll-task-only, no
+ * locking needed: same reasoning as down_logged above, only the poll task
+ * ever touches these fields. */
+static uint8_t safety_context_update_relay_recent(SafetyLinkClass *link, uint8_t relay_now_mask)
+{
+    TickType_t now = xTaskGetTickCount();
+    uint8_t recent = 0;
+    for (unsigned i = 0; i < 4u; i++) {
+        if (relay_now_mask & (1u << i)) {
+            link->relay_last_on_tick[i] = now;
+            link->relay_last_on_tick_valid[i] = true;
+        }
+        if (link->relay_last_on_tick_valid[i] &&
+            safety_elapsed_ms(link->relay_last_on_tick[i]) <=
+                (uint32_t)SAFETY_LINK_CONTEXT_RECENT_WINDOW_S * 1000u) {
+            recent |= (uint8_t)(1u << i);
+        }
+    }
+    return recent;
+}
+
+/* Builds and sends one SAFETY_CMD_PUSH_CONTEXT broadcast from live KilnFW
+ * state -- relay mask from kiln_io (context_io), raw per-channel
+ * thermocouple readings + configured tc_type from the MAX31856 bus
+ * (context_thermo_bus), and per-zone setpoint/active/relay-on/guard-tripped
+ * from profile_executor_get_status() (a free accessor already shared with
+ * dashboard_http.c, no pointer needed). Called from the poll task every
+ * iteration, same cadence LINK_PROTOCOL.md sec 4 specifies ("every
+ * CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS"); never blocks beyond handing bytes
+ * to the UART (uart_protocol_send_broadcast's own contract).
+ *
+ * Either source pointer may be NULL (that board/bus never came up this
+ * boot) -- the frame still goes out with zone_count = 0 and/or
+ * relay_now_mask = 0 rather than being skipped: the Pico still learns
+ * boot_id/seq/uptime/flags, which is strictly better than silence. */
+static void safety_build_and_send_context(SafetyLinkClass *link)
+{
+    kiln_io_t *io = (kiln_io_t *)link->context_io;
+    MAX31856BusClass *thermo_bus = (MAX31856BusClass *)link->context_thermo_bus;
+
+    uint8_t relay_now_mask = io ? kiln_io_get_relay_shadow(io) : 0u;
+    uint8_t relay_recent_mask = safety_context_update_relay_recent(link, relay_now_mask);
+
+    profile_exec_status_t pstat;
+    profile_executor_get_status(&pstat);
+
+    kilnlink_context_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.boot_id = link->esp_boot_id;
+    ctx.seq = link->context_seq++;
+    ctx.uptime_ms = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
+    ctx.relay_now_mask = relay_now_mask;
+    ctx.relay_recent_mask = relay_recent_mask;
+    ctx.recent_window_s = (uint8_t)SAFETY_LINK_CONTEXT_RECENT_WINDOW_S;
+
+    /* One burst read of every initialized channel -- MAX31856_read_all skips
+     * channels that never came up rather than faking them, so readings[]
+     * is indexed by *position among initialized channels*, not by channel
+     * number; match each entry back to its channel via ::channel below
+     * rather than assuming readings[i] is channel i. */
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t reading_count = 0;
+    if (thermo_bus) {
+        (void)MAX31856_read_all(thermo_bus, readings, MAX31856_CHANNEL_COUNT, &reading_count);
+    }
+
+    bool any_zone_faulted = (pstat.state == PROFILE_EXEC_FAULTED);
+    bool heat_requested = false;
+
+    uint8_t zone_count = thermo_bus ? (uint8_t)MAX31856_CHANNEL_COUNT : 0u;
+    if (zone_count > KILNLINK_CONTEXT_MAX_ZONES) {
+        zone_count = KILNLINK_CONTEXT_MAX_ZONES; /* defensive; the two constants agree today */
+    }
+    ctx.zone_count = zone_count;
+
+    for (uint8_t i = 0; i < zone_count; i++) {
+        kilnlink_zone_context_t *z = &ctx.zones[i];
+        z->zone_index = i;
+
+        const MAX31856Reading *reading = NULL;
+        for (size_t r = 0; r < reading_count; r++) {
+            if (readings[r].channel == i) {
+                reading = &readings[r];
+                break;
+            }
+        }
+
+        MAX31856Config cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        MAX31856Class *ch = MAX31856_bus_channel(thermo_bus, i);
+        if (ch) {
+            (void)MAX31856_get_config(ch, &cfg);
+        }
+        z->tc_type = cfg.tc_type;
+
+        bool measured_valid =
+            reading && !reading->spi_failed && !isnan(reading->tc_temperature_c);
+        z->measured_c = measured_valid ? reading->tc_temperature_c : NAN;
+        z->tc_fault = reading ? reading->fault_status : 0u;
+        /* LINK_PROTOCOL.md sec 4: increment only at the point a fresh
+         * conversion is actually consumed -- reading->stale is exactly that
+         * signal (MAX31856Reading's own "no new conversion since the
+         * previous read" flag), never the mere act of building this frame. */
+        if (reading && !reading->stale) {
+            link->context_sample_counter[i]++;
+        }
+        z->sample_counter = link->context_sample_counter[i];
+
+        bool zone_active = pstat.zones[i].active;
+        bool zone_relay_on = pstat.zones[i].relay_commanded_on;
+        bool zone_faulted = pstat.zones[i].faulted;
+        /* profile_executor.c: "each active zone runs its own independent
+         * PID/guard/relay against one shared setpoint" -- there is no
+         * per-zone setpoint to report, so every currently-active zone
+         * reports the one shared target; an inactive zone has no setpoint,
+         * same NaN-for-invalid convention as measured_c above. */
+        z->setpoint_c = zone_active ? pstat.target_c : NAN;
+
+        if (measured_valid) {
+            z->flags |= KILNLINK_ZONE_FLAG_MEASURED_VALID;
+        }
+        if (zone_active) {
+            z->flags |= KILNLINK_ZONE_FLAG_ACTIVE;
+        }
+        if (zone_relay_on) {
+            z->flags |= KILNLINK_ZONE_FLAG_RELAY_ON;
+            heat_requested = true;
+        }
+        if (zone_faulted) {
+            z->flags |= KILNLINK_ZONE_FLAG_GUARD_TRIPPED;
+            any_zone_faulted = true;
+        }
+    }
+
+    if (pstat.state == PROFILE_EXEC_RUNNING) {
+        ctx.flags |= KILNLINK_CONTEXT_FLAG_PROFILE_RUNNING;
+    }
+    if (any_zone_faulted) {
+        ctx.flags |= KILNLINK_CONTEXT_FLAG_ANY_ZONE_FAULTED;
+    }
+    if (heat_requested) {
+        ctx.flags |= KILNLINK_CONTEXT_FLAG_HEAT_REQUESTED;
+    }
+    /* This driver always believes its own numbers -- an absent thermo_bus or
+     * io just makes the numbers empty (relay_now_mask 0 / zone_count 0), not
+     * untrustworthy. */
+    ctx.flags |= KILNLINK_CONTEXT_FLAG_CONTEXT_VALID;
+#if CONFIG_KILNCTL_SIM_PLANT
+    ctx.flags |= KILNLINK_CONTEXT_FLAG_SIM_PLANT;
+#endif
+
+    uint8_t payload[KILNLINK_CONTEXT_MAX_LEN];
+    kilnlink_context_status_t status = KILNLINK_CONTEXT_OK;
+    size_t len = kilnlink_context_encode(&ctx, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGW(TAG, "PUSH_CONTEXT encode failed: status %d", (int)status);
+        return;
+    }
+
+    /* Same (dst_device, dst_task, src_task) triple as ANNOUNCE_VERSION's own
+     * broadcast call site above -- fire-and-forget, no ACK expected. */
+    (void)uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                        UART_TASK_ID_SAFETY, payload, len);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -749,6 +940,12 @@ static void safety_poll_task(void *arg)
         TickType_t started = xTaskGetTickCount();
         (void)safety_exchange(link, request, sizeof(request), true);
         safety_update_health(link);
+        /* ROADMAP.md M5: SAFETY_CMD_PUSH_CONTEXT, same cadence as the
+         * GET_STATUS poll above -- LINK_PROTOCOL.md sec 4's "every
+         * CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS". Independent of whether the
+         * exchange above got a reply: this is a broadcast, not part of that
+         * request/reply pairing. */
+        safety_build_and_send_context(link);
 
         /* Measure the sleep from the start of the attempt, so the poll rate
          * stays at the requested period rather than period + however long a

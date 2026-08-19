@@ -107,6 +107,19 @@
 // folded into the *same* SAFETY_FAULT_SRC_SAFETY_LINK bit link staleness
 // already uses -- LINK_PROTOCOL.md sec 4: "The ESP treats it exactly like a
 // dead link." See safety_update_health() in safety_link.c.
+//
+// ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT (ESP -> Pico, BROADCAST,
+// unrequested, every poll period, LINK_PROTOCOL.md sec 4's 57-byte-at-3-zones
+// layout): relay_now_mask/relay_recent_mask from kiln_io_get_relay_shadow()
+// (context_io, set via safety_link_set_context_sources()), per-zone raw
+// MAX31856 readings + configured tc_type from context_thermo_bus, and
+// per-zone setpoint/active/relay-on/guard-tripped from
+// profile_executor_get_status() (a free accessor, no pointer needed here).
+// Built and sent by safety_build_and_send_context() from the poll task, right
+// alongside the existing GET_STATUS exchange -- see that function in
+// safety_link.c for the exact source of every field, including
+// sample_counter's "increment only when a fresh conversion was actually
+// read" rule and relay_recent_mask's rolling-window bookkeeping.
 #ifndef SAFETY_LINK_H
 #define SAFETY_LINK_H
 
@@ -126,6 +139,14 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* kiln_io_t is an anonymous-struct typedef (kiln_io.h) and MAX31856BusClass
+ * is a named one (MAX31856.h) -- rather than pull either header in here
+ * (safety_link.h stays free of that hard dependency, same minimal-include
+ * philosophy relay_authority.h documents), SafetyLinkClass below stores them
+ * as void* and safety_link.c, which already needs both headers to build
+ * ROADMAP.md M5's SAFETY_CMD_PUSH_CONTEXT frame (0x07, LINK_PROTOCOL.md sec
+ * 4), casts back. safety_link_set_context_sources() is the only setter. */
 
 /* Length of the Pico's status frame (see the contract above). */
 #define SAFETY_LINK_STATUS_FRAME_LEN 23u
@@ -214,6 +235,14 @@ static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
  * permanently absent Pico leaves periodic evidence in the log without one
  * warning per poll (which at the default period would be two per second). */
 #define SAFETY_LINK_DOWN_LOG_PERIOD_MS 60000u
+
+/* ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: "recent_window_s should be >= 150 s
+ * (two heater windows plus decay margin)" -- HEATER_WINDOW_MS is 60000
+ * (profile_executor.c), so 2*60 + 60 margin = 180 s clears that floor with
+ * room to spare. Transmitted in the frame itself (byte 13), not hard-coded
+ * on the Pico side -- this constant is what actually governs the window this
+ * driver tracks against. */
+#define SAFETY_LINK_CONTEXT_RECENT_WINDOW_S 180u
 
 /* --- Phase 10 (SaftyFW) / TODO.md 9.5: Pico firmware-update relay ---------
  * CommonFW/docs/UPDATE_PROTOCOL.md section 4's UPDATE_STATUS (0x14) reply.
@@ -400,6 +429,43 @@ typedef struct {
     bool       down_logged;      /* rate limiting for the "link is down" warning */
     TickType_t down_log_tick;
 
+    /* ROADMAP.md M5 / LINK_PROTOCOL.md sec 4 -- SAFETY_CMD_PUSH_CONTEXT
+     * source pointers, set once by safety_link_set_context_sources() (called
+     * from app_main after both boards have come up, same pattern as
+     * dashboard_http_start()'s hardware pointers). Either may stay NULL
+     * (board not populated this boot); the push then reports zone_count = 0
+     * and relay_now_mask = 0 rather than skipping the frame -- the Pico
+     * still learns boot_id/seq/uptime/flags either way. Stored as void* --
+     * see this header's forward-declaration comment above. */
+    void *context_io;         /* kiln_io_t*, relay state */
+    void *context_thermo_bus; /* MAX31856BusClass*, raw per-channel readings */
+
+    /* relay_recent_mask bookkeeping (LINK_PROTOCOL.md sec 4: "relays
+     * commanded on at any point in the last recent_window_s"), poll-task-only
+     * state, same no-lock reasoning as down_logged above -- only the poll
+     * task ever samples relay_now_mask or reads/writes these. Index i =
+     * relay i+1 (bit i of relay_now_mask). *_valid distinguishes "never seen
+     * on this boot" from tick 0, which xTaskGetTickCount() can legitimately
+     * be early in boot. */
+    TickType_t relay_last_on_tick[4];
+    bool       relay_last_on_tick_valid[4];
+
+    /* SAFETY_CMD_PUSH_CONTEXT's own seq counter (LINK_PROTOCOL.md sec 4:
+     * "increments every frame, never resets except on boot") -- distinct
+     * from stats.frames_sent, which counts ACK'd GET_STATUS exchanges, not
+     * this fire-and-forget broadcast. Poll-task-only, same as the fields
+     * just above. */
+    uint32_t context_seq;
+
+    /* Per-channel sample_counter (LINK_PROTOCOL.md sec 4: "increments only
+     * when a new conversion was actually read from that channel"),
+     * incremented in safety_build_context() itself -- the point at which
+     * this driver consumes that channel's MAX31856Reading -- never by the
+     * mere act of building the frame around an unchanged counter. Sized to
+     * MAX31856_CHANNEL_COUNT (3) without including MAX31856.h; a 4th slot
+     * would simply never be touched if that constant ever grew. */
+    uint8_t context_sample_counter[3];
+
     /* TODO.md 9.5/9.6: while a deliberate Pico update is relaying
      * (ota_pico_relay.c), the link legitimately goes quiet -- UPDATE_
      * PROTOCOL.md's "the Pico update deliberately trips the liveness rule"
@@ -457,6 +523,20 @@ esp_err_t safety_link_ping(SafetyLinkClass *link);
 esp_err_t safety_link_set_poll_period(SafetyLinkClass *link, uint16_t period_ms);
 
 esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out);
+
+/* ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: sets the two hardware pointers the
+ * poll task reads to build SAFETY_CMD_PUSH_CONTEXT -- io_or_null (kiln_io_t*,
+ * relay state) and thermo_bus_or_null (MAX31856BusClass*, raw thermocouple
+ * readings). Call once after both have come up (app_main, alongside the
+ * other dashboard_http_start()-style wiring); either may be NULL if that
+ * board didn't come up this boot, same non-fatal convention as everywhere
+ * else in this codebase -- the push still goes out, just with zone_count = 0
+ * and/or relay_now_mask = 0. Safe to call before or after safety_link_start
+ * (the poll task only reads these fields, never assumes they're set by a
+ * particular point in bring-up), but must not be called concurrently with
+ * itself. */
+void safety_link_set_context_sources(SafetyLinkClass *link, void *io_or_null,
+                                      void *thermo_bus_or_null);
 
 /* Phase 7b (LINK_PROTOCOL.md sec 4): reports what the last FW_VERSION frame
  * from the Pico said about compatibility. *out_known is false, and

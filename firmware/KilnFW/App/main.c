@@ -533,6 +533,16 @@ void app_main(void)
                  esp_err_to_name(exec_err));
     }
 
+    // ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: gives the safety link's poll
+    // task the two hardware pointers it needs to build SAFETY_CMD_PUSH_CONTEXT
+    // (relay state + raw thermocouple readings) -- same non-fatal NULL-tolerant
+    // wiring convention as everything else here; a board with no io/thermo_bus
+    // this boot still gets the frame, just with zone_count=0/relay_now_mask=0.
+    if (safety_err == ESP_OK) {
+        safety_link_set_context_sources(&safety, io_ready ? &kio : NULL,
+                                        thermo_bus.initialized ? &thermo_bus : NULL);
+    }
+
     // --- Autotune engine (TODO.md 6A.4) -------------------------------------
     // Same bring-up convention and NULL-tolerance as profile_executor above;
     // must also come up before dashboard_http_start() (registers /api/autotune*).
