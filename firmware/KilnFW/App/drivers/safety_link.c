@@ -341,6 +341,8 @@ static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_mess
     }
     link->peer_version_known = true;
     link->peer_version_compatible = compatible;
+    link->peer_protocol_version = peer_protocol;
+    link->peer_min_compatible = peer_min_compatible;
     if (have_boot_id) {
         boot_id_changed = (!link->pico_boot_id_known) || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
@@ -1062,7 +1064,9 @@ esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out)
 }
 
 esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_known,
-                                               bool *out_compatible)
+                                               bool *out_compatible,
+                                               uint16_t *out_peer_protocol,
+                                               uint16_t *out_peer_min_compatible)
 {
     if (!link || !out_known || !out_compatible) {
         return ESP_ERR_INVALID_ARG;
@@ -1075,6 +1079,12 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
     }
     *out_known = link->peer_version_known;
     *out_compatible = link->peer_version_compatible;
+    if (out_peer_protocol) {
+        *out_peer_protocol = link->peer_protocol_version;
+    }
+    if (out_peer_min_compatible) {
+        *out_peer_min_compatible = link->peer_min_compatible;
+    }
     safety_unlock(link);
     return ESP_OK;
 }

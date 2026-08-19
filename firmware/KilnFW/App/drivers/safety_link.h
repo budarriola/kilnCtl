@@ -354,6 +354,14 @@ typedef struct {
     bool    pico_boot_id_known;
     bool    peer_version_known;
     bool    peer_version_compatible;
+    /* The peer's own numbers off the last FW_VERSION frame, kept alongside
+     * peer_version_known/peer_version_compatible above purely so a caller
+     * (dashboard_http.c/ui_page_home.c, TODO.md 9.0's deferred "GUI names
+     * both versions and which one is older" item) can show the actual
+     * numbers rather than just a bool -- meaningless until peer_version_known
+     * is true, same convention as peer_version_compatible. */
+    uint16_t peer_protocol_version;
+    uint16_t peer_min_compatible;
 
     /* Phase 10 (SaftyFW) / TODO.md 9.5: last-received UPDATE_STATUS,
      * applied the same way cached/cached_tick are (safety_apply_status()) --
@@ -426,12 +434,20 @@ esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out)
 
 /* Phase 7b (LINK_PROTOCOL.md sec 4): reports what the last FW_VERSION frame
  * from the Pico said about compatibility. *out_known is false, and
- * *out_compatible is meaningless, until the Pico has pushed at least one
- * FW_VERSION frame (its own boot push, or a reply to SAFETY_CMD_GET_STATUS's
- * eventual GET_FW_VERSION request -- Phase 0.6b, not built this pass). Never
- * blocks on the far side. */
+ * *out_compatible, *out_peer_protocol and *out_peer_min_compatible are all
+ * meaningless, until the Pico has pushed at least one FW_VERSION frame (its
+ * own boot push, or a reply to SAFETY_CMD_GET_STATUS's eventual
+ * GET_FW_VERSION request -- Phase 0.6b, not built this pass).
+ * out_peer_protocol and out_peer_min_compatible
+ * are the peer's own KILNLINK_PROTOCOL_VERSION/KILNLINK_MIN_COMPATIBLE off
+ * that frame -- TODO.md 9.0's deferred "GUI names both versions and which one
+ * is older" item, added so a caller can show the actual numbers rather than
+ * just the bool verdict; either pointer may be NULL if the caller only wants
+ * a subset. Never blocks on the far side. */
 esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_known,
-                                               bool *out_compatible);
+                                               bool *out_compatible,
+                                               uint16_t *out_peer_protocol,
+                                               uint16_t *out_peer_min_compatible);
 
 /* --- Isolated fault line (GPIO6, an ESP OUTPUT) ---
  * High asserts: it lights U1's LED, which pulls the Pico's mainFault input

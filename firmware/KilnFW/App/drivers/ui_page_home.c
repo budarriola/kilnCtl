@@ -117,6 +117,7 @@ static lv_obj_t *s_stop_btn;
 static lv_obj_t *s_safety_temp_label;
 static lv_obj_t *s_enclosure_temp_label;
 static lv_obj_t *s_safety_power_label;
+static lv_obj_t *s_link_version_label;
 
 /* WiFi/IP/mDNS status readout, added to the status bar this pass. Text comes
  * from wifi_status_ui_get_text() (wifi_status_ui.c) -- see that module's
@@ -418,6 +419,17 @@ static void build_safety_card(lv_obj_t *parent)
     s_safety_power_label = lv_label_create(card);
     lv_obj_set_style_text_color(s_safety_power_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(s_safety_power_label, "Power: ---");
+
+    /* TODO.md 9.0's deferred "GUI names both versions and which one is
+     * older" item. Reuses this same card rather than a new one (10.1a's
+     * shared-backend rule / avoiding UI sprawl). Wrapped so a long
+     * "update ESP first" line can wrap onto a second line instead of
+     * overflowing the card. */
+    s_link_version_label = lv_label_create(card);
+    lv_obj_set_width(s_link_version_label, lv_pct(100));
+    lv_label_set_long_mode(s_link_version_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(s_link_version_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_link_version_label, "Link version: ---");
 }
 
 static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
@@ -735,6 +747,35 @@ static void refresh_cb(lv_timer_t *timer)
         lv_label_set_text(s_safety_power_label, buf);
     } else {
         lv_label_set_text(s_safety_power_label, "Power: ---");
+    }
+
+    /* TODO.md 9.0's deferred "GUI names both versions and which one is
+     * older" item. self_protocol_version is always known (this firmware's
+     * own KILNLINK_PROTOCOL_VERSION); peer_protocol_version reads "---"
+     * until the Pico has announced itself, same null-tolerant convention as
+     * the temp/power rows above -- on this build (no Pico, ROADMAP.md M0's
+     * bench-confirmed dead link) that is the honest, designed-for state.
+     * LINK_PROTOCOL.md sec 4 / UPDATE_PROTOCOL.md's "Update the ESP first
+     * when both need it" is unconditional (not gated on which side is
+     * numerically older -- the ESP is USB-recoverable and the Pico's easy
+     * path runs through it either way), so that instruction is static text,
+     * not a computed decision. */
+    if (!ds.link_version_known) {
+        lv_label_set_text(s_link_version_label, "Link version: ---");
+    } else if (ds.link_version_compatible) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Link version: ESP %u / Pico %u (OK)",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
+        lv_label_set_text(s_link_version_label, buf);
+    } else {
+        char buf[112];
+        const char *older = (ds.peer_protocol_version < ds.self_protocol_version) ? "Pico"
+                            : (ds.peer_protocol_version > ds.self_protocol_version) ? "ESP"
+                                                                                     : "neither";
+        snprintf(buf, sizeof(buf),
+                 "Link version: ESP %u / Pico %u -- INCOMPATIBLE, %s is older. Update ESP first.",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version, older);
+        lv_label_set_text(s_link_version_label, buf);
     }
 
     for (uint8_t zi = 0; zi < s_zone_count; zi++) {

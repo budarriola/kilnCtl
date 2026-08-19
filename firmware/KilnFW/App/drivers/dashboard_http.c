@@ -14,6 +14,7 @@
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "sim_backend.h"
+#include "uart_task_ids.h"
 #include "wifi_provision_http.h"
 #include "zones_http.h"
 
@@ -126,6 +127,18 @@ void dashboard_get_status(dashboard_status_t *out)
                 out->power_valid = !isnan(sl.power_total_w);
             }
         }
+
+        /* TODO.md 9.0's deferred "GUI names both versions" item -- this
+         * firmware's own protocol number is always known regardless of link
+         * state, the peer's is whatever the last FW_VERSION frame said (or
+         * unknown, on this no-Pico bench build). */
+        out->self_protocol_version = (uint16_t)UART_PROTOCOL_VERSION;
+        (void)safety_link_get_peer_version_status(s_dash.safety, &out->link_version_known,
+                                                    &out->link_version_compatible,
+                                                    &out->peer_protocol_version,
+                                                    &out->peer_min_compatible);
+    } else {
+        out->self_protocol_version = (uint16_t)UART_PROTOCOL_VERSION;
     }
     if (!out->safety_temp_valid) {
         out->safety_temp_c = NAN;
@@ -215,6 +228,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     APPEND(",\"power_w\":%s", ds.power_valid ? "" : "null");
     if (ds.power_valid) {
         APPEND("%.1f", (double)ds.power_w);
+    }
+
+    /* TODO.md 9.0's deferred "GUI names both versions and which one is
+     * older" item. self_protocol_version is always known; peer fields are
+     * null until the Pico has announced itself (same convention as
+     * safety_temp_c/power_w above). */
+    APPEND(",\"self_protocol_version\":%u", (unsigned)ds.self_protocol_version);
+    APPEND(",\"link_version_known\":%s", ds.link_version_known ? "true" : "false");
+    if (ds.link_version_known) {
+        APPEND(",\"link_version_compatible\":%s", ds.link_version_compatible ? "true" : "false");
+        APPEND(",\"peer_protocol_version\":%u", (unsigned)ds.peer_protocol_version);
+    } else {
+        APPEND(",\"link_version_compatible\":null");
+        APPEND(",\"peer_protocol_version\":null");
     }
 
     /* TODO.md 8.2's "one boot-time report": present/mounted per NVS

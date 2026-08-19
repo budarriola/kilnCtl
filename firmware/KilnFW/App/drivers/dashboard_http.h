@@ -109,6 +109,23 @@ typedef struct {
     float    enclosure_temp_c;
     bool     power_valid;
     float    power_w;
+
+    /* TODO.md 9.0's deferred "GUI names both versions and which one is
+     * older" item: this firmware's own KILNLINK_PROTOCOL_VERSION (always
+     * known, not link-dependent) plus whatever the Pico last announced via
+     * ANNOUNCE_VERSION/FW_VERSION (LINK_PROTOCOL.md sec 4), straight from
+     * safety_link_get_peer_version_status() -- same shared-backend rule as
+     * safety_temp_c/enclosure_temp_c above. link_version_known is false (and
+     * peer_protocol_version/peer_min_compatible are meaningless) until the
+     * Pico has pushed at least one FW_VERSION frame; on this build (no Pico
+     * attached, ROADMAP.md M0's bench-confirmed dead link) it stays false,
+     * which is the honest, designed-for state. link_version_compatible is
+     * only meaningful when link_version_known is true. */
+    uint16_t self_protocol_version;
+    bool     link_version_known;
+    bool     link_version_compatible;
+    uint16_t peer_protocol_version;
+    uint16_t peer_min_compatible;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);

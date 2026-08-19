@@ -407,7 +407,15 @@ path. Two facts set the shape of this milestone:
       (`link_task.c`'s `link_task_handle_announce_version()`). `ANNOUNCE_VERSION`
       built this pass at the codec layer (`kilnlink_announce.{c,h}`,
       `KilnFW/TODO.md` 9.0); both firmwares' hand-rolled encode/parse of this
-      frame predate the codec and were not migrated onto it
+      frame predate the codec and were not migrated onto it. **2026-08-18,
+      later same day:** the GUI half of this item is done too -- the LCD's
+      "Safety Processor" card now shows both sides' protocol versions, marks
+      compatibility, names which side is older on a mismatch, and always
+      appends "Update ESP first" (static text per `UPDATE_PROTOCOL.md`'s
+      unconditional rule, not computed from which side is older) -- see
+      `KilnFW/TODO.md` 9.0 for the file-level detail. Not verified against
+      real mismatched hardware, only by code inspection and a no-Pico bench
+      build
 - [~] **Compatibility floor** frozen so a version mismatch can never disable the
       update path itself — otherwise every mismatch needs a debug probe.
       Frame ids `0x00`-`0x0F` (incl. `ANNOUNCE_VERSION`, `FW_VERSION`) are

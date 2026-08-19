@@ -3038,9 +3038,33 @@ depend on it, so it is tracked here as a gate. Design:
       aborted on mismatch specifically was not verified this pass** — that is
       the same 30 s-silence abort path `ROADMAP.md` M6 tracks separately and
       was out of scope here
-- [ ] The GUI names **both** versions and which one is older. "Incompatible"
+- [x] The GUI names **both** versions and which one is older. "Incompatible"
       without saying which side to update generates a question instead of
-      answering one -- **deferred, GUI work, out of scope for this pass**
+      answering one. **2026-08-18, later same day:** reuses the existing
+      "Safety Processor" card (`5a3e459`'s card, `ui_page_home.c`'s
+      `build_safety_card()`/`s_link_version_label`) rather than a new one, per
+      10.1a's shared-backend rule. `safety_link.h`'s `SafetyLinkClass` gained
+      `peer_protocol_version`/`peer_min_compatible` fields (the numbers
+      behind the existing `peer_version_known`/`peer_version_compatible`
+      bools, populated in `safety_apply_fw_version()`);
+      `safety_link_get_peer_version_status()` grew two more out-params to
+      expose them. `dashboard_http.c`'s `dashboard_get_status()` (the shared
+      backend `ui_page_home.c` and `GET /api/status` both read) now carries
+      `self_protocol_version` (this build's `UART_PROTOCOL_VERSION`, always
+      known), `link_version_known`/`link_version_compatible`, and
+      `peer_protocol_version`/`peer_min_compatible`; `GET /api/status`'s JSON
+      gained matching fields (`null` until known, same convention as
+      `safety_temp_c`). The LCD card shows "Link version: ESP N / Pico M
+      (OK)" when compatible, or "ESP N / Pico M -- INCOMPATIBLE, <ESP|Pico> is
+      older. Update ESP first." when not (older side picked by comparing the
+      two protocol numbers), and "---" whenever `link_version_known` is
+      false (no Pico attached, `ROADMAP.md` M0's current bench state).
+      **Not verified against real mismatched hardware this pass** -- no Pico
+      is attached in this environment, so only the "unknown, shows ---" path
+      has actually been exercised; the "INCOMPATIBLE" rendering was verified
+      by code inspection, not a live mismatched pair. `idf.py -C
+      firmware/KilnFW build` succeeds
+      (`KilnCtrl.bin` 0x1546d0 bytes, 9% free in `factory`)
 - [x] The compatibility floor — framing, `ANNOUNCE_VERSION`, `FW_VERSION`,
       `UPDATE_*` — stays functional across any mismatch, so the fix can be pushed
       over the link rather than needing a debug probe. Neither side's frame
@@ -3052,9 +3076,17 @@ depend on it, so it is tracked here as a gate. Design:
 - [ ] **Refuse to push a Pico image this build could not then talk to.** That one
       action is what creates a lockout. Override must be explicit and separately
       confirmed -- **deferred, OTA-side work, out of scope for this pass**
-- [ ] When both need updating, the GUI states the order: **ESP first**, because
-      the ESP is recoverable over USB and the Pico's easy path runs through it
-      -- **deferred, GUI work, out of scope for this pass**
+- [x] When both need updating, the GUI states the order: **ESP first**, because
+      the ESP is recoverable over USB and the Pico's easy path runs through it.
+      **2026-08-18, later same day:** the incompatible-state message above
+      always ends with "Update ESP first." as static text, not a computed
+      decision -- re-read `UPDATE_PROTOCOL.md`'s wording (line ~420, "Update
+      the ESP first when both need it... The GUI should say this rather than
+      leaving the order to chance") and confirmed the rule is unconditional:
+      it does not say "update whichever is older first," it says ESP,
+      always, because the ESP is USB-recoverable and the Pico's own update
+      path runs through it regardless of which side's protocol number is
+      numerically behind
 
 **SaftyFW side (2026-08-18, later same day pass):** intentionally not
 re-touched here. Reading `firmware/SaftyFW/src/tasks/link_task.c` shows this
