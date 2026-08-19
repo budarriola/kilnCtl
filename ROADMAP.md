@@ -182,7 +182,17 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       pass since `selfcheck.py` wasn't touched this session
 - [ ] `KilnFW` delegating framing and CRC, proven byte-identical **before** the
       old code is deleted
-- [ ] CI grep: no CRC or byte-stuffing implementation outside `CommonFW`
+- [x] CI grep: no CRC or byte-stuffing implementation outside `CommonFW` --
+      `tools/check_no_duplicate_crc.ps1` (2026-08-18), matching
+      `firmware/SaftyFW/tools/check_isolation.ps1`'s conventions. Greps for
+      the kilnlink CRC-16/CCITT-FALSE polynomial (`0x1021`) outside
+      `firmware/CommonFW`. Not registered in any CI pipeline (none exists
+      yet for this check to join). Scoped to catch *new* untracked
+      duplicates only: the 4 known pre-migration copies (`KilnFW`'s
+      `uart_protocol.c` and its `UnitTestFw` mirror, `pc_tools`'
+      `protocol.py` and its mirror) are an explicit, documented allowlist
+      tied to the two items above -- deleting an allowlist entry is part of
+      finishing each migration, so it can't go stale silently
 
 ## M3 — Safety processor to first trustworthy reading
 
