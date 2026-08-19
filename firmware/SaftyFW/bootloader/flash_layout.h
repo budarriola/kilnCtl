@@ -43,6 +43,19 @@ extern "C" {
 #define BOOTLOADER_FLASH_OFFSET      0x00000100u
 #define BOOTLOADER_FLASH_SIZE        0x0000FF00u // ~64K (63.75K exactly)
 
+// Public-key reservation (docs/BOOTLOADER.md section 6): unused today
+// (signing is off), reserved at a fixed offset near the end of the
+// bootloader region so the bootloader's own code/.data size can grow
+// without moving it. 768 B is sized against Ed25519 (32 B) with headroom
+// for a larger scheme (e.g. RSA-2048 at 256 B, or more than one key) --
+// which algorithm, and whether more than one key is reservable, is
+// deliberately unpicked (docs/BOOTLOADER.md section 6). This is a
+// reservation only: nothing in this codebase reads or writes it, and no
+// verification logic exists.
+#define BOOTLOADER_PUBKEY_FLASH_SIZE   0x00000300u // 768 B
+#define BOOTLOADER_PUBKEY_FLASH_OFFSET \
+    (BOOTLOADER_FLASH_OFFSET + BOOTLOADER_FLASH_SIZE - BOOTLOADER_PUBKEY_FLASH_SIZE) // 0x0000FD00
+
 // Metadata region: ONE 4K sector (not two, despite docs/BOOTLOADER.md's
 // original "two copies... written alternately" wording -- see this file's
 // metadata.h header comment for why that phrasing describes a scheme that

@@ -98,6 +98,22 @@ typedef struct {
     char     build_commit[20];
     uint32_t build_epoch; // 0 = unknown, matching this codebase's "unknown maps to
                            // the honest-but-uninformative value" convention
+    // Reserved, unused. Space for an Ed25519 (or similar) signature over
+    // [0, length) of this slot, so turning on signing later
+    // (docs/BOOTLOADER.md section 6) is a format_version bump inside the
+    // SAME record layout, not a new field squeezed in around existing data.
+    // All-zero means "no signature present" -- what every image ships with
+    // until signing is turned on. Nothing packs, unpacks, or checks this
+    // field for meaning today beyond byte-for-byte roundtripping it.
+    uint8_t  signature[64];
+    // Reserved, unused, defaults to 0. A future format version could set
+    // this per-record to require a valid `signature` before a slot is
+    // considered bootable; until then the bootloader must treat it as
+    // always-false regardless of its stored value, so a stray nonzero byte
+    // in an old record can never accidentally start enforcing a check the
+    // current bootloader build cannot perform. bootloader_decide_boot() and
+    // bootloader_decide_after_crc_fail() never read this field.
+    uint8_t  sig_required;
 } bootloader_slot_meta_t;
 
 typedef struct {

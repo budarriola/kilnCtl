@@ -560,6 +560,50 @@
  * above. */
 #define SAFETY_CMD_TRIP_EVENT 0x0Du
 
+/* PC->ESP queries, LINK_PROTOCOL.md sec 7: "Mirror all of it on the PC-link
+ * SAFETY task as well" -- give pc_tools/the MCP server the same DIAG/
+ * TRIP_EVENT data the HTTP dashboard (dashboard_http.c) and LCD
+ * (ui_page_safety.c) already read, without needing Wi-Fi. Answered from the
+ * cache only, exactly like GET_STATUS/GET_LINK_STATS above -- never by
+ * talking to the Pico -- see safety_link_build_diag_payload() /
+ * safety_link_build_trip_event_payload() in safety_link.c. No arguments.
+ *
+ * GET_DIAG response payload (mirrors safety_link_status_t's diag_* fields,
+ * safety_link.h):
+ *   byte0      = SAFETY_CMD_GET_DIAG (0x0C)
+ *   byte1      = flags: bit0 diag_ever_received (all other bytes below are
+ *                       meaningless/zero if this bit is clear)
+ *   byte2      = diag_trip_reason (SAFETY_TRIP_*, 0 = none)
+ *   bytes3..4  = diag_warn_mask, u16 LE
+ *   bytes5..6  = diag_trip_mask, u16 LE
+ *   bytes7..10 = diag_uptime_ms, u32 LE
+ *   byte11     = diag_boot_reason (SAFETY_LINK_DIAG_BOOT_* bits)
+ *   byte12     = diag_context_age_100ms (255 = never)
+ *   bytes13..16= diag_context_frames_ok, u32 LE
+ *   bytes17..20= diag_context_frames_bad, u32 LE
+ *   bytes21..24= diag_tx_frames_dropped, u32 LE
+ *   byte25     = diag_state (SAFETY_LINK_DIAG_STATE_*)
+ *   byte26     = diag_flags (SAFETY_LINK_DIAG_FLAG_* bits)
+ *
+ * GET_TRIP_EVENT response payload (mirrors safety_link_status_t's trip_*
+ * fields, safety_link.h):
+ *   byte0      = SAFETY_CMD_GET_TRIP_EVENT (0x15)
+ *   byte1      = flags: bit0 trip_event_ever_received (all other bytes
+ *                       below are meaningless/zero if this bit is clear)
+ *   byte2      = trip_last_seq
+ *   byte3      = trip_reason (SAFETY_TRIP_* at the moment of this trip)
+ *   bytes4..7  = trip_uptime_ms, u32 LE
+ *   bytes8..11 = trip_safety_tc_c, f32 LE, degC
+ *   bytes12..15= trip_deciding_threshold, f32 LE
+ *   bytes16..19= trip_current_a[0], f32 LE, amps
+ *   bytes20..23= trip_current_a[1], f32 LE, amps
+ *   bytes24..27= trip_current_a[2], f32 LE, amps
+ *   byte28     = trip_relay_recent_mask
+ *   byte29     = trip_context_age_100ms
+ *   bytes30..33= trip_event_age_ms, u32 LE, ms (0 if never received)
+ */
+#define SAFETY_CMD_GET_DIAG       0x0Cu
+
 /* Phase 10 (SaftyFW) / TODO.md 9.5's Pico firmware-update relay
  * (CommonFW/docs/UPDATE_PROTOCOL.md section 4). Ids are byte-for-byte
  * SaftyFW's own src/tasks/link_frame.h LINK_FRAME_UPDATE_*_CMD values --
@@ -589,6 +633,11 @@
 #define SAFETY_CMD_UPDATE_END     0x12u
 #define SAFETY_CMD_UPDATE_ABORT   0x13u
 #define SAFETY_CMD_UPDATE_STATUS  0x14u
+
+/* See SAFETY_CMD_GET_DIAG's doc comment above for both GET_DIAG and
+ * GET_TRIP_EVENT's payload layouts -- 0x15 is the next free id after the
+ * 0x10-0x14 UPDATE_* block. */
+#define SAFETY_CMD_GET_TRIP_EVENT 0x15u
 
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u

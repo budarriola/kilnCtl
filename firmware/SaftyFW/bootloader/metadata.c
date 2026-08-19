@@ -15,9 +15,9 @@
 //     12     1  active_slot
 //     13     1  boot_attempts
 //     14     2  reserved1 (0)
-//     16    52  slots[BOOTLOADER_SLOT_A]  (see SLOT_BLOCK_LEN layout below)
-//     68    52  slots[BOOTLOADER_SLOT_B]
-//    120   132  reserved, 0xFF-filled
+//     16   117  slots[BOOTLOADER_SLOT_A]  (see SLOT_BLOCK_LEN layout below)
+//    133   117  slots[BOOTLOADER_SLOT_B]
+//    250     2  reserved, 0xFF-filled
 //    252     4  record_crc32, over bytes [0, 252)
 //    256  total = BOOTLOADER_METADATA_RECORD_LEN
 #define REC_OFF_MAGIC          0u
@@ -28,7 +28,11 @@
 #define REC_OFF_SLOTS          16u
 #define REC_OFF_CRC            252u
 
-// Per-slot block (52 bytes):
+// Per-slot block (117 bytes). `signature`/`sig_required` are the reserved,
+// unused fields docs/BOOTLOADER.md section 2's table and section 6 describe
+// -- present in the byte layout so a future format version can start using
+// them without moving anything else, but never read for a boot decision by
+// this build (see bootloader_slot_meta_t's own comment in metadata.h).
 //   0  1  state
 //   1  3  reserved (0)
 //   4  4  length
@@ -36,13 +40,26 @@
 //  12 16  version (ASCII, not null-terminated)
 //  28 20  build_commit (ASCII, not null-terminated)
 //  48  4  build_epoch
-#define SLOT_BLOCK_LEN       52u
-#define SLOT_OFF_STATE       0u
-#define SLOT_OFF_LENGTH      4u
-#define SLOT_OFF_CRC32       8u
-#define SLOT_OFF_VERSION     12u
+//  52 64  signature -- reserved, unused, all-zero = "no signature present"
+// 116  1  sig_required -- reserved, unused, always treated as false
+// 117  total = SLOT_BLOCK_LEN
+#define SLOT_BLOCK_LEN        117u
+#define SLOT_OFF_STATE        0u
+#define SLOT_OFF_LENGTH       4u
+#define SLOT_OFF_CRC32        8u
+#define SLOT_OFF_VERSION      12u
 #define SLOT_OFF_BUILD_COMMIT 28u
-#define SLOT_OFF_BUILD_EPOCH 48u
+#define SLOT_OFF_BUILD_EPOCH  48u
+#define SLOT_OFF_SIGNATURE    52u
+#define SLOT_OFF_SIG_REQUIRED 116u
+
+// Compile-time budget check: two slot blocks plus the fixed header/CRC must
+// fit inside the frozen 256-byte record (docs/BOOTLOADER.md section 2's
+// "well under half of that, so there is room ... without changing the
+// record size" claim) -- if a future field addition breaks this, it must
+// fail the build, not silently overrun into the CRC field.
+typedef char bootloader_metadata_record_budget_check
+    [(REC_OFF_SLOTS + 2u * SLOT_BLOCK_LEN <= REC_OFF_CRC) ? 1 : -1];
 
 static void put_u16_le(uint8_t *out, uint16_t v)
 {
@@ -78,6 +95,8 @@ static void pack_slot(const bootloader_slot_meta_t *slot, uint8_t out[SLOT_BLOCK
     memcpy(&out[SLOT_OFF_VERSION], slot->version, sizeof(slot->version));
     memcpy(&out[SLOT_OFF_BUILD_COMMIT], slot->build_commit, sizeof(slot->build_commit));
     put_u32_le(&out[SLOT_OFF_BUILD_EPOCH], slot->build_epoch);
+    memcpy(&out[SLOT_OFF_SIGNATURE], slot->signature, sizeof(slot->signature));
+    out[SLOT_OFF_SIG_REQUIRED] = slot->sig_required;
 }
 
 static void unpack_slot(const uint8_t in[SLOT_BLOCK_LEN], bootloader_slot_meta_t *slot)
@@ -88,6 +107,12 @@ static void unpack_slot(const uint8_t in[SLOT_BLOCK_LEN], bootloader_slot_meta_t
     memcpy(slot->version, &in[SLOT_OFF_VERSION], sizeof(slot->version));
     memcpy(slot->build_commit, &in[SLOT_OFF_BUILD_COMMIT], sizeof(slot->build_commit));
     slot->build_epoch = get_u32_le(&in[SLOT_OFF_BUILD_EPOCH]);
+    memcpy(slot->signature, &in[SLOT_OFF_SIGNATURE], sizeof(slot->signature));
+    // Unpacked verbatim but never consulted for a boot decision: see
+    // bootloader_slot_meta_t's comment in metadata.h. A stray nonzero byte
+    // here from an old/corrupt-but-CRC-valid record must never be able to
+    // start enforcing a check this build cannot perform.
+    slot->sig_required = in[SLOT_OFF_SIG_REQUIRED];
 }
 
 void bootloader_metadata_pack(const bootloader_metadata_t *meta,

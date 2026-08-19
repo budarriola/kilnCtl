@@ -218,6 +218,11 @@ extern "C" {
 /* Length of the PC-facing GET_LINK_STATS payload (uart_task_ids.h). */
 #define SAFETY_LINK_STATS_PAYLOAD_LEN 19u
 
+/* Length of the PC-facing GET_DIAG / GET_TRIP_EVENT payloads
+ * (uart_task_ids.h). */
+#define SAFETY_LINK_DIAG_PAYLOAD_LEN       27u
+#define SAFETY_LINK_TRIP_EVENT_PAYLOAD_LEN 34u
+
 /* Reserved age meaning "no status has ever been received". Distinct from a
  * merely old reading: 65534 ms of staleness is a link that died a minute ago,
  * 65535 is a Pico that has never spoken. */
@@ -783,6 +788,8 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link);
  * bad argument). */
 size_t safety_link_build_status_payload(SafetyLinkClass *link, uint8_t *out);
 size_t safety_link_build_stats_payload(SafetyLinkClass *link, uint8_t *out);
+size_t safety_link_build_diag_payload(SafetyLinkClass *link, uint8_t *out);
+size_t safety_link_build_trip_event_payload(SafetyLinkClass *link, uint8_t *out);
 
 #ifdef __cplusplus
 }

@@ -1327,6 +1327,18 @@ static void safety_bridge_task(void *arg)
                 err = (reply_len > 0) ? ESP_OK : ESP_FAIL;
                 break;
             }
+            case SAFETY_CMD_GET_DIAG: {
+                /* LINK_PROTOCOL.md sec 7: mirror DIAG onto the PC link too --
+                 * answered from the cache, never by talking to the Pico. */
+                reply_len = safety_link_build_diag_payload(ctx->link, reply);
+                err = (reply_len > 0) ? ESP_OK : ESP_FAIL;
+                break;
+            }
+            case SAFETY_CMD_GET_TRIP_EVENT: {
+                reply_len = safety_link_build_trip_event_payload(ctx->link, reply);
+                err = (reply_len > 0) ? ESP_OK : ESP_FAIL;
+                break;
+            }
             case SAFETY_CMD_SET_POLL_PERIOD: {
                 if (!bridge_args_ok("safety", &msg, 3)) { rejected = true; break; }
                 err = safety_link_set_poll_period(ctx->link, bridge_u16_le(&msg.payload[1]));

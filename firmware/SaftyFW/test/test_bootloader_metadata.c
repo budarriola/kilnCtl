@@ -74,6 +74,32 @@ static void test_pack_unpack_roundtrip(void)
                "slot B state roundtrips");
     TEST_CHECK(back.slots[BOOTLOADER_SLOT_B].build_epoch == 1700000500u,
                "slot B build_epoch roundtrips");
+
+    // Reserved signature/sig_required fields: all-zero in, all-zero out --
+    // fill_slot() memsets the whole struct to 0 before setting the fields it
+    // knows about, so this proves the reserved bytes roundtrip untouched
+    // rather than being clobbered by pack/unpack.
+    static const uint8_t zero_sig[64] = {0};
+    TEST_CHECK(memcmp(back.slots[BOOTLOADER_SLOT_A].signature, zero_sig, 64) == 0,
+               "slot A signature roundtrips as all-zero (no signature present)");
+    TEST_CHECK(back.slots[BOOTLOADER_SLOT_A].sig_required == 0,
+               "slot A sig_required roundtrips as 0");
+
+    // Non-zero reserved fields must also roundtrip byte-for-byte -- this is
+    // still just wire-format plumbing, not a claim that anything checks them.
+    uint8_t sig_pattern[64];
+    for (int i = 0; i < 64; i++) {
+        sig_pattern[i] = (uint8_t)(i + 1);
+    }
+    memcpy(meta.slots[BOOTLOADER_SLOT_B].signature, sig_pattern, 64);
+    meta.slots[BOOTLOADER_SLOT_B].sig_required = 1;
+    bootloader_metadata_pack(&meta, record);
+    ok = bootloader_metadata_unpack(record, &back);
+    TEST_CHECK(ok, "record with non-zero reserved fields still unpacks");
+    TEST_CHECK(memcmp(back.slots[BOOTLOADER_SLOT_B].signature, sig_pattern, 64) == 0,
+               "slot B non-zero signature roundtrips byte-for-byte");
+    TEST_CHECK(back.slots[BOOTLOADER_SLOT_B].sig_required == 1,
+               "slot B non-zero sig_required roundtrips");
 }
 
 static void test_unpack_hostile(void)
@@ -253,6 +279,17 @@ static void test_decide_boot(void)
     m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_EMPTY, BOOTLOADER_SLOT_BAD, 0);
     d = bootloader_decide_boot(&m);
     TEST_CHECK(!d.bootable, "both slots unusable from the start -> not bootable");
+
+    // sig_required is dead weight: a VALID active slot with sig_required=1
+    // and an all-zero signature must boot exactly as if sig_required were 0
+    // -- this build has no verifier and must never start enforcing a check
+    // it cannot perform (docs/BOOTLOADER.md section 2/6).
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_EMPTY, 0);
+    m.slots[BOOTLOADER_SLOT_A].sig_required = 1;
+    d = bootloader_decide_boot(&m);
+    TEST_CHECK(d.bootable, "sig_required=1 with no signature does not block boot (unenforced)");
+    TEST_CHECK(d.chosen_slot == BOOTLOADER_SLOT_A,
+               "sig_required has no effect on which slot is chosen");
 }
 
 static void test_decide_after_crc_fail(void)

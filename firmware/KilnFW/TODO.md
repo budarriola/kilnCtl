@@ -5123,13 +5123,32 @@ decode these frames", not "the ESP has ever received a real one."
       that actually sends Frame B/Frame D, which does not exist yet (see
       this section's opening paragraph) — nothing here can be exercised
       against live safety telemetry until then.
-- [ ] **Not done this pass**: mirroring `DIAG`/`TRIP_EVENT` onto the
-      PC-link `SAFETY` task (`uart_bridge.c`) so `pc_tools`/the MCP server
-      see the same data without Wi-Fi — `LINK_PROTOCOL.md` sec 7's "Mirror
-      all of it on the PC-link SAFETY task as well" and `LINK_PROTOCOL.md`
-      sec 9 item 0.9 both call for this, but the task this pass was scoped
-      to (`dashboard_http.c`/`ui_page_safety.c`, the web/LCD half of 0.9)
-      didn't extend to `uart_bridge.c`. A real follow-up, not forgotten.
+- [x] **Done (2026-08-19), build-verified only.** Mirrored `DIAG`/
+      `TRIP_EVENT` onto the PC-link `SAFETY` task per `LINK_PROTOCOL.md` sec
+      7's "Mirror all of it on the PC-link SAFETY task as well": two new
+      PC->ESP query subcommands on `UART_TASK_ID_SAFETY`,
+      `SAFETY_CMD_GET_DIAG` (0x0C) and `SAFETY_CMD_GET_TRIP_EVENT` (0x15,
+      the next free id after the 0x10-0x14 UPDATE_* block — 0x0C was the
+      only unused id left below 0x10). Both take no arguments and are
+      answered purely from `safety_link_status_t`'s cache — never by
+      talking to the Pico — exactly like the existing
+      `SAFETY_CMD_GET_STATUS`/`GET_LINK_STATS` cases:
+      `safety_link_build_diag_payload()`/`safety_link_build_trip_event_payload()`
+      (new, `safety_link.c`, following the byte-packing style of
+      `safety_link_build_status_payload()`) serialize every `diag_*`/`trip_*`
+      field respectively (27-byte and 34-byte fixed payloads,
+      `SAFETY_LINK_DIAG_PAYLOAD_LEN`/`SAFETY_LINK_TRIP_EVENT_PAYLOAD_LEN` in
+      `safety_link.h`), wired into `safety_bridge_task()`'s switch in
+      `uart_bridge.c` with two new cases. Full byte layout documented in
+      `uart_task_ids.h` next to the id definitions, same style as
+      `GET_STATUS`. `idf.py -C firmware/KilnFW build` (via `ninja -j 24` in
+      the configured `build/` dir) succeeds clean, no new warnings. Not
+      hardware/wire-verified — same caveat as the item above: no
+      Pico/ESP32-S3 attached in this environment, and no `SaftyFW` build
+      yet sends Frame B/Frame D for these fields to actually mirror, so this
+      is cross-compile-clean only, not exercised against a live reply.
+      `pc_tools`/the MCP server's own client-side decode of these two new
+      subcommands is not part of this change and remains open.
 
 ### 10.14 Command queue between every control surface and the tasks that own state
 

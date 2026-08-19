@@ -1751,3 +1751,56 @@ size_t safety_link_build_stats_payload(SafetyLinkClass *link, uint8_t *out)
     safety_put_u16_le(&out[17], stats.poll_period_ms);
     return SAFETY_LINK_STATS_PAYLOAD_LEN;
 }
+
+/* LINK_PROTOCOL.md sec 7: "Mirror all of it on the PC-link SAFETY task as
+ * well" -- answered from the cache only, never by talking to the Pico, same
+ * as safety_link_build_status_payload()/safety_link_build_stats_payload()
+ * above. Layout in uart_task_ids.h's SAFETY_CMD_GET_DIAG doc comment. */
+size_t safety_link_build_diag_payload(SafetyLinkClass *link, uint8_t *out)
+{
+    safety_link_status_t status;
+    if (!out || safety_link_get_status(link, &status) != ESP_OK) {
+        return 0;
+    }
+
+    out[0] = SAFETY_CMD_GET_DIAG;
+    out[1] = status.diag_ever_received ? 0x01u : 0x00u;
+    out[2] = status.diag_trip_reason;
+    safety_put_u16_le(&out[3], status.diag_warn_mask);
+    safety_put_u16_le(&out[5], status.diag_trip_mask);
+    safety_put_u32_le(&out[7], status.diag_uptime_ms);
+    out[11] = status.diag_boot_reason;
+    out[12] = status.diag_context_age_100ms;
+    safety_put_u32_le(&out[13], status.diag_context_frames_ok);
+    safety_put_u32_le(&out[17], status.diag_context_frames_bad);
+    safety_put_u32_le(&out[21], status.diag_tx_frames_dropped);
+    out[25] = status.diag_state;
+    out[26] = status.diag_flags;
+    return SAFETY_LINK_DIAG_PAYLOAD_LEN;
+}
+
+/* Same cache-only contract as safety_link_build_diag_payload() above. Layout
+ * in uart_task_ids.h's SAFETY_CMD_GET_DIAG doc comment (GET_TRIP_EVENT
+ * section). */
+size_t safety_link_build_trip_event_payload(SafetyLinkClass *link, uint8_t *out)
+{
+    safety_link_status_t status;
+    if (!out || safety_link_get_status(link, &status) != ESP_OK) {
+        return 0;
+    }
+
+    out[0] = SAFETY_CMD_GET_TRIP_EVENT;
+    out[1] = status.trip_event_ever_received ? 0x01u : 0x00u;
+    out[2] = status.trip_last_seq;
+    out[3] = status.trip_reason;
+    safety_put_u32_le(&out[4], status.trip_uptime_ms);
+    safety_put_f32_le(&out[8], status.trip_safety_tc_c);
+    safety_put_f32_le(&out[12], status.trip_deciding_threshold);
+    safety_put_f32_le(&out[16], status.trip_current_a[0]);
+    safety_put_f32_le(&out[20], status.trip_current_a[1]);
+    safety_put_f32_le(&out[24], status.trip_current_a[2]);
+    out[28] = status.trip_relay_recent_mask;
+    out[29] = status.trip_context_age_100ms;
+    safety_put_u32_le(&out[30], status.trip_event_age_ms);
+    return SAFETY_LINK_TRIP_EVENT_PAYLOAD_LEN;
+}

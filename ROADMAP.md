@@ -551,10 +551,14 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       real `cmake --build` (arm-none-eabi-gcc 14.2.1/pico-sdk 2.1.1/Ninja)
       succeeds clean, zero warnings under `-Wall -Wextra -Werror`, for
       `SaftyFW`/`_slotA`/`_slotB`. `tools/check_isolation.ps1` re-run clean.
-      **Still open**: sec 9 item 0.9's other half — mirroring DIAG/TRIP_EVENT
-      onto the PC-link `SAFETY` task in `uart_bridge.c` so `pc_tools`/MCP see
-      the same data without Wi-Fi — is not done (not touched by either
-      pass). **Not hardware-verified, and cannot be from this environment**:
+      **2026-08-19, later pass**: sec 9 item 0.9's other half now closed —
+      `SAFETY_CMD_GET_DIAG` (0x0C) and `SAFETY_CMD_GET_TRIP_EVENT` (0x15)
+      added to `uart_task_ids.h`, answered from the same cache as
+      `GET_STATUS`/`GET_LINK_STATS` via new `safety_link_build_diag_payload()`/
+      `_build_trip_event_payload()` in `safety_link.c`, wired into
+      `uart_bridge.c`'s `safety_bridge_task()`. `pc_tools`/MCP-side decoding
+      of these two subcommands is separate follow-on work, not done here.
+      **Not hardware-verified, and cannot be from this environment**:
       no ESP32-S3/Pico is attached, and M0 already established the isolated
       link doesn't pass a byte end-to-end on real hardware, so neither
       `SaftyFW`'s new send path nor `KilnFW`'s `safety_apply_diag()`/
@@ -805,15 +809,23 @@ path. Two facts set the shape of this milestone:
       `ota_rollback_confirm_task()` in `App/main.c` gating on
       `nvs_ok && web_ok && link_up`; host-build-verified, not yet
       hardware-flashed)
-- [ ] Pico flash layout and metadata format frozen before the first board is
+- [x] Pico flash layout and metadata format frozen before the first board is
       programmed; signature field and key space reserved even though signing is off
       — **design frozen 2026-08-19**, `SaftyFW/docs/BOOTLOADER.md` §2 (layout
       diagram + metadata table now include a reserved `signature[64]` field, a
       `sig_required` flag, and a 768 B pubkey reservation in the bootloader
-      region, all with fixed offsets). Layout/metadata *code*
-      (`flash_layout.h`, `metadata.h`) does not implement the reserved fields
-      yet — that is still open, tracked in `SaftyFW/TODO.md` phase 10. Stays
-      unchecked: design frozen is not the same as implemented.
+      region, all with fixed offsets). **2026-08-19, later pass — now in
+      code too**: `metadata.h`'s `bootloader_slot_meta_t` gained `signature[64]`/
+      `sig_required` (all-zero/0 by default), `metadata.c`'s pack/unpack
+      roundtrip both fields with a compile-time budget check keeping the
+      256-byte record intact (250 B used, 2 spare), and `flash_layout.h`
+      gained `BOOTLOADER_PUBKEY_FLASH_OFFSET`/`_SIZE` (768 B, fixed offset
+      near the end of the ~64K bootloader region) — reservation only, no
+      crypto/verification code, `sig_required` stays unread by boot-decision
+      logic (host-tested: `bootloader_decide_boot()` proven unaffected by a
+      set `sig_required` with no signature). Host tests (459/459) and a real
+      arm-none-eabi-gcc/pico-sdk bootloader build both pass clean. Not
+      flashed or hardware-verified — no RP2040/probe attached here.
 - [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
       mode over UART1 with no timeout out of it — **substantially built and
       host-build-verified** (GPIO6-first, per-boot CRC, `boot_attempts`
