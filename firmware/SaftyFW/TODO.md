@@ -426,10 +426,11 @@ header comment, so the build is reproducible elsewhere.
       estop-released succeeds, S1's documented scope-limit behavior with a
       follow-up proving it still re-trips normally): 391/391 checks pass.
       Real `cmake --build` for `SaftyFW`/`_slotA`/`_slotB` succeeds clean.
-      **Still not checked off**: `safety_core_request_clear_trip()` has no
-      caller anywhere in this build — the real trigger is Phase 7's
-      link_task/GUI `CLEAR_TRIP` (0x0A) command, which doesn't exist yet.
-      This pass closes the policy/API half only.
+      **2026-08-19, later pass: the caller now exists** — see Phase 7's
+      `CLEAR_TRIP (0x0A)` item below for `link_task_handle_clear_trip()`.
+      Still honestly not hardware-verified end-to-end (pi↔ESP UART link is
+      currently broken on the bench), but the policy/API half and the
+      wiring half are both closed now, build- and host-test-verified.
 - [x] GRACE → ARMED state machine, `startup_grace_s` = 60 s. Built
       2026-08-16 in `src/tasks/relay_owner.c`: the GRACE timer starts the
       instant `relay_owner_task()` itself begins running (a judgement call —
@@ -566,8 +567,34 @@ S9) are explicitly out of scope for this pass — they need `link_task`'s
       honestly a partial, not a completed feature.
 - [ ] Handle `SET_FIRING_CEILING` (0x09) → S1's `effective_ceiling`.
       **Clamp with `min()`** — the ESP may only ever tighten it.
-- [ ] Handle `CLEAR_TRIP` (0x0A), refused while the condition holds and
-      refused on a `trip_mask` mismatch.
+- [x] Handle `CLEAR_TRIP` (0x0A), refused while the condition holds and
+      refused on a `trip_mask` mismatch (2026-08-19). CommonFW's
+      `kilnlink_clear_trip_decode()` already existed and was already
+      host-tested (`CommonFW/test/test_clear_trip.c`) — nothing to add
+      there. `link_task.c` gained `link_task_handle_clear_trip()`, dispatched
+      from `link_task_handle_raw_frame()`'s switch on the new
+      `LINK_FRAME_CLEAR_TRIP_CMD` (`link_frame.h`): decodes the 3-byte
+      payload, calls `safety_core_get_diag_status()` for the currently-latched
+      `trip_reason` (same isolation-legal link_task-calls-safety_core
+      direction the status/diag/trip-event pulls already use), refuses
+      locally (never even asking `safety_core`) if nothing is tripped or if
+      the wire `trip_mask` doesn't match `link_frame_trip_mask_for_reason(trip_reason)`
+      — a new pure helper in `link_frame.c`/`.h`, factored out of Frame B/DIAG's
+      own trip_mask synthesis so both share the identical single-bit-per-reason
+      mapping instead of duplicating it. Otherwise calls
+      `safety_core_request_clear_trip()` and logs accepted/refused via
+      `log_task_log()`. Never ACKs on the wire (link_task never participates
+      in the ACK'd transport, and `LINK_PROTOCOL.md` doesn't ask this frame
+      to reply) — the ESP observes the outcome via the tripped bit in the
+      next status/DIAG frame. Host-tested: 427/427 checks pass
+      (`test/build_host_tests.ps1`), including new
+      `test_trip_mask_for_reason()` in `test_link_frame.c` (5 cases covering
+      the NONE/bit-0/bit-1/bit-7/bit-13 mapping). Real `cmake --build` for
+      `SaftyFW`/`_slotA`/`_slotB` succeeds clean, zero warnings.
+      `tools/check_isolation.ps1` still passes. **Honestly not
+      hardware-verified end-to-end**: the pi↔ESP UART link is currently
+      broken on the bench, so the CLEAR_TRIP frame itself has never crossed
+      real wire — build- and host-test-verified only.
 - [ ] Handle `SET_CLOCK` (0x0C), diagnostic only. **No guard may read it.**
 - [ ] **`tc_placement_mode` commissioning field** (`CHAMBER_AGREED` /
       `EXTERNAL_OVERHEAT`). Gates S1's firing-ceiling tightening, S2 and S10.

@@ -78,11 +78,13 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
 // condition persists). Returns true if the trip is now clear (or was already
 // not tripped), false if the clear was refused because the guard retripped.
 //
-// NOT YET CALLED FROM ANYWHERE in this build -- same honesty as
-// relay_owner_clear_trip()'s own header comment: the real trigger is Phase
-// 7's link_task CLEAR_TRIP (0x0A) command from the ESP/GUI, which does not
-// exist yet. This function is the policy/API half of that; wiring an actual
-// caller is a separate, later pass.
+// Called from link_task_handle_clear_trip() (src/tasks/link_task.c) on a
+// SAFETY_CMD_CLEAR_TRIP (0x0A) frame whose trip_mask matches the currently-
+// latched trip -- link_task checks the mask match and the "nothing tripped"
+// case itself (via safety_core_get_diag_status()) before calling this, so by
+// the time this is reached there is a real latched trip whose mask the ESP
+// echoed correctly; the only refusal left for this function to make is the
+// retick-still-tripped one described above.
 bool safety_core_request_clear_trip(void);
 
 // Trip-event pull for link_task's Frame D (SAFETY_CMD_TRIP_EVENT,

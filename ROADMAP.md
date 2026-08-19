@@ -304,10 +304,29 @@ physically stop a kiln, and the first that can nuisance-trip one.
       (`test/build_host_tests.ps1`), including new cases for the estop
       refuse/succeed paths and the documented S1 scope-limit behavior. Real
       `cmake --build` for the RP2040 target (`SaftyFW`/`_slotA`/`_slotB`)
-      succeeds clean. **Still open**: `safety_core_request_clear_trip()` has
-      no caller yet — the real trigger is Phase 7's link_task `CLEAR_TRIP`
-      (0x0A) command from the ESP/GUI, which doesn't exist yet. This closes
-      the policy/API half, not the end-to-end wiring.
+      succeeds clean. **2026-08-19, later pass — the caller now exists**:
+      `link_task.c` decodes inbound `SAFETY_CMD_CLEAR_TRIP` (0x0A) via
+      CommonFW's `kilnlink_clear_trip_decode()` (the codec's decode side
+      already existed, host-tested, no changes needed there), checks
+      "nothing currently tripped" and the wire `trip_mask` against the
+      currently-latched one (`link_frame_trip_mask_for_reason()`, new pure
+      helper in `link_frame.c`/`.h`, factored out of Frame B/DIAG's own
+      trip_mask synthesis so both use the identical single-bit-per-reason
+      mapping) before calling `safety_core_request_clear_trip()`, and logs
+      the accepted/refused outcome via `log_task_log()`. Never ACKs on the
+      wire — matches `LINK_PROTOCOL.md`'s silence on a CLEAR_TRIP reply; the
+      ESP observes the outcome via the tripped bit in the next status/DIAG
+      frame. Host-tested: 427/427 checks pass (new
+      `test_trip_mask_for_reason()` in `test_link_frame.c`, 5 cases). Real
+      `cmake --build` for `SaftyFW`/`_slotA`/`_slotB` succeeds clean, zero
+      warnings. `tools/check_isolation.ps1` still passes (link_task.c still
+      never references GPIO6/relay; it only calls INTO safety_core, same
+      direction as the existing status/diag/trip-event pulls). **Honestly
+      not hardware-verified end-to-end**: the physical pi↔ESP UART link is
+      currently broken on the bench, so the CLEAR_TRIP frame itself has
+      never been exercised over real wire — this is build- and
+      host-test-verified only. This closes the milestone's remaining gap;
+      see `firmware/SaftyFW/TODO.md` Phase 7 for the item this checks off.
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
 - [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
 

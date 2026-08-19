@@ -1,10 +1,11 @@
 // link_task.c -- Phase 7/7b/8 (partial): kilnlink BROADCAST TX of the
 // existing 23-byte status frame, SAFETY_CMD_FW_VERSION, SAFETY_CMD_DIAG
 // (Frame B) and now SAFETY_CMD_TRIP_EVENT (Frame D), RX handling of
-// ANNOUNCE_VERSION, GET_FW_VERSION and SAFETY_CMD_PUSH_CONTEXT (0x07) ->
-// context_snapshot_t, and the receiver hardening (resync-on-0x7E, bounded
-// buffers, no allocation) LINK_PROTOCOL.md section 3 requires.
-// SET_FIRING_CEILING, CLEAR_TRIP and SET_CLOCK are still explicitly out of
+// ANNOUNCE_VERSION, GET_FW_VERSION, SAFETY_CMD_PUSH_CONTEXT (0x07) ->
+// context_snapshot_t, and now SAFETY_CMD_CLEAR_TRIP (0x0A) ->
+// safety_core_request_clear_trip(), and the receiver hardening
+// (resync-on-0x7E, bounded buffers, no allocation) LINK_PROTOCOL.md section 3
+// requires. SET_FIRING_CEILING and SET_CLOCK are still explicitly out of
 // scope for this pass -- see docs/TODO.md Phase 7's remaining checkboxes.
 // Parsing the context frame is only half of Phase 7: nothing here yet acts
 // on it (no S2/S3/S4/S6/S10 guard exists to disable on SIM_PLANT or reset on
@@ -60,11 +61,13 @@
 #include "boot_reason.h"
 #include "current_task.h"
 #include "discrete_task.h"
+#include "log_task.h" // CLEAR_TRIP outcome logging, see link_task_handle_clear_trip()
 #include "safety_core.h"
 #include "snapshots.h"
 #include "thermo_task.h"
 #include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
 
+#include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_power.h"
@@ -359,10 +362,7 @@ static void link_task_send_diag(void)
     // since no per-guard identity is available for WARN at all. TODO.md
     // records this as the honest state of Frame B, not a placeholder to
     // silently upgrade later.
-    uint16_t trip_mask = 0;
-    if (trip_reason != SAFETY_TRIP_NONE) {
-        trip_mask = (uint16_t)(1u << ((uint8_t)trip_reason - 1u));
-    }
+    uint16_t trip_mask = link_frame_trip_mask_for_reason(trip_reason);
     uint16_t warn_mask = warn_active ? 0x0001u : 0u;
 
     uint32_t uptime_ms = to_ms_since_boot(get_absolute_time());
@@ -605,6 +605,68 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     s_degraded_no_context = !compatible;
 }
 
+// SAFETY_CMD_CLEAR_TRIP (0x0A), CommonFW/docs/LINK_PROTOCOL.md section 4 --
+// the GUI's path to acknowledging a trip. This function only decodes and
+// validates the wire frame and logs the outcome; the actual refuse/clear
+// policy (still-tripped retick) is safety_core_request_clear_trip()'s job,
+// called from here the same direction link_task already calls
+// safety_core_get_diag_status()/_get_output_status()/_get_trip_event() --
+// link_task calling INTO safety_core, never the reverse, so this file still
+// never needs to be called by, or export anything to, safety_core.c.
+//
+// Two refusal paths per the protocol doc, both checked here before
+// safety_core is even asked:
+//   1. Nothing currently tripped (trip_reason == SAFETY_TRIP_NONE) -- there
+//      is nothing to clear, and the wire trip_mask (whatever the ESP sent)
+//      cannot possibly match a mask of 0 from an actual trip, so this is
+//      also naturally a mismatch. Called out separately for a clearer log
+//      line.
+//   2. `trip_mask` doesn't match the currently-latched one -- LINK_PROTOCOL.md:
+//      "prevents a stale clear queued before a second, different trip from
+//      clearing that one too." Computed via
+//      link_frame_trip_mask_for_reason(), the exact same single-bit
+//      degraded-approximation this build's Frame B (DIAG) already reports,
+//      so a GUI that echoes back the trip_mask it last saw in a DIAG frame
+//      matches correctly.
+//
+// Never ACKs on the wire -- link_task never participates in the ACK'd
+// transport (see link_task_handle_raw_frame()'s own BROADCAST-only check
+// above) and LINK_PROTOCOL.md does not ask CLEAR_TRIP to reply; the ESP
+// observes the outcome via the tripped bit in the next Frame A/B it
+// receives.
+static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
+{
+    kilnlink_clear_trip_t msg;
+    kilnlink_clear_trip_status_t dstatus =
+        kilnlink_clear_trip_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_CLEAR_TRIP_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file (see
+        // link_task_handle_raw_frame()'s own comments).
+        return;
+    }
+
+    safety_trip_t trip_reason = SAFETY_TRIP_NONE;
+    safety_core_get_diag_status(&trip_reason, NULL, NULL);
+    uint16_t current_mask = link_frame_trip_mask_for_reason(trip_reason);
+
+    if (trip_reason == SAFETY_TRIP_NONE) {
+        log_task_log(LOG_LEVEL_INFO, "clear_trip", "ignored, nothing tripped");
+        return;
+    }
+    if (msg.trip_mask != current_mask) {
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, trip_mask mismatch");
+        return;
+    }
+
+    bool cleared = safety_core_request_clear_trip();
+    if (cleared) {
+        log_task_log(LOG_LEVEL_INFO, "clear_trip", "accepted");
+    } else {
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, condition still holds");
+    }
+}
+
 static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t unstuffed[LINK_RX_ASSEMBLY_MAX];
@@ -640,6 +702,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     case LINK_FRAME_PUSH_CONTEXT_CMD:
         link_task_handle_push_context(&frame);
         break;
+    case LINK_FRAME_CLEAR_TRIP_CMD:
+        link_task_handle_clear_trip(&frame);
+        break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
     // call above, except the handler lives in update_task.c rather than
     // this file: flash I/O does not belong on link_task's priority/stack,
@@ -665,9 +730,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         update_task_handle_abort(frame.payload, frame.length);
         break;
     default:
-        // Everything else (CLEAR_TRIP, SET_FIRING_CEILING, SET_CLOCK, ...)
-        // is genuinely out of scope this pass -- see this file's header
-        // comment and TODO.md Phase 7's remaining checkboxes. An
+        // Everything else (SET_FIRING_CEILING, SET_CLOCK, ...) is genuinely
+        // out of scope this pass -- see this file's header comment and
+        // TODO.md Phase 7's remaining checkboxes. An
         // unrecognised type is silently discarded, matching
         // LINK_PROTOCOL.md's own additive-compatibility principle: "a peer
         // that has never heard of it discards it."

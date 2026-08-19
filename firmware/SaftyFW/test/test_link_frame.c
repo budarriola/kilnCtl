@@ -339,6 +339,26 @@ static void test_versions_compatible(void)
                 "self_protocol==self_min_compatible==peer_protocol==peer_min_compatible -> compatible");
 }
 
+// Host tests for link_frame_trip_mask_for_reason() -- factored out of
+// link_task_send_diag()'s single-bit degraded trip_mask approximation so
+// link_task_handle_clear_trip()'s mismatch check (link_task.c) uses the
+// exact same mapping DIAG frames report. TODO.md Phase 7's CLEAR_TRIP item.
+static void test_trip_mask_for_reason(void)
+{
+    TEST_SECTION("link_frame_trip_mask_for_reason -- single-bit mapping");
+
+    TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_NONE) == 0u,
+                "SAFETY_TRIP_NONE -> mask 0 (nothing latched)");
+    TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_OVERTEMP) == 0x0001u,
+                "SAFETY_TRIP_OVERTEMP (1) -> bit 0");
+    TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_OVER_SETPOINT) == 0x0002u,
+                "SAFETY_TRIP_OVER_SETPOINT (2) -> bit 1");
+    TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_ESTOP) == (1u << 7),
+                "SAFETY_TRIP_ESTOP (8) -> bit 7");
+    TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_BORROWED_STALE) == (1u << 13),
+                "SAFETY_TRIP_BORROWED_STALE (14) -> bit 13, still within a u16");
+}
+
 void run_test_link_frame(void)
 {
     test_zero_zones();
@@ -346,4 +366,5 @@ void run_test_link_frame(void)
     test_hostile_inputs();
     test_nan_survives();
     test_versions_compatible();
+    test_trip_mask_for_reason();
 }

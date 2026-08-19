@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "safety_guards.h" // safety_trip_t -- pure, no RTOS/SDK, same as this file
 #include "snapshots.h"
 
 #ifdef __cplusplus
@@ -101,6 +102,17 @@ size_t link_frame_pack_fw_version(uint8_t *out, size_t out_cap, uint16_t protoco
 // `*out` is left completely unmodified.
 bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_snapshot_t *out);
 
+// --- ESP -> Pico: SAFETY_CMD_CLEAR_TRIP (0x0A) -------------------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
+// KILNLINK_CLEAR_TRIP_CMD (kilnlink/kilnlink_clear_trip.h) -- redefined here
+// as a local dispatch id, same convention as LINK_FRAME_PUSH_CONTEXT_CMD/
+// LINK_FRAME_FW_VERSION_CMD above rather than pulling the kilnlink codec
+// header into this file's own namespace. The payload itself is decoded by
+// kilnlink_clear_trip_decode() in src/tasks/link_task.c, not unpacked here --
+// it's a fixed 3-byte frame with no variable-length fields, unlike
+// PUSH_CONTEXT, so there is no bespoke unpack helper to add in this file.
+#define LINK_FRAME_CLEAR_TRIP_CMD 0x0Au
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's
@@ -126,6 +138,18 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // arguments passed -- callable identically from either firmware.
 bool link_frame_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
                                      uint16_t peer_protocol, uint16_t peer_min_compatible);
+
+// --- Single-bit trip_mask synthesis (Frame B / CLEAR_TRIP shared logic) -----
+// Both SAFETY_CMD_DIAG's trip_mask field (link_task_send_diag()) and
+// SAFETY_CMD_CLEAR_TRIP's mismatch check (link_task_handle_clear_trip())
+// need "the wire trip_mask for the one reason this build currently tracks",
+// so it is factored here once rather than duplicated -- see
+// link_task_send_diag()'s own comment in link_task.c for why this is a
+// documented single-bit degraded approximation of LINK_PROTOCOL.md's
+// "one bit per guard" wording, not the real 13-bit mask. Returns 0 for
+// SAFETY_TRIP_NONE, else 1 << (reason - 1) matching safety_trip_t's own
+// numbering.
+uint16_t link_frame_trip_mask_for_reason(safety_trip_t reason);
 
 #ifdef __cplusplus
 }
