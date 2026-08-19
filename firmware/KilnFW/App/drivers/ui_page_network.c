@@ -64,12 +64,36 @@
 // no scan result to pre-fill it from -- a second keyboard flow this pass
 // does not build. wifi_provision_page.html remains the only way to change
 // the board's own AP identity.
+// 2026-08-18 no-scroll pass: `scr`/`content`/the connect modal below now
+// explicitly clear LV_OBJ_FLAG_SCROLLABLE, and several rows/buttons were
+// shrunk (mode toggle and Scan button from UI_THEME_MIN_TOUCH_TARGET_PX/72px
+// to 44px, scan/saved list heights from 140/120px to 90px each, Back from
+// 72px to 36px) to reduce this page's real overflow against its ~264px
+// content budget (480x320 landscape -- see ui_page_home.c's header comment
+// for that number's derivation). HONESTLY: this page's home_section (status
+// card + mode toggle + Scan button/status/list + Saved-networks
+// title/list), when fully populated, still does not fit inside that budget
+// even after this pass's compaction -- rough arithmetic puts it around
+// 300-350px, i.e. still an overflow, just a much smaller one than the
+// pre-pass ~600px. The scan_list/saved_list lv_list widgets are left
+// internally scrollable on purpose (a fixed-height, bounded scrollable list
+// is a normal, self-contained UI pattern -- the LG_FLAG_SCROLLABLE clears
+// above target the *page-level* containers, not these lists), which
+// mitigates but does not eliminate the risk: with both a longer scan result
+// set and several saved networks, or the STA-connected QR row also visible,
+// this page can still clip content below the Back button (the
+// page-level LV_OBJ_FLAG_SCROLLABLE clears above target `scr`/`content`
+// only, not these bounded internal lists). A real fix needs
+// a further redesign (e.g. splitting Scan and Saved Networks into their own
+// sub-pages via kiln_ui, the same page-manager pattern this file already
+// uses) that this pass did not have room to build -- flagged in TODO.md
+// 10.9's status note as explicit follow-up, not silently left as "solved."
 static const char *TAG __attribute__((unused)) = "ui_page_network";
 
 #define UI_PAGE_NETWORK_REFRESH_MS 1000
 #define UI_PAGE_NETWORK_SCAN_MAX 20
 #define UI_PAGE_NETWORK_SAVED_MAX 8
-#define UI_PAGE_NETWORK_QR_SIZE_PX 140
+#define UI_PAGE_NETWORK_QR_SIZE_PX 100 /* was 140 -- shrunk in the 2026-08-18 no-scroll pass, see this file's header comment */
 
 /* ---- Top status readout ---- */
 static lv_obj_t *s_status_label;
@@ -496,6 +520,7 @@ static void build_connect_modal(lv_obj_t *scr)
     lv_obj_set_style_pad_all(s_connect_modal, UI_THEME_PADDING_PX, 0);
     lv_obj_set_flex_flow(s_connect_modal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(s_connect_modal, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(s_connect_modal, LV_OBJ_FLAG_SCROLLABLE);
 
     s_connect_title = lv_label_create(s_connect_modal);
     lv_obj_set_style_text_color(s_connect_title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -557,7 +582,8 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0);
-    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
@@ -565,6 +591,7 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *title = lv_label_create(bar);
     lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(title, "Network / Wi-Fi");
@@ -577,7 +604,8 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Status card. */
     lv_obj_t *status_card = lv_obj_create(content);
@@ -585,9 +613,10 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(status_card, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(status_card, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(status_card, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_set_style_pad_all(status_card, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_all(status_card, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(status_card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(status_card, UI_THEME_PADDING_PX / 4, 0);
+    lv_obj_remove_flag(status_card, LV_OBJ_FLAG_SCROLLABLE);
 
     s_status_label = lv_label_create(status_card);
     lv_obj_set_style_text_color(s_status_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -608,7 +637,7 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_pad_gap(mode_row, UI_THEME_PADDING_PX, 0);
 
     s_mode_home_btn = lv_button_create(mode_row);
-    lv_obj_set_height(s_mode_home_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_height(s_mode_home_btn, 44); /* see this file's no-scroll-pass header comment */
     lv_obj_set_flex_grow(s_mode_home_btn, 1);
     lv_obj_set_style_radius(s_mode_home_btn, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(s_mode_home_btn, mode_home_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -620,7 +649,7 @@ lv_obj_t *ui_page_network_build(void)
     ui_theme_apply_touch_area(s_mode_home_btn, false);
 
     s_mode_ap_btn = lv_button_create(mode_row);
-    lv_obj_set_height(s_mode_ap_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_height(s_mode_ap_btn, 44);
     lv_obj_set_flex_grow(s_mode_ap_btn, 1);
     lv_obj_set_style_radius(s_mode_ap_btn, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(s_mode_ap_btn, mode_ap_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -639,11 +668,12 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_border_width(s_home_section, 0, 0);
     lv_obj_set_style_pad_all(s_home_section, 0, 0);
     lv_obj_set_flex_flow(s_home_section, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(s_home_section, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(s_home_section, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(s_home_section, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *scan_btn = lv_button_create(s_home_section);
     lv_obj_set_width(scan_btn, lv_pct(100));
-    lv_obj_set_height(scan_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_height(scan_btn, 44);
     lv_obj_set_style_bg_color(scan_btn, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(scan_btn, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(scan_btn, scan_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -660,7 +690,7 @@ lv_obj_t *ui_page_network_build(void)
 
     s_scan_list = lv_list_create(s_home_section);
     lv_obj_set_width(s_scan_list, lv_pct(100));
-    lv_obj_set_height(s_scan_list, 140);
+    lv_obj_set_height(s_scan_list, 90); /* see this file's no-scroll-pass header comment */
 
     lv_obj_t *saved_title = lv_label_create(s_home_section);
     lv_obj_set_style_text_color(saved_title, UI_THEME_COLOR_TEXT_SECONDARY, 0);
@@ -668,7 +698,7 @@ lv_obj_t *ui_page_network_build(void)
 
     s_saved_list = lv_list_create(s_home_section);
     lv_obj_set_width(s_saved_list, lv_pct(100));
-    lv_obj_set_height(s_saved_list, 120);
+    lv_obj_set_height(s_saved_list, 90);
 
     /* STA-connected QR row -- dashboard (kiln.local) and raw-IP QRs, hidden
      * until sta_connected (this file's header comment). */
@@ -724,6 +754,7 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_flex_flow(s_ap_section, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_ap_section, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_gap(s_ap_section, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(s_ap_section, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *ap_title = lv_label_create(s_ap_section);
     lv_obj_set_style_text_color(ap_title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -750,7 +781,7 @@ lv_obj_t *ui_page_network_build(void)
 
     /* Back. */
     lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 36);
     lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);

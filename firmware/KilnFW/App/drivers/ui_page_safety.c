@@ -1,0 +1,156 @@
+#include "ui_page_safety.h"
+
+#include <stdio.h>
+
+#include "dashboard_http.h"
+#include "kiln_ui.h"
+#include "ui_theme.h"
+
+// See ui_page_safety.h for why this page exists (moved off ui_page_home.c
+// in the 2026-08-18 no-scroll rewrite). Contents/behavior are otherwise
+// unchanged from the card ui_page_home.c used to build: same
+// dashboard_get_status() read, same null-tolerant "---" convention for a
+// field the safety link hasn't got real data for (same convention
+// ui_page_board_health.c's per-channel rows use), same
+// TODO.md 9.0 "which link version is older" line.
+
+static const char *TAG __attribute__((unused)) = "ui_page_safety";
+
+#define UI_PAGE_SAFETY_REFRESH_MS 1000
+
+static lv_obj_t *s_safety_temp_label;
+static lv_obj_t *s_enclosure_temp_label;
+static lv_obj_t *s_safety_power_label;
+static lv_obj_t *s_link_version_label;
+
+static void back_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("config");
+}
+
+static void refresh_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
+    dashboard_status_t ds;
+    dashboard_get_status(&ds);
+
+    if (ds.safety_temp_valid) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Safety temp: %.1f C", (double)ds.safety_temp_c);
+        lv_label_set_text(s_safety_temp_label, buf);
+    } else {
+        lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
+    }
+    if (ds.enclosure_temp_valid) {
+        char buf[28];
+        snprintf(buf, sizeof(buf), "Enclosure temp: %.1f C", (double)ds.enclosure_temp_c);
+        lv_label_set_text(s_enclosure_temp_label, buf);
+    } else {
+        lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");
+    }
+    if (ds.power_valid) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Power: %.0f W", (double)ds.power_w);
+        lv_label_set_text(s_safety_power_label, buf);
+    } else {
+        lv_label_set_text(s_safety_power_label, "Power: ---");
+    }
+
+    if (!ds.link_version_known) {
+        lv_label_set_text(s_link_version_label, "Link version: ---");
+    } else if (ds.link_version_compatible) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Link version: ESP %u / Pico %u (OK)",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version);
+        lv_label_set_text(s_link_version_label, buf);
+    } else {
+        char buf[112];
+        const char *older = (ds.peer_protocol_version < ds.self_protocol_version) ? "Pico"
+                            : (ds.peer_protocol_version > ds.self_protocol_version) ? "ESP"
+                                                                                     : "neither";
+        snprintf(buf, sizeof(buf),
+                 "Link version: ESP %u / Pico %u -- INCOMPATIBLE, %s is older. Update ESP first.",
+                 (unsigned)ds.self_protocol_version, (unsigned)ds.peer_protocol_version, older);
+        lv_label_set_text(s_link_version_label, buf);
+    }
+}
+
+/* Compact stat row -- pad_all trimmed to UI_THEME_PADDING_PX/2 (4px) rather
+ * than the full 8px so all four rows plus the back button fit comfortably
+ * inside this page's ~264px content budget (same 480x320 landscape budget
+ * ui_page_home.c's header comment derives). */
+static lv_obj_t *build_stat_label(lv_obj_t *parent, const char *initial_text)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(label, initial_text);
+    return label;
+}
+
+lv_obj_t *ui_page_safety_build(void)
+{
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_width(bar, lv_pct(100));
+    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *title = lv_label_create(bar);
+    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(title, "Safety Processor");
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *content = lv_obj_create(scr);
+    lv_obj_set_width(content, lv_pct(100));
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, 0, 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_safety_temp_label = build_stat_label(content, "Safety temp: ---");
+    s_enclosure_temp_label = build_stat_label(content, "Enclosure temp: ---");
+    s_safety_power_label = build_stat_label(content, "Power: ---");
+    s_link_version_label = build_stat_label(content, "Link version: ---");
+
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *back_label = lv_label_create(back);
+    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(back_label, "Back");
+    lv_obj_center(back_label);
+    lv_obj_update_layout(back);
+    ui_theme_apply_touch_area(back, false);
+
+    lv_timer_create(refresh_cb, UI_PAGE_SAFETY_REFRESH_MS, NULL);
+    refresh_cb(NULL);
+
+    return scr;
+}

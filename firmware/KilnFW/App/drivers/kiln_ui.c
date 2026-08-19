@@ -6,8 +6,10 @@
 
 #include "ui_page_board_health.h"
 #include "ui_page_config.h"
+#include "ui_page_history.h"
 #include "ui_page_home.h"
 #include "ui_page_network.h"
+#include "ui_page_safety.h"
 #include "ui_page_temperature.h"
 
 static const char *TAG = "kiln_ui";
@@ -72,6 +74,16 @@ esp_err_t kiln_ui_init(void)
      * ui_page_config.c's "Network / Wi-Fi" nav item (previously a
      * "not built yet" placeholder row). */
     err = kiln_ui_register_page("network", ui_page_network_build);
+    if (err != ESP_OK) return err;
+
+    /* 2026-08-18 no-scroll rewrite -- ui_page_home.c's Safety Processor card
+     * and temperature-history chart moved to their own pages (no room left
+     * in home's ~264px content budget once zones/run-state/action row were
+     * sized to fit), reachable from ui_page_config.c's nav hub. See
+     * ui_page_safety.c/ui_page_history.c's header comments. */
+    err = kiln_ui_register_page("safety", ui_page_safety_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("history", ui_page_history_build);
     if (err != ESP_OK) return err;
 
     return kiln_ui_show("home");

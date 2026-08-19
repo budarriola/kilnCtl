@@ -379,6 +379,20 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 
 ## M6 — Throw the liveness switch
 
+**2026-08-18: LCD pages rewritten to never require scrolling** (explicit user
+requirement). `ui_page_home.c` was stacking AP-QR + zones + the safety card +
+profile card + chart + nav onto one scrollable column — the code's own prior
+comment admitted "scrolling is the safe fallback rather than guessing
+pixel-perfect fixed heights." Rewritten to a hard 320x480 no-scroll budget:
+home page trimmed to zones + run state, safety-processor detail moved to a
+new `ui_page_safety.c`, the chart moved to a new `ui_page_history.c`, both
+reachable via nav. `LV_OBJ_FLAG_SCROLLABLE` explicitly cleared on every
+container so a future overflow clips visibly instead of silently becoming
+scrollable again. Real `idf.py build` verified clean. **Not verified**: no
+real ILI9488 panel attached in this environment, so pixel-exact fit on real
+hardware is still unconfirmed — this closes "budgeted and scroll-disabled
+in code," not "confirmed to fit on the physical screen."
+
 The point at which the two processors become one system. Deliberately separate,
 because it changes what a bare main board will do.
 

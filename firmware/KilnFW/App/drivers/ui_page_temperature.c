@@ -186,6 +186,22 @@ static void relay_toggle_cb(lv_event_t *e)
     refresh_cb(NULL); /* repaint immediately instead of waiting one tick */
 }
 
+/* 2026-08-18 no-scroll pass: card padding/gap trimmed and relay buttons
+ * shrunk from UI_THEME_MIN_TOUCH_TARGET_PX (72px) to 36px tall (still using
+ * ui_theme_apply_touch_area(..., true), which extends an undersized
+ * widget's effective click area back toward that same 72px minimum per its
+ * own documented behavior -- see ui_theme.h) so up to MAX31856_CHANNEL_COUNT
+ * (3) zone cards, each with a wrapped row of relay buttons, plus a status
+ * label and Back button have a real chance of fitting this page's ~264px
+ * content budget (480x320 landscape -- see ui_page_home.c's header comment
+ * for that number's derivation). Unlike ui_page_home.c/ui_page_board_health.c,
+ * this page's actual height still depends on how many relays are assigned
+ * per zone (zones_config_get_relay_mask()), which is runtime config this
+ * pass cannot bound at compile time -- a zone with several relays wrapping
+ * onto a second button row will still grow past a single-row estimate. This
+ * is a real, currently-unresolved risk for that configuration, not
+ * something this pass can rule out without real hardware or a fixed cap on
+ * relays-per-zone; flagged honestly in TODO.md 10.1/10.3's status note. */
 static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -194,9 +210,10 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
     lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_set_style_pad_gap(row, UI_THEME_PADDING_PX / 4, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *header = lv_obj_create(row);
     lv_obj_set_width(header, lv_pct(100));
@@ -231,6 +248,7 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
     lv_obj_set_style_pad_all(relay_row, 0, 0);
     lv_obj_set_flex_flow(relay_row, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_style_pad_gap(relay_row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(relay_row, LV_OBJ_FLAG_SCROLLABLE);
 
     if (!have_mask || relay_mask == 0) {
         lv_obj_t *none = lv_label_create(relay_row);
@@ -258,7 +276,7 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
 
         lv_obj_t *btn = lv_button_create(relay_row);
         lv_obj_set_width(btn, UI_THEME_MIN_TOUCH_TARGET_PX * 2);
-        lv_obj_set_height(btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+        lv_obj_set_height(btn, 36); /* see build_zone_row()'s comment on this page's height budget */
         lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
         lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
         s_relay_ctx[r].relay_index = (uint8_t)(r + 1);
@@ -290,7 +308,8 @@ lv_obj_t *ui_page_temperature_build(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0);
-    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
@@ -298,6 +317,7 @@ lv_obj_t *ui_page_temperature_build(void)
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *title = lv_label_create(bar);
     lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(title, "Temperature -- manual relay control");
@@ -310,7 +330,8 @@ lv_obj_t *ui_page_temperature_build(void)
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     memset(s_relay_claimed, 0, sizeof(s_relay_claimed));
     memset(s_relay_btn, 0, sizeof(s_relay_btn));
@@ -339,7 +360,7 @@ lv_obj_t *ui_page_temperature_build(void)
     lv_label_set_text(s_msg_label, "");
 
     lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 36);
     lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);

@@ -86,6 +86,12 @@ static void refresh_cb(lv_timer_t *timer)
     }
 }
 
+/* 2026-08-18 no-scroll pass: pad_all trimmed from UI_THEME_PADDING_PX (8px)
+ * to UI_THEME_PADDING_PX/2 (4px) so this page's esp32 + MAX31856_CHANNEL_COUNT
+ * (3) channel rows plus a Back button fit with a real margin inside its
+ * ~264px content budget (480x320 landscape, this codebase's actual runtime
+ * canvas -- see ui_page_home.c's header comment for that number's
+ * derivation). Row content/behavior is otherwise unchanged. */
 static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t accent)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -94,7 +100,8 @@ static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t a
     lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_border_width(row, 3, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, accent, 0);
@@ -119,7 +126,8 @@ lv_obj_t *ui_page_board_health_build(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(scr, UI_THEME_PADDING_PX, 0);
-    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_width(bar, lv_pct(100));
@@ -127,6 +135,7 @@ lv_obj_t *ui_page_board_health_build(void)
     lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *title = lv_label_create(bar);
     lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(title, "Board Health -- onboard IC temperatures");
@@ -139,7 +148,8 @@ lv_obj_t *ui_page_board_health_build(void)
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     s_esp32_label = build_stat_row(content, "ESP32-S3 die temp", UI_THEME_ACCENT_1);
 
@@ -158,7 +168,7 @@ lv_obj_t *ui_page_board_health_build(void)
     }
 
     lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 44);
     lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
