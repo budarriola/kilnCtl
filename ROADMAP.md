@@ -154,10 +154,33 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
 
 - [~] `kilnlink` target consumable by both pico-sdk and ESP-IDF — builds
       clean under MSVC and, as of 2026-08-16, under `KilnFW`'s real
-      xtensa-gcc build too (`components/kilnlink/` wrapper, auto-discovered,
-      linked-but-unused so far — `KilnCtrl.bin` size unchanged). **Not yet
-      tried under pico-sdk/arm-none-eabi-gcc**, since `SaftyFW` has no CMake
-      project; **not yet actually called** by `uart_protocol.c`
+      xtensa-gcc build too (`components/kilnlink/CMakeLists.txt` wrapper
+      around `CommonFW`, `idf_component_register`-based). **Now also
+      verified under pico-sdk/arm-none-eabi-gcc**: `firmware/SaftyFW`
+      has a real CMake project (`firmware/SaftyFW/CMakeLists.txt:47`,
+      `add_subdirectory(../CommonFW kilnlink)`) and links `kilnlink` into
+      all three of its executables (`CMakeLists.txt:130`/`215`,
+      `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB`); `src/tasks/link_task.c`
+      actually calls into it (`#include "kilnlink/kilnlink_*.h"` for
+      `clear_trip`/`diag`/`frame`/`power`/`trip`/`version`, plus
+      `kilnlink_frame_encode_raw`/`_decode`, `kilnlink_stuff`/`_unstuff`,
+      and the `diag`/`trip`/`power`/`clear_trip` codecs — see e.g.
+      `link_task.c:249,255,423-438,452-456,480-508,637-641,673-680`),
+      most recently building clean at commit `62ce6bf`. `KilnFW`'s side
+      is also no longer "linked-but-unused": `App/drivers/espInterfaces/
+      uart_protocol.c` now calls `kilnlink_crc16_ccitt_false`/
+      `kilnlink_stuff` (lines 37, 43) instead of its own copies (see the
+      "`KilnFW` delegating framing and CRC" bullet below). **What's still
+      genuinely open:** the ESP-IDF `components/kilnlink/CMakeLists.txt`
+      wrapper compiles only a subset of codecs (`kilnlink_crc.c`,
+      `kilnlink_frame.c`, `kilnlink_context.c` — not the
+      `announce`/`diag`/`trip`/`power`/`clear_trip`/`ceiling`/
+      `get_fw_version`/`set_clock` codecs `SaftyFW` already links), and
+      `KilnFW`'s `safety_link.c` still hand-rolls the `ANNOUNCE_VERSION`
+      frame inline rather than calling `kilnlink_announce` (tracked in the
+      "Codecs pure and bounds-checked" bullet below) — so this stays `[~]`
+      until the ESP-IDF wrapper's codec set and `KilnFW`'s remaining
+      hand-rolled parsing are brought up to parity with `SaftyFW`'s usage
 - [x] `KILNLINK_PROTOCOL_VERSION` the single source (2026-08-16); `KilnFW`'s
       `UART_PROTOCOL_VERSION` (`App/drivers/uart_task_ids.h`) is now
       `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, a real alias rather than a
