@@ -5353,7 +5353,71 @@ queue set in place) — full migration, not a patch.
       own `kiln_io_read()` call (a status-building read, not a write — left
       direct since SX1509's bus-level mutex already makes it I2C-transaction-safe
       and it carries no safety implication, unlike every write case above).
-- [ ] Phase 2: `thermo_owner.c`/`.h`
+- [x] **Phase 2: `thermo_owner.c`/`.h` (2026-08-19).** Same shape as Phase 1,
+      deliberately, and a materially different motivation, stated up front in
+      `thermo_owner.h`'s top comment rather than left implicit:
+      `MAX31856.c`'s `ch->lock` (`max31856_lock()`/`max31856_unlock()`,
+      around line 77) already guards each channel's ENTIRE multi-transfer
+      sequence, not just one SPI transaction the way SX1509's mutex only
+      covered one I2C transaction before Phase 1 — so there is no equivalent
+      lost-update race here today. This phase is architectural consistency
+      (one owning task per hardware subsystem, matching Phase 1 and
+      `relay_owner.c`) and lays a single choke point for Phase 6's later
+      system-mode gate, not a bug fix. Confirmed accurate rather than
+      invented before writing the header, per explicit instruction this pass.
+      **What landed**: `thermo_owner.c`/`.h` (new), a single task + bounded
+      queue (depth 8) owning `MAX31856_config_channel`/`_set_thresholds`/
+      `_set_cj_offset`/`_trigger_one_shot`/`_read`/`_read_all`/`_read_faults`/
+      `_clear_faults`/`_read_reg`/`_write_reg`. One producer family (no
+      ownership/safety gate applies to a thermocouple read or config write
+      the way it does to a relay) — every `thermo_owner_command_*()` is
+      post-and-wait, identical shape to `kiln_io_owner.c`'s. A bad or
+      never-came-up channel index answers `ESP_ERR_NOT_FOUND` from inside the
+      owner task's own `MAX31856_bus_channel()` lookup, same contract the
+      direct calls had. `main.c` calls `thermo_owner_start(&thermo_bus)`
+      right after the `~DRDY` provider wiring, before the UART THERMO bridge
+      task or `safety_link_start()` — unconditionally, not gated on
+      `thermo_bus.initialized`, since the thermocouple daughterboard is not
+      physically attached in this environment and every per-channel producer
+      already fails closed (`ESP_ERR_NOT_FOUND`/`ESP_ERR_TIMEOUT`) rather than
+      assuming a channel exists.
+      **Migrated**: `uart_bridge.c`'s `thermo_bridge_task` (`THERMO_CMD_*`
+      switch, all nine subcommands that touch the driver — every wire-format
+      guard/log line wording kept unchanged, only the call underneath moved),
+      and `safety_link.c`'s `safety_build_and_send_context()` (its
+      `MAX31856_read_all()` call, via the new `thermo_owner_command_read_all()`
+      producer mirroring `MAX31856_read_all()`'s own out-array/max/count
+      shape).
+      **Deliberately left direct, each with its own doc comment**:
+      `safety_link.c`'s `MAX31856_get_config()` call — reads
+      `ch->cr0_shadow`/`ch->cr1_shadow` under `ch->lock` with no SPI transfer
+      at all (confirmed by reading the implementation before deciding, not
+      assumed), so a task hop would add latency for zero correctness benefit,
+      same reasoning Phase 1 gave for `kiln_io_lcd_dc()`/`kiln_io_lcd_reset()`.
+      Also left direct: every OTHER `MAX31856_read_all()` caller in this
+      codebase (`profile_executor.c`'s control loop — off-limits this pass
+      per explicit scope, along with `dashboard_http.c` — `autotune_engine.c`,
+      `board_temps.c`, `ota_http.c`) — a research grep of the full
+      `MAX31856_*` API surface found no OTHER caller of the
+      config/write/one-shot/read/fault functions outside `uart_bridge.c`, so
+      those five files' `read_all()` calls were the only thing left
+      unmigrated on purpose: read-only, already serialized per-channel by
+      `ch->lock`, and not part of the diagnosed "every writer/config path
+      needs one owner" scope.
+      **Build**: `idf.py -C firmware/KilnFW build` (ninja, incremental) clean
+      under `-Werror`, after adding `thermo_owner.c` to
+      `App/drivers/CMakeLists.txt`'s `SRCS` list (same "new file, not
+      glob-discovered" gotcha Phase 1 hit).
+      **Not hardware-verified, and cannot be bench-verified in this
+      environment even later this pass**: no board is attached
+      (`ROADMAP.md` M0), and additionally the thermocouple daughterboard
+      itself is not physically connected to the bench board that IS present,
+      so every `MAX31856_*` channel is expected to fail its own bring-up at
+      boot regardless of this change — verifying `thermo_owner`'s actual SPI
+      behavior (not just that it fails closed on a missing channel, which
+      compiles and can be reasoned about but not observed working) is blocked
+      on the daughterboard being connected, a separate hardware readiness gap
+      from the no-board-at-all case Phase 1 hit.
 - [ ] Phase 3: `profile_executor.c` command queue
 - [ ] Phase 4: `wifi_prov.c` owning task (needs real Wi-Fi hardware to trust
       before shipping — do not rush this one)

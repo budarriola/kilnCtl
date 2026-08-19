@@ -21,6 +21,7 @@
 #include "MAX31856.h"
 #include "kiln_io.h"
 #include "profile_executor.h"
+#include "thermo_owner.h"
 
 /* Real build identity (git commit/dirty/build timestamp), generated fresh
  * every build by gen_build_info.cmake into this component's binary dir --
@@ -440,11 +441,19 @@ static void safety_build_and_send_context(SafetyLinkClass *link)
      * channels that never came up rather than faking them, so readings[]
      * is indexed by *position among initialized channels*, not by channel
      * number; match each entry back to its channel via ::channel below
-     * rather than assuming readings[i] is channel i. */
+     * rather than assuming readings[i] is channel i.
+     *
+     * 2026-08-19, TODO.md 10.14 Phase 2: goes through
+     * thermo_owner_command_read_all() instead of calling MAX31856_read_all()
+     * on `thermo_bus` directly -- see thermo_owner.h's top comment for why
+     * this is the one MAX31856_read_all() caller migrated this pass (this
+     * function already had to be touched to reach MAX31856_get_config()
+     * below, which stays a direct call; the other MAX31856_read_all()
+     * callers elsewhere in this codebase were out of scope). */
     MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
     size_t reading_count = 0;
     if (thermo_bus) {
-        (void)MAX31856_read_all(thermo_bus, readings, MAX31856_CHANNEL_COUNT, &reading_count);
+        (void)thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &reading_count);
     }
 
     bool any_zone_faulted = (pstat.state == PROFILE_EXEC_FAULTED);
@@ -470,6 +479,11 @@ static void safety_build_and_send_context(SafetyLinkClass *link)
 
         MAX31856Config cfg;
         memset(&cfg, 0, sizeof(cfg));
+        /* Direct call, deliberately not routed through thermo_owner: per
+         * MAX31856_get_config()'s implementation it only reads
+         * ch->cr0_shadow/ch->cr1_shadow under ch->lock -- no SPI transfer at
+         * all -- so a task hop here would add latency for no correctness
+         * benefit (thermo_owner.h's top comment). */
         MAX31856Class *ch = MAX31856_bus_channel(thermo_bus, i);
         if (ch) {
             (void)MAX31856_get_config(ch, &cfg);

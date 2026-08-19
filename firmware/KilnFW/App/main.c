@@ -28,6 +28,7 @@
 #include "i2c_scan.h"
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
+#include "thermo_owner.h"
 #include "mdns.h"
 #include "monitor_task.h"
 #include "nvs_report.h"
@@ -391,6 +392,26 @@ void app_main(void)
         if (drdy_err != ESP_OK) {
             ESP_LOGW(TAG, "MAX31856_set_drdy_provider failed: %s", esp_err_to_name(drdy_err));
         }
+    }
+
+    // thermo_owner (TODO.md 10.14 Phase 2): the single task that touches the
+    // MAX31856 SPI API from here on -- must start before anything that can
+    // issue a thermocouple command does (the UART THERMO bridge task, and
+    // safety_link's context broadcast, both started later below). Started
+    // unconditionally on &thermo_bus regardless of thermo_bus.initialized:
+    // the thermocouple daughterboard is not physically attached in this
+    // environment, so MAX31856_start_all() above is expected to leave every
+    // channel un-initialized here, but thermo_owner_start() only needs a bus
+    // pointer to own -- see thermo_owner.h's doc comment. Every per-channel
+    // producer fails closed (ESP_ERR_NOT_FOUND, via MAX31856_bus_channel()
+    // returning NULL inside the owner task) rather than crashing when a
+    // channel is missing, same fail-closed spirit as kiln_io_owner_start()
+    // above.
+    esp_err_t thermo_owner_err = thermo_owner_start(&thermo_bus);
+    if (thermo_owner_err != ESP_OK) {
+        ESP_LOGE(TAG, "thermo_owner_start failed: %s -- no thermocouple commands routed through "
+                      "thermo_owner will be reachable this boot",
+                 esp_err_to_name(thermo_owner_err));
     }
 
     // --- ILI9488 display (J2) ----------------------------------------------

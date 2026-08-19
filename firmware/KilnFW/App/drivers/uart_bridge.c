@@ -16,6 +16,7 @@
 #include "kiln_io_owner.h"
 #include "relay_authority.h"
 #include "settings.h"
+#include "thermo_owner.h"
 #include "uart_task_ids.h"
 #include "wifi_prov.h"
 #include "zones_http.h"
@@ -205,6 +206,11 @@ static void bridge_push(uart_protocol_t *proto, uart_proto_device_t dst_device, 
 typedef struct {
     uart_protocol_t *proto;
     QueueHandle_t inbox;
+    /* Kept only because uart_bridge_start_thermo_task()'s signature (unchanged
+     * by this pass) still takes the bus; every actual channel access now goes
+     * through thermo_owner instead of dereferencing it here -- 2026-08-19,
+     * TODO.md 10.14 Phase 2, same convention io_bridge_ctx_t::io adopted in
+     * Phase 1. */
     MAX31856BusClass *bus;
 
     /* SET_AUTO_REPORT state. The destination is remembered from the request
@@ -230,8 +236,14 @@ static void thermo_put_record(uint8_t *out, uint8_t channel, const MAX31856Readi
     out[11] = 0;
 }
 
-/* chan_mask has bit N set for channel N. Returns the payload length. */
-static size_t thermo_build_read_payload(MAX31856BusClass *bus, uint8_t chan_mask, uint8_t *out)
+/* chan_mask has bit N set for channel N. Returns the payload length.
+ * 2026-08-19, TODO.md 10.14 Phase 2: goes through thermo_owner_command_read()
+ * instead of MAX31856_bus_channel()+MAX31856_read() directly -- a channel
+ * that never came up now comes back as ESP_ERR_NOT_FOUND with the reading
+ * already filled NaN/spi_failed by thermo_owner itself (its own contract,
+ * mirroring MAX31856_read()'s), so the "never came up" branch that used to
+ * live here is gone; the two paths converged. */
+static size_t thermo_build_read_payload(uint8_t chan_mask, uint8_t *out)
 {
     size_t o = 2;
     uint8_t count = 0;
@@ -240,23 +252,12 @@ static size_t thermo_build_read_payload(MAX31856BusClass *bus, uint8_t chan_mask
         if ((chan_mask & (1u << ch)) == 0) {
             continue;
         }
-        MAX31856Class *dev = MAX31856_bus_channel(bus, ch);
         MAX31856Reading reading;
-        if (dev) {
-            (void)MAX31856_read(dev, &reading);
-            /* Zone i <-> channel i (zones_http.h). Firmware-applied
-             * calibration now reaches every consumer, per TODO.md section
-             * 3 -- the UART bridge was the one documented holdout. */
-            reading.tc_temperature_c = zones_config_apply_cal(ch, reading.tc_temperature_c);
-        } else {
-            /* Never came up. Reported exactly like a failed transfer rather
-             * than omitted, for the same reason. */
-            memset(&reading, 0, sizeof(reading));
-            reading.channel = ch;
-            reading.tc_temperature_c = NAN;
-            reading.cj_temperature_c = NAN;
-            reading.spi_failed = true;
-        }
+        (void)thermo_owner_command_read(ch, &reading);
+        /* Zone i <-> channel i (zones_http.h). Firmware-applied calibration
+         * now reaches every consumer, per TODO.md section 3 -- the UART
+         * bridge was the one documented holdout. */
+        reading.tc_temperature_c = zones_config_apply_cal(ch, reading.tc_temperature_c);
         thermo_put_record(&out[o], ch, &reading);
         o += 12;
         count++;
@@ -267,7 +268,7 @@ static size_t thermo_build_read_payload(MAX31856BusClass *bus, uint8_t chan_mask
     return o;
 }
 
-static size_t thermo_build_faults_payload(MAX31856BusClass *bus, uint8_t chan_mask, uint8_t *out)
+static size_t thermo_build_faults_payload(uint8_t chan_mask, uint8_t *out)
 {
     size_t o = 2;
     uint8_t count = 0;
@@ -276,12 +277,9 @@ static size_t thermo_build_faults_payload(MAX31856BusClass *bus, uint8_t chan_ma
         if ((chan_mask & (1u << ch)) == 0) {
             continue;
         }
-        MAX31856Class *dev = MAX31856_bus_channel(bus, ch);
         uint8_t sr = 0;
         uint8_t mask = 0;
-        if (dev) {
-            (void)MAX31856_read_faults(dev, &sr, &mask);
-        }
+        (void)thermo_owner_command_read_faults(ch, &sr, &mask);
         out[o++] = ch;
         out[o++] = sr;
         out[o++] = mask;
@@ -327,7 +325,7 @@ static void thermo_bridge_task(void *arg)
             /* Nothing arrived within the auto-report period: that IS the
              * report tick. Same payload the READ query returns. */
             if (ctx->auto_mask != 0 && ctx->auto_period_ms != 0) {
-                size_t len = thermo_build_read_payload(ctx->bus, ctx->auto_mask, reply);
+                size_t len = thermo_build_read_payload(ctx->auto_mask, reply);
                 bridge_push(ctx->proto, ctx->auto_device, ctx->auto_task, UART_TASK_ID_THERMO, reply,
                             len);
             }
@@ -344,12 +342,20 @@ static void thermo_bridge_task(void *arg)
         uint8_t subcmd = msg.payload[0];
         esp_err_t err = ESP_ERR_INVALID_ARG;
         size_t reply_len = 0;
-        MAX31856Class *dev = NULL;
         /* Set by a guard that has already logged the precise reason, so the
          * generic "subcmd failed" line below does not bury it. */
         bool rejected = false;
         uint8_t chan_mask = 0;
 
+        /* 2026-08-19, TODO.md 10.14 Phase 2: every case below used to call
+         * MAX31856_bus_channel()+MAX31856_*() directly. All of that now lives
+         * in thermo_owner.c, the single task that touches the MAX31856 SPI
+         * API -- this task just posts and translates the result back onto
+         * the wire, same "rejected -> no reply" / "err != ESP_OK -> logged,
+         * no reply" / "reply_len > 0 -> reply" shape as before (and as
+         * kiln_io_owner's Phase 1 rewrite of io_bridge_task above). A bad
+         * channel index still comes back as ESP_ERR_NOT_FOUND, now from
+         * thermo_owner_command_*() instead of a NULL MAX31856_bus_channel(). */
         switch (subcmd) {
             case THERMO_CMD_CONFIG_CHANNEL: {
                 if (!bridge_args_ok("thermo", &msg, 6)) { rejected = true; break; }
@@ -364,39 +370,33 @@ static void thermo_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_config_channel(dev, msg.payload[2], msg.payload[3],
-                                              msg.payload[4] != 0, msg.payload[5] != 0);
+                err = thermo_owner_command_config_channel(msg.payload[1], msg.payload[2],
+                                                          msg.payload[3], msg.payload[4] != 0,
+                                                          msg.payload[5] != 0);
                 break;
             }
             case THERMO_CMD_SET_THRESHOLDS: {
                 if (!bridge_args_ok("thermo", &msg, 12)) { rejected = true; break; }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_set_thresholds(dev, bridge_f32_le(&msg.payload[2]),
-                                              bridge_f32_le(&msg.payload[6]),
-                                              (int8_t)msg.payload[10], (int8_t)msg.payload[11]);
+                err = thermo_owner_command_set_thresholds(msg.payload[1], bridge_f32_le(&msg.payload[2]),
+                                                          bridge_f32_le(&msg.payload[6]),
+                                                          (int8_t)msg.payload[10],
+                                                          (int8_t)msg.payload[11]);
                 break;
             }
             case THERMO_CMD_SET_CJ_OFFSET: {
                 if (!bridge_args_ok("thermo", &msg, 6)) { rejected = true; break; }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_set_cj_offset(dev, bridge_f32_le(&msg.payload[2]));
+                err = thermo_owner_command_set_cj_offset(msg.payload[1], bridge_f32_le(&msg.payload[2]));
                 break;
             }
             case THERMO_CMD_ONE_SHOT: {
                 if (!bridge_args_ok("thermo", &msg, 2)) { rejected = true; break; }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_trigger_one_shot(dev);
+                err = thermo_owner_command_trigger_one_shot(msg.payload[1]);
                 break;
             }
             case THERMO_CMD_READ: {
@@ -411,7 +411,7 @@ static void thermo_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                reply_len = thermo_build_read_payload(ctx->bus, chan_mask, reply);
+                reply_len = thermo_build_read_payload(chan_mask, reply);
                 err = ESP_OK;
                 break;
             }
@@ -424,7 +424,7 @@ static void thermo_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                reply_len = thermo_build_faults_payload(ctx->bus, chan_mask, reply);
+                reply_len = thermo_build_faults_payload(chan_mask, reply);
                 err = ESP_OK;
                 break;
             }
@@ -432,9 +432,7 @@ static void thermo_bridge_task(void *arg)
                 if (!bridge_args_ok("thermo", &msg, 2)) { rejected = true; break; }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_clear_faults(dev);
+                err = thermo_owner_command_clear_faults(msg.payload[1]);
                 break;
             }
             case THERMO_CMD_SET_AUTO_REPORT: {
@@ -461,9 +459,7 @@ static void thermo_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_read_reg(dev, msg.payload[2], &reply[4], len);
+                err = thermo_owner_command_read_reg(msg.payload[1], msg.payload[2], &reply[4], len);
                 if (err != ESP_OK) break;
                 reply[0] = THERMO_CMD_READ_REG;
                 reply[1] = msg.payload[1];
@@ -476,9 +472,7 @@ static void thermo_bridge_task(void *arg)
                 if (!bridge_args_ok("thermo", &msg, 4)) { rejected = true; break; }
                 if (!bridge_range_ok("thermo", subcmd, "channel", msg.payload[1], 0,
                                      THERMO_CHANNEL_COUNT - 1u)) { rejected = true; break; }
-                dev = MAX31856_bus_channel(ctx->bus, msg.payload[1]);
-                if (!dev) { err = ESP_ERR_NOT_FOUND; break; }
-                err = MAX31856_write_reg(dev, msg.payload[2], msg.payload[3]);
+                err = thermo_owner_command_write_reg(msg.payload[1], msg.payload[2], msg.payload[3]);
                 break;
             }
             default:

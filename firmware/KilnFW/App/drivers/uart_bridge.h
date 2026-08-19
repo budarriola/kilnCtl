@@ -28,7 +28,15 @@ extern "C" {
  * *bus*, not a channel, because every subcommand carries its own channel index
  * (or 0xFF for all three) and MAX31856_bus_channel() is the lookup. Implements
  * SET_AUTO_REPORT: a periodic unsolicited push of the READ payload for the
- * selected channels. */
+ * selected channels.
+ *
+ * 2026-08-19 (TODO.md 10.14 Phase 2): every actual MAX31856 access now goes
+ * through thermo_owner.c -- see thermo_owner.h's top comment for why (NOT a
+ * race fix, unlike kiln_io_owner's Phase 1; architectural consistency and a
+ * future Phase 6 choke point). thermo_owner_start() must be called (with the
+ * same bus passed here) before this function. `bus` is still required
+ * because this task's signature is unchanged and MAX31856_start_all()'s
+ * result is what main.c gates thermo_owner_start() on. */
 esp_err_t uart_bridge_start_thermo_task(uart_protocol_t *proto, MAX31856BusClass *bus);
 
 /* IO (task 2): the SX1509 expander through the kiln_io board layer -- relays,
