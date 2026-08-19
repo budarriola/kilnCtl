@@ -4139,7 +4139,7 @@ ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
 
 ### 10.7 Onboard IC temperature sensors
 
-- [ ] Several ICs on the board (MAX31856s, the ESP32-S3 itself, and any
+- [x] Several ICs on the board (MAX31856s, the ESP32-S3 itself, and any
       other part with an on-die/onboard temp sensor) expose their own
       temperature reading, separate from the thermocouple-measured kiln
       temperature. Surface these on **a separate menu/page** — both LCD
@@ -4147,6 +4147,9 @@ ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
       web (a new route, not mixed into the main dashboard) — since this
       is board-health diagnostic data, not kiln-process data, and mixing
       the two would make the main page harder to read at a glance.
+      **Done: LCD nav item/page and the JSON route both built and
+      build-verified (see status update below); a styled HTML web page for
+      the route is still open, tracked in that update.**
 
   **Status update (2026-08-17): web JSON endpoint built, LCD side not
   started.** `App/drivers/board_temps.c`/`.h` is a new driver module that
@@ -4175,16 +4178,48 @@ ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
   documented ESP-IDF v5.0+ behavior, not confirmed against this repo's
   actual installed IDF v6.0.2 headers — no `managed_components/` manifest
   or installed SDK checkout was reachable to grep from inside the repo
-  this pass. Likewise `esp_driver_tsens` as the CMake `REQUIRES` component
-  name is a best guess by analogy with `esp_driver_i2c`/`esp_driver_spi`
-  above it, not confirmed. **This has never been built** (no build tool
-  available this pass) — the first real build against the actual
-  toolchain may need a component-name or API-signature fix in
-  `App/drivers/CMakeLists.txt`/`board_temps.c`. Still entirely open: the
-  LCD/LVGL nav item this section also asks for (explicitly left to
-  whichever pass owns `kiln_ui.c` next), and any real web *page* for this
-  endpoint (10.7 only asked for the endpoint to exist this pass; a page is
-  future 10.3/10.6-adjacent work).
+  this pass.
+
+  **Status update (2026-08-18): build-verified against the real toolchain,
+  LCD nav item/page built.** `idf.py -C firmware/KilnFW build` (via
+  `Microsoft.v6.0.2.PowerShell_profile.ps1`) now runs clean end to end --
+  `KilnCtrl.bin` 0x153cd0 bytes, 9% of the app partition free. The guessed
+  `temperature_sensor.h` API surface (`temperature_sensor_install()`/
+  `_enable()`/`_get_celsius()`, `TEMPERATURE_SENSOR_CONFIG_DEFAULT`) and the
+  `esp_driver_tsens` CMake `REQUIRES` component name both turned out to be
+  correct as written against the installed IDF v6.0.2 headers -- no
+  API-surface fix was needed in `board_temps.c`/`.h`. The actual build
+  breakage found and fixed this pass was unrelated to the guessed API:
+  `App/drivers/CMakeLists.txt`'s 10.6a gzip `execute_process()` block ran
+  during ESP-IDF's early `CMAKE_BUILD_EARLY_EXPANSION` REQUIRES-harvest
+  pass (where `CMAKE_CURRENT_SOURCE_DIR` isn't the real source tree yet)
+  and needed an `if(NOT CMAKE_BUILD_EARLY_EXPANSION)` guard; plus a handful
+  of small C/LVGL-v9.5.0 fixes (`(void)TAG;` at file scope, `LV_OPA_TRANSP`
+  vs the nonexistent `LV_OPA_TRANSPARENT`, a format-truncation buffer size)
+  across `ui_page_home.c`/`ui_page_config.c`/`ui_page_temperature.c`/
+  `ui_page_board_health.c` and `settings.h`'s touch-cal macro aliasing --
+  see commit `3335276`.
+
+  The LCD/LVGL nav item is now built: `App/drivers/ui_page_board_health.c`/
+  `.h`, a standalone page (not folded into the home/dashboard page, matching
+  the web side's separate-route decision) reached via a "Board Health"
+  button on `ui_page_config.c`'s Configuration hub and registered as
+  `kiln_ui_register_page("board_health", ...)` in `kiln_ui.c`. It calls
+  `board_temps_get_live()` (the plain-C getter `board_temps.c` already
+  exposed per 10.1a's shared-backend rule) directly -- the exact same read
+  `GET /api/board_temps` performs, not a second implementation -- and shows
+  the ESP32-S3 die temp plus one row per possible MAX31856 channel
+  (`MAX31856_CHANNEL_COUNT`, always all rows drawn), each independently
+  null-tolerant ("n/a" in secondary text when that field's `_valid` flag is
+  false), refreshed on a 1 s `lv_timer`.
+
+  **Still unverified: real hardware.** No ESP32-S3/MAX31856 board is
+  attached in this environment -- actual die-temp/cold-junction readings
+  and on-panel LCD rendering have not been confirmed live, only that the
+  code builds and the logic matches the JSON endpoint's already-established
+  contract. Also still open, unchanged from before: a real web *page* for
+  `GET /api/board_temps` (10.7 only asked for the JSON endpoint + LCD page
+  this pass; a styled web page is future 10.3/10.6-adjacent work).
 
 ### 10.8 Multi-thermocouple-per-zone (cross-reference: section 3)
 
