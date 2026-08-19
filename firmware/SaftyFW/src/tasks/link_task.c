@@ -67,6 +67,7 @@
 #include "thermo_task.h"
 #include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
 
+#include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
@@ -581,17 +582,23 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
 
 static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
 {
-    // Offsets 1..2 = peer protocol version, 3..4 = peer min_compatible, both
-    // u16 LE, fixed offset (LINK_PROTOCOL.md section 4: "read bytes 1-4
-    // first"). Anything shorter is malformed/truncated -- ignored, not
-    // guessed at.
-    if (frame->length < 5) {
+    // ROADMAP.md M2/M8: parse via the shared kilnlink_announce_decode()
+    // codec (CommonFW/src/kilnlink_announce.c, host-tested) instead of this
+    // file's own hand-rolled fixed-offset read -- same pattern already used
+    // for CLEAR_TRIP above. Malformed/truncated/wrong-cmd frames are
+    // discarded silently, same idiom every other decode failure in this file
+    // uses; only protocol_version/min_compatible (the first two fields) are
+    // needed here, per LINK_PROTOCOL.md section 4/6's "read bytes 1-4 first"
+    // guidance that kilnlink_announce.h's own doc comment echoes.
+    kilnlink_announce_t msg;
+    kilnlink_announce_status_t dstatus =
+        kilnlink_announce_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_ANNOUNCE_OK) {
         return;
     }
 
-    uint16_t peer_protocol = (uint16_t)(frame->payload[1] | ((uint16_t)frame->payload[2] << 8));
-    uint16_t peer_min_compatible =
-        (uint16_t)(frame->payload[3] | ((uint16_t)frame->payload[4] << 8));
+    uint16_t peer_protocol = msg.protocol_version;
+    uint16_t peer_min_compatible = msg.min_compatible;
 
     bool compatible = link_frame_versions_compatible(KILNLINK_PROTOCOL_VERSION,
                                                        KILNLINK_MIN_COMPATIBLE, peer_protocol,

@@ -199,7 +199,13 @@ Owned by [`firmware/CommonFW/README.md`](firmware/CommonFW/README.md), gating it
       frame inline rather than calling `kilnlink_announce` (tracked in the
       "Codecs pure and bounds-checked" bullet below) — so this stays `[~]`
       until the ESP-IDF wrapper's codec set and `KilnFW`'s remaining
-      hand-rolled parsing are brought up to parity with `SaftyFW`'s usage
+      hand-rolled parsing are brought up to parity with `SaftyFW`'s usage.
+      **2026-08-19: `SaftyFW`'s half closed** — `link_task.c`'s
+      `link_task_handle_announce_version()` now calls
+      `kilnlink_announce_decode()` instead of hand-reading fixed byte
+      offsets; same compatibility verdict, same `s_degraded_no_context`
+      effect on mismatch. `KilnFW`'s send-side hand-roll is unchanged (owned
+      separately)
 - [x] `KILNLINK_PROTOCOL_VERSION` the single source (2026-08-16); `KilnFW`'s
       `UART_PROTOCOL_VERSION` (`App/drivers/uart_task_ids.h`) is now
       `((uint16_t)KILNLINK_PROTOCOL_VERSION)`, a real alias rather than a
@@ -769,7 +775,10 @@ path. Two facts set the shape of this milestone:
       (`link_task.c`'s `link_task_handle_announce_version()`). `ANNOUNCE_VERSION`
       built this pass at the codec layer (`kilnlink_announce.{c,h}`,
       `KilnFW/TODO.md` 9.0); both firmwares' hand-rolled encode/parse of this
-      frame predate the codec and were not migrated onto it. **2026-08-18,
+      frame predate the codec and were not migrated onto it. **2026-08-19:
+      `SaftyFW`'s receive-side parse migrated onto `kilnlink_announce_decode()`**
+      (`link_task_handle_announce_version()`) — `KilnFW`'s send-side hand-roll
+      is unchanged (separate item). **2026-08-18,
       later same day:** the GUI half of this item is done too -- the LCD's
       "Safety Processor" card now shows both sides' protocol versions, marks
       compatibility, names which side is older on a mismatch, and always

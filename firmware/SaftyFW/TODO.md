@@ -688,7 +688,13 @@ every later frame safe to parse.
       fields read and compared **before** anything after them is parsed --
       `link_frame_pack_fw_version()` (bytes 3..4) and
       `link_task_handle_announce_version()` (reads bytes 1..4 before anything
-      else, bails on `frame->length < 5`)
+      else, bails on `frame->length < 5`). **2026-08-19**: `_handle_announce_version()`
+      now decodes via the shared `kilnlink_announce_decode()` codec
+      (`kilnlink/kilnlink_announce.h`) instead of hand-reading fixed offsets --
+      same compatibility-verdict fields, same `s_degraded_no_context` effect
+      on mismatch, ROADMAP.md M2/M8's "SaftyFW hand-rolls this frame" gap
+      closed on this side. `KilnFW`'s own send-side hand-roll is untouched
+      (owned separately, `KilnFW/TODO.md` 9.0)
 - [x] 7b.4 Compatibility evaluated in **both** directions --
       `link_frame_versions_compatible()`, host-sanity-checked against five
       combinations (equal, newer self, self-raised-floor, peer-below-floor,
