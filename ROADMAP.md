@@ -101,17 +101,36 @@ soldering session.
 
 - [x] `KilnFW/pc_tools/` → `tools/PcTools/`, package still `kilnctrl`
 - [x] GPIO probe on the ESP, default off, deny-list including GPIO6 (2026-08-16,
-      `firmware/KilnFW/App/drivers/gpio_probe.{c,h}` + `tools/PcTools`; not yet
-      bench-tested, see `tools/PcTools/TODO.md`)
+      `firmware/KilnFW/App/drivers/gpio_probe.{c,h}` + `tools/PcTools`).
+      **Bench-tested 2026-08-19, FAIL**: with ESP + Pico attached (JTAG/SWD +
+      USB-serial), the whole PC<->ESP command link was unresponsive --
+      `get_fw_version`/`gpio_probe_read_all`/`gpio_probe_read` all timed out
+      ("no reply after all retries") even after `disconnect`/`connect` and a
+      JTAG `reset(run)`. OpenOCD/JTAG to the ESP itself works fine (chip
+      examines, halts, reports PC), so the board is present and powered; the
+      fault is in the UART command path, not "no hardware attached". Not the
+      known Pi<->ESP UART break -- this is the separate PC<->ESP USB-serial
+      link. GPIO6 deny-list therefore unverified this session (no command
+      reached the device to test it against)
 - [x] GPIO probe on the Pico over SWD, GPIO6 never writable (2026-08-18,
       `tools/PcTools/src/kilnctrl/pico_gpio_probe.py`, no firmware agent
       needed -- RP2040 GPIO is memory-mapped, poked via the existing
       `debug_probe.py`/OpenOCD SWD connection; GPIO6 refused unconditionally
-      for SET_MODE/WRITE, READ allowed; not yet bench-tested, see
-      `tools/PcTools/TODO.md` §1b)
+      for SET_MODE/WRITE, READ allowed).
+      **Bench-tested 2026-08-19, PASS**: `pico_gpio_set_mode`/`pico_gpio_write`
+      on GPIO6 both refused unconditionally over real SWD; `pico_gpio_read`
+      on GPIO6 succeeded (read-only as designed); a safe pin (GPIO25)
+      round-tripped `set_mode`(input) -> `read_all` correctly
 - [x] Coordinated two-board test script, reaching each side by a path that is
       **not** the link under test (`tools/PcTools/scripts/
-      coordinated_gpio_test.py`; not yet run against real hardware)
+      coordinated_gpio_test.py`).
+      **Run against real hardware 2026-08-19**: Pico pre-flight (halt, detach
+      GPIO4/5/10 from firmware over SWD) succeeded; Step A failed immediately
+      at the first ESP `set_mode` call with the same PC<->ESP link fault as
+      the ESP GPIO probe item above -- confirms the script's own claim that it
+      reaches each side by a path independent of the broken Pi<->ESP link
+      (the Pico/SWD half worked), but the run itself did not complete. The
+      script's `finally` block reset both boards cleanly on abort
 - [x] OpenOCD wrapper covering both chips: program, reset, halt, read/write memory
       — done 2026-08-17, `kilnctrl.debug_probe` + `openocd_util` (`tools/PcTools/TODO.md`
       "Debug and programming"); flashed and verified `firmware/SaftyFW/build/SaftyFW.elf`

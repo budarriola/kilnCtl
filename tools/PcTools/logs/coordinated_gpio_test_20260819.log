@@ -1,0 +1,29 @@
+=== Coordinated two-board GPIO test (HARDWARE.md section 1, Steps A/B) ===
+Reminder: SWD to the Pico bonds GND_Safty to PC ground for the duration.
+Bench only, no load wiring. Both boards must be powered.
+
+--- Pre-flight: halting Pico, detaching GPIO4/5/10 from firmware ---
+
+--- Step A: ESP drives GPIO4, Pico reads GPIO5 (+GPIO10 baseline) ---
+
+--- Restoring normal operation ---
+Resetting Pico to restore SaftyFW's own UART1 init...
+Resetting ESP to restore safety_link's own UART1 init...
+Traceback (most recent call last):
+  File "C:\Users\budar\OneDrive\Desktop\kilnCtl\tools\PcTools\scripts\coordinated_gpio_test.py", line 178, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "C:\Users\budar\OneDrive\Desktop\kilnCtl\tools\PcTools\scripts\coordinated_gpio_test.py", line 123, in main
+    esp_drive(esp, 5, None)  # ESP GPIO5 input, own RX -- expect no change
+    ~~~~~~~~~^^^^^^^^^^^^^^
+  File "C:\Users\budar\OneDrive\Desktop\kilnCtl\tools\PcTools\scripts\coordinated_gpio_test.py", line 100, in esp_drive
+    p.set_mode(gpio_num, probe.MODE_INPUT, timeout=_ESP_TIMEOUT_S)
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\budar\OneDrive\Desktop\kilnCtl\tools\PcTools\src\kilnctrl\probe.py", line 107, in set_mode
+    self._query(GPIO_PROBE_CMD_SET_MODE, devices.gpio_probe_set_mode(gpio_num, mode), timeout)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\budar\OneDrive\Desktop\kilnCtl\tools\PcTools\src\kilnctrl\probe.py", line 137, in _query
+    raise ProbeQueryError(
+    ...<3 lines>...
+    )
+kilnctrl.probe.ProbeQueryError: GPIO_PROBE request 0x01 not delivered: no reply after all retries - link or peer is down
