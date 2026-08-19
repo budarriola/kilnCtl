@@ -800,20 +800,25 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
     memory. Live RAM/flash-mapped memory write on a running board -- refused
     unless `confirm=True` is passed explicitly.
 
-    NOTE for peer="pico": there is currently no way to query the Pico's
-    ARMED state from the PC (SaftyFW is skeleton-only, no such protocol
-    exists yet), so `confirm=True` is the only gate here -- this is NOT a
-    real ARMED-state safety check, despite tools/PcTools/TODO.md's guard-rail
-    list calling for one. Treat this tool as unrestricted memory access on a
-    board that drives heaters."""
+    Additive guard for peer="pico": even with confirm=True, this reads
+    SaftyFW's relay_owner.c ARMED/GRACE/TRIPPED state directly over SWD first
+    (debug_probe.pico_armed_state() -- UART-link-independent, see
+    debug_probe.py's module docstring) and refuses the write if that state
+    reads ARMED, OR if it could not be confidently determined at all (fail
+    closed -- an unreadable state is never treated as "not armed"). This is
+    additive to, never a replacement for, the confirm=True gate below."""
     if not confirm:
-        return (
-            "error: memory write refused without confirm=True -- this writes live "
-            "RAM/flash-mapped memory on a running board" + (
-                " (and for peer=\"pico\", there is no ARMED-state check available yet -- "
-                "confirm=True is the only gate)" if peer == debug_probe.PEER_PICO else ""
+        return "error: memory write refused without confirm=True -- this writes live RAM/flash-mapped memory on a running board"
+    if peer == debug_probe.PEER_PICO:
+        armed, detail = debug_probe.pico_armed_state()
+        if armed is not False:
+            _session_log.warning(
+                "debug_write_memory: REFUSED peer=pico address=0x%x armed_state=%s detail=%s",
+                address, armed, detail,
             )
-        )
+            if armed is None:
+                return f"error: write refused -- could not confidently determine Pico ARMED state ({detail})"
+            return f"error: write refused -- Pico is ARMED ({detail})"
     ok, output = debug_probe.write_memory(peer, address, value, width)
     _session_log.warning(
         "debug_write_memory: peer=%s address=0x%x value=0x%x width=%d ok=%s", peer, address, value, width, ok

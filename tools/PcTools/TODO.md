@@ -380,11 +380,30 @@ reimplementing the transfer.
       relay_owner's state (same honest gap `debug_probe.py`'s
       `write_memory()` already documents), so there is nothing to query;
       GPIO6's hard, unconditional deny stands in for that guard rail today,
-      stricter but not equivalent. **Not bench-verified** -- no RP2040/debug
-      probe attached this session; deny-list and precondition logic verified
-      by unit-level calls (refusal paths raise before any SWD traffic), the
-      register-poke paths themselves are unverified against real silicon.
-- [ ] 1c. Coordinated two-board test script implementing `firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C, reaching each processor by a path that is **not** the link under test
+      stricter but not equivalent.
+      **Bench-verified 2026-08-18, and it found a real bug**: `set_mode()`
+      does set `CTRL.FUNCSEL = GPIO_FUNC_SIO` as designed, but `write()`
+      against `SaftyFW`'s live GPIO4 (`PicoTx`) did not reliably move the
+      physical pad -- `set_mode`/`write` both returned success and
+      `read_all()` echoed the commanded value back, but a Saleae capture on
+      the actual net showed **zero transitions** across two full sessions (up
+      to 82 s, writes spaced 0.7-4 s apart). Root cause not yet found; suspect
+      is somewhere in `write()`'s register path (`_write_word`/OE/SIO_OUT
+      addressing) rather than `set_mode()`, since funcsel is confirmed
+      correct. Needs a scope/multimeter cross-check against a spare, unused
+      Pico GPIO (not one `SaftyFW`'s own firmware is also touching) to rule
+      out firmware contention before assuming the tool itself is at fault.
+- [ ] 1c. Coordinated two-board test script implementing `firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C, reaching each processor by a path that is **not** the link under test.
+      **Pin/direction mapping half done manually 2026-08-18** (not by this
+      script): user physically confirmed ESP board pin 4/6 as outputs and
+      Pico board pin 7/14 as the corresponding inputs, Pico board pin 6 as
+      output into ESP board pin 5 -- matches `HARDWARE.md` §1 exactly, see
+      its Verification status table. **The electrical propagation half is
+      still open** and blocked on the `write()` bug just above plus an
+      unconfirmed `12v_Safty` power state -- neither ESP GPIO4->Pico GPIO5
+      nor Pico GPIO4->ESP GPIO5 showed a captured edge on the far side in any
+      attempt this session, and ESP GPIO6 (fault) could not be driven at all
+      (hard-denied, no override, by design).
 - [~] 2. Saleae capture as an MCP tool. Done 2026-08-16: `saleae_list_devices`/
       `saleae_capture` wrap `logic_capture.py`'s automation-API client;
       verified against no-Logic2-running (clean error, not a crash) since no
@@ -456,12 +475,42 @@ reimplementing the transfer.
 - [x] `debug_halt` refused on the ESP while a profile is running or paused
       (`ProfilesClient.get_exec_status()`); an unreachable ESP does not block
       the halt
-- [ ] **Any** write refused on the Pico while `ARMED` -- **not implemented,
-      and currently not implementable**: SaftyFW is skeleton-only and exposes
-      no protocol to query ARMED state from the PC. `debug_write_memory`'s
-      `confirm=True` flag is the only gate today, for both peers; its
-      docstring and `debug_probe.py`'s module docstring both say this
-      plainly. Revisit once SaftyFW's link task (Phase 7) exposes real state.
+- [x] **Any** write refused on the Pico while `ARMED` -- **implemented
+      2026-08-19, via SWD, not the (still dead) UART link**: SaftyFW's
+      `relay_owner.c` keeps its GRACE/ARMED/TRIPPED state in one file-local
+      static, `s_state` (1 byte after GCC's enum packing, confirmed unique
+      repo-wide). `debug_probe.resolve_symbol()` resolves that symbol's
+      address fresh from `SaftyFW.elf` on every call via
+      `arm-none-eabi-nm -S` (never a hardcoded address -- BSS layout can
+      shift on an unrelated recompile), and `pico_armed_state()` reads it
+      over the same SWD path `debug_read_memory` already uses.
+      `debug_write_memory`'s MCP wrapper (`mcp_server.py`) now calls this
+      before honoring `confirm=True` for `peer="pico"` and refuses the write
+      if the state reads ARMED, *or* if it can't be confidently determined at
+      all (missing `arm-none-eabi-nm`, missing/stale ELF, ambiguous symbol,
+      failed SWD read, or a read-back value outside `relay_owner_state_t`'s
+      valid 0-3 range) -- fail closed in every case, `confirm=True` alone is
+      never enough for the Pico. Host-side logic (symbol resolution, value
+      interpretation, all the fail-closed branches) is unit-tested against
+      mocked `nm`/`read_memory` calls in
+      `tools/PcTools/tests/test_debug_probe_armed.py`.
+      Read-only hardware smoke test this session (Debug Probe attached):
+      `resolve_symbol()` against the real `SaftyFW.elf` returned
+      `(0x2000ba33, 1)` as expected, but the live SWD read against the
+      attached board came back `0xb7` -- not a valid `relay_owner_state_t`
+      value, i.e. the attached board is not currently running the exact ELF
+      this address was resolved from (stale/different image flashed, or RAM
+      not yet initialized this boot). `pico_armed_state()` correctly reported
+      `(None, ...)` (fail closed) rather than a false "not armed" -- this is
+      exactly the failure mode the None-handling exists for, caught for real
+      rather than only in a mock. **Caveat carried forward, unchanged**: any
+      SWD connection into the safety domain bonds `GND_Safty` to PC ground
+      (see `debug_probe.py`'s module docstring and
+      `firmware/SaftyFW/docs/HARDWARE.md` §7b) -- bench only. Not yet
+      exercised against a board actually running SaftyFW with `s_state ==
+      ARMED` end to end (needs a live build+flash+arm sequence, a bigger
+      verification pass than this read-only smoke test); do that before
+      relying on this gate for anything beyond defense-in-depth.
 - [x] Flash writes require an explicit confirm -- `debug_program(confirm=True)`,
       done 2026-08-17
 - [x] Every halt, reset and write logged -- `_session_log.warning(...)` in

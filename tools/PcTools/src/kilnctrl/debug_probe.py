@@ -22,12 +22,24 @@ guard-rail list:
   controller and trip -- that's enforced in ``mcp_server.py``'s
   ``debug_halt()`` (it consults ``ProfilesClient.get_exec_status()``), not
   here.
-- **There is currently no way to query the Pico's "ARMED" state from the PC**
-  -- SaftyFW is skeleton-only today, no such protocol exists yet. The TODO's
-  "refuse any write to the Pico while ARMED" guard rail therefore **cannot be
-  implemented today**. ``write_memory()`` below and its MCP wrapper both say
-  this plainly rather than pretending an ARMED check exists: the ``confirm``
-  flag on the MCP tool is the only gate, for both peers, right now.
+- **The Pico's "ARMED" state IS now readable from the PC, but only via SWD,
+  never via the (still dead) UART link.** SaftyFW's ``relay_owner.c`` (Phase
+  5) keeps its GRACE/ARMED/TRIPPED state machine in one file-local static,
+  ``s_state`` (``relay_owner_state_t``, 1 byte after GCC's enum packing;
+  ``RELAY_OWNER_STATE_ARMED == 2``) -- no mutex, single-writer, matching this
+  codebase's established pattern for that class of scalar (see
+  ``relay_owner.h``'s own doc comment). ``resolve_symbol()``/
+  ``pico_armed_state()`` below resolve that symbol's address fresh from
+  ``SaftyFW.elf`` on every call (via ``arm-none-eabi-nm -S``, never a
+  hardcoded address -- BSS layout can shift on an unrelated recompile) and
+  read it over SWD the same way ``read_memory()`` already does. ``confirm=True``
+  on ``write_memory()`` for ``peer="pico"`` now goes through this check first
+  and fails closed (refuses) if the symbol can't be resolved uniquely, isn't
+  1 byte, or the SWD read itself fails -- an unreadable state is never treated
+  as "not armed". This is still UART-link-independent and still bonds
+  ``GND_Safty`` to PC ground for the duration (see the caveat below);
+  it does *not* need the dead link to work, and it does not (and does not
+  try to) query link_task's own DIAG/status protocol.
 - ⚠️ **Standing caveat**: any PC debug connection into the safety domain (SWD
   to the Pico) bonds ``GND_Safty`` to PC ground, and if the ESP is on the same
   PC, bypasses the isolation barrier for the duration. Bench only, never with
@@ -38,7 +50,11 @@ guard-rail list:
 
 from __future__ import annotations
 
+import glob
 import os
+import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -201,6 +217,135 @@ def step(peer: str) -> "tuple[bool, str]":
     return _run(peer, tcl)
 
 
+# --- ARMED-state read (Pico peer only), see module docstring ---------------
+
+# relay_owner.c's single-writer state-machine static -- see the module
+# docstring's "ARMED state IS now readable" section above. Verified unique in
+# the repo (2026-08-19: `grep -rln s_state firmware/SaftyFW/src` returns only
+# relay_owner.c) and confirmed 1 byte via `arm-none-eabi-nm -S` against a real
+# build (`firmware/SaftyFW/build/SaftyFW.elf`: `2000ba33 00000001 b s_state`).
+_ARMED_SYMBOL = "s_state"
+_ARMED_SYMBOL_EXPECTED_SIZE = 1
+# relay_owner.h: RELAY_OWNER_STATE_INIT=0, GRACE=1, ARMED=2, TRIPPED=3.
+_ARMED_ENUM_VALUE = 2
+
+_MEMRD_RE = re.compile(r"MEMRD\s+0x[0-9a-fA-F]+\s+0x([0-9a-fA-F]+)")
+
+
+def _find_arm_nm_exe() -> Optional[str]:
+    """Locates arm-none-eabi-nm, needed to resolve ``s_state``'s address
+    fresh from the ELF on every call (see ``resolve_symbol()``). Mirrors
+    ``openocd_util._find_openocd_exe()``'s resolution shape: an env var
+    override first, then PATH, then the actual installed-tools layout found
+    on this machine (Arm GNU Toolchain's default installer path)."""
+    env_path = os.environ.get("ARM_NM_EXE")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    which = shutil.which("arm-none-eabi-nm")
+    if which:
+        return which
+
+    candidates = glob.glob(r"C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\*\bin\arm-none-eabi-nm.exe")
+    candidates += glob.glob(r"C:\Program Files\Arm GNU Toolchain arm-none-eabi\*\bin\arm-none-eabi-nm.exe")
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def resolve_symbol(elf_path: str, symbol: str, nm_exe: Optional[str] = None) -> Optional["tuple[int, int]"]:
+    """Resolves ``symbol``'s (address, size) in ``elf_path`` via
+    ``arm-none-eabi-nm -S``, freshly on every call -- never a hardcoded
+    address, because BSS layout can shift on an unrelated recompile even
+    though the symbol name itself is stable.
+
+    Fails closed (returns ``None``) rather than guessing: no nm executable
+    found, the ELF is missing, nm errors out, the symbol is absent, or --
+    critically -- the symbol name is found more than once (ambiguous; would
+    silently resolve to the wrong global). Callers must treat ``None`` as
+    "could not determine", never as an absence of the state it was checking.
+    """
+    nm = nm_exe or _find_arm_nm_exe()
+    if not nm or not os.path.isfile(elf_path):
+        return None
+    try:
+        proc = subprocess.run([nm, "-S", elf_path], capture_output=True, text=True, timeout=15)
+    except Exception:  # noqa: BLE001 - any failure here means "can't resolve", not a crash
+        return None
+    if proc.returncode != 0:
+        return None
+
+    matches: "list[tuple[int, int]]" = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        # nm -S line shape for a sized symbol: "<addr> <size> <type> <name>".
+        # Undefined/external symbols print only 3 fields (no size) and are
+        # not candidates for a data read regardless.
+        if len(parts) == 4 and parts[3] == symbol:
+            try:
+                matches.append((int(parts[0], 16), int(parts[1], 16)))
+            except ValueError:
+                continue
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def pico_armed_state() -> "tuple[Optional[bool], str]":
+    """Reads relay_owner.c's ``s_state`` over SWD and reports whether it
+    currently reads ``RELAY_OWNER_STATE_ARMED``.
+
+    Returns ``(True, detail)`` if armed, ``(False, detail)`` if confidently
+    read as not-armed, or ``(None, detail)`` if the state could not be
+    confidently determined -- callers (``debug_write_memory``'s MCP wrapper)
+    MUST treat ``None`` as fail-closed (refuse the write), never as "assume
+    not armed". Halts the Pico core as a side effect (same as any
+    ``read_memory()`` call)."""
+    elf = _safty_fw_elf()
+    resolved = resolve_symbol(elf, _ARMED_SYMBOL)
+    if resolved is None:
+        return None, (
+            f"could not resolve symbol {_ARMED_SYMBOL!r} in {elf} -- missing "
+            "arm-none-eabi-nm (set ARM_NM_EXE or install the Arm GNU Toolchain), "
+            "missing/stale ELF (build SaftyFW first), or the symbol was not "
+            "found exactly once"
+        )
+    addr, size = resolved
+    if size != _ARMED_SYMBOL_EXPECTED_SIZE:
+        return None, (
+            f"symbol {_ARMED_SYMBOL!r} resolved to {size} byte(s), expected "
+            f"{_ARMED_SYMBOL_EXPECTED_SIZE} -- refusing to trust this read "
+            "(relay_owner_state_t's underlying type may have changed)"
+        )
+
+    ok, output = read_memory(PEER_PICO, addr, count=1, width=8)
+    if not ok:
+        return None, f"SWD read of s_state at 0x{addr:x} failed:\n{output.strip()}"
+
+    match = _MEMRD_RE.search(output)
+    if not match:
+        return None, f"could not parse a MEMRD line out of read_memory() output:\n{output.strip()}"
+
+    value = int(match.group(1), 16)
+    # relay_owner_state_t only ever holds 0..3 (INIT/GRACE/ARMED/TRIPPED).
+    # Anything else means the read address doesn't actually hold this
+    # variable right now -- e.g. the attached board isn't running the ELF
+    # this address was resolved from (different/older firmware flashed,
+    # RAM not yet initialized this boot) -- found for real doing this
+    # session's hardware smoke test: a live read came back 0xb7, not a valid
+    # enum value. Fail closed rather than reporting a bogus "not armed".
+    if value not in (0, 1, 2, 3):
+        return None, (
+            f"s_state at 0x{addr:x} read back 0x{value:x}, not a valid "
+            "relay_owner_state_t (0-3) -- the attached board likely isn't "
+            "running the ELF this address was resolved from; refusing to "
+            "trust this read"
+        )
+    armed = value == _ARMED_ENUM_VALUE
+    return armed, f"s_state=0x{value:x} at 0x{addr:x} ({'ARMED' if armed else 'not armed'})"
+
+
 def read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> "tuple[bool, str]":
     """Reads ``count`` ``width``-bit words starting at ``address`` (read-only,
     no ARMED/safety implications). ``count`` is capped at 4096 to stop a
@@ -235,11 +380,14 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> "tu
 def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple[bool, str]":
     """Writes one ``width``-bit ``value`` at ``address``.
 
-    NOTE: there is no ARMED-state check for the Pico here (see module
-    docstring) -- SaftyFW does not yet expose any protocol to query it from
-    the PC, so this function (and its MCP wrapper's ``confirm`` flag) cannot
-    enforce the TODO's "refuse any write to the Pico while ARMED" guard rail.
-    ``confirm=True`` at the MCP layer is the only gate today, for both peers.
+    NOTE: this bare function has no ARMED-state gate of its own -- that policy
+    (peer="pico" only: refuse if ``pico_armed_state()`` reports armed, or
+    can't confidently determine the state) lives one layer up, in
+    ``mcp_server.py``'s ``debug_write_memory()`` MCP wrapper, matching where
+    this codebase's other write-time policy (e.g. ``debug_halt``'s
+    profile-running guard) already lives. Call ``pico_armed_state()``
+    yourself first if you're calling this directly rather than through the
+    MCP tool.
     """
     cmd = _MEM_WIDTH_WRITE_CMDS.get(width)
     if cmd is None:
