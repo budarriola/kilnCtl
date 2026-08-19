@@ -3535,6 +3535,25 @@ host-tested than it is.
       fault-text page should read the same `safety_link_get_status()` bits
       and would need no further change here.
 
+### 9.6a MCP tools (`tools/PcTools`)
+
+Not a web-page item, but tracked here since it consumes the same
+`/api/ota/*` endpoints this section built. Full detail:
+[`../CommonFW/docs/UPDATE_PROTOCOL.md`](../CommonFW/docs/UPDATE_PROTOCOL.md)
+section 6.
+
+- [x] **2026-08-18.** Four `mcp__kilnctrl__` tools wrapping `ota_http.c`'s
+      HTTP surface (`ota_get_challenge`, `ota_update_esp`, `ota_update_pico`,
+      `ota_status`) added in `tools/PcTools/src/kilnctrl/ota_http_client.py`
+      + `mcp_server.py`. Deviates from `ota_rollback(processor)` +
+      "logs the image hash" as originally sketched — see
+      `UPDATE_PROTOCOL.md` section 6 for why (no HTTP rollback endpoint
+      exists yet; no local SHA-256 computed this pass). Unit-tested against
+      mocked HTTP only (`tools/PcTools/tests/test_ota_http_client.py`,
+      15 tests) — **no physical board exercised**, same "host-build/config
+      only, no hardware in this environment" caveat as the rest of this
+      section.
+
 ### 9.7 Verification
 
 - [ ] Power pulled mid-transfer, both processors — both still boot the old image

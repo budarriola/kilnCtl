@@ -554,12 +554,53 @@ bar, and a rollback button per processor.
 These matter more than the web page for day-to-day work, since most updates
 during development will be driven by an agent:
 
-- [ ] `ota_status()` — both processors: versions, slots, interlock state, and
-      *why* an update is currently refused
-- [ ] `ota_update_esp(image_path, password)` — streams, returns the new version
-- [ ] `ota_update_pico(image_path, password)` — same, over the link
-- [ ] `ota_rollback(processor)` — explicit, and refused under the same interlocks
-- [ ] Every one of these logged, with the image hash
+- [x] **2026-08-18, `tools/PcTools/src/kilnctrl/ota_http_client.py` +
+      `mcp_server.py`.** Four tools, HTTP-based (this is the board's own web
+      server, not the UART link the rest of `mcp_server.py` uses):
+      `ota_get_challenge(host)`, `ota_update_esp(image_path, password, host)`,
+      `ota_update_pico(image_path, password, host)`, `ota_status(host)`.
+      **Deviates from the four names sketched here, on purpose**: there is no
+      `ota_rollback(processor)` HTTP endpoint in `ota_http.c` to wrap (nothing
+      under §3/§4 exposes a rollback trigger over HTTP — rollback today is
+      automatic, bootloader-driven, not an operator action), so building that
+      tool would mean inventing client behavior with no server side to call.
+      `ota_get_challenge()` stands in as the fourth tool instead — a real,
+      already-built endpoint (`GET /api/ota/challenge`) with no wrapper
+      before this pass, useful on its own for confirming the OTA HTTP surface
+      is reachable. `ota_status()` is **not** "both processors: versions,
+      slots, interlock state" as sketched — only `GET /api/ota/pico/status`
+      (relay phase/percent/last_error) exists as an HTTP route today; ESP
+      self-update progress (`ota_http_get_esp_progress()`) and the persisted
+      `ota_record` history are real C-level state with no HTTP endpoint yet,
+      and `ota_status()` says so explicitly rather than fabricating a reading
+      for either. Host discovery reuses the UART `wifi_get_status()` query
+      (station IP) with the board's AP-fallback address as a backstop, same
+      pattern `gui.py`'s Wi-Fi Settings popup already uses.
+- [x] `ota_status()` reports the one thing that actually is queryable today
+      (Pico relay progress) — see the deviation note above for what it does
+      not yet cover.
+- [x] `ota_update_esp(image_path, password)` — streams, returns the new
+      version (plus partition and byte count) on success, or the board's
+      specific refusal reason on failure.
+- [x] `ota_update_pico(image_path, password)` — stages + starts the relay,
+      returns immediately (202) with staged bytes/CRC; does not itself wait
+      for the ~35s+ relay to finish (see `ota_status()`).
+- [ ] `ota_rollback(processor)` — **not built**, see the deviation note above:
+      no HTTP endpoint exists for this to wrap. Would need a new
+      `ota_http.c` route first.
+- [x] Every push tool's board-reported result (including refusals) is
+      returned verbatim to the caller. **Not yet true**: neither tool
+      computes or logs a local SHA-256 of the image before sending — the doc
+      text's "logged, with the image hash" is about the image content hash,
+      which this pass does not add on the PC side (the ESP-side `ota_record`
+      has the same gap, noted in `ota_record.h`'s own header comment).
+- [x] **Unit-tested against mocked HTTP** (no live board):
+      `tools/PcTools/tests/test_ota_http_client.py`, 15 tests covering HMAC
+      derivation, challenge parsing, push request construction (including the
+      `X-Ota-Mac` header value), and both JSON and plain-text (409/403)
+      response handling. **Not yet verified against a physical board** — no
+      hardware attached in this pass's environment; that remains open (see
+      §7 "Verification").
 
 ---
 
@@ -749,7 +790,11 @@ and "Pico update" sections below for what each actually covers.
 **Surfaces**
 - [ ] Web page with per-processor version, slot, interlock state, progress, rollback
 - [ ] Protocol-version mismatch warned about, with a second confirmation
-- [ ] Four MCP tools, each logging the image hash
+- [x] **Four MCP tools — 2026-08-18, `tools/PcTools`, see section 6 above for
+      the full deviation notes**: `ota_get_challenge`, `ota_update_esp`,
+      `ota_update_pico`, `ota_status` (not `ota_rollback` — no HTTP endpoint
+      exists to wrap; not image-hash-logging — no local SHA-256 computed this
+      pass). Mocked-HTTP unit tests only; no physical board exercised.
 
 **Verification**
 - [ ] Power pulled mid-transfer, both processors, both still boot the old image

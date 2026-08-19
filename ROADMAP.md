@@ -358,9 +358,24 @@ path. Two facts set the shape of this milestone:
       `relay_authority.c` is unmodified (right, per design) but there is no
       Pico-update transfer path wired up yet to exercise this end-to-end
       (`KilnFW/TODO.md` 9.4)
-- [ ] Four MCP tools, since most development updates will be agent-driven —
-      HTTP OTA endpoints exist (`/api/ota/challenge`, `/api/ota/esp`,
-      `/api/ota/pico`) but nothing in `tools/PcTools` wraps them yet
+- [x] **Four MCP tools (2026-08-18).** `tools/PcTools/src/kilnctrl/ota_http_client.py`
+      (pure HTTP client: challenge fetch, HMAC derivation, streamed push,
+      status poll) plus four `mcp__kilnctrl__` wrappers in `mcp_server.py`:
+      `ota_get_challenge(host)`, `ota_update_esp(image_path, password, host)`,
+      `ota_update_pico(image_path, password, host)`, `ota_status(host)`.
+      Board discovery mirrors `gui.py`'s `_wifi_default_host()` (UART
+      `wifi_get_status()`'s station IP, falling back to the AP default
+      `192.168.4.1`; an explicit `host` always wins). Request construction /
+      HMAC signing / response parsing unit-tested against mocked HTTP
+      (`tools/PcTools/tests/test_ota_http_client.py`, 15 tests, no live
+      board). **Real gap, surfaced honestly rather than papered over**:
+      `ota_status()` can only report the Pico relay's progress
+      (`GET /api/ota/pico/status`) — there is no HTTP route for the ESP
+      self-update's own progress counter or the persisted `ota_record` "last
+      update" blob, both of which exist only as in-process C getters today.
+      **Not yet exercised against a physical board** — no hardware attached
+      in this pass's environment; live-board verification (real interlock
+      refusals, real lockout, a real Pico relay) is still outstanding.
 
 ---
 

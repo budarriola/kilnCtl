@@ -95,6 +95,7 @@ from .protocol import (
     MsgType,
     unstuff,
 )
+from . import ota_http_client as ota_http
 from . import probe
 from .probe import ProbeClient, ProbeQueryError
 from .wifi_uart import WifiUartClient, WifiUartQueryError
@@ -1794,6 +1795,194 @@ def wifi_forget(ssid: str) -> str:
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     return f"ok - forgot {ssid!r}" if ok else f"refused - no such saved network {ssid!r}"
+
+
+# ---------------------------------------------------------------------------
+# OTA (firmware/CommonFW/docs/UPDATE_PROTOCOL.md, KilnFW/TODO.md 9.5/9.6) --
+# HTTP, not the UART link. All four tools below drive ota_http.c's
+# /api/ota/{challenge,esp,pico} + /api/ota/pico/status endpoints over the
+# board's own web server -- request construction, HMAC signing, and response
+# parsing live in ota_http_client.py (unit-tested there with mocked HTTP
+# responses; see tools/PcTools/tests/test_ota_http_client.py). NEVER
+# exercised against real hardware from here -- no board is attached in CI or
+# in this pass's dev environment. Live-board verification (does a real ESP
+# accept these bytes end to end, do the lockout/interlock paths behave as
+# documented) is still outstanding.
+#
+# Host discovery mirrors gui.py's _wifi_default_host(): prefer the board's
+# current station IP (from the UART-side WIFI tools, which always work even
+# with Wi-Fi itself down or never provisioned), fall back to the board's own
+# fallback-AP address. An explicit `host` argument always wins over both --
+# useful for kiln.local (mDNS) or a host on a network the UART link can't see
+# into (e.g. this MCP server's serial port is on a different PC than the one
+# actually joined to the board's Wi-Fi).
+#
+# These are destructive-adjacent, safety-relevant operations (flashing a
+# kiln controller and its safety processor). Nothing here retries a partial
+# write on its own -- a failed push is left failed, and re-uploading is a
+# separate, explicit tool call, never something a caller has to guess
+# happened silently underneath these.
+# ---------------------------------------------------------------------------
+def _ota_resolve_host(host: Optional[str]) -> str:
+    if host:
+        return host
+    try:
+        status = _wifi.get_status()
+        if status.sta_connected and status.sta_ip:
+            return status.sta_ip
+    except WifiUartQueryError:
+        pass
+    return ota_http.OTA_AP_DEFAULT_HOST
+
+
+@_tool()
+def ota_get_challenge(host: Optional[str] = None) -> str:
+    """GET /api/ota/challenge -- issue a fresh single-use OTA auth nonce.
+
+    Mostly a diagnostic/manual tool: ota_update_esp()/ota_update_pico() below
+    already fetch their own challenge internally, so this is not a required
+    first step for a normal push. Useful to confirm the board's OTA HTTP
+    surface is reachable at all, or to hand-verify the HMAC scheme.
+
+    `host`: board IP or hostname (e.g. "192.168.1.42" or "kiln.local").
+    Defaults to the board's current station IP (via wifi_get_status()'s UART
+    query) if connected, else the board's fallback-AP address 192.168.4.1.
+    """
+    resolved = _ota_resolve_host(host)
+    try:
+        nonce = ota_http.get_challenge(resolved)
+    except ota_http.OtaHttpError as exc:
+        return f"error: {exc} (host={resolved})"
+    return f"ok - nonce={nonce.hex()} host={resolved} (single-use, 30s expiry)"
+
+
+@_tool()
+def ota_update_esp(image_path: str, password: str, host: Optional[str] = None) -> str:
+    """Push a new ESP32-S3 firmware image over Wi-Fi -- POST /api/ota/esp.
+
+    DESTRUCTIVE-ADJACENT: this streams `image_path` (a raw ESP-IDF .bin,
+    e.g. KilnCtrl.bin) straight into the inactive OTA slot and sets it as
+    the next boot partition on success. Refused by the board itself unless
+    every interlock in UPDATE_PROTOCOL.md section 1 holds (kiln idle, no
+    heater commanded, safety link healthy, temperature below the configured
+    ceiling) -- a refusal comes back here as a specific error naming the
+    unmet precondition, not a generic failure.
+
+    `password`: the board's AP password (same one wifi_prov_get_ap_password()
+    returns) -- used only to derive the challenge-response HMAC per
+    CommonFW/docs/UPDATE_PROTOCOL.md section 2; the plaintext password is
+    never sent over the wire.
+
+    On success the image is written and set as the boot partition, but stays
+    PENDING_VERIFY until the board reboots AND main.c's
+    ota_rollback_confirm_task() confirms NVS/safety-link/web-server are all
+    up post-reboot -- this call does not reboot the board itself, and does
+    not wait for or confirm that verification. Nothing here retries a
+    partial write: a failure mid-transfer is left failed on both sides
+    (ota_esp_do_transfer()'s single cleanup path aborts the OTA handle and
+    releases the update mutex), and re-uploading is a fresh, separate call.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    response-parsing are unit-tested with mocked HTTP only (see
+    ota_http_client.py's module doc comment).
+    """
+    resolved = _ota_resolve_host(host)
+    try:
+        result = ota_http.push_esp_image(resolved, image_path, password)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved})"
+    if not result.ok:
+        return f"error: board reported failure: {result.body} (host={resolved})"
+    b = result.body
+    return (f"ok - wrote {b.get('bytes')} bytes to {b.get('partition')!r}, "
+            f"new version={b.get('version')!r} (host={resolved}) -- "
+            f"PENDING_VERIFY until the board reboots and self-confirms; "
+            f"reboot required for the new image to run")
+
+
+@_tool()
+def ota_update_pico(image_path: str, password: str, host: Optional[str] = None) -> str:
+    """Push a new RP2040 safety-processor firmware image -- POST
+    /api/ota/pico. Stages `image_path` (a raw SaftyFW .bin) into the ESP's
+    `pico_img` partition at Wi-Fi speed, then hands off to a background task
+    that relays it to the RP2040 over the isolated UART link (~35s+,
+    unacknowledged UPDATE_DATA broadcast + gap-report retransmit -- see
+    CommonFW/docs/UPDATE_PROTOCOL.md section 4).
+
+    DESTRUCTIVE-ADJACENT, and this is the SAFETY PROCESSOR: refused unless
+    the same interlocks as ota_update_esp() hold, checked independently by
+    BOTH processors (the Pico does not take the ESP's word for it). A
+    refusal (wrong password, an interlock, or a concurrent update already
+    in progress) comes back as a specific board-reported reason.
+
+    `password`: same AP-password-derived HMAC scheme as ota_update_esp() --
+    see that tool's doc comment.
+
+    IMPORTANT: a successful response here means "the image was staged and
+    the relay STARTED" -- it does NOT mean the RP2040 is now running the new
+    image. The relay itself takes ~35 seconds or more and happens in the
+    background after this call returns (202 Accepted). Call
+    ota_status(host) afterward, repeatedly, to learn whether the relay
+    actually completed, failed, or is still in progress. Nothing here
+    retries a partial write on its own -- ota_pico_do_stage()'s single
+    cleanup path releases the update mutex on any staging failure, and the
+    relay task itself caps retransmission rounds and fails cleanly rather
+    than looping forever on a bad link.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- neither the ESP HTTP path nor
+    the RP2040 relay has been exercised against physical boards from this
+    tool; only request construction/HMAC/response-parsing are unit-tested,
+    with mocked HTTP.
+    """
+    resolved = _ota_resolve_host(host)
+    try:
+        result = ota_http.push_pico_image(resolved, image_path, password)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved})"
+    if not result.ok:
+        return f"error: board reported failure: {result.body} (host={resolved})"
+    b = result.body
+    return (f"ok - staged {b.get('bytes')} bytes, crc32={b.get('crc32')!r}, "
+            f"relay started (host={resolved}) -- this does NOT mean the "
+            f"RP2040 has finished updating; poll ota_status(host) for the "
+            f"actual relay outcome")
+
+
+@_tool()
+def ota_status(host: Optional[str] = None) -> str:
+    """Poll OTA update progress -- GET /api/ota/pico/status, the only
+    HTTP-queryable progress surface that exists today.
+
+    Reports the background Pico relay task's phase/percent/last_error
+    (ota_pico_relay.c) -- e.g. "sending" at 60%, or "done"/"failed" once the
+    relay has finished.
+
+    HONEST GAP, not papered over: there is currently no HTTP endpoint for
+    (a) the ESP self-update's own progress
+    (ota_http_get_esp_progress() exists in ota_http.c but has no
+    `/api/ota/esp/status`-style route registered), or (b) the persisted
+    "last update" record (ota_record.h's append-only-of-one NVS blob --
+    timestamp, processor, version before/after, result -- has no HTTP GET
+    route either). Both are real, C-level state that simply isn't exposed
+    over HTTP yet; this tool does not invent a stand-in for either. The ESP
+    path's push result (see ota_update_esp()'s return value) is, today, the
+    only way to learn how an ESP update went, at the moment it happens.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- response parsing is
+    unit-tested with mocked HTTP only.
+    """
+    resolved = _ota_resolve_host(host)
+    try:
+        status = ota_http.get_pico_status(resolved)
+    except ota_http.OtaHttpError as exc:
+        return f"error: {exc} (host={resolved})"
+    return (f"pico relay: phase={status.get('phase')!r} percent={status.get('percent')} "
+            f"last_error={status.get('last_error')!r} (host={resolved}) | "
+            f"NOTE: ESP self-update progress and the persisted ota_record "
+            f"('last update' history) have no HTTP endpoint yet -- not queryable "
+            f"from here, see this tool's own doc comment")
 
 
 # ---------------------------------------------------------------------------
