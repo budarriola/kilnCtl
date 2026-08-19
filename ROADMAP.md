@@ -695,12 +695,11 @@ because it changes what a bare main board will do.
       `ctest` in `firmware/CommonFW/build` 7/7 green, including the new
       `test_power`. See `KilnFW/TODO.md` 10.10 for detail.
       **Still not hardware-verified, and still reads `null`/"---" on any
-      real board today**: no Pico is attached in this environment, the link
-      itself is bench-confirmed dead (M0), and `SaftyFW` does not build or
-      send Frame E yet (M5's "Pico → ESP telemetry ... power" bullet, still
-      open on the Pico side) — so `power_ever_received` never goes true
-      outside the host tests. That is the designed-for state until M0/M5
-      land on the Pico side too, not a defect in this pass.
+      real board today**: no Pico is attached in this environment to send
+      Frame E to (M0's bench-confirmed dead link, not a code gap) — so
+      `power_ever_received` never goes true outside the host tests. That is
+      the designed-for state until M0 lands and a Pico is physically
+      connected, not a defect in this pass.
 
 ## M7 — Repo reorganisation · *done 2026-08-16, three items open*
 
@@ -772,8 +771,22 @@ path. Two facts set the shape of this milestone:
       hardware-flashed)
 - [ ] Pico flash layout and metadata format frozen before the first board is
       programmed; signature field and key space reserved even though signing is off
+      — **design frozen 2026-08-19**, `SaftyFW/docs/BOOTLOADER.md` §2 (layout
+      diagram + metadata table now include a reserved `signature[64]` field, a
+      `sig_required` flag, and a 768 B pubkey reservation in the bootloader
+      region, all with fixed offsets). Layout/metadata *code*
+      (`flash_layout.h`, `metadata.h`) does not implement the reserved fields
+      yet — that is still open, tracked in `SaftyFW/TODO.md` phase 10. Stays
+      unchecked: design frozen is not the same as implemented.
 - [ ] Pico bootloader: GPIO6 low first, active slot CRC'd every boot, recovery
-      mode over UART1 with no timeout out of it
+      mode over UART1 with no timeout out of it — **substantially built and
+      host-build-verified** (GPIO6-first, per-boot CRC, `boot_attempts`
+      fallback, and a beacon-only recovery mode all exist in
+      `bootloader/main.c`; see `SaftyFW/TODO.md` items 10.3–10.5). Stays
+      unchecked because recovery mode is beacon-only (no `UPDATE_*` frame
+      handling yet) and nothing has been flashed or verified over SWD on
+      physical hardware — see `BOOTLOADER.md`'s status header for the exact
+      boundary.
 - [x] **Mutual protocol-version check** (lands with M5, gates this): each side
       verifies the other, a mismatch blocks heating on the ESP
       (`safety_link.c`'s `safety_update_health()` asserts
@@ -813,10 +826,23 @@ path. Two facts set the shape of this milestone:
       blocker named (2026-08-17, already on `main` — `ota_interlock_check()`
       names the zone/reason, e.g. `"zone 2 is at 340 C"`)
 - [ ] Link-loss heating block **not** bypassed during a Pico update — alarm text
-      suppressed, never the block. **Correctly untouched, not yet verifiable**:
-      `relay_authority.c` is unmodified (right, per design) but there is no
-      Pico-update transfer path wired up yet to exercise this end-to-end
-      (`KilnFW/TODO.md` 9.4)
+      suppressed, never the block. **Still correct by code inspection, now
+      structurally exercisable end-to-end (not yet run on real hardware)**:
+      `relay_authority.c` remains unmodified since 2026-08-13 (`git log
+      --follow` shows no touches since the tree-reorg commit `a382380` on
+      2026-08-16). The real transfer path this bullet was waiting on now
+      exists: `firmware/SaftyFW/src/tasks/update_task.c`'s
+      `update_task_gather_preconditions()` (line ~487) only *reads*
+      `safety_core_get_output_status()`/`thermo_task_get_snapshot()` to gate
+      `UPDATE_BEGIN` — it never writes relay or GPIO state, matching
+      `UPDATE_PROTOCOL.md`'s "Pico independently enforces relay-open,
+      no-trip-pending, and the temperature ceiling" and this file's own
+      cross-processor invariant that the Pico enforces the no-heat-while-
+      updating rule itself. `firmware/KilnFW/App/drivers/ota_pico_relay.c`
+      (the ESP-side frame relay) has zero references to `relay_authority`,
+      `kiln_io_owner`, or any relay/GPIO symbol — it only packs/forwards
+      UPDATE_* frames. So the invariant holds by inspection on both sides;
+      what remains is exercising it on real hardware (`KilnFW/TODO.md` 9.4).
 - [x] **Four MCP tools (2026-08-18).** `tools/PcTools/src/kilnctrl/ota_http_client.py`
       (pure HTTP client: challenge fetch, HMAC derivation, streamed push,
       status poll) plus four `mcp__kilnctrl__` wrappers in `mcp_server.py`:

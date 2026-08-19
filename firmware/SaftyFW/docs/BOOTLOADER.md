@@ -1,6 +1,15 @@
 # RP2040 Bootloader — field updates over the isolated link
 
-> **Status:** planning, nothing built · **Last reviewed:** 2026-08-16
+> **Status:** flash layout and metadata format design frozen (§2); bootloader
+> boot/CRC/fallback logic and a beacon-only recovery mode are built and
+> host-build-verified (`bootloader/main.c`, `metadata.h`/`.c`,
+> `flash_layout.h`); the reserved signature/key-space fields in §2's tables
+> below are **design only, not yet reflected in `metadata.h`/`flash_layout.h`**
+> (tracked as a follow-on code change, not done this pass). Nothing has been
+> flashed to physical hardware or verified over SWD. See
+> `../TODO.md` phase 10 for the itemised status of every checklist entry.
+> **Last reviewed:** 2026-08-19
+>
 > **Keep this file current.** The flash layout here is a commitment: once a
 > bootloader is written to a board over SWD it is not going to be changed in the
 > field, so the offsets and the metadata format have to be right before the
@@ -44,7 +53,12 @@ The Pico module has 2 MB of flash, memory-mapped for execute-in-place at
             | second stage (boot2)      256 B|  vendor, from the SDK
 0x10000100  +--------------------------------+
             | bootloader                ~64 K|  written once over SWD, never
-            |                                |  updated in the field
+            |   .text/.data          ~63.25K|  updated in the field
+            |   pubkey reservation      768 B|  unused today (signing off);
+            |                                |  see §6 — a fixed offset near
+            |                                |  the end of the region so the
+            |                                |  bootloader's own code size can
+            |                                |  grow without moving it
 0x10010000  +--------------------------------+
             | metadata sector             4 K|  two copies, A/B, CRC'd
 0x10011000  +--------------------------------+
@@ -82,8 +96,22 @@ loss during a metadata write always leaves one valid copy:
 | `slot[2].state` | `EMPTY` / `STAGED` / `VALID` / `PENDING_VERIFY` / `BAD` |
 | `slot[2].length`, `slot[2].crc32` | Verified before every boot, not just after an update |
 | `slot[2].version[16]`, `build_commit[20]`, `build_epoch` | Reported over the link |
+| `slot[2].signature[64]` | **Reserved, unused.** Space for an Ed25519 (or similar) signature over `[0, length)` of the slot, so turning on signing later (§6) is a format-version bump inside the *same* record layout, not a new field that has to be squeezed in around existing data. All-zero means "no signature present" and is what every image ships with until signing is turned on. |
 | `boot_attempts` | Incremented before jumping, cleared on check-in |
+| `sig_required` | **Reserved, unused, defaults to 0.** A future format version could set this per-record to require a valid `signature` before a slot is considered bootable; until then the bootloader must treat it as always-false regardless of its stored value, so a stray nonzero byte in an old record can never accidentally start enforcing a check the current bootloader build cannot perform. |
 | `crc32` | Over the whole record |
+
+The implementation's record is currently `BOOTLOADER_METADATA_RECORD_LEN` = 256
+bytes (`metadata.h`) against a `bootloader_metadata_t` that today uses well
+under half of that, so there is room for `signature[64]` and `sig_required`
+without changing the record size or the metadata sector's offset/size in
+`flash_layout.h`. **This is the frozen intent, not yet the frozen code**:
+`metadata.h`'s `bootloader_slot_meta_t` does not declare these fields yet, and
+adding them is a follow-on change to `metadata.h`/`.c` (struct field, pack/
+unpack, and the accompanying host tests), tracked in `TODO.md` phase 10
+alongside the rest of §6. Landing it before any board is programmed matters
+more than landing it in this pass — the record's on-flash byte layout, once a
+unit ships, is exactly as permanent as the offsets around it.
 
 ---
 
@@ -209,9 +237,31 @@ that has to be kept somewhere and a build step that uses it, and getting key
 management wrong produces a confident false sense of security. But it must be
 possible to turn on later without a flash-layout change:
 
-- [ ] Reserve space in the bootloader region for a public key, populated or not
-- [ ] Reserve a signature field in the image header from the start
-- [ ] Reserve a metadata flag for "signature required", defaulting to off
+- [ ] Reserve space in the bootloader region for a public key, populated or
+      not — **layout frozen** (§2's flash map: a 768 B pubkey reservation at
+      a fixed offset near the end of the ~64K bootloader region), **not yet
+      in `flash_layout.h`** as a named macro/offset. 768 B is sized against
+      Ed25519 (32 B public key) with generous headroom for a larger scheme
+      (e.g. an RSA-2048 key at 256 B, or room for more than one key if
+      key rotation is ever wanted) — **open question, not decided**: which
+      signature algorithm, and whether more than one key should be
+      reservable, is deliberately left unpicked until signing is actually
+      built, since picking wrong now costs nothing (the space is reserved
+      either way) and picking early would just be a guess.
+- [ ] Reserve a signature field in the image header from the start — **format
+      frozen** (§2's metadata table: `slot[2].signature[64]`, all-zero =
+      "none present"), **not yet in `metadata.h`**. 64 B fits an Ed25519
+      signature (64 B) with no headroom to spare; if a larger-signature
+      scheme is ever chosen this field is undersized and would need a
+      `format_version` bump to widen — flagged here rather than
+      over-allocating against an algorithm that has not been chosen.
+- [ ] Reserve a metadata flag for "signature required", defaulting to off —
+      **format frozen** (§2's metadata table: `sig_required`), **not yet in
+      `metadata.h`**. The bootloader must ignore this flag entirely (treat
+      as always-false) until a build actually implements signature
+      verification, so that a stray nonzero byte in an old, pre-signing
+      record can never be misread as "verification required" by a bootloader
+      that has no verifier to run.
 
 Reserving the space costs nothing now. Not reserving it means the upgrade path
 is a bench visit to every board.

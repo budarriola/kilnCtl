@@ -975,9 +975,22 @@ metadata format and the slot boundaries are effectively permanent.
       `bootloader/metadata.h`/`.c` frozen and host-tested (204/204,
       `test/test_bootloader_metadata.c`) earlier this session; `bootloader/main.c`
       now implements against that frozen layout/format rather than just
-      declaring it. Signature/public-key space reservation itself is
-      unchanged from before this pass — still a §6 TODO, not newly addressed
-      here.
+      declaring it.
+      **2026-08-19, documentation-only follow-on**: the signature/public-key
+      reservation now has a frozen design — `BOOTLOADER.md` section 2's
+      layout diagram adds a 768 B pubkey reservation at a fixed offset inside
+      the ~64K bootloader region, and its metadata table adds
+      `slot[2].signature[64]` (all-zero = none present) and `sig_required`
+      (must be ignored/treated-false until a bootloader build actually
+      verifies signatures). **Not yet in code**: `flash_layout.h` has no
+      pubkey-offset macro and `metadata.h`'s `bootloader_slot_meta_t` has
+      neither field — `BOOTLOADER_METADATA_RECORD_LEN` (256 B) has room for
+      both without changing the record size, so adding them is a struct/pack/
+      unpack/host-test change, not a layout change. Left as an open follow-on
+      rather than done this pass, since this pass was scoped to documentation
+      only. Open question flagged in `BOOTLOADER.md` section 6: signature
+      algorithm (Ed25519 assumed for sizing) and whether key rotation should
+      be supported are both still undecided.
 - [~] 10.3 Bootloader: GPIO6 low as the first statement; double-buffered CRC'd
       metadata; active-slot CRC on **every** boot; `boot_attempts` fallback.
       Never writes its own region or the config partition. **2026-08-17,

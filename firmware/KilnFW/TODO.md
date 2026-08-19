@@ -3708,6 +3708,21 @@ presses into `screen_idle_inject_touch()` so `screen_idle`'s idle-timer/wake
 semantics are unchanged, just fed from a different source — `main.c` now
 passes `touch = NULL` to `screen_idle_init()` for this reason.
 
+**PC/firmware DISPLAY task & tools mismatch (2026-08-19):** `uart_bridge.c`'s
+`display_bridge_task` is intentionally dead code — `main.c` no longer calls
+`uart_bridge_start_display_task()` since LVGL now owns the ILI9488 rendering
+exclusively. However, `tools/PcTools`' MCP server still exposes 12+ live
+`display_*` tools (`display_read_id`, `display_reset`, `display_set_power`,
+`display_set_rotation`, `display_set_text_cursor`, `display_set_text_style`,
+`display_clear`, `display_draw_line`, `display_draw_rect`, `display_fill_rect`,
+`display_print`, `display_send_image`) that send `DISPLAY_CMD_*` frames over
+the UART bridge protocol — frames the firmware can no longer answer, since the
+task was never started. Not a crash risk (frames are simply unhandled/timeout),
+but any invocation of these MCP tools today will silently fail. **Decision
+pending:** (a) delete the stale PC-side tools, (b) restore a minimal firmware
+handler to support them, or (c) leave as-is. Document the fork in the road
+here; don't pre-judge which path to take.
+
 - [x] A small, generic "screen" abstraction — pages + widgets, roughly a
       simplified Tkinter: a page owns a widget tree, widgets draw
       themselves and expose a tap/press callback, the screen manager swaps
