@@ -5287,9 +5287,90 @@ switch-case and `dashboard_set_relay()`. User confirmed (2026-08-19,
 rather than the smaller alternative (extending `io_bridge_task`'s existing
 queue set in place) — full migration, not a patch.
 
-- [ ] Phase 1: `kiln_io_owner.c`/`.h` — in progress
+- [x] **Phase 1: `kiln_io_owner.c`/`.h` (2026-08-19).** Scope grew twice while
+      implementing, both times surfaced to the user before proceeding rather
+      than decided silently:
+      1. Research (`AskUserQuestion`) found `io_bridge_task` already runs as
+         a dedicated task, not a naive blocking handler — the real bug was
+         three uncoordinated writers (UART/HTTP/LCD) and a duplicated
+         ownership/safety check. User chose the full `kiln_io_owner.c` file
+         over the smaller in-place patch.
+      2. Mid-implementation, found `profile_executor.c` (the PID/time-
+         proportioning control loop itself, every tick) and
+         `autotune_engine.c` also write relay state directly — a real
+         lost-update race on `kiln_io_set_relay_mask()`'s read-modify-write,
+         missed by the original plan's ownership table. User chose to
+         include them in Phase 1 rather than defer to Phase 3.
+      **What landed**: `kiln_io_owner.c`/`.h` (new), a single task + bounded
+      queue (depth 8) owning every relay/digital-IO/raw-SX1509 write and
+      read. Two producer families: MANUAL
+      (`kiln_io_owner_command_set_relay[_mask]()`, applies the ownership +
+      safety-fault gate, used by `uart_bridge.c`'s `io_bridge_task` and
+      `dashboard_http.c`'s `dashboard_set_relay()` — itself called from both
+      the HTTP handler and, via `ui_page_temperature.c`, the LCD) and
+      AUTHORIZED (`kiln_io_owner_command_set_relay_mask_authorized()`, no
+      ownership check since the caller already applied its own zone-level
+      gate via `relay_authority_zone_blocked()` — used by
+      `profile_executor.c`'s `apply_relay()`/`force_relay_mask_off()`/
+      `sweep_unowned_relays()` and `autotune_engine.c`'s `apply_relay()`).
+      `main.c` calls `kiln_io_owner_start()` right after `safety_link_start()`,
+      before anything that can issue a relay/IO command.
+      **Deliberately NOT routed through the owner**, each with its own doc
+      comment explaining why: `kiln_io_lcd_dc()`/`kiln_io_lcd_reset()`
+      (`ILI9488.c`'s hot path, called once per display command from
+      `lvgl_port_task` — SX1509.c's own internal I2C-transaction mutex
+      already makes these safe to interleave with everything else, and
+      queuing them would add latency to every single display draw for no
+      correctness benefit); and every DIRECT `kiln_io_all_relays_off()` call
+      that exists as a last-resort fail-safe independent of everything else
+      — `uart_bridge.c`'s link-loss watchdog, `profile_executor.c`'s own
+      `watchdog_task_entry()` (guard 9 / the 30s safety-link-silence abort),
+      and `main.c`'s `kiln_enter_safe_state()`. Routing any of those through
+      the owner's queue would make them depend on the owner task NOT being
+      the thing that's wedged — backwards for code whose purpose is acting
+      when something else already is; `kiln_io_all_relays_off()` is
+      unconditional and only ever turns things OFF, so a race between one of
+      these and the owner mid-write is benign in the failure direction.
+      **Build**: `idf.py -C firmware/KilnFW build` (ninja, incremental)
+      clean under `-Werror`, after adding `kiln_io_owner.c` to
+      `App/drivers/CMakeLists.txt`'s `SRCS` list (new file, not
+      glob-discovered). Two real bugs caught by the build itself before
+      this ever reached hardware: a `*/` inside a `/* ... */` comment
+      (`kiln_io_*/SX1509_*` in a doc comment closed the comment early and
+      the following text parsed as code) and the same pattern in
+      `kiln_io_owner.h`.
+      **Not hardware-verified.** No board is attached in this environment
+      (`ROADMAP.md` M0) — this closes "single writer, compiles clean, gate
+      logic centralized," not "confirmed safe on a real kiln." Real
+      verification needs bench time: exercising SET_RELAY from all three
+      surfaces (UART/HTTP/LCD) concurrently, confirming the ownership/
+      safety-fault refusals still fire correctly now that they're centralized,
+      and confirming a firing's relay switching timing is unaffected by the
+      added queue hop (expected to be small — a bounded 200ms producer
+      timeout against I2C transactions that take low milliseconds — but
+      unmeasured on real hardware).
+      **Not done this pass, explicitly out of scope**: `dashboard_http.c`'s
+      own `kiln_io_read()` call (a status-building read, not a write — left
+      direct since SX1509's bus-level mutex already makes it I2C-transaction-safe
+      and it carries no safety implication, unlike every write case above).
 - [ ] Phase 2: `thermo_owner.c`/`.h`
 - [ ] Phase 3: `profile_executor.c` command queue
 - [ ] Phase 4: `wifi_prov.c` owning task (needs real Wi-Fi hardware to trust
       before shipping — do not rush this one)
 - [ ] Phase 5: HTTP handler migration, per-domain, alongside 1-4
+- [ ] Phase 6 (added mid-Phase-1, user request): a system-mode command gate,
+      distinct from the owner-task pattern above. The owners answer "can two
+      writers race on this piece of state"; this answers "is this *class* of
+      command allowed at all given what the system is doing right now" —
+      e.g. while a profile is firing, stop/pause/modify-this-run is fine,
+      but starting a *different* profile, running a PID autotune, or a raw
+      GPIO/SX1509 write through the debug/UART path should be refused
+      outright. Can't live inside `kiln_io_owner`/`thermo_owner` — needs to
+      see `profile_executor`'s and `autotune_engine`'s state, which those
+      modules have no business knowing about. A policy layer *above* the
+      owners, consulted by every producer-facing entry point (HTTP, LCD,
+      UART) before a command is even built. Sketch and a first-pass policy
+      table kept in the full plan file
+      (`C:\Users\budar\.claude\plans\moonlit-wishing-brook.md` on this
+      machine) — needs its own design pass before it's built; do not
+      implement ahead of Phases 1-5 landing.

@@ -1,0 +1,187 @@
+// kiln_io_owner -- the single task that ever writes the SX1509 expander
+// (relays, digital IO, and the raw register passthrough), so the checks
+// that decide whether a write is allowed live in exactly one place instead
+// of being copied at every call site.
+//
+// 2026-08-19, TODO.md section 10.14 Phase 1. Filed after a research pass
+// found FIVE independent callers writing relay/IO state through
+// kiln_io_set_relay()/kiln_io_set_relay_mask() with no coordination between
+// them: uart_bridge.c's io_bridge_task (UART), dashboard_http.c's
+// dashboard_set_relay() (HTTP and, via ui_page_temperature.c, the LCD),
+// profile_executor.c's apply_relay()/force_relay_mask_off()/
+// sweep_unowned_relays() (the automatic PID/time-proportioning control
+// loop), and autotune_engine.c's apply_relay(). Two problems, not one:
+//   1. kiln_io_set_relay_mask() is a read-modify-write against the
+//      expander's data register. SX1509.c's own internal mutex
+//      (SX1509Class::lock) serializes each CALL's I2C transaction, but does
+//      NOT stop two independent calls from racing on a stale read -- a
+//      lost-update on the code path that energizes mains contactors.
+//   2. The "is this relay owned by a running profile" /
+//      "would this turn a relay on while a safety fault is asserted" checks
+//      were independently reimplemented in uart_bridge.c and
+//      dashboard_http.c (relay_authority_manual_blocked_by_owner()/
+//      relay_authority_on_blocked(), called from two places that can drift)
+//      while profile_executor.c/autotune_engine.c apply their own
+//      zone-level equivalent (relay_authority_zone_blocked()) before
+//      calling in -- correct today, but nothing stopped a manual write from
+//      landing between that check and the eventual I2C transfer.
+//
+// Every caller above becomes a producer into this module's queue instead.
+// Two producer families, matching this codebase's existing
+// firmware/SaftyFW/src/tasks/relay_owner.c pattern:
+//   - MANUAL (kiln_io_owner_command_set_relay[_mask]()): applies the same
+//     ownership/safety-fault gate uart_bridge.c and dashboard_http.c used
+//     to apply independently, now in exactly one place. Used by the UART
+//     bridge and dashboard_set_relay() (HTTP + LCD).
+//   - AUTHORIZED (kiln_io_owner_command_set_relay_mask_authorized()): no
+//     ownership check (the caller -- profile_executor.c/autotune_engine.c
+//     -- already IS the owner of the relays it names, via
+//     relay_authority_zone_blocked()'s zone-level gate, checked by the
+//     caller before this is called) and no additional safety-fault check
+//     (same reason: the caller already applied its own). This function
+//     exists only so the actual I2C write is serialized against the MANUAL
+//     writers above through the same queue -- it does not change who is
+//     allowed to command what, only who is allowed to do the writing.
+//
+// Every producer is a bounded, non-blocking POST (xQueueSend with 0 ticks)
+// followed by a bounded WAIT on a per-call result (a stack-allocated binary
+// semaphore, per relay_owner.c's own "never block the queue, but the
+// caller may still wait for its own answer" shape) -- callers here are the
+// UART bridge task, the HTTP worker task, lvgl_port_task (a single I2C
+// write's worth of latency, not a multi-second operation), and
+// profile_executor's/autotune_engine's own control tasks, none of which are
+// the owner task itself, so none of them can deadlock waiting on it.
+//
+// Explicitly NOT covered: kiln_io_lcd_dc()/kiln_io_lcd_reset(). Those are
+// ILI9488.c's own hot path, called once per display command from
+// lvgl_port_task, and SX1509.c's internal mutex already makes them safe to
+// interleave with everything above at the I2C-transaction level -- routing
+// them through this queue too would add a task hop to the single most
+// latency-sensitive call in the display driver for no correctness benefit.
+//
+// Also explicitly NOT covered, and deliberately so: every DIRECT
+// kiln_io_all_relays_off() call in the codebase that exists specifically as
+// a last-resort fail-safe, independent of everything else --
+// uart_bridge.c's link-loss watchdog (uart_bridge_start_link_watchdog(),
+// "must still run when every bridge task is blocked"),
+// profile_executor.c's own watchdog_task_entry() (guard 9 / the safety-link
+// 30s-silence abort, "must still run if the main control task is stuck"),
+// and main.c's kiln_enter_safe_state() (the shutdown/panic path). Routing
+// any of these through this module's queue would make them depend on the
+// owner task NOT being the thing that's wedged -- exactly backwards for
+// code whose entire purpose is acting when something else already is.
+// kiln_io_all_relays_off() is unconditional and only ever turns things OFF,
+// so a race between one of these and the owner task mid-write is benign in
+// the failure direction: worst case is a redundant I2C transaction, never
+// an unsafe state.
+#ifndef KILN_IO_OWNER_H
+#define KILN_IO_OWNER_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+
+#include "SX1509.h"
+#include "kiln_io.h"
+#include "safety_link.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    KILN_IO_OWNER_RELAY_OK = 0,
+    KILN_IO_OWNER_RELAY_ERR_RANGE,    /* relay index out of range */
+    KILN_IO_OWNER_RELAY_ERR_OWNED,    /* refused: owned by a running profile */
+    KILN_IO_OWNER_RELAY_ERR_SAFETY,   /* refused: a safety fault source is asserted */
+    KILN_IO_OWNER_RELAY_ERR_IO_FAIL,  /* the expander write itself failed */
+    KILN_IO_OWNER_RELAY_ERR_TIMEOUT,  /* owner task did not answer in time -- see
+                                        * kiln_io_owner_start()'s doc comment; treat
+                                        * exactly like ERR_IO_FAIL, fail closed */
+} kiln_io_owner_relay_result_t;
+
+typedef enum {
+    KILN_IO_OWNER_SX_OK = 0,
+    KILN_IO_OWNER_SX_REFUSED_RELAY, /* would touch a relay pin, refused --
+                                      * docs/SAFETY_MODEL.md's "SX_WRITE_REG/
+                                      * SX_SET_DIR can bypass the relay gate" gap */
+    KILN_IO_OWNER_SX_IO_FAIL,
+    KILN_IO_OWNER_SX_TIMEOUT,
+} kiln_io_owner_sx_result_t;
+
+/* Starts the owner task. Must be called exactly once, after kiln_io_init()
+ * has succeeded on `io` and before anything below is called -- every
+ * producer fails closed (returns a TIMEOUT-flavored result or
+ * ESP_ERR_INVALID_STATE, never silently "assume it worked") if called before this or if
+ * this itself failed. `safety` may be NULL (no SafetyLinkClass wired in
+ * yet) -- same fail-closed behavior as the uart_bridge.c code this
+ * replaces: every relay-ON command is refused until a live link exists. */
+esp_err_t kiln_io_owner_start(kiln_io_t *io, SafetyLinkClass *safety);
+
+/* ---- MANUAL producers -- ownership + safety-fault gated ---- */
+
+/* relay is 1..KILN_IO_RELAY_COUNT (kiln_io.h's Relay1..4 numbering).
+ * out_safety_sources may be NULL; only meaningful when the return is
+ * KILN_IO_OWNER_RELAY_ERR_SAFETY. */
+kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay(uint8_t relay, bool on,
+                                                              uint32_t *out_safety_sources);
+
+/* mask/value bit order matches kiln_io_set_relay_mask() (bit 0 = Relay1 ..
+ * bit 3 = Relay4). Refused (ERR_OWNED) if ANY selected relay is owned by a
+ * running profile, all-or-nothing, matching the manual single-relay path.
+ * out_safety_sources may be NULL. */
+kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, uint8_t value,
+                                                                   uint32_t *out_safety_sources);
+
+/* ---- AUTHORIZED producer -- profile_executor.c/autotune_engine.c only.
+ * See this header's top comment for why this one skips the gate the MANUAL
+ * functions apply. Returns the raw kiln_io_set_relay_mask() esp_err_t (or
+ * ESP_ERR_TIMEOUT/ESP_ERR_INVALID_STATE if the owner task isn't up) so
+ * existing callers' "if (err != ESP_OK) log and continue" shape is
+ * unchanged. */
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value);
+
+/* ---- Digital IO (IO_1..IO_7) ---- */
+esp_err_t kiln_io_owner_command_set_io(uint8_t index, bool level);
+esp_err_t kiln_io_owner_command_set_io_dir(uint8_t index, bool input, bool pullup);
+
+/* Unconditional, no gating (same as kiln_io_all_relays_off() itself --
+ * this is the fail-safe path, not something to refuse). */
+esp_err_t kiln_io_owner_command_all_relays_off(void);
+
+/* One expander read -- see kiln_io_read()'s doc comment (also clears the
+ * expander's interrupt source, releasing ~INT). */
+esp_err_t kiln_io_owner_command_read(kiln_io_state_t *out_state);
+
+/* ---- Raw SX1509 register passthrough -- uart_bridge.c's debug/diagnostic
+ * subcommands only, no other caller today. Routed through the same owner
+ * task as everything above so a diagnostic register poke can't interleave
+ * with a relay write at the logical (not just I2C-transaction) level. ---- */
+
+/* Refused (SX_REFUSED_RELAY) if the write would set a relay pin's bit HIGH
+ * while a safety fault source is asserted -- see kiln_io_relay_pin_mask().
+ * out_safety_sources may be NULL; only meaningful on SX_REFUSED_RELAY. */
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_write_reg(uint8_t reg, uint8_t value,
+                                                              uint32_t *out_safety_sources);
+esp_err_t kiln_io_owner_command_sx_read_reg(uint8_t reg, uint8_t *out_buf, size_t len);
+
+/* Unconditionally refused (SX_REFUSED_RELAY, no safety_sources -- relay
+ * pins are always outputs on this board regardless of fault state) if
+ * dir_mask would set any relay pin's bit to 1 (input). */
+kiln_io_owner_sx_result_t kiln_io_owner_command_sx_set_dir(uint16_t dir_mask);
+
+esp_err_t kiln_io_owner_command_sx_set_pullup(uint16_t mask);
+esp_err_t kiln_io_owner_command_sx_set_opendrain(uint16_t mask);
+esp_err_t kiln_io_owner_command_sx_set_debounce(uint16_t mask, uint8_t config);
+esp_err_t kiln_io_owner_command_sx_set_int_mask(uint16_t mask, uint32_t sense);
+esp_err_t kiln_io_owner_command_sx_led_driver(uint8_t pin, bool enable, uint8_t intensity);
+esp_err_t kiln_io_owner_command_sx_reset(bool hard);
+esp_err_t kiln_io_owner_command_sx_scan(uint8_t *out_found, size_t max_found, size_t *out_count);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // KILN_IO_OWNER_H

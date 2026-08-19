@@ -38,14 +38,15 @@ esp_err_t uart_bridge_start_thermo_task(uart_protocol_t *proto, MAX31856BusClass
  * deliberately installs none) and pushes a READ payload immediately on every
  * edge, so an input change is reported without waiting out the period.
  *
- * safety (may be NULL, e.g. if safety_link_start failed at boot) gates
- * SET_RELAY / SET_RELAY_MASK: a command that would turn any relay ON is
- * refused with ESP_ERR_INVALID_STATE while safety_link_get_fault_sources()
- * is nonzero -- link loss, a thermocouple fault, a stale safety link, or a
- * manual assert all count. Commanding a relay OFF is never gated; the safe
- * direction is always available. This is the PC link's side of "the GUI/MCP
- * can ask, but a real safety condition wins" -- see docs/SAFETY_MODEL.md. */
-esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io, SafetyLinkClass *safety);
+ * 2026-08-19 (TODO.md 10.14 Phase 1): every actual expander access, and the
+ * ownership/safety-fault gate on SET_RELAY/SET_RELAY_MASK/SX_WRITE_REG/
+ * SX_SET_DIR, now goes through kiln_io_owner.c -- see kiln_io_owner.h.
+ * kiln_io_owner_start() must be called (with the live SafetyLinkClass, or
+ * NULL if none came up) before this function; there is no `safety` param
+ * here any more. A command that would turn a relay ON while a safety fault
+ * is asserted is still refused, same as always -- see kiln_io_owner.h's doc
+ * comments and docs/SAFETY_MODEL.md. */
+esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io);
 
 /* DISPLAY (task 4): the ILI9488 on J2. Drawing subcommands are fire-and-forget;
  * only READ_ID answers. Note BLIT_BEGIN/DATA/END keep panel state open across

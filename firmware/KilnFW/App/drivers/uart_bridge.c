@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "SX1509.h"
 #include "kiln_io.h"
+#include "kiln_io_owner.h"
 #include "relay_authority.h"
 #include "settings.h"
 #include "uart_task_ids.h"
@@ -539,7 +540,9 @@ esp_err_t uart_bridge_start_thermo_task(uart_protocol_t *proto, MAX31856BusClass
 typedef struct {
     uart_protocol_t *proto;
     QueueHandle_t inbox;
-    kiln_io_t *io;
+    kiln_io_t *io; /* used only for kiln_io_irq_gpio() at startup below --
+                    * every actual expander access goes through
+                    * kiln_io_owner now (2026-08-19, TODO.md 10.14 Phase 1) */
 
     /* The expander's ~INT arrives as a GPIO edge; the task has to wait on that
      * *and* on its inbox *and* on the auto-report period, so the two objects go
@@ -551,74 +554,7 @@ typedef struct {
     bool auto_enabled;
     uart_proto_device_t auto_device;
     uint8_t auto_task;
-
-    /* Gates SET_RELAY / SET_RELAY_MASK -- see io_relay_on_blocked() below and
-     * docs/SAFETY_MODEL.md. May be NULL (safety_link_start failed at boot);
-     * NULL is treated as "no way to prove it's safe", not as "assume safe". */
-    SafetyLinkClass *safety;
 } io_bridge_ctx_t;
-
-/* Gates SET_RELAY / SET_RELAY_MASK for the PC link -- see
- * relay_authority_on_blocked() (relay_authority.h) for the actual decision,
- * which is shared with every other caller that can turn a relay ON (the web
- * UI's manual override, the profile executor -- TODO.md section 0). This is
- * just the UART bridge's own ctx->safety plumbed through to it. */
-static bool io_relay_on_blocked(io_bridge_ctx_t *ctx, uint32_t *out_sources)
-{
-    return relay_authority_on_blocked(ctx->safety, out_sources);
-}
-
-/* Closes the "SX_WRITE_REG/SX_SET_DIR bypass the relay gate entirely" gap
- * docs/SAFETY_MODEL.md flags: those two raw-register debug subcommands write
- * straight to the SX1509 through kiln_io->exp, not through
- * kiln_io_set_relay_mask(), so they never passed through io_relay_on_blocked()
- * above. Per-pin, not a blanket refusal of the whole subcommand -- the other
- * 12 expander pins (thermocouple ~DRDY, LCD control, general IO) stay fully
- * reachable for debug. Returns true (refuse) only when the write would
- * energize a relay pin while relay_authority says no.
- *
- * reg is the target SX1509 register (RegDataA=0x11 covers pins 0-7, where
- * this board's 4 relay pins live -- see kiln_io.h's pin map; RegDataB=0x10
- * covers pins 8-15, checked too for robustness against a future board
- * revision moving a relay pin up there). new_byte is the value about to be
- * written to that register. */
-static bool sx_write_reg_touches_relay_on(io_bridge_ctx_t *ctx, uint8_t reg, uint8_t new_byte,
-                                          uint32_t *out_sources)
-{
-    uint16_t relay_mask = kiln_io_relay_pin_mask();
-    uint8_t relay_bits_in_byte;
-    if (reg == SX1509_REG_DATA_A) {
-        relay_bits_in_byte = (uint8_t)(relay_mask & 0xFFu);
-    } else if (reg == SX1509_REG_DATA_B) {
-        relay_bits_in_byte = (uint8_t)((relay_mask >> 8) & 0xFFu);
-    } else {
-        return false; /* not a RegData write -- no pin state changes */
-    }
-    if ((new_byte & relay_bits_in_byte) == 0) {
-        return false; /* doesn't set any relay pin high */
-    }
-    return io_relay_on_blocked(ctx, out_sources);
-}
-
-/* SX_SET_DIR writes the *whole* 16-bit direction register every call (not a
- * masked bit-set), so every call inherently "touches" every pin including
- * the relay ones -- the only question is which value it leaves them at.
- * Refused unconditionally (independent of the current safety-fault state,
- * unlike the RegData check above) whenever it would set a relay pin's bit to
- * 1 (input): relay pins are always outputs on this board (kiln_io.h's top
- * comment), and turning one into an input doesn't just stop new ON commands
- * -- it also stops the executor's/PC's next OFF command from reaching the
- * coil driver, so a relay already energized when this lands could get stuck
- * on with no software path left to drop it. Mirrors kiln_io_set_io_dir()'s
- * existing design, which achieves the same guarantee a different way: its
- * index space (IO_1..IO_7) simply cannot address a relay pin at all, so a
- * relay pin's direction is otherwise only ever touched by kiln_io_init()'s
- * own bring-up. A dir_mask that keeps every relay bit at 0 (output) is
- * always allowed, fault or no fault -- it's a no-op on the relay pins. */
-static bool sx_set_dir_touches_relay(uint16_t dir_mask)
-{
-    return (dir_mask & kiln_io_relay_pin_mask()) != 0;
-}
 
 /* ~INT handler. Deliberately nothing but a semaphore give: the expander lives
  * on I2C, and reading it -- or logging, or anything else that can block -- is
@@ -638,13 +574,14 @@ static void IRAM_ATTR io_bridge_isr(void *arg)
 }
 
 /* The 9-byte READ payload, which is also exactly what an auto-report push
- * carries. kiln_io_read also clears the expander's interrupt source, which is
- * what releases ~INT -- so this is the call that re-arms the edge. */
-static size_t io_build_read_payload(kiln_io_t *io, uint8_t *out)
+ * carries. kiln_io_read (via kiln_io_owner_command_read()) also clears the
+ * expander's interrupt source, which is what releases ~INT -- so this is
+ * the call that re-arms the edge. */
+static size_t io_build_read_payload(uint8_t *out)
 {
     kiln_io_state_t st;
     memset(&st, 0, sizeof(st));
-    esp_err_t err = kiln_io_read(io, &st);
+    esp_err_t err = kiln_io_owner_command_read(&st);
     if (err != ESP_OK) {
         st.flags |= KILN_IO_FLAG_I2C_FAILED;
     }
@@ -694,7 +631,7 @@ static void io_bridge_task(void *arg)
         if (active == NULL) {
             /* Period expired: the periodic half of the auto report. */
             if (ctx->auto_enabled && ctx->auto_period_ms != 0) {
-                size_t len = io_build_read_payload(ctx->io, reply);
+                size_t len = io_build_read_payload(reply);
                 bridge_push(ctx->proto, ctx->auto_device, ctx->auto_task, UART_TASK_ID_IO, reply,
                             len);
             }
@@ -706,7 +643,7 @@ static void io_bridge_task(void *arg)
             /* An edge on ~INT. Read (which also clears the interrupt source
              * and releases the line) and push, whether or not the periodic
              * half is switched on -- but only if reporting was asked for. */
-            size_t len = io_build_read_payload(ctx->io, reply);
+            size_t len = io_build_read_payload(reply);
             if (ctx->auto_enabled) {
                 bridge_push(ctx->proto, ctx->auto_device, ctx->auto_task, UART_TASK_ID_IO, reply,
                             len);
@@ -729,25 +666,28 @@ static void io_bridge_task(void *arg)
         bool rejected = false;
 
         switch (subcmd) {
+            /* 2026-08-19, TODO.md 10.14 Phase 1: every case below used to call
+             * kiln_io_*()/SX1509_*() (and, for SET_RELAY[/_MASK] and
+             * SX_WRITE_REG/SX_SET_DIR, its own copy of the ownership/safety
+             * gate) directly. All of that now lives in kiln_io_owner.c, the
+             * single task that touches the expander -- this task just posts
+             * and translates the result back onto the wire, the same
+             * "rejected -> no reply" / "err != ESP_OK -> logged, no reply" /
+             * "reply_len > 0 -> reply" shape as before. */
             case IO_CMD_SET_RELAY: {
                 if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
-                /* This is the command that energizes a mains contactor. It gets
-                 * its index checked here as well as in kiln_io, because a
-                 * rejection that says "relay 9" in the log is the difference
-                 * between diagnosing a host bug and chasing a dead expander. */
                 if (!bridge_range_ok("io", subcmd, "relay", msg.payload[1], 1,
                                      KILN_IO_RELAY_COUNT)) { rejected = true; break; }
-                bool want_on = msg.payload[2] != 0;
-                /* TODO.md section 0: a relay a running profile owns refuses a
-                 * manual command in either direction -- see relay_authority.h. */
-                if (relay_authority_manual_blocked_by_owner(msg.payload[1])) {
+                uint32_t sources = 0;
+                kiln_io_owner_relay_result_t rr =
+                    kiln_io_owner_command_set_relay(msg.payload[1], msg.payload[2] != 0, &sources);
+                if (rr == KILN_IO_OWNER_RELAY_ERR_OWNED) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u owned by a running profile",
                              subcmd, msg.payload[1]);
                     rejected = true;
                     break;
                 }
-                uint32_t sources = 0;
-                if (want_on && io_relay_on_blocked(ctx, &sources)) {
+                if (rr == KILN_IO_OWNER_RELAY_ERR_SAFETY) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON while safety fault "
                                   "sources 0x%02X asserted (safety wins, see "
                                   "docs/SAFETY_MODEL.md)", subcmd, msg.payload[1],
@@ -755,7 +695,7 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = kiln_io_set_relay(ctx->io, msg.payload[1], want_on);
+                err = (rr == KILN_IO_OWNER_RELAY_OK) ? ESP_OK : ESP_FAIL;
                 break;
             }
             case IO_CMD_SET_RELAY_MASK: {
@@ -763,7 +703,9 @@ static void io_bridge_task(void *arg)
                 /* kiln_io_set_relay_mask silently trims bits above 3 and then
                  * returns ESP_OK for an all-zero mask, so a host that sent a
                  * garbage mask would be told its relay command succeeded when
-                 * nothing moved. Refuse it here instead. */
+                 * nothing moved. Refuse it here instead -- this stays a
+                 * uart_bridge-only wire-format check, not a kiln_io_owner
+                 * concern (a bad mask isn't an ownership or safety question). */
                 const uint8_t relay_bits = (uint8_t)((1u << KILN_IO_RELAY_COUNT) - 1u);
                 if ((msg.payload[1] & (uint8_t)~relay_bits) != 0 || msg.payload[1] == 0) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X relay mask 0x%02X selects no valid relay "
@@ -772,31 +714,16 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                /* TODO.md section 0: any selected relay owned by a running
-                 * profile refuses the whole mask write, same all-or-nothing
-                 * rule as the ON check below. */
-                bool any_owned = false;
-                for (uint8_t ri = 1; ri <= KILN_IO_RELAY_COUNT; ri++) {
-                    if ((msg.payload[1] & (1u << (ri - 1u))) &&
-                        relay_authority_manual_blocked_by_owner(ri)) {
-                        any_owned = true;
-                        break;
-                    }
-                }
-                if (any_owned) {
+                uint32_t sources = 0;
+                kiln_io_owner_relay_result_t rr =
+                    kiln_io_owner_command_set_relay_mask(msg.payload[1], msg.payload[2], &sources);
+                if (rr == KILN_IO_OWNER_RELAY_ERR_OWNED) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X selects a relay owned "
                                   "by a running profile", subcmd, msg.payload[1]);
                     rejected = true;
                     break;
                 }
-                /* Any selected relay commanded ON refuses the WHOLE mask write,
-                 * same all-or-nothing rule as every other malformed command in
-                 * this bridge: a host that wanted "turn these two off, that one
-                 * on" while a fault is asserted does not get the two OFFs
-                 * silently split out from the refused ON. */
-                bool any_on = (msg.payload[1] & msg.payload[2]) != 0;
-                uint32_t sources = 0;
-                if (any_on && io_relay_on_blocked(ctx, &sources)) {
+                if (rr == KILN_IO_OWNER_RELAY_ERR_SAFETY) {
                     ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X/value 0x%02X turns a "
                                   "relay ON while safety fault sources 0x%02X asserted (safety "
                                   "wins, see docs/SAFETY_MODEL.md)", subcmd, msg.payload[1],
@@ -804,28 +731,28 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = kiln_io_set_relay_mask(ctx->io, msg.payload[1], msg.payload[2]);
+                err = (rr == KILN_IO_OWNER_RELAY_OK) ? ESP_OK : ESP_FAIL;
                 break;
             }
             case IO_CMD_SET_IO: {
                 if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
                 if (!bridge_range_ok("io", subcmd, "io", msg.payload[1], 1,
                                      KILN_IO_DIGITAL_COUNT)) { rejected = true; break; }
-                err = kiln_io_set_io(ctx->io, msg.payload[1], msg.payload[2] != 0);
+                err = kiln_io_owner_command_set_io(msg.payload[1], msg.payload[2] != 0);
                 break;
             }
             case IO_CMD_SET_IO_DIR: {
                 if (!bridge_args_ok("io", &msg, 4)) { rejected = true; break; }
                 if (!bridge_range_ok("io", subcmd, "io", msg.payload[1], 1,
                                      KILN_IO_DIGITAL_COUNT)) { rejected = true; break; }
-                err = kiln_io_set_io_dir(ctx->io, msg.payload[1], msg.payload[2] != 0,
-                                         msg.payload[3] != 0);
+                err = kiln_io_owner_command_set_io_dir(msg.payload[1], msg.payload[2] != 0,
+                                                       msg.payload[3] != 0);
                 break;
             }
             case IO_CMD_READ: {
                 /* No arguments -- the subcommand byte alone is the whole frame,
                  * which msg.length >= 1 above has already established. */
-                reply_len = io_build_read_payload(ctx->io, reply);
+                reply_len = io_build_read_payload(reply);
                 err = ESP_OK;
                 break;
             }
@@ -841,13 +768,15 @@ static void io_bridge_task(void *arg)
                 break;
             }
             case IO_CMD_ALL_RELAYS_OFF: {
-                err = kiln_io_all_relays_off(ctx->io);
+                err = kiln_io_owner_command_all_relays_off();
                 break;
             }
             case IO_CMD_SX_WRITE_REG: {
                 if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
                 uint32_t sources = 0;
-                if (sx_write_reg_touches_relay_on(ctx, msg.payload[1], msg.payload[2], &sources)) {
+                kiln_io_owner_sx_result_t sr =
+                    kiln_io_owner_command_sx_write_reg(msg.payload[1], msg.payload[2], &sources);
+                if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
                     ESP_LOGW(TAG, "io: SX_WRITE_REG reg 0x%02X val 0x%02X refused -- would energize a "
                                   "relay pin while safety fault sources 0x%02X asserted (safety wins, "
                                   "see docs/SAFETY_MODEL.md)", msg.payload[1], msg.payload[2],
@@ -855,7 +784,7 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = SX1509_write_reg(ctx->io->exp, msg.payload[1], msg.payload[2]);
+                err = (sr == KILN_IO_OWNER_SX_OK) ? ESP_OK : ESP_FAIL;
                 break;
             }
             case IO_CMD_SX_READ_REG: {
@@ -864,7 +793,7 @@ static void io_bridge_task(void *arg)
                 /* Bounds the burst into reply[3..]; 3 + 16 is well inside
                  * BRIDGE_REPLY_MAX, so no reply can be built past the buffer. */
                 if (!bridge_range_ok("io", subcmd, "len", len, 1, 16)) { rejected = true; break; }
-                err = SX1509_read_regs(ctx->io->exp, msg.payload[1], &reply[3], len);
+                err = kiln_io_owner_command_sx_read_reg(msg.payload[1], &reply[3], len);
                 if (err != ESP_OK) break;
                 reply[0] = IO_CMD_SX_READ_REG;
                 reply[1] = msg.payload[1];
@@ -875,23 +804,24 @@ static void io_bridge_task(void *arg)
             case IO_CMD_SX_SET_DIR: {
                 if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
                 uint16_t dir_mask = bridge_u16_le(&msg.payload[1]);
-                if (sx_set_dir_touches_relay(dir_mask)) {
+                kiln_io_owner_sx_result_t sr = kiln_io_owner_command_sx_set_dir(dir_mask);
+                if (sr == KILN_IO_OWNER_SX_REFUSED_RELAY) {
                     ESP_LOGW(TAG, "io: SX_SET_DIR mask 0x%04X refused -- would retarget a relay pin's "
                                   "direction (relay pins are always outputs, see kiln_io.h)", dir_mask);
                     rejected = true;
                     break;
                 }
-                err = SX1509_set_dir(ctx->io->exp, dir_mask);
+                err = (sr == KILN_IO_OWNER_SX_OK) ? ESP_OK : ESP_FAIL;
                 break;
             }
             case IO_CMD_SX_SET_PULLUP: {
                 if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
-                err = SX1509_set_pullup(ctx->io->exp, bridge_u16_le(&msg.payload[1]));
+                err = kiln_io_owner_command_sx_set_pullup(bridge_u16_le(&msg.payload[1]));
                 break;
             }
             case IO_CMD_SX_SET_OPENDRAIN: {
                 if (!bridge_args_ok("io", &msg, 3)) { rejected = true; break; }
-                err = SX1509_set_open_drain(ctx->io->exp, bridge_u16_le(&msg.payload[1]));
+                err = kiln_io_owner_command_sx_set_opendrain(bridge_u16_le(&msg.payload[1]));
                 break;
             }
             case IO_CMD_SX_SET_DEBOUNCE: {
@@ -900,45 +830,39 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = SX1509_set_debounce(ctx->io->exp, bridge_u16_le(&msg.payload[1]),
-                                          msg.payload[3]);
+                err = kiln_io_owner_command_sx_set_debounce(bridge_u16_le(&msg.payload[1]),
+                                                            msg.payload[3]);
                 break;
             }
             case IO_CMD_SX_SET_INT_MASK: {
                 if (!bridge_args_ok("io", &msg, 5)) { rejected = true; break; }
-                err = SX1509_set_interrupt(ctx->io->exp, bridge_u16_le(&msg.payload[1]),
-                                           io_expand_sense(bridge_u16_le(&msg.payload[3])));
+                err = kiln_io_owner_command_sx_set_int_mask(
+                    bridge_u16_le(&msg.payload[1]), io_expand_sense(bridge_u16_le(&msg.payload[3])));
                 break;
             }
             case IO_CMD_SX_LED_DRIVER: {
                 if (!bridge_args_ok("io", &msg, 4)) { rejected = true; break; }
                 if (!bridge_range_ok("io", subcmd, "pin", msg.payload[1], 0,
                                      SX1509_PIN_COUNT - 1u)) { rejected = true; break; }
-                err = SX1509_led_driver(ctx->io->exp, msg.payload[1], msg.payload[2] != 0,
-                                        msg.payload[3]);
+                err = kiln_io_owner_command_sx_led_driver(msg.payload[1], msg.payload[2] != 0,
+                                                          msg.payload[3]);
                 break;
             }
             case IO_CMD_SX_RESET: {
                 if (!bridge_args_ok("io", &msg, 2)) { rejected = true; break; }
-                err = SX1509_reset(ctx->io->exp, msg.payload[1] != 0);
+                err = kiln_io_owner_command_sx_reset(msg.payload[1] != 0);
                 break;
             }
             case IO_CMD_SX_SCAN: {
-                uint8_t found[SX1509_ADDR_COUNT];
                 size_t count = 0;
-                err = SX1509_scan(ctx->io->exp->bus, found, sizeof(found), &count);
+                /* reply[2..] holds the found-address list; kiln_io_owner_command_sx_scan()
+                 * itself clamps to its own internal buffer (SX1509_ADDR_COUNT,
+                 * far smaller than BRIDGE_REPLY_MAX - 2), so no reply can be
+                 * built past this buffer. */
+                err = kiln_io_owner_command_sx_scan(&reply[2], BRIDGE_REPLY_MAX - 2, &count);
                 if (err != ESP_OK) break;
-                /* Trusting a driver's out-count to be within the buffer we
-                 * ourselves passed is exactly the assumption that turns a
-                 * driver bug into a stack smash in this task. */
-                if (count > sizeof(found)) {
-                    ESP_LOGE(TAG, "io: SX1509_scan reported %u addresses for a %u-entry buffer",
-                             (unsigned)count, (unsigned)sizeof(found));
-                    count = sizeof(found);
-                }
                 reply[0] = IO_CMD_SX_SCAN;
                 reply[1] = (uint8_t)count;
-                memcpy(&reply[2], found, count);
                 reply_len = 2u + count;
                 break;
             }
@@ -965,24 +889,20 @@ static void io_bridge_task(void *arg)
     }
 }
 
-esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io, SafetyLinkClass *safety)
+esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io)
 {
     if (!proto || !io || !io->exp) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!safety) {
-        /* Not a startup failure -- see io_relay_on_blocked(): every relay-ON
-         * command is refused until a live SafetyLinkClass is wired in, which
-         * is the correct fail-closed behaviour for a board that came up
-         * without one, not a reason to abort the IO bridge itself. */
-        ESP_LOGW(TAG, "io: starting with no safety link -- all relay-ON commands will be "
-                      "refused until one is wired in (safety wins, see docs/SAFETY_MODEL.md)");
-    }
+    /* No safety param here any more -- kiln_io_owner_start() (main.c) is
+     * where the SafetyLinkClass is wired in now, and its own doc comment
+     * carries the same "starting with no safety link" warning this used to
+     * log. That call must happen before this one; kiln_io_owner's producers
+     * fail closed on their own if it hasn't. */
 
     static io_bridge_ctx_t ctx;
     ctx.proto = proto;
     ctx.io = io;
-    ctx.safety = safety;
     ctx.auto_period_ms = 0;
     ctx.auto_enabled = false;
     ctx.auto_device = UART_PROTO_DEVICE_HOST;

@@ -27,6 +27,7 @@
 #include "autotune_engine.h"
 #include "i2c_scan.h"
 #include "kiln_io.h"
+#include "kiln_io_owner.h"
 #include "mdns.h"
 #include "monitor_task.h"
 #include "nvs_report.h"
@@ -491,6 +492,35 @@ void app_main(void)
         }
     }
 
+    // kiln_io_owner (TODO.md 10.14 Phase 1): the single task that writes
+    // relay/expander state from here on -- must start before anything that
+    // can issue a relay/IO command does (profile_executor, autotune,
+    // dashboard_http, the UART IO bridge, all below). Needs both io (just
+    // brought up above) and safety (just brought up above); skipped like
+    // every other hardware-dependent step here if the expander itself never
+    // came up -- there is nothing for it to own.
+    //
+    // Deliberately does NOT clear io_ready on failure: kiln_enter_safe_state()
+    // and uart_bridge_start_link_watchdog() below both call
+    // kiln_io_all_relays_off() DIRECTLY, independent of kiln_io_owner on
+    // purpose (this file's link-loss/shutdown paths must still work even if
+    // the owner task itself is wedged -- see kiln_io_owner.h's top comment).
+    // Clearing io_ready here would wrongly take those away too, over a
+    // failure (e.g. task/queue allocation) that says nothing about whether
+    // the expander itself is reachable. Every kiln_io_owner_command_*()
+    // call already fails closed on its own (post_and_wait() checks for a
+    // NULL queue) if this didn't succeed -- nothing downstream needs a
+    // second guard.
+    if (io_ready) {
+        esp_err_t owner_err = kiln_io_owner_start(&kio, safety_err == ESP_OK ? &safety : NULL);
+        if (owner_err != ESP_OK) {
+            ESP_LOGE(TAG, "kiln_io_owner_start failed: %s -- no relay/IO commands routed through "
+                          "kiln_io_owner will be reachable this boot (direct fail-safe paths are "
+                          "unaffected)",
+                     esp_err_to_name(owner_err));
+        }
+    }
+
 #if CONFIG_KILNCTL_SIM_PLANT
     /* Same reasoning as the missing-expander case above: with no RP2040
      * answering, the link's own fail-safe policy asserts
@@ -763,9 +793,7 @@ void app_main(void)
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
         }
     }
-    if (io_ready &&
-        uart_bridge_start_io_task(&uart_proto, &kio, safety_err == ESP_OK ? &safety : NULL) !=
-            ESP_OK) {
+    if (io_ready && uart_bridge_start_io_task(&uart_proto, &kio) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start io uart bridge task");
     }
     // Replaces the UART DISPLAY_CMD_* remote-draw path -- LVGL owns the panel

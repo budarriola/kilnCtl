@@ -11,6 +11,7 @@
 
 #include "autotune_engine.h"
 #include "heater_output.h"
+#include "kiln_io_owner.h"
 #include "pid.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
@@ -438,9 +439,15 @@ static void apply_relay(uint8_t zi, bool want_on)
     }
 
     if (s_exec.io) {
-        esp_err_t err = kiln_io_set_relay_mask(s_exec.io, mask, want_on ? mask : 0);
+        /* AUTHORIZED, not the manual gate -- see kiln_io_owner.h's top
+         * comment. relay_authority_zone_blocked() just above already
+         * applied this run's own gate; kiln_io_owner just serializes the
+         * actual write against uart_bridge.c/dashboard_set_relay() (2026-08-19,
+         * TODO.md 10.14 Phase 1). */
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "kiln_io_set_relay_mask failed: %s -- relay state for zone %u is unknown",
+            ESP_LOGW(TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
+                          "state for zone %u is unknown",
                      esp_err_to_name(err), zi);
         }
     }
@@ -659,7 +666,8 @@ static void force_relay_mask_off(uint8_t zi, uint8_t mask)
     heater_output_force_off(&s_exec.zones[zi].heater_state);
     s_exec.claimed_relay_mask |= mask; /* see apply_relay() -- this is the one caller that can be handed a mask the live config no longer knows */
     if (s_exec.io && mask != 0) {
-        esp_err_t err = kiln_io_set_relay_mask(s_exec.io, mask, 0);
+        /* AUTHORIZED -- same reasoning as apply_relay() above. */
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "zone %u: dropping superseded relay mask 0x%02X failed: %s -- "
                           "those contacts may still be closed and nothing owns them now",
@@ -757,7 +765,8 @@ static void sweep_unowned_relays(void)
                   "owned 0x%02X by an active zone or an autotune run -- an earlier force-off failed or a "
                   "mask edit stranded them; forcing off",
              stray, s_exec.claimed_relay_mask, owned);
-    esp_err_t err = kiln_io_set_relay_mask(s_exec.io, stray, 0);
+    /* AUTHORIZED -- same reasoning as apply_relay() above. */
+    esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(stray, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "unowned-relay sweep could not open 0x%02X: %s -- those contacts are still closed and "
                       "the expander is not answering",

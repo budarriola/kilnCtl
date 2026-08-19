@@ -84,6 +84,7 @@ endif()
 idf_component_register(SRCS "MAX31856.c"
                        "SX1509.c"
                        "kiln_io.c"
+                       "kiln_io_owner.c"
                        "ILI9488.c"
                        "lvgl_port.c"
                        "kiln_ui.c"

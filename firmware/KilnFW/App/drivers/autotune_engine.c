@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "heater_output.h"
+#include "kiln_io_owner.h"
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "sim_backend.h"
@@ -125,7 +126,10 @@ static void apply_relay(bool want_on)
         }
     }
     if (s_at.io) {
-        kiln_io_set_relay_mask(s_at.io, mask, want_on ? mask : 0);
+        /* AUTHORIZED, not the manual gate -- see kiln_io_owner.h's top
+         * comment and profile_executor.c's apply_relay() for the identical
+         * reasoning (2026-08-19, TODO.md 10.14 Phase 1). */
+        kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
     }
     sim_backend_note_zone_relay(s_at.zone_index, want_on); /* no-op unless CONFIG_KILNCTL_SIM_PLANT */
 }

@@ -8,6 +8,7 @@
 
 #include "autotune_engine.h"
 #include "http_form.h"
+#include "kiln_io_owner.h"
 #include "nvs_report.h"
 #include "profile_executor.h"
 #include "relay_authority.h"
@@ -347,44 +348,44 @@ void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, boo
  * goes through the same ownership/safety gate and the same kiln_io write,
  * not a reimplementation of either. relay_post_handler() below is now a thin
  * wrapper: parse the HTTP body, call this, translate the result to an HTTP
- * status. */
+ * status.
+ *
+ * 2026-08-19 (TODO.md 10.14 Phase 1): the ownership/safety-fault check and
+ * the actual write both moved into kiln_io_owner.c -- this used to
+ * reimplement relay_authority_manual_blocked_by_owner()/
+ * relay_authority_on_blocked() independently of uart_bridge.c's identical
+ * copy, which is exactly the "two copies that can drift" problem that pass
+ * closed. This function is now a thin translation from
+ * kiln_io_owner_relay_result_t to dashboard_relay_result_t. Also closes a
+ * real race: this used to call kiln_io_set_relay() directly, with no
+ * coordination against uart_bridge.c's io_bridge_task or
+ * profile_executor.c's control loop doing the same. */
 dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint32_t *out_safety_sources)
 {
     if (!s_dash.io) {
         return DASHBOARD_RELAY_ERR_NO_BOARD;
     }
-    if (relay_index < 1 || relay_index > KILN_IO_RELAY_COUNT) {
-        return DASHBOARD_RELAY_ERR_RANGE;
-    }
 
-    /* TODO.md section 0's ownership decision: a relay a running (or paused,
-     * pre-resume) profile claimed is refused to a manual command in either
-     * direction -- not just ON -- since a de-energize mid-window fights the
-     * executor's own time-proportioning exactly as much as an unwanted
-     * energize does. */
-    if (relay_authority_manual_blocked_by_owner(relay_index)) {
+    kiln_io_owner_relay_result_t rr = kiln_io_owner_command_set_relay(relay_index, on, out_safety_sources);
+    switch (rr) {
+    case KILN_IO_OWNER_RELAY_OK:
+        return DASHBOARD_RELAY_OK;
+    case KILN_IO_OWNER_RELAY_ERR_RANGE:
+        return DASHBOARD_RELAY_ERR_RANGE;
+    case KILN_IO_OWNER_RELAY_ERR_OWNED:
         ESP_LOGW(TAG, "dashboard: relay %u refused -- owned by a running profile", (unsigned)relay_index);
         return DASHBOARD_RELAY_ERR_OWNED;
-    }
-
-    if (on) {
-        uint32_t sources = 0;
-        if (relay_authority_on_blocked(s_dash.safety, &sources)) {
-            ESP_LOGW(TAG, "dashboard: relay %u ON refused -- safety fault sources 0x%02X",
-                     (unsigned)relay_index, (unsigned)sources);
-            if (out_safety_sources) {
-                *out_safety_sources = sources;
-            }
-            return DASHBOARD_RELAY_ERR_SAFETY;
-        }
-    }
-
-    esp_err_t err = kiln_io_set_relay(s_dash.io, relay_index, on);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "kiln_io_set_relay failed: %s", esp_err_to_name(err));
+    case KILN_IO_OWNER_RELAY_ERR_SAFETY:
+        ESP_LOGW(TAG, "dashboard: relay %u ON refused -- safety fault sources 0x%02X", (unsigned)relay_index,
+                 out_safety_sources ? (unsigned)*out_safety_sources : 0u);
+        return DASHBOARD_RELAY_ERR_SAFETY;
+    case KILN_IO_OWNER_RELAY_ERR_IO_FAIL:
+    case KILN_IO_OWNER_RELAY_ERR_TIMEOUT:
+    default:
+        ESP_LOGW(TAG, "dashboard: kiln_io_owner_command_set_relay(%u) failed (result %d)",
+                 (unsigned)relay_index, (int)rr);
         return DASHBOARD_RELAY_ERR_IO_FAIL;
     }
-    return DASHBOARD_RELAY_OK;
 }
 
 static esp_err_t relay_post_handler(httpd_req_t *req)
