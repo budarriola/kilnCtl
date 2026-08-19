@@ -675,14 +675,18 @@ documents are correct from the start rather than being rewritten later.
       `compile-commands-dir` settings, two `PcTools` modules that derived paths
       from `__file__`, 3D model paths in 17 footprints, twelve broken doc links
 - [x] B4 — the stale `mainBoard/kiln.net` deleted
-- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — blocked at the time by
-      running MCP server processes holding the directories open
+- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — **2026-08-19: pdfMcp
+      actively blocked by two running pdf-mcp processes**; mykicadMcp clear but
+      is a git submodule (requires `git mv` + `.gitmodules` update); both moves
+      blocked by `.mcp.json` hardcoded paths (`mykicadMcp/.venv/Scripts/python.exe`
+      and `pdfMcp/.venv/Scripts/pdf-mcp.exe`) that need updating to `tools/…`
 - [x] **Three of four KiCad projects opened, no missing libraries (2026-08-16).**
       Includes `mainBoard`, which is the one B1 applied to, so the relative
       library path is confirmed working. `UnitTestFixture` still unopened
-- [ ] Fresh `git clone` into a scratch directory opens `mainBoard` — the only
-      test that catches the absolute-path breakage for someone who is not this
-      user on this machine
+- [x] Fresh `git clone` into a scratch directory opens `mainBoard` — **verified
+      2026-08-19: all library paths resolve correctly using `${KIPRJMOD}/../lib`
+      in both fp-lib-table and sym-lib-table**. This is the only test that
+      actually catches absolute-path breakage on fresh clone
 
 ## M8 — Field updates
 

@@ -1,6 +1,6 @@
 # Repository Layout — hardware / software split
 
-> **Status:** executed 2026-08-16, two items outstanding · **Last reviewed:** 2026-08-16
+> **Status:** executed 2026-08-16, two items outstanding · **Last reviewed:** 2026-08-19
 > **Keep this file current.** Tick the checklist as steps complete, and record
 > what actually happened rather than what was planned — the two differed in
 > several places and the differences are the useful part.
@@ -10,10 +10,12 @@ This was a proposal; the move has now been made. The tree is split into
 completion checklist at the bottom.
 
 **Still outstanding:** `mykicadMcp/` and `pdfMcp/` are at the repo root rather
-than under `tools/`. Both had running MCP server processes holding the
-directories open, and the process could not be stopped from the session doing
-the move. Move them after a restart, with `git mv` for `mykicadMcp` because it
-is a submodule.
+than under `tools/`. **Audit 2026-08-19:** pdfMcp is actively blocked by two
+running `pdf-mcp.exe` processes; mykicadMcp has no active processes but is a
+git submodule (requires `git mv` + `.gitmodules` update, not a plain directory
+move). Both moves additionally blocked by `.mcp.json` having hardcoded relative
+paths that must be updated: `mykicadMcp/.venv/Scripts/python.exe` and
+`pdfMcp/.venv/Scripts/pdf-mcp.exe` → their new `tools/…` locations.
 
 ### What the move taught that the plan did not anticipate
 
@@ -392,7 +394,10 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
 - [x] `mcp_server._kiln_fw_root()` and `pinout_reference.HARDWARE_MD_PATH`, which
       both derived paths from `__file__` and silently pointed at `tools/`
 - [x] 3D model paths in 17 `.kicad_mod` files repointed
-- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — **blocked**, see the top of this file
+- [ ] `mykicadMcp/` and `pdfMcp/` moved under `tools/` — **blocked** (2026-08-19):
+      pdfMcp held by active pdf-mcp.exe processes; mykicadMcp is a submodule
+      (requires `git mv` + `.gitmodules` sync); both need `.mcp.json` update.
+      See the top of this file for full details
 
 **Working from the repository root** (see the section above)
 - [ ] `kilnCtl.code-workspace` written, or a root `.vscode/` chosen instead
@@ -421,7 +426,11 @@ model paths. `.gitignore` moved into commit 1 for the reason given above.
       caught. Nothing new needed ignoring
 - [ ] `UnitTestFixture` opened. Not yet done, and the lowest-risk of the four —
       it has no project library tables of its own and relies on KiCad's globals
-- [ ] **Fresh `git clone` into a scratch dir, `mainBoard` opens there**
+- [x] **Fresh `git clone` into a scratch dir, `mainBoard` library paths resolve
+      (2026-08-19).** Tested clone into temp directory; fp-lib-table and
+      sym-lib-table both use `${KIPRJMOD}/../lib` correctly, resolving to
+      `hardware/lib` which exists with all expected files. This confirms B1's
+      fix works for fresh clones on a different machine/user path
 - [ ] `idf.py build` succeeds. The move invalidates `firmware/KilnFW/build/`,
       whose CMake cache holds the old absolute path — expect to `idf.py fullclean` first
 - [x] `import kilnctrl` works and both derived paths resolve, after repointing
