@@ -102,6 +102,22 @@ static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_start_btn;
 static lv_obj_t *s_stop_btn;
 
+/* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
+ * power" -- a small card fed by dashboard_get_status() (TODO.md 10.1a's
+ * shared-backend rule, same call this page already makes for zones/relays),
+ * not a second implementation of safety_link_get_status()'s cache. Placed on
+ * the main home page rather than a separate page/menu item: LINK_PROTOCOL.md
+ * sec 7 frames this as kiln-process data the operator watches while firing
+ * ("A 'Safety Processor' panel, always visible"), the opposite of 10.7's
+ * board-health diagnostics (ESP die temp / MAX31856 CJ temps), which earned
+ * their own separate page precisely because mixing board-health noise into
+ * the main page would make it harder to read at a glance -- safety/
+ * enclosure temp and power are the inverse case: exactly what belongs next
+ * to the zone temps an operator is already watching. */
+static lv_obj_t *s_safety_temp_label;
+static lv_obj_t *s_enclosure_temp_label;
+static lv_obj_t *s_safety_power_label;
+
 /* WiFi/IP/mDNS status readout, added to the status bar this pass. Text comes
  * from wifi_status_ui_get_text() (wifi_status_ui.c) -- see that module's
  * header comment for the underlying getters and the TODO.md 10.1a
@@ -370,6 +386,38 @@ static void refresh_ap_qr(void)
      * optional today, so T:nopass is not used). */
     snprintf(uri, sizeof(uri), "WIFI:T:WPA;S:%s;P:%s;;", ap_ssid, ap_password);
     update_ap_qr_if_changed(uri);
+}
+
+/* ROADMAP.md M6's safety-processor card. Three rows built once; refresh_cb()
+ * below fills them in null-tolerantly ("---" when the underlying reading is
+ * NaN/invalid), the same convention 10.7's ui_page_board_health.c uses for
+ * its own per-channel rows. */
+static void build_safety_card(lv_obj_t *parent)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_width(card, lv_pct(100));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(card, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(card, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(card, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(card, UI_THEME_PADDING_PX / 4, 0);
+
+    lv_obj_t *title = lv_label_create(card);
+    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(title, "Safety Processor");
+
+    s_safety_temp_label = lv_label_create(card);
+    lv_obj_set_style_text_color(s_safety_temp_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
+
+    s_enclosure_temp_label = lv_label_create(card);
+    lv_obj_set_style_text_color(s_enclosure_temp_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");
+
+    s_safety_power_label = lv_label_create(card);
+    lv_obj_set_style_text_color(s_safety_power_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(s_safety_power_label, "Power: ---");
 }
 
 static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
@@ -660,6 +708,35 @@ static void refresh_cb(lv_timer_t *timer)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
+    /* ROADMAP.md M6 -- null-tolerant "---" for whichever field the safety
+     * link hasn't got real data for, same as this page's zone rows already
+     * do for an absent thermocouple, and the same convention 10.7's
+     * board-health page uses for its own per-channel rows. On this build
+     * (no Pico attached, ROADMAP.md M0's bench-confirmed dead link) every
+     * one of these reads "---" -- that is the honest, designed-for state,
+     * not a bug in this page. */
+    if (ds.safety_temp_valid) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Safety temp: %.1f C", (double)ds.safety_temp_c);
+        lv_label_set_text(s_safety_temp_label, buf);
+    } else {
+        lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
+    }
+    if (ds.enclosure_temp_valid) {
+        char buf[28];
+        snprintf(buf, sizeof(buf), "Enclosure temp: %.1f C", (double)ds.enclosure_temp_c);
+        lv_label_set_text(s_enclosure_temp_label, buf);
+    } else {
+        lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");
+    }
+    if (ds.power_valid) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Power: %.0f W", (double)ds.power_w);
+        lv_label_set_text(s_safety_power_label, buf);
+    } else {
+        lv_label_set_text(s_safety_power_label, "Power: ---");
+    }
+
     for (uint8_t zi = 0; zi < s_zone_count; zi++) {
         char buf[24];
         const dashboard_channel_status_t *ch = NULL;
@@ -816,6 +893,12 @@ lv_obj_t *ui_page_home_build(void)
             build_zone_row(content, zi);
         }
     }
+
+    /* Safety-processor card (ROADMAP.md M6) -- right after the zone rows,
+     * ahead of the profile/run-state card, matching the "kiln-process data
+     * the operator watches while firing" placement this file's header
+     * comment gives for putting it on the home page at all. */
+    build_safety_card(content);
 
     /* Profile / run state card. */
     lv_obj_t *profile_card = lv_obj_create(content);

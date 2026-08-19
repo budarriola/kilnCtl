@@ -99,6 +99,36 @@ void dashboard_get_status(dashboard_status_t *out)
 
     out->safety_ready = s_dash.safety != NULL;
 
+    /* ROADMAP.md M6: safety/enclosure temperature straight from the safety
+     * link's cache -- see dashboard_http.h's field comment for the wire
+     * source and why power_w has no data yet. safety_link_get_status()
+     * itself is null-tolerant on a never-initialized link (returns an error,
+     * leaving out->safety_temp_c/enclosure_temp_c at the memset(0) above,
+     * caught by the isnan() check anyway since a plain 0.0f would otherwise
+     * read as a real, very cold reading). */
+    if (s_dash.safety) {
+        safety_link_status_t sl;
+        if (safety_link_get_status(s_dash.safety, &sl) == ESP_OK) {
+            out->safety_temp_c = sl.tc_temp_c;
+            out->safety_temp_valid = !isnan(sl.tc_temp_c);
+            out->enclosure_temp_c = sl.cj_temp_c;
+            out->enclosure_temp_valid = !isnan(sl.cj_temp_c);
+        }
+    }
+    if (!out->safety_temp_valid) {
+        out->safety_temp_c = NAN;
+    }
+    if (!out->enclosure_temp_valid) {
+        out->enclosure_temp_c = NAN;
+    }
+    /* power_w: no SAFETY_CMD_POWER (Frame E) parser exists yet anywhere in
+     * this firmware -- see dashboard_http.h's comment. Always reported
+     * invalid/NaN rather than inventing a number from current_a[] (that
+     * would need mains_voltage_v and a conduction-fraction the wire frame
+     * carries and this build has never decoded). */
+    out->power_valid = false;
+    out->power_w = NAN;
+
     /* TODO.md 8.2 "Tie it to the guards, not only the UI": surface the same
      * flag profile_executor.c/autotune_engine.c now refuse on, so the
      * dashboard and pc_tools' Zones panel can say "zone config failed to
@@ -161,6 +191,23 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     APPEND(",\"safety_ready\":%s", ds.safety_ready ? "true" : "false");
     APPEND(",\"zones_config_valid\":%s", ds.zones_config_valid ? "true" : "false");
+
+    /* ROADMAP.md M6 -- null (not 0), same convention board_temps.c's
+     * GET /api/board_temps already established (TODO.md 10.7): a JSON null
+     * cannot be mistaken for a real 0 C reading or a real 0 W power figure
+     * the way a bare 0 could. */
+    APPEND(",\"safety_temp_c\":%s", ds.safety_temp_valid ? "" : "null");
+    if (ds.safety_temp_valid) {
+        APPEND("%.2f", (double)ds.safety_temp_c);
+    }
+    APPEND(",\"enclosure_temp_c\":%s", ds.enclosure_temp_valid ? "" : "null");
+    if (ds.enclosure_temp_valid) {
+        APPEND("%.2f", (double)ds.enclosure_temp_c);
+    }
+    APPEND(",\"power_w\":%s", ds.power_valid ? "" : "null");
+    if (ds.power_valid) {
+        APPEND("%.1f", (double)ds.power_w);
+    }
 
     /* TODO.md 8.2's "one boot-time report": present/mounted per NVS
      * partition, so the wizard (8.3) can say precisely which storage section

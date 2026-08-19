@@ -4611,3 +4611,71 @@ picks it up automatically, no per-builder memory required.
       the LCD is now strictly ahead of the web page, which is fine (the web
       page's equivalent gap is called out above, low priority, not a
       silent omission).
+
+### 10.10 Safety processor GUI panel (ROADMAP.md M6)
+
+**2026-08-18: built, web + LCD, both on the main dashboard/home page (not a
+separate board-health-style page).** ROADMAP.md M6's checklist item "GUI
+shows safety temperature, enclosure temperature and power" — the data
+plumbing built now, independent of the link itself being bench-confirmed
+dead (ROADMAP.md M0).
+
+**Where, and why (unlike 10.7's board-health page):** `LINK_PROTOCOL.md`
+sec 7 ("What the ESP web GUI should show") explicitly names
+`dashboard_http.c` as the home for this — "A 'Safety Processor' panel,
+always visible" — because safety/enclosure temperature and power are
+kiln-process data an operator watches while firing, the opposite of 10.7's
+board-health diagnostics (ESP die temp, MAX31856 CJ temps as a *board
+health* signal), which earned their own separate page/route precisely to
+keep that diagnostic noise off the main page. So this landed on the
+existing `GET /api/status` endpoint and the existing LCD home page
+(`ui_page_home.c`), not a new route/page.
+
+- [x] **`dashboard_status_t` (`dashboard_http.h`) gained three fields**:
+      `safety_temp_valid`/`safety_temp_c`, `enclosure_temp_valid`/
+      `enclosure_temp_c`, `power_valid`/`power_w`. `dashboard_get_status()`
+      (`dashboard_http.c`) fills the first two straight from
+      `safety_link_get_status()`'s cache — `tc_temp_c` (`LINK_PROTOCOL.md`
+      sec 6 Frame A, `SAFETY_CMD_GET_STATUS`, bytes 2..5, the safety
+      processor's own thermocouple) and `cj_temp_c` (same frame, bytes
+      6..9, the MAX31856 cold junction — sec 7's "Enclosure temperature ...
+      this is the electronics enclosure, not the kiln"). `safety_link.c`
+      already decodes this frame (`safety_apply_status()`, 9.0's
+      `ANNOUNCE_VERSION` work landed alongside it) and already sends NaN,
+      never 0, when `TEMP_VALID` is clear or nothing has arrived — `_valid`
+      is computed here as `!isnan()`, not re-derived from the flag byte a
+      second time.
+      **Power has no real source**: `SAFETY_CMD_POWER` (Frame E, `0x0E`,
+      `LINK_PROTOCOL.md` sec 6) is not parsed anywhere in this firmware —
+      `safety_link.c`'s `safety_drain_inbox()` switch only recognizes
+      `GET_STATUS`/`FW_VERSION`/`UPDATE_STATUS`. Building a Frame E codec
+      was out of scope for this pass (M5's own checklist still lists
+      "Pico → ESP telemetry: ... power" as open); `power_valid` is
+      unconditionally `false` today so the JSON/LCD shapes are already
+      correct once that lands, without a second pass through this struct.
+- [x] `GET /api/status` gained `safety_temp_c`/`enclosure_temp_c`/`power_w`,
+      each JSON `null` (not `0`) when its `_valid` flag is false — same
+      null-tolerant convention `GET /api/board_temps` (10.7) established,
+      applied here rather than reinvented.
+- [x] LCD: `ui_page_home.c` gained a "Safety Processor" card (new
+      `build_safety_card()`, three labels refreshed every `refresh_cb()`
+      tick from the same `dashboard_get_status()` call this page already
+      makes for zones/relays — TODO.md 10.1a's shared-backend rule, no
+      second read of `safety_link.c`). Each row independently shows "---"
+      when its field is invalid, matching 10.7's `ui_page_board_health.c`
+      "n/a" convention (different placeholder text, same idea: never a
+      plausible-looking number for missing data).
+- [x] `idf.py -C firmware/KilnFW build` (via
+      `Microsoft.v6.0.2.PowerShell_profile.ps1`) clean: `KilnCtrl.bin`
+      0x154190 bytes, 9% of the `factory` partition free (was already at 9%
+      free after 10.9; this pass's three extra floats/bools and one LCD
+      card did not measurably move it).
+- [ ] **Not hardware-verified, and cannot be this session.** No ESP32-S3/
+      Pico is attached in this environment, and ROADMAP.md M0 already
+      established the isolated link doesn't pass a byte end-to-end on the
+      real board — so on real hardware today every one of these three
+      fields reads `null`/"---", by design, not by bug. Real verification
+      needs both M0 (link fixed) and a Pico actually emitting Frame A, and
+      Frame E for power specifically needs a new codec that doesn't exist
+      yet (see above). Nothing here can be exercised against live safety
+      telemetry until then.

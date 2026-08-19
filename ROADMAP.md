@@ -296,7 +296,24 @@ because it changes what a bare main board will do.
 - [ ] 30 s silence aborts a firing
 - [ ] Boot-time version request with retry, surfaced in the GUI
 - [ ] Bench escape hatch documented: `safety_link_fault_on_link_loss(link, false)`
-- [ ] GUI shows safety temperature, enclosure temperature and power
+- [~] GUI shows safety temperature, enclosure temperature and power
+      (2026-08-18). `GET /api/status` (`dashboard_http.c`) gained
+      `safety_temp_c`/`enclosure_temp_c`/`power_w`, null when invalid — read
+      straight from `safety_link_get_status()`'s cache (`tc_temp_c`/
+      `cj_temp_c`, `LINK_PROTOCOL.md` sec 6 Frame A), not a second frame
+      parse. The LCD home page (`ui_page_home.c`) shows the same three
+      fields in a new "Safety Processor" card, via the same
+      `dashboard_get_status()` call the page already makes (TODO.md 10.1a).
+      **Power has no real source yet**: `SAFETY_CMD_POWER` (Frame E, 0x0E)
+      is not parsed by `safety_link.c` or `kilnlink_status.c` today, so
+      `power_w` is always `null` — this is `dashboard_get_status()`
+      reporting the field honestly, not a bug; wiring Frame E is separate,
+      still-open M5 work. See `KilnFW/TODO.md` 10.10 for detail. Build
+      clean (`idf.py -C firmware/KilnFW build`, `KilnCtrl.bin` 9% free).
+      **Not hardware-verified**: no Pico is attached in this environment and
+      the link itself is bench-confirmed dead (M0), so every field reads
+      "---"/null on a real board today — that is the designed-for state
+      until M0/M5 land, not a defect in this pass.
 
 ## M7 — Repo reorganisation · *done 2026-08-16, three items open*
 

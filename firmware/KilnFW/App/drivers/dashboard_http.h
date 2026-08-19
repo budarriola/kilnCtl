@@ -75,6 +75,38 @@ typedef struct {
 
     bool     safety_ready;
     bool     zones_config_valid;
+
+    /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
+     * power" -- read straight from safety_link_get_status()'s cache
+     * (safety_link.h's safety_link_status_t), not re-parsed from a frame
+     * here: TODO.md 10.1a's shared-backend rule applies to the safety link
+     * exactly like it does to kiln_io/MAX31856 above.
+     *
+     * safety_temp_c / enclosure_temp_c come from LINK_PROTOCOL.md sec 6 Frame
+     * A (SAFETY_CMD_GET_STATUS, the 23-byte layout already parsed by
+     * safety_link.c's safety_apply_status()): tc_temp_c (bytes 2..5, the
+     * safety-processor's own thermocouple) and cj_temp_c (bytes 6..9, the
+     * MAX31856's cold junction -- LINK_PROTOCOL.md sec 7's "Enclosure
+     * temperature" row: "this is the electronics enclosure, not the kiln").
+     * Both are NaN when TEMP_VALID is clear or nothing has ever arrived --
+     * *_valid is exactly !isnan(), computed once here so callers never have
+     * to isnan() themselves.
+     *
+     * power_w has NO real source yet: LINK_PROTOCOL.md sec 6 Frame E
+     * (SAFETY_CMD_POWER, 0x0E) is the wire's power estimate, but neither
+     * kilnlink_status.c nor safety_link.c parses it today (safety_link.c's
+     * safety_drain_inbox() switch only handles GET_STATUS/FW_VERSION/
+     * UPDATE_STATUS) -- see LINK_PROTOCOL.md sec 6/M5's still-open "Pico ->
+     * ESP telemetry: ... power" bullet. power_valid is therefore always
+     * false today; the field exists so the JSON/LCD shapes are already
+     * correct the day Frame E gets wired up, rather than needing a second
+     * pass through this struct, the HTTP handler, and the LCD page. */
+    bool     safety_temp_valid;
+    float    safety_temp_c;
+    bool     enclosure_temp_valid;
+    float    enclosure_temp_c;
+    bool     power_valid;
+    float    power_w;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);
