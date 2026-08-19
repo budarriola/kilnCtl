@@ -462,6 +462,30 @@ S9) are explicitly out of scope for this pass — they need `link_task`'s
 
 ## Phase 7 — The link
 
+- [x] **No-wait rules audit** (2026-08-18, `../CommonFW/docs/LINK_PROTOCOL.md`
+      §2's five testable rules) — `link_task.c`, `uart_owner.c`,
+      `safety_core.c` inspected against each rule; **zero violations found,
+      no code changes needed**:
+      1. never ACKs/expects one — `link_task_handle_raw_frame()` only accepts
+         `KILNLINK_MSG_BROADCAST`, no ACK send path exists anywhere.
+      2. never retransmits — no retry logic in `link_task.c`; a dropped
+         `uart_owner_send()` is simply discarded.
+      3. never blocks on TX — `uart_owner_send()` is a short
+         `save_and_disable_interrupts()` critical section; drops the whole
+         frame and counts it when the ring lacks room, never waits on the ISR.
+      4. `safety_core.c` never calls into the link — no `link_task_*` call
+         anywhere in `safety_core.c` (context-snapshot consumption is still a
+         TODO comment, not a call); `tools/check_isolation.ps1` re-run clean.
+      5. `link_task` priority/affinity — priority 2 (second-lowest, above
+         only `log_task`/`update_task`), pinned to `SAFTYFW_CORE_LINK_PATH`
+         (core 0), disjoint from the trip-path core (1), matching
+         `docs/ARCHITECTURE.md` §4.
+      Also reaudited `PUSH_CONTEXT` (0x07) receive, which already exists
+      (`link_task_handle_push_context()`) contrary to the audit prompt's
+      "check whether it's still a gap" — it isn't; its lock wait is a bounded
+      50 ms `xSemaphoreTake`, and `update_task`'s frame dispatch queue uses a
+      zero-timeout `xQueueSend`. Full build (`cmake --build .`) and all 320
+      host tests (`test/build_host_tests.ps1`) verified clean after the audit.
 - [x] `0x7E` framing, `0x7D`/`^0x20` stuffing, CRC16/CCITT-FALSE now actually
       wired to real traffic: `link_task.c` calls the existing, host-tested
       `kilnlink_frame_encode_raw()`/`kilnlink_stuff()`/`kilnlink_unstuff()`/

@@ -301,7 +301,35 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       power-estimate producer exists on the Pico side (see the "Current
       sensing" bullet above, also still open), so this frame has never
       crossed a real link. See `KilnFW/TODO.md` 10.10.
-- [ ] Pico never blocks on the link — all five no-wait rules honoured
+- [x] Pico never blocks on the link — all five no-wait rules honoured.
+      **Audited 2026-08-18, no violations found** (`firmware/SaftyFW/src/
+      tasks/link_task.c`, `uart_owner.c`): (1) never ACKs/expects one —
+      `link_task_handle_raw_frame()` (`link_task.c:463-465`) discards
+      anything but `KILNLINK_MSG_BROADCAST`, no ACK path exists; (2) never
+      retransmits — no retry logic anywhere in `link_task.c`, a failed
+      `uart_owner_send()` is just discarded; (3) never blocks on TX —
+      `uart_owner_send()` (`uart_owner.c:110-142`) is a bounded
+      `save_and_disable_interrupts()` critical section that drops the whole
+      frame and counts it (`s_tx_dropped`) when the ring lacks room, never
+      waits on the ISR; (4) `safety_core.c` never calls into the link —
+      confirmed both by inspection (no call to any `link_task_*` function in
+      `safety_core.c`; `context_snapshot_t` consumption is still a TODO
+      comment at `safety_core.c:114-116`) and by `tools/check_isolation.ps1`
+      (re-run clean this pass: no link/uart `#include` in `safety_core.{c,h}`,
+      no GPIO6/relay reference in `link_task.{c,h}`); (5) priority/affinity —
+      `task_priorities.h:49` puts `link_task` at priority 2 (second-lowest,
+      above only `log_task`/`update_task` at 1) and `SAFTYFW_CORE_LINK_PATH`
+      (core 0), disjoint from `SAFTYFW_CORE_TRIP_PATH` (core 1) that
+      `relay_owner`/`safety_core`/guard tasks run on — matches
+      `docs/ARCHITECTURE.md` §4 exactly. `PUSH_CONTEXT` (0x07) receive-side
+      already exists (`link_task_handle_push_context()`, wired since an
+      earlier pass) and was reaudited here rather than found missing: its
+      only lock wait (`s_context_lock`, `link_task.c:370`) is a bounded 50 ms
+      `xSemaphoreTake`, and downstream `update_task` dispatch uses a
+      zero-timeout `xQueueSend` (`update_task.c:880`). No code changes were
+      needed. Full `SaftyFW` build verified clean (`cmake --build .`,
+      arm-none-eabi-gcc/pico-sdk, zero warnings under `-Wall -Wextra -Werror`)
+      and all 320 host tests pass (`test/build_host_tests.ps1`).
 - [x] Mutual version handshake: `ANNOUNCE_VERSION` both ways, `min_compatible`
       checked in both directions, compatibility floor reserved at ids `0x00`–`0x0F`.
       `KilnFW`'s `safety_link.c` sends `ANNOUNCE_VERSION` unprompted at boot
