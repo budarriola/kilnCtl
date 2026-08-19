@@ -509,6 +509,20 @@
 #define SAFETY_CMD_FW_VERSION      0x0Bu
 #define SAFETY_CMD_ANNOUNCE_VERSION 0x0Fu
 
+/* Pico -> ESP telemetry, Frame B (CommonFW/docs/LINK_PROTOCOL.md sec 6):
+ * "Everything the 23-byte [status] frame has no room for" -- trip/warn
+ * masks, boot reason, context-frame health counters, the Pico's own
+ * armed/warn/tripped state. Pushed unsolicited by the Pico, same 500 ms
+ * cadence as the status frame (Frame A); this build never requests it.
+ * 26-byte fixed payload -- see safety_link.c's safety_apply_diag() for the
+ * field-by-field layout and firmware/CommonFW/include/kilnlink/
+ * kilnlink_diag.h for the byte-exact codec this is mirrored from
+ * (kilnlink_diag.c is not compiled into this component today -- see this
+ * file's kilnlink component CMakeLists.txt comment -- so this driver
+ * hand-parses it the same way it already hand-parses GET_STATUS/POWER,
+ * rather than depending on that codec). */
+#define SAFETY_CMD_DIAG 0x08u
+
 /* Pico -> ESP telemetry, Frame E (CommonFW/docs/LINK_PROTOCOL.md sec 6):
  * "No guard reads any of this. It exists to be displayed." Pushed
  * unsolicited by the Pico; this build never requests it. 55-byte fixed
@@ -519,6 +533,18 @@
  * CMakeLists.txt comment -- so this driver hand-parses it the same way it
  * already hand-parses GET_STATUS, rather than depending on that codec). */
 #define SAFETY_CMD_POWER 0x0Eu
+
+/* Pico -> ESP telemetry, Frame D (CommonFW/docs/LINK_PROTOCOL.md sec 6):
+ * pushed immediately the moment a trip latches (not on the 500 ms cadence),
+ * repeated a few times over the next second since there is no ACK; the ESP
+ * dedups on trip_seq (byte1). "Capturing the deciding values at the instant
+ * of the trip is the whole point" -- the answer to "why did the kiln stop."
+ * 29-byte fixed payload -- see safety_link.c's safety_apply_trip_event() for
+ * the field-by-field layout and firmware/CommonFW/include/kilnlink/
+ * kilnlink_trip.h for the byte-exact codec this is mirrored from, same
+ * not-compiled-into-this-component reasoning as SAFETY_CMD_DIAG/POWER
+ * above. */
+#define SAFETY_CMD_TRIP_EVENT 0x0Du
 
 /* Phase 10 (SaftyFW) / TODO.md 9.5's Pico firmware-update relay
  * (CommonFW/docs/UPDATE_PROTOCOL.md section 4). Ids are byte-for-byte

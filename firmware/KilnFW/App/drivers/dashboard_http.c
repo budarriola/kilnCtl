@@ -126,6 +126,26 @@ void dashboard_get_status(dashboard_status_t *out)
                 out->power_w = sl.power_total_w;
                 out->power_valid = !isnan(sl.power_total_w);
             }
+
+            /* ROADMAP.md M5: DIAG (Frame B) / TRIP_EVENT (Frame D) now have a
+             * decode path -- see safety_link.h's field comments for what
+             * each of these means. Straight passthrough, same convention as
+             * the temperature/power fields above. */
+            out->diag_ever_received = sl.diag_ever_received;
+            out->diag_trip_reason = sl.diag_trip_reason;
+            out->diag_warn_mask = sl.diag_warn_mask;
+            out->diag_trip_mask = sl.diag_trip_mask;
+            out->diag_state = sl.diag_state;
+            out->diag_context_age_100ms = sl.diag_context_age_100ms;
+            out->diag_context_frames_ok = sl.diag_context_frames_ok;
+            out->diag_context_frames_bad = sl.diag_context_frames_bad;
+            out->diag_tx_frames_dropped = sl.diag_tx_frames_dropped;
+
+            out->trip_event_ever_received = sl.trip_event_ever_received;
+            out->trip_reason = sl.trip_reason;
+            out->trip_event_age_ms = sl.trip_event_age_ms;
+            out->trip_safety_tc_c = sl.trip_safety_tc_c;
+            out->trip_deciding_threshold = sl.trip_deciding_threshold;
         }
 
         /* TODO.md 9.0's deferred "GUI names both versions" item -- this
@@ -159,7 +179,10 @@ void dashboard_get_status(dashboard_status_t *out)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    char json[896];
+    /* Bumped from 896 with the DIAG/TRIP_EVENT fields below (ROADMAP.md
+     * M5) -- comfortably over the worst case (~1150 bytes with 3 zones/
+     * channels and every optional block populated). */
+    char json[1400];
     size_t o = 0;
     int n;
 
@@ -242,6 +265,32 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     } else {
         APPEND(",\"link_version_compatible\":null");
         APPEND(",\"peer_protocol_version\":null");
+    }
+
+    /* ROADMAP.md M5 -- SAFETY_CMD_DIAG (Frame B) and SAFETY_CMD_TRIP_EVENT
+     * (Frame D), same null-until-received convention as everything else on
+     * this endpoint. diag_trip_mask/diag_warn_mask are bitmasks (one bit per
+     * guard, SaftyFW's safety_guards.h) -- left as raw integers rather than
+     * decoded here, same as diag_trip_reason/trip_reason, since this
+     * firmware has no guard-name table of its own to decode them against. */
+    APPEND(",\"diag_ever_received\":%s", ds.diag_ever_received ? "true" : "false");
+    if (ds.diag_ever_received) {
+        APPEND(",\"diag_trip_reason\":%u", (unsigned)ds.diag_trip_reason);
+        APPEND(",\"diag_warn_mask\":%u", (unsigned)ds.diag_warn_mask);
+        APPEND(",\"diag_trip_mask\":%u", (unsigned)ds.diag_trip_mask);
+        APPEND(",\"diag_state\":%u", (unsigned)ds.diag_state);
+        APPEND(",\"diag_context_age_100ms\":%u", (unsigned)ds.diag_context_age_100ms);
+        APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds.diag_context_frames_ok);
+        APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds.diag_context_frames_bad);
+        APPEND(",\"diag_tx_frames_dropped\":%lu", (unsigned long)ds.diag_tx_frames_dropped);
+    }
+
+    APPEND(",\"trip_event_ever_received\":%s", ds.trip_event_ever_received ? "true" : "false");
+    if (ds.trip_event_ever_received) {
+        APPEND(",\"trip_reason\":%u", (unsigned)ds.trip_reason);
+        APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds.trip_event_age_ms);
+        APPEND(",\"trip_safety_tc_c\":%.1f", (double)ds.trip_safety_tc_c);
+        APPEND(",\"trip_deciding_threshold\":%.1f", (double)ds.trip_deciding_threshold);
     }
 
     /* TODO.md 8.2's "one boot-time report": present/mounted per NVS

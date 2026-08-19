@@ -126,6 +126,32 @@ typedef struct {
     bool     link_version_compatible;
     uint16_t peer_protocol_version;
     uint16_t peer_min_compatible;
+
+    /* ROADMAP.md M5's Pico -> ESP telemetry: SAFETY_CMD_DIAG (Frame B) and
+     * SAFETY_CMD_TRIP_EVENT (Frame D) now have a decode path in safety_link.c
+     * (safety_apply_diag()/safety_apply_trip_event(), dispatched from
+     * safety_drain_inbox()) -- straight passthrough of
+     * safety_link_status_t's diag_ and trip_ fields, same shared-backend rule
+     * as safety_temp_c/power_w above. *_ever_received false (fields below
+     * meaningless) until the Pico has actually pushed one, which it cannot
+     * on this bench build (ROADMAP.md M0: no live link). trip_reason stays
+     * cached indefinitely once received -- "why did it trip" must remain
+     * answerable long after the trip cleared, see safety_link.h. */
+    bool     diag_ever_received;
+    uint8_t  diag_trip_reason;
+    uint16_t diag_warn_mask;
+    uint16_t diag_trip_mask;
+    uint8_t  diag_state;
+    uint8_t  diag_context_age_100ms;
+    uint32_t diag_context_frames_ok;
+    uint32_t diag_context_frames_bad;
+    uint32_t diag_tx_frames_dropped;
+
+    bool     trip_event_ever_received;
+    uint8_t  trip_reason;
+    uint32_t trip_event_age_ms;
+    float    trip_safety_tc_c;
+    float    trip_deciding_threshold;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);

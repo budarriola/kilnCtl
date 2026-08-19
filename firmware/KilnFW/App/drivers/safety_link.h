@@ -171,6 +171,46 @@ extern "C" {
 #define SAFETY_LINK_POWER_FLAG_ANY_CHANNEL_CLIPPED       0x02u
 #define SAFETY_LINK_POWER_FLAG_CALIBRATED                0x04u
 
+/* Length of the Pico's DIAG frame (SAFETY_CMD_DIAG / Frame B,
+ * CommonFW/docs/LINK_PROTOCOL.md sec 6), byte-for-byte KILNLINK_DIAG_LEN
+ * from kilnlink_diag.h. Pushed unsolicited on the same 500 ms cadence as the
+ * status frame -- see safety_apply_diag() in safety_link.c for the field
+ * layout. */
+#define SAFETY_LINK_DIAG_FRAME_LEN 26u
+
+/* DIAG flags byte (offset 25), kilnlink_diag.h's kilnlink_diag_flag_t
+ * mirrored here for the same reason SAFETY_CMD_POWER/DIAG are hand-parsed
+ * rather than calling that codec (see uart_task_ids.h). */
+#define SAFETY_LINK_DIAG_FLAG_SIM_CONTEXT_SEEN      0x01u
+#define SAFETY_LINK_DIAG_FLAG_CALIBRATION_MISSING   0x02u
+#define SAFETY_LINK_DIAG_FLAG_ESTOP_UNWIRED_SUSPECT 0x04u
+
+/* DIAG boot_reason byte (offset 10), kilnlink_diag.h's
+ * kilnlink_diag_boot_flag_t mirrored here, same reasoning as above. */
+#define SAFETY_LINK_DIAG_BOOT_POWERON  0x01u
+#define SAFETY_LINK_DIAG_BOOT_WATCHDOG 0x02u
+#define SAFETY_LINK_DIAG_BOOT_BROWNOUT 0x04u
+
+/* DIAG state byte (offset 24), kilnlink_diag.h's kilnlink_diag_state_t
+ * mirrored here, same reasoning as above. */
+#define SAFETY_LINK_DIAG_STATE_INIT    0u
+#define SAFETY_LINK_DIAG_STATE_GRACE   1u
+#define SAFETY_LINK_DIAG_STATE_ARMED   2u
+#define SAFETY_LINK_DIAG_STATE_WARN    3u
+#define SAFETY_LINK_DIAG_STATE_TRIPPED 4u
+
+/* DIAG context_age_100ms sentinel: "never received" -- kilnlink_diag.h's
+ * KILNLINK_DIAG_CONTEXT_AGE_NEVER mirrored here, same reasoning as above. */
+#define SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER 255u
+
+/* Length of the Pico's TRIP_EVENT frame (SAFETY_CMD_TRIP_EVENT / Frame D,
+ * CommonFW/docs/LINK_PROTOCOL.md sec 6), byte-for-byte KILNLINK_TRIP_LEN
+ * from kilnlink_trip.h. Pushed immediately on trip, not on the poll
+ * cadence -- see safety_apply_trip_event() in safety_link.c for the field
+ * layout and the trip_seq dedup rule. */
+#define SAFETY_LINK_TRIP_EVENT_FRAME_LEN 29u
+#define SAFETY_LINK_TRIP_EVENT_CHANNELS 3u
+
 /* Length of the PC-facing GET_STATUS payload -- the frame above plus the
  * ESP-measured age -- as specified in uart_task_ids.h. */
 #define SAFETY_LINK_STATUS_PAYLOAD_LEN 25u
@@ -348,6 +388,57 @@ typedef struct {
     bool     power_mains_voltage_configured;
     bool     power_any_channel_clipped;
     bool     power_calibrated;
+
+    /* SAFETY_CMD_DIAG (Frame B) telemetry -- ROADMAP.md M5, LINK_PROTOCOL.md
+     * sec 6: "Everything the 23-byte frame has no room for." diag_ever_received
+     * is false (and every other diag_* field below meaningless) until the
+     * first DIAG frame arrives -- a board with no Pico firmware, or a Pico
+     * build that predates this frame's sender, leaves this permanently at
+     * its zero-initialized state, same "no hardware yet, not a bug"
+     * convention as power_ever_received above. */
+    bool     diag_ever_received;
+    uint8_t  diag_trip_reason;         /* SAFETY_TRIP_* (SaftyFW's safety_guards.h), 0 = none */
+    uint16_t diag_warn_mask;           /* one bit per guard currently warning */
+    uint16_t diag_trip_mask;           /* one bit per guard currently tripped */
+    uint32_t diag_uptime_ms;           /* Pico uptime */
+    uint8_t  diag_boot_reason;         /* SAFETY_LINK_DIAG_BOOT_* bits */
+    uint8_t  diag_context_age_100ms;   /* SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER (255) = never */
+    uint32_t diag_context_frames_ok;
+    uint32_t diag_context_frames_bad;  /* CRC/framing/length errors, Pico-side */
+    uint32_t diag_tx_frames_dropped;   /* Pico's TX ring full */
+    uint8_t  diag_state;               /* SAFETY_LINK_DIAG_STATE_* */
+    uint8_t  diag_flags;               /* SAFETY_LINK_DIAG_FLAG_* bits */
+
+    /* SAFETY_CMD_TRIP_EVENT (Frame D) -- the most recent trip event the Pico
+     * has pushed, cached until a newer one replaces it. Deliberately never
+     * cleared by anything else (not by CLEAR_TRIP, not by the trip
+     * condition going away): "why did the kiln stop" must stay answerable
+     * long after the trip itself cleared, which is the entire point of this
+     * frame (LINK_PROTOCOL.md sec 6: "the answer is the only place the
+     * evidence is preserved"). trip_event_ever_received is false (and every
+     * other trip_* field below meaningless) until the first TRIP_EVENT frame
+     * arrives. trip_last_seq is the Pico's own dedup key -- LINK_PROTOCOL.md
+     * sec 6: "Idempotent: the ESP dedups on trip_seq" -- repeated copies of
+     * the same event refresh trip_event_age_ms but are not logged as a new
+     * event (see safety_apply_trip_event() in safety_link.c). */
+    bool     trip_event_ever_received;
+    uint8_t  trip_last_seq;
+    uint8_t  trip_reason;              /* SAFETY_TRIP_* at the moment of this trip */
+    uint32_t trip_uptime_ms;           /* Pico uptime at trip */
+    float    trip_safety_tc_c;         /* safety thermocouple, degC, at trip */
+    float    trip_deciding_threshold;  /* the threshold value that decided the trip */
+    float    trip_current_a[SAFETY_LINK_TRIP_EVENT_CHANNELS]; /* current sense 1..3, amps, at trip */
+    uint8_t  trip_relay_recent_mask;   /* relay_recent_mask last received from the ESP, at trip */
+    uint8_t  trip_context_age_100ms;   /* context_age_100ms at trip */
+    /* How long ago this trip event was received, computed the same way
+     * age_ms above is (safety_link_get_status() fills this in at read time
+     * from a tick recorded when the frame was applied) -- distinct from
+     * "how long ago the trip happened" (trip_uptime_ms is the Pico's clock,
+     * which this ESP does not share a reference with; see SET_CLOCK's
+     * "no guard may ever read this clock" note in LINK_PROTOCOL.md sec 4 for
+     * why the two are not conflated). 0 if trip_event_ever_received is
+     * false. */
+    uint32_t trip_event_age_ms;
 } safety_link_status_t;
 
 /* Counters for the PC's GET_LINK_STATS. All monotonic since start. */
@@ -385,6 +476,14 @@ typedef struct {
     safety_link_status_t cached;      /* last good status, age computed on read */
     TickType_t           cached_tick; /* when `cached` arrived */
     bool                 ever_received;
+
+    /* When the last SAFETY_CMD_TRIP_EVENT was applied -- separate from
+     * cached_tick above, which only moves on GET_STATUS (Frame A). Read
+     * under state_lock, same as cached_tick; safety_link_get_status() turns
+     * it into safety_link_status_t::trip_event_age_ms the same way
+     * cached_tick becomes age_ms. Meaningless until
+     * cached.trip_event_ever_received is true. */
+    TickType_t            trip_event_tick;
 
     safety_link_stats_t stats;
     uint16_t            poll_period_ms;

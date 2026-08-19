@@ -714,6 +714,132 @@ static bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t
     return true;
 }
 
+/* Accepts one SAFETY_CMD_DIAG (Frame B) frame from the Pico and replaces the
+ * cached diagnostic snapshot with it. Same discard-rather-than-partially-
+ * apply contract as safety_apply_status()/safety_apply_power(): a malformed
+ * frame is dropped and counted as a frame error rather than half-applied.
+ * Byte layout (26 bytes total, LINK_PROTOCOL.md sec 6):
+ *   byte0        cmd (0x08)
+ *   byte1        trip_reason
+ *   bytes2..3    warn_mask, u16 LE
+ *   bytes4..5    trip_mask, u16 LE
+ *   bytes6..9    uptime_ms, u32 LE
+ *   byte10       boot_reason
+ *   byte11       context_age_100ms (255 = never received)
+ *   bytes12..15  context_frames_ok, u32 LE
+ *   bytes16..19  context_frames_bad, u32 LE
+ *   bytes20..23  tx_frames_dropped, u32 LE
+ *   byte24       state
+ *   byte25       flags
+ * Mirrors kilnlink_diag_decode() in firmware/CommonFW/src/kilnlink_diag.c
+ * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_DIAG comment for why this
+ * driver hand-parses rather than linking that codec. */
+static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
+{
+    if (msg->length != SAFETY_LINK_DIAG_FRAME_LEN || msg->payload[0] != SAFETY_CMD_DIAG) {
+        if (safety_lock(link)) {
+            link->stats.frame_errors++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "unexpected DIAG frame from dev%u/task%u: subcmd 0x%02X, %u bytes",
+                 msg->device, msg->task_id, msg->payload[0], msg->length);
+        return false;
+    }
+
+    const uint8_t *p = msg->payload;
+    if (!safety_lock(link)) {
+        return false;
+    }
+    link->cached.diag_trip_reason = p[1];
+    link->cached.diag_warn_mask = safety_read_u16_le(&p[2]);
+    link->cached.diag_trip_mask = safety_read_u16_le(&p[4]);
+    link->cached.diag_uptime_ms = safety_read_u32_le(&p[6]);
+    link->cached.diag_boot_reason = p[10];
+    link->cached.diag_context_age_100ms = p[11];
+    link->cached.diag_context_frames_ok = safety_read_u32_le(&p[12]);
+    link->cached.diag_context_frames_bad = safety_read_u32_le(&p[16]);
+    link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
+    link->cached.diag_state = p[24];
+    link->cached.diag_flags = p[25];
+    link->cached.diag_ever_received = true;
+    safety_unlock(link);
+    return true;
+}
+
+/* Accepts one SAFETY_CMD_TRIP_EVENT (Frame D) frame from the Pico and
+ * replaces the cached "most recent trip" snapshot with it -- never cleared
+ * by anything else (see safety_link_status_t's trip_event_* field comments
+ * in safety_link.h for why). Same discard-rather-than-partially-apply
+ * contract as the other Pico->ESP frames. Byte layout (29 bytes total,
+ * LINK_PROTOCOL.md sec 6):
+ *   byte0        cmd (0x0D)
+ *   byte1        trip_seq
+ *   byte2        trip_reason
+ *   bytes3..6    uptime_ms, u32 LE, at trip
+ *   bytes7..10   safety_tc_c, f32 LE, at trip
+ *   bytes11..14  deciding_threshold, f32 LE
+ *   bytes15..18  current_a[0], f32 LE
+ *   bytes19..22  current_a[1], f32 LE
+ *   bytes23..26  current_a[2], f32 LE
+ *   byte27       relay_recent_mask last received
+ *   byte28       context_age_100ms at trip
+ * Mirrors kilnlink_trip_decode() in firmware/CommonFW/src/kilnlink_trip.c
+ * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_TRIP_EVENT comment for why
+ * this driver hand-parses rather than linking that codec.
+ *
+ * Idempotent per LINK_PROTOCOL.md sec 6 ("the ESP dedups on trip_seq"): the
+ * Pico repeats this frame a few times against loss, so every copy is still
+ * *applied* (repetition is what makes trip_event_age_ms track the most
+ * recent copy actually received), but only a trip_seq that differs from the
+ * one already cached is logged as a new event -- otherwise a healthy resend
+ * burst would look like three separate trips in the log. */
+static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *msg)
+{
+    if (msg->length != SAFETY_LINK_TRIP_EVENT_FRAME_LEN || msg->payload[0] != SAFETY_CMD_TRIP_EVENT) {
+        if (safety_lock(link)) {
+            link->stats.frame_errors++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "unexpected TRIP_EVENT frame from dev%u/task%u: subcmd 0x%02X, %u bytes",
+                 msg->device, msg->task_id, msg->payload[0], msg->length);
+        return false;
+    }
+
+    const uint8_t *p = msg->payload;
+    uint8_t trip_seq = p[1];
+    uint8_t trip_reason = p[2];
+    float safety_tc_c = safety_read_f32_le(&p[7]);
+    float deciding_threshold = safety_read_f32_le(&p[11]);
+
+    if (!safety_lock(link)) {
+        return false;
+    }
+    bool is_new_event =
+        !link->cached.trip_event_ever_received || link->cached.trip_last_seq != trip_seq;
+
+    link->cached.trip_last_seq = trip_seq;
+    link->cached.trip_reason = trip_reason;
+    link->cached.trip_uptime_ms = safety_read_u32_le(&p[3]);
+    link->cached.trip_safety_tc_c = safety_tc_c;
+    link->cached.trip_deciding_threshold = deciding_threshold;
+    link->cached.trip_current_a[0] = safety_read_f32_le(&p[15]);
+    link->cached.trip_current_a[1] = safety_read_f32_le(&p[19]);
+    link->cached.trip_current_a[2] = safety_read_f32_le(&p[23]);
+    link->cached.trip_relay_recent_mask = p[27];
+    link->cached.trip_context_age_100ms = p[28];
+    link->cached.trip_event_ever_received = true;
+    link->trip_event_tick = xTaskGetTickCount();
+    safety_unlock(link);
+
+    if (is_new_event) {
+        ESP_LOGW(TAG, "safety processor TRIPPED: reason 0x%02X, trip_seq %u, safety TC %.1f C "
+                      "(threshold %.1f)",
+                 (unsigned)trip_reason, (unsigned)trip_seq, (double)safety_tc_c,
+                 (double)deciding_threshold);
+    }
+    return true;
+}
+
 /* Drains the inbox for up to wait_ms, applying every status frame found.
  * Returns true if at least one was applied. Waiting on the *first* message
  * only -- once something has arrived the rest of the queue is taken without
@@ -755,6 +881,12 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
                 break;
             case SAFETY_CMD_POWER:
                 safety_apply_power(link, &msg);
+                break;
+            case SAFETY_CMD_DIAG:
+                safety_apply_diag(link, &msg);
+                break;
+            case SAFETY_CMD_TRIP_EVENT:
+                safety_apply_trip_event(link, &msg);
                 break;
             default:
                 break;
@@ -1041,6 +1173,15 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
         link->cached.power_channel_i_conducting_a[ch] = NAN;
         link->cached.power_channel_conduction_fraction[ch] = NAN;
     }
+    /* SAFETY_CMD_TRIP_EVENT (Frame D) -- same NaN-until-real-reading
+     * reasoning; gated behind trip_event_ever_received either way, but a
+     * caller that forgets to check it sees NaN, not a plausible-looking 0. */
+    link->cached.trip_safety_tc_c = NAN;
+    link->cached.trip_deciding_threshold = NAN;
+    for (unsigned ch = 0; ch < SAFETY_LINK_TRIP_EVENT_CHANNELS; ch++) {
+        link->cached.trip_current_a[ch] = NAN;
+    }
+    link->cached.diag_context_age_100ms = (uint8_t)SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER;
 
     /* Declared up here, not at first use: every failure below lands on the
      * shared cleanup labels, which report it. */
@@ -1231,6 +1372,11 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     out->age_ms = safety_age_ms_locked(link);
     out->link_up = safety_link_up_locked(link);
     out->fault_asserted = (link->fault_sources != 0u);
+    /* trip_event_age_ms, same "age computed on read" contract as age_ms
+     * above -- meaningless (and left at whatever safety_elapsed_ms(0) works
+     * out to) until trip_event_ever_received is true. */
+    out->trip_event_age_ms =
+        out->trip_event_ever_received ? safety_elapsed_ms(link->trip_event_tick) : 0u;
     safety_unlock(link);
     return ESP_OK;
 }

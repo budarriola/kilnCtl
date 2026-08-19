@@ -4980,3 +4980,110 @@ context frames, including `relay_recent_mask`" item.
       confirms a real `SaftyFW` build decodes it correctly. `SaftyFW`'s
       receive side for this frame is separately tracked in
       `firmware/SaftyFW/TODO.md`.
+
+### 10.13 DIAG / TRIP_EVENT decode + dispatch (ROADMAP.md M5)
+
+**2026-08-19.** `LINK_PROTOCOL.md` sec 6's Frame B (`SAFETY_CMD_DIAG`, `0x08`,
+26 bytes) and Frame D (`SAFETY_CMD_TRIP_EVENT`, `0x0D`, 29 bytes) got
+host-tested codecs in `firmware/CommonFW` (`kilnlink_diag.{c,h}`,
+`kilnlink_trip.{c,h}`) in an earlier pass; this one closes the other half —
+`KilnFW`'s `safety_link.c` decoding and caching them. Both frames are
+Pico → ESP telemetry the Pico is not yet building (`SaftyFW`'s send path for
+either is explicitly out of scope here — a separate pass, tracked in
+`firmware/SaftyFW/TODO.md` — is what wires `link_task.c` to
+`safety_core.c`'s guard state), so this closes "the ESP can receive and
+decode these frames", not "the ESP has ever received a real one."
+
+- [x] **`uart_task_ids.h`**: added `SAFETY_CMD_DIAG` (`0x08`) and
+      `SAFETY_CMD_TRIP_EVENT` (`0x0D`) to the `SAFETY_CMD_*` list, next to
+      the existing `SAFETY_CMD_POWER` (`0x0E`) entry and documented the same
+      way — this ESP-IDF component still compiles only
+      `kilnlink_crc.c`/`kilnlink_frame.c`/`kilnlink_context.c`
+      (`components/kilnlink/CMakeLists.txt`), so `safety_link.c` hand-parses
+      both new frames rather than linking `kilnlink_diag.c`/`kilnlink_trip.c`
+      directly, same reasoning as `SAFETY_CMD_POWER`.
+- [x] **`safety_link.h`**: `SAFETY_LINK_DIAG_FRAME_LEN` (26),
+      `SAFETY_LINK_TRIP_EVENT_FRAME_LEN` (29), and the DIAG flags/boot-reason/
+      state-byte constants mirrored from `kilnlink_diag.h`
+      (`SAFETY_LINK_DIAG_FLAG_*`, `SAFETY_LINK_DIAG_BOOT_*`,
+      `SAFETY_LINK_DIAG_STATE_*`, `SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER`).
+      `safety_link_status_t` gained twelve `diag_*` fields (trip/warn masks,
+      uptime, boot reason, context-frame health counters, TX-drop counter,
+      state, flags) and nine `trip_*` fields for the most recent
+      `TRIP_EVENT` (sequence, reason, uptime, safety TC, deciding threshold,
+      three current channels, relay-recent mask, context age at trip), plus
+      a `trip_event_age_ms` companion computed the same way the link's own
+      `age_ms` is. `SafetyLinkClass` gained one new field,
+      `trip_event_tick`, to support that age computation (`cached_tick`
+      only moves on `GET_STATUS`, so a second tick was needed rather than
+      reusing it).
+- [x] **`safety_link.c`**: `safety_apply_diag()` and
+      `safety_apply_trip_event()`, both following `safety_apply_power()`'s
+      exact shape — length/subcommand check first (a mismatch counts a frame
+      error and logs a warning, same as every other frame here), then a
+      locked field-by-field copy, byte offsets matching
+      `kilnlink_diag_decode()`/`kilnlink_trip_decode()`. `safety_drain_inbox()`
+      now dispatches `SAFETY_CMD_DIAG`/`SAFETY_CMD_TRIP_EVENT` to them
+      alongside the existing `GET_STATUS`/`FW_VERSION`/`UPDATE_STATUS`/`POWER`
+      cases. `TRIP_EVENT` is idempotent per `LINK_PROTOCOL.md`'s own
+      description ("the ESP dedups on `trip_seq`") — every copy received
+      still updates the cache and `trip_event_tick` (so a resend burst keeps
+      the reported age accurate), but only a `trip_seq` that actually
+      changed logs `"safety processor TRIPPED"` at `ESP_LOGW`, so three
+      repeats of the same event don't read as three separate trips.
+      `safety_link_start()` initializes the trip/DIAG float fields to `NaN`
+      and `diag_context_age_100ms` to `SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER`
+      (255), same "NaN/sentinel, not 0, until a real reading arrives"
+      convention as the temperature/power fields — belt-and-suspenders,
+      since every field here is also gated behind
+      `diag_ever_received`/`trip_event_ever_received`.
+- [x] **`dashboard_http.h`/`.c`**: `dashboard_status_t` gained the
+      `diag_ever_received`/`diag_*` and `trip_event_ever_received`/`trip_*`
+      fields as a straight passthrough of `safety_link_status_t`'s new
+      fields (same `TODO.md` 10.1a shared-backend rule as `safety_temp_c`/
+      `power_w`). `GET /api/status` emits them only when their `*_ever_received`
+      flag is true (the DIAG/TRIP_EVENT keys are simply absent from the JSON
+      object otherwise, rather than emitting a run of `null`s for a dozen
+      fields — a different null-convention than `safety_temp_c`'s "always
+      present, sometimes `null`," chosen because DIAG/TRIP_EVENT are
+      logically one wide record each, not independent scalars). The
+      `status_get_handler` JSON buffer grew `896` → `1400` bytes to hold the
+      worst case with every optional block populated.
+- [x] **LCD (`ui_page_safety.c`)**: one new row, "Last trip: reason 0xNN,
+      Ns ago" (or "---" before the first `TRIP_EVENT` arrives) — chosen
+      because `LINK_PROTOCOL.md` sec 7 calls the trip reason "the answer to
+      'why did the kiln stop'" and it was the only field that fit this
+      page's documented ~264px no-scroll budget (`ui_page_home.c`'s header
+      comment derives that number; this page already used ~200px of it for
+      its existing four rows plus the back button, per the arithmetic
+      checked before adding anything). `DIAG`'s warn/trip masks and
+      context-frame health counters are cached and HTTP-exposed
+      (`GET /api/status` above) but were deliberately **not** added here —
+      squeezing a fifth and sixth row into the remaining ~36-64px of slack
+      would leave the page uncomfortably close to its ceiling for diagnostic
+      data an operator doesn't need mid-firing; a dedicated diagnostics page
+      (the `ui_page_board_health.c` precedent, TODO.md 10.7) is the better
+      home for it if/when it's added, not this page.
+- [x] `idf.py -C firmware/KilnFW build` (ninja, incremental against an
+      already-configured `build/` — see this repo's
+      `project_kilnfw_idf_build_invocation` memory for why `idf.py build`
+      itself needs the PowerShell profile script sourced first): clean, no
+      new warnings, under `-Werror`. `KilnCtrl.bin` 0x157800 bytes, 8% of the
+      `factory` partition free (was 9% before this pass — the new fields/
+      functions cost about 1% of the partition).
+- [ ] **Not hardware-verified, and cannot be from this environment.** No
+      ESP32-S3/Pico is attached, and ROADMAP.md M0 already established the
+      isolated link doesn't pass a byte end-to-end on real hardware — so
+      `safety_apply_diag()`/`safety_apply_trip_event()` have never decoded a
+      frame that actually crossed the wire, only a clean cross-compile.
+      Real verification needs both M0 (link fixed) and a `SaftyFW` build
+      that actually sends Frame B/Frame D, which does not exist yet (see
+      this section's opening paragraph) — nothing here can be exercised
+      against live safety telemetry until then.
+- [ ] **Not done this pass**: mirroring `DIAG`/`TRIP_EVENT` onto the
+      PC-link `SAFETY` task (`uart_bridge.c`) so `pc_tools`/the MCP server
+      see the same data without Wi-Fi — `LINK_PROTOCOL.md` sec 7's "Mirror
+      all of it on the PC-link SAFETY task as well" and `LINK_PROTOCOL.md`
+      sec 9 item 0.9 both call for this, but the task this pass was scoped
+      to (`dashboard_http.c`/`ui_page_safety.c`, the web/LCD half of 0.9)
+      didn't extend to `uart_bridge.c`. A real follow-up, not forgotten.

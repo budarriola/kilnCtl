@@ -348,14 +348,50 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       `SAFETY_CMD_TRIP_EVENT` (Frame D, `0x0D`, 29 bytes) landed in
       `firmware/CommonFW` — `kilnlink_diag.{c,h}`, `kilnlink_trip.{c,h}`,
       host-tested (9/9 CommonFW test suites pass, including the two new
-      ones). **Still open**: neither frame has a send path on `SaftyFW`
+      ones). **2026-08-19: `KilnFW`'s decode/dispatch half now exists too.**
+      `safety_link.c` gained `safety_apply_diag()` and
+      `safety_apply_trip_event()`, hand-parsing the same 26/29-byte layouts
+      the CommonFW codecs define (this ESP-IDF component still compiles only
+      `kilnlink_crc.c`/`kilnlink_frame.c`/`kilnlink_context.c` — see
+      `firmware/KilnFW/components/kilnlink/CMakeLists.txt` — so DIAG/
+      TRIP_EVENT are hand-parsed the same way GET_STATUS and POWER already
+      are, not by linking the new codecs directly), and
+      `safety_drain_inbox()` now dispatches `SAFETY_CMD_DIAG` (`0x08`) and
+      `SAFETY_CMD_TRIP_EVENT` (`0x0D`, both newly defined in
+      `uart_task_ids.h`) to them. `safety_link_status_t` gained twelve
+      `diag_*` fields (trip/warn masks, boot reason, context-frame health
+      counters, armed/warn/tripped state) and nine `trip_*` fields for the
+      most recent trip event, including a dedicated `trip_event_age_ms`
+      computed the same way the link's own `age_ms` is. `TRIP_EVENT`
+      dedups on `trip_seq` for *logging* purposes only (a resend burst logs
+      once, not three times) but every copy received still refreshes the
+      cache and its age, per this file's own idempotency note in sec 6.
+      `GET /api/status` (`dashboard_http.c`) now surfaces both frames'
+      fields (null until each has actually arrived, same convention as
+      `safety_temp_c`/`power_w`). The LCD gained exactly one new row —
+      `ui_page_safety.c`'s "Last trip" line — chosen because sec 7 calls
+      trip reason "the answer to 'why did the kiln stop'" and it was the
+      only field that fit the page's documented ~264px no-scroll budget;
+      DIAG's warn/trip masks and context-health counters are cached and
+      HTTP-exposed but deliberately left off the LCD (see `TODO.md`'s entry
+      for the reasoning and the diagnostics-page follow-up this leaves).
+      `idf.py -C firmware/KilnFW build` (via ninja, incremental after a full
+      configure) is clean, no new warnings, under `-Werror`.
+      **Still open**: neither frame has a send path on `SaftyFW`
       (guard-trip state would need to reach `link_task.c` from
       `safety_core.c` through whatever cross-task notification already
       exists, respecting the link-isolation direction `check_isolation.ps1`
-      enforces — not investigated this pass) or a decode/dispatch path on
-      `KilnFW`'s `safety_link.c`. The codec-only half of this closes
-      cleanly; the wiring half is a separate follow-up. Nothing here has
-      crossed a real link (M0's bench-confirmed dead link) regardless.
+      enforces — not investigated this pass), and sec 9 item 0.9's other
+      half — mirroring DIAG/TRIP_EVENT onto the PC-link `SAFETY` task in
+      `uart_bridge.c` so `pc_tools`/MCP see the same data without Wi-Fi —
+      is not done. **Not hardware-verified, and cannot be from this
+      environment**: no ESP32-S3/Pico is attached, and M0 already
+      established the isolated link doesn't pass a byte end-to-end on real
+      hardware, so `safety_apply_diag()`/`safety_apply_trip_event()` have
+      never decoded a frame that actually crossed the wire — only
+      host-tested codec vectors on the `SaftyFW`/`CommonFW` side and a
+      clean cross-compile on the `KilnFW` side. Nothing here has crossed a
+      real link (M0's bench-confirmed dead link) regardless.
 - [x] Pico never blocks on the link — all five no-wait rules honoured.
       **Audited 2026-08-18, no violations found** (`firmware/SaftyFW/src/
       tasks/link_task.c`, `uart_owner.c`): (1) never ACKs/expects one —
