@@ -310,15 +310,14 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       bench-confirmed dead link) to confirm the frame decodes correctly on
       the receiving end -- this closes "the ESP builds and sends the frame",
       not "a real Pico received and parsed it correctly".
-- [ ] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power.
-      **2026-08-18**: the ESP-side half of power telemetry is done —
-      `firmware/CommonFW/src/kilnlink_power.c` (Frame E's 55-byte codec,
-      host-tested) plus `KilnFW/App/drivers/safety_link.c`'s
-      `safety_apply_power()` dispatch and cache. Still open because `SaftyFW`
-      does not build or send `SAFETY_CMD_POWER` yet — no live current-sensing/
-      power-estimate producer exists on the Pico side (see the "Current
-      sensing" bullet above, also still open), so this frame has never
-      crossed a real link. See `KilnFW/TODO.md` 10.10.
+- [~] Pico → ESP telemetry: status, diagnostics, firmware version, trip events, power.
+      **2026-08-18**: status, firmware version, and power (`SAFETY_CMD_POWER`,
+      commit `b1fdf46`) are now built and sent by `SaftyFW`'s `link_task.c`
+      and decoded by `KilnFW`'s `safety_link.c`. **Still open**: diagnostics
+      and trip-event frames have no codec or send path on either side yet —
+      not attempted this pass. Nothing here has crossed a real link (M0's
+      bench-confirmed dead link), so this closes "both sides build/send/
+      decode the frames that exist", not "verified received correctly."
 - [x] Pico never blocks on the link — all five no-wait rules honoured.
       **Audited 2026-08-18, no violations found** (`firmware/SaftyFW/src/
       tasks/link_task.c`, `uart_owner.c`): (1) never ACKs/expects one —
