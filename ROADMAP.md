@@ -309,7 +309,17 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       Blocks all real-reading work below it — SPI bus verify, per-channel type
       config, and fault-read all need the parts populated/wired first, not just
       the schematic net
-- [ ] MAX31856 on J7, with per-thermocouple type configuration
+- [~] MAX31856 on J7, with per-thermocouple type configuration —
+      **2026-08-19: the driver and config plumbing exist now, hardware
+      still doesn't.** `max31856.{c,h}` is a full single-channel driver
+      (ported from KilnFW's), and a new `config_store.{c,h}`/
+      `config_store_flash.c` (versioned, CRC'd, ARMED-refused writes) now
+      sources `tc_type` at boot instead of a hard-coded placeholder —
+      `SaftyFW/TODO.md` Phase 9. **Still open**: no PC/link command exists
+      to actually set `tc_type` (`SAFETY_CMD_SET_CONFIG` is unwritten), and
+      the part itself is still not physically populated/wired on the
+      bench — this item stays `[~]` until both a real commissioning path
+      and the hardware exist.
 - [x] Guards implemented and **host-tested against synthetic inputs**, no relay
       yet — 2026-08-18, `firmware/SaftyFW/src/safety_guards.c`. 12 of the 13
       guards in `SAFETY_MODEL.md` section 4 are built as pure functions and
