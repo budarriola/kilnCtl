@@ -1,0 +1,91 @@
+{
+  "scenario": {
+    "name": "main_safety_skew",
+    "version": 1,
+    "hash": "cacb7ef7a335879ae7deb95dee8bfabe3f53d3c730bc35c58942edbf784ea278"
+  },
+  "fw_versions": {},
+  "seed": 49,
+  "timescale": 20.0,
+  "start_time": 1787267889.1631658,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 22000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "skew",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 240000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 2,
+      "sim_time_us": 474000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": true,
+        "relay": "K1",
+        "edge": "open"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 374000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_HEATING_FAILED"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s1_trips_conservatively_early",
+      "verdict": "BLOCKED",
+      "evidence": [
+        0
+      ],
+      "detail": "event:guard_trip not observed within 120s after fault_fired (seq 0) [BLOCKED: abs_max_temp_c defaults to 0.0 and safety_core.c never commissions it (its own comment: permanently the conservative 'nothing commissioned' state until config_store exists) -- safety_guards.c's S1 block only evaluates `if (cfg->abs_max_temp_c > 0.0f)`, so S1 cannot trip at all against present-day SaftyFW no matter what the fixture does, independent of whether this clause's own within_s:120 guess is even the right number.]",
+      "blocked_on": {
+        "reason": "abs_max_temp_c defaults to 0.0 and safety_core.c never commissions it (its own comment: permanently the conservative 'nothing commissioned' state until config_store exists) -- safety_guards.c's S1 block only evaluates `if (cfg->abs_max_temp_c > 0.0f)`, so S1 cannot trip at all against present-day SaftyFW no matter what the fixture does, independent of whether this clause's own within_s:120 guess is even the right number.",
+        "phase": "Phase 9 (config_store) -- SAFETY_MODEL.md section 1: abs_max_temp_c has no default and must be commissioned. config_store now exists (config_store.{c,h}/ config_store_flash.c) and already wires tc_type as its first real consumer, but abs_max_temp_c is not among its fields yet (only `reserved` room is set aside, per config_store.h's own header comment), and safety_core.c never calls into config_store for guard thresholds at all -- s_guard_cfg is a zero-initialized static. So this is 'the field and the read path don't exist yet', not 'config_store doesn't exist yet' -- safety_core.c's own TODO comment (line 71-73) predates config_store's construction and is itself stale on that point."
+      }
+    },
+    {
+      "name": "s10_stays_quiet",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_warn never observed before the boundary"
+    }
+  ],
+  "verdict": "BLOCKED",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

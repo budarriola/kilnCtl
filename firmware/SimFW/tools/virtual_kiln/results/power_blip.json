@@ -1,0 +1,90 @@
+{
+  "scenario": {
+    "name": "power_blip",
+    "version": 1,
+    "hash": "328ff4ca3a7a126023aae344d01cff78951f6441af2fecd09daa4b56d6a32531"
+  },
+  "fw_versions": {},
+  "seed": 57,
+  "timescale": 10.0,
+  "start_time": 1787267920.2223263,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 57000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 360000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": true,
+        "relay": "K1",
+        "edge": "open"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 345000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_HEATING_FAILED"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "mainfault_reads_healthy_during_blip",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_trip never observed before the boundary"
+    },
+    {
+      "name": "relays_deenergize_no_current_during_blip",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (dut_power {'state': False}) never occurred"
+    },
+    {
+      "name": "s6b_stays_at_warn_not_trip",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:K4_open never observed before the boundary [blocked_on annotation is STALE: this expectation now passes -- the DUT appears to have gained the capability the annotation assumed it lacked; consider removing blocked_on from the scenario]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0. Separately, link_up is never set true because safety_core_build_input() never populates it (the struct literal has no .link_up entry at all -- confirmed by reading safety_core.c), so S6b's own unconditional ~120s hard-backstop trip (link_dead_hard_s default) would also eventually fire in any run long enough to reach sim_end regardless of this blip's own current/link behavior -- two independent reasons this cannot currently validate the 'stays at warn, not trip' claim it names.",
+        "phase": "For K4 energize: link_task exists but has no LINK_FRAME_REQUEST_ENABLE_CMD case (SAFETY_CMD_REQUEST_ENABLE 0x02, already sent by KilnFW) -- a genuinely missing decoder, Phase 7 work not yet done. For link_up: unlike context_valid (which link_task already produces via link_task_get_context_snapshot(), just unread by safety_core_build_input()), link_up has no producer/getter in link_task.{c,h} at all yet -- link_task.h's own doc comment on link_task_get_degraded_no_context() confirms Phase 7's context-dependent-guard wiring is still future work. Both are Phase 7 gaps, but not the same gap as each other, and neither is 'link_task does not exist' -- link_task is built and handles PUSH_CONTEXT/CLEAR_TRIP/SET_CONFIG/ROLLBACK/ ANNOUNCE_REBOOT/ANNOUNCE_VERSION/FW_VERSION already."
+      },
+      "stale_annotation": true
+    },
+    {
+      "name": "safe_resume",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (dut_power {'state': True}) never occurred"
+    }
+  ],
+  "verdict": "PASS",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

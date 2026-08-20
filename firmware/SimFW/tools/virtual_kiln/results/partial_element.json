@@ -1,0 +1,92 @@
+{
+  "scenario": {
+    "name": "partial_element",
+    "version": 1,
+    "hash": "aaacee01b0b66a54886be127feb18bf60102393dd362ddb3c7c02d25491b51e3"
+  },
+  "fw_versions": {},
+  "seed": 51,
+  "timescale": 20.0,
+  "start_time": 1787267912.6133163,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 12000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "partial",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 226000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 2,
+      "sim_time_us": 462000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": true,
+        "relay": "K1",
+        "edge": "open"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 392000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_HEATING_FAILED"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "no_guard_trips",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:K4_open never observed before the boundary [blocked_on annotation is STALE: this expectation now passes -- the DUT appears to have gained the capability the annotation assumed it lacked; consider removing blocked_on from the scenario]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, not because the reduced-power coil genuinely stayed inside every guard's healthy band.",
+        "phase": "Phase 7 (link_task) -- link_task exists and already decodes several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP, SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one. KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over the link (safety_link_request_enable(), App/drivers/ uart_bridge.c), yet SaftyFW's link_task.c has no LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against link_frame.h's command list), so relay_owner_command_energize() is never called from anywhere. A genuinely missing decoder, not a wiring omission on an existing pair -- see ROADMAP.md M4's matching finding."
+      },
+      "stale_annotation": true
+    },
+    {
+      "name": "current_still_present_just_reduced",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:current_present not observed within 5s after fault_fired (seq 0)"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "scenario": {
+    "name": "baseline_firing",
+    "version": 1,
+    "hash": "f5587cdbfc2c13422b00f7c1c11374aec5834bc38860995eafce1f7ffa5e24c3"
+  },
+  "fw_versions": {},
+  "seed": 1,
+  "timescale": 10.0,
+  "start_time": 1787267806.3720977,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 55000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 304000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": true,
+        "relay": "K1",
+        "edge": "open"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 297000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_HEATING_FAILED"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "never_faults",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:fault_line_asserted never observed before the boundary"
+    },
+    {
+      "name": "never_estops",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:estop_open never observed before the boundary"
+    },
+    {
+      "name": "never_trips",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:K4_open never observed before the boundary [blocked_on annotation is STALE: this expectation now passes -- the DUT appears to have gained the capability the annotation assumed it lacked; consider removing blocked_on from the scenario]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way for the whole run, because relay_owner_command_energize() (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built (INIT/GRACE/ARMED/TRIPPED state machine) but is called by nothing anywhere in the current source tree -- so K4_open is already true at sim-time 0, before a healthy no-fault run has had any chance to prove anything, not because this baseline genuinely stayed healthy under a real energized relay.",
+        "phase": "Phase 7 (link_task) -- link_task exists and already decodes several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP, SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one. KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over the link (safety_link_request_enable(), App/drivers/ uart_bridge.c), yet SaftyFW's link_task.c has no LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against link_frame.h's command list), so relay_owner_command_energize() is never called from anywhere. A genuinely missing decoder, not a wiring omission on an existing pair -- see ROADMAP.md M4's matching finding."
+      },
+      "stale_annotation": true
+    },
+    {
+      "name": "heat_actually_cycles",
+      "verdict": "PASS",
+      "evidence": [
+        0,
+        0
+      ],
+      "detail": "dut:K1_closed observed 0.000s after relay_edge"
+    }
+  ],
+  "verdict": "PASS",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "scenario": {
+    "name": "estop_midfire",
+    "version": 1,
+    "hash": "5a4a932628e32886783f47eaa477338ce1d0694c7eec7bf5c93e1ebf28631860"
+  },
+  "fw_versions": {},
+  "seed": 52,
+  "timescale": 10.0,
+  "start_time": 1787267866.1201506,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 57000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 321000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": true,
+        "relay": "K1",
+        "edge": "open"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 300000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_HEATING_FAILED"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "fast_trip",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (fault_fired {'slot': 'estop'}) never occurred"
+    },
+    {
+      "name": "stays_latched_after_physical_release",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (fault_cleared {'slot': 'estop'}) never occurred"
+    },
+    {
+      "name": "latched_at_end",
+      "verdict": "FAIL",
+      "evidence": [],
+      "detail": "K4 state never observed; cannot be dut:K4_open at end"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

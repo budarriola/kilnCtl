@@ -1,0 +1,93 @@
+{
+  "scenario": {
+    "name": "welded_ssr_midfire",
+    "version": 1,
+    "hash": "b9fa061fa0cf399d27acce3f1c950690c89bd3690c8c6fd052ac7dd85850bd51"
+  },
+  "fw_versions": {},
+  "seed": 42,
+  "timescale": 10.0,
+  "start_time": 1787267607.6488235,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 59000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 308000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": true,
+        "relay": "K1",
+        "edge": "open"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 297000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_HEATING_FAILED"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "safety_trips",
+      "verdict": "BLOCKED",
+      "evidence": [],
+      "detail": "triggering event (fault_fired {'slot': 'weld'}) never occurred [BLOCKED: context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's whole block (in->any_current_present && !in->relay_commanded_recently) lives inside safety_guards.c's `if (!in->context_valid) { ... } else { ... }` split and is unconditionally reset/skipped while context_valid is false, so this cannot fire against present-day SaftyFW regardless of what the fixture does.]",
+      "blocked_on": {
+        "reason": "context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's whole block (in->any_current_present && !in->relay_commanded_recently) lives inside safety_guards.c's `if (!in->context_valid) { ... } else { ... }` split and is unconditionally reset/skipped while context_valid is false, so this cannot fire against present-day SaftyFW regardless of what the fixture does.",
+        "phase": "Phase 7 (link_task) is built and already publishes this context -- link_task_publish_context()/ link_task_get_context_snapshot() (firmware/SaftyFW/src/tasks/ link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT (0x07) frame today. The real gap is one layer up: safety_core.c's safety_core_build_input() never calls link_task_get_context_snapshot() at all (see its own TODO at safety_core.c:208-210), so context_valid stays at its zero-init false regardless of what the ESP sends. A wiring gap in an already-built producer/consumer pair, not a missing Phase 7 deliverable -- distinct from S6b's own unconditional-trip finding, which is about link_up (see power_blip.yaml's blocked_on), a fact link_task has no producer for at all yet, not merely an unread one."
+      }
+    },
+    {
+      "name": "no_early_trip",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "boundary fault 'weld' never fired"
+    },
+    {
+      "name": "trip_latched",
+      "verdict": "FAIL",
+      "evidence": [],
+      "detail": "K4 state never observed; cannot be dut:K4_open at end"
+    },
+    {
+      "name": "current_decays_after_k4_opens",
+      "verdict": "BLOCKED",
+      "evidence": [],
+      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred [BLOCKED: Downstream of `safety_trips` above: this clause's own trigger is the relay_edge{K4, open} event, which only occurs if S3 actually trips K4 -- since S3 cannot fire (see `safety_trips` blocked_on), the triggering edge never occurs either.]",
+      "blocked_on": {
+        "reason": "Downstream of `safety_trips` above: this clause's own trigger is the relay_edge{K4, open} event, which only occurs if S3 actually trips K4 -- since S3 cannot fire (see `safety_trips` blocked_on), the triggering edge never occurs either.",
+        "phase": "Same as `safety_trips` above -- link_task already publishes this context; safety_core_build_input() just never reads it. Not a Phase 7 existence gap."
+      }
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}
