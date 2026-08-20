@@ -30,6 +30,17 @@ faults:
     target: ct:0
     trigger: { on_relay_edge: { relay: K4, edge: open, delay_s: 0 } }
     duration: permanent
+    # params[0] = forced amps (fault_sched.h's
+    # FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST doc comment). Without a
+    # params: list this forces the CT channel to CT_WAVE_MODE_MANUAL at
+    # 0.0 A -- the opposite of "current keeps flowing", silently defeating
+    # this scenario's entire point (S9's "current persists after K4 opens"
+    # signature). 20.0 = V_mains (240, thermal_model.c's preset default) /
+    # this scenario's own zones[0].R_element override (12.0, line 13) --
+    # exactly the current a genuinely-conducting zone-0 element would draw,
+    # so the persisted current is physically plausible rather than an
+    # arbitrary large number.
+    params: [20.0]
 expect:
   - name: initial_trip
     event: { type: fault_fired, slot: weld_ssr }
@@ -37,11 +48,25 @@ expect:
       dut: K4_open
       within_s: 25       # stuck_on_time_s = 20s (SAFETY_MODEL.md §4 S3) + margin
       not_before_s: 18
+    blocked_on:
+      reason: "context_valid is never set true by safety_core_build_input()
+               (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's block
+               lives inside safety_guards.c's context_valid-gated
+               else-branch and is unconditionally reset while context_valid
+               is false, so this cannot fire against present-day SaftyFW."
+      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
+              the context frame that would set context_valid true."
   - name: contactor_weld_engages_on_k4_open
     event: { type: relay_edge, relay: K4, edge: open }
     then:
       dut: current_present
       within_s: 1
+    blocked_on:
+      reason: "Downstream of `initial_trip` above: this clause's trigger is
+               the relay_edge{K4, open} event, which only occurs if S3
+               actually trips K4 -- since S3 cannot fire (see `initial_trip`
+               blocked_on), the triggering edge never occurs either."
+      phase: "Phase 7 (link_task) -- same as `initial_trip` above."
   - name: s9_escalates
     event: { type: relay_edge, relay: K4, edge: open }
     then:
@@ -50,10 +75,29 @@ expect:
                         # margin for the peak-hold decay and evaluation tick
       not_before_s: 8   # must not report ineffective before the decay window
                         # (τ≈1s) could plausibly have cleared a real trip
+    blocked_on:
+      reason: "Doubly blocked: (1) same relay_edge{K4, open} trigger
+               dependency on S3 as `contactor_weld_engages_on_k4_open`
+               above, and (2) even with a trip, S9's own escalation
+               (safety_guards.c: `if (in->relay_deenergized) { ... }`) reads
+               relay_deenergized, which safety_core_build_input() also never
+               populates -- so S9 could not escalate even if something else
+               produced a K4 open edge."
+      phase: "Phase 7 (link_task) for the trigger dependency; relay_deenergized
+              has no dedicated roadmap phase documented anywhere in
+              firmware/SaftyFW/docs -- it is relay_owner's own 'did the
+              hardware actually respond' fact (safety_guards.h's doc comment
+              on the field) and nothing currently wires it from relay_owner
+              back into safety_core_build_input()."
   - name: stays_open_and_latched
     at_end: { dut: K4_open }
   - name: escalation_latched_at_end
     at_end: { event: trip_ineffective_latched }
+    blocked_on:
+      reason: "trip_ineffective can only latch via S9's escalation path
+               (see `s9_escalates` blocked_on above), which cannot run."
+      phase: "Phase 7 (link_task) plus the unphased relay_deenergized gap --
+              see `s9_escalates` blocked_on above."
 manual_checks:
   - "Confirm the GUI/LCD escalates TRIP_INEFFECTIVE distinctly from a normal trip — e.g. a 'POWER IS STILL FLOWING — REMOVE IT AT THE BREAKER' style message, not the ordinary fault banner (SAFETY_MODEL.md §4 S9) — fixture cannot read display/web content"
 report_keep: [telemetry, events]

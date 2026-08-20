@@ -17,18 +17,44 @@ dut:
 faults:
   - id: noise
     # PLAN.md §7.1: "Flaky TC (noise) | Gaussian/spike noise added to
-    # reported temperature". Magnitude/sigma is a bench-tuning parameter not
-    # yet exposed by the frozen scenario schema (PROTOCOL.md, M-B/M-G);
-    # "heavy" per PLAN.md §8 item 7 means large enough that individual
-    # samples plausibly cross S1's ceiling and S10's 200°C disagreement
-    # threshold, but never for 3 consecutive readings or 300s respectively.
+    # reported temperature". params[0] = noise sigma, degC
+    # (fault_sched.h's FAULT_SCHED_TYPE_TC_NOISE doc comment; sigma is a
+    # bench-tuning value, not something PLAN.md/SAFETY_MODEL.md states
+    # numerically anywhere -- this scenario had no `params:` list at all,
+    # so it was firing with sigma 0.0 (zero-amplitude, i.e. no noise
+    # whatsoever) until this pass, which is a dead test regardless of
+    # whether S1/S10 can currently trip at all (see this scenario's
+    # `blocked_on:` annotation below). 50.0 chosen so individual samples
+    # "plausibly cross" S10's tc_disagreement_c = 200°C (SAFETY_MODEL.md §4
+    # S10, confirmed in main_safety_skew.yaml) on rare 4-sigma excursions
+    # (~0.006% of samples, i.e. occasional not sustained) while 3-sigma
+    # (~150°C, covering the overwhelming majority of samples) stays well
+    # under it -- "heavy enough to occasionally spike past a ceiling,
+    # never sustained" per PLAN.md §8 item 7's own description of this
+    # scenario, without guessing a specific S1 ceiling number (abs_max_temp_c
+    # has no default -- SAFETY_MODEL.md §1 -- so no such number exists to
+    # target precisely).
     type: flaky_noise_tc
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
     duration: permanent
+    params: [50.0]
 expect:
   - name: no_trip_ever
     forbid: { dut: K4_open, before: { sim_end: true } }
+    blocked_on:
+      reason: "This forbid clause is currently satisfied for the wrong
+               reason: K4 starts de-energized (open) at boot and stays that
+               way -- relay_owner_command_energize() is fully built
+               (firmware/SaftyFW/src/tasks/relay_owner.c) but called by
+               nothing in the current source tree -- so K4_open is already
+               true at sim-time 0. Separately, this scenario's own exercised
+               guards S1/S10 also cannot evaluate at all today (S1:
+               abs_max_temp_c uncommissioned, Phase 9; S10: context_valid
+               never populated, Phase 7), so 'no trip ever' is not
+               exercising the anti-nuisance behavior it names either way."
+      phase: "Phase 7 (link_task) for K4 energize and S10's context_valid;
+              Phase 9 (config_store) for S1's abs_max_temp_c."
   - name: no_fault_line_latch
     forbid: { dut: fault_line_asserted, before: { sim_end: true } }
 manual_checks:

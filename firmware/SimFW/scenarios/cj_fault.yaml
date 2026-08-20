@@ -21,6 +21,17 @@ faults:
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
     duration: permanent
+    # params[0] = CJ offset, degC (fault_sched.h's FAULT_SCHED_TYPE_TC_CJ_FAULT
+    # doc comment; max31856_regs.c adds this straight onto the internally-
+    # sensed CJ reading). Without a params: list here this fault fires with
+    # magnitude 0 -- a scenario-file gap fixed this pass, not a guard/fixture
+    # bug. 70.0 chosen so reported_cj_c = true_cj_c (~T_ambient = 25 degC,
+    # thermal_model.c's preset default, all presets incl. fast_test) + 70 =
+    # ~95 degC, clearing both safety_guards.c's CJ_WARN_C_DEFAULT (60.0,
+    # line 17) and CJ_MAX_C_DEFAULT (85.0, line 18) with margin (~35 degC
+    # over warn, ~10 degC over trip) instead of landing exactly on a
+    # threshold where float rounding could go either way.
+    params: [70.0]
 expect:
   - name: s5_never_trips_on_cj_alone
     forbid: { event: { type: guard_trip, guard: S5 }, before: { sim_end: true } }

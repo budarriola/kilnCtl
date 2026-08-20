@@ -52,6 +52,29 @@ expect:
       not_before_s: 0.1   # must not trip on the very first bad read alone
                            # -- KilnFW's guard 6 requires 3 *consecutive*
                            # bad reads before it escalates at all
+    blocked_on:
+      reason: "firmware/SaftyFW/src/tasks/safety_core.c's
+               safety_core_build_input() never sets main_fault_asserted --
+               discrete_task.c's discrete_task_main_fault() (a real,
+               200ms-debounced GPIO10 read) exists and is called nowhere in
+               safety_core.c (grepped this pass; only
+               discrete_task_estop_pressed() is called there for S7).
+               safety_guards.c's S6a block only checks
+               `if (in->main_fault_asserted)`, which is therefore always
+               false, so S6a cannot trip against present-day SaftyFW
+               regardless of what KilnFW's own GPIO10 line does -- this is
+               true even though the fixture's half of the story (getting
+               KilnFW to genuinely assert mainFault) works exactly as this
+               scenario's own header comment describes."
+      phase: "Unassigned -- unlike S1/S11/S3/S4/S9/S10/S13's Phase 9/7 gaps,
+              no firmware/SaftyFW/docs/*.md roadmap phase currently tracks
+              wiring discrete_task_main_fault() into
+              safety_core_build_input(); discrete_task.c itself is a
+              completed Phase 4/5 deliverable (its own header comment), so
+              this looks like a plain missed wiring step rather than
+              deliberately deferred work -- worth a SaftyFW-side ticket, not
+              something this scenario library can fix (scenarios/*.yaml
+              cannot touch firmware/SaftyFW/src)."
   - name: fault_line_asserted
     event: { type: fault_fired, slot: oc_main }
     then:

@@ -34,6 +34,16 @@ expect:
       dut: K4_open
       within_s: 25       # stuck_on_time_s = 20s (SAFETY_MODEL.md §4 S3) + margin
       not_before_s: 18
+    blocked_on:
+      reason: "context_valid is never set true by safety_core_build_input()
+               (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's whole
+               block (in->any_current_present && !in->relay_commanded_recently)
+               lives inside safety_guards.c's context_valid-gated
+               else-branch and is unconditionally reset while context_valid
+               is false, so this cannot fire against present-day SaftyFW
+               regardless of what the fixture does."
+      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
+              the context frame that would set context_valid true."
   - name: s8_produces_no_trip_of_its_own_today
     forbid: { event: { type: guard_trip, guard: S8 }, before: { sim_end: true } }
     # S8 ships disabled (max_rate_c_per_min = 0, SAFETY_MODEL.md §4 S8) —

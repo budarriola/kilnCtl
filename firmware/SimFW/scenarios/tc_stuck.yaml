@@ -34,12 +34,27 @@ expect:
       event: { type: guard_warn, guard: S13 }
       within_s: 13       # borrowed_stale_s = 10s (SAFETY_MODEL.md §4 S13) + margin
       not_before_s: 9
+    blocked_on:
+      reason: "context_valid is never set true by safety_core_build_input()
+               (firmware/SaftyFW/src/tasks/safety_core.c) -- S13's staleness
+               tracking (state->s13_stale_elapsed_s/s13_warn) lives inside
+               safety_guards.c's context_valid-gated else-branch and is
+               force-reset to 0/false while context_valid is false, so this
+               cannot warn against present-day SaftyFW regardless of what
+               the fixture does."
+      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
+              the context frame (including sample_counter) that would set
+              context_valid true."
   - name: trips_after_stale_trip_deadline
     event: { type: fault_fired, slot: stuck }
     then:
       dut: K4_open
       within_s: 65       # borrowed_stale_trip_s = 60s (SAFETY_MODEL.md §4 S13) + margin
       not_before_s: 58
+    blocked_on:
+      reason: "Same context_valid gap as `sample_counter_goes_stale` above --
+               S13 cannot warn, so it certainly cannot escalate to a trip."
+      phase: "Phase 7 (link_task) -- same as `sample_counter_goes_stale` above."
 manual_checks:
   - "Confirm SaftyFW is commissioned with tc_source=BORROWED_ZONE or BOTH before running this scenario — S13 only evaluates in those modes (SAFETY_MODEL.md §3/§4 S13); under tc_source=OWN_J7 this same fault, fired on tc:safety instead, would exercise S11 (frozen_window_s=600s) rather than S13, and that commissioning state is not something the fixture itself can verify or set"
 report_keep: [telemetry, events]

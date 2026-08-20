@@ -23,16 +23,32 @@ faults:
   - id: partial
     # PLAN.md §7.1: "Partially failed coil | Wrong element resistance ->
     # wrong current + slow heating". Magnitude: ~60% power per PLAN.md §8
-    # item 10 (stated there explicitly — recorded as a comment since the
-    # scenario schema has no numeric param field yet, e.g. as an
-    # element_health≈0.6-equivalent resistance change).
+    # item 10 (stated there explicitly). params[0] = forced element_health,
+    # 0..1 directly (fault_sched.h's FAULT_SCHED_TYPE_PARTIAL_ELEMENT doc
+    # comment; sim_engine's P_heater = duty * V^2/R * element_health, so
+    # health=0.6 IS the "~60% power" this scenario names). Without a
+    # params: list this fault type reads slot->params[0] == 0.0, which is
+    # indistinguishable from BROKEN_ELEMENT (fully dead, 0% power) rather
+    # than "partially failed" -- fixed this pass.
     type: partial_element_health
     target: element:0
     trigger: { at_sim_time: { t: 10 } }
     duration: permanent
+    params: [0.6]
 expect:
   - name: no_guard_trips
     forbid: { dut: K4_open, before: { sim_end: true } }
+    blocked_on:
+      reason: "This forbid clause is currently satisfied for the wrong
+               reason: K4 starts de-energized (open) at boot and stays that
+               way -- relay_owner_command_energize() is fully built
+               (firmware/SaftyFW/src/tasks/relay_owner.c) but called by
+               nothing in the current source tree -- so K4_open is already
+               true at sim-time 0, not because the reduced-power coil
+               genuinely stayed inside every guard's healthy band."
+      phase: "Phase 7 (link_task) -- relay_owner_command_energize() needs a
+              legitimate ARMED-state request from context the ESP sends
+              over the link; link_task does not exist yet to issue it."
   - name: current_still_present_just_reduced
     event: { type: fault_fired, slot: partial }
     then:

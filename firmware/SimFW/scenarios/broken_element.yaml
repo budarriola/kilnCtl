@@ -28,9 +28,34 @@ expect:
       event: { type: guard_warn, guard: S4 }
       within_s: 155      # correlation_window_s = 150s (SAFETY_MODEL.md §4 S4) + margin
       not_before_s: 148
+    blocked_on:
+      reason: "context_valid is never set true by safety_core_build_input()
+               (firmware/SaftyFW/src/tasks/safety_core.c) -- S4's
+               `state->s4_warn = in->relay_commanded_continuously &&
+               !in->any_current_present` assignment lives inside
+               safety_guards.c's context_valid-gated else-branch and is
+               force-reset to false while context_valid is false, so this
+               cannot warn against present-day SaftyFW regardless of what
+               the fixture does."
+      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
+              the context frame that would set context_valid true."
   - name: s4_never_trips
     forbid: { dut: K4_open, before: { sim_end: true } }
     # "This never trips, and that is a design decision" (SAFETY_MODEL.md §4 S4)
+    blocked_on:
+      reason: "This forbid clause is currently satisfied for the wrong
+               reason: K4 starts de-energized (open) at boot and stays that
+               way, because relay_owner_command_energize()
+               (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built but
+               called by nothing in the current source tree -- so K4_open is
+               already true at sim-time 0, before any guard (or lack of one)
+               has had a chance to say anything, not because S4's own
+               correct 'never trips' design held up under test."
+      phase: "Phase 7 (link_task) -- relay_owner_command_energize() is meant
+              to be driven by a legitimate ARMED-state request originating
+              from context the ESP sends over the link; link_task does not
+              exist yet to issue it (same root cause as context_valid/
+              link_up never being populated)."
 manual_checks:
   - "Confirm KilnFW's own thermal_guard 'heating failed' (main-board guard, not SaftyFW) aborts or flags the profile on the LCD/web UI — outside GUARD_TEST_MATRIX.md's scope and not observable by the fixture"
 report_keep: [telemetry, events]

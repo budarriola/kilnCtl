@@ -59,6 +59,20 @@ expect:
     # unpowered, so no CT current should flow during the blip
   - name: s6b_stays_at_warn_not_trip
     forbid: { dut: K4_open, before: { sim_end: true } }
+    blocked_on:
+      reason: "This forbid clause is currently satisfied for the wrong
+               reason: K4 starts de-energized (open) at boot and stays that
+               way -- relay_owner_command_energize() is fully built
+               (firmware/SaftyFW/src/tasks/relay_owner.c) but called by
+               nothing in the current source tree -- so K4_open is already
+               true at sim-time 0. Separately, link_up is never set true by
+               any producer (Phase 7 link_task does not exist), so S6b's own
+               unconditional ~120s hard-backstop trip (link_dead_hard_s
+               default) would also eventually fire in any run long enough
+               to reach sim_end regardless of this blip's own current/link
+               behavior -- two independent reasons this cannot currently
+               validate the 'stays at warn, not trip' claim it names."
+      phase: "Phase 7 (link_task) for both K4 energize and link_up."
     # quiet link + no current = "not an emergency... warn and keep
     # watching" (SAFETY_MODEL.md §4 S6) — this is the expected, SAFE
     # outcome of a brief blip with no current flowing, distinct from the

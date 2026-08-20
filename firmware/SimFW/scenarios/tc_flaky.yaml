@@ -57,6 +57,17 @@ faults:
 expect:
   - name: no_trip_from_flapping
     forbid: { dut: K4_open, before: { sim_end: true } }
+    blocked_on:
+      reason: "This forbid clause is currently satisfied for the wrong
+               reason: K4 starts de-energized (open) at boot and stays that
+               way -- relay_owner_command_energize() is fully built
+               (firmware/SaftyFW/src/tasks/relay_owner.c) but called by
+               nothing in the current source tree -- so K4_open is already
+               true at sim-time 0, not because the flapping fault genuinely
+               failed to trip anything under S5's real streak-reset logic."
+      phase: "Phase 7 (link_task) -- relay_owner_command_energize() needs a
+              legitimate ARMED-state request from context the ESP sends
+              over the link; link_task does not exist yet to issue it."
   - name: no_warn_storm
     forbid: { event: { type: guard_warn, guard: S5 }, before: { sim_end: true } }
     # Resolved: see the `flaky` fault's own comment above for the derivation

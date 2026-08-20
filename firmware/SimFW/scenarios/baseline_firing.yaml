@@ -20,6 +20,21 @@ expect:
     forbid: { dut: estop_open, before: { sim_end: true } }
   - name: never_trips
     forbid: { dut: K4_open, before: { sim_end: true } }
+    blocked_on:
+      reason: "This forbid clause is currently satisfied for the wrong
+               reason: K4 starts de-energized (open) at boot and stays that
+               way for the whole run, because relay_owner_command_energize()
+               (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built
+               (INIT/GRACE/ARMED/TRIPPED state machine) but is called by
+               nothing anywhere in the current source tree -- so K4_open is
+               already true at sim-time 0, before a healthy no-fault run has
+               had any chance to prove anything, not because this baseline
+               genuinely stayed healthy under a real energized relay."
+      phase: "Phase 7 (link_task) -- relay_owner_command_energize() is meant
+              to be driven by a legitimate ARMED-state request originating
+              from context the ESP sends over the link (relay_owner.h's own
+              doc comment); link_task does not exist yet to issue it (same
+              root cause as context_valid/link_up never being populated)."
   - name: heat_actually_cycles
     event: { type: relay_edge, relay: K1, edge: close }
     then:

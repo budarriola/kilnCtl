@@ -24,12 +24,20 @@ faults:
   - id: skew
     # PLAN.md §7.1: "Main/safety disagree | Skew safety TC vs zone truth by
     # an offset/gain". Offset magnitude: +80°C (PLAN.md §8 item 8, stated
-    # explicitly there — recorded here as a comment since the scenario
-    # schema has no numeric param field yet, PROTOCOL.md M-B/M-G).
+    # explicitly there). params[0] = offset degC
+    # (fault_sched.h's FAULT_SCHED_TYPE_MAIN_SAFETY_DISAGREE doc comment);
+    # params[1] (gain) deliberately omitted so it defaults to 1.0 per that
+    # same doc comment -- this scenario only wants an offset skew. The prior
+    # version of this comment claimed "the scenario schema has no numeric
+    # param field yet" -- that was stale even when written: scenario.py's
+    # loader has supported a `params:` list on a fault entry since it was
+    # first written (see `_parse_fault`'s `extra`/`params` handling); this
+    # fault was firing with offset 0.0 (no skew at all) until this pass.
     type: main_safety_disagree
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
     duration: permanent
+    params: [80.0]
 expect:
   - name: s1_trips_conservatively_early
     # With the safety TC reading +80°C hot, S1's 3-consecutive-reading bar
@@ -40,7 +48,10 @@ expect:
     event: { type: fault_fired, slot: skew }
     then:
       event: { type: guard_trip, guard: S1 }
-      within_s: 120     # TODO: still genuinely unresolvable, confirmed by
+      within_s: 120     # See this clause's blocked_on: below -- S1 cannot
+                        # trip at all against present-day SaftyFW regardless
+                        # of this deadline's own accuracy.
+                        # TODO: still genuinely unresolvable, confirmed by
                         # reading safety_guards.c for this pass (lines
                         # 267-293): `abs_max_temp_c == 0` is treated as
                         # "not commissioned -- never trip" (the guard's own
@@ -66,6 +77,19 @@ expect:
                         # replaced with a bench-measured deadline once
                         # abs_max_temp_c is actually commissioned for a real
                         # kiln (SAFETY_MODEL.md §4 S1).
+    blocked_on:
+      reason: "abs_max_temp_c defaults to 0.0 and safety_core.c never
+               commissions it (its own comment: permanently the conservative
+               'nothing commissioned' state until config_store exists) --
+               safety_guards.c's S1 block only evaluates
+               `if (cfg->abs_max_temp_c > 0.0f)`, so S1 cannot trip at all
+               against present-day SaftyFW no matter what the fixture does,
+               independent of whether this clause's own within_s:120 guess
+               is even the right number."
+      phase: "Phase 9 (config_store) -- SAFETY_MODEL.md section 1:
+              abs_max_temp_c has no default and must be commissioned; there
+              is no config_store yet to commission it from (safety_core.c's
+              own TODO comment)."
   - name: s10_stays_quiet
     forbid: { event: { type: guard_warn, guard: S10 }, before: { sim_end: true } }
     # 80°C < tc_disagreement_c = 200°C (SAFETY_MODEL.md §4 S10) — must never fire

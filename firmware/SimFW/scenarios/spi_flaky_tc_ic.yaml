@@ -37,16 +37,32 @@ faults:
     # bearing fact about current firmware behavior (worth flagging upstream:
     # PLAN.md §8 item 14's "no garbage temps accepted" expectation currently
     # has no mechanism to make it true for a corrupted-but-structurally-valid
-    # transfer), not something this scenario file can paper over with a
-    # number. Schema note: tools/PcTools/src/kilnsim/scenario.py's loader
-    # already supports a `params:` list on a fault entry (passed through
-    # verbatim, see `_parse_fault`'s `extra`/`params` handling) -- so a rate
-    # CAN be wired in once one is bench-derived; it is the magnitude, not the
-    # schema, that is missing.
+    # transfer). No bench-derived rate exists, and none can be derived from
+    # PLAN.md/SAFETY_MODEL.md -- but leaving params: unset makes
+    # bit_error_rate == 0.0 (max31856_regs.c's apply_bit_errors() short-
+    # circuits entirely at rate <= 0.0), which is not "an unresolved
+    # magnitude", it is "no fault at all": every byte reads back clean and
+    # this scenario's whole fault never does anything. That is the same
+    # class of dead-test bug as this pass's other params: gaps, so it gets
+    # a value too, chosen to be defensible without pretending a bench number
+    # exists: params[0] = bit_error_rate, 0..1, independent per-bit flip
+    # probability (fault_sched.h's FAULT_SCHED_TYPE_TC_FLAKY_SPI doc
+    # comment; max31856_regs.c's apply_bit_errors(), applied per-bit to
+    # every byte of every read including the SR byte at 0x0F). 0.5 gives
+    # P(a given byte entirely unflipped) = 0.5^8 ≈ 0.4%, so the SR byte is
+    # disturbed on very nearly every read -- high enough to reliably (not
+    # just occasionally) knock some of S5's trip-relevant bits (OC/OVUV/
+    # TCRANGE) high often enough to accumulate the required 10-consecutive-
+    # bad-read streak well inside this scenario's deadlines, while still
+    # being genuinely probabilistic/intermittent rather than the
+    # deterministic full-inversion a rate of 1.0 would give (which would be
+    # indistinguishable from dead_tc_ic/TC_DEAD_IC, a different fault type
+    # this scenario is not testing).
     type: flaky_spi_tc_ic
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
     duration: permanent
+    params: [0.5]
 expect:
   - name: not_an_instant_trip
     forbid: { dut: K4_open, before: { sim_time_s: 5 } }
