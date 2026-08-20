@@ -1,0 +1,89 @@
+{
+  "scenario": {
+    "name": "mainfault_tc_disconnect",
+    "version": 1,
+    "hash": "03ee50edbef5fe70fb9dcd60210cc04d21adb8cd374786c3828360afa70b6a67"
+  },
+  "fw_versions": {},
+  "seed": 63,
+  "timescale": 10.0,
+  "start_time": 1787258725.768331,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 6000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "oc_main",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 44000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 145000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "no_early_trip",
+      "verdict": "PASS",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:K4_open never observed before the boundary"
+    },
+    {
+      "name": "mainfault_trips_s6a",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "event:guard_trip not observed within 3s after fault_fired (seq 0)"
+    },
+    {
+      "name": "fault_line_asserted",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:fault_line_asserted not observed within 3s after fault_fired (seq 0)"
+    },
+    {
+      "name": "trip_latched",
+      "verdict": "PASS",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open held at end of run (last observed seq 2000000000)"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

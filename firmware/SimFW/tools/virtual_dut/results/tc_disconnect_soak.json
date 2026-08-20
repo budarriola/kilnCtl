@@ -1,0 +1,91 @@
+{
+  "scenario": {
+    "name": "tc_disconnect_soak",
+    "version": 1,
+    "hash": "fc3c26a552ca3b236e80376a62258e59e65add283d78f2a9b04fe3d84fd75f85"
+  },
+  "fw_versions": {},
+  "seed": 45,
+  "timescale": 10.0,
+  "start_time": 1787258891.801512,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 91000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "oc_soak",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 97000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S5"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 147000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S5"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "warns_first",
+      "verdict": "PASS",
+      "evidence": [
+        0,
+        2000000001
+      ],
+      "detail": "event:guard_warn observed 6.000s after fault_fired"
+    },
+    {
+      "name": "trips_after_blind_grace",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:K4_open not observed within 65s after fault_fired (seq 0)"
+    },
+    {
+      "name": "reports_nan_not_stale_value",
+      "verdict": "FAIL",
+      "evidence": [],
+      "detail": "safety_temp_valid state never observed; cannot be dut:safety_temp_valid at end"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

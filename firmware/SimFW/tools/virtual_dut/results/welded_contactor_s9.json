@@ -1,0 +1,77 @@
+{
+  "scenario": {
+    "name": "welded_contactor_s9",
+    "version": 1,
+    "hash": "99dc868280526f60e19af6f7c3d78335777594b87cab4536cb6552b45ca573f9"
+  },
+  "fw_versions": {},
+  "seed": 43,
+  "timescale": 10.0,
+  "start_time": 1787258950.252794,
+  "events": [
+    {
+      "seq": 2000000000,
+      "sim_time_us": 45000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 145000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "initial_trip",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (fault_fired {'slot': 'weld_ssr'}) never occurred"
+    },
+    {
+      "name": "contactor_weld_engages_on_k4_open",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred"
+    },
+    {
+      "name": "s9_escalates",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred"
+    },
+    {
+      "name": "stays_open_and_latched",
+      "verdict": "PASS",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open held at end of run (last observed seq 2000000000)"
+    },
+    {
+      "name": "escalation_latched_at_end",
+      "verdict": "FAIL",
+      "evidence": [],
+      "detail": "event:trip_ineffective_latched never occurred"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

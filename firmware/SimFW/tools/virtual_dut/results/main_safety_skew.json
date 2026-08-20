@@ -1,0 +1,71 @@
+{
+  "scenario": {
+    "name": "main_safety_skew",
+    "version": 1,
+    "hash": "718f79cec654d371265ef40013383b4c3c05ad93673c458788dfdf1f4d53d53e"
+  },
+  "fw_versions": {},
+  "seed": 49,
+  "timescale": 20.0,
+  "start_time": 1787258712.2807097,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 22000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "skew",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 182000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 182000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s1_trips_conservatively_early",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "event:guard_trip not observed within 120s after fault_fired (seq 0)"
+    },
+    {
+      "name": "s10_stays_quiet",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_warn never observed before the boundary"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

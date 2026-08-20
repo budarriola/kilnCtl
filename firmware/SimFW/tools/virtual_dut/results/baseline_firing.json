@@ -1,0 +1,71 @@
+{
+  "scenario": {
+    "name": "baseline_firing",
+    "version": 1,
+    "hash": "0a3e97910726a5d700ca42002fbc2ae0bccfe9bc91de4be13a56a354f278879f"
+  },
+  "fw_versions": {},
+  "seed": 1,
+  "timescale": 10.0,
+  "start_time": 1787258629.8669074,
+  "events": [
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 148000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "never_faults",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:fault_line_asserted never observed before the boundary"
+    },
+    {
+      "name": "never_estops",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:estop_open never observed before the boundary"
+    },
+    {
+      "name": "never_trips",
+      "verdict": "FAIL",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+    },
+    {
+      "name": "heat_actually_cycles",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

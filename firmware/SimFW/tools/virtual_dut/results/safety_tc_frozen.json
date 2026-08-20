@@ -1,0 +1,81 @@
+{
+  "scenario": {
+    "name": "safety_tc_frozen",
+    "version": 1,
+    "hash": "0a09aba23a19e647cf10943771c6e3ffdda1c12cc1dfcc2bc9ac71e227802558"
+  },
+  "fw_versions": {},
+  "seed": 61,
+  "timescale": 10.0,
+  "start_time": 1787258793.628386,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 6000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "freeze",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 147000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "no_early_trip",
+      "verdict": "PASS",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:K4_open never observed before the boundary"
+    },
+    {
+      "name": "frozen_window_trips_s11",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "event:guard_trip not observed within 605s after fault_fired (seq 0)"
+    },
+    {
+      "name": "trip_latched",
+      "verdict": "PASS",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open held at end of run (last observed seq 2000000000)"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

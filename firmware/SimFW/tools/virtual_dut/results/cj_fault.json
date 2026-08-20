@@ -1,0 +1,79 @@
+{
+  "scenario": {
+    "name": "cj_fault",
+    "version": 1,
+    "hash": "e2f629ce3f66fa6fe25b0cecddacfeb54181d264394afccbb39d5d80d0d71f0b"
+  },
+  "fw_versions": {},
+  "seed": 54,
+  "timescale": 10.0,
+  "start_time": 1787258663.6047742,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 21000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "cj",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 45000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 147000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s5_never_trips_on_cj_alone",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_trip never observed before the boundary"
+    },
+    {
+      "name": "s12_warns_at_60c",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "event:guard_warn not observed within 1s after fault_fired (seq 0)"
+    },
+    {
+      "name": "s12_trips_at_85c_sustained",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:K4_open not observed within 65s after fault_fired (seq 0)"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

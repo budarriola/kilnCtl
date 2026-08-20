@@ -1,0 +1,57 @@
+{
+  "scenario": {
+    "name": "runaway_zone",
+    "version": 1,
+    "hash": "37739bc1fcf8a9d02f573183105b299cac320e6818d1a73a8e4ac051c5819114"
+  },
+  "fw_versions": {},
+  "seed": 53,
+  "timescale": 10.0,
+  "start_time": 1787258768.844039,
+  "events": [
+    {
+      "seq": 2000000000,
+      "sim_time_us": 45000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 145000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s3_catches_it_first",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (fault_fired {'slot': 'runaway'}) never occurred"
+    },
+    {
+      "name": "s8_produces_no_trip_of_its_own_today",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_trip never observed before the boundary"
+    }
+  ],
+  "verdict": "PASS",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

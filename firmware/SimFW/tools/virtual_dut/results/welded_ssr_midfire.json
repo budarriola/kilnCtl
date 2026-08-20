@@ -1,0 +1,71 @@
+{
+  "scenario": {
+    "name": "welded_ssr_midfire",
+    "version": 1,
+    "hash": "99e4c18383af0599658dbc5c4532f10985f26c8ee36fd75ce154f49c114cea71"
+  },
+  "fw_versions": {},
+  "seed": 42,
+  "timescale": 10.0,
+  "start_time": 1787258975.01995,
+  "events": [
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 147000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "safety_trips",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (fault_fired {'slot': 'weld'}) never occurred"
+    },
+    {
+      "name": "no_early_trip",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "boundary fault 'weld' never fired"
+    },
+    {
+      "name": "trip_latched",
+      "verdict": "PASS",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open held at end of run (last observed seq 2000000000)"
+    },
+    {
+      "name": "current_decays_after_k4_opens",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred"
+    }
+  ],
+  "verdict": "PASS",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

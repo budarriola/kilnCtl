@@ -1,0 +1,73 @@
+{
+  "scenario": {
+    "name": "partial_element",
+    "version": 1,
+    "hash": "749859db26a332e79d1c14ccbeac24bf816df7859ef049873bed46c11fde2ac0"
+  },
+  "fw_versions": {},
+  "seed": 51,
+  "timescale": 20.0,
+  "start_time": 1787258735.7589211,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 12000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "partial",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 184000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 184000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "no_guard_trips",
+      "verdict": "FAIL",
+      "evidence": [
+        2000000001
+      ],
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000001)"
+    },
+    {
+      "name": "current_still_present_just_reduced",
+      "verdict": "FAIL",
+      "evidence": [
+        0
+      ],
+      "detail": "dut:current_present not observed within 5s after fault_fired (seq 0)"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

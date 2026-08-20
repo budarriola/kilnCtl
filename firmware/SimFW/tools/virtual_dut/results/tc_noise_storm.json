@@ -1,0 +1,71 @@
+{
+  "scenario": {
+    "name": "tc_noise_storm",
+    "version": 1,
+    "hash": "2f07388ce7246710d5cad0c3b688baff7fdf2d52f1cb2a7e74abafcad9ff627c"
+  },
+  "fw_versions": {},
+  "seed": 48,
+  "timescale": 10.0,
+  "start_time": 1787258924.386586,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 21000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "noise",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 147000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "no_trip_ever",
+      "verdict": "FAIL",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+    },
+    {
+      "name": "no_fault_line_latch",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:fault_line_asserted never observed before the boundary"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "scenario": {
+    "name": "broken_element",
+    "version": 1,
+    "hash": "ad6ef7b43ca0ebd41125b0e54b96563964c2129b510042ae153960d4179fa0c3"
+  },
+  "fw_versions": {},
+  "seed": 50,
+  "timescale": 10.0,
+  "start_time": 1787258639.8189838,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 11000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "broken",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 148000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s4_warns",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred"
+    },
+    {
+      "name": "s4_never_trips",
+      "verdict": "FAIL",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "scenario": {
+    "name": "power_blip",
+    "version": 1,
+    "hash": "6b2aec64c68ea8332fdd75bef232b9ad772db0e2c796e78e71e07f39a5cd83db"
+  },
+  "fw_versions": {},
+  "seed": 57,
+  "timescale": 10.0,
+  "start_time": 1787258743.293255,
+  "events": [
+    {
+      "seq": 2000000000,
+      "sim_time_us": 46000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 148000000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "mainfault_reads_healthy_during_blip",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_trip never observed before the boundary"
+    },
+    {
+      "name": "relays_deenergize_no_current_during_blip",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (dut_power {'state': False}) never occurred"
+    },
+    {
+      "name": "s6b_stays_at_warn_not_trip",
+      "verdict": "FAIL",
+      "evidence": [
+        2000000000
+      ],
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+    },
+    {
+      "name": "safe_resume",
+      "verdict": "SKIPPED",
+      "evidence": [],
+      "detail": "triggering event (dut_power {'state': True}) never occurred"
+    }
+  ],
+  "verdict": "FAIL",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  }
+}
