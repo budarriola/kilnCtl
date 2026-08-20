@@ -64,11 +64,24 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
                           SafetyLinkClass *safety_or_null);
 
 // The context a client authenticates for -- CommonFW/docs/UPDATE_PROTOCOL.md
-// section 2 step 2's literal "esp" or "pico" HMAC context string, and also
-// which of the two independent per-endpoint lockout states applies.
+// section 2 step 2's literal "esp"/"pico"/"esp-rollback" HMAC context
+// string, and also which of the three independent per-endpoint lockout
+// states applies.
+//
+// OTA_HTTP_CONTEXT_ESP_ROLLBACK is its own context, NOT a reuse of
+// OTA_HTTP_CONTEXT_ESP, even though both ultimately act on the ESP: a
+// signature over "esp" authorizes pushing a NEW image, a signature over
+// "esp-rollback" authorizes reverting to the PREVIOUS one -- deliberately
+// different actions, so a MAC computed for one must not double as
+// authorization for the other. The single-use nonce already prevents literal
+// replay, but binding the context string to the specific action is what
+// keeps a future client bug (or a proxy that reorders/misroutes requests)
+// from a signed-for-update MAC ever being accepted as a signed-for-rollback
+// one, or vice versa.
 typedef enum {
     OTA_HTTP_CONTEXT_ESP = 0,
     OTA_HTTP_CONTEXT_PICO,
+    OTA_HTTP_CONTEXT_ESP_ROLLBACK,
 } ota_http_context_t;
 
 typedef enum {
@@ -273,6 +286,50 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 // ota_pico_relay_get_status(). No separate public entry point is exposed
 // here for either handler -- same "specific to this transfer, no other
 // caller" reasoning as the ESP path above.
+
+// --- POST /api/ota/esp/rollback -- explicit revert to the previous image --
+//
+// TODO.md 9.9/UPDATE_PROTOCOL.md section 3's "don't auto-revert a healthy
+// new image" is only half the rollback story -- esp_ota_mark_app_valid_
+// cancel_rollback() (ota_rollback_confirm_task(), App/main.c) is the side
+// that stops an unwanted automatic revert. This route is the OTHER half: an
+// explicit, operator/agent-triggered "go back to the previous image right
+// now", even though the currently running image is healthy and already
+// confirmed. Genuinely rare -- normal recovery from a bad update is the
+// bootloader's own automatic PENDING_VERIFY-never-confirmed revert on the
+// next boot, which needs no HTTP call at all. This route exists for the
+// case an operator wants to revert a currently-RUNNING, already-CONFIRMED
+// image deliberately (e.g. the new version is valid but behaves worse in
+// practice than the one it replaced).
+//
+// Same four-step order as POST /api/ota/esp (header well-formed ->
+// ota_http_verify_request() with context OTA_HTTP_CONTEXT_ESP_ROLLBACK ->
+// ota_http_check_interlocks() -> ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)
+// -- reusing the ESP claim slot, not a separate one, since a rollback is
+// exactly as disruptive to "another update in flight" as a push would be),
+// PLUS one more gate specific to this route: esp_ota_check_rollback_is_
+// possible() (esp_ota_ops.h) must return true, or the request is refused
+// with a specific "no previous valid image to roll back to" reason rather
+// than calling esp_ota_mark_app_invalid_rollback_and_reboot() blind and
+// letting IT discover there is nothing to roll back to.
+//
+// On success: appends an ota_record (processor "esp", version_before the
+// currently running image's version, version_after left "" since the
+// previous image's version is not read back here, success=true, reason
+// "rollback requested"), sends a 200 JSON response, THEN -- from a short-
+// lived background task, same pattern factory_reset.c's reboot_task() uses
+// so the HTTP response has a chance to actually reach the client's socket
+// before the reboot tears the connection down -- calls
+// esp_ota_mark_app_invalid_rollback_and_reboot(), which marks the current
+// app partition invalid and reboots into the previous one. There is no
+// "wait for the reboot" response possible (the reboot itself is the point),
+// so this mirrors POST /api/ota/esp's own "report success, the actual
+// effect completes after this request" shape rather than holding the
+// connection open for something that can never respond.
+//
+// Registered by ota_http_start() alongside the other OTA routes. No
+// separate public entry point exposed here, same "specific to this route,
+// no other caller" reasoning as the rest of this file's handlers.
 
 #ifdef __cplusplus
 }

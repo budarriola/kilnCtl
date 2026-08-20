@@ -26,6 +26,11 @@ transfer)/section 9.5-era pico staging. Mirrored here, not re-derived:
        -> 202 {"ok":true,"status":"relay_started","bytes":N,"crc32":"0x..."}
   GET  /api/ota/pico/status    -> 200 {"phase":"...","percent":N,"last_error":"..."}
   GET  /api/ota/esp/status     -> 200 {"phase":"...","percent":N,"last_update":null|{...}}
+  POST /api/ota/esp/rollback, header X-Ota-Mac: <64 hex chars> over context
+       "esp-rollback" (NOT the same MAC as /api/ota/esp -- distinct context
+       string), empty body -> 200 {"ok":true,"status":"rebooting",
+       "version_before":"..."}. Explicit revert to the previous OTA image;
+       reboots the board shortly after responding.
 
 Failure responses (400/403/409/500) are PLAIN TEXT
 (httpd_resp_send_err()/httpd_resp_set_status()+httpd_resp_send()), not JSON --
@@ -115,10 +120,13 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     function: "key = HMAC-SHA256(ap_password, ...)" is the ap_password as
     the HMAC KEY and the context string as the message -- this derivation is
     what keeps the literal Wi-Fi/AP password out of the value that's ever
-    compared or sent). `context` must be exactly "esp" or "pico".
+    compared or sent). `context` must be exactly "esp", "pico", or
+    "esp-rollback" (the last is its own context, not a reuse of "esp" -- see
+    ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a
+    plain-update MAC must not double as a rollback authorization).
     """
-    if context not in ("esp", "pico"):
-        raise ValueError(f"context must be 'esp' or 'pico', got {context!r}")
+    if context not in ("esp", "pico", "esp-rollback"):
+        raise ValueError(f"context must be 'esp', 'pico', or 'esp-rollback', got {context!r}")
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -287,3 +295,60 @@ def get_esp_status(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
         return json.loads(body_text)
     except Exception as exc:
         raise OtaHttpError(f"esp status response was not valid JSON: {body_text!r}") from exc
+
+
+def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/ota/esp/rollback -- explicit "revert to the previous image
+    right now" (App/drivers/ota_http.c's ota_esp_rollback_post_handler()).
+    Unlike push_esp_image()/push_pico_image(), there is no file to send --
+    the body is empty, only the challenge/MAC dance and the X-Ota-Mac header
+    are needed.
+
+    Refused the same way an update push is: wrong/missing auth (403), an
+    unmet interlock (409, kiln not idle/cool or similar -- see
+    ota_http_check_interlocks()), a concurrent update/rollback already
+    holding the mutex (409), or -- specific to this route -- no previous
+    valid image to roll back to (409, "no previous valid image to roll back
+    to", from esp_ota_check_rollback_is_possible()). All of these raise
+    OtaHttpError with the board's specific plain-text reason in `.detail`.
+
+    On success (200), the board has already appended an ota_record and is
+    about to reboot into the previous image from a short-lived background
+    task (ota_rollback_reboot_task()) -- this call returns as soon as that
+    response is received, it does NOT wait for the reboot or for the board
+    to come back up running the older version. Returns the parsed JSON body,
+    {"ok": true, "status": "rebooting", "version_before": "<version>"}.
+
+    `ap_password`: same AP-password-derived HMAC scheme as push_esp_image()/
+    push_pico_image() -- see derive_mac()'s doc comment. Uses the
+    "esp-rollback" context, a distinct signature from a plain "esp" update
+    MAC (ota_http.h's OTA_HTTP_CONTEXT_ESP_ROLLBACK doc comment).
+    """
+    nonce = get_challenge(host, timeout)
+    mac_hex = derive_mac(ap_password, nonce, "esp-rollback").hex()
+
+    req = urllib.request.Request(
+        _url(host, "/api/ota/esp/rollback"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            "X-Ota-Mac": mac_hex,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/esp/rollback refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/esp/rollback unreachable: {detail}") from exc
+
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/ota/esp/rollback response was not valid JSON: {body_text!r}") from exc

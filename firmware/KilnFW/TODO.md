@@ -3715,6 +3715,42 @@ section 6.
       test-verified, and the C-side JSON-building logic is build-verified
       (compiles, links, matches the documented shape) but not run.
 
+**2026-08-19 — explicit ESP rollback, `POST /api/ota/esp/rollback`**: closes
+the other half of `tools/PcTools/TODO.md`'s `ota_rollback(processor)` line
+(ESP side only — the RP2040/SaftyFW side has its own bootloader slot-switch
+mechanics and is not attempted here). `ota_rollback_confirm_task()`
+(`App/main.c`) already handled "don't auto-revert a healthy new image";
+this route is the deliberate opposite: "go back to the previous image right
+now", even though the running image is healthy and already confirmed. New
+`ota_esp_rollback_post_handler()` in `App/drivers/ota_http.c` follows the
+same four-step order as `POST /api/ota/esp` (header well-formed -> auth ->
+`ota_http_check_interlocks()` -> single update-mutex claim), plus a fifth
+gate specific to this route: `esp_ota_check_rollback_is_possible()`
+(`esp_ota_ops.h`) must return true, or the request is refused with "no
+previous valid image to roll back to" rather than calling
+`esp_ota_mark_app_invalid_rollback_and_reboot()` blind. Auth uses a NEW,
+separate `ota_http_context_t` value, `OTA_HTTP_CONTEXT_ESP_ROLLBACK`
+(HMAC context string `"esp-rollback"`, its own lockout counter
+`s_lockout_esp_rollback`) — deliberately not a reuse of the plain `"esp"`
+context, so a signature authorizing a push can never double as
+authorization for a rollback. On success the handler appends an
+`ota_record` (processor `"esp"`, `version_before` the running image's
+version, `success=true`, reason `"rollback requested"`), sends a 200 JSON
+response, then hands off to a short-lived background task
+(`ota_rollback_reboot_task()`, same 500ms-delay-then-act pattern
+`factory_reset.c`'s `reboot_task()` already uses) which calls
+`esp_ota_mark_app_invalid_rollback_and_reboot()` — there is no "wait for
+the reboot" response possible, so this mirrors `POST /api/ota/esp`'s own
+"report success, the actual effect completes after this request" shape.
+PC side: `tools/PcTools/src/kilnctrl/ota_http_client.py` gained
+`rollback_esp()` (empty-body POST, signs over the `"esp-rollback"`
+context); `mcp_server.py` gained `ota_rollback_esp(password, host=None)`.
+`test_ota_http_client.py` gained 8 new tests (27 total, up from 19), all
+passing. Build-verified only: `ninja -j 24` in `firmware/KilnFW/build` is
+clean, zero new warnings, `-Werror` intact. **No physical ESP32-S3
+exercised** — nothing here has ever actually triggered a reboot/rollback
+against real hardware.
+
 ### 9.7 Verification
 
 - [ ] Power pulled mid-transfer, both processors — both still boot the old image

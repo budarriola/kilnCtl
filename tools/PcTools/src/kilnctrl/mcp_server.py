@@ -1944,6 +1944,65 @@ def ota_update_esp(image_path: str, password: str, host: Optional[str] = None) -
 
 
 @_tool()
+def ota_rollback_esp(password: str, host: Optional[str] = None) -> str:
+    """Explicitly revert the ESP32-S3 to its PREVIOUS firmware image, right
+    now -- POST /api/ota/esp/rollback.
+
+    This is the OTHER half of the rollback story: ota_rollback_confirm_task()
+    (App/main.c) already handles the "don't auto-revert a healthy new image"
+    side (it confirms the currently-running new image as good once NVS/
+    safety-link/web-server are all up post-reboot). This tool is the
+    "operator/agent wants to go back to the previous image on purpose" side
+    -- even though the currently running image is healthy and already
+    confirmed. Genuinely rare: ordinary recovery from a BAD update needs no
+    call here at all, since an unconfirmed PENDING_VERIFY image is already
+    reverted automatically by the bootloader on the next boot. Use this when
+    the running image is valid but behaves worse in practice than the one it
+    replaced, and a deliberate revert is wanted.
+
+    DESTRUCTIVE-ADJACENT, same class as ota_update_esp(): refused unless the
+    same interlocks in UPDATE_PROTOCOL.md section 1 hold (kiln idle, no
+    heater commanded, safety link healthy, temperature below the configured
+    ceiling) -- the board reboots into different code either way, so a
+    rollback is exactly as disruptive as a push. ALSO refused, with a
+    specific "no previous valid image to roll back to" reason, if there is
+    genuinely no earlier valid image to fall back to
+    (esp_ota_check_rollback_is_possible() on the board) -- this is checked
+    before the reboot is attempted, not discovered by a blind call that
+    fails partway.
+
+    `password`: the board's AP password, same HMAC scheme ota_update_esp()
+    uses -- but signed over a DIFFERENT context ("esp-rollback", not "esp"),
+    so a MAC captured for one action cannot be reused to authorize the
+    other. The plaintext password is never sent over the wire.
+
+    On success, the board has already persisted an ota_record (processor
+    "esp", success=true, reason "rollback requested") and is rebooting into
+    the previous image from a short-lived background task -- this call
+    returns as soon as the board's response arrives, it does NOT wait for
+    the reboot to finish or re-check the version afterward. Call this
+    tool's caller's own version check (e.g. get_fw_version, once the board
+    is back up) to confirm which image is actually running now.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    response-parsing are unit-tested with mocked HTTP only (see
+    ota_http_client.py's module doc comment); no ESP32-S3 was available in
+    this environment to actually trigger a reboot/rollback.
+    """
+    resolved = _ota_resolve_host(host)
+    try:
+        body = ota_http.rollback_esp(resolved, password)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved})"
+    if not body.get("ok"):
+        return f"error: board reported failure: {body} (host={resolved})"
+    return (f"ok - rollback accepted, was running version={body.get('version_before')!r} "
+            f"(host={resolved}) -- board is rebooting into the previous image now; "
+            f"re-check the version once it comes back up")
+
+
+@_tool()
 def ota_update_pico(image_path: str, password: str, host: Optional[str] = None) -> str:
     """Push a new RP2040 safety-processor firmware image -- POST
     /api/ota/pico. Stages `image_path` (a raw SaftyFW .bin) into the ESP's

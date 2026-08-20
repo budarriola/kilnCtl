@@ -306,7 +306,27 @@ reimplementing the transfer.
       returns the version actually running afterwards
 - [ ] `ota_update_pico(image_path, password)` — same, relayed over the link,
       with progress surfaced at least every 2 s
-- [ ] `ota_rollback(processor)` — explicit, refused under the same interlocks
+- [x] `ota_rollback(processor)` — explicit, refused under the same interlocks.
+      **2026-08-19, ESP half only**: `ota_rollback_esp(password, host=None)`
+      (`mcp_server.py`) now exists, calling `POST /api/ota/esp/rollback`
+      (`firmware/KilnFW/App/drivers/ota_http.c`'s new
+      `ota_esp_rollback_post_handler()`) — same challenge/HMAC auth as
+      `ota_update_esp()` but over its own `"esp-rollback"` context (not a
+      reuse of `"esp"`, so a plain-update MAC can't double as rollback
+      authorization), same `ota_http_check_interlocks()` gate, PLUS an
+      explicit `esp_ota_check_rollback_is_possible()` check that refuses
+      cleanly ("no previous valid image to roll back to") rather than
+      calling `esp_ota_mark_app_invalid_rollback_and_reboot()` blind. On
+      success it appends an `ota_record` and reboots from a short-lived
+      background task (`ota_rollback_reboot_task()`, same pattern
+      `factory_reset.c`'s `reboot_task()` uses) so the HTTP response has a
+      chance to reach the client first. `ota_rollback(processor="pico")` is
+      **still open** — the RP2040/SaftyFW side has its own bootloader
+      slot-switch mechanics, not attempted in this pass. Build-verified
+      only (`ninja -j 24` clean, `-Werror` intact); `test_ota_http_client.py`
+      gained 8 new tests (27 total, up from 19), all passing. **No physical
+      ESP32-S3 exercised** — nothing here has ever actually triggered a
+      reboot/rollback on real hardware.
 - [ ] Every call logged with the image's SHA-256, and refusals logged too
 - [ ] The password is never written to the log or to a settings file; it is
       supplied per call or read from an environment variable

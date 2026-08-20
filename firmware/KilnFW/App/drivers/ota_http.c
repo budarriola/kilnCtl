@@ -91,6 +91,11 @@ static SemaphoreHandle_t s_ota_lock;
 static ota_auth_nonce_state_t s_nonce;
 static ota_auth_lockout_state_t s_lockout_esp;
 static ota_auth_lockout_state_t s_lockout_pico;
+// Its own lockout state, not a reuse of s_lockout_esp -- see ota_http.h's
+// doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK for why the rollback context
+// is kept entirely separate from the plain-esp-update context, including
+// its own 3-strikes counter.
+static ota_auth_lockout_state_t s_lockout_esp_rollback;
 
 // The hardware pointers main.c hands to ota_http_start(), same pattern (and
 // same NULL-tolerant meaning) as dashboard_http.c's s_dash struct. Read-only
@@ -245,9 +250,15 @@ static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
 ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const uint8_t mac[32],
                                                    const char *client_ip)
 {
-    const char *ctx_str = (ctx == OTA_HTTP_CONTEXT_ESP) ? "esp" : "pico";
+    const char *ctx_str;
+    ota_auth_lockout_state_t *lockout;
+    switch (ctx) {
+        case OTA_HTTP_CONTEXT_ESP:          ctx_str = "esp";          lockout = &s_lockout_esp;          break;
+        case OTA_HTTP_CONTEXT_ESP_ROLLBACK: ctx_str = "esp-rollback"; lockout = &s_lockout_esp_rollback; break;
+        case OTA_HTTP_CONTEXT_PICO:
+        default:                            ctx_str = "pico";         lockout = &s_lockout_pico;         break;
+    }
     const char *ip = client_ip ? client_ip : "unknown";
-    ota_auth_lockout_state_t *lockout = (ctx == OTA_HTTP_CONTEXT_ESP) ? &s_lockout_esp : &s_lockout_pico;
 
     uint32_t t = now_ms();
 
@@ -295,7 +306,7 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
                                key);
 
     // expected_mac = HMAC-SHA256(key, nonce || context)
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 4]; // "esp" (3) or "pico" (4) -- 4 covers both
+    uint8_t msg[OTA_AUTH_NONCE_LEN + 12]; // "esp" (3), "pico" (4), or "esp-rollback" (12) -- 12 covers all three
     size_t ctx_len = strlen(ctx_str);
     memcpy(msg, nonce_copy, sizeof(nonce_copy));
     memcpy(msg + sizeof(nonce_copy), ctx_str, ctx_len);
@@ -1194,6 +1205,132 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// --- POST /api/ota/esp/rollback -- see ota_http.h's doc comment above this
+// section for the full contract. Runs on its own short-lived task (same
+// factory_reset.c reboot_task() pattern) so the JSON response already
+// queued by the handler has a chance to reach the client before the
+// connection is torn down by the reboot.
+static void ota_rollback_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGW(TAG, "OTA rollback: rebooting now into the previous image");
+    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+    // Only reached if the call itself failed to even start the reboot --
+    // on success this line never runs, the board is already restarting.
+    ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
+                  "board NOT rebooted, still running the current image",
+             esp_err_to_name(err));
+}
+
+static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    get_client_ip(req, ip, sizeof(ip));
+
+    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
+    // ota_esp_post_handler(), before anything else is checked.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(TAG, "OTA esp rollback from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
+                 ip, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return ESP_OK;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return ESP_OK;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(TAG, "OTA esp rollback from %s: X-Ota-Mac is not valid hex", ip);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return ESP_OK;
+    }
+
+    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_ESP_ROLLBACK), see
+    // ota_http.h's doc comment on that enum value for why a rollback MAC is
+    // not interchangeable with a plain-update MAC.
+    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_ESP_ROLLBACK, mac, ip);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return ESP_OK;
+    }
+
+    // 3. Interlocks -- identical gate to POST /api/ota/esp: a rollback
+    // reboots into different code just like an update does, so it is
+    // exactly as disruptive and must be refused under the same conditions
+    // (kiln not idle/cool, safety link down, another update in progress, ...).
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+        ESP_LOGW(TAG, "OTA esp rollback from %s: refused by interlock: %s", ip, reason);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // 4. Single update mutex -- claimed as OTA_HTTP_CONTEXT_ESP (not a
+    // separate rollback slot): a rollback is exactly as mutually exclusive
+    // with an in-flight ESP or Pico update as a second ESP update would be,
+    // there is still only one slot.
+    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
+        ESP_LOGW(TAG, "OTA esp rollback from %s: refused, an update is already in progress", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // 5. Is there actually a previous valid image to roll back to? Checked
+    // explicitly rather than calling esp_ota_mark_app_invalid_rollback_and_
+    // reboot() blind and letting it discover there is nothing -- refuses
+    // cleanly, naming the reason, same as every other interlock in this file.
+    if (!esp_ota_check_rollback_is_possible()) {
+        ESP_LOGW(TAG, "OTA esp rollback from %s: refused, no previous valid image to roll back to", ip);
+        ota_http_update_end();
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "no previous valid image to roll back to", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    const esp_app_desc_t *running_desc = esp_app_get_description();
+    const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
+
+    {
+        ota_record_t rec;
+        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
+                         "", true, "rollback requested");
+        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
+    }
+
+    ESP_LOGW(TAG, "OTA esp rollback from %s: accepted, was running '%s' -- rebooting into the "
+                  "previous image", ip, version_before[0] ? version_before : "(unknown version)");
+
+    char body[96];
+    int n = snprintf(body, sizeof(body), "{\"ok\":true,\"status\":\"rebooting\",\"version_before\":\"%s\"}",
+                      version_before);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+
+    // The mutex is intentionally left held across the reboot -- there is no
+    // "release it after the transfer" moment here the way ota_esp_do_
+    // transfer()'s cleanup path has, because the board is about to reboot
+    // out from under this claim entirely. A fresh boot starts with
+    // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
+    // is nothing left to release.
+    if (xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
+                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
+                      "board will NOT reboot, still running the current image", ip);
+        ota_http_update_end();
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t ota_pico_status_get_handler(httpd_req_t *req)
 {
     ota_pico_relay_status_t st;
@@ -1235,6 +1372,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     memset(&s_nonce, 0, sizeof(s_nonce));
     memset(&s_lockout_esp, 0, sizeof(s_lockout_esp));
     memset(&s_lockout_pico, 0, sizeof(s_lockout_pico));
+    memset(&s_lockout_esp_rollback, 0, sizeof(s_lockout_esp_rollback));
     s_update_claim = OTA_UPDATE_NONE;
 
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -1293,6 +1431,18 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &esp_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/status) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Explicit revert to the previous image -- ota_http.h's doc comment
+    // above this section for the full contract, and why it needs its own
+    // route rather than being folded into POST /api/ota/esp.
+    static const httpd_uri_t esp_rollback_uri = {
+        .uri = "/api/ota/esp/rollback", .method = HTTP_POST, .handler = ota_esp_rollback_post_handler
+    };
+    err = httpd_register_uri_handler(server, &esp_rollback_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
         return err;
     }
 

@@ -250,5 +250,113 @@ class GetEspStatusTest(unittest.TestCase):
                 ota.get_esp_status("kiln.local")
 
 
+class RollbackEspTest(unittest.TestCase):
+    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
+        challenge_body = json.dumps({"nonce": "22" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            if post_side_effect is not None:
+                raise post_side_effect
+            return post_response
+
+        return fake_urlopen, calls
+
+    def test_sends_rollback_context_mac_and_empty_body(self):
+        ok_body = json.dumps({"ok": True, "status": "rebooting",
+                               "version_before": "1.2.3"}).encode()
+        challenge_body = json.dumps({"nonce": "22" * 16}).encode()
+
+        calls = {"n": 0}
+        captured_req = {}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            captured_req["req"] = req
+            return _fake_response(ok_body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.rollback_esp("kiln.local", "hunter2")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["version_before"], "1.2.3")
+        req = captured_req["req"]
+        self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp/rollback")
+        self.assertEqual(req.data, b"")
+        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
+        self.assertIsNotNone(mac_header)
+        self.assertEqual(len(mac_header), 64)
+        # Must be signed over the "esp-rollback" context, NOT "esp" -- a
+        # plain update MAC must not double as rollback authorization.
+        expected = ota.derive_mac("hunter2", bytes.fromhex("22" * 16), "esp-rollback").hex()
+        self.assertEqual(mac_header, expected)
+        not_esp_context = ota.derive_mac("hunter2", bytes.fromhex("22" * 16), "esp").hex()
+        self.assertNotEqual(mac_header, not_esp_context)
+
+    def test_surfaces_409_no_previous_image_refusal(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp/rollback", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b"no previous valid image to roll back to"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.rollback_esp("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("no previous valid image to roll back to", ctx.exception.detail)
+
+    def test_surfaces_403_wrong_password(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp/rollback", 403, "Forbidden", hdrs=None,
+            fp=io.BytesIO(b"wrong password"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.rollback_esp("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_surfaces_409_interlock_refusal(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp/rollback", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b"zone 2 is at 340 C"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.rollback_esp("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("zone 2 is at 340 C", ctx.exception.detail)
+
+    def test_rejects_non_json_response(self):
+        fake_urlopen, _ = self._mock_challenge_then(_fake_response(b"not json"))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.rollback_esp("kiln.local", "hunter2")
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.rollback_esp("192.0.2.1", "hunter2")
+
+
+class DeriveMacRollbackContextTest(unittest.TestCase):
+    def test_matches_manual_double_hmac(self):
+        nonce = bytes(range(16))
+        expected_key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
+        expected = hmac.new(expected_key, nonce + b"esp-rollback", hashlib.sha256).digest()
+        self.assertEqual(ota.derive_mac("hunter2", nonce, "esp-rollback"), expected)
+
+    def test_three_contexts_all_diverge(self):
+        nonce = bytes(range(16))
+        mac_esp = ota.derive_mac("pw", nonce, "esp")
+        mac_pico = ota.derive_mac("pw", nonce, "pico")
+        mac_rollback = ota.derive_mac("pw", nonce, "esp-rollback")
+        self.assertEqual(len({mac_esp, mac_pico, mac_rollback}), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
