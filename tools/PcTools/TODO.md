@@ -316,8 +316,23 @@ reimplementing the transfer.
       `min_compatible`, and says plainly whether they are compatible and which
       side is older. This is the first thing to check when the link is behaving
       oddly, and it should not require reading two frames by hand
-- [ ] SWD recovery documented alongside, since a bricked Pico is recovered by
-      the debug probe and not by these tools
+- [x] SWD recovery documented alongside, since a bricked Pico is recovered by
+      the debug probe and not by these tools. **2026-08-19**: `ota_rollback`
+      (this section, above) and `ota_update_pico` both only work through a
+      link that is up and a bootloader that is still answering
+      `UPDATE_*`/beacon traffic (`firmware/SaftyFW/docs/BOOTLOADER.md`
+      §4's recovery mode) — neither path exists for a Pico that will not
+      boot into either app slot or its own bootloader at all. That case is
+      SWD-only, over the same Debug Probe connection
+      (`kilnctrl.debug_probe`, `mcp__kilnctrl__debug_program`/`debug_halt`/
+      `debug_reset`) already used to flash `SaftyFW.elf` directly, bypassing
+      the isolated link entirely — reflash whichever slot (or the
+      bootloader itself, `firmware/SaftyFW/bootloader/`) is bad, per
+      `BOOTLOADER.md`'s own status header and completion checklist for the
+      current boundary of what's flashable this way today. No new tooling
+      needed: this is a pointer between two already-documented facts
+      (recovery mode's real limits, SWD's unconditional path around them),
+      not a new capability.
 
 ## What this does not become
 
