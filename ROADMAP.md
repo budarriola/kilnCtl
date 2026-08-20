@@ -940,9 +940,21 @@ path. Two facts set the shape of this milestone:
       `esp_ota_mark_app_invalid_rollback_and_reboot()`, with its own HMAC
       context (`"esp-rollback"`) separate from the update MAC, so one
       auth can't double as the other. `mcp__kilnctrl__ota_rollback_esp()`
-      added; 97/97 `pc_tools` tests pass. Pico-side rollback is separate,
-      unattempted scope (different mechanism — bootloader slot switch, not
-      an ESP-IDF API). **Not yet exercised against a physical board** — no
+      added; 97/97 `pc_tools` tests pass. **2026-08-19, later pass — Pico-side
+      rollback now built too**: `SAFETY_CMD_ROLLBACK` (0x17,
+      `kilnlink_rollback` codec) mirrors CLEAR_TRIP/SET_CONFIG's three-hop
+      shape; `bootloader_decide_rollback()` refuses — metadata untouched —
+      unless the OTHER slot is VALID/PENDING_VERIFY, checked *before*
+      the current slot is ever marked BAD, so a rollback can never strand
+      the board with zero bootable slots; also refused while ARMED.
+      `mcp__kilnctrl__ota_rollback_pico()` added. A new `GET /ota` web page
+      (`ota_page.html`) surfaces both processors' version info, the
+      idle/interlock gate before the file picker, and the ESP rollback
+      button (Pico rollback button left disabled/pending — no HTTP surface,
+      it travels over the safety UART link instead). SaftyFW host tests
+      516/516 (incl. the refusal-gate test), CommonFW 15/15, KilnFW full
+      rebuild clean, PcTools 104/104 — all independently re-verified.
+      **Not yet exercised against a physical board** — no
       hardware attached in this pass's environment; live-board verification
       (real interlock refusals, real lockout, a real Pico relay, a real
       rollback reboot) is still outstanding.
