@@ -59,8 +59,10 @@ connection diagram, the fault catalog, the standard test library, and the
 honest milestone-by-milestone status (section 10). See also
 [`docs/HARDWARE.md`](docs/HARDWARE.md) for the reconciled pin map and
 bring-up checklist, [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full
-USB command reference, and [`docs/BENCH_RUNBOOK.md`](docs/BENCH_RUNBOOK.md)
-for the ordered, go/no-go first-hardware-session procedure.
+USB command reference, [`docs/BENCH_RUNBOOK.md`](docs/BENCH_RUNBOOK.md)
+for the ordered, go/no-go first-hardware-session procedure, and
+[`docs/BOM.md`](docs/BOM.md) for the orderable parts list and sizing
+analysis needed to actually build the fixture.
 
 ## Build
 
