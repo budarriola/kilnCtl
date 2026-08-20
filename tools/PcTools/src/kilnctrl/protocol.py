@@ -247,6 +247,14 @@ SAFETY_CMD_SET_FAULT_OUT = 0x06
 #: SaftyFW's config_store.h tc_type. Fire-and-forget, no reply on the wire;
 #: the outcome shows up on the next GET_DIAG/GET_STATUS poll, not here.
 SAFETY_CMD_SET_CONFIG = 0x16
+#: ESP -> Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- tools/PcTools/TODO.md's
+#: `ota_rollback(processor)` line, Pico half. Explicit "revert to the
+#: previously-running bootloader slot, right now". No payload (cmd byte
+#: only), fire-and-forget, no reply on the wire; refused (ARMED, or no valid
+#: slot to fall back to) entirely on SaftyFW's own say-so -- the outcome
+#: shows up as the link dropping and recovering with a new boot_id on the
+#: next GET_STATUS poll, not here.
+SAFETY_CMD_ROLLBACK = 0x17
 
 #: Age field in GET_STATUS: "no valid status has ever been received".
 SAFETY_AGE_NEVER = 0xFFFF

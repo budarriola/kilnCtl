@@ -315,6 +315,57 @@ static void test_decide_after_crc_fail(void)
                "failed slot still recorded BAD even though nothing will boot");
 }
 
+static void test_decide_rollback(void)
+{
+    TEST_SECTION("bootloader_decide_rollback -- the 'other slot must be bootable' gate");
+
+    // Current slot A running fine (VALID), other slot B also VALID -> allowed.
+    bootloader_metadata_t m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID,
+                                         BOOTLOADER_SLOT_VALID, 2);
+    bootloader_rollback_decision_t d = bootloader_decide_rollback(&m, BOOTLOADER_SLOT_A);
+    TEST_CHECK(d.allowed, "other slot VALID -> rollback allowed");
+    TEST_CHECK(d.other_slot == BOOTLOADER_SLOT_B, "other_slot is B");
+    TEST_CHECK(d.updated_meta.slots[BOOTLOADER_SLOT_A].state == BOOTLOADER_SLOT_BAD,
+               "current slot A marked BAD");
+    TEST_CHECK(d.updated_meta.active_slot == BOOTLOADER_SLOT_B, "active_slot switched to B");
+    TEST_CHECK(d.updated_meta.boot_attempts == 0, "boot_attempts reset to 0");
+    TEST_CHECK(d.updated_meta.slots[BOOTLOADER_SLOT_B].state == BOOTLOADER_SLOT_VALID,
+               "other slot's own state untouched (still VALID)");
+
+    // Other slot PENDING_VERIFY also counts as bootable (same slot_is_bootable()
+    // rule bootloader_decide_boot() uses).
+    m = make_meta(BOOTLOADER_SLOT_B, BOOTLOADER_SLOT_PENDING_VERIFY, BOOTLOADER_SLOT_VALID, 0);
+    d = bootloader_decide_rollback(&m, BOOTLOADER_SLOT_B);
+    TEST_CHECK(d.allowed, "current slot with a VALID other slot -> allowed, direction B->A");
+    TEST_CHECK(d.other_slot == BOOTLOADER_SLOT_A, "other_slot is A");
+    TEST_CHECK(d.updated_meta.active_slot == BOOTLOADER_SLOT_A, "active_slot switched to A");
+
+    // THE load-bearing case: other slot EMPTY -> refused, nothing mutated.
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_EMPTY, 1);
+    d = bootloader_decide_rollback(&m, BOOTLOADER_SLOT_A);
+    TEST_CHECK(!d.allowed, "other slot EMPTY -> refused (nothing to fall back to)");
+    TEST_CHECK(d.updated_meta.slots[BOOTLOADER_SLOT_A].state == BOOTLOADER_SLOT_VALID,
+               "refused: current slot's state left untouched (still VALID)");
+    TEST_CHECK(d.updated_meta.active_slot == BOOTLOADER_SLOT_A,
+               "refused: active_slot left untouched");
+
+    // Other slot BAD -> also refused.
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_BAD, 1);
+    d = bootloader_decide_rollback(&m, BOOTLOADER_SLOT_A);
+    TEST_CHECK(!d.allowed, "other slot BAD -> refused");
+
+    // Other slot STAGED (an update in flight, not yet confirmed even once) ->
+    // also refused: STAGED is not in slot_is_bootable()'s set.
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_STAGED, 1);
+    d = bootloader_decide_rollback(&m, BOOTLOADER_SLOT_A);
+    TEST_CHECK(!d.allowed, "other slot STAGED -> refused");
+
+    // Malformed current_slot -> defensive refusal.
+    m = make_meta(BOOTLOADER_SLOT_A, BOOTLOADER_SLOT_VALID, BOOTLOADER_SLOT_VALID, 0);
+    d = bootloader_decide_rollback(&m, 2 /* out of range */);
+    TEST_CHECK(!d.allowed, "out-of-range current_slot -> refused defensively");
+}
+
 void run_test_bootloader_metadata(void)
 {
     test_crc32();
@@ -324,4 +375,5 @@ void run_test_bootloader_metadata(void)
     test_next_write_slot();
     test_decide_boot();
     test_decide_after_crc_fail();
+    test_decide_rollback();
 }

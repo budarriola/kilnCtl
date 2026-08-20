@@ -14,6 +14,7 @@
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_context.h"
+#include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -1583,6 +1584,49 @@ esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type)
     /* Same (dst_device, dst_task, src_task) triple as CLEAR_TRIP's own
      * broadcast call site above -- fire-and-forget, no ACK expected
      * (link_task_handle_set_config() never replies on the wire). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --
+ * tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (this
+ * driver's own ota_http.c owns the ESP half, POST /api/ota/esp/rollback).
+ * Same fire-and-forget BROADCAST shape as safety_link_send_clear_trip()/
+ * safety_link_send_set_config() above: the Pico's link_task.c never ACKs
+ * this on the wire (see link_task_handle_rollback()), so there is no reply
+ * to wait for here -- the outcome is observed the same way CLEAR_TRIP's is,
+ * by the caller polling GET_STATUS/GET_FW_VERSION afterward (a successful
+ * rollback reboots the Pico, which shows up as a link drop-and-recover with
+ * a new boot_id), or via the SaftyFW log if a debug probe is attached.
+ *
+ * No arguments -- unlike SET_CONFIG's tc_type, there is nothing for this
+ * driver to validate or supply; every refusal reason (ARMED, or no valid
+ * slot to fall back to) is entirely SaftyFW's decision
+ * (update_task_request_rollback(), bootloader_decide_rollback()), read-only
+ * reference from here. */
+esp_err_t safety_link_send_rollback(SafetyLinkClass *link)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_rollback_t msg = {0};
+    uint8_t payload[KILNLINK_ROLLBACK_LEN];
+    kilnlink_rollback_status_t status = KILNLINK_ROLLBACK_OK;
+    size_t len = kilnlink_rollback_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "rollback: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "rollback: sending -- requesting the safety processor revert to its "
+                  "previous bootloader slot");
+    /* Same (dst_device, dst_task, src_task) triple as CLEAR_TRIP/SET_CONFIG's
+     * own broadcast call sites above -- fire-and-forget, no ACK expected
+     * (link_task_handle_rollback() never replies on the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
 }

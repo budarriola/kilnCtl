@@ -301,3 +301,33 @@ bootloader_boot_decision_t bootloader_decide_after_crc_fail(const bootloader_met
     d.needs_metadata_update = true; // the BAD marking must still persist
     return d;
 }
+
+bootloader_rollback_decision_t bootloader_decide_rollback(const bootloader_metadata_t *meta,
+                                                            uint8_t current_slot)
+{
+    bootloader_rollback_decision_t d;
+    d.allowed = false;
+    d.other_slot = BOOTLOADER_SLOT_A;
+    d.updated_meta = *meta;
+
+    if (current_slot >= BOOTLOADER_SLOT_COUNT) {
+        return d; // defensive; should not happen
+    }
+
+    uint8_t other = (current_slot == BOOTLOADER_SLOT_A) ? BOOTLOADER_SLOT_B : BOOTLOADER_SLOT_A;
+    d.other_slot = other;
+
+    // The load-bearing check: refuse unless the slot we would fall back to
+    // is itself bootable right now. See this function's own header comment
+    // in metadata.h for why this must be checked before, not after,
+    // current_slot is marked BAD.
+    if (!slot_is_bootable(meta->slots[other].state)) {
+        return d; // d.allowed stays false, d.updated_meta stays an unmodified copy
+    }
+
+    d.allowed = true;
+    d.updated_meta.slots[current_slot].state = BOOTLOADER_SLOT_BAD;
+    d.updated_meta.active_slot = other;
+    d.updated_meta.boot_attempts = 0;
+    return d;
+}

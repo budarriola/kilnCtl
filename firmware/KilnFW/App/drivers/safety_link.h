@@ -810,6 +810,28 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link);
  * Safe to call from any task, same as safety_link_send_clear_trip(). */
 esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --
+ * tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
+ * half is ota_http.c's POST /api/ota/esp/rollback). Explicit "revert to the
+ * previously-running bootloader slot, right now" -- distinct from the
+ * automatic boot_attempts fallback, which only fires after the active slot
+ * has already failed real CRC checks on its own.
+ *
+ * No arguments, no local refusal checks (unlike safety_link_send_clear_trip()
+ * this driver has no cached state to fail closed against) -- every refusal
+ * reason is SaftyFW's: the relay is ARMED, or (the load-bearing property of
+ * this whole feature) the OTHER bootloader slot is not currently VALID/
+ * PENDING_VERIFY, so a rollback can never strand the board with zero
+ * bootable slots. Same fire-and-forget BROADCAST shape as
+ * safety_link_send_clear_trip()/safety_link_send_set_config(): the Pico
+ * never ACKs this on the wire, so success is observed by watching the link
+ * drop and recover with a new boot_id on the next poll, not by a reply here.
+ *
+ * Returns ESP_ERR_INVALID_STATE if the driver isn't initialized, ESP_OK once
+ * the broadcast has been handed to the UART (not proof of Pico acceptance).
+ * Safe to call from any task, same as safety_link_send_clear_trip(). */
+esp_err_t safety_link_send_rollback(SafetyLinkClass *link);
+
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded
  * in the bridge. `out` must have room for SAFETY_LINK_STATUS_PAYLOAD_LEN /

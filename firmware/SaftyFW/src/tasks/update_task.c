@@ -70,6 +70,7 @@
 
 #include "hardware/flash.h"
 #include "hardware/regs/addressmap.h" // XIP_BASE
+#include "hardware/watchdog.h"        // watchdog_reboot() -- update_task_request_rollback()
 
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -860,6 +861,109 @@ static void update_task_confirm_tick(void)
     }
     // On persist failure, s_confirm_pending stays true and this retries on
     // the next UPDATE_CONFIRM_TICK_PERIOD_MS tick.
+}
+
+// --- Explicit rollback (SAFETY_CMD_ROLLBACK, 0x17) --------------------------
+//
+// tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
+// half already exists: ota_http.c's POST /api/ota/esp/rollback). Called
+// SYNCHRONOUSLY from link_task_handle_rollback() (src/tasks/link_task.c) --
+// not queued to this task's own s_rx_queue like UPDATE_BEGIN/_DATA/_END/
+// _ABORT are -- following config_store_write()'s own established precedent
+// (link_task_handle_set_config() already calls it directly, doing a real
+// flash_safe_execute() write on link_task's own priority/stack) rather than
+// UPDATE_*'s "flash I/O does not belong on link_task's priority/stack"
+// reasoning, which was written for erasing/programming up to 832K over many
+// blocks -- a single metadata record write is the same small, bounded cost
+// config_store_write() already accepts inline.
+//
+// Returns false (filling `*out_reason`) on any refusal or a flash failure --
+// the caller only logs it, exactly like config_store_write()'s own
+// accept/refuse logging, since this frame never ACKs on the wire (same as
+// CLEAR_TRIP/SET_CONFIG). On success this function DOES NOT RETURN:
+// watchdog_reboot() resets the RP2040 immediately, which is the entire
+// point of the command.
+bool update_task_request_rollback(const char **out_reason)
+{
+    // Same ARMED-equivalent gate config_store_write() uses (relay_owner_
+    // get_state() == RELAY_OWNER_STATE_ARMED there; this file legitimately
+    // reaches relay state only through safety_core_get_output_status(), the
+    // same legal channel update_task_gather_preconditions() already uses
+    // for UPDATE_BEGIN's own relay_open precondition -- see this file's
+    // header comment on why update_task.c may call safety_core but not
+    // relay_owner.h directly). A rollback reboots into different code, which
+    // is exactly as disruptive as an update or a config write while heating
+    // is armed.
+    bool relay_energized = false;
+    safety_core_get_output_status(&relay_energized, NULL);
+    if (relay_energized) {
+        if (out_reason) {
+            *out_reason = "refused: relay is ARMED, rollback is refused while ARMED "
+                          "(same gate as config writes)";
+        }
+        return false;
+    }
+
+    bootloader_metadata_t meta;
+    size_t latest = update_task_read_latest_metadata(&meta);
+    if (latest == BOOTLOADER_METADATA_NO_SLOT) {
+        if (out_reason) {
+            *out_reason = "refused: no bootloader metadata to roll back from";
+        }
+        return false;
+    }
+    if (meta.active_slot >= BOOTLOADER_SLOT_COUNT) {
+        if (out_reason) {
+            *out_reason = "refused: malformed metadata (active_slot out of range)";
+        }
+        return false;
+    }
+
+    // meta.active_slot -- not s_own_slot above -- is the authoritative
+    // "which slot actually booted" fact: bootloader_decide_boot()
+    // (bootloader/metadata.c) persists it every time it chooses or falls
+    // back to a slot, so it stays correct for the whole life of a boot,
+    // including the common steady-state case (an already-confirmed VALID
+    // slot) where s_own_slot is never updated past its BOOTLOADER_SLOT_A
+    // start-of-day default -- update_task_startup_confirm_check() only sets
+    // s_own_slot when THIS boot's active slot is PENDING_VERIFY. Using
+    // s_own_slot here would silently mark the wrong slot BAD on every boot
+    // that never needed the confirmation gate at all.
+    bootloader_rollback_decision_t decision = bootloader_decide_rollback(&meta, meta.active_slot);
+    if (!decision.allowed) {
+        // The one property that matters most for this whole feature: refuse
+        // rather than strand the board with zero bootable slots. See
+        // bootloader_decide_rollback()'s own doc comment (metadata.h) for
+        // exactly what "the other slot" means and why this check runs
+        // before anything is marked BAD.
+        if (out_reason) {
+            *out_reason = "refused: the other bootloader slot is not currently valid "
+                          "to fall back to";
+        }
+        return false;
+    }
+
+    if (!update_task_persist_metadata(&decision.updated_meta, latest)) {
+        if (out_reason) {
+            *out_reason = "flash write failed";
+        }
+        return false;
+    }
+
+    if (out_reason) {
+        *out_reason = "ok";
+    }
+
+    // No further code in this function runs after this call -- the caller
+    // must log "accepted" (or otherwise act on `out_reason == "ok"`) BEFORE
+    // calling this function's caller chain concludes, since watchdog_reboot()
+    // resets the RP2040 immediately rather than returning.
+    watchdog_reboot(0, 0, 0);
+    for (;;) {
+        // Defensive only: watchdog_reboot() does not return on real
+        // hardware. Never reached, but a function declared to return bool
+        // must not fall off its own end.
+    }
 }
 
 // --- Queue-facing handlers (called from link_task's context) --------------

@@ -1367,6 +1367,17 @@ static void safety_bridge_task(void *arg)
                 err = safety_link_send_set_config(ctx->link, msg.payload[1]);
                 break;
             }
+            case SAFETY_CMD_ROLLBACK: {
+                /* No args: tools/PcTools/TODO.md's `ota_rollback(processor)`
+                 * line, Pico half. Fire-and-forget broadcast to the Pico,
+                 * same shape as CLEAR_TRIP above -- the PC observes the
+                 * outcome via the link dropping and recovering with a new
+                 * boot_id on the next GET_STATUS poll (success), or nothing
+                 * changing at all (refused -- ARMED, or no valid slot to
+                 * fall back to, both entirely SaftyFW's decision). */
+                err = safety_link_send_rollback(ctx->link);
+                break;
+            }
             case SAFETY_CMD_SET_FAULT_OUT: {
                 /* A truncated SET_FAULT_OUT must never be guessed at: byte1
                  * decides whether the isolated fault line into the safety

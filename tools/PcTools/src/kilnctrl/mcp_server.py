@@ -1533,6 +1533,60 @@ def safety_set_tc_type(tc_type_name: str) -> str:
     return _send(UART_TASK_ID_SAFETY, devices.safety_set_config(devices.SAFETY_TC_TYPE_NAMES[name]))
 
 
+@_tool()
+def ota_rollback_pico() -> str:
+    """Explicitly revert the safety processor (RP2040/SaftyFW) to its
+    PREVIOUS bootloader slot, right now.
+
+    This is the Pico half of tools/PcTools/TODO.md's `ota_rollback(processor)`
+    line -- the ESP half is ota_rollback_esp() above. Unlike the ESP, the Pico
+    has no ESP-IDF-style rollback API: SaftyFW's own bootloader
+    (firmware/SaftyFW/bootloader/) picks the active slot at every boot from
+    versioned/CRC'd flash metadata, and this call is the explicit,
+    operator/agent-triggered path to marking the CURRENTLY ACTIVE slot BAD
+    and switching to the other one -- even though the currently running
+    image is healthy. Ordinary recovery from a bad update needs no call here
+    at all: an unconfirmed PENDING_VERIFY image is already reverted
+    automatically by the bootloader's own boot_attempts fallback. Use this
+    when the running image is valid but behaves worse in practice than the
+    one it replaced.
+
+    This travels over the already-authenticated safety UART bridge (PC -> ESP
+    -> Pico, SAFETY_CMD_ROLLBACK = 0x17), the same authentication boundary as
+    safety_set_tc_type()/safety_ping() -- NOT the HTTP OTA challenge/password
+    path ota_rollback_esp() uses, since there is no separate HTTP surface on
+    the Pico side at all; every Pico command already goes through the ESP's
+    UART bridge.
+
+    Refused entirely on SaftyFW's own say-so (fire-and-forget: this call
+    cannot see the refusal, only that nothing changes):
+      - the relay is currently ARMED (same gate config writes and updates
+        use -- a rollback reboots into different code, exactly as disruptive
+        as a push);
+      - the OTHER bootloader slot is not currently VALID or PENDING_VERIFY.
+        THIS IS THE PROPERTY THAT MATTERS MOST: unlike the ESP (which has
+        esp_ota_check_rollback_is_possible()), SaftyFW's bootloader has only
+        two slots total, so a rollback that proceeded while the other slot
+        were EMPTY/STAGED/BAD would strand the board with zero bootable
+        slots on the very next boot. bootloader/metadata.c's
+        bootloader_decide_rollback() checks this BEFORE marking the current
+        slot BAD, not after.
+
+    Call ota_status(processor="pico") (once it exists -- still open per
+    tools/PcTools/TODO.md) or safety_get_status()/safety_get_link_stats()
+    afterward to confirm the outcome: a successful rollback shows up as the
+    safety link dropping and recovering with a new boot_id; a refused one
+    leaves the link and boot_id exactly as they were, with the reason only
+    visible in the Pico's own log (log_task) if a debug probe is attached --
+    nothing is returned to this call either way.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- no RP2040 attached in this
+    environment; only the wire codec and host-tested decision logic are
+    exercised here.
+    """
+    return _send(UART_TASK_ID_SAFETY, devices.safety_request_rollback())
+
+
 # ---------------------------------------------------------------------------
 # GPIO_PROBE -- raw ESP32-S3 pin control (task 12)
 #

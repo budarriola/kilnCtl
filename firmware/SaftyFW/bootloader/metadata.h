@@ -227,6 +227,55 @@ bootloader_boot_decision_t bootloader_decide_boot(const bootloader_metadata_t *m
 bootloader_boot_decision_t bootloader_decide_after_crc_fail(const bootloader_metadata_t *meta,
                                                               uint8_t failed_slot);
 
+// --- Explicit rollback decision ---------------------------------------------
+//
+// tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half: an
+// operator/agent wants to revert to the previously-running slot RIGHT NOW,
+// even though the currently active slot is healthy and running fine (unlike
+// bootloader_decide_after_crc_fail(), which only fires when the active slot
+// has already failed a real CRC check). src/tasks/link_task.c's
+// link_task_handle_rollback() is the only caller: it reads the current
+// metadata, decides via this function, and -- only if `allowed` -- persists
+// `updated_meta` and reboots.
+typedef struct {
+    bool    allowed;     // false => refuse; caller must not persist anything
+                          // or reboot. updated_meta is a copy of the INPUT
+                          // meta, unmodified, when this is false.
+    uint8_t other_slot;   // the slot that would become active if allowed
+    bootloader_metadata_t updated_meta; // meaningful only if allowed
+} bootloader_rollback_decision_t;
+
+// The single most important correctness property of the whole rollback
+// feature: refuses (leaves `updated_meta` an unmodified copy of `meta`,
+// `allowed` false) unless the OTHER slot (not `current_slot`) is currently
+// VALID or PENDING_VERIFY -- the exact same "bootable" test
+// slot_is_bootable() applies inside bootloader_decide_boot() above. A
+// rollback that proceeded while the other slot were EMPTY/STAGED/BAD would
+// strand the board with zero bootable slots the very next boot -- there is
+// no third slot to fall back to. This function's entire job is making that
+// impossible: it is checked BEFORE `current_slot` is ever marked BAD, not
+// discovered afterward by a boot that then has nowhere to go.
+//
+// `current_slot` must be the slot ACTUALLY RUNNING right now (the caller's
+// job to determine correctly -- see link_task_handle_rollback()'s own
+// comment on where that fact comes from), not merely `meta->active_slot`
+// read blindly; in the steady state the two agree, which is exactly why
+// passing `meta->active_slot` as `current_slot` is the right thing to do
+// once the caller has confirmed metadata is authoritative for "which slot is
+// running" (see that call site's comment).
+//
+// On success: `current_slot` is marked BOOTLOADER_SLOT_BAD (the existing
+// "don't pick me next boot" state, not a new one -- the very state
+// bootloader_decide_boot()/bootloader_decide_after_crc_fail() already treat
+// as unbootable), `active_slot` becomes the other slot, and `boot_attempts`
+// resets to 0 for a clean start on the slot being switched to. `current_slot
+// >= BOOTLOADER_SLOT_COUNT` also refuses (defensive; should not happen).
+//
+// Pure: does not touch flash, does not mutate `*meta` -- same contract as
+// bootloader_decide_boot()/bootloader_decide_after_crc_fail().
+bootloader_rollback_decision_t bootloader_decide_rollback(const bootloader_metadata_t *meta,
+                                                            uint8_t current_slot);
+
 #ifdef __cplusplus
 }
 #endif

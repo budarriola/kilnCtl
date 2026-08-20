@@ -53,7 +53,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 
     set(KILNCTL_GZIP_ASSETS
         "wifi_provision_page.html" "main_page.html"
-        "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css")
+        "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css"
+        "ota_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")

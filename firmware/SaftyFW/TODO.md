@@ -1023,6 +1023,73 @@ See `../CommonFW/docs/LINK_PROTOCOL.md` §7 for the full panel spec and presenta
       environment; build- and host-test-verified only (`cmake --build` for
       `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` clean, 501/501 host checks
       including the new `config_store_record_crc` test).
+- [x] `SAFETY_CMD_ROLLBACK` (0x17) — explicit "revert to the previously-running
+      bootloader slot, right now" command, the Pico half of
+      `tools/PcTools/TODO.md`'s `ota_rollback(processor)` line (the ESP half,
+      `POST /api/ota/esp/rollback`, already existed). **2026-08-19**: same
+      three-hop shape as `SAFETY_CMD_CLEAR_TRIP`/`SET_CONFIG`:
+      `kilnlink_rollback.{c,h}` (`firmware/CommonFW`, host-tested
+      `test/test_rollback.c`, 1-byte cmd-only frame, no payload — the
+      simplest of the three) → `KilnFW`'s `safety_link_send_rollback()`
+      (`App/drivers/safety_link.c`, no local checks to make — this driver
+      caches nothing rollback-relevant, unlike CLEAR_TRIP's trip_mask) →
+      `uart_bridge.c`'s `SAFETY_CMD_ROLLBACK` case (PC→ESP hop, no args) →
+      this firmware's `link_task_handle_rollback()` (`src/tasks/link_task.c`):
+      decodes, logs "requested", and calls
+      `update_task_request_rollback()` (`src/tasks/update_task.c`)
+      SYNCHRONOUSLY — not queued the way `UPDATE_BEGIN`/`_DATA`/`_END`/
+      `_ABORT` are, following `config_store_write()`'s own precedent that a
+      single bounded flash-metadata write is fine to do inline on
+      `link_task`'s own priority/stack.
+
+      Unlike the ESP (`esp_ota_check_rollback_is_possible()`), this
+      firmware's own bootloader (`bootloader/`) has no ESP-IDF-style
+      rollback API — it decides the active slot at every boot from
+      `bootloader/metadata.h`'s versioned/CRC'd flash record. The new pure
+      decision function, `bootloader/metadata.c`'s
+      `bootloader_decide_rollback(meta, current_slot)` (host-tested,
+      `test/test_bootloader_metadata.c`'s `test_decide_rollback()`, 6
+      cases), refuses — leaving the metadata untouched — unless the OTHER
+      slot (not `current_slot`) is currently `BOOTLOADER_SLOT_VALID` or
+      `BOOTLOADER_SLOT_PENDING_VERIFY`. **This is the single most important
+      correctness property of the whole feature**: unlike the ESP, this
+      bootloader has only two slots total, so a rollback that proceeded
+      while the other slot were `EMPTY`/`STAGED`/`BAD` would strand the
+      board with zero bootable slots on the very next boot — there is no
+      third slot to fall back to. The check runs *before* `current_slot` is
+      marked `BOOTLOADER_SLOT_BAD`, not discovered afterward by a boot that
+      then has nowhere to go. `update_task_request_rollback()` also refuses
+      while the relay is ARMED (`safety_core_get_output_status()`, the same
+      legal channel this file already uses for `UPDATE_BEGIN`'s own
+      `relay_open` precondition — this file still never touches
+      `relay_owner.h` directly). "Which slot is actually running" comes from
+      the freshly-read metadata's own `active_slot` field, not this file's
+      `s_own_slot` static (which is only kept current across a
+      `PENDING_VERIFY` boot, per `update_task_startup_confirm_check()`, and
+      would silently name the wrong slot in the ordinary already-`VALID`
+      steady state) — `active_slot` is written by `bootloader_decide_boot()`
+      on every boot/switch, so it is always correct. On success:
+      `current_slot` → `BOOTLOADER_SLOT_BAD`, `active_slot` → the other
+      slot, `boot_attempts` → 0, persisted via the same
+      `update_task_persist_metadata()` helper `UPDATE_END` already uses,
+      then `watchdog_reboot(0, 0, 0)` — the first actual reboot trigger this
+      firmware has; `UPDATE_END` deliberately still does not reboot (see
+      its own comment). Never ACKs on the wire, same as CLEAR_TRIP/SET_CONFIG
+      — the PC observes a successful rollback as the safety link dropping
+      and recovering with a new `boot_id`. `tools/PcTools` surfaces it as
+      `mcp__kilnctrl__ota_rollback_pico()` (no arguments), unit-tested in
+      `tools/PcTools/tests/test_safety_rollback.py` (7 tests). No LCD/GUI
+      surface — same budget-scope reason CLEAR_TRIP/SET_CONFIG's own were
+      deferred.
+
+      Build/test-verified only: `test/build_host_tests.ps1` 516/516 checks
+      passing (up from 501); real `ninja -j 24` clean under `-Werror` for
+      `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` and the bootloader itself
+      (both link `kilnlink_rollback.c` via the shared `add_subdirectory`);
+      `idf.py -C firmware/KilnFW build` clean. **Nothing here has been
+      exercised against real RP2040/ESP32-S3 hardware** — no probe/board
+      attached in this environment, and in particular `watchdog_reboot()`'s
+      actual reset behavior is unverified.
 - [x] Config writes **refused while ARMED**. **2026-08-19**: pure decision
       logic in `config_store_decide_write()` (host-tested,
       `test/test_config_store.c`) refuses unconditionally while

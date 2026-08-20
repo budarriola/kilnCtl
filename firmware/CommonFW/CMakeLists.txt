@@ -25,6 +25,7 @@ add_library(kilnlink STATIC
     src/kilnlink_ceiling.c
     src/kilnlink_clear_trip.c
     src/kilnlink_set_config.c
+    src/kilnlink_rollback.c
     src/kilnlink_get_fw_version.c
     src/kilnlink_set_clock.c
 )
@@ -168,4 +169,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_set_clock PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_set_clock COMMAND test_set_clock)
+
+    add_executable(test_rollback test/test_rollback.c)
+    target_link_libraries(test_rollback PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_rollback PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_rollback PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_rollback COMMAND test_rollback)
 endif()

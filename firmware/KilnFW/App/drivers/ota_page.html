@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Firmware Update</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  /* Same page-local-palette convention as rules_page.html/readiness_page.html
+     -- see theme.css's header comment. Only what's specific to this page
+     lives here. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --warn: #b00; --ok: #2a7; --accent: #06c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --warn: var(--ui-accent-5); --ok: var(--ui-accent-4); --accent: var(--ui-accent-3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --warn: var(--ui-accent-5); --ok: var(--ui-accent-4); --accent: var(--ui-accent-3);
+  }
+  body { font-family: sans-serif; max-width: 560px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1.05em; border-top: 1px solid var(--border); padding-top: 0.8em; margin-top: 1.4em; }
+  p { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.8em 1em; margin: 0.6em 0; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15em 0.8em; font-size: 0.92em; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-all; }
+  .blocker { background: var(--card-bg); border: 1px solid var(--warn); color: var(--warn);
+             border-radius: var(--ui-radius); padding: 0.7em 1em; font-weight: bold; }
+  .ready { background: var(--card-bg); border: 1px solid var(--ok); color: var(--ok);
+           border-radius: var(--ui-radius); padding: 0.7em 1em; font-weight: bold; }
+  .progress-outer { background: var(--input-bg); border: 1px solid var(--input-border);
+                     border-radius: var(--ui-radius); height: 1.6em; overflow: hidden; margin: 0.5em 0; }
+  .progress-inner { background: var(--accent); height: 100%; width: 0%; transition: width 0.3s ease;
+                     color: #fff; font-size: 0.8em; line-height: 1.6em; text-align: center; white-space: nowrap; }
+  input[type="password"], input[type="file"] { width: 100%; box-sizing: border-box; font-size: 1em;
+             background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+             border-radius: var(--ui-radius); padding: 0.5em; margin: 0.3em 0; }
+  label { display: block; margin-top: 0.6em; font-size: 0.9em; color: var(--muted); }
+  button { margin-top: 0.8em; margin-right: 0.5em; padding: 0.7em 1.5em;
+           font-size: 1em; background: var(--button-bg); color: var(--fg);
+           border: 1px solid var(--input-border); border-radius: var(--ui-radius); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { border-color: var(--warn); color: var(--warn); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .msg { margin-top: 0.6em; font-weight: bold; }
+  .note { font-size: 0.85em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/">&larr; Dashboard</a>
+<h1>Firmware Update</h1>
+<p>Push a new image to the ESP32-S3 main controller or relay one to the RP2040
+safety processor over the isolated UART link. Both require the Wi-Fi AP
+password (Settings &rarr; Network) as the update key -- it is never sent to
+the board, only used locally in this page to sign each request.</p>
+
+<h2>Kiln state</h2>
+<div id="interlockBox" class="card">Checking…</div>
+
+<h2>ESP32-S3 (main controller)</h2>
+<div id="espInfo" class="card kv">Loading…</div>
+<div id="espLastUpdate" class="card note" style="display:none"></div>
+
+<!-- TODO.md 9.6: "reachable only when the kiln is idle" -- the file
+     picker/upload controls for BOTH processors are hidden entirely (not
+     merely disabled) until loadInterlock() confirms idle, and re-hidden the
+     moment a later poll finds the kiln no longer idle. The password field
+     lives outside either picker since it's shared by both processors. -->
+<label for="apPassword">Wi-Fi AP password (update key)</label>
+<input type="password" id="apPassword" autocomplete="off">
+
+<div id="espPicker" style="display:none">
+  <label for="espFile">New ESP image (.bin)</label>
+  <input type="file" id="espFile" accept=".bin">
+  <div>
+    <button id="espUpdateBtn" type="button" class="primary">Update ESP</button>
+    <button id="espRollbackBtn" type="button" class="danger">Roll back ESP to previous image</button>
+  </div>
+</div>
+<div id="espProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="espProgressBar" class="progress-inner">0%</div></div>
+</div>
+<p id="espMsg" class="msg"></p>
+
+<h2>RP2040 (safety processor)</h2>
+<div id="picoInfo" class="card kv">Loading…</div>
+
+<div id="picoPicker" style="display:none">
+  <label for="picoFile">New Pico image (.bin)</label>
+  <input type="file" id="picoFile" accept=".bin">
+  <div>
+    <button id="picoUpdateBtn" type="button" class="primary">Update Pico</button>
+    <button type="button" class="danger" disabled title="Not yet available: no Pico-side rollback HTTP route exists. Pico rollback is being wired over the safety UART link, not HTTP, by separate work -- this page cannot call it yet.">Roll back Pico (not yet available)</button>
+  </div>
+</div>
+<div id="picoProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="picoProgressBar" class="progress-inner">0%</div></div>
+</div>
+<p id="picoMsg" class="msg"></p>
+
+<script>
+/* ---- Pure-JS SHA-256 / HMAC-SHA256 -------------------------------------
+ * This page is served over plain HTTP (the board has no TLS cert -- it is
+ * reachable from its own fallback AP at 192.168.4.1 during first-boot
+ * provisioning, and from the home LAN afterward, neither of which is a
+ * "secure context" per the Secure Contexts spec). window.crypto.subtle is
+ * only exposed in a secure context (https:, or http://localhost) --
+ * confirmed against the spec, not assumed: a real browser hitting this page
+ * over plain http://192.168.x.x has `crypto.subtle === undefined`. There is
+ * no vendored JS HMAC/SHA-256 anywhere else in this repo (grepped
+ * App/drivers/*.html and *.js for crypto.subtle/hmac/sha256 -- only the C
+ * side, ota_http.c/ota_auth.h, has one), so this is a from-scratch, minimal,
+ * dependency-free implementation, kept local to this page rather than a
+ * shared file since nothing else in the codebase needs it yet. Standard
+ * FIPS 180-4 SHA-256 / RFC 2104 HMAC construction, byte arrays only (no
+ * external libs, no eval, no network fetch of code). */
+function sha256(bytes) {
+  var K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+  ];
+  var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+
+  var bitLen = bytes.length * 8;
+  var withOne = bytes.concat([0x80]);
+  while (withOne.length % 64 !== 56) withOne.push(0);
+  for (var s = 56; s >= 0; s -= 8) withOne.push(Math.floor(bitLen / Math.pow(2, s)) & 0xff);
+
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+
+  for (var chunk = 0; chunk < withOne.length; chunk += 64) {
+    var w = new Array(64);
+    for (var i = 0; i < 16; i++) {
+      var o = chunk + i * 4;
+      w[i] = ((withOne[o] << 24) | (withOne[o + 1] << 16) | (withOne[o + 2] << 8) | withOne[o + 3]) >>> 0;
+    }
+    for (i = 16; i < 64; i++) {
+      var s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      var s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (i = 0; i < 64; i++) {
+      var S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      var ch = (e & f) ^ (~e & g);
+      var temp1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+      var S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+  }
+
+  var out = [];
+  for (i = 0; i < 8; i++) {
+    out.push((H[i] >>> 24) & 0xff, (H[i] >>> 16) & 0xff, (H[i] >>> 8) & 0xff, H[i] & 0xff);
+  }
+  return out;
+}
+
+function hmacSha256(keyBytes, msgBytes) {
+  var blockSize = 64;
+  if (keyBytes.length > blockSize) keyBytes = sha256(keyBytes);
+  var padded = keyBytes.concat(new Array(blockSize - keyBytes.length).fill(0));
+  var ipad = padded.map(function (b) { return b ^ 0x36; });
+  var opad = padded.map(function (b) { return b ^ 0x5c; });
+  var inner = sha256(ipad.concat(msgBytes));
+  return sha256(opad.concat(inner));
+}
+
+function strToBytes(s) {
+  var out = [];
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+  }
+  return out;
+}
+
+function bytesToHex(bytes) {
+  return bytes.map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+}
+
+function hexToBytes(hex) {
+  var out = [];
+  for (var i = 0; i < hex.length; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
+  return out;
+}
+
+/* CommonFW/docs/UPDATE_PROTOCOL.md section 2 step 2, same derivation
+ * ota_http.c's ota_http_verify_request() and PcTools' ota_http_client.py's
+ * derive_mac() both implement:
+ *   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
+ *   mac = HMAC-SHA256(key, nonce_bytes || context)
+ * context is exactly "esp", "pico", or "esp-rollback". */
+var OTA_KDF_CONTEXT = "kilnctl-ota-v1";
+function deriveMac(apPassword, nonceBytes, context) {
+  var key = hmacSha256(strToBytes(apPassword), strToBytes(OTA_KDF_CONTEXT));
+  var msg = nonceBytes.concat(strToBytes(context));
+  return hmacSha256(key, msg);
+}
+
+/* ---- Fetch helpers ------------------------------------------------------ */
+function getChallenge() {
+  return fetch('/api/ota/challenge').then(function (r) {
+    if (!r.ok) throw new Error('challenge request failed: HTTP ' + r.status);
+    return r.json();
+  }).then(function (obj) {
+    return hexToBytes(obj.nonce);
+  });
+}
+
+function pushImage(endpoint, context, apPassword, fileBytes, onDone) {
+  return getChallenge().then(function (nonce) {
+    var mac = deriveMac(apPassword, nonce, context);
+    return fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Ota-Mac': bytesToHex(mac),
+      },
+      body: fileBytes,
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      var body = {};
+      try { body = JSON.parse(text); } catch (e) { /* plain-text error body -- see below */ }
+      if (!r.ok) {
+        var e2 = new Error(text || ('HTTP ' + r.status));
+        e2.status = r.status;
+        throw e2;
+      }
+      return body;
+    });
+  });
+}
+
+function readFileBytes(fileInput) {
+  var file = fileInput.files && fileInput.files[0];
+  if (!file) return Promise.reject(new Error('choose a file first'));
+  return file.arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+}
+
+/* ---- Interlock (before the file picker matters) -------------------------
+ * GET /api/ota/interlock (App/drivers/ota_http.c, added this session) --
+ * unauthenticated, same exposure level as GET /api/status already has.
+ * Named blocker shown right at the top, refreshed on a slow timer so an
+ * operator watching this page sees the kiln become idle without reloading. */
+function setPickersVisible(visible) {
+  document.getElementById('espPicker').style.display = visible ? '' : 'none';
+  document.getElementById('picoPicker').style.display = visible ? '' : 'none';
+}
+
+function loadInterlock() {
+  var box = document.getElementById('interlockBox');
+  return fetch('/api/ota/interlock').then(function (r) { return r.json(); }).then(function (s) {
+    if (s.ok) {
+      box.className = 'ready';
+      box.textContent = 'Idle -- updates are allowed.';
+    } else {
+      box.className = 'blocker';
+      box.textContent = 'Blocked: ' + (s.reason || 'kiln is not idle');
+    }
+    setPickersVisible(s.ok);
+    return s.ok;
+  }).catch(function () {
+    box.className = 'blocker';
+    box.textContent = 'Could not read interlock state -- assume blocked.';
+    setPickersVisible(false);
+    return false;
+  });
+}
+
+/* ---- ESP status ----------------------------------------------------------
+ * GET /api/ota/esp/status -- phase/percent/version/commit/dirty/build_date/
+ * active_slot/inactive_slot/inactive_version/last_update (App/drivers/
+ * ota_http.c, extended this session -- see TODO.md 9.6). */
+function renderEspInfo(s) {
+  var info = document.getElementById('espInfo');
+  info.innerHTML =
+    '<dt>Running version</dt><dd>' + (s.version || '(unknown)') + '</dd>' +
+    '<dt>Build commit</dt><dd>' + s.commit + (s.dirty ? ' (dirty)' : '') + '</dd>' +
+    '<dt>Build date</dt><dd>' + s.build_date + '</dd>' +
+    '<dt>Active slot</dt><dd>' + s.active_slot + '</dd>' +
+    '<dt>Inactive slot</dt><dd>' + s.inactive_slot +
+      ' (' + (s.inactive_version ? s.inactive_version : '(empty)') + ')</dd>';
+
+  var lu = document.getElementById('espLastUpdate');
+  if (s.last_update) {
+    lu.style.display = '';
+    lu.textContent = 'Last update: ' + s.last_update.version_before + ' -> ' +
+      (s.last_update.version_after || '(unknown)') + ', ' +
+      (s.last_update.success ? 'succeeded' : 'FAILED (' + s.last_update.reason + ')') +
+      ', ' + s.last_update.uptime_s + 's after boot.';
+  } else {
+    lu.style.display = 'none';
+  }
+
+  var wrap = document.getElementById('espProgressWrap');
+  var bar = document.getElementById('espProgressBar');
+  if (s.phase === 'writing' || s.phase === 'verifying' || s.phase === 'finalizing') {
+    wrap.style.display = '';
+    bar.style.width = s.percent + '%';
+    bar.textContent = s.phase + ' ' + s.percent + '%';
+  } else {
+    wrap.style.display = 'none';
+  }
+  return s.phase;
+}
+
+function pollEspStatus() {
+  fetch('/api/ota/esp/status').then(function (r) { return r.json(); }).then(function (s) {
+    var phase = renderEspInfo(s);
+    if (phase === 'writing' || phase === 'verifying' || phase === 'finalizing') {
+      setTimeout(pollEspStatus, 1000);
+    }
+  }).catch(function () {
+    document.getElementById('espInfo').textContent = 'Could not load ESP status.';
+  });
+}
+
+/* ---- Pico status ----------------------------------------------------------
+ * GET /api/ota/pico/status -- phase/percent/last_error plus protocol_version*
+ * fields (App/drivers/ota_http.c, extended this session). NOTE: unlike the
+ * ESP side, the Pico's build commit/dirty flag/build date are NOT available
+ * over this link -- safety_link.c's safety_apply_fw_version() parses past
+ * those fields (to reach boot_id) but never stores them (see safety_link.h's
+ * SAFETY_CMD_FW_VERSION doc comment and safety_link.c's
+ * safety_parse_fw_version()). This page shows what IS actually on the wire:
+ * protocol version and whether it's compatible with this ESP build. There is
+ * also no A/B "active/inactive slot" concept on the Pico side in this
+ * protocol at all -- the RP2040 has one firmware image, not two OTA
+ * partitions -- so this section has no slot row, unlike the ESP one. */
+function renderPicoInfo(s) {
+  var info = document.getElementById('picoInfo');
+  var html = '<dt>Relay phase</dt><dd>' + s.phase + '</dd>';
+  if (s.protocol_version_known) {
+    html += '<dt>Protocol version</dt><dd>' + s.protocol_version +
+      ' (min compatible ' + s.protocol_min_compatible + ')</dd>' +
+      '<dt>Compatible with this ESP</dt><dd>' + (s.protocol_compatible ? 'yes' : 'NO -- mismatch') + '</dd>';
+  } else {
+    html += '<dt>Protocol version</dt><dd>not yet known (no FW_VERSION frame received)</dd>';
+  }
+  html += '<dt>Build commit / date</dt><dd>not available over this link -- see page source comment</dd>';
+  if (s.last_error) {
+    html += '<dt>Last relay error</dt><dd>' + s.last_error + '</dd>';
+  }
+  info.innerHTML = html;
+
+  var wrap = document.getElementById('picoProgressWrap');
+  var bar = document.getElementById('picoProgressBar');
+  var active = ['begin', 'erasing', 'sending', 'retransmit', 'finishing'].indexOf(s.phase) !== -1;
+  if (active) {
+    wrap.style.display = '';
+    bar.style.width = s.percent + '%';
+    bar.textContent = s.phase + ' ' + s.percent + '%';
+  } else {
+    wrap.style.display = 'none';
+  }
+  return s.phase;
+}
+
+function pollPicoStatus() {
+  fetch('/api/ota/pico/status').then(function (r) { return r.json(); }).then(function (s) {
+    var phase = renderPicoInfo(s);
+    if (['begin', 'erasing', 'sending', 'retransmit', 'finishing'].indexOf(phase) !== -1) {
+      setTimeout(pollPicoStatus, 1000);
+    }
+  }).catch(function () {
+    document.getElementById('picoInfo').textContent = 'Could not load Pico status.';
+  });
+}
+
+/* ---- Button wiring -------------------------------------------------------- */
+document.getElementById('espUpdateBtn').addEventListener('click', function () {
+  var msg = document.getElementById('espMsg');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
+  msg.textContent = 'Reading file…';
+  readFileBytes(document.getElementById('espFile')).then(function (bytes) {
+    msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
+    return pushImage('/api/ota/esp', 'esp', pw, bytes);
+  }).then(function (body) {
+    msg.textContent = 'ESP update accepted: ' + body.bytes + ' bytes written to ' + body.partition +
+      ', version ' + body.version + '. Reboot the board to run it (stays PENDING_VERIFY until confirmed).';
+    pollEspStatus();
+  }).catch(function (e) {
+    msg.textContent = 'ESP update failed: ' + e.message;
+  });
+});
+
+document.getElementById('espRollbackBtn').addEventListener('click', function () {
+  var msg = document.getElementById('espMsg');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
+  if (!confirm('Roll back the ESP to its previous image and reboot now?')) return;
+  msg.textContent = 'Requesting rollback…';
+  getChallenge().then(function (nonce) {
+    var mac = deriveMac(pw, nonce, 'esp-rollback');
+    return fetch('/api/ota/esp/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Ota-Mac': bytesToHex(mac) },
+      body: new Uint8Array(0),
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+      return JSON.parse(text);
+    });
+  }).then(function (body) {
+    msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
+  }).catch(function (e) {
+    msg.textContent = 'Rollback failed: ' + e.message;
+  });
+});
+
+document.getElementById('picoUpdateBtn').addEventListener('click', function () {
+  var msg = document.getElementById('picoMsg');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
+  msg.textContent = 'Reading file…';
+  readFileBytes(document.getElementById('picoFile')).then(function (bytes) {
+    msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
+    return pushImage('/api/ota/pico', 'pico', pw, bytes);
+  }).then(function (body) {
+    msg.textContent = 'Pico image staged (' + body.bytes + ' bytes, crc32 ' + body.crc32 +
+      '), relaying over the safety UART link now -- watch the progress bar below.';
+    pollPicoStatus();
+  }).catch(function (e) {
+    msg.textContent = 'Pico update failed: ' + e.message;
+  });
+});
+
+/* ---- Boot ------------------------------------------------------------------ */
+loadInterlock();
+setInterval(loadInterlock, 15000);
+pollEspStatus();
+pollPicoStatus();
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

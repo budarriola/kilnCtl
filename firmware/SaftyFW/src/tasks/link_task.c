@@ -74,6 +74,7 @@
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_power.h"
+#include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_trip.h"
 #include "kilnlink/kilnlink_version.h"
@@ -744,6 +745,49 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
     }
 }
 
+// SAFETY_CMD_ROLLBACK (0x17), CommonFW/docs/LINK_PROTOCOL.md section 4 --
+// tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
+// half, POST /api/ota/esp/rollback, already exists). Same shape as
+// link_task_handle_clear_trip()/link_task_handle_set_config() above: decode
+// the wire frame here, log accept/refuse, never ACK on the wire -- the PC
+// observes the outcome (or, on acceptance, simply a reconnect after the
+// reboot) rather than a reply to this frame.
+//
+// Unlike CLEAR_TRIP/SET_CONFIG, all of the actual policy -- the ARMED check
+// AND the "is the other bootloader slot valid to fall back to" gate that is
+// this whole feature's load-bearing correctness property -- lives in
+// update_task_request_rollback() (update_task.c), called synchronously
+// here. See that function's own doc comment for why a synchronous call is
+// right for this (small, bounded) flash write, following config_store_
+// write()'s own precedent rather than UPDATE_*'s queued-to-update_task
+// shape built for up-to-832K transfers.
+static void link_task_handle_rollback(const kilnlink_frame_t *frame)
+{
+    kilnlink_rollback_t msg;
+    kilnlink_rollback_status_t dstatus =
+        kilnlink_rollback_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_ROLLBACK_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file (see
+        // link_task_handle_raw_frame()'s own comments).
+        return;
+    }
+
+    // Logged BEFORE the call: update_task_request_rollback() does not
+    // return on success (watchdog_reboot() resets the board immediately),
+    // so this is the only chance to record acceptance at all -- the refusal
+    // path below is what actually executes and gets logged when the request
+    // does not succeed.
+    log_task_log(LOG_LEVEL_WARN, "rollback", "requested");
+
+    const char *reason = NULL;
+    bool accepted = update_task_request_rollback(&reason);
+    // Reached only on refusal/failure -- see the function's own doc comment.
+    if (!accepted) {
+        log_task_log(LOG_LEVEL_WARN, "rollback", reason ? reason : "refused");
+    }
+}
+
 static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t unstuffed[LINK_RX_ASSEMBLY_MAX];
@@ -784,6 +828,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_SET_CONFIG_CMD:
         link_task_handle_set_config(&frame);
+        break;
+    case LINK_FRAME_ROLLBACK_CMD:
+        link_task_handle_rollback(&frame);
         break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
     // call above, except the handler lives in update_task.c rather than

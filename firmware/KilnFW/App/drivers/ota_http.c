@@ -5,6 +5,9 @@
 
 #include "psa/crypto.h"
 
+#include "build_info.h" /* FW_GIT_COMMIT/FW_GIT_DIRTY/FW_BUILD_DATE/FW_BUILD_TIME -- TODO.md 9.6's
+                          * per-processor build-identity fields for the ESP side, same header
+                          * safety_link.c already includes for the ANNOUNCE_VERSION payload */
 #include "esp_app_desc.h"
 #include "esp_app_format.h" /* esp_image_header_t, ESP_IMAGE_HEADER_MAGIC -- section 3's pre-esp_ota_begin() check */
 #include "esp_log.h"
@@ -37,6 +40,15 @@
 #include "zones_http.h"
 
 static const char *TAG = "ota_http";
+
+// GET /ota page (TODO.md 9.6) -- gzipped at configure time by
+// App/drivers/CMakeLists.txt's KILNCTL_GZIP_ASSETS list, same
+// EMBED_TXTFILES + Content-Encoding: gzip convention every other page in
+// this component uses (rules_page.html/profiles_page.html/etc. -- see
+// rules_http.c's page_get_handler()/client_accepts_gzip() for the precedent
+// this mirrors).
+extern const uint8_t ota_page_html_gz_start[] asm("_binary_ota_page_html_gz_start");
+extern const uint8_t ota_page_html_gz_end[] asm("_binary_ota_page_html_gz_end");
 
 // mbedtls/md.h's classic mbedtls_md_hmac*() family is entirely gated behind
 // MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS in this vendored mbedtls 4.x/TF-PSA-
@@ -212,6 +224,31 @@ static void get_client_ip(httpd_req_t *req, char *out, size_t out_len)
     } else {
         inet_ntop(AF_INET6, &addr.sin6_addr, out, out_len);
     }
+}
+
+// Same per-file duplicated helper every other page's *_http.c carries
+// (rules_http.c's client_accepts_gzip(), wifi_provision_http.c's own copy)
+// rather than a shared one -- matches this codebase's existing convention
+// per TODO.md 10.6a's own note on that duplication being deliberate.
+static bool ota_page_client_accepts_gzip(httpd_req_t *req)
+{
+    char enc[32];
+    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
+        return false;
+    }
+    return strstr(enc, "gzip") != NULL;
+}
+
+static esp_err_t ota_page_get_handler(httpd_req_t *req)
+{
+    if (!ota_page_client_accepts_gzip(req)) {
+        ESP_LOGW(TAG, "ota_page.html: client did not advertise Accept-Encoding: gzip; serving gzip "
+                      "body anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)ota_page_html_gz_start,
+                            (size_t)(ota_page_html_gz_end - ota_page_html_gz_start));
 }
 
 static esp_err_t ota_challenge_get_handler(httpd_req_t *req)
@@ -1181,24 +1218,69 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     ota_record_t rec;
     bool have_record = (ota_record_load(&rec) == ESP_OK);
 
+    // TODO.md 9.6: "running version, build commit, build date, dirty flag,
+    // active slot, and the version sitting in the inactive slot" -- none of
+    // this was on any existing HTTP route before this pass (dashboard_http.c's
+    // /api/status has no such fields; grepped for esp_app_get_description/
+    // FW_GIT_COMMIT/esp_ota_get_running_partition there and found nothing).
+    // Added directly to this already-existing status route rather than a new
+    // one, same "small, contained addition to an existing endpoint" the
+    // Pico-status handler below also gets for its own available fields.
+    const esp_app_desc_t *running_desc = esp_app_get_description();
+    const char *running_version = (running_desc && running_desc->version[0]) ? running_desc->version : "";
+    const esp_partition_t *running_part = esp_ota_get_running_partition();
+    const char *active_slot = running_part ? running_part->label : "unknown";
+
+    const esp_partition_t *inactive_part = esp_ota_get_next_update_partition(NULL);
+    const char *inactive_slot = inactive_part ? inactive_part->label : "unknown";
+    char inactive_version[33] = "";
+    if (inactive_part) {
+        esp_app_desc_t inactive_desc;
+        if (esp_ota_get_partition_description(inactive_part, &inactive_desc) == ESP_OK) {
+            strncpy(inactive_version, inactive_desc.version, sizeof(inactive_version) - 1);
+            inactive_version[sizeof(inactive_version) - 1] = '\0';
+        }
+        // Left blank (not "unknown") when the inactive slot has no readable
+        // app descriptor -- an erased/never-flashed factory or ota_1
+        // partition on a fresh board is a real, common state, not an error;
+        // the page renders an empty string as "(empty)" itself.
+    }
+
     // rec.reason (ota_record_fill()'s callers, ota_esp_do_transfer() above)
     // is always this codebase's own snprintf() output -- never copied
     // verbatim from an external source -- so, same as
     // ota_pico_status_get_handler()'s last_error field below, it cannot
-    // contain a raw '"' or '\' that would need JSON escaping here.
-    char body[384];
+    // contain a raw '"' or '\' that would need JSON escaping here. version/
+    // active_slot/inactive_slot are equally safe: version comes from this
+    // firmware's own PROJECT_VER (esp_app_desc_t), the slot labels come from
+    // the partition table (esp_partition_t::label), and inactive_version
+    // comes from the SAME struct field on a partition this build itself
+    // wrote (or its factory-default) -- none of these are attacker-supplied.
+    char body[640];
     int n;
     if (have_record) {
         n = snprintf(body, sizeof(body),
-                      "{\"phase\":\"%s\",\"percent\":%u,\"last_update\":"
+                      "{\"phase\":\"%s\",\"percent\":%u,"
+                      "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
+                      "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
+                      "\"last_update\":"
                       "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
                       "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u}}",
-                      esp_phase_str(phase), (unsigned)percent, rec.processor, rec.version_before,
+                      esp_phase_str(phase), (unsigned)percent,
+                      running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
+                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
+                      rec.processor, rec.version_before,
                       rec.version_after, rec.success ? "true" : "false", rec.reason,
                       (unsigned)rec.uptime_s);
     } else {
-        n = snprintf(body, sizeof(body), "{\"phase\":\"%s\",\"percent\":%u,\"last_update\":null}",
-                      esp_phase_str(phase), (unsigned)percent);
+        n = snprintf(body, sizeof(body),
+                      "{\"phase\":\"%s\",\"percent\":%u,"
+                      "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
+                      "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
+                      "\"last_update\":null}",
+                      esp_phase_str(phase), (unsigned)percent,
+                      running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
+                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version);
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);
@@ -1331,18 +1413,84 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// GET /api/ota/interlock -- TODO.md 9.6: "interlock state shown BEFORE the
+// file picker, with the blocker named." ota_http_check_interlocks() itself
+// is only ever called from inside the authenticated POST /api/ota/{esp,pico}
+// handlers (see ota_http.h's doc comment above that function: an
+// unauthenticated caller would learn live kiln telemetry, e.g. "zone 2 is at
+// 340 C", folded into the refusal reason string). That reasoning is sound in
+// isolation, but this codebase's own GET /api/status (dashboard_http.c) is
+// ALREADY unauthenticated and already returns every zone's live temperature
+// directly -- so gating this endpoint behind the OTA challenge/HMAC dance
+// (which would force the web page to ask for the Wi-Fi AP password just to
+// show "kiln is running a profile" before the file picker even appears)
+// would not close any exposure that isn't already open on this same LAN.
+// Unauthenticated here, matching /api/status's existing exposure level, not
+// a new one. Returns {"ok":true} or {"ok":false,"reason":"<why>"}.
+static esp_err_t ota_interlock_get_handler(httpd_req_t *req)
+{
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    ota_interlock_result_t r = ota_http_check_interlocks(reason, sizeof(reason));
+
+    char body[OTA_INTERLOCK_REASON_MAX + 32];
+    int n;
+    if (r == OTA_INTERLOCK_OK) {
+        n = snprintf(body, sizeof(body), "{\"ok\":true}");
+    } else {
+        n = snprintf(body, sizeof(body), "{\"ok\":false,\"reason\":\"%s\"}", reason);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, n);
+    return ESP_OK;
+}
+
 static esp_err_t ota_pico_status_get_handler(httpd_req_t *req)
 {
     ota_pico_relay_status_t st;
     ota_pico_relay_get_status(&st);
 
+    // TODO.md 9.6: the Pico half of "running version, build commit, build
+    // date, dirty flag, active slot, inactive slot" -- and here the honest
+    // answer is that most of it does NOT exist over this link. Per
+    // safety_link.h's own header comment (SAFETY_CMD_FW_VERSION) the Pico's
+    // reply carries protocol/min_compatible/dirty/commit/datetime/boot_id,
+    // but safety_apply_fw_version()/safety_parse_fw_version() (safety_link.c)
+    // only extract protocol/min_compatible/boot_id -- dirty/commit/datetime
+    // are parsed past (to find boot_id's offset) and then discarded, never
+    // stored in safety_link_status_t. There is also no concept of an
+    // "active/inactive slot" on the Pico side in this protocol at all (no
+    // A/B image slots the way the ESP has). What IS actually available is
+    // exposed here: the peer's protocol version, whether it's known/
+    // compatible with this ESP's build, and its boot_id -- via
+    // safety_link_get_peer_version_status(), the same accessor
+    // dashboard_http.c's peer_protocol_version fields already use.
+    bool version_known = false, version_compatible = false;
+    uint16_t peer_protocol = 0, peer_min_compatible = 0;
+    if (s_safety) {
+        (void)safety_link_get_peer_version_status(s_safety, &version_known, &version_compatible,
+                                                    &peer_protocol, &peer_min_compatible);
+    }
+
     // last_error is always built by this codebase's own snprintf() calls
     // (ota_pico_relay.c's relay_set_error()/format_update_error()) -- never
     // copied verbatim from an external source -- so it cannot contain a
     // raw '"' or '\' that would need JSON escaping here.
-    char body[256];
-    int n = snprintf(body, sizeof(body), "{\"phase\":\"%s\",\"percent\":%u,\"last_error\":\"%s\"}",
+    char body[384];
+    int n;
+    if (version_known) {
+        n = snprintf(body, sizeof(body),
+                      "{\"phase\":\"%s\",\"percent\":%u,\"last_error\":\"%s\","
+                      "\"protocol_version_known\":true,\"protocol_version\":%u,"
+                      "\"protocol_min_compatible\":%u,\"protocol_compatible\":%s}",
+                      ota_pico_relay_phase_str(st.phase), (unsigned)st.percent, st.last_error,
+                      (unsigned)peer_protocol, (unsigned)peer_min_compatible,
+                      version_compatible ? "true" : "false");
+    } else {
+        n = snprintf(body, sizeof(body),
+                      "{\"phase\":\"%s\",\"percent\":%u,\"last_error\":\"%s\","
+                      "\"protocol_version_known\":false}",
                       ota_pico_relay_phase_str(st.phase), (unsigned)st.percent, st.last_error);
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);
     return ESP_OK;
@@ -1380,10 +1528,22 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
         return ESP_ERR_INVALID_STATE;
     }
 
+    // TODO.md 9.6: the web page itself, GET /ota -- registered first among
+    // this file's routes purely because it has no dependency on anything
+    // below it; order does not otherwise matter to httpd_register_uri_handler().
+    static const httpd_uri_t ota_page_uri = {
+        .uri = "/ota", .method = HTTP_GET, .handler = ota_page_get_handler
+    };
+    esp_err_t err = httpd_register_uri_handler(server, &ota_page_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/ota) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
     static const httpd_uri_t challenge_uri = {
         .uri = "/api/ota/challenge", .method = HTTP_GET, .handler = ota_challenge_get_handler
     };
-    esp_err_t err = httpd_register_uri_handler(server, &challenge_uri);
+    err = httpd_register_uri_handler(server, &challenge_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/challenge) failed: %s",
                  esp_err_to_name(err));
@@ -1419,6 +1579,18 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &pico_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/pico/status) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // TODO.md 9.6: interlock state for the web page, before the file picker
+    // -- see ota_interlock_get_handler()'s own doc comment for why this is
+    // unauthenticated, same exposure level as GET /api/status.
+    static const httpd_uri_t interlock_uri = {
+        .uri = "/api/ota/interlock", .method = HTTP_GET, .handler = ota_interlock_get_handler
+    };
+    err = httpd_register_uri_handler(server, &interlock_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/interlock) failed: %s", esp_err_to_name(err));
         return err;
     }
 

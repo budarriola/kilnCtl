@@ -73,6 +73,21 @@ void update_task_handle_data(const uint8_t *payload, uint8_t length);
 void update_task_handle_end(const uint8_t *payload, uint8_t length);
 void update_task_handle_abort(const uint8_t *payload, uint8_t length);
 
+// SAFETY_CMD_ROLLBACK (0x17) -- tools/PcTools/TODO.md's
+// `ota_rollback(processor)` line, Pico half. Called SYNCHRONOUSLY from
+// link_task_handle_rollback() (src/tasks/link_task.c), not queued like the
+// four handlers above -- see this function's own doc comment in
+// update_task.c for why a single metadata-record write is small enough to
+// do inline, the same way config_store_write() already is.
+//
+// Refuses (returns false, fills `*out_reason` if non-NULL) if the relay is
+// currently ARMED, or if bootloader/metadata.c's bootloader_decide_rollback()
+// refuses because the OTHER bootloader slot is not currently VALID or
+// PENDING_VERIFY -- the property that keeps a rollback from ever stranding
+// the board with zero bootable slots. On success this function DOES NOT
+// RETURN: it calls watchdog_reboot() and the RP2040 resets immediately.
+bool update_task_request_rollback(const char **out_reason);
+
 #ifdef __cplusplus
 }
 #endif

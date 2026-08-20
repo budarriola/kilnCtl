@@ -121,6 +121,7 @@ from .protocol import (
     SAFETY_CMD_GET_STATUS,
     SAFETY_CMD_PING,
     SAFETY_CMD_REQUEST_ENABLE,
+    SAFETY_CMD_ROLLBACK,
     SAFETY_CMD_SET_CONFIG,
     SAFETY_CMD_SET_FAULT_OUT,
     SAFETY_CMD_SET_POLL_PERIOD,
@@ -1722,6 +1723,23 @@ def safety_set_config(tc_type: int) -> bytes:
     return struct.pack(
         "<BB", SAFETY_CMD_SET_CONFIG, _check_range(tc_type, 0, 0x0F, "tc_type")
     )
+
+
+def safety_request_rollback() -> bytes:
+    """0x17 ROLLBACK: revert the safety processor to its previous bootloader
+    slot, right now.
+
+    tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the
+    ESP half is mcp_server.ota_rollback_esp()). No args, fire-and-forget like
+    CLEAR_TRIP/SET_CONFIG -- there is no reply on the wire. Refused entirely
+    on SaftyFW's own say-so: the relay is currently ARMED, or (the property
+    that matters most) the OTHER bootloader slot is not currently VALID or
+    PENDING_VERIFY, so a rollback can never strand the board with zero
+    bootable slots. A successful rollback reboots the Pico -- the outcome is
+    observed as the link dropping and recovering with a new boot_id on the
+    next GET_STATUS poll, not from anything returned here.
+    """
+    return struct.pack("<B", SAFETY_CMD_ROLLBACK)
 
 
 @dataclass(frozen=True)

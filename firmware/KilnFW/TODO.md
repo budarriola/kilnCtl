@@ -3636,11 +3636,68 @@ host-tested than it is.
 
 ### 9.6 Web page
 
-- [ ] Per processor: running version, build commit, build date, dirty flag,
-      active slot, and the version sitting in the inactive slot
-- [ ] Interlock state shown **before** the file picker, with the blocker named
-- [ ] Progress bar, and a rollback button per processor
-- [ ] Reachable only when the kiln is idle
+- [x] Per processor: running version, build commit, build date, dirty flag,
+      active slot, and the version sitting in the inactive slot. **2026-08-19**:
+      new page `App/drivers/ota_page.html`, served at `GET /ota`
+      (`ota_http.c`), linked from `main_page.html`'s Settings section
+      ("Firmware update"). ESP side: `GET /api/ota/esp/status` extended this
+      pass with `version`/`commit`/`dirty`/`build_date`/`active_slot`/
+      `inactive_slot`/`inactive_version` (`esp_app_get_description()`,
+      `build_info.h`'s `FW_GIT_COMMIT`/`FW_GIT_DIRTY`/`FW_BUILD_DATE`,
+      `esp_ota_get_running_partition()`/`esp_ota_get_next_update_partition()`/
+      `esp_ota_get_partition_description()`) — none of this existed on any
+      HTTP route before this pass, confirmed by grepping `dashboard_http.c`.
+      Pico side: **partial, and this is a real protocol gap, not an
+      oversight** — `GET /api/ota/pico/status` was extended with
+      `protocol_version_known`/`protocol_version`/`protocol_min_compatible`/
+      `protocol_compatible` (`safety_link_get_peer_version_status()`), but
+      the Pico's build commit/dirty flag/build date are **not retrievable**:
+      `safety_link.h`'s own `SAFETY_CMD_FW_VERSION` doc comment says the
+      wire frame carries dirty/commit/datetime, but
+      `safety_parse_fw_version()`/`safety_apply_fw_version()`
+      (`safety_link.c`) only extract protocol/min_compatible/boot_id — the
+      commit/dirty/datetime bytes are parsed past (to reach boot_id's
+      offset) and discarded, never stored in `safety_link_status_t`. Closing
+      this needs a `safety_link.h`/`.c` change (new struct fields + a
+      getter), which is out of scope for this pass per the "don't touch
+      safety_link.*" boundary — named gap for a future pass. There is also
+      no active/inactive-slot concept on the Pico side in this protocol at
+      all (one image, not A/B partitions), so the page has no slot row for
+      it, by design, not omission.
+- [x] Interlock state shown **before** the file picker, with the blocker
+      named. **2026-08-19**: new unauthenticated `GET /api/ota/interlock`
+      (`ota_http.c`) wraps the existing `ota_http_check_interlocks()` (until
+      now only reachable from inside the authenticated POST handlers).
+      Deliberately unauthenticated despite `ota_http.h`'s doc comment
+      warning that an unauthenticated interlock check leaks live telemetry
+      in the reason string — `GET /api/status` (`dashboard_http.c`) already
+      exposes every zone's live temperature unauthenticated on this same
+      LAN, so gating this one endpoint behind the OTA password (forcing the
+      page to ask for it just to show "kiln is running a profile") would not
+      close any exposure that isn't already open. The page polls this on
+      load and every 15s, and hides the file-picker/upload controls for
+      BOTH processors entirely (not just disables them) until it reports OK.
+- [x] Progress bar, and a rollback button per processor. **2026-08-19**: ESP
+      progress bar polls `GET /api/ota/esp/status`'s `phase`/`percent`
+      during `verifying`/`writing`/`finalizing`; ESP rollback button wired
+      to `POST /api/ota/esp/rollback` (challenge + `"esp-rollback"`-context
+      HMAC, added last session). Pico progress bar polls
+      `GET /api/ota/pico/status`. **Pico rollback button is a labeled,
+      disabled placeholder ("not yet available"), not wired to anything** —
+      no `POST /api/ota/pico/rollback`-equivalent HTTP route exists; a Pico
+      rollback trigger is expected to go over the safety UART link, not
+      HTTP, and per this task's own scope boundary this pass does not touch
+      `safety_link.*`/`ota_pico_relay.c`'s bigger relay logic. Named gap,
+      not silently omitted.
+- [x] Reachable only when the kiln is idle. **2026-08-19**: the `/ota` page
+      itself loads regardless of kiln state (so an operator can always see
+      *why* it's blocked), but the actual update surface — both processors'
+      file pickers and their Update/Rollback buttons — stays hidden
+      (`display:none`, not just disabled) until `GET /api/ota/interlock`
+      reports idle. The real enforcement point remains server-side, as
+      before: `ota_http_check_interlocks()` inside the authenticated POST
+      handlers refuses the write itself regardless of what the page shows,
+      so a stale/cached page can never push an update past the interlock.
 - [x] Suppress the "safety processor not responding" alarm TEXT (not the
       block) while a Pico relay is genuinely in progress. **2026-08-17**:
       `safety_link_set_update_in_progress()` (`App/drivers/safety_link.{h,c}`),
@@ -3718,7 +3775,15 @@ section 6.
 **2026-08-19 — explicit ESP rollback, `POST /api/ota/esp/rollback`**: closes
 the other half of `tools/PcTools/TODO.md`'s `ota_rollback(processor)` line
 (ESP side only — the RP2040/SaftyFW side has its own bootloader slot-switch
-mechanics and is not attempted here). `ota_rollback_confirm_task()`
+mechanics and was not attempted in this pass. **Update, same day**: the Pico
+side now also exists — `SAFETY_CMD_ROLLBACK` (0x17) over the safety UART
+bridge, see `firmware/SaftyFW/TODO.md`'s own entry for the full design
+(`bootloader/metadata.c`'s `bootloader_decide_rollback()`, the "other slot
+must be VALID/PENDING_VERIFY or refuse" gate). This driver's own
+`safety_link_send_rollback()` (`App/drivers/safety_link.{h,c}`) and
+`uart_bridge.c`'s `SAFETY_CMD_ROLLBACK` case are this file's half of that
+work — no HTTP surface involved, since the Pico command already travels the
+existing PC→ESP→Pico bridge). `ota_rollback_confirm_task()`
 (`App/main.c`) already handled "don't auto-revert a healthy new image";
 this route is the deliberate opposite: "go back to the previous image right
 now", even though the running image is healthy and already confirmed. New

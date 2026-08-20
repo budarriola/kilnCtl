@@ -307,7 +307,7 @@ reimplementing the transfer.
 - [ ] `ota_update_pico(image_path, password)` — same, relayed over the link,
       with progress surfaced at least every 2 s
 - [x] `ota_rollback(processor)` — explicit, refused under the same interlocks.
-      **2026-08-19, ESP half only**: `ota_rollback_esp(password, host=None)`
+      **2026-08-19**: `ota_rollback_esp(password, host=None)`
       (`mcp_server.py`) now exists, calling `POST /api/ota/esp/rollback`
       (`firmware/KilnFW/App/drivers/ota_http.c`'s new
       `ota_esp_rollback_post_handler()`) — same challenge/HMAC auth as
@@ -320,11 +320,81 @@ reimplementing the transfer.
       success it appends an `ota_record` and reboots from a short-lived
       background task (`ota_rollback_reboot_task()`, same pattern
       `factory_reset.c`'s `reboot_task()` uses) so the HTTP response has a
-      chance to reach the client first. `ota_rollback(processor="pico")` is
-      **still open** — the RP2040/SaftyFW side has its own bootloader
-      slot-switch mechanics, not attempted in this pass. Build-verified
-      only (`ninja -j 24` clean, `-Werror` intact); `test_ota_http_client.py`
-      gained 8 new tests (27 total, up from 19), all passing. **No physical
+      chance to reach the client first.
+
+      **2026-08-19, Pico half now also exists**: `ota_rollback_pico()`
+      (`mcp_server.py`, no arguments) sends `SAFETY_CMD_ROLLBACK` (0x17,
+      new — the next free id after `SET_CONFIG`'s 0x16) over the
+      already-authenticated PC→ESP→Pico safety UART bridge, not the HTTP
+      OTA challenge/password path (`ota_rollback_esp()` uses that path
+      because it *is* an HTTP endpoint; the Pico has no HTTP surface of its
+      own — every Pico command already travels this same bridge, same
+      authentication boundary as `safety_set_tc_type()`/`safety_ping()`).
+      Fire-and-forget: this call cannot see the refusal, only that nothing
+      changes.
+
+      Unlike the ESP (`esp_ota_check_rollback_is_possible()`), SaftyFW's own
+      bootloader (`firmware/SaftyFW/bootloader/`) has no ESP-IDF-style
+      rollback API — it picks the active slot at every boot from a
+      versioned/CRC'd flash metadata log
+      (`firmware/SaftyFW/bootloader/metadata.h`'s `bootloader_metadata_t`).
+      The Pico side is `SaftyFW/src/tasks/link_task.c`'s
+      `link_task_handle_rollback()`, which decodes the frame and calls
+      `update_task_request_rollback()` (`SaftyFW/src/tasks/update_task.c`)
+      synchronously (same "a single metadata-record write is small enough
+      to do inline" precedent `config_store_write()` already established,
+      not queued the way the much larger UPDATE_BEGIN/_DATA/_END/_ABORT
+      transfers are). That function refuses (logs why, sends no reply —
+      this frame never ACKs on the wire, same as CLEAR_TRIP/SET_CONFIG) if:
+        - the relay is currently ARMED (same gate `config_store_write()`
+          uses — a rollback reboots into different code, exactly as
+          disruptive as a push or a config write); or
+        - **the property that matters most**: the OTHER bootloader slot is
+          not currently VALID or PENDING_VERIFY. SaftyFW's bootloader has
+          only two slots total, unlike the ESP's richer partition history —
+          a rollback that proceeded while the other slot were
+          EMPTY/STAGED/BAD would strand the board with zero bootable slots
+          on the very next boot. This is checked by
+          `bootloader/metadata.c`'s new `bootloader_decide_rollback()`
+          *before* the current slot is ever marked `BOOTLOADER_SLOT_BAD` —
+          host-tested in `test/test_bootloader_metadata.c`
+          (`test_decide_rollback()`, 6 cases: both-VALID, other
+          PENDING_VERIFY, other EMPTY/BAD/STAGED all refused, malformed
+          `current_slot` refused defensively). On success: the current slot
+          is marked `BOOTLOADER_SLOT_BAD` (the existing state, not a new
+          one), `active_slot` flips to the other slot, `boot_attempts`
+          resets to 0, the record is persisted via the same
+          `update_task_persist_metadata()` helper `UPDATE_END` already
+          uses, and `watchdog_reboot(0, 0, 0)` resets the RP2040
+          immediately — this is the first thing in SaftyFW to actually
+          trigger a controlled reboot; `UPDATE_END` deliberately still does
+          not.
+
+      The "which slot is actually running" fact comes from the freshly-read
+      metadata's own `active_slot` field, not `update_task.c`'s `s_own_slot`
+      static — that static is only kept current when a boot starts
+      `PENDING_VERIFY` (`update_task_startup_confirm_check()`), so it stays
+      stuck at its `BOOTLOADER_SLOT_A` default through the ordinary
+      steady-state case (an already-confirmed `VALID` slot) and would name
+      the wrong slot most of the time. `active_slot` is written by
+      `bootloader_decide_boot()` on every single boot and switch, so it is
+      correct in both cases.
+
+      New codec: `kilnlink_rollback.{h,c}` (`firmware/CommonFW`), 1-byte
+      frame (cmd only, no payload — the simplest of the three SAFETY_CMD_*
+      codecs added this session), host-tested in `test/test_rollback.c`
+      (round trip, NULL msg/out, byte-exact vector `{0x17}`, hostile
+      too-short/too-long/wrong-cmd, undersized-buffer encode) — full
+      CommonFW ctest suite: 15/15 passing. PC side:
+      `devices.safety_request_rollback()` + `mcp_server.ota_rollback_pico()`,
+      tested in `test_safety_rollback.py` (7 tests), full PcTools suite
+      104/104 passing.
+
+      Build-verified only: `firmware/SaftyFW/test/build_host_tests.ps1`
+      516/516 checks passing (up from before this pass); real `ninja -j 24`
+      clean under `-Werror` for `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB`
+      and the bootloader itself; `idf.py -C firmware/KilnFW build`
+      (via `ninja -j 24` once configured) clean. **No physical RP2040 or
       ESP32-S3 exercised** — nothing here has ever actually triggered a
       reboot/rollback on real hardware.
 - [ ] Every call logged with the image's SHA-256, and refusals logged too

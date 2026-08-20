@@ -654,6 +654,30 @@
  *           THERMO_CMD_CONFIG_CHANNEL's own tc_type byte uses above) */
 #define SAFETY_CMD_SET_CONFIG 0x16u
 
+/* ESP->Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- tools/PcTools/TODO.md's
+ * `ota_rollback(processor)` line, Pico half (the ESP half is
+ * ota_http.c's POST /api/ota/esp/rollback). Explicit "revert to the
+ * previously-running bootloader slot, right now" -- distinct from the
+ * automatic boot_attempts fallback (bootloader_decide_boot()), which only
+ * fires after the active slot has already failed real CRC checks. Same
+ * value as kilnlink_rollback.h's KILNLINK_ROLLBACK_CMD, defined again here
+ * for the same "one place every subcommand on this wire is enumerated"
+ * reason SAFETY_CMD_CLEAR_TRIP/SET_CONFIG are; safety_link.c's
+ * safety_link_send_rollback() encodes the (empty) payload through that
+ * shared codec, not by hand.
+ *
+ * No payload -- 1 byte, cmd only, same shape as SAFETY_CMD_PING/CLEAR_TRIP's
+ * PC->ESP no-args use above. Fire-and-forget, never ACKs on the wire: the
+ * Pico refuses (ARMED, or no valid slot to fall back to) or reboots; the PC
+ * observes the outcome via the next GET_STATUS/GET_FW_VERSION poll (a
+ * changed boot_id/active-slot version), not a reply to this frame. See
+ * SaftyFW's src/tasks/link_task.c's link_task_handle_rollback() and
+ * bootloader/metadata.c's bootloader_decide_rollback() for the refusal
+ * logic -- most importantly, this is refused unless the OTHER slot is
+ * currently VALID/PENDING_VERIFY, so a rollback can never strand the board
+ * with zero bootable slots. */
+#define SAFETY_CMD_ROLLBACK 0x17u
+
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u
 #define SAFETY_FLAG_ESTOP        0x04u

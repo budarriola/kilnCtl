@@ -122,6 +122,20 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // variable-length fields, same reasoning as CLEAR_TRIP.
 #define LINK_FRAME_SET_CONFIG_CMD 0x16u
 
+// --- ESP -> Pico: SAFETY_CMD_ROLLBACK (0x17) ---------------------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
+// KILNLINK_ROLLBACK_CMD (kilnlink/kilnlink_rollback.h) -- redefined here as a
+// local dispatch id, same convention as LINK_FRAME_CLEAR_TRIP_CMD/
+// LINK_FRAME_SET_CONFIG_CMD above. The payload is decoded by
+// kilnlink_rollback_decode() in src/tasks/link_task.c, not unpacked here --
+// a fixed 1-byte (cmd only, no fields) frame, same reasoning as CLEAR_TRIP/
+// SET_CONFIG. tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico
+// half: reverts to the previously-running bootloader slot, refused unless
+// that slot is currently VALID/PENDING_VERIFY (bootloader/metadata.c's
+// bootloader_decide_rollback()) and refused while ARMED (same gate
+// SAFETY_CMD_SET_CONFIG uses) -- see link_task_handle_rollback().
+#define LINK_FRAME_ROLLBACK_CMD 0x17u
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's
