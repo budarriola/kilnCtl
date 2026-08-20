@@ -56,6 +56,11 @@ class SysCmd(enum.IntEnum):
     SET_TIMESCALE = 4
     SET_SEED = 5
     GET_CAPS = 6
+    # PROTOCOL.md sec 4 "GET_SIM_STATE": read-back companion to
+    # SET_TIMESCALE/SET_SEED, added in the same gap-closure pass that gave
+    # real firmware's cmd_task.c real (non-stub) handlers for all four ids
+    # 0x03-0x07. Not in PLAN.md sec 5's original sketch.
+    GET_SIM_STATE = 7
 
 
 # --- MODEL -------------------------------------------------------------------
@@ -84,6 +89,11 @@ class CtCmd(enum.IntEnum):
     SET_AMPS = 2
     SET_DISTORTION = 3
     GET_STATE = 4
+    # PROTOCOL.md sec 5.3: "not in PLAN.md 5's original sketch; wired up
+    # because wave_owner.h exposes it as a first-class public setter" --
+    # payloads.py's _ct_encode/_ct_decode already handle cmd id 5, this enum
+    # member was just missing.
+    SET_PHASE = 5
 
 
 # --- RELAY ---------------------------------------------------------------------

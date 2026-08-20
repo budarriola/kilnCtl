@@ -19,8 +19,9 @@ import sys
 import time
 from typing import Optional
 
-from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink
-from .protocol import CommandGroup, IoCmd, ModelCmd, SysCmd
+from . import selftest as _selftest
+from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink, get_state_snapshot
+from .protocol import CommandGroup, CtCmd, FaultCmd, IoCmd, ModelCmd, RelayCmd, SysCmd
 from .report import evaluate_expectations
 from .runner import run_scenario
 from .scenario import ScenarioError, load_scenario
@@ -50,10 +51,10 @@ def cmd_state(args) -> int:
     link = _make_link(args)
     _connect(link, args)
     try:
-        # See link.MockSimLink._default_response's SYS/100 note: state is a
-        # kilnsim-local convenience read (telemetry is push-only per PLAN.md
-        # sec 5.3), fetched here the same way against either link type.
-        state = link.send_command(CommandGroup.SYS, 100)
+        # get_state_snapshot() papers over MockSimLink's SYS/100 convenience
+        # vs. a real link's TELEMETRY-broadcast-only reality -- see its own
+        # docstring in link.py for the bug this replaced.
+        state = get_state_snapshot(link)
     except SimLinkError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -177,6 +178,144 @@ def cmd_run(args) -> int:
     return 0 if report.passed else 1
 
 
+def cmd_io(args) -> int:
+    link = _make_link(args)
+    _connect(link, args)
+    try:
+        if args.io_command == "read":
+            result = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": args.exp, "pin": args.pin})
+        elif args.io_command == "write":
+            result = link.send_command(
+                CommandGroup.IO, IoCmd.WRITE,
+                {"exp": args.exp, "pin": args.pin, "level": args.level == "on"},
+            )
+        elif args.io_command == "dir":
+            result = link.send_command(
+                CommandGroup.IO, IoCmd.SET_DIR,
+                {"exp": args.exp, "pin": args.pin, "is_input": args.direction == "in", "pullup": args.pullup},
+            )
+        elif args.io_command == "fault-line":
+            result = link.send_command(CommandGroup.IO, IoCmd.FAULT_LINE_GET)
+        elif args.io_command == "estop-get":
+            result = link.send_command(CommandGroup.IO, IoCmd.ESTOP_GET)
+        elif args.io_command == "power-get":
+            result = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
+        else:  # pragma: no cover - argparse `choices` already guards this
+            print(f"error: unknown io subcommand {args.io_command!r}", file=sys.stderr)
+            return 2
+    except SimLinkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_ct(args) -> int:
+    link = _make_link(args)
+    _connect(link, args)
+    try:
+        if args.ct_command == "state":
+            result = link.send_command(CommandGroup.CT, CtCmd.GET_STATE, {"channel": args.channel})
+        elif args.ct_command == "mode":
+            result = link.send_command(
+                CommandGroup.CT, CtCmd.SET_MODE, {"channel": args.channel, "mode": args.mode}
+            )
+        elif args.ct_command == "amps":
+            result = link.send_command(
+                CommandGroup.CT, CtCmd.SET_AMPS, {"channel": args.channel, "amps": args.amps}
+            )
+        elif args.ct_command == "phase":
+            result = link.send_command(
+                CommandGroup.CT, CtCmd.SET_PHASE, {"channel": args.channel, "phase_deg": args.phase_deg}
+            )
+        elif args.ct_command == "distortion":
+            distortion = {
+                "dc_offset": args.dc_offset,
+                "clip_fraction": args.clip_fraction,
+                "dropout_half_cycle": args.dropout_half,
+                "dropout_negative_half": args.dropout_negative,
+                "apply_immediately": not args.defer,
+            }
+            result = link.send_command(
+                CommandGroup.CT, CtCmd.SET_DISTORTION, {"channel": args.channel, "distortion": distortion}
+            )
+        else:  # pragma: no cover - argparse `choices` already guards this
+            print(f"error: unknown ct subcommand {args.ct_command!r}", file=sys.stderr)
+            return 2
+    except SimLinkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_relay(args) -> int:
+    link = _make_link(args)
+    _connect(link, args)
+    try:
+        if args.relay_command == "states":
+            result = link.send_command(CommandGroup.RELAY, RelayCmd.GET_STATES)
+        elif args.relay_command == "edges":
+            result = link.send_command(
+                CommandGroup.RELAY, RelayCmd.GET_EDGES,
+                {"since_seq": args.since_seq, "max_count": args.max_count},
+            )
+        else:  # pragma: no cover - argparse `choices` already guards this
+            print(f"error: unknown relay subcommand {args.relay_command!r}", file=sys.stderr)
+            return 2
+    except SimLinkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_fault_list(args) -> int:
+    """``kilnsim fault-list`` / ``kilnsim fault-cancel`` / ``kilnsim
+    fault-fire`` -- the FAULT_LIST/CANCEL/FIRE_NOW half of the FAULT group
+    that ``cmd_fault`` (the pre-existing ``kilnsim fault`` subcommand,
+    FAULT_SCHEDULE only) didn't cover."""
+    link = _make_link(args)
+    _connect(link, args)
+    try:
+        if args.fault_command == "list":
+            result = link.send_command(
+                CommandGroup.FAULT, FaultCmd.LIST,
+                {"start_index": args.start_index, "max_count": args.max_count},
+            )
+        elif args.fault_command == "cancel":
+            result = link.send_command(CommandGroup.FAULT, FaultCmd.CANCEL, {"fault_slot": args.slot})
+        elif args.fault_command == "fire-now":
+            result = link.send_command(CommandGroup.FAULT, FaultCmd.FIRE_NOW, {"fault_slot": args.slot})
+        else:  # pragma: no cover - argparse `choices` already guards this
+            print(f"error: unknown fault subcommand {args.fault_command!r}", file=sys.stderr)
+            return 2
+    except SimLinkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_selftest(args) -> int:
+    link = _make_link(args)
+    try:
+        _connect(link, args)
+    except SimLinkError as exc:
+        print(f"error: could not connect: {exc}", file=sys.stderr)
+        return 1
+    try:
+        report = _selftest.run_selftest(link)
+    finally:
+        if link.is_connected:
+            link.disconnect()
+    if args.json:
+        print(report.to_json())
+    else:
+        print(report.to_text())
+    return 0 if report.passed else 1
+
+
 def cmd_monitor(args) -> int:
     link = _make_link(args)
     _connect(link, args)
@@ -245,6 +384,102 @@ def build_parser() -> argparse.ArgumentParser:
                           "(default: estimated from the scenario's faults/expect deadlines)")
     sp.add_argument("--report", default=None, help="write the report JSON to this path")
     sp.set_defaults(func=cmd_run)
+
+    sp = sub.add_parser("io", help="discrete I/O group (I2C expander pins, E-stop/DUT-power readback, fault line)")
+    io_sub = sp.add_subparsers(dest="io_command", required=True)
+
+    iosp = io_sub.add_parser("read", help="read a discrete I/O pin")
+    iosp.add_argument("pin", type=int, help="pin 0..15 (0..7 = port A, 8..15 = port B)")
+    iosp.add_argument("--exp", type=int, default=0, help="expander index: 0 = EXP_1 (0x20), 1 = EXP_2 (0x21)")
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser("write", help="drive a discrete I/O pin")
+    iosp.add_argument("pin", type=int)
+    iosp.add_argument("level", choices=["on", "off"])
+    iosp.add_argument("--exp", type=int, default=0)
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser("dir", help="set a discrete I/O pin's direction")
+    iosp.add_argument("pin", type=int)
+    iosp.add_argument("direction", choices=["in", "out"])
+    iosp.add_argument("--exp", type=int, default=0)
+    iosp.add_argument("--pullup", action="store_true")
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser("fault-line", help="read the fault-line sense input")
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser("estop-get", help="read back the E-stop loop's commanded state")
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser("power-get", help="read back the DUT power relay's commanded state")
+    iosp.set_defaults(func=cmd_io)
+
+    sp = sub.add_parser("ct", help="current-transformer emulation group")
+    ct_sub = sp.add_subparsers(dest="ct_command", required=True)
+
+    ctsp = ct_sub.add_parser("state", help="read a CT channel's full state (mode, amps, distortion, readback)")
+    ctsp.add_argument("channel", type=int)
+    ctsp.set_defaults(func=cmd_ct)
+
+    ctsp = ct_sub.add_parser("mode", help="set a CT channel's mode")
+    ctsp.add_argument("channel", type=int)
+    ctsp.add_argument("mode", choices=["model", "manual"])
+    ctsp.set_defaults(func=cmd_ct)
+
+    ctsp = ct_sub.add_parser("amps", help="set a CT channel's commanded amplitude (manual mode)")
+    ctsp.add_argument("channel", type=int)
+    ctsp.add_argument("amps", type=float)
+    ctsp.set_defaults(func=cmd_ct)
+
+    ctsp = ct_sub.add_parser("phase", help="set a CT channel's phase offset in degrees")
+    ctsp.add_argument("channel", type=int)
+    ctsp.add_argument("phase_deg", type=float)
+    ctsp.set_defaults(func=cmd_ct)
+
+    ctsp = ct_sub.add_parser("distortion", help="set a CT channel's distortion knobs")
+    ctsp.add_argument("channel", type=int)
+    ctsp.add_argument("--dc-offset", type=float, default=0.0, dest="dc_offset")
+    ctsp.add_argument("--clip-fraction", type=float, default=0.0, dest="clip_fraction")
+    ctsp.add_argument("--dropout-half", action="store_true", dest="dropout_half")
+    ctsp.add_argument("--dropout-negative", action="store_true", dest="dropout_negative")
+    ctsp.add_argument("--defer", action="store_true",
+                       help="apply on the next natural waveform boundary instead of immediately")
+    ctsp.set_defaults(func=cmd_ct)
+
+    sp = sub.add_parser("relay", help="relay sense group")
+    relay_sub = sp.add_subparsers(dest="relay_command", required=True)
+
+    relsp = relay_sub.add_parser("states", help="current sensed state of every relay + the fault line")
+    relsp.set_defaults(func=cmd_relay)
+
+    relsp = relay_sub.add_parser("edges", help="timestamped relay edge log")
+    relsp.add_argument("--since-seq", type=int, default=0, dest="since_seq")
+    relsp.add_argument("--max-count", type=int, default=8, dest="max_count")
+    relsp.set_defaults(func=cmd_relay)
+
+    sp = sub.add_parser("fault-list", help="list armed/active fault slots")
+    sp.add_argument("--start-index", type=int, default=0, dest="start_index")
+    sp.add_argument("--max-count", type=int, default=8, dest="max_count")
+    sp.set_defaults(func=cmd_fault_list, fault_command="list")
+
+    sp = sub.add_parser("fault-cancel", help="cancel a fault slot by id")
+    sp.add_argument("slot", type=int)
+    sp.set_defaults(func=cmd_fault_list, fault_command="cancel")
+
+    sp = sub.add_parser("fault-fire", help="force an armed fault slot to fire now, bypassing its trigger")
+    sp.add_argument("slot", type=int)
+    sp.set_defaults(func=cmd_fault_list, fault_command="fire-now")
+
+    sp = sub.add_parser(
+        "selftest",
+        help="PLAN.md sec 13 layer-2 loopback self-check: is the fixture itself healthy? "
+             "(protocol round-trip, every command group reachable, telemetry cadence, "
+             "event-sequence continuity, a determinism spot-check; hardware-only checks "
+             "-- SPI master loopback, CT->ADC loopback -- are reported NOT_RUNNABLE, never faked)",
+    )
+    sp.add_argument("--json", action="store_true", help="machine-readable report instead of a text summary")
+    sp.set_defaults(func=cmd_selftest)
 
     sp = sub.add_parser("monitor", help="tail live telemetry/events")
     sp.add_argument("--json", action="store_true")

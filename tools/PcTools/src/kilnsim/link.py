@@ -83,6 +83,39 @@ class SimLinkError(RuntimeError):
     """Raised for connect/send failures that aren't just "not connected"."""
 
 
+def get_state_snapshot(link: "SimLink", wait_s: float = 1.0) -> dict:
+    """A "current telemetry snapshot" that works across every concrete
+    :class:`SimLink`, papering over a real gap this function exists to fix:
+    callers used to send ``SYS/100`` unconditionally (a purely kilnsim-local
+    convenience id `MockSimLink._default_response` answers directly) --
+    fine against :class:`MockSimLink`, but PROTOCOL.md sec 4 defines no such
+    id, so a real :class:`SerialSimLink`/:class:`TcpSimLink` raises
+    ``kilnsim.payloads.PayloadError`` (uncaught -- not even a clean
+    :class:`SimLinkError`) the instant anything called it, e.g. ``kilnsim
+    state --virtual`` or the GUI's zone chart against a real link. Found
+    while wiring the GUI/CLI up against ``virtual_simfw`` for real.
+
+    The real-link answer is the most recent TELEMETRY broadcast
+    (:meth:`_FramedSimLink.get_last_telemetry`, PROTOCOL.md sec 6) -- if
+    none has arrived yet, this drains :meth:`SimLink.read_events` (which
+    demultiplexes TELEMETRY on the framed links as a side effect) for up to
+    ``wait_s`` seconds waiting for the first one. Raises
+    :class:`SimLinkError` if none ever arrives.
+    """
+    get_last = getattr(link, "get_last_telemetry", None)
+    if get_last is None:  # MockSimLink and any other non-framed SimLink
+        return link.send_command(CommandGroup.SYS, 100)
+    snap = get_last()
+    if snap is None:
+        deadline = time.monotonic() + wait_s
+        while snap is None and time.monotonic() < deadline:
+            link.read_events(timeout=0.2)
+            snap = get_last()
+    if snap is None:
+        raise SimLinkError("no TELEMETRY frame received yet (nothing published since connect?)")
+    return snap
+
+
 # ---------------------------------------------------------------------------
 # Abstract interface
 # ---------------------------------------------------------------------------
@@ -726,6 +759,13 @@ class MockSimLink(SimLink):
                 self._state["sim_time_us"] = 0
                 self._state["active_fault_count"] = 0
                 return {"ok": True}
+            if cmd == 7:  # GET_SIM_STATE
+                return {
+                    "seed": self._state["seed"],
+                    "snapshot_valid": True,
+                    "timescale": self._state["timescale"],
+                    "sim_time_us": self._state["sim_time_us"],
+                }
         if group is CommandGroup.MODEL and cmd == 4:  # LOAD_PRESET
             return {"ok": True, "preset": payload.get("name")}
         if group is CommandGroup.TC and cmd == 1:  # GET_REGS

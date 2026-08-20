@@ -106,6 +106,8 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
         return bytes([cmd]) + struct.pack("<f", float(payload.get("value", 1.0)))
     if cmd == 5:
         return bytes([cmd]) + struct.pack("<I", int(payload.get("value", 0)) & 0xFFFFFFFF)
+    if cmd == 7:  # GET_SIM_STATE (PROTOCOL.md sec 4) -- no args
+        return bytes([cmd])
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 
@@ -167,6 +169,15 @@ def _sys_decode(cmd: int, status: int, data: bytes) -> dict:
         return block
     if cmd in (3, 4, 5):
         return {}
+    if cmd == 7:  # GET_SIM_STATE: [status, u32 seed, u8 snapshot_valid, u32 timescale_x100, u64 sim_time_us]
+        seed, snapshot_valid, timescale_x100 = struct.unpack_from("<IBI", data, 0)
+        (sim_time_us,) = struct.unpack_from("<Q", data, 9)
+        return {
+            "seed": seed,
+            "snapshot_valid": bool(snapshot_valid),
+            "timescale": timescale_x100 / 100.0,
+            "sim_time_us": sim_time_us,
+        }
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 
