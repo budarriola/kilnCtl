@@ -15,6 +15,7 @@ void run_test_sine_synth(void);
 void run_test_fault_engine(void);
 void run_test_tc_fault_state(void);
 void run_test_gap_closure_logic(void);
+void run_test_cmd_task_gap_closure(void);
 
 int main(void)
 {
@@ -24,6 +25,7 @@ int main(void)
     run_test_fault_engine();
     run_test_tc_fault_state();
     run_test_gap_closure_logic();
+    run_test_cmd_task_gap_closure();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

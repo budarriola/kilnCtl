@@ -71,7 +71,7 @@ done once at boot by `cmd_task_start()`) — PLAN.md section 5.1's task-registra
 
 | Group | `SIMFW_TASK_ID_*` | Value | Status |
 |---|---|---|---|
-| SYS | `SIMFW_TASK_ID_SYS` | 1 | **PING/GET_VERSION/GET_CAPS implemented**, rest reserved |
+| SYS | `SIMFW_TASK_ID_SYS` | 1 | **implemented** (section 4) |
 | MODEL | `SIMFW_TASK_ID_MODEL` | 2 | **implemented** (section 5.1) |
 | TC | `SIMFW_TASK_ID_TC` | 3 | **implemented** (section 5.2), incl. `TC_GET_MASTER_CONFIG` |
 | CT | `SIMFW_TASK_ID_CT` | 4 | **implemented** (section 5.3) |
@@ -94,10 +94,11 @@ to change shape for this.
 |---|---|---|
 | `PING` | `0x01` | **implemented** |
 | `GET_VERSION` | `0x02` | **implemented** |
-| `RESET_SIM` | `0x03` | reserved (PLAN.md sec 5) |
-| `SET_TIMESCALE` | `0x04` | reserved |
-| `SET_SEED` | `0x05` | reserved |
+| `RESET_SIM` | `0x03` | **implemented** (gap-closure pass) |
+| `SET_TIMESCALE` | `0x04` | **implemented** |
+| `SET_SEED` | `0x05` | **implemented** |
 | `GET_CAPS` | `0x06` | **implemented** |
+| `GET_SIM_STATE` | `0x07` | **implemented** (gap-closure pass; new id, not in PLAN.md sec 5's original sketch) |
 
 ### `PING` (request: `[0x01]`, no args)
 
@@ -164,12 +165,61 @@ SYS has no bit (always fully present by construction — the link couldn't
 work otherwise) and neither does EVT (not a request/reply group, section 6).
 Today's value is `0x0000003F` (all six bits set).
 
-### `RESET_SIM` / `SET_TIMESCALE` / `SET_SEED` (reserved)
+### `RESET_SIM` (request: `[0x03, u8 keep_params]`)
 
-Ids are allocated (`0x03`/`0x04`/`0x05`) so a future implementation doesn't
-have to renumber anything else, but there is no handler yet — a request
-today gets `[SIMFW_CMD_STATUS_ERR_NOT_IMPL]` back, same as any command in a
-still-stub group.
+Thin decode-then-call wrapper over `sim_engine_reset()` (`sim_engine.h`):
+`keep_params` 1 reinitializes state from the current zone params' `T0`;
+0 reloads the last-selected preset first (PLAN.md 6.1's `sim_reset` tool
+doc: "model to T0"). Resets `sim_time_us` to 0, clears MANUAL overrides, and
+resets the event ring's sequence number to 0 — does **not** clear
+`fault_sched`'s armed/active slots (`FAULT_CANCEL` each explicitly, or send
+fresh `FAULT_SCHEDULE`s, if a run needs a clean fault-slot pool too).
+Queued, same command-queue contract as every `sim_engine.h` MODEL-group
+setter (section 5.1) — a full queue reports `ERR_BUSY`, not `ERR_BAD_ARGS`.
+Reply: `[status]`.
+
+### `SET_TIMESCALE` (request: `[0x04, u32 timescale_x100 LE]`)
+
+`sim_engine_set_timescale()` — PLAN.md 4.2/5.2's x100 fixed point (1000 ==
+10.00x accelerated, 100 == 1.00x real time, 0 treated as 1.00x by
+`sim_engine` itself). Queued, same contract as `RESET_SIM` above. Reply:
+`[status]`.
+
+### `SET_SEED` (request: `[0x05, u32 seed LE]`)
+
+`sim_engine_set_seed()` — PLAN.md 4.2's determinism contract ("the same
+scenario + seed => the same run, byte-for-byte"); a scenario runner sends
+this (and typically `RESET_SIM`) before a fresh run's first tick. Also seeds
+the TELEMETRY frame's own `seed` field (section 6) once wired — see that
+section's note. Queued, same contract as `RESET_SIM` above. Reply:
+`[status]`.
+
+### `GET_SIM_STATE` (request: `[0x07]`, no args)
+
+Read-back companion to `SET_TIMESCALE`/`SET_SEED` — neither setter's value
+was otherwise readable back over the wire except via the TELEMETRY frame's
+`seed` field (section 6), which says nothing about `timescale_x100`. New id
+this pass adds (not in PLAN.md section 5's original sketch), same
+"first-class getter for what a client just set" reasoning `cmd_ids.h`
+already documents for `IO_ESTOP_GET`/`IO_DUT_POWER_GET`.
+
+```
+byte0        status
+byte1-4      seed, u32 LE                -- sim_engine_get_seed(), 0 if never set
+byte5        snapshot_valid, u8 (0/1)    -- sim_engine has published at least one
+                                            tick's snapshot (sim_snapshot_read())
+byte6-9      timescale_x100, u32 LE      -- sim_snapshot_t.timescale_x100;
+                                            0 if snapshot_valid is 0
+byte10-17    sim_time_us, u64 LE         -- sim_snapshot_t.sim_time_us;
+                                            0 if snapshot_valid is 0
+```
+
+`timescale_x100`/`sim_time_us` come from the published snapshot (the same
+source telemetry's TELEMETRY frame uses) rather than a standalone
+`sim_engine.h` getter, since none exists for timescale alone — before the
+first tick (or right after `RESET_SIM`, whose effect lands at the next tick
+boundary like every other queued setter) `snapshot_valid` is 0 and both
+fields read 0 rather than a stale value.
 
 ## 5. MODEL / TC / CT / RELAY / IO / FAULT
 
@@ -467,6 +517,7 @@ reply `[status, open]`. `FAULT_LINE_GET`: no args, reply
 | `CANCEL` | `0x02` | `fault_sched_cancel()` |
 | `LIST` | `0x03` | `fault_sched_list()` |
 | `FIRE_NOW` | `0x04` | `fault_sched_fire_now()` |
+| `SET_UNTIL_TRIGGER` | `0x05` | `fault_sched_schedule()` (frame 2 of the `UNTIL_TRIGGER` two-frame design, see below) |
 
 **`SCHEDULE`** request is a compact re-encoding of `fault_engine.h`'s
 `fault_trigger_t`/`fault_duration_t`/`fault_repeat_t` — **not** PLAN.md
@@ -477,11 +528,13 @@ at all:
 
 ```
 u16      slot_id
-u8       fault_type        (fault_sched_fault_type_t, 0..12)
+u8       fault_type        (fault_sched_fault_type_t, 0..22 -- the full
+                             catalog, fault_sched.h; up through
+                             FAULT_SCHED_TYPE_DUT_POWER_CUT)
 u16      target             (zone / tc_fault_channel_t / system-target,
                              per fault_type -- fault_sched_schedule() itself
                              validates the pairing)
--- trigger (fault_trigger_kind_t, 0..6) --
+-- ARM trigger (fault_trigger_kind_t, 0..6) --
 u8       trigger_kind
 f64      trigger_a          (AT_SIM_TIME: at_sim_time_s; AT_ZONE_TEMP: temp_c;
                              ON_RELAY_EDGE/ON_EVENT/AFTER_FAULT: delay_s;
@@ -493,8 +546,9 @@ u8       trigger_edge         (AT_ZONE_TEMP: temp_edge 0=rising/1=falling;
                                ON_RELAY_EDGE: relay_edge 0=close/1=open; else 0)
 char[24] event_name           (ON_EVENT only, NUL-padded ASCII; else ignored)
 -- duration (fault_duration_kind_t) --
-u8       duration_kind         (0 PERMANENT, 1 FOR -- 2 UNTIL_TRIGGER
-                                REJECTED, see gap below)
+u8       duration_kind         (0 PERMANENT, 1 FOR, 2 UNTIL_TRIGGER -- see
+                                the two-frame design below; duration_for_s
+                                is ignored when duration_kind == 2)
 f64      duration_for_s
 -- repeat (fault_repeat_kind_t, 0..2) --
 u8       repeat_kind
@@ -508,16 +562,64 @@ f32      param0, param1, param2, param3
 94 bytes total (incl. the `0x01` cmd_id byte), comfortably under the
 128-byte frame payload cap. Reply: `[status, u16 slot_id echo]`.
 
-**GAP (wire-frame-size, not an owner-API gap):** PLAN.md section 7.2 lists
-`UNTIL_TRIGGER` as a required duration kind, but it needs a second, full
-nested `fault_trigger_t` — the same ~90-byte shape as the top-level trigger
-above — which does not fit alongside everything else within
-`BENCHPROTO_FRAME_MAX_PAYLOAD` (128 bytes). `duration_kind == 2` is rejected
-with `ERR_BAD_ARGS`. Workaround: use `FOR` a generous duration, or arm a
-`MANUAL`-triggered fault and `FAULT_CANCEL` it explicitly once a PC-side
-scenario runner observes the clearing condition.
+`fault_type`'s valid range was previously documented (and enforced) as
+`0..12`, matching the catalog's size before the sim_engine/fault_sched
+gap-closure pass added `MAIN_SAFETY_DISAGREE`, `WELDED_K4_CURRENT_PERSIST`,
+`THERMAL_MASS_SURPRISE`, `TC_LAG_STRESS`, and `DUT_POWER_CUT`. `cmd_task.c`'s
+bound check was never updated to match and used
+`FAULT_SCHED_TYPE_AMBIENT_SHIFT` (value 19) as the assumed last value, so
+`THERMAL_MASS_SURPRISE`/`TC_LAG_STRESS`/`DUT_POWER_CUT` (20/21/22) were
+silently rejected via `FAULT_SCHEDULE` despite being fully implemented and
+reachable through `fault_sched_schedule()` directly. Fixed this pass: the
+bound is now `FAULT_SCHED_TYPE_DUT_POWER_CUT`, the catalog's actual last
+value.
 
-**`CANCEL`** request: `[u16 slot_id]` → `fault_sched_cancel()`. **`FIRE_NOW`**
+**`UNTIL_TRIGGER` — two-frame design (gap-closure pass):** `duration_kind ==
+2` needs `fault_duration_t.until_trigger`, a second, full `fault_trigger_t`
+(`fault_engine.h`: "evaluated the same way as a top-level trigger") — the
+same ~44-byte shape the ARM trigger above already spends. Doubling that
+inside one `FAULT_SCHEDULE` frame does not fit `BENCHPROTO_FRAME_MAX_PAYLOAD`
+(128 bytes: 94 already spent on the `PERMANENT`/`FOR` case, +44 more = 138),
+and reserving that headroom in every request just to serve the rare
+`UNTIL_TRIGGER` case would tax the common one. Instead, `UNTIL_TRIGGER` is
+split across two frames:
+
+1. **`FAULT_SCHEDULE`** with `duration_kind == 2`: `fault_type`/`target`/the
+   ARM trigger/`repeat`/`params` are captured immediately (firmware-side,
+   `cmd_task.c`'s `s_pending_until[slot_id]`, indexed directly by `slot_id`
+   — valid range `0..FAULT_ENGINE_MAX_SLOTS-1` (31), the same range the slot
+   pool itself uses) but the slot is **not armed yet** in `fault_sched`.
+   `duration_for_s` is ignored. Reply: `[status, u16 slot_id echo]`, same as
+   any other `FAULT_SCHEDULE` — a client cannot yet distinguish "armed" from
+   "parked, awaiting its release trigger" from this reply alone; poll
+   `FAULT_LIST` (state stays `IDLE` until step 2 completes) if that
+   distinction matters.
+2. **`SET_UNTIL_TRIGGER`** (request: `[0x05, u16 slot_id, <trigger encoding,
+   byte-identical to `FAULT_SCHEDULE`'s own ARM-trigger fields above: u8
+   trigger_kind, f64 trigger_a, f64 trigger_b, u16 trigger_ref, u8
+   trigger_edge, char[24] event_name>]`, 47 bytes total incl. cmd_id) —
+   supplies the RELEASE trigger and performs the actual
+   `fault_sched_schedule()` call combining it with the parked fields from
+   step 1. Only now does the slot become `ARMED`. Reply: `[status, u16
+   slot_id echo]`. `ERR_BAD_ARGS` if `slot_id` has no pending `UNTIL_TRIGGER`
+   schedule (step 1 was never sent for it, it was already consumed by a
+   prior `SET_UNTIL_TRIGGER`, or `FAULT_CANCEL` discarded it — see below).
+
+A `PERMANENT`/`FOR` `FAULT_SCHEDULE` on a `slot_id` that still has a pending,
+uncompleted `UNTIL_TRIGGER` parked on it discards the stale pending entry.
+`FAULT_CANCEL` on a `slot_id` with a pending `UNTIL_TRIGGER` also discards
+it (nothing is armed in `fault_sched` yet to cancel at the engine level for
+that case, but the parked intent should not survive an explicit cancel).
+
+**PC-side follow-up needed:** `tools/PcTools/src/kilnsim/payloads.py`'s
+`FAULT_SCHEDULE` encoder is unaffected for `PERMANENT`/`FOR` (identical wire
+shape, `fault_type`'s valid range widened per above). A new
+`FAULT_SET_UNTIL_TRIGGER` encoder (cmd_id `0x05` on the FAULT group, request
+shape above) is needed to actually drive `UNTIL_TRIGGER` from the PC side —
+out of scope for this pass (`payloads.py` is owned separately).
+
+**`CANCEL`** request: `[u16 slot_id]` → `fault_sched_cancel()` (also
+discards a pending `UNTIL_TRIGGER` on that slot, see above). **`FIRE_NOW`**
 request: `[u16 slot_id]` → `fault_sched_fire_now()`.
 
 **`LIST`** request: `[u8 start_index, u8 max_count]` — pagination over the
@@ -562,7 +664,8 @@ little-endian (section 2's convention), `zone_count` copied verbatim from
 byte0        frame_kind = SIMFW_EVT_FRAME_KIND_TELEMETRY
 byte1-8      sim_time_us, u64 LE          -- sim_snapshot_t.sim_time_us
 byte9-12     timescale_x100, u32 LE       -- sim_snapshot_t.timescale_x100
-byte13-16    seed, u32 LE                 -- always 0 today, see "Known gaps" below
+byte13-16    seed, u32 LE                 -- sim_engine_get_seed(); 0 until a client
+                                              sends SYS_SET_SEED (section 4)
 byte17       zone_count, u8               -- sim_snapshot_t.zone_count
 byte18..+16N per-zone, N = zone_count, 16 bytes each:
                f32 LE T_true_c
@@ -623,18 +726,11 @@ stream alone:
   data existed and was built into a frame, but the frame itself never made
   it onto the wire.
 
-### Known gaps (report, not worked around — see this pass's own
-instructions on sim_engine.h/fault_sched.h getters)
+### Known gaps
 
-- **`seed` is always 0.** `sim_engine.h` now exposes `sim_engine_get_seed()`
-  (added alongside the safety-TC MANUAL override this pass closed in section
-  5.2), so the getter-side of this gap is closed, but `telemetry.c` — the
-  file that builds this frame — has not been wired to call it yet, and is
-  out of scope for this pass. Still harmless today since no
-  `SIMFW_CMD_SYS_SET_SEED` handler exists either (section 4's reserved-ids
-  table) — nothing can set a non-zero seed for this field to report
-  regardless. Wire `sim_engine_get_seed()` into `telemetry.c` in the same
-  pass that implements `SET_SEED`.
+None outstanding for this frame. (Previously: "`seed` is always 0" —
+`telemetry.c` now calls `sim_engine_get_seed()`, wired in the same
+gap-closure pass that implemented `SYS_SET_SEED`, section 4.)
 
 ## 7. Known simplifications (this pass)
 

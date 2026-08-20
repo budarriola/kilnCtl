@@ -5,16 +5,16 @@
 //
 // Dispatch is a two-level lookup table -- s_groups[] keyed by
 // SIMFW_TASK_ID_* (cmd_ids.h), each entry pointing at its own group's
-// cmd_id -> handler table -- so a later agent filling in MODEL/TC/CT/RELAY/
-// IO/FAULT's real handlers only ever adds entries to that group's own
-// `commands` array; nothing about this file's dispatch *structure* needs to
-// change. Today only SYS (s_sys_commands below) has any entries: PING,
-// GET_VERSION, GET_CAPS are fully implemented per docs/PROTOCOL.md;
-// RESET_SIM/SET_TIMESCALE/SET_SEED are reserved SYS command ids
-// (cmd_ids.h) with no table entry, so they fall through to the exact same
-// SIMFW_CMD_STATUS_ERR_NOT_IMPL reply every other group's commands get
-// today (cmd_task_dispatch()'s fallthrough) -- a clean, defined "not yet
-// implemented" answer, never a silently unhandled frame.
+// cmd_id -> handler table -- so a later agent filling in a new group's real
+// handlers only ever adds entries to that group's own `commands` array;
+// nothing about this file's dispatch *structure* needs to change. Every
+// group (SYS/MODEL/TC/CT/RELAY/IO/FAULT) is now fully implemented per
+// docs/PROTOCOL.md (gap-closure pass: SYS's RESET_SIM/SET_TIMESCALE/
+// SET_SEED/GET_SIM_STATE, FAULT's SET_UNTIL_TRIGGER). Any cmd_id genuinely
+// absent from a group's table (a future, not-yet-allocated id) still falls
+// through to SIMFW_CMD_STATUS_ERR_NOT_IMPL (cmd_task_dispatch()'s
+// fallthrough) -- a clean, defined "not yet implemented" answer, never a
+// silently unhandled frame.
 #include "cmd_task.h"
 
 #include <string.h>
@@ -288,6 +288,105 @@ static void handle_sys_get_caps(const uint8_t *args, uint8_t args_len, uint8_t *
     *out_len = w.len;
 }
 
+// request: {u8 keep_params} -- sim_engine_reset()'s own bool: true = keep
+// the current zone params, reinit state from their T0; false = reload the
+// last-selected preset first (PLAN.md 6.1's sim_reset tool doc). Queued,
+// same as every other MODEL-group setter sim_engine.h documents (this
+// function lives in that header's MODEL-group command surface even though
+// it is exposed here under SYS, per PLAN.md sec 5's own command-group
+// table) -- a false return means the internal command queue was full, not
+// a bad argument.
+static void handle_sys_reset_sim(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                  uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t keep_params = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, sim_engine_reset(keep_params != 0) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+// request: {u32 timescale_x100} -- sim_engine_set_timescale(), PLAN.md 4.2/
+// 5.2's x100 fixed point (1000 == 10.00x, 100 == 1.00x real time, 0 treated
+// as 1.00x by sim_engine itself). Queued, same convention as above.
+static void handle_sys_set_timescale(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint32_t timescale_x100 = ar_u32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, sim_engine_set_timescale(timescale_x100) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+// request: {u32 seed} -- sim_engine_set_seed(). Queued, same convention as
+// above. PLAN.md 4.2's determinism contract ("the same scenario + seed =>
+// the same run, byte-for-byte") is why a scenario runner sends this before
+// RESET_SIM/the first tick of a fresh run.
+static void handle_sys_set_seed(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                 uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint32_t seed = ar_u32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, sim_engine_set_seed(seed) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+// request: none. Reply (docs/PROTOCOL.md section 4): {status, u32 seed,
+// u8 snapshot_valid, u32 timescale_x100, u64 sim_time_us}. seed comes from
+// sim_engine_get_seed() (always available, even before the first tick).
+// timescale_x100/sim_time_us come from the published sim_snapshot_t --
+// sim_engine.h exposes no standalone timescale getter, but PLAN.md 4.5's
+// snapshot already carries timescale_x100/sim_time_us for exactly this kind
+// of read, same source telemetry.c's own TELEMETRY frame uses. Before
+// sim_engine's first tick, sim_snapshot_read() returns false: snapshot_valid
+// is reported 0 and timescale_x100/sim_time_us are reported 0 rather than
+// stale/uninitialized values.
+static void handle_sys_get_sim_state(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+
+    uint32_t seed = sim_engine_get_seed();
+    sim_snapshot_t snap;
+    bool snap_ok = sim_snapshot_read(&snap);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u32le(&w, seed);
+    rw_u8(&w, snap_ok ? 1u : 0u);
+    rw_u32le(&w, snap_ok ? snap.timescale_x100 : 0u);
+    rw_u64le(&w, snap_ok ? snap.sim_time_us : 0u);
+    *out_len = w.len;
+}
+
 // Named (not anonymous) so s_sys_commands[] below and cmd_group_t's
 // `commands` field (also below) refer to the exact same type -- two
 // structurally-identical anonymous struct definitions are still distinct,
@@ -302,7 +401,11 @@ typedef struct {
 static const cmd_table_entry_t s_sys_commands[] = {
     {SIMFW_CMD_SYS_PING, handle_sys_ping},
     {SIMFW_CMD_SYS_GET_VERSION, handle_sys_get_version},
+    {SIMFW_CMD_SYS_RESET_SIM, handle_sys_reset_sim},
+    {SIMFW_CMD_SYS_SET_TIMESCALE, handle_sys_set_timescale},
+    {SIMFW_CMD_SYS_SET_SEED, handle_sys_set_seed},
     {SIMFW_CMD_SYS_GET_CAPS, handle_sys_get_caps},
+    {SIMFW_CMD_SYS_GET_SIM_STATE, handle_sys_get_sim_state},
 };
 
 // --- MODEL group handlers (sim_engine.h) ------------------------------------
@@ -1188,16 +1291,10 @@ static const cmd_table_entry_t s_io_commands[] = {
 //                            ON_RELAY_EDGE: relay_edge 0=close/1=open; else 0)
 //   char[24] event_name     (ON_EVENT only, NUL-padded ASCII; else ignored)
 //   -- duration --
-//   u8  duration_kind       (0 PERMANENT, 1 FOR -- 2 UNTIL_TRIGGER is
-//                            REJECTED with ERR_BAD_ARGS: it needs a second,
-//                            full nested trigger and the frame budget above
-//                            already spends ~90 of 128 bytes on the top-level
-//                            one. GAP against PLAN.md 7.2, which lists
-//                            UNTIL_TRIGGER as a required duration kind --
-//                            not an owner-API gap, a wire-frame-size one.
-//                            Workaround: FOR a generous duration, or
-//                            FAULT_CANCEL explicitly once the PC-side
-//                            scenario runner observes the condition.)
+//   u8  duration_kind       (0 PERMANENT, 1 FOR, 2 UNTIL_TRIGGER -- see the
+//                            two-frame design below for UNTIL_TRIGGER;
+//                            duration_for_s is ignored when duration_kind ==
+//                            UNTIL_TRIGGER)
 //   f64 duration_for_s
 //   -- repeat --
 //   u8  repeat_kind          (fault_repeat_kind_t, 0..2)
@@ -1208,6 +1305,106 @@ static const cmd_table_entry_t s_io_commands[] = {
 //   f32 param0, f32 param1, f32 param2, f32 param3
 // Total 93 bytes of args (+1 cmd_id byte), comfortably under the 128-byte
 // frame payload cap. Reply: {status, u16 slot_id echo}.
+//
+// --- UNTIL_TRIGGER two-frame design (gap-closure pass) ----------------------
+// fault_duration_t.until_trigger (fault_engine.h) is a second, full
+// fault_trigger_t -- "evaluated the same way as a top-level trigger" per
+// that header's own doc comment -- the same ~44-byte shape the ARM trigger
+// above already spends on the wire. Doubling that inside one FAULT_SCHEDULE
+// frame does not fit BENCHPROTO_FRAME_MAX_PAYLOAD (128 bytes: 94 already
+// spent on the PERMANENT/FOR case, +44 more = 138) and complicating the wire
+// shape to reserve that headroom for every request would tax the common
+// (non-UNTIL_TRIGGER) case just to serve the rare one. Instead:
+//   1. FAULT_SCHEDULE with duration_kind == FAULT_DURATION_UNTIL_TRIGGER
+//      (2): fault_type/target/the ARM trigger/repeat/params are captured
+//      immediately into s_pending_until[slot_id] (indexed directly by
+//      slot_id, 0..FAULT_ENGINE_MAX_SLOTS-1 -- the same range fault_engine's
+//      own slot pool uses, so no separate id scheme is needed) but the slot
+//      is NOT armed in fault_sched yet. duration_for_s is ignored for this
+//      duration_kind.
+//   2. SIMFW_CMD_FAULT_SET_UNTIL_TRIGGER {u16 slot_id, <trigger encoding,
+//      byte-identical to FAULT_SCHEDULE's own ARM-trigger fields:
+//      u8 trigger_kind, f64 trigger_a, f64 trigger_b, u16 trigger_ref,
+//      u8 trigger_edge, char[24] event_name>} supplies the RELEASE trigger
+//      and performs the actual fault_sched_schedule() call, combining it
+//      with the fields step 1 parked. Only now does the slot become ARMED.
+// A slot_id with no pending entry (step 1 was never sent for it, or it was
+// already consumed by a prior SET_UNTIL_TRIGGER, or FAULT_CANCEL discarded
+// it -- see handle_fault_cancel()) rejects SET_UNTIL_TRIGGER with
+// ERR_BAD_ARGS. See docs/PROTOCOL.md section 5.6 for the wire spec in full
+// and this pass's report for the exact PC-side (tools/PcTools) follow-up
+// this implies -- payloads.py is out of scope for this pass.
+typedef struct {
+    bool pending;
+    fault_sched_fault_type_t fault_type;
+    uint16_t target;
+    fault_trigger_t trigger;
+    fault_repeat_t repeat;
+    float params[4];
+} pending_until_trigger_t;
+
+static pending_until_trigger_t s_pending_until[FAULT_ENGINE_MAX_SLOTS];
+
+// Decodes the wire's compact fault_trigger_t encoding (u8 trigger_kind, f64
+// trigger_a, f64 trigger_b, u16 trigger_ref, u8 trigger_edge, char[24]
+// event_name -- see handle_fault_schedule()'s doc comment / PROTOCOL.md
+// section 5.6). Shared by FAULT_SCHEDULE's top-level ARM trigger and
+// FAULT_SET_UNTIL_TRIGGER's RELEASE trigger, since fault_engine.h documents
+// UNTIL_TRIGGER's nested trigger as "evaluated the same way as a top-level
+// trigger" -- one wire shape, one decoder, for both. Returns false (and
+// leaves *out zeroed) if trigger_kind is out of range; does not itself
+// inspect r->overflow -- callers check that separately, same as every other
+// handler in this file.
+static bool decode_fault_trigger(arg_reader_t *r, fault_trigger_t *out)
+{
+    uint8_t trigger_kind = ar_u8(r);
+    double trigger_a = ar_f64le(r);
+    double trigger_b = ar_f64le(r);
+    uint16_t trigger_ref = ar_u16le(r);
+    uint8_t trigger_edge = ar_u8(r);
+    char event_name[FAULT_ENGINE_MAX_NAME_LEN];
+    ar_bytes(r, (uint8_t *)event_name, (uint8_t)sizeof(event_name));
+    event_name[FAULT_ENGINE_MAX_NAME_LEN - 1] = '\0'; // defensive: force NUL termination regardless of wire content
+
+    memset(out, 0, sizeof(*out));
+    if (trigger_kind > (uint8_t)FAULT_TRIGGER_MANUAL) {
+        return false;
+    }
+
+    out->kind = (fault_trigger_kind_t)trigger_kind;
+    switch (out->kind) {
+        case FAULT_TRIGGER_AT_SIM_TIME:
+            out->at_sim_time_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_AT_ZONE_TEMP:
+            out->zone = (uint8_t)trigger_ref;
+            out->temp_c = (float)trigger_a;
+            out->temp_edge = (fault_temp_edge_t)trigger_edge;
+            break;
+        case FAULT_TRIGGER_ON_RELAY_EDGE:
+            out->relay = (uint8_t)trigger_ref;
+            out->relay_edge = (fault_relay_edge_t)trigger_edge;
+            out->delay_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_ON_EVENT:
+            memcpy(out->event_name, event_name, sizeof(out->event_name));
+            out->delay_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_AFTER_FAULT:
+            out->after_fault_slot = trigger_ref;
+            out->delay_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_RANDOM_IN:
+            out->random_t0_s = trigger_a;
+            out->random_t1_s = trigger_b;
+            break;
+        case FAULT_TRIGGER_MANUAL:
+        default:
+            break;
+    }
+    return true;
+}
+
 static void handle_fault_schedule(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
                                    uint8_t out_cap)
 {
@@ -1218,14 +1415,8 @@ static void handle_fault_schedule(const uint8_t *args, uint8_t args_len, uint8_t
     uint8_t fault_type = ar_u8(&r);
     uint16_t target = ar_u16le(&r);
 
-    uint8_t trigger_kind = ar_u8(&r);
-    double trigger_a = ar_f64le(&r);
-    double trigger_b = ar_f64le(&r);
-    uint16_t trigger_ref = ar_u16le(&r);
-    uint8_t trigger_edge = ar_u8(&r);
-    char event_name[FAULT_ENGINE_MAX_NAME_LEN];
-    ar_bytes(&r, (uint8_t *)event_name, (uint8_t)sizeof(event_name));
-    event_name[FAULT_ENGINE_MAX_NAME_LEN - 1] = '\0'; // defensive: force NUL termination regardless of wire content
+    fault_trigger_t trigger;
+    bool trigger_ok = decode_fault_trigger(&r, &trigger);
 
     uint8_t duration_kind = ar_u8(&r);
     double duration_for_s = ar_f64le(&r);
@@ -1243,50 +1434,18 @@ static void handle_fault_schedule(const uint8_t *args, uint8_t args_len, uint8_t
 
     reply_writer_t w;
     rw_init(&w, out, out_cap);
-    if (r.overflow || fault_type > (uint8_t)FAULT_SCHED_TYPE_AMBIENT_SHIFT ||
-        trigger_kind > (uint8_t)FAULT_TRIGGER_MANUAL ||
-        duration_kind >= (uint8_t)FAULT_DURATION_UNTIL_TRIGGER || repeat_kind > (uint8_t)FAULT_REPEAT_N_TIMES) {
+    // fault_type's upper bound is FAULT_SCHED_TYPE_DUT_POWER_CUT, the
+    // catalog's actual last value (fault_sched.h) -- NOT
+    // FAULT_SCHED_TYPE_AMBIENT_SHIFT, which stopped being the last value
+    // once THERMAL_MASS_SURPRISE/TC_LAG_STRESS/DUT_POWER_CUT were added by
+    // the sim_engine/fault_sched gap-closure pass; the stale bound silently
+    // rejected all three via FAULT_SCHEDULE (found and fixed this pass).
+    if (r.overflow || !trigger_ok || fault_type > (uint8_t)FAULT_SCHED_TYPE_DUT_POWER_CUT ||
+        duration_kind > (uint8_t)FAULT_DURATION_UNTIL_TRIGGER || repeat_kind > (uint8_t)FAULT_REPEAT_N_TIMES) {
         rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
         *out_len = w.len;
         return;
     }
-
-    fault_trigger_t trigger = {0};
-    trigger.kind = (fault_trigger_kind_t)trigger_kind;
-    switch (trigger.kind) {
-        case FAULT_TRIGGER_AT_SIM_TIME:
-            trigger.at_sim_time_s = trigger_a;
-            break;
-        case FAULT_TRIGGER_AT_ZONE_TEMP:
-            trigger.zone = (uint8_t)trigger_ref;
-            trigger.temp_c = (float)trigger_a;
-            trigger.temp_edge = (fault_temp_edge_t)trigger_edge;
-            break;
-        case FAULT_TRIGGER_ON_RELAY_EDGE:
-            trigger.relay = (uint8_t)trigger_ref;
-            trigger.relay_edge = (fault_relay_edge_t)trigger_edge;
-            trigger.delay_s = trigger_a;
-            break;
-        case FAULT_TRIGGER_ON_EVENT:
-            memcpy(trigger.event_name, event_name, sizeof(trigger.event_name));
-            trigger.delay_s = trigger_a;
-            break;
-        case FAULT_TRIGGER_AFTER_FAULT:
-            trigger.after_fault_slot = trigger_ref;
-            trigger.delay_s = trigger_a;
-            break;
-        case FAULT_TRIGGER_RANDOM_IN:
-            trigger.random_t0_s = trigger_a;
-            trigger.random_t1_s = trigger_b;
-            break;
-        case FAULT_TRIGGER_MANUAL:
-        default:
-            break;
-    }
-
-    fault_duration_t duration = {0};
-    duration.kind = (fault_duration_kind_t)duration_kind;
-    duration.for_s = duration_for_s;
 
     fault_repeat_t repeat = {0};
     repeat.kind = (fault_repeat_kind_t)repeat_kind;
@@ -1294,8 +1453,86 @@ static void handle_fault_schedule(const uint8_t *args, uint8_t args_len, uint8_t
     repeat.jitter_s = repeat_jitter_s;
     repeat.n = repeat_n;
 
+    if (duration_kind == (uint8_t)FAULT_DURATION_UNTIL_TRIGGER) {
+        // Two-frame path (s_pending_until's doc comment above): park
+        // everything but the release trigger, do not arm yet.
+        if (slot_id >= FAULT_ENGINE_MAX_SLOTS) {
+            rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+            *out_len = w.len;
+            return;
+        }
+        s_pending_until[slot_id].pending = true;
+        s_pending_until[slot_id].fault_type = (fault_sched_fault_type_t)fault_type;
+        s_pending_until[slot_id].target = target;
+        s_pending_until[slot_id].trigger = trigger;
+        s_pending_until[slot_id].repeat = repeat;
+        memcpy(s_pending_until[slot_id].params, params, sizeof(params));
+        rw_u8(&w, SIMFW_CMD_STATUS_OK);
+        rw_u16le(&w, slot_id);
+        *out_len = w.len;
+        return;
+    }
+
+    // A direct (PERMANENT/FOR) schedule on this slot_id supersedes any
+    // still-pending UNTIL_TRIGGER parked on it (frame 1 sent, frame 2 never
+    // arrived) -- discard the stale entry so a later, unrelated
+    // SET_UNTIL_TRIGGER cannot resurrect it against this new schedule.
+    if (slot_id < FAULT_ENGINE_MAX_SLOTS) {
+        s_pending_until[slot_id].pending = false;
+    }
+
+    fault_duration_t duration = {0};
+    duration.kind = (fault_duration_kind_t)duration_kind;
+    duration.for_s = duration_for_s;
+
     uint16_t sid = fault_sched_schedule(slot_id, (fault_sched_fault_type_t)fault_type, target, &trigger, &duration,
                                           &repeat, params);
+    if (sid == FAULT_ENGINE_INVALID_SLOT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u16le(&w, sid);
+    *out_len = w.len;
+}
+
+// request: {u16 slot_id, <trigger encoding, same shape as FAULT_SCHEDULE's
+// own ARM trigger -- see decode_fault_trigger()>}. Supplies FAULT_SCHEDULE's
+// UNTIL_TRIGGER release trigger and performs the actual fault_sched_schedule()
+// call, combining it with the fields FAULT_SCHEDULE parked in
+// s_pending_until[slot_id] (see that struct's doc comment above
+// handle_fault_schedule for the full two-frame design). Reply: {status,
+// u16 slot_id echo}. ERR_BAD_ARGS if slot_id has no pending UNTIL_TRIGGER
+// schedule (step 1 was never sent for it, or it was already consumed/
+// cancelled).
+static void handle_fault_set_until_trigger(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                            uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint16_t slot_id = ar_u16le(&r);
+
+    fault_trigger_t release_trigger;
+    bool trigger_ok = decode_fault_trigger(&r, &release_trigger);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || !trigger_ok || slot_id >= FAULT_ENGINE_MAX_SLOTS || !s_pending_until[slot_id].pending) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+
+    pending_until_trigger_t *pend = &s_pending_until[slot_id];
+
+    fault_duration_t duration = {0};
+    duration.kind = FAULT_DURATION_UNTIL_TRIGGER;
+    duration.until_trigger = release_trigger;
+
+    uint16_t sid = fault_sched_schedule(slot_id, pend->fault_type, pend->target, &pend->trigger, &duration,
+                                          &pend->repeat, pend->params);
+    pend->pending = false; // consumed regardless of outcome -- resend FAULT_SCHEDULE to retry
     if (sid == FAULT_ENGINE_INVALID_SLOT) {
         rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
         *out_len = w.len;
@@ -1312,6 +1549,15 @@ static void handle_fault_cancel(const uint8_t *args, uint8_t args_len, uint8_t *
     arg_reader_t r;
     ar_init(&r, args, args_len);
     uint16_t slot_id = ar_u16le(&r);
+
+    // Discard any still-pending UNTIL_TRIGGER schedule on this slot (step 1
+    // sent, step 2/FAULT_SET_UNTIL_TRIGGER never arrived) -- there is
+    // nothing armed in fault_sched yet to cancel at the engine level for
+    // that case, but the parked PC-side intent should not survive an
+    // explicit cancel either.
+    if (slot_id < FAULT_ENGINE_MAX_SLOTS) {
+        s_pending_until[slot_id].pending = false;
+    }
 
     reply_writer_t w;
     rw_init(&w, out, out_cap);
@@ -1402,6 +1648,7 @@ static const cmd_table_entry_t s_fault_commands[] = {
     {SIMFW_CMD_FAULT_CANCEL, handle_fault_cancel},
     {SIMFW_CMD_FAULT_LIST, handle_fault_list},
     {SIMFW_CMD_FAULT_FIRE_NOW, handle_fault_fire_now},
+    {SIMFW_CMD_FAULT_SET_UNTIL_TRIGGER, handle_fault_set_until_trigger},
 };
 
 // --- Dispatch table --------------------------------------------------------

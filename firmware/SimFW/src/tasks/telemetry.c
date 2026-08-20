@@ -25,6 +25,7 @@
 #include "i2c_owner.h"
 #include "log_task.h"
 #include "sim/sim_snapshot.h"
+#include "sim_engine.h"
 #include "spi_emu_a.h"
 #include "spi_emu_b.h"
 #include "task_priorities.h"
@@ -219,13 +220,11 @@ static void telemetry_build_and_send_state_frame(void)
 
     i2c_owner_relay_states_t relays = i2c_owner_get_relay_states();
 
-    // seed: sim_engine.h has no getter for the seed it was last told
-    // (sim_engine_set_seed() exists, sim_engine_get_seed() does not) --
-    // documented gap, docs/PROTOCOL.md section 6 "Known gaps". 0 is
-    // reported until that getter exists; harmless today since no SET_SEED
-    // handler is wired up either, so nothing can set a non-zero seed for
-    // this field to be wrong about.
-    uint32_t seed = 0;
+    // seed: gap-closure pass -- sim_engine_get_seed() now exists and
+    // cmd_task.c's SYS_SET_SEED handler is wired up, so this reports
+    // whatever the PC side last set (0 if never set), closing the "seed is
+    // always 0" gap docs/PROTOCOL.md section 6 previously documented.
+    uint32_t seed = sim_engine_get_seed();
 
     uint8_t buf[BENCHPROTO_FRAME_MAX_PAYLOAD];
     size_t len = build_telemetry_frame(buf, &snap, seed, active_fault_count, relays.fault_line_asserted,

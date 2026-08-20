@@ -39,17 +39,22 @@ extern "C" {
 #define SIMFW_TASK_ID_EVT   8u
 
 // SYS group command ids (PLAN.md sec 5's row: PING, GET_VERSION, RESET_SIM,
-// SET_TIMESCALE, SET_SEED, GET_CAPS). Only PING/GET_VERSION/GET_CAPS have a
-// table entry in cmd_task.c today -- the other three are reserved numbers
-// with no handler yet, so an incoming request for them falls through to the
-// same "not implemented" default every other group's commands get (see
-// cmd_task.c's dispatch table comment) rather than being silently unrouted.
+// SET_TIMESCALE, SET_SEED, GET_CAPS). All six now have real handlers in
+// cmd_task.c (gap-closure pass, docs/PROTOCOL.md section 4): RESET_SIM/
+// SET_TIMESCALE/SET_SEED are thin decode-then-call wrappers over
+// sim_engine.h's sim_engine_reset()/_set_timescale()/_set_seed(). GET_SIM_STATE
+// is a new id this pass adds (not in PLAN.md sec 5's original sketch, same
+// "first-class getter for what a client just set" reasoning cmd_ids.h
+// already documents for IO_ESTOP_GET/IO_DUT_POWER_GET above) so a client can
+// read back the seed/timescale it set (or that a fresh boot defaulted to)
+// without depending on the TELEMETRY frame's own seed field.
 #define SIMFW_CMD_SYS_PING          0x01u
 #define SIMFW_CMD_SYS_GET_VERSION   0x02u
 #define SIMFW_CMD_SYS_RESET_SIM     0x03u
 #define SIMFW_CMD_SYS_SET_TIMESCALE 0x04u
 #define SIMFW_CMD_SYS_SET_SEED      0x05u
 #define SIMFW_CMD_SYS_GET_CAPS      0x06u
+#define SIMFW_CMD_SYS_GET_SIM_STATE 0x07u
 
 // Reply-payload status byte -- byte 0 of every SYS/MODEL/TC/CT/RELAY/IO/
 // FAULT reply payload (docs/PROTOCOL.md "Reply convention"). This is
@@ -136,11 +141,18 @@ extern "C" {
 #define SIMFW_CMD_IO_DUT_POWER_GET 0x08u
 
 // --- FAULT group command ids (SIMFW_TASK_ID_FAULT) -- docs/PROTOCOL.md
-// section 5.6, backed by fault_sched.h's schedule/cancel/fire_now/list API. ---
+// section 5.6, backed by fault_sched.h's schedule/cancel/fire_now/list API.
+// SET_UNTIL_TRIGGER (gap-closure pass): FAULT_SCHEDULE's UNTIL_TRIGGER
+// duration kind needs a second, full nested trigger that does not fit
+// alongside everything else in one 128-byte frame -- see PROTOCOL.md section
+// 5.6 for the two-frame design this id completes (FAULT_SCHEDULE parks
+// everything but the release trigger, this command supplies it and performs
+// the actual arm). ---
 #define SIMFW_CMD_FAULT_SCHEDULE  0x01u
 #define SIMFW_CMD_FAULT_CANCEL    0x02u
 #define SIMFW_CMD_FAULT_LIST      0x03u
 #define SIMFW_CMD_FAULT_FIRE_NOW  0x04u
+#define SIMFW_CMD_FAULT_SET_UNTIL_TRIGGER 0x05u
 
 // --- EVT group frame-kind byte (SIMFW_TASK_ID_EVT) -- docs/PROTOCOL.md
 // section 6, backed by telemetry.c's real body (this pass). EVT is not a
