@@ -97,6 +97,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "ui_page_network.c"
                        "ui_page_safety.c"
                        "ui_page_history.c"
+                       "lvgl_mem_psram.c"
                        "ui_page_diagnostics.c"
                        "ui_page_thermo_faults.c"
                        "ui_page_touch_cal.c"
@@ -182,3 +183,17 @@ add_custom_target(drivers_build_info ALL
     VERBATIM
 )
 add_dependencies(${COMPONENT_LIB} drivers_build_info)
+
+# lvgl_mem_psram.c implements LVGL's LV_STDLIB_CUSTOM allocator hooks
+# (lv_malloc_core/lv_free_core/...). liblvgl.a references those symbols but is
+# linked BEFORE this component's archive, so with plain archive semantics the
+# linker has already passed them by and fails with "undefined reference to
+# lv_malloc_core" pointing inside liblvgl.a -- which looks like an LVGL fault
+# rather than a link-order one.
+#
+# idf_component_add_link_dependency(FROM lvgl) tells the build to link lvgl
+# against this component, which is exactly the supported way to satisfy a
+# library's externally-implemented hooks. Adding lvgl to this component's
+# REQUIRES would not help: that is the dependency that already exists, and in
+# the wrong direction for this.
+idf_component_add_link_dependency(FROM lvgl)
