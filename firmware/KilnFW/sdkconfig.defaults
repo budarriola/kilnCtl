@@ -29,6 +29,26 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # ~172K free. Every UART bridge task and the LVGL display task itself
 # start successfully with this set; without it, the LCD does not
 # initialize at all on this build.
+#
+# Do NOT switch this to CONFIG_LV_USE_BUILTIN_MALLOC. Tried 2026-08-20 and
+# reverted: LVGL's many small object allocations were (correctly) identified
+# as the thing fragmenting the internal DRAM heap -- the largest contiguous
+# DRAM block is a healthy 163840 bytes at 1.4s into boot and has collapsed to
+# ~2560 bytes by 2.9s, which is when the UI is built -- and the built-in
+# allocator looked like the fix, since it confines LVGL to one arena instead
+# of scattering allocations through the shared heap. On hardware, enabling it
+# (64KB pool, LV_MEM_ADR=0) made the board stop responding entirely: no boot
+# log, no PC link, dead. Reverting restored it. The pool is a static array,
+# so with LV_MEM_ADR=0 it lands in .bss/DRAM on top of everything else rather
+# than relieving anything.
+#
+# The idea is still sound -- LVGL is the fragmenter -- but making it work
+# needs the pool placed in PSRAM (EXT_RAM_BSS_ATTR / a custom
+# LV_MEM_POOL_ALLOC), not merely switched to the built-in allocator. Until
+# someone does that carefully, CLIB malloc plus the explicit
+# xTaskCreatePinnedToCoreWithCaps()/xQueueCreateWithCaps() moves in
+# lvgl_port.c, uart_bridge.c and uart_protocol.c is what keeps this board
+# booting.
 CONFIG_LV_USE_CLIB_MALLOC=y
 
 # CONFIG_LV_USE_QRCODE: off by default in upstream LVGL. ui_page_network.c

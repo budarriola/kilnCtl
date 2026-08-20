@@ -90,9 +90,13 @@ static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *n
      * is actually working (internal SRAM should no longer visibly dip
      * during this window) and gives headroom numbers if a future task
      * created here ever needs more stack than expected. */
-    ESP_LOGI(TAG, "%s: pre-create heap free=%u largest_internal_block=%u largest_spiram_block=%u", name,
+    /* MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT, not MALLOC_CAP_INTERNAL alone:
+     * the latter includes 32-bit-only IRAM, which cannot back a task stack,
+     * so it overstates what is actually available here. See main.c's
+     * boot-time heap line for the same correction and why it matters. */
+    ESP_LOGI(TAG, "%s: pre-create heap free=%u largest_dram_block=%u largest_spiram_block=%u", name,
              (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     for (int attempt = 0; attempt < 5; attempt++) {
         BaseType_t created = xTaskCreatePinnedToCoreWithCaps(task_fn, name, stack_depth, param, priority, NULL,

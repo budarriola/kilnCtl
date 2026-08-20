@@ -261,10 +261,25 @@ void app_main(void)
             case ESP_RST_SDIO:       rr_name = "SDIO"; break;
             default: break;
         }
-        ESP_LOGE(TAG, "esp_reset_reason=%d (%s); free_heap=%u free_internal=%u free_spiram=%u",
-                 (int)rr, rr_name, (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        /* MALLOC_CAP_INTERNAL on its own is a misleading number on this chip
+         * and it misled this project for most of a day. It counts every
+         * internal region including IRAM, which is 32-bit-access-only: a task
+         * stack, a queue, or any byte-addressable buffer needs
+         * MALLOC_CAP_8BIT, so a large "free_internal" can sit alongside a DRAM
+         * pool that is effectively full. Reporting both, plus the largest
+         * contiguous 8-bit block, is what actually explains an ESP_ERR_NO_MEM
+         * here: a multi-KB allocation fails on the largest-block figure, not
+         * on any of the free totals. */
+        ESP_LOGE(TAG, "esp_reset_reason=%d (%s); free_heap=%u free_spiram=%u", (int)rr, rr_name,
+                 (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        ESP_LOGE(TAG,
+                 "internal heap: total_free=%u dram_free(8BIT)=%u dram_largest_block=%u "
+                 "dram_min_ever=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
         // CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y (sdkconfig.defaults, added
         // the same 2026-08-20 diagnosability pass as this reset-reason line)
