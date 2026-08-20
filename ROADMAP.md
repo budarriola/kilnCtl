@@ -315,11 +315,17 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       (ported from KilnFW's), and a new `config_store.{c,h}`/
       `config_store_flash.c` (versioned, CRC'd, ARMED-refused writes) now
       sources `tc_type` at boot instead of a hard-coded placeholder —
-      `SaftyFW/TODO.md` Phase 9. **Still open**: no PC/link command exists
-      to actually set `tc_type` (`SAFETY_CMD_SET_CONFIG` is unwritten), and
-      the part itself is still not physically populated/wired on the
-      bench — this item stays `[~]` until both a real commissioning path
-      and the hardware exist.
+      `SaftyFW/TODO.md` Phase 9. **2026-08-19, later pass — the commissioning
+      path now exists too**: `SAFETY_CMD_SET_CONFIG` (0x16, `kilnlink_set_config`
+      codec) carries `tc_type` PC→ESP→Pico, mirroring `CLEAR_TRIP`'s
+      three-hop shape exactly (`safety_link_send_set_config()`,
+      `uart_bridge.c` subcommand, `link_task.c` decode + range-check +
+      `config_store_write()`, no wire ACK). `mcp__kilnctrl__safety_set_tc_type(name)`
+      exposes it from `pc_tools`. `FW_VERSION`'s `config_version`/
+      `config_crc` fields are real now too, no longer hard-coded 0. **Still
+      open**: the part itself is still not physically populated/wired on
+      the bench, and no LCD/web commissioning surface exists — this item
+      stays `[~]` until the hardware exists to actually commission.
 - [x] Guards implemented and **host-tested against synthetic inputs**, no relay
       yet — 2026-08-18, `firmware/SaftyFW/src/safety_guards.c`. 12 of the 13
       guards in `SAFETY_MODEL.md` section 4 are built as pure functions and
