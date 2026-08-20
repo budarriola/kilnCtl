@@ -934,9 +934,18 @@ path. Two facts set the shape of this milestone:
       `get_esp_status()`; `mcp__kilnctrl__ota_status()` now polls and reports
       both routes independently. `idf.py -C firmware/KilnFW build` clean;
       19/19 `test_ota_http_client.py` tests pass (mocked HTTP).
-      **Not yet exercised against a physical board** — no hardware attached
-      in this pass's environment; live-board verification (real interlock
-      refusals, real lockout, a real Pico relay) is still outstanding.
+      **2026-08-19, later pass — explicit ESP rollback added**:
+      `POST /api/ota/esp/rollback` (`ota_http.c`), gated by
+      `esp_ota_check_rollback_is_possible()` before ever calling
+      `esp_ota_mark_app_invalid_rollback_and_reboot()`, with its own HMAC
+      context (`"esp-rollback"`) separate from the update MAC, so one
+      auth can't double as the other. `mcp__kilnctrl__ota_rollback_esp()`
+      added; 97/97 `pc_tools` tests pass. Pico-side rollback is separate,
+      unattempted scope (different mechanism — bootloader slot switch, not
+      an ESP-IDF API). **Not yet exercised against a physical board** — no
+      hardware attached in this pass's environment; live-board verification
+      (real interlock refusals, real lockout, a real Pico relay, a real
+      rollback reboot) is still outstanding.
 
 ---
 
