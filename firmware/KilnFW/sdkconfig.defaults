@@ -111,6 +111,55 @@ CONFIG_SPIRAM_CS_IO=26
 CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MEMTEST=y
+#
+# Internal-SRAM pressure, measured 2026-08-20. The board booted reporting
+# ~243KB of internal heap free but a largest contiguous internal block of
+# only 992 bytes (uart_bridge_ext.c logs both at each bridge-task creation).
+# Any allocation bigger than that fails regardless of the free total, which
+# is exactly what UART task 12 (gpio_probe) hit: its uart_protocol inbox
+# xQueueCreate() failed every boot with "internal SRAM genuinely exhausted",
+# leaving the task running with no inbox and NACKing every request.
+#
+# Two knobs drive that, and both were working against this board:
+#
+#   ALWAYSINTERNAL is the size BELOW which an allocation is forced into
+#   internal RAM. At 16384 essentially every routine allocation in the
+#   firmware -- queues, small buffers, driver state -- was pinned to internal
+#   RAM and none of it could ever spill to the 8MB of PSRAM sitting idle.
+#   4096 keeps genuinely small/hot allocations internal (where PSRAM's
+#   latency would hurt) while letting anything mid-sized use PSRAM.
+#
+#   TRY_ALLOCATE_WIFI_LWIP lets the Wi-Fi and lwIP stacks take their buffer
+#   pools from PSRAM. Those pools are among the largest internal consumers on
+#   this board, and this project made them bigger on the same day: the httpd
+#   concurrency fix raised max_open_sockets to 13 and CONFIG_LWIP_MAX_SOCKETS
+#   to 16 (see the LWIP_MAX_SOCKETS comment above), so leaving this off meant
+#   paying for that fix entirely out of the scarcest pool.
+#
+# DMA-capable allocations are unaffected either way -- those request
+# MALLOC_CAP_DMA explicitly and always come from internal RAM, and
+# MALLOC_RESERVE_INTERNAL below keeps a floor for them.
+# Both values below are DELIBERATELY unchanged from the IDF defaults. Tried
+# and reverted, 2026-08-20 -- recorded here so the next person does not repeat
+# it:
+#
+#   ALWAYSINTERNAL 16384 -> 4096, and TRY_ALLOCATE_WIFI_LWIP off -> on, on the
+#   reasoning that pushing mid-sized allocations and the Wi-Fi/lwIP buffer
+#   pools into PSRAM would relieve the internal shortage. On real hardware it
+#   made things WORSE, not better: the LVGL display task stopped starting at
+#   all ("Failed to start lvgl_port_task"), more UART task inboxes failed than
+#   before, and the PC-link safety watchdog failed to start with ESP_ERR_NO_MEM.
+#   Reverting both restored the previous behaviour.
+#
+# The lesson is that the shortage here is FRAGMENTATION, not total free bytes:
+# the board reports ~243KB internal free while the largest contiguous block is
+# ~1-2.5KB. Global allocator knobs shift which pool small allocations come
+# from; they do nothing for a multi-KB contiguous request, and can worsen
+# fragmentation. What actually fixed it was moving specific large, long-lived
+# allocations to PSRAM explicitly at their call sites -- task stacks via
+# xTaskCreatePinnedToCoreWithCaps() and the UART inbox queues via
+# xQueueCreateWithCaps(). See lvgl_port.c, uart_bridge.c, uart_bridge_ext.c
+# and espInterfaces/uart_protocol.c.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 

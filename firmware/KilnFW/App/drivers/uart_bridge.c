@@ -5,7 +5,10 @@
 
 #include "build_info.h"
 #include "driver/gpio.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+
+#include "freertos/idf_additions.h"
 #include "factory_reset.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -1476,8 +1479,15 @@ esp_err_t uart_bridge_start_safety_task(uart_protocol_t *proto, SafetyLinkClass 
         return err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(safety_bridge_task, "safety_uart_bridge", 4096,
-                                                 &ctx, 5, NULL, tskNO_AFFINITY);
+    /* PSRAM stack -- same 2026-08-20 internal-fragmentation fix as the link
+     * watchdog below and the bridge tasks in uart_bridge_ext.c. This one is
+     * a PC-link surface (it relays safety STATUS to the host); the actual
+     * isolated link to the RP2040 lives in safety_link.c and is unaffected by
+     * whether this task exists, so a failure here costs visibility, not
+     * safety. It still should not fail for want of a contiguous 4KB. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(safety_bridge_task, "safety_uart_bridge",
+                                                         4096, &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_SAFETY);
         return ESP_ERR_NO_MEM;
@@ -1916,8 +1926,23 @@ esp_err_t uart_bridge_start_link_watchdog(kiln_io_t *io, SafetyLinkClass *link)
     /* Priority 6: above the bridge tasks (5), because this must still run when
      * every one of them is blocked inside a uart_protocol_send that a departed
      * host will never ACK -- which is precisely the situation it exists for. */
-    BaseType_t created = xTaskCreatePinnedToCore(link_watchdog_task, "link_watchdog", 3072, &ctx, 6,
-                                                 NULL, tskNO_AFFINITY);
+    /* PSRAM stack, 2026-08-20, same reason and same API as lvgl_port.c's and
+     * uart_bridge_ext.c's: this 3072-byte stack could not be satisfied from
+     * an internal heap fragmented to a sub-1KB largest free block, and the
+     * failure mode was the worst one on this board -- app_main logged "PC
+     * link watchdog did not start (ESP_ERR_NO_MEM) -- RELAYS WILL NOT DROP ON
+     * LINK LOSS" and dropped into safe state. A safety watchdog that cannot
+     * be created because of heap fragmentation is not an acceptable failure,
+     * and PSRAM is sitting 8MB empty.
+     *
+     * Safe in PSRAM: this task polls timestamps and, on timeout, calls
+     * kiln_io/safety_link to drop relays and assert the fault line. It holds
+     * no DMA buffers and runs from no ISR. Note the fault line is also
+     * asserted by hardware-independent paths, so the safe direction does not
+     * depend solely on this task's stack being reachable. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(link_watchdog_task, "link_watchdog", 3072,
+                                                         &ctx, 6, NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

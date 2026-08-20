@@ -2,8 +2,11 @@
 
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+
+#include "freertos/idf_additions.h"
 
 #include "kilnlink/kilnlink_frame.h"
 
@@ -339,7 +342,7 @@ esp_err_t uart_protocol_deinit(uart_protocol_t *proto)
         xSemaphoreTake(proto->tasks_lock, portMAX_DELAY);
         for (int i = 0; i < UART_PROTO_MAX_TASKS; ++i) {
             if (proto->tasks[i].in_use && proto->tasks[i].inbox) {
-                vQueueDelete(proto->tasks[i].inbox);
+                vQueueDeleteWithCaps(proto->tasks[i].inbox);
             }
         }
         memset(proto->tasks, 0, sizeof(proto->tasks));
@@ -401,7 +404,22 @@ esp_err_t uart_protocol_register_task(uart_protocol_t *proto,
      * the next power cycle. */
     QueueHandle_t inbox = NULL;
     for (int attempt = 0; attempt < 5; ++attempt) {
-        inbox = xQueueCreate(inbox_len, sizeof(uart_proto_message_t));
+        /* PSRAM-backed, 2026-08-20. sizeof(uart_proto_message_t) is dominated
+         * by its fixed 128-byte payload buffer, so an inbox of any useful
+         * depth is a multi-KB contiguous request -- and this board's internal
+         * heap fragments to a largest free block under 1KB during boot, so
+         * plain xQueueCreate() failed here for most task ids ("internal SRAM
+         * genuinely exhausted", logged just below). A registered task with no
+         * inbox still runs but NACKs every request, which is how the
+         * gpio_probe/wifi/profiles surfaces appeared broken.
+         *
+         * Safe in PSRAM because these inboxes are strictly task-to-task:
+         * uart_protocol_rx_task() posts into them and the owning bridge task
+         * drains them. Nothing here posts from an ISR -- that would require
+         * internal memory, since PSRAM is unreachable while the cache is
+         * disabled. */
+        inbox = xQueueCreateWithCaps(inbox_len, sizeof(uart_proto_message_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (inbox) {
             break;
         }
@@ -459,7 +477,7 @@ esp_err_t uart_protocol_unregister_task(uart_protocol_t *proto, uint8_t task_id)
         xSemaphoreGive(proto->tasks_lock);
         return ESP_ERR_NOT_FOUND;
     }
-    vQueueDelete(slot->inbox);
+    vQueueDeleteWithCaps(slot->inbox);
     memset(slot, 0, sizeof(*slot));
     xSemaphoreGive(proto->tasks_lock);
     return ESP_OK;

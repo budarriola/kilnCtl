@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -481,8 +482,30 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
         return ui_err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(lvgl_port_task, "lvgl", 8192, NULL, 4, NULL,
-                                                 tskNO_AFFINITY);
+    /* PSRAM stack, 2026-08-20. This 8192-byte stack is the single largest
+     * contiguous internal-SRAM allocation the firmware makes, and plain
+     * xTaskCreatePinnedToCore() can only take it from internal RAM. On this
+     * board that stopped being possible: the internal heap reports ~243KB
+     * free but fragments down to a largest contiguous block under 1KB by the
+     * time this runs (uart_bridge_ext.c logs the figure at each bridge-task
+     * creation), so an 8KB request fails no matter how much is free in total
+     * and the display never came up at all -- "Failed to start
+     * lvgl_port_task" on every boot.
+     *
+     * Same fix, and the same API, already applied to the UART bridge tasks in
+     * uart_bridge_ext.c and gpio_probe.c: CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+     * does NOT make plain xTaskCreate* use PSRAM -- that needs
+     * xTaskCreatePinnedToCoreWithCaps() with an explicit MALLOC_CAP_SPIRAM.
+     *
+     * Safe for this task specifically: its stack holds LVGL's own bookkeeping,
+     * not DMA buffers. The frame data handed to the ILI9488 comes from LVGL's
+     * draw buffers, which are already allocated in PSRAM (see the buffer
+     * allocation above and the "PSRAM buffers" note in the log line below),
+     * and any transfer needing DMA-capable memory requests MALLOC_CAP_DMA and
+     * is unaffected by where this stack lives. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(lvgl_port_task, "lvgl", 8192, NULL, 4, NULL,
+                                                         tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         ESP_LOGE(TAG, "Failed to start lvgl_port_task");
         return ESP_ERR_NO_MEM;
