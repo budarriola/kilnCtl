@@ -2,16 +2,16 @@
   "scenario": {
     "name": "power_blip",
     "version": 1,
-    "hash": "d6b5c351c40866dc295f248c91575b51792dd75c5d92cff667bd3fbb70ccf8fc"
+    "hash": "328ff4ca3a7a126023aae344d01cff78951f6441af2fecd09daa4b56d6a32531"
   },
   "fw_versions": {},
   "seed": 57,
   "timescale": 10.0,
-  "start_time": 1787260983.836851,
+  "start_time": 1787265264.886977,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 47000000,
+      "sim_time_us": 43000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 149000000,
+      "sim_time_us": 146000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
@@ -49,11 +49,15 @@
     },
     {
       "name": "s6b_stays_at_warn_not_trip",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0. Separately, link_up is never set true because safety_core_build_input() never populates it (the struct literal has no .link_up entry at all -- confirmed by reading safety_core.c), so S6b's own unconditional ~120s hard-backstop trip (link_dead_hard_s default) would also eventually fire in any run long enough to reach sim_end regardless of this blip's own current/link behavior -- two independent reasons this cannot currently validate the 'stays at warn, not trip' claim it names.]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0. Separately, link_up is never set true because safety_core_build_input() never populates it (the struct literal has no .link_up entry at all -- confirmed by reading safety_core.c), so S6b's own unconditional ~120s hard-backstop trip (link_dead_hard_s default) would also eventually fire in any run long enough to reach sim_end regardless of this blip's own current/link behavior -- two independent reasons this cannot currently validate the 'stays at warn, not trip' claim it names.",
+        "phase": "For K4 energize: link_task exists but has no LINK_FRAME_REQUEST_ENABLE_CMD case (SAFETY_CMD_REQUEST_ENABLE 0x02, already sent by KilnFW) -- a genuinely missing decoder, Phase 7 work not yet done. For link_up: unlike context_valid (which link_task already produces via link_task_get_context_snapshot(), just unread by safety_core_build_input()), link_up has no producer/getter in link_task.{c,h} at all yet -- link_task.h's own doc comment on link_task_get_degraded_no_context() confirms Phase 7's context-dependent-guard wiring is still future work. Both are Phase 7 gaps, but not the same gap as each other, and neither is 'link_task does not exist' -- link_task is built and handles PUSH_CONTEXT/CLEAR_TRIP/SET_CONFIG/ROLLBACK/ ANNOUNCE_REBOOT/ANNOUNCE_VERSION/FW_VERSION already."
+      }
     },
     {
       "name": "safe_resume",
@@ -62,7 +66,7 @@
       "detail": "triggering event (dut_power {'state': True}) never occurred"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

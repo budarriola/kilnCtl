@@ -65,14 +65,29 @@ expect:
                way -- relay_owner_command_energize() is fully built
                (firmware/SaftyFW/src/tasks/relay_owner.c) but called by
                nothing in the current source tree -- so K4_open is already
-               true at sim-time 0. Separately, link_up is never set true by
-               any producer (Phase 7 link_task does not exist), so S6b's own
-               unconditional ~120s hard-backstop trip (link_dead_hard_s
-               default) would also eventually fire in any run long enough
-               to reach sim_end regardless of this blip's own current/link
-               behavior -- two independent reasons this cannot currently
-               validate the 'stays at warn, not trip' claim it names."
-      phase: "Phase 7 (link_task) for both K4 energize and link_up."
+               true at sim-time 0. Separately, link_up is never set true
+               because safety_core_build_input() never populates it (the
+               struct literal has no .link_up entry at all -- confirmed by
+               reading safety_core.c), so S6b's own unconditional ~120s
+               hard-backstop trip (link_dead_hard_s default) would also
+               eventually fire in any run long enough to reach sim_end
+               regardless of this blip's own current/link behavior -- two
+               independent reasons this cannot currently validate the
+               'stays at warn, not trip' claim it names."
+      phase: "For K4 energize: link_task exists but has no
+              LINK_FRAME_REQUEST_ENABLE_CMD case (SAFETY_CMD_REQUEST_ENABLE
+              0x02, already sent by KilnFW) -- a genuinely missing decoder,
+              Phase 7 work not yet done. For link_up: unlike context_valid
+              (which link_task already produces via
+              link_task_get_context_snapshot(), just unread by
+              safety_core_build_input()), link_up has no producer/getter in
+              link_task.{c,h} at all yet -- link_task.h's own doc comment on
+              link_task_get_degraded_no_context() confirms Phase 7's
+              context-dependent-guard wiring is still future work. Both are
+              Phase 7 gaps, but not the same gap as each other, and neither
+              is 'link_task does not exist' -- link_task is built and
+              handles PUSH_CONTEXT/CLEAR_TRIP/SET_CONFIG/ROLLBACK/
+              ANNOUNCE_REBOOT/ANNOUNCE_VERSION/FW_VERSION already."
     # quiet link + no current = "not an emergency... warn and keep
     # watching" (SAFETY_MODEL.md §4 S6) — this is the expected, SAFE
     # outcome of a brief blip with no current flowing, distinct from the

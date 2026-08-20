@@ -87,9 +87,18 @@ expect:
                independent of whether this clause's own within_s:120 guess
                is even the right number."
       phase: "Phase 9 (config_store) -- SAFETY_MODEL.md section 1:
-              abs_max_temp_c has no default and must be commissioned; there
-              is no config_store yet to commission it from (safety_core.c's
-              own TODO comment)."
+              abs_max_temp_c has no default and must be commissioned.
+              config_store now exists (config_store.{c,h}/
+              config_store_flash.c) and already wires tc_type as its first
+              real consumer, but abs_max_temp_c is not among its fields yet
+              (only `reserved` room is set aside, per config_store.h's own
+              header comment), and safety_core.c never calls into
+              config_store for guard thresholds at all -- s_guard_cfg is a
+              zero-initialized static. So this is 'the field and the read
+              path don't exist yet', not 'config_store doesn't exist yet' --
+              safety_core.c's own TODO comment (line 71-73) predates
+              config_store's construction and is itself stale on that
+              point."
   - name: s10_stays_quiet
     forbid: { event: { type: guard_warn, guard: S10 }, before: { sim_end: true } }
     # 80°C < tc_disagreement_c = 200°C (SAFETY_MODEL.md §4 S10) — must never fire

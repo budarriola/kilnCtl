@@ -2,12 +2,12 @@
   "scenario": {
     "name": "tc_noise_storm",
     "version": 1,
-    "hash": "24dc4d98702a55a6aebd48cc74e3f766f24e083d8edea89b9e2d5af4fbceac20"
+    "hash": "fedce986b1d5b0d67a2ecdf717f964d3251238172d9206ddfef23a61dd1f465b"
   },
   "fw_versions": {},
   "seed": 48,
   "timescale": 10.0,
-  "start_time": 1787261164.6757977,
+  "start_time": 1787265445.9493313,
   "events": [
     {
       "seq": 0,
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 147000000,
+      "sim_time_us": 149000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
@@ -49,11 +49,15 @@
   "expectations": [
     {
       "name": "no_trip_ever",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0. Separately, this scenario's own exercised guards S1/S10 also cannot evaluate at all today (S1: abs_max_temp_c uncommissioned, Phase 9; S10: context_valid never populated, Phase 7), so 'no trip ever' is not exercising the anti-nuisance behavior it names either way.]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0. Separately, this scenario's own exercised guards S1/S10 also cannot evaluate at all today (S1: abs_max_temp_c uncommissioned, Phase 9; S10: context_valid never populated, Phase 7), so 'no trip ever' is not exercising the anti-nuisance behavior it names either way.",
+        "phase": "For K4 energize: link_task exists but has no LINK_FRAME_REQUEST_ENABLE_CMD case (SAFETY_CMD_REQUEST_ENABLE 0x02, already sent by KilnFW) -- a genuinely missing decoder, Phase 7 work not yet done. For S10's context_valid: link_task already publishes context (link_task_get_context_snapshot()); safety_core_build_input() just never reads it -- a wiring gap, not a Phase 7 existence gap. For S1's abs_max_temp_c: config_store now exists (Phase 9, config_store.{c,h}/ config_store_flash.c) but has no abs_max_temp_c field yet (only tc_type is wired), and safety_core.c never reads config_store for guard thresholds at all -- s_guard_cfg is a zero-initialized static, never populated from flash."
+      }
     },
     {
       "name": "no_fault_line_latch",
@@ -62,7 +66,7 @@
       "detail": "dut:fault_line_asserted never observed before the boundary"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

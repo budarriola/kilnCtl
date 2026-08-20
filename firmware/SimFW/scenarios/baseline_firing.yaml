@@ -30,11 +30,17 @@ expect:
                already true at sim-time 0, before a healthy no-fault run has
                had any chance to prove anything, not because this baseline
                genuinely stayed healthy under a real energized relay."
-      phase: "Phase 7 (link_task) -- relay_owner_command_energize() is meant
-              to be driven by a legitimate ARMED-state request originating
-              from context the ESP sends over the link (relay_owner.h's own
-              doc comment); link_task does not exist yet to issue it (same
-              root cause as context_valid/link_up never being populated)."
+      phase: "Phase 7 (link_task) -- link_task exists and already decodes
+              several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP,
+              SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one.
+              KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over
+              the link (safety_link_request_enable(), App/drivers/
+              uart_bridge.c), yet SaftyFW's link_task.c has no
+              LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against
+              link_frame.h's command list), so relay_owner_command_energize()
+              is never called from anywhere. A genuinely missing decoder,
+              not a wiring omission on an existing pair -- see ROADMAP.md
+              M4's matching finding."
   - name: heat_actually_cycles
     event: { type: relay_edge, relay: K1, edge: close }
     then:

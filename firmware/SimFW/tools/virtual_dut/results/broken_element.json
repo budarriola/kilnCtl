@@ -2,12 +2,12 @@
   "scenario": {
     "name": "broken_element",
     "version": 1,
-    "hash": "a6fb2d1898cceab0275be852af918dc0cd8d0dc34dbed6e4a9718bff942f834c"
+    "hash": "2a6074614918363c7f1dd28e21164fd1a965891b76539e298dc0072c6d348cc5"
   },
   "fw_versions": {},
   "seed": 50,
   "timescale": 10.0,
-  "start_time": 1787260880.3236768,
+  "start_time": 1787265160.7434683,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 45000000,
+      "sim_time_us": 46000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 146000000,
+      "sim_time_us": 149000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
@@ -49,20 +49,28 @@
   "expectations": [
     {
       "name": "s4_warns",
-      "verdict": "SKIPPED",
+      "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred"
+      "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred [BLOCKED: context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S4's `state->s4_warn = in->relay_commanded_continuously && !in->any_current_present` assignment lives inside safety_guards.c's context_valid-gated else-branch and is force-reset to false while context_valid is false, so this cannot warn against present-day SaftyFW regardless of what the fixture does.]",
+      "blocked_on": {
+        "reason": "context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S4's `state->s4_warn = in->relay_commanded_continuously && !in->any_current_present` assignment lives inside safety_guards.c's context_valid-gated else-branch and is force-reset to false while context_valid is false, so this cannot warn against present-day SaftyFW regardless of what the fixture does.",
+        "phase": "Phase 7 (link_task) is built and already publishes this context -- link_task_publish_context()/ link_task_get_context_snapshot() (firmware/SaftyFW/src/tasks/ link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT (0x07) frame today. The real gap is one layer up: safety_core.c's safety_core_build_input() never calls link_task_get_context_snapshot() at all (see its own TODO at safety_core.c:208-210), so context_valid stays at its zero-init false regardless of what the ESP sends. A wiring gap in an already-built producer/consumer pair, not a missing Phase 7 deliverable."
+      }
     },
     {
       "name": "s4_never_trips",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way, because relay_owner_command_energize() (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, before any guard (or lack of one) has had a chance to say anything, not because S4's own correct 'never trips' design held up under test.]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way, because relay_owner_command_energize() (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, before any guard (or lack of one) has had a chance to say anything, not because S4's own correct 'never trips' design held up under test.",
+        "phase": "Phase 7 (link_task) -- link_task exists and already decodes several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP, SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one. KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over the link (safety_link_request_enable(), App/drivers/ uart_bridge.c), yet SaftyFW's link_task.c has no LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against link_frame.h's command list), so relay_owner_command_energize() is never called from anywhere. A genuinely missing decoder, not a wiring omission on an existing pair like context_valid's gap above -- see ROADMAP.md M4's matching finding."
+      }
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

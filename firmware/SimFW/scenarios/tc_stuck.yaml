@@ -42,9 +42,19 @@ expect:
                force-reset to 0/false while context_valid is false, so this
                cannot warn against present-day SaftyFW regardless of what
                the fixture does."
-      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
-              the context frame (including sample_counter) that would set
-              context_valid true."
+      phase: "Phase 7 (link_task) is built and already publishes this
+              context, sample_counter included -- link_task_publish_
+              context()/link_task_get_context_snapshot() (firmware/SaftyFW/
+              src/tasks/link_task.c) parse and cache every
+              SAFETY_CMD_PUSH_CONTEXT (0x07) frame today, and
+              context_zone_t.sample_counter (snapshots.h) is already part
+              of that decoded struct. The real gap is one layer up:
+              safety_core.c's safety_core_build_input() never calls
+              link_task_get_context_snapshot() at all (see its own TODO at
+              safety_core.c:208-210), so context_valid stays at its
+              zero-init false regardless of what the ESP sends. A wiring
+              gap in an already-built producer/consumer pair, not a
+              missing Phase 7 deliverable."
   - name: trips_after_stale_trip_deadline
     event: { type: fault_fired, slot: stuck }
     then:
@@ -54,7 +64,9 @@ expect:
     blocked_on:
       reason: "Same context_valid gap as `sample_counter_goes_stale` above --
                S13 cannot warn, so it certainly cannot escalate to a trip."
-      phase: "Phase 7 (link_task) -- same as `sample_counter_goes_stale` above."
+      phase: "Same as `sample_counter_goes_stale` above -- link_task
+              already publishes this context; safety_core_build_input()
+              just never reads it. Not a Phase 7 existence gap."
 manual_checks:
   - "Confirm SaftyFW is commissioned with tc_source=BORROWED_ZONE or BOTH before running this scenario — S13 only evaluates in those modes (SAFETY_MODEL.md §3/§4 S13); under tc_source=OWN_J7 this same fault, fired on tc:safety instead, would exercise S11 (frozen_window_s=600s) rather than S13, and that commissioning state is not something the fixture itself can verify or set"
 report_keep: [telemetry, events]

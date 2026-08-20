@@ -2,16 +2,16 @@
   "scenario": {
     "name": "baseline_firing",
     "version": 1,
-    "hash": "0a3e97910726a5d700ca42002fbc2ae0bccfe9bc91de4be13a56a354f278879f"
+    "hash": "f5587cdbfc2c13422b00f7c1c11374aec5834bc38860995eafce1f7ffa5e24c3"
   },
   "fw_versions": {},
   "seed": 1,
   "timescale": 10.0,
-  "start_time": 1787260870.3961954,
+  "start_time": 1787265150.7007465,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 47000000,
+      "sim_time_us": 41000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 149000000,
+      "sim_time_us": 143000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
@@ -49,11 +49,15 @@
     },
     {
       "name": "never_trips",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000)"
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way for the whole run, because relay_owner_command_energize() (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built (INIT/GRACE/ARMED/TRIPPED state machine) but is called by nothing anywhere in the current source tree -- so K4_open is already true at sim-time 0, before a healthy no-fault run has had any chance to prove anything, not because this baseline genuinely stayed healthy under a real energized relay.]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way for the whole run, because relay_owner_command_energize() (firmware/SaftyFW/src/tasks/relay_owner.c) is fully built (INIT/GRACE/ARMED/TRIPPED state machine) but is called by nothing anywhere in the current source tree -- so K4_open is already true at sim-time 0, before a healthy no-fault run has had any chance to prove anything, not because this baseline genuinely stayed healthy under a real energized relay.",
+        "phase": "Phase 7 (link_task) -- link_task exists and already decodes several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP, SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one. KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over the link (safety_link_request_enable(), App/drivers/ uart_bridge.c), yet SaftyFW's link_task.c has no LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against link_frame.h's command list), so relay_owner_command_energize() is never called from anywhere. A genuinely missing decoder, not a wiring omission on an existing pair -- see ROADMAP.md M4's matching finding."
+      }
     },
     {
       "name": "heat_actually_cycles",
@@ -62,7 +66,7 @@
       "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

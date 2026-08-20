@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 63,
   "timescale": 10.0,
-  "start_time": 1787260965.949651,
+  "start_time": 1787265247.0914562,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 43000000,
+      "sim_time_us": 45000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 145000000,
+      "sim_time_us": 147000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
@@ -57,11 +57,15 @@
     },
     {
       "name": "mainfault_trips_s6a",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         0
       ],
-      "detail": "event:guard_trip not observed within 3s after fault_fired (seq 0)"
+      "detail": "event:guard_trip not observed within 3s after fault_fired (seq 0) [BLOCKED: firmware/SaftyFW/src/tasks/safety_core.c's safety_core_build_input() never sets main_fault_asserted -- discrete_task.c's discrete_task_main_fault() (a real, 200ms-debounced GPIO10 read) exists and is called nowhere in safety_core.c (grepped this pass; only discrete_task_estop_pressed() is called there for S7). safety_guards.c's S6a block only checks `if (in->main_fault_asserted)`, which is therefore always false, so S6a cannot trip against present-day SaftyFW regardless of what KilnFW's own GPIO10 line does -- this is true even though the fixture's half of the story (getting KilnFW to genuinely assert mainFault) works exactly as this scenario's own header comment describes.]",
+      "blocked_on": {
+        "reason": "firmware/SaftyFW/src/tasks/safety_core.c's safety_core_build_input() never sets main_fault_asserted -- discrete_task.c's discrete_task_main_fault() (a real, 200ms-debounced GPIO10 read) exists and is called nowhere in safety_core.c (grepped this pass; only discrete_task_estop_pressed() is called there for S7). safety_guards.c's S6a block only checks `if (in->main_fault_asserted)`, which is therefore always false, so S6a cannot trip against present-day SaftyFW regardless of what KilnFW's own GPIO10 line does -- this is true even though the fixture's half of the story (getting KilnFW to genuinely assert mainFault) works exactly as this scenario's own header comment describes.",
+        "phase": "Unassigned -- unlike S1/S11/S3/S4/S9/S10/S13's Phase 9/7 gaps, no firmware/SaftyFW/docs/*.md roadmap phase currently tracks wiring discrete_task_main_fault() into safety_core_build_input(); discrete_task.c itself is a completed Phase 4/5 deliverable (its own header comment), so this looks like a plain missed wiring step rather than deliberately deferred work -- worth a SaftyFW-side ticket, not something this scenario library can fix (scenarios/*.yaml cannot touch firmware/SaftyFW/src)."
+      }
     },
     {
       "name": "fault_line_asserted",

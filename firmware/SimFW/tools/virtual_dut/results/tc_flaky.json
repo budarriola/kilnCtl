@@ -2,12 +2,12 @@
   "scenario": {
     "name": "tc_flaky",
     "version": 1,
-    "hash": "8fda82145c895ec17eae0425fb05f05ba654534e8da42051bab196226b2b6385"
+    "hash": "a2e7c867a69f56c5b42cb1e216c394a841b1e7aa183d48ada578eaf931c0f135"
   },
   "fw_versions": {},
   "seed": 46,
   "timescale": 10.0,
-  "start_time": 1787261155.0920014,
+  "start_time": 1787265436.3173432,
   "events": [
     {
       "seq": 0,
@@ -11194,19 +11194,32 @@
       "f0": 0.0
     },
     {
-      "seq": 2000000000,
-      "sim_time_us": 46000000,
-      "event_type": "GUARD_WARN",
+      "seq": 932,
+      "sim_time_us": 953000000,
+      "event_type": "FAULT_FIRED",
       "payload": {
-        "guard": "S5"
+        "fault_id": "flaky",
+        "slot": 0
       },
       "a": 0,
       "b": 0,
       "f0": 0.0
     },
     {
-      "seq": 2000000001,
-      "sim_time_us": 46000000,
+      "seq": 933,
+      "sim_time_us": 954000000,
+      "event_type": "FAULT_CLEARED",
+      "payload": {
+        "fault_id": "flaky",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 42000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -11217,22 +11230,11 @@
       "f0": 0.0
     },
     {
-      "seq": 2000000002,
-      "sim_time_us": 98000000,
-      "event_type": "GUARD_WARN",
-      "payload": {
-        "guard": "S5"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000003,
-      "sim_time_us": 149000000,
+      "seq": 2000000001,
+      "sim_time_us": 143000000,
       "event_type": "GUARD_TRIP",
       "payload": {
-        "guard": "S5"
+        "guard": "S6b"
       },
       "a": 0,
       "b": 0,
@@ -11243,23 +11245,24 @@
   "expectations": [
     {
       "name": "no_trip_from_flapping",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
-        2000000001
+        2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000001)"
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, not because the flapping fault genuinely failed to trip anything under S5's real streak-reset logic.]",
+      "blocked_on": {
+        "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, not because the flapping fault genuinely failed to trip anything under S5's real streak-reset logic.",
+        "phase": "Phase 7 (link_task) -- link_task exists and already decodes several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP, SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one. KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over the link (safety_link_request_enable(), App/drivers/ uart_bridge.c), yet SaftyFW's link_task.c has no LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against link_frame.h's command list), so relay_owner_command_energize() is never called from anywhere. A genuinely missing decoder, not a wiring omission on an existing pair -- see ROADMAP.md M4's matching finding."
+      }
     },
     {
       "name": "no_warn_storm",
-      "verdict": "FAIL",
-      "evidence": [
-        2000000000,
-        2000000002
-      ],
-      "detail": "event:guard_warn observed before the boundary (first at seq 2000000000)"
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_warn never observed before the boundary"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

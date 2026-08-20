@@ -2,12 +2,12 @@
   "scenario": {
     "name": "tc_stuck",
     "version": 1,
-    "hash": "bd21283aa2ac186bd1dd648b9990def3a29d225970b774d86aec90de7e2b086e"
+    "hash": "d9466fcabfdb7e491003aa13398be5e5e5d27c9c97e38b1ad9c4205627dd778f"
   },
   "fw_versions": {},
   "seed": 47,
   "timescale": 10.0,
-  "start_time": 1787261174.331437,
+  "start_time": 1787265455.732214,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 44000000,
+      "sim_time_us": 43000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -49,22 +49,30 @@
   "expectations": [
     {
       "name": "sample_counter_goes_stale",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         0
       ],
-      "detail": "event:guard_warn not observed within 13s after fault_fired (seq 0)"
+      "detail": "event:guard_warn not observed within 13s after fault_fired (seq 0) [BLOCKED: context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S13's staleness tracking (state->s13_stale_elapsed_s/s13_warn) lives inside safety_guards.c's context_valid-gated else-branch and is force-reset to 0/false while context_valid is false, so this cannot warn against present-day SaftyFW regardless of what the fixture does.]",
+      "blocked_on": {
+        "reason": "context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S13's staleness tracking (state->s13_stale_elapsed_s/s13_warn) lives inside safety_guards.c's context_valid-gated else-branch and is force-reset to 0/false while context_valid is false, so this cannot warn against present-day SaftyFW regardless of what the fixture does.",
+        "phase": "Phase 7 (link_task) is built and already publishes this context, sample_counter included -- link_task_publish_ context()/link_task_get_context_snapshot() (firmware/SaftyFW/ src/tasks/link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT (0x07) frame today, and context_zone_t.sample_counter (snapshots.h) is already part of that decoded struct. The real gap is one layer up: safety_core.c's safety_core_build_input() never calls link_task_get_context_snapshot() at all (see its own TODO at safety_core.c:208-210), so context_valid stays at its zero-init false regardless of what the ESP sends. A wiring gap in an already-built producer/consumer pair, not a missing Phase 7 deliverable."
+      }
     },
     {
       "name": "trips_after_stale_trip_deadline",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         0
       ],
-      "detail": "dut:K4_open not observed within 65s after fault_fired (seq 0)"
+      "detail": "dut:K4_open not observed within 65s after fault_fired (seq 0) [BLOCKED: Same context_valid gap as `sample_counter_goes_stale` above -- S13 cannot warn, so it certainly cannot escalate to a trip.]",
+      "blocked_on": {
+        "reason": "Same context_valid gap as `sample_counter_goes_stale` above -- S13 cannot warn, so it certainly cannot escalate to a trip.",
+        "phase": "Same as `sample_counter_goes_stale` above -- link_task already publishes this context; safety_core_build_input() just never reads it. Not a Phase 7 existence gap."
+      }
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

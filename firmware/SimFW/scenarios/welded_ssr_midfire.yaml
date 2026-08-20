@@ -63,8 +63,12 @@
 #                (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's whole
 #                block is gated on it (safety_guards.c), so this can never
 #                fire regardless of what the fixture does"
-#       phase: "Phase 7 (link_task) -- link_task does not exist yet to
-#               publish the context frame that would set context_valid true"
+#       phase: "Phase 7 (link_task) is already built and publishes this
+#               context (link_task_publish_context()/link_task_get_
+#               context_snapshot(), firmware/SaftyFW/src/tasks/link_task.c);
+#               safety_core.c's safety_core_build_input() just never reads
+#               it (see that function's own TODO). A wiring gap, not a
+#               missing Phase 7 deliverable"
 #
 # `reason` names the specific missing SaftyFW input/behavior (cite the file/
 # field, not just the guard letter); `phase` names the roadmap phase that
@@ -132,10 +136,20 @@ expect:
                } else { ... }` split and is unconditionally reset/skipped
                while context_valid is false, so this cannot fire against
                present-day SaftyFW regardless of what the fixture does."
-      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
-              the context frame that would set context_valid true (same root
-              cause as S6b's own unconditional-trip finding: no link
-              producer exists yet)."
+      phase: "Phase 7 (link_task) is built and already publishes this
+              context -- link_task_publish_context()/
+              link_task_get_context_snapshot() (firmware/SaftyFW/src/tasks/
+              link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT
+              (0x07) frame today. The real gap is one layer up:
+              safety_core.c's safety_core_build_input() never calls
+              link_task_get_context_snapshot() at all (see its own TODO at
+              safety_core.c:208-210), so context_valid stays at its
+              zero-init false regardless of what the ESP sends. A wiring
+              gap in an already-built producer/consumer pair, not a
+              missing Phase 7 deliverable -- distinct from S6b's own
+              unconditional-trip finding, which is about link_up (see
+              power_blip.yaml's blocked_on), a fact link_task has no
+              producer for at all yet, not merely an unread one."
   - name: no_early_trip
     forbid: { dut: K4_open, before: { fault: weld } }
   - name: trip_latched
@@ -151,7 +165,9 @@ expect:
                is the relay_edge{K4, open} event, which only occurs if S3
                actually trips K4 -- since S3 cannot fire (see `safety_trips`
                blocked_on), the triggering edge never occurs either."
-      phase: "Phase 7 (link_task) -- same as `safety_trips` above."
+      phase: "Same as `safety_trips` above -- link_task already publishes
+              this context; safety_core_build_input() just never reads it.
+              Not a Phase 7 existence gap."
 manual_checks:
   - "Confirm KilnFW's LCD/web UI surfaces the S3 trip reason distinctly (not a generic fault) — fixture cannot read display/web content"
 report_keep: [telemetry, events]

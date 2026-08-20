@@ -53,8 +53,18 @@ expect:
                abs_max_temp_c uncommissioned, Phase 9; S10: context_valid
                never populated, Phase 7), so 'no trip ever' is not
                exercising the anti-nuisance behavior it names either way."
-      phase: "Phase 7 (link_task) for K4 energize and S10's context_valid;
-              Phase 9 (config_store) for S1's abs_max_temp_c."
+      phase: "For K4 energize: link_task exists but has no
+              LINK_FRAME_REQUEST_ENABLE_CMD case (SAFETY_CMD_REQUEST_ENABLE
+              0x02, already sent by KilnFW) -- a genuinely missing decoder,
+              Phase 7 work not yet done. For S10's context_valid: link_task
+              already publishes context (link_task_get_context_snapshot());
+              safety_core_build_input() just never reads it -- a wiring
+              gap, not a Phase 7 existence gap. For S1's abs_max_temp_c:
+              config_store now exists (Phase 9, config_store.{c,h}/
+              config_store_flash.c) but has no abs_max_temp_c field yet
+              (only tc_type is wired), and safety_core.c never reads
+              config_store for guard thresholds at all -- s_guard_cfg is a
+              zero-initialized static, never populated from flash."
   - name: no_fault_line_latch
     forbid: { dut: fault_line_asserted, before: { sim_end: true } }
 manual_checks:

@@ -2,12 +2,12 @@
   "scenario": {
     "name": "welded_contactor_s9",
     "version": 1,
-    "hash": "3dae126bee29966ee4d521ed77687255557d5155fc831c8270e56c3f0c729595"
+    "hash": "6fb1bf32b8f0a6d57203b0f96aeb3ce8ae1117fe0fe2e25cd9b0126fff569e3f"
   },
   "fw_versions": {},
   "seed": 43,
   "timescale": 10.0,
-  "start_time": 1787261190.2434094,
+  "start_time": 1787265471.6214607,
   "events": [
     {
       "seq": 2000000000,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 147000000,
+      "sim_time_us": 149000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
@@ -37,21 +37,33 @@
   "expectations": [
     {
       "name": "initial_trip",
-      "verdict": "SKIPPED",
+      "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (fault_fired {'slot': 'weld_ssr'}) never occurred"
+      "detail": "triggering event (fault_fired {'slot': 'weld_ssr'}) never occurred [BLOCKED: context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's block lives inside safety_guards.c's context_valid-gated else-branch and is unconditionally reset while context_valid is false, so this cannot fire against present-day SaftyFW.]",
+      "blocked_on": {
+        "reason": "context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's block lives inside safety_guards.c's context_valid-gated else-branch and is unconditionally reset while context_valid is false, so this cannot fire against present-day SaftyFW.",
+        "phase": "Phase 7 (link_task) is built and already publishes this context -- link_task_publish_context()/ link_task_get_context_snapshot() (firmware/SaftyFW/src/tasks/ link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT (0x07) frame today. The real gap is one layer up: safety_core.c's safety_core_build_input() never calls link_task_get_context_snapshot() at all (see its own TODO at safety_core.c:208-210), so context_valid stays at its zero-init false regardless of what the ESP sends. A wiring gap in an already-built producer/consumer pair, not a missing Phase 7 deliverable."
+      }
     },
     {
       "name": "contactor_weld_engages_on_k4_open",
-      "verdict": "SKIPPED",
+      "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred"
+      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred [BLOCKED: Downstream of `initial_trip` above: this clause's trigger is the relay_edge{K4, open} event, which only occurs if S3 actually trips K4 -- since S3 cannot fire (see `initial_trip` blocked_on), the triggering edge never occurs either.]",
+      "blocked_on": {
+        "reason": "Downstream of `initial_trip` above: this clause's trigger is the relay_edge{K4, open} event, which only occurs if S3 actually trips K4 -- since S3 cannot fire (see `initial_trip` blocked_on), the triggering edge never occurs either.",
+        "phase": "Same as `initial_trip` above -- link_task already publishes this context; safety_core_build_input() just never reads it. Not a Phase 7 existence gap."
+      }
     },
     {
       "name": "s9_escalates",
-      "verdict": "SKIPPED",
+      "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred"
+      "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred [BLOCKED: Doubly blocked: (1) same relay_edge{K4, open} trigger dependency on S3 as `contactor_weld_engages_on_k4_open` above, and (2) even with a trip, S9's own escalation (safety_guards.c: `if (in->relay_deenergized) { ... }`) reads relay_deenergized, which safety_core_build_input() also never populates -- so S9 could not escalate even if something else produced a K4 open edge.]",
+      "blocked_on": {
+        "reason": "Doubly blocked: (1) same relay_edge{K4, open} trigger dependency on S3 as `contactor_weld_engages_on_k4_open` above, and (2) even with a trip, S9's own escalation (safety_guards.c: `if (in->relay_deenergized) { ... }`) reads relay_deenergized, which safety_core_build_input() also never populates -- so S9 could not escalate even if something else produced a K4 open edge.",
+        "phase": "For the trigger dependency: same as `initial_trip` above -- link_task already publishes context; safety_core_build_input() just never reads it, not a Phase 7 existence gap. Separately, relay_deenergized has no dedicated roadmap phase documented anywhere in firmware/SaftyFW/docs -- it is relay_owner's own 'did the hardware actually respond' fact (safety_guards.h's doc comment on the field) and nothing currently wires it from relay_owner back into safety_core_build_input()."
+      }
     },
     {
       "name": "stays_open_and_latched",
@@ -63,12 +75,16 @@
     },
     {
       "name": "escalation_latched_at_end",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "event:trip_ineffective_latched never occurred"
+      "detail": "event:trip_ineffective_latched never occurred [BLOCKED: trip_ineffective can only latch via S9's escalation path (see `s9_escalates` blocked_on above), which cannot run.]",
+      "blocked_on": {
+        "reason": "trip_ineffective can only latch via S9's escalation path (see `s9_escalates` blocked_on above), which cannot run.",
+        "phase": "Same context_valid wiring gap plus the unphased relay_deenergized gap -- see `s9_escalates` blocked_on above. Neither is a Phase 7 existence gap."
+      }
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

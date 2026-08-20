@@ -37,8 +37,17 @@ expect:
                force-reset to false while context_valid is false, so this
                cannot warn against present-day SaftyFW regardless of what
                the fixture does."
-      phase: "Phase 7 (link_task) -- link_task does not exist yet to publish
-              the context frame that would set context_valid true."
+      phase: "Phase 7 (link_task) is built and already publishes this
+              context -- link_task_publish_context()/
+              link_task_get_context_snapshot() (firmware/SaftyFW/src/tasks/
+              link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT
+              (0x07) frame today. The real gap is one layer up:
+              safety_core.c's safety_core_build_input() never calls
+              link_task_get_context_snapshot() at all (see its own TODO at
+              safety_core.c:208-210), so context_valid stays at its
+              zero-init false regardless of what the ESP sends. A wiring
+              gap in an already-built producer/consumer pair, not a
+              missing Phase 7 deliverable."
   - name: s4_never_trips
     forbid: { dut: K4_open, before: { sim_end: true } }
     # "This never trips, and that is a design decision" (SAFETY_MODEL.md §4 S4)
@@ -51,11 +60,18 @@ expect:
                already true at sim-time 0, before any guard (or lack of one)
                has had a chance to say anything, not because S4's own
                correct 'never trips' design held up under test."
-      phase: "Phase 7 (link_task) -- relay_owner_command_energize() is meant
-              to be driven by a legitimate ARMED-state request originating
-              from context the ESP sends over the link; link_task does not
-              exist yet to issue it (same root cause as context_valid/
-              link_up never being populated)."
+      phase: "Phase 7 (link_task) -- link_task exists and already decodes
+              several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP,
+              SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one.
+              KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over
+              the link (safety_link_request_enable(), App/drivers/
+              uart_bridge.c), yet SaftyFW's link_task.c has no
+              LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against
+              link_frame.h's command list), so relay_owner_command_energize()
+              is never called from anywhere. A genuinely missing decoder,
+              not a wiring omission on an existing pair like
+              context_valid's gap above -- see ROADMAP.md M4's matching
+              finding."
 manual_checks:
   - "Confirm KilnFW's own thermal_guard 'heating failed' (main-board guard, not SaftyFW) aborts or flags the profile on the LCD/web UI — outside GUARD_TEST_MATRIX.md's scope and not observable by the fixture"
 report_keep: [telemetry, events]
