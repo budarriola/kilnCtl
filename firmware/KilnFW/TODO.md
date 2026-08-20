@@ -511,6 +511,48 @@ page. also add support for the temp sensors you currently have access to."
       UART link. Every affected surface eventually returned good data on a
       later retry in the same bench session; this is link congestion, not a
       registration failure, and is out of scope for this entry.
+- [x] **Internal-DRAM fragmentation — MEASURED and largely RESOLVED
+      (2026-08-20), verified live on the bench.** The entry above fixed the
+      *symptom* (task stacks that couldn't be allocated) by moving those
+      individual stacks to PSRAM. This entry fixes the cause. The figure
+      that matters is `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL
+      | MALLOC_CAP_8BIT)`, **not** any free total — a multi-KB task stack or
+      queue fails on the largest-block number while ~243KB still reads as
+      "free". That block was 163840 bytes at `app_main` entry and 2560 by
+      the time LVGL started.
+      **Instrumentation**: `main.c`'s `heap_stage()` prints that block plus
+      a delta at each bring-up step. It is deliberately permanent (two log
+      lines at boot, nothing afterwards) — this question had come back three
+      times and each round previously started by re-adding probes by hand.
+      **What it showed**: `wifi_prov_start()` alone cost 100KB of the 160KB
+      block in one step. Every other stage cost 1-14KB. There was one large
+      consumer, not a diffuse leak.
+      **Two fixes, each measured separately**:
+      1. LVGL's allocator moved wholesale to PSRAM via
+         `LV_USE_CUSTOM_MALLOC` + `App/drivers/lvgl_mem_psram.c`
+         (largest block 2560 -> 7680, zero PSRAM-fallback warnings, so
+         every LVGL allocation is served from PSRAM).
+      2. `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` (7680 -> 17408).
+      **Correction to an earlier record**: `sdkconfig.defaults` previously
+      documented `TRY_ALLOCATE_WIFI_LWIP` as tried-and-failed. That
+      experiment changed it in the same pass as
+      `SPIRAM_MALLOC_ALWAYSINTERNAL 16384 -> 4096`; when the board broke,
+      both were reverted and both were written up as failures. Only
+      `ALWAYSINTERNAL` deserved it — retested alone it is a clear win.
+      `ALWAYSINTERNAL` stays at 16384. The comment in `sdkconfig.defaults`
+      has been corrected, since as written it would have steered the next
+      reader away from a fix that works.
+      **Net**: largest contiguous internal block at end of boot 2560 ->
+      17408 (6.8x); free DRAM at end of boot 14075 -> 26319. Verified live:
+      LVGL up, safety link up, all HTTP APIs up, station joined (RSSI -45),
+      all 12 UART tasks registered, no `ESP_ERR_NO_MEM`, no failed task or
+      queue creation.
+      **Deliberately NOT done**: the next-largest stages are
+      `uart_bridges_1` (-14336, five task stacks) and `i2c+spi+thermo`
+      (-16384), both amenable to the same `*WithCaps` treatment for perhaps
+      20KB more. With 17408 available and the largest single request being
+      an 8KB stack, the pressure that justified those moves is gone —
+      revisit only if DRAM tightens again.
 
 ## 2. Web UI — Main / Dashboard page
 
