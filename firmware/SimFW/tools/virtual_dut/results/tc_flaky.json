@@ -2,12 +2,12 @@
   "scenario": {
     "name": "tc_flaky",
     "version": 1,
-    "hash": "bf678bb758a2eb397e60ae5e19d2847e4516772637e7cd58725449d8ef4e4941"
+    "hash": "8fda82145c895ec17eae0425fb05f05ba654534e8da42051bab196226b2b6385"
   },
   "fw_versions": {},
   "seed": 46,
   "timescale": 10.0,
-  "start_time": 1787258914.7949343,
+  "start_time": 1787261155.0920014,
   "events": [
     {
       "seq": 0,
@@ -11195,7 +11195,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 44000000,
+      "sim_time_us": 46000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S5"
@@ -11206,7 +11206,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 44000000,
+      "sim_time_us": 46000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -11218,7 +11218,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 95000000,
+      "sim_time_us": 98000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S5"
@@ -11229,10 +11229,10 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 145000000,
+      "sim_time_us": 149000000,
       "event_type": "GUARD_TRIP",
       "payload": {
-        "guard": "S6b"
+        "guard": "S5"
       },
       "a": 0,
       "b": 0,

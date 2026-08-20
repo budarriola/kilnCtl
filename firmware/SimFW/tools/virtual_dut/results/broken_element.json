@@ -2,12 +2,12 @@
   "scenario": {
     "name": "broken_element",
     "version": 1,
-    "hash": "ad6ef7b43ca0ebd41125b0e54b96563964c2129b510042ae153960d4179fa0c3"
+    "hash": "a6fb2d1898cceab0275be852af918dc0cd8d0dc34dbed6e4a9718bff942f834c"
   },
   "fw_versions": {},
   "seed": 50,
   "timescale": 10.0,
-  "start_time": 1787258639.8189838,
+  "start_time": 1787260880.3236768,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 46000000,
+      "sim_time_us": 45000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 148000000,
+      "sim_time_us": 146000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

@@ -2,16 +2,16 @@
   "scenario": {
     "name": "power_blip",
     "version": 1,
-    "hash": "6b2aec64c68ea8332fdd75bef232b9ad772db0e2c796e78e71e07f39a5cd83db"
+    "hash": "d6b5c351c40866dc295f248c91575b51792dd75c5d92cff667bd3fbb70ccf8fc"
   },
   "fw_versions": {},
   "seed": 57,
   "timescale": 10.0,
-  "start_time": 1787258743.293255,
+  "start_time": 1787260983.836851,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 46000000,
+      "sim_time_us": 47000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 148000000,
+      "sim_time_us": 149000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

@@ -2,12 +2,12 @@
   "scenario": {
     "name": "safety_tc_frozen",
     "version": 1,
-    "hash": "0a09aba23a19e647cf10943771c6e3ffdda1c12cc1dfcc2bc9ac71e227802558"
+    "hash": "e80e30ede63d938cfb3b017d13b297012518c35ab7f4a150743b599dcd2a0565"
   },
   "fw_versions": {},
   "seed": 61,
   "timescale": 10.0,
-  "start_time": 1787258793.628386,
+  "start_time": 1787261034.1964786,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 46000000,
+      "sim_time_us": 47000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 147000000,
+      "sim_time_us": 148000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

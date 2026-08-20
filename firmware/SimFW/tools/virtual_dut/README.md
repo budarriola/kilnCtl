@@ -69,19 +69,26 @@ substitute.
                                        │   safety_guards.c               │
                                        │   tasks/relay_grace.c          │
                                        └───────────────────────────────┘
-                     TCP (benchproto, single client)
+                TCP (benchproto, multi-client -- up to 4)
  virtual_dut ───────────────────────────────────────────► virtual_simfw.exe
-                                                            (unmodified,
-                                                             another agent's
-                                                             build)
+                                                            (built in this
+                                                             repo, RELAY
+                                                             group gained a
+                                                             virtual-only
+                                                             SET_SENSE cmd)
 ```
 
-Three processes: `virtual_simfw.exe` (the fixture, unmodified, built
-elsewhere), `dut_core.exe` (the real guard code behind a tiny stdio
+Three processes: `virtual_simfw.exe` (the fixture; its RELAY command group
+gained one virtual-only extension, `SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE`, see
+its own README), `dut_core.exe` (the real guard code behind a tiny stdio
 protocol, built in `dut_core/`), and `run_dut_scenarios.py` (the
-orchestrator, which is the *only* TCP client of `virtual_simfw.exe` for the
-duration of a run -- see "Known limitation: single-client protocol" below
-for why kilnsim's own CLI cannot also be connected at the same time).
+orchestrator, which drives K4's sensed state back into `virtual_simfw.exe`
+every poll -- see "The K4 physical loop IS now closed" below).
+`virtual_simfw.exe` now accepts multiple concurrent TCP clients, so
+`kilnsim`'s own CLI/MCP surface could in principle watch the same run live;
+`run_dut_scenarios.py` still launches and owns a private instance per
+scenario for reproducibility (see "Known limitation: single-client
+protocol -- RESOLVED" below).
 
 ## Exactly which SaftyFW source files are compiled, and which are not
 
@@ -276,54 +283,64 @@ nor a fixture bug -- the scenario file itself needs a `params: [40.0]`
 
 ## Known, documented limitations
 
-### The K4 physical loop is not closed
+### The K4 physical loop IS now closed -- and it changes nothing, for two separate, verified reasons
 
-The task's aspiration was for the DUT's real relay decision to feed back
-into the fixture's thermal model (heat responds to the real guard's real
-K4 decision). **This is not implemented, and cannot be, without a change to
-`virtual_simfw` (explicitly out of scope for this task -- read-only,
-another agent may be editing it):**
+A later pass than the one that wrote the finding below closed this gap.
+`firmware/SimFW/tools/virtual_simfw/` (owned by that pass, read-only for
+*this* one) gained a virtual-only command,
+`SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE` (RELAY group, wire id `0xF0` --
+deliberately absent from `PROTOCOL.md`/`cmd_ids.h`/`kilnsim.protocol`, see
+that directory's README "Known, virtual-only extensions" section), and
+`run_dut_scenarios.py` in *this* directory now calls it every poll,
+feeding `dut_core.exe`'s real, unmodified `energized` output back as K4's
+sensed state (see `_send_relay_set_sense()` and its call site in
+`run_dut_scenarios.py`).
 
-- `virtual_simfw`'s `RELAY` command group is read-only:
-  `RELAY_GET_STATES`/`RELAY_GET_EDGES` only (`firmware/SimFW/src/tasks/
-  cmd_ids.h`'s own comment on `SIMFW_CMD_RELAY_*`: no `SET` id is even
-  allocated -- "relay sense is read-only from this task's perspective by
-  design"). There is no wire command a DUT (real or virtual) could ever
-  send to set K4's sensed state.
-- Zone heating duty in `virtual_simfw` (`device_tick()`'s `duty[]` array) is
-  driven entirely by `FAULT_SCHEDULE` overrides (`WELDED_RELAY`/
-  `STUCK_OPEN_RELAY`), never by `d->k1`/`d->k2`/`d->k3`, which are
-  themselves never set by any external command either. **Zone heat in this
-  fixture, with no DUT and no fault forcing duty, never turns on at all** --
-  this is a pre-existing property of `virtual_simfw`, not something this
-  pass introduces or could work around.
+**Re-running the full scenario suite through this now-closed loop produced
+a byte-for-byte identical set of expectation verdicts** (only harness-timing
+fields like `start_time` differ -- see `results/SCENARIO_RESULTS.md`'s "What
+changed in this pass" section for the full comparison). Two independent,
+separately-verified facts explain why, neither of them a wiring failure:
 
-**Precisely what would be needed to close this loop** (reported per the
-task brief, not implemented, since it requires editing `virtual_simfw`):
-a new `RELAY` command (e.g. `RELAY_SET_K4_SENSE`) that lets a connected DUT
-report K4's actual state, feeding `d->k4` (and ideally `d->k1..d->k3` for
-the main-side relays too, once KilnFW/PID has an equivalent virtual DUT) so
-`device_tick()`'s existing `relay_mask`-derived `duty[]` logic starts
-reflecting commanded reality instead of only fault overrides.
+1. **Finding 2 above still holds, unaffected:** K4 is never energized
+   anywhere in current SaftyFW, so the real value this loop now genuinely
+   transmits is always the same `false`/open value `virtual_simfw` already
+   defaulted K4's sense to. No new edge is ever produced.
+2. **A second, previously-unverified finding, now confirmed by reading the
+   code:** `virtual_simfw`'s `device_tick()` (a near-verbatim port of
+   **real, unmodified** `firmware/SimFW/src/tasks/sim_engine.c`) never
+   consults K4 when computing `duty[]`/`current_a[]` -- only K1/K2/K3 gate
+   heater duty and CT current, in both the harness and real firmware alike.
+   So even on a day K4 *did* close, that alone still would not gate
+   simulated heat/current in this fixture's model today (PLAN.md sec 2 loop
+   2's "K4 permits" clause is not implemented anywhere in the codebase this
+   fixture is built from). Confirming or fixing that is out of scope for
+   both this pass and the one that added the RELAY command
+   (`firmware/SimFW/src/**` is read-only in both).
 
-### Known limitation: single-client protocol
+Zone heating duty is, as before, driven by relay sense (now genuinely
+settable) plus `FAULT_SCHEDULE` overrides (`WELDED_RELAY`/
+`STUCK_OPEN_RELAY`) -- `d->k1`/`d->k2`/`d->k3` are simply never set to
+`true` by anything in *this* pass's scenario runs (no virtual KilnFW/PID
+exists yet to decide when to close them), so zone heat still never turns on
+in these particular runs; that absence is unrelated to K4.
 
-`virtual_simfw.exe` accepts exactly one TCP client at a time (its own
-`main()`: `listen(listener, 1)`, and its accept loop only polls for a new
-connection while `g_client == INVALID_SOCKET` -- a second connection
-attempt while one client is active simply never gets accepted). This means
-`kilnsim`'s own CLI/MCP surface and `virtual_dut` cannot both be connected
-to the same running `virtual_simfw.exe` process at once.
+### Known limitation: single-client protocol -- RESOLVED
 
-`run_dut_scenarios.py` resolves this by being the *only* client itself: it
-launches its own `virtual_simfw.exe` per scenario (same pattern the
-existing `tools/PcTools/tests/test_kilnsim_virtual_simfw.py` uses) and
-drives the whole conversation -- arming, fault scheduling, telemetry
-polling, event translation -- using `kilnsim`'s own library modules
-(`kilnsim.link.TcpSimLink`, `kilnsim.scenario`, `kilnsim.report`,
-several private helpers from `kilnsim.runner`) rather than a second,
-divergent implementation of that logic. Nothing under `tools/PcTools/` is
-modified to make this work.
+`virtual_simfw.exe` now accepts up to 4 concurrent TCP clients (each with
+its own dedup/registration state and its own EVT-ring read cursor -- see
+that directory's README). `kilnsim`'s own CLI/MCP surface and `virtual_dut`
+CAN now both connect directly to the same running `virtual_simfw.exe`
+process. `run_dut_scenarios.py` in this pass still launches and owns its
+own private `virtual_simfw.exe` per scenario run (the simplest,
+most-reproducible setup for an automated suite, and it still uses
+`kilnsim`'s library modules -- `kilnsim.link.TcpSimLink`, `kilnsim.scenario`,
+`kilnsim.report`, several private helpers from `kilnsim.runner` -- rather
+than a second, divergent implementation of that logic); the multi-client
+capability is available for anyone who wants to point `kilnsim`'s CLI/GUI/
+MCP surface at the same live process a `virtual_dut` run is using, e.g. to
+watch a run interactively while it executes. Nothing under `tools/PcTools/`
+was modified to add multi-client support.
 
 ### Known approximation: batch ticking
 

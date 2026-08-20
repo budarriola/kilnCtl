@@ -2,16 +2,16 @@
   "scenario": {
     "name": "welded_ssr_midfire",
     "version": 1,
-    "hash": "99e4c18383af0599658dbc5c4532f10985f26c8ee36fd75ce154f49c114cea71"
+    "hash": "dbdf4da3304aba4bd5ba48417bba395e16eb6c5deaef5d381d81732eb96593e1"
   },
   "fw_versions": {},
   "seed": 42,
   "timescale": 10.0,
-  "start_time": 1787258975.01995,
+  "start_time": 1787261215.3279753,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 46000000,
+      "sim_time_us": 45000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 147000000,
+      "sim_time_us": 146000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

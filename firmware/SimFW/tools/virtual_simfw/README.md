@@ -49,14 +49,20 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
 
 ## What it does NOT simulate
 
-* **There is no DUT.** No KilnFW, no SaftyFW. Relay sense (K1/K2/K3/K5/K4)
-  and the ESP-driven `Fault` line are never driven by anything, because
-  nothing is closing those relays. Power-path faults (`welded_ssr`,
-  `broken_heater_coil`, ...) still work correctly -- they act at the
-  duty-override level exactly as real `fault_sched.c` does, so simulated
-  heat/current still flows -- but the *sensed contact* honestly stays at
-  its default (open/not-closed), because that is the truth: nothing
-  physically closed it.
+* **There is no real DUT.** No KilnFW, no SaftyFW. Relay sense
+  (K1/K2/K3/K5/K4) and the ESP-driven `Fault` line default to open/not-
+  closed and stay there unless something explicitly reports otherwise --
+  because on real hardware nothing but a real relay's physical contact
+  could close them, and there is no real relay here. Power-path faults
+  (`welded_ssr`, `broken_heater_coil`, ...) still work correctly -- they act
+  at the duty-override level exactly as real `fault_sched.c` does, so
+  simulated heat/current still flows -- and separately, a **virtual** DUT
+  (one with no physical relay coil to close at all, e.g.
+  `firmware/SimFW/tools/virtual_dut/`) can now report a relay's sensed state
+  through a virtual-only command (see "Known, virtual-only extensions"
+  below) -- but the fixture itself never closes a relay on its own, and a
+  real DUT still has no wire to do so either: this command exists only to
+  stand in for the missing physical wire a real relay coil would use.
 * No real SPI bytes ever flow (no DUT to drive CS/SCLK against the emulated
   MAX31856 register machine), so `TC_GET_REGS`/`TC_GET_MASTER_CONFIG`'s
   transaction/error/underrun counters are always 0, and `configured` is
@@ -124,6 +130,55 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   exactly (deliberately not allocated; `FAULT_SCHEDULE`'s `welded_relay`/
   `stuck_open_relay` types are the real path either way).
 
+## Known, virtual-only extensions
+
+Commands in this section exist **only** on this host harness. They are not
+in `PROTOCOL.md`, not in `firmware/SimFW/src/tasks/cmd_ids.h` (read-only for
+this project regardless of this pass), and must never be added there --
+adding a real command like these to real firmware would misrepresent what
+the physical fixture can actually do.
+
+* **`SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE` (RELAY group, wire id `0xF0`).** On
+  real hardware the fixture only ever *senses* a relay's physical contact
+  (PLAN.md sec 3.4) -- there is no GPIO, no wire, no mechanism by which a
+  DUT could ever tell the fixture "I closed this contact"; `cmd_ids.h`'s own
+  comment on the RELAY group already makes this explicit ("relay sense is
+  read-only from this task's perspective by design"). This command was
+  added for exactly one reason: a **virtual** DUT
+  (`firmware/SimFW/tools/virtual_dut/`) has no physical relay coil to close
+  in the first place, so there is no contact for a real fixture-style sense
+  wire to ever pick up. Without some substitute for that missing wire,
+  nothing could ever report K4's (or K1/K2/K3/K5's) sensed state on behalf
+  of a virtual DUT. `SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE` is that narrowly-
+  scoped substitute: `{u8 signal, u8 level}` (`signal` 0..4 = K1/K2/K3/K5/K4,
+  same numbering as `RELAY_GET_STATES`'s reply order; 5/FAULT_LINE refused,
+  ERR_BAD_ARGS -- that line has no relay coil to represent), reply
+  `[status]`. Once told, `device_tick()` treats the value exactly like any
+  other sensed contact: same `relay_mask` bit, same `duty[]`/edge-log/
+  telemetry path K1/K2/K3/K5 already had. `firmware/SimFW/tools/virtual_dut/
+  run_dut_scenarios.py` is this command's one caller today, feeding
+  `dut_core.exe`'s real, unmodified `relay_owner_task()`-equivalent
+  `energized` decision back as K4's sensed state every poll -- see that
+  directory's README for what closing this loop did (and, just as
+  importantly, did not) change about scenario results.
+  * **Verified, not assumed: K4 does not gate simulated heater current
+    today.** `device_tick()`'s `duty[]`/`current_a[]` computation (this
+    file, ported near-verbatim from `sim_engine.c`) only reads the K1/K2/K3
+    bits of `relay_mask` -- K4 is tracked (folded into `relay_mask`, exposed
+    via `RELAY_GET_STATES`, now settable by this command) but never
+    consulted when deciding duty or current. Cross-checked against **real,
+    unmodified** `firmware/SimFW/src/tasks/sim_engine.c`: its own `duty[]`
+    loop uses the identical three-relay `zone_relay_bit[]` array with no K4
+    anywhere in the file. So this is a real, pre-existing property of
+    SimFW's fixture thermal/current model (real firmware included), not
+    something this harness introduced and not something this pass could fix
+    (`firmware/SimFW/src/**` is read-only here) -- PLAN.md sec 2 loop 2's
+    "heater current appears ... only when the right relays are closed *and*
+    K4 permits" is not yet implemented anywhere in the codebase this fixture
+    is built from. `firmware/SimFW/tools/virtual_dut/results/
+    SCENARIO_RESULTS.md` reports the resulting (zero) scenario-level delta
+    from wiring this command up.
+
 ## FAULT group: `UNTIL_TRIGGER` two-frame handshake
 
 `FAULT_SCHEDULE`'s `duration_kind == 2` (`UNTIL_TRIGGER`) needs a second,
@@ -176,7 +231,17 @@ cmake --build build
 Prints `VIRTUAL_SIMFW_LISTENING port=<N> seed=42` on stdout once the
 listening socket is up (`--port 0` asks the OS for an ephemeral port --
 exactly what the pytest integration test does). Binds to `127.0.0.1` only,
-one client at a time.
+accepts up to `SIMFW_MAX_CLIENTS` (4) concurrent TCP clients -- e.g.
+`kilnsim`'s own CLI/MCP surface and `firmware/SimFW/tools/virtual_dut/`
+connected directly to the same running process at once. Each client gets
+its own `benchproto_link_t` (dedup/task-registration state), its own RX
+reassembly buffer, and its own cursor into the shared, globally-sequenced
+EVT ring, so `report.py`'s per-client sequence-gap check stays honest no
+matter which clients are connected when an event is written (see
+`src/virtual_simfw.c`'s block comment above `client_t`'s definition for the
+full design rationale, including why a single shared read cursor was
+considered and rejected). A connection beyond the 4th is accepted then
+immediately closed rather than left to sit in the listen backlog.
 
 ## Point `kilnsim` at it
 

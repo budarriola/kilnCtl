@@ -33,13 +33,23 @@
 //     counters are always 0 and `configured` is always false -- this is the
 //     honest, correct answer for "a channel no master has ever touched",
 //     not a bug.
-//   - Relay sense (K1/K2/K3/K5/K4) and the ESP-driven `Fault` line are never
-//     driven by anything (no DUT commands them), so RELAY_GET_STATES always
-//     reports them open/deasserted and RELAY_GET_EDGES never produces a
-//     relay-commanded edge. Power-path faults (WELDED_RELAY etc.) act at the
-//     duty-override level exactly as real fault_sched.c does, so they still
-//     correctly show up in CT current -- only the *sensed contact* stays at
-//     its default, honestly reflecting "no DUT is closing this relay."
+//   - Relay sense (K1/K2/K3/K5/K4) and the ESP-driven `Fault` line default
+//     open/deasserted and stay there unless something explicitly reports
+//     otherwise -- a real DUT has no wire to do that (real hardware only
+//     ever senses a contact, PLAN.md sec 3.4), so RELAY_GET_STATES/
+//     RELAY_GET_EDGES stay at their defaults against a real DUT. A
+//     *virtual* DUT, with no physical relay coil to close in the first
+//     place, can report a sensed state through a new virtual-only command,
+//     SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE (see the RELAY-group section
+//     below and README.md's "Known, virtual-only extensions") -- standing
+//     in for the missing physical sense wire, never a claim that real
+//     hardware works this way. Power-path faults (WELDED_RELAY etc.) act
+//     at the duty-override level exactly as real fault_sched.c does, so
+//     they still correctly show up in CT current independent of relay
+//     sense either way.
+//   - This file now serves MULTIPLE concurrent TCP clients (up to
+//     SIMFW_MAX_CLIENTS), each with its own benchproto_link_t and EVT-ring
+//     read cursor -- see the block comment above client_t's definition.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -209,8 +219,9 @@ typedef struct {
     bool has_published;
 
     sim_event_t ring[SIM_EVENT_RING_SIZE];
-    uint32_t ring_next_seq; // next seq to be written
-    uint32_t telemetry_next_evt_seq; // next seq to drain for EVT broadcast
+    uint32_t ring_next_seq; // next seq to be written (global; each client
+                             // drains it through its OWN cursor -- see
+                             // client_t::telemetry_next_evt_seq below)
 
     uint32_t active_fault_count;
 } device_t;
@@ -641,8 +652,66 @@ typedef struct {
     size_t len;
 } rx_buf_t;
 
-static benchproto_link_t g_link;
-static SOCKET g_client = INVALID_SOCKET;
+// ===========================================================================
+// Multi-client support. Real SimFW hardware is a single USB CDC endpoint --
+// there is exactly one wire, so real firmware's usb_owner.c never had a
+// "which client" question to answer. This harness stands in for that one
+// wire over TCP, but Task 2 of this pass's brief requires it to serve TWO
+// independent PC-side processes at once (kilnsim's own CLI/MCP surface and
+// virtual_dut's run_dut_scenarios.py), neither of which is willing to be a
+// relay for the other. Each accepted TCP connection gets its own
+// benchproto_link_t (dedup/task-registration state is a per-connection
+// concept -- BENCHPROTO.md sec 4/6 -- so two clients must not share one),
+// its own RX reassembly buffer, and its own EVT-ring read cursor
+// (telemetry_next_evt_seq) so `report.py`'s per-client sequence-gap check
+// stays honest: seq numbers are global (assigned once, in ring_push(), the
+// single source of truth every client reads from), but each client is owed
+// its OWN unbroken 0,1,2,... sub-sequence of frames actually delivered to
+// IT, not a shared cursor that would silently skip frames for whichever
+// client didn't happen to be connected when they were written. A simpler
+// design (one global cursor, replicated to whichever clients are present)
+// was considered and rejected: it would make two clients that connect at
+// different times see different gaps in the SAME seq numbers, which is
+// exactly the kind of thing report.py exists to catch -- see this file's
+// header and README.md for the fuller writeup.
+// ===========================================================================
+#define SIMFW_MAX_CLIENTS 4u
+
+typedef struct {
+    bool in_use;
+    SOCKET sock;
+    rx_buf_t rx;
+    benchproto_link_t link;
+    uint32_t telemetry_next_evt_seq; // next ring seq owed to THIS client
+} client_t;
+
+static client_t g_clients[SIMFW_MAX_CLIENTS];
+
+static void client_register_tasks(client_t *c)
+{
+    benchproto_link_init(&c->link, SIMFW_TARGET_DEVICE);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_SYS);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_MODEL);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_TC);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_CT);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_RELAY);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_IO);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_FAULT);
+    benchproto_link_register_task(&c->link, SIMFW_TASK_ID_EVT);
+}
+
+// Called whenever the event ring's write sequence resets to 0 (SYS
+// RESET_SIM, MODEL LOAD_PRESET) so every already-connected client's read
+// cursor resets in lockstep with it -- otherwise a client's cursor (e.g.
+// 500) would sit above the freshly-zeroed ring_next_seq and drain_events()
+// would simply stop delivering to it until the ring counter climbed back
+// past its old value.
+static void reset_client_evt_cursors(void)
+{
+    for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
+        if (g_clients[i].in_use) g_clients[i].telemetry_next_evt_seq = 0;
+    }
+}
 
 static bool socket_send_all(SOCKET s, const uint8_t *data, size_t len)
 {
@@ -655,9 +724,16 @@ static bool socket_send_all(SOCKET s, const uint8_t *data, size_t len)
     return true;
 }
 
-static void send_frame(const benchproto_frame_t *frame)
+static void client_drop(client_t *c)
 {
-    if (g_client == INVALID_SOCKET) return;
+    if (c->sock != INVALID_SOCKET) closesocket(c->sock);
+    c->sock = INVALID_SOCKET;
+    c->in_use = false;
+}
+
+static void send_frame_to(client_t *c, const benchproto_frame_t *frame)
+{
+    if (c == NULL || !c->in_use || c->sock == INVALID_SOCKET) return;
     uint8_t raw[BENCHPROTO_FRAME_RAW_MAX];
     benchproto_frame_status_t st;
     size_t raw_len = benchproto_frame_encode_raw(frame, raw, sizeof(raw), &st);
@@ -665,9 +741,17 @@ static void send_frame(const benchproto_frame_t *frame)
     uint8_t stuffed[BENCHPROTO_FRAME_STUFFED_MAX];
     size_t stuffed_len = benchproto_stuff(raw, raw_len, stuffed, sizeof(stuffed));
     if (stuffed_len == 0) return;
-    if (!socket_send_all(g_client, stuffed, stuffed_len)) {
-        closesocket(g_client);
-        g_client = INVALID_SOCKET;
+    if (!socket_send_all(c->sock, stuffed, stuffed_len)) {
+        client_drop(c);
+    }
+}
+
+// Broadcast helper (telemetry/EVT): same frame content, delivered to every
+// currently-connected client, each over its own socket.
+static void send_frame_broadcast(const benchproto_frame_t *frame)
+{
+    for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
+        if (g_clients[i].in_use) send_frame_to(&g_clients[i], frame);
     }
 }
 
@@ -842,7 +926,7 @@ static bool dispatch_model(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         d->safety_tc_state_c = blend;
         d->safety_manual = false;
         d->ring_next_seq = 0;
-        d->telemetry_next_evt_seq = 0;
+        reset_client_evt_cursors();
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         return true;
     }
@@ -1039,11 +1123,66 @@ static bool dispatch_ct(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 }
 
 // ===========================================================================
-// RELAY group (PROTOCOL.md sec 5.4)
+// RELAY group (PROTOCOL.md sec 5.4) -- PLUS one VIRTUAL-ONLY extension.
+//
+// SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE (0xF0) is NOT part of PROTOCOL.md and
+// deliberately NOT added to firmware/SimFW/src/tasks/cmd_ids.h (that header
+// is real firmware's numeric source of truth and is read-only for this
+// pass regardless). On real hardware the fixture only ever SENSES relay
+// contacts through the MCP23017 (PLAN.md sec 3.4) -- there is no wire, no
+// GPIO, no physical mechanism by which a DUT could ever tell the fixture
+// "I closed this contact"; the fixture watches the contact, it does not
+// take dictation from the board. cmd_ids.h's own comment on this group
+// already says as much: "RELAY_SET_CONTACT_FAULT ... deliberately NOT
+// allocated ... relay sense is read-only from this task's perspective by
+// design." Adding a real SET command to that header, or to real firmware,
+// would therefore misrepresent the hardware and must never happen.
+//
+// This command exists ONLY because a *virtual* DUT (firmware/SimFW/tools/
+// virtual_dut/) has no physical relay coil to close in the first place --
+// there is no contact for a virtual fixture to sense, so nothing at all
+// would ever move without some substitute for that missing wire. This id
+// is that substitute, scoped as narrowly as possible: it lets a connected
+// client report what a real relay's sensed contact WOULD read if the
+// (nonexistent, virtual) coil it represents were in that state, standing
+// in for the physical sense wire that a real fixture would use instead.
+// Once told, this harness treats the value exactly as it treats any other
+// sensed contact -- same relay_mask bit, same duty[]/edge-log/telemetry
+// path device_tick() already runs for K1/K2/K3/K5 (PLAN.md sec 2 loop 1)
+// -- see this file's own README.md "Known, virtual-only extensions"
+// section for the full writeup, including the verified finding that
+// device_tick()'s duty[]/current_a[] math does not gate on K4 today (a
+// property of REAL, unmodified sim_engine.c too -- not something this
+// pass could or should paper over here).
+//
+// Request: [u8 signal, u8 level]. signal uses the SAME 0..4 numbering as
+// RELAY_GET_STATES's reply order / edge_entry_t.signal (0 K1, 1 K2, 2 K3,
+// 3 K5, 4 K4) -- 5 (FAULT_LINE) is refused (ERR_BAD_ARGS): that line is
+// ESP-driven, not a relay, and has no coil for a virtual DUT to represent.
+// level: 0 = open/not sensed closed, nonzero = sensed closed. Reply:
+// [status] only.
 // ===========================================================================
+#define SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE 0xF0u
+
 static bool dispatch_relay(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 {
     switch (cmd) {
+    case SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE: {
+        uint8_t signal = ar_u8(r);
+        uint8_t level = ar_u8(r);
+        if (r->overflow || signal > 4u) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+        bool closed = level != 0u;
+        switch (signal) {
+        case 0u: d->k1 = closed; break;
+        case 1u: d->k2 = closed; break;
+        case 2u: d->k3 = closed; break;
+        case 3u: d->k5 = closed; break;
+        case 4u: d->k4 = closed; break;
+        default: break;
+        }
+        rw_u8(w, SIMFW_CMD_STATUS_OK);
+        return true;
+    }
     case SIMFW_CMD_RELAY_GET_STATES:
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         rw_u8(w, d->k1 ? 1u : 0u);
@@ -1419,15 +1558,19 @@ static void send_telemetry(device_t *d)
     frame.dst_task = 0;
     frame.length = w.len;
     frame.payload = payload;
-    send_frame(&frame);
+    send_frame_broadcast(&frame);
 }
 
-static void drain_events(device_t *d)
+// Per-client EVT drain: each client owns its own telemetry_next_evt_seq
+// cursor into the shared, globally-sequenced ring (see the multi-client
+// block comment above client_t's definition for why this must be per-
+// client rather than one shared cursor).
+static void drain_events_for(device_t *d, client_t *c)
 {
-    while (d->telemetry_next_evt_seq < d->ring_next_seq) {
+    while (c->telemetry_next_evt_seq < d->ring_next_seq) {
         uint32_t oldest = (d->ring_next_seq > SIM_EVENT_RING_SIZE) ? (d->ring_next_seq - SIM_EVENT_RING_SIZE) : 0u;
-        if (d->telemetry_next_evt_seq < oldest) d->telemetry_next_evt_seq = oldest;
-        const sim_event_t *e = &d->ring[d->telemetry_next_evt_seq % SIM_EVENT_RING_SIZE];
+        if (c->telemetry_next_evt_seq < oldest) c->telemetry_next_evt_seq = oldest;
+        const sim_event_t *e = &d->ring[c->telemetry_next_evt_seq % SIM_EVENT_RING_SIZE];
 
         uint8_t payload[20];
         rw_t w; rw_init(&w, payload, sizeof(payload));
@@ -1448,9 +1591,16 @@ static void drain_events(device_t *d)
         frame.dst_task = 0;
         frame.length = w.len;
         frame.payload = payload;
-        send_frame(&frame);
+        send_frame_to(c, &frame);
 
-        d->telemetry_next_evt_seq++;
+        c->telemetry_next_evt_seq++;
+    }
+}
+
+static void drain_events_all(device_t *d)
+{
+    for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
+        if (g_clients[i].in_use) drain_events_for(d, &g_clients[i]);
     }
 }
 
@@ -1473,7 +1623,7 @@ static void reset_device(device_t *d, bool keep_params)
     d->safety_manual = false;
 
     d->ring_next_seq = 0;
-    d->telemetry_next_evt_seq = 0;
+    reset_client_evt_cursors();
     d->edge_write_idx = 0;
     d->edge_count = 0;
     d->relay_mask_prev = 0;
@@ -1514,9 +1664,7 @@ static void device_init(device_t *d, uint32_t seed)
 // ===========================================================================
 // Networking + main loop
 // ===========================================================================
-static rx_buf_t g_rx;
-
-static void handle_wire_frame(device_t *d, const uint8_t *stuffed, size_t stuffed_len)
+static void handle_wire_frame(device_t *d, client_t *c, const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t raw[BENCHPROTO_FRAME_RAW_MAX];
     benchproto_frame_status_t ust;
@@ -1530,7 +1678,7 @@ static void handle_wire_frame(device_t *d, const uint8_t *stuffed, size_t stuffe
     if (frame.msg_type != BENCHPROTO_MSG_DATA) return; // host never sends us ACK/NACK/BROADCAST
     if (frame.dst_device != SIMFW_TARGET_DEVICE) return;
 
-    benchproto_link_action_t action = benchproto_link_on_frame(&g_link, NULL, &frame);
+    benchproto_link_action_t action = benchproto_link_on_frame(&c->link, NULL, &frame);
 
     uint8_t reply_payload[BENCHPROTO_FRAME_MAX_PAYLOAD];
     benchproto_frame_t reply;
@@ -1544,7 +1692,7 @@ static void handle_wire_frame(device_t *d, const uint8_t *stuffed, size_t stuffe
         reply.msg_type = BENCHPROTO_MSG_NACK;
         reply.length = 0;
         reply.payload = NULL;
-        send_frame(&reply);
+        send_frame_to(c, &reply);
         return;
     }
     if (action != BENCHPROTO_LINK_ACTION_DELIVER && action != BENCHPROTO_LINK_ACTION_DUPLICATE_REACK) {
@@ -1552,32 +1700,32 @@ static void handle_wire_frame(device_t *d, const uint8_t *stuffed, size_t stuffe
     }
 
     uint8_t len = dispatch_command(d, frame.dst_task, frame.payload, frame.length, reply_payload, sizeof(reply_payload));
-    benchproto_link_mark_delivered(&g_link, frame.dst_task, frame.src_device, frame.src_task, frame.msg_index);
+    benchproto_link_mark_delivered(&c->link, frame.dst_task, frame.src_device, frame.src_task, frame.msg_index);
 
     reply.msg_type = BENCHPROTO_MSG_ACK;
     reply.length = len;
     reply.payload = reply_payload;
-    send_frame(&reply);
+    send_frame_to(c, &reply);
 }
 
-static void drain_rx(device_t *d)
+static void drain_rx(device_t *d, client_t *c)
 {
     for (;;) {
         // Find first DELIM.
         size_t first = (size_t)-1;
-        for (size_t i = 0; i < g_rx.len; i++) if (g_rx.buf[i] == BENCHPROTO_FRAME_DELIM) { first = i; break; }
+        for (size_t i = 0; i < c->rx.len; i++) if (c->rx.buf[i] == BENCHPROTO_FRAME_DELIM) { first = i; break; }
         if (first == (size_t)-1) return;
-        if (first > 0) { memmove(g_rx.buf, g_rx.buf + first, g_rx.len - first); g_rx.len -= first; }
+        if (first > 0) { memmove(c->rx.buf, c->rx.buf + first, c->rx.len - first); c->rx.len -= first; }
 
         size_t second = (size_t)-1;
-        for (size_t i = 1; i < g_rx.len; i++) if (g_rx.buf[i] == BENCHPROTO_FRAME_DELIM) { second = i; break; }
+        for (size_t i = 1; i < c->rx.len; i++) if (c->rx.buf[i] == BENCHPROTO_FRAME_DELIM) { second = i; break; }
         if (second == (size_t)-1) return; // frame not complete yet
 
-        if (second == 1) { memmove(g_rx.buf, g_rx.buf + 1, g_rx.len - 1); g_rx.len -= 1; continue; }
+        if (second == 1) { memmove(c->rx.buf, c->rx.buf + 1, c->rx.len - 1); c->rx.len -= 1; continue; }
 
-        handle_wire_frame(d, g_rx.buf, second + 1);
-        memmove(g_rx.buf, g_rx.buf + second, g_rx.len - second);
-        g_rx.len -= second;
+        handle_wire_frame(d, c, c->rx.buf, second + 1);
+        memmove(c->rx.buf, c->rx.buf + second, c->rx.len - second);
+        c->rx.len -= second;
     }
 }
 
@@ -1617,7 +1765,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "bind() failed: %d\n", WSAGetLastError());
         return 1;
     }
-    if (listen(listener, 1) == SOCKET_ERROR) { fprintf(stderr, "listen() failed\n"); return 1; }
+    if (listen(listener, (int)SIMFW_MAX_CLIENTS) == SOCKET_ERROR) { fprintf(stderr, "listen() failed\n"); return 1; }
 
     // Report the actual bound port (useful when --port 0 asks the OS to
     // pick an ephemeral one -- tests do exactly this).
@@ -1628,15 +1776,10 @@ int main(int argc, char **argv)
     printf("VIRTUAL_SIMFW_LISTENING port=%u seed=%u\n", (unsigned)actual_port, (unsigned)seed);
     fflush(stdout);
 
-    benchproto_link_init(&g_link, SIMFW_TARGET_DEVICE);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_SYS);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_MODEL);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_TC);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_CT);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_RELAY);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_IO);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_FAULT);
-    benchproto_link_register_task(&g_link, SIMFW_TASK_ID_EVT);
+    for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
+        g_clients[i].in_use = false;
+        g_clients[i].sock = INVALID_SOCKET;
+    }
 
     device_init(&g_dev, seed);
 
@@ -1645,48 +1788,72 @@ int main(int argc, char **argv)
     double last_telemetry = now_seconds();
 
     for (;;) {
-        if (g_client == INVALID_SOCKET) {
-            // Blocking accept -- one client at a time, exactly what this
-            // harness needs (kilnsim owns the single connection for a run).
+        // Poll the listener for a new connection every iteration --
+        // regardless of how many clients are already connected, up to
+        // SIMFW_MAX_CLIENTS (Task 2: kilnsim and virtual_dut both need to
+        // be connected directly at once; see the multi-client block
+        // comment above client_t's definition).
+        {
             u_long nb = 1;
             ioctlsocket(listener, FIONBIO, &nb);
             fd_set rfds; FD_ZERO(&rfds); FD_SET(listener, &rfds);
-            struct timeval tv = {0, 50000};
+            struct timeval tv = {0, 0};
             int r = select(0, &rfds, NULL, NULL, &tv);
             if (r > 0) {
                 SOCKET c = accept(listener, NULL, NULL);
                 if (c != INVALID_SOCKET) {
-                    g_client = c;
-                    u_long nbc = 1;
-                    ioctlsocket(g_client, FIONBIO, &nbc);
-                    int nodelay = 1;
-                    setsockopt(g_client, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
-                    g_rx.len = 0;
-                    printf("VIRTUAL_SIMFW_CLIENT_CONNECTED\n");
-                    fflush(stdout);
+                    int slot = -1;
+                    for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
+                        if (!g_clients[i].in_use) { slot = (int)i; break; }
+                    }
+                    if (slot < 0) {
+                        // Server full -- accept-then-close so the pending
+                        // connection doesn't sit in the backlog forever.
+                        closesocket(c);
+                    } else {
+                        client_t *nc = &g_clients[slot];
+                        memset(nc, 0, sizeof(*nc));
+                        nc->in_use = true;
+                        nc->sock = c;
+                        u_long nbc = 1;
+                        ioctlsocket(nc->sock, FIONBIO, &nbc);
+                        int nodelay = 1;
+                        setsockopt(nc->sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
+                        client_register_tasks(nc);
+                        // New clients start draining from "now", not from
+                        // the full event history -- matches the original
+                        // single-client harness's behavior on reconnect.
+                        nc->telemetry_next_evt_seq = g_dev.ring_next_seq;
+                        printf("VIRTUAL_SIMFW_CLIENT_CONNECTED slot=%d\n", slot);
+                        fflush(stdout);
+                    }
                 }
             }
-        } else {
+        }
+
+        for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) {
+            client_t *c = &g_clients[i];
+            if (!c->in_use) continue;
             char buf[4096];
-            int n = recv(g_client, buf, sizeof(buf), 0);
+            int n = recv(c->sock, buf, sizeof(buf), 0);
             if (n > 0) {
-                if (g_rx.len + (size_t)n <= sizeof(g_rx.buf)) {
-                    memcpy(g_rx.buf + g_rx.len, buf, (size_t)n);
-                    g_rx.len += (size_t)n;
+                if (c->rx.len + (size_t)n <= sizeof(c->rx.buf)) {
+                    memcpy(c->rx.buf + c->rx.len, buf, (size_t)n);
+                    c->rx.len += (size_t)n;
                 } else {
-                    g_rx.len = 0; // overflow -- drop and resync on next delimiter
+                    c->rx.len = 0; // overflow -- drop and resync on next delimiter
                 }
-                drain_rx(&g_dev);
+                drain_rx(&g_dev, c);
             } else if (n == 0) {
-                closesocket(g_client);
-                g_client = INVALID_SOCKET;
-                printf("VIRTUAL_SIMFW_CLIENT_DISCONNECTED\n");
+                client_drop(c);
+                printf("VIRTUAL_SIMFW_CLIENT_DISCONNECTED slot=%u\n", i);
                 fflush(stdout);
             } else {
                 int err = WSAGetLastError();
                 if (err != WSAEWOULDBLOCK) {
-                    closesocket(g_client);
-                    g_client = INVALID_SOCKET;
+                    client_drop(c);
+                    printf("VIRTUAL_SIMFW_CLIENT_DISCONNECTED slot=%u\n", i);
+                    fflush(stdout);
                 }
             }
         }
@@ -1701,8 +1868,10 @@ int main(int argc, char **argv)
             tick_accum_s -= TICK_PERIOD_MS / 1000.0;
         }
 
-        if (g_client != INVALID_SOCKET) {
-            drain_events(&g_dev);
+        bool any_client = false;
+        for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) if (g_clients[i].in_use) { any_client = true; break; }
+        if (any_client) {
+            drain_events_all(&g_dev);
             if (t - last_telemetry >= 1.0 / TELEMETRY_RATE_HZ) {
                 send_telemetry(&g_dev);
                 last_telemetry = t;

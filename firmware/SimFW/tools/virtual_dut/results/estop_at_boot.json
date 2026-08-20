@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 56,
   "timescale": 10.0,
-  "start_time": 1787258679.3089416,
+  "start_time": 1787260919.7971811,
   "events": [
     {
       "seq": 2000000000,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 148000000,
+      "sim_time_us": 147000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

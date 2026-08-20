@@ -38,13 +38,25 @@ README.md for the full architecture and its honestly-reported limits). It:
      can genuinely PASS/FAIL against the real guard's real output, not just
      SKIP.
 
-What this script does NOT do (see README.md for the full, honest list):
-  - It does NOT feed the K4 decision back into virtual_simfw's thermal
-    model. virtual_simfw's RELAY command group is read-only (GET_STATES/
-    GET_EDGES only -- no SET_* exists), and zone duty is driven entirely by
-    FAULT_SCHEDULE overrides, never by relay state. There is no wire command
-    this script could send to close that physical loop without a change to
-    virtual_simfw (out of scope -- explicitly read-only for this task).
+This pass ALSO closes the loop the previous pass correctly reported as
+blocked: after each dut_core.exe poll, `_send_relay_set_sense()` feeds
+dut_core's real, unmodified `energized` decision (relay_owner_task()'s own
+state, via relay_grace.c/safety_guards.c) back into virtual_simfw as K4's
+sensed contact state, using a new virtual_simfw-only command
+(SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE, RELAY group id 0xF0 -- see that file's
+own header comment on why it is namespaced as virtual-only and will never
+become a real SimFW/PROTOCOL.md command). See README.md for what this loop
+closure did and did not change about scenario results -- the short version:
+K4 is never energized in current SaftyFW (a pre-existing, documented
+finding, unaffected by this pass), and separately, virtual_simfw's
+device_tick() (a faithful, near-verbatim port of REAL, unmodified
+firmware/SimFW/src/tasks/sim_engine.c) never gated duty[]/current_a[] on K4
+in the first place -- so the loop is now genuinely wired end-to-end, but
+produces no numerically different scenario results, for two independent
+and separately-verified reasons, not because the wiring is a no-op.
+
+What this script still does NOT do (see README.md for the full, honest
+list):
   - It does NOT invent context (context_valid stays false, matching
     safety_core_build_input()'s real current struct literal), so S2/S3/S4/
     S9/S10/S13 correctly never fire here -- not a gap in this script, a
@@ -93,6 +105,56 @@ _TRIP_REASON_TO_GUARD = {
     1: "S1", 2: "S2", 3: "S3", 5: "S5", 6: "S6a", 7: "S6b", 8: "S7",
     9: "S8", 10: "S9", 12: "S11", 13: "S12", 14: "S13",
 }
+
+# --- K4-feedback loop closure -------------------------------------------------
+# This is the piece the README's "Known limitation: the K4 physical loop is
+# not closed" section (written before this pass) said could not be done
+# without editing virtual_simfw -- which was correctly out of scope for the
+# earlier pass. This pass (a different task) DOES own virtual_simfw.c and
+# added SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE (RELAY group, cmd id 0xF0) there:
+# a virtual-only command, deliberately absent from PROTOCOL.md/cmd_ids.h/
+# kilnsim.protocol/kilnsim.payloads (see virtual_simfw.c's RELAY-group
+# comment for exactly why it must never become a real command). Because it
+# has no entry in kilnsim.payloads' per-group encoder tables, it cannot be
+# sent through TcpSimLink.send_command() -- _send_relay_set_sense() below
+# reuses that same object's own request/reply/retry primitives
+# (_link/_pending/_write_frame/_wait_for_reply) with a hand-built payload
+# instead, exactly the pattern tools/PcTools/tests/test_kilnsim_virtual_simfw.py's
+# _send_raw_relay_command() helper uses for the same reason.
+_RELAY_SET_SENSE_CMD = 0xF0
+_RELAY_SIGNAL_K1, _RELAY_SIGNAL_K2, _RELAY_SIGNAL_K3, _RELAY_SIGNAL_K5, _RELAY_SIGNAL_K4 = range(5)
+
+
+def _send_relay_set_sense(link: TcpSimLink, signal: int, level: bool) -> int:
+    """Sends SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE(signal, level) and returns the
+    reply's status byte (0 == SIMFW_CMD_STATUS_OK). See the module-level
+    comment above for why this bypasses kilnsim.payloads entirely."""
+    from kilnsim import benchproto_codec as bp
+
+    with link._send_lock:  # noqa: SLF001 - intentional low-level reuse, see comment above
+        msg_index = link._link.next_msg_index()  # noqa: SLF001
+        link._pending.begin(dst_device=1, dst_task=int(CommandGroup.RELAY), msg_index=msg_index)  # noqa: SLF001
+        frame = bp.Frame(
+            msg_type=bp.MsgType.DATA, msg_index=msg_index, src_device=0, src_task=0,
+            dst_device=1, dst_task=int(CommandGroup.RELAY),
+            payload=bytes([_RELAY_SET_SENSE_CMD, signal, 1 if level else 0]),
+        )
+        try:
+            while True:
+                with link._reply_cv:  # noqa: SLF001
+                    link._reply_frame = None  # noqa: SLF001
+                link._write_frame(frame)  # noqa: SLF001
+                reply = link._wait_for_reply(2.0)  # noqa: SLF001
+                if reply is not None:
+                    break
+                if not link._pending.note_retry():  # noqa: SLF001
+                    raise TimeoutError("no reply to RELAY_SET_SENSE")
+                frame.msg_index = link._pending.msg_index  # noqa: SLF001
+        finally:
+            link._pending.clear()  # noqa: SLF001
+    if reply.msg_type != bp.MsgType.ACK or not reply.payload:
+        raise RuntimeError(f"RELAY_SET_SENSE: unexpected reply {reply.msg_type}")
+    return reply.payload[0]
 
 
 class DutCore:
@@ -306,6 +368,16 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                 last_sim_time_us = max(sim_time_us, last_sim_time_us)
                 if result is not None:
                     collected.extend(guard_tracker.observe(sim_time_us, result))
+                    # Close the loop: feed relay_owner_task()'s real,
+                    # unmodified decision (dut_core's `energized`, straight
+                    # from relay_grace.c/safety_guards.c -- not re-derived
+                    # here) back into the fixture as K4's sensed contact
+                    # state, exactly what a real K4 pilot relay's physical
+                    # contact would report to the fixture if this were real
+                    # hardware. See the module-level comment above
+                    # _send_relay_set_sense() for why this uses a virtual-
+                    # only command rather than anything in kilnsim.protocol.
+                    _send_relay_set_sense(link, _RELAY_SIGNAL_K4, bool(result["energized"]))
 
         for e in link.read_events(timeout=0.0):
             collected.append(kr._translate_wire_event(e, slot_to_fault_id))

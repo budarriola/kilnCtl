@@ -2,12 +2,12 @@
   "scenario": {
     "name": "spi_flaky_tc_ic",
     "version": 1,
-    "hash": "d288169fedf0a213f8a455be7d89c19cc4bb0ac8793ccf903549ccb5ca50c49c"
+    "hash": "5b852cc5d16dd6cec6195ad03b73d5e6ddb04b41eb6b2a5b2e9d54eca5109776"
   },
   "fw_versions": {},
   "seed": 55,
   "timescale": 10.0,
-  "start_time": 1787258858.8752687,
+  "start_time": 1787261099.6912613,
   "events": [
     {
       "seq": 0,
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 147000000,
+      "sim_time_us": 146000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

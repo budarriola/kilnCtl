@@ -2,12 +2,12 @@
   "scenario": {
     "name": "cj_fault",
     "version": 1,
-    "hash": "e2f629ce3f66fa6fe25b0cecddacfeb54181d264394afccbb39d5d80d0d71f0b"
+    "hash": "afc34310be2b261c8ace9f452c8ddf9f69e637c7ecb246db16b4ac449a9267c8"
   },
   "fw_versions": {},
   "seed": 54,
   "timescale": 10.0,
-  "start_time": 1787258663.6047742,
+  "start_time": 1787260904.112274,
   "events": [
     {
       "seq": 0,
@@ -24,6 +24,17 @@
     {
       "seq": 2000000000,
       "sim_time_us": 45000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S12"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 45000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -34,11 +45,11 @@
       "f0": 0.0
     },
     {
-      "seq": 2000000001,
-      "sim_time_us": 147000000,
+      "seq": 2000000002,
+      "sim_time_us": 96000000,
       "event_type": "GUARD_TRIP",
       "payload": {
-        "guard": "S6b"
+        "guard": "S12"
       },
       "a": 0,
       "b": 0,

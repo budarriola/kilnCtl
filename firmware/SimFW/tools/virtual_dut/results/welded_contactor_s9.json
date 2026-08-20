@@ -2,16 +2,16 @@
   "scenario": {
     "name": "welded_contactor_s9",
     "version": 1,
-    "hash": "99dc868280526f60e19af6f7c3d78335777594b87cab4536cb6552b45ca573f9"
+    "hash": "3dae126bee29966ee4d521ed77687255557d5155fc831c8270e56c3f0c729595"
   },
   "fw_versions": {},
   "seed": 43,
   "timescale": 10.0,
-  "start_time": 1787258950.252794,
+  "start_time": 1787261190.2434094,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 45000000,
+      "sim_time_us": 47000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 145000000,
+      "sim_time_us": 147000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

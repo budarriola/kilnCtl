@@ -2,12 +2,12 @@
   "scenario": {
     "name": "mainfault_tc_disconnect",
     "version": 1,
-    "hash": "03ee50edbef5fe70fb9dcd60210cc04d21adb8cd374786c3828360afa70b6a67"
+    "hash": "6741e9f5f597edbb0feeb2797b2c9485ae0988a4dbb42fc9f328b9971d9145e0"
   },
   "fw_versions": {},
   "seed": 63,
   "timescale": 10.0,
-  "start_time": 1787258725.768331,
+  "start_time": 1787260965.949651,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 44000000,
+      "sim_time_us": 43000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
