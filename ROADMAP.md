@@ -976,6 +976,21 @@ path. Two facts set the shape of this milestone:
       hardware attached in this pass's environment; live-board verification
       (real interlock refusals, real lockout, a real Pico relay, a real
       rollback reboot) is still outstanding.
+- [x] `SAFETY_CMD_ANNOUNCE_REBOOT` (0x18) sent before the ESP reboots, so a
+      routine update does not trip S6(b). The ESP broadcasts it right before
+      `esp_ota_mark_app_invalid_rollback_and_reboot()`; the Pico records the
+      timestamp (new `reboot_announce.c`, isolation-safe) and gives S6b a 20s
+      grace window (`safety_core.c`), same "reasonable software timeout"
+      category as `SAFETY_LINK_STALE_MS`. Load-bearing property, verified by
+      review and host test: only the two `trip()` calls in S6b's block are
+      gated — the elapsed-silence accumulator keeps counting regardless, so
+      a still-dead ESP once the window closes trips on the very next tick,
+      no second grace period; `relay_owner`'s energize/ARM path has no way
+      to read the suppression flag at all. SaftyFW 525/525 host checks
+      (isolation check clean), CommonFW 16/16, real SaftyFW/_slotA/_slotB
+      and full KilnFW builds all clean. Not hardware-verified — no board
+      attached to confirm a real reboot actually stops nuisance-tripping
+      S6b.
 
 ---
 
