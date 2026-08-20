@@ -19,18 +19,27 @@ import sys
 import time
 from typing import Optional
 
-from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError
+from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink
 from .protocol import CommandGroup, IoCmd, ModelCmd, SysCmd
 from .report import evaluate_expectations
+from .runner import run_scenario
 from .scenario import ScenarioError, load_scenario
 
 
 def _make_link(args) -> SimLink:
-    return MockSimLink() if args.mock else SerialSimLink()
+    if args.mock:
+        return MockSimLink()
+    if getattr(args, "virtual", None) is not None:
+        return TcpSimLink()
+    return SerialSimLink()
 
 
 def _connect(link: SimLink, args) -> None:
-    port = link.connect(args.port)
+    if isinstance(link, TcpSimLink):
+        address = getattr(args, "virtual", None) or None
+        port = link.connect(address if address else None)
+    else:
+        port = link.connect(args.port)
     print(f"connected: {port}", file=sys.stderr)
 
 
@@ -131,24 +140,34 @@ def cmd_run(args) -> int:
     _connect(link, args)
 
     seed = args.seed if args.seed is not None else scenario.seed
-    try:
-        link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": seed})
-        link.send_command(CommandGroup.SYS, SysCmd.SET_TIMESCALE, {"value": scenario.timescale})
-        if scenario.preset:
-            link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": scenario.preset})
-    except SimLinkError as exc:
-        print(f"error: could not arm scenario: {exc}", file=sys.stderr)
-        return 1
 
-    # Real run orchestration -- watching the EVT stream for the scenario's
-    # actual duration and driving the DUT -- is `run_test_scenario`'s job
-    # (mcp_server.py); this CLI path exercises the same primitives against
-    # whatever events the link already has buffered (real hardware mid-run,
-    # or a MockSimLink a test has pre-loaded via inject_event/make_event),
-    # so `kilnsim run --mock` is a meaningful smoke test without a full
-    # scenario runner having to be simulated here too.
-    events = link.read_events(timeout=0.0)
-    report = evaluate_expectations(scenario, events, seed=seed, timescale=scenario.timescale)
+    if args.mock:
+        # Against a MockSimLink there is nothing to wait on -- exercise the
+        # same primitives against whatever events a test pre-loaded via
+        # inject_event/make_event, so `kilnsim run --mock` stays a useful
+        # smoke test without a full wait loop being simulated for it.
+        try:
+            link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": seed})
+            link.send_command(CommandGroup.SYS, SysCmd.SET_TIMESCALE, {"value": scenario.timescale})
+            if scenario.preset:
+                link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": scenario.preset})
+        except SimLinkError as exc:
+            print(f"error: could not arm scenario: {exc}", file=sys.stderr)
+            return 1
+        events = link.read_events(timeout=0.0)
+        report = evaluate_expectations(scenario, events, seed=seed, timescale=scenario.timescale)
+    else:
+        # Real run: kilnsim.runner drives the whole thing -- arm, wait for
+        # the estimated scenario duration while draining/translating the
+        # EVT stream and polling TELEMETRY, then evaluate expectations.
+        try:
+            report = run_scenario(link, scenario, seed=seed,
+                                   duration_s=args.duration, timescale=args.timescale)
+        except SimLinkError as exc:
+            print(f"error: run failed: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            link.disconnect()
 
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
@@ -189,6 +208,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kilnsim", description="PC-side control for SimFW")
     p.add_argument("--mock", action="store_true", help="use an in-memory MockSimLink instead of real hardware")
     p.add_argument("--port", default=None, help="serial port (autodetected if omitted)")
+    p.add_argument("--virtual", nargs="?", const="", default=None, metavar="HOST:PORT",
+                    help="connect to firmware/SimFW/tools/virtual_simfw over TCP instead of real hardware "
+                         "(default 127.0.0.1:8765 if no address given)")
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("state", help="print the current telemetry snapshot as JSON")
@@ -217,6 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("run", help="run a scenario YAML; exit code = pass/fail")
     sp.add_argument("scenario_path")
     sp.add_argument("--seed", type=int, default=None)
+    sp.add_argument("--timescale", type=float, default=None, help="override the scenario's own timescale")
+    sp.add_argument("--duration", type=float, default=None,
+                     help="sim-clock seconds to run before evaluating expectations "
+                          "(default: estimated from the scenario's faults/expect deadlines)")
     sp.add_argument("--report", default=None, help="write the report JSON to this path")
     sp.set_defaults(func=cmd_run)
 

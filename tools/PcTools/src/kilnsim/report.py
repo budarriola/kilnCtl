@@ -44,7 +44,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from .protocol import Event, EventType
+from .protocol import Event, EventType, WIRE_EVENT_TYPES
 from .scenario import EventThenExpect, ForbidExpect, AtEndExpect, Scenario
 
 #: Verdict strings, matching PLAN.md sec 8.2's "PASS|FAIL|SKIPPED".
@@ -396,7 +396,16 @@ def _eval_at_end(clause: AtEndExpect, events: list) -> ExpectationResult:
 # validity
 # ---------------------------------------------------------------------------
 def _check_event_seq_gap(events: list) -> bool:
-    seqs = sorted(e.seq for e in events)
+    # Only real wire EVT frames carry a meaningful, gap-detectable sequence
+    # number (PROTOCOL.md sec 6's `seq`, "sequence-numbered so the PC
+    # detects loss"). A scenario runner may also inject *synthetic* events
+    # for observations the wire never frames as an EVT (e.g. fault_line_
+    # asserted/estop_open telemetry-diff edges, "current_present" derived
+    # from I_amps -- see kilnsim.runner) -- those get their own seq
+    # namespace (deliberately disjoint from the wire's, so they can never be
+    # mistaken for a wire loss) and must be excluded here, or a run with any
+    # synthetic events at all would spuriously fail validity.
+    seqs = sorted(e.seq for e in events if e.event_type in WIRE_EVENT_TYPES)
     for a, b in zip(seqs, seqs[1:]):
         if b != a + 1:
             return True

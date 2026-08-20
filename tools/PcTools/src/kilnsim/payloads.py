@@ -35,6 +35,7 @@ from __future__ import annotations
 import struct
 from typing import Optional
 
+from . import fault_catalog
 from .protocol import CommandGroup
 
 STATUS_OK = 0x00
@@ -87,11 +88,24 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
         return bytes([cmd])
     # RESET_SIM(3)/SET_TIMESCALE(4)/SET_SEED(5): PROTOCOL.md sec 4 -- ids
     # allocated, "no handler yet ... a request today gets
-    # [SIMFW_CMD_STATUS_ERR_NOT_IMPL] back". Still send a well-formed request
-    # (byte0=cmd_id, no documented args) so the round trip is exercisable
-    # against real firmware and comes back ERR_NOT_IMPL, not a decode error.
-    if cmd in (3, 4, 5):
-        return bytes([cmd])
+    # [SIMFW_CMD_STATUS_ERR_NOT_IMPL] back" against REAL firmware.
+    # `virtual_simfw` (firmware/SimFW/tools/virtual_simfw/) DOES implement
+    # all three for real (a documented virtual-device-only extension -- see
+    # that tool's README.md), so their args are now encoded for real rather
+    # than dropped: RESET_SIM [u8 keep_params], SET_TIMESCALE [f32 value],
+    # SET_SEED [u32 value]. This used to be a bare `bytes([cmd])` for all
+    # three, silently dropping `payload["value"]`/`payload["keep_params"]`
+    # entirely -- a real bug, since run_test_scenario()/cmd_run() both call
+    # SET_SEED/SET_TIMESCALE expecting the value to actually reach the
+    # device. The round trip against real (unmodified) firmware still comes
+    # back ERR_NOT_IMPL, not a decode error, since real cmd_task.c's stub
+    # path never reads past its own dispatch-table lookup on byte0.
+    if cmd == 3:
+        return bytes([cmd, 1 if payload.get("keep_params") else 0])
+    if cmd == 4:
+        return bytes([cmd]) + struct.pack("<f", float(payload.get("value", 1.0)))
+    if cmd == 5:
+        return bytes([cmd]) + struct.pack("<I", int(payload.get("value", 0)) & 0xFFFFFFFF)
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 
@@ -249,12 +263,17 @@ def _tc_encode(cmd: int, payload: dict) -> bytes:
             "<f", float(payload.get("manual_temp_c", payload.get("temp_c", 0.0)))
         )
     if cmd == 4:  # INJECT_FAULT
+        raw_kind = payload.get("fault_kind", payload.get("fault_type", 0))
+        # fault_kind is fault_sched_fault_type_t's TC-only subset (0..8,
+        # PROTOCOL.md sec 5.2) -- same numbering fault_catalog.py uses for
+        # its TC-kind entries, so the same name table applies here too.
+        kind_id = fault_catalog.fault_type_to_id(raw_kind) if isinstance(raw_kind, str) else int(raw_kind)
         return struct.pack(
             "<BHBBf",
             cmd,
             int(payload["fault_slot"]) if "fault_slot" in payload else int(payload.get("slot_id", 0)),
             _u8(payload["channel"]),
-            _u8(payload["fault_kind"]),
+            _u8(kind_id),
             float(payload.get("param0", 0.0)),
         )
     if cmd == 5:  # CLEAR_FAULT
@@ -505,8 +524,22 @@ _FAULT_SLOT_STATE_NAMES = {0: "idle", 1: "armed", 2: "active", 3: "expired"}
 
 def _encode_fault_schedule(payload: dict) -> bytes:
     slot_id = int(payload.get("fault_slot", payload.get("slot_id", 0)))
-    fault_type = _u8(payload.get("fault_type", 0))
-    target = int(payload.get("target", 0))
+    # fault_type/target arrive as the scenario's own catalog strings (e.g.
+    # "welded_ssr" / "relay:K1", PLAN.md sec 7.1/8.1) -- fault_catalog.py is
+    # the name<->wire-numeric translation this module never had (a bare
+    # `_u8(payload.get("fault_type", 0))` would TypeError on a string, or
+    # silently default to 0/TC_DISCONNECTED for a missing one). Also accept
+    # an already-numeric fault_type/target for callers (tests, sim_raw_command)
+    # that want to bypass the catalog and address the wire directly.
+    raw_type = payload.get("fault_type", 0)
+    raw_target = payload.get("target", 0)
+    if isinstance(raw_type, str):
+        type_id = fault_catalog.fault_type_to_id(raw_type)
+        target = fault_catalog.parse_target(type_id, raw_target) if isinstance(raw_target, str) else int(raw_target)
+    else:
+        type_id = int(raw_type)
+        target = int(raw_target)
+    fault_type = _u8(type_id)
 
     trigger = payload.get("trigger", {})
     trigger_kind = trigger.get("kind", "manual")
@@ -515,7 +548,11 @@ def _encode_fault_schedule(payload: dict) -> bytes:
         trigger.get("t", trigger.get("temp_c", trigger.get("delay_s", trigger.get("t0", 0.0)))) or 0.0
     )
     trigger_b = float(trigger.get("t1", 0.0) or 0.0)
-    trigger_ref = int(trigger.get("zone", trigger.get("relay", trigger.get("after_fault_slot", 0))) or 0)
+    _relay_bit = {"K1": 0, "K2": 1, "K3": 2, "K5": 3, "K4": 4}  # sim_snapshot.h's sim_relay_bit_t order
+    if "relay" in trigger and isinstance(trigger["relay"], str):
+        trigger_ref = _relay_bit.get(trigger["relay"].upper(), 0)
+    else:
+        trigger_ref = int(trigger.get("zone", trigger.get("relay", trigger.get("after_fault_slot", 0))) or 0)
     edge_raw = trigger.get("edge")
     trigger_edge = 1 if edge_raw in ("falling", "open", 1) else 0
     event_name = (trigger.get("event_name") or "").encode("ascii")[:24]

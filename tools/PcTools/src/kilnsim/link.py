@@ -67,6 +67,8 @@ except ImportError:  # pragma: no cover - exercised implicitly by CI without pys
     serial = None
     _list_ports = None
 
+import socket as _socket
+
 #: SimFW's placeholder USB VID:PID. Raspberry Pi's own default RP2040 CDC
 #: VID:PID (2E8A:000A, the "Board CDC" example) until SimFW claims its own --
 #: swap this out once firmware/SimFW/docs/HARDWARE.md documents a real one.
@@ -137,25 +139,23 @@ class SimLink(abc.ABC):
 # ---------------------------------------------------------------------------
 # Real transport: pyserial + the real benchproto wire protocol
 # ---------------------------------------------------------------------------
-class SerialSimLink(SimLink):
-    """pyserial-backed :class:`SimLink` against real SimFW hardware, speaking
-    the real ``benchproto`` wire protocol (BENCHPROTO.md) + SimFW's own
-    command-group payload layouts (PROTOCOL.md).
+class _FramedSimLink(SimLink):
+    """Shared plumbing for every :class:`SimLink` that speaks the real
+    ``benchproto`` wire protocol over a byte-stream transport: frame
+    reassembly, request/reply matching + retry, and BROADCAST (TELEMETRY/
+    EVT) demultiplexing. This is the part :class:`SerialSimLink` and
+    :class:`TcpSimLink` share byte-for-byte -- the two differ only in how
+    bytes actually move (a serial port vs. a TCP socket), so this base class
+    factors out everything above that line and each subclass supplies just
+    four transport primitives: :meth:`_transport_open`, :meth:`_transport_close`,
+    :meth:`_transport_read_chunk`, :meth:`_transport_write`.
 
     Framing/CRC/stuffing lives in :mod:`kilnsim.benchproto_codec` (proven
     byte-identical against ``firmware/CommonFW``'s shared C test vectors);
-    per-command-group byte layouts live in :mod:`kilnsim.payloads`. This
-    class owns only the transport: the actual serial byte pipe, the RX
-    thread that reassembles a stuffed byte stream into frames, the
-    request/reply matching + retry *timer* (the state machine itself is
-    :mod:`kilnsim.benchproto_codec`'s ``PendingRequest``/``BenchprotoLink``),
-    and demultiplexing unsolicited BROADCAST frames (TELEMETRY/EVT,
-    PROTOCOL.md sec 6) away from command replies.
+    per-command-group byte layouts live in :mod:`kilnsim.payloads`.
     """
 
-    def __init__(self, baudrate: int = DEFAULT_BAUD_RATE) -> None:
-        self.baudrate = baudrate
-        self._serial = None
+    def __init__(self) -> None:
         self._port: Optional[str] = None
         self._reader: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -184,79 +184,64 @@ class SerialSimLink(SimLink):
         self.evt_seq_gap_count = 0
         self._last_telemetry: Optional[dict] = None
 
-    @property
-    def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+    # -- transport primitives, supplied by subclasses ---------------------------
+    def _transport_open(self, port: Optional[str]) -> str:
+        """Opens the underlying byte pipe and returns the identifier actually
+        used (e.g. the serial device path, or "host:port" for TCP)."""
+        raise NotImplementedError
 
-    # -- discovery -----------------------------------------------------------
-    @staticmethod
-    def list_candidate_ports() -> list:
-        """Ports whose VID:PID matches :data:`SIMFW_VID_PID`."""
-        if _list_ports is None:
-            raise SimLinkError("pyserial is not installed -- cannot enumerate serial ports")
-        out = []
-        for p in _list_ports.comports():
-            hwid = (p.hwid or "").upper()
-            if SIMFW_VID_PID in hwid:
-                out.append(p.device)
-        return out
+    def _transport_close(self) -> None:
+        raise NotImplementedError
+
+    def _transport_read_chunk(self) -> bytes:
+        """Blocks briefly (a short, subclass-chosen timeout) for whatever
+        bytes are available; returns b"" on timeout with nothing new, raises
+        on a real I/O error."""
+        raise NotImplementedError
+
+    def _transport_write(self, data: bytes) -> None:
+        raise NotImplementedError
 
     def connect(self, port: Optional[str] = None) -> str:
-        if serial is None:
-            raise SimLinkError("pyserial is not installed -- pip install pyserial")
         if self.is_connected:
             raise SimLinkError(f"already connected to {self._port}")
-
-        if port is None:
-            candidates = self.list_candidate_ports()
-            if not candidates:
-                raise SimLinkError(
-                    f"no SimFW-looking port found (VID:PID {SIMFW_VID_PID}); "
-                    "pass an explicit port"
-                )
-            port = candidates[0]
-
-        ser = serial.Serial(port=port, baudrate=self.baudrate, timeout=0.2)
-        self._serial = ser
-        self._port = port
+        opened = self._transport_open(port)
+        self._port = opened
         self._rx_buf.clear()
         self._stop.clear()
         self._reader = threading.Thread(target=self._rx_loop, name="simlink-rx", daemon=True)
         self._reader.start()
 
         # PING round-trip proves this is actually a SimFW peer, not just a
-        # port that happened to match the VID:PID.
+        # port/address that happened to accept a connection.
         try:
             self.send_command(CommandGroup.SYS, 1, timeout=DEFAULT_CONNECT_TIMEOUT_S)  # SysCmd.PING
         except SimLinkError:
             self.disconnect()
             raise
-        return port
+        return opened
 
     def disconnect(self) -> None:
         self._stop.set()
         reader, self._reader = self._reader, None
-        ser, self._serial = self._serial, None
         if reader is not None and reader is not threading.current_thread():
             reader.join(timeout=2.0)
-        if ser is not None:
-            try:
-                ser.close()
-            except Exception:  # pragma: no cover
-                log.debug("error closing SimFW port", exc_info=True)
+        try:
+            self._transport_close()
+        except Exception:  # pragma: no cover
+            log.debug("error closing SimFW transport", exc_info=True)
         self._port = None
 
     # -- RX: byte stream -> frames --------------------------------------------
     def _rx_loop(self) -> None:
-        ser = self._serial
         while not self._stop.is_set():
             try:
-                if ser is None or not ser.is_open:
+                if not self.is_connected:
                     break
-                chunk = ser.read(max(1, ser.in_waiting or 1))
+                chunk = self._transport_read_chunk()
             except Exception:
                 if not self._stop.is_set():
-                    log.warning("SimFW serial read failed; reader exiting", exc_info=True)
+                    log.warning("SimFW transport read failed; reader exiting", exc_info=True)
                 break
             if chunk:
                 self._rx_buf.extend(chunk)
@@ -403,8 +388,7 @@ class SerialSimLink(SimLink):
     def _write_frame(self, frame: bp.Frame) -> None:
         wire = bp.encode_frame(frame)
         try:
-            self._serial.write(wire)
-            self._serial.flush()
+            self._transport_write(wire)
         except Exception as exc:  # noqa: BLE001
             raise SimLinkError(f"write failed: {exc}") from exc
 
@@ -420,6 +404,152 @@ class SerialSimLink(SimLink):
                 self._events_cv.wait(timeout=timeout)
             out, self._events[:] = self._events[:], []
             return out
+
+
+# ---------------------------------------------------------------------------
+# Real transport #1: pyserial, for real SimFW hardware over native USB CDC.
+# ---------------------------------------------------------------------------
+class SerialSimLink(_FramedSimLink):
+    """pyserial-backed :class:`_FramedSimLink` against real SimFW hardware."""
+
+    def __init__(self, baudrate: int = DEFAULT_BAUD_RATE) -> None:
+        super().__init__()
+        self.baudrate = baudrate
+        self._serial = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._serial is not None and self._serial.is_open
+
+    # -- discovery -----------------------------------------------------------
+    @staticmethod
+    def list_candidate_ports() -> list:
+        """Ports whose VID:PID matches :data:`SIMFW_VID_PID`."""
+        if _list_ports is None:
+            raise SimLinkError("pyserial is not installed -- cannot enumerate serial ports")
+        out = []
+        for p in _list_ports.comports():
+            hwid = (p.hwid or "").upper()
+            if SIMFW_VID_PID in hwid:
+                out.append(p.device)
+        return out
+
+    def _transport_open(self, port: Optional[str]) -> str:
+        if serial is None:
+            raise SimLinkError("pyserial is not installed -- pip install pyserial")
+        if port is None:
+            candidates = self.list_candidate_ports()
+            if not candidates:
+                raise SimLinkError(
+                    f"no SimFW-looking port found (VID:PID {SIMFW_VID_PID}); "
+                    "pass an explicit port"
+                )
+            port = candidates[0]
+        self._serial = serial.Serial(port=port, baudrate=self.baudrate, timeout=0.2)
+        return port
+
+    def _transport_close(self) -> None:
+        ser, self._serial = self._serial, None
+        if ser is not None:
+            ser.close()
+
+    def _transport_read_chunk(self) -> bytes:
+        ser = self._serial
+        if ser is None or not ser.is_open:
+            return b""
+        return ser.read(max(1, ser.in_waiting or 1))
+
+    def _transport_write(self, data: bytes) -> None:
+        self._serial.write(data)
+        self._serial.flush()
+
+
+# ---------------------------------------------------------------------------
+# Real transport #2: plain TCP, for firmware/SimFW/tools/virtual_simfw's
+# host-side "virtual SimFW" (see that directory's README.md). Same real
+# benchproto wire protocol as SerialSimLink -- only the byte pipe differs
+# (a loopback TCP socket instead of a serial port), which is exactly what
+# _FramedSimLink's split makes a ~60-line subclass instead of a second copy
+# of the whole request/reply/BROADCAST machinery.
+# ---------------------------------------------------------------------------
+#: virtual_simfw's default listen port (firmware/SimFW/tools/virtual_simfw/
+#: src/virtual_simfw.c's own `port` default) -- used when TcpSimLink.connect()
+#: is given no explicit "host:port" address.
+DEFAULT_VIRTUAL_SIMFW_PORT = 8765
+DEFAULT_TCP_CONNECT_TIMEOUT_S = 5.0
+
+
+class TcpSimLink(_FramedSimLink):
+    """TCP-backed :class:`_FramedSimLink` against ``virtual_simfw`` (or any
+    other peer speaking the same real benchproto wire protocol over a raw
+    TCP byte stream -- the protocol has no notion of "this is the virtual
+    one", so real hardware bridged over TCP would work here too).
+
+    ``port`` passed to :meth:`connect` is ``"host:port"`` (default host
+    ``127.0.0.1`` if just a bare port number or nothing is given) --
+    kilnsim's CLI/MCP surface calls this ``--virtual [host:port]`` per the
+    task's own sketch.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sock: Optional[_socket.socket] = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._sock is not None
+
+    @staticmethod
+    def _parse_address(address: Optional[str]) -> tuple:
+        if not address:
+            return "127.0.0.1", DEFAULT_VIRTUAL_SIMFW_PORT
+        address = str(address)
+        if address.isdigit():
+            return "127.0.0.1", int(address)
+        if ":" in address:
+            host, _, port_s = address.rpartition(":")
+            return (host or "127.0.0.1"), int(port_s)
+        return address, DEFAULT_VIRTUAL_SIMFW_PORT
+
+    def _transport_open(self, port: Optional[str]) -> str:
+        host, tcp_port = self._parse_address(port)
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.settimeout(DEFAULT_TCP_CONNECT_TIMEOUT_S)
+        try:
+            sock.connect((host, tcp_port))
+        except OSError as exc:
+            sock.close()
+            raise SimLinkError(f"could not connect to virtual SimFW at {host}:{tcp_port}: {exc}") from exc
+        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        sock.settimeout(0.2)  # short blocking-with-timeout reads, matching
+                                # SerialSimLink's ser.read(timeout=0.2)
+        self._sock = sock
+        return f"{host}:{tcp_port}"
+
+    def _transport_close(self) -> None:
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            try:
+                sock.shutdown(_socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+
+    def _transport_read_chunk(self) -> bytes:
+        sock = self._sock
+        if sock is None:
+            return b""
+        try:
+            return sock.recv(4096)
+        except _socket.timeout:
+            return b""
+        except OSError:
+            return b""
+
+    def _transport_write(self, data: bytes) -> None:
+        if self._sock is None:
+            raise SimLinkError("not connected")
+        self._sock.sendall(data)
 
 
 # ---------------------------------------------------------------------------

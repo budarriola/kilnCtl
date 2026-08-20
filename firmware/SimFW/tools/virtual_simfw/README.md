@@ -1,0 +1,221 @@
+# virtual_simfw
+
+A host-side program that runs SimFW's **real** simulation logic and speaks
+the **real** `benchproto` wire protocol over a plain TCP socket, so `kilnsim`
+(`tools/PcTools/src/kilnsim/`) can drive complete scenarios end-to-end on a
+PC with no bench hardware attached.
+
+Before this tool existed, `kilnsim run --mock` only ever exercised
+`MockSimLink`'s canned replies -- no scenario had ever actually run: the
+scenario runner, the fault-trigger logic, the expectation evaluator, and the
+report generator had no real device to run against. `virtual_simfw` closes
+that gap for everything **firmware/SimFW/src/sim/** owns (the thermal model,
+the MAX31856 register machine, the fault engine, the sine synth, the TC
+fault-state contract) while staying honest about the one thing it cannot
+simulate: **there is no DUT**. See "What this does NOT simulate" below.
+
+## What it is
+
+* `src/virtual_simfw.c` -- a single-threaded Win32 console program that:
+  1. Compiles and links `firmware/SimFW/src/sim/*.c` **unmodified** --
+     `thermal_model.c`, `max31856_regs.c`, `fault_engine.c`,
+     `tc_fault_state.c`, `sine_synth.c`. This is not a reimplementation of
+     the simulation; it is the same code the firmware runs, compiled for
+     the host, the same way `firmware/SimFW/test/build_host_tests.ps1`
+     already proves that code is pure and portable (~4955 host-test checks).
+  2. Compiles and links `firmware/CommonFW/src/benchproto_*.c` **unmodified**
+     -- the real wire codec (SLIP-style framing, CRC-16/CCITT-FALSE) and
+     reliability layer (sequence numbers, retry/dedup, task registration).
+     `kilnsim`'s own `benchproto_codec.py` is proven byte-identical against
+     this same C library's shared test vectors, so this device and
+     `kilnsim`'s encoder are provably speaking the same protocol.
+  3. Owns a sim clock with a settable timescale and ticks the thermal
+     model + fault engine at 10 Hz of sim time (`device_tick()`, a
+     near-verbatim single-threaded port of `sim_engine.c`'s tick order and
+     `fault_sched.c`'s "recompute overrides from the active slot set every
+     tick" strategy -- FreeRTOS queues/mutexes are simply unnecessary here,
+     since there is only one thread of execution).
+  4. Implements `sim_snapshot.h`'s reader contract (`sim_snapshot_read`/
+     `sim_event_ring_drain`) as the same struct-and-ring shape, single-
+     threaded (no seqlock needed for the same reason as above).
+  5. Speaks SimFW's own command groups (SYS/MODEL/TC/CT/RELAY/IO/FAULT/EVT,
+     `firmware/SimFW/docs/PROTOCOL.md`) over the TCP socket, `cmd_ids.h`
+     included directly as the numeric source of truth so this file's
+     dispatch can never silently drift from that header.
+* `CMakeLists.txt` / `build_host.ps1` -- a standalone build, deliberately
+  separate from SimFW's own `../../CMakeLists.txt` (which builds RP2040
+  firmware against pico-sdk/FreeRTOS), the same way `../spi_test_master/` is
+  kept apart. No pico-sdk, no FreeRTOS -- a plain Win32 console program.
+
+## What it does NOT simulate
+
+* **There is no DUT.** No KilnFW, no SaftyFW. Relay sense (K1/K2/K3/K5/K4)
+  and the ESP-driven `Fault` line are never driven by anything, because
+  nothing is closing those relays. Power-path faults (`welded_ssr`,
+  `broken_heater_coil`, ...) still work correctly -- they act at the
+  duty-override level exactly as real `fault_sched.c` does, so simulated
+  heat/current still flows -- but the *sensed contact* honestly stays at
+  its default (open/not-closed), because that is the truth: nothing
+  physically closed it.
+* No real SPI bytes ever flow (no DUT to drive CS/SCLK against the emulated
+  MAX31856 register machine), so `TC_GET_REGS`/`TC_GET_MASTER_CONFIG`'s
+  transaction/error/underrun counters are always 0, and `configured` is
+  always `false`. That is the correct, honest answer for "no master has
+  ever touched this channel" -- not a bug.
+* No SaftyFW guards exist, so `guard_warn`/`guard_trip` events (referenced
+  by most of `firmware/SimFW/scenarios/*.yaml`'s `expect` clauses) can never
+  appear. See "Which scenarios are DUT-gated" below.
+* No PWM/DMA/PIO hardware -- CT channel state (amps/phase/distortion) is
+  tracked as plain numbers, same `wave_owner.h` TODO(M-D calibration)
+  placeholder real firmware uses today (amps == a 0..1 PWM-scale fraction,
+  not yet a real calibrated current unit).
+* No I2C expander hardware -- `IO_SET_DIR`/`IO_WRITE`/`IO_READ` ack but do
+  nothing (no scenario in the standard library needs J20/spare-pin coverage
+  today).
+
+## Known, documented deviations from real SimFW firmware
+
+* **SYS `RESET_SIM`/`SET_TIMESCALE`/`SET_SEED` are implemented for real.**
+  `firmware/SimFW/docs/PROTOCOL.md` sec 4 documents these three as
+  *reserved* ids on real firmware today (`ERR_NOT_IMPL`) -- no handler
+  exists in `cmd_task.c` yet. `virtual_simfw` implements all three, because
+  `kilnsim`'s scenario runner needs a way to set the seed/timescale before a
+  run and no other path exists. This is a virtual-device-only extension,
+  clearly marked in `virtual_simfw.c`'s `dispatch_sys()` -- not a claim
+  about real firmware's behavior. `tools/PcTools/src/kilnsim/payloads.py`'s
+  encoder for these three commands was fixed in the same pass (it used to
+  silently drop `payload["value"]`/`payload["keep_params"]` entirely --
+  harmless against real firmware's stub, a real bug against anything that
+  actually reads them, which is exactly what this tool exposed).
+* **Commands apply synchronously on arrival, not queued to a tick
+  boundary.** Real firmware's owner tasks all follow a "queue-then-apply-
+  next-tick" doctrine (PLAN.md sec 4.5) so a command's effect always lands
+  on a clean tick boundary. This harness applies every command directly
+  the instant its TCP frame is decoded (there is no second thread to queue
+  toward). The practical consequence: the exact sim-time at which a
+  scheduled fault first becomes `ARMED` can vary slightly run-to-run with
+  ordinary process-scheduling/TCP round-trip jitter in the setup handshake
+  (`SET_SEED`/`SET_TIMESCALE`/`LOAD_PRESET`/`FAULT_SCHEDULE`), since the
+  device's sim clock keeps free-running the whole time. This is not unique
+  to the simplification -- any live, asynchronously-commanded system (real
+  hardware over USB CDC included) has the same setup-latency variance. It
+  does NOT affect the determinism contract the fixture actually promises
+  (PLAN.md 4.2/7.2): once a fault's own evaluation starts, every subsequent
+  `EVERY`+jitter re-arm interval is a pure function of the seeded PRNG
+  stream, byte-for-byte identical run to run -- see
+  `tools/PcTools/tests/test_kilnsim_virtual_simfw.py`'s determinism test
+  and its own extensive comment on exactly this distinction (it compares
+  the *sequence of intervals between fires*, not their absolute sim-time,
+  for precisely this reason). A `RANDOM_IN` *trigger*, by contrast, picks
+  its fire time relative to "now" at first evaluation and IS measurably
+  affected by this wrinkle -- documented, not swept under the rug.
+* **CJ (cold-junction) temperature is a fixed 25 C**, not the "slow ambient
+  drift" PLAN.md sec 3.2 describes for the eventual real firmware. Nothing
+  in the required scenario set needs CJ drift over time; `cj_fault.yaml`
+  injects an explicit CJ *offset*, which this simplification does not
+  affect.
+* **No `RELAY_SET_CONTACT_FAULT`** -- matches real firmware/PROTOCOL.md
+  exactly (deliberately not allocated; `FAULT_SCHEDULE`'s `welded_relay`/
+  `stuck_open_relay` types are the real path either way).
+
+## Build
+
+Same environment `firmware/SimFW/test/build_host_tests.ps1` uses (MSVC Build
+Tools, no cmake/ninja required on PATH):
+
+```powershell
+cd firmware/SimFW/tools/virtual_simfw
+powershell -File build_host.ps1
+# -> build\virtual_simfw.exe
+```
+
+A `CMakeLists.txt` is also provided (mirrors `../spi_test_master`'s pattern)
+for anyone with `cmake`+a generator on PATH:
+
+```powershell
+cmake -G Ninja -B build
+cmake --build build
+```
+
+## Run it standalone
+
+```powershell
+.\build\virtual_simfw.exe --port 0 --seed 42
+```
+
+Prints `VIRTUAL_SIMFW_LISTENING port=<N> seed=42` on stdout once the
+listening socket is up (`--port 0` asks the OS for an ephemeral port --
+exactly what the pytest integration test does). Binds to `127.0.0.1` only,
+one client at a time.
+
+## Point `kilnsim` at it
+
+```powershell
+kilnsim --virtual 127.0.0.1:<port> state
+kilnsim --virtual 127.0.0.1:<port> run ../../scenarios/baseline_firing.yaml
+```
+
+`--virtual` (no address) defaults to `127.0.0.1:8765`. Under the hood this
+is `tools/PcTools/src/kilnsim/link.py`'s `TcpSimLink` -- a new `SimLink`
+implementation alongside `SerialSimLink`/`MockSimLink`, sharing all of the
+real request/reply/BROADCAST-demultiplexing logic with `SerialSimLink`
+through a new shared base class (`_FramedSimLink`); only the byte-pipe
+primitives (open/close/read/write) differ. Every module above `SimLink`
+(CLI, MCP server, GUI, scenario runner, report generator) is unchanged --
+that was the whole point of the existing `SimLink` abstraction.
+
+Real scenario execution -- arming the fault schedule, waiting for the
+estimated run duration while draining/translating the EVT stream, polling
+TELEMETRY for the observations the EVT stream can't carry
+(`fault_line_asserted`, `estop_open`, current presence), and evaluating
+`expect` clauses -- is `tools/PcTools/src/kilnsim/runner.py`'s job, a new
+module: neither `mcp_server.run_test_scenario` nor `cli.cmd_run` had a real
+wait loop before this pass (both called `read_events(timeout=0.0)`
+immediately after arming, correct only against a `MockSimLink`). `cli.py`'s
+`run` subcommand now calls into `runner.run_scenario()` for any non-mock
+link; `--duration`/`--timescale` let a caller override the estimate.
+
+`tools/PcTools/src/kilnsim/fault_catalog.py` is also new: the scenario-
+vocabulary (`type: welded_ssr`, `target: relay:K1`) <-> wire-numeric
+(`fault_sched_fault_type_t`, a zone/TC/CT channel index) translation table
+that `payloads.py`'s `FAULT_SCHEDULE`/`TC_INJECT_FAULT` encoders now use --
+before this pass, `payloads._encode_fault_schedule` fed a bare catalog
+*string* straight into `struct.pack("<B", ...)`, which raises; this
+translation had never been written.
+
+## Which scenarios are meaningfully DUT-independent vs. DUT-gated
+
+Every scenario's `expect` clauses were run against `virtual_simfw` (see the
+task's own verification output). Two honestly different outcomes showed up,
+both correct:
+
+* **Fixture-side machinery genuinely exercised, no DUT needed for the
+  cause:** any fault whose trigger is `at_sim_time` (or `manual`) fires
+  correctly with no DUT at all -- `tc_stuck`, `tc_disconnect_ramp`,
+  `cj_fault`, `broken_element` all produce a real `fault_fired` EVT frame
+  at the right sim time. This proves the fault-trigger engine, the TC
+  register machine, and the thermal model actually work end-to-end.
+* **DUT-gated, correctly SKIPPED/FAILED, never a spurious PASS:** every
+  `expect` clause that needs a SaftyFW guard (`guard_warn`/`guard_trip`) or
+  a real relay actually closing (`K4_open`, `K1_closed`,
+  `safety_temp_valid`) cannot be satisfied by the fixture alone --
+  `evaluate_expectations` correctly reports these as `SKIPPED` (the
+  triggering condition never arose) or `FAIL` (the triggering condition
+  fired, but the DUT-side reaction never showed up in time), never `PASS`.
+  This is `report.py`'s validity honesty working exactly as designed.
+* **A notable sub-case:** `welded_ssr_midfire`'s fault trigger is itself
+  `at_zone_temp` (zone 0 reaching 400 C) -- which *also* never happens
+  without a DUT, because heat only flows when a relay is sensed closed, and
+  nothing closes it. So this scenario's fault never even fires against the
+  fixture alone; every one of its `expect` clauses correctly `SKIP`s. This
+  is a good illustration of why some scenarios are DUT-gated at a deeper
+  level than their `expect` clauses alone suggest.
+
+## Tests
+
+`tools/PcTools/tests/test_kilnsim_virtual_simfw.py` is the standing
+regression gate: it builds nothing itself (skips cleanly if
+`build\virtual_simfw.exe` doesn't exist yet -- run `build_host.ps1` first),
+but spins up the compiled executable on an ephemeral port, drives it with
+`TcpSimLink`, and asserts on real scenario reports, including the
+determinism check.
