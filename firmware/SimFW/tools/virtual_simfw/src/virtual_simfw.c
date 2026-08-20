@@ -255,6 +255,26 @@ static void edge_push(device_t *d, uint8_t signal, bool level)
     slot->time_us = d->sim_time_us;
 }
 
+// Pushes fault_engine_t FIRED/CLEARED events into the sim_event ring, same
+// translation device_tick()'s own regular-tick loop does for the events
+// fault_engine_tick() returns (SIM_EVENT_FAULT_FIRED/CLEARED, a=slot_id).
+// Needed here too because fault_engine_fire_now() (SIMFW_CMD_FAULT_FIRE_NOW,
+// and SIMFW_CMD_TC_INJECT_FAULT which routes through the same call)
+// transitions a slot straight to FAULT_STATE_ACTIVE outside the regular
+// tick's ARMED->ACTIVE check -- fault_engine_tick()'s own event-emitting
+// branch (fault_engine.c) only fires for a slot it *itself* observes
+// transition from ARMED, so a slot that was already forced ACTIVE by
+// fire_now() is invisible to it and the FIRED event would otherwise never
+// reach the ring. `report.py`/scenario expectations key off ring events, so
+// a fire_now()-triggered fault needs its own explicit push here.
+static void push_fault_events_to_ring(device_t *d, const fault_event_t *events, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        sim_event_type_t type = (events[i].kind == FAULT_EVENT_FIRED) ? SIM_EVENT_FAULT_FIRED : SIM_EVENT_FAULT_CLEARED;
+        ring_push(d, type, (uint8_t)events[i].slot_id, 0u, 0.0f);
+    }
+}
+
 // --- fault_sched.c's target_kind_of(), ported verbatim (see that file) -----
 typedef enum { TK_TC, TK_ZONE, TK_CT, TK_SYSTEM, TK_INVALID } target_kind_t;
 
@@ -833,10 +853,18 @@ static bool dispatch_sys(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         return true;
     }
     case SIMFW_CMD_SYS_SET_TIMESCALE: {
-        // Virtual-device extension. Request: [f32 timescale].
-        float v = ar_f32le(r);
-        if (r->overflow || v <= 0.0f) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
-        d->timescale_x100 = (uint32_t)(v * 100.0f + 0.5f);
+        // Virtual-device extension, but the wire shape itself is NOT a
+        // virtual-only choice: PROTOCOL.md sec 4 / real firmware's
+        // cmd_task.c's handle_sys_set_timescale() both document/decode
+        // `u32 timescale_x100 LE` (PLAN.md 4.2/5.2's x100 fixed point,
+        // 0 treated as 1.00x by sim_engine itself) -- this handler
+        // previously decoded a raw f32 here, a real protocol mismatch that
+        // happened to still round-trip against kilnsim's own (also
+        // previously wrong) payloads.py encoder but would silently
+        // misbehave against real hardware. Request: [u32 timescale_x100].
+        uint32_t v = ar_u32le(r);
+        if (r->overflow) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+        d->timescale_x100 = (v == 0u) ? 100u : v; // 0 treated as 1.00x, PROTOCOL.md sec 4
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         return true;
     }
@@ -1032,6 +1060,7 @@ static bool dispatch_tc(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         if (n == 0) { rw_u8(w, SIMFW_CMD_STATUS_ERR_INTERNAL); return true; }
         apply_edge_effects(d, events, n);
         recompute_overrides(d);
+        push_fault_events_to_ring(d, events, n); // same gap as FAULT_FIRE_NOW, see that helper's comment
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         rw_u16le(w, sid);
         return true;
@@ -1464,6 +1493,7 @@ static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         if (n == 0) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BUSY); return true; }
         apply_edge_effects(d, events, n);
         recompute_overrides(d);
+        push_fault_events_to_ring(d, events, n); // see push_fault_events_to_ring()'s own comment
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         return true;
     }

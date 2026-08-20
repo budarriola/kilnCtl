@@ -3,8 +3,17 @@
 Implements ``firmware/SimFW/docs/PLAN.md`` section 8.2's run-report JSON
 shape: scenario name/version/hash, firmware versions, seed, timescale, start
 time, full event list, telemetry samples, per-expectation
-``{name, PASS|FAIL|SKIPPED, evidence: [event seqs]}``, overall verdict, and
-validity flags (SPI underruns, event-seq gaps => run invalid, not failed).
+``{name, PASS|FAIL|SKIPPED|BLOCKED, evidence: [event seqs]}``, overall
+verdict, and validity flags (SPI underruns, event-seq gaps => run invalid,
+not failed).
+
+BLOCKED (added this pass) is a fourth verdict class for an expectation that
+carries a scenario ``blocked_on: {reason, phase}`` annotation (PLAN.md sec
+8.1's template, ``firmware/SimFW/scenarios/welded_ssr_midfire.yaml``'s header
+comment) and did not pass -- known, tracked DUT incompleteness, distinct
+from a genuine FAIL. See the ``BLOCKED`` module constant and
+``_apply_blocked_on`` below for the full policy, including the "unexpectedly
+passed" stale-annotation case.
 
 :func:`evaluate_expectations` is pure Python logic over a scenario and a
 captured event list -- no hardware, no link -- which is exactly why it is the
@@ -47,10 +56,25 @@ from typing import Any, Optional
 from .protocol import Event, EventType, WIRE_EVENT_TYPES
 from .scenario import EventThenExpect, ForbidExpect, AtEndExpect, Scenario
 
-#: Verdict strings, matching PLAN.md sec 8.2's "PASS|FAIL|SKIPPED".
+#: Verdict strings, matching PLAN.md sec 8.2's "PASS|FAIL|SKIPPED", plus
+#: BLOCKED (added this pass -- see the "blocked_on" section below).
 PASS = "PASS"
 FAIL = "FAIL"
 SKIPPED = "SKIPPED"
+#: An expectation carrying a scenario ``blocked_on:`` annotation (welded_ssr_
+#: midfire.yaml's template comment, kilnsim.scenario's ``_parse_blocked_on``)
+#: that did NOT pass -- distinct from FAIL. `blocked_on:` marks expectations
+#: that cannot pass against TODAY's DUT by design of the roadmap (a guard
+#: input the DUT structurally never populates yet, a relay path with zero
+#: callers, etc.), not a defect in the guard, the fixture, or the scenario.
+#: Reporting these as FAIL would make the suite look broken when it is
+#: actually blocked on known, tracked, upstream incompleteness; reporting
+#: them as SKIPPED would lose the reason/phase information and conflate them
+#: with "the triggering condition never arose" (a genuinely different
+#: situation -- SKIPPED already means that). BLOCKED is its own verdict so a
+#: report reader (and report.py's own overall-verdict logic below) can tell
+#: all three apart at a glance.
+BLOCKED = "BLOCKED"
 
 _POSITIVE_WORDS = {"open", "on", "asserted", "true", "present"}
 _NEGATIVE_WORDS = {"closed", "close", "off", "deasserted", "false", "absent"}
@@ -63,17 +87,35 @@ class ReportError(ValueError):
 @dataclass
 class ExpectationResult:
     name: str
-    verdict: str  # PASS | FAIL | SKIPPED
+    verdict: str  # PASS | FAIL | SKIPPED | BLOCKED
     evidence: list = field(default_factory=list)  # event seqs
     detail: str = ""
+    #: Carried through verbatim from the scenario's own ``blocked_on:``
+    #: mapping ({"reason": ..., "phase": ...}) whenever the clause has one,
+    #: regardless of which verdict it ended up with -- present even on a
+    #: PASS (see ``stale_annotation`` below), so a report reader always has
+    #: the full picture for an annotated clause.
+    blocked_on: Optional[dict] = None
+    #: True only for the "unexpectedly passed" case: the clause carries a
+    #: ``blocked_on:`` annotation but evaluated to PASS anyway -- a real,
+    #: valuable signal that the DUT gained a capability the annotation
+    #: assumed it didn't have. Verdict stays PASS (it genuinely did pass);
+    #: this flag is what a report consumer checks to notice the annotation
+    #: is now stale and should be removed from the scenario file.
+    stale_annotation: bool = False
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "verdict": self.verdict,
             "evidence": list(self.evidence),
             "detail": self.detail,
         }
+        if self.blocked_on is not None:
+            d["blocked_on"] = dict(self.blocked_on)
+        if self.stale_annotation:
+            d["stale_annotation"] = True
+        return d
 
 
 @dataclass
@@ -135,6 +177,16 @@ class Report:
     @property
     def passed(self) -> bool:
         return self.verdict == PASS
+
+    @property
+    def blocked(self) -> bool:
+        """True for the overall-BLOCKED verdict (see ``evaluate_expectations``'s
+        overall-verdict rule): every non-PASS expectation in this run is a
+        documented ``blocked_on:`` case and none is a genuine FAIL. Distinct
+        from ``passed`` -- a BLOCKED run is not a clean PASS -- but also not
+        a failure a CI gate should redden for; see cli.py's ``cmd_run`` for
+        the exit-code consequence."""
+        return self.verdict == BLOCKED
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +465,48 @@ def _check_event_seq_gap(events: list) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# blocked_on post-processing
+# ---------------------------------------------------------------------------
+def _apply_blocked_on(clause, result: ExpectationResult) -> ExpectationResult:
+    """Reinterprets a clause's raw PASS/FAIL/SKIPPED ``result`` in light of
+    its scenario ``blocked_on:`` annotation (if any) -- see the ``BLOCKED``
+    constant's own doc comment above for the reasoning; this is where that
+    policy is actually applied. Called once per clause, after the normal
+    ``_eval_event_then``/``_eval_forbid``/``_eval_at_end`` evaluation, so the
+    per-clause evaluators themselves stay ignorant of ``blocked_on:``
+    entirely (PLAN.md 8.1's `_parse_expect` already tolerated the key
+    without reading it; this is report.py's own new consumer).
+
+    - No ``blocked_on:`` on the clause: ``result`` is returned unchanged.
+    - ``blocked_on:`` present and the raw verdict is FAIL or SKIPPED (the
+      documented DUT gap kept the expectation from passing, whether that
+      showed up as an outright FAIL or as its triggering condition never
+      arising): verdict becomes BLOCKED, carrying ``reason``/``phase``.
+    - ``blocked_on:`` present and the raw verdict is PASS (the DUT gained
+      the capability the annotation assumed it lacked): verdict STAYS PASS
+      -- it genuinely passed -- but ``stale_annotation`` is set and the
+      ``blocked_on`` reason/phase are still attached, so whoever owns that
+      roadmap phase can find out their annotation needs removing instead of
+      the signal being silently swallowed (task brief's explicit ask).
+    """
+    if clause.blocked_on is None:
+        return result
+    if result.verdict == PASS:
+        return ExpectationResult(
+            name=result.name, verdict=PASS, evidence=result.evidence,
+            detail=result.detail + " [blocked_on annotation is STALE: this expectation now passes -- "
+                                    "the DUT appears to have gained the capability the annotation assumed "
+                                    "it lacked; consider removing blocked_on from the scenario]",
+            blocked_on=clause.blocked_on, stale_annotation=True,
+        )
+    return ExpectationResult(
+        name=result.name, verdict=BLOCKED, evidence=result.evidence,
+        detail=result.detail + f" [BLOCKED: {clause.blocked_on.get('reason', 'no reason given')}]",
+        blocked_on=clause.blocked_on,
+    )
+
+
+# ---------------------------------------------------------------------------
 # top-level API
 # ---------------------------------------------------------------------------
 def evaluate_expectations(scenario: Scenario, events: list,
@@ -425,35 +519,62 @@ def evaluate_expectations(scenario: Scenario, events: list,
     """Check ``scenario.expect`` against a captured, seq-ordered ``events``
     list and build the run :class:`Report` (PLAN.md sec 8.2).
 
-    Overall verdict is PASS only if every expectation is PASS and the
-    validity flags are clean (a SKIPPED expectation does not fail the run --
-    it means its triggering condition never arose -- but it does mean the
-    verdict can't be an unqualified PASS either, so a run with any SKIPPED
-    expectation and no FAILs is reported PASS with those SKIPPED entries
-    visible, matching "SKIPPED" being a first-class verdict alongside PASS/
-    FAIL in PLAN.md sec 8.2 rather than a synonym for FAIL).
+    Overall verdict is PASS only if every expectation is PASS or SKIPPED and
+    the validity flags are clean (a SKIPPED expectation does not fail the
+    run -- it means its triggering condition never arose -- so a run with
+    any SKIPPED expectation and no FAILs is reported PASS with those SKIPPED
+    entries visible, matching "SKIPPED" being a first-class verdict alongside
+    PASS/FAIL in PLAN.md sec 8.2 rather than a synonym for FAIL).
+
+    A clause carrying a scenario ``blocked_on:`` annotation (see the
+    ``BLOCKED`` module constant's own doc comment) that does not pass is
+    reported BLOCKED instead of FAIL/SKIPPED, and the overall verdict
+    follows suit: FAIL beats BLOCKED beats PASS. A run with a genuine FAIL
+    anywhere is still FAIL regardless of any BLOCKED entries; a run with no
+    FAIL but at least one BLOCKED is reported BLOCKED overall -- not PASS
+    (something genuinely didn't pass), not FAIL (it is known, tracked DUT
+    incompleteness, not a surprise regression). A ``blocked_on:``-annotated
+    clause that unexpectedly PASSes stays PASS (see ``_apply_blocked_on``)
+    and does not by itself prevent an unqualified overall PASS.
     """
     events = sorted(events, key=lambda e: e.seq)
     results = []
     for clause in scenario.expect:
         if isinstance(clause, EventThenExpect):
-            results.append(_eval_event_then(clause, events))
+            raw = _eval_event_then(clause, events)
         elif isinstance(clause, ForbidExpect):
-            results.append(_eval_forbid(clause, events))
+            raw = _eval_forbid(clause, events)
         elif isinstance(clause, AtEndExpect):
-            results.append(_eval_at_end(clause, events))
+            raw = _eval_at_end(clause, events)
         else:  # pragma: no cover - scenario.py only produces the three above
             raise ReportError(f"unhandled expect clause type: {type(clause)}")
+        results.append(_apply_blocked_on(clause, raw))
 
     validity = ValidityFlags(
         spi_underrun=spi_underrun,
         event_seq_gap=_check_event_seq_gap(events),
     )
 
+    # Overall verdict (PLAN.md sec 8.2, extended this pass for BLOCKED):
+    #   FAIL    -- the run is invalid, or at least one expectation is a
+    #              genuine FAIL (a blocked_on-annotated clause that didn't
+    #              pass is BLOCKED, not FAIL, so it never lands here).
+    #   BLOCKED -- no FAIL and no invalidity, but at least one expectation
+    #              is BLOCKED. Deliberately its own overall verdict, neither
+    #              PASS nor FAIL: a run whose only non-passes are documented,
+    #              tracked DUT incompleteness should not redden a CI gate
+    #              (that would just be re-reporting a known, already-tracked
+    #              gap as a surprise failure) but also must not read as an
+    #              unqualified clean PASS (something genuinely did not pass)
+    #              -- see cli.py's cmd_run for the resulting exit-code choice.
+    #   PASS    -- everything else (every expectation PASS or SKIPPED, run
+    #              valid) -- unchanged from the pre-BLOCKED behavior.
     if not validity.valid:
         overall = FAIL  # an invalid run cannot be certified PASS, PLAN.md sec 8.2
     elif any(r.verdict == FAIL for r in results):
         overall = FAIL
+    elif any(r.verdict == BLOCKED for r in results):
+        overall = BLOCKED
     else:
         overall = PASS
 
@@ -490,6 +611,8 @@ def report_from_dict(data: dict) -> Report:
             ExpectationResult(
                 name=e["name"], verdict=e["verdict"],
                 evidence=list(e.get("evidence", [])), detail=e.get("detail", ""),
+                blocked_on=dict(e["blocked_on"]) if e.get("blocked_on") is not None else None,
+                stale_annotation=bool(e.get("stale_annotation", False)),
             )
             for e in data.get("expectations", [])
         ],

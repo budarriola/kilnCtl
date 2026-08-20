@@ -92,18 +92,32 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
     # `virtual_simfw` (firmware/SimFW/tools/virtual_simfw/) DOES implement
     # all three for real (a documented virtual-device-only extension -- see
     # that tool's README.md), so their args are now encoded for real rather
-    # than dropped: RESET_SIM [u8 keep_params], SET_TIMESCALE [f32 value],
-    # SET_SEED [u32 value]. This used to be a bare `bytes([cmd])` for all
-    # three, silently dropping `payload["value"]`/`payload["keep_params"]`
-    # entirely -- a real bug, since run_test_scenario()/cmd_run() both call
-    # SET_SEED/SET_TIMESCALE expecting the value to actually reach the
-    # device. The round trip against real (unmodified) firmware still comes
-    # back ERR_NOT_IMPL, not a decode error, since real cmd_task.c's stub
-    # path never reads past its own dispatch-table lookup on byte0.
+    # than dropped: RESET_SIM [u8 keep_params], SET_TIMESCALE
+    # [u32 timescale_x100 LE], SET_SEED [u32 value]. This used to be a bare
+    # `bytes([cmd])` for all three, silently dropping
+    # `payload["value"]`/`payload["keep_params"]` entirely -- a real bug,
+    # since run_test_scenario()/cmd_run() both call SET_SEED/SET_TIMESCALE
+    # expecting the value to actually reach the device. The round trip
+    # against real (unmodified) firmware still comes back ERR_NOT_IMPL, not
+    # a decode error, since real cmd_task.c's stub path never reads past its
+    # own dispatch-table lookup on byte0.
+    #
+    # SET_TIMESCALE's wire shape (PROTOCOL.md sec 4 / real firmware's
+    # cmd_task.c's `handle_sys_set_timescale()`) is `u32 timescale_x100 LE`
+    # (PLAN.md 4.2/5.2's x100 fixed point: 1000 == 10.00x, 100 == 1.00x),
+    # NOT a raw f32 -- this module previously encoded a bare f32 here,
+    # matching `virtual_simfw.c`'s (also wrong) decoder rather than
+    # PROTOCOL.md/real firmware, which would silently misbehave against
+    # actual hardware (a raw IEEE-754 f32 bit pattern reinterpreted as a
+    # u32 fixed-point value is nowhere near the intended timescale).
+    # `payload["value"]` is the caller-facing multiplier (1.0 == real time,
+    # matching GET_SIM_STATE/TELEMETRY's own `timescale_x100 / 100.0`
+    # decode), converted to the wire's x100 fixed point here.
     if cmd == 3:
         return bytes([cmd, 1 if payload.get("keep_params") else 0])
     if cmd == 4:
-        return bytes([cmd]) + struct.pack("<f", float(payload.get("value", 1.0)))
+        timescale_x100 = int(round(float(payload.get("value", 1.0)) * 100.0))
+        return bytes([cmd]) + struct.pack("<I", timescale_x100 & 0xFFFFFFFF)
     if cmd == 5:
         return bytes([cmd]) + struct.pack("<I", int(payload.get("value", 0)) & 0xFFFFFFFF)
     if cmd == 7:  # GET_SIM_STATE (PROTOCOL.md sec 4) -- no args

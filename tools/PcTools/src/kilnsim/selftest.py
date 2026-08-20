@@ -308,14 +308,14 @@ def _fault_fired_gaps(link: SimLink, seed: int) -> "list[int]":
 
 
 def _check_determinism_spot(link: SimLink) -> "tuple[str, str]":
-    # SET_TIMESCALE is not used here deliberately: kilnsim's own
-    # payloads.py encodes it as a raw f32 (matching virtual_simfw.c's
-    # decoder) while PROTOCOL.md sec 4 / real firmware's cmd_task.c
-    # document+implement it as a u32 timescale_x100 fixed-point value --
-    # see this task's report for the precise mismatch. Leaving the default
-    # 1.00x timescale sidesteps that gap rather than tripping over it here;
-    # the probe's own period/jitter are small enough to still finish in a
-    # few real seconds at 1x.
+    # SET_TIMESCALE is not used here deliberately: payloads.py now encodes
+    # it as `u32 timescale_x100` LE, matching PROTOCOL.md sec 4 / real
+    # firmware's cmd_task.c and virtual_simfw.c's decoder (a previous pass
+    # encoded a raw f32 here, a real wire-format mismatch against real
+    # hardware -- fixed on both the PC and virtual-device sides in the same
+    # pass). Leaving the default 1.00x timescale still sidesteps needing a
+    # non-default value in this particular probe; the probe's own
+    # period/jitter are small enough to finish in a few real seconds at 1x.
     gaps1 = _fault_fired_gaps(link, seed=13)
     gaps2 = _fault_fired_gaps(link, seed=13)
     if len(gaps1) < 2 or len(gaps2) < 2:

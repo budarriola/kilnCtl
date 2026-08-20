@@ -3,7 +3,9 @@
 Subcommands: ``state``, ``preset <name>``, ``fault <target> <type>
 [--at-temp N] [--zone N]``, ``estop <open|closed>``, ``power
 <cycle|on|off>``, ``run <scenario.yaml> [--seed N] [--report out.json]``
-(exit code = pass/fail -- the CI entry point), ``monitor [--json]``.
+(exit code = pass/fail/blocked -- the CI entry point: 0 PASS, 1 FAIL, 2
+BLOCKED-only -- see ``cmd_run``'s own comment for the full reasoning),
+``monitor [--json]``.
 
 Defaults to the real :class:`~kilnsim.link.SerialSimLink`; pass ``--mock``
 to run any subcommand against :class:`~kilnsim.link.MockSimLink` instead --
@@ -175,7 +177,35 @@ def cmd_run(args) -> int:
             fh.write(report.to_json())
         print(f"report written: {args.report}", file=sys.stderr)
     print(report.to_json())
-    return 0 if report.passed else 1
+
+    # Exit-code semantics (kilnsim run is the CI gate, module docstring):
+    #   0 -- PASS. Every expectation passed (or was SKIPPED -- its
+    #        triggering condition never arose) and the run was valid.
+    #   2 -- BLOCKED. No genuine FAIL anywhere, but at least one expectation
+    #        is BLOCKED on documented, tracked DUT incompleteness
+    #        (scenario's own blocked_on:, report.py's BLOCKED verdict). This
+    #        is deliberately NOT exit 0 (an unqualified pass would hide that
+    #        something genuinely did not pass) and NOT exit 1 (a CI gate
+    #        that reds out on a known, already-tracked roadmap gap trains
+    #        people to ignore red, and re-reports old news as a fresh
+    #        failure every run) -- callers that want a strict "only 0 is OK"
+    #        gate still get a nonzero exit distinct from a real failure to
+    #        alert on if they choose to; callers that want "don't block CI
+    #        on known gaps" treat 2 as non-fatal.
+    #   1 -- FAIL. A genuine expectation failure, or the run itself was
+    #        invalid (SPI underrun / event-seq gap, PLAN.md sec 8.2).
+    if report.passed:
+        return 0
+    if report.blocked:
+        n_blocked = sum(1 for e in report.expectations if e.verdict == "BLOCKED")
+        n_stale = sum(1 for e in report.expectations if e.stale_annotation)
+        print(f"BLOCKED: {n_blocked} expectation(s) blocked on documented DUT incompleteness "
+              f"(exit 2, not a CI failure)"
+              + (f"; {n_stale} blocked_on annotation(s) unexpectedly PASSED -- "
+                 f"consider removing them from their scenario" if n_stale else ""),
+              file=sys.stderr)
+        return 2
+    return 1
 
 
 def cmd_io(args) -> int:
@@ -375,7 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--off-ms", type=int, default=200, dest="off_ms")
     sp.set_defaults(func=cmd_power)
 
-    sp = sub.add_parser("run", help="run a scenario YAML; exit code = pass/fail")
+    sp = sub.add_parser("run", help="run a scenario YAML; exit code 0=PASS, 1=FAIL, 2=BLOCKED-only")
     sp.add_argument("scenario_path")
     sp.add_argument("--seed", type=int, default=None)
     sp.add_argument("--timescale", type=float, default=None, help="override the scenario's own timescale")

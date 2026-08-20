@@ -47,6 +47,7 @@ class EventThenExpect:
     name: str
     event: dict
     then: dict
+    blocked_on: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class ForbidExpect:
 
     name: str
     forbid: dict
+    blocked_on: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,7 @@ class AtEndExpect:
 
     name: str
     at_end: dict
+    blocked_on: Optional[dict] = None
 
 
 ExpectClause = Union[EventThenExpect, ForbidExpect, AtEndExpect]
@@ -228,6 +231,27 @@ def _parse_fault(data: dict) -> FaultSpec:
     )
 
 
+def _parse_blocked_on(data: dict, name: str) -> Optional[dict]:
+    """``blocked_on:`` (PLAN.md sec 8.1's template, `welded_ssr_midfire.yaml`'s
+    header comment) -- an optional sibling of event/then/forbid/at_end on any
+    ``expect:`` entry, marking an expectation that cannot pass against
+    today's DUT by design of the roadmap, not by a defect in the guard, the
+    fixture, or the scenario. Shape: ``{reason: <str>, phase: <str>}``, both
+    plain strings (the template's own doc: "reason names the specific
+    missing SaftyFW input/behavior ... phase names the roadmap phase that
+    supplies it"). Loosely validated here -- only that it is present as a
+    mapping if given at all -- since this loader's job is structural
+    validation, not enforcing prose content; report.py (evaluate_expectations)
+    is what actually reads ``reason``/``phase`` back out for the BLOCKED
+    verdict."""
+    if "blocked_on" not in data:
+        return None
+    blocked_on = data["blocked_on"]
+    if not isinstance(blocked_on, dict):
+        raise ScenarioError(f"expect entry {name!r}: 'blocked_on' must be a mapping, got {blocked_on!r}")
+    return dict(blocked_on)
+
+
 def _parse_expect(data: dict) -> ExpectClause:
     if "name" not in data:
         raise ScenarioError(f"expect entry missing 'name': {data!r}")
@@ -240,11 +264,12 @@ def _parse_expect(data: dict) -> ExpectClause:
             f"expect entry {name!r} must be exactly one of "
             "(event+then) / forbid / at_end, got {list(data)}"
         )
+    blocked_on = _parse_blocked_on(data, name)
     if has_event:
-        return EventThenExpect(name=name, event=dict(data["event"]), then=dict(data["then"]))
+        return EventThenExpect(name=name, event=dict(data["event"]), then=dict(data["then"]), blocked_on=blocked_on)
     if has_forbid:
-        return ForbidExpect(name=name, forbid=dict(data["forbid"]))
-    return AtEndExpect(name=name, at_end=dict(data["at_end"]))
+        return ForbidExpect(name=name, forbid=dict(data["forbid"]), blocked_on=blocked_on)
+    return AtEndExpect(name=name, at_end=dict(data["at_end"]), blocked_on=blocked_on)
 
 
 # ---------------------------------------------------------------------------

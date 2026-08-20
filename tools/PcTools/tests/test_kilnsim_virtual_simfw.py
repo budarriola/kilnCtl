@@ -118,9 +118,17 @@ def test_tc_stuck_fault_fires_without_a_dut():
     """An AT_SIM_TIME-triggered fault needs no DUT at all to fire (unlike
     an AT_ZONE_TEMP trigger, which needs a DUT closing a relay to ever heat
     a zone) -- fault_fired must appear on the wire, and the DUT-gated guard/
-    K4 expectations downstream of it must FAIL (not SKIP, not PASS): the
-    triggering event genuinely occurred, the DUT-side reaction genuinely
-    never did."""
+    K4 expectations downstream of it must NOT pass: the triggering event
+    genuinely occurred, the DUT-side reaction genuinely never did.
+
+    Both of those downstream clauses carry the scenario's own `blocked_on:`
+    annotation (tc_stuck.yaml: context_valid is never set true by present-day
+    SaftyFW, Phase 7/link_task) -- report.py's BLOCKED verdict (added in the
+    same pass as this test's update) is exactly for this case: a well-formed
+    expectation that cannot pass today by documented, tracked DUT
+    incompleteness, not a surprise regression. FAIL would have been correct
+    before BLOCKED existed; asserting FAIL here now would be re-testing the
+    OLD, less-informative behavior."""
     scenario = load_scenario(_SCENARIOS_DIR / "tc_stuck.yaml")
     with _VirtualSimFW() as device:
         link = TcpSimLink()
@@ -135,9 +143,9 @@ def test_tc_stuck_fault_fires_without_a_dut():
     assert fired, "TC_STUCK's AT_SIM_TIME(t=20) trigger should fire without any DUT"
 
     names = {e.name: e.verdict for e in report.expectations}
-    assert names["sample_counter_goes_stale"] == "FAIL"  # SaftyFW's guard_warn never arrives
-    assert names["trips_after_stale_trip_deadline"] == "FAIL"  # K4 never opens
-    assert report.verdict == "FAIL"
+    assert names["sample_counter_goes_stale"] == "BLOCKED"  # SaftyFW's guard_warn never arrives (blocked_on)
+    assert names["trips_after_stale_trip_deadline"] == "BLOCKED"  # K4 never opens (blocked_on)
+    assert report.verdict == "BLOCKED"  # no genuine FAIL, but not an unqualified PASS either
 
 
 def test_until_trigger_fault_two_frame_sequence():

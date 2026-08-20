@@ -129,6 +129,40 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
 * **No `RELAY_SET_CONTACT_FAULT`** -- matches real firmware/PROTOCOL.md
   exactly (deliberately not allocated; `FAULT_SCHEDULE`'s `welded_relay`/
   `stuck_open_relay` types are the real path either way).
+* **`SET_TIMESCALE`'s wire shape was a real protocol mismatch, fixed this
+  pass.** This handler used to decode a raw `f32` argument; `PROTOCOL.md`
+  sec 4 and real firmware's `cmd_task.c` (`handle_sys_set_timescale()`) both
+  document/decode `u32 timescale_x100 LE` (PLAN.md 4.2/5.2's x100 fixed
+  point). `tools/PcTools/src/kilnsim/payloads.py`'s encoder had the matching
+  bug (also encoding a bare `f32`) -- the two happened to agree with each
+  other, so the virtual harness stayed green throughout, but both disagreed
+  with real hardware. Fixed on both sides in the same pass; a request now
+  reads correctly against either device.
+* **`FAULT_FIRE_NOW`/`TC_INJECT_FAULT` now push a `FAULT_FIRED` ring event,
+  a deliberate divergence from real firmware's current behavior, not a
+  parity bug.** `fault_engine_fire_now()` (used by both commands) sets a
+  slot straight to `FAULT_STATE_ACTIVE`, bypassing the ARMED->ACTIVE
+  transition that `fault_engine_tick()` itself watches for to emit a FIRED
+  event (`src/sim/fault_engine.c`). Neither real firmware's
+  `fault_sched_fire_now()`/`cmd_task.c` nor (until this pass) this harness
+  ever pushed a ring event for that case -- verified by reading both: real
+  firmware's `sim_engine.c` is the sim-event ring's sole producer, and it
+  only ever ring-pushes the events `fault_sched_tick()` (the regular,
+  tick-driven path) returns, never anything from an out-of-band
+  `fault_sched_fire_now()` call. So a `FAULT_FIRE_NOW`- or
+  `TC_INJECT_FAULT`-triggered fault is, as far as could be determined from
+  the source, **invisible to the event ring on real hardware today** --
+  `report.py`/scenario expectations that key off a `FAULT_FIRED` event for
+  an immediately-fired fault would silently never see it there either. This
+  harness now pushes that event anyway (`push_fault_events_to_ring()`,
+  reusing `device_tick()`'s own FIRED/CLEARED translation) because
+  `kilnsim`'s scenario suite needs it to validate immediate-fire fault
+  injection at all -- a deliberate, documented choice to make the virtual
+  device more observable than real firmware currently is, not a claim that
+  real firmware behaves this way. The underlying gap is real firmware's to
+  fix (`fault_sched.c`/`sim_engine.c`, both out of scope here); this bullet
+  exists so nobody mistakes this harness's ring event for confirmation that
+  real hardware would also report one.
 
 ## Known, virtual-only extensions
 
