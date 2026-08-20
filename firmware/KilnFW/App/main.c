@@ -753,6 +753,21 @@ void app_main(void)
     }
 
     // --- PC link -----------------------------------------------------------
+    // NOTE (2026-08-19): this block used to `return;` from app_main on
+    // either failure below, which silently skipped EVERY subsequent line in
+    // this function -- including lvgl_port_start(). On a bench where the
+    // PC<->ESP USB-serial UART is the thing that's actually broken (a known,
+    // separate, already-documented fault -- see ROADMAP.md M1's bench-state
+    // notes), that meant a dead PC cable also took down the local LCD UI,
+    // which has no dependency on the PC link at all. A board that can't be
+    // driven from a PC should still show its own screen; per this file's own
+    // "non-fatal like everything else in app_main" convention (see the
+    // Wi-Fi/mDNS/I2C comments above), a missing PC link is exactly that kind
+    // of independent, non-fatal peripheral, not a reason to abort boot.
+    // pc_link_ready gates only the uart_proto-dependent bridge tasks below;
+    // lvgl_port_start() and the fail-safe link watchdog do not take
+    // uart_proto and are unaffected either way.
+    bool pc_link_ready = false;
     static uart_owner_t uart_owner;
     esp_err_t uart_err = uart_owner_init(&uart_owner, UART_OWNER_PORT_NUM, UART_OWNER_TX_IO,
                                           UART_OWNER_RX_IO, UART_OWNER_BAUD_RATE,
@@ -760,62 +775,73 @@ void app_main(void)
                                           UART_OWNER_STACK_SIZE, tskNO_AFFINITY);
     if (uart_err != ESP_OK) {
         ESP_LOGE(TAG, "uart_owner_init failed: %s", esp_err_to_name(uart_err));
-        /* No PC link will ever come up, so the link watchdog below is never
-         * started and nothing else will ever drop the relays. Do it here,
-         * before returning, or the board sits forever with whatever the
-         * expander's power-on latch left energized. */
+        /* No PC link will ever come up. Relays go to their safe state right
+         * here rather than waiting on the link watchdog further down (which
+         * needs a link to watch and will never get one) -- otherwise the
+         * board sits with whatever the expander's power-on latch left
+         * energized. Local UI/display bring-up continues below regardless. */
         kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
                               SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
                               "the PC link UART could not be opened");
-        return;
     }
 
     static uart_protocol_t uart_proto;
-    uart_err = uart_protocol_init(&uart_proto, &uart_owner, UART_PROTO_DEVICE_ESP,
-                                   UART_PROTOCOL_TASK_PRIORITY, UART_PROTOCOL_STACK_SIZE,
-                                   tskNO_AFFINITY);
-    if (uart_err != ESP_OK) {
-        ESP_LOGE(TAG, "uart_protocol_init failed: %s", esp_err_to_name(uart_err));
-        /* Same reasoning as the uart_owner_init failure above: the port exists
-         * but nothing can be addressed over it, so no host will ever command
-         * these relays and no watchdog is watching them. */
-        kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
-                              SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
-                              "the PC link protocol stack could not be started");
-        return;
-    }
-
-    // Starts draining the backlog (everything logged since app_main started)
-    // over the wire. Started before the other bridge tasks below purely so
-    // buffered boot-time log lines -- e.g. an SX1509 or panel failure -- reach
-    // the PC as early as possible; registration order otherwise doesn't matter
-    // between these tasks.
-    if (uart_log_bridge_start(&uart_proto) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start log uart bridge task");
-    }
-
-    if (uart_bridge_start_info_task(&uart_proto) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start info uart bridge task");
-    }
-    if (uart_bridge_start_system_task(&uart_proto, &uart_owner) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start system uart bridge task");
-    }
-    if (thermo_bus.initialized) {
-        /* Reports the actual error and the free heap: this failure was hit on
-         * the bench 2026-08-12 and the old message ("Failed to start thermo
-         * uart bridge task") could not distinguish a task-registration
-         * refusal (ESP_ERR_INVALID_STATE / task id already taken) from
-         * ESP_ERR_NO_MEM, which is the difference between a logic bug and a
-         * memory-pressure problem. */
-        esp_err_t thermo_task_err = uart_bridge_start_thermo_task(&uart_proto, &thermo_bus);
-        if (thermo_task_err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start thermo uart bridge task: %s (free heap %lu B, largest block %u B)",
-                     esp_err_to_name(thermo_task_err), (unsigned long)esp_get_free_heap_size(),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+    if (uart_err == ESP_OK) {
+        uart_err = uart_protocol_init(&uart_proto, &uart_owner, UART_PROTO_DEVICE_ESP,
+                                       UART_PROTOCOL_TASK_PRIORITY, UART_PROTOCOL_STACK_SIZE,
+                                       tskNO_AFFINITY);
+        if (uart_err != ESP_OK) {
+            ESP_LOGE(TAG, "uart_protocol_init failed: %s", esp_err_to_name(uart_err));
+            /* Same reasoning as the uart_owner_init failure above: the port
+             * exists but nothing can be addressed over it, so no host will
+             * ever command these relays. */
+            kiln_enter_safe_state(io_ready ? &kio : NULL, &safety, safety_err == ESP_OK,
+                                  SAFETY_FAULT_SRC_PC_LINK | SAFETY_FAULT_SRC_APP,
+                                  "the PC link protocol stack could not be started");
+        } else {
+            pc_link_ready = true;
         }
     }
-    if (io_ready && uart_bridge_start_io_task(&uart_proto, &kio) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start io uart bridge task");
+
+    // Everything below through the control/profiles/autotune/wifi/gpio_probe
+    // block takes &uart_proto and is only valid to call once pc_link_ready is
+    // true (see the PC link block's own NOTE above). lvgl_port_start() is the
+    // one exception in this stretch -- it takes &display, not &uart_proto --
+    // so it stays outside this gate, exactly as unaffected by a dead PC link
+    // as Wi-Fi/mDNS/I2C bring-up already were above.
+    if (pc_link_ready) {
+        // Starts draining the backlog (everything logged since app_main
+        // started) over the wire. Started before the other bridge tasks below
+        // purely so buffered boot-time log lines -- e.g. an SX1509 or panel
+        // failure -- reach the PC as early as possible; registration order
+        // otherwise doesn't matter between these tasks.
+        if (uart_log_bridge_start(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start log uart bridge task");
+        }
+
+        if (uart_bridge_start_info_task(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start info uart bridge task");
+        }
+        if (uart_bridge_start_system_task(&uart_proto, &uart_owner) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start system uart bridge task");
+        }
+        if (thermo_bus.initialized) {
+            /* Reports the actual error and the free heap: this failure was hit
+             * on the bench 2026-08-12 and the old message ("Failed to start
+             * thermo uart bridge task") could not distinguish a
+             * task-registration refusal (ESP_ERR_INVALID_STATE / task id
+             * already taken) from ESP_ERR_NO_MEM, which is the difference
+             * between a logic bug and a memory-pressure problem. */
+            esp_err_t thermo_task_err = uart_bridge_start_thermo_task(&uart_proto, &thermo_bus);
+            if (thermo_task_err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start thermo uart bridge task: %s (free heap %lu B, largest block %u B)",
+                         esp_err_to_name(thermo_task_err), (unsigned long)esp_get_free_heap_size(),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+            }
+        }
+        if (io_ready && uart_bridge_start_io_task(&uart_proto, &kio) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start io uart bridge task");
+        }
     }
     // Replaces the UART DISPLAY_CMD_* remote-draw path -- LVGL owns the panel
     // now (TODO.md 10.1). uart_bridge_start_display_task() is no longer
@@ -825,12 +851,14 @@ void app_main(void)
                         screen_idle_ready ? &screen_idle : NULL) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start LVGL display task");
     }
-    if (screen_idle_ready && uart_bridge_start_touch_task(&uart_proto, &screen_idle) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start touch uart bridge task");
-    }
-    if (safety_err == ESP_OK &&
-        uart_bridge_start_safety_task(&uart_proto, &safety) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start safety uart bridge task");
+    if (pc_link_ready) {
+        if (screen_idle_ready && uart_bridge_start_touch_task(&uart_proto, &screen_idle) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start touch uart bridge task");
+        }
+        if (safety_err == ESP_OK &&
+            uart_bridge_start_safety_task(&uart_proto, &safety) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start safety uart bridge task");
+        }
     }
 
     // CONTROL/PROFILES/AUTOTUNE/WIFI (tasks 8-11): additive UART coverage for
@@ -841,25 +869,27 @@ void app_main(void)
     // wifi_prov.c getters and setters the HTTP handlers already call above,
     // so starting them unconditionally (no io_ready/thermo_bus.initialized
     // gate) matches those modules' own "safe with nothing attached" design.
-    if (uart_bridge_start_control_task(&uart_proto) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start control uart bridge task");
-    }
-    if (uart_bridge_start_profiles_task(&uart_proto) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start profiles uart bridge task");
-    }
-    if (uart_bridge_start_autotune_task(&uart_proto) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start autotune uart bridge task");
-    }
-    if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start wifi uart bridge task");
-    }
-    // ESP_ERR_NOT_SUPPORTED here just means CONFIG_KILNCTL_ENABLE_GPIO_PROBE
-    // is off (the default) -- not a failure worth an ESP_LOGE. See
-    // gpio_probe.h.
-    esp_err_t gpio_probe_err = uart_bridge_start_gpio_probe_task(&uart_proto);
-    if (gpio_probe_err != ESP_OK && gpio_probe_err != ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGE(TAG, "Failed to start gpio_probe uart bridge task: %s",
-                 esp_err_to_name(gpio_probe_err));
+    if (pc_link_ready) {
+        if (uart_bridge_start_control_task(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start control uart bridge task");
+        }
+        if (uart_bridge_start_profiles_task(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start profiles uart bridge task");
+        }
+        if (uart_bridge_start_autotune_task(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start autotune uart bridge task");
+        }
+        if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start wifi uart bridge task");
+        }
+        // ESP_ERR_NOT_SUPPORTED here just means CONFIG_KILNCTL_ENABLE_GPIO_PROBE
+        // is off (the default) -- not a failure worth an ESP_LOGE. See
+        // gpio_probe.h.
+        esp_err_t gpio_probe_err = uart_bridge_start_gpio_probe_task(&uart_proto);
+        if (gpio_probe_err != ESP_OK && gpio_probe_err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGE(TAG, "Failed to start gpio_probe uart bridge task: %s",
+                     esp_err_to_name(gpio_probe_err));
+        }
     }
 
     // --- Fail-safe on loss of the PC link -----------------------------------

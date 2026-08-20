@@ -39,3 +39,30 @@ CONFIG_LV_USE_CLIB_MALLOC=y
 # fresh checkout silently lost it (found while auditing 10.9 for this pass --
 # see TODO.md 10.9's checklist status note).
 CONFIG_LV_USE_QRCODE=y
+
+# CONFIG_ESP_MAIN_TASK_STACK_SIZE: found the hard way 2026-08-19, on real
+# hardware. Board booted, printed ILI9488's "kilnCtl ready" boot banner to
+# the panel (App/drivers/ILI9488.c), then hung there forever -- looked from
+# the outside like a frozen splash screen, and was invisible over this
+# app's own PC link (the reliable-UART log bridge never gets to start; see
+# uart_log_bridge.c) because the bench's separate PC<->ESP USB-serial UART
+# (COM9) was independently dead this same session. Read live boot output
+# instead over the ESP32-S3's native USB-Serial-JTAG port (a second, always-
+# present serial device distinct from COM9 -- CONFIG_ESP_CONSOLE_SECONDARY_
+# USB_SERIAL_JTAG is already on, so ESP-IDF's own console mirrors there
+# regardless of whether this app's own link is up), which showed the real
+# fault: "***ERROR*** A stack overflow in task main has been detected",
+# repeating every ~1s in an unbroken reboot loop, always after the ILI9488
+# banner and always around PC-link (uart_owner_init) bring-up. `main_task`
+# (the FreeRTOS task app_main() runs on) never got a config here before --
+# ESP-IDF's plain default, 3584 bytes, sized for a typical minimal app_main,
+# not one that chains I2C + SPI + Wi-Fi/mDNS + several HTTP server
+# registrations + SX1509 + three MAX31856 channels + ILI9488 + NS2009 touch
+# + LVGL setup + a dozen UART bridge task starts, all inline, all before
+# returning. Raised generously (8192, 2.3x the old value) rather than to
+# the bare minimum that happens to survive this one boot path -- a tight
+# margin here is exactly the kind of thing that comes back the next time
+# this function grows. Not yet reprofiled to find the true peak usage; a
+# future pass could measure it precisely (uxTaskGetStackHighWaterMark) and
+# right-size this rather than carry a guessed margin indefinitely.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
