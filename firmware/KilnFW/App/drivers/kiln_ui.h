@@ -68,6 +68,19 @@ esp_err_t kiln_ui_show(const char *name);
  * show) succeeds. */
 const char *kiln_ui_current_page(void);
 
+/* Re-emits the tap-target dump (widget rectangles, centre points and labels)
+ * for whatever screen is currently loaded. kiln_ui_show() already does this
+ * on every navigation, so this is only for the case where what is tappable
+ * changes WITHOUT a page switch -- ui_page_config.c's paged hub swapping
+ * which set of cells is visible being the reason it exists. Without it, a
+ * Prev/Next press silently changes every tap target on the screen and the
+ * last dump on record becomes wrong, which is worse than no dump at all.
+ *
+ * Safe to call any time; does nothing if no screen is loaded yet. Intended
+ * for bench/diagnostic use, not for anything on a hot path -- see the volume
+ * note on kiln_ui_show()'s own dump. */
+void kiln_ui_log_tap_targets(void);
+
 #ifdef __cplusplus
 }
 #endif

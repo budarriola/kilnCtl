@@ -180,6 +180,17 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
             continue;
         }
 
+        /* Skip hidden subtrees entirely. A hidden widget still reports valid
+         * coordinates, so without this the dump advertises targets that
+         * cannot be tapped -- ui_page_config.c's paged hub keeps two of its
+         * three pages hidden at all times, and listing all three made the
+         * dump report three different widgets at the same centre point. The
+         * dump's whole purpose is to say where a tap will actually land, so
+         * anything not currently hittable has no business in it. */
+        if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+
         if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
             lv_area_t area;
             lv_obj_get_coords(child, &area);
@@ -294,6 +305,15 @@ esp_err_t kiln_ui_show(const char *name)
 
     lvgl_port_set_input_enabled(true);
     return ESP_OK;
+}
+
+void kiln_ui_log_tap_targets(void)
+{
+    lv_obj_t *screen = lv_screen_active();
+    if (!screen) {
+        return;
+    }
+    log_tap_targets(screen, 0);
 }
 
 const char *kiln_ui_current_page(void)

@@ -168,7 +168,13 @@ static void build_channel_row(lv_obj_t *parent, uint8_t channel, lv_color_t acce
 {
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_set_width(row, lv_pct(100));
-    lv_obj_set_height(row, UI_PAGE_THERMO_FAULTS_ROW_HEIGHT_PX);
+    /* Shares the list's height with its siblings rather than claiming a fixed
+     * UI_PAGE_THERMO_FAULTS_ROW_HEIGHT_PX -- see the list's comment in
+     * ui_page_thermo_faults_build() for why (three fixed 72px rows overflowed
+     * the page and hid the third channel). ROW_HEIGHT_PX is kept as the
+     * documented design target the flex result should land near, not as a
+     * hard size. */
+    lv_obj_set_flex_grow(row, 1);
     lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
@@ -233,13 +239,26 @@ lv_obj_t *ui_page_thermo_faults_build(void)
     lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Fixed-height, internally scrollable -- see this file's header comment
-     * for the worst-case row-height math this depends on. */
+    /* Grows to fill what content has left after the Back row, and does NOT
+     * scroll. 2026-08-20: this was a fixed UI_PAGE_THERMO_FAULTS_LIST_HEIGHT_PX
+     * (180px) internally-scrollable box holding three
+     * UI_PAGE_THERMO_FAULTS_ROW_HEIGHT_PX (72px) rows -- 3*72 + 2 gaps =
+     * 224px of content in a 180px viewport, so the third channel was always
+     * off-screen behind a scroll gesture. On a page whose entire purpose is
+     * "show me every channel's fault state at a glance", hiding a third of
+     * the channels defeats the page.
+     *
+     * Scrolling is not permitted on this project's LCD pages. The list now
+     * takes content's remaining ~219px and the rows below share it via
+     * flex_grow, which lands each at ~70px -- close enough to the original 72
+     * to keep the two-to-three text lines per row the header comment's
+     * worst-case math assumed, with none of the clipping. Row height being
+     * derived rather than hard-coded also means a fourth channel would
+     * shrink the rows rather than silently push one off the page. */
     lv_obj_t *list = lv_obj_create(content);
     lv_obj_set_width(list, lv_pct(100));
-    lv_obj_set_height(list, UI_PAGE_THERMO_FAULTS_LIST_HEIGHT_PX);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);

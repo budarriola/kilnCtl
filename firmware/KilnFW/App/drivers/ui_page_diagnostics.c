@@ -173,14 +173,29 @@ lv_obj_t *ui_page_diagnostics_build(void)
     lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Fixed-height, internally scrollable -- see this file's header comment
-     * on why (7 rows would blow the ~264px budget at LV_SIZE_CONTENT row
-     * heights). */
+    /* Grows to fill what content has left after the Back row, and does NOT
+     * scroll. 2026-08-20: this was a fixed UI_PAGE_DIAGNOSTICS_LIST_HEIGHT_PX
+     * internally-scrollable box, on the assumption that 7 rows could not fit
+     * the page budget. Measuring the real post-layout geometry on hardware
+     * (kiln_ui.c's tap-target dump) showed that assumption was wrong twice
+     * over: the rows render at 23px, not the LV_SIZE_CONTENT height the old
+     * comment assumed, so all 7 need 7*23 + 6*(UI_THEME_PADDING_PX/2) =
+     * ~191px -- comfortably inside the ~219px content leaves after the 44px
+     * Back row and its gap. The old 180px box was therefore both unnecessary
+     * AND too short: it clipped the last row ("ESP32-S3 die temp" rendered at
+     * y=212..235 against a viewport ending at y=223), so the one number this
+     * page exists to surface was the one you had to scroll to see.
+     *
+     * Scrolling is not permitted on this project's LCD pages, so the fix is
+     * to let the list take the room it actually has. flex_grow rather than a
+     * new hard-coded number keeps it correct if a row is added or the theme's
+     * padding changes -- and if it ever genuinely overflows, the honest fix
+     * is to page it the way ui_page_config.c's hub now does, not to
+     * reintroduce a scrollbar. */
     lv_obj_t *list = lv_obj_create(content);
     lv_obj_set_width(list, lv_pct(100));
-    lv_obj_set_height(list, UI_PAGE_DIAGNOSTICS_LIST_HEIGHT_PX);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
