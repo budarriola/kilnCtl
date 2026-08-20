@@ -1,12 +1,20 @@
 name: power_blip
 version: 1
-exercises: [S6]
+exercises: [S6b]
 # S6a (mainFault) and S6b (link timeout) are treated separately, per
 # SAFETY_MODEL.md §4 S6's own instruction that "they are not redundant
 # copies of each other and must never be collapsed into one": with the main
 # board unpowered, R8 pulls GPIO10 (mainFault) high, which reads *healthy* —
-# "mainFault cannot detect a dead ESP" — so only S6b's link-timeout path can
-# possibly react here (SAFETY_MODEL.md §4 S6).
+# "mainFault cannot detect a dead ESP" — so S6a structurally CANNOT react to
+# an unannounced DUT power cut (confirmed by re-reading safety_guards.c: its
+# S6a block reads only in->main_fault_asserted, which this fault has no way
+# to set true) and only S6b's link-timeout path can possibly react here.
+# Previously declared as generic `S6`; corrected to the specific `S6b` this
+# scenario actually exercises (audit finding, see
+# firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md §5). S6a coverage for an
+# ESP-detected fault (as opposed to an ESP-unpowered fault, which S6a cannot
+# see by design) is a separate scenario:
+# firmware/SimFW/scenarios/mainfault_tc_disconnect.yaml.
 #
 # This fault is NOT one of PLAN.md §7.1's three catalog tables — it uses the
 # fixture's dedicated DUT 12V power relay (PLAN.md §3.4/§6.2), a distinct

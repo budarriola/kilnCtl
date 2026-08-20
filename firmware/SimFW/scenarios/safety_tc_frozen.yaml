@@ -1,0 +1,55 @@
+name: safety_tc_frozen
+version: 1
+exercises: [S11]
+# S11 ("Frozen safety reading", SAFETY_MODEL.md §4) applies to *whichever*
+# safety-side source is active -- the Pico's own MAX31856 (tc_source=OWN_J7),
+# a borrowed zone channel (BORROWED_ZONE), or both (BOTH). This scenario
+# freezes the safety-side channel (tc:safety) directly with `stuck_tc`,
+# which is the right target regardless of tc_source: in OWN_J7/BOTH it
+# freezes the Pico's own conversion (the case this scenario is built for);
+# in BORROWED_ZONE it would freeze the exact main-side register the ESP
+# forwards over the context link, which is *also* S13's trigger condition on
+# the same fault mechanism -- see tc_stuck.yaml's own manual_checks note
+# (that file fires the identical `stuck_tc` fault on tc:0, the main-side
+# channel, specifically to land on S13 instead of S11). The two guards read
+# disjoint facts (safety_guards.c: S11 reads only tc_c/tc_valid/
+# heat_commanded; S13 reads only context_valid/sample_counter_advancing) so
+# firing on tc:safety here cannot accidentally exercise S13 instead.
+preset: fast_test
+timescale: 10
+seed: 61
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: freeze
+    # PLAN.md §7.1 TC/sensor fault catalog: "Stuck TC | LTCB frozen at last
+    # value while zone keeps moving". Fired 5s in (near the start of the
+    # ramp) so the ~600s frozen_window_s accumulates from as close to t=0 as
+    # this library's convention allows (matching tc_disconnect_ramp.yaml's
+    # early-in-the-ramp placement for the same reason: leave the whole rest
+    # of the run to observe the guard).
+    type: stuck_tc
+    target: tc:safety
+    trigger: { at_sim_time: { t: 5 } }
+    duration: permanent
+expect:
+  - name: no_early_trip
+    forbid: { dut: K4_open, before: { fault: freeze } }
+  - name: frozen_window_trips_s11
+    event: { type: fault_fired, slot: freeze }
+    then:
+      event: { type: guard_trip, guard: S11 }
+      within_s: 605       # frozen_window_s = 600s (SAFETY_MODEL.md §4 S11)
+                           # + ~5s margin for the guard's own 10Hz-class
+                           # evaluation tick, same margin convention as
+                           # welded_ssr_midfire.yaml/tc_stuck.yaml
+      not_before_s: 598   # must not trip before the 600s bar clears
+                           # (two-bar doctrine, SAFETY_MODEL.md §2)
+  - name: trip_latched
+    at_end: { dut: K4_open }
+manual_checks:
+  - "Confirm SaftyFW is commissioned with tc_source=OWN_J7, BORROWED_ZONE, or BOTH before running -- S11 evaluates against whichever source is active (SAFETY_MODEL.md §4 S11), and commissioning state is not something the fixture itself can verify or set."
+  - "KNOWN GAP, not a fixture limitation: as of this pass, firmware/SaftyFW/src/tasks/safety_core.c builds safety_guard_input_t with heat_commanded hardcoded to false ('no current sense yet, Phase 6' per its own comment). S11's trip path is gated on `in->tc_valid && in->heat_commanded` (safety_guards.c), so with heat_commanded permanently false this scenario cannot actually trip S11 against present-day SaftyFW no matter what the fixture does -- the guard's own logic (safety_guards.c) and this scenario's provocation both match the documented design in SAFETY_MODEL.md; what's missing is the Phase-6 current-sense wiring safety_core.c's own comment already flags as future work. Re-run once that wiring lands."
+  - "Physics reachability: cone6_fast's target temperature is expected to be well above fast_test's zone-0 steady-state asymptote (~505 degC = T_ambient + V_mains^2/(R_element*k_loss) = 25 + 240^2/(15*8), derived from thermal_model.c THERMAL_PRESET_FAST_TEST's unmodified zone-0 params: C=2000 J/degC, k_loss=8 W/degC, R_element=15 ohm, V_mains=240V), so the DUT's PID should be unable to satisfy setpoint and should command near-100% duty continuously for the whole run rather than settling into a duty-cycled soak -- this matters because heat_commanded resets S11's elapsed-time accumulator to 0 on any gap (safety_guards.c: `else { state->s11_window_active = false; }`), so a soak phase partway through the 600s window would silently restart the clock. If a future profile change makes cone6_fast reachable under fast_test's physics, re-check this assumption before trusting the within_s/not_before_s deadlines above."
+report_keep: [telemetry, events]

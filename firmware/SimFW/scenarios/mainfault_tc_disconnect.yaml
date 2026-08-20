@@ -1,0 +1,65 @@
+name: mainfault_tc_disconnect
+version: 1
+exercises: [S6a]
+# S6a ("The ESP explicitly asserts fault", SAFETY_MODEL.md §4 S6) trips on
+# `mainFault` (GPIO10) reading LOW, debounced 200ms -- an unambiguous signal
+# the fixture cannot drive directly (PLAN.md §3.4: the `Fault` line is
+# ESP-driven, GPIO6 -> U1 opto -> the Pico's GPIO10, and the fixture only
+# *senses* it). The only way to provoke S6a through this fixture is to make
+# the real DUT (KilnFW) decide, on its own, to assert its fault output.
+# firmware/KilnFW/docs/SAFETY_MODEL.md §"boot faults"/live-fault table and
+# App/drivers/safety_link.h document that a main-board thermocouple fault
+# does exactly that: guard 6 (sensor validity) trips after 3 consecutive bad
+# reads *while a profile is actively running that zone* and asserts a live
+# `SAFETY_FAULT_SRC_THERMO`, which lights U1's LED and pulls the Pico's
+# mainFault input low (KilnFW/docs/SAFETY_MODEL.md: "guard 6 ... trips after
+# 3 consecutive bad reads and asserts a live SAFETY_FAULT_SRC_THERMO ...
+# live-verified end to end on the real board"). This scenario disconnects a
+# main-side channel (tc:0, ESP/bus-A side -- NOT tc:safety, which is the
+# Pico's own independent sensor and cannot affect mainFault at all) to
+# provoke that path indirectly, which is the only path this fixture has.
+preset: fast_test
+timescale: 10
+seed: 63
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: oc_main
+    type: disconnected_tc
+    target: tc:0
+    # Fired 5s in so cone6_fast's profile is already actively running zone 0
+    # -- the live SAFETY_FAULT_SRC_THERMO escalation this scenario relies on
+    # only fires "while a profile is actively running a zone"
+    # (KilnFW/docs/SAFETY_MODEL.md); outside of a running profile the same
+    # live fault does not block relay-on or assert mainFault at all.
+    trigger: { at_sim_time: { t: 5 } }
+    duration: permanent
+expect:
+  - name: no_early_trip
+    forbid: { dut: K4_open, before: { fault: oc_main } }
+  - name: mainfault_trips_s6a
+    event: { type: fault_fired, slot: oc_main }
+    then:
+      event: { type: guard_trip, guard: S6a }
+      within_s: 3         # no single frozen number exists for KilnFW's own
+                           # "3 consecutive bad reads" cadence (MAX31856
+                           # conversion cadence is "~100ms nominal",
+                           # PLAN.md §3.2) plus SaftyFW's 200ms mainFault
+                           # debounce (SAFETY_MODEL.md §4 S6a) -- generous
+                           # margin used deliberately rather than a guessed
+                           # precise figure
+      not_before_s: 0.1   # must not trip on the very first bad read alone
+                           # -- KilnFW's guard 6 requires 3 *consecutive*
+                           # bad reads before it escalates at all
+  - name: fault_line_asserted
+    event: { type: fault_fired, slot: oc_main }
+    then:
+      dut: fault_line_asserted
+      within_s: 3
+  - name: trip_latched
+    at_end: { dut: K4_open }
+manual_checks:
+  - "Confirm KilnFW's cone6_fast profile is actively running zone 0 (not paused/idle) by the time this fault fires at t=5s -- the live SAFETY_FAULT_SRC_THERMO escalation this scenario depends on is documented as profile-gated, not unconditional (firmware/KilnFW/docs/SAFETY_MODEL.md: 'a live thermocouple fault during operation still does not block relay-on outside of a running profile')."
+  - "Confirm KilnFW's LCD/web UI surfaces the mainFault/thermocouple trip reason distinctly -- fixture cannot read display/web content."
+report_keep: [telemetry, events]

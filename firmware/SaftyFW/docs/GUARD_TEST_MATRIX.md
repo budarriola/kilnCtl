@@ -296,12 +296,13 @@ recorded per section 4's convention.
 | S3 | `runaway_zone`, `welded_contactor_s9`, `welded_ssr_midfire` |
 | S4 | `broken_element`, `welded_ssr_midfire` |
 | S5 | `cj_fault`, `spi_flaky_tc_ic`, `tc_disconnect_ramp`, `tc_disconnect_soak`, `tc_flaky` |
-| S6a / S6b | `power_blip` (scenario declares generic `S6`, not split a/b — see note below) |
+| S6a | `mainfault_tc_disconnect` |
+| S6b | `power_blip` |
 | S7 | `estop_at_boot`, `estop_midfire` |
 | S8 | `runaway_zone` (S8 itself ships disabled per `SAFETY_MODEL.md`; this scenario documents expected *current* behavior, ready for when S8 gets a measured threshold — `PLAN.md` section 8 item 12) |
 | S9 | `welded_contactor_s9` |
 | S10 | `main_safety_skew`, `tc_noise_storm` |
-| S11 | **none** — no scenario file declares S11 today |
+| S11 | `safety_tc_frozen` |
 | S12 | `cj_fault` |
 | S13 | `tc_stuck` |
 
@@ -327,3 +328,39 @@ here for completeness rather than omitted silently.
   directly (`firmware/SimFW/scenarios/*.yaml`, 17 files) — not by asking
   `SimFW`'s own plan to summarize itself — so it reflects the scenarios as
   written on 2026-08-20, not an aspirational mapping.
+
+**2026-08-20 follow-up: both gaps above closed, 19 scenario files now.**
+- `power_blip.yaml`'s `exercises:` was corrected from generic `S6` to the
+  specific `S6b` it actually exercises: `safety_guards.c`'s S6a block reads
+  only `in->main_fault_asserted`, and an unpowered ESP (R8 pulling GPIO10
+  high) has no way to set that true — confirmed against the code, not just
+  re-asserting the scenario file's own prior comment. S6a genuinely cannot
+  be provoked by an unannounced DUT power cut, by design (SAFETY_MODEL.md
+  §4 S6: "`mainFault` cannot detect a dead ESP").
+- A new scenario, `mainfault_tc_disconnect.yaml`, closes the resulting S6a
+  gap: it disconnects a **main-side** TC channel (`tc:0`) while a KilnFW
+  profile is actively running that zone, which (per
+  `firmware/KilnFW/docs/SAFETY_MODEL.md` and `App/drivers/safety_link.h`)
+  makes KilnFW's own guard 6 assert a live `SAFETY_FAULT_SRC_THERMO`,
+  pulling the Pico's `mainFault` input low and tripping S6a — the only path
+  this fixture has to provoke S6a at all, since the `Fault` line is
+  ESP-driven and the fixture only senses it (PLAN.md §3.4).
+- A new scenario, `safety_tc_frozen.yaml`, closes the S11 gap: it freezes
+  the safety-side channel (`tc:safety`) via the existing `stuck_tc` fault
+  type and expects a trip once `frozen_window_s` (600s default) elapses
+  with heat commanded throughout. Its own `manual_checks` flag a real,
+  separate finding made while writing it: `firmware/SaftyFW/src/tasks/
+  safety_core.c` currently hardcodes `heat_commanded = false` when building
+  `safety_guard_input_t` ("no current sense yet, Phase 6" per its own
+  comment), so **S11 cannot actually trip against present-day SaftyFW
+  regardless of what any fixture does** — the guard logic and this
+  scenario's provocation both match the documented design; what's missing
+  is the Phase-6 current-sense wiring already flagged as future work at
+  that call site. This is a SaftyFW-side wiring gap, not a scenario-writing
+  or fixture-capability gap, and is recorded here rather than papered over.
+- Both new scenarios pass `firmware/SimFW/tools/check_scenarios.py`
+  (schema, guard-ID, and fault-type/trigger-kind validation) and load
+  cleanly through `kilnsim`'s scenario loader, same as the other 17 — see
+  this repo's commit history for the exact check output. As with every
+  other row in this table, **a scenario existing and loading is not the
+  same as it having run against hardware**; none of the 19 have.
