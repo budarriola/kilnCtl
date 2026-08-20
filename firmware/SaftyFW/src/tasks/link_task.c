@@ -59,9 +59,11 @@
 #include "link_frame.h"
 
 #include "boot_reason.h"
+#include "config_store.h" // SAFETY_CMD_SET_CONFIG, see link_task_handle_set_config()
 #include "current_task.h"
 #include "discrete_task.h"
-#include "log_task.h" // CLEAR_TRIP outcome logging, see link_task_handle_clear_trip()
+#include "log_task.h" // CLEAR_TRIP/SET_CONFIG outcome logging, see link_task_handle_clear_trip()/_set_config()
+#include "max31856.h" // MAX31856_TC_TYPE_* range check, see link_task_handle_set_config()
 #include "safety_core.h"
 #include "snapshots.h"
 #include "thermo_task.h"
@@ -72,6 +74,7 @@
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_power.h"
+#include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_trip.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -309,14 +312,17 @@ static void link_task_send_fw_version(void)
     // generated yet -- TODO.md Phase 8 item, not this pass. "Unknown must map
     // to dirty = 1" (LINK_PROTOCOL.md section 4) is honoured trivially: an
     // unknown commit is reported dirty, never falsely clean. config_version/
-    // config_crc are 0 -- there is no config_store yet (Phase 9), and the
-    // spec documents 0 as meaning exactly that: "running on compiled-in
-    // defaults that were never commissioned."
+    // config_crc now come from config_store's real cache (Phase 9's store
+    // landed, and SAFETY_CMD_SET_CONFIG's link_task_handle_set_config() above
+    // is its first writer) -- still 0/0 on a never-commissioned board, since
+    // that is exactly config_store_default()'s seq=0 record, which the spec
+    // documents as meaning "running on compiled-in defaults that were never
+    // commissioned."
     uint8_t payload[16];
-    size_t len = link_frame_pack_fw_version(payload, sizeof(payload), KILNLINK_PROTOCOL_VERSION,
-                                             KILNLINK_MIN_COMPATIBLE, /* dirty = */ 1, NULL, 0, NULL,
-                                             0, s_boot_id, /* config_version = */ 0,
-                                             /* config_crc = */ 0);
+    size_t len = link_frame_pack_fw_version(
+        payload, sizeof(payload), KILNLINK_PROTOCOL_VERSION, KILNLINK_MIN_COMPATIBLE,
+        /* dirty = */ 1, NULL, 0, NULL, 0, s_boot_id, config_store_get_config_version(),
+        config_store_get_config_crc());
     if (len == 0) {
         return;
     }
@@ -677,6 +683,67 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     }
 }
 
+// SAFETY_CMD_SET_CONFIG (0x16), CommonFW/docs/LINK_PROTOCOL.md section 4 --
+// the GUI's path to commissioning config_store.h's tc_type (TODO.md Phase 9's
+// "SAFETY_CMD_SET_CONFIG (wire command) -- still not done"). Same shape as
+// link_task_handle_clear_trip() immediately above: decode and validate the
+// wire frame here, log accept/refuse, and never ACK on the wire -- the PC
+// observes the outcome via the next GET_DIAG/GET_FW_VERSION poll, not a reply
+// to this frame (LINK_PROTOCOL.md sec 4's SET_CONFIG entry).
+//
+// Two refusal paths, both checked (or delegated) before any flash write is
+// attempted:
+//   1. `tc_type` isn't a value this firmware recognises as a
+//      MAX31856_TC_TYPE_* -- checked here, since config_store.c/.h are
+//      deliberately dependency-free of max31856.h (config_store.h's own doc
+//      comment) and so cannot make this check themselves.
+//   2. The relay is currently ARMED -- config_store_write()'s own
+//      unconditional refusal (config_store_decide_write()), delegated to
+//      config_store_flash.c rather than duplicated here. This is the one
+//      place in this file that reaches (indirectly, through config_store.c)
+//      into relay state -- but link_task.c itself still never names GPIO6 or
+//      the relay, which is what THE ONE RULE THAT MATTERS (this file's
+//      header comment) actually forbids; config_store_flash.c is the file
+//      that legitimately depends on relay_owner, the same "safety_core
+//      already legitimately depends on relay_owner" carve-out this file's
+//      header comment already documents for output-status reads.
+static void link_task_handle_set_config(const kilnlink_frame_t *frame)
+{
+    kilnlink_set_config_t msg;
+    kilnlink_set_config_status_t dstatus =
+        kilnlink_set_config_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_SET_CONFIG_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file (see
+        // link_task_handle_raw_frame()'s own comments).
+        return;
+    }
+
+    if (msg.tc_type > MAX31856_TC_TYPE_T) {
+        log_task_log(LOG_LEVEL_WARN, "set_config", "refused, tc_type out of range");
+        return;
+    }
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = msg.tc_type;
+    rec.calibration_missing = true; // a new tc_type invalidates any prior
+                                     // calibration -- see config_store.h's
+                                     // own doc comment on this field; there
+                                     // is no calibration-clearing mechanism
+                                     // yet (TODO.md Phase 9's later bullets),
+                                     // so every SET_CONFIG conservatively
+                                     // re-arms it.
+
+    const char *reason = NULL;
+    bool written = config_store_write(&rec, &reason);
+    if (written) {
+        log_task_log(LOG_LEVEL_INFO, "set_config", "accepted");
+    } else {
+        log_task_log(LOG_LEVEL_WARN, "set_config", reason ? reason : "refused");
+    }
+}
+
 static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t unstuffed[LINK_RX_ASSEMBLY_MAX];
@@ -714,6 +781,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_CLEAR_TRIP_CMD:
         link_task_handle_clear_trip(&frame);
+        break;
+    case LINK_FRAME_SET_CONFIG_CMD:
+        link_task_handle_set_config(&frame);
         break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
     // call above, except the handler lives in update_task.c rather than

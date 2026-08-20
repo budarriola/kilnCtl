@@ -191,6 +191,38 @@ static void test_decide_write(void)
     TEST_CHECK(strcmp(ok_reason, refused_reason) != 0, "OK and refused reasons differ");
 }
 
+static void test_record_crc(void)
+{
+    TEST_SECTION("config_store_record_crc -- matches the packed record's trailing CRC");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 123;
+    rec.tc_type = 0x05u; // MAX31856_TC_TYPE_R
+    rec.calibration_missing = false;
+
+    uint8_t packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, packed);
+
+    // The CRC is the last 4 bytes before the trailing pad (config_store.c's
+    // REC_OFF_CRC = 248), little-endian -- read directly rather than
+    // duplicating the offset constant here, since this test only needs to
+    // prove config_store_record_crc() agrees with what pack() actually wrote.
+    uint32_t expected = (uint32_t)packed[248] | ((uint32_t)packed[249] << 8) |
+                         ((uint32_t)packed[250] << 16) | ((uint32_t)packed[251] << 24);
+
+    uint32_t got = config_store_record_crc(&rec);
+    TEST_CHECK(got == expected, "config_store_record_crc() matches config_store_pack()'s trailing CRC");
+
+    // Changing any field the CRC covers must change the result -- otherwise
+    // it isn't actually protecting anything.
+    config_store_record_t rec2 = rec;
+    rec2.tc_type = 0x06u;
+    TEST_CHECK(config_store_record_crc(&rec2) != got,
+               "a changed field changes the computed CRC");
+}
+
 void run_test_config_store(void)
 {
     test_pack_unpack_roundtrip();
@@ -199,4 +231,5 @@ void run_test_config_store(void)
     test_find_latest();
     test_next_write_slot();
     test_decide_write();
+    test_record_crc();
 }

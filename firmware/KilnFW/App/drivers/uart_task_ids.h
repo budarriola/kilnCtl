@@ -639,6 +639,21 @@
  * 0x10-0x14 UPDATE_* block. */
 #define SAFETY_CMD_GET_TRIP_EVENT 0x15u
 
+/* ESP->Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- the GUI's path to
+ * commissioning SaftyFW's config_store.h record (SaftyFW TODO.md Phase 9's
+ * "SAFETY_CMD_SET_CONFIG (wire command)"). Same value as
+ * kilnlink_set_config.h's KILNLINK_SET_CONFIG_CMD, defined again here for
+ * the same "one place every subcommand on this wire is enumerated" reason
+ * SAFETY_CMD_CLEAR_TRIP is; safety_link.c's safety_link_send_set_config()
+ * encodes the payload through that shared codec, not by hand.
+ *
+ * Doubles, additively, as the PC->ESP subcommand pc_tools' MCP server sends
+ * on UART_TASK_ID_SAFETY (mirroring SAFETY_CMD_CLEAR_TRIP's own PC->ESP use
+ * above) -- 1 byte argument:
+ *   byte1 = tc_type, 0-0x0F (MAX31856 CR1 TC[3:0] nibble, same range
+ *           THERMO_CMD_CONFIG_CHANNEL's own tc_type byte uses above) */
+#define SAFETY_CMD_SET_CONFIG 0x16u
+
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u
 #define SAFETY_FLAG_ESTOP        0x04u

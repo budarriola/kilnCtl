@@ -14,6 +14,7 @@
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_context.h"
+#include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_version.h"
 
 /* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT's live-state sources. safety_link.h
@@ -1541,6 +1542,47 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
     /* Same (dst_device, dst_task, src_task) triple as ANNOUNCE_VERSION's own
      * broadcast call site above -- fire-and-forget, no ACK expected
      * (link_task_handle_clear_trip() never replies on the wire). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CONFIG (0x16) -- see
+ * safety_link.h's doc comment for the full design rationale (why tc_type is
+ * an operator choice rather than derived, why the range check here is
+ * looser than SaftyFW's own). This function only does the wire-level range
+ * check and the encode/send; the ARMED-refusal and TC-type-recognised
+ * policy are entirely SaftyFW's (config_store_decide_write(),
+ * link_task_handle_set_config(), read-only reference). */
+esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (tc_type > 0x0Fu) {
+        /* MAX31856 CR1 TC[3:0] is a 4-bit field -- anything above it can
+         * never be a legal register value on either side of the link,
+         * whatever SaftyFW's own narrower enum eventually decides about it. */
+        ESP_LOGW(TAG, "set_config: refused locally, tc_type=%u out of the 0-0x0F wire range",
+                 (unsigned)tc_type);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_set_config_t msg = { .tc_type = tc_type };
+    uint8_t payload[KILNLINK_SET_CONFIG_LEN];
+    kilnlink_set_config_status_t status = KILNLINK_SET_CONFIG_OK;
+    size_t len = kilnlink_set_config_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "set_config: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "set_config: sending, tc_type=%u", (unsigned)tc_type);
+    /* Same (dst_device, dst_task, src_task) triple as CLEAR_TRIP's own
+     * broadcast call site above -- fire-and-forget, no ACK expected
+     * (link_task_handle_set_config() never replies on the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
 }

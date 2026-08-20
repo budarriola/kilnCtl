@@ -182,6 +182,13 @@ config_store_write_decision_t config_store_decide_write(bool armed)
     return armed ? CONFIG_STORE_WRITE_REFUSED_ARMED : CONFIG_STORE_WRITE_OK;
 }
 
+uint32_t config_store_record_crc(const config_store_record_t *rec)
+{
+    uint8_t packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(rec, packed);
+    return get_u32_le(&packed[REC_OFF_CRC]);
+}
+
 const char *config_store_write_decision_reason(config_store_write_decision_t decision)
 {
     switch (decision) {

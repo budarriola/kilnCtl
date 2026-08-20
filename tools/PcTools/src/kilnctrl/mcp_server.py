@@ -1510,6 +1510,29 @@ def safety_set_fault_out(assert_fault: bool) -> str:
     return _send(UART_TASK_ID_SAFETY, devices.safety_set_fault_out(assert_fault))
 
 
+@_tool()
+def safety_set_tc_type(tc_type_name: str) -> str:
+    """Commission the safety processor's thermocouple type (config_store.h).
+
+    `tc_type_name` is one of "B", "E", "J", "K", "N", "R", "S", "T"
+    (case-insensitive), mirroring firmware/SaftyFW/src/max31856.h's
+    MAX31856_TC_TYPE_* ordering. Fire-and-forget, like clear_trip -- there is
+    no reply on the wire; the outcome (accepted, or refused because the relay
+    is ARMED / the value wasn't recognised) shows up on the Pico's log, and
+    eventually in config_version advancing on the next GET_DIAG/GET_STATUS
+    poll, not here.
+
+    This tool only sends the wire command -- it does not build any GUI/LCD
+    commissioning flow (out of scope, same as clear_trip's own LCD surface
+    was deferred for the same budget/scope reason).
+    """
+    name = tc_type_name.strip().upper()
+    if name not in devices.SAFETY_TC_TYPE_NAMES:
+        known = ", ".join(sorted(devices.SAFETY_TC_TYPE_NAMES))
+        return f"error: unknown tc_type_name {tc_type_name!r} -- expected one of {known}"
+    return _send(UART_TASK_ID_SAFETY, devices.safety_set_config(devices.SAFETY_TC_TYPE_NAMES[name]))
+
+
 # ---------------------------------------------------------------------------
 # GPIO_PROBE -- raw ESP32-S3 pin control (task 12)
 #

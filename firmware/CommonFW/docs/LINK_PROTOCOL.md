@@ -389,6 +389,29 @@ from clearing that one too.
 This is the GUI's path to acknowledging a trip. The E-stop assert/release cycle
 remains available as the physical alternative (`firmware/SaftyFW/docs/SAFETY_MODEL.md` §6).
 
+### `SAFETY_CMD_SET_CONFIG` = `0x16` (ESP → Pico)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x16` |
+| 1 | u8 | `tc_type` — one of `MAX31856_TC_TYPE_*` (`SaftyFW/src/max31856.h`) |
+
+The GUI's path to commissioning the safety processor's `config_store.h`
+record (`firmware/SaftyFW/TODO.md` Phase 9). Fire-and-forget, same as
+`CLEAR_TRIP`: never ACKed on the wire, and the PC observes the outcome via
+the next status/diag poll rather than a reply to this frame.
+
+Refused, with the reason logged on the Pico side, if:
+- the relay is currently `ARMED` (`config_store_decide_write()` — "config
+  writes are refused while ARMED" applies unconditionally, no per-field
+  carve-out), or
+- `tc_type` is not a value `SaftyFW` recognises as a `MAX31856_TC_TYPE_*`.
+
+This codec (`kilnlink_set_config.{c,h}`) only serializes the byte — like
+`CLEAR_TRIP`'s `trip_mask`, it does not know what a valid `tc_type` is; that
+validation, and the write itself, are `SaftyFW`'s (`link_task.c` calling
+`config_store_write()`).
+
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
 One byte, no arguments. Sent by the ESP at boot and whenever the Pico's

@@ -121,6 +121,7 @@ from .protocol import (
     SAFETY_CMD_GET_STATUS,
     SAFETY_CMD_PING,
     SAFETY_CMD_REQUEST_ENABLE,
+    SAFETY_CMD_SET_CONFIG,
     SAFETY_CMD_SET_FAULT_OUT,
     SAFETY_CMD_SET_POLL_PERIOD,
     SYSTEM_CMD_RESTART_UART,
@@ -1685,6 +1686,42 @@ def safety_set_fault_out(assert_fault: bool) -> bytes:
     (loss of the PC link, a thermocouple fault, the watchdog).
     """
     return struct.pack("<BB", SAFETY_CMD_SET_FAULT_OUT, _check_bool_byte(assert_fault))
+
+
+#: Human-readable thermocouple type names -> the MAX31856 CR1 TC[3:0] wire
+#: value SAFETY_CMD_SET_CONFIG carries, mirroring firmware/SaftyFW/src/max31856.h's
+#: MAX31856_TC_TYPE_* ordering (B=0, E=1, J=2, K=3, N=4, R=5, S=6, T=7). Only
+#: those eight are recognised names here even though the wire field is a full
+#: 0-0x0F nibble (uart_task_ids.h's SAFETY_CMD_SET_CONFIG doc comment) --
+#: SaftyFW's own config_store only accepts these eight, so a name this table
+#: doesn't know would always be refused on the Pico side anyway.
+SAFETY_TC_TYPE_NAMES: dict[str, int] = {
+    "B": 0x00,
+    "E": 0x01,
+    "J": 0x02,
+    "K": 0x03,
+    "N": 0x04,
+    "R": 0x05,
+    "S": 0x06,
+    "T": 0x07,
+}
+
+
+def safety_set_config(tc_type: int) -> bytes:
+    """0x16 SET_CONFIG: commission SaftyFW's config_store.h tc_type.
+
+    Fire-and-forget, like CLEAR_TRIP -- no reply on the wire. Refused on the
+    Pico side (logged there, not returned here) if the relay is currently
+    ARMED, or if `tc_type` isn't a value SaftyFW recognises.
+
+    `tc_type` is the raw MAX31856 CR1 TC[3:0] wire value (0-0x0F); callers
+    that have a human-readable name ("K", "J", ...) should go through
+    SAFETY_TC_TYPE_NAMES / mcp_server.safety_set_tc_type() instead of calling
+    this directly with a guessed number.
+    """
+    return struct.pack(
+        "<BB", SAFETY_CMD_SET_CONFIG, _check_range(tc_type, 0, 0x0F, "tc_type")
+    )
 
 
 @dataclass(frozen=True)

@@ -243,6 +243,10 @@ SAFETY_CMD_PING = 0x03
 SAFETY_CMD_GET_LINK_STATS = 0x04
 SAFETY_CMD_SET_POLL_PERIOD = 0x05
 SAFETY_CMD_SET_FAULT_OUT = 0x06
+#: ESP -> Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- commissions
+#: SaftyFW's config_store.h tc_type. Fire-and-forget, no reply on the wire;
+#: the outcome shows up on the next GET_DIAG/GET_STATUS poll, not here.
+SAFETY_CMD_SET_CONFIG = 0x16
 
 #: Age field in GET_STATUS: "no valid status has ever been received".
 SAFETY_AGE_NEVER = 0xFFFF

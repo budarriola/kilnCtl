@@ -781,6 +781,35 @@ esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_updat
  * handing bytes to the UART, same as safety_link_send_update_frame(). */
 esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CONFIG (0x16) -- the
+ * GUI's path to commissioning the safety processor's config_store.h record
+ * (SaftyFW TODO.md Phase 9's "SAFETY_CMD_SET_CONFIG (wire command)"). Same
+ * fire-and-forget BROADCAST shape as safety_link_send_clear_trip() above:
+ * the Pico's link_task.c never ACKs this on the wire either (see that file's
+ * link_task_handle_set_config()), so there is no reply to wait for here --
+ * success is observed the same way CLEAR_TRIP's is, by the caller polling
+ * the next GET_DIAG/GET_FW_VERSION and watching config_version advance (once
+ * the accept/refuse outcome has propagated), or via the SaftyFW log if a
+ * debug probe is attached.
+ *
+ * Unlike CLEAR_TRIP's trip_mask, `tc_type` is NOT derived from any cached
+ * ESP-side state -- it is an operator choice (which thermocouple type is
+ * physically fitted), not something the ESP could infer on its own. This
+ * function only validates the wire-level range (0..0x0F, the MAX31856 CR1
+ * TC[3:0] nibble -- the same range uart_bridge.c's THERMO_CMD_CONFIG_CHANNEL
+ * handler already checks for the identical field, see its bridge_range_ok()
+ * call) and sends; SaftyFW does not build KilnFW's MAX31856.h, and this
+ * driver does not build SaftyFW's own, narrower max31856.h (only 8 of the 16
+ * nibble values name a real MAX31856_TC_TYPE_*) -- so the real "is this
+ * actually a recognised thermocouple type" decision is entirely SaftyFW's
+ * (config_store_decide_write(), link_task_handle_set_config()).
+ *
+ * Returns ESP_ERR_INVALID_ARG if tc_type is out of the wire-level range,
+ * ESP_ERR_INVALID_STATE if the driver isn't initialized, ESP_OK once the
+ * broadcast has been handed to the UART (not proof of Pico acceptance).
+ * Safe to call from any task, same as safety_link_send_clear_trip(). */
+esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type);
+
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded
  * in the bridge. `out` must have room for SAFETY_LINK_STATUS_PAYLOAD_LEN /

@@ -1,0 +1,21 @@
+{
+  "frame": "SAFETY_CMD_SET_CONFIG",
+  "cmd": "0x16",
+  "vectors": [
+    {
+      "name": "tc_type_k",
+      "fields": {
+        "tc_type": 3
+      },
+      "bytes_hex": "1603"
+    },
+    {
+      "name": "tc_type_max",
+      "fields": {
+        "tc_type": 255
+      },
+      "bytes_hex": "16ff"
+    }
+  ],
+  "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_set_config.c (mirroring clear_trip's own convention); this file records the field values that produced them for anyone re-deriving the vectors by hand. tc_type is an opaque MAX31856_TC_TYPE_* value (max31856.h, SaftyFW-only) -- this codec does not validate it is a recognised type; SaftyFW's link_task.c and config_store_decide_write() do that, and refuse the write while ARMED regardless of the value."
+}

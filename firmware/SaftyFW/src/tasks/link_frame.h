@@ -113,6 +113,15 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // PUSH_CONTEXT, so there is no bespoke unpack helper to add in this file.
 #define LINK_FRAME_CLEAR_TRIP_CMD 0x0Au
 
+// --- ESP -> Pico: SAFETY_CMD_SET_CONFIG (0x16) -------------------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
+// KILNLINK_SET_CONFIG_CMD (kilnlink/kilnlink_set_config.h) -- redefined here
+// as a local dispatch id, same convention as LINK_FRAME_CLEAR_TRIP_CMD above.
+// The payload is decoded by kilnlink_set_config_decode() in
+// src/tasks/link_task.c, not unpacked here -- a fixed 2-byte frame with no
+// variable-length fields, same reasoning as CLEAR_TRIP.
+#define LINK_FRAME_SET_CONFIG_CMD 0x16u
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's

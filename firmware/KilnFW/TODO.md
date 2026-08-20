@@ -208,6 +208,21 @@ isn't covered by Dashboard/Profiles/Settings/Network today:
   ~264px no-scroll budget) for the single latest-trip row it already
   shows, not a button, so the LCD surface for this action is still
   outstanding.
+  **2026-08-19 (later): the same three-hop send path now also exists for
+  `SAFETY_CMD_SET_CONFIG` (0x16)** — commissioning SaftyFW's `config_store.h`
+  `tc_type` from the PC, mirroring CLEAR_TRIP's shape exactly:
+  `safety_link_send_set_config()` in `App/drivers/safety_link.c` (wire-level
+  0-0x0F range check, fire-and-forget BROADCAST via the new
+  `kilnlink_set_config.{c,h}` codec in `firmware/CommonFW`), `SAFETY_CMD_SET_CONFIG`
+  case on the PC-facing `UART_TASK_ID_SAFETY` bridge in `uart_bridge.c`
+  (1-byte `tc_type` arg), surfaced as `mcp__kilnctrl__safety_set_tc_type(tc_type_name)`
+  in `tools/PcTools/src/kilnctrl/mcp_server.py`. No HTTP route and no LCD
+  surface — same "not this page's scope yet" reasoning CLEAR_TRIP's own LCD
+  button above is waiting on; SaftyFW's `link_task_handle_set_config()`
+  (`src/tasks/link_task.c`) is the receiving end, see
+  `firmware/SaftyFW/TODO.md`'s Phase 9 config_store bullet for the full
+  three-hop writeup and what remains (S8 calibration fields, DIAG's
+  `calibration_missing` bit, `update_task.c`'s `config_crc_ok` gate).
 - **Diagnostics / System info page.** Both processors' firmware versions
   (`GET_FW_VERSION`/`ANNOUNCE_VERSION`, sec 4/6), safety-link stats
   (`safety_get_link_stats`-equivalent: uptime, RX/TX counts, last-seen age),

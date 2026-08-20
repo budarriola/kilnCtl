@@ -81,6 +81,26 @@ bool config_store_is_calibration_missing(void)
     return s_cached_record.calibration_missing;
 }
 
+// SAFETY_CMD_FW_VERSION's config_version/config_crc fields (LINK_PROTOCOL.md
+// sec 4), wired to the real cache now that config_store exists -- see
+// link_task.c's link_task_send_fw_version(), which used to hard-code both to
+// 0 with a "no config_store yet" comment.
+uint8_t config_store_get_config_version(void)
+{
+    if (!s_loaded) {
+        return 0;
+    }
+    return (uint8_t)(s_cached_record.seq & 0xFFu);
+}
+
+uint16_t config_store_get_config_crc(void)
+{
+    if (!s_loaded) {
+        return 0;
+    }
+    return (uint16_t)(config_store_record_crc(&s_cached_record) & 0xFFFFu);
+}
+
 typedef struct {
     size_t  next_write_slot;
     bool    needs_erase;

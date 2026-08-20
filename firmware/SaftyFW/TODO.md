@@ -982,19 +982,47 @@ See `../CommonFW/docs/LINK_PROTOCOL.md` §7 for the full panel spec and presenta
       `max31856.h`'s updated header comment. Real `cmake --build` of
       `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` and the bootloader (shares
       `flash_layout.h`) all pass clean under `-Wall -Wextra -Werror`.
-      **Not built this pass, deliberately out of scope**: no wire command
-      (`SAFTY_CMD_SET_CONFIG` or similar) exists to ever WRITE a non-default
-      record — that is its own `LINK_PROTOCOL.md` addition and commissioning-
-      flow UI work, later Phase 9 bullets. S8's threshold and current-sense
-      calibration constants are NOT added to the record (room reserved only).
-      The DIAG frame's `calibration_missing` bit and the `FW_VERSION` frame's
-      `config_version`/`config_crc` fields are NOT yet sourced from the real
-      store (`link_task.c` still hard-codes them) — see this file's other
-      `config_store` references for exactly which call sites remain open.
-      `update_task.c`'s `config_crc_ok` gate and its update temperature
-      ceiling are likewise not yet wired to the real store. Nothing here has
-      been verified against real RP2040 hardware — no probe/board attached in
-      this environment; build- and host-test-verified only.
+      **2026-08-19 (later same day): `SAFETY_CMD_SET_CONFIG` (0x16) landed**
+      — the wire command this bullet used to flag as missing. Three-hop
+      shape mirroring `SAFETY_CMD_CLEAR_TRIP`'s exactly: `kilnlink_set_config.{c,h}`
+      (`firmware/CommonFW`, host-tested `test/test_set_config.c` +
+      `test/vectors/set_config_vectors.json`, 1-byte opaque `tc_type`
+      payload — this codec does not know what a valid type is, same split
+      `kilnlink_clear_trip`'s `trip_mask` uses) → `KilnFW`'s
+      `safety_link_send_set_config()` (`App/drivers/safety_link.c`, wire-level
+      0-0x0F range check only, fire-and-forget BROADCAST) → `uart_bridge.c`'s
+      `SAFETY_CMD_SET_CONFIG` case (PC→ESP hop, 1-byte `tc_type` arg) →
+      SaftyFW's `link_task_handle_set_config()` (`src/tasks/link_task.c`):
+      decodes, range-checks against `MAX31856_TC_TYPE_T`, and calls
+      `config_store_write()`, which does the real ARMED refusal
+      (`config_store_decide_write()`) and flash write. Never ACKs on the
+      wire, same as CLEAR_TRIP — the PC observes the outcome via the next
+      `GET_DIAG`/`FW_VERSION` poll or the Pico's own log. `tools/PcTools`
+      surfaces it as `mcp__kilnctrl__safety_set_tc_type(tc_type_name)`
+      (`kilnctrl/mcp_server.py`, name→byte via `devices.SAFETY_TC_TYPE_NAMES`),
+      unit-tested in `tools/PcTools/tests/test_safety_set_config.py`. No LCD/
+      GUI commissioning flow — deliberately out of scope, same budget reason
+      CLEAR_TRIP's own LCD surface was deferred.
+      The `FW_VERSION` frame's `config_version`/`config_crc` fields are now
+      also sourced from the real store (`config_store_get_config_version()`/
+      `_get_config_crc()`, new getters in `config_store.h`/`.c`/
+      `config_store_flash.c`) instead of the hard-coded 0/0 this bullet used
+      to flag — a small, contained change since the getters just needed a
+      cache read plus (for the CRC) a re-pack of the cached record; still
+      reads back 0/0 on a never-commissioned board, exactly the
+      `config_store_default()` seq-0 record LINK_PROTOCOL.md documents as
+      meaning that. S8's threshold and current-sense calibration constants
+      are still NOT added to the record (room reserved only) — this pass's
+      `SET_CONFIG` payload only ever writes `tc_type` (and, conservatively,
+      re-arms `calibration_missing`); a future payload extension to also
+      accept those fields is its own pass. The DIAG frame's
+      `calibration_missing` bit and `update_task.c`'s `config_crc_ok` gate/
+      update temperature ceiling are still not wired to the real store — see
+      this file's other `config_store` references. Nothing here has been
+      verified against real RP2040 hardware — no probe/board attached in this
+      environment; build- and host-test-verified only (`cmake --build` for
+      `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` clean, 501/501 host checks
+      including the new `config_store_record_crc` test).
 - [x] Config writes **refused while ARMED**. **2026-08-19**: pure decision
       logic in `config_store_decide_write()` (host-tested,
       `test/test_config_store.c`) refuses unconditionally while

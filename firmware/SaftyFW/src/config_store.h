@@ -208,8 +208,31 @@ bool config_store_is_calibration_missing(void);
 // `rec->format_version`/`rec->seq` are overwritten internally -- callers
 // only need to set tc_type/calibration_missing/reserved.
 //
-// No caller wires this yet -- see config_store_flash.c's header comment.
+// Wired to SAFETY_CMD_SET_CONFIG (0x16, LINK_PROTOCOL.md sec 4) via
+// link_task_handle_set_config() (src/tasks/link_task.c).
 bool config_store_write(const config_store_record_t *rec, const char **out_reason);
+
+// The cached record's `seq`, truncated to a u8 -- what
+// SAFETY_CMD_FW_VERSION's `config_version` byte carries (LINK_PROTOCOL.md
+// sec 4). Bumped by every accepted config_store_write(), so a GUI watching
+// FW_VERSION can tell a commissioning write actually landed. Returns 0
+// (config_store_default()'s own seq) if called before
+// config_store_boot_load().
+uint8_t config_store_get_config_version(void);
+
+// A CRC over the cached record's active fields -- what
+// SAFETY_CMD_FW_VERSION's `config_crc` field carries. The low 16 bits of
+// config_store_record_crc() applied to the cached record; returns 0 if
+// called before config_store_boot_load(). Pure/host-testable via
+// config_store_record_crc() itself -- this getter only adds the cache read.
+uint16_t config_store_get_config_crc(void);
+
+// Pure: packs `rec` (config_store_pack()) and returns the CRC-32 that ends
+// up in its trailing field. Exposed so callers that only want the
+// checksum -- not a full pack/unpack round trip -- don't have to carry a
+// scratch CONFIG_STORE_RECORD_LEN buffer themselves. Host-testable exactly
+// like the rest of this file's pure logic.
+uint32_t config_store_record_crc(const config_store_record_t *rec);
 
 #ifdef __cplusplus
 }

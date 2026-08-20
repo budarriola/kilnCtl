@@ -1354,6 +1354,19 @@ static void safety_bridge_task(void *arg)
                 err = safety_link_send_clear_trip(ctx->link);
                 break;
             }
+            case SAFETY_CMD_SET_CONFIG: {
+                /* 1 byte: tc_type. Fire-and-forget broadcast to the Pico,
+                 * same shape as CLEAR_TRIP above -- the PC observes the
+                 * outcome via the next GET_DIAG/GET_FW_VERSION poll, not an
+                 * ACK from here. safety_link_send_set_config() does the
+                 * wire-level range check; a truncated frame is caught by
+                 * bridge_args_ok() first, same "never guess at a missing
+                 * byte" discipline every other subcommand in this file
+                 * follows. */
+                if (!bridge_args_ok("safety", &msg, 2)) { rejected = true; break; }
+                err = safety_link_send_set_config(ctx->link, msg.payload[1]);
+                break;
+            }
             case SAFETY_CMD_SET_FAULT_OUT: {
                 /* A truncated SET_FAULT_OUT must never be guessed at: byte1
                  * decides whether the isolated fault line into the safety

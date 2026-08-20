@@ -25,5 +25,6 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_context.c"
          "${KILNLINK_DIR}/src/kilnlink_announce.c"
          "${KILNLINK_DIR}/src/kilnlink_clear_trip.c"
+         "${KILNLINK_DIR}/src/kilnlink_set_config.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )
