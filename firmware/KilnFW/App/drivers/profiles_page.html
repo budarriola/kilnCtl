@@ -55,7 +55,9 @@
   .seg { display: flex; gap: 0.5em; align-items: flex-end; margin-top: 0.5em; }
   .seg > div { flex: 1; }
   .seg label { font-size: 0.75em; margin-top: 0; }
-  button { min-height: var(--ui-touch); padding: 0.6em 1.2em; font-size: 0.95em;
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2). */
+  button { padding: 0.6em 1.2em; font-size: 0.95em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
            border-radius: var(--ui-radius); cursor: pointer; }
   button.small { min-height: 0; padding: 0.3em 0.7em; font-size: 0.85em; }

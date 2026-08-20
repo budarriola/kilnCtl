@@ -23,3 +23,28 @@
 .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
              background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
              padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+/* UI_PLAN.md section 3, Web item 2: every real <button> across all six pages
+   independently redeclared `min-height: var(--ui-touch)` (profiles_page.html/
+   rules_page.html/zones_page.html/wifi_provision_page.html's plain `button {}`
+   rule, main_page.html's per-class button.relay-toggle/run-btn/danger-btn
+   rules) -- the exact six-copies-of-one-number duplication this file's own
+   header comment already flags as the mistake to avoid repeating. Consolidated
+   here once; each page's own `<style>` block keeps only what's actually
+   page/class-specific (padding, margin, font-size, colors) and no longer
+   repeats min-height itself. Deliberately just `button`, not `a.button` --
+   main_page.html's `a.button` is an anchor styled to look like a button, and
+   the bare-tag selector below does not match it, so that one rule keeps its
+   own explicit min-height (see main_page.html). readiness_page.html has no
+   real <button> elements needing this (its only button is `.theme-btn` above,
+   a small icon toggle, not a 72px action target) -- nothing to remove there. */
+button { min-height: var(--ui-touch); }
+/* UI_PLAN.md section 3, Web item 1: shared horizontal-scroll wrapper for any
+   data table that could overflow a phone-width (~390px) viewport --
+   rules_page.html's #cycleTable and zones_page.html's generated
+   #couplingMatrix/#rgaMatrix coupling tables. One class, defined once,
+   wrapped around each call site rather than a per-page copy -- same
+   "byte-identical stuff belongs here" rule this file's own header comment
+   already states. profiles_page.html was checked for a #cycleTable/similar
+   this pass (UI_PLAN.md's audit named it) but has no <table> element at all
+   -- nothing to wrap there; noted here rather than silently skipped. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }

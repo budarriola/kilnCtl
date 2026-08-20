@@ -49,7 +49,10 @@
   .temp { font-size: 1.1em; font-weight: bold; }
   .fault { color: var(--fault-color); font-size: 0.85em; }
   .stale { color: var(--muted); font-size: 0.85em; }
-  button.relay-toggle { min-height: var(--ui-touch); min-width: var(--ui-touch); padding: 0.4em 1em;
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2) -- min-width isn't part of that shared rule (only
+     relay-toggle needs a square minimum), so it stays here. */
+  button.relay-toggle { min-width: var(--ui-touch); padding: 0.4em 1em;
                          font-size: 0.9em; border-radius: var(--ui-radius);
                          border: 1px solid var(--border); cursor: pointer; }
   button.relay-on { background: var(--on-color); color: #fff; }
@@ -72,14 +75,14 @@
   select { width: 100%; box-sizing: border-box; min-height: var(--ui-touch); padding: 0.5em; font-size: 1em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
            border-radius: var(--ui-radius); margin-bottom: 0.5em; }
-  button.run-btn { min-height: var(--ui-touch); padding: 0.6em 1.2em; font-size: 0.95em;
+  button.run-btn { padding: 0.6em 1.2em; font-size: 0.95em;
                     border-radius: var(--ui-radius);
                     border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
                     cursor: pointer; margin-right: 0.5em; margin-top: 0.3em; }
   button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
   .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
                padding: 0.7em 1em; margin-top: 0.5em; }
-  button.danger-btn { display: block; width: 100%; min-height: var(--ui-touch); box-sizing: border-box;
+  button.danger-btn { display: block; width: 100%; box-sizing: border-box;
                        text-align: left; padding: 0.6em 1em;
                        font-size: 0.9em; border-radius: var(--ui-radius); border: 1px solid var(--fault-color);
                        background: var(--button-bg); color: var(--fault-color); cursor: pointer;

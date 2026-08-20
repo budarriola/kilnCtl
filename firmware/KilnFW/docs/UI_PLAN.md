@@ -1,6 +1,13 @@
 # UI_PLAN.md — LCD + web usability/cleanup plan
 
-Docs/planning only. Nothing in this pass touches `.c`/`.h`/`.html`/`.css`.
+**Verification: build-clean only (`idf.py -C firmware/KilnFW build`, `-Werror`),
+not visually confirmed on hardware or a real phone browser.** The 2026-08-19
+implementation pass below DOES touch `.c`/`.h`/`.html`/`.css` (all 10 section-3
+work-queue items) -- the original "docs/planning only" line below described
+the state before that pass and is no longer accurate; kept struck through
+rather than deleted, per this doc's own honesty-header convention.
+
+~~Docs/planning only. Nothing in this pass touches `.c`/`.h`/`.html`/`.css`.~~
 Driven by the explicit user requirement: "the user interface is in need of
 usability and cleanup fixes... the webpage should be optimized for a phone
 or tablet. and the lcd should not require scrolling."
@@ -126,57 +133,105 @@ are build+inspection-verified only until that's fixed, noted per item.
 
 ### LCD
 
-1. **Fix `ui_page_network.c`'s ~268px overrun** (combine status/detail
-   label into one line; re-sum the arithmetic; verify no other row grew
-   since the last pass). Verifiable now — flash and visually confirm no
-   scroll/clip on both AP and STA-connected states.
-2. **Bound `ui_page_temperature.c`'s relay-count risk** — cap visible relay
-   buttons per zone card, fall back to an internal `lv_list`-style scroll
-   the same way `ui_page_network.c`'s Scan/Saved lists already do.
-   Verifiable now on the bench's actual zone/relay configuration, but a
-   config with more relays-per-zone than the bench currently has configured
-   can't be exercised without reconfiguring `zones_config` first.
-3. **Restore visible affordance for shrunk touch targets** — the 44px
-   (network mode/scan buttons) and 36px (temperature relay buttons) targets
-   rely entirely on `ui_theme_apply_touch_area()`'s invisible extended hit
-   area; consider a visual cue (larger tap ripple, subtle padding) so the
-   *drawn* size doesn't mislead a user about where they can tap. Verifiable
-   now, purely visual.
-4. **Audit `ui_page_touch_cal.c`/`ui_page_touch_test.c`** against the same
-   no-page-scroll rule the other 8 pages already got — currently unreviewed.
-   Verifiable now.
-5. **Navigation-depth review of `ui_page_config.c`'s 7-destination grid** —
-   confirm each of the 7 cells meets `UI_THEME_MIN_TOUCH_TARGET_PX` in a
-   2-column layout at 480px width; the file's own comment doesn't cite a
-   per-cell number. Verifiable now.
+1. **DONE (2026-08-19).** Fixed `ui_page_network.c`'s ~268px overrun:
+   `s_status_label`/`s_detail_label` (two label rows) combined into one
+   `s_status_label` line (`"%s -- %s"` of the wifi-status text and the
+   RSSI/client-count detail, built in `refresh_cb()`'s `combined_buf`).
+   Re-summed the arithmetic in a new header-comment paragraph ("2026-08-19
+   budget-fix pass"): status_card ~40px -> ~20px, bringing the page's
+   content-only worst case from ~228px to ~207px against the ~264px budget.
+   Build-clean only — NOT flashed/visually confirmed (no ILI9488 panel
+   attached to this environment this pass).
+2. **DONE (2026-08-19).** Bounded `ui_page_temperature.c`'s relay-count
+   risk: `relay_row` changed from `LV_SIZE_CONTENT` (unbounded growth) to a
+   fixed `UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX` (80px, room for 2 rows of
+   the 36px buttons) and left internally scrollable (`LV_DIR_VER`,
+   `LV_SCROLLBAR_MODE_AUTO`) — same sanctioned pattern as
+   `ui_page_network.c`'s `s_scan_list`/`s_saved_list` (fixed height,
+   `LV_OBJ_FLAG_SCROLLABLE` left set, not cleared). Each zone card's
+   worst-case height is now fixed at compile time regardless of runtime
+   relay count. Build-clean only — the bench's actual relay-per-zone count
+   wasn't exercised against the >2-row case this pass (no hardware access).
+3. **DONE (2026-08-19).** Added a visual affordance (1px border,
+   `UI_THEME_COLOR_TEXT_SECONDARY` at `LV_OPA_40`, no theme-color change) to
+   every shrunk-target button this doc named: `ui_page_network.c`'s
+   `s_mode_home_btn`/`s_mode_ap_btn` (44px), `s_scan_toggle_btn`/
+   `s_saved_toggle_btn` (36px), `s_scan_btn` (44px), and
+   `ui_page_temperature.c`'s per-relay toggle buttons (36px). Purely visual;
+   `ui_theme_apply_touch_area()`'s invisible hit-area extension is
+   unchanged. Build-clean only — not visually confirmed on hardware.
+4. **DONE (2026-08-19).** Audited `ui_page_touch_cal.c`/
+   `ui_page_touch_test.c`: both already clear `LV_OBJ_FLAG_SCROLLABLE` on
+   `scr`, and neither is sized against the fixed ~264px budget the "main"
+   pages use — `ui_page_touch_cal.c` places every element from the real
+   `lv_display_get_*_resolution()` at build time (`compute_targets()`);
+   `ui_page_touch_test.c` derives `s_canvas_h` directly from the real
+   resolution minus the status bar/button row/padding, so content sums to
+   exactly the available height by construction. Both were previously
+   unreviewed and un-commented per this doc's own finding; added a header
+   comment to each documenting this check (no code fix needed — neither was
+   actually broken). Build-clean only.
+5. **DONE (2026-08-19).** Checked `ui_page_config.c`'s grid cells against
+   `UI_THEME_MIN_TOUCH_TARGET_PX` (72px), reading `ui_theme.c`'s real
+   extension code rather than assuming: width was already fine (~223px,
+   `lv_pct(48)` of the ~464px grid), but the old 44px-tall cells only got
+   `compact_layout=true`'s small capped extension (`UI_THEME_PADDING_PX/2` =
+   4px/side, NOT the "extend to 72px" behavior that's `compact_layout=false`
+   -only), so effective height was ~52px — genuinely short, and raising
+   every cell's drawn height enough to close that gap would have blown the
+   ~264px budget. Fixed by making `grid` a fixed-height (180px), internally
+   scrollable container (same pattern as items 2/3 above) holding real
+   72px-tall cells, rather than shrinking cells to fit all 8 on-screen at
+   once. Build-clean only.
 
 ### Web
 
-1. **Add a shared `.table-scroll` wrapper rule to `theme.css`**, apply to
-   `rules_page.html`'s and `profiles_page.html`'s `#cycleTable` and
-   `zones_page.html`'s generated coupling table. Build+inspection-verified
-   only (UART dead — cannot load these pages live from the board right now;
-   verify by rendering the built HTML in a desktop browser resized to
-   ~390px, which does not require the board at all).
-2. **Consolidate the six pages' duplicated `min-height: var(--ui-touch)`
-   button rule into `theme.css`** if `wifi_provision_page.html`/
-   `readiness_page.html` don't already have it locally. Build+inspection-
-   verified only, same reasoning as above (static HTML, no board needed to
-   check the CSS renders correctly).
-3. **Confirm `wifi_provision_page.html`'s AP-mode QR/form flow on an actual
-   phone viewport** (390px) — this is the one page guaranteed to be opened
-   from a phone during first-boot provisioning, so it's the highest-value
-   page to check first even though it can't be live-tested against the
-   board right now. Inspection-only until the bench UART is fixed (cannot
-   confirm the AP is actually reachable/joinable from a phone without live
-   Wi-Fi status).
-4. **Table density pass on `zones_page.html`'s coupling matrix** for >4-zone
-   configurations — decide between horizontal scroll (already covered by
-   item 1) and a responsive re-layout (e.g. collapsing to a per-zone card
-   list below a breakpoint) if the scroll wrapper alone reads as
-   unusably cramped. Build+inspection-verified only.
-5. **Full six-page pass for any remaining fixed-pixel-width elements**
-   beyond what this audit read (canvases, inline `width:` styles not
-   caught by the grep-driven pass above) — a broader sweep since this
-   plan's audit was targeted, not exhaustive. Build+inspection-verified
-   only.
+1. **DONE (2026-08-19).** Added `.table-scroll` (`overflow-x: auto;
+   -webkit-overflow-scrolling: touch;`) to `theme.css`. Wrapped
+   `rules_page.html`'s `#cycleTable` in it. `zones_page.html`'s two
+   generated tables (`#couplingMatrix` and `#rgaMatrix`, built by JS that
+   replaces each div's `innerHTML` with a `<table class="coupling">`) got
+   the wrapper on their static container divs, which picks up the scroll
+   behavior regardless of how the JS renders. **Correction to this doc's own
+   audit**: `profiles_page.html` has no `#cycleTable` or any `<table>`
+   element at all (checked directly, grep confirms zero matches) — the
+   audit's claim that it has one was wrong; nothing to wrap there. Verified
+   by inspection/build only (UART dead, board not reachable live).
+2. **DONE (2026-08-19).** Added `button { min-height: var(--ui-touch); }`
+   to `theme.css`. Removed the now-redundant `min-height: var(--ui-touch)`
+   from `profiles_page.html`, `zones_page.html`, `rules_page.html`,
+   `wifi_provision_page.html`'s plain `button {}` rules and from
+   `main_page.html`'s `button.relay-toggle`/`button.run-btn`/
+   `button.danger-btn` rules (`main_page.html`'s `a.button` keeps its own —
+   it's an `<a>`, not a `<button>`, so the shared bare-tag rule doesn't
+   match it). Deliberate overrides (`button.small { min-height: 0; }`,
+   `.forget-btn`, `.mode-toggle button { min-height: 2.6em; }`) were left
+   alone. `readiness_page.html` has no real `<button>` needing this (only
+   `.theme-btn`, a small icon toggle) — nothing to change there. Verified by
+   inspection/build only.
+3. **NOT DONE this pass.** `wifi_provision_page.html`'s AP-mode QR/form flow
+   on an actual phone viewport still needs a live check — this item was
+   explicitly scoped as inspection-only pending the bench UART fix in the
+   original queue, and that dependency hasn't changed; no code change was
+   made or needed for this item specifically (its CSS was already
+   `max-width: 420px`-responsive per the original audit).
+4. **DONE (2026-08-19).** Decided in favor of "scroll wrapper alone is
+   sufficient," documented in a new comment above `zones_page.html`'s
+   `table.coupling` CSS rule: `MAX31856_CHANNEL_COUNT` is 3, so this
+   board physically never has more than 3 thermocouple zones — the
+   coupling matrix is at most 4x4 (header row/col + up to 3 zones),
+   nowhere near the ">4-zone cramped" case the original audit worried
+   about in the abstract. No responsive collapse was built; it would
+   solve a problem this hardware configuration can't produce.
+5. **DONE (2026-08-19).** Swept all six pages for fixed-pixel-width
+   elements beyond the original audit: found `main_page.html`'s
+   `<canvas id="historyChart" width="600" height="220">` (HTML attribute)
+   and `wifi_provision_page.html`'s `<canvas id="apQrCanvas" width="200"
+   height="200">`. Neither needed a fix: `#historyChart` already has a CSS
+   `width: 100%` rule that overrides the HTML attribute for layout, and its
+   own JS (`drawHistoryChart()`) re-derives the actual backing-buffer size
+   from `canvas.clientWidth` at draw time (DPR-aware) — already responsive.
+   `#apQrCanvas`'s 200px is well inside `wifi_provision_page.html`'s 420px
+   `max-width` container and is a deliberately fixed physical QR-code
+   resolution, not a layout-overflow risk. No other fixed-width elements
+   found. Verified by inspection/build only.

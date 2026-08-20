@@ -45,8 +45,11 @@
     background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
     border-radius: var(--ui-radius);
   }
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2) -- .mode-toggle button below deliberately overrides it back
+     down to 2.6em, that override is unaffected by this consolidation. */
   button {
-    min-height: var(--ui-touch); margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+    margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
     background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
     border-radius: var(--ui-radius); cursor: pointer;
   }

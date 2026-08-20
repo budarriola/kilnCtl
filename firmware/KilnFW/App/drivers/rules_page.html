@@ -48,7 +48,9 @@
   textarea { width: 100%; box-sizing: border-box; height: 16em; font-family: monospace; font-size: 0.9em;
              background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
              border-radius: var(--ui-radius); padding: 0.5em; }
-  button { min-height: var(--ui-touch); margin-top: 1em; margin-right: 0.5em; padding: 0.7em 1.5em;
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2). */
+  button { margin-top: 1em; margin-right: 0.5em; padding: 0.7em 1.5em;
            font-size: 1em; background: var(--button-bg); color: var(--fg);
            border: 1px solid var(--input-border); border-radius: var(--ui-radius); cursor: pointer; }
   #msg { margin-top: 1em; font-weight: bold; }
@@ -87,8 +89,11 @@ kept across reboots. These are electromechanical relays: their contacts are
 good for roughly 100,000 operations, so a number climbing toward six figures
 means that relay is nearing the end of its life and should be replaced
 before it welds shut during a firing.</p>
+<!-- UI_PLAN.md section 3, Web item 1: .table-scroll (theme.css) wrapper. -->
+<div class="table-scroll">
 <table id="cycleTable"><thead><tr><th>Relay</th><th>Cycles</th></tr></thead>
 <tbody id="cycleBody"><tr><td colspan="2">Loading…</td></tr></tbody></table>
+</div>
 
 <script>
 function load() {

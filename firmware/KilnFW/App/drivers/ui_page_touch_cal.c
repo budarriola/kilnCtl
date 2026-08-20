@@ -10,6 +10,19 @@
 #include "touch_cal_store.h"
 #include "ui_theme.h"
 
+// 2026-08-19 no-scroll audit (UI_PLAN.md section 3, LCD item 4): this page
+// was previously unreviewed against the same no-page-scroll rule the other 8
+// pages carry a budget comment for. Checked here rather than left silent.
+// `scr` clears LV_OBJ_FLAG_SCROLLABLE (ui_page_touch_cal_build() below), same
+// as every other page. Unlike the ~264px-budget pages, this page's content
+// isn't sized against that fixed constant at all -- compute_targets() reads
+// the *real* lv_display_get_horizontal/vertical_resolution() at build time
+// and places every target dot, the progress label, and the full-screen
+// overlay strictly within [0, width) x [0, height), by construction, rather
+// than stacking a fixed set of rows that could overflow a fixed budget.
+// There is nothing here that could grow past the screen regardless of
+// resolution -- confirmed by reading compute_targets()/show_point() below,
+// not just by the presence of the SCROLLABLE clear.
 static const char *TAG = "ui_page_touch_cal";
 
 /* 3x3 grid rather than the old 3-point corner/center/edge layout -- more

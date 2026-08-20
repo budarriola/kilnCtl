@@ -57,6 +57,22 @@ static const char *TAG = "ui_page_temperature";
 
 #define UI_PAGE_TEMPERATURE_REFRESH_MS 1000
 
+/* UI_PLAN.md section 3, LCD item 2: relay_row used to be LV_SIZE_CONTENT
+ * (build_zone_row()'s comment below), so a zone with several relays wrapping
+ * onto a second/third button row grew the card's -- and therefore the whole
+ * page's -- drawn height without bound, at odds with every other page's
+ * compile-time-fixed ~264px budget. Capped here at a fixed pixel height
+ * (room for 2 rows of the 36px relay buttons plus one inter-row gap: 2*36 +
+ * UI_THEME_PADDING_PX/2 = 76, rounded up) and left scrollable -- same
+ * sanctioned "small internally-scrollable list, not page-level scrolling"
+ * pattern ui_page_network.c's s_scan_list/s_saved_list already use (fixed
+ * lv_list height, LV_OBJ_FLAG_SCROLLABLE left set rather than cleared, so
+ * LVGL's own touch-drag scroll handles overflow inside that one bounded
+ * box). A zone with few enough relays to fit in 2 rows never actually
+ * scrolls (nothing overflows the fixed height); one with more does, exactly
+ * like Scan/Saved's lists. */
+#define UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX 80
+
 typedef struct {
     lv_obj_t *temp_label;
 } zone_widgets_t;
@@ -201,7 +217,22 @@ static void relay_toggle_cb(lv_event_t *e)
  * onto a second button row will still grow past a single-row estimate. This
  * is a real, currently-unresolved risk for that configuration, not
  * something this pass can rule out without real hardware or a fixed cap on
- * relays-per-zone; flagged honestly in TODO.md 10.1/10.3's status note. */
+ * relays-per-zone; flagged honestly in TODO.md 10.1/10.3's status note.
+ *
+ * 2026-08-19 relay-count-bound pass (UI_PLAN.md section 3, LCD item 2): the
+ * risk above is now bounded. relay_row is no longer LV_SIZE_CONTENT --
+ * UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's header comment above has the
+ * arithmetic (fixed height for 2 rows of buttons, internally scrollable
+ * beyond that, same pattern as ui_page_network.c's s_scan_list/s_saved_list).
+ * Each zone card's own worst-case height is therefore fixed at compile time
+ * regardless of zones_config_get_relay_mask()'s runtime relay count: header
+ * row (~24px) + relay_row (80px, capped) + card padding/gap
+ * (UI_THEME_PADDING_PX/2 * 2 + UI_THEME_PADDING_PX/4 ~= 12px) =~ 116px per
+ * card. Still NOT verified against real hardware for a config with more
+ * relays-per-zone than the bench currently has (UI_PLAN.md's own
+ * "verifiable now on the bench's actual configuration" caveat for this
+ * item) -- the fix bounds the worst case, it doesn't prove the scroll
+ * gesture feels right on the physical panel. */
 static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -242,13 +273,19 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
 
     lv_obj_t *relay_row = lv_obj_create(row);
     lv_obj_set_width(relay_row, lv_pct(100));
-    lv_obj_set_height(relay_row, LV_SIZE_CONTENT);
+    /* Fixed height + left scrollable, NOT LV_SIZE_CONTENT + SCROLLABLE
+     * cleared -- see UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's header
+     * comment (LCD item 2). This is the one internally-scrollable container
+     * on this page, same as ui_page_network.c's lists; it is not a violation
+     * of the page-level no-scroll rule any more than those are. */
+    lv_obj_set_height(relay_row, UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX);
+    lv_obj_set_scroll_dir(relay_row, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(relay_row, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(relay_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(relay_row, 0, 0);
     lv_obj_set_style_pad_all(relay_row, 0, 0);
     lv_obj_set_flex_flow(relay_row, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_style_pad_gap(relay_row, UI_THEME_PADDING_PX / 2, 0);
-    lv_obj_remove_flag(relay_row, LV_OBJ_FLAG_SCROLLABLE);
 
     if (!have_mask || relay_mask == 0) {
         lv_obj_t *none = lv_label_create(relay_row);
@@ -279,6 +316,14 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
         lv_obj_set_height(btn, 36); /* see build_zone_row()'s comment on this page's height budget */
         lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
         lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+        /* Visual affordance for the 36px-drawn/72px-effective touch target
+         * (UI_PLAN.md section 3, LCD item 3, same reasoning as
+         * ui_page_network.c's shrunk mode/scan/toggle buttons) -- a subtle
+         * dimmed border, not a theme-color change, so the drawn size doesn't
+         * mislead about where the tap actually registers. */
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
         s_relay_ctx[r].relay_index = (uint8_t)(r + 1);
         lv_obj_add_event_cb(btn, relay_toggle_cb, LV_EVENT_CLICKED, &s_relay_ctx[r]);
 

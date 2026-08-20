@@ -136,6 +136,20 @@
 // NOT verified against real hardware (no ILI9488 panel attached in this
 // environment) -- this is arithmetic against ui_theme.h's real constants,
 // not a hardware-confirmed fit.
+//
+// 2026-08-19 budget-fix pass (UI_PLAN.md section 3, LCD item 1): status_card
+// used to hold two label rows -- status_label ("WiFi: --" style text) and
+// detail_label (RSSI/client-count) -- contributing to the "~40px" figure the
+// paragraph above cites for status_card. Combined onto one label/one line
+// (see "Top status readout" comment on s_status_label's declaration and
+// refresh_cb()'s combined_buf build), which removes one montserrat_14 line
+// height (~20px, this file's own established per-line estimate) from
+// status_card. Re-summing the ~228px content-only figure from the paragraph
+// above: status_card(~40 -> ~20) + mode_row(44) + toggle_row(40) + one list
+// block (title ~18 + list 70 = ~88) = ~192px of content plus ~15px of
+// inter-item gaps (one fewer row means one fewer gap) =~ 207px against the
+// ~264px content budget, real margin rather than barely under. Still NOT
+// verified against real hardware, same caveat as the paragraph above.
 static const char *TAG __attribute__((unused)) = "ui_page_network";
 
 #define UI_PAGE_NETWORK_REFRESH_MS 1000
@@ -143,9 +157,16 @@ static const char *TAG __attribute__((unused)) = "ui_page_network";
 #define UI_PAGE_NETWORK_SAVED_MAX 8
 #define UI_PAGE_NETWORK_QR_SIZE_PX 100 /* was 140 -- shrunk in the 2026-08-18 no-scroll pass, see this file's header comment */
 
-/* ---- Top status readout ---- */
+/* ---- Top status readout ----
+ * 2026-08-19 budget-fix pass: status_label and detail_label used to be two
+ * separate label rows inside status_card (see this file's "2026-08-18
+ * follow-up pass" comment's ~268px arithmetic, which counted status_card at
+ * ~40px for exactly that reason -- two montserrat_14 lines). Combined into
+ * one label/one line here to claw back the missing ~20px of budget margin;
+ * s_detail_label no longer exists as a separate widget, its text is appended
+ * onto s_status_label's single line instead (see refresh_cb()'s combined-
+ * text build below). */
 static lv_obj_t *s_status_label;
-static lv_obj_t *s_detail_label; /* RSSI when connected, AP client count in AP mode */
 
 /* ---- Mode toggle ---- */
 static lv_obj_t *s_mode_home_btn;
@@ -715,7 +736,11 @@ static void refresh_cb(lv_timer_t *timer)
 
     char status_buf[64];
     wifi_status_ui_get_text(status_buf, sizeof(status_buf));
-    lv_label_set_text(s_status_label, status_buf);
+    /* Not painted yet -- combined with detail_buf below (see this file's
+     * "Top status readout" header comment) and set on s_status_label once,
+     * after detail_buf is filled in by whichever of the sta_connected/AP/
+     * neither branches below applies. */
+    char detail_buf[32] = "";
 
     wifi_prov_mode_t mode = wifi_prov_get_mode();
     wifi_prov_state_t state = wifi_prov_get_state();
@@ -783,9 +808,7 @@ static void refresh_cb(lv_timer_t *timer)
 
     if (sta_connected) {
         int8_t rssi = wifi_prov_get_sta_rssi();
-        char detail[32];
-        snprintf(detail, sizeof(detail), "Signal: %d dBm", (int)rssi);
-        lv_label_set_text(s_detail_label, detail);
+        snprintf(detail_buf, sizeof(detail_buf), "Signal: %d dBm", (int)rssi);
         if (show_qr_row_slot) {
             lv_obj_remove_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -812,14 +835,34 @@ static void refresh_cb(lv_timer_t *timer)
         lv_label_set_text(s_ip_qr_caption, ip_url);
     } else if (mode == WIFI_PROV_MODE_AP) {
         uint8_t clients = wifi_prov_get_ap_client_count();
-        char detail[32];
-        snprintf(detail, sizeof(detail), "Clients: %u", (unsigned)clients);
-        lv_label_set_text(s_detail_label, detail);
+        snprintf(detail_buf, sizeof(detail_buf), "Clients: %u", (unsigned)clients);
         lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_label_set_text(s_detail_label, "");
         lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
     }
+
+    /* Single combined line -- see this file's "Top status readout" header
+     * comment. "%s -- %s" rather than two lines/labels; skip the separator
+     * entirely when detail_buf is empty (neither connected nor AP-active
+     * yet) so the line doesn't end in a dangling "--". */
+    /* sizeof(status_buf)-1 (63) + " -- " (4) + sizeof(detail_buf)-1 (31) + NUL
+     * = 99 worst case -- 104 leaves headroom so GCC's -Wformat-truncation
+     * can prove the %.*s-bounded snprintf() below never truncates. */
+    char combined_buf[104];
+    if (detail_buf[0]) {
+        /* Explicit %.*s widths (sizeof(status_buf)/detail_buf minus 1, their
+         * real max) rather than bare %s -- GCC's -Wformat-truncation can't
+         * otherwise bound either argument's contribution and assumes
+         * worst-case, warning under -Werror even though combined_buf is
+         * sized to comfortably fit both fixed-size buffers plus the " -- "
+         * separator (same fix apply_scan_job_result() already uses above
+         * for the same reason). */
+        snprintf(combined_buf, sizeof(combined_buf), "%.*s -- %.*s", (int)sizeof(status_buf) - 1, status_buf,
+                 (int)sizeof(detail_buf) - 1, detail_buf);
+    } else {
+        snprintf(combined_buf, sizeof(combined_buf), "%.*s", (int)sizeof(status_buf) - 1, status_buf);
+    }
+    lv_label_set_text(s_status_label, combined_buf);
 
     if (ap_active) {
         const char *ap_ssid = wifi_prov_get_ap_ssid();
@@ -1013,10 +1056,6 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_text_color(s_status_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(s_status_label, "WiFi: --");
 
-    s_detail_label = lv_label_create(status_card);
-    lv_obj_set_style_text_color(s_detail_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_detail_label, "");
-
     /* Mode toggle. */
     lv_obj_t *mode_row = lv_obj_create(content);
     lv_obj_set_width(mode_row, lv_pct(100));
@@ -1031,6 +1070,14 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(s_mode_home_btn, 44); /* see this file's no-scroll-pass header comment */
     lv_obj_set_flex_grow(s_mode_home_btn, 1);
     lv_obj_set_style_radius(s_mode_home_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Visual affordance for the 44px-drawn/72px-effective touch target below
+     * (UI_PLAN.md section 3, LCD item 3): ui_theme_apply_touch_area() extends
+     * the real hit area invisibly, which by itself lets a shrunk button
+     * mislead a user about where they can tap. A subtle 1px border (dimmed,
+     * not a theme-color change) is the visual half of that story. */
+    lv_obj_set_style_border_width(s_mode_home_btn, 1, 0);
+    lv_obj_set_style_border_color(s_mode_home_btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_border_opa(s_mode_home_btn, LV_OPA_40, 0);
     lv_obj_add_event_cb(s_mode_home_btn, mode_home_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *home_label = lv_label_create(s_mode_home_btn);
     lv_obj_set_style_text_color(home_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -1043,6 +1090,10 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(s_mode_ap_btn, 44);
     lv_obj_set_flex_grow(s_mode_ap_btn, 1);
     lv_obj_set_style_radius(s_mode_ap_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Same shrunk-target affordance as s_mode_home_btn above. */
+    lv_obj_set_style_border_width(s_mode_ap_btn, 1, 0);
+    lv_obj_set_style_border_color(s_mode_ap_btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_border_opa(s_mode_ap_btn, LV_OPA_40, 0);
     lv_obj_add_event_cb(s_mode_ap_btn, mode_ap_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *ap_label = lv_label_create(s_mode_ap_btn);
     lv_obj_set_style_text_color(ap_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -1077,6 +1128,10 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(s_scan_toggle_btn, 36);
     lv_obj_set_flex_grow(s_scan_toggle_btn, 1);
     lv_obj_set_style_radius(s_scan_toggle_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Same shrunk-target affordance as s_mode_home_btn above. */
+    lv_obj_set_style_border_width(s_scan_toggle_btn, 1, 0);
+    lv_obj_set_style_border_color(s_scan_toggle_btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_border_opa(s_scan_toggle_btn, LV_OPA_40, 0);
     lv_obj_add_event_cb(s_scan_toggle_btn, scan_toggle_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *scan_toggle_label = lv_label_create(s_scan_toggle_btn);
     lv_obj_set_style_text_color(scan_toggle_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -1089,6 +1144,10 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(s_saved_toggle_btn, 36);
     lv_obj_set_flex_grow(s_saved_toggle_btn, 1);
     lv_obj_set_style_radius(s_saved_toggle_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Same shrunk-target affordance as s_mode_home_btn above. */
+    lv_obj_set_style_border_width(s_saved_toggle_btn, 1, 0);
+    lv_obj_set_style_border_color(s_saved_toggle_btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_border_opa(s_saved_toggle_btn, LV_OPA_40, 0);
     lv_obj_add_event_cb(s_saved_toggle_btn, saved_toggle_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *saved_toggle_label = lv_label_create(s_saved_toggle_btn);
     lv_obj_set_style_text_color(saved_toggle_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
@@ -1102,6 +1161,11 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_height(s_scan_btn, 44);
     lv_obj_set_style_bg_color(s_scan_btn, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(s_scan_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    /* Same shrunk-target affordance as s_mode_home_btn above -- this is the
+     * "Scan button" the file's own header comment names as shrunk to 44px. */
+    lv_obj_set_style_border_width(s_scan_btn, 1, 0);
+    lv_obj_set_style_border_color(s_scan_btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_border_opa(s_scan_btn, LV_OPA_40, 0);
     lv_obj_add_event_cb(s_scan_btn, scan_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *scan_label = lv_label_create(s_scan_btn);
     lv_obj_set_style_text_color(scan_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);

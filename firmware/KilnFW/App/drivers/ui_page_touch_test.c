@@ -6,6 +6,20 @@
 #include "kiln_ui.h"
 #include "ui_theme.h"
 
+// 2026-08-19 no-scroll audit (UI_PLAN.md section 3, LCD item 4): this page
+// was previously unreviewed against the same no-page-scroll rule the other 8
+// pages carry a budget comment for. Checked here rather than left silent.
+// `scr` clears LV_OBJ_FLAG_SCROLLABLE (ui_page_touch_test_build() below),
+// same as every other page. This page also isn't sized against the fixed
+// ~264px content budget the "main" pages use -- s_canvas_h is computed
+// directly from the real display resolution minus
+// UI_THEME_STATUS_BAR_HEIGHT_PX, UI_THEME_MIN_TOUCH_TARGET_PX (the
+// Clear/Done button row), and 3*UI_THEME_PADDING_PX (title/gap padding), so
+// title + canvas + button row sum to exactly the screen height by
+// construction rather than by estimate -- there is no fixed-height content
+// stack here that could grow past what's actually available. The `if
+// (s_canvas_h < 60)` floor only matters for a pathological (near-zero)
+// resolution, never expected on this board's real 480x320 panel.
 static const char *TAG = "ui_page_touch_test";
 
 #define SQUARE_MARGIN_PX 24

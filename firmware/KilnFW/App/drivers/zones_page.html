@@ -58,12 +58,25 @@
   .thermobits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
   .row2 { display: flex; gap: 0.7em; }
   .row2 > div { flex: 1; }
-  button { min-height: var(--ui-touch); margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2). */
+  button { margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
            border-radius: var(--ui-radius); cursor: pointer; }
   #msg { margin-top: 1em; font-weight: bold; }
   .empty { color: var(--muted); font-style: italic; }
   h3 { font-size: 0.95em; margin-top: 1.2em; }
+  /* UI_PLAN.md section 3, Web item 4 (table density pass): checked whether
+     the .table-scroll wrapper alone (Web item 1, applied around #couplingMatrix
+     /#rgaMatrix in the body below) is enough, or whether a responsive
+     per-zone-card collapse is also warranted for many-zone configs.
+     MAX31856_CHANNEL_COUNT (MAX31856.h) is 3 -- this board physically has at
+     most 3 thermocouple zones, so this table is never larger than 4x4
+     (zone rows/cols plus one header row/col) at 0.85em font, nowhere near
+     the ">4-zone" cramped case UI_PLAN.md's audit worried about in the
+     abstract. Scroll wrapper alone is sufficient; a responsive collapse
+     would be solving a problem this hardware configuration can't produce,
+     so none was added. */
   table.coupling { border-collapse: collapse; width: 100%; font-size: 0.85em; }
   table.coupling th, table.coupling td { border: 1px solid var(--border); padding: 0.3em 0.4em; text-align: center; }
   table.coupling th { background: var(--card-bg); }
@@ -192,7 +205,15 @@ is zone j's steady-state gain (&deg;C per unit duty) to zone i's step. The
 diagonal is each zone's own direct gain (same number the Autotune result
 above shows). Empty until that row's zone has completed a run this session
 (not persisted across reboot).</p>
+<!-- UI_PLAN.md section 3, Web item 1: wrapper, not the table itself -- the
+     <table class="coupling"> is built by buildCouplingTable-style JS below
+     (see line ~612's html += '<table class="coupling">...') and replaces
+     this div's innerHTML, so wrapping the container itself (rather than
+     patching every JS string-concat call site) picks up the scroll
+     behavior for free regardless of how the JS renders. -->
+<div class="table-scroll">
 <div id="couplingMatrix"><p class="empty">No autotune runs completed yet this session.</p></div>
+</div>
 
 <h3>Do the zones interfere? (Relative Gain Array)</h3>
 <p class="hint">Computed from the matrix above. Read only the <b>bold diagonal</b>:
@@ -207,7 +228,10 @@ that have <em>all</em> their cross-gains measured, and it is refused outright
 rather than estimated when the matrix has a hole in it or is degenerate -- a
 wrong answer here would say &quot;your zones are independent&quot; about a kiln
 where they are not.</p>
+<!-- Same table-scroll wrapper reasoning as #couplingMatrix above. -->
+<div class="table-scroll">
 <div id="rgaMatrix"><p class="empty">Not computable yet.</p></div>
+</div>
 
 <script>
 var RELAY_NAMES = ['Relay1', 'Relay2', 'Relay3', 'Relay4'];
