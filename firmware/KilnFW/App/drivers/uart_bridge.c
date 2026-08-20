@@ -14,6 +14,7 @@
 #include "SX1509.h"
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
+#include "lvgl_port.h"
 #include "relay_authority.h"
 #include "settings.h"
 #include "thermo_owner.h"
@@ -1264,8 +1265,23 @@ static void touch_bridge_task(void *arg)
             }
             case TOUCH_CMD_INJECT: {
                 if (!bridge_args_ok("touch", &msg, 6)) { rejected = true; break; }
-                err = screen_idle_inject_touch(ctx->idle, bridge_u16_le(&msg.payload[1]),
-                                               bridge_u16_le(&msg.payload[3]), msg.payload[5] != 0);
+                uint16_t inj_x = bridge_u16_le(&msg.payload[1]);
+                uint16_t inj_y = bridge_u16_le(&msg.payload[3]);
+                bool inj_pressed = msg.payload[5] != 0;
+                /* Two independent consumers of the same wire event, on purpose:
+                 * screen_idle_inject_touch() only ever cared THAT a touch
+                 * happened (idle-timer reset / wake), never where -- see its
+                 * header comment. lvgl_port_inject_touch() is the new half:
+                 * it hands x/y to LVGL's input device so the injected point
+                 * actually hit-tests against the UI, which is the whole point
+                 * of this command (previously the coordinates went nowhere --
+                 * see lvgl_port.c's touch_read_cb). Both are cheap
+                 * lock-protected variable writes, not lv_* calls, so calling
+                 * both from this UART task is safe -- lvgl_port_inject_touch()
+                 * never touches LVGL itself; only touch_read_cb (running on
+                 * lvgl_port_task) reads what it wrote. */
+                err = screen_idle_inject_touch(ctx->idle, inj_x, inj_y, inj_pressed);
+                lvgl_port_inject_touch(inj_x, inj_y, inj_pressed);
                 break;
             }
             default:

@@ -147,3 +147,42 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # let alone build or flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# CONFIG_ESP_COREDUMP_*: spontaneous-reboot diagnosability pass, 2026-08-20
+# (see firmware/KilnFW/TODO.md and partitions.csv's "coredump partition,
+# added 2026-08-20" comment). The board was seen rebooting on the bench with
+# no panic text recoverable -- the panic handler writes straight to the
+# USB-Serial-JTAG console, which re-enumerates across the reset and drops
+# whatever was captured on the PC side in that window. Writing the panic
+# reason, backtrace, and task states to the new `coredump` flash partition
+# instead means they survive the reset and can be read back afterward with
+# espcoredump.py, no serial capture window to lose.
+#
+# Following this file's own established pattern (CONFIG_LWIP_MAX_SOCKETS /
+# CONFIG_SPIRAM / CONFIG_PARTITION_TABLE_CUSTOM above): put it here, not only
+# in the gitignored local `sdkconfig`, or a fresh checkout silently loses
+# crash diagnosability entirely -- exactly the class of bug this file's
+# preceding three entries were all found fixing.
+#
+# ESP_COREDUMP_DATA_FORMAT_ELF / _CHECKSUM_SHA256 are deliberately NOT set
+# here: checked against components/espcoredump/Kconfig in this repo's pinned
+# IDF v6.0.2 (C:\esp\v6.0.2\esp-idf) -- `ESP_COREDUMP_ENABLE` (itself
+# selected by ENABLE_TO_FLASH below) unconditionally `select`s both, and
+# neither has a Kconfig `bool`/prompt of its own in this IDF version (the
+# legacy binary-format and CRC32-checksum choices from older IDF releases
+# no longer exist as user-facing options). Setting them here produced a
+# `NOTE: unknown kconfig symbol` build warning -- harmless, but noise this
+# file should not carry. ELF is what espcoredump.py's
+# `info_corefile`/`dbg_corefile` expect; SHA256 is this IDF version's only
+# integrity check for a partially-written/torn dump (e.g. a second panic
+# before the flash write completes) -- both are on by construction via the
+# select chain, not by anything in this file.
+# CONFIG_ESP_COREDUMP_MAX_TASKS_NUM: this app starts on the order of a few
+# dozen FreeRTOS tasks (I2C/SPI drivers, HTTP handlers, every UART bridge
+# task in App/main.c, LVGL, safety link, etc.). 64 is this Kconfig's own
+# default in v6.0.2 already -- pinned explicitly here so a dump taken with
+# everything running still captures every task's state rather than silently
+# truncating the list, regardless of what a future IDF version's default
+# becomes.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64

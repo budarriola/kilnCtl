@@ -32,6 +32,7 @@
 #define LVGL_PORT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -80,6 +81,57 @@ void lvgl_port_reload_touch_cal(void);
  * same pixel on the incoming page. Only lvgl_port_task calls lv_*, so this
  * is safe to call from an LV_EVENT_CLICKED handler (same task). */
 void lvgl_port_set_input_enabled(bool enabled);
+
+/* Feeds a synthetic touch into LVGL's input pipeline from the UART bridge's
+ * TOUCH_CMD_INJECT handler (uart_bridge.c) -- the fix for the long-standing
+ * gap where injected x/y went nowhere (previously only
+ * screen_idle_inject_touch() saw them, and only to reset the idle timer).
+ *
+ * Coordinate space: SCREEN PIXELS, post-calibration -- i.e. exactly what
+ * touch_read_cb() would hand LVGL after applying touch_cal_apply() to a real
+ * NS2009 reading. This is a deliberate choice, not the raw-ADC space the
+ * physical path starts from: a test harness wants to say "tap the button at
+ * (240,160)" against the same coordinate system every ui_page_*.c already
+ * lays widgets out in, not against a board-specific, orientation-dependent
+ * ADC range that only touch_cal_store.h's transform knows how to interpret
+ * (and that varies with a calibration the harness has no reason to run
+ * through first). Bypassing the transform also means injection keeps working
+ * identically whether or not this particular board has been calibrated yet.
+ *
+ * Thread safety: this may be called from ANY task (the UART bridge task,
+ * specifically) -- it only ever writes a small lock-protected struct, never
+ * an lv_* API. touch_read_cb() (lvgl_port.c), which runs exclusively on
+ * lvgl_port_task, is the only reader/consumer, matching every other
+ * cross-task data handoff in this codebase (thermo_owner.c / kiln_io_owner.c
+ * style: one owner task, lock-guarded writes from outside it).
+ *
+ * Press/release lifecycle: `pressed = true` latches an active injected press
+ * that touch_read_cb() will keep reporting, at the given (x, y), on every
+ * poll until either a `pressed = false` call arrives (a clean release -- one
+ * press + one release yields exactly one LVGL click, same as a real tap) or
+ * INJECTED_TOUCH_AUTO_RELEASE_MS elapses with no follow-up call at all (see
+ * lvgl_port.c) -- a safety net against a test script that injects a press
+ * and then crashes, disconnects, or simply forgets the matching release,
+ * which would otherwise wedge the UI in a permanently-pressed state (a stuck
+ * button, or an unreleased drag) until the board is reset. A drag is just a
+ * press followed by however many more `pressed = true` calls with updated
+ * (x, y) the caller wants (each one keeps the press alive and moves LVGL's
+ * tracked point, exactly like a finger sliding), then one final release.
+ *
+ * Interaction with a real finger: an injected press takes priority over the
+ * NS2009 for as long as it is active (see touch_read_cb()) -- deliberate, so
+ * an automated test run isn't fighting stray physical touches on the bench
+ * for control of the same indev. The physical path resumes automatically the
+ * moment there is no active injected press (never pressed, cleanly released,
+ * or auto-released). Wake/idle-timer behavior is unaffected either way: both
+ * the physical and injected paths still call screen_idle_inject_touch()
+ * (uart_bridge.c calls it directly for the injected path, alongside this
+ * function, since it needs to fire even before the LVGL side has resolved a
+ * hit-test) -- and neither path checks screen_idle's blanked/awake state
+ * before hit-testing, matching the existing physical-touch behavior: a wake
+ * tap also activates whatever it lands on underneath, intentionally (see
+ * touch_read_cb's comment for why this isn't gated). */
+void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
 
 #ifdef __cplusplus
 }

@@ -187,7 +187,30 @@ esp_err_t kiln_ui_show(const char *name)
     }
 
     lv_screen_load(page->screen);
+    const char *from = s_current_page_name ? s_current_page_name : "(none)";
     s_current_page_name = page->name;
+
+    /* One line per navigation, at INFO. Added 2026-08-20 because this panel
+     * has no framebuffer readback, so before this line there was NO way --
+     * from the PC, over the UART link, or from the device log -- to tell
+     * which page was actually on the glass: kiln_ui_show() logged only its
+     * failure paths, so a successful navigation was entirely silent. That
+     * made every touch-driven UI test unfalsifiable (a tap that hit nothing
+     * and a tap that navigated correctly produced identical evidence: none),
+     * and in particular made the "a Back button must go back exactly one
+     * level" rule checkable only by reading source, never by exercising it.
+     *
+     * Logging the from->to pair rather than just the destination is what
+     * makes that rule directly testable: a Back press from "temperature"
+     * must log temperature->config, not temperature->home.
+     *
+     * Volume is genuinely low -- this fires once per page switch, i.e. at
+     * human tap rate, not per poll. That distinction is the one this file's
+     * neighbours got wrong twice (NS2009's per-poll log, and the injected
+     * touch's per-delivery log), both of which flooded the ring buffer and
+     * dropped other lines; see lvgl_port.c's touch_read_cb() for that
+     * post-mortem. */
+    ESP_LOGI(TAG, "page: %s -> %s", from, page->name);
 
     /* lv_screen_load() only marks the new screen dirty -- normally the
      * render+flush happens later in the same lv_timer_handler() call this

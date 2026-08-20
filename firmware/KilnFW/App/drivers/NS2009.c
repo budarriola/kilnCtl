@@ -170,9 +170,25 @@ esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16
     *out_pressed = pressed;
     if (out_z1) *out_z1 = z1;
 
+    /* Routine polling chatter (2026-08-20, TODO.md diagnosability pass): this
+     * fires roughly once per touch poll (~700ms). At ESP_LOGI with a
+     * diag_counter % 20 gate it was still flooding both the device log ring
+     * and the PC-side view badly enough to rotate out genuinely important
+     * lines within seconds -- including the boot-time esp_reset_reason() line
+     * in App/main.c, which is the whole reason a spontaneous-reboot
+     * investigation went looking here. Steady-state "nothing is touching the
+     * panel" is not worth INFO; a real press/release transition still is, so
+     * that edge is logged separately at INFO below regardless of level. */
     static unsigned diag_counter = 0;
     if ((diag_counter++ % 20) == 0) {
-        ESP_LOGI(TAG, "Z1=%u threshold=%u pressed=%d", z1, (unsigned)TOUCH_Z1_MAX_THRESHOLD, pressed);
+        ESP_LOGD(TAG, "Z1=%u threshold=%u pressed=%d", z1, (unsigned)TOUCH_Z1_MAX_THRESHOLD, pressed);
+    }
+
+    static bool last_pressed = false;
+    if (pressed != last_pressed) {
+        ESP_LOGI(TAG, "touch %s (Z1=%u threshold=%u)", pressed ? "PRESSED" : "released", z1,
+                 (unsigned)TOUCH_Z1_MAX_THRESHOLD);
+        last_pressed = pressed;
     }
 
     if (!pressed) {
@@ -187,7 +203,9 @@ esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16
     err = NS2009_read_axis(t, NS2009_CMD_MEASURE_Y, &y);
     if (err != ESP_OK) return err;
 
-    ESP_LOGI(TAG, "raw_x=%u raw_y=%u z1=%u", x, y, z1);
+    /* Per-sample coordinates while held are still routine chatter at the same
+     * ~700ms cadence as Z1 above -- demoted alongside it. */
+    ESP_LOGD(TAG, "raw_x=%u raw_y=%u z1=%u", x, y, z1);
 
     *out_x = x;
     *out_y = y;

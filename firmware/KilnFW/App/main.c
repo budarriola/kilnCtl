@@ -7,6 +7,7 @@
 
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
+#include "esp_core_dump.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -239,6 +240,30 @@ void app_main(void)
                  (int)rr, rr_name, (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+        // CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y (sdkconfig.defaults, added
+        // the same 2026-08-20 diagnosability pass as this reset-reason line)
+        // writes a panic's backtrace/task-state dump to the new `coredump`
+        // flash partition (partitions.csv) instead of only to the
+        // USB-Serial-JTAG console, which re-enumerates across the reset and
+        // is exactly why earlier attempts to catch this board's spontaneous
+        // reboots lost the panic text. esp_core_dump_image_check() reports
+        // whether a dump is sitting there waiting to be read out with
+        // espcoredump.py -- logged right next to the reset reason so a
+        // glance at the boot log answers both "did it reset unexpectedly"
+        // and "is there a dump for that reset" in one place, without having
+        // to separately run the readback tool speculatively every time.
+        // ESP_ERR_NOT_FOUND from this call just means no dump is present
+        // (the common case, including every normal boot) -- not a fault.
+        esp_err_t cd_err = esp_core_dump_image_check();
+        if (cd_err == ESP_OK) {
+            ESP_LOGE(TAG, "COREDUMP PRESENT in flash from a previous crash -- decode with "
+                          "espcoredump.py info_corefile/dbg_corefile against build/KilnCtrl.elf "
+                          "(see firmware/KilnFW/TODO.md for the exact command), then erase it "
+                          "with esp_core_dump_image_erase() or it will keep reporting here");
+        } else if (cd_err != ESP_ERR_NOT_FOUND && cd_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "esp_core_dump_image_check: %s", esp_err_to_name(cd_err));
+        }
     }
 
     // --- ESP32-S3 internal die-temperature sensor (TODO.md 10.7) -----------

@@ -1422,11 +1422,25 @@ def touch_get_state() -> str:
 def touch_inject(x: int, y: int, pressed: bool = True) -> str:
     """Send a synthetic touch at (x, y), as if the physical panel were pressed.
 
-    Fire-and-forget: resets the firmware's screen auto-blank idle timer and
-    wakes the panel if it is currently blanked, exactly as a real touch
-    would. x/y are accepted and carried on the wire for a future UI-hit-test
-    use; they do not affect the idle/wake decision today. pressed=False (a
-    release) is accepted but is a no-op on the firmware side.
+    x/y are SCREEN PIXEL coordinates (0,0 at the top-left, same space every
+    ui_page_*.c file lays widgets out in) -- the firmware applies them
+    directly to LVGL's input device, downstream of the NS2009 calibration
+    transform, so this call hit-tests real buttons/containers exactly like a
+    finger would, independent of whether this board has ever been
+    touch-calibrated. It also resets the firmware's screen auto-blank idle
+    timer and wakes the panel if it is currently blanked, exactly as a real
+    touch would.
+
+    pressed=True latches the touch: the firmware keeps reporting it at (x, y)
+    on every LVGL input poll until a matching pressed=False call releases it
+    (one press + one release == one click, same as a real tap), or until
+    ~5s pass with no follow-up call, at which point the firmware auto-releases
+    it on its own so a forgotten release can't wedge the UI. To drag/scroll,
+    send one pressed=True call, then further pressed=True calls with updated
+    (x, y) tracing the path, then a final pressed=False to release -- each
+    call is one point along the gesture, there is no separate "move" verb.
+    An injected press takes priority over the physical NS2009 for as long as
+    it is held, so it will not race a stray touch on the bench.
     """
     return _send(UART_TASK_ID_TOUCH, devices.touch_inject(x, y, pressed))
 

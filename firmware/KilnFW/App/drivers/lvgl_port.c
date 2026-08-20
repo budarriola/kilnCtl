@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "lvgl.h"
@@ -119,6 +120,101 @@ static void ili9488_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t 
     lv_display_flush_ready(disp);
 }
 
+/* --- Touch injection (TOUCH_CMD_INJECT) ------------------------------------
+ * uart_bridge.c's UART touch task calls lvgl_port_inject_touch() below with
+ * whatever x/y/pressed came off the wire. That task is NOT lvgl_port_task, so
+ * it must never call an lv_* function (see this file's top comment) -- this
+ * struct plus a short-held mutex is the hand-off, same shape as
+ * thermo_owner.c/kiln_io_owner.c's "one owner task consumes a small state
+ * struct another task writes" convention and screen_idle.h's own lock.
+ * touch_read_cb() (lvgl_port_task, i.e. the one legal LVGL caller) is the
+ * only consumer.
+ *
+ * Coordinate space: SCREEN PIXELS, entering the pipeline downstream of the
+ * NS2009 calibration transform (touch_cal_apply() / the swap-invert fallback
+ * a few lines below) rather than upstream of it as raw ADC counts. A real
+ * press starts as raw ADC counts and only becomes a pixel coordinate after
+ * that per-board fit runs; an injected press already IS the coordinate a test
+ * harness wants hit-tested (e.g. "the Menu button center is (240,160)" read
+ * straight off ui_page_home.c's lv_obj_set_pos/size calls), and making it
+ * detour through the calibration transform first would require either
+ * inverting that transform (fragile, and pointless extra work) or shipping a
+ * synthetic ADC count that happens to map back to the intended pixel (equally
+ * fragile, and couples the test harness to whichever board's calibration
+ * happens to be loaded). Entering post-transform is also what keeps injected
+ * taps working identically on a board that has never been calibrated at all
+ * (s_touch_cal.calibrated == false) -- see touch_cal_store.h.
+ *
+ * Press/release lifecycle: a press stays "pending" (returned by touch_read_cb
+ * on every poll, same coordinates) until an explicit release arrives on the
+ * wire, exactly mirroring how a finger held down on real glass reads PRESSED
+ * on every NS2009 poll until it lifts -- LVGL's own click/long-press/drag
+ * state machine needs that repetition, not a single edge, to do the right
+ * thing. One press message followed later by one release message therefore
+ * produces exactly one LVGL click, the same as a real tap.
+ *
+ * Auto-release safeguard: TOUCH_INJECT_AUTORELEASE_MS bounds how long a press
+ * can be held with no matching release or refresh before this module lets go
+ * of it on its own. A test script that injects a press and then crashes,
+ * disconconnects, or simply forgets the matching release would otherwise wedge
+ * the UI in a permanent PRESSED state -- worse than doing nothing, since it
+ * also blocks real NS2009 touches (see touch_read_cb: an active injection
+ * takes priority over the physical read every poll). 5000ms is chosen to be
+ * far longer than any legitimate LVGL interaction this UI performs (clicks
+ * resolve in well under a second; the longest deliberate hold anywhere in the
+ * UI is the config grid's drag-to-scroll gesture, which is a handful of
+ * discrete move points a test harness sends within milliseconds of each
+ * other, not a multi-second hold) while still being short enough that a
+ * forgotten release recovers on its own well within the length of a manual
+ * bench-test pass rather than requiring a reboot. */
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool pending;   /* an unreleased press or an unconsumed release is waiting */
+    bool pressed;
+    int32_t x, y;
+    TickType_t last_update_tick;
+} touch_inject_t;
+
+static touch_inject_t s_inject;
+
+/* Last injected sample actually written to the log, used by touch_read_cb() to
+ * log transitions only (see the rationale at that call site). Deliberately NOT
+ * part of touch_inject_t and deliberately not guarded by s_inject.lock: these
+ * are read and written only by touch_read_cb(), i.e. only ever from
+ * lvgl_port_task, so they have a single owner and taking the lock for them
+ * would be pure overhead on the hottest path in this file. */
+static bool s_inject_logged_valid;
+static bool s_inject_logged_pressed;
+static int32_t s_inject_logged_x;
+static int32_t s_inject_logged_y;
+
+#define TOUCH_INJECT_LOCK_TIMEOUT_MS 1000u
+#define TOUCH_INJECT_AUTORELEASE_MS  5000u
+
+static bool touch_inject_lock(void)
+{
+    return xSemaphoreTake(s_inject.lock, pdMS_TO_TICKS(TOUCH_INJECT_LOCK_TIMEOUT_MS)) == pdTRUE;
+}
+
+static void touch_inject_unlock(void)
+{
+    xSemaphoreGive(s_inject.lock);
+}
+
+void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
+{
+    if (!s_inject.lock) return; /* lvgl_port_start hasn't run yet -- nothing to inject into */
+    if (!touch_inject_lock()) return; /* contention on a 1s timeout: drop rather than block the UART task */
+
+    s_inject.pending = true;
+    s_inject.pressed = pressed;
+    s_inject.x = (int32_t)x;
+    s_inject.y = (int32_t)y;
+    s_inject.last_update_tick = xTaskGetTickCount();
+
+    touch_inject_unlock();
+}
+
 /* --- Touch input device -----------------------------------------------
  * The one and only NS2009 reader once this module starts (see lvgl_port.h).
  * A real press is forwarded into screen_idle_inject_touch() so screen_idle's
@@ -136,6 +232,78 @@ static int32_t touch_raw_to_px(uint16_t raw, uint16_t panel_extent, bool invert)
 static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     lvgl_port_t *p = (lvgl_port_t *)lv_indev_get_user_data(indev);
+
+    /* An injected touch always takes priority over the physical NS2009 read
+     * for this poll -- see the "Touch injection" block comment above for why
+     * that's the right call (and its auto-release safeguard for why this
+     * can't wedge the UI against real touch forever). Injected coordinates
+     * are already screen pixels (see that same comment), so they go straight
+     * to data->point with no calibration transform. */
+    if (touch_inject_lock()) {
+        bool have_injection = s_inject.pending;
+        bool inject_pressed = s_inject.pressed;
+        int32_t inject_x = s_inject.x;
+        int32_t inject_y = s_inject.y;
+        TickType_t elapsed = xTaskGetTickCount() - s_inject.last_update_tick;
+
+        if (have_injection && inject_pressed && elapsed > pdMS_TO_TICKS(TOUCH_INJECT_AUTORELEASE_MS)) {
+            /* Safeguard tripped: synthesize the release the host never sent
+             * and stop overriding the physical path after this poll. */
+            ESP_LOGW(TAG, "injected touch held > %ums with no release -- auto-releasing",
+                     (unsigned)TOUCH_INJECT_AUTORELEASE_MS);
+            inject_pressed = false;
+            s_inject.pressed = false;
+            s_inject.pending = false;
+        } else if (have_injection && !inject_pressed) {
+            /* An explicit release: deliver it once, then let the physical
+             * path resume on the next poll. */
+            s_inject.pending = false;
+        }
+        touch_inject_unlock();
+
+        if (have_injection) {
+            data->point.x = inject_x;
+            data->point.y = inject_y;
+            data->state = inject_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+            /* This is the one piece of evidence, short of a framebuffer
+             * readback this panel doesn't support, that a TOUCH_CMD_INJECT
+             * frame actually reached LVGL's input pipeline rather than
+             * stopping at screen_idle like it did before this feature
+             * existed. It is worth keeping at INFO for exactly that reason --
+             * but only on a CHANGE.
+             *
+             * 2026-08-20, found live on the bench: an earlier version logged
+             * on every delivery, on the assumption that a harness "sends a
+             * handful of these per gesture". That assumption was wrong. A
+             * latched press is re-reported on every LVGL poll (~30ms) by
+             * design -- that repetition is what LVGL's click/drag state
+             * machine needs -- so logging each delivery emitted ~33 lines a
+             * second and produced exactly the flood this codebase has now
+             * fixed twice elsewhere (NS2009's poll log, uart_log_bridge's own
+             * retry storm): the ring filled, uart_log_bridge reported
+             * "log line(s) dropped (queue full)", and the dropped lines
+             * included the RELEASED line this message exists to show. A log
+             * that destroys the evidence it was added to capture is worse
+             * than no log.
+             *
+             * Logging only on a transition -- press, each drag point, release
+             * -- yields the "handful per gesture" the original intent
+             * described, with none of the flood. */
+            if (!s_inject_logged_valid || s_inject_logged_pressed != inject_pressed ||
+                s_inject_logged_x != inject_x || s_inject_logged_y != inject_y) {
+                ESP_LOGI(TAG, "injected touch delivered to LVGL: (%ld,%ld) %s", (long)inject_x,
+                         (long)inject_y, inject_pressed ? "PRESSED" : "RELEASED");
+                s_inject_logged_valid = true;
+                s_inject_logged_pressed = inject_pressed;
+                s_inject_logged_x = inject_x;
+                s_inject_logged_y = inject_y;
+            }
+            if (p->idle) {
+                screen_idle_inject_touch(p->idle, (uint16_t)inject_x, (uint16_t)inject_y, inject_pressed);
+            }
+            return;
+        }
+    }
 
     if (!p->touch) {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -237,6 +405,13 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
     s_port.touch = touch;
     s_port.idle = idle;
     s_port.last_screen_on = true;
+
+    memset(&s_inject, 0, sizeof(s_inject));
+    s_inject.lock = xSemaphoreCreateMutex();
+    if (!s_inject.lock) {
+        ESP_LOGE(TAG, "xSemaphoreCreateMutex (touch inject) failed");
+        return ESP_ERR_NO_MEM;
+    }
 
     touch_cal_store_load(&s_touch_cal);
 

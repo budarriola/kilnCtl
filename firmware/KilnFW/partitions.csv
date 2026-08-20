@@ -78,7 +78,8 @@
 # ota_0        app,  ota_0,     0x210000, 0x200000  2048K  OTA slot A
 # ota_1        app,  ota_1,     0x410000, 0x200000  2048K  OTA slot B
 # pico_img     data, undefined, 0x610000, 0xE0000   896K  Pico-image relay staging
-# spare                         0x6F0000..0x1000000 ~9.29M unused headroom (16 MB part)
+# coredump     data, coredump,  0x6F0000, 0x10000    64K  panic/backtrace capture (see below)
+# spare                         0x700000..0x1000000 ~9.0M unused headroom (16 MB part)
 #
 # Fit arithmetic:
 #   otadata:  0x200000 + 0x002000 = 0x202000
@@ -86,10 +87,30 @@
 #             0x210000 + 0x200000 = 0x410000
 #   ota_1:    0x410000 + 0x200000 = 0x610000
 #   pico_img: 0x610000 + 0x0E0000 = 0x6F0000
-#   spare:    0x6F0000 .. 0x1000000 (16 MB) = 0x910000 = 9,502,720 B ~= 9.29 MB
+#   coredump: 0x6F0000 + 0x010000 = 0x700000
+#   spare:    0x700000 .. 0x1000000 (16 MB) = 0x900000 = 9,437,184 B ~= 9.0 MB
 #   Even against the conservative 8 MB (0x800000) floor this table was
-#   designed for, 0x6F0000 < 0x800000 with ~1.1 MB to spare -- the layout does
+#   designed for, 0x700000 < 0x800000 with ~1.0 MB to spare -- the layout does
 #   not depend on the 16 MB confirmation being right, per UPDATE_PROTOCOL.md.
+#
+# --- coredump partition, added 2026-08-20 (spontaneous-reboot diagnosability
+# pass -- see firmware/KilnFW/TODO.md) --------------------------------------
+# The board was seen rebooting spontaneously on the bench with the panic
+# handler's own text landing in a dead window of the serial capture (the
+# USB-Serial-JTAG device re-enumerates across the reset). CONFIG_ESP_COREDUMP_
+# ENABLE_TO_FLASH=y (see sdkconfig.defaults) writes the panic reason,
+# backtrace, and task states to THIS partition instead, where they survive the
+# reset and can be read back at leisure with espcoredump.py against the build
+# ELF -- no serial capture window to lose. 64K (0x10000) is the size ESP-IDF's
+# own examples/docs treat as the conventional default for
+# CONFIG_ESP_COREDUMP_MAX_TASKS_NUM in the range this firmware runs (a few
+# dozen tasks); subtype `coredump` (0x03) is the reserved subtype
+# esp_core_dump_* uses to find this partition by type+subtype scan, not by
+# name, so the partition label itself is cosmetic but kept as `coredump` for
+# readability. Placed in the same 0x6F0000..0x1000000 spare region as
+# pico_img above it, immediately following pico_img and 64K-aligned already
+# (0x6F0000 = 111 x 0x10000), so no additional padding is needed the way
+# ota_0 needed after otadata.
 #
 # Why the 56K gap between otadata and ota_0: `gen_esp32part.py` requires `app`
 # type partitions (factory/ota_0/ota_1, but not `data` partitions like
@@ -151,3 +172,4 @@ otadata,      data, ota,       0x200000, 0x2000,
 ota_0,        app,  ota_0,     0x210000, 0x200000,
 ota_1,        app,  ota_1,     0x410000, 0x200000,
 pico_img,     data, undefined, 0x610000, 0xE0000,
+coredump,     data, coredump,  0x6F0000, 0x10000,
