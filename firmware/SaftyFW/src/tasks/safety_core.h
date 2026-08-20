@@ -135,6 +135,32 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
                                  uint32_t *out_uptime_ms, float *out_tc_c,
                                  float *out_deciding_threshold);
 
+// SAFETY_CMD_REQUEST_ENABLE (0x02), CommonFW/docs/LINK_PROTOCOL.md section 4
+// -- "advisory only, the Pico's interlocks always win" (SAFETY_MODEL.md
+// section 6). Called from link_task_handle_request_enable() (src/tasks/
+// link_task.c), the same "link_task calls INTO safety_core, never the
+// reverse" direction safety_core_request_clear_trip() above already
+// established -- link_task.c is structurally forbidden from calling
+// relay_owner directly (tools/check_isolation.ps1: it must never name the
+// relay at all), so this is the one legal path for an ESP energize/disable
+// request to reach it.
+//
+// A thin forward to relay_owner_command_energize(enable), not a second
+// policy layer: relay_owner's own state machine already refuses while
+// TRIPPED, accepts-but-never-applies during GRACE, and only actually drives
+// GPIO6 high while ARMED (relay_owner.c's RELAY_OWNER_CMD_ENERGIZE case) --
+// every refusal SAFETY_MODEL.md requires is already enforced there, and
+// duplicating any part of that check here would create exactly the kind of
+// second, potentially-diverging copy this codebase's "port it, do not
+// reimplement it" discipline (ARCHITECTURE.md section 3) warns against.
+//
+// Returns relay_owner_command_energize()'s own result: false if the command
+// queue was full (dropped) or the Pico is currently TRIPPED (refused
+// synchronously); true if the command was accepted for processing (which,
+// during GRACE, still does not mean GPIO6 actually went high -- see
+// relay_owner_is_energized() for that).
+bool safety_core_request_enable(bool enable);
+
 #ifdef __cplusplus
 }
 #endif

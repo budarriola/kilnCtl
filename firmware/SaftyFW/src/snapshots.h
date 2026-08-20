@@ -11,6 +11,7 @@
 #define SAFTYFW_SNAPSHOTS_H
 
 #include <stdbool.h>
+#include <stddef.h> // NULL, for context_reduce_zones()/current_any_present() below
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -104,6 +105,144 @@ typedef struct {
     uint8_t  zone_count; /* 0..CONTEXT_SNAPSHOT_MAX_ZONES */
     context_zone_t zones[CONTEXT_SNAPSHOT_MAX_ZONES];
 } context_snapshot_t;
+
+// --- Pure reduction helpers -------------------------------------------------
+// safety_core.c (src/tasks/safety_core.c) needs these to turn the raw structs
+// above into the handful of scalars safety_guards.h's safety_guard_input_t
+// actually takes (S2/S10's "already reduced by the caller" contract, see that
+// struct's own field comments) -- but safety_core.c is structurally forbidden
+// from #include-ing any header whose name contains "link" or "uart"
+// (docs/ARCHITECTURE.md section 2, tools/check_isolation.ps1), which rules out
+// putting them in link_frame.h/.c alongside link_frame_unpack_context() where
+// they would otherwise belong. snapshots.h already has neither substring in
+// its name and is already included by both safety_core.c and link_task.c for
+// the structs themselves, so it is the one legal shared home. `static inline`
+// (not `static`) deliberately: GCC/Clang do not warn on an unused static
+// inline function the way they would a plain unused static one, so
+// thermo_task.c/current_task.c/link_frame.c -- which include this header for
+// the structs but never call these two -- build clean under -Wall -Wextra
+// -Werror without needing a suppression. Free host-test coverage too
+// (test/test_snapshots.c, test/build_host_tests.ps1): no FreeRTOS/pico-sdk
+// dependency, same reasoning link_frame.c's own pure functions already rely
+// on.
+
+// S2/S10's zone reduction (SAFETY_MODEL.md section 4). Only zones with both
+// CONTEXT_ZONE_FLAG_ACTIVE and CONTEXT_ZONE_FLAG_MEASURED_VALID set are
+// eligible -- an inactive or faulted zone must influence neither S2's ceiling
+// nor S10's nearest-match search. `*out_zone_count` is the count of ELIGIBLE
+// zones, not `ctx->zone_count` itself: safety_guard_input_t's own doc
+// comment is explicit that "zone_count == 0" means "no ACTIVE zones this
+// tick", not "no zones were on the wire". `*out_max_setpoint_c` is the
+// highest `setpoint_c` among eligible zones (S2). `*out_nearest_measured_c`
+// is the eligible zone's `measured_c` whose absolute difference from `tc_c`
+// is smallest (S10: "compares against the *nearest* valid zone reading, not
+// the mean -- kilns stratify by well over 100C top to bottom"). When
+// `ctx == NULL`, `!ctx->valid`, or no zone is eligible, `*out_zone_count` is
+// 0 and the two float outputs are left at 0.0f -- meaningless in that case,
+// exactly like every other "count == 0" contract already in this codebase
+// (the guards themselves gate on context_valid/zone_count before ever
+// reading the floats, so this never needs to publish NaN to be safe).
+static inline void context_reduce_zones(const context_snapshot_t *ctx, float tc_c,
+                                         uint8_t *out_zone_count, float *out_max_setpoint_c,
+                                         float *out_nearest_measured_c)
+{
+    uint8_t count = 0;
+    float   max_setpoint = 0.0f;
+    float   nearest_measured = 0.0f;
+    float   nearest_diff = 0.0f; /* meaningful only once count > 0 */
+
+    if (ctx != NULL && ctx->valid) {
+        uint8_t n = ctx->zone_count;
+        if (n > CONTEXT_SNAPSHOT_MAX_ZONES) {
+            n = CONTEXT_SNAPSHOT_MAX_ZONES; /* defensive -- ctx is caller-trusted here, but never overrun */
+        }
+        for (uint8_t i = 0; i < n; i++) {
+            const context_zone_t *z = &ctx->zones[i];
+            bool eligible = (z->flags & CONTEXT_ZONE_FLAG_ACTIVE) != 0u &&
+                            (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u;
+            if (!eligible) {
+                continue;
+            }
+            if (count == 0u || z->setpoint_c > max_setpoint) {
+                max_setpoint = z->setpoint_c;
+            }
+            float diff = z->measured_c - tc_c;
+            if (diff < 0.0f) {
+                diff = -diff;
+            }
+            if (count == 0u || diff < nearest_diff) {
+                nearest_diff = diff;
+                nearest_measured = z->measured_c;
+            }
+            count++;
+        }
+    }
+
+    if (out_zone_count) {
+        *out_zone_count = count;
+    }
+    if (out_max_setpoint_c) {
+        *out_max_setpoint_c = max_setpoint;
+    }
+    if (out_nearest_measured_c) {
+        *out_nearest_measured_c = nearest_measured;
+    }
+}
+
+// S3/S4/S6b's "is the load actually drawing current right now" fact
+// (SAFETY_MODEL.md section 3: presence/absence only, never a magnitude
+// guard) -- OR across all three channels against `i_present_a`. `cur == NULL`
+// conservatively reads as "no current present", same "unknown means the
+// conservative default" convention every other input in this codebase uses.
+static inline bool current_any_present(const current_snapshot_t *cur, float i_present_a)
+{
+    if (cur == NULL) {
+        return false;
+    }
+    return cur->amps[0] > i_present_a || cur->amps[1] > i_present_a || cur->amps[2] > i_present_a;
+}
+
+// --- Link-task boundary getters ---------------------------------------------
+// Declared here, not in link_task.h, for the same isolation reason as the
+// pure functions above -- these three are implemented in link_task.c (their
+// full doc comments live there / in link_task.h, which re-declares
+// link_task_get_context_snapshot() and link_task_get_degraded_no_context()
+// for link_task.c's own internal use and any other non-isolation-constrained
+// caller). A matching prototype in two headers is ordinary, legal C -- the
+// same trick reboot_announce.h already established for the ANNOUNCE_REBOOT
+// grace-window fact (see safety_core.c's own header comment), applied here
+// for context and link liveness, which need a snapshot-shaped and a
+// boolean-shaped crossing respectively rather than reboot_announce.h's single
+// timestamp.
+bool link_task_get_context_snapshot(context_snapshot_t *out);
+bool link_task_get_degraded_no_context(void);
+// True iff link_task decoded a valid (CRC-passing, well-formed) kilnlink
+// frame from the ESP within the last LINK_UP_RECENCY_MS (link_task.c) --
+// a per-tick LEVEL, deliberately mirroring discrete_task_estop_pressed()'s
+// own shape (safety_guard_input_t's own doc comment on link_up: "a level
+// (true/false per tick), not a duration"). safety_guards.c's own
+// s6b_link_down_elapsed_s accumulator is what turns this level into the
+// real two-tier (10s soft / 120s hard) timeout -- this function only ever
+// answers "is a frame arriving right now", never does the timeout math
+// itself.
+bool link_task_link_up(void);
+
+// Milliseconds `relay_now_mask` (the context frame's instantaneous field, not
+// `relay_recent_mask`'s already-ESP-computed OR-over-window) has been
+// continuously nonzero across the sequence of PUSH_CONTEXT frames link_task
+// has actually received, or 0 if it is not on right now. safety_core.c
+// compares this against `correlation_window_s` (safety_guard_cfg_t) itself
+// to produce S4's `relay_commanded_continuously` (SAFETY_MODEL.md section 4:
+// "commanded on throughout the last correlation_window_s" -- an AND over the
+// window, which neither wire mask alone answers: `relay_now_mask` is a single
+// instant and `relay_recent_mask` is an OR, not an AND). Tracked in
+// link_task.c because it is single-writer-safe there (link_task's own RX
+// path is the only writer, matching s_context_frames_ok/bad's own
+// documented reasoning) -- safety_core_build_input() is called from two
+// different task contexts (safety_core_task's own tick, and
+// safety_core_request_clear_trip() from link_task's CLEAR_TRIP handler), so
+// it must never own a mutable time accumulator of its own.
+uint32_t link_task_get_relay_on_continuous_ms(void);
 
 #ifdef __cplusplus
 }

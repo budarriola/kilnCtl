@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 45,
   "timescale": 10.0,
-  "start_time": 1787265413.4324121,
+  "start_time": 1787269337.3458588,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 45000000,
+      "sim_time_us": 44000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 97000000,
+      "sim_time_us": 94000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S5"
@@ -46,7 +46,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 148000000,
+      "sim_time_us": 145000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S5"
@@ -60,12 +60,11 @@
   "expectations": [
     {
       "name": "warns_first",
-      "verdict": "PASS",
+      "verdict": "FAIL",
       "evidence": [
-        0,
-        2000000001
+        0
       ],
-      "detail": "event:guard_warn observed 6.000s after fault_fired"
+      "detail": "event:guard_warn not observed within 6s after fault_fired (seq 0)"
     },
     {
       "name": "trips_after_blind_grace",

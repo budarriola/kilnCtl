@@ -1,6 +1,56 @@
 # virtual_dut scenario results
 Full run against `virtual_simfw.exe` + `dut_core.exe` (real `safety_guards.c`/`relay_grace.c`), all 19 scenarios in `firmware/SimFW/scenarios/`. See `../README.md` for the architecture and the findings that explain the FAIL/BLOCKED pattern below (S6b's unconditional ~120s trip, K4 never energizing in current SaftyFW, context_valid always false, plus the corollary that a `dut: K4_open` clause has no NEW edge to point to once K4 was already open before the run started).
 
+## Re-run after the `safety_core.c`/`link_task.c` wiring pass (this pass) -- zero verdict delta, by design of this fixture's own scope boundary
+
+A separate task (this one) wired `firmware/SaftyFW/src/tasks/safety_core.c`'s
+`safety_core_build_input()` to actually populate `context_valid`,
+`zone_count`/`max_zone_setpoint_c`/`nearest_zone_measured_c`,
+`any_current_present`, `relay_commanded_recently`/`_continuously`, and
+`link_up` from `link_task.c`'s real (now also newly-decoding-`REQUEST_ENABLE`)
+published context/liveness, and added `safety_core_request_enable()` as the
+first-ever caller of `relay_owner_command_energize()`. Full details, the
+exact wiring, and the guards this newly makes reachable **on real hardware**
+are in the commit this results update ships with.
+
+**Re-running this exact suite (`run_dut_scenarios.py`, all 19 scenarios)
+against that fixed real firmware produces byte-identical verdicts and
+reason strings to the run recorded below, field for field (only
+`start_time`/poll-jitter `sim_time_us` differ).** This is expected, not a
+sign the fix did nothing: `dut_core/main.c` (this directory, explicitly
+off-limits to that task -- "Do NOT modify ... `firmware/SimFW/tools/
+virtual_dut/**` code") is a **from-scratch, independent, hand-written
+stand-in** for `safety_core_build_input()`'s outer loop, not a wrapper that
+calls the real function -- `firmware/SaftyFW/src/tasks/safety_core.c`
+itself is FreeRTOS/pico-sdk-shaped and cannot be host-compiled at all (see
+`../README.md`'s own "Explicitly NOT compiled" table). `dut_core/main.c`'s
+own header comment says so plainly: it hardcodes `context_valid`,
+`link_up`, `main_fault_asserted`, `relay_deenergized`,
+`any_current_present`, `relay_commanded_recently`/`_continuously` to the
+exact zero/false values the OLD, pre-fix `safety_core_build_input()`'s
+struct literal left them at, and `energized` is never set `true` anywhere
+in the file, matching the OLD "K4 has zero callers" state. None of that
+mirror code changed in this pass (by constraint), so none of its output
+can change either, regardless of what the real firmware now does.
+
+**What this means concretely:** the guard-reachability delta this fix
+actually produces (S2/S3/S4/S10/S13 now context-gated correctly instead of
+force-off; S6b's link-liveness input now real instead of permanently
+false; K4 now has a real caller via `SAFETY_CMD_REQUEST_ENABLE`) is real
+on the RP2040 target -- confirmed by the RP2040 `cmake --build` succeeding
+clean and by the 24 new host-tested checks in `firmware/SaftyFW/test/
+test_snapshots.c` covering the pure reduction logic
+(`context_reduce_zones()`/`current_any_present()`) that
+`safety_core_build_input()` now calls -- but this specific fixture cannot
+demonstrate it without `dut_core/main.c` also being updated to call (or at
+least faithfully re-derive) the fixed logic, which is a follow-on task,
+not this one. Bringing `dut_core/main.c` up to date with the real
+`safety_core_build_input()` -- ideally by finding a way to compile the real
+function's pure fact-derivation instead of hand-mirroring it a second time,
+the same "port it, don't reimplement it" discipline this whole codebase
+otherwise follows -- is recorded here as the natural next step for whoever
+owns `firmware/SimFW/tools/virtual_dut/` next.
+
 ## What changed in this pass: virtual_simfw's K4 duty/current gating bug is fixed -- and, as predicted, the scenario delta is genuinely zero
 
 A separate task fixed a real bug in real firmware (`firmware/SimFW/src/tasks/sim_engine.c`, commit `af88ffc`): the thermal model's `duty[]`/`current_a[]` computation never gated on K4, the mechanical safety pilot relay, even though `docs/PLAN.md` section 2 loop 2 and section 1 both specify "heater current appears ... only when the right relays are closed *and* K4 permits." That gate is now applied *after* any per-zone `fault_sched` duty override, so even a runaway-heater or welded-relay override that forces duty to 1.0 is still cut off once K4 opens.

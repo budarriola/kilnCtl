@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 54,
   "timescale": 10.0,
-  "start_time": 1787265184.6269393,
+  "start_time": 1787269108.7036028,
   "events": [
     {
       "seq": 0,
@@ -46,7 +46,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 94000000,
+      "sim_time_us": 95000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S12"

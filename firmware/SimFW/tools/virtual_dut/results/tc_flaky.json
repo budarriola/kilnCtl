@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 46,
   "timescale": 10.0,
-  "start_time": 1787265436.3173432,
+  "start_time": 1787269360.119074,
   "events": [
     {
       "seq": 0,
@@ -11194,32 +11194,19 @@
       "f0": 0.0
     },
     {
-      "seq": 932,
-      "sim_time_us": 953000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 933,
-      "sim_time_us": 954000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
       "seq": 2000000000,
-      "sim_time_us": 42000000,
+      "sim_time_us": 43000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S5"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 43000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -11230,11 +11217,22 @@
       "f0": 0.0
     },
     {
-      "seq": 2000000001,
-      "sim_time_us": 143000000,
+      "seq": 2000000002,
+      "sim_time_us": 145000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 145000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S5"
       },
       "a": 0,
       "b": 0,
@@ -11247,9 +11245,9 @@
       "name": "no_trip_from_flapping",
       "verdict": "BLOCKED",
       "evidence": [
-        2000000000
+        2000000001
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, not because the flapping fault genuinely failed to trip anything under S5's real streak-reset logic.]",
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000001) [BLOCKED: This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, not because the flapping fault genuinely failed to trip anything under S5's real streak-reset logic.]",
       "blocked_on": {
         "reason": "This forbid clause is currently satisfied for the wrong reason: K4 starts de-energized (open) at boot and stays that way -- relay_owner_command_energize() is fully built (firmware/SaftyFW/src/tasks/relay_owner.c) but called by nothing in the current source tree -- so K4_open is already true at sim-time 0, not because the flapping fault genuinely failed to trip anything under S5's real streak-reset logic.",
         "phase": "Phase 7 (link_task) -- link_task exists and already decodes several ESP->Pico commands (PUSH_CONTEXT, CLEAR_TRIP, SET_CONFIG, ROLLBACK, ANNOUNCE_REBOOT...), but not this one. KilnFW already sends SAFETY_CMD_REQUEST_ENABLE (0x02) over the link (safety_link_request_enable(), App/drivers/ uart_bridge.c), yet SaftyFW's link_task.c has no LINK_FRAME_REQUEST_ENABLE_CMD case at all (confirmed against link_frame.h's command list), so relay_owner_command_energize() is never called from anywhere. A genuinely missing decoder, not a wiring omission on an existing pair -- see ROADMAP.md M4's matching finding."
@@ -11257,12 +11255,15 @@
     },
     {
       "name": "no_warn_storm",
-      "verdict": "PASS",
-      "evidence": [],
-      "detail": "event:guard_warn never observed before the boundary"
+      "verdict": "FAIL",
+      "evidence": [
+        2000000000,
+        2000000003
+      ],
+      "detail": "event:guard_warn observed before the boundary (first at seq 2000000000)"
     }
   ],
-  "verdict": "BLOCKED",
+  "verdict": "FAIL",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

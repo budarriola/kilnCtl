@@ -30,6 +30,7 @@ $sources = @(
     (Join-Path $testDir "test_tx_watermark.c"),
     (Join-Path $testDir "test_relay_grace.c"),
     (Join-Path $testDir "test_config_store.c"),
+    (Join-Path $testDir "test_snapshots.c"),
     (Join-Path $srcDir "safety_guards.c"),
     (Join-Path $srcDir "config_store.c"),
     (Join-Path $srcDir "tasks\link_frame.c"),

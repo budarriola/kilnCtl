@@ -13,7 +13,13 @@
 // into the link path. tools/check_isolation.ps1 greps for this.
 // discrete_task_estop_pressed() and relay_owner.h/boot_reason.h are fine to
 // include here -- neither is link-shaped, and check_isolation.ps1 only
-// greps for "uart"/"link" in an #include line, not for these.
+// greps for "uart"/"link" in an #include line, not for these. Same for
+// current_task.h (its own ADC0/1/2, independent of the link entirely -- see
+// SAFETY_MODEL.md section 3) and snapshots.h, which is where link_task.c's
+// context/link-liveness getters are (re-)declared specifically so this file
+// can call them without a "link"-named #include -- see that header's own
+// doc comment on that section, and reboot_announce.h's comment two lines up
+// for the precedent this follows.
 #include "safety_core.h"
 
 #include <math.h>
@@ -30,6 +36,9 @@
 #include "watchdog_task.h"
 
 #include "boot_reason.h"
+#include "current_task.h" // any_current_present (S3/S4/S6b) -- current_task is a real, independent
+                           // Phase-6 producer (its own ADC, not link-derived), not link/uart-shaped,
+                           // fine for check_isolation.ps1
 #include "discrete_task.h"
 #include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18) grace-window fact for
                               // S6b -- see that header's own doc comment for why this,
@@ -37,6 +46,13 @@
                               // link->safety_core boundary tools/check_isolation.ps1 enforces.
 #include "relay_owner.h"
 #include "safety_guards.h"
+#include "snapshots.h" // context_snapshot_t + link_task_get_context_snapshot()/
+                        // link_task_get_degraded_no_context()/link_task_link_up()/
+                        // link_task_get_relay_on_continuous_ms() -- declared here, not in
+                        // link_task.h, specifically so this file can see them without an
+                        // #include naming "link"/"uart"; see snapshots.h's own doc comment
+                        // on that section for the full reasoning, and reboot_announce.h's
+                        // comment just above for the precedent this follows.
 #include "thermo_task.h"
 
 #define SAFETY_CORE_STACK_WORDS   configMINIMAL_STACK_SIZE
@@ -56,6 +72,34 @@
 // stuck reboot still gets caught by the hard backstop shortly after this
 // window closes, not held open indefinitely).
 #define REBOOT_GRACE_WINDOW_MS 20000u
+
+// SAFETY_MODEL.md section 5 rule 2: "Stale context is no context. Older than
+// context_max_age_s (default 5s, i.e. 10 poll periods) and the context-
+// consuming guards go inactive, not pessimistic." Not a
+// safety_guard_cfg_t field (context_valid is a caller-computed bool, not a
+// per-tick raw value the guard module itself ages -- see
+// safety_guard_input_t's own doc comment on context_valid), so this lives
+// here as a local constant, same status as REBOOT_GRACE_WINDOW_MS just
+// above: a documented software default from SAFETY_MODEL.md, not an
+// invented one.
+#define CONTEXT_MAX_AGE_MS 5000u
+
+// Mirrors safety_guards.c's own I_PRESENT_A_DEFAULT / CORRELATION_WINDOW_S_
+// DEFAULT (safety_guards.h's cfg field doc comment: "0 -> i_present_a=2.0A,
+// correlation_window_s=150.0s") -- duplicated here, not exported from
+// safety_guards.c, because this file needs the SAME "0 means not
+// configured, substitute the default" substitution safety_guards.c already
+// does internally in order to compute any_current_present/
+// relay_commanded_continuously as INPUT facts, one tick before
+// safety_guards_tick() itself runs. Both numbers are the already-documented
+// SAFETY_MODEL.md defaults, not new ones invented for this file -- if
+// safety_guards.c's own defaults ever change, these must change with them
+// (same risk any duplicated constant carries; there is no third home to put
+// a single copy in without violating the isolation boundary this whole file
+// exists to keep, see snapshots.h's own doc comment on why the shared pure
+// helpers live there instead of in safety_guards.c or link_frame.c).
+#define SAFETY_CORE_I_PRESENT_A_DEFAULT          2.0f
+#define SAFETY_CORE_CORRELATION_WINDOW_S_DEFAULT 150.0f
 
 static TaskHandle_t s_task_handle = NULL;
 
@@ -115,10 +159,13 @@ static safety_guard_input_t safety_core_build_input(void)
     // the fallback here needs no special-casing beyond the struct's
     // default field values.
     //
-    // heat_commanded stays false -- still correctly out of scope (no
-    // current sense yet, Phase 6); this is unchanged from the Phase 2
-    // stub and remains the honest, conservative answer to "do you know
-    // heat is happening?" until current_task exists.
+    // heat_commanded stays false -- deliberately still out of scope for
+    // THIS pass, not because current_task doesn't exist (it does, Phase 6 is
+    // built, and any_current_present below now reads it), but because S11's
+    // own wiring is a separate, unauthorised-for-this-change gap: S11 is not
+    // one of the guards this pass's fix is scoped to. false remains the
+    // honest, conservative answer to "do you know heat is happening?" until
+    // that separate wiring lands.
     thermo_snapshot_t thermo;
     (void)thermo_task_get_snapshot(&thermo);
 
@@ -143,6 +190,99 @@ static safety_guard_input_t safety_core_build_input(void)
         reboot_grace_active = age_ms < REBOOT_GRACE_WINDOW_MS;
     }
 
+    // --- Context from link_task (SAFETY_MODEL.md section 5) ----------------
+    // Pulled here, never pushed -- same "safety_core pulls, link_task never
+    // pushes into it" discipline as the thermo snapshot above. This was the
+    // TODO (Phase 7) this function carried for every prior pass: context_
+    // snapshot_t is now actually read, not just declared reachable.
+    context_snapshot_t ctx;
+    bool ctx_published = link_task_get_context_snapshot(&ctx);
+
+    // "Stale context is no context" -- collapses never-received, stale, AND
+    // a version mismatch (DEGRADED_NO_CONTEXT, SAFETY_MODEL.md section 6a:
+    // "the context-dependent guards report as disabled") into the single
+    // context_valid fact safety_guards.c's own doc comment expects: it does
+    // not, and must not, need to re-derive any of these three conditions
+    // itself.
+    bool context_valid = false;
+    if (ctx_published && ctx.valid && !link_task_get_degraded_no_context()) {
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        // Same wraparound-safe unsigned subtraction reasoning as
+        // reboot_grace_active above -- both ctx.timestamp_ms and now_ms come
+        // from the same to_ms_since_boot() clock.
+        uint32_t age_ms = now_ms - ctx.timestamp_ms;
+        context_valid = age_ms < CONTEXT_MAX_AGE_MS;
+    }
+
+    // S2/S10's zone reduction -- context_reduce_zones() (snapshots.h) is the
+    // pure, host-tested function that turns the raw per-zone array into the
+    // two scalars those guards actually consume; see its own doc comment for
+    // why *_zone_count is a count of ELIGIBLE (active + measured-valid)
+    // zones, not ctx.zone_count itself. Only meaningful (and only computed
+    // against a real tc_c) when context is valid -- when it is not, zeroing
+    // zone_count below is what tells safety_guards.c "no active zones this
+    // tick", the same inactive treatment as context_valid == false itself
+    // (safety_guards.c resets S2/S10's own accumulators either way).
+    uint8_t zone_count = 0;
+    float   max_zone_setpoint_c = 0.0f;
+    float   nearest_zone_measured_c = 0.0f;
+    if (context_valid) {
+        context_reduce_zones(&ctx, thermo.tc_c, &zone_count, &max_zone_setpoint_c,
+                              &nearest_zone_measured_c);
+    }
+
+    // S3/S4/S6b's current-presence fact -- current_task is a real, already-
+    // running Phase 6 producer (its own ADC0/1/2, independent of the link;
+    // SAFETY_MODEL.md section 3 -- "not an over/under-current guard", so this
+    // is presence/absence only). current_any_present() (snapshots.h) applies
+    // the SAME threshold substitution safety_guards.c's own effective_f()
+    // does internally (see SAFETY_CORE_I_PRESENT_A_DEFAULT's declaration
+    // comment) -- unconditional, not gated on context_valid, matching
+    // safety_guards.c's own S6b block which reads any_current_present
+    // regardless of context (SAFETY_MODEL.md section 2: "a quiet link with
+    // current flowing" needs current sensing to work even with no ESP
+    // context at all).
+    current_snapshot_t current;
+    current_task_get_snapshot(&current);
+    float i_present_a = (s_guard_cfg.i_present_a > 0.0f) ? s_guard_cfg.i_present_a
+                                                           : SAFETY_CORE_I_PRESENT_A_DEFAULT;
+    bool any_current_present = current_any_present(&current, i_present_a);
+
+    // S3/S4's relay-correlation facts (SAFETY_MODEL.md section 4) -- both
+    // derived from context, so both collapse to false whenever context_valid
+    // is false, matching safety_guards.c's own "reset the accumulator, don't
+    // just skip the check" discipline for the whole context-dependent block.
+    bool relay_commanded_recently = false;
+    bool relay_commanded_continuously = false;
+    if (context_valid) {
+        relay_commanded_recently = ctx.relay_recent_mask != 0u;
+        float correlation_window_s = (s_guard_cfg.correlation_window_s > 0.0f)
+                                          ? s_guard_cfg.correlation_window_s
+                                          : SAFETY_CORE_CORRELATION_WINDOW_S_DEFAULT;
+        uint32_t continuous_ms = link_task_get_relay_on_continuous_ms();
+        relay_commanded_continuously = (float)continuous_ms >= correlation_window_s * 1000.0f;
+    }
+
+    // S13's sample_counter_advancing: deliberately left false. SAFETY_MODEL.md
+    // section 3 requires a commissioned `borrowed_zone_index` (0..2) to say
+    // WHICH context zone is "the" borrowed channel before this fact means
+    // anything at all -- that field is documented (docs/CONFIG_REFERENCE.md,
+    // SAFETY_MODEL.md section 3) but does not exist anywhere in this
+    // codebase yet (grep-confirmed: no config_store field, no
+    // safety_guard_cfg_t field), the same "Phase 9, not commissioned" gap
+    // abs_max_temp_c is in for S1. Guessing a zone index (e.g. hardcoding
+    // zone 0) would be inventing a commissioning decision this pass is not
+    // authorised to make, and it would be silently WRONG the moment a real
+    // installation's borrowed zone is not zone 0. This is harmless today
+    // regardless: cfg.tc_source has no default and stays SAFETY_TC_SOURCE_
+    // OWN_J7 (0) absent Phase 9 commissioning, and safety_guards.c's own S13
+    // block is gated on `cfg->tc_source == BORROWED_ZONE || BOTH` before it
+    // ever reads this field -- so S13 stays correctly dormant either way,
+    // the same "config gap, not a missing-producer gap" category
+    // GUARD_TEST_MATRIX.md section 6 already documents for S1. Revisit once
+    // borrowed_zone_index is real.
+    bool sample_counter_advancing = false;
+
     return (safety_guard_input_t){
         .tc_valid = thermo.valid,
         .tc_c = thermo.tc_c,
@@ -151,6 +291,15 @@ static safety_guard_input_t safety_core_build_input(void)
         .spi_failed = thermo.spi_failed,
         .estop_pressed = discrete_task_estop_pressed(),
         .heat_commanded = false,
+        .context_valid = context_valid,
+        .zone_count = zone_count,
+        .max_zone_setpoint_c = max_zone_setpoint_c,
+        .nearest_zone_measured_c = nearest_zone_measured_c,
+        .any_current_present = any_current_present,
+        .relay_commanded_recently = relay_commanded_recently,
+        .relay_commanded_continuously = relay_commanded_continuously,
+        .sample_counter_advancing = sample_counter_advancing,
+        .link_up = link_task_link_up(),
         .reboot_grace_active = reboot_grace_active,
         .dt_s = (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f,
     };
@@ -204,10 +353,6 @@ static void safety_core_task(void *arg)
             // order (logging) is deliberately not implemented here rather
             // than faked with a printf that goes nowhere real.
         }
-
-        // TODO (Phase 7): context_snapshot_t is read here too, once
-        // link_task publishes one -- but only ever READ, never called into;
-        // safety_core pulls, link_task never pushes (section 2's diagram).
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_SAFETY_CORE);
     }
@@ -340,6 +485,15 @@ bool safety_core_request_clear_trip(void)
         (void)relay_owner_clear_trip();
     }
     return cleared;
+}
+
+bool safety_core_request_enable(bool enable)
+{
+    // See safety_core.h's doc comment: deliberately a thin forward, no
+    // second policy layer. relay_owner_command_energize() already refuses
+    // while TRIPPED, accepts-but-never-applies during GRACE, and only
+    // actually drives GPIO6 high while ARMED.
+    return relay_owner_command_energize(enable);
 }
 
 bool safety_core_start(void)

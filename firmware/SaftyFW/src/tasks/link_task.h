@@ -100,6 +100,14 @@ uint32_t link_task_get_status_tx_ok_count(void);
 // question for everything else.
 float link_task_get_tx_ring_fill_fraction(void);
 
+// link_task_link_up() and link_task_get_relay_on_continuous_ms() are declared
+// (with their full doc comments) in snapshots.h, not here -- safety_core.c,
+// their real consumer, is structurally forbidden from #include-ing any header
+// naming "link"/"uart" (tools/check_isolation.ps1), and snapshots.h is
+// already the shared, isolation-legal home this header comment's own
+// link_task_get_context_snapshot()/link_task_get_degraded_no_context() are
+// mirrored into for the same reason. Both are implemented in link_task.c.
+
 #ifdef __cplusplus
 }
 #endif

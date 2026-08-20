@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 47,
   "timescale": 10.0,
-  "start_time": 1787265455.732214,
+  "start_time": 1787269379.4039333,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 43000000,
+      "sim_time_us": 47000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 145000000,
+      "sim_time_us": 148000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S6b"

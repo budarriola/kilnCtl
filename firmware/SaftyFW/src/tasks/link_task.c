@@ -227,6 +227,34 @@ static kilnlink_trip_t s_pending_trip;
 static unsigned s_trip_repeats_pending = 0;
 static TickType_t s_last_trip_tx_tick = 0;
 
+// Link liveness (SAFETY_MODEL.md section 4, S6b), snapshots.h's
+// link_task_link_up() doc comment. Single-writer: only
+// link_task_handle_raw_frame() below ever touches these, right after a
+// frame's CRC/length/type checks pass in kilnlink_frame_decode() -- BEFORE
+// the BROADCAST-only filter just below it, deliberately: S6b's question is
+// "is the ESP alive and transmitting", not "did it send us something we act
+// on", so even a frame this build ends up discarding for its type still
+// proves the peer is there.
+static TickType_t s_last_valid_frame_tick = 0;
+static bool s_valid_frame_seen = false;
+// A software recency window, not a measured physical constant (same category
+// as REBOOT_GRACE_WINDOW_MS, safety_core.c) -- comfortably above the ESP's
+// ~500ms PUSH_CONTEXT cadence (CONFIG_KILNCTL_SAFETY_POLL_PERIOD_MS,
+// firmware/KilnFW/App/drivers/Kconfig) plus margin for scheduling jitter, and
+// far below S6b's own 10s soft / 120s hard timeouts -- so a link_up that
+// occasionally reads false between two healthy frames costs nothing (safety_
+// guards.c's own s6b_link_down_elapsed_s accumulator tolerates that exactly
+// the way it tolerates any other brief link_up==false tick), while a link_up
+// that reads true only for genuinely recent traffic is what keeps the 10s/
+// 120s timers meaningful.
+#define LINK_UP_RECENCY_MS 1000u
+
+// S4's "commanded on throughout the correlation window" fact (snapshots.h's
+// link_task_get_relay_on_continuous_ms() doc comment) -- single-writer,
+// touched only from link_task_handle_push_context() below.
+static TickType_t s_relay_on_since_tick = 0;
+static bool s_relay_on_continuous = false;
+
 // --- TX ----------------------------------------------------------------
 
 // dst_task-general version -- link_task_send_broadcast() below is the
@@ -587,6 +615,21 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
 
     s_context_frames_ok++;
     s_last_context_rx_tick = xTaskGetTickCount();
+
+    // S4's continuously-on tracking (see s_relay_on_since_tick's own
+    // declaration comment): relay_now_mask is the only wire fact this frame
+    // carries that is a true instant, so "continuously on" can only be
+    // derived by watching it across the sequence of frames actually
+    // received, here, where that sequence is single-writer-safe.
+    bool relay_now_on = (snap.relay_now_mask != 0u);
+    if (relay_now_on) {
+        if (!s_relay_on_continuous) {
+            s_relay_on_since_tick = xTaskGetTickCount();
+            s_relay_on_continuous = true;
+        }
+    } else {
+        s_relay_on_continuous = false;
+    }
 }
 
 static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
@@ -619,6 +662,52 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     // call, by design (and this file could not make one anyway, see the
     // header comment).
     s_degraded_no_context = !compatible;
+}
+
+// SAFETY_CMD_REQUEST_ENABLE (0x02), CommonFW/docs/LINK_PROTOCOL.md section 4
+// ("Kept, converted to BROADCAST. Advisory only -- the Pico's interlocks
+// always win"). 2-byte payload: cmd (0x02) + a 0/1 enable byte, exactly what
+// firmware/KilnFW/App/drivers/safety_link.c's safety_link_request_enable()
+// sends (`{ SAFETY_CMD_REQUEST_ENABLE, enable ? 1u : 0u }`). No kilnlink_*
+// codec exists for this frame in CommonFW (unlike CLEAR_TRIP/SET_CONFIG/
+// ROLLBACK/ANNOUNCE_REBOOT above) and this pass is not authorised to add one
+// there, so the 2-byte payload is validated and read inline here rather than
+// through a bespoke link_frame.c unpacker -- there is nothing left to get
+// wrong once frame->length == 2 is checked.
+//
+// Never touches relay_owner directly -- link_task.c is structurally
+// forbidden from naming the relay at all (tools/check_isolation.ps1, this
+// file's own header comment), so this only ever asks
+// safety_core_request_enable(), the same shape as
+// link_task_handle_clear_trip() calling safety_core_request_clear_trip()
+// below. Every refusal path (TRIPPED refuses outright, GRACE accepts the
+// command but never actually drives GPIO6 high, only ARMED honours it) is
+// enforced inside relay_owner's own state machine
+// (src/tasks/relay_owner.c's RELAY_OWNER_CMD_ENERGIZE case) -- safety_core_
+// request_enable() is a thin forward, not a second policy layer, so there is
+// exactly one place a refusal could be silently dropped, and it is not this
+// one.
+#define LINK_FRAME_REQUEST_ENABLE_CMD 0x02u
+
+static void link_task_handle_request_enable(const kilnlink_frame_t *frame)
+{
+    if (frame->length != 2u) {
+        // Malformed/wrong-length -- untrusted wire input, discarded silently
+        // like every other decode failure in this file.
+        return;
+    }
+    bool enable = frame->payload[1] != 0u;
+
+    bool accepted = safety_core_request_enable(enable);
+    if (enable) {
+        log_task_log(accepted ? LOG_LEVEL_INFO : LOG_LEVEL_WARN, "request_enable",
+                     accepted ? "accepted" : "refused, interlocks");
+    } else {
+        // A disable request always succeeds (relay_owner_command_energize()
+        // has no refusal path for energize == false) -- logged at INFO,
+        // never WARN, since there is nothing advisory being overridden here.
+        log_task_log(LOG_LEVEL_INFO, "request_enable", "disable requested");
+    }
 }
 
 // SAFETY_CMD_CLEAR_TRIP (0x0A), CommonFW/docs/LINK_PROTOCOL.md section 4 --
@@ -832,6 +921,13 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         return; // bad length/CRC/type -- untrusted wire input, discarded, not guessed at
     }
 
+    // S6b's link_up (snapshots.h's link_task_link_up() doc comment): a
+    // frame that decodes cleanly proves the ESP is alive and transmitting,
+    // regardless of whether this build goes on to act on it -- recorded
+    // before the BROADCAST-only filter just below on purpose.
+    s_last_valid_frame_tick = xTaskGetTickCount();
+    s_valid_frame_seen = true;
+
     if (frame.msg_type != KILNLINK_MSG_BROADCAST || frame.length == 0) {
         return; // the Pico never participates in the ACK'd DATA/ACK/NACK transport
     }
@@ -852,6 +948,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_PUSH_CONTEXT_CMD:
         link_task_handle_push_context(&frame);
+        break;
+    case LINK_FRAME_REQUEST_ENABLE_CMD:
+        link_task_handle_request_enable(&frame);
         break;
     case LINK_FRAME_CLEAR_TRIP_CMD:
         link_task_handle_clear_trip(&frame);
@@ -1076,6 +1175,11 @@ bool link_task_start(void)
     s_trip_repeats_pending = 0;
     s_last_trip_tx_tick = 0;
 
+    s_last_valid_frame_tick = 0;
+    s_valid_frame_seen = false;
+    s_relay_on_since_tick = 0;
+    s_relay_on_continuous = false;
+
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.
     s_context_lock = xSemaphoreCreateMutex();
@@ -1159,4 +1263,23 @@ float link_task_get_tx_ring_fill_fraction(void)
         return 1.0f; // defensive -- treat "no capacity info" as "full", never as "empty"
     }
     return (float)uart_owner_get_tx_used() / (float)cap;
+}
+
+bool link_task_link_up(void)
+{
+    if (!s_valid_frame_seen) {
+        return false;
+    }
+    TickType_t age_ticks = xTaskGetTickCount() - s_last_valid_frame_tick;
+    uint32_t age_ms = (uint32_t)age_ticks * portTICK_PERIOD_MS;
+    return age_ms < LINK_UP_RECENCY_MS;
+}
+
+uint32_t link_task_get_relay_on_continuous_ms(void)
+{
+    if (!s_relay_on_continuous) {
+        return 0u;
+    }
+    TickType_t elapsed_ticks = xTaskGetTickCount() - s_relay_on_since_tick;
+    return (uint32_t)elapsed_ticks * portTICK_PERIOD_MS;
 }
