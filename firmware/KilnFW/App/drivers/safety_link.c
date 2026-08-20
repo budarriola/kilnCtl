@@ -1099,7 +1099,17 @@ static void safety_poll_task(void *arg)
         }
 
         TickType_t started = xTaskGetTickCount();
-        (void)safety_exchange(link, request, sizeof(request), true);
+        esp_err_t poll_err = safety_exchange(link, request, sizeof(request), true);
+
+        /* SAFETY_LINK_BACKOFF_MAX_STREAK's comment: streak resets to 0 the
+         * instant any exchange succeeds -- a Pico that comes online later is
+         * back to full normal cadence on its very first reply, no reboot
+         * needed. */
+        if (poll_err == ESP_OK) {
+            link->no_reply_streak = 0;
+        } else if (link->no_reply_streak < SAFETY_LINK_BACKOFF_MAX_STREAK) {
+            link->no_reply_streak++;
+        }
 
         bool peer_version_known = false;
         if (safety_lock(link)) {
@@ -1138,6 +1148,18 @@ static void safety_poll_task(void *arg)
         uint32_t sleep_ms = (spent >= period) ? SAFETY_LINK_MIN_POLL_GAP_MS : (period - spent);
         if (sleep_ms < SAFETY_LINK_MIN_POLL_GAP_MS) {
             sleep_ms = SAFETY_LINK_MIN_POLL_GAP_MS;
+        }
+        /* SAFETY_LINK_BACKOFF_MAX_STREAK's comment: extra sleep on top of the
+         * requested period while nothing has answered recently, capped and
+         * reset on the next reply -- poll_period_ms itself (what
+         * GET_LINK_STATS reports) is untouched, only how long this
+         * particular iteration sleeps. */
+        if (link->no_reply_streak > 0u) {
+            uint32_t backoff_extra = (uint32_t)period * ((1u << (link->no_reply_streak - 1u)) - 1u);
+            if (backoff_extra > SAFETY_LINK_BACKOFF_MAX_EXTRA_MS) {
+                backoff_extra = SAFETY_LINK_BACKOFF_MAX_EXTRA_MS;
+            }
+            sleep_ms += backoff_extra;
         }
         vTaskDelay(pdMS_TO_TICKS(sleep_ms));
     }

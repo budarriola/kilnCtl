@@ -150,11 +150,30 @@ class ThermoClient:
         length: int = 1,
         timeout: float = DEFAULT_REPLY_TIMEOUT_S,
     ) -> ThermoRegisters:
-        """Raw register read from one MAX31856 (debug)."""
+        """Raw register read from one MAX31856 (debug).
+
+        Raises :class:`ThermoQueryError` if the firmware answers with zero
+        data bytes -- the reply firmware now sends (uart_bridge.c,
+        THERMO_CMD_READ_REG case, 2026-08-20) when the channel's owner-side
+        read failed (e.g. the channel never came up: no thermocouple
+        daughterboard attached, see thermo_owner.h's BENCH NOTE) instead of
+        the old silent timeout. A 0-length body is a definite "could not
+        read this register," never a legitimate answer -- the caller always
+        asks for at least 1 byte (``devices.thermo_read_reg``'s ``length``
+        range is 1..16), so an empty ``data`` can only be the firmware's
+        failure marker.
+        """
         value = self._query(
             THERMO_CMD_READ_REG, devices.thermo_read_reg(channel, reg, length), timeout
         )
-        return value  # type: ignore[return-value]
+        registers = value  # type: ThermoRegisters
+        if not registers.data:
+            raise ThermoQueryError(
+                f"THERMO READ_REG ch{channel} reg 0x{reg:02X}: firmware reported "
+                "0 data bytes -- the channel's SPI read failed (channel never "
+                "came up, e.g. no thermocouple daughterboard attached)"
+            )
+        return registers
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
         with self._query_lock:

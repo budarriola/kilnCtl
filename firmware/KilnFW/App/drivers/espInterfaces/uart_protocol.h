@@ -173,6 +173,34 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto,
                               size_t length,
                               uint32_t ack_timeout_ms);
 
+/* Same DATA-frame contract as uart_protocol_send(), but with the retry
+ * ceiling given explicitly instead of the fixed UART_PROTO_MAX_RETRIES (10).
+ * uart_protocol_send() is implemented as this with max_retries ==
+ * UART_PROTO_MAX_RETRIES, so both share one retry loop.
+ *
+ * Added for uart_log_bridge.c (see 2026-08-20 congestion note in that file):
+ * that caller already treats the result as fire-and-forget ("the result is
+ * intentionally ignored"), but was calling the 10-retry uart_protocol_send()
+ * anyway, so a single stuck ACK could hold this proto's tx_lock -- shared
+ * with every real reply this link ever sends -- for up to
+ * ack_timeout_ms * UART_PROTO_MAX_RETRIES. A true BROADCAST send would be
+ * free of that cost, but the PC-side reader (serial_link.py's
+ * _handle_frame()) only delivers MsgType.DATA to a registered task's inbox
+ * today -- BROADCAST is silently dropped there -- so the log channel cannot
+ * switch frame types without going dark. Capping max_retries instead keeps
+ * the DATA frame (and therefore PC-side delivery) while bounding the worst
+ * case a single log line can dominate the shared link to
+ * ack_timeout_ms * max_retries. max_retries must be >= 1. Returns the same
+ * codes as uart_protocol_send(). */
+esp_err_t uart_protocol_send_limited(uart_protocol_t *proto,
+                                      uart_proto_device_t dst_device,
+                                      uint8_t dst_task,
+                                      uint8_t src_task,
+                                      const uint8_t *payload,
+                                      size_t length,
+                                      uint32_t ack_timeout_ms,
+                                      int max_retries);
+
 /* Sends payload to (dst_device, dst_task) as a BROADCAST frame: one shot, no
  * ACK wait, no retry, no dedup on the receiving side. Returns as soon as the
  * bytes are handed to the UART. A peer that never replies -- the safety

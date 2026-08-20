@@ -21,8 +21,10 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
@@ -301,8 +303,20 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
         return err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(gpio_probe_task, "gpio_probe", 3072, &ctx, 3,
-                                                 NULL, tskNO_AFFINITY);
+    /* 2026-08-20: this task is registered right after uart_bridge_ext.c's
+     * CONTROL/PROFILES/AUTOTUNE/WIFI, i.e. in the same post-wifi_prov boot
+     * window where the WiFi driver's own internal-SRAM buffer allocations
+     * were observed racing plain xTaskCreatePinnedToCore() calls for the
+     * same shrinking pool -- see uart_bridge_ext.c's retry_task_create_pinned()
+     * comment for the full evidence. This task never had a retry loop at
+     * all (a bare failed create here was silent, worse than the other
+     * four), so it gets the same PSRAM-stack fix: WithCaps + MALLOC_CAP_SPIRAM
+     * removes it from that internal-SRAM race entirely rather than papering
+     * over it with retries. Not latency-critical -- it blocks on its inbox
+     * like every other bridge task. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(gpio_probe_task, "gpio_probe", 3072, &ctx, 3,
+                                                         NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_GPIO_PROBE);
         return ESP_ERR_NO_MEM;

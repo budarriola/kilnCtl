@@ -626,6 +626,39 @@ esp_err_t wifi_provision_http_start(void)
                                      * pressure instead of refusing new ones
                                      * -- keeps a stuck/slow client from
                                      * locking a phone out permanently. */
+    /* Socket-pool sizing, 2026-08-20 (live-tested wedge). Confirmed on the
+     * bench: a burst of 10 near-simultaneous `curl` GETs to /status hit the
+     * DEFAULT (7) open-socket cap -- 3 connection-refused outright, the rest
+     * queue behind httpd's single worker task and stall to their client
+     * timeout. A second burst right after times out entirely, and the
+     * server doesn't recover until ~5 s of idle time lets lru_purge_enable
+     * (above) age out the backlog. Real-world trigger: a phone and a PC
+     * both polling the dashboard at once. max_open_sockets must satisfy
+     * ESP-IDF's own invariant (max_open_sockets <= CONFIG_LWIP_MAX_SOCKETS
+     * - 3, checked inside httpd_start()), so this bump is paired with
+     * raising CONFIG_LWIP_MAX_SOCKETS 10 -> 16 in sdkconfig -- see that
+     * file's comment at the same line. 13 (16-3) gives real headroom over
+     * the 10-connection burst that wedged the board without chasing the
+     * internal-SRAM-per-socket cost too far (see this project's earlier
+     * SRAM-starvation history -- 10-13 sockets is the sane range, not
+     * dozens). backlog_conn (kernel-level pending-accept queue, separate
+     * from httpd's own open-socket cap) is also bumped from its default of
+     * 5 so a burst larger than max_open_sockets still gets queued by the OS
+     * instead of refused at the TCP level. */
+    config.max_open_sockets = 13;
+    config.backlog_conn = 10;
+    /* Same burst: sockets sitting idle-but-stuck (e.g. a client that opened
+     * a connection but is slow to send/read) held their slot for the full
+     * 5 s default recv/send timeout, which is most of what made the second
+     * burst hang instead of failing fast. Shortened to 3 s so a stuck
+     * socket is recycled faster under load. Safe to do server-wide: the OTA
+     * upload handlers (ota_http.c, ota_esp_do_transfer()/pico equivalent)
+     * do NOT rely on this default -- they set their own 30 s per-recv
+     * setsockopt(SO_RCVTIMEO) directly on the connection's socket fd
+     * specifically so a global default bump/cut here can't affect them
+     * (see ota_http.c's comment at that setsockopt() call). */
+    config.recv_wait_timeout = 3;
+    config.send_wait_timeout = 3;
     /* Default (8) is one short of this file's own 5 routes plus
      * dashboard_http.c's 2 -- bumped with headroom rather than tuned to the
      * exact current count, so the next route added here doesn't silently

@@ -66,3 +66,84 @@ CONFIG_LV_USE_QRCODE=y
 # future pass could measure it precisely (uxTaskGetStackHighWaterMark) and
 # right-size this rather than carry a guessed margin indefinitely.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# CONFIG_LWIP_MAX_SOCKETS: found the hard way 2026-08-20 auditing this file
+# after wifi_provision_http.c's `config.max_open_sockets = 13` fix (see that
+# file's comment at the same line, added the same pass) -- this project's
+# `sdkconfig` had CONFIG_LWIP_MAX_SOCKETS raised 10 -> 16 to satisfy it, but
+# that edit was made through menuconfig, which only ever writes the
+# gitignored, machine-local `sdkconfig`, never this file. A fresh checkout
+# regenerates `sdkconfig` from this file plus ESP-IDF's own defaults, which
+# means CONFIG_LWIP_MAX_SOCKETS would silently fall back to 10 -- verified by
+# deleting `sdkconfig` and running `idf.py reconfigure` with this fix absent.
+# ESP-IDF enforces max_open_sockets <= CONFIG_LWIP_MAX_SOCKETS - 3 inside
+# httpd_start() (see wifi_provision_http.c); with the default of 10 that caps
+# max_open_sockets at 7, so httpd_start() for the dashboard/captive-portal
+# server returns ESP_ERR_INVALID_ARG and the board boots with NO web server
+# at all -- no dashboard, no AP-join page, nothing reachable over WiFi. This
+# is a hard dependency, not a tuning knob: do NOT lower this back toward 10
+# without also lowering wifi_provision_http.c's max_open_sockets to match
+# (and re-checking it still survives the ~10-connection dashboard-polling
+# burst documented there), or the server will fail to start on next boot.
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# CONFIG_SPIRAM and friends: found the hard way 2026-08-20, same audit pass
+# as CONFIG_LWIP_MAX_SOCKETS above and for the identical reason -- this
+# board's octal PSRAM is enabled only in the gitignored, machine-local
+# `sdkconfig` (set once through menuconfig years ago) and was never carried
+# into this file. Verified by deleting `sdkconfig` and running
+# `idf.py reconfigure`: with this block absent, the regenerated sdkconfig
+# comes back "# CONFIG_SPIRAM is not set" -- PSRAM off entirely. That is not
+# a minor regression on this board: CONFIG_LV_USE_CLIB_MALLOC above depends
+# on CONFIG_SPIRAM_USE_MALLOC=y to route LVGL's allocator to PSRAM (without
+# it the LCD does not initialize -- see that entry's comment), and
+# App/drivers/uart_bridge_ext.c's xTaskCreatePinnedToCoreWithCaps(...,
+# MALLOC_CAP_SPIRAM) calls for the UART bridge tasks have nowhere to
+# allocate from without PSRAM present, so those tasks would fail to start
+# too. CLK_IO/CS_IO/mode/speed below are this board's actual wiring (copied
+# from the working `sdkconfig`), not guesses -- do not change them without
+# confirming against the schematic.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_CLK_IO=30
+CONFIG_SPIRAM_CS_IO=26
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MEMTEST=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# CONFIG_PARTITION_TABLE_CUSTOM: found the hard way 2026-08-20, same audit
+# pass, same root cause as the two entries above (a menuconfig-only change
+# that never made it into this file) -- and this one reproduces immediately.
+# Deleting `sdkconfig` and running `idf.py reconfigure` + a full ninja build
+# with this line absent fails at the partition-size-check step:
+#   Error: app partition is too small for binary KilnCtrl.bin size 0x15f490:
+#   - Part 'factory' 0/0 @ 0x10000 size 0x100000 (overflow 0x5f490)
+# Without CONFIG_PARTITION_TABLE_CUSTOM=y, ESP-IDF falls back to
+# CONFIG_PARTITION_TABLE_SINGLE_APP (partitions_singleapp.csv, a fixed 1MB
+# factory partition) instead of this project's partitions.csv (factory
+# fixed at 1500K -- see CONFIG_COMPILER_OPTIMIZATION_SIZE's comment above
+# for why that size is fixed rather than grown). The 1MB default is smaller
+# than KilnCtrl.bin even with -Os, so a fresh checkout fails to link a
+# flashable image at all, not just at boot. Without CUSTOM_FILENAME here,
+# CONFIG_PARTITION_TABLE_FILENAME does not get set to partitions.csv either.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# CONFIG_ESPTOOLPY_FLASHSIZE: found the hard way 2026-08-20, same audit pass,
+# same root cause again -- reproduces immediately and is even more fatal than
+# the two entries above. Deleting `sdkconfig` and reconfiguring+building with
+# this absent fails during partition-table generation itself, before any app
+# code is even linked:
+#   Partitions tables occupies 6.9MB of flash (7274496 bytes) which does not
+#   fit in configured flash size 2MB.
+# ESP-IDF's default flash size is 2MB; partitions.csv (see its own header
+# comment, "CONFIG_ESPTOOLPY_FLASHSIZE was corrected from 2MB to 16MB earlier
+# this session") lays out the OTA dual-app-slot table across the first
+# ~7.28 MB of this board's real 16 MB (N16R8 module) flash chip. Without this
+# pinned to 16MB, a fresh checkout cannot even generate a partition table,
+# let alone build or flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"

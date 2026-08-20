@@ -877,9 +877,16 @@ def parse_thermo_response(
                 f"READ_REG reports channel {channel}, outside "
                 f"0..{THERMO_CHANNEL_COUNT - 1}"
             )
-        if not 1 <= length <= THERMO_REG_READ_MAX:
+        # length 0 is not a request the PC ever sends (thermo_read_reg's own
+        # range is 1..THERMO_REG_READ_MAX) -- it is the firmware's failure
+        # marker for a channel whose SPI read did not succeed (uart_bridge.c,
+        # THERMO_CMD_READ_REG case, 2026-08-20: "reply with 0 data bytes
+        # instead of dropping the reply"). Accept it structurally here and let
+        # ThermoClient.read_reg() turn it into a ThermoQueryError -- this
+        # layer only validates the wire shape, not what the firmware meant.
+        if not 0 <= length <= THERMO_REG_READ_MAX:
             raise ThermoResponseError(
-                f"READ_REG len={length} outside 1..{THERMO_REG_READ_MAX}"
+                f"READ_REG len={length} outside 0..{THERMO_REG_READ_MAX}"
             )
         if len(payload) != 4 + length:
             raise ThermoResponseError(

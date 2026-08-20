@@ -52,6 +52,35 @@ typedef struct {
  * UART_PROTO_MAX_RETRIES retries on top of this. */
 #define UART_LOG_BRIDGE_ACK_TIMEOUT_MS UART_PROTO_DEFAULT_ACK_TIMEOUT_MS
 
+/* 2026-08-20 congestion fix (see ROADMAP.md/TODO.md): this task used to call
+ * plain uart_protocol_send(), which retries UART_PROTO_MAX_RETRIES (10)
+ * times against uart_protocol.h's default ack_timeout_ms before giving up --
+ * despite this call site's own comment two paragraphs down already saying
+ * "Fire-and-forget: the result is intentionally ignored". That mismatch was
+ * the actual mechanism behind the bench-observed PC-link congestion: with no
+ * RP2040 attached, safety_link.c's poll retries (dev2/task7) throw a
+ * rate-limited "no reply" WARNing roughly every 5s (uart_protocol.c's
+ * RETRY_LOG_INTERVAL_US) -- and *that* line, like every ESP_LOGx call, gets
+ * captured by uart_log_vprintf() and forwarded here as an ordinary DATA
+ * frame on the *same* proto (and therefore the same tx_lock) uart_bridge.c
+ * uses for real PC replies. If the PC side is even briefly slow to ACK, one
+ * such forward could hold that shared tx_lock for up to
+ * UART_LOG_BRIDGE_ACK_TIMEOUT_MS * UART_PROTO_MAX_RETRIES (2000ms) --
+ * directly explaining the observed 2-3s+ reply delays and the "PC link lost
+ * (no frame or ACK for 5000ms)" events under heavier load, since every
+ * *other* queued reply serializes on that same lock behind it.
+ *
+ * A true BROADCAST send (uart_protocol_send_broadcast, zero retries, returns
+ * as soon as the bytes are queued) would remove the cost entirely, but the
+ * PC-side reader only delivers MsgType.DATA frames to a registered task's
+ * inbox (tools/PcTools/src/kilnctrl/serial_link.py's _handle_frame():
+ * anything that "is not MsgType.DATA" is silently dropped) -- switching this
+ * channel's frame type would make device logging go dark on the PC side, not
+ * just cheaper. uart_protocol_send_limited() keeps the DATA frame (so
+ * delivery still works) while capping the retry budget to what this call
+ * site already claimed it wanted: try once, keep going either way. */
+#define UART_LOG_BRIDGE_MAX_RETRIES 1
+
 typedef struct {
     QueueHandle_t queue;
     uart_protocol_t *proto;      /* NULL until uart_log_bridge_start() */
@@ -202,10 +231,14 @@ static void uart_log_bridge_task(void *arg)
         /* Fire-and-forget: the result is intentionally ignored -- there is
          * nowhere to report it that wouldn't itself just be another log line
          * queued behind this one (see uart_log_vprintf's self-filter above),
-         * and best-effort is the whole point here. */
-        uart_protocol_send(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
-                            UART_TASK_ID_LOG, payload, (size_t)entry.len + 1,
-                            UART_LOG_BRIDGE_ACK_TIMEOUT_MS);
+         * and best-effort is the whole point here. _limited() with
+         * UART_LOG_BRIDGE_MAX_RETRIES=1 makes that true in practice, not just
+         * in this comment -- see that macro's definition for why the old
+         * 10-retry uart_protocol_send() call here was the actual congestion
+         * mechanism, not merely a slow path. */
+        uart_protocol_send_limited(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
+                                    UART_TASK_ID_LOG, payload, (size_t)entry.len + 1,
+                                    UART_LOG_BRIDGE_ACK_TIMEOUT_MS, UART_LOG_BRIDGE_MAX_RETRIES);
 
         /* Surface any lines lost to a full queue since the last report --
          * built directly as a payload (not through ESP_LOGx, which
@@ -224,9 +257,9 @@ static void uart_log_bridge_task(void *arg)
                               "uart_log_bridge: %u log line(s) dropped (queue full)",
                               (unsigned)dropped);
             size_t drop_len = (m > 0 && (size_t)m < UART_LOG_TEXT_MAX) ? (size_t)m : UART_LOG_TEXT_MAX - 1;
-            uart_protocol_send(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
-                                UART_TASK_ID_LOG, drop_payload, drop_len + 1,
-                                UART_LOG_BRIDGE_ACK_TIMEOUT_MS);
+            uart_protocol_send_limited(bridge->proto, UART_PROTO_DEVICE_HOST, UART_TASK_ID_LOG,
+                                        UART_TASK_ID_LOG, drop_payload, drop_len + 1,
+                                        UART_LOG_BRIDGE_ACK_TIMEOUT_MS, UART_LOG_BRIDGE_MAX_RETRIES);
         }
     }
 }

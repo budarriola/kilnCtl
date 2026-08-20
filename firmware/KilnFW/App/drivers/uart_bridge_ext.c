@@ -26,6 +26,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
@@ -45,56 +46,60 @@ static const char *TAG = "uart_bridge_ext";
 #define BRIDGE_REPLY_MAX UART_PROTO_MAX_PAYLOAD
 #define BRIDGE_REPLY_ACK_TIMEOUT_MS 200u
 
-/* 2026-08-20, found live on the bench: this file's four uart_bridge_start_*_task()
- * functions (CONTROL/PROFILES/AUTOTUNE/WIFI) run back-to-back in main.c with
- * zero delay between them, each calling xTaskCreatePinnedToCore() for a
- * 4096-byte stack -- FreeRTOS task stacks, like the xQueueCreate() calls
- * uart_protocol.c's own uart_protocol_register_task() comment already
- * documents fighting over the same scarce pool, come from internal SRAM
- * only, never PSRAM. Repeatable on real hardware: CONTROL and PROFILES
- * (registered first and second) came up clean every boot, but AUTOTUNE and
- * WIFI (registered third and fourth, right after two successful ones)
- * consistently NACKed every query across multiple separate boots -- hard
- * evidence of exactly this transient-window class of failure, not a
- * one-off glitch. A failed
- * xTaskCreatePinnedToCore() here already rolls back its own
- * uart_protocol_register_task() (see each function below), so the task
- * NEVER stays half-registered -- it looks identical to "never
- * started" to every later query, which is what made this look like a
- * mysterious one-off NACK before the pattern was checked against multiple
- * boots. Same fix shape uart_protocol_register_task() already uses for the
- * analogous xQueueCreate() contention: a few short retries through the
- * transient window rather than taking one failed attempt as final. */
+/* 2026-08-20, ROOT-CAUSED on the bench once the uart_log_bridge queue-overflow
+ * bug (separate fix, see TODO.md) stopped eating the early boot log: this
+ * file's four uart_bridge_start_*_task() functions (CONTROL/PROFILES/
+ * AUTOTUNE/WIFI) run back-to-back in main.c right after wifi_prov starts the
+ * softAP (main.c ~2.9-3.6s in), which is exactly when the WiFi driver is
+ * itself tearing through internal SRAM for its own buffers (32 dynamic tx,
+ * 10 static rx @1600B, 5 static mgmt, etc. -- all logged immediately before,
+ * see "wifi_init: Init ... buffer num" lines). xTaskCreatePinnedToCore()
+ * (plain, no *WithCaps suffix) always allocates BOTH the TCB and the stack
+ * from internal SRAM -- CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY does
+ * *not* change that; it only permits PSRAM stacks for tasks created through
+ * the *WithCaps API below, which nothing here was using. So these four
+ * tasks were racing the WiFi driver for the same shrinking internal-SRAM
+ * pool at the worst possible moment. The proof this was a *race*, not a
+ * fixed-size shortfall: which task(s) failed varied boot to boot with no
+ * source change -- one capture showed AUTOTUNE+WIFI (3rd/4th in line)
+ * failing while CONTROL+PROFILES (1st/2nd, both still stack=4096 then)
+ * came up clean; a later capture with AUTOTUNE/WIFI's stack already shrunk
+ * to 3072 instead showed PROFILES+WIFI failing while CONTROL+AUTOTUNE came
+ * up clean -- i.e. PROFILES failed at 4096 in one boot and AUTOTUNE
+ * succeeded at 3072 in another. A fixed-size problem would fail the same
+ * task(s) every time; a shrinking-race problem doesn't. Shrinking the stack
+ * request (the earlier attempt) only nudged the odds, it didn't remove the
+ * race.
+ *
+ * FIX: request the stack from PSRAM via xTaskCreatePinnedToCoreWithCaps()
+ * (freertos/idf_additions.h) with MALLOC_CAP_SPIRAM -- these four bridge
+ * tasks are not latency-critical (they block on their inbox and answer
+ * queries; see the file banner) and PSRAM access is more than fast enough
+ * for that. Per idf_additions.h's own doc comment, the caps only apply to
+ * the stack -- the TCB (a few hundred bytes, not the multi-KB stack that
+ * was actually contending with WiFi's buffers) still comes from internal
+ * SRAM, which is fine; a TCB-sized allocation was never the problem. The
+ * retry loop stays: it's still valid insurance against genuine transient
+ * contention (e.g. two of these racing each other, or PSRAM itself
+ * momentarily fragmented), just no longer the primary defense against the
+ * WiFi-driver race, which moving off internal SRAM removes at the source. */
 static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *name, uint32_t stack_depth,
                                             void *param, UBaseType_t priority)
 {
-    /* DIAGNOSTIC, left in deliberately -- 2026-08-20: AUTOTUNE/WIFI's
-     * xTaskCreatePinnedToCore() fails on every boot, persistently (not
-     * transient -- the retry loop below never once recovers it), and
-     * reducing the stack request 4096->3072 did NOT fix it either, which
-     * rules out simple internal-SRAM headroom as the cause on its own --
-     * CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is already on, so a task
-     * stack should be able to fall back to PSRAM when internal SRAM is
-     * tight, and shrinking the request should have helped if pure headroom
-     * were the whole story. NOT YET ROOT-CAUSED. This log line is the next
-     * lead (largest free internal block vs. total free heap right at the
-     * failure point) but the boot-time `uart_log_bridge` queue is itself
-     * overwhelmed here ("N log line(s) dropped (queue full)" appears
-     * repeatedly in the same window), so this line may not even reach the
-     * PC-facing log -- confirmed present in the device's local log
-     * pipeline by the surrounding ESP_LOGW ("still failing after 5
-     * attempts") which DOES arrive. See firmware/KilnFW/TODO.md's UART
-     * section for the tracking entry; do not remove this line until that
-     * entry is closed. */
-    ESP_LOGI(TAG, "%s: pre-create heap free=%u largest_internal_block=%u", name,
+    /* DIAGNOSTIC, left in deliberately: confirms at each boot that the fix
+     * is actually working (internal SRAM should no longer visibly dip
+     * during this window) and gives headroom numbers if a future task
+     * created here ever needs more stack than expected. */
+    ESP_LOGI(TAG, "%s: pre-create heap free=%u largest_internal_block=%u largest_spiram_block=%u", name,
              (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     for (int attempt = 0; attempt < 5; attempt++) {
-        BaseType_t created = xTaskCreatePinnedToCore(task_fn, name, stack_depth, param, priority, NULL,
-                                                     tskNO_AFFINITY);
+        BaseType_t created = xTaskCreatePinnedToCoreWithCaps(task_fn, name, stack_depth, param, priority, NULL,
+                                                             tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (created == pdPASS) {
             if (attempt > 0) {
-                ESP_LOGI(TAG, "xTaskCreatePinnedToCore(%s) succeeded on retry %d/5", name, attempt + 1);
+                ESP_LOGI(TAG, "xTaskCreatePinnedToCoreWithCaps(%s) succeeded on retry %d/5", name, attempt + 1);
             }
             return pdPASS;
         }
@@ -102,7 +107,7 @@ static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *n
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
-    ESP_LOGW(TAG, "xTaskCreatePinnedToCore(%s) still failing after 5 attempts (~200ms)", name);
+    ESP_LOGW(TAG, "xTaskCreatePinnedToCoreWithCaps(%s) still failing after 5 attempts (~200ms)", name);
     return pdFAIL;
 }
 

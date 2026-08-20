@@ -473,15 +473,17 @@ esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_m
     return (xQueueReceive(inbox, out_msg, wait_ticks) == pdTRUE) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
-esp_err_t uart_protocol_send(uart_protocol_t *proto,
-                              uart_proto_device_t dst_device,
-                              uint8_t dst_task,
-                              uint8_t src_task,
-                              const uint8_t *payload,
-                              size_t length,
-                              uint32_t ack_timeout_ms)
+esp_err_t uart_protocol_send_limited(uart_protocol_t *proto,
+                                      uart_proto_device_t dst_device,
+                                      uint8_t dst_task,
+                                      uint8_t src_task,
+                                      const uint8_t *payload,
+                                      size_t length,
+                                      uint32_t ack_timeout_ms,
+                                      int max_retries)
 {
-    if (!proto || !proto->initialized || length > UART_PROTO_MAX_PAYLOAD || (length > 0 && !payload)) {
+    if (!proto || !proto->initialized || length > UART_PROTO_MAX_PAYLOAD || (length > 0 && !payload) ||
+        max_retries < 1) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -512,7 +514,7 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto,
     xSemaphoreTake(proto->ack_sem, 0); /* clear any stale signal */
 
     esp_err_t result = ESP_ERR_TIMEOUT;
-    for (int attempt = 0; attempt < UART_PROTO_MAX_RETRIES; ++attempt) {
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
         if (stuff_and_send(proto, raw, raw_len, 1000) == 0) {
             continue; /* tx itself failed; still worth retrying */
         }
@@ -528,11 +530,11 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto,
         if (now_us - proto->last_retry_log_us >= RETRY_LOG_INTERVAL_US) {
             if (proto->suppressed_retry_logs > 0) {
                 ESP_LOGW(TAG, "no reply for msg %u to dev%u/task%u, retry %d/%d (+%lu more suppressed)",
-                         msg_index, dst_device, dst_task, attempt + 1, UART_PROTO_MAX_RETRIES,
+                         msg_index, dst_device, dst_task, attempt + 1, max_retries,
                          (unsigned long)proto->suppressed_retry_logs);
             } else {
                 ESP_LOGW(TAG, "no reply for msg %u to dev%u/task%u, retry %d/%d", msg_index, dst_device,
-                         dst_task, attempt + 1, UART_PROTO_MAX_RETRIES);
+                         dst_task, attempt + 1, max_retries);
             }
             proto->last_retry_log_us = now_us;
             proto->suppressed_retry_logs = 0;
@@ -543,6 +545,23 @@ esp_err_t uart_protocol_send(uart_protocol_t *proto,
 
     xSemaphoreGive(proto->tx_lock);
     return result;
+}
+
+/* Thin wrapper: the original public entry point, now just
+ * uart_protocol_send_limited() pinned to the full UART_PROTO_MAX_RETRIES.
+ * Every existing caller (safety_link.c, uart_bridge.c's request/reply
+ * handlers, etc.) keeps its current retry budget unchanged -- only
+ * uart_log_bridge.c has moved to the limited form directly. */
+esp_err_t uart_protocol_send(uart_protocol_t *proto,
+                              uart_proto_device_t dst_device,
+                              uint8_t dst_task,
+                              uint8_t src_task,
+                              const uint8_t *payload,
+                              size_t length,
+                              uint32_t ack_timeout_ms)
+{
+    return uart_protocol_send_limited(proto, dst_device, dst_task, src_task, payload, length,
+                                       ack_timeout_ms, UART_PROTO_MAX_RETRIES);
 }
 
 esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto,

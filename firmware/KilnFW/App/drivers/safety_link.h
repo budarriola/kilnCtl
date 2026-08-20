@@ -281,6 +281,37 @@ static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
  * costs a wakeup; keeps SET_POLL_PERIOD responsive without a notification. */
 #define SAFETY_LINK_IDLE_TICK_MS 200u
 
+/* 2026-08-20 congestion fix: exponential backoff added on top of
+ * poll_period_ms for the inter-poll *sleep* only -- poll_period_ms itself
+ * (what GET_LINK_STATS reports, and what safety_link_up_locked() measures
+ * staleness against) is left alone, so this is purely "poll less often while
+ * nothing is answering", never a change to the configured cadence a caller
+ * asked for via safety_set_poll_period().
+ *
+ * The retry storm this exists for (uart_protocol.c's "no reply for msg N to
+ * dev2/task7") was already rate-limited to one log line per
+ * RETRY_LOG_INTERVAL_US on its own -- see uart_log_bridge.c's
+ * UART_LOG_BRIDGE_MAX_RETRIES comment for the actual PC-link congestion
+ * mechanism that fix addresses. This backoff is the belt-and-suspenders
+ * half: independent of the log-forwarding fix, cut CPU/UART1 traffic a
+ * genuinely absent RP2040 causes, and cap how long the poll task spends
+ * blocked inside safety_exchange (SAFETY_LINK_ACK_TIMEOUT_MS *
+ * UART_PROTO_MAX_RETRIES per failed exchange, twice per cycle once
+ * peer_version_known is also false) once it is clear nothing is out there to
+ * answer soon.
+ *
+ * SafetyLinkClass::no_reply_streak counts consecutive failed GET_STATUS
+ * exchanges (poll-task-only, no lock -- same reasoning as down_logged);
+ * extra sleep is (2^(streak-1) - 1) * poll_period_ms, capped at
+ * SAFETY_LINK_BACKOFF_MAX_EXTRA_MS, so streak 1 adds nothing (a single miss
+ * is normal jitter, not absence), streak 2 doubles the effective period,
+ * streak 3 quadruples it, and so on up to the cap -- reset to zero, and
+ * therefore full normal cadence, on the very next successful reply with no
+ * reboot required (ROADMAP.md M1: a Pico that boots later must be found
+ * without a power cycle on the ESP side). */
+#define SAFETY_LINK_BACKOFF_MAX_STREAK    6u
+#define SAFETY_LINK_BACKOFF_MAX_EXTRA_MS  4500u
+
 /* A down link is logged once on the transition, then at most this often, so a
  * permanently absent Pico leaves periodic evidence in the log without one
  * warning per poll (which at the default period would be two per second). */
@@ -492,6 +523,9 @@ typedef struct {
 
     safety_link_stats_t stats;
     uint16_t            poll_period_ms;
+    /* 2026-08-20 congestion fix -- see SAFETY_LINK_BACKOFF_MAX_STREAK's
+     * comment. Poll-task-only, no lock needed. */
+    uint8_t             no_reply_streak;
 
     uint32_t fault_sources;        /* bitwise OR of safety_fault_source_t */
     bool     fault_on_link_loss;   /* policy: raise SAFETY_FAULT_SRC_SAFETY_LINK

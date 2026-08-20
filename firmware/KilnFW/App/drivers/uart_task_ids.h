@@ -154,10 +154,21 @@
  *   byte0    = THERMO_CMD_READ_FAULTS (0x06)
  *   byte1    = count (N)
  *   N * 3 bytes: [0] channel, [1] SR (fault status), [2] MASK register
+ *   A channel whose SPI read failed (never came up) is omitted from the
+ *   list rather than reported with fabricated SR=0x00/MASK=0x00 -- matching
+ *   MAX31856_read_all()'s own "never came up; report it as absent, not as
+ *   0" convention. Bug fix, 2026-08-20: this used to always include every
+ *   requested channel with zeroed SR/MASK regardless of read success, which
+ *   read as "hardware present, no faults" even for a channel that was never
+ *   on the bus -- directly contradicting the same channel's READ reply.
  *
  * READ_REG response payload:
  *   byte0 = THERMO_CMD_READ_REG (0x09)  byte1 = channel  byte2 = reg_addr
  *   byte3 = len (N)   N bytes = register contents
+ *   N is 0 (no data bytes follow) if the channel's SPI read failed -- this
+ *   is the *only* thermo query subcommand whose owner-side failure used to
+ *   drop the reply outright (bug fix, 2026-08-20), leaving the host with a
+ *   silent timeout instead of an answer.
  */
 #define THERMO_CMD_CONFIG_CHANNEL  0x01u
 #define THERMO_CMD_SET_THRESHOLDS  0x02u

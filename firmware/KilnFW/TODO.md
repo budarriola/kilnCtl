@@ -458,32 +458,59 @@ page. also add support for the temp sensors you currently have access to."
       possible from this environment regardless of the MCP tool, and needs
       either physical/network proximity to the board or a session restart
       plus a reachable network to attempt.
-- [ ] **UART bridge task registration bug, investigated further, still NOT
-      root-caused.** `UART_TASK_ID_AUTOTUNE` (10) and `UART_TASK_ID_WIFI`
-      (11) fail `xTaskCreatePinnedToCore()` on every single boot,
-      persistently — not the transient window
-      `uart_protocol_register_task()`'s own comment describes for its
-      analogous `xQueueCreate()` case. Added a retry loop
-      (`retry_task_create_pinned()`, same shape) AND shrunk both tasks'
-      stack request 4096→3072 (matching `uart_bridge.c`'s system/info
-      bridges' already-successful size for equivalent-complexity work) —
-      **neither fixed it**, which rules out plain internal-SRAM headroom as
-      the sole cause, especially since `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`
-      is already on and should let a stack fall back to PSRAM under
-      pressure. A diagnostic log line (free heap / largest internal free
-      block right before the failing call) was added and left in place —
-      it may itself be getting dropped by the same boot-time
-      `uart_log_bridge` queue-full condition visible in the surrounding
-      log (`"N log line(s) dropped (queue full)"`), which is why this
-      wasn't fully chased down this pass. CONTROL(8) and PROFILES(9),
-      registered immediately before these two in the same tight sequence,
-      succeed every boot. Does not affect the AP's actual radio-level
-      operation (phones can still join, per earlier session logs) — only
-      PC/MCP tooling's ability to query Wi-Fi/autotune state over UART.
-      Next step for whoever picks this up: get a real coredump or GDB
-      backtrace at the failure point rather than relying on
-      `uart_log_bridge`, which is demonstrably unreliable during this exact
-      boot window.
+- [x] **UART bridge task registration bug — ROOT-CAUSED and FIXED
+      (2026-08-20), verified live on the bench.** Once the separate
+      `uart_log_bridge` queue-overflow bug was fixed (per-transfer heap
+      semaphores made static, board-wide), the early boot log came through
+      intact for the first time and showed the real picture:
+      `CONTROL`/`PROFILES`/`AUTOTUNE`/`WIFI` (`uart_bridge_ext.c`) all call
+      plain `xTaskCreatePinnedToCore()` back-to-back in `main.c`, right after
+      `wifi_prov` brings up the softAP — exactly the window where the WiFi
+      driver itself is allocating its own internal-SRAM buffers (32 dynamic
+      tx, 10 static rx @1600B, 5 static mgmt, etc. — see the `wifi_init:
+      Init ... buffer num` lines immediately before). Plain
+      `xTaskCreatePinnedToCore()` always allocates **both** the TCB and the
+      stack from internal SRAM; `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY`
+      does *not* change that — it only enables PSRAM stacks for tasks
+      created through the separate `*WithCaps` API
+      (`freertos/idf_additions.h`), which nothing here was using. So these
+      four (plus `gpio_probe.c`'s task, registered right after them, which
+      had no retry loop at all) were racing the WiFi driver for the same
+      shrinking internal-SRAM pool. Proof it was a *race*, not a fixed
+      shortfall: which task(s) failed varied boot to boot with no source
+      change — one capture showed AUTOTUNE+WIFI (3rd/4th in line) failing
+      while CONTROL+PROFILES (1st/2nd, both still stack=4096) came up
+      clean; a later capture with AUTOTUNE/WIFI's stack already shrunk to
+      3072 instead showed PROFILES+WIFI failing while CONTROL+AUTOTUNE came
+      up clean — PROFILES failed at 4096 stack in one boot and AUTOTUNE
+      succeeded at 3072 in another, which a fixed-size problem can't
+      explain but a shrinking-race one does. **Fix**: switched all five
+      creation sites (`uart_bridge_ext.c`'s `retry_task_create_pinned()`,
+      shared by CONTROL/PROFILES/AUTOTUNE/WIFI, and `gpio_probe.c`'s direct
+      call) to `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM |
+      MALLOC_CAP_8BIT)`, moving their stacks to PSRAM — none of these five
+      are latency-critical (they block on their inbox and answer queries).
+      The TCB stays in internal RAM per the API's own contract, but a TCB
+      (a few hundred bytes) was never the contended resource; the multi-KB
+      stack was. **Verified live on the bench (COM9, JTAG/OpenOCD flash)**:
+      rebooted repeatedly post-fix, zero `"still failing after 5 attempts"`
+      warnings in any boot log since (previously present on every boot for
+      at least two of the four); `wifi_get_status`, `autotune_get_status`,
+      `profiles_list`, and `control_get_zones` all returned real decoded
+      data (not NACK) across multiple calls post-fix, confirming all four
+      tasks register successfully now. **Known, separate, pre-existing
+      issue found during verification, NOT part of this bug and NOT
+      touched**: some individual UART queries (including previously-healthy
+      `info`/task 6, and occasionally `wifi_get_status`) intermittently time
+      out waiting for their reply (ACKed, task confirmed registered, but no
+      reply within 2-3s) — this tracks with the constant background of
+      `uart_proto: no reply for msg N to dev2/task7 ... (+98 more
+      suppressed)` retries already documented elsewhere in this file (the
+      safety-link RP2040 firmware doesn't exist yet, so every poll to it
+      times out and retries), which appears to be saturating the shared
+      UART link. Every affected surface eventually returned good data on a
+      later retry in the same bench session; this is link congestion, not a
+      registration failure, and is out of scope for this entry.
 
 ## 2. Web UI — Main / Dashboard page
 
@@ -5085,6 +5112,56 @@ picks it up automatically, no per-builder memory required.
       **Still not built**: editing the board's own AP SSID/password from
       this page (read-only here, per the file's own header comment --
       `wifi_provision_page.html` remains the only way to change it).
+
+**Durability audit, 2026-08-20 (build-clean, host-side only — same class of
+gap as the `LV_USE_QRCODE` one directly above, found while auditing the
+`max_open_sockets = 13` fix in `wifi_provision_http.c`).** Grepped the
+gitignored, machine-local `sdkconfig` against the committed
+`sdkconfig.defaults` for every non-default setting App/ code actually
+depends on. Three more menuconfig-only settings were carried in the local
+`sdkconfig` but never into `sdkconfig.defaults`, each verified to
+demonstrably break a fresh checkout (deleted `sdkconfig`, ran
+`idf.py reconfigure` + `ninja` with each fix absent one at a time, confirmed
+the exact failure, then confirmed it goes away once added):
+- `CONFIG_LWIP_MAX_SOCKETS=16` — without it, `httpd_start()`'s own
+  `max_open_sockets <= CONFIG_LWIP_MAX_SOCKETS - 3` check rejects the 13 set
+  in `wifi_provision_http.c`, and the dashboard/AP-join web server does not
+  start at all. This was the one already suspected going into the audit.
+- `CONFIG_SPIRAM=y` and its mode/pin/malloc settings — without them, PSRAM is
+  off entirely: `CONFIG_LV_USE_CLIB_MALLOC` (above) has nothing PSRAM-backed
+  to route LVGL's allocator to, and `App/drivers/uart_bridge_ext.c` /
+  `gpio_probe.c`'s `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`
+  calls for the UART bridge task stacks have no PSRAM to allocate from --
+  this is the same failure class TODO.md/uart_bridge_ext.c's own comment
+  documents from the *bench*, just reachable a different way (no PSRAM
+  configured, rather than PSRAM present but raced by WiFi bring-up).
+- `CONFIG_PARTITION_TABLE_CUSTOM=y` (+ `_FILENAME="partitions.csv"`) and
+  `CONFIG_ESPTOOLPY_FLASHSIZE_16MB` — without them, the build doesn't even
+  fail at runtime, it fails to produce a flashable image: ESP-IDF falls back
+  to the 2MB single-app partition table and flash-size assumption, and
+  `partitions.csv`'s 16MB OTA layout (~7.28MB) either won't fit the app
+  partition (`KilnCtrl.bin` overflows the stock 1MB `factory` partition) or
+  won't fit the chip at all (`gen_esp32part.py` refuses to even generate the
+  table). A fresh checkout could not produce `KilnCtrl.bin`, let alone boot
+  it.
+
+All four are now pinned in `sdkconfig.defaults` with comments explaining the
+dependency and the failure mode, matching this section's existing
+`LV_USE_QRCODE`/`-Os`/CLIB-malloc entries. **What this closes**: a fresh
+`git clone` + `idf.py build` now reproduces this board's working
+configuration without any of these four having to be re-discovered by hand
+in menuconfig. **What this does NOT prove**: the existing, gitignored
+`sdkconfig` in this environment already had all four set (that's why the
+board here builds and would have kept building regardless of this pass), so
+a `ninja` build against *that* file passing is not evidence the
+`sdkconfig.defaults` fix works — the fresh-checkout failure/fix was verified
+separately, once per setting, by deleting `sdkconfig` and reconfiguring +
+building from `sdkconfig.defaults` alone, per the failure descriptions
+above. `CONFIG_KILNCTL_*`, `CONFIG_ESP_COREDUMP*`, and `CONFIG_FREERTOS_*`
+symbols referenced under App/ were also checked: no other case found where
+code depends on a non-default value of any of them that isn't already
+covered by an existing `sdkconfig.defaults` entry or a plain Kconfig
+default.
 - [x] **QR code: join the board's fallback AP from a phone.** When the
       board is in AP or AP+STA-fallback mode (`wifi_prov_get_mode() ==
       WIFI_PROV_MODE_AP` or `wifi_prov_get_state() ==
@@ -5874,6 +5951,141 @@ queue set in place) — full migration, not a patch.
       compiles and can be reasoned about but not observed working) is blocked
       on the daughterboard being connected, a separate hardware readiness gap
       from the no-board-at-all case Phase 1 hit.
+
+- [x] **Phase 2 follow-up: two consistency bugs found live on the bench
+      (2026-08-20), filed from an MCP-tool investigation, not speculative.**
+      With a board now attached (COM9) but the thermocouple daughterboard
+      still not physically connected (Phase 2's known bench gap above —
+      **confirmed again this pass, not a new condition**: `MAX31856_bus_channel()`
+      returns `NULL` for all three channels every boot, so `thermo_owner`
+      answers `ESP_ERR_NOT_FOUND` for every per-channel command), three THERMO
+      surfaces disagreed about the same hardware state:
+      - `thermo_read` (0x05): correctly reported all three channels
+        `invalid [SPI read failed]` — this one was already honest, no change.
+      - `thermo_read_faults` (0x06): reported `CH0/1/2: no faults (SR 0x00,
+        MASK 0x00)` — **verified root cause**: `uart_bridge.c`'s
+        `thermo_build_faults_payload()` discarded the `esp_err_t` from
+        `thermo_owner_command_read_faults()` with `(void)`, so a channel that
+        never came up got the zero-initialized `sr`/`mask` locals reported as
+        if they were a real "no faults" reading — indistinguishable from a
+        live, fault-free part, and directly contradicting `thermo_read`'s
+        answer for the identical channel in the identical boot state.
+      - `thermo_read_reg` (0x09, debug raw register read): timed out with no
+        reply at all (device log: `uart_bridge: thermo: subcmd 0x09 ch_ reg
+        0x__ failed: ESP_ERR_NOT_FOUND`) — **verified root cause**:
+        `thermo_bridge_task`'s shared `if (err != ESP_OK) { ...; continue; }`
+        tail (used by every non-query THERMO subcommand, where "no reply" is
+        correct — the transport ACK is the only delivery confirmation those
+        need) also caught this one, but READ_REG *is* a query, the same as
+        READ and READ_FAULTS — so unlike those two, its owner-side failure
+        silently dropped the reply instead of answering with a definite
+        failure. This is a protocol bug independent of the bench's
+        no-daughterboard state: any future READ_REG failure for any reason
+        (bad channel, real SPI fault once hardware is attached) hits the same
+        silent-timeout path.
+      **Root cause classification**: hardware is genuinely absent on this
+      bench (scenario (a) from the investigation brief) — not a regression,
+      not a wiring fault on the board that IS present, exactly the documented
+      Phase 2 bench gap. The bug was software lying about / mishandling that
+      known-absent state, not the absence itself.
+      **Fixed** (`App/drivers/uart_bridge.c`):
+      - `thermo_build_faults_payload()` now checks
+        `thermo_owner_command_read_faults()`'s return and **omits** a channel
+        that failed instead of reporting fabricated zeroed SR/MASK — same
+        "report it as absent, not as 0" convention `MAX31856_read_all()`
+        already uses (`MAX31856.c`, `MAX31856_read_all()`'s own
+        `if (!ch) continue;`). Verified live: `thermo_read_faults()` now
+        returns `device reported no channels` (PC-side: an empty channel list
+        renders that way), matching `thermo_read`'s `SPI read failed` for the
+        same three channels instead of contradicting it.
+      - The `THERMO_CMD_READ_REG` case no longer routes its result through
+        the shared `err` var / drop-and-continue tail. It now always replies,
+        with the data-length byte set to 0 (no register bytes attached)
+        instead of the requested length when the owner-side read failed —
+        deliberately mirroring how READ and READ_FAULTS both encode "this
+        channel failed" IN the payload rather than failing the whole request.
+        **PC-side matching change** (`tools/PcTools/src/kilnctrl/devices.py`'s
+        `parse_thermo_response()`, `tools/PcTools/src/kilnctrl/thermo.py`'s
+        `ThermoClient.read_reg()`): the wire-format length guard now accepts
+        0..16 instead of 1..16 (0 was previously an impossible/rejected
+        length since the PC never requests it), and `read_reg()` raises
+        `ThermoQueryError` with an explicit "SPI read failed" message when
+        the reply's data is empty, instead of returning a `ThermoRegisters`
+        with 0 bytes for a caller to misinterpret.
+      **Verified live on the bench (COM9) after reflash (OpenOCD, per this
+      repo's flashing convention — never esptool)**: device log shows
+      `uart_bridge: thermo: subcmd 0x09 ch_ reg 0x__ failed: ESP_ERR_NOT_FOUND
+      -- replying with 0 data bytes instead of dropping the reply` on every
+      request, and no `bridge_reply(...) failed` line ever followed it (the
+      transport ACK for the reply succeeded every time it was checked). The
+      firmware-side fix is confirmed correct from that log evidence.
+      **NOT fully verified end-to-end**: `thermo_read_reg` still timed out on
+      the PC side in every attempt made this pass (5+ retries), even though
+      the log confirms the firmware sent a valid reply each time. This bench's
+      UART link was independently and repeatedly unstable during the same
+      window — `uart_bridge: PC link lost (no frame or ACK for 5000ms)` /
+      `PC link back after 5000ms of silence` fired multiple times, and the
+      `uart_proto: no reply ... to dev2/task7` (safety-link polling a RP2040
+      that is not present on this bench) retry storm was continuous
+      throughout — exactly the congestion this task's brief already flagged
+      as capable of delaying THERMO replies 2-3s against the PC client's
+      2.0s `DEFAULT_REPLY_TIMEOUT_S`. Genuinely unresolved which of "still
+      congestion" vs. "a second, undiagnosed bug specific to this reply path"
+      is the full explanation — flagged honestly rather than claimed fixed.
+      Re-verify once the bench's safety-link congestion is addressed
+      separately (a RP2040 being present, or the poll being backed off) and
+      the link is otherwise quiet.
+      **2026-08-20 congestion fix landed, partially re-verified**: root cause
+      traced with certainty — `dev2`/`task7` (`UART_PROTO_DEVICE_SAFETY` /
+      `UART_TASK_ID_SAFETY`) lives entirely on the isolated UART1
+      (`safety_link.c` owns its own `uart_protocol_t`, physically separate
+      from the PC link's UART0), so it never contends for wire time with PC
+      traffic directly. The actual congestion path was
+      `App/drivers/uart_log_bridge.c`: `esp_log_set_vprintf()` captures every
+      `ESP_LOGx` call including the (already rate-limited-to-1-per-5s) "no
+      reply ... to dev2/task7" WARNing, and forwards each one over the
+      *PC-facing* `uart_protocol_t` via plain `uart_protocol_send()` — 10
+      retries at a 200 ms ACK timeout, i.e. up to 2000 ms holding that proto's
+      `tx_lock`, the same lock every real PC reply serializes on. **Fixed**:
+      added `uart_protocol_send_limited()` (`espInterfaces/uart_protocol.c/.h`,
+      explicit `max_retries` param; `uart_protocol_send()` now just calls it
+      with `UART_PROTO_MAX_RETRIES`) and switched `uart_log_bridge_task()`'s
+      two send call sites to it with `UART_LOG_BRIDGE_MAX_RETRIES=1`, capping
+      worst-case `tx_lock` hold from one log line to ~200 ms instead of
+      ~2000 ms. (A true BROADCAST send would be free of the cost entirely, but
+      `tools/PcTools/src/kilnctrl/serial_link.py`'s `_handle_frame()` only
+      delivers `MsgType.DATA` to a task inbox — BROADCAST is silently dropped
+      — so switching frame types would make PC-side device logging go dark
+      instead of just cheaper.) Also added exponential backoff
+      (`safety_link.h`'s `SAFETY_LINK_BACKOFF_MAX_STREAK`/`_MAX_EXTRA_MS`,
+      `safety_link.c`'s poll task) on the poll task's *sleep* while
+      `no_reply_streak` climbs, capped ~5s, reset to 0 the instant any
+      exchange succeeds — belt-and-suspenders CPU/UART1 relief, independent
+      of the log-bridge fix, with `poll_period_ms` itself (what
+      `GET_LINK_STATS` reports) left untouched. **Verified**: built, flashed
+      over OpenOCD/JTAG (COM9); `safety_get_status` still reports
+      `never received` / `link_up=0` and `safety_get_link_stats` still shows
+      `frames_sent` climbing (18 sent, 0 received, matching the missing-RP2040
+      signature) — safety detection is unweakened. `get_fw_version` and
+      sequential single `wifi_get_status`/`profiles_list` calls succeeded
+      promptly. **NOT cleanly re-verified**: repeated `thermo_read_reg` calls
+      still timed out PC-side during this pass, and `get_device_log` caught
+      the board's uptime counter resetting to ~1300 ms mid-session (i.e. an
+      actual reboot, not a stale-log artifact — confirmed by watching uptime
+      climb monotonically for 40+ seconds and then drop within one continuous
+      log fetch) with no panic/backtrace visible through the log-bridge
+      channel (a panic dump bypasses `esp_log_set_vprintf` and goes out as raw
+      bytes on the same wire, invisible to this tool). This reboot loop's
+      cadence (~40 s) does not match anything in the congestion fix above and
+      none of this pass's changes touch reset/panic paths, so it reads as a
+      separate, previously-undiscovered stability bug on this exact bench
+      configuration (no RP2040, no thermocouple daughterboard) rather than a
+      regression from this fix — but that is inference, not proof, and it is
+      exactly the kind of instability that would make a THERMO_CMD_READ_REG
+      round trip fail regardless of link congestion. Flagged honestly rather
+      than claimed fixed. Next step: capture a raw (non-log-bridge) serial
+      trace across one of these resets to get the panic reason before
+      re-attempting this entry's end-to-end verification.
 - [~] **Phase 3: `profile_executor` command queue — REVIEWED AND
       DELIBERATELY SKIPPED (2026-08-19).** Marked `[~]`, not `[x]`: nothing
       was built, and this is a decision to record, not work to come back to

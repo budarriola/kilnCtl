@@ -279,7 +279,24 @@ static size_t thermo_build_faults_payload(uint8_t chan_mask, uint8_t *out)
         }
         uint8_t sr = 0;
         uint8_t mask = 0;
-        (void)thermo_owner_command_read_faults(ch, &sr, &mask);
+        esp_err_t fault_err = thermo_owner_command_read_faults(ch, &sr, &mask);
+        /* Bug fix, 2026-08-20: this used to discard fault_err and emit the
+         * zeroed sr/mask unconditionally, so a channel that never came up
+         * (thermo_owner_command_read_faults() -> ESP_ERR_NOT_FOUND, see
+         * thermo_owner.h's BENCH NOTE) reported "no faults, SR 0x00, MASK
+         * 0x00" -- indistinguishable from a live part that genuinely has no
+         * faults set, and directly contradicting THERMO_CMD_READ's honest
+         * "SPI read failed" for the same channel. Follow the convention
+         * MAX31856_read_all() already uses for the same situation (MAX31856.c,
+         * "never came up; the caller reports it as absent, not as 0 degC"):
+         * omit the channel from the reply instead of fabricating a clean
+         * reading for it. A channel missing from the list is not ambiguous
+         * the way a wire could otherwise be misread; every caller already
+         * has to handle count < requested (a channel not on the bus never
+         * appears in the first place). */
+        if (fault_err != ESP_OK) {
+            continue;
+        }
         out[o++] = ch;
         out[o++] = sr;
         out[o++] = mask;
@@ -459,13 +476,34 @@ static void thermo_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
-                err = thermo_owner_command_read_reg(msg.payload[1], msg.payload[2], &reply[4], len);
-                if (err != ESP_OK) break;
+                /* Unlike every other thermo *query* subcommand, this one used to
+                 * let the owner's failure (channel never came up -- e.g. the
+                 * daughterboard unplugged, see thermo_owner.h's BENCH NOTE) fall
+                 * straight into the generic "log and drop" handling below that
+                 * every non-query thermo command shares. For a command that
+                 * writes nothing, that means the host sees a silent timeout
+                 * instead of an answer -- the one thing THERMO_CMD_READ and
+                 * THERMO_CMD_READ_FAULTS both avoid, by encoding "this channel
+                 * failed" in the payload instead of failing the whole request.
+                 * Match that here: always reply, with a 0-length data body when
+                 * the read failed, so the host gets a definite "no data" instead
+                 * of guessing whether the request was ever received. Deliberately
+                 * uses its own local instead of the shared `err` -- setting that
+                 * would route back through the drop-the-reply path this exists
+                 * to avoid. */
+                esp_err_t reg_err = thermo_owner_command_read_reg(msg.payload[1], msg.payload[2],
+                                                                   &reply[4], len);
                 reply[0] = THERMO_CMD_READ_REG;
                 reply[1] = msg.payload[1];
                 reply[2] = msg.payload[2];
-                reply[3] = len;
-                reply_len = 4u + len;
+                reply[3] = (reg_err == ESP_OK) ? len : 0u;
+                reply_len = 4u + reply[3];
+                err = ESP_OK;
+                if (reg_err != ESP_OK) {
+                    ESP_LOGW(TAG, "thermo: subcmd 0x%02X ch%u reg 0x%02X failed: %s -- "
+                                  "replying with 0 data bytes instead of dropping the reply",
+                             subcmd, msg.payload[1], msg.payload[2], esp_err_to_name(reg_err));
+                }
                 break;
             }
             case THERMO_CMD_WRITE_REG: {
