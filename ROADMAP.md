@@ -171,6 +171,24 @@ soldering session.
 **Bench state (2026-08-19):**
 - Working: ILI9488 LCD attached, boots, verified live (KilnFW flashed via OpenOCD/JTAG this same day); ESP32-S3 JTAG (OpenOCD) — program/halt/reset verified; Pico SWD via Debug Probe — program + GPIO probe verified (GPIO6 deny-list bench-confirmed 2026-08-19); Saleae logic analyzer available (used 2026-08-18 per bench notes)
 - Broken/absent, blocking work: Pi↔ESP isolated UART link — bench-confirmed dead (M0, still the top blocker); PC↔ESP command UART (USB-serial, COM9) — found dead 2026-08-19 (JTAG proves chip alive; every UART command times out; separate fault from isolated link; blocks console, wifi status, mcp tools); MAX31856 thermocouple ICs — physically not connected (blocks real-reading thermo work and thermo_owner bench verification)
+- **2026-08-19, later same day — real boot-loop found and fixed live on this
+  bench**: with COM9 dead, `get_device_log`/`get_fw_version` gave no
+  visibility into a crash-reboot loop the board was actually stuck in.
+  Diagnosed by reading the ESP32-S3's native USB-Serial-JTAG console directly
+  (COM3 — distinct from COM9, always present, mirrors ESP-IDF's own
+  boot/panic output via `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG`
+  regardless of the app's own link state): a real `***ERROR*** A stack
+  overflow in task main***`, looping every ~1s, always right after
+  `ILI9488`'s "kilnCtl ready" boot banner — explaining why the panel looked
+  frozen on that exact line every time. Fixed: `CONFIG_ESP_MAIN_TASK_STACK_SIZE`
+  raised 3584→8192 (`sdkconfig.defaults`), plus `app_main()` no longer
+  `return`s on a failed PC-link init (it used to skip `lvgl_port_start()` and
+  everything after it too, compounding the same symptom for a dead COM9
+  specifically). Reflashed via OpenOCD/JTAG and confirmed live over COM3:
+  boot now runs continuously past the crash point with normal steady-state
+  activity. First genuinely hardware-verified fix of this session, not just
+  build-verified — see `firmware/KilnFW/App/main.c`/`sdkconfig.defaults`'s
+  own commit for detail.
 
 ## M2 — `CommonFW`, before either firmware depends on it
 
