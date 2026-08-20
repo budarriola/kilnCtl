@@ -553,6 +553,76 @@ page. also add support for the temp sensors you currently have access to."
       20KB more. With 17408 available and the largest single request being
       an 8KB stack, the pressure that justified those moves is gone —
       revisit only if DRAM tightens again.
+- [x] **Coredump-to-flash — WAS BROKEN, now FIXED and PROVEN END TO END
+      (2026-08-20).** The coredump path had been installed but never tested.
+      It did not work. Every panic silently wrote nothing, and the
+      spontaneous-reboot investigation was resting on a diagnostic that could
+      never have produced anything.
+      **Root cause**: the `coredump` partition was 64K. This firmware's dump
+      is **82080 bytes**. The panic handler failed with `ESP_ERR_NO_MEM`
+      (257) every time. Captured off the USB-Serial-JTAG console (COM3) at
+      the moment of a deliberate crash:
+      ```
+      E esp_core_dump_flash: Not enough space to save core dump!
+      E esp_core_dump_elf: Failed to prepare core dump storage (257)!
+      E esp_core_dump_common: Core dump write failed with error=257
+      I esp_core_dump_flash: Core dump has been saved to flash.
+      ```
+      **Read that last line carefully.** ESP-IDF prints "Core dump has been
+      saved to flash." unconditionally, immediately after reporting the
+      failure. On its own it states the opposite of what happened. Do not
+      trust it during a real incident; look for the `Erase flash N bytes @`
+      line instead, which only appears on the success path.
+      **Fix**: `coredump` partition 64K -> 512K (partitions.csv). 64K came
+      from ESP-IDF's examples; dump size scales with task count and stack
+      sizes, and this firmware runs a few dozen tasks.
+      **Proven on hardware**, deliberate null-store crash: dump written
+      (`Erase flash 86016 bytes @ 0x6f0000`), found and checksum-verified on
+      the next boot (`Found core dump 82080 bytes in flash @ 0x6f0000`),
+      `main.c` reported `COREDUMP PRESENT`, and the dump decoded back to the
+      exact crashing function and line.
+      **Two instrumentation lessons, both now fixed in main.c:**
+      1. `esp_core_dump_image_check()` returning NOT_FOUND used to log
+         nothing. Combined with `uart_log_bridge` reporting "9 log line(s)
+         dropped (queue full)" on that same boot, there was no way to tell
+         "no dump was written" from "the news was dropped". It now always
+         states its outcome. An absent log line is not evidence.
+      2. **`uart_log_bridge` cannot see a panic at all.** The panic handler
+         writes straight to the USB-Serial-JTAG console, never through
+         ESP_LOGx. It also truncates long lines (`...[+3]`). For any crash
+         work, capture COM3 directly — reopening the port on disconnect,
+         because it re-enumerates across the reset. A capture script that
+         does this is what finally recovered the evidence above.
+
+      **WORKING DECODE COMMAND** (verified on this machine, IDF v6.0.2 —
+      needs the Espressif PowerShell profile sourced first):
+      ```powershell
+      python C:\esp\v6.0.2\esp-idf\components\espcoredump\espcoredump.py `
+          --chip esp32s3 -p COM3 info_corefile --off 0x6f0000 `
+          --save-core core.bin build\KilnCtrl.elf
+      ```
+      Run it from `firmware/KilnFW`. Notes that cost time to work out:
+      - Omitting `-c` makes it read the dump from flash over serial. It
+        invokes esptool itself, which resets the board into download mode.
+      - `-p COM3` is the USB-Serial-JTAG port (VID:PID 303A:1001), **not**
+        COM9 (the CH340 PC link).
+      - **The ELF must be the exact image that crashed.** Rebuilding first
+        breaks symbol resolution. Snapshot `build/KilnCtrl.elf` before
+        touching the tree.
+      - PowerShell reports a nonzero exit for this command because esptool
+        writes progress to stderr; redirect with `> out.txt 2>$null` and
+        check the file rather than trusting `$LASTEXITCODE`.
+      - Erase a read dump or it reports on every boot:
+        `python -m esptool --chip esp32s3 -p COM3 erase-region 0x6f0000 0x80000`
+      **KNOWN LIMITATION, not yet investigated**: in the decoded dump most
+      threads show an empty task name and the crashed-task entry reads
+      "Corrupted TCB data", while the backtraces themselves resolve
+      correctly (the crashing task's frame was exact). Suspected interaction
+      with task stacks that now live in PSRAM (see the DRAM entry above), or
+      with `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` being off. Backtrace recovery
+      — the thing that matters most — works; task-name attribution does not.
+      Worth chasing before relying on this to identify *which* task died in
+      a real spontaneous reboot.
 
 ## 2. Web UI — Main / Dashboard page
 

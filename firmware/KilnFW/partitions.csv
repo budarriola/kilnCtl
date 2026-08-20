@@ -78,8 +78,8 @@
 # ota_0        app,  ota_0,     0x210000, 0x200000  2048K  OTA slot A
 # ota_1        app,  ota_1,     0x410000, 0x200000  2048K  OTA slot B
 # pico_img     data, undefined, 0x610000, 0xE0000   896K  Pico-image relay staging
-# coredump     data, coredump,  0x6F0000, 0x10000    64K  panic/backtrace capture (see below)
-# spare                         0x700000..0x1000000 ~9.0M unused headroom (16 MB part)
+# coredump     data, coredump,  0x6F0000, 0x80000   512K  panic/backtrace capture (see below)
+# spare                         0x770000..0x1000000 ~8.6M unused headroom (16 MB part)
 #
 # Fit arithmetic:
 #   otadata:  0x200000 + 0x002000 = 0x202000
@@ -87,8 +87,8 @@
 #             0x210000 + 0x200000 = 0x410000
 #   ota_1:    0x410000 + 0x200000 = 0x610000
 #   pico_img: 0x610000 + 0x0E0000 = 0x6F0000
-#   coredump: 0x6F0000 + 0x010000 = 0x700000
-#   spare:    0x700000 .. 0x1000000 (16 MB) = 0x900000 = 9,437,184 B ~= 9.0 MB
+#   coredump: 0x6F0000 + 0x080000 = 0x770000
+#   spare:    0x770000 .. 0x1000000 (16 MB) = 0x890000 = 8,978,432 B ~= 8.6 MB
 #   Even against the conservative 8 MB (0x800000) floor this table was
 #   designed for, 0x700000 < 0x800000 with ~1.0 MB to spare -- the layout does
 #   not depend on the 16 MB confirmation being right, per UPDATE_PROTOCOL.md.
@@ -101,10 +101,32 @@
 # ENABLE_TO_FLASH=y (see sdkconfig.defaults) writes the panic reason,
 # backtrace, and task states to THIS partition instead, where they survive the
 # reset and can be read back at leisure with espcoredump.py against the build
-# ELF -- no serial capture window to lose. 64K (0x10000) is the size ESP-IDF's
-# own examples/docs treat as the conventional default for
-# CONFIG_ESP_COREDUMP_MAX_TASKS_NUM in the range this firmware runs (a few
-# dozen tasks); subtype `coredump` (0x03) is the reserved subtype
+# ELF -- no serial capture window to lose.
+#
+# SIZED AT 512K (0x80000), raised from 64K on 2026-08-20 after the path was
+# finally tested end to end with a deliberate crash. 64K DID NOT WORK. The
+# panic handler wrote nothing and the next boot reported
+# ESP_ERR_NOT_FOUND, i.e. the whole diagnostic was silently dead. Captured
+# from the USB-Serial-JTAG console (COM3) at the moment of the panic:
+#
+#   E esp_core_dump_flash: Not enough space to save core dump!
+#   E esp_core_dump_elf: Failed to prepare core dump storage (257)!
+#   E esp_core_dump_common: Core dump write failed with error=257
+#   I esp_core_dump_flash: Core dump has been saved to flash.
+#
+# 257 is ESP_ERR_NO_MEM. Note the LAST line: ESP-IDF prints "Core dump has
+# been saved to flash." unconditionally, immediately after reporting the
+# failure. Read on its own it says the exact opposite of what happened --
+# worth knowing before trusting it during a real incident.
+#
+# 64K was chosen originally by analogy with ESP-IDF's examples, which is the
+# mistake: the dump size scales with the number of tasks and the size of
+# their stacks, and this firmware runs a few dozen tasks (every UART bridge,
+# LVGL, the owners, HTTP handlers, safety link). 512K is generous on purpose
+# -- the flash above it is unused headroom that costs nothing, and a
+# too-small partition fails in the worst possible way: silently, at exactly
+# the moment the diagnostic was needed. subtype `coredump` (0x03) is the
+# reserved subtype
 # esp_core_dump_* uses to find this partition by type+subtype scan, not by
 # name, so the partition label itself is cosmetic but kept as `coredump` for
 # readability. Placed in the same 0x6F0000..0x1000000 spare region as
@@ -172,4 +194,4 @@ otadata,      data, ota,       0x200000, 0x2000,
 ota_0,        app,  ota_0,     0x210000, 0x200000,
 ota_1,        app,  ota_1,     0x410000, 0x200000,
 pico_img,     data, undefined, 0x610000, 0xE0000,
-coredump,     data, coredump,  0x6F0000, 0x10000,
+coredump,     data, coredump,  0x6F0000, 0x80000,

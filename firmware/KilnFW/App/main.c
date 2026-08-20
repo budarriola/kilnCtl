@@ -324,14 +324,40 @@ void app_main(void)
         // to separately run the readback tool speculatively every time.
         // ESP_ERR_NOT_FOUND from this call just means no dump is present
         // (the common case, including every normal boot) -- not a fault.
+        //
+        // PROVEN END TO END 2026-08-20 with a deliberate crash: dump written
+        // (82080 bytes), found and checksum-verified on the next boot, and
+        // decoded back to the exact crashing function/line. It did NOT work
+        // before that test -- the partition was 64K, too small for an 82KB
+        // dump, so every panic silently wrote nothing. See partitions.csv.
+        //
+        // ALWAYS reports its outcome, including "no dump present". Silence used
+        // to mean this check ran and found nothing -- but it equally meant the
+        // line was lost to uart_log_bridge's queue, which does drop lines
+        // during the boot burst and says so ("N log line(s) dropped (queue
+        // full)"). Found 2026-08-20 while trying to prove this path works after
+        // a deliberate crash: the reboot reported esp_reset_reason=4 (PANIC),
+        // printed no coredump line at all, and also reported 9 dropped lines --
+        // leaving no way to tell "no dump was written" from "the dump was found
+        // and the news got dropped". An absent log line is not evidence, and a
+        // crash diagnostic nobody can trust is worse than none, so this now
+        // states the negative result explicitly and prints the error name in
+        // every branch.
         esp_err_t cd_err = esp_core_dump_image_check();
         if (cd_err == ESP_OK) {
             ESP_LOGE(TAG, "COREDUMP PRESENT in flash from a previous crash -- decode with "
                           "espcoredump.py info_corefile/dbg_corefile against build/KilnCtrl.elf "
                           "(see firmware/KilnFW/TODO.md for the exact command), then erase it "
                           "with esp_core_dump_image_erase() or it will keep reporting here");
-        } else if (cd_err != ESP_ERR_NOT_FOUND && cd_err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "esp_core_dump_image_check: %s", esp_err_to_name(cd_err));
+        } else if (cd_err == ESP_ERR_NOT_FOUND || cd_err == ESP_ERR_INVALID_STATE) {
+            /* The ordinary case on a clean boot, and the expected result after
+             * a normal restart. Logged rather than passed over so that seeing
+             * nothing here means the check itself did not run. */
+            ESP_LOGE(TAG, "no coredump in flash (esp_core_dump_image_check: %s)",
+                     esp_err_to_name(cd_err));
+        } else {
+            ESP_LOGE(TAG, "coredump check FAILED: %s -- a dump may exist but be unreadable",
+                     esp_err_to_name(cd_err));
         }
     }
 
