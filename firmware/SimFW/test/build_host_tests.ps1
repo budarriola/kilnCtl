@@ -27,6 +27,7 @@ $sources = @(
     (Join-Path $testDir "test_tc_fault_state.c"),
     (Join-Path $testDir "test_gap_closure_logic.c"),
     (Join-Path $testDir "test_cmd_task_gap_closure.c"),
+    (Join-Path $testDir "test_k4_gating_logic.c"),
     (Join-Path $simDir "thermal_model.c"),
     (Join-Path $simDir "max31856_regs.c"),
     (Join-Path $simDir "sine_synth.c"),

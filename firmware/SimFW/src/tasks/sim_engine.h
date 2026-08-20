@@ -33,7 +33,12 @@
 // relay under this assumption -- its base duty is always 0 unless a fault
 // override forces it. Confirm or correct against docs/HARDWARE.md once it
 // exists (PLAN.md section 14 bring-up step 2), same caveat i2c_owner.h
-// carries for its own provisional pin choices.
+// carries for its own provisional pin choices. Unlike K1/K2/K3, K4 is NOT a
+// per-zone base-duty source -- it is a veto applied to every zone's final
+// duty (sim_engine.c's sim_engine_tick(): open K4 forces duty to 0 for every
+// zone, after both the relay-derived base and any fault_sched duty
+// override), per PLAN.md's "closed AND K4 permits" and its "Current loop
+// (safety side): relay closed and K4 pilot closed and element healthy".
 #ifndef SIMFW_TASKS_SIM_ENGINE_H
 #define SIMFW_TASKS_SIM_ENGINE_H
 

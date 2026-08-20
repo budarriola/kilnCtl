@@ -23,7 +23,11 @@
 //      sim_engine_set_ambient()) land immediately, before step 4, so this
 //      tick's physics already sees them.
 //   4. Compute relay-derived duty[] per zone, apply any active duty
-//      override, build an effective params copy with any active health
+//      override, then gate every zone's duty by K4 (the safety pilot relay
+//      -- open K4 forces duty to 0 regardless of the zone relay/override,
+//      PLAN.md's "closed AND K4 permits"; see the K4-gating block's own
+//      comment for why FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST is
+//      unaffected), build an effective params copy with any active health
 //      override, then thermal_model_tick().
 //   5. Apply MANUAL zone-temp overrides (pin T_zone/T_tc, post-physics).
 //   6. Advance sim_time_us by dt_s (wall period * timescale).
@@ -331,7 +335,8 @@ static void sim_engine_tick(void)
     size_t fault_event_count = fault_sched_tick(&fault_snap, fault_events,
                                                  sizeof(fault_events) / sizeof(fault_events[0]));
 
-    // --- duty[] : relay-derived base, then any fault override ---------------
+    // --- duty[] : relay-derived base, then any fault override, then K4's
+    // veto -----------------------------------------------------------------
     // Zone-to-relay mapping ASSUMPTION -- see sim_engine.h's header comment.
     float duty[THERMAL_MODEL_MAX_ZONES] = { 0 };
     static const sim_relay_bit_t zone_relay_bit[3] = { SIM_RELAY_BIT_K1, SIM_RELAY_BIT_K2, SIM_RELAY_BIT_K3 };
@@ -343,6 +348,33 @@ static void sim_engine_tick(void)
     for (uint8_t z = 0; z < s_params.zone_count; z++) {
         if (s_zone_duty_override_active[z]) {
             duty[z] = s_zone_duty_override_value[z];
+        }
+    }
+
+    // K4 is the mechanical safety pilot relay: it is architecturally in
+    // series with every zone's power path (docs/HARDWARE.md 3.4: "contact is
+    // in GND_Safty"; docs/PLAN.md's "Sense all five relay outputs (K1, K2,
+    // K3, K5 on the main side; K4 pilot on the safety side)... heater current
+    // appears on the CT outputs only when the right relays are closed *and*
+    // K4 permits"). So it gates every zone's duty *after* both the
+    // relay-derived base and any fault_sched duty override -- a welded zone
+    // relay (WELDED_RELAY) or a runaway heater (RUNAWAY_ZONE) still cannot
+    // conduct once K4 opens, exactly as intended: K4 is the last-resort cutoff
+    // regardless of what mischief the zone relay/heater is up to. The one
+    // fault type this must NOT fight is FAULT_SCHED_TYPE_WELDED_K4_CURRENT_
+    // PERSIST (PLAN.md's S9 escalation: a welded *contactor* means K4's coil
+    // opens but its contacts stay shut, so current keeps flowing despite the
+    // sense reading K4 open) -- that fault is a TARGET_KIND_CT type wired
+    // straight onto wave_owner's CT channel (fault_sched.c's
+    // recompute_overrides_locked(), ct_wave_set_mode(MANUAL) + forced amps),
+    // entirely bypassing this duty[]/current_a[] path (wave_owner.c only
+    // reads snap.zones[ch].current_a while a channel is in MODEL mode), so
+    // gating duty by K4 here has no effect on it: the CT channel's forced
+    // amps read through regardless of what duty/current_a say underneath.
+    bool k4_closed = (relay_mask & (1u << SIM_RELAY_BIT_K4)) != 0u;
+    if (!k4_closed) {
+        for (uint8_t z = 0; z < s_params.zone_count; z++) {
+            duty[z] = 0.0f;
         }
     }
 
