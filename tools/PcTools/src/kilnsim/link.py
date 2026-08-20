@@ -580,6 +580,15 @@ class MockSimLink(SimLink):
         self._scripts: dict[tuple, list] = {}
         self._history: "list[tuple[CommandGroup, int, dict]]" = []
         self._next_seq = 1
+        # FAULT_SCHEDULE/UNTIL_TRIGGER two-frame design (PROTOCOL.md sec
+        # 5.6): slot ids with a pending FAULT_SCHEDULE(duration_kind==2)
+        # frame 1 that hasn't yet been completed by a FAULT_SET_UNTIL_TRIGGER
+        # frame 2. Mirrors cmd_task.c's s_pending_until[slot_id] closely
+        # enough to keep mock-based scenario/runner tests meaningful: a
+        # direct PERMANENT/FOR FAULT_SCHEDULE or a FAULT_CANCEL on the same
+        # slot discards it, and FAULT_SET_UNTIL_TRIGGER on a slot with
+        # nothing pending answers ERR_BAD_ARGS via SimLinkError.
+        self._pending_until_trigger: "set[int]" = set()
         self._state: dict = {
             "sim_time_us": 0,
             "timescale": 1.0,
@@ -795,7 +804,30 @@ class MockSimLink(SimLink):
         if group is CommandGroup.FAULT and cmd == 3:  # LIST
             return {"returned_count": 0, "faults": []}
         if group is CommandGroup.FAULT and cmd == 1:  # SCHEDULE
-            return {"fault_slot": payload.get("fault_slot", payload.get("slot_id", 0))}
+            slot = payload.get("fault_slot", payload.get("slot_id", 0))
+            duration = payload.get("duration", {}) or {}
+            duration_kind = duration.get("kind")
+            if duration_kind in (2, "until_trigger"):
+                # Frame 1 of the two-frame design: park, do not arm yet.
+                self._pending_until_trigger.add(slot)
+            else:
+                # A direct PERMANENT/FOR FAULT_SCHEDULE discards any stale
+                # pending UNTIL_TRIGGER entry for this slot (PROTOCOL.md sec
+                # 5.6).
+                self._pending_until_trigger.discard(slot)
+            return {"fault_slot": slot}
+        if group is CommandGroup.FAULT and cmd == 2:  # CANCEL
+            slot = payload.get("fault_slot", payload.get("slot_id", 0))
+            self._pending_until_trigger.discard(slot)
+            return {"ok": True}
+        if group is CommandGroup.FAULT and cmd == 5:  # SET_UNTIL_TRIGGER
+            slot = payload.get("fault_slot", payload.get("slot_id", 0))
+            if slot not in self._pending_until_trigger:
+                raise SimLinkError(
+                    f"FAULT/SET_UNTIL_TRIGGER: ERR_BAD_ARGS (no pending UNTIL_TRIGGER for slot {slot})"
+                )
+            self._pending_until_trigger.discard(slot)
+            return {"fault_slot": slot}
         # GET_STATE is not its own group in the section-5 table (telemetry is
         # push-only) -- the CLI/MCP "state" surface reads the mock's snapshot
         # directly via `sim_get_state`-shaped SYS traffic instead, handled

@@ -120,6 +120,10 @@ class FaultCmd(enum.IntEnum):
     CANCEL = 2
     LIST = 3
     FIRE_NOW = 4
+    # UNTIL_TRIGGER two-frame design (PROTOCOL.md sec 5.6): SCHEDULE with
+    # duration_kind == 2 parks the fault's fields without arming it; this
+    # command supplies the release trigger and performs the actual arm.
+    SET_UNTIL_TRIGGER = 5
 
 
 # --- EVT event types (PLAN.md sec 5.3, PROTOCOL.md sec 6) ---------------------

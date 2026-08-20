@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .link import SimLink
-from .protocol import CommandGroup, Event, EventType, FaultCmd, ModelCmd, SysCmd
+from .protocol import CommandGroup, DurationKind, Event, EventType, FaultCmd, ModelCmd, SysCmd
 from .report import Report, evaluate_expectations
 from .scenario import Scenario, compile_faults
 
@@ -265,6 +265,13 @@ def run_scenario(link: SimLink, scenario: Scenario, *, seed: Optional[int] = Non
     slot_to_fault_id = {compiled.fault_slot: scenario.faults[compiled.fault_slot].id
                          for compiled in compile_faults(scenario)}
     for compiled in compile_faults(scenario):
+        # FAULT_SCHEDULE always goes first, PROTOCOL.md sec 5.6: for a
+        # PERMANENT/FOR duration it arms the slot directly; for UNTIL_TRIGGER
+        # it only parks the fault's fields (fault_type/target/ARM trigger/
+        # repeat/params) without arming. send_command() raises SimLinkError
+        # if the reply's status byte isn't OK (kilnsim.link.SerialSimLink/
+        # kilnsim.payloads.decode_reply), so a bad first frame never reaches
+        # the second send below.
         link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
             "fault_slot": compiled.fault_slot,
             "fault_type": compiled.fault_type,
@@ -274,6 +281,15 @@ def run_scenario(link: SimLink, scenario: Scenario, *, seed: Optional[int] = Non
             "repeat": _repeat_payload(compiled.repeat),
             "params": list(compiled.params),
         })
+        if compiled.duration.kind == DurationKind.UNTIL_TRIGGER:
+            # Frame 2 of the two-frame design: supplies the release trigger
+            # and performs the actual arm (fault_sched_schedule() combining
+            # it with what frame 1 parked). Must follow frame 1 for this
+            # slot_id -- ERR_BAD_ARGS if nothing is pending for it.
+            link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                "fault_slot": compiled.fault_slot,
+                "trigger": _trigger_payload(compiled.duration.until),
+            })
 
     collected: "list[Event]" = []
     tracker = _TelemetryEdgeTracker()

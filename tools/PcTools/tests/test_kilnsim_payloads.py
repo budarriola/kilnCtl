@@ -237,17 +237,77 @@ class FaultGroupTests(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<H", req, 1)[0], 3)
         self.assertEqual(len(req), 94)
 
-    def test_schedule_until_trigger_rejected(self):
-        with self.assertRaises(pl.PayloadError):
-            pl.encode_request(
-                CommandGroup.FAULT,
-                1,
-                {
-                    "fault_slot": 1,
-                    "trigger": {"kind": "manual"},
-                    "duration": {"kind": "until_trigger"},
-                },
-            )
+    def test_schedule_until_trigger_accepted_frame1(self):
+        # PROTOCOL.md sec 5.6: duration_kind == 2 (UNTIL_TRIGGER) is now
+        # *accepted* by FAULT_SCHEDULE -- it's frame 1 of the two-frame
+        # design, parking the fault's fields without arming the slot yet.
+        # Same 94-byte wire shape as PERMANENT/FOR; duration_for_s is simply
+        # ignored (not encoded specially).
+        req = pl.encode_request(
+            CommandGroup.FAULT,
+            1,
+            {
+                "fault_slot": 1,
+                "fault_type": 0,
+                "target": 1,
+                "trigger": {"kind": "manual"},
+                "duration": {"kind": "until_trigger"},
+                "repeat": {"kind": "once"},
+            },
+        )
+        self.assertEqual(req[0], 1)
+        self.assertEqual(len(req), 94)
+        # duration_kind byte sits right after the 44-byte ARM trigger block
+        # (1 cmd + 2 slot + 1 fault_type + 2 target + 44 trigger = 50).
+        self.assertEqual(req[50], 2)
+
+    def test_set_until_trigger_request_round_trip(self):
+        # Frame 2: [0x05, u16 slot_id, <trigger encoding>], 47 bytes total.
+        req = pl.encode_request(
+            CommandGroup.FAULT,
+            5,
+            {
+                "fault_slot": 7,
+                "trigger": {"kind": "at_zone_temp", "zone": 2, "temp_c": 250.0, "edge": "falling"},
+            },
+        )
+        self.assertEqual(req[0], 5)
+        self.assertEqual(len(req), 47)
+        self.assertEqual(struct.unpack_from("<H", req, 1)[0], 7)
+        # trigger_kind (AT_ZONE_TEMP == 1) at offset 3
+        self.assertEqual(req[3], 1)
+        # trigger_a (temp_c) at offset 4, f64
+        self.assertAlmostEqual(struct.unpack_from("<d", req, 4)[0], 250.0, places=3)
+        # trigger_ref (zone) at offset 20, u16
+        self.assertEqual(struct.unpack_from("<H", req, 20)[0], 2)
+        # trigger_edge (falling == 1) at offset 22
+        self.assertEqual(req[22], 1)
+
+        decoded = pl.decode_reply(CommandGroup.FAULT, 5, _ok_reply(struct.pack("<H", 7)))
+        self.assertEqual(decoded, {"fault_slot": 7})
+
+    def test_set_until_trigger_matches_schedule_arm_trigger_encoding(self):
+        # "byte-identical trigger encoding to FAULT_SCHEDULE's own ARM
+        # trigger" (PROTOCOL.md sec 5.6) -- same trigger dict through both
+        # encoders should produce the identical 44-byte trigger block.
+        trigger = {"kind": "on_relay_edge", "relay": "K4", "edge": "open", "delay_s": 1.5}
+        schedule_req = pl.encode_request(
+            CommandGroup.FAULT,
+            1,
+            {
+                "fault_slot": 0,
+                "fault_type": 0,
+                "target": 0,
+                "trigger": trigger,
+                "duration": {"kind": "permanent"},
+                "repeat": {"kind": "once"},
+            },
+        )
+        until_req = pl.encode_request(CommandGroup.FAULT, 5, {"fault_slot": 0, "trigger": trigger})
+        # schedule_req's ARM trigger block is at offset 6..50 (1 cmd + 2 slot
+        # + 1 fault_type + 2 target = 6); until_req's is at offset 3..47
+        # (1 cmd + 2 slot_id = 3).
+        self.assertEqual(schedule_req[6:50], until_req[3:47])
 
     def test_list_reply(self):
         entry = struct.pack("<HBHHI", 1, 1, 2, 0, 5) + struct.pack("<f", 12.5)

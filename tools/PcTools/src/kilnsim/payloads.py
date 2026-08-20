@@ -522,6 +522,37 @@ _REPEAT_KIND_TO_ID = {"once": 0, "every": 1, "n_times": 2}
 _FAULT_SLOT_STATE_NAMES = {0: "idle", 1: "armed", 2: "active", 3: "expired"}
 
 
+def _encode_trigger_fields(trigger: dict) -> bytes:
+    """Byte-identical trigger encoding (PROTOCOL.md sec 5.6) shared by
+    FAULT_SCHEDULE's own ARM trigger and FAULT_SET_UNTIL_TRIGGER's release
+    trigger: `u8 trigger_kind, f64 trigger_a, f64 trigger_b, u16 trigger_ref,
+    u8 trigger_edge, char[24] event_name` -- 44 bytes."""
+    trigger_kind = trigger.get("kind", "manual")
+    trigger_kind_id = trigger_kind if isinstance(trigger_kind, int) else _TRIGGER_KIND_TO_ID[str(trigger_kind)]
+    trigger_a = float(
+        trigger.get("t", trigger.get("temp_c", trigger.get("delay_s", trigger.get("t0", 0.0)))) or 0.0
+    )
+    trigger_b = float(trigger.get("t1", 0.0) or 0.0)
+    _relay_bit = {"K1": 0, "K2": 1, "K3": 2, "K5": 3, "K4": 4}  # sim_snapshot.h's sim_relay_bit_t order
+    if "relay" in trigger and isinstance(trigger["relay"], str):
+        trigger_ref = _relay_bit.get(trigger["relay"].upper(), 0)
+    else:
+        trigger_ref = int(trigger.get("zone", trigger.get("relay", trigger.get("after_fault_slot", 0))) or 0)
+    edge_raw = trigger.get("edge")
+    trigger_edge = 1 if edge_raw in ("falling", "open", 1) else 0
+    event_name = (trigger.get("event_name") or "").encode("ascii")[:24]
+    event_name = event_name + b"\x00" * (24 - len(event_name))
+
+    out = bytearray()
+    out += struct.pack("<B", trigger_kind_id)
+    out += struct.pack("<d", trigger_a)
+    out += struct.pack("<d", trigger_b)
+    out += struct.pack("<H", trigger_ref)
+    out += struct.pack("<B", trigger_edge)
+    out += event_name
+    return bytes(out)
+
+
 def _encode_fault_schedule(payload: dict) -> bytes:
     slot_id = int(payload.get("fault_slot", payload.get("slot_id", 0)))
     # fault_type/target arrive as the scenario's own catalog strings (e.g.
@@ -542,30 +573,16 @@ def _encode_fault_schedule(payload: dict) -> bytes:
     fault_type = _u8(type_id)
 
     trigger = payload.get("trigger", {})
-    trigger_kind = trigger.get("kind", "manual")
-    trigger_kind_id = trigger_kind if isinstance(trigger_kind, int) else _TRIGGER_KIND_TO_ID[str(trigger_kind)]
-    trigger_a = float(
-        trigger.get("t", trigger.get("temp_c", trigger.get("delay_s", trigger.get("t0", 0.0)))) or 0.0
-    )
-    trigger_b = float(trigger.get("t1", 0.0) or 0.0)
-    _relay_bit = {"K1": 0, "K2": 1, "K3": 2, "K5": 3, "K4": 4}  # sim_snapshot.h's sim_relay_bit_t order
-    if "relay" in trigger and isinstance(trigger["relay"], str):
-        trigger_ref = _relay_bit.get(trigger["relay"].upper(), 0)
-    else:
-        trigger_ref = int(trigger.get("zone", trigger.get("relay", trigger.get("after_fault_slot", 0))) or 0)
-    edge_raw = trigger.get("edge")
-    trigger_edge = 1 if edge_raw in ("falling", "open", 1) else 0
-    event_name = (trigger.get("event_name") or "").encode("ascii")[:24]
-    event_name = event_name + b"\x00" * (24 - len(event_name))
+    trigger_fields = _encode_trigger_fields(trigger)
 
+    # duration_kind == 2 (UNTIL_TRIGGER, PROTOCOL.md sec 5.6): this frame
+    # parks fault_type/target/the ARM trigger/repeat/params firmware-side
+    # without arming the slot; duration_for_s is ignored. The release
+    # trigger is supplied separately via FAULT_SET_UNTIL_TRIGGER (cmd 0x05),
+    # which performs the actual arm -- see that command's encoder below.
     duration = payload.get("duration", {})
     duration_kind = duration.get("kind", "permanent")
     duration_kind_id = duration_kind if isinstance(duration_kind, int) else _DURATION_KIND_TO_ID[str(duration_kind)]
-    if duration_kind_id == 2:
-        raise PayloadError(
-            "FAULT_SCHEDULE: duration_kind UNTIL_TRIGGER (2) is rejected by SimFW today "
-            "(PROTOCOL.md sec 5.6 wire-frame-size gap) -- use FOR or MANUAL+FAULT_CANCEL"
-        )
     duration_for_s = float(duration.get("t", 0.0) or 0.0)
 
     repeat = payload.get("repeat", {})
@@ -580,12 +597,7 @@ def _encode_fault_schedule(payload: dict) -> bytes:
 
     out = bytearray()
     out += struct.pack("<BHBH", 0x01, slot_id, fault_type, target)
-    out += struct.pack("<B", trigger_kind_id)
-    out += struct.pack("<d", trigger_a)
-    out += struct.pack("<d", trigger_b)
-    out += struct.pack("<H", trigger_ref)
-    out += struct.pack("<B", trigger_edge)
-    out += event_name
+    out += trigger_fields
     out += struct.pack("<B", duration_kind_id)
     out += struct.pack("<d", duration_for_s)
     out += struct.pack("<B", repeat_kind_id)
@@ -594,6 +606,16 @@ def _encode_fault_schedule(payload: dict) -> bytes:
     out += struct.pack("<H", repeat_n)
     out += struct.pack("<ffff", *[float(x) for x in params])
     return bytes(out)
+
+
+def _encode_fault_set_until_trigger(payload: dict) -> bytes:
+    """FAULT_SET_UNTIL_TRIGGER (cmd 0x05, PROTOCOL.md sec 5.6): frame 2 of
+    the UNTIL_TRIGGER two-frame design. `[0x05, u16 slot_id, <trigger
+    encoding, byte-identical to FAULT_SCHEDULE's own ARM trigger>]`, 47
+    bytes total incl. cmd_id."""
+    slot_id = int(payload.get("fault_slot", payload.get("slot_id", 0)))
+    trigger = payload.get("trigger", {})
+    return struct.pack("<BH", 0x05, slot_id) + _encode_trigger_fields(trigger)
 
 
 def _fault_encode(cmd: int, payload: dict) -> bytes:
@@ -609,6 +631,8 @@ def _fault_encode(cmd: int, payload: dict) -> bytes:
     if cmd == 4:  # FIRE_NOW
         slot = int(payload.get("fault_slot", payload.get("slot_id", 0)))
         return struct.pack("<BH", cmd, slot)
+    if cmd == 5:  # SET_UNTIL_TRIGGER
+        return _encode_fault_set_until_trigger(payload)
     raise PayloadError(f"FAULT: unknown command id {cmd}")
 
 
@@ -618,6 +642,9 @@ def _fault_decode(cmd: int, status: int, data: bytes) -> dict:
         return {"fault_slot": slot_id}
     if cmd == 2:  # CANCEL
         return {}
+    if cmd == 5:  # SET_UNTIL_TRIGGER -- reply [status, u16 slot_id echo]
+        (slot_id,) = struct.unpack_from("<H", data, 0)
+        return {"fault_slot": slot_id}
     if cmd == 3:  # LIST
         count = data[0]
         entries = []

@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnsim.link import MockSimLink, SimLinkError  # noqa: E402
-from kilnsim.protocol import CommandGroup, Event, EventType, SysCmd, TcCmd  # noqa: E402
+from kilnsim.protocol import CommandGroup, Event, EventType, FaultCmd, SysCmd, TcCmd  # noqa: E402
 
 
 class ConnectDisconnectTests(unittest.TestCase):
@@ -148,6 +148,69 @@ class StateSnapshotTests(unittest.TestCase):
         link = MockSimLink()
         link.set_state(estop_open=True)
         self.assertTrue(link.get_state_snapshot()["estop_open"])
+
+
+class FaultUntilTriggerTwoFrameTests(unittest.TestCase):
+    """MockSimLink's answer for the UNTIL_TRIGGER two-frame design
+    (PROTOCOL.md sec 5.6), so scenario/runner tests built on the mock stay
+    meaningful without a real device."""
+
+    def setUp(self):
+        self.link = MockSimLink()
+        self.link.connect()
+
+    def test_set_until_trigger_after_pending_schedule_succeeds(self):
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+            "fault_slot": 2, "duration": {"kind": "until_trigger"},
+        })
+        reply = self.link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+            "fault_slot": 2, "trigger": {"kind": "at_sim_time", "t": 5.0},
+        })
+        self.assertEqual(reply, {"fault_slot": 2})
+
+    def test_set_until_trigger_with_nothing_pending_raises(self):
+        with self.assertRaises(SimLinkError):
+            self.link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                "fault_slot": 9, "trigger": {"kind": "manual"},
+            })
+
+    def test_set_until_trigger_twice_second_call_raises(self):
+        # Once consumed by a SET_UNTIL_TRIGGER, the pending entry is gone --
+        # a second SET_UNTIL_TRIGGER for the same slot has nothing pending.
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+            "fault_slot": 1, "duration": {"kind": "until_trigger"},
+        })
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+            "fault_slot": 1, "trigger": {"kind": "manual"},
+        })
+        with self.assertRaises(SimLinkError):
+            self.link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                "fault_slot": 1, "trigger": {"kind": "manual"},
+            })
+
+    def test_permanent_schedule_discards_stale_pending_entry(self):
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+            "fault_slot": 3, "duration": {"kind": "until_trigger"},
+        })
+        # A direct PERMANENT FAULT_SCHEDULE on the same slot discards the
+        # stale pending UNTIL_TRIGGER entry (PROTOCOL.md sec 5.6).
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+            "fault_slot": 3, "duration": {"kind": "permanent"},
+        })
+        with self.assertRaises(SimLinkError):
+            self.link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                "fault_slot": 3, "trigger": {"kind": "manual"},
+            })
+
+    def test_cancel_discards_pending_entry(self):
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+            "fault_slot": 4, "duration": {"kind": "until_trigger"},
+        })
+        self.link.send_command(CommandGroup.FAULT, FaultCmd.CANCEL, {"fault_slot": 4})
+        with self.assertRaises(SimLinkError):
+            self.link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                "fault_slot": 4, "trigger": {"kind": "manual"},
+            })
 
 
 class EventRoundTripTests(unittest.TestCase):

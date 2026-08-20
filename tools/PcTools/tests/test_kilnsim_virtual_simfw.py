@@ -140,6 +140,92 @@ def test_tc_stuck_fault_fires_without_a_dut():
     assert report.verdict == "FAIL"
 
 
+def test_until_trigger_fault_two_frame_sequence():
+    """FAULT_SCHEDULE(duration_kind=UNTIL_TRIGGER) + FAULT_SET_UNTIL_TRIGGER
+    (PROTOCOL.md sec 5.6's two-frame design) against the real virtual
+    device. No shipped scenario under firmware/SimFW/scenarios/ uses
+    `until_trigger` yet, so this test builds a small synthetic one (same
+    pattern as the determinism probe above) rather than skip the coverage
+    entirely.
+
+    NOTE: virtual_simfw.c predates FAULT_SET_UNTIL_TRIGGER and is owned by a
+    different tree/agent (do not modify it here) -- PROTOCOL.md sec 5.6 says
+    only that cmd_task.c (real firmware) implements the two-frame handshake;
+    nothing guarantees the virtual device's mock does yet. This test reports
+    what actually happens rather than assuming either outcome, and is
+    written so it stays meaningful once virtual_simfw does implement it."""
+    from kilnsim.link import SimLinkError
+    from kilnsim.protocol import CommandGroup, FaultCmd
+
+    yaml_text = """
+name: until_trigger_probe
+version: 1
+preset: fast_test
+timescale: 20
+seed: 1
+faults:
+  - id: noisy
+    type: tc_noise
+    target: tc:0
+    trigger: { at_sim_time: { t: 1 } }
+    duration: { until_trigger: { at_sim_time: { t: 5 } } }
+    params: [3.0]
+expect: []
+"""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "until_trigger_probe.yaml"
+        path.write_text(yaml_text, encoding="utf-8")
+        scenario = load_scenario(path)
+
+    with _VirtualSimFW() as device:
+        link = TcpSimLink()
+        link.connect(f"127.0.0.1:{device.port}")
+        try:
+            link.send_command(CommandGroup.SYS, 5, {"value": scenario.seed})  # SET_SEED
+            link.send_command(CommandGroup.SYS, 4, {"value": scenario.timescale})  # SET_TIMESCALE
+            link.send_command(CommandGroup.MODEL, 4, {"name": scenario.preset})  # LOAD_PRESET
+
+            try:
+                reply1 = link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+                    "fault_slot": 0,
+                    "fault_type": "tc_noise",
+                    "target": "tc:0",
+                    "trigger": {"kind": "at_sim_time", "t": 1.0},
+                    "duration": {"kind": "until_trigger"},
+                    "params": [3.0, 0.0, 0.0, 0.0],
+                })
+            except SimLinkError as exc:
+                # Observed: virtual_simfw.c predates duration_kind==2 being
+                # an accepted value at all (PROTOCOL.md sec 5.6's gap-closure
+                # pass is real-firmware-only) and rejects frame 1 itself with
+                # ERR_BAD_ARGS -- not a PC-side encoder bug, and not this
+                # tree's to fix (see docstring above).
+                pytest.skip(
+                    f"virtual_simfw rejects FAULT_SCHEDULE(duration_kind=UNTIL_TRIGGER): {exc}"
+                )
+            assert reply1["fault_slot"] == 0
+
+            try:
+                reply2 = link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                    "fault_slot": 0,
+                    "trigger": {"kind": "at_sim_time", "t": 5.0},
+                })
+            except SimLinkError as exc:
+                # Expected if virtual_simfw hasn't picked up cmd 0x05 yet
+                # (unregistered task/command -> NACK or ERR_NOT_IMPL/
+                # ERR_BAD_ARGS surfaced as SimLinkError) -- not a bug in the
+                # PC-side encoder under test here, see docstring above.
+                pytest.skip(
+                    f"virtual_simfw does not (yet) implement FAULT_SET_UNTIL_TRIGGER: {exc}"
+                )
+            else:
+                assert reply2["fault_slot"] == 0
+        finally:
+            link.disconnect()
+
+
 def test_determinism_same_seed_same_scenario_byte_identical_events():
     """PLAN.md sec 4.2/7.2's core testing contract: "the same scenario + seed
     => the same run, byte-for-byte in the event log" -- run twice against two
