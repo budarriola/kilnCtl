@@ -195,28 +195,58 @@ CONFIG_SPIRAM_MEMTEST=y
 # DMA-capable allocations are unaffected either way -- those request
 # MALLOC_CAP_DMA explicitly and always come from internal RAM, and
 # MALLOC_RESERVE_INTERNAL below keeps a floor for them.
-# Both values below are DELIBERATELY unchanged from the IDF defaults. Tried
-# and reverted, 2026-08-20 -- recorded here so the next person does not repeat
-# it:
+# ALWAYSINTERNAL stays at the IDF default of 16384. Lowering it to 4096 was
+# tried and reverted, 2026-08-20 -- recorded here so the next person does not
+# repeat it: on real hardware the LVGL display task stopped starting at all
+# ("Failed to start lvgl_port_task"), more UART task inboxes failed than
+# before, and the PC-link safety watchdog failed with ESP_ERR_NO_MEM.
 #
-#   ALWAYSINTERNAL 16384 -> 4096, and TRY_ALLOCATE_WIFI_LWIP off -> on, on the
-#   reasoning that pushing mid-sized allocations and the Wi-Fi/lwIP buffer
-#   pools into PSRAM would relieve the internal shortage. On real hardware it
-#   made things WORSE, not better: the LVGL display task stopped starting at
-#   all ("Failed to start lvgl_port_task"), more UART task inboxes failed than
-#   before, and the PC-link safety watchdog failed to start with ESP_ERR_NO_MEM.
-#   Reverting both restored the previous behaviour.
+# TRY_ALLOCATE_WIFI_LWIP is ON, enabled 2026-08-20 after being measured
+# properly. IMPORTANT correction to the earlier record: this knob was
+# originally changed in the SAME experiment as ALWAYSINTERNAL 16384 -> 4096,
+# so when that experiment broke the board both were reverted and both were
+# written up here as failures. Only one of them deserved it. Retested ALONE,
+# with ALWAYSINTERNAL left at 16384, this knob is a clear improvement and
+# nothing regressed -- so the confounded conclusion above was wrong about this
+# half, and this comment supersedes it.
 #
-# The lesson is that the shortage here is FRAGMENTATION, not total free bytes:
-# the board reports ~243KB internal free while the largest contiguous block is
-# ~1-2.5KB. Global allocator knobs shift which pool small allocations come
-# from; they do nothing for a multi-KB contiguous request, and can worsen
-# fragmentation. What actually fixed it was moving specific large, long-lived
-# allocations to PSRAM explicitly at their call sites -- task stacks via
-# xTaskCreatePinnedToCoreWithCaps() and the UART inbox queues via
-# xQueueCreateWithCaps(). See lvgl_port.c, uart_bridge.c, uart_bridge_ext.c
-# and espInterfaces/uart_protocol.c.
+# The evidence for enabling it is main.c's heap_stage() boot probe, which
+# prints the largest contiguous internal 8-bit block at each bring-up step.
+# wifi_prov_start() was by a wide margin the single largest consumer -- every
+# other stage costs 1-14KB:
+#
+#   stage              before        after
+#   entry              163840        163840
+#   wifi_prov           61440 (-100K) 73728 (-88K)
+#   ...
+#   lvgl_start (final)   7680        17408
+#   dram_free (final)   14075        26319
+#
+# 2.27x the largest contiguous block at the end of boot, for one line of
+# config. The Wi-Fi/lwIP buffer pools are also bigger on this board than the
+# IDF default assumes: the httpd concurrency fix raised max_open_sockets to 13
+# and CONFIG_LWIP_MAX_SOCKETS to 16 (see that comment above), so leaving this
+# off meant paying for that fix entirely out of the scarcest pool.
+#
+# DMA-capable allocations are unaffected: Wi-Fi's DMA descriptors and rx
+# buffers request internal memory explicitly (PSRAM is not DMA-reachable for
+# the Wi-Fi peripheral on the ESP32-S3), and this option only redirects the
+# allocations for which PSRAM is a legal backing store.
+#
+# The wider lesson from that day still holds and is worth keeping: the
+# shortage here is FRAGMENTATION, not total free bytes -- the board reports
+# ~243KB internal free at boot while the largest contiguous block collapses to
+# single-digit KB. Global allocator knobs mostly shift which pool SMALL
+# allocations come from and do nothing for a multi-KB contiguous request.
+# TRY_ALLOCATE_WIFI_LWIP is the exception because what it moves is genuinely
+# large. The rest of the recovery came from moving specific large, long-lived
+# allocations to PSRAM at their call sites -- task stacks via
+# xTaskCreatePinnedToCoreWithCaps(), the UART inbox queues via
+# xQueueCreateWithCaps(), and LVGL's entire allocator via lvgl_mem_psram.c.
+# See lvgl_port.c, uart_bridge.c, uart_bridge_ext.c and
+# espInterfaces/uart_protocol.c.
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
 # CONFIG_PARTITION_TABLE_CUSTOM: found the hard way 2026-08-20, same audit

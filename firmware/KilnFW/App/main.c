@@ -181,6 +181,35 @@ static void ota_rollback_confirm_task(void *arg)
     }
 }
 
+/* Boot-stage internal-DRAM probe.
+ *
+ * The largest contiguous 8-bit internal block is 163840 bytes early in boot
+ * and a few KB by the time the UART bridge tasks are created -- that collapse,
+ * not any free total, is what makes a multi-KB task stack or queue allocation
+ * fail (see the MALLOC_CAP_INTERNAL note in the reset-reason block above).
+ * Moving LVGL's allocator to PSRAM (lvgl_mem_psram.c) recovered part of it but
+ * demonstrably not all, and "somewhere between those two log lines" was as
+ * precise as the evidence got.
+ *
+ * This prints the same figure at each bring-up stage so the drop can be
+ * attributed to the stage that causes it rather than inferred. It is two log
+ * lines' worth of cost at boot and nothing at all afterwards, so it stays in
+ * rather than being added and removed each time this question comes back --
+ * it has come back three times now.
+ *
+ * `delta` is against the previous call, so a stage that costs a large
+ * contiguous block is visible directly without subtracting timestamps by hand. */
+static void heap_stage(const char *stage)
+{
+    static size_t s_prev_largest;
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t free8 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    int delta = (s_prev_largest == 0) ? 0 : (int)largest - (int)s_prev_largest;
+    s_prev_largest = largest;
+    ESP_LOGW(TAG, "heap stage %-18s largest=%6u delta=%+7d dram_free=%7u", stage,
+             (unsigned)largest, delta, (unsigned)free8);
+}
+
 /* Every task creation in this file is a single-line "start" call -- the
  * semaphore/queue/task choreography behind each one lives in that driver's
  * own file (MAX31856_start_all in MAX31856.c, monitor_task_start in
@@ -314,6 +343,8 @@ void app_main(void)
     // NULL-tolerant convention as a missing thermo_bus/kiln_io elsewhere in
     // this file. NOT YET VERIFIED AGAINST THE INSTALLED TOOLCHAIN OR REAL
     // HARDWARE THIS PASS -- see board_temps.h's doc comment.
+    heap_stage("entry");
+
     esp_err_t board_temps_err = board_temps_start();
     if (board_temps_err != ESP_OK) {
         ESP_LOGW(TAG, "board_temps_start failed: %s -- no ESP32-S3 die temp this boot",
@@ -340,6 +371,8 @@ void app_main(void)
     // the AP fallback case still wants kiln.local to resolve. Non-fatal like
     // everything else here -- no name resolution is not a reason to fail
     // app_main.
+    heap_stage("wifi_prov");
+
     esp_err_t mdns_err = mdns_init();
     if (mdns_err == ESP_OK) {
         mdns_hostname_set("kiln");
@@ -353,6 +386,8 @@ void app_main(void)
     // ESP-IDF allows exactly one i2c_master_bus_handle_t per physical bus, so
     // it is created here and handed to whoever needs it, rather than by the
     // first driver that happens to want it.
+    heap_stage("mdns");
+
     i2c_master_bus_handle_t i2c_bus = NULL;
     i2c_master_bus_config_t i2c_config = {
         .i2c_port = I2C_NUM_0,
@@ -514,6 +549,8 @@ void app_main(void)
                  esp_err_to_name(thermo_owner_err));
     }
 
+    heap_stage("i2c+spi+thermo");
+
     // --- ILI9488 display (J2) ----------------------------------------------
     // Borrows the thermocouple bus's spi_owner_t, which is what keeps a
     // 1440-byte pixel push from being interleaved into the middle of a
@@ -586,6 +623,8 @@ void app_main(void)
             screen_idle_ready = true;
         }
     }
+
+    heap_stage("display+touch");
 
     // --- Safety processor link (opto-isolated UART1 + the fault line) ------
     // Comes up whether or not an RP2040 is answering; a silent far side is
@@ -668,6 +707,8 @@ void app_main(void)
                  esp_err_to_name(cycles_err));
     }
 
+    heap_stage("safety+io_owner");
+
     // --- Profile executor (TODO.md section 6) -------------------------------
     // Must come up before dashboard_http_start() below, which registers the
     // /api/profile_exec* routes that call into this module at request time.
@@ -703,6 +744,8 @@ void app_main(void)
     if (autotune_err != ESP_OK) {
         ESP_LOGW(TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(autotune_err));
     }
+
+    heap_stage("executor+autotune");
 
     // --- Dashboard HTTP API (live status + manual relay control) -----------
     // Registers on the httpd instance wifi_prov_start() already brought up
@@ -846,6 +889,8 @@ void app_main(void)
                  esp_err_to_name(sim_err));
     }
 
+    heap_stage("http_handlers");
+
     static monitor_task_t monitor;
     monitor_task_init(&monitor, &expander.owner.task_handle);
     if (monitor_task_start(&monitor) != pdPASS) {
@@ -903,6 +948,8 @@ void app_main(void)
         }
     }
 
+    heap_stage("uart_owner+proto");
+
     // Everything below through the control/profiles/autotune/wifi/gpio_probe
     // block takes &uart_proto and is only valid to call once pc_link_ready is
     // true (see the PC link block's own NOTE above). lvgl_port_start() is the
@@ -943,6 +990,8 @@ void app_main(void)
             ESP_LOGE(TAG, "Failed to start io uart bridge task");
         }
     }
+    heap_stage("uart_bridges_1");
+
     // Replaces the UART DISPLAY_CMD_* remote-draw path -- LVGL owns the panel
     // now (TODO.md 10.1). uart_bridge_start_display_task() is no longer
     // called here; it stays in uart_bridge.c as dead code for now.
@@ -960,6 +1009,8 @@ void app_main(void)
             ESP_LOGE(TAG, "Failed to start safety uart bridge task");
         }
     }
+
+    heap_stage("lvgl_start");
 
     // CONTROL/PROFILES/AUTOTUNE/WIFI (tasks 8-11): additive UART coverage for
     // everything the HTTP dashboard offers (TODO.md "UART parity with
@@ -992,6 +1043,8 @@ void app_main(void)
         }
     }
 
+    heap_stage("uart_bridges_2");
+
     // --- Fail-safe on loss of the PC link -----------------------------------
     // Started last, so it is watching a link every bridge above can already
     // feed. Until the host's first frame or ACK it holds the board in the
@@ -1011,4 +1064,6 @@ void app_main(void)
                               SAFETY_FAULT_SRC_APP,
                               "no link watchdog, so relays cannot be guaranteed to drop");
     }
+
+    heap_stage("app_main_done");
 }
