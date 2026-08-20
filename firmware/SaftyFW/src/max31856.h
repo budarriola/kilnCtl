@@ -139,16 +139,25 @@ extern "C" {
 
 // THERMOCOUPLE.md section 2: "The type is configuration, and a mismatch is a
 // silent hazard" -- tc_type must be a real, per-installation commissioning
-// decision against tc_placement_mode and the kiln's peak temperature. There
-// is no config_store yet (Phase 9) to source that decision from, so this is
-// a placeholder main.c passes at boot purely so the part has SOME type
-// configured rather than being left at an ambiguous power-on default. Type K
-// is chosen because it is the safe "does not crash, does not claim precision
-// it cannot have" placeholder, matching KilnFW's own zone default -- it is
-// explicitly NOT a claim that K is correct for this installation. Whoever
-// wires config_store in Phase 9 must replace the call site that uses this,
-// not just change the constant here.
-#define MAX31856_TC_TYPE_PLACEHOLDER MAX31856_TC_TYPE_K
+// decision against tc_placement_mode and the kiln's peak temperature.
+//
+// WIRED (Phase 9, config_store.c/.h + config_store_flash.c): main.c's boot
+// sequence now passes config_store_get_tc_type() to max31856_configure(),
+// not a hard-coded constant. There used to be a MAX31856_TC_TYPE_PLACEHOLDER
+// macro here that main.c passed directly -- it has been removed, because the
+// call site it warned about ("whoever wires config_store must replace the
+// call site that uses this") has now been replaced; keeping a dead,
+// unreferenced macro around would be misleading. What has NOT changed: on
+// every board built so far, config_store's flash sector has never been
+// written, so config_store_get_tc_type() still resolves to
+// CONFIG_STORE_DEFAULT_TC_TYPE == MAX31856_TC_TYPE_K (config_store.h) via
+// its documented safe-default path -- the same Type K result as before, just
+// reached honestly through "nothing has ever commissioned this yet" rather
+// than a constant baked into this header. It is still explicitly NOT a claim
+// that K is correct for any given installation. There is still no
+// commissioning UI or wire command (no SAFTY_CMD_SET_CONFIG) that can ever
+// write a different tc_type -- that remains open, TODO.md Phase 9's later
+// bullets.
 
 /* --- Fixed-point scales (datasheet register bit-weight tables), ported
  * verbatim from MAX31856.h. --------------------------------------------- */
@@ -185,9 +194,12 @@ bool max31856_init(uint8_t cs_gpio, uint8_t fault_gpio);
 /* Full CR0/CR1/MASK (re)configuration per THERMOCOUPLE.md section 5's table:
  * auto-convert, OCFAULT mode 1, CJ enabled, comparator fault mode, 60Hz
  * notch, AVGSEL = 4 samples, MASK = MAX31856_DEFAULT_FAULT_MASK. tc_type is
- * the one runtime-commissioned field (THERMOCOUPLE.md section 2) -- see
- * MAX31856_TC_TYPE_PLACEHOLDER in max31856.c for why K is passed today and
- * why that is explicitly not a decision about what belongs on this board.
+ * the one runtime-commissioned field (THERMOCOUPLE.md section 2) -- main.c
+ * passes config_store_get_tc_type() (src/config_store.h, Phase 9), not a
+ * constant; see this header's comment just above MAX31856_AVGSEL_4_SAMPLES's
+ * definition for why that still resolves to K on every board built so far
+ * and why that is explicitly not a decision about what belongs on this
+ * board.
  *
  * Handles the same two datasheet ordering constraints KilnFW's
  * MAX31856_configure() does: "change the notch frequency only in Normally

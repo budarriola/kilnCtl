@@ -281,12 +281,16 @@ header comment, so the build is reproducible elsewhere.
       `tc_valid = false` stub.
 - [~] **Choose `tc_type` deliberately, per sensor** — type K is marginal above
       ~1150 °C and green-rots *low* in reduction. Type S/R for a chamber-mounted
-      sensor on a cone-10 kiln. `docs/THERMOCOUPLE.md` §2. **Not decided this
-      phase** — `tc_type` is correctly a runtime parameter of
-      `max31856_configure()` (not a compile-time constant), but `main.c`
-      currently passes `MAX31856_TC_TYPE_PLACEHOLDER` (type K) because no
-      `config_store` exists yet (Phase 9) to source the real per-installation
-      decision from. Explicitly not a claim that K is correct for this kiln.
+      sensor on a cone-10 kiln. `docs/THERMOCOUPLE.md` §2. **Still not decided**
+      — `tc_type` is correctly a runtime parameter of `max31856_configure()`
+      (not a compile-time constant), and as of this pass `main.c` sources it
+      from `config_store_get_tc_type()` (`src/config_store.h`, Phase 9) rather
+      than a hard-coded `MAX31856_TC_TYPE_PLACEHOLDER` constant. But nothing
+      has ever written a non-default record to the config store — there is
+      still no commissioning UI or wire command (`SAFTY_CMD_SET_CONFIG` or
+      similar) — so this still resolves to type K on every board built so
+      far, via the store's documented safe-default path rather than a
+      constant. Explicitly not a claim that K is correct for this kiln.
 - [ ] **Per-type plausibility ranges**, driven from the configured type — a
       range hard-coded to type K misfires on every other type. **Not started**
       — needs a real commissioned `tc_type` (above) to be meaningful.
@@ -344,10 +348,15 @@ header comment, so the build is reproducible elsewhere.
       comment calling S9 "escalation, not a cause". S8 (implausible rate of
       rise) remains unimplemented by design — `SAFETY_MODEL.md` section 4 says
       it ships disabled until a real full-power ramp is logged (Phase 9); there
-      is no defensible threshold to build yet. Runtime configuration integrity
-      (the periodic CRC background check) is also out of scope here — it needs
-      `config_store` (Phase 9), which doesn't exist. This module now implements
-      12 of `SAFETY_MODEL.md` section 4's 13 guards.
+      is no defensible threshold to build yet, and `config_store_record_t`'s
+      `reserved` field (`src/config_store.h`, Phase 9) only reserves room for
+      it, nothing reads/writes it. Runtime configuration integrity (the
+      periodic CRC background check) is also out of scope here — `config_store`
+      now exists (Phase 9: `src/config_store.{c,h}` + `config_store_flash.c`)
+      but nothing calls it periodically to re-verify the CRC in the
+      background; only the one-shot boot-time load
+      (`config_store_boot_load()`) is wired. This module now implements 12 of
+      `SAFETY_MODEL.md` section 4's 13 guards.
 - [x] `discrete_task`: debounce E-stop (50 ms) and `mainFault` (200 ms).
       Built in the relay-authority pass, 2026-08-16: a standard
       consecutive-sample debounce in `src/tasks/discrete_task.c`, sample
@@ -515,6 +524,9 @@ S9) are explicitly out of scope for this pass — they need `link_task`'s
       relay state by design (module isolation) and nothing calls it yet; the
       ">= 5 min idle, no relay commanded on" precondition and the drift
       report are Phase 9's `config_store`/commissioning-flow job.
+      `config_store` exists now (Phase 9), but current-sense calibration
+      constants are not among the fields it stores yet -- `reserved` has room
+      for them, nothing uses it. Still not started.
 - [ ] **Run the full commissioning check in `docs/CURRENT_SENSE.md` §5** — in
       particular step 2, one relay at a time, confirming each CT maps to the
       channel you think it does. Needs real hardware; not done.
@@ -796,8 +808,14 @@ The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCO
       `context_age_100ms` is real once at least one context frame has been
       parsed (255 = "never received" before that), `context_frames_ok`/`bad`
       are real running counts, `tx_frames_dropped` is real. `flags` bit1
-      `calibration_missing` is always 1 (true — no `config_store` yet, Phase
-      9); bit0 `sim_context_seen` is real (latched once `CONTEXT_FLAG_SIM_PLANT`
+      `calibration_missing` is always 1 (true). `config_store` now exists
+      (Phase 9: `src/config_store.{c,h}` + `config_store_flash.c`,
+      `config_store_is_calibration_missing()`), and its answer happens to
+      agree with the hard-coded 1 today (nothing has ever cleared the flag),
+      but this DIAG frame's send path in `link_task.c` still doesn't call it
+      — the 1 here is still a hard-coded literal, not sourced from the store.
+      Wiring it is an open follow-on, not attempted this pass. bit0
+      `sim_context_seen` is real (latched once `CONTEXT_FLAG_SIM_PLANT`
       is seen), bit2 `estop_unwired_suspect` is always 0, no detection
       heuristic exists. **2026-08-19 (ROADMAP.md M5)**: the send path was
       migrated off this file's own hand-rolled `link_frame_pack_diag()` onto
@@ -819,9 +837,15 @@ The ESP will not permit heating without this. See `../CommonFW/docs/LINK_PROTOCO
 - [x] Emit `SAFETY_CMD_FW_VERSION` (0x0B) on request **and unsolicited at boot**;
       include `boot_id`, `config_version` and the **active config CRC**.
       `boot_id` is a real (pseudo-random, time-derived) per-boot value;
-      `config_version`/`config_crc` are 0 — honest, since `config_store`
-      (Phase 9) doesn't exist yet and the spec documents 0 as exactly that
-      case ("running on compiled-in defaults that were never commissioned").
+      `config_version`/`config_crc` are 0 — still honest: `config_store`
+      exists now (Phase 9), and its record does carry a real `format_version`
+      and a real CRC internally (`config_store_pack()`/`_unpack()`), but
+      `link_task.c`'s `SAFETY_CMD_FW_VERSION` reply doesn't read them yet —
+      not wired this pass — and the spec documents 0 as exactly the
+      "running on compiled-in defaults that were never commissioned" case,
+      which is still true of every board built so far (nothing has ever
+      written a non-default record). Wiring the real values through is an
+      open follow-on.
 - [x] Emit `SAFETY_CMD_TRIP_EVENT` (0x0D) **immediately on trip**, repeated a
       few times, carrying the deciding values at the moment of the trip.
       **2026-08-19 (ROADMAP.md M5)**. The cross-task path needed for this
@@ -933,8 +957,54 @@ See `../CommonFW/docs/LINK_PROTOCOL.md` §7 for the full panel spec and presenta
 
 ## Phase 9 — Commissioning and the honest gaps
 
-- [ ] Config store: versioned, CRC'd, safe defaults, `calibration_missing` flag.
-- [ ] Config writes **refused while ARMED**.
+- [~] Config store: versioned, CRC'd, safe defaults, `calibration_missing` flag.
+      **2026-08-19**: `src/config_store.{c,h}` (pure record pack/unpack/CRC/
+      find-latest/next-write-slot logic, mirroring `bootloader/metadata.h`/
+      `.c`'s append-only-log-in-one-sector discipline exactly, host-tested
+      `test/test_config_store.c`, 40 new checks, 499/499 total) plus
+      `config_store_flash.c` (the real XIP-mapped read /
+      `flash_safe_execute()`-wrapped write glue, NOT host-tested, same reason
+      `update_task.c` is not). Lives in a new 4K sector carved from the
+      existing, previously-unused `BOOTLOADER_CONFIG_FLASH_SIZE` (64K) region
+      (`bootloader/flash_layout.h`'s `SAFTYFW_CONFIG_STORE_FLASH_OFFSET`/
+      `_SIZE`) — no new top-level flash region needed. 256 B records
+      (`CONFIG_STORE_RECORD_LEN`), 16 slots/sector: `format_version` (2 B),
+      `seq` (4 B), `tc_type` (1 B), `calibration_missing` (1 B), 64 B
+      `reserved` for S8's threshold and current-sense calibration constants
+      (not added yet — TODO.md's own later bullets), CRC32 at offset 248. A
+      blank/corrupt/unreadable sector reads back as `config_store_default()`
+      (tc_type = K, calibration_missing = true) rather than failing boot,
+      matching `max31856_configure()`'s "a missing part must not abort boot"
+      philosophy. Wired as `tc_type`'s first real consumer: `main.c` now
+      calls `config_store_boot_load()` at boot (step 4) and passes
+      `config_store_get_tc_type()` to `max31856_configure()` (step 6),
+      replacing the retired `MAX31856_TC_TYPE_PLACEHOLDER` constant — see
+      `max31856.h`'s updated header comment. Real `cmake --build` of
+      `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` and the bootloader (shares
+      `flash_layout.h`) all pass clean under `-Wall -Wextra -Werror`.
+      **Not built this pass, deliberately out of scope**: no wire command
+      (`SAFTY_CMD_SET_CONFIG` or similar) exists to ever WRITE a non-default
+      record — that is its own `LINK_PROTOCOL.md` addition and commissioning-
+      flow UI work, later Phase 9 bullets. S8's threshold and current-sense
+      calibration constants are NOT added to the record (room reserved only).
+      The DIAG frame's `calibration_missing` bit and the `FW_VERSION` frame's
+      `config_version`/`config_crc` fields are NOT yet sourced from the real
+      store (`link_task.c` still hard-codes them) — see this file's other
+      `config_store` references for exactly which call sites remain open.
+      `update_task.c`'s `config_crc_ok` gate and its update temperature
+      ceiling are likewise not yet wired to the real store. Nothing here has
+      been verified against real RP2040 hardware — no probe/board attached in
+      this environment; build- and host-test-verified only.
+- [x] Config writes **refused while ARMED**. **2026-08-19**: pure decision
+      logic in `config_store_decide_write()` (host-tested,
+      `test/test_config_store.c`) refuses unconditionally while
+      `relay_owner_get_state() == RELAY_OWNER_STATE_ARMED`, checked inside
+      `config_store_write()` (`config_store_flash.c`) against a real
+      `relay_owner_get_state()` read — every write path gets the same
+      guarantee, not something each future caller has to remember to check
+      itself. No caller exists yet (see above: no `SAFTY_CMD_SET_CONFIG`), so
+      this is verified by host test and by inspection, not by a real ARMED
+      write attempt on hardware.
 - [ ] Log a full-power ramp, measure the real maximum °C/min, **then** set and
       enable **S8** at ~2× it. Do not guess this number.
 - [ ] Work `docs/GUARD_TEST_MATRIX.md` end to end and record every result
@@ -1224,14 +1294,19 @@ metadata format and the slot boundaries are effectively permanent.
       the running slot's metadata to `BOOTLOADER_SLOT_VALID` exactly once via
       the same `flash_safe_execute()`-wrapped persist pattern `UPDATE_END`
       uses. **Marked `[~]`, not `[x]`, because `config_crc_ok` is
-      permanently `false`** — no `config_store` exists yet (Phase 9), and
-      `confirm.h`'s own discipline forbids a caller from ever passing `true`
-      for a check it cannot actually perform ("unknown must never read as
-      confirmed-good"). This means `update_confirm_missing()` can never
+      permanently `false`** — `config_store` exists now (Phase 9:
+      `src/config_store.{c,h}` + `config_store_flash.c`), and it does carry
+      a real per-record CRC internally, but nothing in `update_task.c`/
+      `confirm.c` reads it to compute `config_crc_ok` yet — that call site
+      was explicitly left unwired this pass (TODO.md Phase 9 scoped itself to
+      "the store plus its first consumer", `tc_type`, not this gate too), and
+      `confirm.h`'s own discipline still forbids a caller from ever passing
+      `true` for a check it cannot actually perform ("unknown must never read
+      as confirmed-good"). This means `update_confirm_missing()` can never
       reach 0 and no slot can be marked `VALID` in this build — an honest
-      consequence of wiring the gate against a config store that does not
-      exist yet, not a bug to paper over with a fake CRC check. The gate
-      starts working the moment Phase 9 lands, with no further change needed
+      consequence of the gate not being wired to the (now-existing) config
+      store yet, not a bug to paper over with a fake CRC check. Wiring
+      `config_crc_ok` to a real `config_store` read is the next open item
       in `update_task.c`.
 - [x] 10.8b Image header validated **before the first erase**: magic, target,
       header version, protocol version, `min_compatible`, length, CRC32. Without
@@ -1274,8 +1349,10 @@ metadata format and the slot boundaries are effectively permanent.
       `safety_core_get_diag_status()`'s `trip_reason == SAFETY_TRIP_NONE`,
       and `thermo_task_get_snapshot()`'s `valid && !isnan(tc_c) && tc_c <
       UPDATE_TASK_TEMP_CEILING_C` (100 °C, `UPDATE_PROTOCOL.md` section 1's
-      documented default; no `config_store` yet to source a real
-      per-installation ceiling from, Phase 9) — and
+      documented default; `config_store` exists now (Phase 9), but it has no
+      ceiling field yet — `config_store_record_t`'s `reserved` bytes could
+      hold one, but nothing does, so this is still a compiled-in constant,
+      not a per-installation config store read) — and
       `update_task_process_begin()` refuses (with the specific unmet
       precondition named in the `UPDATE_STATUS` reply, never a generic
       failure) before the image header is even inspected, matching

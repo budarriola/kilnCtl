@@ -27,6 +27,7 @@
 
 #include "board_pins.h"
 #include "boot_reason.h"
+#include "config_store.h"
 #include "max31856.h"
 #include "spi_owner.h"
 
@@ -125,8 +126,19 @@ int main(void)
     boot_reason_clear_trip();
 
     // --- Step 4: config from flash. ------------------------------------------
-    // TODO (Phase 9): config_store.c -- versioned, CRC'd, safe defaults on
-    // corruption, calibration_missing flag. Nothing to load yet.
+    // config_store_boot_load() (Phase 9) reads the config store's flash
+    // sector (bootloader/flash_layout.h's SAFTYFW_CONFIG_STORE_FLASH_OFFSET/
+    // _SIZE) once, here, before anything below reads config_store_get_tc_type()/
+    // config_store_is_calibration_missing() -- see config_store_flash.c's
+    // header comment. On a blank/corrupt sector this leaves the cache holding
+    // config_store_default() (tc_type = K, calibration_missing = true), same
+    // "a missing part must not abort boot" contract as step 6 below.
+    // Still TODO (Phase 9, later bullets): S8's threshold and current-sense
+    // calibration constants have reserved room in config_store_record_t but
+    // nothing reads/writes them yet, and there is no wire command
+    // (SAFTY_CMD_SET_CONFIG or similar) to actually set any of this -- see
+    // config_store.h's header comment.
+    config_store_boot_load();
 
     // --- Step 5: spi_owner, adc_owner, uart_owner bring-up. -------------------
     // spi_owner (SPI0 + CS0, Phase 3) is real as of this pass -- see
@@ -166,15 +178,17 @@ int main(void)
     // (spi_failed = true), which is exactly the honest "sensor invalid"
     // state S5 is built to catch.
     //
-    // tc_type: MAX31856_TC_TYPE_PLACEHOLDER (max31856.h) -- type K, chosen
-    // only because there is no config_store yet (Phase 9) to source the real,
-    // per-installation commissioning decision from (docs/THERMOCOUPLE.md
-    // section 2). This is explicitly not a decision that K is correct for
-    // this kiln's tc_placement_mode; whoever wires config_store must replace
-    // this call site.
+    // tc_type: config_store_get_tc_type() (Phase 9) -- reads the cache
+    // config_store_boot_load() (step 4, above) already populated, real or
+    // safe-default K. This is a real per-installation commissioning read
+    // now, not a hard-coded placeholder -- but there is still no
+    // commissioning UI/wire command that ever WRITES a non-default tc_type
+    // (see config_store.h's header comment), so on every board built so far
+    // this still evaluates to K in practice, honestly, via the same safe-
+    // default path as a blank sector rather than a special-cased constant.
     bool max31856_ok = spi_owner_ok && max31856_init(SAFTYFW_PIN_SPI0_CS0,
                                                        SAFTYFW_PIN_THERMO_FAULT) &&
-                        max31856_configure(MAX31856_TC_TYPE_PLACEHOLDER);
+                        max31856_configure(config_store_get_tc_type());
     (void)max31856_ok; // no log sink yet (Phase 8) to report this to; the
                         // failure still surfaces at runtime via S5, see above.
 

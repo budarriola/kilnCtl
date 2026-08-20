@@ -77,7 +77,21 @@ extern "C" {
 #define BOOTLOADER_CONFIG_FLASH_OFFSET 0x001B1000u
 #define BOOTLOADER_CONFIG_FLASH_SIZE   0x00010000u // 64K
 
-// Reserved headroom: 0x1C1000..0x200000, 252K. Not represented by a macro
+// src/config_store.{c,h} (TODO.md Phase 9): one 4K erase sector carved from
+// the front of the 64K config region above -- the config store is an
+// application-layer concern (like BOOTLOADER_CONFIG_FLASH_SIZE's own comment
+// says, this bootloader never writes here), so it gets a named sub-region
+// rather than a new top-level offset. Sized like BOOTLOADER_METADATA_FLASH_
+// SIZE (one sector, 16 slots of CONFIG_STORE_RECORD_LEN=256B each) --
+// conservative for what Phase 9's first pass needs (tc_type,
+// calibration_missing, and reserved room for S8's threshold / CT calibration
+// constants), with 60K of the config region still unclaimed after this for
+// whatever Phase 9 adds next.
+#define SAFTYFW_CONFIG_STORE_FLASH_OFFSET BOOTLOADER_CONFIG_FLASH_OFFSET
+#define SAFTYFW_CONFIG_STORE_FLASH_SIZE   0x00001000u // 4K, one erase sector
+
+// Reserved headroom: 0x1B1000+0x1000 (SAFTYFW_CONFIG_STORE_FLASH_SIZE)
+// ..0x1C1000, 60K, plus 0x1C1000..0x200000, 252K. Not represented by a macro
 // here -- nothing addresses it yet, and giving unclaimed space a name invites
 // something to start using it without a doc update.
 

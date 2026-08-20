@@ -58,6 +58,13 @@ set(SAFTYFW_APP_SOURCES
     src/spi_owner.c
     src/max31856.c
     src/current_sense.c
+    # Phase 9 -- src/config_store.c is the pure, host-tested record format
+    # (test/test_config_store.c, mirrors bootloader/metadata.c); config_store_flash.c
+    # is the real XIP-read / flash_safe_execute()-write / ARMED-check glue, NOT
+    # host-tested, same discipline as update_task.c (see that file's header
+    # comment for why).
+    src/config_store.c
+    src/config_store_flash.c
     src/tasks/relay_owner.c
     src/tasks/relay_grace.c
     src/tasks/watchdog_task.c
