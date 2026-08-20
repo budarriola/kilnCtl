@@ -64,12 +64,14 @@
 #include "discrete_task.h"
 #include "log_task.h" // CLEAR_TRIP/SET_CONFIG outcome logging, see link_task_handle_clear_trip()/_set_config()
 #include "max31856.h" // MAX31856_TC_TYPE_* range check, see link_task_handle_set_config()
+#include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18), see link_task_handle_announce_reboot()
 #include "safety_core.h"
 #include "snapshots.h"
 #include "thermo_task.h"
 #include "update_task.h" // Phase 10 -- UPDATE_BEGIN/_DATA/_END/_ABORT dispatch, see the switch below
 
 #include "kilnlink/kilnlink_announce.h"
+#include "kilnlink/kilnlink_announce_reboot.h" // SAFETY_CMD_ANNOUNCE_REBOOT, see link_task_handle_announce_reboot()
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
@@ -788,6 +790,34 @@ static void link_task_handle_rollback(const kilnlink_frame_t *frame)
     }
 }
 
+// SAFETY_CMD_ANNOUNCE_REBOOT (0x18), CommonFW/docs/LINK_PROTOCOL.md section
+// 4 -- KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
+// reboots" line. Fire-and-forget, never ACKs on the wire, same shape as
+// link_task_handle_rollback() above minus the policy call: there is nothing
+// to accept or refuse here, only a fact to record. reboot_announce_mark()
+// stores the local (Pico) uptime at which this frame was decoded;
+// safety_core.c reads it back to compute S6b's bounded grace-window fact
+// (safety_guard_input_t::reboot_grace_active) -- this function has no
+// opinion about how long that window is or what it suppresses, matching
+// this file's "publish the fact, let safety_core decide" division with
+// every other context/status field it hands off.
+static void link_task_handle_announce_reboot(const kilnlink_frame_t *frame)
+{
+    kilnlink_announce_reboot_t msg;
+    kilnlink_announce_reboot_status_t dstatus =
+        kilnlink_announce_reboot_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_ANNOUNCE_REBOOT_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input,
+        // discarded silently like every other decode failure in this file.
+        return;
+    }
+
+    reboot_announce_mark(to_ms_since_boot(get_absolute_time()));
+    log_task_log(LOG_LEVEL_INFO, "announce_reboot",
+                 "ESP announced an imminent reboot -- S6b's trip is grace-windowed, "
+                 "link_up and every other guard are unaffected");
+}
+
 static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t unstuffed[LINK_RX_ASSEMBLY_MAX];
@@ -831,6 +861,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_ROLLBACK_CMD:
         link_task_handle_rollback(&frame);
+        break;
+    case LINK_FRAME_ANNOUNCE_REBOOT_CMD:
+        link_task_handle_announce_reboot(&frame);
         break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
     // call above, except the handler lives in update_task.c rather than

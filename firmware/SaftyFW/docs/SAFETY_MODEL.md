@@ -430,6 +430,49 @@ means the main controller is gone, current or no current.
 > (`HARDWARE.md` §4). Signal (b), the UART timeout, is the *only* detector of a
 > dead main controller. This is why the two signals are kept separate.
 
+**A routine ESP reboot looks identical to a dead ESP, from here.** An OTA
+self-update necessarily stops the context stream for several seconds while
+the board resets, re-inits Wi-Fi and reaches its first poll cycle -- Signal
+(b) has no way to tell that apart from a crash on its own. `SAFETY_CMD_
+ANNOUNCE_REBOOT` (0x18, **built and host-tested 2026-08-19**) closes that
+gap: the ESP sends this unsolicited, no-payload frame immediately before
+calling `esp_restart()`, and `link_task.c` records the local receive time
+(`reboot_announce.c`). `safety_core.c` compares that timestamp against "now"
+every tick and passes a plain `reboot_grace_active` bool into `safety_guards.
+c` -- the guard itself does no clock arithmetic, matching every other input
+in `safety_guard_input_t`.
+
+This is a **narrow, time-boxed exception to S6b's trip condition only**:
+
+```
+in->reboot_grace_active == true
+  -> the hard-backstop and soft-path trip() calls above are withheld
+  -> state->s6b_link_down_elapsed_s keeps accumulating regardless
+  -> in->link_up is never touched, no other guard reads this field
+```
+
+The window is 20s (`REBOOT_GRACE_WINDOW_MS`, `safety_core.c`) -- a software
+timeout with generous margin over a plausible ESP32-S3 boot-to-first-
+PUSH_CONTEXT time, in the same "reasonable timeout, not a measured physical
+constant" category as `SAFETY_LINK_STALE_MS`/`SAFETY_LINK_FIRING_ABORT_
+SILENCE_MS` (`firmware/KilnFW/App/drivers/safety_link.h`), *not* the same
+category as S8's rate-of-rise threshold, which this document explicitly
+forbids guessing. 20s sits comfortably below `link_dead_hard_s`'s 120s
+unconditional backstop, so a reboot that genuinely fails to come back is
+still caught shortly after the window closes.
+
+**The one property that must never be compromised: this grants no
+permission to heat.** The elapsed-silence accumulator is never reset by the
+grace window -- only the two `trip()` calls are gated -- so if the ESP is
+still silent once the window expires, S6b trips on the very next tick
+exactly as if `ANNOUNCE_REBOOT` had never arrived; there is no second grace
+period hiding behind the first. `relay_owner`'s energize/ARM logic has no
+path to `reboot_grace_active` at all (`safety_guards.c` has no link/flash/
+GPIO access, by this module's own design), and no other guard reads it --
+`test_s6b_reboot_grace()` (`test/test_safety_guards.c`) covers the
+suppression, the no-accumulated-advantage-on-expiry property, S1 firing
+unaffected, and `link_up == true` making the field a provable no-op.
+
 ### S7 — E-stop · **TRIP**
 
 ```

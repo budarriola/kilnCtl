@@ -1012,6 +1012,121 @@ static void test_s6(void)
     }
 }
 
+static void test_s6b_reboot_grace(void)
+{
+    TEST_SECTION("S6b -- ANNOUNCE_REBOOT grace window suppression");
+
+    /* Suppressed: soft path (quiet link + current) would trip at
+     * link_timeout_s, but reboot_grace_active holds it off indefinitely
+     * while true -- no trip even well past where the un-suppressed test
+     * above trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = true;
+        in.reboot_grace_active = true;
+        in.dt_s = 2.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) { /* 10*2=20s, well past the 10s soft threshold */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "reboot_grace_active suppresses S6b's soft (current-present) trip");
+    }
+
+    /* Suppressed: hard backstop would trip at link_dead_hard_s, but stays
+     * suppressed the entire time reboot_grace_active is true, even with no
+     * current at all. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = false;
+        in.any_current_present = false;
+        in.reboot_grace_active = true;
+        in.dt_s = 10.0f;
+        bool tripped = false;
+        for (int i = 0; i < 13 && !tripped; i++) { /* 13*10=130s > 120s hard backstop */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "reboot_grace_active suppresses S6b's hard backstop trip too");
+    }
+
+    /* The load-bearing property: once the caller flips reboot_grace_active
+     * back to false (the window has expired, per safety_core.c's own
+     * bookkeeping) while the link is STILL down, S6b trips on the very next
+     * tick that crosses a threshold -- exactly as if ANNOUNCE_REBOOT had
+     * never been sent. The elapsed accumulator was never reset by the grace
+     * period, so no "extra time" was ever granted. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t grace = base_input();
+        grace.link_up = false;
+        grace.any_current_present = true;
+        grace.reboot_grace_active = true;
+        grace.dt_s = 2.0f;
+
+        /* 6 ticks * 2s = 12s of real silence accrues while suppressed --
+         * already past link_timeout_s (10s default), so the very first tick
+         * with the window closed must trip immediately. */
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &grace);
+        }
+        TEST_CHECK(!tripped, "still suppressed while reboot_grace_active stays true, despite 12s > link_timeout_s");
+
+        safety_guard_input_t expired = grace;
+        expired.reboot_grace_active = false;
+        tripped = safety_guards_tick(&s, &cfg, &expired);
+        TEST_CHECK(tripped, "window-expired tick trips immediately -- no grace period of its own, no accumulated advantage");
+        TEST_CHECK(s.reason == SAFETY_TRIP_LINK_DEAD, "reason is SAFETY_TRIP_LINK_DEAD, same as an unannounced link-dead trip");
+    }
+
+    /* Isolation: reboot_grace_active must not affect any OTHER guard.
+     * Cross-check against S1 (a completely unrelated trip condition) with
+     * reboot_grace_active true throughout -- S1 must trip exactly as it
+     * does with the field false (test_s1 above), unaffected. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.reboot_grace_active = true;
+        in.tc_c = cfg.abs_max_temp_c + 50.0f; /* well over the S1 ceiling */
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped, "reboot_grace_active does not suppress S1 -- an unrelated over-temperature trip fires normally");
+        TEST_CHECK(s.reason == SAFETY_TRIP_OVERTEMP, "reason is SAFETY_TRIP_OVERTEMP, not affected by the S6b-only suppression");
+    }
+
+    /* Isolation: reboot_grace_active with link_up TRUE is a no-op -- S6b's
+     * elapsed accumulator is already held at 0 by link_up, so the field has
+     * literally nothing to suppress. Confirms this is scoped to S6b's trip
+     * condition specifically, not a blanket "believe the ESP" flag that
+     * could interact with link_up in some other way. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.link_up = true;
+        in.reboot_grace_active = true;
+        bool tripped = false;
+        for (int i = 0; i < 1000 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "reboot_grace_active with link_up true never trips (nothing to suppress)");
+        TEST_CHECK(s.s6b_link_down_elapsed_s == 0.0f, "elapsed accumulator stays at 0 -- link_up already held it there");
+    }
+}
+
 static void test_s9(void)
 {
     TEST_SECTION("S9 -- trip ineffective / contactor welded (post-trip escalation)");
@@ -1683,6 +1798,7 @@ void run_test_safety_guards(void)
     test_s2();
     test_s3_s4();
     test_s6();
+    test_s6b_reboot_grace();
     test_s9();
     test_s10();
     test_s13();

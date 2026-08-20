@@ -75,6 +75,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/uart_owner.c
     src/tasks/link_frame.c
     src/tasks/link_task.c
+    src/tasks/reboot_announce.c
     src/tasks/log_task.c
     src/tasks/tx_watermark.c
     src/tasks/update_task.c

@@ -3543,13 +3543,45 @@ sdkconfig/driver changes.
       mismatch, and only then calls `esp_ota_begin()` -- the buffered header
       bytes are written first via `esp_ota_write()` so nothing is re-read
       from the socket.
-- [ ] `SAFETY_CMD_ANNOUNCE_REBOOT` sent before the ESP reboots, so a routine
+- [x] `SAFETY_CMD_ANNOUNCE_REBOOT` sent before the ESP reboots, so a routine
       update does not trip S6(b) on the safety processor. It suppresses the trip
-      for a bounded window and grants **no** permission to heat. **Not
-      built** -- explicitly out of scope this pass (the link command does
-      not exist yet in `CommonFW`/`SaftyFW`). The transfer handler above
-      sets the boot partition but does not itself reboot the board; nothing
-      in this pass touches the reboot path or the safety link.
+      for a bounded window and grants **no** permission to heat. **Built and
+      host-tested (2026-08-19)**: 0x18, `CommonFW/include/kilnlink/
+      kilnlink_announce_reboot.h` + `src/kilnlink_announce_reboot.c`
+      (no-payload frame, same shape as `kilnlink_rollback`), sent by
+      `firmware/KilnFW/App/drivers/safety_link.c`'s
+      `safety_link_send_announce_reboot()`. Call site is
+      `ota_http.c`'s `ota_rollback_reboot_task()`, immediately before
+      `esp_ota_mark_app_invalid_rollback_and_reboot()` -- currently the
+      **only** path in this file that actually reboots the ESP; the plain
+      transfer handler (`ota_esp_do_transfer()`) still only sets the boot
+      partition and does not reboot on its own (unchanged from the note this
+      replaces), so when that path grows a self-reboot it must call this
+      too, and does not yet. Receive side: `firmware/SaftyFW/src/tasks/
+      link_task.c`'s `link_task_handle_announce_reboot()` records the local
+      uptime via the new `reboot_announce.{c,h}` module (its own header,
+      deliberately not part of `link_task.h`, so `safety_core.c` can read it
+      without an `#include` line `tools/check_isolation.ps1` would flag).
+      `safety_core.c` computes a 20s grace window (`REBOOT_GRACE_WINDOW_MS`,
+      chosen the same way as `SAFETY_LINK_STALE_MS`/`SAFETY_LINK_FIRING_
+      ABORT_SILENCE_MS` -- generous margin over a plausible ESP32-S3 boot-to-
+      first-PUSH_CONTEXT time, well short of S6b's own 120s hard backstop)
+      and passes the plain `reboot_grace_active` bool into
+      `safety_guard_input_t`; `safety_guards.c`'s S6b block gates only its
+      two `trip()` calls on it -- the elapsed-silence accumulator is never
+      reset by the grace window, so a still-silent ESP once the window
+      expires trips on the very next tick exactly as if this frame had never
+      arrived. `link_up` itself, every other guard, and `relay_owner`'s
+      energize/ARM path are untouched by this field.
+      `firmware/SaftyFW/test/test_safety_guards.c`'s new
+      `test_s6b_reboot_grace()` covers: soft-path suppression, hard-backstop
+      suppression, no-accumulated-advantage-after-expiry, S1 unaffected, and
+      `link_up==true` making the field a no-op. 525/525 SaftyFW host checks
+      pass (up from 378); CommonFW's `test_announce_reboot` brings the
+      kilnlink ctest suite to 16/16. `SaftyFW`/`_slotA`/`_slotB` build clean
+      under `-Werror`. Not verified on real hardware (none attached in this
+      environment) -- host-test/build-verified only, per this task's own
+      scope.
 - [x] Single update mutex across both processors — a second tab, or an agent
       racing a human, is refused rather than interleaved. **2026-08-17**: now
       actually acquired -- `ota_esp_post_handler()` calls
@@ -3612,10 +3644,12 @@ sdkconfig/driver changes.
       item is specifically about a proactive, second-confirmation warning
       BEFORE the relay starts, which is not built.
 
-**Not built this pass, by design** (see the task's own scope statement):
-`SAFETY_CMD_ANNOUNCE_REBOOT` (does not exist in `CommonFW`/`SaftyFW` yet),
-the rest of the 9.6 web page, and 9.7's physical-hardware verification (no
+**Not built this pass, by design** (see the task's own scope statement): the
+rest of the 9.6 web page, and 9.7's physical-hardware verification (no
 hardware in this environment -- host-build/`idf.py build` verified only).
+`SAFETY_CMD_ANNOUNCE_REBOOT`, listed here as not built at the time this
+paragraph was written, was built in a later pass (2026-08-19) -- see its own
+checklist entry above for the full description.
 
 **Follow-on, same day (2026-08-17):** the alarm-text suppression flagged
 above as an open gap was wired in a small follow-up pass --

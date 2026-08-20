@@ -678,6 +678,28 @@
  * with zero bootable slots. */
 #define SAFETY_CMD_ROLLBACK 0x17u
 
+/* ESP->Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- KilnFW/TODO.md's
+ * "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP reboots" line. Unsolicited
+ * courtesy notice sent immediately before an OTA self-update's
+ * esp_restart(): tells SaftyFW's link_task.c "the next several seconds of
+ * silence are expected, not a crash," so S6b (the link-dead guard,
+ * SAFETY_MODEL.md section 4) can suppress its own trip for a bounded window
+ * instead of nuisance-tripping on every routine update. Same value as
+ * kilnlink_announce_reboot.h's KILNLINK_ANNOUNCE_REBOOT_CMD, defined again
+ * here for the same "one place every subcommand on this wire is enumerated"
+ * reason SAFETY_CMD_CLEAR_TRIP/SET_CONFIG/ROLLBACK are; safety_link.c's
+ * safety_link_send_announce_reboot() encodes the (empty) payload through
+ * that shared codec, not by hand.
+ *
+ * No payload -- 1 byte, cmd only, same shape as SAFETY_CMD_PING/ROLLBACK's
+ * no-args use above. Fire-and-forget, never ACKs on the wire: by the time a
+ * reply could matter the ESP is already rebooting. This is advisory only --
+ * it grants no permission to heat, does not touch relay_owner, and does not
+ * suppress any guard other than S6b's own trip condition. See
+ * src/tasks/link_task.c's link_task_handle_announce_reboot() and
+ * src/safety_guards.c's S6b block for the suppression logic. */
+#define SAFETY_CMD_ANNOUNCE_REBOOT 0x18u
+
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u
 #define SAFETY_FLAG_ESTOP        0x04u

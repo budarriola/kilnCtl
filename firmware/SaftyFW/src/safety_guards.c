@@ -162,22 +162,41 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * backstop regardless of current, because "no current right now" is a
      * weak statement given a 60s heater window the ESP could have died
      * inside of. link_up resets the elapsed timer every tick it is true,
-     * matching S12/S2's own "reset on a healthy tick" pattern. */
+     * matching S12/S2's own "reset on a healthy tick" pattern.
+     *
+     * reboot_grace_active (KilnFW/TODO.md's ANNOUNCE_REBOOT line) gates ONLY
+     * the two trip() calls below -- it never touches the elapsed-time
+     * accumulator. That is the whole mechanism that makes "the window
+     * expiring reverts to exactly the same behavior as if ANNOUNCE_REBOOT
+     * had never arrived" true: elapsed keeps counting real silence the
+     * entire time, so if the ESP is still quiet once the window closes,
+     * whichever threshold was already crossed fires on the very next tick
+     * with no grace period of its own -- there is no separate "second
+     * chance" timer hiding in this suppression. */
     if (in->link_up) {
         state->s6b_link_down_elapsed_s = 0.0f;
     } else {
         state->s6b_link_down_elapsed_s += in->dt_s;
         float hard = effective_f(cfg->link_dead_hard_s, LINK_DEAD_HARD_S_DEFAULT);
         if (state->s6b_link_down_elapsed_s >= hard) {
-            trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_dead_hard_s %.1fs), unconditional",
-                 (double)state->s6b_link_down_elapsed_s, (double)hard);
-            return true;
+            if (!in->reboot_grace_active) {
+                trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_dead_hard_s %.1fs), unconditional",
+                     (double)state->s6b_link_down_elapsed_s, (double)hard);
+                return true;
+            }
+            /* Suppressed: the ESP announced this reboot and the grace
+             * window is still open. Nothing else about this tick changes --
+             * no other guard reads reboot_grace_active, and relay_owner's
+             * energize/ARM path has no way to observe this field at all. */
         }
         float soft = effective_f(cfg->link_timeout_s, LINK_TIMEOUT_S_DEFAULT);
         if (state->s6b_link_down_elapsed_s >= soft && in->any_current_present) {
-            trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_timeout_s %.1fs) with current present",
-                 (double)state->s6b_link_down_elapsed_s, (double)soft);
-            return true;
+            if (!in->reboot_grace_active) {
+                trip(state, SAFETY_TRIP_LINK_DEAD, "link silent for %.1fs (>= link_timeout_s %.1fs) with current present",
+                     (double)state->s6b_link_down_elapsed_s, (double)soft);
+                return true;
+            }
+            /* Suppressed, same reasoning as the hard-backstop branch above. */
         }
         /* Quiet link, no current: WARN territory (reported by the caller
          * from s6b_link_down_elapsed_s > 0), not a trip. Keep watching. */

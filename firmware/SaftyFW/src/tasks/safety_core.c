@@ -31,11 +31,31 @@
 
 #include "boot_reason.h"
 #include "discrete_task.h"
+#include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18) grace-window fact for
+                              // S6b -- see that header's own doc comment for why this,
+                              // and not link_task.h, is the safe way to cross the
+                              // link->safety_core boundary tools/check_isolation.ps1 enforces.
 #include "relay_owner.h"
 #include "safety_guards.h"
 #include "thermo_task.h"
 
 #define SAFETY_CORE_STACK_WORDS   configMINIMAL_STACK_SIZE
+
+// KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP reboots"
+// line: how long S6b's trip stays suppressed after the most recent
+// ANNOUNCE_REBOOT frame. Chosen the same way SAFETY_LINK_STALE_MS/SAFETY_
+// LINK_FIRING_ABORT_SILENCE_MS (firmware/KilnFW/App/drivers/safety_link.h)
+// were -- a reasonable software timeout with generous margin, not a measured
+// physical constant (unlike S8's rate-of-rise threshold, which SAFETY_MODEL.md
+// explicitly forbids guessing because it depends on this kiln's actual mass
+// and element power). An ESP32-S3 OTA self-reboot needs to: reset, run the
+// ROM/second-stage bootloader, bring up FreeRTOS and Wi-Fi, and reach
+// safety_link's first PUSH_CONTEXT poll cycle -- plausibly a few seconds on a
+// clean boot. 20s gives roughly 2x margin over that without getting anywhere
+// close to link_dead_hard_s's own 120s unconditional backstop (so a genuinely
+// stuck reboot still gets caught by the hard backstop shortly after this
+// window closes, not held open indefinitely).
+#define REBOOT_GRACE_WINDOW_MS 20000u
 
 static TaskHandle_t s_task_handle = NULL;
 
@@ -102,6 +122,27 @@ static safety_guard_input_t safety_core_build_input(void)
     thermo_snapshot_t thermo;
     (void)thermo_task_get_snapshot(&thermo);
 
+    // SAFETY_CMD_ANNOUNCE_REBOOT grace window: this is the ONE place that
+    // does the announced-timestamp-to-now arithmetic -- safety_guards.c
+    // receives only the already-computed bool, per that struct field's own
+    // doc comment. reboot_announce_get() returning false ("never announced
+    // this boot") correctly collapses to reboot_grace_active = false, the
+    // same "unknown means not-suppressed" default every other guard input
+    // in this function already uses.
+    uint32_t announced_at_ms = 0;
+    bool reboot_grace_active = false;
+    if (reboot_announce_get(&announced_at_ms)) {
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        // Unsigned subtraction is deliberately safe here even across a
+        // pico/time wraparound: both operands come from the same
+        // to_ms_since_boot() clock, so (now_ms - announced_at_ms) wraps
+        // correctly in uint32_t arithmetic regardless of which side is
+        // numerically larger, identical to how link_task.c already reasons
+        // about its own tick-based age calculations.
+        uint32_t age_ms = now_ms - announced_at_ms;
+        reboot_grace_active = age_ms < REBOOT_GRACE_WINDOW_MS;
+    }
+
     return (safety_guard_input_t){
         .tc_valid = thermo.valid,
         .tc_c = thermo.tc_c,
@@ -110,6 +151,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .spi_failed = thermo.spi_failed,
         .estop_pressed = discrete_task_estop_pressed(),
         .heat_commanded = false,
+        .reboot_grace_active = reboot_grace_active,
         .dt_s = (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f,
     };
 }

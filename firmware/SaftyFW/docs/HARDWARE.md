@@ -1,6 +1,6 @@
 # Safety Processor Hardware Map
 
-> **Status:** planning · **Last reviewed:** 2026-08-16
+> **Status:** planning · **Last reviewed:** 2026-08-18
 > **Keep this file current.** This is the traced-from-schematic authority for
 > the safety domain. If the board is revised, update it in the same commit as
 > the schematic and re-run the bench checks in §1. If it disagrees with the
@@ -115,11 +115,14 @@ symbols happen to be drawn.
 | 390 R / 1 k passive pattern, all three crossings | consistent, three for three | ✅ |
 | **R15's net, parsed from `MainControler.kicad_sch`** | **R15 is on the `DataFromSafty` net** — a 1 k pull-up belongs only on an open collector | ✅ |
 | Quick pre-check (internal pull-downs, ESP alone) | — | ⬜ |
-| **Coordinated two-board GPIO test** | — | ⬜ |
+| **Coordinated two-board GPIO test — pin/direction mapping** | **Confirmed 2026-08-18 by manual physical inspection**: ESP board pin 4 (GPIO4) and board pin 6 (GPIO6) are ESP outputs; Pico board pin 7 (GPIO5) reads ESP GPIO4, Pico board pin 6 (GPIO4) writes to ESP board pin 5 (GPIO5), Pico board pin 14 (GPIO10) is the fault read. Matches this document's map exactly | ✅ |
+| Coordinated two-board GPIO test — **electrical toggle/propagation** | Attempted 2026-08-18 via `gpio_probe`/`pico_gpio` + Saleae. ESP GPIO4 was seen to physically toggle (multi-second, inconsistent lag between command and pad transition — worth characterizing before trusting timing on this net) but **no propagation to any Pico-side channel was observed in any capture**, and Pico GPIO4 drive produced no visible edge anywhere. GPIO6 (fault) could not be driven at all — hard-denied unconditionally by `gpio_probe.c`'s deny-list, no override. Leading suspect: `12v_Safty` not powered during the test — **unconfirmed, needs bench check** | ⬜ |
 | Saleae capture under real traffic | — | ⬜ |
 
-Three independent lines of schematic evidence agree. **None of them is a
-measurement**, so the bench checks below still stand.
+Three independent lines of schematic evidence agree, and the pin/direction
+mapping now also has a fourth: **manual physical confirmation** (2026-08-18).
+**None of the electrical propagation is a measurement yet**, so the bench
+checks below still stand.
 
 ### The definitive test: coordinated, both boards, both directions
 
@@ -670,7 +673,7 @@ the documentation in the first place.
 ## Completion checklist
 
 **Verify before writing firmware**
-- [ ] §1 bench check run: GPIO5 pulled up by R15, GPIO4 floating, Pico GPIO4 drives ESP GPIO5
+- [x] §1 pin/direction mapping confirmed by manual physical inspection 2026-08-18 (ESP pin4/pin6 out, Pico pin7/pin14 in, Pico pin6 out → ESP pin5 in) — [ ] **electrical toggle/propagation still not confirmed**, see Verification status table
 - [x] `KilnFW` safety-UART pins corrected (TX→4, RX→5) and its docs fixed (2026-08-16)
 - [x] K4 interlock topology identified from the schematic (J10: 1=NO, 2=COM, 3=NC; §3) — [ ] **still needs confirming on the physical part**, the symbol-drawing convention this reading rests on is not a silkscreened label
 - [ ] De-energized K4 proven to open the contactor on the real wiring

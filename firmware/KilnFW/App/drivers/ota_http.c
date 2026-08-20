@@ -1296,6 +1296,25 @@ static void ota_rollback_reboot_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    // KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
+    // reboots" line: this call to esp_ota_mark_app_invalid_rollback_and_
+    // reboot() below is the one existing path in this file that actually
+    // calls esp_restart() (the plain OTA transfer path, ota_esp_do_
+    // transfer(), only sets the boot partition and does not itself reboot --
+    // see that function's own doc note -- so it has no reboot moment to hook
+    // yet; when it grows one, it must send this too). Best-effort: a failed
+    // send here does not block or abort the reboot -- worst case SaftyFW's
+    // S6b guard behaves exactly as it did before this feature existed, which
+    // is the same "no announcement" fallback the grace window itself
+    // degrades to on expiry.
+    esp_err_t announce_err = safety_link_send_announce_reboot(s_safety);
+    if (announce_err != ESP_OK) {
+        ESP_LOGW(TAG, "OTA rollback: safety_link_send_announce_reboot failed (%s) -- "
+                      "rebooting anyway, S6b may nuisance-trip on the safety processor",
+                 esp_err_to_name(announce_err));
+    }
+
     ESP_LOGW(TAG, "OTA rollback: rebooting now into the previous image");
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     // Only reached if the call itself failed to even start the reboot --

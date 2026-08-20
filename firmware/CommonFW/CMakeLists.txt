@@ -28,6 +28,7 @@ add_library(kilnlink STATIC
     src/kilnlink_rollback.c
     src/kilnlink_get_fw_version.c
     src/kilnlink_set_clock.c
+    src/kilnlink_announce_reboot.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -178,4 +179,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_rollback PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_rollback COMMAND test_rollback)
+
+    add_executable(test_announce_reboot test/test_announce_reboot.c)
+    target_link_libraries(test_announce_reboot PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_announce_reboot PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_announce_reboot PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_announce_reboot COMMAND test_announce_reboot)
 endif()

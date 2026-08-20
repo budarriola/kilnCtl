@@ -12,6 +12,7 @@
 #include "uart_task_ids.h"
 
 #include "kilnlink/kilnlink_announce.h"
+#include "kilnlink/kilnlink_announce_reboot.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_rollback.h"
@@ -1627,6 +1628,40 @@ esp_err_t safety_link_send_rollback(SafetyLinkClass *link)
     /* Same (dst_device, dst_task, src_task) triple as CLEAR_TRIP/SET_CONFIG's
      * own broadcast call sites above -- fire-and-forget, no ACK expected
      * (link_task_handle_rollback() never replies on the wire). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ANNOUNCE_REBOOT (0x18) --
+ * see safety_link.h's doc comment for the full design rationale (why this
+ * exists, why it grants no heating permission, why it is fire-and-forget).
+ * Called from ota_http.c's ota_esp_reboot_task() immediately before
+ * esp_restart(), same delayed-reboot-task pattern ota_rollback_reboot_task()
+ * already uses for the Pico rollback endpoint. */
+esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_announce_reboot_t msg = {0};
+    uint8_t payload[KILNLINK_ANNOUNCE_REBOOT_LEN];
+    kilnlink_announce_reboot_status_t status = KILNLINK_ANNOUNCE_REBOOT_OK;
+    size_t len = kilnlink_announce_reboot_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "announce_reboot: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "announce_reboot: sending -- ESP is about to reboot for a routine "
+                  "self-update, suppress S6b's nuisance trip for the grace window");
+    /* Same (dst_device, dst_task, src_task) triple as CLEAR_TRIP/ROLLBACK's
+     * own broadcast call sites above -- fire-and-forget, no ACK expected
+     * (link_task.c's LINK_FRAME_ANNOUNCE_REBOOT_CMD handler never replies on
+     * the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
 }

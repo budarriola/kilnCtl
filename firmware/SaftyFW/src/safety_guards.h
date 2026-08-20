@@ -316,6 +316,31 @@ typedef struct {
      * a duration, deliberately mirroring how estop_pressed is a level too. */
     bool link_up;
 
+    /* S6b, ANNOUNCE_REBOOT grace window (KilnFW/TODO.md's "SAFETY_CMD_
+     * ANNOUNCE_REBOOT sent before the ESP reboots" line). A plain,
+     * already-computed fact -- "the ESP told us within the last
+     * reboot_grace_window_s that a reboot was coming, and we're still inside
+     * that window" -- never a timestamp or a duration this module would have
+     * to do its own clock math on, matching every other input in this
+     * struct's own discipline (this module has no clock, no link, no flash
+     * access at all; see this file's own isolation notes and safety_core.c's
+     * safety_core_build_input(), the only place that is allowed to compute
+     * this by comparing reboot_announce_get()'s timestamp against "now").
+     *
+     * Scope is narrow and deliberate: this ONLY suppresses S6b's own trip
+     * condition below. It does not change link_up itself (the elapsed-time
+     * accumulator below still advances normally while link_up is false, so
+     * the guard's memory of how long the link has actually been silent stays
+     * accurate), does not touch any other guard, and grants no heating
+     * permission of any kind -- relay_owner's energize/ARM logic has no path
+     * to this field at all. If this flips back to false (window expired)
+     * while link_up is still false, the very next tick trips exactly as it
+     * would have if this field had been false the whole time -- see the S6b
+     * block's own comment for how that "no accumulated advantage" property
+     * is achieved (by never resetting the elapsed accumulator, only gating
+     * the trip() calls). */
+    bool reboot_grace_active;
+
     /* S9. Set by the caller once relay_owner has actually de-energized K4
      * (SAFETY_MODEL.md section 4, S9: "tripped (K4 de-energized) for
      * trip_verify_s"). Distinct from state->is_tripped, which this module

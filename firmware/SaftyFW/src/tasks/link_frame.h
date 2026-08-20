@@ -136,6 +136,24 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // SAFETY_CMD_SET_CONFIG uses) -- see link_task_handle_rollback().
 #define LINK_FRAME_ROLLBACK_CMD 0x17u
 
+// --- ESP -> Pico: SAFETY_CMD_ANNOUNCE_REBOOT (0x18) --------------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
+// KILNLINK_ANNOUNCE_REBOOT_CMD (kilnlink/kilnlink_announce_reboot.h) --
+// redefined here as a local dispatch id, same convention as
+// LINK_FRAME_ROLLBACK_CMD above. The payload is decoded by
+// kilnlink_announce_reboot_decode() in src/tasks/link_task.c, not unpacked
+// here -- a fixed 1-byte (cmd only, no fields) frame, same reasoning as
+// ROLLBACK. KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP
+// reboots" line: an unsolicited courtesy notice sent immediately before an
+// OTA self-update's esp_restart(), recorded by link_task_handle_announce_
+// reboot() as a timestamp that safety_core.c reads to compute a bounded
+// "within the post-announce grace window" fact for safety_guards.c's S6b
+// block (SAFETY_MODEL.md section 4) -- suppresses ONLY S6b's own trip
+// condition, never link_up itself, never any other guard, and never grants
+// or extends heating permission. If the window expires with the link still
+// down, S6b trips exactly as if this frame had never arrived.
+#define LINK_FRAME_ANNOUNCE_REBOOT_CMD 0x18u
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's

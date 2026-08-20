@@ -832,6 +832,36 @@ esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type);
  * Safe to call from any task, same as safety_link_send_clear_trip(). */
 esp_err_t safety_link_send_rollback(SafetyLinkClass *link);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ANNOUNCE_REBOOT (0x18) --
+ * KilnFW TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP reboots"
+ * line. Fire-and-forget notice sent immediately before an OTA self-update's
+ * esp_restart() (see ota_http.c's OTA_HTTP_CONTEXT_ESP delayed-reboot task)
+ * so the several seconds of silence a routine reboot necessarily causes does
+ * not look identical, from the Pico's side, to a crashed main controller.
+ *
+ * This is advisory only and grants NO permission to heat: SaftyFW's S6b
+ * guard (SAFETY_MODEL.md section 4) suppresses its own trip for a bounded
+ * window after receipt, nothing more -- it does not touch relay_owner's
+ * energize/ARM logic, does not suppress any other guard, and if the ESP is
+ * still silent once the window expires, S6b trips exactly as if this frame
+ * had never been sent. See safety_guards.c's S6b block and safety_core.c for
+ * the window arithmetic; this driver has no say in any of it.
+ *
+ * No arguments, no local refusal checks -- there is nothing here to fail
+ * closed against; this is a courtesy notice, not a request the Pico can
+ * refuse. Same fire-and-forget BROADCAST shape as
+ * safety_link_send_clear_trip()/safety_link_send_rollback(): the Pico never
+ * ACKs this on the wire (link_task.c never replies to it), so there is no
+ * outcome to observe here at all -- by design, since the ESP is about to
+ * stop listening anyway.
+ *
+ * Returns ESP_ERR_INVALID_STATE if the driver isn't initialized, ESP_OK once
+ * the broadcast has been handed to the UART. Safe to call from any task,
+ * same as safety_link_send_clear_trip(). Callers MUST send this before
+ * calling esp_restart(), not after -- there is no way to recover a reboot
+ * that has already begun. */
+esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link);
+
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded
  * in the bridge. `out` must have room for SAFETY_LINK_STATUS_PAYLOAD_LEN /
