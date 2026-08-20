@@ -1,0 +1,157 @@
+; max31856_spi_slave.pio -- PIO SPI *slave* engines for the MAX31856
+; emulation buses. docs/PLAN.md section 3.2.1 is the authoritative design
+; (RX/TX state machines, mode-1 SPI, the 1.6us first-byte-latency problem,
+; the multi-CS-on-bus-A / single-CS-on-bus-B asymmetry). This file is the
+; PIO half; the C glue that loads/configures/drives these programs lives in
+; max31856_pio_engine.c right next to this file.
+;
+; ============================================================================
+; BUILD-VERIFIED, NOT HARDWARE-TIMING-VERIFIED. There is no Pico attached in
+; this environment. pioasm (run automatically by pico_generate_pio_header()
+; at build time) validates that these programs assemble and fit PIO program
+; memory; it says nothing about whether the sampled/driven edge is actually
+; correct against a real ESP32-S3 or RP2040 SPI master's mode-1 clocking.
+; The edge choices below are a logically-consistent, best-effort reading of
+; PLAN.md 3.2.1's mode-1 description (which is itself a little ambiguous --
+; see the RX program comment) combined with standard SPI slave PIO idioms.
+; Proving this against a real master's SCLK/MOSI/MISO relationship (Saleae
+; capture, PLAN.md section 10 M-A's actual exit criterion) is NOT done here.
+; ============================================================================
+;
+; --- Pin-mapping contract every program below assumes (enforced by the C
+; glue's sm_config_set_*_pins calls in max31856_pio_engine.c, not by pioasm
+; itself -- get this wrong in the .c file and these programs silently watch
+; the wrong pin) ---
+;
+;   max31856_spi_rx      (one instance per emulated channel, shared program):
+;     IN_BASE  = MOSI gpio            -- `in pins, 1` samples exactly MOSI
+;     JMP_PIN  = this channel's own CS gpio (absolute gpio, independent of
+;                IN_BASE -- active LOW: jmp_pin reads pin state directly,
+;                `jmp pin, target` jumps when the pin is HIGH i.e. CS
+;                deasserted)
+;     SCLK reached via offset 31 from IN_BASE, i.e. the C glue must place
+;     SCLK at gpio (MOSI_gpio - 1) so (SCLK - MOSI) mod 32 == 31. This only
+;     works because PIO pin-index arithmetic always wraps mod 32 regardless
+;     of how many real GPIOs exist (RP2040 exposes far fewer than 32, so the
+;     wrap is a deliberate, standard trick, not an accident) -- see
+;     max31856_pio_engine.c's PIN LAYOUT comment for the concrete numbers.
+;
+;   max31856_spi_tx_a    (bus A: 3 CS lines share one physical MISO):
+;     IN_BASE       = first of 3 *consecutive* CS gpios (CS0,CS1,CS2) --
+;                     `in pins, 3` reads all three at once into a single
+;                     idle/active test word.
+;     OUT_BASE/SET_BASE = MISO gpio  -- `out pins,1` drives MISO's value,
+;                     `set pindirs,n` drives MISO's output-enable (tri-state
+;                     control -- PLAN.md 3.2.1: "MISO pin is tri-stated...
+;                     whenever no CS is low, since three emulated chips share
+;                     one physical MISO on bus A").
+;     SCLK reached via offset 29 from IN_BASE (CS0 - SCLK == 3 in the chosen
+;     provisional pinout, so (SCLK - CS0) mod 32 == 29).
+;
+;   max31856_spi_tx_b    (bus B: single CS, tri-stating kept for symmetry
+;     even though PLAN.md notes it is "optional/simpler" there -- costs
+;     nothing and means one C code path instead of two):
+;     Same as tx_a but `in pins, 1` (only CS0 exists) and the idle-compare
+;     constant is 1 instead of 7. SCLK offset is still 29 by construction
+;     (same CS-to-SCLK gpio spacing reused on bus B, see the C glue).
+;
+; --- Shift-direction / byte-justification contract (also enforced by the C
+; glue, called out here so the two files can be cross-checked) ---
+;   RX: sm_config_set_in_shift(shift_right=false, autopush=true, threshold=8).
+;       ISR is explicitly zeroed at the start of every byte (`mov isr,null`,
+;       and autopush itself clears ISR on every push per the RP2040
+;       datasheet), so shifting LEFT from a clean zero for 8 bits leaves the
+;       MSB-first assembled byte in the LOW 8 bits of the pushed FIFO word --
+;       the C side reads it with `word & 0xFF`, not `word >> 24`.
+;   TX: sm_config_set_out_shift(shift_right=false, autopull=true,
+;       threshold=8). OUT shifts LEFT and emits the current MSB of a 32-bit
+;       OSR each time, so the C side must LEFT-JUSTIFY each response byte
+;       before pushing it: `pio_sm_put(pio, sm_tx, (uint32_t)byte << 24)`.
+
+; ---------------------------------------------------------------------------
+; RX: samples MOSI on SCLK's rising edge (PLAN.md 3.2.1's literal wording),
+; one whole byte at a time (autopush, 8 bits), gated by this channel's own
+; CS line. Falls back to a clean byte boundary (`mov isr, null`) whenever CS
+; is seen high, whether that is between transactions or an out-of-protocol
+; mid-byte deassert -- a well-behaved master never does the latter, but this
+; program does not assume it.
+;
+; NOTE on mode-1 ambiguity: PLAN.md 3.2.1 says both "samples MOSI on SCLK
+; rising edge" AND "(mode 1: CPOL=0, CPHA=1 -- shift on leading edge, sample
+; on trailing...)" in the same sentence, which is internally inconsistent
+; (leading edge for CPOL=0 is the rising edge, so "sample on trailing" would
+; mean sample on the FALLING edge, not the rising edge stated first). This
+; program follows the plan's literal, explicit instruction ("samples MOSI on
+; SCLK rising edge") rather than resolving the parenthetical. If a Saleae
+; capture later shows this is backwards, swap the two `wait` instructions
+; below.
+.program max31856_spi_rx
+resync:
+    mov isr, null              ; clear any partial byte + reset the autopush shift counter (datasheet: MOV to ISR resets both)
+wait_cs:
+    jmp pin, wait_cs           ; loop while CS (this SM's jmp_pin) reads HIGH, i.e. deasserted
+bit_loop:
+    wait 1 pin 31               ; SCLK rising edge (offset 31 == SCLK, wraparound from IN_BASE=MOSI, see header)
+    in pins, 1                  ; sample MOSI into ISR; autopush fires to the RX FIFO every 8 bits
+    wait 0 pin 31                ; SCLK falling edge, so the next `wait 1` needs a genuinely new rising edge
+    jmp pin, resync               ; CS deasserted (mid-byte or at a boundary) -> resync for the next transaction
+    jmp bit_loop
+
+; ---------------------------------------------------------------------------
+; TX (bus A variant): shared MISO shifter for all 3 emulated channels on the
+; ESP-side bus. Tri-states MISO (pindir=0, Hi-Z) whenever all 3 CS lines read
+; high; drives it (pindir=1) and shifts a byte out per SCLK cycle whenever
+; any one of them is low. Complementary edge to the RX program above: shifts
+; (changes MISO) on SCLK's FALLING edge and holds through the RISING edge, so
+; the master's own sample point (whichever edge that turns out to be, see the
+; RX program's ambiguity note) sees a settled bit rather than one still
+; transitioning.
+.program max31856_spi_tx_a
+    set y, 7                   ; compare constant: 0b111 == all 3 CS lines idle-high
+poll_idle:
+    in pins, 3                  ; sample CS0,CS1,CS2 (IN_BASE = CS0) into ISR
+    mov x, isr
+    mov isr, null                ; ISR is scratch here (not a byte stream) -- clear it back out
+    jmp x!=y, active
+    set pindirs, 0                ; tri-state MISO -- no channel selected
+    jmp poll_idle
+active:
+    set pindirs, 1                 ; drive MISO -- at least one CS asserted
+byte_loop:
+    wait 0 pin 29                   ; SCLK falling edge -> safe to change MISO
+    out pins, 1                      ; shift next bit out; autopull refills the OSR from the TX FIFO at the 8-bit threshold, BLOCKING (stalling this SM) if the FIFO is empty -- this stall IS the first-byte-late / underrun condition PLAN.md 3.2.1 requires counted, never silent; max31856_pio_engine.c's ISR detects it (see that file's stats comment)
+    wait 1 pin 29                     ; SCLK rising edge -- hold the bit steady through the master's sample window
+    in pins, 3                         ; re-check CS state every bit (cheaper than a separate SM, and CS can legitimately deassert mid-byte on an aborted transaction)
+    mov x, isr
+    mov isr, null
+    jmp x!=y, byte_loop
+    set pindirs, 0                       ; all CS lines rose -> tri-state again
+    jmp poll_idle
+
+; ---------------------------------------------------------------------------
+; TX (bus B variant): identical structure to tx_a, but only 1 CS line exists
+; (PLAN.md 3.2.1: "bus B has just 1 CS so tri-stating is optional/simpler
+; there" -- kept anyway, at zero extra pin-budget cost, purely so bus B does
+; not need a third, near-duplicate C code path). `in pins, 1` / compare
+; constant 1 replace tx_a's `in pins, 3` / constant 7.
+.program max31856_spi_tx_b
+    set y, 1                   ; compare constant: 0b1 == the single CS line idle-high
+poll_idle:
+    in pins, 1
+    mov x, isr
+    mov isr, null
+    jmp x!=y, active
+    set pindirs, 0
+    jmp poll_idle
+active:
+    set pindirs, 1
+byte_loop:
+    wait 0 pin 29                ; SCLK falling edge (same offset-29 CS-to-SCLK spacing as bus A, see header)
+    out pins, 1
+    wait 1 pin 29
+    in pins, 1
+    mov x, isr
+    mov isr, null
+    jmp x!=y, byte_loop
+    set pindirs, 0
+    jmp poll_idle

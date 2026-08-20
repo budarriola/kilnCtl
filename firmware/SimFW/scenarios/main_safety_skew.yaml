@@ -1,0 +1,53 @@
+name: main_safety_skew
+version: 1
+exercises: [S1, S10]
+# S1 is the guard that actually acts: a safety TC reading systematically
+# +80°C hot relative to the real zone truth makes S1 trip at a LOWER real
+# chamber temperature than abs_max_temp_c — i.e. the skew makes the system
+# MORE conservative, not less, which is the "conservative side wins" outcome
+# PLAN.md §8 item 8 describes. S10 is cited as the accompanying nuisance
+# check: 80°C is below S10's 200°C disagreement threshold, so the standing
+# skew must never itself produce an S10 WARN (SAFETY_MODEL.md §4 S1/S10).
+#
+# Preset: a slower, single-zone-dominant preset is used rather than
+# fast_test, because the point of this scenario is steady-state behavior
+# near S1's ceiling and S10's window, not a compressed 2-minute firing —
+# per the task's own note that scenarios like this benefit from a more
+# realistic time base (PLAN.md §4.3 `small_kiln`).
+preset: small_kiln
+timescale: 20
+seed: 49
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: skew
+    # PLAN.md §7.1: "Main/safety disagree | Skew safety TC vs zone truth by
+    # an offset/gain". Offset magnitude: +80°C (PLAN.md §8 item 8, stated
+    # explicitly there — recorded here as a comment since the scenario
+    # schema has no numeric param field yet, PROTOCOL.md M-B/M-G).
+    type: main_safety_disagree
+    target: tc:safety
+    trigger: { at_sim_time: { t: 20 } }
+    duration: permanent
+expect:
+  - name: s1_trips_conservatively_early
+    # With the safety TC reading +80°C hot, S1's 3-consecutive-reading bar
+    # is crossed once the real zone truth is within 80°C of abs_max_temp_c
+    # (minus firing_margin_c=100°C tightening in CHAMBER_AGREED, SAFETY_MODEL
+    # §4 S1) rather than only once the real temperature itself reaches the
+    # ceiling — i.e. it trips sooner than a healthy sensor would.
+    event: { type: fault_fired, slot: skew }
+    then:
+      event: { type: guard_trip, guard: S1 }
+      within_s: 120     # TODO: no fixed deadline is derivable without the
+                        # commissioned abs_max_temp_c/firing_max_c and the
+                        # small_kiln preset's actual ramp rate; placeholder
+                        # generous enough to cover a full ramp-to-ceiling
+                        # under small_kiln at 20x timescale — confirm against
+                        # bench data once abs_max_temp_c is commissioned
+                        # (SAFETY_MODEL.md §4 S1)
+  - name: s10_stays_quiet
+    forbid: { event: { type: guard_warn, guard: S10 }, before: { sim_end: true } }
+    # 80°C < tc_disagreement_c = 200°C (SAFETY_MODEL.md §4 S10) — must never fire
+report_keep: [telemetry, events]

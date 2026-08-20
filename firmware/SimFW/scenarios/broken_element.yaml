@@ -1,0 +1,36 @@
+name: broken_element
+version: 1
+exercises: [S4]
+# S4 — "Heat commanded but load inactive" — matches this scenario exactly:
+# relay closes, zero current on that CT, zone never heats (SAFETY_MODEL.md
+# §4 S4). S4 is WARN-only by design and never touches the relay; the
+# "profile abort" half of PLAN.md §8 item 9's description is a KilnFW-side
+# (thermal_guard "heating failed") decision, not a SaftyFW guard, so it is
+# not cited in `exercises` and is called out under manual_checks instead.
+preset: fast_test
+timescale: 10
+seed: 50
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: broken
+    # PLAN.md §7.1: "Broken heater coil | Relay closes, zero current on that
+    # CT, zone doesn't heat".
+    type: broken_heater_coil
+    target: element:0
+    trigger: { at_sim_time: { t: 10 } }
+    duration: permanent
+expect:
+  - name: s4_warns
+    event: { type: relay_edge, relay: K1, edge: close }
+    then:
+      event: { type: guard_warn, guard: S4 }
+      within_s: 155      # correlation_window_s = 150s (SAFETY_MODEL.md §4 S4) + margin
+      not_before_s: 148
+  - name: s4_never_trips
+    forbid: { dut: K4_open, before: { sim_end: true } }
+    # "This never trips, and that is a design decision" (SAFETY_MODEL.md §4 S4)
+manual_checks:
+  - "Confirm KilnFW's own thermal_guard 'heating failed' (main-board guard, not SaftyFW) aborts or flags the profile on the LCD/web UI — outside GUARD_TEST_MATRIX.md's scope and not observable by the fixture"
+report_keep: [telemetry, events]

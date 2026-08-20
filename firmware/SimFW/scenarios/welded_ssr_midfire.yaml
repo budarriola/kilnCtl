@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# Signal / event vocabulary used throughout firmware/SimFW/scenarios/
+# (documented once, here, since this file is PLAN.md §8.1's own template)
+# ---------------------------------------------------------------------------
+# `expect` clauses follow PLAN.md §8.1's three forms: `event`+`then`, `forbid`,
+# `at_end`. Within them:
+#
+#   dut:  <signal>        a boolean the fixture senses from the real board or
+#                          derives from its own telemetry truth. Used values:
+#                          K1_closed/K2_closed/K3_closed/K5_closed/K4_closed,
+#                          K4_open (== !K4_closed, spelled out for readability
+#                          at trip sites), estop_open, fault_line_asserted,
+#                          current_present (per-channel CT presence, from the
+#                          fixture's own I_amps telemetry, PLAN.md §5.3).
+#   event: { type: ..., slot/relay/guard: ... }
+#                          fixture EVT-stream events (PLAN.md §5.3): fault_fired,
+#                          fault_cleared, relay_edge, guard_warn, guard_trip,
+#                          trip_ineffective_latched, link_up, dut_power.
+#   then: { dut: X, within_s: N }
+#                          upper-bound deadline (as in PLAN.md §8.1's example).
+#   then: { ..., not_before_s: M }
+#                          added lower bound, same field, for asserting BOTH
+#                          bars of the nuisance-trip doctrine (SAFETY_MODEL.md
+#                          §2: "a magnitude... and a duration... one alone is
+#                          never enough") in a single clause: must not fire
+#                          before M, must fire by N.
+#
+# Fault entries stick to exactly {id, type, target, trigger, duration} per
+# PLAN.md §8.1's frozen shape. Fault-type parameters (offsets, duty cycles,
+# bit-error rates) that PLAN.md's catalog (§7.1) describes qualitatively but
+# whose byte-level encoding isn't frozen until PROTOCOL.md (§5.2, M-B/M-G)
+# are recorded as a plain YAML comment beside the fault, never invented as a
+# schema field that doesn't exist yet.
+# ---------------------------------------------------------------------------
+
+name: welded_ssr_midfire
+version: 1
+exercises: [S3, S4]
+# S3 is the guard this scenario is built to provoke (welded/shorted SSR:
+# current flows with the relay sensed open — SAFETY_MODEL.md §4 S3).
+# S4 is cited because the healthy portion of the run *before* the weld fires
+# is itself S4's nuisance check: relay commanded on, current present, for the
+# whole pre-fault period — must never produce a WARN (SAFETY_MODEL.md §4 S4,
+# GUARD_TEST_MATRIX.md §1).
+preset: fast_test
+timescale: 10
+seed: 42
+overrides:
+  zones[0].R_element: 12.0
+dut:
+  profile: cone6_fast
+faults:
+  - id: weld
+    type: welded_ssr
+    target: relay:K1
+    # trigger point approximates "40% of soak" (PLAN.md §8 item 2); no exact
+    # sim-clock boundary for "40% of soak" is defined anywhere, so a zone-temp
+    # trigger mid-ramp is used as a reasonable, repeatable proxy instead of a
+    # guessed sim-time offset.
+    trigger: { at_zone_temp: { zone: 0, temp_c: 400, edge: rising } }
+    duration: permanent
+expect:
+  - name: safety_trips
+    event: { type: fault_fired, slot: weld }
+    then:
+      dut: K4_open
+      within_s: 25       # stuck_on_time_s = 20s (SAFETY_MODEL.md §4 S3) + ~5s
+                         # margin for the guard's own 10Hz evaluation tick and
+                         # relay coil release time (no separate numeric bound
+                         # is given for the latter beyond "de-energizes K4
+                         # first, before anything else, before logging",
+                         # SAFETY_MODEL.md §6)
+      not_before_s: 18  # must not trip meaningfully before the 20s
+                         # stuck_on_time_s bar is cleared (lower bar of the
+                         # two-bar doctrine, SAFETY_MODEL.md §2)
+  - name: no_early_trip
+    forbid: { dut: K4_open, before: { fault: weld } }
+  - name: trip_latched
+    at_end: { dut: K4_open }
+  - name: current_decays_after_k4_opens
+    event: { type: relay_edge, relay: K4, edge: open }
+    then:
+      dut: current_absent
+      within_s: 4        # <5% within ~4s, τ≈1s peak-hold decay
+                         # (GUARD_TEST_MATRIX.md §3.3 "Decay")
+manual_checks:
+  - "Confirm KilnFW's LCD/web UI surfaces the S3 trip reason distinctly (not a generic fault) — fixture cannot read display/web content"
+report_keep: [telemetry, events]

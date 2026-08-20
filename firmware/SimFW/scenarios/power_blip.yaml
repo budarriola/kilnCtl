@@ -1,0 +1,61 @@
+name: power_blip
+version: 1
+exercises: [S6]
+# S6a (mainFault) and S6b (link timeout) are treated separately, per
+# SAFETY_MODEL.md §4 S6's own instruction that "they are not redundant
+# copies of each other and must never be collapsed into one": with the main
+# board unpowered, R8 pulls GPIO10 (mainFault) high, which reads *healthy* —
+# "mainFault cannot detect a dead ESP" — so only S6b's link-timeout path can
+# possibly react here (SAFETY_MODEL.md §4 S6).
+#
+# This fault is NOT one of PLAN.md §7.1's three catalog tables — it uses the
+# fixture's dedicated DUT 12V power relay (PLAN.md §3.4/§6.2), a distinct
+# fixture capability from the TC/power-path/system fault catalog.
+preset: fast_test
+timescale: 10
+seed: 57
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: blip
+    type: dut_power_cut
+    target: io:dut_power
+    trigger: { at_zone_temp: { zone: 0, temp_c: 500, edge: rising } }
+    # 200ms off-time, matching PLAN.md §6.2's own CLI example
+    # (`kilnsim power cycle --off-ms 200`) rather than a guessed duration.
+    duration: { for_s: 0.2 }
+expect:
+  - name: mainfault_reads_healthy_during_blip
+    forbid: { event: { type: guard_trip, guard: S6a }, before: { sim_end: true } }
+    # "R8 pulls GPIO10 high, and it reads healthy" while the ESP is
+    # unpowered (SAFETY_MODEL.md §4 S6) — S6a must never trip from this
+  - name: relays_deenergize_no_current_during_blip
+    event: { type: dut_power, state: off }
+    then:
+      dut: current_absent
+      within_s: 1
+    # relay outputs are expected to fail safe (de-energized) with the ESP
+    # unpowered, so no CT current should flow during the blip
+  - name: s6b_stays_at_warn_not_trip
+    forbid: { dut: K4_open, before: { sim_end: true } }
+    # quiet link + no current = "not an emergency... warn and keep
+    # watching" (SAFETY_MODEL.md §4 S6) — this is the expected, SAFE
+    # outcome of a brief blip with no current flowing, distinct from the
+    # 10s soft-trip path that applies only when current IS present
+  - name: safe_resume
+    event: { type: dut_power, state: on }
+    then:
+      event: { type: link_up }
+      within_s: 30
+    # TODO: no precise ESP32-S3 boot-to-first-PUSH_CONTEXT deadline is
+    # stated for an unannounced power-cut reboot. SAFETY_MODEL.md §4 S6
+    # only gives REBOOT_GRACE_WINDOW_MS = 20000 (20s) for the
+    # SAFETY_CMD_ANNOUNCE_REBOOT path, which is specific to a *routine,
+    # announced* OTA self-restart and explicitly does not apply here (the
+    # ESP has no chance to send ANNOUNCE_REBOOT before an external power
+    # cut). 30s is a placeholder order-of-magnitude margin over that number
+    # for boot + Wi-Fi init + first poll; confirm against bench measurement.
+manual_checks:
+  - "Confirm KilnFW resumes the firing (or safely aborts/pauses per its own policy) rather than silently continuing as if nothing happened — LCD/web UI behavior not observable by the fixture"
+report_keep: [telemetry, events]

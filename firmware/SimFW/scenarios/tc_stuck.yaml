@@ -1,0 +1,45 @@
+name: tc_stuck
+version: 1
+exercises: [S13]
+# PLAN.md §8 item 6 labels this "frozen reading during ramp (S13/sample-
+# counter class)". S13 ("Borrowed channel not updating") is the guard whose
+# whole mechanism IS a frozen conversion: the ESP only advances a zone's
+# sample_counter when it consumes a genuinely fresh conversion
+# (SAFETY_MODEL.md §4 S13), so freezing the *main-side* MAX31856 channel
+# that a BORROWED_ZONE/BOTH-configured safety processor reads produces
+# exactly the "sample_counter stops advancing while frames keep arriving"
+# signature S13 exists to catch — as opposed to S11 ("Frozen safety
+# reading"), which is what the identical fault would exercise if fired on
+# the *safety-side* channel (tc:safety) instead, or if tc_source=OWN_J7.
+preset: fast_test
+timescale: 10
+seed: 47
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: stuck
+    # PLAN.md §7.1: "Stuck TC | LTCB frozen at last value while zone keeps
+    # moving". Targets the main-side (ESP/bus A) zone-0 channel, since that
+    # is the physical sensor a BORROWED_ZONE-configured safety processor is
+    # reading via the context frame.
+    type: stuck_tc
+    target: tc:0
+    trigger: { at_sim_time: { t: 20 } }
+    duration: permanent
+expect:
+  - name: sample_counter_goes_stale
+    event: { type: fault_fired, slot: stuck }
+    then:
+      event: { type: guard_warn, guard: S13 }
+      within_s: 13       # borrowed_stale_s = 10s (SAFETY_MODEL.md §4 S13) + margin
+      not_before_s: 9
+  - name: trips_after_stale_trip_deadline
+    event: { type: fault_fired, slot: stuck }
+    then:
+      dut: K4_open
+      within_s: 65       # borrowed_stale_trip_s = 60s (SAFETY_MODEL.md §4 S13) + margin
+      not_before_s: 58
+manual_checks:
+  - "Confirm SaftyFW is commissioned with tc_source=BORROWED_ZONE or BOTH before running this scenario — S13 only evaluates in those modes (SAFETY_MODEL.md §3/§4 S13); under tc_source=OWN_J7 this same fault, fired on tc:safety instead, would exercise S11 (frozen_window_s=600s) rather than S13, and that commissioning state is not something the fixture itself can verify or set"
+report_keep: [telemetry, events]

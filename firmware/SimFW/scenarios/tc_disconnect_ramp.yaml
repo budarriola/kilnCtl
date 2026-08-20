@@ -1,0 +1,42 @@
+name: tc_disconnect_ramp
+version: 1
+exercises: [S5]
+# S5 — Safety thermocouple invalid, graduated WARN-then-TRIP
+# (SAFETY_MODEL.md §4 S5). This half of the pair (item 4 in PLAN.md §8)
+# disconnects the safety-side TC early in the ramp; tc_disconnect_soak.yaml
+# is the same fault fired later, during the hold/soak portion.
+preset: fast_test
+timescale: 10
+seed: 44
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: oc_ramp
+    type: disconnected_tc
+    target: tc:safety
+    # Early in the ramp. No exact "ramp phase" boundary is defined anywhere
+    # in PLAN.md/SAFETY_MODEL.md; this is a judgment call chosen to land
+    # comfortably before the fast_test preset's soak portion.
+    trigger: { at_sim_time: { t: 30 } }
+    duration: permanent
+expect:
+  - name: warns_first
+    event: { type: fault_fired, slot: oc_ramp }
+    then:
+      event: { type: guard_warn, guard: S5 }
+      within_s: 6         # "bad reads >= 10 consecutive AND >= 5s -> WARN"
+                          # (SAFETY_MODEL.md §4 S5) + ~1s margin
+      not_before_s: 4.5
+  - name: trips_after_blind_grace
+    event: { type: fault_fired, slot: oc_ramp }
+    then:
+      dut: K4_open
+      within_s: 65        # blind_grace_s = 60s (SAFETY_MODEL.md §4 S5) + margin
+      not_before_s: 55    # must not trip before the 60s grace clears
+                          # (two-bar doctrine, SAFETY_MODEL.md §2)
+  - name: reports_nan_not_stale_value
+    at_end: { dut: safety_temp_valid, equals: false }
+    # While blind, the status frame reports NaN with SAFETY_FLAG_TEMP_VALID
+    # clear — never 0, never the last good reading (SAFETY_MODEL.md §4 S5)
+report_keep: [telemetry, events]

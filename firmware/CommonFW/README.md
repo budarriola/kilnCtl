@@ -9,6 +9,17 @@ The wire between the ESP32-S3 main controller ([`../KilnFW`](../KilnFW)) and
 the RP2040 safety processor ([`../SaftyFW`](../SaftyFW)), implemented **once**
 and linked into both.
 
+`CommonFW` also hosts a second, independent protocol family here:
+**`benchproto`** ([`docs/BENCHPROTO.md`](docs/BENCHPROTO.md),
+`include/benchproto/`, `src/benchproto_*.c`) — a hardened, addressed
+request/reply protocol (framing, CRC16, retry/dedup, task registration) for
+bench/instrument firmwares talking to a PC, extracted from
+`firmware/UnitTestFw`'s UART prototype for `SimFW`'s USB-CDC link (see
+`firmware/SimFW/docs/PLAN.md` sec 4.4/12). It shares no code with `kilnlink`
+— see `docs/BENCHPROTO.md` sec 1 for why the two look alike but are kept
+apart — and is host-tested the same way (`test_benchproto_frame.c`,
+`test_benchproto_link.c`, both wired into this file's `CMakeLists.txt`).
+
 **Status: the framing layer exists and is host-tested.** `kilnlink_frame.{c,h}`
 + `kilnlink_crc.c` are written, byte-exact cross-checked against
 `pc_tools/src/kilnctrl/protocol.py` (the second, already-proven
@@ -85,7 +96,12 @@ firmware.
 firmware/CommonFW/
 ├─ README.md                       ← this file
 ├─ docs/
-│  └─ LINK_PROTOCOL.md             ← THE contract. Owned here, not by either firmware
+│  ├─ LINK_PROTOCOL.md             ← THE kilnlink contract. Owned here, not by either firmware
+│  └─ BENCHPROTO.md                ← THE benchproto spec (separate protocol family, see "Layout" below)
+├─ include/benchproto/
+│  ├─ benchproto_version.h         ← BENCHPROTO_PROTOCOL_VERSION, the single source
+│  ├─ benchproto_frame.h           ← delimiter/stuffing/CRC framing (independent of kilnlink_frame.h)
+│  └─ benchproto_link.h            ← retry/dedup + addressable-task-registration model
 ├─ include/kilnlink/
 │  ├─ kilnlink_version.h           ← KILNLINK_PROTOCOL_VERSION, the single source
 │  ├─ kilnlink_bytes.h             ← shared LE encode/decode helpers
@@ -106,13 +122,16 @@ firmware/CommonFW/
 │  ├─ kilnlink_announce.c  kilnlink_ceiling.c  kilnlink_clear_trip.c
 │  ├─ kilnlink_get_fw_version.c  kilnlink_set_clock.c
 │  └─ kilnlink_status.c  kilnlink_diag.c  kilnlink_trip.c  kilnlink_power.c
+├─ src/benchproto_crc.c  src/benchproto_frame.c  src/benchproto_link.c
 ├─ test/
 │  ├─ test_frame.c  test_fuzz.c  test_uart_protocol_delegate.c
 │  ├─ test_context.c  test_announce.c  test_ceiling.c  test_clear_trip.c
 │  ├─ test_get_fw_version.c  test_set_clock.c
 │  ├─ test_status.c  test_diag.c  test_trip.c  test_power.c
+│  ├─ test_benchproto_frame.c  test_benchproto_link.c
 │  └─ vectors/                     ← shared byte-exact test vectors, see below
-└─ CMakeLists.txt
+│     (kilnlink's `*_vectors.json` plus benchproto_frame_vectors.json)
+└─ CMakeLists.txt                  ← builds both the `kilnlink` and `benchproto` targets
 ```
 
 ## Rules for code in here
@@ -358,3 +377,8 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
   frames that carry an image to the Pico over the isolated link. The update
   frame codecs belong in `kilnlink` for the same reason the rest do — one
   implementation, shared test vectors.
+- [`docs/BENCHPROTO.md`](docs/BENCHPROTO.md) — the separate `benchproto`
+  protocol family's spec: framing, CRC, reliability, and task-registration,
+  hardware-agnostic. First consumer is `SimFW`
+  ([`../SimFW/docs/PLAN.md`](../SimFW/docs/PLAN.md)); shares no code with
+  `kilnlink` (see that document's section 1 for why).

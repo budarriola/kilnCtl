@@ -1,0 +1,493 @@
+"""Run-report construction and expectation evaluation.
+
+Implements ``firmware/SimFW/docs/PLAN.md`` section 8.2's run-report JSON
+shape: scenario name/version/hash, firmware versions, seed, timescale, start
+time, full event list, telemetry samples, per-expectation
+``{name, PASS|FAIL|SKIPPED, evidence: [event seqs]}``, overall verdict, and
+validity flags (SPI underruns, event-seq gaps => run invalid, not failed).
+
+:func:`evaluate_expectations` is pure Python logic over a scenario and a
+captured event list -- no hardware, no link -- which is exactly why it is the
+most valuable piece to get right and unit test hard (see
+``tests/test_kilnsim_report.py``).
+
+Event/observation convention
+-----------------------------
+PLAN.md sec 8.1 says an ``expect`` clause's ``dut:`` field "reference[s] DUT
+observations the fixture can see (relay states, fault line, E-stop loop)".
+The wire-level shape of those observations is not frozen yet (PLAN.md sec
+5.2/12), so this module works against a normalized, already-decoded form:
+whatever assembles the event list before handing it to
+:func:`evaluate_expectations` (eventually ``run_test_scenario`` in
+``mcp_server.py``) is responsible for turning wire-level relay-edge/IO
+frames into :class:`~kilnsim.protocol.Event` objects whose ``payload`` carries
+
+    {"entity": "<name>", "state": <bool>}
+
+for anything observable as a named boolean -- e.g. ``{"entity": "K4",
+"state": True}`` for "K4 is now open". A scenario's ``dut: K4_open`` names
+the *entity* (``K4``) and the *desired polarity* (``open`` -> ``True``) via
+:func:`_parse_dut_flag`; recognized positive/negative words are open/on/
+asserted/true and closed/off/deasserted/false respectively.
+
+Fault lifecycle events (``fault_fired``/``fault_cleared`` in an ``event:``
+clause) are matched against :data:`~kilnsim.protocol.EventType.FAULT_FIRED` /
+``FAULT_CLEARED`` events whose payload carries ``{"fault_id": "<scenario
+fault id>"}`` (the scenario YAML's own ``faults[].id``, not the compiled
+numeric slot -- see ``scenario.compile_faults``).
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Optional
+
+from .protocol import Event, EventType
+from .scenario import EventThenExpect, ForbidExpect, AtEndExpect, Scenario
+
+#: Verdict strings, matching PLAN.md sec 8.2's "PASS|FAIL|SKIPPED".
+PASS = "PASS"
+FAIL = "FAIL"
+SKIPPED = "SKIPPED"
+
+_POSITIVE_WORDS = {"open", "on", "asserted", "true", "present"}
+_NEGATIVE_WORDS = {"closed", "close", "off", "deasserted", "false", "absent"}
+
+
+class ReportError(ValueError):
+    pass
+
+
+@dataclass
+class ExpectationResult:
+    name: str
+    verdict: str  # PASS | FAIL | SKIPPED
+    evidence: list = field(default_factory=list)  # event seqs
+    detail: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "verdict": self.verdict,
+            "evidence": list(self.evidence),
+            "detail": self.detail,
+        }
+
+
+@dataclass
+class ValidityFlags:
+    """PLAN.md sec 8.2: "validity flags (SPI underruns, event-seq gaps =>
+    run invalid, not failed)"."""
+
+    spi_underrun: bool = False
+    event_seq_gap: bool = False
+
+    @property
+    def valid(self) -> bool:
+        return not (self.spi_underrun or self.event_seq_gap)
+
+    def to_dict(self) -> dict:
+        return {
+            "spi_underrun": self.spi_underrun,
+            "event_seq_gap": self.event_seq_gap,
+            "valid": self.valid,
+        }
+
+
+@dataclass
+class Report:
+    scenario_name: str
+    scenario_version: int
+    scenario_hash: str
+    seed: int
+    timescale: float
+    start_time: float
+    events: list  # list[Event]
+    telemetry_samples: list  # list[dict] (protocol.TelemetryFrame-shaped, kept loose here)
+    expectations: list  # list[ExpectationResult]
+    validity: ValidityFlags
+    fw_versions: dict = field(default_factory=dict)
+    verdict: str = SKIPPED  # overall
+
+    def to_dict(self) -> dict:
+        return {
+            "scenario": {
+                "name": self.scenario_name,
+                "version": self.scenario_version,
+                "hash": self.scenario_hash,
+            },
+            "fw_versions": dict(self.fw_versions),
+            "seed": self.seed,
+            "timescale": self.timescale,
+            "start_time": self.start_time,
+            "events": [e.to_dict() for e in self.events],
+            "telemetry_samples": list(self.telemetry_samples),
+            "expectations": [e.to_dict() for e in self.expectations],
+            "verdict": self.verdict,
+            "validity": self.validity.to_dict(),
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)
+
+    @property
+    def passed(self) -> bool:
+        return self.verdict == PASS
+
+
+# ---------------------------------------------------------------------------
+# clause-target resolution
+#
+# An ``event:``/``then:``/``forbid:``/``at_end:`` clause targets one of two
+# things -- see the module docstring:
+#
+#   {"dut": "K4_open"}                       -- entity/polarity from the name
+#   {"dut": "safety_temp_valid", "equals": false}  -- explicit polarity
+#   {"event": "trip_ineffective_latched"}    -- bare event-type name
+#   {"event": {"type": "guard_trip", "guard": "S6a"}}  -- type + payload filters
+#
+# firmware/SimFW/scenarios/*.yaml (written in parallel against this same
+# PLAN.md sec 8.1 schema) use every one of these forms, so this module
+# resolves them generically rather than assuming the single ``dut:
+# <entity>_<state>`` shorthand PLAN.md sec 8.1's own inline example shows.
+# ---------------------------------------------------------------------------
+def _parse_dut_flag(flag: str) -> tuple:
+    """``"K4_open"`` -> ``("K4", True)``. Raises :class:`ReportError` if the
+    trailing word isn't a recognized polarity."""
+    if "_" not in flag:
+        raise ReportError(f"dut flag {flag!r} must be '<entity>_<state>' (e.g. 'K4_open')")
+    entity, state = flag.rsplit("_", 1)
+    word = state.lower()
+    if word in _POSITIVE_WORDS:
+        return entity, True
+    if word in _NEGATIVE_WORDS:
+        return entity, False
+    raise ReportError(
+        f"dut flag {flag!r}: unrecognized state word {state!r} "
+        f"(expected one of {sorted(_POSITIVE_WORDS | _NEGATIVE_WORDS)})"
+    )
+
+
+def _resolve_dut_target(clause: dict) -> tuple:
+    """``{"dut": "K4_open"}`` -> ``("K4", True)``; ``{"dut": "x", "equals":
+    false}`` -> ``("x", False)`` (explicit polarity, no suffix parsing)."""
+    dut_val = clause["dut"]
+    if "equals" in clause:
+        return str(dut_val), bool(clause["equals"])
+    return _parse_dut_flag(str(dut_val))
+
+
+def _resolve_event_clause(value) -> tuple:
+    """``"trip_ineffective_latched"`` -> ``("trip_ineffective_latched", {})``;
+    ``{"type": "guard_trip", "guard": "S6a"}`` -> ``("guard_trip", {"guard":
+    "S6a"})``."""
+    if isinstance(value, str):
+        return value, {}
+    if isinstance(value, dict):
+        type_name = value.get("type")
+        if not type_name:
+            raise ReportError(f"event clause missing 'type': {value!r}")
+        filters = {k: v for k, v in value.items() if k != "type"}
+        return type_name, filters
+    raise ReportError(f"event clause must be a string or mapping, got {value!r}")
+
+
+def _target_kind(clause: dict) -> str:
+    """Which of "dut"/"event" a then/forbid/at_end clause targets."""
+    if "dut" in clause:
+        return "dut"
+    if "event" in clause:
+        return "event"
+    raise ReportError(f"clause needs 'dut' or 'event': {clause!r}")
+
+
+def _event_type_from_name(type_name: str) -> EventType:
+    try:
+        return EventType[type_name.upper()]
+    except KeyError as exc:
+        raise ReportError(f"unknown event type in expect clause: {type_name!r}") from exc
+
+
+def _entity_state_events(events: list, entity: str) -> list:
+    """Events observing ``entity``'s boolean state, in seq order (input is
+    assumed already time/seq ordered -- the event ring's own guarantee,
+    PLAN.md sec 4.5)."""
+    out = []
+    for e in events:
+        payload = e.payload or {}
+        if payload.get("entity") == entity and "state" in payload:
+            out.append(e)
+    return out
+
+
+def _find_events(events: list, type_name: str, filters: dict) -> list:
+    """Events of ``type_name`` whose payload matches every key/value in
+    ``filters`` (``slot`` is a filter alias for the payload's ``fault_id``,
+    matching FAULT_FIRED/FAULT_CLEARED's convention -- see the module
+    docstring; every other filter key is matched literally against the
+    payload, e.g. ``guard``/``relay``/``edge``/``state``)."""
+    event_type = _event_type_from_name(type_name)
+    out = []
+    for e in events:
+        if e.event_type is not event_type:
+            continue
+        payload = e.payload or {}
+        ok = True
+        for k, v in filters.items():
+            actual = payload.get("fault_id") if k == "slot" else payload.get(k)
+            if actual != v:
+                ok = False
+                break
+        if ok:
+            out.append(e)
+    return out
+
+
+def _us_to_s(sim_time_us: int) -> float:
+    return sim_time_us / 1_000_000.0
+
+
+# ---------------------------------------------------------------------------
+# per-clause evaluation
+# ---------------------------------------------------------------------------
+def _eval_event_then(clause: EventThenExpect, events: list) -> ExpectationResult:
+    clause_type, cause_filters = _resolve_event_clause(clause.event)
+    causes = _find_events(events, clause_type, cause_filters)
+    if not causes:
+        return ExpectationResult(
+            name=clause.name, verdict=SKIPPED,
+            detail=f"triggering event ({clause_type}{f' {cause_filters}' if cause_filters else ''}) never occurred",
+        )
+    cause = causes[0]
+
+    then = clause.then
+    within_s = then.get("within_s")
+    not_before_s = then.get("not_before_s", 0.0)
+    earliest_us = cause.sim_time_us + int(not_before_s * 1_000_000)
+    deadline_us = cause.sim_time_us + int(within_s * 1_000_000) if within_s is not None else None
+
+    kind = _target_kind(then)
+    if kind == "dut":
+        entity, want = _resolve_dut_target(then)
+        target_desc = f"dut:{then['dut']}"
+        candidates = [
+            e for e in _entity_state_events(events, entity)
+            if bool(e.payload.get("state")) == want
+        ]
+    else:
+        type_name, filters = _resolve_event_clause(then["event"])
+        target_desc = f"event:{type_name}"
+        candidates = _find_events(events, type_name, filters)
+
+    for e in candidates:
+        if e.sim_time_us < earliest_us:
+            continue
+        if deadline_us is not None and e.sim_time_us > deadline_us:
+            break
+        return ExpectationResult(
+            name=clause.name, verdict=PASS,
+            evidence=[cause.seq, e.seq],
+            detail=f"{target_desc} observed {_us_to_s(e.sim_time_us) - _us_to_s(cause.sim_time_us):.3f}s "
+                   f"after {clause_type}",
+        )
+    return ExpectationResult(
+        name=clause.name, verdict=FAIL, evidence=[cause.seq],
+        detail=f"{target_desc} not observed"
+               + (f" within {within_s}s" if within_s is not None else "")
+               + f" after {clause_type} (seq {cause.seq})",
+    )
+
+
+def _forbid_boundary(before: dict, events: list) -> tuple:
+    """Returns ``(boundary_us, boundary_seq, skip_detail)``. ``skip_detail``
+    is set (and the other two ``None``) when the boundary event never
+    occurred, meaning the clause can't be evaluated."""
+    if before.get("sim_end"):
+        return float("inf"), None, None
+    if "sim_time_s" in before:
+        return float(before["sim_time_s"]) * 1_000_000, None, None
+    if "sim_time" in before:
+        return float(before["sim_time"]) * 1_000_000, None, None
+    if "fault" in before:
+        fired = _find_events(events, "fault_fired", {"slot": before["fault"]})
+        if not fired:
+            return None, None, f"boundary fault {before['fault']!r} never fired"
+        return fired[0].sim_time_us, fired[0].seq, None
+    raise ReportError(f"forbid.before needs 'fault', 'sim_time_s', or 'sim_end': {before!r}")
+
+
+def _eval_forbid(clause: ForbidExpect, events: list) -> ExpectationResult:
+    forbid = clause.forbid
+    before = forbid.get("before") or {}
+    boundary_us, boundary_seq, skip_detail = _forbid_boundary(before, events)
+    if skip_detail:
+        return ExpectationResult(name=clause.name, verdict=SKIPPED, detail=skip_detail)
+
+    kind = _target_kind(forbid)
+    if kind == "dut":
+        entity, want = _resolve_dut_target(forbid)
+        target_desc = f"dut:{forbid['dut']}"
+        candidates = [
+            e for e in _entity_state_events(events, entity)
+            if bool(e.payload.get("state")) == want
+        ]
+    else:
+        type_name, filters = _resolve_event_clause(forbid["event"])
+        target_desc = f"event:{type_name}"
+        candidates = _find_events(events, type_name, filters)
+
+    violations = [e for e in candidates if e.sim_time_us < boundary_us]
+    if violations:
+        return ExpectationResult(
+            name=clause.name, verdict=FAIL,
+            evidence=[e.seq for e in violations],
+            detail=f"{target_desc} observed before the boundary (first at seq {violations[0].seq})",
+        )
+    return ExpectationResult(
+        name=clause.name, verdict=PASS,
+        evidence=[] if boundary_seq is None else [boundary_seq],
+        detail=f"{target_desc} never observed before the boundary",
+    )
+
+
+def _eval_at_end(clause: AtEndExpect, events: list) -> ExpectationResult:
+    at_end = clause.at_end
+    kind = _target_kind(at_end)
+    if kind == "dut":
+        entity, want = _resolve_dut_target(at_end)
+        target_desc = f"dut:{at_end['dut']}"
+        observed = _entity_state_events(events, entity)
+        if not observed:
+            return ExpectationResult(
+                name=clause.name, verdict=FAIL,
+                detail=f"{entity} state never observed; cannot be {target_desc} at end",
+            )
+        last = observed[-1]
+        if bool(last.payload.get("state")) == want:
+            return ExpectationResult(
+                name=clause.name, verdict=PASS, evidence=[last.seq],
+                detail=f"{target_desc} held at end of run (last observed seq {last.seq})",
+            )
+        return ExpectationResult(
+            name=clause.name, verdict=FAIL, evidence=[last.seq],
+            detail=f"{entity} did not end in the expected state "
+                   f"(last observed seq {last.seq}, state={last.payload.get('state')})",
+        )
+
+    # event target: "still true at the end" is read as "occurred at least
+    # once" -- these are latched conditions (e.g. TRIP_INEFFECTIVE_LATCHED),
+    # not events that could sensibly un-occur by end of run.
+    type_name, filters = _resolve_event_clause(at_end["event"])
+    matches = _find_events(events, type_name, filters)
+    if matches:
+        return ExpectationResult(
+            name=clause.name, verdict=PASS, evidence=[matches[-1].seq],
+            detail=f"event:{type_name} occurred (last at seq {matches[-1].seq})",
+        )
+    return ExpectationResult(
+        name=clause.name, verdict=FAIL,
+        detail=f"event:{type_name} never occurred",
+    )
+
+
+# ---------------------------------------------------------------------------
+# validity
+# ---------------------------------------------------------------------------
+def _check_event_seq_gap(events: list) -> bool:
+    seqs = sorted(e.seq for e in events)
+    for a, b in zip(seqs, seqs[1:]):
+        if b != a + 1:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# top-level API
+# ---------------------------------------------------------------------------
+def evaluate_expectations(scenario: Scenario, events: list,
+                           telemetry_samples: Optional[list] = None,
+                           spi_underrun: bool = False,
+                           seed: Optional[int] = None,
+                           timescale: Optional[float] = None,
+                           start_time: Optional[float] = None,
+                           fw_versions: Optional[dict] = None) -> Report:
+    """Check ``scenario.expect`` against a captured, seq-ordered ``events``
+    list and build the run :class:`Report` (PLAN.md sec 8.2).
+
+    Overall verdict is PASS only if every expectation is PASS and the
+    validity flags are clean (a SKIPPED expectation does not fail the run --
+    it means its triggering condition never arose -- but it does mean the
+    verdict can't be an unqualified PASS either, so a run with any SKIPPED
+    expectation and no FAILs is reported PASS with those SKIPPED entries
+    visible, matching "SKIPPED" being a first-class verdict alongside PASS/
+    FAIL in PLAN.md sec 8.2 rather than a synonym for FAIL).
+    """
+    events = sorted(events, key=lambda e: e.seq)
+    results = []
+    for clause in scenario.expect:
+        if isinstance(clause, EventThenExpect):
+            results.append(_eval_event_then(clause, events))
+        elif isinstance(clause, ForbidExpect):
+            results.append(_eval_forbid(clause, events))
+        elif isinstance(clause, AtEndExpect):
+            results.append(_eval_at_end(clause, events))
+        else:  # pragma: no cover - scenario.py only produces the three above
+            raise ReportError(f"unhandled expect clause type: {type(clause)}")
+
+    validity = ValidityFlags(
+        spi_underrun=spi_underrun,
+        event_seq_gap=_check_event_seq_gap(events),
+    )
+
+    if not validity.valid:
+        overall = FAIL  # an invalid run cannot be certified PASS, PLAN.md sec 8.2
+    elif any(r.verdict == FAIL for r in results):
+        overall = FAIL
+    else:
+        overall = PASS
+
+    return Report(
+        scenario_name=scenario.name,
+        scenario_version=scenario.version,
+        scenario_hash=scenario.content_hash(),
+        seed=seed if seed is not None else scenario.seed,
+        timescale=timescale if timescale is not None else scenario.timescale,
+        start_time=start_time if start_time is not None else time.time(),
+        events=list(events),
+        telemetry_samples=list(telemetry_samples or []),
+        expectations=results,
+        validity=validity,
+        fw_versions=dict(fw_versions or {}),
+        verdict=overall,
+    )
+
+
+def report_from_dict(data: dict) -> Report:
+    """Inverse of :meth:`Report.to_dict`, for ``get_test_report``-style
+    round trips (MCP tool returning a previously saved report)."""
+    scenario = data.get("scenario", {})
+    return Report(
+        scenario_name=scenario.get("name", ""),
+        scenario_version=int(scenario.get("version", 0)),
+        scenario_hash=scenario.get("hash", ""),
+        seed=int(data.get("seed", 0)),
+        timescale=float(data.get("timescale", 1.0)),
+        start_time=float(data.get("start_time", 0.0)),
+        events=[Event.from_dict(e) for e in data.get("events", [])],
+        telemetry_samples=list(data.get("telemetry_samples", [])),
+        expectations=[
+            ExpectationResult(
+                name=e["name"], verdict=e["verdict"],
+                evidence=list(e.get("evidence", [])), detail=e.get("detail", ""),
+            )
+            for e in data.get("expectations", [])
+        ],
+        validity=ValidityFlags(
+            spi_underrun=bool((data.get("validity") or {}).get("spi_underrun", False)),
+            event_seq_gap=bool((data.get("validity") or {}).get("event_seq_gap", False)),
+        ),
+        fw_versions=dict(data.get("fw_versions", {})),
+        verdict=data.get("verdict", SKIPPED),
+    )

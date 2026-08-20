@@ -1,0 +1,41 @@
+name: estop_midfire
+version: 1
+exercises: [S7]
+preset: fast_test
+timescale: 10
+seed: 52
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: estop
+    # PLAN.md §7.1 system-fault catalog: "E-stop during firing | Open the
+    # E-stop loop at trigger". Held open for 5s then the fixture physically
+    # re-closes the loop (simulating press-then-release) so the scenario can
+    # also assert the trip does NOT auto-clear when the contact re-closes.
+    type: estop_trip
+    target: io:estop
+    trigger: { at_zone_temp: { zone: 0, temp_c: 500, edge: rising } }
+    duration: { for_s: 5 }
+expect:
+  - name: fast_trip
+    event: { type: fault_fired, slot: estop }
+    then:
+      dut: K4_open
+      within_s: 1        # GPIO9 debounced 50ms (SAFETY_MODEL.md §4 S7) +
+                         # generous margin for the fixture's own event
+                         # detection latency; still comfortably sub-second
+  - name: stays_latched_after_physical_release
+    event: { type: fault_cleared, slot: estop }
+    then:
+      dut: K4_open
+      within_s: 1
+    # loop is physically closed again (fault_cleared = the fixture's
+    # for_s:5 override expired and it re-closed the contact), but the trip
+    # must remain latched — "clearing requires a deliberate operator act",
+    # not a condition clearing on its own (SAFETY_MODEL.md §6)
+  - name: latched_at_end
+    at_end: { dut: K4_open }
+manual_checks:
+  - "Confirm the trip cannot be cleared except via SAFETY_CMD_CLEAR_TRIP or a full E-stop assert-then-release cycle at the physical button (not exercised by this scenario's scripted fixture release) — SAFETY_MODEL.md §6"
+report_keep: [telemetry, events]

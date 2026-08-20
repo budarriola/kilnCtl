@@ -1,0 +1,39 @@
+name: tc_flaky
+version: 1
+exercises: [S5]
+# Anti-nuisance doctrine: intermittent OC at a ~0.5 Hz-class alternation must
+# NOT produce an instant trip. S5's streak-reset behavior is what should
+# absorb it (GUARD_TEST_MATRIX.md §2: "9 bad reads, then a good one -> No
+# trip, streak resets"; PLAN.md §8 item 5).
+preset: fast_test
+timescale: 10
+seed: 46
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: flaky
+    # PLAN.md §7.1: "Broken (intermittent) TC | Alternates connected/OC on a
+    # configurable duty/period". The ~0.5 Hz-class alternation is this fault
+    # type's own internal duty-cycle behavior (not a scheduler `repeat` —
+    # PLAN.md §8.1's scenario schema has no `repeat`/`params` fields yet;
+    # those are frozen in PROTOCOL.md at M-B/M-G).
+    type: broken_intermittent_tc
+    target: tc:safety
+    trigger: { at_sim_time: { t: 20 } }
+    duration: permanent
+expect:
+  - name: no_trip_from_flapping
+    forbid: { dut: K4_open, before: { sim_end: true } }
+  - name: no_warn_storm
+    forbid: { event: { type: guard_warn, guard: S5 }, before: { sim_end: true } }
+    # TODO: confirm the flaky fault's exact duty/period against the
+    # MAX31856's real ~100ms nominal conversion cadence (PLAN.md §3.2) so
+    # bad-read runs reliably stay under S5's "≥10 consecutive AND ≥5s" WARN
+    # trigger (SAFETY_MODEL.md §4 S5). A ~0.5 Hz (≈1s bad / ≈1s good)
+    # alternation sits close to that 10-sample/5s boundary and needs bench
+    # tuning, not just a plausible-looking number, to land clearly in the
+    # no-WARN nuisance region this assertion claims.
+manual_checks:
+  - "Confirm LCD/web UI show no fault banner despite the intermittent flips, per the anti-nuisance doctrine (SAFETY_MODEL.md §2)"
+report_keep: [telemetry, events]

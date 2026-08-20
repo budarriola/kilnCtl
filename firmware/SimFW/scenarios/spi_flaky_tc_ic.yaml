@@ -1,0 +1,47 @@
+name: spi_flaky_tc_ic
+version: 1
+exercises: [S5]
+# Targets the safety-side channel (tc:safety) specifically because S5's
+# trip set explicitly includes "SPI transfer failure" as one of its three
+# trigger conditions (SAFETY_MODEL.md §4 S5: "Trips on: SPI transfer
+# failure, NaN, or THERMO_FAULT_OPEN / OVUV / TCRANGE"), giving this
+# scenario a direct guard mapping. PLAN.md §8 item 14's "no garbage temps
+# accepted" half of the expectation is a driver-correctness property best
+# checked via the fixture's shadow-truth vs. reported-value comparison and
+# SPI error counters (PLAN.md §3.2.1) rather than a DUT-facing sensed
+# signal, and is called out under manual_checks.
+preset: fast_test
+timescale: 10
+seed: 55
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: flaky_spi
+    # PLAN.md §7.1: "TC IC flaky SPI | Bit errors on MISO at configurable
+    # rate".
+    # TODO: no bit-error-rate number is stated anywhere in PLAN.md/
+    # SAFETY_MODEL.md; use a rate high enough to fail the driver's
+    # checksum/sanity check on most transfers without disabling the
+    # channel entirely (i.e. distinct from "TC IC dead") — needs bench
+    # tuning against the real driver's rejection behavior, not a guessed
+    # precise percentage.
+    type: flaky_spi_tc_ic
+    target: tc:safety
+    trigger: { at_sim_time: { t: 20 } }
+    duration: permanent
+expect:
+  - name: not_an_instant_trip
+    forbid: { dut: K4_open, before: { sim_time_s: 5 } }
+    # S5 requires >= 10 consecutive bad reads AND >= 5s before even a WARN
+    # (SAFETY_MODEL.md §4 S5) — a single bit error must not trip anything
+  - name: warns_then_trips_like_disconnect
+    event: { type: fault_fired, slot: flaky_spi }
+    then:
+      dut: K4_open
+      within_s: 65       # blind_grace_s = 60s (SAFETY_MODEL.md §4 S5) + margin,
+                         # same numeric pattern as tc_disconnect_*.yaml
+      not_before_s: 55
+manual_checks:
+  - "Confirm via SWD/telemetry SPI CRC-class error counters (PLAN.md §3.2.1) that the driver's own sanity checks rejected the corrupted transfers rather than accepting a garbled temperature reading — not directly observable from the fixture's DUT-facing sensed signals alone"
+report_keep: [telemetry, events]

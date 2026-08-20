@@ -1,15 +1,32 @@
-# kilnlink -- the shared wire-protocol library between KilnFW (ESP-IDF) and
-# SaftyFW (pico-sdk). See README.md for the freestanding-C11 rules every file
-# under src/ and include/ must follow: no allocation, no I/O, no globals,
-# every decoder bounds-checked. Consumed three ways:
+# CommonFW hosts two independent, sibling wire-protocol libraries, each its
+# own CMake target from this one file:
 #
-#   SaftyFW (pico-sdk):  add_subdirectory(../CommonFW kilnlink)
-#                         target_link_libraries(SaftyFW PRIVATE kilnlink)
-#   KilnFW (ESP-IDF):     a thin components/kilnlink/CMakeLists.txt wrapper
-#                         pointing idf_component_register at this directory
-#   host tests:           this file, built standalone (the default when this
-#                         is the top-level CMakeLists, i.e. not pulled in via
-#                         add_subdirectory from an embedded build)
+#   kilnlink   -- the shared link between KilnFW (ESP-IDF) and SaftyFW
+#                 (pico-sdk). See README.md for the freestanding-C11 rules
+#                 every file under src/ and include/ must follow: no
+#                 allocation, no I/O, no globals, every decoder
+#                 bounds-checked. Consumed three ways:
+#                   SaftyFW (pico-sdk):  add_subdirectory(../CommonFW kilnlink)
+#                                        target_link_libraries(SaftyFW PRIVATE kilnlink)
+#                   KilnFW (ESP-IDF):    a thin components/kilnlink/CMakeLists.txt
+#                                        wrapper pointing idf_component_register
+#                                        at this directory
+#                   host tests:          this file, built standalone
+#
+#   benchproto -- a *separate* protocol family for bench/instrument-fixture
+#                 firmwares talking to a PC (first consumer: SimFW's USB CDC
+#                 link, see docs/BENCHPROTO.md and
+#                 firmware/SimFW/docs/PLAN.md sec 4.4/5/12). Same
+#                 freestanding-C11 rules, same "host tests build standalone"
+#                 pattern, deliberately zero shared source with kilnlink --
+#                 see include/benchproto/benchproto_frame.h's file comment
+#                 for why the two are kept apart despite the family
+#                 resemblance.
+#
+# Host tests for both are only built when this file is the top-level CMake
+# project -- an embedded build (pico-sdk/ESP-IDF) pulling either library in
+# via add_subdirectory() gets just the library, not host-only test
+# executables it has no way to run.
 cmake_minimum_required(VERSION 3.16)
 project(kilnlink C)
 
@@ -37,6 +54,20 @@ if(MSVC)
     target_compile_options(kilnlink PRIVATE /W4 /WX)
 else()
     target_compile_options(kilnlink PRIVATE -Wall -Wextra -Werror)
+endif()
+
+add_library(benchproto STATIC
+    src/benchproto_crc.c
+    src/benchproto_frame.c
+    src/benchproto_link.c
+)
+target_include_directories(benchproto PUBLIC include)
+set_target_properties(benchproto PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+if(MSVC)
+    target_compile_options(benchproto PRIVATE /W4 /WX)
+else()
+    target_compile_options(benchproto PRIVATE -Wall -Wextra -Werror)
 endif()
 
 # Only build the host test binary when this is the top-level CMake project --
@@ -188,4 +219,23 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_announce_reboot PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_announce_reboot COMMAND test_announce_reboot)
+
+    # -- benchproto host tests (independent of everything above) --------------
+    add_executable(test_benchproto_frame test/test_benchproto_frame.c)
+    target_link_libraries(test_benchproto_frame PRIVATE benchproto)
+    if(MSVC)
+        target_compile_options(test_benchproto_frame PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_benchproto_frame PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_benchproto_frame COMMAND test_benchproto_frame)
+
+    add_executable(test_benchproto_link test/test_benchproto_link.c)
+    target_link_libraries(test_benchproto_link PRIVATE benchproto)
+    if(MSVC)
+        target_compile_options(test_benchproto_link PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_benchproto_link PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_benchproto_link COMMAND test_benchproto_link)
 endif()

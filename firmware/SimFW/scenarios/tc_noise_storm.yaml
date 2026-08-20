@@ -1,0 +1,36 @@
+name: tc_noise_storm
+version: 1
+exercises: [S1, S2, S10]
+# No single trip guard "owns" this scenario; it is a nuisance check across
+# every guard whose evidence is a thermal *reading* rather than a discrete
+# event (GUARD_TEST_MATRIX.md §1's doctrine). Heavy Gaussian/spike noise on
+# the safety TC must not, by itself, cross S1's 3-consecutive-reading bar,
+# S2's 120s sustained-excess window, or S10's 300s sustained-disagreement
+# window (SAFETY_MODEL.md §4 S1/S2/S10) even though individual samples may
+# spike past any of those thresholds momentarily.
+preset: fast_test
+timescale: 10
+seed: 48
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: noise
+    # PLAN.md §7.1: "Flaky TC (noise) | Gaussian/spike noise added to
+    # reported temperature". Magnitude/sigma is a bench-tuning parameter not
+    # yet exposed by the frozen scenario schema (PROTOCOL.md, M-B/M-G);
+    # "heavy" per PLAN.md §8 item 7 means large enough that individual
+    # samples plausibly cross S1's ceiling and S10's 200°C disagreement
+    # threshold, but never for 3 consecutive readings or 300s respectively.
+    type: flaky_noise_tc
+    target: tc:safety
+    trigger: { at_sim_time: { t: 20 } }
+    duration: permanent
+expect:
+  - name: no_trip_ever
+    forbid: { dut: K4_open, before: { sim_end: true } }
+  - name: no_fault_line_latch
+    forbid: { dut: fault_line_asserted, before: { sim_end: true } }
+manual_checks:
+  - "Confirm the GUI/strip-chart shows the noisy trace filtered/smoothed rather than jittering the operator-facing display (per anti-nuisance intent) — not directly assertable from fixture-sensed signals alone"
+report_keep: [telemetry, events]

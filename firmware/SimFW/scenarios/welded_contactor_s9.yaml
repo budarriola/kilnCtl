@@ -1,0 +1,59 @@
+name: welded_contactor_s9
+version: 1
+exercises: [S3, S9]
+# S3 provides the initiating trip (same welded-SSR mechanism as
+# welded_ssr_midfire.yaml). S9 is the guard this scenario is actually built
+# to provoke: current keeps flowing after K4 is sensed open, i.e. the trip
+# did not work (SAFETY_MODEL.md §4 S9 — "the single most valuable guard
+# after S1").
+preset: fast_test
+timescale: 10
+seed: 43
+overrides:
+  zones[0].R_element: 12.0
+dut:
+  profile: cone6_fast
+faults:
+  - id: weld_ssr
+    type: welded_ssr
+    target: relay:K1
+    trigger: { at_zone_temp: { zone: 0, temp_c: 400, edge: rising } }
+    duration: permanent
+  - id: welded_contactor
+    # PLAN.md §7.1 power-path catalog: "Welded K4 test support: Keep CT
+    # current flowing after K4 sensed open (S9 escalation)". This is the
+    # fixture's stand-in for a real, mains-rated line contactor that is
+    # physically welded downstream of K4 — the fixture cannot simulate mains
+    # hardware (out of scope, PLAN.md §1), so it keeps synthesizing current
+    # on the CT channel even after K4's own contacts are sensed open.
+    type: welded_k4_current_persist
+    target: ct:0
+    trigger: { on_relay_edge: { relay: K4, edge: open, delay_s: 0 } }
+    duration: permanent
+expect:
+  - name: initial_trip
+    event: { type: fault_fired, slot: weld_ssr }
+    then:
+      dut: K4_open
+      within_s: 25       # stuck_on_time_s = 20s (SAFETY_MODEL.md §4 S3) + margin
+      not_before_s: 18
+  - name: contactor_weld_engages_on_k4_open
+    event: { type: relay_edge, relay: K4, edge: open }
+    then:
+      dut: current_present
+      within_s: 1
+  - name: s9_escalates
+    event: { type: relay_edge, relay: K4, edge: open }
+    then:
+      event: { type: trip_ineffective_latched }
+      within_s: 15      # trip_verify_s = 10s (SAFETY_MODEL.md §4 S9) + ~5s
+                        # margin for the peak-hold decay and evaluation tick
+      not_before_s: 8   # must not report ineffective before the decay window
+                        # (τ≈1s) could plausibly have cleared a real trip
+  - name: stays_open_and_latched
+    at_end: { dut: K4_open }
+  - name: escalation_latched_at_end
+    at_end: { event: trip_ineffective_latched }
+manual_checks:
+  - "Confirm the GUI/LCD escalates TRIP_INEFFECTIVE distinctly from a normal trip — e.g. a 'POWER IS STILL FLOWING — REMOVE IT AT THE BREAKER' style message, not the ordinary fault banner (SAFETY_MODEL.md §4 S9) — fixture cannot read display/web content"
+report_keep: [telemetry, events]

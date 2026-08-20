@@ -1,0 +1,31 @@
+name: baseline_firing
+version: 1
+# Clean regression run: no fault is scheduled. This is deliberately the
+# "healthy kiln" control run GUARD_TEST_MATRIX.md §1 argues every guard needs
+# ("the only way to know a guard does not [nuisance-]trip is to run a healthy
+# kiln at it") — but it exercises no *specific* guard on its own, so the list
+# below is empty rather than padded with speculative citations.
+exercises: []
+preset: fast_test
+timescale: 10
+seed: 1
+overrides: {}
+dut:
+  profile: cone6_fast
+faults: []
+expect:
+  - name: never_faults
+    forbid: { dut: fault_line_asserted, before: { sim_end: true } }
+  - name: never_estops
+    forbid: { dut: estop_open, before: { sim_end: true } }
+  - name: never_trips
+    forbid: { dut: K4_open, before: { sim_end: true } }
+  - name: heat_actually_cycles
+    event: { type: relay_edge, relay: K1, edge: close }
+    then:
+      dut: K1_closed
+      within_s: 1
+manual_checks:
+  - "KilnFW LCD shows normal profile progress and a clean 'complete'/idle state at the end of the run — the fixture has no profile-completion signal of its own"
+  - "Web UI firing history shows a completed run with no fault/alarm banner"
+report_keep: [telemetry, events]

@@ -1,0 +1,44 @@
+name: runaway_zone
+version: 1
+exercises: [S3, S8]
+# PLAN.md §8 item 12: "heat with relay open (model-forced); the S8-relevant
+# scenario (S8 itself ships disabled; scenario documents expected *current*
+# behavior and is ready for when S8 gets a measured threshold)."
+#
+# Forcing P_heater regardless of relay state produces the same physical
+# signature S3 exists to catch (current flowing, no relay commanded), so in
+# TODAY's system S3 trips this well before any dangerous rate-of-rise
+# develops — S8 never gets the chance to matter. This scenario documents
+# that current behavior explicitly, and separately documents that S8
+# produces no trip of its own (it ships disabled, max_rate_c_per_min = 0,
+# SAFETY_MODEL.md §4 S8) so the assertion below must be revisited once S8
+# is enabled with a measured threshold (TODO.md phase 6).
+preset: fast_test
+timescale: 10
+seed: 53
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: runaway
+    # PLAN.md §7.1 system-fault catalog: "Runaway zone | Force P_heater on
+    # regardless of relay state (model-level)".
+    type: runaway_zone
+    target: zone:0
+    trigger: { at_zone_temp: { zone: 0, temp_c: 300, edge: rising } }
+    duration: permanent
+expect:
+  - name: s3_catches_it_first
+    event: { type: fault_fired, slot: runaway }
+    then:
+      dut: K4_open
+      within_s: 25       # stuck_on_time_s = 20s (SAFETY_MODEL.md §4 S3) + margin
+      not_before_s: 18
+  - name: s8_produces_no_trip_of_its_own_today
+    forbid: { event: { type: guard_trip, guard: S8 }, before: { sim_end: true } }
+    # S8 ships disabled (max_rate_c_per_min = 0, SAFETY_MODEL.md §4 S8) —
+    # this documents CURRENT behavior and must be revisited once S8 is
+    # enabled with a measured maximum legitimate ramp rate (TODO.md phase 6)
+manual_checks:
+  - "Once S8 is enabled (TODO.md phase 6), re-run this scenario and add an assertion that S8 itself would have tripped before S1's absolute ceiling, per SAFETY_MODEL.md §4 S8's stated intent"
+report_keep: [telemetry, events]
