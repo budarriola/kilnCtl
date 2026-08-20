@@ -319,5 +319,33 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 # everything running still captures every task's state rather than silently
 # truncating the list, regardless of what a future IDF version's default
 # becomes.
+# CONFIG_ESP_COREDUMP_CAPTURE_DRAM: on, added 2026-08-20 after decoding a real
+# dump showed the diagnostic was only half working. Without it the dump holds
+# per-task stacks but NOT the TCBs, which live in .bss/heap. Every decoded
+# thread then came back as:
+#
+#   0x3fcc0c08 Corrupted TCB data
+#   ==== THREAD 3 (TCB: 0x3fcb8b28, name: '') ====
+#
+# -- empty task names and nonsense stack figures, because GDB was reading
+# memory that simply was not in the file. Backtraces resolved correctly, but
+# nothing identified WHICH task died, and for a spontaneous reboot that is
+# most of the value.
+#
+# Costs dump size: ESP-IDF's Kconfig help asks for at least 128K more, and the
+# coredump partition was grown 512K -> 1024K to cover it (partitions.csv).
+#
+# PSRAM task stacks are NOT a problem here, checked rather than assumed.
+# espcoredump/Kconfig warns "sections located in external RAM will not be
+# stored", which reads like bad news for this firmware -- several task stacks
+# were deliberately moved to PSRAM to survive internal-DRAM exhaustion (see
+# the SPIRAM entries above, lvgl_port.c, uart_bridge.c, uart_bridge_ext.c).
+# That warning is about .bss/.data placed in external RAM, not about task
+# stacks, which are captured per task via snapshots wherever they live.
+# Verified on a real dump: `lvgl` and `link_watchdog` -- both created with
+# xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM) -- resolved full,
+# correct backtraces into lvgl_port.c and uart_bridge.c. So the DRAM fix cost
+# nothing in crash diagnosability.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_CAPTURE_DRAM=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64

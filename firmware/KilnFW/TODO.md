@@ -614,15 +614,44 @@ page. also add support for the temp sensors you currently have access to."
         check the file rather than trusting `$LASTEXITCODE`.
       - Erase a read dump or it reports on every boot:
         `python -m esptool --chip esp32s3 -p COM3 erase-region 0x6f0000 0x80000`
-      **KNOWN LIMITATION, not yet investigated**: in the decoded dump most
-      threads show an empty task name and the crashed-task entry reads
-      "Corrupted TCB data", while the backtraces themselves resolve
-      correctly (the crashing task's frame was exact). Suspected interaction
-      with task stacks that now live in PSRAM (see the DRAM entry above), or
-      with `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` being off. Backtrace recovery
-      — the thing that matters most — works; task-name attribution does not.
-      Worth chasing before relying on this to identify *which* task died in
-      a real spontaneous reboot.
+      **Task-name attribution — was broken, now FIXED (2026-08-20).** The
+      first working dump decoded with every thread showing `name: ''` and
+      the crashed task reading "Corrupted TCB data", with nonsense stack
+      figures (pointers printed into the PRIO/STACK columns). Backtraces
+      resolved, but nothing said WHICH task died — most of the value when
+      chasing a spontaneous reboot.
+      **Cause**: `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` was off, so the dump held
+      per-task stacks but not the TCBs, which live in .bss/heap. GDB was
+      reading memory that was not in the file.
+      **Fix**: `CONFIG_ESP_COREDUMP_CAPTURE_DRAM=y` (sdkconfig.defaults),
+      partition 512K -> 1024K to fit it — the dump grew 82080 -> 679200
+      bytes, so 512K would NOT have been enough.
+      **Verified on a real dump**: `Crashed task handle: 0x3fcc0b70, name:
+      'temp_crash'`, and the full table now reads correctly:
+      ```
+             TCB             NAME PRIO C/B  STACK USED/FREE
+      0x3fcc0b70       temp_crash      5/5         1280/752
+      0x3fcbb9f8  uart_owner_task      5/5         752/3340
+      0x3fcc0830             lvgl      4/4         592/7596
+      0x3fcee77c            tcpip    18/18         784/2796
+      ```
+      **PSRAM task stacks are fine** — checked, not assumed. The Kconfig
+      warning "sections located in external RAM will not be stored" is about
+      .bss/.data in external RAM, not task stacks, which are snapshotted per
+      task wherever they live. `lvgl` and `link_watchdog` (both created with
+      `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`) resolved
+      full correct backtraces. The DRAM fix cost nothing here.
+      **Two method traps that wasted cycles, worth avoiding next time:**
+      - Do NOT decode while the board is crash-looping. A fresh panic
+        rewrites the partition mid-read and yields corrupt or empty results
+        (seen as "Invalid core dump SHA256" and blank backtraces). Flash
+        clean firmware first — reflashing does NOT erase the dump — then
+        decode.
+      - `build/KilnCtrl.elf` must be the exact crashing image. Snapshot it
+        BEFORE rebuilding, and pass the snapshot path to espcoredump.
+      Cosmetic only: frame #0 of a task parked in ROM shows `0x400559e0 in
+      ?? ()` because no ROM ELF is installed for this chip; frames above it
+      resolve normally.
 
 ## 2. Web UI — Main / Dashboard page
 

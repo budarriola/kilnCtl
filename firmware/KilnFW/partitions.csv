@@ -78,8 +78,8 @@
 # ota_0        app,  ota_0,     0x210000, 0x200000  2048K  OTA slot A
 # ota_1        app,  ota_1,     0x410000, 0x200000  2048K  OTA slot B
 # pico_img     data, undefined, 0x610000, 0xE0000   896K  Pico-image relay staging
-# coredump     data, coredump,  0x6F0000, 0x80000   512K  panic/backtrace capture (see below)
-# spare                         0x770000..0x1000000 ~8.6M unused headroom (16 MB part)
+# coredump     data, coredump,  0x6F0000, 0x100000 1024K  panic/backtrace capture (see below)
+# spare                         0x7F0000..0x1000000 ~8.1M unused headroom (16 MB part)
 #
 # Fit arithmetic:
 #   otadata:  0x200000 + 0x002000 = 0x202000
@@ -87,8 +87,8 @@
 #             0x210000 + 0x200000 = 0x410000
 #   ota_1:    0x410000 + 0x200000 = 0x610000
 #   pico_img: 0x610000 + 0x0E0000 = 0x6F0000
-#   coredump: 0x6F0000 + 0x080000 = 0x770000
-#   spare:    0x770000 .. 0x1000000 (16 MB) = 0x890000 = 8,978,432 B ~= 8.6 MB
+#   coredump: 0x6F0000 + 0x100000 = 0x7F0000
+#   spare:    0x7F0000 .. 0x1000000 (16 MB) = 0x810000 = 8,454,144 B ~= 8.1 MB
 #   Even against the conservative 8 MB (0x800000) floor this table was
 #   designed for, 0x700000 < 0x800000 with ~1.0 MB to spare -- the layout does
 #   not depend on the 16 MB confirmation being right, per UPDATE_PROTOCOL.md.
@@ -103,8 +103,8 @@
 # reset and can be read back at leisure with espcoredump.py against the build
 # ELF -- no serial capture window to lose.
 #
-# SIZED AT 512K (0x80000), raised from 64K on 2026-08-20 after the path was
-# finally tested end to end with a deliberate crash. 64K DID NOT WORK. The
+# SIZED AT 1024K (0x100000). Raised 64K -> 512K -> 1024K on 2026-08-20 as the
+# path was actually tested rather than assumed. 64K DID NOT WORK. The
 # panic handler wrote nothing and the next boot reported
 # ESP_ERR_NOT_FOUND, i.e. the whole diagnostic was silently dead. Captured
 # from the USB-Serial-JTAG console (COM3) at the moment of the panic:
@@ -122,11 +122,20 @@
 # 64K was chosen originally by analogy with ESP-IDF's examples, which is the
 # mistake: the dump size scales with the number of tasks and the size of
 # their stacks, and this firmware runs a few dozen tasks (every UART bridge,
-# LVGL, the owners, HTTP handlers, safety link). 512K is generous on purpose
-# -- the flash above it is unused headroom that costs nothing, and a
-# too-small partition fails in the worst possible way: silently, at exactly
-# the moment the diagnostic was needed. subtype `coredump` (0x03) is the
-# reserved subtype
+# LVGL, the owners, HTTP handlers, safety link).
+#
+# Then 512K -> 1024K when CONFIG_ESP_COREDUMP_CAPTURE_DRAM was turned on
+# (sdkconfig.defaults). Without it the dump held only per-task stacks, so the
+# TCBs -- which live in .bss/heap -- were absent, and every decoded thread
+# came back with an empty task name and "Corrupted TCB data" (GDB reading
+# unmapped memory). Backtraces resolved, but nothing said WHICH task died,
+# which is most of the value when chasing a spontaneous reboot. CAPTURE_DRAM
+# adds .bss/.data/heap; ESP-IDF's own Kconfig help says to reserve at least
+# 128K more for it. 1024K is deliberately well past that -- the flash above
+# is unused headroom that costs nothing, and a too-small partition fails in
+# the worst possible way: silently, at exactly the moment the diagnostic was
+# needed. That is not hypothetical here; it is what 64K did.
+# subtype `coredump` (0x03) is the reserved subtype
 # esp_core_dump_* uses to find this partition by type+subtype scan, not by
 # name, so the partition label itself is cosmetic but kept as `coredump` for
 # readability. Placed in the same 0x6F0000..0x1000000 spare region as
@@ -194,4 +203,4 @@ otadata,      data, ota,       0x200000, 0x2000,
 ota_0,        app,  ota_0,     0x210000, 0x200000,
 ota_1,        app,  ota_1,     0x410000, 0x200000,
 pico_img,     data, undefined, 0x610000, 0xE0000,
-coredump,     data, coredump,  0x6F0000, 0x80000,
+coredump,     data, coredump,  0x6F0000, 0x100000,
