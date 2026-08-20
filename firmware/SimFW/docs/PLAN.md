@@ -127,11 +127,19 @@ A real SPI-mode bug was found and fixed in this pass: the PIO slave engine
 > **Decisions locked 2026-08-20 (user-confirmed):** USB link uses
 > `UnitTestFw`'s hardened UART protocol design (retry/dedup/task
 > registration), not bare kilnlink framing; CT coupling via isolation
-> transformers; the 8 DRDY/`~FAULT` lines are direct Pico GPIO, not expander
-> pins; the fixture switches the DUT's 12 V feed through its own relay
-> (brownout tests in scope); project name stays **SimFW**; scenarios are
-> YAML; GUI is Tk; the thermal model supports a configurable 1–4 zones
-> (default 3).
+> transformers (**ratio revised same-day, see below — still a decided
+> transformer-coupling approach, just not 1:1**); the 8 DRDY/`~FAULT` lines
+> are direct Pico GPIO, not expander pins; the fixture switches the DUT's
+> 12 V feed through its own relay (brownout tests in scope); project name
+> stays **SimFW**; scenarios are YAML; GUI is Tk; the thermal model supports
+> a configurable 1–4 zones (default 3).
+>
+> **Correction to that same locked decision, found while writing
+> `docs/BOM.md` (2026-08-20):** the "small 1:1 audio/isolation transformers"
+> language above was the user-confirmed decision at the time, but it is a
+> **design error**, not a stylistic detail — see §3.3 below for the
+> corrected ratio and the arithmetic behind it. The *decision to couple via
+> transformer* stands; the *1:1 ratio* does not.
 >
 > **Also decided 2026-08-20: `UnitTestFw` was a first attempt and gets
 > deleted** — all of it, including its embedded `UnitTestFixture.kicad_*`
@@ -415,13 +423,48 @@ milestone (section 10, M-A) with Saleae capture as the acceptance evidence.
 - Three GPIO, each running high-carrier PWM (~250 kHz) whose duty cycle is
   modulated by a 60 Hz sine table (DMA-paced, per-channel phase), then a
   2-pole RC low-pass on the fixture side.
-- **Coupling into J13/J15/J17 via small 1:1 audio/isolation transformers**
-  (decided). A real CT is an isolated,
-  floating AC source; a transformer reproduces that honestly *and* keeps the
-  fixture out of the `GND_Safty` domain for these channels. The AD8542 input
-  stages on the safety board set the amplitude target — the burden/divider
-  values must be read off `CurrentSense` sheets during implementation to size
-  the attenuation (open question, section 11).
+- **Coupling into J13/J15/J17 via a small step-up audio/isolation
+  transformer** (decided: transformer coupling; **ratio corrected
+  2026-08-20**, superseding the earlier "1:1" figure — see below). A real CT
+  is an isolated, floating AC source; a transformer reproduces that honestly
+  *and* keeps the fixture out of the `GND_Safty` domain for these channels.
+  The AD8542 input stages on the safety board set the amplitude target — the
+  burden/divider values must be read off `CurrentSense` sheets during
+  implementation to size the attenuation (open question, section 11).
+
+  **Ratio correction (2026-08-20, found while writing `docs/BOM.md`):** the
+  original locked decision (status header above, user-confirmed 2026-08-20)
+  named a **1:1** transformer. That was a real design error, not a wording
+  slip: at 1:1, this design's own Pico-drive ceiling caps the fixture at
+  roughly **31.5 A rms** on the safety board's 1 V/30 A CT model — fine for
+  the typical 10–25 A a resistive kiln element draws, but structurally
+  incapable of reaching the ADC's clipping boundary (**≈98 A rms**, traced
+  from `SaftyFW/docs/CURRENT_SENSE.md` §2: gain 0.715, clamp ≈4.6 V peak,
+  1 V/30 A CT), so the fixture could never exercise `CURRENT_FLAG_CLIPPED`
+  handling — one of the fixture's own stated purposes (section 1). The
+  corrected decision is **~3:1 step-up**, derived as:
+
+  ```
+  V_sec,pk (clip target)      ≈ 4.6 V   (CURRENT_SENSE.md §2, high confidence)
+  V_pri,pk (usable Pico drive) ≈ 1.5 V   (medium confidence, see caveat below)
+  n = V_sec,pk / V_pri,pk      ≈ 3.07  →  call it 3:1
+  ```
+
+  The 1.5 V peak primary-drive figure is a **medium-confidence estimate, not
+  a measured or firmware-confirmed number** — it assumes a practical usable
+  swing of ~91% of the theoretical ±1.65 V (half the 3.3 V logic rail) that
+  the PWM/RC chain above can produce before a DC-blocking cap. The real
+  ceiling depends on whatever modulation-index cap `ct_wave_pwm.c`'s
+  amplitude-to-duty mapping ends up using — that mapping is currently an
+  explicit `TODO(M-D calibration)` **IDENTITY placeholder** (M-D, section 10),
+  so this number is not yet firmware-confirmed either way. Candidate part
+  (also unconfirmed — its exact turns/impedance ratio has not been read off
+  a datasheet in this pass): Triad Magnetics TY-300P, per `docs/BOM.md` §3 —
+  confirm the ratio before ordering, and see that section for a same-cost
+  fallback (1:1 transformer + a ×3 op-amp gain stage) if the part's real
+  ratio doesn't hold up. Full sizing derivation, confidence breakdown, and
+  the CT sizing math live in `docs/BOM.md` §3; this paragraph is the summary
+  a future session should trust for the *decision*, not the show-work.
 - **Programmable per channel:** amplitude (in simulated amps, fixture converts
   via calibration table), phase, plus distortion knobs — DC offset, clipping,
   dropout (half-cycle skipping, as a failing SSR would produce), and 50 Hz
@@ -1150,13 +1193,17 @@ than left to be inferred.
 2. **CT input stage transfer function** — read the AD8542 `CurrentSense`
    sheets to size the transformer/attenuator so "N amps simulated" maps to
    the right burden voltage; then calibrate against `CURRENT_SENSE.md` §5's
-   commissioning procedure. **Partially resolved:** `docs/HARDWARE.md` §3.3
-   now records the target gain/full-scale figures read off
-   `CURRENT_SENSE.md` §2 (gain 0.715, ≈98 A rms for a 1 V/30 A CT). **Still
-   open:** the transformer itself is unselected/unsized (§5's own table
-   marks it "Open"), and `wave_owner.c`'s amplitude mapping is currently an
-   IDENTITY placeholder pending the real calibration procedure — see M-D's
-   status in section 10. (M-D)
+   commissioning procedure. **Further resolved 2026-08-20 (`docs/BOM.md`
+   §3):** the target gain/full-scale figures (gain 0.715, ≈98 A rms for a
+   1 V/30 A CT) are confirmed against `CURRENT_SENSE.md` §2 directly, and
+   the transformer ratio decision is corrected from 1:1 to **~3:1**
+   step-up — see §3.3 above for the full arithmetic and its confidence
+   breakdown. **Still open:** the ~1.5 Vpk usable-Pico-drive figure behind
+   that ratio is a medium-confidence estimate, not measured or
+   firmware-confirmed; the candidate part's (Triad TY-300P) exact turns
+   ratio is unconfirmed against its datasheet; and `wave_owner.c`'s
+   amplitude mapping is still an IDENTITY placeholder pending the real
+   calibration procedure — see M-D's status in section 10. (M-D)
 3. ~~DRDY/`~FAULT` over I2C latency~~ — **resolved 2026-08-20:** direct Pico
    GPIO (3.4/3.6); no I2C latency question remains.
 4. **Does the ESP's driver ever use write-then-read within one CS assertion**
@@ -1167,17 +1214,28 @@ than left to be inferred.
    distinct and unanswered. This is explicitly named as part of M-A's exit
    criterion, so M-A cannot close without it either way. (M-A)
 5. ~~DUT power control~~ — **resolved 2026-08-20:** yes, a fixture relay in
-   the 12 V feed, MCP23017 #1-driven (3.4); `power_blip` is in scope. Still
-   to size: relay/high-side switch rating vs the board's inrush. **Newly
-   discovered while writing `docs/HARDWARE.md` (§0 item 6): a single relay
-   cannot brown out the whole DUT.** The main board has *two* independent
-   12 V inputs — J18 (main domain) and J19 (safety domain), each with its
-   own TVS — but the current design (`EXP1_PIN_DUT_POWER`, `i2c_owner.c`) is
-   one MCP23017 output bit driving one relay. Unless the bench operator
-   wires both J18 and J19 from a common point downstream of that single
-   relay, `power_blip`-class scenarios brown out at most whichever domain
-   the fixture actually feeds — not something PLAN.md or the code states
-   explicitly today. Flagged for resolution before M-E; see
+   the 12 V feed, MCP23017 #1-driven (3.4); `power_blip` is in scope.
+   **One-vs-two-relay question further resolved 2026-08-20
+   (`docs/BOM.md` §6): two relays, not one.** The main board has *two*
+   independent 12 V inputs — J18 (main domain) and J19 (safety domain) —
+   with no shared copper downstream (confirmed: their bulk caps live on
+   different schematic sheets, `/5V Regulator/` vs `/SaftyRegulator/`). A
+   single relay bridging both downstream of itself would bond `GND_Main`
+   and `GND_Safty` through the shared 12 V return, undermining the
+   isolation the rest of the fixture is built to preserve — so the design
+   uses two independent relays, each on its own bench-supply channel, which
+   also lets scenarios brown out one domain independently of the other.
+   **Not yet implemented in code:** `i2c_owner.c` still exposes only
+   `EXP1_PIN_DUT_POWER` (one bit); a second named MCP23017 output is needed
+   (spare capacity exists, `docs/HARDWARE.md` §3.7) — a firmware follow-on,
+   not a parts gap. **Still genuinely open, not just an estimate needing a
+   part:** relay inrush rating vs the board's actual inrush has not been
+   measured. `docs/BOM.md` §6 gives an estimate — ~60 A peak / ~190 µs decay
+   from ~940 µF per-domain bulk capacitance (confirmed via
+   `get_kicad_component` on C9/C10/C53/C61) and an *assumed* ~0.2 Ω total
+   source+ESR resistance — but that source-resistance figure is not
+   measured, so treat the 60 A/190 µs numbers as a planning estimate only,
+   pending a scope/current-probe capture at first power-on. See
    `docs/HARDWARE.md` §0 item 6 and §3.7. (M-E)
 6. **Fixture hardware form** — how long does the breadboard harness survive
    before a real `hardware/SimFixture/` KiCad board is worth it? Revisit
@@ -1203,17 +1261,33 @@ than left to be inferred.
    isolator side unpowered. Resolve at bring-up step 5–6 (section 14),
    alongside the ground-domain check that already lives there. (M-A/pre-M-A
    bring-up)
-10. **NEW — kilnsim's own CLI is missing subcommands `docs/HARDWARE.md`'s
-    bring-up checklist (§6) needs.** No `kilnsim io`/`kilnsim ct`/
-    `kilnsim relay` subcommand exists yet in `tools/PcTools/src/kilnsim/
-    cli.py` — the MCP tools (`io_write`/`ct_set_amps`/`relay_get_edges`,
-    etc.) exist as the interim path. Not blocking any milestone by itself,
-    but worth closing before a real bring-up session so the checklist's own
-    commands actually exist. **§13.2's `kilnsim selftest` loopback mode
-    specifically is under active construction as of this pass** (a separate,
-    concurrent session) — do not assume its shape or completeness from this
-    document; check its own commit history rather than this line. (pre-M-A
-    bring-up convenience)
+10. ~~kilnsim's own CLI is missing subcommands `docs/HARDWARE.md`'s bring-up
+    checklist (§6) needs~~ — **resolved 2026-08-20:** `tools/PcTools/src/
+    kilnsim/cli.py` now has `io`, `ct`, `relay`, `selftest`, `fault-list`,
+    `fault-cancel`, and `fault-fire` subcommand groups; `docs/HARDWARE.md`
+    §6 and `docs/BENCH_RUNBOOK.md` have been updated to use them instead of
+    the MCP-only workaround. §13.2's `kilnsim selftest` loopback mode is
+    implemented and its own help text is explicit that hardware-only checks
+    (SPI master loopback, CT→ADC loopback) report `NOT_RUNNABLE`, never
+    faked — still worth re-checking its exact behavior against its own
+    source before leaning on it, since it was landing concurrently with this
+    pass. (pre-M-A bring-up convenience)
+11. **NEW — `kilnsim`'s USB auto-detect matches a placeholder VID:PID, not
+    one `SimFW` actually claims.** `tools/PcTools/src/kilnsim/link.py`
+    defines `SIMFW_VID_PID = "2E8A:000A"` — Raspberry Pi's generic
+    example-board CDC identifier, explicitly commented as a placeholder "until
+    `firmware/SimFW/docs/HARDWARE.md` documents a real one." With multiple
+    RP2040-based Picos on the bench at once — the fixture Pico, the
+    `spi_test_master` reference Pico, and the safety processor's Debug
+    Probe — auto-detection could latch onto the wrong device, silently
+    talking to (or trying to flash/reset) something other than the fixture.
+    `docs/BENCH_RUNBOOK.md` already warns operators to pass `--port COMx`
+    explicitly whenever more than one Pico is attached (§1.2), which is most
+    of a real bench session. **Not fixed here** — `tools/PcTools` is being
+    worked on concurrently by another session; this item exists so a real
+    VID:PID gets claimed and swapped in before it causes a bench mistake, not
+    just worked around by operator discipline every time. (pre-M-A bring-up
+    hazard)
 
 ---
 

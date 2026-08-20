@@ -64,16 +64,25 @@ Read this section first.
    feed is wired**, since getting this wrong means either back-feeding an
    unintended 3.3 V rail or leaving the isolator side unpowered.
 
-6. **Open design gap: the DUT-power relay (PLAN.md 3.4, "decided") is a
-   single MCP23017 output bit (`EXP1_PIN_DUT_POWER`, `i2c_owner.c`), but the
-   main board has *two independent* 12 V inputs** — J18 (main domain) and
-   J19 (safety domain), each with its own TVS, per `firmware/KilnFW/docs/
-   HARDWARE.md`'s Power section. A single fixture relay can only brown out
-   the whole DUT if the bench operator wires both J18 and J19 from a common
-   point *downstream* of that one relay — nothing in PLAN.md or the code
-   says this explicitly. **Flagged for resolution before M-E** (§6, step 9);
-   until resolved, `power_blip`-class scenarios brown out at most the domain
-   the fixture is actually wired to.
+6. **Resolved 2026-08-20 (`docs/BOM.md` §6): two relays, not one.** The
+   design gap this item originally flagged — the DUT-power relay (PLAN.md
+   3.4, "decided") being a single MCP23017 output bit
+   (`EXP1_PIN_DUT_POWER`, `i2c_owner.c`) driving one relay, while the main
+   board has *two independent* 12 V inputs, J18 (main domain) and J19
+   (safety domain), each with its own TVS and no shared copper downstream
+   (confirmed: `C9`/`C10` bulk caps on `/5V Regulator/`, `C53`/`C61` on
+   `/SaftyRegulator/`, different sheets) — is resolved in favor of **two
+   independent relays**, not a common feed downstream of one. A single relay
+   bridging both domains would bond `GND_Main` and `GND_Safty` through the
+   shared 12 V return, undermining the isolation the rest of the fixture
+   exists to preserve — the same failure mode step 5's ground-continuity
+   check exists to catch, so better not to build it in. Two relays also let
+   test scenarios brown out one domain independently of the other (a real
+   test case: `SaftyFW` noticing a main-side power loss while its own domain
+   stays up, and vice versa). **Firmware follow-on, out of scope for this
+   document:** `i2c_owner.c` currently exposes one control bit; a second
+   named MCP23017 pin is needed (spare capacity exists per §3.7) — not done
+   here, flagged for whoever picks up the code change.
 
 7. **Two things checked and found NOT to be problems, recorded so nobody
    re-litigates them:**
@@ -254,10 +263,13 @@ safety daughterboard's **J1** (no reversal, unlike J6) —
 
 Direction split across the isolator: 3 channels board→fixture (`CLK`,
 `MOSI`, `CS0`), 3 channels fixture→board (`MISO`, `thermoDrdy`,
-`thermoFault`) — check this 3/3 split against whatever isolator part is
-actually purchased (see §5); some 6-channel parts are fixed at a different
-forward/reverse split (e.g. 4/2) and would not fit this bus without
-re-routing a channel.
+`thermoFault`). **Resolved 2026-08-20 (`docs/BOM.md` §2):** no common
+6-channel isolator ships with a fixed 3/3 split (TI's family tops out at 4
+channels/package, fixed at 4/0, 3/1, or 2/2) — so the design uses **two TI
+ISO7740DWR** (quad, all-4-channels-same-direction), one wired for the 3
+board→fixture signals and one for the 3 fixture→board signals, one spare
+channel on each. This sidesteps the fixed-split problem entirely rather than
+forcing a mismatched part.
 
 ### 3.3 Fixture → CT jacks (J13/J15/J17)
 
@@ -329,15 +341,20 @@ the as-built float.
 
 | From | Via | To |
 |---|---|---|
-| Bench supply | fixture power-in connector → fixture relay/high-side switch (`EXP1_PIN_DUT_POWER`, exp1 pin 7) → fixture power-out connector | J18 (main 12 V in) **and/or** J19 (safety 12 V in) |
+| Bench supply (per-domain channel, or a dual-output supply) | fixture power-in connector → fixture relay #1 (`EXP1_PIN_DUT_POWER`, exp1 pin 7, existing) → fixture power-out connector | J18 (main 12 V in) |
+| Bench supply (independent channel) | fixture power-in connector → fixture relay #2 (**new control bit needed, not yet named in `i2c_owner.c`** — spare pins exist) → fixture power-out connector | J19 (safety 12 V in) |
 
-**Open gap (§0 item 6):** only one relay/one control bit exists in the
-current design, but J18 and J19 are two independent inputs, each with its
-own TVS (`firmware/KilnFW/docs/HARDWARE.md`, Power section). To brown out
-the *whole* DUT with a single fixture relay, both J18 and J19 must be wired
-from a common point downstream of that relay by the bench operator — not
-something the code or PLAN.md currently states. Resolve before bring-up
-step 9 (§6).
+**Resolved (§0 item 6, `docs/BOM.md` §6): two independent relays, not one
+relay with a common downstream feed.** A single relay bridging both domains
+would bond `GND_Main` and `GND_Safty` through the shared 12 V return,
+defeating the isolation the rest of the fixture preserves. `i2c_owner.c`
+today implements only relay #1's control bit; relay #2 is a firmware
+follow-on (a second named MCP23017 output, capacity already exists per this
+section's spare-pin count), not yet wired in code. **Inrush sizing is a
+separate, still-open item** — see §5's DUT power relay row and
+`docs/BOM.md` §6's estimate (~60 A / ~190 µs from ~940 µF per-domain bulk
+capacitance and an assumed ~0.2 Ω source resistance) — this is an estimate
+pending a bench scope/current-probe capture, not a measured figure.
 
 ---
 
@@ -348,8 +365,8 @@ Per PLAN.md 3.5, restated against the pin map above:
 | Fixture signal group | Domain | Crosses via |
 |---|---|---|
 | I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, relay sense K1/K2/K3/K5, `Fault` line sense, J20 IO_3/IO_4, debug UART, DUT-power relay control | GND_Main | — (native) |
-| SPI bus B, `DRDY_SAFETY`, `FAULT_SAFETY` | GND_Safty | 6-channel digital isolator (ISO7741-class), powered from J7's safety-side rail (§0 item 5) on the isolated side |
-| 3× CT channels | floating (neither domain) | isolation transformer, 1:1, per channel |
+| SPI bus B, `DRDY_SAFETY`, `FAULT_SAFETY` | GND_Safty | two quad TI ISO7740DWR digital isolators (revised 2026-08-20 from a single 6-channel ISO7741-class part — see §3.2), powered from J7's safety-side rail (§0 item 5) on the isolated side |
+| 3× CT channels | floating (neither domain) | isolation transformer, **~3:1 step-up** (revised 2026-08-20 from an earlier 1:1 decision — a 1:1 ratio cannot reach the ADC's clipping boundary; see `PLAN.md` §3.3 and `docs/BOM.md` §3 for the arithmetic), per channel |
 | K4 relay sense | GND_Safty at the contact, GND_Main at the MCP23017 | optocoupler in the wetting circuit (§3.4) |
 | E-stop | GND_Safty at J1 | optoMOS, GND_Main-side control |
 
@@ -364,11 +381,11 @@ exists specifically to verify this before the DUT is ever touched.
 
 | Part | Qty | Role | Sizing status |
 |---|---|---|---|
-| 6-channel digital isolator, ISO7741-class | 1 | SPI bus B (4 ch) + `DRDY_SAFETY`/`FAULT_SAFETY` (2 ch) | Direction split must be 3 board→fixture / 3 fixture→board (§3.2) — confirm against the specific part's fixed channel directions before ordering |
-| CT isolation transformer, 1:1 audio/isolation | 3 | One per CT channel, between the RC-filtered PWM output and the J13/J15/J17 jack | **Open (PLAN.md §11 item 2):** transfer function not sized — must be read off the AD8542 `CurrentSense` sheets / `SaftyFW/docs/CURRENT_SENSE.md` §2 (gain 0.715, full-scale ≈98 A rms for a 1 V/30 A CT or ≈326 A rms for a 1 V/100 A CT) so "N amps commanded" maps to a plausible CT secondary voltage, not an arbitrary one |
-| Relay-sense wetting circuit | 5 | One per relay (K1/K2/K3/K5 direct, K4 through an opto stage) into MCP23017 #1 inputs | Not sized; a small voltage source + resistor per contact, per PLAN.md 3.4 |
-| E-stop optoMOS | 1 | In series with J1's E-stop loop, driven by `EXP1_PIN_ESTOP_DRIVE` | Not sized |
-| DUT 12 V power relay / high-side switch | 1 (see §0 item 6 re: whether 1 is enough) | Fixture's own 12 V feed to J18 (and/or J19) | **Open (PLAN.md §11 item 5):** inrush rating vs the board's actual inrush not measured |
+| Digital isolator, quad unidirectional, TI ISO7740DWR (revised 2026-08-20; was "6-channel ISO7741-class, qty 1") | 2 | One for the 3 board→fixture channels (`CLK`/`MOSI`/`CS0`), one for the 3 fixture→board channels (`MISO`/`DRDY_SAFETY`/`FAULT_SAFETY`), 1 spare channel each | **Resolved (§3.2, `docs/BOM.md` §2):** no 6-channel part ships with a fixed 3/3 split, so two single-direction quad parts are used instead. In stock, Mouser 595-ISO7740DWR |
+| CT isolation transformer, **~3:1 step-up** audio/isolation (revised 2026-08-20; was 1:1) | 3 | One per CT channel, between the RC-filtered PWM output and the J13/J15/J17 jack | **Partially resolved (PLAN.md §11 item 2):** target transfer function sized — `SaftyFW/docs/CURRENT_SENSE.md` §2 (gain 0.715, full-scale ≈98 A rms for a 1 V/30 A CT or ≈326 A rms for a 1 V/100 A CT) against an estimated ~1.5 Vpk usable Pico drive gives ~3:1 (medium confidence — see `docs/BOM.md` §3). **Still open:** the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its datasheet, and `ct_wave_pwm.c`'s amplitude mapping is still an `IDENTITY` placeholder (M-D) |
+| Relay-sense wetting circuit | 5 | One per relay (K1/K2/K3/K5 direct, K4 through an opto stage) into MCP23017 #1 inputs | **Resolved (`docs/BOM.md` §4):** no dedicated wetting supply needed — MCP23017's internal 100 kΩ pull-ups (`GPPU`) plus a 1 kΩ series resistor per contact (K1/K2/K3/K5 direct to `GND_Main`; K4 through the 4N35 opto stage's phototransistor, LED side wetted from J7's safety rail). Vishay 4N35 for K4's opto, per `docs/BOM.md` §5 |
+| E-stop optoMOS | 1 | In series with J1's E-stop loop, driven by `EXP1_PIN_ESTOP_DRIVE` | **Resolved (`docs/BOM.md` §5):** Littelfuse/IXYS CPC1017N — loop current ≈3.3 mA (3.3 V / 1 kΩ pull-up) against a part rated for 100+ mA continuous in this family, comfortable margin |
+| DUT 12 V power relay | **2** (resolved 2026-08-20, §0 item 6 — one per domain, not one shared) | Fixture's own 12 V feed to J18 (relay #1) and J19 (relay #2) independently | Part: Omron G5LE-14-DC12 (10 A/250 VAC continuous, already used elsewhere on the main board), per `docs/BOM.md` §6. **Still open (PLAN.md §11 item 5):** inrush rating vs the board's actual inrush not measured — `docs/BOM.md` §6 estimates ~60 A / ~190 µs from ~940 µF per-domain bulk capacitance and an assumed ~0.2 Ω source resistance; this is an estimate, not a measurement, and needs a scope/current-probe capture at first power-on |
 | MCP23017 | 2 | 0x20 (fixed-role pins) and 0x21 (spare) on I2C0 | Sized; already in code |
 | PCA9685 (optional) | 0–1 | PWM/LED stimulus, not required for the base feature set | Not needed unless a test calls for analog-ish stimulus |
 
@@ -379,7 +396,11 @@ exists specifically to verify this before the DUT is ever touched.
 Expanded from PLAN.md section 14. Each step's pass criterion is concrete;
 run the listed `kilnsim` CLI command or MCP tool where one exists today (from
 `tools/PcTools/src/kilnsim/cli.py` and `mcp_server.py` — commands not yet
-implemented are called out as gaps rather than invented).
+implemented are called out as gaps rather than invented). **This stays a
+concise per-step checklist, not the procedure** — for the actual first
+bench session (pre-flight hardware list, wiring order, troubleshooting
+tables, what to record afterward), follow `docs/BENCH_RUNBOOK.md`, which
+expands this same ten-step order in full.
 
 - [ ] **Step 1 — Pico alone: USB CDC + protocol + heartbeat.**
   Pass: `kilnsim state` connects (auto-detected port or `--port`), returns a
@@ -390,28 +411,34 @@ implemented are called out as gaps rather than invented).
 - [ ] **Step 2 — Expanders on I2C: read/write, interrupt lines if used.**
   Pass: both MCP23017s ACK on I2C0 (0x20, 0x21); writing then reading back a
   spare, non-reserved pin on either expander round-trips.
-  Command: MCP tools `io_write` / `io_read` (`mcp_server.py`) — **no `kilnsim`
-  CLI subcommand exists for raw I/O yet**; the CLI's own subcommand list
-  (`state`/`preset`/`fault`/`estop`/`power`/`run`/`monitor`) has no `io`
-  entry. Use `sim_raw_command` or the MCP `io_write`/`io_read` tools, or add
-  the CLI subcommand before this bench session.
+  Command: `kilnsim io write <pin> on|off --exp 0|1` /
+  `kilnsim io read <pin> --exp 0|1` — the CLI's `io` group now exists
+  (`tools/PcTools/src/kilnsim/cli.py`); this was the MCP-only workaround
+  noted in an earlier revision of this checklist, now stale.
 
 - [ ] **Step 3 — SPI A loopback (scripted master on spare pins): register
   machine correct.**
   Pass: a scripted transaction against a channel returns the expected
   register image with zero underruns.
-  Command: PLAN.md 13.2's `kilnsim selftest` mode **is not implemented yet**
-  (no such subcommand in `cli.py`). Interim: inspect the SPI
-  transaction/underrun counters in the telemetry frame (`kilnsim state`,
-  PLAN.md 5.3) before and after a manual scripted burst.
+  Command: `kilnsim selftest` (PLAN.md §13 layer-2 loopback self-check) now
+  exists and covers protocol round-trip/command-group reachability/event
+  continuity, but its own help text is explicit that hardware-only checks
+  (SPI master loopback, CT→ADC loopback) report `NOT_RUNNABLE`, never faked
+  — it does not replace this step. For the real M-A proof (a second Pico as
+  reference SPI master, sweep + Saleae capture), follow
+  `docs/BENCH_RUNBOOK.md` §4 step 3 rather than duplicating that procedure
+  here. Cross-check via `kilnsim state`'s SPI transaction/underrun counters
+  before and after.
 
 - [ ] **Step 4 — CT synthesis into a scope/DMM through the transformer:
   waveform + levels.**
   Pass: commanded amplitude produces a clean 60 Hz waveform at the jack
   within the expected voltage range for the fitted transformer/CT
   calibration.
-  Command: MCP tool `ct_set_amps(channel, amps)` (`mcp_server.py`) — **no
-  `kilnsim ct` CLI subcommand exists yet.**
+  Command: `kilnsim ct amps <channel> <amps>` then `kilnsim ct state
+  <channel>` — the CLI's `ct` group now exists; judge on waveform
+  cleanliness, not absolute amplitude (`ct_wave_pwm.c`'s amplitude mapping is
+  still an `IDENTITY` placeholder pending M-D calibration).
 
 - [ ] **Step 5 — GROUND-DOMAIN CHECK BEFORE FIRST DUT CONTACT. Do not skip,
   do not reorder.**
@@ -446,9 +473,9 @@ implemented are called out as gaps rather than invented).
   Pass: commanding K1/K2/K3/K5/K4 through `kilnctrl` produces a matching edge
   in the fixture's relay-edge log within one debounce window (~24 ms worst
   case, `mcp23017.h`).
-  Commands: `mcp__kilnctrl__io_set_relay` (DUT side) and MCP tool
-  `relay_get_edges` / `relay_get_states` (fixture side) — **no `kilnsim relay`
-  CLI subcommand exists yet.**
+  Commands: `mcp__kilnctrl__io_set_relay` (DUT side) and `kilnsim relay
+  states` / `kilnsim relay edges --since-seq N` (fixture side) — the CLI's
+  `relay` group now exists.
 
 - [ ] **Step 9 — E-stop + fault line + DUT power relay, one at a time.**
   Pass (E-stop): `kilnsim estop open` then `kilnsim estop closed` produces
@@ -456,8 +483,11 @@ implemented are called out as gaps rather than invented).
   Pass (fault line): a fault forced on the DUT's `Fault` GPIO is visible in
   the fixture's sense state.
   Pass (DUT power): `kilnsim power cycle --off-ms 500` reboots the DUT and
-  its telemetry shows the gap — **first confirm §0 item 6's J18/J19 wiring
-  question is resolved**, or this step only proves one domain browns out.
+  its telemetry shows the gap. **§0 item 6 (J18/J19, one relay vs two) is
+  design-resolved (two relays) but not yet implemented** — `i2c_owner.c`
+  today drives only one relay/one MCP23017 bit, so until the second relay's
+  control bit is added, this step only proves the wired domain browns out;
+  note which domain in the bench log (§6 of `docs/BENCH_RUNBOOK.md`).
   Commands: `kilnsim estop open|closed`, `kilnsim power on|off|cycle
   [--off-ms N]`.
 

@@ -48,12 +48,14 @@ realistic plan.
 - **Saleae logic analyzer** — required for M-A's actual exit criterion (a
   capture, not just a pass/fail table). ROADMAP.md records one was available
   and used on this bench 2026-08-18, so it should already be in the kit.
-- **The built fixture hardware itself.** `firmware/SimFW/docs/BOM.md` does
-  **not exist yet** — there is no bill of materials or built harness to pick
-  up. This session's realistic ceiling is therefore the fixture Pico +
-  reference-master Pico + a hand-wired handful of jumpers for M-A, not a
-  populated fixture board. If a breadboard/protoboard harness has been built
-  since this line was last reviewed, update this paragraph and section 7.
+- **The built fixture hardware itself.** `firmware/SimFW/docs/BOM.md` now
+  exists (a first-pass, not-yet-ordered bill of materials — see its own
+  status header for what's confirmed-orderable vs. still flagged) but **no
+  parts have been ordered and no harness has been built from it as of this
+  review.** This session's realistic ceiling is therefore still the fixture
+  Pico + reference-master Pico + a hand-wired handful of jumpers for M-A, not
+  a populated fixture board. If parts have since been ordered or a
+  breadboard/protoboard harness built, update this paragraph and section 7.
 - **Cables:** USB (fixture Pico CDC + reference-master Pico CDC + Debug
   Probe), SWD ribbon/leg wires, jumper wires for the SPI-bus-A harness
   between the two Picos (6 signals + GND, see §2 of
@@ -303,10 +305,11 @@ With the bring-up jumper (if one is fitted) **OUT**:
    continuity here means the fixture has become an unintended ground strap
    between the main board's two isolated domains — **ABORT** per section 3,
    do not connect to the real board until this is resolved.
-2. Verify isolator orientation (the 6-channel digital isolator carrying SPI
-   bus B + `DRDY_SAFETY`/`FAULT_SAFETY`) and CT transformer orientation
-   against `docs/HARDWARE.md` §4's isolation boundary map, if that hardware
-   is populated this session.
+2. Verify isolator orientation (the two quad digital isolators — TI
+   ISO7740DWR, one per direction — carrying SPI bus B + `DRDY_SAFETY`/
+   `FAULT_SAFETY`, per `docs/HARDWARE.md` §3.2) and CT transformer
+   orientation against `docs/HARDWARE.md` §4's isolation boundary map, if
+   that hardware is populated this session.
 3. **Resolve the J7 pin-1 contradiction before wiring the isolated-side
    supply.** `firmware/KilnFW/docs/HARDWARE.md` says J7 pin 1 is "no
    connect"; `firmware/SaftyFW/docs/HARDWARE.md` §8 says the same physical
@@ -407,13 +410,17 @@ on `mcp__kilnctrl__safety_get_status`.
 **Pass (fault line):** a fault forced on the DUT's `Fault` GPIO shows up in
 `kilnsim io fault-line`'s reading.
 **Pass (DUT power):** the power cycle reboots the DUT and its telemetry
-shows the gap. **First confirm the J18/J19 wiring question is resolved** —
-`docs/HARDWARE.md` §0 item 6: the fixture's single MCP23017-driven relay can
-only brown out one of the main board's *two* independent 12 V inputs (J18
-main-domain, J19 safety-domain) unless the bench operator has deliberately
-wired both from a common point downstream of that one relay. If that wiring
-hasn't been done, this step only proves one domain browns out — note which
-domain in your bench log (section 6).
+shows the gap. **The J18/J19 question is design-resolved but not yet
+implemented** — `docs/HARDWARE.md` §0 item 6: the board's two independent
+12 V inputs (J18 main-domain, J19 safety-domain) need *two independent*
+relays, not one relay with the two domains commoned downstream of it (that
+would bond `GND_Main` and `GND_Safty` through the shared 12 V return and
+defeat the fixture's isolation — do **not** wire it that way even as a
+bench expedient). Today's code (`i2c_owner.c`) only drives one relay/one
+domain; a second relay's control bit is a firmware follow-on that has not
+landed. Until it does, this step only proves whichever single domain the
+fixture is actually wired to browns out — note which domain in your bench
+log (section 6).
 
 ### Step 10 — First closed-loop firing attempt
 
@@ -470,7 +477,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 |---|---|
 | No waveform at all | PWM GPIO not wired, RC filter component missing/wrong values, or `wave_owner` mode is still MODEL (not MANUAL) and the thermal model has no simulated current on that zone yet — set `ct mode <ch> manual` first |
 | Waveform present but wildly wrong amplitude | Expected — calibration is an identity placeholder (`TODO(M-D calibration)`), not a fixture fault; do not chase this as a bug this session |
-| Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built/sized (`docs/PLAN.md` §11 item 2, open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
+| Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built (ratio decided as ~3:1 step-up, `docs/PLAN.md` §3.3/§11 item 2, but the physical coupling network has not been built — still open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
 
 ### Isolator / K4 / relay-sense-wetting-circuit symptoms
 
