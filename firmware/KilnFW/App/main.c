@@ -206,6 +206,41 @@ void app_main(void)
     // below for when the backlog actually flushes.
     uart_log_bridge_early_init();
 
+    // --- Reset-reason instrumentation (TODO.md 6089 open item, 2026-08-20) --
+    // The board has been seen rebooting spontaneously on the bench with no
+    // panic text visible over the log-bridge channel (the panic handler
+    // writes straight to the USB-Serial-JTAG console, bypassing
+    // esp_log_set_vprintf/uart_log_bridge entirely). This line survives
+    // that: whatever the cause, the NEXT boot logs it here, queued by
+    // uart_log_bridge_early_init() above so it reaches the PC link even
+    // before Wi-Fi/UART bring-up finishes. Logged at ERROR so it is never
+    // filtered out by a lower default log level, and unconditionally (not
+    // just on unexpected reasons) so a normal power-cycle/deliberate reset
+    // boot establishes the "this is what a clean boot's line looks like"
+    // baseline for comparison.
+    {
+        esp_reset_reason_t rr = esp_reset_reason();
+        const char *rr_name = "UNKNOWN";
+        switch (rr) {
+            case ESP_RST_UNKNOWN:    rr_name = "UNKNOWN"; break;
+            case ESP_RST_POWERON:    rr_name = "POWERON"; break;
+            case ESP_RST_EXT:        rr_name = "EXT"; break;
+            case ESP_RST_SW:         rr_name = "SW"; break;
+            case ESP_RST_PANIC:      rr_name = "PANIC"; break;
+            case ESP_RST_INT_WDT:    rr_name = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT:   rr_name = "TASK_WDT"; break;
+            case ESP_RST_WDT:        rr_name = "WDT"; break;
+            case ESP_RST_DEEPSLEEP:  rr_name = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT:   rr_name = "BROWNOUT"; break;
+            case ESP_RST_SDIO:       rr_name = "SDIO"; break;
+            default: break;
+        }
+        ESP_LOGE(TAG, "esp_reset_reason=%d (%s); free_heap=%u free_internal=%u free_spiram=%u",
+                 (int)rr, rr_name, (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+
     // --- ESP32-S3 internal die-temperature sensor (TODO.md 10.7) -----------
     // Independent of every other peripheral here -- no bus, no GPIO, nothing
     // to share or serialize against -- so it comes up this early rather than

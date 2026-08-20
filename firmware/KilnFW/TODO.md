@@ -6086,6 +6086,73 @@ queue set in place) — full migration, not a patch.
       than claimed fixed. Next step: capture a raw (non-log-bridge) serial
       trace across one of these resets to get the panic reason before
       re-attempting this entry's end-to-end verification.
+      **Follow-up pass (2026-08-20), root-cause attempt — NOT REPRODUCED,
+      instrumentation now in place.** Two pieces of new evidence:
+      1. **`app_main()` now logs `esp_reset_reason()` at ERROR level as the
+         very first line after `uart_log_bridge_early_init()`**
+         (`App/main.c`, right before the die-temp-sensor bring-up), printing
+         the enum name plus free heap/internal/SPIRAM. Verified working: a
+         deliberate JTAG reset (`debug_reset esp run`) produced
+         `esp_reset_reason=3 (SW); free_heap=8602544 free_internal=248419
+         free_spiram=8386156` at t=1325ms on the raw USB-Serial-JTAG console
+         (COM3) — reached before the log-bridge queue has any chance to be
+         under pressure, so it will survive on the NEXT boot regardless of
+         what caused this one to end, panic included (a panic dump itself
+         still bypasses the log bridge, but this line is emitted going
+         *into* app_main on the reboot that follows, not during the crash).
+      2. **Found the raw USB-Serial-JTAG console port**: COM3 (VID:PID
+         303A:1001, Espressif's native USB-Serial-JTAG descriptor;
+         `list_serial_ports` scores it -55 as *unsuitable for the PC-link
+         UART*, which is a separate scoring question from "is this the debug
+         console" — it is). Captured continuously with a small pyserial
+         script (`tools/PcTools/.venv/Scripts/python.exe`, 115200 8N1,
+         timestamped line-by-line) run in the background while driving the
+         board. This channel receives the *same* `ESP_LOGx` output as the
+         log-bridge (confirmed: `board_temps`/`wifi`/`app_main` lines appear
+         on both COM3 and `get_device_log` with matching uptimes) plus
+         whatever the panic handler or ROM bootloader print directly — i.e.
+         it is a strict superset of the log-bridge view and the right place
+         to have been looking for the missing panic text.
+      **Reproduction attempt against Hypothesis 1** (PSRAM-stacked bridge
+      tasks scheduled during a cache-disabled NVS-write window): drove
+      `thermo_set_cj_offset` (9 writes across ch 0-2), `safety_set_poll_period`
+      (6 writes, 500→100ms and back), and repeated
+      `wifi_add_network`/`wifi_forget` cycles against a fake SSID (6 add/forget
+      pairs) — each an `nvs_set*`+`nvs_commit`, i.e. exactly the cache-disabled
+      window the hypothesis needs — concurrently with 6 parallel HTTP request
+      threads hammering `/` and `/api/state` on the softAP for a combined
+      ~3.5 minutes of sustained load (two back-to-back windows, 60s + 90s of
+      HTTP load with NVS writes interleaved throughout, plus an untimed stretch
+      driving individual MCP calls). **No reboot occurred.** Uptime climbed
+      monotonically past 184s (well past the ~40s cadence seen previously and
+      the ~1300ms uptime-resets from TODO.md's other open note above) with no
+      dip, no `Guru Meditation`, no `Backtrace`, no `Cache disabled` text on
+      COM3, and `get_fw_version` kept reporting the same build throughout —
+      i.e. no reset of any kind, deliberate or otherwise, happened during the
+      stress window. **Hypothesis 1 is NOT confirmed and NOT ruled out** —
+      not reproduced under this specific load pattern in this session, which
+      is meaningfully different from "the PSRAM-stack hazard doesn't exist"
+      (the classic cache-disabled-vs-PSRAM-stack failure mode is real and
+      still applies in principle to `uart_bridge_ext.c`'s
+      `retry_task_create_pinned()`/`gpio_probe.c`'s task; nothing in this
+      pass changed that code). The original spontaneous reboot this session
+      was tasked with root-causing was not observed at all — cadence was
+      never established before this pass (see the note above), so absence
+      here does not clear the board. **What is now in place for the next
+      person/session who catches it live**: the reset-reason line above
+      (works even without a debugger attached, since it reads from the
+      log-bridge-forwarded console the PC link already has) and the known-
+      good COM3 raw-capture recipe for a decoded backtrace if a panic ever
+      does fire. Coredump-to-flash was considered per this task's own
+      escalation order but not enabled — the partition-table edit it would
+      require is exactly the kind of flash-layout change the `partitions.csv`
+      header above warns is only safe with real justification, and the
+      cheaper routes (reset-reason line, raw console) had not yet been tried
+      when this pass started. Next step if the reboot recurs: repeat this
+      capture setup and simply wait/exercise the board longer, or drive
+      candidate triggers not yet tried this pass (concurrent profile-adjacent
+      reads under load, longer soak, or Wi-Fi station-join churn instead of
+      AP-mode add/forget, since AP mode was the only mode exercised here).
 - [~] **Phase 3: `profile_executor` command queue — REVIEWED AND
       DELIBERATELY SKIPPED (2026-08-19).** Marked `[~]`, not `[x]`: nothing
       was built, and this is a decision to record, not work to come back to
