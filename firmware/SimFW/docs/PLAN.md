@@ -228,16 +228,26 @@ Behavioral rules on top of the map:
 One engine per bus. Bus A (ESP side) has three CS lines sharing
 SCLK/MOSI/MISO; bus B has one CS. Design per engine:
 
-- **RX state machine** (one per bus): samples MOSI on SCLK rising edge
-  (mode 1: CPOL=0, CPHA=1 — shift on leading edge, sample on trailing; the
-  PIO program encodes the mode-1 edge relationship exactly), pushes each
-  byte to its RX FIFO with the active-CS number ORed into the high bits
-  (CS lines read via `in pins`). CS deassert is detected by a second tiny SM
-  or a GPIO IRQ, which terminates the transaction.
+- **RX state machine** (one per bus): samples MOSI on SCLK's **falling**
+  edge (mode 1: CPOL=0, CPHA=1 — both master and slave shift/drive their
+  next bit on the *leading* edge, which for CPOL=0 is the rising edge, and
+  latch/sample on the *trailing* edge, the falling edge; this is not "the
+  opposite edge from the master" — master and slave key off the same
+  leading/trailing split of the one shared clock. Confirmed against the
+  MAX31856 datasheet's own Table 5, CPOL=0 row: SDI "Data bit latch" on
+  "SCLK falling", and against both real masters' SPI config: KilnFW's
+  `MAX31856_SPI_MODE 1` / SaftyFW's explicit `SPI_CPOL_0, SPI_CPHA_1`),
+  pushes each byte to its RX FIFO with the active-CS number ORed into the
+  high bits (CS lines read via `in pins`). CS deassert is detected by a
+  second tiny SM or a GPIO IRQ, which terminates the transaction.
 - **TX state machine** (one per bus): pulls response bytes from its TX FIFO
-  and shifts them out on MISO; MISO pin is tri-stated (pindir flip in the
-  PIO program) whenever no CS is low, since three emulated chips share one
-  physical MISO on bus A.
+  and shifts them out on MISO on SCLK's **rising** edge (the mode-1 leading
+  edge, per the same derivation above — this is also what the datasheet's
+  Table 5 says for SDO under CPOL=0: "Next data bit shift" on "SCLK
+  rising"), holding steady through the falling edge so the master samples a
+  settled bit; MISO pin is tri-stated (pindir flip in the PIO program)
+  whenever no CS is low, since three emulated chips share one physical
+  MISO on bus A.
 - **First-byte path (the 1.6 µs problem):** at 5 MHz a byte takes 1.6 µs and
   the master's first clock for the *response* byte comes one byte-time after
   the address byte. A FreeRTOS task cannot bounce a queue in that window

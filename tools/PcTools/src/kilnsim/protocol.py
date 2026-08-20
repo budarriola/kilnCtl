@@ -90,7 +90,12 @@ class CtCmd(enum.IntEnum):
 class RelayCmd(enum.IntEnum):
     GET_STATES = 1
     GET_EDGES = 2  # timestamped edge log
-    SET_CONTACT_FAULT = 3  # welded/stuck-open, at the *sense* interpretation level
+    # PLAN.md sec 5's original sketch had a SET_CONTACT_FAULT here, but
+    # PROTOCOL.md sec 5.4 documents it as deliberately **not allocated**:
+    # i2c_owner.h exposes no such setter (relay sense is read-only from this
+    # task's perspective by design). FAULT_SCHEDULE's WELDED_RELAY/
+    # STUCK_OPEN_RELAY types are the real path -- no SIMFW_CMD_RELAY_* id 3
+    # exists on the wire, so no enum member is defined for it here either.
 
 
 # --- IO (discrete I/O, E-stop, fault line, DUT power) -------------------------
@@ -101,6 +106,12 @@ class IoCmd(enum.IntEnum):
     ESTOP_SET = 4
     FAULT_LINE_GET = 5
     DUT_POWER_SET = 6  # not in PLAN.md's sketch table but needed by 6.1's dut_power_set
+    # ESTOP_GET/DUT_POWER_GET (PROTOCOL.md sec 5.5): not in PLAN.md 5's
+    # original sketch either, but i2c_owner.h exposes both getters as
+    # first-class public API and a client otherwise has no way to read back
+    # what it last commanded, so SimFW wires them up too.
+    ESTOP_GET = 7
+    DUT_POWER_GET = 8
 
 
 # --- FAULT (scheduler, PLAN.md sec 7) -----------------------------------------
@@ -111,31 +122,61 @@ class FaultCmd(enum.IntEnum):
     FIRE_NOW = 4
 
 
-# --- EVT event types (PLAN.md sec 5.3) ----------------------------------------
+# --- EVT event types (PLAN.md sec 5.3, PROTOCOL.md sec 6) ---------------------
 #
-# RELAY_EDGE, FAULT_FIRED/CLEARED, DUT_POWER etc. are PLAN.md sec 5.3's own
-# list ("relay edges, fault fired/cleared, threshold crossings, mode
-# changes, DUT power switch, protocol errors"). GUARD_TRIP/GUARD_WARN/
-# LINK_UP/TRIP_INEFFECTIVE_LATCHED were added once firmware/SimFW/scenarios/
-# *.yaml (written in parallel against this same PLAN.md sec 8.1 schema)
-# showed real `expect` clauses referencing them -- a scenario asserting "S9
-# escalates" needs an event *type* for that escalation to reference, and
-# PLAN.md sec 1's whole point ("exercise every guard ... on the bench") is
-# guard trips/warns being observable, so these round out the vocabulary
-# rather than inventing something unrelated to the plan.
+# RELAY_EDGE..PROTOCOL_ERROR's *numeric values* below were corrected to match
+# firmware/SimFW/src/sim/sim_snapshot.h's real `sim_event_type_t` (0-based:
+# SIM_EVENT_RELAY_EDGE=0 .. SIM_EVENT_PROTOCOL_ERROR=6), which is what
+# actually appears in wire EVT frames' `event_type` byte (PROTOCOL.md sec 6:
+# "sim_event_t.type verbatim ... sim_snapshot.h's own 1:1 wire-mapping
+# guarantee"). This module originally numbered them 1-7, a mismatch found
+# while wiring up kilnsim.payloads.decode_evt_frame() -- reported, not a
+# firmware bug (kilnsim's own numbering was wrong, not sim_snapshot.h's).
+#
+# GUARD_TRIP/GUARD_WARN/LINK_UP/TRIP_INEFFECTIVE_LATCHED/SIM_CLOCK_MARK have
+# **no corresponding `sim_event_type_t` value** -- `sim_snapshot.h` only
+# defines the 7 types above, nothing SaftyFW-guard-shaped. These five were
+# added because firmware/SimFW/scenarios/*.yaml `expect` clauses reference
+# them, but nothing in SimFW's own EVT wire stream can produce them today;
+# they are kept as kilnsim-local/synthetic values (a scenario runner or
+# report generator's own derived vocabulary, e.g. inferred from a sequence of
+# real EVT frames plus kilnctrl-side SaftyFW telemetry) and numbered starting
+# at 100 specifically so they can never collide with a real wire byte and so
+# Event.from_wire() below can tell "this came off the wire" from "this is
+# kilnsim's own synthesis" by value range alone. This is a real gap between
+# the scenario vocabulary and what SimFW's EVT stream can express — reported
+# here, not silently worked around; see WIRE_EVENT_TYPES below for the set
+# decode_evt_frame() can actually produce.
 class EventType(enum.IntEnum):
-    RELAY_EDGE = 1
-    FAULT_FIRED = 2
-    FAULT_CLEARED = 3
-    THRESHOLD_CROSSED = 4
-    MODE_CHANGED = 5
-    DUT_POWER = 6
-    PROTOCOL_ERROR = 7
-    SIM_CLOCK_MARK = 8
-    GUARD_TRIP = 9  # SaftyFW guard S<n> tripped (SAFETY_MODEL.md)
-    GUARD_WARN = 10  # SaftyFW guard S<n> warned without tripping
-    LINK_UP = 11  # kilnlink came back up (e.g. after power_blip)
-    TRIP_INEFFECTIVE_LATCHED = 12  # S9: a trip that did not actually cut power
+    RELAY_EDGE = 0
+    FAULT_FIRED = 1
+    FAULT_CLEARED = 2
+    THRESHOLD_CROSSED = 3
+    MODE_CHANGED = 4
+    DUT_POWER = 5
+    PROTOCOL_ERROR = 6
+    # --- kilnsim-local/synthetic only; never appear on SimFW's real wire ---
+    SIM_CLOCK_MARK = 100
+    GUARD_TRIP = 101  # SaftyFW guard S<n> tripped (SAFETY_MODEL.md)
+    GUARD_WARN = 102  # SaftyFW guard S<n> warned without tripping
+    LINK_UP = 103  # kilnlink came back up (e.g. after power_blip)
+    TRIP_INEFFECTIVE_LATCHED = 104  # S9: a trip that did not actually cut power
+
+
+#: The subset of EventType values sim_snapshot.h's sim_event_type_t can
+#: actually produce on the wire (PROTOCOL.md sec 6) -- everything else in
+#: EventType is kilnsim-local synthesis, see the class comment above.
+WIRE_EVENT_TYPES = frozenset(
+    {
+        EventType.RELAY_EDGE,
+        EventType.FAULT_FIRED,
+        EventType.FAULT_CLEARED,
+        EventType.THRESHOLD_CROSSED,
+        EventType.MODE_CHANGED,
+        EventType.DUT_POWER,
+        EventType.PROTOCOL_ERROR,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -291,10 +332,21 @@ class TelemetryFrame:
     spi_txn_count: int
     spi_underrun_count: int
     event_ring_high_water: int
+    # Real wire fields (firmware/SimFW/docs/PROTOCOL.md sec 6, "Loss
+    # visibility"): the PC's report generator (report.py) refuses to certify
+    # a run with a sequence gap, and these two counters let it do so without
+    # reconstructing the answer purely from the EVT stream itself.
+    evt_seq_gap_count: int = 0
+    evt_send_drop_count: int = 0
 
 
 # ---------------------------------------------------------------------------
-# EVT frame (PLAN.md sec 5.3): {u32 seq, u64 sim_time_us, u8 event_type, payload}
+# EVT frame (PROTOCOL.md sec 6): {u32 seq, u64 sim_time_us, u8 event_type,
+# u8 a, u8 b, f32 f0} -- the real wire shape (20 bytes fixed, kilnsim.payloads
+# .decode_evt_frame()). `payload` below is a kilnsim-local convenience
+# dict built on top of the raw a/b/f0 fields (e.g. by scenario.py/report.py)
+# for callers that want named fields instead of the raw wire bytes; it is not
+# itself part of the wire format.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Event:
@@ -302,6 +354,12 @@ class Event:
     sim_time_us: int
     event_type: EventType
     payload: dict = field(default_factory=dict)
+    # Raw wire fields, PROTOCOL.md sec 6's EVT frame layout. Default 0 so
+    # existing payload-dict-only construction (tests, MockSimLink) keeps
+    # working unchanged.
+    a: int = 0
+    b: int = 0
+    f0: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -309,6 +367,9 @@ class Event:
             "sim_time_us": self.sim_time_us,
             "event_type": self.event_type.name,
             "payload": dict(self.payload),
+            "a": self.a,
+            "b": self.b,
+            "f0": self.f0,
         }
 
     @classmethod
@@ -319,6 +380,38 @@ class Event:
             event_type=EventType[data["event_type"]] if isinstance(data["event_type"], str)
             else EventType(data["event_type"]),
             payload=dict(data.get("payload") or {}),
+            a=int(data.get("a", 0)),
+            b=int(data.get("b", 0)),
+            f0=float(data.get("f0", 0.0)),
+        )
+
+    @classmethod
+    def from_wire(cls, fields: dict) -> "Event":
+        """Builds an Event straight from kilnsim.payloads.decode_evt_frame()'s
+        dict -- the raw a/b/f0 wire fields, no `payload` interpretation
+        attempted (PROTOCOL.md sec 6 does not define per-event-type a/b/f0
+        semantics; a caller wanting that mapping builds it on top of this).
+
+        A wire `event_type` byte outside sim_event_type_t's defined range
+        (WIRE_EVENT_TYPES) is preserved as PROTOCOL_ERROR with the original
+        byte kept in `payload["raw_event_type"]`, rather than raising --
+        a malformed/future firmware byte should not crash the receive path;
+        see kilnsim.link's broadcast demux for how this is surfaced."""
+        raw_type = fields["event_type"]
+        try:
+            event_type = EventType(raw_type)
+            payload = {}
+        except ValueError:
+            event_type = EventType.PROTOCOL_ERROR
+            payload = {"raw_event_type": raw_type}
+        return cls(
+            seq=fields["seq"],
+            sim_time_us=fields["sim_time_us"],
+            event_type=event_type,
+            payload=payload,
+            a=fields.get("a", 0),
+            b=fields.get("b", 0),
+            f0=fields.get("f0", 0.0),
         )
 
 

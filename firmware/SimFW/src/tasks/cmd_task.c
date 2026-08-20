@@ -30,6 +30,27 @@
 #include "usb_owner.h"
 #include "version.h"
 
+// MODEL/TC/CT/RELAY/IO/FAULT groups (this pass): each group's handlers call
+// only its owning task's public API below -- never another task's private
+// state (PLAN.md section 4.5/this file's own header comment). tc_fault_state.h
+// and sim_snapshot.h/max31856_regs.h are pulled in as READ-ONLY contracts
+// (sim_snapshot_read()/tc_fault_state_read() are documented multi-reader
+// APIs; nothing here ever calls the *_write side of either) purely to build
+// TC_GET_REGS's shadow-truth reply. spi_emu_a.h/spi_emu_b.h's
+// *_get_reg_image()/*_channel_configured() getters close the register-image
+// gap a previous pass left open -- see handle_tc_get_regs()'s own comment.
+#include "sim_engine.h"
+#include "fault_sched.h"
+#include "i2c_owner.h"
+#include "wave_owner.h"
+#include "spi_emu_a.h"
+#include "spi_emu_b.h"
+#include "sim/sim_snapshot.h"
+#include "sim/tc_fault_state.h"
+#include "sim/max31856_regs.h"
+#include "sim/fault_engine.h"
+#include "sim/thermal_model.h"
+
 #define CMD_TASK_STACK_WORDS (configMINIMAL_STACK_SIZE * 2u)
 
 static TaskHandle_t s_task_handle = NULL;
@@ -90,6 +111,112 @@ static void rw_u32le(reply_writer_t *w, uint32_t v)
         (uint8_t)((v >> 24) & 0xFFu),
     };
     rw_bytes(w, b, 4);
+}
+
+static void rw_u64le(reply_writer_t *w, uint64_t v)
+{
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++) {
+        b[i] = (uint8_t)((v >> (8 * i)) & 0xFFu);
+    }
+    rw_bytes(w, b, 8);
+}
+
+static void rw_f32le(reply_writer_t *w, float v)
+{
+    union {
+        float f;
+        uint32_t u;
+    } conv;
+    conv.f = v;
+    rw_u32le(w, conv.u);
+}
+
+// --- Request payload reader ------------------------------------------------
+// Mirror of reply_writer_t for the inbound args[]/args_len this file's
+// handlers decode -- same bounds-checked, overflow-latching shape so a
+// handler can pull a whole fixed-shape struct off the wire and check
+// r.overflow exactly once at the end rather than after every field (docs/
+// PROTOCOL.md's "multi-byte fields ... are little-endian" convention).
+typedef struct {
+    const uint8_t *buf;
+    uint8_t len;
+    uint8_t pos;
+    bool overflow;
+} arg_reader_t;
+
+static void ar_init(arg_reader_t *r, const uint8_t *buf, uint8_t len)
+{
+    r->buf = buf;
+    r->len = len;
+    r->pos = 0;
+    r->overflow = false;
+}
+
+static bool ar_bytes(arg_reader_t *r, uint8_t *out, uint8_t n)
+{
+    if (r->overflow || (uint16_t)r->pos + (uint16_t)n > (uint16_t)r->len) {
+        r->overflow = true;
+        if (out != NULL) {
+            memset(out, 0, n);
+        }
+        return false;
+    }
+    memcpy(out, r->buf + r->pos, n);
+    r->pos = (uint8_t)(r->pos + n);
+    return true;
+}
+
+static uint8_t ar_u8(arg_reader_t *r)
+{
+    uint8_t v = 0;
+    ar_bytes(r, &v, 1);
+    return v;
+}
+
+static uint16_t ar_u16le(arg_reader_t *r)
+{
+    uint8_t b[2] = {0, 0};
+    ar_bytes(r, b, 2);
+    return (uint16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8));
+}
+
+static uint32_t ar_u32le(arg_reader_t *r)
+{
+    uint8_t b[4] = {0, 0, 0, 0};
+    ar_bytes(r, b, 4);
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+static uint64_t ar_u64le(arg_reader_t *r)
+{
+    uint8_t b[8] = {0};
+    ar_bytes(r, b, 8);
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) {
+        v = (v << 8) | b[i];
+    }
+    return v;
+}
+
+static float ar_f32le(arg_reader_t *r)
+{
+    union {
+        float f;
+        uint32_t u;
+    } conv;
+    conv.u = ar_u32le(r);
+    return conv.f;
+}
+
+static double ar_f64le(arg_reader_t *r)
+{
+    union {
+        double d;
+        uint64_t u;
+    } conv;
+    conv.u = ar_u64le(r);
+    return conv.d;
 }
 
 // --- SYS group handlers --------------------------------------------------
@@ -178,6 +305,1105 @@ static const cmd_table_entry_t s_sys_commands[] = {
     {SIMFW_CMD_SYS_GET_CAPS, handle_sys_get_caps},
 };
 
+// --- MODEL group handlers (sim_engine.h) ------------------------------------
+// docs/PROTOCOL.md section 5.1. Every setter below is a thin decode-then-call
+// wrapper over sim_engine.h's own queue-then-apply-next-tick API -- a false
+// return from an owner setter means either an out-of-range zone (sim_engine
+// validates against the currently loaded zone_count itself, per its own doc
+// comments) or a full command queue; both collapse to ERR_BAD_ARGS/ERR_BUSY
+// respectively is not distinguishable from the bool alone, so ERR_BAD_ARGS is
+// used for setters (index errors are overwhelmingly the likely cause for a
+// well-behaved client) and ERR_BUSY only where a queue-full condition is the
+// sole failure mode documented (none of MODEL's setters have another failure
+// mode besides "index out of range", so all use ERR_BAD_ARGS).
+
+static void handle_model_set_zone_params(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                          uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t zone = ar_u8(&r);
+    thermal_zone_params_t p;
+    p.C = ar_f32le(&r);
+    p.k_loss = ar_f32le(&r);
+    for (uint8_t i = 0; i < THERMAL_MODEL_MAX_ZONES; i++) {
+        p.k_couple[i] = ar_f32le(&r);
+    }
+    p.R_element = ar_f32le(&r);
+    p.element_health = ar_f32le(&r);
+    p.tc_lag_s = ar_f32le(&r);
+    p.T0 = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    if (!sim_engine_set_zone_params(zone, &p)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+static void handle_model_get_zone_params(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                          uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t zone = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    thermal_zone_params_t p;
+    if (r.overflow || !sim_engine_get_zone_params(zone, &p)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, zone);
+    rw_f32le(&w, p.C);
+    rw_f32le(&w, p.k_loss);
+    for (uint8_t i = 0; i < THERMAL_MODEL_MAX_ZONES; i++) {
+        rw_f32le(&w, p.k_couple[i]);
+    }
+    rw_f32le(&w, p.R_element);
+    rw_f32le(&w, p.element_health);
+    rw_f32le(&w, p.tc_lag_s);
+    rw_f32le(&w, p.T0);
+    *out_len = w.len;
+}
+
+static void handle_model_set_ambient(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    float ambient_c = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || !sim_engine_set_ambient(ambient_c)) {
+        rw_u8(&w, r.overflow ? SIMFW_CMD_STATUS_ERR_BAD_ARGS : SIMFW_CMD_STATUS_ERR_BUSY);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+static void handle_model_load_preset(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t preset = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || preset >= THERMAL_PRESET_COUNT || !sim_engine_load_preset((thermal_preset_id_t)preset)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+// request: {u8 zone, u8 mode, f32 temp_c} -- mode 0 = return zone to MODEL
+// (sim_engine_clear_zone_manual, temp_c ignored), mode 1 = force MANUAL at
+// temp_c (sim_engine_force_zone_temp). PLAN.md section 5's "SET_TEMP (force a
+// zone temp)" folded together with the clear path so one command id covers
+// both halves of sim_engine.h's MANUAL-mode pair.
+static void handle_model_set_temp(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                   uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t zone = ar_u8(&r);
+    uint8_t mode = ar_u8(&r);
+    float temp_c = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    bool ok;
+    if (mode == 1u) {
+        ok = sim_engine_force_zone_temp(zone, temp_c);
+    } else if (mode == 0u) {
+        ok = sim_engine_clear_zone_manual(zone);
+    } else {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, ok ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    *out_len = w.len;
+}
+
+// sim_engine.h has no standalone "set just tc_lag_s" setter -- tc_lag_s is
+// one field of thermal_zone_params_t, and the only writer is
+// sim_engine_set_zone_params(), which replaces the whole struct. Not an
+// owner-API gap: this is a legitimate read-modify-write built entirely from
+// two existing public calls (get then set), same pattern a PC-side client
+// could do itself with two commands -- folding it into one command id here
+// just saves a round trip and avoids a TOCTOU window between a client's own
+// get and set.
+static void handle_model_set_tc_lag(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                     uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t zone = ar_u8(&r);
+    float tc_lag_s = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    thermal_zone_params_t p;
+    if (r.overflow || !sim_engine_get_zone_params(zone, &p)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    p.tc_lag_s = tc_lag_s;
+    if (!sim_engine_set_zone_params(zone, &p)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BUSY);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+static const cmd_table_entry_t s_model_commands[] = {
+    {SIMFW_CMD_MODEL_SET_ZONE_PARAMS, handle_model_set_zone_params},
+    {SIMFW_CMD_MODEL_GET_ZONE_PARAMS, handle_model_get_zone_params},
+    {SIMFW_CMD_MODEL_SET_AMBIENT, handle_model_set_ambient},
+    {SIMFW_CMD_MODEL_LOAD_PRESET, handle_model_load_preset},
+    {SIMFW_CMD_MODEL_SET_TEMP, handle_model_set_temp},
+    {SIMFW_CMD_MODEL_SET_TC_LAG, handle_model_set_tc_lag},
+};
+
+// --- TC group handlers (spi_emu_a.h/spi_emu_b.h + sim_engine.h's MANUAL-mode
+// pair + fault_sched.h) ------------------------------------------------------
+// docs/PROTOCOL.md section 5.2. Channel numbering matches tc_fault_state.h's
+// tc_fault_channel_t: 0..2 = MAIN_0..2 (spi_emu_a, ESP bus), 3 = SAFETY
+// (spi_emu_b). MAIN_0..2 index-match zone 0..2 by sim_engine.h's own
+// documented zone-to-TC mapping assumption.
+
+// TC_GET_REGS reply layout (docs/PROTOCOL.md section 5.2):
+//   byte0      status
+//   byte1      channel (echo)
+//   byte2      flags: bit0 reg_image_valid, bit1 snapshot_valid (sim_engine
+//              has published at least one tick), bit2 stuck_ltcb,
+//              bit3 spurious_fault_pin, bit4 force_sr_open,
+//              bit5 force_sr_ovuv
+//   byte3-18   reg_image[16] -- the channel's live max31856_channel_t.regs[]
+//              (MSB-first CR0..SR, MAX31856_REG_* addressing), obtained via
+//              spi_emu_a_get_reg_image()/spi_emu_b_get_reg_image(). Only
+//              meaningful when flags bit0 (reg_image_valid) is set; zeroed
+//              otherwise -- see below.
+//   byte19-22  f32 shadow_true_tc_c   -- thermal model's uncorrupted truth
+//              (sim_snapshot_t.T_true_c for this channel's zone)
+//   byte23-26  f32 shadow_reported_tc_c -- post-TC-lag, pre-corruption signal
+//              (T_tc_reported_c / T_safety_reported_c) -- together with
+//              byte3-18 (when valid) and byte19-22 this is PLAN.md 5.2's
+//              full "the DUT was lied to, this is the truth" pair: the
+//              register image the DUT actually reads, plus the shadow
+//              truth it was never shown.
+//   byte27     dead_mode (max31856_dead_mode_t)
+//   byte28-31  f32 noise_sigma_c
+//   byte32-35  f32 bit_error_rate
+//   byte36-39  u32 spi transactions (spi_emu_a/b_get_stats().transactions)
+//   byte40-43  u32 spi protocol_errors
+//   byte44-47  u32 spi first_byte_late (TX FIFO underrun count, PLAN.md
+//              3.2.1: "counted, never silent")
+//
+// reg_image_valid semantics: spi_emu_a/b's getters never block (PLAN.md
+// 4.5) -- they retry a small, bounded number of times against the PIO
+// engine's busy/transaction-counter state (see spi_emu_a.h's coherency-
+// guarantee comment) and give up rather than risk a torn image. bit0
+// clear means exactly that: the channel was found mid-transaction (CS
+// low) across every retry, byte3-18 is all zero, and a client should
+// simply ask again -- it is not an error, just a transient "the DUT was
+// mid-read/write when you asked" the same as a normal SPI collision would
+// produce on real hardware.
+static void handle_tc_get_regs(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= TC_FAULT_CHANNEL_COUNT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+
+    sim_snapshot_t snap;
+    bool snap_ok = sim_snapshot_read(&snap);
+
+    tc_fault_override_t ovr = {0};
+    (void)tc_fault_state_read((tc_fault_channel_t)channel, &ovr);
+
+    max31856_pio_stats_t stats;
+    float true_c = 0.0f, reported_c = 0.0f;
+    uint8_t reg_image[MAX31856_REG_COUNT] = {0};
+    bool reg_image_valid;
+    if (channel < TC_FAULT_CHANNEL_SAFETY) {
+        stats = spi_emu_a_get_stats(channel);
+        reg_image_valid = spi_emu_a_get_reg_image(channel, reg_image);
+        if (snap_ok && channel < snap.zone_count) {
+            true_c = snap.zones[channel].T_true_c;
+            reported_c = snap.zones[channel].T_tc_reported_c;
+        }
+    } else {
+        stats = spi_emu_b_get_stats(0);
+        reg_image_valid = spi_emu_b_get_reg_image(0, reg_image);
+        if (snap_ok && snap.zone_count > 0) {
+            true_c = snap.zones[0].T_true_c;
+            reported_c = snap.zones[0].T_safety_reported_c;
+        }
+    }
+
+    uint8_t flags = 0;
+    if (reg_image_valid) flags |= 0x01u;
+    if (snap_ok) flags |= 0x02u;
+    if (ovr.corruption.stuck_ltcb) flags |= 0x04u;
+    if (ovr.corruption.spurious_fault_pin) flags |= 0x08u;
+    if (ovr.force_sr_bits & MAX31856_FAULT_OPEN) flags |= 0x10u;
+    if (ovr.force_sr_bits & MAX31856_FAULT_OVUV) flags |= 0x20u;
+
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, channel);
+    rw_u8(&w, flags);
+    rw_bytes(&w, reg_image, sizeof(reg_image));
+    rw_f32le(&w, true_c);
+    rw_f32le(&w, reported_c);
+    rw_u8(&w, (uint8_t)ovr.corruption.dead_mode);
+    rw_f32le(&w, ovr.corruption.noise_sigma_c);
+    rw_f32le(&w, ovr.corruption.bit_error_rate);
+    rw_u32le(&w, stats.transactions);
+    rw_u32le(&w, stats.protocol_errors);
+    rw_u32le(&w, stats.first_byte_late);
+    *out_len = w.len;
+}
+
+// request: {u8 channel, f32 temp_c}. MAIN_0..2 route to
+// sim_engine_force_zone_temp() (keyed by zone index, MAIN channels
+// index-match zones 1:1); channel == SAFETY (3) routes to
+// sim_engine_force_safety_temp() -- the safety-side MANUAL override, which
+// pins T_safety_reported_c independently of every zone's own
+// T_true_c/T_tc_reported_c (sim_engine.h's blend/lag+MANUAL safety-TC API),
+// so a main-vs-safety disagreement scenario (PLAN.md section 8, test 8) can
+// be expressed with either side pinned alone. Any other channel value is out
+// of range.
+static void handle_tc_force_temp(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                  uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+    float temp_c = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= TC_FAULT_CHANNEL_COUNT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    bool ok = (channel == TC_FAULT_CHANNEL_SAFETY) ? sim_engine_force_safety_temp(temp_c)
+                                                     : sim_engine_force_zone_temp(channel, temp_c);
+    rw_u8(&w, ok ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    *out_len = w.len;
+}
+
+// request: {u8 channel, u8 mode, f32 manual_temp_c} -- mode 0 = MODEL
+// (sim_engine_clear_zone_manual() for MAIN, sim_engine_clear_safety_manual()
+// for SAFETY), mode 1 = MANUAL at manual_temp_c (sim_engine_force_zone_temp()
+// / sim_engine_force_safety_temp()). Same MAIN-vs-SAFETY channel routing as
+// handle_tc_force_temp above.
+static void handle_tc_set_mode(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+    uint8_t mode = ar_u8(&r);
+    float temp_c = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= TC_FAULT_CHANNEL_COUNT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    bool is_safety = (channel == TC_FAULT_CHANNEL_SAFETY);
+    bool ok;
+    if (mode == 1u) {
+        ok = is_safety ? sim_engine_force_safety_temp(temp_c) : sim_engine_force_zone_temp(channel, temp_c);
+    } else if (mode == 0u) {
+        ok = is_safety ? sim_engine_clear_safety_manual() : sim_engine_clear_zone_manual(channel);
+    } else {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, ok ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    *out_len = w.len;
+}
+
+// request: {u16 slot_id, u8 channel, u8 fault_kind, f32 param0}. fault_kind
+// is fault_sched_fault_type_t's TC-only subset (0..5: TC_DISCONNECTED,
+// TC_NOISE, TC_STUCK, TC_DEAD_IC, TC_FLAKY_SPI, TC_SPURIOUS_FAULT_PIN).
+// Routes through fault_sched_schedule()+fault_sched_fire_now() -- NOT a
+// direct tc_fault_state_write() -- because tc_fault_state.h's own header
+// documents fault_sched.c as the state's SOLE writer, which "recomputes it
+// from scratch every tick from the active fault slot set." A direct write
+// from here would be silently clobbered on fault_sched's very next
+// evaluation, so a MANUAL-trigger/PERMANENT/ONCE slot fired immediately is
+// the only correct way to express "inject this TC fault now" through the
+// public API (see fault_sched.h's own note on why this replaces an
+// independently-scheduled trigger-eval loop). Reply echoes slot_id so the PC
+// side can TC_CLEAR_FAULT it later.
+static void handle_tc_inject_fault(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                    uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint16_t slot_id = ar_u16le(&r);
+    uint8_t channel = ar_u8(&r);
+    uint8_t fault_kind = ar_u8(&r);
+    float param0 = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= TC_FAULT_CHANNEL_COUNT || fault_kind > (uint8_t)FAULT_SCHED_TYPE_TC_SPURIOUS_FAULT_PIN) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+
+    fault_trigger_t trigger = {0};
+    trigger.kind = FAULT_TRIGGER_MANUAL;
+    fault_duration_t duration = {0};
+    duration.kind = FAULT_DURATION_PERMANENT;
+    fault_repeat_t repeat = {0};
+    repeat.kind = FAULT_REPEAT_ONCE;
+    float params[4] = {param0, 0.0f, 0.0f, 0.0f};
+
+    uint16_t sid = fault_sched_schedule(slot_id, (fault_sched_fault_type_t)fault_kind, channel, &trigger, &duration,
+                                          &repeat, params);
+    if (sid == FAULT_ENGINE_INVALID_SLOT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    if (!fault_sched_fire_now(sid)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_INTERNAL);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u16le(&w, sid);
+    *out_len = w.len;
+}
+
+// request: {u16 slot_id} -- the slot id TC_INJECT_FAULT's reply echoed.
+static void handle_tc_clear_fault(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                   uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint16_t slot_id = ar_u16le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || !fault_sched_cancel(slot_id)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+// request: {u8 channel}. Reply (docs/PROTOCOL.md section 5.2):
+//   byte0  status
+//   byte1  channel (echo)
+//   byte2  flags: bit0 configured (spi_emu_a/b_channel_configured() --
+//          "has the master EVER written anything to this channel", not
+//          just "is it configured correctly" -- PLAN.md 5.2's own framing:
+//          a test must be able to tell "configured wrong" apart from
+//          "never configured at all"), bit1 reg_image_valid (same
+//          busy/retry semantics as TC_GET_REGS's identically-named bit --
+//          see that handler's comment)
+//   byte3  CR0 (regs[MAX31856_REG_CR0]) -- 0 if reg_image_valid is clear
+//   byte4  CR1 (regs[MAX31856_REG_CR1]) -- TC TYPE[3:0] is bits[3:0],
+//          AVGSEL[2:0] is bits[6:4] (PLAN.md 3.2's CR1 row); 0 if
+//          reg_image_valid is clear
+//   byte5  MASK (regs[MAX31856_REG_MASK]) -- 0 if reg_image_valid is clear
+// `configured` and `reg_image_valid` are independent: a channel can be
+// configured (bit0 set) while a request happens to land mid-transaction
+// (bit1 clear, CR0/CR1/MASK all reported as 0) -- callers must check bit1
+// before trusting byte3-5, exactly as with TC_GET_REGS, and simply retry
+// on a false reg_image_valid rather than treating it as "never
+// configured."
+static void handle_tc_get_master_config(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                          uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= TC_FAULT_CHANNEL_COUNT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+
+    bool configured;
+    uint8_t reg_image[MAX31856_REG_COUNT] = {0};
+    bool reg_image_valid;
+    if (channel < TC_FAULT_CHANNEL_SAFETY) {
+        configured = spi_emu_a_channel_configured(channel);
+        reg_image_valid = spi_emu_a_get_reg_image(channel, reg_image);
+    } else {
+        configured = spi_emu_b_channel_configured(0);
+        reg_image_valid = spi_emu_b_get_reg_image(0, reg_image);
+    }
+
+    uint8_t flags = 0;
+    if (configured) flags |= 0x01u;
+    if (reg_image_valid) flags |= 0x02u;
+
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, channel);
+    rw_u8(&w, flags);
+    rw_u8(&w, reg_image[MAX31856_REG_CR0]);
+    rw_u8(&w, reg_image[MAX31856_REG_CR1]);
+    rw_u8(&w, reg_image[MAX31856_REG_MASK]);
+    *out_len = w.len;
+}
+
+static const cmd_table_entry_t s_tc_commands[] = {
+    {SIMFW_CMD_TC_GET_REGS, handle_tc_get_regs},
+    {SIMFW_CMD_TC_FORCE_TEMP, handle_tc_force_temp},
+    {SIMFW_CMD_TC_SET_MODE, handle_tc_set_mode},
+    {SIMFW_CMD_TC_INJECT_FAULT, handle_tc_inject_fault},
+    {SIMFW_CMD_TC_CLEAR_FAULT, handle_tc_clear_fault},
+    {SIMFW_CMD_TC_GET_MASTER_CONFIG, handle_tc_get_master_config},
+};
+
+// --- CT group handlers (wave_owner.h) ---------------------------------------
+// docs/PROTOCOL.md section 5.3. Channel is 0..CT_WAVE_NUM_CHANNELS-1 (3).
+
+static void handle_ct_set_mode(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+    uint8_t mode = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= CT_WAVE_NUM_CHANNELS || mode > (uint8_t)CT_WAVE_MODE_MANUAL) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, ct_wave_set_mode(channel, (ct_wave_mode_t)mode) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+static void handle_ct_set_amps(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+    float amps = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= CT_WAVE_NUM_CHANNELS) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, ct_wave_set_amps(channel, amps) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+static void handle_ct_set_phase(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                 uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+    float phase_deg = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= CT_WAVE_NUM_CHANNELS) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, ct_wave_set_phase(channel, phase_deg) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+// request: {u8 channel, f32 dc_offset, f32 clip_fraction, u8 dropout_half,
+//           u8 dropout_negative_half, u8 apply_immediately}
+static void handle_ct_set_distortion(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+    ct_wave_distortion_t d;
+    d.dc_offset = ar_f32le(&r);
+    d.clip_fraction = ar_f32le(&r);
+    d.dropout_half_cycle = ar_u8(&r) != 0;
+    d.dropout_negative_half = ar_u8(&r) != 0;
+    d.apply_immediately = ar_u8(&r) != 0;
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || channel >= CT_WAVE_NUM_CHANNELS) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, ct_wave_set_distortion(channel, &d) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+static void handle_ct_get_state(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                 uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t channel = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    ct_wave_channel_state_t st;
+    if (r.overflow || channel >= CT_WAVE_NUM_CHANNELS || !ct_wave_get_state(channel, &st)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, (uint8_t)st.mode);
+    rw_f32le(&w, st.amps);
+    rw_f32le(&w, st.phase_deg);
+    rw_f32le(&w, st.distortion.dc_offset);
+    rw_f32le(&w, st.distortion.clip_fraction);
+    rw_u8(&w, st.distortion.dropout_half_cycle ? 1u : 0u);
+    rw_u8(&w, st.distortion.dropout_negative_half ? 1u : 0u);
+    rw_u8(&w, st.distortion.apply_immediately ? 1u : 0u);
+    rw_f32le(&w, st.last_pwm_scale);
+    rw_u8(&w, st.valid ? 1u : 0u);
+    *out_len = w.len;
+}
+
+static const cmd_table_entry_t s_ct_commands[] = {
+    {SIMFW_CMD_CT_SET_MODE, handle_ct_set_mode},
+    {SIMFW_CMD_CT_SET_AMPS, handle_ct_set_amps},
+    {SIMFW_CMD_CT_SET_DISTORTION, handle_ct_set_distortion},
+    {SIMFW_CMD_CT_GET_STATE, handle_ct_get_state},
+    {SIMFW_CMD_CT_SET_PHASE, handle_ct_set_phase},
+};
+
+// --- RELAY group handlers (i2c_owner.h) -------------------------------------
+// docs/PROTOCOL.md section 5.4.
+
+static void handle_relay_get_states(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                     uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+    i2c_owner_relay_states_t st = i2c_owner_get_relay_states();
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, st.k1_closed ? 1u : 0u);
+    rw_u8(&w, st.k2_closed ? 1u : 0u);
+    rw_u8(&w, st.k3_closed ? 1u : 0u);
+    rw_u8(&w, st.k5_closed ? 1u : 0u);
+    rw_u8(&w, st.k4_closed ? 1u : 0u);
+    rw_u8(&w, st.fault_line_asserted ? 1u : 0u);
+    rw_u64le(&w, st.sample_time_us);
+    rw_u8(&w, st.valid ? 1u : 0u);
+    *out_len = w.len;
+}
+
+// Max edges returned per RELAY_GET_EDGES reply -- bounded so a full reply
+// (status + count + N * 14-byte entries) always fits BENCHPROTO_FRAME_MAX_PAYLOAD
+// (128 bytes): 2 + 8*14 = 114.
+#define SIMFW_RELAY_EDGES_MAX_PER_REPLY 8u
+
+// request: {u32 since_seq, u8 max_count} -- max_count is clamped to
+// SIMFW_RELAY_EDGES_MAX_PER_REPLY server-side; a client that wants more polls
+// again with since_seq set to the last entry's seq (i2c_owner.h's own
+// pagination contract).
+static void handle_relay_get_edges(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                    uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint32_t since_seq = ar_u32le(&r);
+    uint8_t max_count = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    if (max_count > SIMFW_RELAY_EDGES_MAX_PER_REPLY) {
+        max_count = SIMFW_RELAY_EDGES_MAX_PER_REPLY;
+    }
+
+    i2c_owner_relay_edge_t edges[SIMFW_RELAY_EDGES_MAX_PER_REPLY];
+    size_t n = i2c_owner_get_relay_edges(edges, max_count, since_seq);
+
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, (uint8_t)n);
+    for (size_t i = 0; i < n; i++) {
+        rw_u32le(&w, edges[i].seq);
+        rw_u8(&w, (uint8_t)edges[i].signal);
+        rw_u8(&w, edges[i].level ? 1u : 0u);
+        rw_u64le(&w, edges[i].time_us);
+    }
+    *out_len = w.len;
+}
+
+static const cmd_table_entry_t s_relay_commands[] = {
+    {SIMFW_CMD_RELAY_GET_STATES, handle_relay_get_states},
+    {SIMFW_CMD_RELAY_GET_EDGES, handle_relay_get_edges},
+};
+
+// --- IO group handlers (i2c_owner.h) ----------------------------------------
+// docs/PROTOCOL.md section 5.5.
+
+static void handle_io_set_dir(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                               uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t exp = ar_u8(&r);
+    uint8_t pin = ar_u8(&r);
+    uint8_t input = ar_u8(&r);
+    uint8_t pullup = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || exp > (uint8_t)I2C_OWNER_EXP_2) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    // i2c_owner_io_set_dir() returns false both for a reserved pin (a fixed-
+    // role exp1 pin, permanently rejected) and a transiently full command
+    // queue -- indistinguishable from this return value alone, so
+    // ERR_BAD_ARGS is used (the reserved-pin case is the far more likely
+    // cause of a well-behaved client seeing this).
+    rw_u8(&w, i2c_owner_io_set_dir((i2c_owner_expander_t)exp, pin, input != 0, pullup != 0) ? SIMFW_CMD_STATUS_OK
+                                                                                              : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    *out_len = w.len;
+}
+
+static void handle_io_write(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len, uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t exp = ar_u8(&r);
+    uint8_t pin = ar_u8(&r);
+    uint8_t level = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || exp > (uint8_t)I2C_OWNER_EXP_2) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, i2c_owner_io_write((i2c_owner_expander_t)exp, pin, level != 0) ? SIMFW_CMD_STATUS_OK
+                                                                               : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+    *out_len = w.len;
+}
+
+static void handle_io_read(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len, uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t exp = ar_u8(&r);
+    uint8_t pin = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    bool level = false;
+    if (r.overflow || exp > (uint8_t)I2C_OWNER_EXP_2 || !i2c_owner_io_read((i2c_owner_expander_t)exp, pin, &level)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, level ? 1u : 0u);
+    *out_len = w.len;
+}
+
+static void handle_io_estop_set(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                 uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t open = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, i2c_owner_set_estop(open != 0) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+static void handle_io_estop_get(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                 uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, i2c_owner_get_estop_open() ? 1u : 0u);
+    *out_len = w.len;
+}
+
+static void handle_io_fault_line_get(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                      uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+    i2c_owner_relay_states_t st = i2c_owner_get_relay_states();
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, st.fault_line_asserted ? 1u : 0u);
+    rw_u64le(&w, st.sample_time_us);
+    rw_u8(&w, st.valid ? 1u : 0u);
+    *out_len = w.len;
+}
+
+static void handle_io_dut_power_set(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                     uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t on = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, i2c_owner_set_dut_power(on != 0) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+static void handle_io_dut_power_get(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                     uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, i2c_owner_get_dut_power_on() ? 1u : 0u);
+    *out_len = w.len;
+}
+
+static const cmd_table_entry_t s_io_commands[] = {
+    {SIMFW_CMD_IO_SET_DIR, handle_io_set_dir},
+    {SIMFW_CMD_IO_WRITE, handle_io_write},
+    {SIMFW_CMD_IO_READ, handle_io_read},
+    {SIMFW_CMD_IO_ESTOP_SET, handle_io_estop_set},
+    {SIMFW_CMD_IO_FAULT_LINE_GET, handle_io_fault_line_get},
+    {SIMFW_CMD_IO_DUT_POWER_SET, handle_io_dut_power_set},
+    {SIMFW_CMD_IO_ESTOP_GET, handle_io_estop_get},
+    {SIMFW_CMD_IO_DUT_POWER_GET, handle_io_dut_power_get},
+};
+
+// --- FAULT group handlers (fault_sched.h) -----------------------------------
+// docs/PROTOCOL.md section 5.6.
+
+// FAULT_SCHEDULE request layout (docs/PROTOCOL.md section 5.6) -- a compact
+// re-encoding of fault_engine.h's fault_trigger_t/fault_duration_t/
+// fault_repeat_t (NOT PLAN.md 5.2's original "u8 kind, f32 a, f32 b, u8
+// zone/relay" sketch, which predates fault_engine.h and cannot address an
+// AFTER_FAULT slot id (needs 16 bits) or carry ON_EVENT's name string at
+// all):
+//   u16 slot_id
+//   u8  fault_type       (fault_sched_fault_type_t, 0..12)
+//   u16 target            (zone / tc_fault_channel_t / system-target, per
+//                          fault_type -- fault_sched_schedule() itself
+//                          validates the pairing)
+//   -- trigger --
+//   u8  trigger_kind      (fault_trigger_kind_t, 0..6)
+//   f64 trigger_a         (AT_SIM_TIME: at_sim_time_s: AT_ZONE_TEMP: temp_c;
+//                          ON_RELAY_EDGE/ON_EVENT/AFTER_FAULT: delay_s;
+//                          RANDOM_IN: random_t0_s; else unused)
+//   f64 trigger_b         (RANDOM_IN: random_t1_s; else unused)
+//   u16 trigger_ref        (AT_ZONE_TEMP: zone; ON_RELAY_EDGE: relay;
+//                           AFTER_FAULT: after_fault_slot; else unused)
+//   u8  trigger_edge        (AT_ZONE_TEMP: temp_edge 0=rising/1=falling;
+//                            ON_RELAY_EDGE: relay_edge 0=close/1=open; else 0)
+//   char[24] event_name     (ON_EVENT only, NUL-padded ASCII; else ignored)
+//   -- duration --
+//   u8  duration_kind       (0 PERMANENT, 1 FOR -- 2 UNTIL_TRIGGER is
+//                            REJECTED with ERR_BAD_ARGS: it needs a second,
+//                            full nested trigger and the frame budget above
+//                            already spends ~90 of 128 bytes on the top-level
+//                            one. GAP against PLAN.md 7.2, which lists
+//                            UNTIL_TRIGGER as a required duration kind --
+//                            not an owner-API gap, a wire-frame-size one.
+//                            Workaround: FOR a generous duration, or
+//                            FAULT_CANCEL explicitly once the PC-side
+//                            scenario runner observes the condition.)
+//   f64 duration_for_s
+//   -- repeat --
+//   u8  repeat_kind          (fault_repeat_kind_t, 0..2)
+//   f64 repeat_period_s
+//   f64 repeat_jitter_s
+//   u16 repeat_n
+//   -- params --
+//   f32 param0, f32 param1, f32 param2, f32 param3
+// Total 93 bytes of args (+1 cmd_id byte), comfortably under the 128-byte
+// frame payload cap. Reply: {status, u16 slot_id echo}.
+static void handle_fault_schedule(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                   uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+
+    uint16_t slot_id = ar_u16le(&r);
+    uint8_t fault_type = ar_u8(&r);
+    uint16_t target = ar_u16le(&r);
+
+    uint8_t trigger_kind = ar_u8(&r);
+    double trigger_a = ar_f64le(&r);
+    double trigger_b = ar_f64le(&r);
+    uint16_t trigger_ref = ar_u16le(&r);
+    uint8_t trigger_edge = ar_u8(&r);
+    char event_name[FAULT_ENGINE_MAX_NAME_LEN];
+    ar_bytes(&r, (uint8_t *)event_name, (uint8_t)sizeof(event_name));
+    event_name[FAULT_ENGINE_MAX_NAME_LEN - 1] = '\0'; // defensive: force NUL termination regardless of wire content
+
+    uint8_t duration_kind = ar_u8(&r);
+    double duration_for_s = ar_f64le(&r);
+
+    uint8_t repeat_kind = ar_u8(&r);
+    double repeat_period_s = ar_f64le(&r);
+    double repeat_jitter_s = ar_f64le(&r);
+    uint16_t repeat_n = ar_u16le(&r);
+
+    float params[4];
+    params[0] = ar_f32le(&r);
+    params[1] = ar_f32le(&r);
+    params[2] = ar_f32le(&r);
+    params[3] = ar_f32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || fault_type > (uint8_t)FAULT_SCHED_TYPE_AMBIENT_SHIFT ||
+        trigger_kind > (uint8_t)FAULT_TRIGGER_MANUAL ||
+        duration_kind >= (uint8_t)FAULT_DURATION_UNTIL_TRIGGER || repeat_kind > (uint8_t)FAULT_REPEAT_N_TIMES) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+
+    fault_trigger_t trigger = {0};
+    trigger.kind = (fault_trigger_kind_t)trigger_kind;
+    switch (trigger.kind) {
+        case FAULT_TRIGGER_AT_SIM_TIME:
+            trigger.at_sim_time_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_AT_ZONE_TEMP:
+            trigger.zone = (uint8_t)trigger_ref;
+            trigger.temp_c = (float)trigger_a;
+            trigger.temp_edge = (fault_temp_edge_t)trigger_edge;
+            break;
+        case FAULT_TRIGGER_ON_RELAY_EDGE:
+            trigger.relay = (uint8_t)trigger_ref;
+            trigger.relay_edge = (fault_relay_edge_t)trigger_edge;
+            trigger.delay_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_ON_EVENT:
+            memcpy(trigger.event_name, event_name, sizeof(trigger.event_name));
+            trigger.delay_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_AFTER_FAULT:
+            trigger.after_fault_slot = trigger_ref;
+            trigger.delay_s = trigger_a;
+            break;
+        case FAULT_TRIGGER_RANDOM_IN:
+            trigger.random_t0_s = trigger_a;
+            trigger.random_t1_s = trigger_b;
+            break;
+        case FAULT_TRIGGER_MANUAL:
+        default:
+            break;
+    }
+
+    fault_duration_t duration = {0};
+    duration.kind = (fault_duration_kind_t)duration_kind;
+    duration.for_s = duration_for_s;
+
+    fault_repeat_t repeat = {0};
+    repeat.kind = (fault_repeat_kind_t)repeat_kind;
+    repeat.period_s = repeat_period_s;
+    repeat.jitter_s = repeat_jitter_s;
+    repeat.n = repeat_n;
+
+    uint16_t sid = fault_sched_schedule(slot_id, (fault_sched_fault_type_t)fault_type, target, &trigger, &duration,
+                                          &repeat, params);
+    if (sid == FAULT_ENGINE_INVALID_SLOT) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u16le(&w, sid);
+    *out_len = w.len;
+}
+
+static void handle_fault_cancel(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                 uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint16_t slot_id = ar_u16le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || !fault_sched_cancel(slot_id)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+static void handle_fault_fire_now(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                   uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint16_t slot_id = ar_u16le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || !fault_sched_fire_now(slot_id)) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    *out_len = w.len;
+}
+
+// Max slots summarized per FAULT_LIST reply -- bounded so status + count +
+// N * 15-byte entries always fits: 2 + 8*15 = 122.
+#define SIMFW_FAULT_LIST_MAX_PER_REPLY 8u
+
+// Reused across calls (single-threaded dispatch, cmd_task.c's only caller of
+// fault_sched_list()) rather than a ~230-byte-per-slot x 32 local array,
+// which would blow CMD_TASK_STACK_WORDS (cmd_task.h) many times over.
+static fault_slot_t s_fault_list_buf[FAULT_ENGINE_MAX_SLOTS];
+
+// request: {u8 start_index, u8 max_count} -- pagination over the fixed
+// 32-slot pool (fault_sched_list() itself always returns from index 0);
+// max_count is clamped to SIMFW_FAULT_LIST_MAX_PER_REPLY. Reply:
+// {status, u8 returned_count, returned_count * {u16 slot_id, u8 state,
+// u16 fault_type, u16 target, u32 fire_count, f32 active_since_s}}.
+static void handle_fault_list(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                               uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t start_index = ar_u8(&r);
+    uint8_t max_count = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || start_index >= FAULT_ENGINE_MAX_SLOTS) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    if (max_count > SIMFW_FAULT_LIST_MAX_PER_REPLY) {
+        max_count = SIMFW_FAULT_LIST_MAX_PER_REPLY;
+    }
+
+    size_t total = fault_sched_list(s_fault_list_buf, FAULT_ENGINE_MAX_SLOTS);
+    uint8_t returned = 0;
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    uint8_t *count_slot = &out[w.len]; // patched below once `returned` is known
+    rw_u8(&w, 0);
+    for (uint8_t i = start_index; i < total && returned < max_count && i < FAULT_ENGINE_MAX_SLOTS; i++) {
+        const fault_slot_t *s = &s_fault_list_buf[i];
+        rw_u16le(&w, s->slot_id);
+        rw_u8(&w, (uint8_t)s->state);
+        rw_u16le(&w, s->fault_type);
+        rw_u16le(&w, s->target);
+        rw_u32le(&w, s->fire_count);
+        rw_f32le(&w, (float)s->active_since_s);
+        if (w.overflow) {
+            break;
+        }
+        returned++;
+    }
+    *count_slot = returned;
+    *out_len = w.len;
+}
+
+static const cmd_table_entry_t s_fault_commands[] = {
+    {SIMFW_CMD_FAULT_SCHEDULE, handle_fault_schedule},
+    {SIMFW_CMD_FAULT_CANCEL, handle_fault_cancel},
+    {SIMFW_CMD_FAULT_LIST, handle_fault_list},
+    {SIMFW_CMD_FAULT_FIRE_NOW, handle_fault_fire_now},
+};
+
 // --- Dispatch table --------------------------------------------------------
 
 // One row per command group (docs/PLAN.md section 5's table). `commands`/
@@ -193,12 +1419,12 @@ typedef struct {
 
 static const cmd_group_t s_groups[] = {
     {SIMFW_TASK_ID_SYS, s_sys_commands, sizeof(s_sys_commands) / sizeof(s_sys_commands[0])},
-    {SIMFW_TASK_ID_MODEL, NULL, 0},
-    {SIMFW_TASK_ID_TC, NULL, 0},
-    {SIMFW_TASK_ID_CT, NULL, 0},
-    {SIMFW_TASK_ID_RELAY, NULL, 0},
-    {SIMFW_TASK_ID_IO, NULL, 0},
-    {SIMFW_TASK_ID_FAULT, NULL, 0},
+    {SIMFW_TASK_ID_MODEL, s_model_commands, sizeof(s_model_commands) / sizeof(s_model_commands[0])},
+    {SIMFW_TASK_ID_TC, s_tc_commands, sizeof(s_tc_commands) / sizeof(s_tc_commands[0])},
+    {SIMFW_TASK_ID_CT, s_ct_commands, sizeof(s_ct_commands) / sizeof(s_ct_commands[0])},
+    {SIMFW_TASK_ID_RELAY, s_relay_commands, sizeof(s_relay_commands) / sizeof(s_relay_commands[0])},
+    {SIMFW_TASK_ID_IO, s_io_commands, sizeof(s_io_commands) / sizeof(s_io_commands[0])},
+    {SIMFW_TASK_ID_FAULT, s_fault_commands, sizeof(s_fault_commands) / sizeof(s_fault_commands[0])},
     {SIMFW_TASK_ID_EVT, NULL, 0},
 };
 #define CMD_TASK_GROUP_COUNT (sizeof(s_groups) / sizeof(s_groups[0]))

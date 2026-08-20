@@ -7,6 +7,8 @@
 // src/drivers/max31856_spi_slave.pio's file header for the full disclaimer.
 #include "spi_emu_a.h"
 
+#include <string.h>
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -18,6 +20,16 @@
 
 #define SPI_EMU_A_STACK_WORDS   (configMINIMAL_STACK_SIZE * 2u) // headroom for 3 max31856_channel_t images + the pio_bus_t struct, all task-owned locals
 #define SPI_EMU_A_SCAN_DELAY_MS 20u // task-loop cadence, NOT the register update cadence -- see the loop body comment; the actual byte-level SPI response path runs entirely in IRQ context (max31856_pio_engine.c), not this loop
+
+// Bounded retry budget for spi_emu_a_get_reg_image()'s seqlock-style
+// optimistic copy (see that function's header comment in spi_emu_a.h) --
+// never blocks, just gives up and reports busy after this many attempts.
+// 4 is generous: a colliding transaction is astronomically unlikely to
+// span multiple consecutive attempts (a full SPI transaction takes
+// microseconds at 5 MHz; a 16-byte memcpy takes nanoseconds), so this
+// exists purely as a documented, finite bound, not a value tuned against
+// observed contention.
+#define SPI_EMU_A_REG_IMAGE_MAX_RETRIES 4u
 
 // --- Bus A pin configuration (PROVISIONAL -- no traced HARDWARE.md exists
 // yet, docs/PLAN.md section 3.6/11.1). i2c_owner.c already claims GPIO4/5
@@ -156,4 +168,38 @@ bool spi_emu_a_start(void)
 max31856_pio_stats_t spi_emu_a_get_stats(uint8_t channel)
 {
     return max31856_pio_engine_get_stats(&s_bus, channel);
+}
+
+bool spi_emu_a_get_reg_image(uint8_t channel, uint8_t out_regs[MAX31856_REG_COUNT])
+{
+    if (channel >= SPI_EMU_A_CHANNEL_COUNT || out_regs == NULL) {
+        return false;
+    }
+
+    for (uint8_t attempt = 0; attempt < SPI_EMU_A_REG_IMAGE_MAX_RETRIES; attempt++) {
+        if (max31856_pio_engine_channel_busy(&s_bus, channel)) {
+            continue; // CS already low -- no point copying, try again
+        }
+        uint32_t txns_before = spi_emu_a_get_stats(channel).transactions;
+
+        memcpy(out_regs, s_channels[channel].regs, MAX31856_REG_COUNT);
+
+        // If the channel is still not busy AND no new transaction was
+        // observed to have started (and possibly already finished) while
+        // the copy above ran, nothing could have mutated regs[] mid-copy --
+        // see the coherency-guarantee comment in spi_emu_a.h.
+        if (!max31856_pio_engine_channel_busy(&s_bus, channel) &&
+            spi_emu_a_get_stats(channel).transactions == txns_before) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool spi_emu_a_channel_configured(uint8_t channel)
+{
+    if (channel >= SPI_EMU_A_CHANNEL_COUNT) {
+        return false;
+    }
+    return s_channels[channel].master_has_written;
 }

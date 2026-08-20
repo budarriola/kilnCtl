@@ -126,6 +126,53 @@ typedef struct {
                                       * MISO) */
     bool spurious_fault_pin;        /* force ~FAULT asserted regardless of
                                       * SR/MASK */
+
+    bool shorted;                   /* PLAN.md 7.1 "Shorted TC": reported TC
+                                      * temperature is forced to the reported
+                                      * CJ temperature (near-ambient/CJ)
+                                      * regardless of the true zone
+                                      * temperature -- what a real shorted
+                                      * junction (zero Seebeck voltage)
+                                      * reads. Takes precedence over
+                                      * drift_offset_c (a shorted junction
+                                      * cannot also be drifting its true
+                                      * reading -- there is no true reading
+                                      * anymore); stuck_ltcb still wins over
+                                      * both if also set, since "frozen at
+                                      * last value" is the more severe/
+                                      * definite claim (same severity
+                                      * doctrine fault_sched.c documents for
+                                      * its own zone-level overrides). */
+    float drift_offset_c;           /* PLAN.md 7.1 "Drifting TC": calibration-
+                                      * drift ramp offset, degC, added to the
+                                      * true TC reading before noise/
+                                      * quantization. This module has no time
+                                      * source of its own (advance_conversion()
+                                      * takes no dt) -- the ramp is expected
+                                      * to be computed by the caller from
+                                      * elapsed sim time and rewritten here
+                                      * every recompute, exactly like every
+                                      * other knob in this struct is a plain
+                                      * instantaneous value, never an
+                                      * accumulator this module integrates
+                                      * itself. 0 = no drift. */
+    float cj_fault_offset_c;        /* PLAN.md 7.1 "CJ fault": added to the
+                                      * internally-sensed CJ temperature
+                                      * (true_cj_c + CJTO) before quantizing
+                                      * into CJTH:CJTL and before the
+                                      * existing CJHF/CJLF threshold compare
+                                      * -- so a nonzero value both reports a
+                                      * wrong CJ temperature *and* naturally
+                                      * asserts SR's CJHIGH/CJLOW bits once
+                                      * it crosses the master-written
+                                      * thresholds, with no separate SR-
+                                      * forcing path needed (unlike OPEN/
+                                      * OVUV, which have no threshold to
+                                      * cross on their own). Has no effect
+                                      * while CR0.CJ_DISABLE is set, since in
+                                      * that mode the master owns CJTH:CJTL
+                                      * outright and this module only reads
+                                      * it back. 0 = no CJ fault. */
 } max31856_corruption_t;
 
 /* One emulated channel: the live 16-byte register image, the "true" inputs
@@ -149,6 +196,23 @@ typedef struct {
     bool txn_is_write;
     uint8_t txn_addr;          /* next register address to touch (auto-incrementing) */
     uint8_t read_snapshot[MAX31856_REG_COUNT]; /* coherency snapshot for an open read */
+
+    /* Master-write bookkeeping (TC_GET_MASTER_CONFIG, PLAN.md 5.2/3.2): set
+     * true the first time apply_write_rule() ever runs for this channel --
+     * i.e. the first data byte of the first write transaction the master
+     * ever issues, even one targeting a read-only address (an attempted
+     * write is still "the master wrote something"). Write-once
+     * false->true, never cleared except by max31856_regs_init() -- this is
+     * what lets a caller distinguish "the DUT configured this channel
+     * wrong" from "the DUT never configured this channel at all", which
+     * PLAN.md 5.2 calls out as "a different and equally important
+     * failure." A plain bool read/write is used deliberately (no snapshot,
+     * no coherency machinery): it is monotonic and single-byte, so a reader
+     * on another core can never observe a torn value the way a multi-byte
+     * struct copy could -- unlike regs[], which needs the caller-side
+     * getters in spi_emu_a.h/spi_emu_b.h to protect against a mid-
+     * transaction sample. */
+    bool master_has_written;
 } max31856_channel_t;
 
 /* Seeds regs[] to the part's documented power-on defaults (CR0=00h,

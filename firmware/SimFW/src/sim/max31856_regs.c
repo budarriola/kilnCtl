@@ -130,6 +130,12 @@ void max31856_regs_init(max31856_channel_t *ch, uint32_t rng_seed)
 
 static void apply_write_rule(max31856_channel_t *ch, uint8_t addr, uint8_t value)
 {
+    /* See max31856_regs.h's struct comment: any data byte the master sends
+     * during a write transaction counts, even one landing on a read-only
+     * address below (the write attempt itself is the observable DUT
+     * behavior TC_GET_MASTER_CONFIG reports on). */
+    ch->master_has_written = true;
+
     switch (addr) {
     case MAX31856_REG_LTCBH:
     case MAX31856_REG_LTCBM:
@@ -253,12 +259,37 @@ bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, f
 {
     uint8_t cr0 = ch->regs[MAX31856_REG_CR0];
 
-    /* --- reported TC value: noise, then stuck-LTCB freeze --- */
+    /* --- cold junction: internal sensor unless CJ_DISABLE is set ---
+     * Computed before the TC block below because corruption.shorted needs
+     * the reported CJ value to build its "reads near-ambient/CJ" result
+     * (PLAN.md 7.1 "Shorted TC"). */
+    float reported_cj_c;
+    if (cr0 & MAX31856_CR0_CJ_DISABLE) {
+        /* Master owns CJTH:CJTL when the internal sensor is off -- do not
+         * overwrite what was written, and no fault offset applies (this
+         * module has nothing to add an offset to; the master's own value is
+         * authoritative). */
+        reported_cj_c = cj16_to_c(decode_threshold16(ch->regs[MAX31856_REG_CJTH], ch->regs[MAX31856_REG_CJTL]));
+    } else {
+        int8_t cjto = (int8_t)ch->regs[MAX31856_REG_CJTO];
+        reported_cj_c = true_cj_c + (float)cjto * MAX31856_CJ_OFFSET_C_PER_LSB + ch->corruption.cj_fault_offset_c;
+        int16_t cj_raw = c_to_cj16(reported_cj_c);
+        uint8_t cjh, cjl;
+        encode_threshold16(cj_raw, &cjh, &cjl);
+        ch->regs[MAX31856_REG_CJTH] = cjh;
+        ch->regs[MAX31856_REG_CJTL] = cjl;
+        reported_cj_c = cj16_to_c(cj_raw);
+    }
+    bool cj_range_fault = (reported_cj_c < -55.0f || reported_cj_c > 125.0f);
+
+    /* --- reported TC value: shorted/drift, then noise, then stuck-LTCB
+     * freeze (severity order documented on max31856_corruption_t itself) --- */
+    float base_tc_c = ch->corruption.shorted ? reported_cj_c : (true_tc_c + ch->corruption.drift_offset_c);
     float reported_tc_c;
     if (ch->corruption.stuck_ltcb && ch->has_reported) {
         reported_tc_c = ch->last_reported_tc_c;
     } else {
-        reported_tc_c = true_tc_c + gaussian(&ch->rng_state, ch->corruption.noise_sigma_c);
+        reported_tc_c = base_tc_c + gaussian(&ch->rng_state, ch->corruption.noise_sigma_c);
     }
     ch->last_reported_tc_c = reported_tc_c;
     ch->has_reported = true;
@@ -270,24 +301,6 @@ bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, f
     ch->regs[MAX31856_REG_LTCBH] = h;
     ch->regs[MAX31856_REG_LTCBM] = m;
     ch->regs[MAX31856_REG_LTCBL] = l;
-
-    /* --- cold junction: internal sensor unless CJ_DISABLE is set --- */
-    float reported_cj_c;
-    if (cr0 & MAX31856_CR0_CJ_DISABLE) {
-        /* Master owns CJTH:CJTL when the internal sensor is off -- do not
-         * overwrite what was written. */
-        reported_cj_c = cj16_to_c(decode_threshold16(ch->regs[MAX31856_REG_CJTH], ch->regs[MAX31856_REG_CJTL]));
-    } else {
-        int8_t cjto = (int8_t)ch->regs[MAX31856_REG_CJTO];
-        reported_cj_c = true_cj_c + (float)cjto * MAX31856_CJ_OFFSET_C_PER_LSB;
-        int16_t cj_raw = c_to_cj16(reported_cj_c);
-        uint8_t cjh, cjl;
-        encode_threshold16(cj_raw, &cjh, &cjl);
-        ch->regs[MAX31856_REG_CJTH] = cjh;
-        ch->regs[MAX31856_REG_CJTL] = cjl;
-        reported_cj_c = cj16_to_c(cj_raw);
-    }
-    bool cj_range_fault = (reported_cj_c < -55.0f || reported_cj_c > 125.0f);
 
     /* --- threshold comparisons against master-written registers --- */
     int16_t tc_hi_raw = decode_threshold16(ch->regs[MAX31856_REG_LTHFTH], ch->regs[MAX31856_REG_LTHFTL]);

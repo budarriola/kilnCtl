@@ -196,6 +196,31 @@ bool usb_owner_send_reply(uint8_t responding_task_id, uint8_t dst_device, uint8_
     return usb_owner_encode_and_transmit(&ack, responding_task_id);
 }
 
+bool usb_owner_send_broadcast(uint8_t src_task, const uint8_t *payload, uint8_t length)
+{
+    if (length > 0 && payload == NULL) {
+        return false;
+    }
+    if ((size_t)length > BENCHPROTO_FRAME_MAX_PAYLOAD) {
+        return false;
+    }
+
+    benchproto_frame_t bcast = {
+        .msg_type = BENCHPROTO_MSG_BROADCAST,
+        .msg_index = 0, // BROADCAST is never retried/deduped/matched (BENCHPROTO.md sec 4)
+        .src_device = SIMFW_DEVICE_TARGET,
+        .src_task = src_task,
+        .dst_device = SIMFW_DEVICE_HOST,
+        .dst_task = 0, // no specific registered receiver task for unsolicited traffic
+        .length = length,
+        .payload = payload,
+    };
+    // Never cached (USB_OWNER_ACK_CACHE_SLOTS as the out-of-range sentinel,
+    // same convention usb_owner_send_nack() uses above): a BROADCAST is
+    // never resent for a DUPLICATE_REACK, so nothing needs saving.
+    return usb_owner_encode_and_transmit(&bcast, USB_OWNER_ACK_CACHE_SLOTS);
+}
+
 bool usb_owner_register_task(uint8_t task_id)
 {
     return benchproto_link_register_task(&s_link, task_id) == BENCHPROTO_LINK_OK;

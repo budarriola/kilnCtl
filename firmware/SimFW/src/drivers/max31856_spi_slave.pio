@@ -6,16 +6,41 @@
 ; max31856_pio_engine.c right next to this file.
 ;
 ; ============================================================================
+; MODE-1 EDGE RESOLUTION (see the RX program comment below for the full
+; derivation): the two real masters that will ever clock this fixture agree
+; with each other and with the datasheet, so the edges are settled from code
+; + datasheet alone, no bench measurement required.
+;   - KilnFW (ESP32-S3): MAX31856.c `#define MAX31856_SPI_MODE 1`, passed as
+;     `spi_device_interface_config_t.mode` in MAX31856_attach() -- ESP-IDF
+;     mode 1 == CPOL=0, CPHA=1.
+;   - SaftyFW (RP2040): spi_owner.c `spi_set_format(spi0, 8, SPI_CPOL_0,
+;     SPI_CPHA_1, SPI_MSB_FIRST)` -- explicit CPOL=0, CPHA=1, same as KilnFW.
+;   - KilnFW/docs/HARDWARE.md's SPI bus section: "The thermocouple parts run
+;     SPI mode 1 at up to 5 MHz."
+;   - MAX31856 datasheet (hardware/datasheets/.../MAX31856.pdf), Table 5
+;     "Serial Interface Function", CPOL=0 rows (page 15; "Note: CPHA bit
+;     polarity must be set to 1" for the whole table, i.e. mode 1 is the only
+;     mode the table describes): SDI ("Data bit latch", i.e. the *slave's*
+;     input sample point) happens on "SCLK falling"; SDO ("Next data bit
+;     shift", i.e. the *slave's* output/shift point) happens on "SCLK
+;     rising". This is the MAX31856 itself telling you, as a slave device,
+;     which edge it samples/shifts on -- exactly the role this PIO program
+;     plays.
+; So: this emulator, acting as the slave, must SAMPLE MOSI on the FALLING
+; edge and SHIFT MISO out on the RISING edge. The RX/TX programs below were
+; originally written backwards (sampled on rising, shifted on falling --
+; textbook mode 0, not mode 1, despite the mode-1 label), per the file's
+; former ambiguity note; that has now been corrected to match the three
+; sources above, which all agree.
+; ============================================================================
 ; BUILD-VERIFIED, NOT HARDWARE-TIMING-VERIFIED. There is no Pico attached in
 ; this environment. pioasm (run automatically by pico_generate_pio_header()
 ; at build time) validates that these programs assemble and fit PIO program
-; memory; it says nothing about whether the sampled/driven edge is actually
-; correct against a real ESP32-S3 or RP2040 SPI master's mode-1 clocking.
-; The edge choices below are a logically-consistent, best-effort reading of
-; PLAN.md 3.2.1's mode-1 description (which is itself a little ambiguous --
-; see the RX program comment) combined with standard SPI slave PIO idioms.
-; Proving this against a real master's SCLK/MOSI/MISO relationship (Saleae
-; capture, PLAN.md section 10 M-A's actual exit criterion) is NOT done here.
+; memory; it does not itself drive a real ESP32-S3/RP2040 master, so the
+; edge choices above -- though derived from the masters' own SPI config and
+; the datasheet's own slave-timing table, not guessed -- are still worth a
+; Saleae confirmation on first bench contact (PLAN.md section 10 M-A's exit
+; criterion) before fully trusting the fixture.
 ; ============================================================================
 ;
 ; --- Pin-mapping contract every program below assumes (enforced by the C
@@ -69,31 +94,38 @@
 ;       before pushing it: `pio_sm_put(pio, sm_tx, (uint32_t)byte << 24)`.
 
 ; ---------------------------------------------------------------------------
-; RX: samples MOSI on SCLK's rising edge (PLAN.md 3.2.1's literal wording),
-; one whole byte at a time (autopush, 8 bits), gated by this channel's own
-; CS line. Falls back to a clean byte boundary (`mov isr, null`) whenever CS
-; is seen high, whether that is between transactions or an out-of-protocol
-; mid-byte deassert -- a well-behaved master never does the latter, but this
-; program does not assume it.
+; RX: samples MOSI on SCLK's FALLING edge, one whole byte at a time
+; (autopush, 8 bits), gated by this channel's own CS line. Falls back to a
+; clean byte boundary (`mov isr, null`) whenever CS is seen high, whether
+; that is between transactions or an out-of-protocol mid-byte deassert -- a
+; well-behaved master never does the latter, but this program does not
+; assume it.
 ;
-; NOTE on mode-1 ambiguity: PLAN.md 3.2.1 says both "samples MOSI on SCLK
-; rising edge" AND "(mode 1: CPOL=0, CPHA=1 -- shift on leading edge, sample
-; on trailing...)" in the same sentence, which is internally inconsistent
-; (leading edge for CPOL=0 is the rising edge, so "sample on trailing" would
-; mean sample on the FALLING edge, not the rising edge stated first). This
-; program follows the plan's literal, explicit instruction ("samples MOSI on
-; SCLK rising edge") rather than resolving the parenthetical. If a Saleae
-; capture later shows this is backwards, swap the two `wait` instructions
-; below.
+; MODE-1 EDGE DERIVATION (see file header for the full source list -- this
+; is the short version, worked from first principles so it's checkable):
+; mode 1 is CPOL=0 (idle low), CPHA=1. CPHA=1 means: the leading edge of
+; each clock cycle is when the *transmitting* side (master's MOSI driver,
+; slave's MISO driver) puts out its next bit, and the trailing edge is when
+; the *receiving* side latches it. For CPOL=0 the leading edge of a cycle is
+; the RISING edge and the trailing edge is the FALLING edge. That rule
+; applies identically to both ends of the same shared clock -- master and
+; slave are not on opposite edges of each other, they both key off the same
+; leading/trailing split. So: the master drives a new MOSI bit on SCLK's
+; RISING edge, and this slave (the emulator) must sample it on the
+; following FALLING edge, once it has settled. This exactly matches the
+; MAX31856 datasheet's own Table 5 (CPOL=0 row): "Data bit latch" (SDI
+; sample) on "SCLK falling". This program used to sample on the rising edge
+; (textbook mode 0); it has been corrected to sample on falling to actually
+; be mode 1.
 .program max31856_spi_rx
 resync:
     mov isr, null              ; clear any partial byte + reset the autopush shift counter (datasheet: MOV to ISR resets both)
 wait_cs:
     jmp pin, wait_cs           ; loop while CS (this SM's jmp_pin) reads HIGH, i.e. deasserted
 bit_loop:
-    wait 1 pin 31               ; SCLK rising edge (offset 31 == SCLK, wraparound from IN_BASE=MOSI, see header)
+    wait 1 pin 31               ; SCLK rising edge (offset 31 == SCLK, wraparound from IN_BASE=MOSI, see header) -- mode-1 leading edge: this is when the master drives its next MOSI bit, NOT our sample point
+    wait 0 pin 31                ; SCLK falling edge -- mode-1 trailing edge: MOSI has settled, this IS the sample point
     in pins, 1                  ; sample MOSI into ISR; autopush fires to the RX FIFO every 8 bits
-    wait 0 pin 31                ; SCLK falling edge, so the next `wait 1` needs a genuinely new rising edge
     jmp pin, resync               ; CS deasserted (mid-byte or at a boundary) -> resync for the next transaction
     jmp bit_loop
 
@@ -102,10 +134,11 @@ bit_loop:
 ; ESP-side bus. Tri-states MISO (pindir=0, Hi-Z) whenever all 3 CS lines read
 ; high; drives it (pindir=1) and shifts a byte out per SCLK cycle whenever
 ; any one of them is low. Complementary edge to the RX program above: shifts
-; (changes MISO) on SCLK's FALLING edge and holds through the RISING edge, so
-; the master's own sample point (whichever edge that turns out to be, see the
-; RX program's ambiguity note) sees a settled bit rather than one still
-; transitioning.
+; (changes MISO) on SCLK's RISING edge -- the mode-1 leading edge, see the RX
+; program's derivation -- and holds through the FALLING edge, so the
+; master's own sample point (the trailing/falling edge, per the MAX31856
+; datasheet Table 5 CPOL=0 "SDO ... SCLK rising" row read from the slave's
+; output side) sees a settled bit rather than one still transitioning.
 .program max31856_spi_tx_a
     set y, 7                   ; compare constant: 0b111 == all 3 CS lines idle-high
 poll_idle:
@@ -118,9 +151,9 @@ poll_idle:
 active:
     set pindirs, 1                 ; drive MISO -- at least one CS asserted
 byte_loop:
-    wait 0 pin 29                   ; SCLK falling edge -> safe to change MISO
+    wait 1 pin 29                   ; SCLK rising edge (mode-1 leading edge) -> safe to change MISO
     out pins, 1                      ; shift next bit out; autopull refills the OSR from the TX FIFO at the 8-bit threshold, BLOCKING (stalling this SM) if the FIFO is empty -- this stall IS the first-byte-late / underrun condition PLAN.md 3.2.1 requires counted, never silent; max31856_pio_engine.c's ISR detects it (see that file's stats comment)
-    wait 1 pin 29                     ; SCLK rising edge -- hold the bit steady through the master's sample window
+    wait 0 pin 29                     ; SCLK falling edge (mode-1 trailing edge) -- hold the bit steady through the master's sample window
     in pins, 3                         ; re-check CS state every bit (cheaper than a separate SM, and CS can legitimately deassert mid-byte on an aborted transaction)
     mov x, isr
     mov isr, null
@@ -146,9 +179,9 @@ poll_idle:
 active:
     set pindirs, 1
 byte_loop:
-    wait 0 pin 29                ; SCLK falling edge (same offset-29 CS-to-SCLK spacing as bus A, see header)
+    wait 1 pin 29                ; SCLK rising edge (mode-1 leading edge; same offset-29 CS-to-SCLK spacing as bus A, see header)
     out pins, 1
-    wait 1 pin 29
+    wait 0 pin 29                ; SCLK falling edge (mode-1 trailing/sample edge)
     in pins, 1
     mov x, isr
     mov isr, null

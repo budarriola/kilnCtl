@@ -207,6 +207,31 @@ void app_main(void)
     // below for when the backlog actually flushes.
     uart_log_bridge_early_init();
 
+    // --- Boot-time log budget, 2026-08-20 -------------------------------
+    // The ESP-IDF Wi-Fi driver emits ~40 INFO lines during init ("Init
+    // dynamic tx buffer num", "Init static rx buffer size", and so on), all
+    // of it fixed configuration this project never varies and can read from
+    // sdkconfig any time. That burst lands in exactly the window where the
+    // interesting diagnostics are (reset reason, task/queue creation
+    // failures, the first page's tap-target dump) and overruns
+    // uart_log_bridge's queue, which then reports "log line(s) dropped
+    // (queue full)" and silently discards them.
+    //
+    // That is not hypothetical: this flood has now destroyed evidence four
+    // separate times during bench work -- it hid the boot-time
+    // task-creation diagnostics that made the UART registration bug
+    // undiagnosable for days, it swallowed the esp_reset_reason() line added
+    // specifically to explain a spontaneous reboot, and it ate the LCD
+    // tap-target dump twice. Dropping the driver's own chatter to WARN keeps
+    // every genuine Wi-Fi problem (auth failures, disconnect reasons, the
+    // "wifi:" state transitions that matter) while giving that queue budget
+    // back to this firmware's own diagnostics.
+    //
+    // Deliberately set here, before wifi_prov_start() runs, so it applies to
+    // the init burst itself rather than only to whatever comes after it.
+    esp_log_level_set("wifi", ESP_LOG_WARN);
+    esp_log_level_set("wifi_init", ESP_LOG_WARN);
+
     // --- Reset-reason instrumentation (TODO.md 6089 open item, 2026-08-20) --
     // The board has been seen rebooting spontaneously on the bench with no
     // panic text visible over the log-bridge channel (the panic handler

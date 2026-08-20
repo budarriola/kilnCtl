@@ -68,6 +68,34 @@ bool usb_owner_register_task(uint8_t task_id);
 bool usb_owner_send_reply(uint8_t responding_task_id, uint8_t dst_device, uint8_t dst_task, uint16_t msg_index,
                            const uint8_t *payload, uint8_t length);
 
+// Sends an unsolicited BROADCAST frame (BENCHPROTO_MSG_BROADCAST,
+// BENCHPROTO.md sec 4: "never ACKed, never NACKed, never deduped") --
+// docs/PLAN.md section 5.3's TELEMETRY/EVT frames. Added alongside
+// usb_owner_send_reply() (this pass, telemetry.c's real body): usb_owner
+// remains the CDC's sole owner (this header's file comment), so the
+// "actual outbound BROADCAST path" docs/PROTOCOL.md section 6 calls
+// "telemetry's own work" still has to be handed off through here rather
+// than telemetry.c touching tud_cdc_write()/benchproto_link_t itself.
+//
+// `src_task` is the SIMFW_TASK_ID_* (cmd_ids.h) this broadcast is FROM --
+// telemetry.c passes SIMFW_TASK_ID_EVT for both its periodic TELEMETRY
+// frames and its per-event EVT frames, disambiguated by a frame-kind byte
+// telemetry.c/docs/PROTOCOL.md define in the payload itself (BROADCAST's
+// own dst_task has no specific registered receiver on this side to route
+// to, so it is sent as 0 -- benchproto's addressing model is built for
+// DATA/ACK/NACK's request/reply pairing, not a specific requirement for
+// unsolicited traffic, BENCHPROTO.md sec 4).
+//
+// `payload`/`length` is the frame body (length may be 0). Never queued or
+// retried: if the CDC TX path is busy (mutex contention) or the write is
+// short, this returns false immediately and the caller counts it as a
+// dropped frame rather than blocking or retrying (PLAN.md 4.5's drop
+// policy: "nothing ever blocks... a full queue toward them is a counted
+// drop"). Not cached for DUPLICATE_REACK resend the way usb_owner_send_reply()'s
+// ACKs are -- BROADCAST frames are never acknowledged or retried by
+// definition (BENCHPROTO.md sec 4), so there is nothing to resend.
+bool usb_owner_send_broadcast(uint8_t src_task, const uint8_t *payload, uint8_t length);
+
 #ifdef __cplusplus
 }
 #endif

@@ -8,6 +8,8 @@
 // src/drivers/max31856_spi_slave.pio's file header for the full disclaimer.
 #include "spi_emu_b.h"
 
+#include <string.h>
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -19,6 +21,9 @@
 
 #define SPI_EMU_B_STACK_WORDS   (configMINIMAL_STACK_SIZE * 2u)
 #define SPI_EMU_B_SCAN_DELAY_MS 20u // see spi_emu_a.c's identical constant's comment -- task-loop cadence only, not the register update path
+
+// See spi_emu_a.c's identical constant's comment.
+#define SPI_EMU_B_REG_IMAGE_MAX_RETRIES 4u
 
 // --- Bus B pin configuration (PROVISIONAL -- see spi_emu_a.c's identical
 // disclaimer). Chosen immediately adjacent to bus A's GPIO6-11 block
@@ -104,4 +109,34 @@ bool spi_emu_b_start(void)
 max31856_pio_stats_t spi_emu_b_get_stats(uint8_t channel)
 {
     return max31856_pio_engine_get_stats(&s_bus, channel);
+}
+
+bool spi_emu_b_get_reg_image(uint8_t channel, uint8_t out_regs[MAX31856_REG_COUNT])
+{
+    if (channel >= SPI_EMU_B_CHANNEL_COUNT || out_regs == NULL) {
+        return false;
+    }
+
+    for (uint8_t attempt = 0; attempt < SPI_EMU_B_REG_IMAGE_MAX_RETRIES; attempt++) {
+        if (max31856_pio_engine_channel_busy(&s_bus, channel)) {
+            continue;
+        }
+        uint32_t txns_before = spi_emu_b_get_stats(channel).transactions;
+
+        memcpy(out_regs, s_channel.regs, MAX31856_REG_COUNT);
+
+        if (!max31856_pio_engine_channel_busy(&s_bus, channel) &&
+            spi_emu_b_get_stats(channel).transactions == txns_before) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool spi_emu_b_channel_configured(uint8_t channel)
+{
+    if (channel >= SPI_EMU_B_CHANNEL_COUNT) {
+        return false;
+    }
+    return s_channel.master_has_written;
 }

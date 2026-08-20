@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnsim.link import MockSimLink, SimLinkError  # noqa: E402
-from kilnsim.protocol import CommandGroup, Event, EventType, SysCmd  # noqa: E402
+from kilnsim.protocol import CommandGroup, Event, EventType, SysCmd, TcCmd  # noqa: E402
 
 
 class ConnectDisconnectTests(unittest.TestCase):
@@ -67,6 +67,12 @@ class BuiltInDefaultResponseTests(unittest.TestCase):
         reply = self.link.send_command(CommandGroup.RELAY, 3, {"anything": 1})
         self.assertEqual(reply, {"ok": True})
 
+    def test_tc_get_master_config_has_expected_shape(self):
+        reply = self.link.send_command(CommandGroup.TC, TcCmd.GET_MASTER_CONFIG, {"channel": 1})
+        self.assertEqual(reply["channel"], 1)
+        for key in ("configured", "reg_image_valid", "cr0", "cr1", "mask"):
+            self.assertIn(key, reply)
+
     def test_history_records_every_send(self):
         self.link.send_command(CommandGroup.SYS, SysCmd.PING)
         self.link.send_command(CommandGroup.MODEL, 4, {"name": "fast_test"})
@@ -85,11 +91,13 @@ class ScriptedResponseTests(unittest.TestCase):
         self.assertEqual(reply, {"pong": False, "note": "custom"})
 
     def test_scripted_responses_are_consumed_fifo(self):
-        self.link.script_response(CommandGroup.TC, 1, {"channel": 0, "seq": 1})
-        self.link.script_response(CommandGroup.TC, 1, {"channel": 0, "seq": 2})
-        first = self.link.send_command(CommandGroup.TC, 1)
-        second = self.link.send_command(CommandGroup.TC, 1)
-        third = self.link.send_command(CommandGroup.TC, 1)  # falls back to default (generic ack)
+        # MODEL/1 (SET_ZONE_PARAMS) has no special-cased mock default, so the
+        # third call exercises the generic-ack fallback path.
+        self.link.script_response(CommandGroup.MODEL, 1, {"channel": 0, "seq": 1})
+        self.link.script_response(CommandGroup.MODEL, 1, {"channel": 0, "seq": 2})
+        first = self.link.send_command(CommandGroup.MODEL, 1)
+        second = self.link.send_command(CommandGroup.MODEL, 1)
+        third = self.link.send_command(CommandGroup.MODEL, 1)  # falls back to default (generic ack)
         self.assertEqual(first["seq"], 1)
         self.assertEqual(second["seq"], 2)
         self.assertEqual(third, {"ok": True})

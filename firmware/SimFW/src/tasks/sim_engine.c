@@ -63,6 +63,9 @@ typedef enum {
     SIM_ENGINE_CMD_RESET,
     SIM_ENGINE_CMD_FORCE_ZONE_TEMP,
     SIM_ENGINE_CMD_CLEAR_ZONE_MANUAL,
+    SIM_ENGINE_CMD_SET_SAFETY_TC_PARAMS,
+    SIM_ENGINE_CMD_FORCE_SAFETY_TEMP,
+    SIM_ENGINE_CMD_CLEAR_SAFETY_MANUAL,
 } sim_engine_cmd_type_t;
 
 typedef struct {
@@ -76,6 +79,8 @@ typedef struct {
         struct { bool keep_params; } reset;
         struct { uint8_t zone; float temp_c; } force_temp;
         struct { uint8_t zone; } clear_manual;
+        struct { sim_engine_safety_tc_params_t params; } safety_tc;
+        struct { float temp_c; } force_safety;
     } u;
 } sim_engine_cmd_t;
 
@@ -90,12 +95,40 @@ static thermal_model_params_t s_params;
 static thermal_model_state_t  s_state;
 static thermal_preset_id_t    s_current_preset = THERMAL_PRESET_FAST_TEST;
 static uint32_t s_timescale_x100 = 100; // 1.00x
-static uint32_t s_seed = 0;
+static volatile uint32_t s_seed = 0; // volatile: read from other tasks by
+                                       // sim_engine_get_seed() without a
+                                       // mutex, see that function's doc.
 static uint64_t s_sim_time_us = 0;
 static uint16_t s_relay_mask_prev = 0;
 
 static bool  s_zone_manual[THERMAL_MODEL_MAX_ZONES];
 static float s_zone_manual_temp_c[THERMAL_MODEL_MAX_ZONES];
+
+// --- Safety-side TC: blend/lag config (params_mutex-guarded, same as
+// s_params) + lag filter state + MANUAL override (task-context-only, same
+// discipline as s_zone_manual above) -----------------------------------
+static sim_engine_safety_tc_params_t s_safety_tc_params = {
+    .weight = { 1.0f, 0.0f, 0.0f, 0.0f }, // PLAN.md 4.3 default: zone 0
+    .lag_s = 5.0f,
+};
+static float s_safety_tc_state_c = 25.0f; // lag filter's running value
+static bool  s_safety_manual = false;
+static float s_safety_manual_temp_c = 0.0f;
+
+// fault_sched's safety-TC hook -- NOT queued, see sim_engine.h's doc on
+// sim_engine_set_safety_tc_fault_override(): same race-free-by-construction
+// reasoning as the duty/health overrides below.
+static bool  s_safety_fault_override_active = false;
+static float s_safety_fault_offset_c = 0.0f;
+static float s_safety_fault_gain = 1.0f;
+
+// zone thermal-mass-surprise / TC-lag-stress overrides -- NOT queued, same
+// fault_sched-only contract as the duty/health overrides below.
+static bool  s_zone_thermal_override_active[THERMAL_MODEL_MAX_ZONES];
+static float s_zone_thermal_override_C[THERMAL_MODEL_MAX_ZONES];
+static float s_zone_thermal_override_k_loss[THERMAL_MODEL_MAX_ZONES];
+static bool  s_zone_tc_lag_override_active[THERMAL_MODEL_MAX_ZONES];
+static float s_zone_tc_lag_override_value[THERMAL_MODEL_MAX_ZONES];
 
 // fault_sched's power-path hook -- NOT queued, see sim_engine.h's doc on
 // sim_engine_set_zone_duty_override()/_health_override(): only ever called
@@ -152,6 +185,23 @@ static void reset_zone_manual_overrides(void)
     memset(s_zone_manual_temp_c, 0, sizeof(s_zone_manual_temp_c));
 }
 
+// Re-seeds the safety-TC lag filter from a fresh blend of the just-(re)init
+// state's zone temps (mirrors thermal_model_init()'s own "a sensor sitting
+// at a constant temperature forever reports the truth" reasoning for the
+// safety channel) and clears its MANUAL override -- called anywhere
+// s_state is freshly (re)initialized (apply_reset(), LOAD_PRESET,
+// sim_engine_start()), same set of call sites reset_zone_manual_overrides()
+// is called from today.
+static void reset_safety_tc_state(void)
+{
+    float blend = 0.0f;
+    for (uint8_t z = 0; z < s_params.zone_count && z < THERMAL_MODEL_MAX_ZONES; z++) {
+        blend += s_safety_tc_params.weight[z] * s_state.T_zone[z];
+    }
+    s_safety_tc_state_c = blend;
+    s_safety_manual = false;
+}
+
 static void apply_reset(bool keep_params)
 {
     if (!keep_params) {
@@ -160,6 +210,7 @@ static void apply_reset(bool keep_params)
     thermal_model_init(&s_state, &s_params);
     s_sim_time_us = 0;
     reset_zone_manual_overrides();
+    reset_safety_tc_state();
 
     xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
     s_ring_next_seq = 0;
@@ -187,6 +238,7 @@ static void apply_pending_commands(void)
             thermal_model_init(&s_state, &s_params);
             s_sim_time_us = 0;
             reset_zone_manual_overrides();
+            reset_safety_tc_state();
             break;
 
         case SIM_ENGINE_CMD_SET_AMBIENT:
@@ -218,6 +270,21 @@ static void apply_pending_commands(void)
             if (cmd.u.clear_manual.zone < THERMAL_MODEL_MAX_ZONES) {
                 s_zone_manual[cmd.u.clear_manual.zone] = false;
             }
+            break;
+
+        case SIM_ENGINE_CMD_SET_SAFETY_TC_PARAMS:
+            params_lock();
+            s_safety_tc_params = cmd.u.safety_tc.params;
+            params_unlock();
+            break;
+
+        case SIM_ENGINE_CMD_FORCE_SAFETY_TEMP:
+            s_safety_manual = true;
+            s_safety_manual_temp_c = cmd.u.force_safety.temp_c;
+            break;
+
+        case SIM_ENGINE_CMD_CLEAR_SAFETY_MANUAL:
+            s_safety_manual = false;
             break;
         }
     }
@@ -286,6 +353,19 @@ static void sim_engine_tick(void)
         if (s_zone_health_override_active[z]) {
             eff_params.zones[z].element_health = s_zone_health_override_value[z];
         }
+        // Thermal-mass surprise (PLAN.md 7.1): step-change C/k_loss.
+        // C <= 0 is ignored -- see sim_engine.h's doc on this override for
+        // why (avoids handing thermal_model_tick() a divide-by-zero).
+        if (s_zone_thermal_override_active[z]) {
+            if (s_zone_thermal_override_C[z] > 0.0f) {
+                eff_params.zones[z].C = s_zone_thermal_override_C[z];
+            }
+            eff_params.zones[z].k_loss = s_zone_thermal_override_k_loss[z];
+        }
+        // Sensor-vs-element lag stress (PLAN.md 7.1): step-change tc_lag_s.
+        if (s_zone_tc_lag_override_active[z]) {
+            eff_params.zones[z].tc_lag_s = s_zone_tc_lag_override_value[z];
+        }
     }
 
     uint32_t scale_int = s_timescale_x100 / 100u;
@@ -305,6 +385,35 @@ static void sim_engine_tick(void)
     }
 
     s_sim_time_us += (uint64_t)(dt_s * 1.0e6f);
+
+    // --- Safety-side TC: blend of *true* zone temps (PLAN.md section 2's
+    // "the same zone temperatures feed the safety-side emulated MAX31856")
+    // + its own first-order lag (same formula as thermal_model.c's TC lag,
+    // deliberately mirrored here rather than in that locked file: dT/dt =
+    // (target - current) / lag_s), then the fault_sched-only offset/gain
+    // override, then MANUAL, which always wins if active. -------------------
+    params_lock();
+    sim_engine_safety_tc_params_t safety_params = s_safety_tc_params;
+    params_unlock();
+
+    float safety_blend_target = 0.0f;
+    for (uint8_t z = 0; z < eff_params.zone_count; z++) {
+        safety_blend_target += safety_params.weight[z] * s_state.T_zone[z];
+    }
+    if (safety_params.lag_s > 0.0f) {
+        float dT_dt = (safety_blend_target - s_safety_tc_state_c) / safety_params.lag_s;
+        s_safety_tc_state_c += dT_dt * dt_s;
+    } else {
+        s_safety_tc_state_c = safety_blend_target;
+    }
+
+    float safety_reported_c = s_safety_tc_state_c;
+    if (s_safety_fault_override_active) {
+        safety_reported_c = safety_reported_c * s_safety_fault_gain + s_safety_fault_offset_c;
+    }
+    if (s_safety_manual) {
+        safety_reported_c = s_safety_manual_temp_c;
+    }
 
     // --- current_a[] : PLAN.md 3.3's formula, using the *effective*
     // duty/health this tick actually used, so fault overrides show up in
@@ -328,13 +437,13 @@ static void sim_engine_tick(void)
     for (uint8_t z = 0; z < eff_params.zone_count; z++) {
         s_pub_snapshot.zones[z].T_true_c = s_state.T_zone[z];
         s_pub_snapshot.zones[z].T_tc_reported_c = s_state.T_tc[z];
-        s_pub_snapshot.zones[z].T_safety_reported_c = s_state.T_tc[z]; // default blend: zone0's
-                                                                         // lagged reading stands in
-                                                                         // for every zone until a
-                                                                         // dedicated safety-blend
-                                                                         // parameter exists
-                                                                         // (PLAN.md 4.3) -- see
-                                                                         // report note.
+        s_pub_snapshot.zones[z].T_safety_reported_c = safety_reported_c; // one physical safety
+                                                                         // channel's blended+lagged
+                                                                         // (+fault-skewed/MANUAL)
+                                                                         // reading, republished into
+                                                                         // every zone slot -- see
+                                                                         // sim_engine.h's doc on
+                                                                         // sim_engine_safety_tc_params_t.
         s_pub_snapshot.zones[z].current_a = current_a[z];
     }
     s_pub_snapshot.relay_mask = relay_mask;
@@ -397,6 +506,7 @@ bool sim_engine_start(void)
     thermal_model_load_preset(THERMAL_PRESET_FAST_TEST, &s_params);
     s_current_preset = THERMAL_PRESET_FAST_TEST;
     thermal_model_init(&s_state, &s_params);
+    reset_safety_tc_state();
 
     BaseType_t ok = xTaskCreate(sim_engine_task_fn, "sim_engine", SIM_ENGINE_STACK_WORDS, NULL,
                                  SIMFW_PRIO_SIM_ENGINE, &s_task_handle);
@@ -502,6 +612,61 @@ bool sim_engine_clear_zone_manual(uint8_t zone)
     return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
 }
 
+uint32_t sim_engine_get_seed(void)
+{
+    return s_seed;
+}
+
+// --- Safety-side TC setters/getters/MANUAL -----------------------------------
+
+bool sim_engine_set_safety_tc_params(const sim_engine_safety_tc_params_t *params)
+{
+    if (!s_cmd_queue || params == NULL) {
+        return false;
+    }
+    sim_engine_cmd_t cmd = { .type = SIM_ENGINE_CMD_SET_SAFETY_TC_PARAMS };
+    cmd.u.safety_tc.params = *params;
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool sim_engine_get_safety_tc_params(sim_engine_safety_tc_params_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    params_lock();
+    *out = s_safety_tc_params;
+    params_unlock();
+    return true;
+}
+
+bool sim_engine_force_safety_temp(float temp_c)
+{
+    if (!s_cmd_queue) {
+        return false;
+    }
+    sim_engine_cmd_t cmd = { .type = SIM_ENGINE_CMD_FORCE_SAFETY_TEMP };
+    cmd.u.force_safety.temp_c = temp_c;
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool sim_engine_clear_safety_manual(void)
+{
+    if (!s_cmd_queue) {
+        return false;
+    }
+    sim_engine_cmd_t cmd = { .type = SIM_ENGINE_CMD_CLEAR_SAFETY_MANUAL };
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool sim_engine_set_safety_tc_fault_override(bool active, float offset_c, float gain)
+{
+    s_safety_fault_override_active = active;
+    s_safety_fault_offset_c = offset_c;
+    s_safety_fault_gain = gain;
+    return true;
+}
+
 // --- fault_sched's direct (non-queued) power-path hook -----------------------
 
 bool sim_engine_set_zone_duty_override(uint8_t zone, bool active, float duty)
@@ -521,6 +686,27 @@ bool sim_engine_set_zone_health_override(uint8_t zone, bool active, float health
     }
     s_zone_health_override_active[zone] = active;
     s_zone_health_override_value[zone] = health;
+    return true;
+}
+
+bool sim_engine_set_zone_thermal_override(uint8_t zone, bool active, float C, float k_loss)
+{
+    if (zone >= THERMAL_MODEL_MAX_ZONES) {
+        return false;
+    }
+    s_zone_thermal_override_active[zone] = active;
+    s_zone_thermal_override_C[zone] = C;
+    s_zone_thermal_override_k_loss[zone] = k_loss;
+    return true;
+}
+
+bool sim_engine_set_zone_tc_lag_override(uint8_t zone, bool active, float tc_lag_s)
+{
+    if (zone >= THERMAL_MODEL_MAX_ZONES) {
+        return false;
+    }
+    s_zone_tc_lag_override_active[zone] = active;
+    s_zone_tc_lag_override_value[zone] = tc_lag_s;
     return true;
 }
 

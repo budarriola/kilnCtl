@@ -24,10 +24,13 @@ $sources = @(
     (Join-Path $testDir "test_max31856_regs.c"),
     (Join-Path $testDir "test_sine_synth.c"),
     (Join-Path $testDir "test_fault_engine.c"),
+    (Join-Path $testDir "test_tc_fault_state.c"),
+    (Join-Path $testDir "test_gap_closure_logic.c"),
     (Join-Path $simDir "thermal_model.c"),
     (Join-Path $simDir "max31856_regs.c"),
     (Join-Path $simDir "sine_synth.c"),
-    (Join-Path $simDir "fault_engine.c")
+    (Join-Path $simDir "fault_engine.c"),
+    (Join-Path $simDir "tc_fault_state.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

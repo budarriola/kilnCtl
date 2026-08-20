@@ -13,6 +13,8 @@ void run_test_thermal_model(void);
 void run_test_max31856_regs(void);
 void run_test_sine_synth(void);
 void run_test_fault_engine(void);
+void run_test_tc_fault_state(void);
+void run_test_gap_closure_logic(void);
 
 int main(void)
 {
@@ -20,6 +22,8 @@ int main(void)
     run_test_max31856_regs();
     run_test_sine_synth();
     run_test_fault_engine();
+    run_test_tc_fault_state();
+    run_test_gap_closure_logic();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

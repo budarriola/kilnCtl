@@ -267,6 +267,175 @@ static void test_cj_disable_makes_cjth_writable(void)
                "with CJ_DISABLE set, advance_conversion leaves the master-written CJTH:CJTL alone");
 }
 
+/* Decodes the 19-bit LTCB code back to degC, independent of
+ * max31856_regs.c's own encoder (same "don't call into the module under
+ * test for its own answer" discipline as encode_threshold() above). */
+static float decode_ltcb_c(const max31856_channel_t *ch)
+{
+    uint32_t raw24 = ((uint32_t)ch->regs[MAX31856_REG_LTCBH] << 16) |
+                      ((uint32_t)ch->regs[MAX31856_REG_LTCBM] << 8) |
+                      (uint32_t)ch->regs[MAX31856_REG_LTCBL];
+    int32_t code19 = (int32_t)(raw24 >> 5);
+    if (code19 & 0x40000) { /* sign-extend 19 bits */
+        code19 -= 0x80000;
+    }
+    return (float)code19 * 0.0078125f;
+}
+
+static float decode_cj_c(const max31856_channel_t *ch)
+{
+    int16_t raw = (int16_t)(((uint16_t)ch->regs[MAX31856_REG_CJTH] << 8) | ch->regs[MAX31856_REG_CJTL]);
+    return (float)raw / 256.0f;
+}
+
+static void test_corruption_shorted_reads_cj(void)
+{
+    TEST_SECTION("max31856_regs -- corruption knob: shorted TC reads near-ambient/CJ");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 11);
+
+    /* Clean baseline: reported TC tracks the true (far-from-CJ) zone temp. */
+    max31856_regs_advance_conversion(&ch, 800.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 800.0, 0.5, "sanity: without the fault, LTCB tracks the true zone temperature");
+
+    ch.corruption.shorted = true;
+    max31856_regs_advance_conversion(&ch, 800.0f, 25.0f); /* zone still hot... */
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 25.0, 0.5, "shorted: LTCB reads near the CJ temperature regardless of true zone temp");
+
+    /* CJ itself drifts (a plain CJTO write) and the shorted reading follows it. */
+    max31856_regs_advance_conversion(&ch, 800.0f, 40.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 40.0, 0.5, "shorted: LTCB tracks CJ as CJ itself changes");
+
+    ch.corruption.shorted = false;
+    max31856_regs_advance_conversion(&ch, 800.0f, 40.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 800.0, 0.5, "clearing shorted lets LTCB resume tracking the true zone temperature");
+}
+
+static void test_corruption_drift_ramps_over_time(void)
+{
+    TEST_SECTION("max31856_regs -- corruption knob: drifting TC (calibration drift ramp)");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 12);
+
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 500.0, 0.5, "sanity: zero drift_offset_c leaves the reading untouched");
+
+    ch.corruption.drift_offset_c = 3.0f;
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 503.0, 0.5, "drift_offset_c adds a positive offset to the true reading");
+
+    ch.corruption.drift_offset_c = 12.5f; /* caller re-computes a larger offset as sim time advances */
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 512.5, 0.5, "a larger drift_offset_c on the next conversion ramps the reading further");
+
+    ch.corruption.drift_offset_c = -8.0f; /* ramp can run either direction */
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 492.0, 0.5, "drift_offset_c can be negative (ramping down)");
+}
+
+static void test_corruption_cj_fault_offset_and_sr_bits(void)
+{
+    TEST_SECTION("max31856_regs -- corruption knob: CJ fault (wrong CJ + CJHIGH/CJLOW SR bits)");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 13);
+
+    /* Wide-open CJ thresholds first so a clean conversion is genuinely
+     * fault-free (CJHF/CJLF default to 0 at power-on, which would trip
+     * immediately otherwise). */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJHF, (const uint8_t[]){(uint8_t)100}, 1);
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJLF, (const uint8_t[]){(uint8_t)(int8_t)(-20)}, 1);
+
+    max31856_regs_advance_conversion(&ch, 50.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_cj_c(&ch), 25.0, 0.5, "sanity: zero cj_fault_offset_c reports the true CJ");
+    TEST_CHECK((ch.regs[MAX31856_REG_SR] & (MAX31856_FAULT_CJHIGH | MAX31856_FAULT_CJLOW)) == 0u,
+               "sanity: within thresholds, no CJ fault bits");
+
+    /* A large positive offset both reports a wrong CJ and crosses CJHF. */
+    ch.corruption.cj_fault_offset_c = 90.0f;
+    max31856_regs_advance_conversion(&ch, 50.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_cj_c(&ch), 115.0, 0.5, "cj_fault_offset_c reports a wrong CJ temperature (true + offset)");
+    TEST_CHECK(ch.regs[MAX31856_REG_SR] & MAX31856_FAULT_CJHIGH,
+               "cj_fault_offset_c large enough to cross CJHF sets CJHIGH -- no separate SR-forcing needed");
+
+    /* A large negative offset crosses CJLF instead. */
+    ch.corruption.cj_fault_offset_c = -60.0f;
+    max31856_regs_advance_conversion(&ch, 50.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_cj_c(&ch), -35.0, 0.5, "cj_fault_offset_c can be negative");
+    TEST_CHECK(ch.regs[MAX31856_REG_SR] & MAX31856_FAULT_CJLOW, "cj_fault_offset_c crossing CJLF sets CJLOW");
+
+    /* CJ_DISABLE: the offset must NOT apply -- the master owns CJTH:CJTL. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CR0, (const uint8_t[]){MAX31856_CR0_CJ_DISABLE}, 1);
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJTH, (const uint8_t[]){0x19u, 0x00u}, 2); /* 25.0 C */
+    ch.corruption.cj_fault_offset_c = 999.0f;
+    max31856_regs_advance_conversion(&ch, 50.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_cj_c(&ch), 25.0, 0.5, "CJ_DISABLE: cj_fault_offset_c has no effect, master-written CJTH:CJTL wins");
+}
+
+static void test_corruption_severity_order_shorted_beats_drift_stuck_beats_both(void)
+{
+    TEST_SECTION("max31856_regs -- corruption knobs compose with documented severity order");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 14);
+
+    /* shorted wins over drift: shorted ignores true_tc_c entirely (and thus
+     * drift_offset_c, which only applies to true_tc_c), reading CJ instead. */
+    ch.corruption.shorted = true;
+    ch.corruption.drift_offset_c = 500.0f;
+    max31856_regs_advance_conversion(&ch, 800.0f, 25.0f);
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), 25.0, 0.5, "shorted takes precedence over drift_offset_c");
+
+    /* stuck_ltcb wins over both: once frozen, neither shorted nor drift can
+     * move the reported value. */
+    ch.corruption.stuck_ltcb = true;
+    float frozen = decode_ltcb_c(&ch);
+    ch.corruption.shorted = false;
+    ch.corruption.drift_offset_c = 0.0f;
+    max31856_regs_advance_conversion(&ch, 900.0f, 90.0f); /* both true temp and CJ move a lot */
+    TEST_CHECK_NEAR(decode_ltcb_c(&ch), frozen, 0.5, "stuck_ltcb takes precedence over both shorted and drift");
+}
+
+static void test_master_has_written_flag(void)
+{
+    TEST_SECTION("max31856_regs -- master_has_written (TC_GET_MASTER_CONFIG's "
+                  "configured-vs-never-configured distinction, PLAN.md 5.2)");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 15);
+    TEST_CHECK(ch.master_has_written == false, "freshly init'd channel: master_has_written starts false");
+
+    /* A pure read burst must NOT set the flag -- only a write transaction
+     * counts as "the master configured something." */
+    uint8_t dummy[1] = {0};
+    max31856_regs_read_burst(&ch, MAX31856_REG_CR1, dummy, 1);
+    TEST_CHECK(ch.master_has_written == false, "a read-only transaction does not set master_has_written");
+
+    /* A write to a normal R/W register sets it. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CR1, (const uint8_t[]){0x23u}, 1);
+    TEST_CHECK(ch.master_has_written == true, "a write transaction sets master_has_written");
+
+    /* Stays set across further transactions of any kind (monotonic, never
+     * cleared except by re-init). */
+    max31856_regs_read_burst(&ch, MAX31856_REG_SR, dummy, 1);
+    TEST_CHECK(ch.master_has_written == true, "master_has_written stays set (monotonic) across a later read");
+
+    /* re-init resets it. */
+    max31856_regs_init(&ch, 16);
+    TEST_CHECK(ch.master_has_written == false, "re-init clears master_has_written");
+
+    /* A write attempt at a READ-ONLY address (e.g. SR) still counts -- "the
+     * master attempted to write" is itself the observable behavior
+     * TC_GET_MASTER_CONFIG reports on, per max31856_regs.h's struct
+     * comment, even though the write has no effect on the register value. */
+    uint8_t sr_before = ch.regs[MAX31856_REG_SR];
+    max31856_regs_write_burst(&ch, MAX31856_REG_SR, (const uint8_t[]){0xFFu}, 1);
+    TEST_CHECK(ch.master_has_written == true, "a write attempt at a read-only address still sets master_has_written");
+    TEST_CHECK(ch.regs[MAX31856_REG_SR] == sr_before, "...even though the read-only register's value is unchanged");
+}
+
 void run_test_max31856_regs(void)
 {
     test_write_read_verbatim();
@@ -279,4 +448,9 @@ void run_test_max31856_regs(void)
     test_corruption_dead_channel();
     test_corruption_spurious_fault_pin();
     test_cj_disable_makes_cjth_writable();
+    test_corruption_shorted_reads_cj();
+    test_corruption_drift_ramps_over_time();
+    test_corruption_cj_fault_offset_and_sr_bits();
+    test_corruption_severity_order_shorted_beats_drift_stuck_beats_both();
+    test_master_has_written_flag();
 }

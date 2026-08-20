@@ -1,30 +1,36 @@
 """Transport layer to SimFW: :class:`SimLink` and its two implementations.
 
-PLAN.md sec 2/5: SimFW talks native USB CDC using a hardened protocol that is
-being lifted from ``firmware/UnitTestFw`` into ``firmware/CommonFW`` by a
-parallel effort, not finalized as this module is written. Every module above
-this one (``protocol.py``, ``scenario.py``, ``report.py``, the CLI, the MCP
-server, the GUI) codes against :class:`SimLink`'s abstract interface, never
-against a wire format directly, so that lift is a change contained entirely
-to this file.
+PLAN.md sec 2/5: SimFW talks native USB CDC using ``benchproto``
+(``firmware/CommonFW/include/benchproto/``, spec in
+``firmware/CommonFW/docs/BENCHPROTO.md``), with SimFW's own command-group
+numbering and payload byte layouts documented in
+``firmware/SimFW/docs/PROTOCOL.md``. Every module above this one
+(``protocol.py``, ``scenario.py``, ``report.py``, the CLI, the MCP server,
+the GUI) codes against :class:`SimLink`'s abstract interface -- plain dicts
+in, plain dicts out -- never against wire bytes directly, so the real
+protocol lift (replacing the old length-prefixed-JSON placeholder framing)
+was contained entirely to this file plus the two new modules it delegates
+to: :mod:`kilnsim.benchproto_codec` (frame envelope + reliability layer,
+proven byte-identical against ``firmware/CommonFW``'s shared test vectors)
+and :mod:`kilnsim.payloads` (per-command-group byte layouts).
 
-:class:`SerialSimLink` is a REAL pyserial transport with a PLACEHOLDER wire
-encoding (length-prefixed JSON -- see ``# TODO(protocol-lift)`` below). It is
-not a guess at the final byte protocol; it exists so the rest of the stack
-(scenario running, report generation, the CLI, the MCP tool surface) is
-testable end-to-end today, against :class:`MockSimLink`, without hardware and
-without having to freeze byte layouts before ``firmware/CommonFW``'s
-extraction lands.
+:class:`SerialSimLink` is a REAL pyserial transport speaking the REAL wire
+protocol: SLIP-style framing, CRC-16/CCITT-FALSE, sequence numbers with
+retry/dedup (BENCHPROTO.md sec 4), SimFW's `[cmd_id, args...]` request /
+`[status, ...]` reply payload convention (PROTOCOL.md sec 2), and unsolicited
+BROADCAST demultiplexing for TELEMETRY/EVT frames (PROTOCOL.md sec 6).
 
 :class:`MockSimLink` is the test double every other kilnsim module's tests
 should run against -- see the module docstring on why nothing in this
-package should need real hardware to be testable.
+package should need real hardware to be testable. Its canned responses are
+shaped like the real decoded payloads (:mod:`kilnsim.payloads`' dict shapes),
+not placeholder JSON, so pre-hardware testing against it actually exercises
+the field names/types a real reply would have.
 """
 
 from __future__ import annotations
 
 import abc
-import json
 import logging
 import struct
 import threading
@@ -32,9 +38,22 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from . import benchproto_codec as bp
+from . import payloads as pl
 from .protocol import CommandGroup, Event, EventType
 
 log = logging.getLogger(__name__)
+
+#: SimFW's own benchproto device ids -- cmd_ids.h SIMFW_DEVICE_HOST/TARGET,
+#: BENCHPROTO.md sec 3's "SRC_DEVICE ... SimFW uses HOST=0, TARGET=1."
+SIMFW_DEVICE_HOST = 0
+SIMFW_DEVICE_TARGET = 1
+
+#: cmd_ids.h SIMFW_TASK_ID_EVT -- the unsolicited BROADCAST source task
+#: (PROTOCOL.md sec 6). dst_task on an inbound BROADCAST is 0 (no specific
+#: registered receiver, usb_owner_send_broadcast()'s own doc comment).
+SIMFW_TASK_ID_EVT = int(CommandGroup.EVT)
+SIMFW_BROADCAST_DST_TASK = 0
 
 #: kilnctrl (this repo's other USB device) already depends on pyserial
 #: (tools/PcTools/pyproject.toml); kilnsim reuses the same dependency rather
@@ -116,24 +135,22 @@ class SimLink(abc.ABC):
 
 
 # ---------------------------------------------------------------------------
-# Real transport: pyserial + placeholder framing
+# Real transport: pyserial + the real benchproto wire protocol
 # ---------------------------------------------------------------------------
 class SerialSimLink(SimLink):
-    """pyserial-backed :class:`SimLink` against real SimFW hardware.
+    """pyserial-backed :class:`SimLink` against real SimFW hardware, speaking
+    the real ``benchproto`` wire protocol (BENCHPROTO.md) + SimFW's own
+    command-group payload layouts (PROTOCOL.md).
 
-    # TODO(protocol-lift): reconcile with firmware/CommonFW's extracted
-    # protocol once that agent's work lands. What's here is a deliberately
-    # simple PLACEHOLDER wire framing -- length-prefixed JSON, see
-    # ``_encode``/``_decode`` below -- chosen so the rest of the kilnsim
-    # stack (scenario running, report generation, CLI, MCP tools) is
-    # testable end-to-end today against MockSimLink, and so this class is at
-    # least structurally exercisable against a bare CDC echo/loopback while
-    # SimFW firmware doesn't exist yet either. It is NOT a proposal for the
-    # final byte protocol -- do not build tooling that assumes this framing
-    # survives the lift. When CommonFW's extraction lands, only
-    # ``_encode``/``_decode``/``_rx_loop`` below should need to change; the
-    # public SimLink surface (connect/disconnect/send_command/read_events)
-    # is what the rest of this package is written against and should not.
+    Framing/CRC/stuffing lives in :mod:`kilnsim.benchproto_codec` (proven
+    byte-identical against ``firmware/CommonFW``'s shared C test vectors);
+    per-command-group byte layouts live in :mod:`kilnsim.payloads`. This
+    class owns only the transport: the actual serial byte pipe, the RX
+    thread that reassembles a stuffed byte stream into frames, the
+    request/reply matching + retry *timer* (the state machine itself is
+    :mod:`kilnsim.benchproto_codec`'s ``PendingRequest``/``BenchprotoLink``),
+    and demultiplexing unsolicited BROADCAST frames (TELEMETRY/EVT,
+    PROTOCOL.md sec 6) away from command replies.
     """
 
     def __init__(self, baudrate: int = DEFAULT_BAUD_RATE) -> None:
@@ -148,10 +165,24 @@ class SerialSimLink(SimLink):
         self._events_lock = threading.Lock()
         self._events_cv = threading.Condition(self._events_lock)
 
-        self._pending_lock = threading.Lock()
-        self._pending: dict[int, threading.Event] = {}
-        self._replies: dict[int, dict] = {}
-        self._next_req_id = 1
+        # Only one outstanding send-and-await-reply cycle at a time
+        # (BENCHPROTO.md sec 4: "Only one outstanding send-and-await-reply
+        # cycle is allowed per benchproto_pending_request_t") -- callers of
+        # send_command() are already serialized by this lock, matching the
+        # firmware side's own single-outstanding-per-link discipline.
+        self._send_lock = threading.Lock()
+        self._link = bp.BenchprotoLink(own_device=SIMFW_DEVICE_HOST)
+        self._pending = bp.PendingRequest()
+        self._reply_cv = threading.Condition()
+        self._reply_frame: Optional[bp.Frame] = None
+
+        # EVT sequence-gap tracking (PROTOCOL.md sec 6 "Loss visibility":
+        # "the PC's report generator refuses to certify a run with a
+        # sequence gap"). None until the first EVT frame is seen (nothing to
+        # compare the first seq against yet).
+        self._last_evt_seq: Optional[int] = None
+        self.evt_seq_gap_count = 0
+        self._last_telemetry: Optional[dict] = None
 
     @property
     def is_connected(self) -> bool:
@@ -215,13 +246,7 @@ class SerialSimLink(SimLink):
                 log.debug("error closing SimFW port", exc_info=True)
         self._port = None
 
-    # -- framing (placeholder -- see class docstring) -------------------------
-    def _encode(self, req_id: int, group: CommandGroup, cmd: int, payload: dict) -> bytes:
-        body = json.dumps(
-            {"req_id": req_id, "group": int(group), "cmd": int(cmd), "payload": payload}
-        ).encode("utf-8")
-        return struct.pack(">I", len(body)) + body
-
+    # -- RX: byte stream -> frames --------------------------------------------
     def _rx_loop(self) -> None:
         ser = self._serial
         while not self._stop.is_set():
@@ -238,76 +263,156 @@ class SerialSimLink(SimLink):
             self._drain_frames()
 
     def _drain_frames(self) -> None:
+        """Splits the accumulated byte stream on DELIM (0x7E) boundaries and
+        hands each complete stuffed frame to :meth:`_handle_wire_frame`.
+        Mirrors a live receiver's resync behavior (BENCHPROTO.md sec 2): any
+        bytes before the first DELIM, and back-to-back DELIMs (empty-frame
+        noise), are simply consumed with nothing decoded."""
         while True:
-            if len(self._rx_buf) < 4:
-                return
-            (length,) = struct.unpack(">I", self._rx_buf[:4])
-            if len(self._rx_buf) < 4 + length:
-                return
-            body = bytes(self._rx_buf[4:4 + length])
-            del self._rx_buf[: 4 + length]
             try:
-                message = json.loads(body.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                log.warning("dropping malformed SimFW frame (%d bytes)", length)
+                first = self._rx_buf.index(bp.DELIM)
+            except ValueError:
+                return  # no delimiter yet -- keep buffering
+            del self._rx_buf[:first]
+            try:
+                second = self._rx_buf.index(bp.DELIM, 1)
+            except ValueError:
+                return  # frame not complete yet
+            if second == 1:
+                del self._rx_buf[:1]  # empty-frame noise (0x7E 0x7E) -- drop one and resync
                 continue
-            self._handle_message(message)
+            wire = bytes(self._rx_buf[: second + 1])
+            del self._rx_buf[:second]  # leave the trailing DELIM as the next frame's leading one
+            self._handle_wire_frame(wire)
 
-    def _handle_message(self, message: dict) -> None:
-        kind = message.get("kind")
-        if kind == "reply":
-            req_id = message.get("req_id")
-            with self._pending_lock:
-                waiter = self._pending.get(req_id)
-                if waiter is not None:
-                    self._replies[req_id] = message
-                    waiter.set()
+    def _handle_wire_frame(self, wire: bytes) -> None:
+        try:
+            frame = bp.decode_frame(wire)
+        except bp.FrameError as exc:
+            log.warning("dropping malformed SimFW frame: %s", exc)
             return
-        if kind == "event":
-            try:
-                evt = Event.from_dict(message["event"])
-            except (KeyError, ValueError, TypeError):
-                log.warning("dropping malformed SimFW event frame", exc_info=True)
-                return
-            with self._events_cv:
-                self._events.append(evt)
-                self._events_cv.notify_all()
+
+        if frame.msg_type == bp.MsgType.BROADCAST:
+            self._handle_broadcast(frame)
             return
-        log.debug("ignoring unrecognized SimFW frame kind %r", kind)
+
+        if frame.msg_type in (bp.MsgType.ACK, bp.MsgType.NACK):
+            action = self._link.on_frame(self._pending, frame)
+            if action in (bp.LinkAction.ACK_MATCHED, bp.LinkAction.NACK_MATCHED):
+                with self._reply_cv:
+                    self._reply_frame = frame
+                    self._reply_cv.notify_all()
+            # IGNORE (stale retry's late reply, or nothing outstanding):
+            # nothing to do, matches BENCHPROTO_LINK_ACTION_IGNORE's contract.
+            return
+
+        # SimFW never sends DATA to the host (PROTOCOL.md sec 7: "no inbound
+        # BROADCAST consumer" and the host has no registered SimFW-facing
+        # command handlers) -- an inbound DATA frame here is unexpected.
+        log.debug("ignoring unexpected inbound DATA frame from SimFW")
+
+    def _handle_broadcast(self, frame: bp.Frame) -> None:
+        if frame.src_task != SIMFW_TASK_ID_EVT or not frame.payload:
+            log.debug("ignoring BROADCAST from unexpected src_task %s", frame.src_task)
+            return
+        kind = frame.payload[0]
+        try:
+            if kind == pl.EVT_FRAME_KIND_EVENT:
+                fields = pl.decode_evt_frame(frame.payload)
+                evt = Event.from_wire(fields)
+                self._note_evt_seq(evt.seq)
+                with self._events_cv:
+                    self._events.append(evt)
+                    self._events_cv.notify_all()
+            elif kind == pl.EVT_FRAME_KIND_TELEMETRY:
+                telemetry = pl.decode_telemetry_frame(frame.payload)
+                with self._events_lock:
+                    self._last_telemetry = telemetry
+            else:
+                log.warning("unknown EVT frame kind 0x%02X", kind)
+        except (struct.error, IndexError, KeyError, ValueError) as exc:
+            log.warning("dropping malformed EVT/TELEMETRY frame: %s", exc, exc_info=True)
+
+    def _note_evt_seq(self, seq: int) -> None:
+        """PROTOCOL.md sec 6 "Loss visibility": a gap between consecutive
+        received EVT `seq` values is, by itself, enough to detect loss --
+        this is that client-side check. ``evt_seq_gap_count`` is exposed so
+        report.py (PLAN.md 5.3: "the PC's report generator refuses to
+        certify a run with a sequence gap") can inspect it after a run."""
+        if self._last_evt_seq is not None and seq != self._last_evt_seq + 1:
+            gap = seq - self._last_evt_seq - 1
+            if gap > 0:
+                log.warning("EVT sequence gap: expected seq %d, got %d (%d missing)",
+                            self._last_evt_seq + 1, seq, gap)
+                self.evt_seq_gap_count += gap
+        self._last_evt_seq = seq
+
+    def get_last_telemetry(self) -> Optional[dict]:
+        """Most recently received TELEMETRY frame (PROTOCOL.md sec 6),
+        decoded, or None if none has arrived yet."""
+        with self._events_lock:
+            return dict(self._last_telemetry) if self._last_telemetry is not None else None
 
     # -- SimLink surface -------------------------------------------------------
     def send_command(self, group: CommandGroup, cmd: int, payload: Optional[dict] = None,
                       timeout: Optional[float] = None) -> dict:
         if not self.is_connected:
             raise SimLinkError("not connected")
-        wait = threading.Event()
-        with self._pending_lock:
-            req_id = self._next_req_id
-            self._next_req_id += 1
-            self._pending[req_id] = wait
-        try:
-            wire = self._encode(req_id, group, cmd, payload or {})
+
+        deadline_timeout = timeout if timeout is not None else DEFAULT_COMMAND_TIMEOUT_S
+        request_payload = pl.encode_request(group, cmd, payload)
+
+        with self._send_lock:
+            msg_index = self._link.next_msg_index()
+            self._pending.begin(dst_device=SIMFW_DEVICE_TARGET, dst_task=int(group),
+                                 msg_index=msg_index)
+            frame = bp.Frame(
+                msg_type=bp.MsgType.DATA,
+                msg_index=msg_index,
+                src_device=SIMFW_DEVICE_HOST,
+                src_task=0,
+                dst_device=SIMFW_DEVICE_TARGET,
+                dst_task=int(group),
+                payload=request_payload,
+            )
             try:
-                self._serial.write(wire)
-                self._serial.flush()
-            except Exception as exc:  # noqa: BLE001
-                raise SimLinkError(f"write failed: {exc}") from exc
+                while True:
+                    with self._reply_cv:
+                        self._reply_frame = None
+                    self._write_frame(frame)
+                    reply = self._wait_for_reply(deadline_timeout)
+                    if reply is not None:
+                        break
+                    if not self._pending.note_retry():
+                        raise SimLinkError(
+                            f"timeout waiting for reply to {group.name}/{cmd} "
+                            f"(after {bp.MAX_RETRIES} attempts)"
+                        )
+                    # Retry reuses the same msg_index (BENCHPROTO.md sec 4).
+                    frame.msg_index = self._pending.msg_index
+            finally:
+                self._pending.clear()
 
-            if not wait.wait(timeout if timeout is not None else DEFAULT_COMMAND_TIMEOUT_S):
-                raise SimLinkError(
-                    f"timeout waiting for reply to {group.name}/{cmd}"
-                )
-            with self._pending_lock:
-                reply = self._replies.pop(req_id, None)
-        finally:
-            with self._pending_lock:
-                self._pending.pop(req_id, None)
+        if reply.msg_type == bp.MsgType.NACK:
+            raise SimLinkError(f"{group.name}/{cmd}: NACK (undeliverable -- task not registered)")
+        try:
+            return pl.decode_reply(group, cmd, reply.payload)
+        except pl.CommandStatusError as exc:
+            raise SimLinkError(str(exc)) from exc
 
-        if reply is None:  # pragma: no cover - defensive
-            raise SimLinkError("reply vanished")
-        if reply.get("status") == "error":
-            raise SimLinkError(str(reply.get("error", "unknown error")))
-        return reply.get("payload", {})
+    def _write_frame(self, frame: bp.Frame) -> None:
+        wire = bp.encode_frame(frame)
+        try:
+            self._serial.write(wire)
+            self._serial.flush()
+        except Exception as exc:  # noqa: BLE001
+            raise SimLinkError(f"write failed: {exc}") from exc
+
+    def _wait_for_reply(self, timeout: float) -> Optional[bp.Frame]:
+        with self._reply_cv:
+            if self._reply_frame is None:
+                self._reply_cv.wait(timeout=timeout)
+            return self._reply_frame
 
     def read_events(self, timeout: float = 0.0) -> list:
         with self._events_cv:
@@ -434,23 +539,43 @@ class MockSimLink(SimLink):
         return out
 
     # -- built-in defaults -------------------------------------------------------
+    #
+    # Shaped like the REAL decoded reply dicts kilnsim.payloads.decode_reply()
+    # would produce for the matching (group, cmd) -- PROTOCOL.md's field
+    # names, not placeholder JSON -- so pre-hardware testing against this
+    # mock (CLI/GUI/MCP --mock, scenario dry runs) exercises the same field
+    # names/types a real SerialSimLink reply would have.
     def _default_response(self, group: CommandGroup, cmd: int, payload: dict) -> dict:
         if group is CommandGroup.SYS:
             if cmd == 1:  # PING
                 return {"pong": True}
             if cmd == 2:  # GET_VERSION
-                return {"fw_version": "mock-0.0", "fw_git_hash": "0000000"}
+                return {
+                    "protocol_version": 1,
+                    "min_compatible": 1,
+                    "fw_version": "mock-0.0",
+                    "fw_version_major": 0,
+                    "fw_version_minor": 0,
+                    "fw_version_patch": 0,
+                    "fw_git_dirty": False,
+                    "fw_git_hash": "0000000",
+                }
             if cmd == 6:  # GET_CAPS
                 return {
-                    "protocol_version": 0,
+                    "protocol_version": 1,
+                    "min_compatible": 1,
                     "fw_version": "mock-0.0",
+                    "fw_git_dirty": False,
                     "fw_git_hash": "0000000",
                     "zone_count_min": 1,
                     "zone_count_max": 4,
+                    "zone_count_default": 3,
                     "tc_channel_count": 4,
+                    "tc_main_channels": 3,
+                    "tc_safety_channels": 1,
                     "ct_channel_count": 3,
                     "relay_count": 5,
-                    "feature_bitmask": 0,
+                    "feature_bitmask": 0x3F,
                 }
             if cmd == 4:  # SET_TIMESCALE
                 self._state["timescale"] = payload.get("value", 1.0)
@@ -464,6 +589,83 @@ class MockSimLink(SimLink):
                 return {"ok": True}
         if group is CommandGroup.MODEL and cmd == 4:  # LOAD_PRESET
             return {"ok": True, "preset": payload.get("name")}
+        if group is CommandGroup.TC and cmd == 1:  # GET_REGS
+            channel = payload.get("channel", 0)
+            return {
+                "channel": channel,
+                "flags": 0x02,
+                "reg_image_valid": False,
+                "snapshot_valid": True,
+                "regs": bytes(16),
+                "shadow_temp_c": self._state["zones"][0]["t_zone"],
+                "shadow_reported_c": self._state["zones"][0]["t_tc_reported"],
+                "dead_mode": 0,
+                "noise_sigma_c": 0.0,
+                "bit_error_rate": 0.0,
+                "spi_transactions": 0,
+                "spi_protocol_errors": 0,
+                "spi_first_byte_late": 0,
+            }
+        if group is CommandGroup.TC and cmd == 6:  # GET_MASTER_CONFIG
+            channel = payload.get("channel", 0)
+            return {
+                "channel": channel,
+                "flags": 0x00,
+                "configured": False,
+                "reg_image_valid": False,
+                "cr0": 0,
+                "cr1": 0,
+                "mask": 0,
+            }
+        if group is CommandGroup.CT and cmd == 4:  # GET_STATE
+            return {
+                "mode": 0,
+                "amps": 0.0,
+                "phase_deg": 0.0,
+                "distortion": {
+                    "dc_offset": 0.0,
+                    "clip_fraction": 0.0,
+                    "dropout_half_cycle": False,
+                    "dropout_negative_half": False,
+                    "apply_immediately": True,
+                },
+                "last_pwm_scale": 1.0,
+                "valid": True,
+            }
+        if group is CommandGroup.RELAY and cmd == 1:  # GET_STATES
+            mask = self._state["relay_state_mask"]
+            return {
+                "k1_closed": bool(mask & 0x01),
+                "k2_closed": bool(mask & 0x02),
+                "k3_closed": bool(mask & 0x04),
+                "k5_closed": bool(mask & 0x08),
+                "k4_closed": bool(mask & 0x10),
+                "fault_line_asserted": self._state["fault_line_asserted"],
+                "sample_time_us": self._state["sim_time_us"],
+                "valid": True,
+            }
+        if group is CommandGroup.RELAY and cmd == 2:  # GET_EDGES
+            return {"returned_count": 0, "edges": []}
+        if group is CommandGroup.IO:
+            if cmd == 3:  # READ
+                return {"level": False}
+            if cmd == 5:  # FAULT_LINE_GET
+                return {
+                    "asserted": self._state["fault_line_asserted"],
+                    "sample_time_us": self._state["sim_time_us"],
+                    "valid": True,
+                }
+            if cmd == 7:  # ESTOP_GET
+                return {"open": self._state["estop_open"]}
+            if cmd == 8:  # DUT_POWER_GET
+                return {"on": True}
+            if cmd == 4:  # ESTOP_SET
+                self._state["estop_open"] = bool(payload.get("open", False))
+                return {"ok": True}
+        if group is CommandGroup.FAULT and cmd == 3:  # LIST
+            return {"returned_count": 0, "faults": []}
+        if group is CommandGroup.FAULT and cmd == 1:  # SCHEDULE
+            return {"fault_slot": payload.get("fault_slot", payload.get("slot_id", 0))}
         # GET_STATE is not its own group in the section-5 table (telemetry is
         # push-only) -- the CLI/MCP "state" surface reads the mock's snapshot
         # directly via `sim_get_state`-shaped SYS traffic instead, handled

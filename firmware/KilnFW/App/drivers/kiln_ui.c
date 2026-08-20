@@ -157,6 +157,54 @@ esp_err_t kiln_ui_register_page(const char *name, kiln_ui_page_build_fn build)
     return ESP_OK;
 }
 
+/* Recursive half of the tap-target dump called at the end of kiln_ui_show()
+ * -- see the comment at that call site for why this exists. Reports each
+ * clickable widget's post-layout rectangle plus its centre point, which is
+ * the coordinate a test harness should actually inject, and the widget's
+ * label text where it has one so targets are identifiable by name rather
+ * than by position alone. Depth is carried only to indent nested targets
+ * (a scrollable container's children), keeping the dump readable. */
+static void log_tap_targets(lv_obj_t *obj, int depth)
+{
+    if (!obj || depth > 6) {
+        /* Depth cap is a guard against a pathological tree, not a real
+         * limit: the deepest page here nests screen > content > container >
+         * row > button > label, i.e. well inside 6. */
+        return;
+    }
+
+    uint32_t count = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, i);
+        if (!child) {
+            continue;
+        }
+
+        if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
+            lv_area_t area;
+            lv_obj_get_coords(child, &area);
+
+            /* A button's caption lives in a child label, so look one level
+             * down for it rather than reporting an anonymous rectangle. */
+            const char *text = "";
+            uint32_t grandchildren = lv_obj_get_child_count(child);
+            for (uint32_t j = 0; j < grandchildren; j++) {
+                lv_obj_t *grandchild = lv_obj_get_child(child, j);
+                if (grandchild && lv_obj_check_type(grandchild, &lv_label_class)) {
+                    text = lv_label_get_text(grandchild);
+                    break;
+                }
+            }
+
+            ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"", depth * 2, "",
+                     (int)area.x1, (int)area.y1, (int)area.x2, (int)area.y2,
+                     (int)((area.x1 + area.x2) / 2), (int)((area.y1 + area.y2) / 2), text);
+        }
+
+        log_tap_targets(child, depth + 1);
+    }
+}
+
 esp_err_t kiln_ui_show(const char *name)
 {
     kiln_ui_page_t *page = find_page(name);
@@ -218,6 +266,31 @@ esp_err_t kiln_ui_show(const char *name)
      * makes the lock above actually cover "until fully loaded" rather than
      * just "until lv_screen_load() returns". */
     lv_refr_now(NULL);
+
+    /* Dump every tap target on the page that just loaded. This runs after
+     * lv_refr_now() on purpose: LVGL resolves flex/percentage layout during
+     * the render pass, so widget coordinates read before it are all zero.
+     *
+     * Why this exists: this panel has no framebuffer readback, so the only
+     * way to aim an injected touch (lvgl_port.c's TOUCH_CMD_INJECT path) was
+     * to hand-compute pixel rectangles from the lv_obj_set_* calls in each
+     * ui_page_*.c -- across flex rows, percentage widths, theme padding and
+     * an internally-scrollable container whose contents move. That was
+     * guesswork, and it was wrong in practice: a tap aimed by hand at the
+     * home page's Menu button using exactly that arithmetic missed it, with
+     * the miss indistinguishable from a broken injection path because both
+     * produce no log output at all.
+     *
+     * Printing the real post-layout rectangles turns "tap the Menu button"
+     * into a lookup instead of a calculation, and makes a miss immediately
+     * diagnosable (the target list says where the button actually is). It
+     * also self-updates: any future layout change republishes correct
+     * coordinates with no test-harness edit.
+     *
+     * Volume is bounded and tied to human interaction -- one burst per page
+     * switch, a dozen or so lines, not per poll. See this function's
+     * navigation-log comment above for why that distinction matters here. */
+    log_tap_targets(page->screen, 0);
 
     lvgl_port_set_input_enabled(true);
     return ESP_OK;

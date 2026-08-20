@@ -34,6 +34,14 @@ bool spi_emu_b_start(void);
 // channel is always 0 on this single-channel bus.
 max31856_pio_stats_t spi_emu_b_get_stats(uint8_t channel);
 
+// Coherent register-image getter and "has the master ever configured this
+// channel" flag -- see spi_emu_a_get_reg_image()/spi_emu_a_channel_configured()
+// in spi_emu_a.h for the full coherency-guarantee rationale, which applies
+// identically here (same PIO engine, same max31856_regs.h model, just one
+// channel instead of three). channel is always 0 on this single-channel bus.
+bool spi_emu_b_get_reg_image(uint8_t channel, uint8_t out_regs[MAX31856_REG_COUNT]);
+bool spi_emu_b_channel_configured(uint8_t channel);
+
 #ifdef __cplusplus
 }
 #endif

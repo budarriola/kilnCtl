@@ -76,6 +76,59 @@ typedef enum {
     FAULT_SCHED_TYPE_TC_DEAD_IC,              /* params[0] = max31856_dead_mode_t as float */
     FAULT_SCHED_TYPE_TC_FLAKY_SPI,            /* params[0] = bit error rate, 0..1 */
     FAULT_SCHED_TYPE_TC_SPURIOUS_FAULT_PIN,   /* ~FAULT asserted regardless of SR */
+    FAULT_SCHED_TYPE_TC_SHORTED,               /* PLAN.md 7.1 "Shorted TC": reported TC
+                                                 * reads near-ambient/CJ regardless of the
+                                                 * true zone temperature (max31856_regs.h's
+                                                 * corruption.shorted) */
+    FAULT_SCHED_TYPE_TC_DRIFT,                 /* PLAN.md 7.1 "Drifting TC": params[0] =
+                                                 * drift rate, degC/s (signed -- negative
+                                                 * ramps down). The offset actually written
+                                                 * into max31856_corruption_t.drift_offset_c
+                                                 * each tick is params[0] * (elapsed sim
+                                                 * seconds since this slot went ACTIVE,
+                                                 * fault_slot_t.active_since_s) -- computed
+                                                 * fresh from scratch every recompute
+                                                 * (fault_sched.c's own doctrine), not
+                                                 * accumulated incrementally, so a slower/
+                                                 * faster polling rate never changes the
+                                                 * total drift at a given sim time. */
+    FAULT_SCHED_TYPE_TC_CJ_FAULT,              /* PLAN.md 7.1 "CJ fault": params[0] = CJ
+                                                 * offset, degC, added to the internally-
+                                                 * sensed CJ temperature (max31856_regs.h's
+                                                 * corruption.cj_fault_offset_c) -- large
+                                                 * enough values naturally cross the
+                                                 * master-written CJHF/CJLF thresholds and
+                                                 * assert CJHIGH/CJLOW without any separate
+                                                 * SR-forcing step. */
+
+    /* Gap-closure pass: target is a fault_sched_system_target_t (ignored/
+     * reserved, same as ESTOP/AMBIENT_SHIFT below -- there is exactly one
+     * physical safety-side TC channel, so no per-target indexing is
+     * needed). */
+    FAULT_SCHED_TYPE_MAIN_SAFETY_DISAGREE,     /* PLAN.md 7.1 "Main/safety disagree:
+                                                 * Skew safety TC vs zone truth by an
+                                                 * offset/gain". params[0] = offset, degC
+                                                 * (composes additively across concurrent
+                                                 * slots of this type, same "recompute
+                                                 * from scratch" doctrine as TC_DRIFT);
+                                                 * params[1] = gain, unitless multiplier
+                                                 * applied to the blended+lagged safety
+                                                 * reading before the offset -- 0.0
+                                                 * (the value an unspecified params[1]
+                                                 * leaves at) is treated as "use gain
+                                                 * 1.0", so a caller that only wants an
+                                                 * offset skew (PLAN.md 8 scenario 8's
+                                                 * "+80 degC") never has to think about
+                                                 * gain at all; an explicit gain of
+                                                 * exactly 0.0 is not expressible through
+                                                 * this type (MANUAL mode via
+                                                 * sim_engine_force_safety_temp() is the
+                                                 * correct tool if a test genuinely needs
+                                                 * the safety channel pinned). Wired onto
+                                                 * sim_engine.h's
+                                                 * sim_engine_set_safety_tc_fault_override(),
+                                                 * level-recomputed every tick like the TC
+                                                 * faults above, not edge-triggered. */
 
     /* Power-path faults -- target is a zone index (thermal_model.h's
      * zone numbering, matches tc_fault_state's MAIN_0..2 ordinally per
@@ -84,6 +137,57 @@ typedef enum {
     FAULT_SCHED_TYPE_STUCK_OPEN_RELAY, /* duty forced 0 regardless of relay sense */
     FAULT_SCHED_TYPE_BROKEN_ELEMENT,   /* element_health forced 0 */
     FAULT_SCHED_TYPE_PARTIAL_ELEMENT,  /* params[0] = forced element_health, 0..1 */
+
+    /* CT/waveform faults -- target is a CT channel index (wave_owner.h's
+     * CT_WAVE_NUM_CHANNELS, 0..2 -- one fewer channel than
+     * THERMAL_MODEL_MAX_ZONES, since the fixture only synthesizes CT for the
+     * first 3 zones, PLAN.md 3.1/3.6). Wired straight onto wave_owner's
+     * existing public API (ct_wave_set_distortion / ct_wave_set_mode /
+     * ct_wave_set_amps) -- no new sine_synth/wave_owner code needed, both
+     * already expressed these knobs (PLAN.md 3.3's dropout_half_cycle, and
+     * MANUAL mode + amps=0 for a muted channel). */
+    FAULT_SCHED_TYPE_HALF_WAVE_SSR,    /* PLAN.md 7.1 "Half-waving SSR": params[0] == 0
+                                         * drops the positive half-cycle, nonzero drops
+                                         * the negative half (ct_wave_distortion_t's
+                                         * dropout_negative_half) -- wired onto the
+                                         * channel's existing distortion config, so it
+                                         * composes with either CT_WAVE_MODE_MODEL or
+                                         * _MANUAL and does not touch amplitude. */
+    FAULT_SCHED_TYPE_PHASE_LOSS,        /* PLAN.md 7.1 "Phase loss": one CT channel
+                                          * forced to zero while the others keep
+                                          * running. wave_owner.h has no separate
+                                          * "override" concept for CT the way
+                                          * sim_engine's duty/health overrides do
+                                          * (single MODE switch shared with operator
+                                          * use) -- fault_sched.c forces the channel to
+                                          * CT_WAVE_MODE_MANUAL + amps=0 while ACTIVE
+                                          * and hands it back to CT_WAVE_MODE_MODEL on
+                                          * clear, documented as a known limitation in
+                                          * fault_sched.c: this competes with any
+                                          * operator-set MANUAL mode on the same channel
+                                          * for as long as the fault is active. */
+    FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST, /* PLAN.md 7.1 power-path table: "Welded K4
+                                         * test support: Keep CT current flowing after K4
+                                         * sensed open (S9 escalation)" -- the fixture's
+                                         * stand-in for a real, mains-rated contactor welded
+                                         * downstream of K4 (mains hardware itself is out of
+                                         * scope, PLAN.md section 1); target is the CT
+                                         * channel whose synthesized current should keep
+                                         * flowing regardless of K4/zone-duty state.
+                                         * params[0] = forced amps. Same edge-triggered
+                                         * "force CT_WAVE_MODE_MANUAL on the inactive->active
+                                         * edge, hand back to CT_WAVE_MODE_MODEL on the
+                                         * active->inactive edge" discipline as HALF_WAVE_SSR/
+                                         * PHASE_LOSS above and the same documented
+                                         * known-limitation (competes with operator MANUAL
+                                         * mode on the same channel while active). If
+                                         * PHASE_LOSS is ALSO active on the same channel,
+                                         * PHASE_LOSS wins (forced-zero is the more
+                                         * severe/definite claim, same "genuinely
+                                         * conflicting pairs resolve to the more severe
+                                         * one" doctrine PLAN.md 7.3 states and
+                                         * STUCK_OPEN_RELAY already applies against
+                                         * WELDED_RELAY). */
 
     /* System faults -- target is a fault_sched_system_target_t (below). */
     FAULT_SCHED_TYPE_ESTOP,            /* opens the E-stop loop via i2c_owner_set_estop() */
@@ -99,6 +203,39 @@ typedef enum {
                                          * documented in fault_sched.c. Not reverted on
                                          * CLEAR (ambient has no "previous value" concept
                                          * at this layer). target is ignored for this type. */
+    FAULT_SCHED_TYPE_THERMAL_MASS_SURPRISE, /* PLAN.md 7.1 system table: "Thermal-mass
+                                         * surprise: Step-change model params mid-run (lid
+                                         * opened, load added)". target is a zone index
+                                         * (NOT a fault_sched_system_target_t, same
+                                         * target-is-actually-a-zone exception RUNAWAY_ZONE
+                                         * already uses). params[0] = new C (J/degC),
+                                         * params[1] = new k_loss (W/degC). Wired onto
+                                         * sim_engine.h's
+                                         * sim_engine_set_zone_thermal_override(),
+                                         * level-recomputed every tick like the duty/health
+                                         * overrides. */
+    FAULT_SCHED_TYPE_TC_LAG_STRESS,    /* PLAN.md 7.1 system table: "Sensor-vs-element lag
+                                         * stress: Crank TC lag to provoke overshoot".
+                                         * target is a zone index (same exception as
+                                         * THERMAL_MASS_SURPRISE/RUNAWAY_ZONE above).
+                                         * params[0] = new tc_lag_s (s). Wired onto
+                                         * sim_engine.h's
+                                         * sim_engine_set_zone_tc_lag_override(). */
+    FAULT_SCHED_TYPE_DUT_POWER_CUT,    /* Not one of PLAN.md 7.1's three catalog tables --
+                                         * scenarios/power_blip.yaml's own comment says so
+                                         * explicitly ("uses the fixture's dedicated DUT
+                                         * 12V power relay ... a distinct fixture
+                                         * capability from the TC/power-path/system fault
+                                         * catalog", PLAN.md section 3.4/6.2). Included
+                                         * here anyway because the trigger/duration/repeat
+                                         * spec the scenario file already uses (
+                                         * `trigger: at_zone_temp`, `duration: for_s`) is
+                                         * exactly FAULT_SCHEDULE's model, and the
+                                         * mechanism (i2c_owner_set_dut_power()) is already
+                                         * public and within this pass's file scope --
+                                         * target ignored (fault_sched_system_target_t).
+                                         * Edge-driven like ESTOP: FIRED -> power off,
+                                         * CLEARED -> power restored. */
 } fault_sched_fault_type_t;
 
 // FAULT_SCHED_TYPE_ESTOP's `target` value (ignored/reserved for other

@@ -52,7 +52,9 @@ Not to be confused with:
 ## Planned layout
 
 ```
-docs/        PLAN.md (this project's owning plan), later PROTOCOL.md, HARDWARE.md
+docs/        PLAN.md (this project's owning plan), HARDWARE.md (pin map,
+             connector mating, bring-up checklist — all provisional, see its
+             own header), later PROTOCOL.md
 src/         main.c + tasks/ (single-owner FreeRTOS tasks) + sim/ (pure, host-testable)
 scenarios/   standard test scenario files (YAML)
 test/        host tests (MSVC/CMake, SaftyFW pattern)
