@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 42,
   "timescale": 10.0,
-  "start_time": 1787267607.6488235,
+  "start_time": 1787268151.826461,
   "events": [
     {
       "seq": 0,
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 308000000,
+      "sim_time_us": 345000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -39,7 +39,7 @@
     },
     {
       "seq": 3000000000,
-      "sim_time_us": 297000000,
+      "sim_time_us": 296000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "KILNFW_HEATING_FAILED"
