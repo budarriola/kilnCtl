@@ -39,7 +39,7 @@ project rather than two.
 | [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
 | [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md) | Field updates for both processors: interlocks, one-password auth, ESP OTA partitioning |
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
-| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission (protocol lifted to `CommonFW`, then `firmware/UnitTestFw` + `hardware/UnitTestFixture` deleted — its §12) — **software complete (every task, every scenario), hardware-gated**: no fixture has ever been built or connected, so nothing below M-A's SPI timing proof is hardware-verified |
+| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission (protocol lifted to `CommonFW`, then `firmware/UnitTestFw` + `hardware/UnitTestFixture` deleted — its §12) — **software complete (every task, every scenario), hardware-gated**: no fixture has ever been built or connected, so nothing below M-A's SPI timing proof is hardware-verified. **New: a software-only cross-check (`tools/virtual_simfw` + `tools/virtual_dut`, section 13.4) runs real `SaftyFW` guard code against the simulator on a PC and found that only 4 of 13 guards can currently fire — see M9 below |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
@@ -363,7 +363,29 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       `firmware/CommonFW/src/kilnlink_status.c` (untracked in git, not
       touched by this pass; see `firmware/SaftyFW/TODO.md` Phase 4 for
       detail). No relay/GPIO6 wiring touched — guards remain evaluated but
-      not commanding hardware, matching this milestone's scope
+      not commanding hardware, matching this milestone's scope.
+      **2026-08-20, qualified by M9's `virtual_dut` cross-check:** "12 of 13
+      guards implemented and host-tested" is still true and is not being
+      walked back — the guard *logic* really is built and really is correct
+      against synthetic inputs, which is exactly what this milestone claims.
+      What that claim does not say, and what `virtual_dut` (M9) makes
+      precise for the first time by running this file's real, unmodified
+      code against a simulated kiln: `safety_core_build_input()`
+      (`safety_core.c`, one layer above this milestone's own scope) only
+      populates enough fields for **4 of those 12 to be reachable by
+      anything today — S5, S6b, S7, S12.** The other 8 wait on exactly the
+      "synthetic context/current-presence/link-liveness facts rather than
+      real producers" gap this bullet already names (Phase 6/7), plus two
+      further specifics found while verifying: S1 additionally needs a
+      commissioned `abs_max_temp_c` (a config gap, not a producer gap), and
+      S6a additionally needs `main_fault_asserted` wired from the already-
+      working `discrete_task_main_fault()` (a one-line omission, not a
+      missing producer). A guard being implemented and host-tested says
+      nothing about whether its inputs are ever populated — see
+      `firmware/SimFW/docs/PLAN.md`'s status header and `firmware/SaftyFW/
+      docs/GUARD_TEST_MATRIX.md`'s new reachability section for the
+      guard-by-guard detail, independently confirmed by both direct source
+      reading and `virtual_dut`'s own run.
 - [x] CI grep: `safety_core.c` never includes the link header — done 2026-08-16,
       `firmware/SaftyFW/tools/check_isolation.ps1`
 
@@ -448,6 +470,19 @@ physically stop a kiln, and the first that can nuisance-trip one.
       verified**: the PC↔ESP UART is dead on this bench (same known issue
       noted above), so neither the HTTP endpoint nor the new UART subcommand
       has been exercised against a running Pico — build/flash-verified only.
+- [ ] **NEW, found via M9's `virtual_dut` cross-check (2026-08-20): K4 is
+      never energized anywhere in the current tree.** `relay_owner_command_
+      energize()` exists, is correctly implemented, and is exercised by host
+      tests — but has zero callers in `firmware/SaftyFW/src/` (confirmed by
+      grepping the whole tree, not just the obvious call site). `relay_owner_
+      task()` starts in GRACE and, once GRACE expires to ARMED, nothing ever
+      asks for an energize — the only caller would be Phase 7's link_task/GUI
+      integration, which doesn't exist yet. This is consistent with this
+      milestone's own scope ("first that can nuisance-trip", not "first that
+      heats") and is not a regression, but it means K4 reads open from t=0 on
+      every boot today, independent of any guard — worth recording explicitly
+      here since it is easy to assume relay *authority* being built implies
+      relay *energization* is exercised, and it is not yet.
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
 - [ ] Every guard exercised per [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
       — 2026-08-19: §2's host provocation table audited row by row; two real
@@ -485,7 +520,12 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       attached to any build machine in this environment. Host tests
       (`test/test_kilnlink_power.c`) and a real arm-none-eabi-gcc/pico-sdk
       build both pass; nothing here has run against actual current-sense
-      hardware.
+      hardware. **2026-08-20: M9's `virtual_dut` cross-check confirms this is
+      part of a wider gap, not isolated to S3/S4** — `safety_core_build_
+      input()` never sets `context_valid` at all (not just
+      `any_current_present`), which independently keeps S2/S3/S4/S10/S13 all
+      inactive regardless of current-sense wiring; see M3's guard bullet
+      above and `GUARD_TEST_MATRIX.md`'s new reachability section.
 - [x] ESP → Pico context frames, including `relay_recent_mask`. **2026-08-18**:
       `KilnFW`'s `safety_link.c` now builds a real `SAFETY_CMD_PUSH_CONTEXT`
       (0x07) from live board state -- `kiln_io_get_relay_shadow()` for
@@ -1209,15 +1249,48 @@ milestone here rather than staying a footnote.
       hardware" — there has never been a safe, repeatable way to provoke a
       welded contactor, an open thermocouple, or a stuck relay without
       either a real kiln or invented test code paths. `SimFW` is the thing
-      that finally makes those rows runnable without a kiln: each of its 17
-      scenarios declares which guard(s) it exercises, and
-      `GUARD_TEST_MATRIX.md` now carries a cross-reference section (added in
-      this pass) mapping guards to the scenario that provokes them. **This
-      does not retire §3's rows** — a scenario existing, or even running
-      cleanly against `kilnsim`'s own loader, is not the same as it having
-      been run against real hardware, and none have been. It only means the
-      moment fixture hardware exists, §3's rows have a concrete, repeatable
-      script to run instead of nothing.
+      that finally makes those rows runnable without a kiln: each of its
+      scenarios (grown from 17 to 19 since this bullet was last written)
+      declares which guard(s) it exercises, and `GUARD_TEST_MATRIX.md`
+      carries a cross-reference section mapping guards to the scenario that
+      provokes them. **This does not retire §3's rows** — a scenario
+      existing, or even running cleanly against `kilnsim`'s own loader, is
+      not the same as it having been run against real hardware, and none
+      have been. It only means the moment fixture hardware exists, §3's rows
+      have a concrete, repeatable script to run instead of nothing.
+- [x] **New this pass — a software-only capability the milestone above didn't
+      anticipate, and it already did real work.**
+      `firmware/SimFW/tools/virtual_simfw/` compiles `SimFW`'s own
+      `src/sim/*.c` unmodified and serves the real `benchproto` wire
+      protocol over TCP, so a complete scenario runs end-to-end against the
+      real simulation logic with zero RP2040 attached.
+      `firmware/SimFW/tools/virtual_dut/` goes further: it compiles
+      `SaftyFW`'s real, unmodified `safety_guards.c` and `relay_grace.c` for
+      the host and ticks them against `virtual_simfw`'s live data, turning
+      real guard verdicts into events `kilnsim`'s report evaluator can
+      score. **Neither is hardware verification, and neither claims to be**
+      — no real SPI bus, no real relay coil, no real ESP link, no FreeRTOS
+      jitter; see each tool's own README. But running real `SaftyFW` guard
+      code against a simulated kiln for the first time established,
+      empirically, that **in today's shipping `SaftyFW` only S5, S6b, S7,
+      and S12 can structurally fire** — the other nine guards are blocked by
+      specific inputs `safety_core_build_input()` never populates (`link_up`
+      for S6b/S2/S3/S4/S10/S13's shared `context_valid` gate, `heat_commanded`
+      hardcoded false for S11, `relay_deenergized` never set for S9,
+      `main_fault_asserted` never wired for S6a despite its debounced
+      producer already existing, `abs_max_temp_c` never commissioned for
+      S1). K4 itself is also never energized anywhere in the tree
+      (`relay_owner_command_energize()` has zero callers). **This is not a
+      discovery of regressions — it precisely quantifies incompleteness
+      `SaftyFW`'s own Phase 6/7 TODOs already admit to** — see M3/M4/M5
+      below for where this qualifies those milestones' own "guards
+      implemented" language, `firmware/SimFW/docs/PLAN.md`'s status header
+      for the full guard-by-guard detail with corrections to an earlier
+      draft of this finding, and `GUARD_TEST_MATRIX.md`'s new reachability
+      section for the same table in its natural home. `virtual_dut` is
+      re-runnable: the moment Phase 6/7 lands, re-running it against the
+      same 19 scenarios shows exactly which guards newly become reachable,
+      without needing bench hardware to find out.
 
 ---
 

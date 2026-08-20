@@ -32,8 +32,24 @@ sampled MOSI on the wrong clock edge (mode 0 behavior under a mode-1 label);
 it is now corrected to match the MAX31856 datasheet and both real masters'
 drivers — see `docs/HARDWARE.md` and the PLAN.md status header for detail.
 CT amplitude calibration is also still an identity placeholder pending real
-hardware to calibrate against. None of the 17 scenarios has ever run against
-a real `KilnFW`+`SaftyFW` pair.
+hardware to calibrate against. None of the 19 scenarios (grown from 17) has
+ever run against a real `KilnFW`+`SaftyFW` pair.
+
+**A fourth, software-only capability exists now and it already found a real
+bug — in `SaftyFW`, not in `SimFW`.** `tools/virtual_simfw/` compiles this
+project's own `src/sim/*.c` unmodified and serves the real `benchproto` wire
+protocol over TCP, so a complete scenario runs end-to-end with zero RP2040
+attached (see `tools/virtual_simfw/README.md`). `tools/virtual_dut/` goes
+further, compiling `SaftyFW`'s real `safety_guards.c`/`relay_grace.c`
+unmodified and ticking them against `virtual_simfw`'s live data, so guard
+verdicts genuinely PASS/FAIL instead of skipping (see
+`tools/virtual_dut/README.md`). **Neither is hardware verification** — see
+each tool's own README — but running real guard code against a simulated
+kiln established that in today's shipping `SaftyFW`, only 4 of 13 guards
+(S5, S6b, S7, S12) can structurally fire; the rest are blocked on inputs
+`safety_core.c` never populates yet (Phase 6/7 work). See `docs/PLAN.md`'s
+status header and `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s new
+reachability section for the full detail.
 
 Single-image, no A/B bootloader slots — unlike `SaftyFW`, this is a bench
 tool, flashed over BOOTSEL or SWD.
@@ -83,9 +99,16 @@ docs/        PLAN.md (this project's owning plan), HARDWARE.md (pin map,
 src/         main.c + tasks/ (single-owner FreeRTOS tasks, all implemented) +
              sim/ (pure, host-testable thermal model / MAX31856 regs / sine
              synth / fault engine) + drivers/ (PIO SPI slave, CT PWM, MCP23017)
-scenarios/   17 standard test scenario files (YAML)
+scenarios/   19 standard test scenario files (YAML) — grown from 17; see
+             GUARD_TEST_MATRIX.md §5 for the guard cross-reference
 test/        host tests (MSVC/CMake, SaftyFW pattern)
 tools/       spi_test_master/ (standalone SPI reference-master bench firmware
-             + host soak runner, built to make M-A's proof achievable) and
-             check scripts
+             + host soak runner, built to make M-A's proof achievable);
+             virtual_simfw/ (host build of this project's own sim code,
+             speaking real benchproto over TCP — no RP2040 needed);
+             virtual_dut/ (host build of SaftyFW's real guard code, ticked
+             against virtual_simfw — a software-only DUT cross-check, not
+             hardware verification); check_single_owner.ps1/
+             check_sim_purity.ps1/check_scenarios.py + run_checks.ps1 (CI
+             checks, not yet wired into any pipeline)
 ```

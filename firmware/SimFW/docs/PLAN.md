@@ -36,7 +36,86 @@
 >   existing and loading is not the same as it having ever executed against
 >   hardware — see section 10's milestone table for exactly what remains).
 >
-> A real SPI-mode bug was found and fixed in this pass: the PIO slave engine
+> **New this pass — a fourth, software-only verification layer exists, and it
+already found real bugs, not in SimFW but in `SaftyFW`.**
+`firmware/SimFW/tools/virtual_simfw/` compiles SimFW's own `src/sim/*.c`
+**unmodified** and serves the real `benchproto` wire protocol over TCP, so a
+complete scenario can run against the actual simulation logic with no RP2040
+ever attached — see that tool's own README for exactly what it does and does
+not reproduce. `firmware/SimFW/tools/virtual_dut/` goes one step further: it
+compiles `SaftyFW`'s real, unmodified `safety_guards.c` and `relay_grace.c`
+for the host and ticks them against `virtual_simfw`'s live data at the real
+100 ms cadence, turning their real verdicts into events `kilnsim`'s own
+report evaluator can genuinely PASS/FAIL instead of skipping. Neither tool
+touches real silicon and neither claims to — this is **not** a substitute for
+section 10's hardware-gated milestones, and every one of them stays exactly
+as unmet as stated below. But running real guard code against a simulated
+kiln did something no host test with synthetic inputs ever could: it
+established, empirically and reproducibly, that **in today's shipping
+`SaftyFW`, only S5, S6b, S7, and S12 can structurally fire.** The other nine
+guards are blocked by specific inputs `safety_core_build_input()`
+(`firmware/SaftyFW/src/tasks/safety_core.c`) never populates:
+
+- **S6b trips unconditionally ~120 s into every boot.** `link_up` is never
+  set true anywhere — `safety_core_build_input()`'s struct literal doesn't
+  name it, so it is `false` from the first tick, on real hardware too, not
+  just this harness. Correction to an earlier draft of this finding: it is
+  **not** that `link_task.c` doesn't exist — it does, and per ROADMAP M5 it
+  is substantially built (context frames, DIAG, STATUS, TRIP_EVENT). The gap
+  is narrower and still real: `safety_core.c` has a standing `TODO (Phase
+  7): context_snapshot_t is read here too, once link_task publishes one`,
+  and nothing has done that yet, so `safety_core` never asks `link_task`
+  whether the link is alive.
+- **K4 is never energized.** `relay_owner_command_energize()` has zero
+  callers anywhere in the tree (confirmed by grep, not just the one obvious
+  call site) — `relay_owner_task()` starts in GRACE and, once GRACE expires,
+  nothing ever asks for an energize. K4 reads open from t=0 on every boot.
+- **S11 cannot trip.** `safety_core_build_input()` hardcodes
+  `heat_commanded = false` ("no current sense yet, Phase 6" per its own
+  comment), and S11's trip condition requires `heat_commanded` true.
+- **S2, S3, S4, S10, S13 cannot fire or warn.** All five are gated on
+  `context_valid`, which `safety_core_build_input()` never sets true (same
+  Phase 7 link-context gap as S6b, one level up).
+- **S9 cannot escalate.** Gated on `relay_deenergized`, which nothing ever
+  computes into the input struct (`relay_owner_is_energized()`'s inverse is
+  never plumbed through).
+- **S6a cannot fire — a narrower, more mechanical gap than the others.**
+  `main_fault_asserted` is never populated in `safety_core_build_input()`,
+  even though the debounced reading it needs, `discrete_task_main_fault()`,
+  already exists and works (the same file calls
+  `discrete_task_estop_pressed()` for S7 two lines away) — `safety_core.c`
+  simply never calls it for S6a. Unlike S6b/S2-S4/S9/S10/S13, this one has
+  no missing producer at all; it is a one-line wiring omission.
+- **S1 does not trip today, but for a different reason than the above, and
+  this correction matters: it is not `context_valid`-gated.** `abs_max_temp_c`
+  defaults to 0, and `safety_guards.c`'s own convention is that 0 means "not
+  commissioned, never trip" — a deliberate safety choice
+  (`safety_guards.h`'s doc comment), not a missing producer. S1's guard logic
+  is otherwise fully wired (real `tc_c` from `thermo_task`) and will trip
+  correctly the moment a real ceiling is commissioned (`config_store`, Phase
+  9, already exists per ROADMAP M3).
+- **S12 (cold junction / enclosure over-temperature) is structurally
+  reachable today** — depends only on the real `cj_c` reading from
+  `thermo_task`, with no `context_valid` or `link_up` gating at all. It
+  wasn't observed firing in this pass's `virtual_dut` run, but for an
+  unrelated reason: `scenarios/cj_fault.yaml` has no numeric fault offset,
+  so the simulated cold junction never actually moves — a scenario-file gap,
+  not a guard defect (see `virtual_dut/README.md` Finding 6).
+
+Every one of these was verified by reading `safety_core.c`/`safety_guards.c`
+directly, then cross-checked against `virtual_dut`'s independent run of the
+real, unmodified code — the two agree. **This is not a discovery of
+regressions; it precisely quantifies known incompleteness.** `SAFETY_MODEL.md`
+and `SaftyFW/TODO.md` already say Phases 6/7 (link context, current sense)
+are unbuilt — what's new is the exact, guard-by-guard list of what that
+means in practice, and the fact that it can now be re-checked automatically
+any time those phases land, by re-running `virtual_dut` against the same 19
+scenarios. See `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s new
+reachability section for the same table in its natural home, and section 13
+below for where this capability sits relative to the three testing layers
+this plan originally described.
+
+A real SPI-mode bug was found and fixed in this pass: the PIO slave engine
 > originally sampled MOSI on SCLK's *rising* edge (textbook SPI mode 0) while
 > labeling itself mode 1; it has been corrected to sample on the *falling*
 > edge, matching the MAX31856 datasheet's own Table 5 and both real masters'
@@ -923,11 +1002,18 @@ tools/PcTools/src/kilnsim/   protocol.py, link.py, mcp_server.py, cli.py,
 Ordered by dependency and risk; each states its exit criterion — the thing
 that must be *demonstrated*, not just built. **Software for every milestone
 M-A through M-H has now been written** (skeleton, protocol, thermal model,
-TC emulation, CT synthesis, relay/IO, fault engine, MCP/CLI/GUI, and all 17
-scenarios all exist in the tree). What follows is honest about which exit
-criteria that satisfies and which it does not — **build-verified and
-host-tested is not hardware-verified**, and for this fixture almost every
-exit criterion as originally written specifically demands hardware evidence.
+TC emulation, CT synthesis, relay/IO, fault engine, MCP/CLI/GUI, and the
+19-scenario library — grown from 17 since this table was last written — all
+exist in the tree). What follows is honest about which exit criteria that
+satisfies and which it does not — **build-verified and host-tested is not
+hardware-verified**, and for this fixture almost every exit criterion as
+originally written specifically demands hardware evidence. None of the
+milestone statuses below change because of `virtual_simfw`/`virtual_dut`
+(section 13.4) — those tools run real code against a simulated fixture on a
+PC, which is neither "built" nor "hardware-verified" in this table's sense,
+it is a new, fourth thing. Where it matters (M-G/M-H, which talk about
+scenarios "running"), that distinction is called out explicitly below rather
+than left to be inferred.
 
 - **M-A — SPI slave proof of concept.** PIO MAX31856 emulation, one channel,
   against a real master (the bench ESP32 running unmodified `KilnFW` driver
@@ -1012,25 +1098,40 @@ exit criterion as originally written specifically demands hardware evidence.
   **Status: SOFTWARE MET, HARDWARE NOT MET.** `kilnsim`'s MCP server, CLI,
   GUI, scenario loader, and report generator all exist
   (`tools/PcTools/src/kilnsim/`); the YAML schema is frozen and all 17
-  scenario files parse cleanly through the loader (pytest-verified, 59
-  passed + 17 subtests at the landing commit). None of the three named
-  scenarios — or any of the other 14 — has ever run against a real
+  scenario files parse cleanly through the loader (pytest-verified figures
+  from an earlier commit — treat exact counts as stale; three other sessions
+  are editing this area as this document is written). None of the named
+  scenarios — or any of the others — has ever run against a real
   `KilnFW`+`SaftyFW` pair, so no scenario report has ever been archived from
   a live run, and the GUI's MANUAL-mode controls have never driven real
-  fixture hardware.
+  fixture hardware. **Since this table was last written, all 19 scenarios
+  have run against `virtual_simfw`+`virtual_dut` (section 13.4) — real
+  `SimFW` simulation code and real `SaftyFW` guard code, on a PC, with no
+  RP2040 at all.** That is a genuinely new kind of evidence, but it is not
+  this milestone's exit criterion: "real `KilnFW`+`SaftyFW`" means silicon,
+  and none has run. See `firmware/SimFW/tools/virtual_dut/results/
+  SCENARIO_RESULTS.md` for that run's actual pass/fail pattern — mostly FAIL,
+  for reasons that are themselves the headline finding of this pass (see the
+  status header above), not a scenario-writing or fixture defect.
 - **M-H — Standard library complete.** All 16 scenarios written and run.
   **Exit:** each maps to its `GUARD_TEST_MATRIX.md` rows and that file is
   updated in the same change; `kilnsim run --all` is a one-command
   regression gate.
-  **Status: LIBRARY MET (over-delivered: 17, not 16), "AND RUN" NOT MET.**
-  All 17 scenario YAML files exist (section 8 lists 16; `power_blip` — item
-  16 in that list — brings the actual count to 17 files on disk, all
-  declaring an `exercises:` guard cross-reference), and
-  `GUARD_TEST_MATRIX.md` has been cross-referenced against them in this pass
-  (see that file's new "SimFW scenario cross-reference" section). **None of
-  them has ever been run** against real hardware — "written" and "run" are
-  different verbs in this milestone's own exit criterion, and only the first
-  is true today.
+  **Status: LIBRARY MET (over-delivered: 19, not 16), "AND RUN" NOT MET
+  AGAINST REAL HARDWARE.** The library has grown twice since this milestone
+  was last written — `power_blip` first brought the count to 17, and two
+  more scenarios (`mainfault_tc_disconnect`, `safety_tc_frozen`) closed
+  guard-coverage gaps found while building `GUARD_TEST_MATRIX.md` §5, for 19
+  files on disk today, all declaring an `exercises:` guard cross-reference.
+  `GUARD_TEST_MATRIX.md` §5 cross-references guards to scenarios, and its new
+  reachability subsection (§6) records, per guard, whether it can currently
+  fire at all. **None of them has ever run against real hardware** — "written"
+  and "run" are different verbs in this milestone's own exit criterion, and
+  only the first is true against silicon today. All 19 *have* now run against
+  `virtual_simfw`+`virtual_dut` (section 13.4), which is real code but not
+  real hardware — see that section and `virtual_dut/README.md` for what that
+  run actually found (mostly: guards whose inputs are never populated in
+  current `SaftyFW`, not scenario or fixture bugs).
 
 ---
 
@@ -1105,12 +1206,14 @@ exit criterion as originally written specifically demands hardware evidence.
 10. **NEW — kilnsim's own CLI is missing subcommands `docs/HARDWARE.md`'s
     bring-up checklist (§6) needs.** No `kilnsim io`/`kilnsim ct`/
     `kilnsim relay` subcommand exists yet in `tools/PcTools/src/kilnsim/
-    cli.py`, and PLAN.md §13.2's `kilnsim selftest` loopback mode is not
-    implemented — the MCP tools (`io_write`/`ct_set_amps`/
-    `relay_get_edges`, etc.) exist as the interim path. Not blocking any
-    milestone by itself, but worth closing before a real bring-up session so
-    the checklist's own commands actually exist. (pre-M-A bring-up
-    convenience)
+    cli.py` — the MCP tools (`io_write`/`ct_set_amps`/`relay_get_edges`,
+    etc.) exist as the interim path. Not blocking any milestone by itself,
+    but worth closing before a real bring-up session so the checklist's own
+    commands actually exist. **§13.2's `kilnsim selftest` loopback mode
+    specifically is under active construction as of this pass** (a separate,
+    concurrent session) — do not assume its shape or completeness from this
+    document; check its own commit history rather than this line. (pre-M-A
+    bring-up convenience)
 
 ---
 
@@ -1153,7 +1256,8 @@ there today:
 
 ## 13. Testing strategy
 
-Three layers, cheapest first:
+Originally three layers, cheapest first. A fourth, unplanned layer has since
+appeared between 1 and 2 — see 13.4.
 
 1. **Host tests** (MSVC/CMake, `SaftyFW/test` pattern, `test/`): everything
    in `src/sim/` is pure and runs on the PC — thermal model golden traces,
@@ -1161,20 +1265,74 @@ Three layers, cheapest first:
    behavior against datasheet-derived vectors), fault trigger evaluation
    (synthetic snapshots through every trigger kind, boundary times, slot
    ordering), sine-table generation. The register-machine vectors double as
-   documentation of what the emulator claims to implement.
+   documentation of what the emulator claims to implement. **Real, done**:
+   this is the layer the status header's 4873/4873-class numbers come from.
 2. **Loopback tests** (fixture alone, no DUT): a `kilnsim selftest` mode —
    PIO engines clocked by a scripted on-fixture master (spare PIO SM) to
    verify the SPI path end-to-end; CT outputs looped to a spare ADC input
    for amplitude sanity; expander read-after-write. Runs in CI-on-a-bench
-   without the main board attached.
+   without the main board attached. **Status: in progress, not yet landed as
+   of this pass** — this is being built concurrently by another session; do
+   not trust a specific implementation shape here until that work lands and
+   this section is updated again. It remains hardware-adjacent (needs real
+   fixture GPIO/SPI/I2C, just not the main board), unlike layer 4 below.
 3. **DUT integration** (the point of the project): the scenario library
    (section 8) against real `KilnFW`+`SaftyFW`. `kilnsim run` exit codes
-   make it a scriptable gate; reports are the archived evidence.
+   make it a scriptable gate; reports are the archived evidence. **Status:
+   unchanged, fully hardware-gated** — see section 10's milestone table.
+   Nothing about layer 4 below substitutes for this; it is real hardware or
+   nothing.
+
+### 13.4 Software-level integration (new, unplanned — `virtual_simfw` +
+     `virtual_dut`)
+
+This plan's original three layers didn't anticipate a middle ground between
+"pure unit test with synthetic input" and "real hardware" — but one exists
+now, sitting between layers 1 and 2 in cost, and it is genuinely useful,
+not a toy:
+
+- **`firmware/SimFW/tools/virtual_simfw/`** compiles this project's own
+  `src/sim/*.c` (thermal model, MAX31856 register machine, sine synth, fault
+  engine) **unmodified** for the host and serves the real `benchproto` wire
+  protocol over TCP — so a complete scenario runs end-to-end against the
+  actual simulation logic, driven by the real `kilnsim` client code, with no
+  RP2040 ever attached. See that tool's own README for its precise scope and
+  limits (in particular: no SaftyFW guards exist inside it by itself, so
+  `guard_warn`/`guard_trip` events cannot appear from `virtual_simfw` alone).
+- **`firmware/SimFW/tools/virtual_dut/`** closes that gap from the other
+  side: it compiles `SaftyFW`'s real, unmodified `safety_guards.c` and
+  `relay_grace.c` for the host, ticks them against `virtual_simfw`'s live
+  data at the real 100 ms cadence, and turns the real verdicts into events
+  `kilnsim`'s own report evaluator can score. See its own README for exactly
+  which `SaftyFW` files are compiled verbatim, which are deliberately out of
+  scope (and why), and its full "Findings" section.
+
+**What this layer is not**: it is not hardware verification, and neither
+tool's own README claims otherwise — no real SPI bus, no real relay coil, no
+real ESP, no FreeRTOS scheduling jitter. Treat a PASS here as "the code's
+decision logic did the right thing given this input," never as "the board is
+safe," exactly as `virtual_dut/README.md` states in its own first paragraph.
+
+**What it is**: the first time any of this project's guard-provocation logic
+has run against `SaftyFW`'s real, unmodified source rather than a synthetic
+host-test harness or a description of intended behavior — and it surfaced a
+genuine, previously-unquantified finding (the status header above, and
+`GUARD_TEST_MATRIX.md`'s reachability section): only S5/S6b/S7/S12 can
+currently fire in shipping `SaftyFW`, for specific, individually-verified
+reasons. That is a real capability this plan did not originally scope for,
+and it is re-runnable — anyone landing Phase 6/7 work in `SaftyFW` can
+re-run `virtual_dut` against the same 19 scenarios and see exactly which
+guards newly become reachable, without needing bench hardware to find out.
 
 Firmware-side checks mirror the repo's conventions: a `tools/` grep script
 enforcing the single-owner doctrine (no peripheral register access outside
 its owner file), `-Wall -Wextra -Werror` clean under arm-none-eabi-gcc, and
-host tests required green before merge — same bar `SaftyFW` holds.
+host tests required green before merge — same bar `SaftyFW` holds. Three CI
+check scripts now exist under `firmware/SimFW/tools/`
+(`check_single_owner.ps1`, `check_sim_purity.ps1`, `check_scenarios.py`) plus
+a `run_checks.ps1` runner, none yet wired into any actual CI pipeline (none
+exists for this repo to join, same caveat `check_no_duplicate_crc.ps1`
+already carries elsewhere in this tree).
 
 ## 14. Bring-up order (bench checklist)
 

@@ -364,3 +364,78 @@ here for completeness rather than omitted silently.
   this repo's commit history for the exact check output. As with every
   other row in this table, **a scenario existing and loading is not the
   same as it having run against hardware**; none of the 19 have.
+
+---
+
+## 6. Guard reachability in current SaftyFW (added 2026-08-20)
+
+**This section answers a different question from §5 above.** §5 says which
+scenario *targets* each guard. This section says whether the guard can
+*actually fire at all* against today's shipping `SaftyFW`, independent of
+any scenario or fixture — because a guard's pure logic being implemented and
+host-tested (section 2 above) says nothing about whether the caller
+(`safety_core.c`) ever populates the input fields that logic depends on.
+
+This was established two ways, cross-checked against each other:
+
+1. **Direct source reading** — `safety_core_build_input()`
+   (`firmware/SaftyFW/src/tasks/safety_core.c`) builds one tick's
+   `safety_guard_input_t` with a C99 designated-initializer struct literal.
+   Any field the literal does not name is zero-initialized. Reading which
+   fields it does and does not name, against `safety_guards.c`'s own gating
+   logic for each guard, gives a guard-by-guard reachability verdict
+   directly from the code.
+2. **`firmware/SimFW/tools/virtual_dut`** — a new host-side tool (this pass)
+   that compiles `safety_guards.c` and `relay_grace.c` **verbatim,
+   unmodified**, ticks them against `firmware/SimFW`'s `virtual_simfw`
+   fixture at the real 100 ms cadence, and records which guards actually
+   transition. Its full run against all 19 scenarios is in
+   `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`, and its
+   own README's "Findings" section reaches the same verdicts below
+   independently. **This is a software cross-check, not hardware
+   verification** — no real SPI bus, no real relay coil, no real ESP link,
+   no FreeRTOS jitter — see that tool's own README for exactly what it does
+   and does not reproduce. It is real code, though, not a synthetic host
+   test with invented inputs, which is why it is worth citing here as a
+   second, independent confirmation rather than trusting the source reading
+   alone.
+
+**Bottom line: only S5, S6b, S7, and S12 can structurally fire in current
+`SaftyFW`.** The other 9 guards are blocked, each for a specific,
+individually-verified reason — not "the same reason" repeated nine times:
+
+| Guard | Reachable today? | Blocking input | Why the input is absent |
+|---|---|---|---|
+| S1 | **No** | `cfg->abs_max_temp_c` | Defaults to 0, and `safety_guards.h`'s own convention is 0 = "not commissioned, never trip" (a deliberate safety choice, not a bug). Guard logic is otherwise fully wired to real `tc_c`; will trip correctly the instant a real ceiling is commissioned via `config_store` (Phase 9, already built — see M3 above). **This is a config gap, not a missing-producer gap** — different in kind from every row below it. |
+| S2 | **No** | `in->context_valid` | Never set true by `safety_core_build_input()` — no field for it in the struct literal. Guard resets its own accumulator every tick context is invalid, per `safety_guards.c`'s own "stale context is no context" discipline. |
+| S3 | **No** | `in->context_valid` | Same as S2. |
+| S4 | **No** | `in->context_valid` | Same as S2. |
+| S5 | **Yes** | — | `tc_valid`/`tc_c`/`fault_bits`/`spi_failed` all come from `thermo_task`'s real snapshot, unconditionally, no gating field at all. |
+| S6a | **No** | `in->main_fault_asserted` | Never set by `safety_core_build_input()` — **notably, the producer already exists and works**: `discrete_task_main_fault()` is a real, debounced (200 ms) reading of GPIO10, called nowhere near `safety_core_build_input()` even though `discrete_task_estop_pressed()` (the sibling function, for S7) is called two lines away in the same function. This is a one-line wiring omission, not a missing Phase. |
+| S6b | **Trips unconditionally** | `in->link_up` | Never set true — no field for it in the struct literal, and `safety_core.c` carries its own `TODO (Phase 7): context_snapshot_t is read here too, once link_task publishes one`, confirming this is known, not accidental. `link_task.c` itself is substantially built (ROADMAP M5) — the gap is specifically that `safety_core` never reads from it. Net effect: the elapsed-silence timer accumulates from the first tick of every boot and trips the hard backstop (`link_dead_hard_s`, default 120 s) regardless of any other condition, roughly 2 minutes into every boot. On a bench this presents as a mystery nuisance trip, not a real link failure. |
+| S7 | **Yes** | — | `estop_pressed` comes from `discrete_task_estop_pressed()`, a real, debounced (50 ms) GPIO9 reading, called directly in `safety_core_build_input()`. |
+| S9 | **No** | `in->relay_deenergized` | Never computed — nothing plumbs `relay_owner_is_energized()`'s inverse into the input struct. S9 only evaluates once already tripped, so this also can never be exercised while every other guard above it is blocked, compounding the gap. Separately, and independently: K4 is never energized in the first place today (`relay_owner_command_energize()` has zero callers anywhere in the tree — see ROADMAP M4), so "K4 was energized, then a trip de-energized it" cannot happen yet regardless of S9's own wiring. |
+| S10 | **No** | `in->context_valid` | Same as S2. |
+| S11 | **No** | `in->heat_commanded` | Hardcoded `false` in `safety_core_build_input()` — its own comment: "no current sense yet, Phase 6." Already flagged in this file's §5 notes for `safety_tc_frozen.yaml`; recorded here as the general row. |
+| S12 | **Yes** | — | `cj_c` comes from the same real `thermo_task` snapshot as S1/S5/S11, with **no** `context_valid` or `link_up` gating at all — the guard's own code puts it before the context-gated block. Not observed firing in this pass's `virtual_dut` run, but for an unrelated, scenario-file reason: `cj_fault.yaml` has no numeric fault offset, so the simulated cold junction never actually moves (`virtual_dut/README.md` Finding 6) — not a guard defect. |
+| S13 | **No** | `in->context_valid` | Same as S2 (S13 is additionally gated on `cfg->tc_source`, which defaults to a value that keeps it inactive anyway — but `context_valid` alone already blocks it). |
+
+**Read this table honestly, not as a verdict on guard quality.** Every guard
+above's *logic* passed its host-test row in section 2 — the code that
+decides "should this trip" is correct against the inputs it is given. What
+this table adds is that most of those inputs are never given today, because
+the parts of `SaftyFW` that would produce them (link context, Phase 7;
+current sense, Phase 6; commissioning, Phase 9's remaining piece) are not
+finished — exactly what `SAFETY_MODEL.md` and `SaftyFW/TODO.md` already say
+about those phases. **What's new here is not the incompleteness — it's a
+precise, per-guard accounting of what it means in practice**, obtained by
+reading the actual code rather than inferring from phase checklists, and
+independently confirmed by running that same code.
+
+**Re-checking this table:** re-run `firmware/SimFW/tools/virtual_dut/
+run_dut_scenarios.py` against the 19 scenarios any time `link_task`
+(Phase 7) or `current_task` (Phase 6) wiring changes in `safety_core.c` —
+newly-reachable guards will show real `guard_warn`/`guard_trip` events in
+`results/SCENARIO_RESULTS.md` where they previously showed none. Update this
+table's "Reachable today?" column in the same change, per this file's own
+"keep this file current" rule at the top.
