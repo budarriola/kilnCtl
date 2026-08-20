@@ -260,21 +260,37 @@ uint16_t fault_sched_schedule(uint16_t slot_id,
                                const fault_repeat_t *repeat,
                                const float params[4]);
 
-// Cancels slot_id (fault_engine_cancel() passthrough). If the slot was
-// ACTIVE, its effect is NOT automatically un-applied here -- per
-// fault_engine.h's own doc for fault_engine_cancel(), "was this a real
-// expiry or an operator abort" is a caller-level distinction; this pass
-// resolves it simply by recomputing every target's effective override from
-// the active-slot set on the very next fault_sched_tick() (see
-// fault_sched.c's header comment: "recompute, don't patch"), so a
-// cancelled slot's effect disappears within one tick regardless, with no
-// separate un-apply path needed here.
+// Cancels slot_id (fault_engine_cancel() passthrough). Does NOT apply any
+// effect synchronously -- fault_engine_cancel() defers an ACTIVE slot's
+// actual reset-to-IDLE (and CLEARED event) to the next fault_engine_tick()
+// call inside fault_sched_tick(), which is also where
+// recompute_overrides_locked() runs; this call just marks the request and
+// returns. This keeps every override write and every ring-bound FIRED/
+// CLEARED event flowing through the one place that already does both
+// safely: sim_engine's own tick, calling fault_sched_tick() synchronously
+// (see this header's top comment). Earlier versions of this function called
+// recompute_overrides_locked() here directly -- a cross-task write into
+// sim_engine's override state from whatever task calls FAULT_CANCEL/
+// TC_CLEAR_FAULT (cmd_task, not sim_engine's own task), which is exactly
+// the hazard sim_engine.c's tick-order comment warns against. Deferring
+// closes that gap too, incidentally, not just the CLEARED-event gap it was
+// written for.
 bool fault_sched_cancel(uint16_t slot_id);
 
-// Immediately fires slot_id (fault_engine_fire_now() passthrough) and
-// applies its effect synchronously before returning (does not wait for the
-// next fault_sched_tick()'s recompute pass -- FAULT_FIRE_NOW is meant to be
-// immediate, PLAN.md section 5). Returns false under the same conditions
+// Requests an immediate fire of slot_id (fault_engine_fire_now() passthrough
+// -- see that function's updated doc). Does NOT apply any effect
+// synchronously: the actual ARMED->ACTIVE transition, its FIRED event, and
+// recompute_overrides_locked()/apply_edge_effects() all happen on the next
+// fault_sched_tick() call, i.e. within <=1 fault_sched period (driven by
+// sim_engine's own tick, SIMFW_PERIOD_SIM_ENGINE_MS), not synchronously in
+// this call's caller's task context. This replaces an earlier version that
+// applied the effect immediately from whatever task calls FAULT_FIRE_NOW/
+// TC_INJECT_FAULT (cmd_task, not sim_engine's own task) -- besides being a
+// cross-task write into sim_engine's override state (the same hazard
+// sim_engine.c's tick-order comment warns against), that path never got its
+// FIRED event into the event ring at all, since sim_engine.c is the ring's
+// sole producer and only ever translates fault_sched_tick()'s own return
+// value into ring pushes. Returns false under the same conditions
 // fault_engine_fire_now() does (slot not ARMED, or out of range).
 bool fault_sched_fire_now(uint16_t slot_id);
 

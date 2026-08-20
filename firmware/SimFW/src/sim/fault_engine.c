@@ -64,14 +64,19 @@ bool fault_engine_cancel(fault_engine_t *eng, uint16_t slot_id)
         return false;
     }
     fault_slot_t *slot = &eng->slots[slot_id];
+    if (slot->state == FAULT_STATE_ACTIVE) {
+        /* Deferred -- see fault_engine.h's doc. The next fault_engine_tick()
+         * call emits CLEARED and finishes the reset to IDLE. */
+        slot->cancel_pending = true;
+        return true;
+    }
     memset(slot, 0, sizeof(*slot));
     slot->slot_id = slot_id;
     slot->state = FAULT_STATE_IDLE;
     return true;
 }
 
-bool fault_engine_fire_now(fault_engine_t *eng, uint16_t slot_id, double sim_time_s,
-                            fault_event_t *out, size_t max_events)
+bool fault_engine_fire_now(fault_engine_t *eng, uint16_t slot_id)
 {
     if (slot_id >= FAULT_ENGINE_MAX_SLOTS) {
         return false;
@@ -80,16 +85,10 @@ bool fault_engine_fire_now(fault_engine_t *eng, uint16_t slot_id, double sim_tim
     if (slot->state != FAULT_STATE_ARMED) {
         return false;
     }
-    slot->state = FAULT_STATE_ACTIVE;
-    slot->active_since_s = sim_time_s;
-    slot->fire_count++;
-    slot->has_scheduled_fire = false;
-    if (out && max_events > 0) {
-        out[0].kind = FAULT_EVENT_FIRED;
-        out[0].slot_id = slot->slot_id;
-        out[0].sim_time_s = sim_time_s;
-        out[0].fire_count = slot->fire_count;
-    }
+    /* Deferred -- see fault_engine.h's doc. The next fault_engine_tick()
+     * call fires the slot through the normal ARMED-slot path and emits
+     * FIRED there. */
+    slot->manual_fire_pending = true;
     return true;
 }
 
@@ -210,6 +209,13 @@ static bool check_duration_expired(fault_engine_t *eng, fault_slot_t *slot, cons
 
 static bool check_fire_condition(fault_engine_t *eng, fault_slot_t *slot, const fault_engine_snapshot_t *snap)
 {
+    /* fault_engine_fire_now() (FAULT_FIRE_NOW / TC_INJECT_FAULT's MANUAL-
+     * trigger path) requested an immediate fire -- take priority over
+     * whatever trigger/repeat timing would otherwise apply, so this tick
+     * fires the slot through the normal path below regardless. */
+    if (slot->manual_fire_pending) {
+        return true;
+    }
     /* After the first firing, EVERY/N_TIMES re-arm on a pure period timer
      * decoupled from the original trigger (PLAN.md 7.2's "EVERY t [jitter
      * j]" reads as a periodic timer, not "re-wait for the same event") --
@@ -264,6 +270,7 @@ size_t fault_engine_tick(fault_engine_t *eng, const fault_engine_snapshot_t *sna
                 slot->active_since_s = snap->sim_time_s;
                 slot->fire_count++;
                 slot->has_scheduled_fire = false;
+                slot->manual_fire_pending = false;
                 if (n < max_events) {
                     out[n].kind = FAULT_EVENT_FIRED;
                     out[n].slot_id = slot->slot_id;
@@ -273,7 +280,23 @@ size_t fault_engine_tick(fault_engine_t *eng, const fault_engine_snapshot_t *sna
                 }
             }
         } else if (slot->state == FAULT_STATE_ACTIVE) {
-            if (check_duration_expired(eng, slot, snap)) {
+            /* An operator-requested cancel (fault_engine_cancel() while
+             * ACTIVE) takes priority over duration/repeat -- it always
+             * clears the slot outright (IDLE), never rearms it, regardless
+             * of what check_duration_expired() would have said this tick. */
+            if (slot->cancel_pending) {
+                if (n < max_events) {
+                    out[n].kind = FAULT_EVENT_CLEARED;
+                    out[n].slot_id = slot->slot_id;
+                    out[n].sim_time_s = snap->sim_time_s;
+                    out[n].fire_count = slot->fire_count;
+                    n++;
+                }
+                uint16_t slot_id = slot->slot_id;
+                memset(slot, 0, sizeof(*slot));
+                slot->slot_id = slot_id;
+                slot->state = FAULT_STATE_IDLE;
+            } else if (check_duration_expired(eng, slot, snap)) {
                 if (n < max_events) {
                     out[n].kind = FAULT_EVENT_CLEARED;
                     out[n].slot_id = slot->slot_id;

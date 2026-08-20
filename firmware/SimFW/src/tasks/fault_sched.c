@@ -521,28 +521,28 @@ uint16_t fault_sched_schedule(uint16_t slot_id,
 
 bool fault_sched_cancel(uint16_t slot_id)
 {
+    // Deferred: fault_engine_cancel() only marks the request (immediately,
+    // for a non-ACTIVE slot; via cancel_pending, for an ACTIVE one). Any
+    // override write and any CLEARED event happen on the next
+    // fault_sched_tick() call, from sim_engine's own task -- see this
+    // file's header doc on fault_sched_cancel().
     engine_lock();
     bool ok = fault_engine_cancel(&s_engine, slot_id);
-    if (ok) {
-        recompute_overrides_locked();
-    }
     engine_unlock();
     return ok;
 }
 
 bool fault_sched_fire_now(uint16_t slot_id)
 {
-    fault_event_t events[2];
-
+    // Deferred: fault_engine_fire_now() only marks manual_fire_pending. The
+    // actual ARMED->ACTIVE transition, its FIRED event, and the resulting
+    // override writes/edge effects all happen on the next fault_sched_tick()
+    // call, from sim_engine's own task -- see this file's header doc on
+    // fault_sched_fire_now().
     engine_lock();
-    size_t n = fault_engine_fire_now(&s_engine, slot_id, s_last_sim_time_s, events, 2);
-    if (n > 0) {
-        apply_edge_effects(events, n);
-        recompute_overrides_locked();
-    }
+    bool ok = fault_engine_fire_now(&s_engine, slot_id);
     engine_unlock();
-
-    return n > 0;
+    return ok;
 }
 
 size_t fault_sched_list(fault_slot_t *out, size_t max_out)

@@ -120,6 +120,20 @@ typedef struct {
     double random_pick_s;
     uint32_t after_fault_last_seen_count; /* AFTER_FAULT: last ref-slot fire_count consumed */
     double repeat_ready_at_s;            /* EVERY/N_TIMES: next scheduled re-fire time */
+    bool manual_fire_pending;            /* MANUAL/FIRE_NOW: fault_engine_fire_now() requested
+                                           * an immediate fire; consumed by the very next
+                                           * fault_engine_tick() call, which fires it through
+                                           * the exact same ARMED->ACTIVE code path (and thus
+                                           * the same FIRED-event emission) as a triggered
+                                           * fire -- see fault_engine_fire_now()'s doc for why
+                                           * this is deferred rather than applied in-place. */
+    bool cancel_pending;                 /* fault_engine_cancel() called while ACTIVE: consumed
+                                           * by the next fault_engine_tick() call, which emits
+                                           * the CLEARED event through the same code path as a
+                                           * natural expiry, then resets to IDLE (not EXPIRED --
+                                           * an operator abort, not exhaustion) instead of
+                                           * evaluating duration/repeat. See
+                                           * fault_engine_cancel()'s doc for why. */
 } fault_slot_t;
 
 /* One tick's inputs -- everything trigger evaluation can see. Only the
@@ -170,20 +184,43 @@ uint16_t fault_engine_schedule(fault_engine_t *eng,
                                 const fault_repeat_t *repeat,
                                 const float params[4]);
 
-/* Returns slot_id to IDLE, discarding any bookkeeping. Does not emit a
- * CLEARED event -- a caller that needs one should read the slot's state
- * (FAULT_STATE_ACTIVE) before cancelling and synthesize it, since "was this
- * a real expiry or an operator abort" is a caller-level distinction this
- * engine does not make. Returns false if slot_id is out of range. */
+/* Cancels slot_id. If the slot is ARMED, IDLE, or EXPIRED, it is reset to
+ * IDLE immediately (discarding any bookkeeping) -- nothing was ever ACTIVE,
+ * so there is nothing to report a CLEARED for. If the slot is ACTIVE, the
+ * reset is deferred: this call only sets cancel_pending, and the very next
+ * fault_engine_tick() call emits the CLEARED event (through the same
+ * ACTIVE-clearing code path a natural expiry uses) before resetting the
+ * slot to IDLE (not EXPIRED -- an operator abort is not exhaustion). This
+ * mirrors fault_engine_fire_now()'s "defer to the next tick so there is one
+ * event-emitting code path, not two" design -- see that function's doc.
+ * Returns false if slot_id is out of range; true otherwise (including for
+ * an ACTIVE slot, where the deferred CLEARED is still pending). */
 bool fault_engine_cancel(fault_engine_t *eng, uint16_t slot_id);
 
-/* Immediately fires slot_id regardless of its trigger (the FAULT_FIRE_NOW /
- * MANUAL-trigger path, PLAN.md section 5/7.2). Valid only from ARMED;
- * returns false otherwise (including an out-of-range slot_id). On success,
- * appends exactly one FIRED event to out (if out != NULL and max_events > 0)
- * and returns true. */
-bool fault_engine_fire_now(fault_engine_t *eng, uint16_t slot_id, double sim_time_s,
-                            fault_event_t *out, size_t max_events);
+/* Requests an immediate fire of slot_id regardless of its trigger (the
+ * FAULT_FIRE_NOW / MANUAL-trigger path, PLAN.md section 5/7.2). Valid only
+ * from ARMED; returns false otherwise (including an out-of-range slot_id).
+ * On success, marks the slot's manual_fire_pending flag and returns true --
+ * it does NOT transition the slot to ACTIVE or emit a FIRED event itself.
+ * The very next fault_engine_tick() call fires the slot through its normal
+ * ARMED-slot evaluation (manual_fire_pending short-circuits trigger
+ * evaluation to "fire now"), which is the same code path -- and therefore
+ * the same FIRED-event emission -- every triggered fire already goes
+ * through. This is deliberate: an earlier version of this function fired
+ * the slot in place and handed the caller a FIRED event directly, but
+ * fault_engine_tick() is the only call that runs in sim_engine's own tick
+ * (sim_snapshot.h's single-ring-producer contract requires all FIRED/
+ * CLEARED events to flow from there) -- an out-of-band caller (e.g.
+ * cmd_task.c handling FAULT_FIRE_NOW/TC_INJECT_FAULT on its own task) had
+ * no way to get that directly-returned event into the ring without either a
+ * second producer or a cross-task write into sim_engine's state, both of
+ * which sim_engine.c's tick-order comment rules out. Deferring the actual
+ * state transition to the next tick, and having that tick's ordinary
+ * ARMED-slot handling notice the pending request, means fire-now events
+ * reach the ring exactly the way triggered ones do -- one path, not two --
+ * at the small cost of the fire landing on the next tick boundary (<=1
+ * fault_sched period) rather than mid-tick. */
+bool fault_engine_fire_now(fault_engine_t *eng, uint16_t slot_id);
 
 /* Evaluates every ARMED/ACTIVE slot in slot-index order (0..31,
  * deterministic per PLAN.md 7.3), firing/expiring slots and writing
