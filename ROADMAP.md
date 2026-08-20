@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-08-19
+> **Status:** planning · **Last reviewed:** 2026-08-20
 > **Keep this file current.** This is the top-level dispatch board: the place to
 > start a task from when you do not already know which plan owns it. It holds
 > *ordering and cross-processor dependencies only* — the detail lives in the
@@ -39,7 +39,7 @@ project rather than two.
 | [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
 | [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md) | Field updates for both processors: interlocks, one-password auth, ESP OTA partitioning |
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
-| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (second Pico): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI; also owns the `UnitTestFw` decommission (protocol lifted to `CommonFW`, then `firmware/UnitTestFw` + `hardware/UnitTestFixture` deleted — its §12) — planning only, nothing implemented |
+| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission (protocol lifted to `CommonFW`, then `firmware/UnitTestFw` + `hardware/UnitTestFixture` deleted — its §12) — **software complete (every task, every scenario), hardware-gated**: no fixture has ever been built or connected, so nothing below M-A's SPI timing proof is hardware-verified |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
@@ -1117,6 +1117,107 @@ path. Two facts set the shape of this milestone:
       and full KilnFW builds all clean. Not hardware-verified — no board
       attached to confirm a real reboot actually stops nuisance-tripping
       S6b.
+
+## M9 — SimFW: the bench fixture that finally unblocks hardware verification
+
+Owned by [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md). Not on the
+`KilnFW`↔`SaftyFW` dependency spine above — `SimFW` is a *third* firmware, a
+second Raspberry Pi Pico that lives on the bench and plugs into the main
+board's connectors in place of the real thermocouple daughterboard and the
+rest of the kiln, so that guards, faults, and control loops in both other
+firmwares can be exercised repeatably from a PC script instead of a real
+kiln. It is listed last because nothing about it gates M0–M8's own
+dependency spine — but it directly gates a specific, long-blocked set of
+work inside `SaftyFW`'s own test plan (see below), which is why it earns a
+milestone here rather than staying a footnote.
+
+- [x] **Software: every task, every `src/sim/` module, every driver
+      implemented — no stubs remain.** Landed 2026-08-20 in a single commit
+      (`c891b72`): the FreeRTOS task skeleton (PIO MAX31856 SPI slave
+      emulation on both buses, CT waveform synthesis via PWM, I2C/expander/
+      relay/E-stop/DUT-power drivers, `sim_engine`/`fault_sched`
+      orchestration), the pure host-tested `src/sim/` modules (thermal
+      model, MAX31856 register machine, sine synth, fault engine, TC fault
+      state), and the 17-scenario standard test library (`scenarios/*.yaml`)
+      all exist and build clean under arm-none-eabi-gcc/pico-sdk/FreeRTOS-SMP,
+      `-Wall -Wextra -Werror`. Same commit extracted `UnitTestFw`'s UART
+      protocol prototype into `firmware/CommonFW` as `benchproto` — a
+      hardened, addressed request/reply protocol (framing, CRC-16, retry/
+      dedup, task registration), separate from `kilnlink` — and built
+      `kilnsim`, a fresh PC toolset (CLI/GUI/MCP server) in
+      `tools/PcTools/src/kilnsim/` against it, plus a YAML scenario loader
+      cross-checked against all 17 scenario files. Verification at that
+      commit: `SimFW.elf` builds clean; `CommonFW` host tests 18/18
+      (`kilnlink` + `benchproto`); `SimFW`'s `src/sim/` host tests 4873/4873
+      checks; `kilnsim`'s pytest suite 59 passed + 17 subtests; the
+      pre-existing `kilnctrl` suite 104 passed, confirmed untouched; all 17
+      scenario YAML files load cleanly through `kilnsim`'s loader.
+- [x] **A real SPI-mode bug found and fixed.** The PIO slave engine's RX/TX
+      programs originally sampled/shifted on the wrong clock edges — textbook
+      SPI mode 0 behavior despite being labeled mode 1. Corrected to sample
+      MOSI on SCLK's falling edge and shift MISO on the rising edge, matching
+      the MAX31856 datasheet's own Table 5 (CPOL=0 row) and both real
+      masters' actual configuration (`KilnFW`'s `MAX31856_SPI_MODE 1`,
+      `SaftyFW`'s explicit `SPI_CPOL_0, SPI_CPHA_1`). See
+      `firmware/SimFW/src/drivers/max31856_spi_slave.pio`'s header comment
+      and `docs/PLAN.md` §3.2.1.
+- [x] **`docs/HARDWARE.md` written: the fixture's own pin map, reconciled
+      across four independently-written driver files, with zero GPIO
+      collisions found** (`i2c_owner.c`, `spi_emu_a/b.c`, `ct_wave_pwm.c` —
+      15 pins claimed, no overlap; 10 more newly assigned in that document
+      for lines no driver had claimed yet). Two real, previously-undocumented
+      problems surfaced while writing it, both now tracked in
+      `docs/PLAN.md` §11 as open questions: **(a)** `firmware/KilnFW/docs/
+      HARDWARE.md` says J7 pin 1 is "no connect" while `firmware/SaftyFW/
+      docs/HARDWARE.md` §8 says the same physical pin is `3.3v_Safty` (via
+      R51) — a real contradiction between two other firmwares' own docs,
+      needing a continuity check before the fixture's isolated-side power
+      feed is wired; **(b)** the DUT-power relay design (a single MCP23017
+      output bit) can only brown out one of the main board's *two*
+      independent 12 V inputs (J18 main-domain, J19 safety-domain) unless
+      the bench operator deliberately wires both from a common point
+      downstream of that one relay — nothing in the code or `PLAN.md` says
+      this explicitly today.
+- [ ] **Hardware-gated, nothing below has ever touched real silicon**: no
+      fixture hardware — breadboard or PCB — has ever been built or
+      connected to a bench ESP32/Pico. In particular:
+      - M-A's exit criterion (a Saleae capture proving 5 MHz mode-1 SPI
+        slave timing over ≥10k transactions with zero underruns) is **not
+        met** and is the single biggest unproven risk in the plan.
+        `firmware/SimFW/tools/spi_test_master/` (a standalone SPI
+        reference-master bench firmware plus a host soak-test runner) was
+        built specifically to make this milestone achievable without
+        needing the real ESP32/`KilnFW` driver as the very first thing ever
+        thrown at the emulator — it has not yet been run against real SimFW
+        hardware either, because none exists.
+      - CT amplitude calibration (`wave_owner.c`) is an explicit `TODO(M-D
+        calibration)` identity placeholder, not the real sweep-fit-store
+        procedure `docs/PLAN.md` §3.3/M-D describes.
+      - The `UnitTestFw` decommission (`docs/PLAN.md` §12) is only half
+        done: the protocol extraction (step 1, `benchproto`) is complete,
+        but step 2 ("prove the replacement" against real hardware) has not
+        happened, so `firmware/UnitTestFw/` and `hardware/UnitTestFixture/`
+        are both still in the tree, untouched.
+      - None of the 17 scenarios has ever run against a real
+        `KilnFW`+`SaftyFW` pair; see `docs/PLAN.md` section 10's milestone
+        table for the honest state of every milestone M-A through M-H.
+- [ ] **Dependency this milestone exists to unblock:**
+      [`GUARD_TEST_MATRIX.md`](firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md)
+      §3's hardware-trip rows (safe-state power-on, sensor open-circuit,
+      current-mapping commissioning, every enabled guard's real trip) have
+      been blocked for the whole of `SaftyFW`'s test plan on "no bench
+      hardware" — there has never been a safe, repeatable way to provoke a
+      welded contactor, an open thermocouple, or a stuck relay without
+      either a real kiln or invented test code paths. `SimFW` is the thing
+      that finally makes those rows runnable without a kiln: each of its 17
+      scenarios declares which guard(s) it exercises, and
+      `GUARD_TEST_MATRIX.md` now carries a cross-reference section (added in
+      this pass) mapping guards to the scenario that provokes them. **This
+      does not retire §3's rows** — a scenario existing, or even running
+      cleanly against `kilnsim`'s own loader, is not the same as it having
+      been run against real hardware, and none have been. It only means the
+      moment fixture hardware exists, §3's rows have a concrete, repeatable
+      script to run instead of nothing.
 
 ---
 

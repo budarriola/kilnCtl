@@ -1,6 +1,6 @@
 # Guard Test Matrix
 
-> **Status:** planning · **Last reviewed:** 2026-08-19
+> **Status:** planning · **Last reviewed:** 2026-08-20
 > **Keep this file current.** Add a row whenever a guard is added or a threshold
 > moves, and record results as they are obtained — this file is the evidence
 > that the safety case is real. Checklist at the bottom.
@@ -262,3 +262,68 @@ should say so rather than being listed as coverage.
 **Records**
 - [ ] Date, commit, config CRC and outcome recorded per guard
 - [ ] `SAFETY_MODEL.md`'s summary table updated with per-row verification state
+
+---
+
+## 5. SimFW scenario cross-reference (added 2026-08-20)
+
+`firmware/SimFW` is a bench-fixture firmware — a second Raspberry Pi Pico
+that plugs into the main board in place of the real thermocouple
+daughterboard and the rest of the kiln, driven from a PC by `kilnsim`
+(`tools/PcTools/src/kilnsim/`). Its owning plan is
+`firmware/SimFW/docs/PLAN.md`; section 8 there defines a 17-scenario
+standard test library (`firmware/SimFW/scenarios/*.yaml`), and each scenario
+file declares an `exercises:` list of the guard IDs it is meant to provoke.
+This section is that cross-reference in the other direction — guard → the
+scenario(s) that exercise it — so anyone working this matrix's §3 rows can
+find the automated test that corresponds to a given guard.
+
+**Read this table's claim carefully: it says a scenario file exists that
+targets this guard, nothing more.** `SimFW`'s software is complete and
+host-tested (`firmware/SimFW/docs/PLAN.md` section 10), but **no fixture
+hardware has ever been built**, so **none of these scenarios has ever run
+against a real `SaftyFW` board** — a scenario existing, or even loading
+cleanly through `kilnsim`'s scenario loader (which all 17 do, pytest-
+verified), is not the same as it having been run, and it is absolutely not
+the same as passing on hardware. Every §3 row above stays exactly as
+unverified as its own checkbox says until a real run happens and gets
+recorded per section 4's convention.
+
+| Guard | Scenario(s) that declare `exercises: [<guard>]` |
+|---|---|
+| S1 | `main_safety_skew`, `tc_noise_storm` |
+| S2 | `tc_noise_storm` |
+| S3 | `runaway_zone`, `welded_contactor_s9`, `welded_ssr_midfire` |
+| S4 | `broken_element`, `welded_ssr_midfire` |
+| S5 | `cj_fault`, `spi_flaky_tc_ic`, `tc_disconnect_ramp`, `tc_disconnect_soak`, `tc_flaky` |
+| S6a / S6b | `power_blip` (scenario declares generic `S6`, not split a/b — see note below) |
+| S7 | `estop_at_boot`, `estop_midfire` |
+| S8 | `runaway_zone` (S8 itself ships disabled per `SAFETY_MODEL.md`; this scenario documents expected *current* behavior, ready for when S8 gets a measured threshold — `PLAN.md` section 8 item 12) |
+| S9 | `welded_contactor_s9` |
+| S10 | `main_safety_skew`, `tc_noise_storm` |
+| S11 | **none** — no scenario file declares S11 today |
+| S12 | `cj_fault` |
+| S13 | `tc_stuck` |
+
+Two scenarios (`baseline_firing`, `partial_element`) declare an empty
+`exercises: []` — they are regression/behavior baselines (no-fault firing,
+partial-power ramp handling), not guard-provocation tests, and are listed
+here for completeness rather than omitted silently.
+
+**Notes and gaps found while building this table:**
+- `power_blip.yaml` declares `exercises: [S6]`, not `[S6a]`/`[S6b]`
+  separately, even though this matrix and `safety_guards.c` treat S6a
+  (`mainFault`) and S6b (link-silence backstop) as distinct guards with
+  distinct provocation rows above. Recorded as-is rather than silently
+  reinterpreted — resolve which sub-guard (or both) `power_blip` actually
+  targets before treating it as S6a or S6b coverage specifically.
+- **S11 has no corresponding scenario.** Every other guard in
+  `SAFETY_MODEL.md` section 4 has at least one scenario file; S11 (frozen
+  reading, six-hour cold-idle nuisance case per section 1's table above) does
+  not. Not something this pass can fix (scenario files are outside this
+  document's ownership), but worth flagging so it does not go unnoticed the
+  next time the SimFW scenario library is extended.
+- This table was built by reading each scenario file's `exercises:` line
+  directly (`firmware/SimFW/scenarios/*.yaml`, 17 files) — not by asking
+  `SimFW`'s own plan to summarize itself — so it reflects the scenarios as
+  written on 2026-08-20, not an aspirational mapping.
