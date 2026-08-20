@@ -28,12 +28,19 @@ expect:
     event: { type: fault_fired, slot: cj }
     then:
       event: { type: guard_warn, guard: S12 }
-      within_s: 3        # TODO: no explicit detection-latency deadline is
-                         # stated beyond "already read on every conversion"
-                         # (SAFETY_MODEL.md §4 S12) — placeholder using the
-                         # MAX31856's ~100ms nominal conversion cadence
-                         # (PLAN.md §3.2) with generous margin; confirm
-                         # against bench behavior
+      within_s: 1        # Resolved (not a placeholder): safety_guards.c's S12
+                         # block (lines 337-359) shows cj_warn_c is "a plain
+                         # level crossing (WARN only, no timer -- it is
+                         # reported every tick it is exceeded, not latched)" --
+                         # there is no accumulator/streak to wait out, unlike
+                         # S5. Worst-case detection latency is therefore one
+                         # MAX31856 conversion (~100-151ms, max31856.c's
+                         # MAX31856_CONV_MS_AUTO_60HZ_4AVG) plus at most one
+                         # safety_core tick (100ms, SAFTYFW_PRIO_SAFETY_CORE
+                         # comment "// 100 ms", task_priorities.h) before the
+                         # new cj_c value is read and evaluated -- roughly
+                         # 0.2-0.3s worst case. within_s: 1 keeps ~4x margin
+                         # over that instead of the earlier 3s guess.
   - name: s12_trips_at_85c_sustained
     event: { type: fault_fired, slot: cj }
     then:

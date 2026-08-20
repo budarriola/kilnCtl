@@ -40,13 +40,32 @@ expect:
     event: { type: fault_fired, slot: skew }
     then:
       event: { type: guard_trip, guard: S1 }
-      within_s: 120     # TODO: no fixed deadline is derivable without the
-                        # commissioned abs_max_temp_c/firing_max_c and the
-                        # small_kiln preset's actual ramp rate; placeholder
-                        # generous enough to cover a full ramp-to-ceiling
-                        # under small_kiln at 20x timescale — confirm against
-                        # bench data once abs_max_temp_c is commissioned
-                        # (SAFETY_MODEL.md §4 S1)
+      within_s: 120     # TODO: still genuinely unresolvable, confirmed by
+                        # reading safety_guards.c for this pass (lines
+                        # 267-293): `abs_max_temp_c == 0` is treated as
+                        # "not commissioned -- never trip" (the guard's own
+                        # comment says so verbatim), and the field has no
+                        # compiled-in default anywhere in safety_guards.c
+                        # (contrast BAD_READ_COUNT_DEFAULT/CJ_MAX_C_DEFAULT/
+                        # etc, which all exist for other guards) -- it is a
+                        # per-kiln commissioning value by design
+                        # (SAFETY_MODEL.md §1: "abs_max_temp_c has no
+                        # default and must be commissioned"). Without it,
+                        # this scenario cannot know how close small_kiln's
+                        # eventual real ceiling sits to T0, so no sim-time
+                        # deadline can be derived, only guessed. Note this
+                        # placeholder is not obviously even generous: at 20x
+                        # timescale, 120 wall-s = 2400 sim-s, which is only
+                        # ~9% of small_kiln's own thermal time constant (tau
+                        # = C/k_loss = 400000/15 ≈ 26667 sim-s,
+                        # thermal_model.c lines 45-46) -- so unless the
+                        # eventual commissioned ceiling sits close to T0
+                        # (unlikely for a real kiln), 120s may well be too
+                        # SHORT rather than too generous. Left unchanged
+                        # rather than "fixed" with another guess; must be
+                        # replaced with a bench-measured deadline once
+                        # abs_max_temp_c is actually commissioned for a real
+                        # kiln (SAFETY_MODEL.md §4 S1).
   - name: s10_stays_quiet
     forbid: { event: { type: guard_warn, guard: S10 }, before: { sim_end: true } }
     # 80°C < tc_disagreement_c = 200°C (SAFETY_MODEL.md §4 S10) — must never fire

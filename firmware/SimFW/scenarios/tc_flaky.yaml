@@ -14,26 +14,54 @@ dut:
 faults:
   - id: flaky
     # PLAN.md §7.1: "Broken (intermittent) TC | Alternates connected/OC on a
-    # configurable duty/period". The ~0.5 Hz-class alternation is this fault
-    # type's own internal duty-cycle behavior (not a scheduler `repeat` —
-    # PLAN.md §8.1's scenario schema has no `repeat`/`params` fields yet;
-    # those are frozen in PROTOCOL.md at M-B/M-G).
-    type: broken_intermittent_tc
+    # configurable duty/period". fault_sched.c's own header comment (2026-08-20
+    # gap-closure pass) is explicit that this fault has no separate
+    # FAULT_SCHED_TYPE_* of its own -- "'Broken (intermittent) TC' still needs
+    # no separate fault type -- it is TC_DISCONNECTED scheduled with an
+    # EVERY/FOR repeat+duration spec, which fault_engine.h already expresses."
+    # `broken_intermittent_tc` is not a real fault type (not in
+    # fault_sched.h's fault_sched_fault_type_t enum) and would fail to
+    # schedule; corrected to `disconnected_tc` (== FAULT_SCHED_TYPE_TC_
+    # DISCONNECTED, the same type tc_disconnect_ramp.yaml/tc_disconnect_
+    # soak.yaml use) with an explicit repeat/duration pair, which
+    # tools/PcTools/src/kilnsim/scenario.py's loader also already parses
+    # (`duration: {for_s: N}`, `repeat: {every: {period: N}}` --
+    # confirmed by reading `_parse_duration`/`_parse_repeat` there), so the
+    # "schema has no repeat/params fields yet" claim in the prior version of
+    # this comment was wrong on the PC-tooling side even though PLAN.md §8.1's
+    # own frozen-schema note is about the firmware wire format, not the YAML.
+    #
+    # Duty/period resolved (not a placeholder): safety_guards.c's S5
+    # constants are BAD_READ_COUNT_DEFAULT = 10u and BAD_READ_TIME_S_DEFAULT
+    # = 5.0f (safety_guards.c lines 13-14), and the MAX31856's nominal
+    # auto-convert cadence is ~100 ms (PLAN.md §3.2). A ~0.5 Hz (≈1s bad /
+    # ≈1s good) alternation, as originally suggested by PLAN.md §8 item 5's
+    # own wording, gives a bad-phase run of ~10 conversions -- exactly AT the
+    # count bar, not reliably under it. Using a 900 ms bad-phase / 900 ms
+    # good-phase split instead gives ~9 consecutive bad reads per run
+    # (900ms / 100ms), one full conversion short of both the 10-read AND the
+    # 5s bar, so the streak resets (safety_guards.c:262, `state->s5_bad_streak
+    # = 0`) before either bar is ever reached -- solidly inside the nuisance
+    # region rather than skimming its edge -- while the resulting 1.8s
+    # bad+good cycle (~0.56 Hz) still matches the "~0.5 Hz-class" figure
+    # PLAN.md §8 item 5 names. `repeat: every.period` is measured from the
+    # fault's CLEAR time to its next fire (fault_engine.c's
+    # rearm_for_repeat(): `repeat_ready_at_s = clear_time_s + period_s`), so
+    # it IS the 900ms good-phase length directly, not the full cycle --
+    # confirmed by reading that function this pass rather than guessed.
+    type: disconnected_tc
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
-    duration: permanent
+    duration: { for_s: 0.9 }
+    repeat: { every: { period: 0.9 } }
 expect:
   - name: no_trip_from_flapping
     forbid: { dut: K4_open, before: { sim_end: true } }
   - name: no_warn_storm
     forbid: { event: { type: guard_warn, guard: S5 }, before: { sim_end: true } }
-    # TODO: confirm the flaky fault's exact duty/period against the
-    # MAX31856's real ~100ms nominal conversion cadence (PLAN.md §3.2) so
-    # bad-read runs reliably stay under S5's "≥10 consecutive AND ≥5s" WARN
-    # trigger (SAFETY_MODEL.md §4 S5). A ~0.5 Hz (≈1s bad / ≈1s good)
-    # alternation sits close to that 10-sample/5s boundary and needs bench
-    # tuning, not just a plausible-looking number, to land clearly in the
-    # no-WARN nuisance region this assertion claims.
+    # Resolved: see the `flaky` fault's own comment above for the derivation
+    # of the 900ms/900ms duty split that keeps every bad-read run one
+    # conversion short of S5's 10-read AND 5s bars (SAFETY_MODEL.md §4 S5).
 manual_checks:
   - "Confirm LCD/web UI show no fault banner despite the intermittent flips, per the anti-nuisance doctrine (SAFETY_MODEL.md §2)"
 report_keep: [telemetry, events]

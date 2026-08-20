@@ -15,7 +15,21 @@ faults:
     # also assert the trip does NOT auto-clear when the contact re-closes.
     type: estop_trip
     target: io:estop
-    trigger: { at_zone_temp: { zone: 0, temp_c: 500, edge: rising } }
+    # Trigger temp checked this pass against fast_test's actual physics
+    # (thermal_model.c THERMAL_PRESET_FAST_TEST, zone 0 default/unmodified:
+    # C=2000 J/degC, k_loss=8 W/degC, R_element=15ohm, V_mains=240V):
+    # P_max = V^2/R = 3840W, steady-state DeltaT = P_max/k_loss = 480degC,
+    # so the zone's own asymptote is T_ss = T_ambient + 480 = 505degC. The
+    # original trigger (500degC) sat only 1% below that asymptote, so
+    # reaching it needed ~4.6 time constants (tau =
+    # C/k_loss = 250 sim-s) = ~1150 sim-s = ~115s wall at this file's 10x
+    # timescale -- nearly the whole ~2min wall-time fast_test is designed
+    # for (PLAN.md §4.3), just to reach the trigger, leaving almost no
+    # margin for this scenario's own post-trigger deadlines. Lowered to
+    # 400degC (reached in ~1.5 tau =~380 sim-s =~38s wall), matching the
+    # trigger already used by welded_ssr_midfire.yaml/welded_contactor_s9.yaml
+    # for the same "mid-fire" intent and leaving comfortable headroom.
+    trigger: { at_zone_temp: { zone: 0, temp_c: 400, edge: rising } }
     duration: { for_s: 5 }
 expect:
   - name: fast_trip

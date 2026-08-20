@@ -21,7 +21,19 @@ faults:
   - id: blip
     type: dut_power_cut
     target: io:dut_power
-    trigger: { at_zone_temp: { zone: 0, temp_c: 500, edge: rising } }
+    # Trigger lowered from 500degC to 400degC this pass -- fast_test's zone 0
+    # (unmodified defaults, thermal_model.c THERMAL_PRESET_FAST_TEST) has a
+    # physics asymptote of only ~505degC (V_mains^2/R_element/k_loss +
+    # T_ambient = 240^2/15/8 + 25 = 505degC), so a 500degC trigger sat 1%
+    # below the ceiling and needed ~115s wall time at 10x timescale to reach
+    # (~4.6 thermal time constants) -- consuming nearly all of fast_test's
+    # ~2min wall-time budget just to arrive, before this scenario's own
+    # post-trigger deadlines (safe_resume within_s: 30, etc.) even start.
+    # 400degC reaches in ~38s wall (~1.5 time constants), matching the
+    # trigger already used for the same "mid-fire" intent in
+    # welded_ssr_midfire.yaml/welded_contactor_s9.yaml. See
+    # estop_midfire.yaml's identical fix for the full derivation.
+    trigger: { at_zone_temp: { zone: 0, temp_c: 400, edge: rising } }
     # 200ms off-time, matching PLAN.md §6.2's own CLI example
     # (`kilnsim power cycle --off-ms 200`) rather than a guessed duration.
     duration: { for_s: 0.2 }
@@ -48,14 +60,27 @@ expect:
     then:
       event: { type: link_up }
       within_s: 30
-    # TODO: no precise ESP32-S3 boot-to-first-PUSH_CONTEXT deadline is
-    # stated for an unannounced power-cut reboot. SAFETY_MODEL.md §4 S6
-    # only gives REBOOT_GRACE_WINDOW_MS = 20000 (20s) for the
-    # SAFETY_CMD_ANNOUNCE_REBOOT path, which is specific to a *routine,
-    # announced* OTA self-restart and explicitly does not apply here (the
-    # ESP has no chance to send ANNOUNCE_REBOOT before an external power
-    # cut). 30s is a placeholder order-of-magnitude margin over that number
-    # for boot + Wi-Fi init + first poll; confirm against bench measurement.
+    # TODO: still genuinely unresolvable from docs/code alone -- confirmed
+    # for this pass by re-reading SAFETY_MODEL.md §4 S6's own text: "The
+    # window is 20s (REBOOT_GRACE_WINDOW_MS, safety_core.c) ... a software
+    # timeout with generous margin over a plausible ESP32-S3 boot-to-first-
+    # PUSH_CONTEXT time" -- but that number covers an *announced* OTA
+    # restart specifically (in->reboot_grace_active gates only the S6b
+    # trip() calls for that narrow case, safety_guards.c's S6 block) and the
+    # doc is explicit the mechanism "does not apply" to an unannounced power
+    # cut, where the ESP gets no chance to send ANNOUNCE_REBOOT before power
+    # actually disappears. No other boot-to-first-context timing figure
+    # exists anywhere in SAFETY_MODEL.md or the safety-side code (which
+    # cannot see the ESP's boot process at all -- it only sees the link go
+    # quiet and come back). The only other numeric anchor is
+    # link_dead_hard_s's 120s unconditional backstop (SAFETY_MODEL.md §4
+    # S6b) -- an upper bound on how long S6b tolerates silence before
+    # tripping regardless of current, not a statement about how fast a cold
+    # boot actually completes. 30s remains a placeholder order-of-magnitude
+    # margin (comfortably under the 120s hard backstop so this scenario's
+    # "safe resume" case and S6b's "conditionally trips" case stay clearly
+    # distinguishable) pending an actual bench measurement of ESP32-S3
+    # cold-boot-to-first-PUSH_CONTEXT time.
 manual_checks:
   - "Confirm KilnFW resumes the firing (or safely aborts/pauses per its own policy) rather than silently continuing as if nothing happened — LCD/web UI behavior not observable by the fixture"
 report_keep: [telemetry, events]

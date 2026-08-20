@@ -20,12 +20,29 @@ faults:
   - id: flaky_spi
     # PLAN.md §7.1: "TC IC flaky SPI | Bit errors on MISO at configurable
     # rate".
-    # TODO: no bit-error-rate number is stated anywhere in PLAN.md/
-    # SAFETY_MODEL.md; use a rate high enough to fail the driver's
-    # checksum/sanity check on most transfers without disabling the
-    # channel entirely (i.e. distinct from "TC IC dead") — needs bench
-    # tuning against the real driver's rejection behavior, not a guessed
-    # precise percentage.
+    # TODO: still genuinely unresolved -- no bit-error-rate number is stated
+    # anywhere in PLAN.md/SAFETY_MODEL.md, and it cannot be derived from the
+    # real driver either. Read firmware/SaftyFW/src/max31856.c in full for
+    # this pass: it has NO checksum/CRC/data-content sanity check at all --
+    # `spi_failed` (the field S5 keys on, safety_guards.c line 227) is set
+    # only from the SPI HAL transfer's own return code (transport-level
+    # failure: clock stall, framing, timeout), never from inspecting the
+    # bytes it got back. So the prior version of this comment's "fail the
+    # driver's checksum/sanity check" framing was inaccurate -- there is no
+    # such check to fail. A bit-flip on MISO that doesn't happen to trip the
+    # HAL-level transfer-failure path, and doesn't happen to land in a bit
+    # that flips an SR fault flag or produces a CJHF/LTHFTH-style threshold
+    # crossing, is simply accepted as a garbled-but-plausible temperature --
+    # there is nothing in the driver to catch it. That is a real, load-
+    # bearing fact about current firmware behavior (worth flagging upstream:
+    # PLAN.md §8 item 14's "no garbage temps accepted" expectation currently
+    # has no mechanism to make it true for a corrupted-but-structurally-valid
+    # transfer), not something this scenario file can paper over with a
+    # number. Schema note: tools/PcTools/src/kilnsim/scenario.py's loader
+    # already supports a `params:` list on a fault entry (passed through
+    # verbatim, see `_parse_fault`'s `extra`/`params` handling) -- so a rate
+    # CAN be wired in once one is bench-derived; it is the magnitude, not the
+    # schema, that is missing.
     type: flaky_spi_tc_ic
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
