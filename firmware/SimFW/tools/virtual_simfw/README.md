@@ -138,31 +138,34 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   other, so the virtual harness stayed green throughout, but both disagreed
   with real hardware. Fixed on both sides in the same pass; a request now
   reads correctly against either device.
-* **`FAULT_FIRE_NOW`/`TC_INJECT_FAULT` now push a `FAULT_FIRED` ring event,
-  a deliberate divergence from real firmware's current behavior, not a
-  parity bug.** `fault_engine_fire_now()` (used by both commands) sets a
-  slot straight to `FAULT_STATE_ACTIVE`, bypassing the ARMED->ACTIVE
-  transition that `fault_engine_tick()` itself watches for to emit a FIRED
-  event (`src/sim/fault_engine.c`). Neither real firmware's
-  `fault_sched_fire_now()`/`cmd_task.c` nor (until this pass) this harness
-  ever pushed a ring event for that case -- verified by reading both: real
-  firmware's `sim_engine.c` is the sim-event ring's sole producer, and it
-  only ever ring-pushes the events `fault_sched_tick()` (the regular,
-  tick-driven path) returns, never anything from an out-of-band
-  `fault_sched_fire_now()` call. So a `FAULT_FIRE_NOW`- or
-  `TC_INJECT_FAULT`-triggered fault is, as far as could be determined from
-  the source, **invisible to the event ring on real hardware today** --
-  `report.py`/scenario expectations that key off a `FAULT_FIRED` event for
-  an immediately-fired fault would silently never see it there either. This
-  harness now pushes that event anyway (`push_fault_events_to_ring()`,
-  reusing `device_tick()`'s own FIRED/CLEARED translation) because
-  `kilnsim`'s scenario suite needs it to validate immediate-fire fault
-  injection at all -- a deliberate, documented choice to make the virtual
-  device more observable than real firmware currently is, not a claim that
-  real firmware behaves this way. The underlying gap is real firmware's to
-  fix (`fault_sched.c`/`sim_engine.c`, both out of scope here); this bullet
-  exists so nobody mistakes this harness's ring event for confirmation that
-  real hardware would also report one.
+* **`FAULT_FIRE_NOW`/`TC_INJECT_FAULT` now emit a `FAULT_FIRED` ring event on
+  both real firmware and this harness -- the gap below is closed, not a
+  live divergence.** This section previously documented a real gap: real
+  firmware's `fault_sched_fire_now()`/`cmd_task.c` never pushed a ring event
+  for an immediately-fired fault, because `fault_engine_fire_now()` used to
+  transition a slot straight to `FAULT_STATE_ACTIVE`, bypassing the
+  ARMED->ACTIVE transition `fault_engine_tick()` watches for to emit a FIRED
+  event -- so this harness had grown its own `push_fault_events_to_ring()`
+  workaround to stay observable for `kilnsim`'s scenario suite, a deliberate
+  divergence from real firmware's (buggy) behavior at the time. A separate
+  pass fixed the underlying gap in `firmware/SimFW/src/sim/fault_engine.c`
+  itself: `fault_engine_fire_now()` now only sets `manual_fire_pending`
+  (see that function's doc comment), and the very next tick's ordinary
+  ARMED-slot handling in `fault_engine_tick()` fires the slot through the
+  exact same code path -- and therefore the same FIRED-event emission -- any
+  triggered fire already goes through. Real firmware's `cmd_task.c` handlers
+  were updated to match (`handle_fault_fire_now()`/`handle_tc_inject_fault()`
+  now just call `fault_sched_fire_now()`/schedule, no local event handling).
+  This harness's `SIMFW_CMD_FAULT_FIRE_NOW`/`SIMFW_CMD_TC_INJECT_FAULT`
+  handlers were updated in the same pass to match: they now call the new
+  2-argument `fault_engine_fire_now(eng, slot_id)` and let `device_tick()`'s
+  regular `fault_engine_tick()` call pick up the pending fire on the next
+  tick, same as real firmware -- `push_fault_events_to_ring()` is gone,
+  no longer needed. The one remaining, harmless difference: this harness's
+  "next tick" can be reached one poll-interval sooner than real firmware's
+  since ticks aren't gated behind a FreeRTOS queue here (see "Commands apply
+  synchronously on arrival" above) -- not a parity bug, the same known
+  timing-only wrinkle that bullet already documents elsewhere.
 
 ## Known, virtual-only extensions
 

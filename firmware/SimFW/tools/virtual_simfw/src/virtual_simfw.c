@@ -255,26 +255,6 @@ static void edge_push(device_t *d, uint8_t signal, bool level)
     slot->time_us = d->sim_time_us;
 }
 
-// Pushes fault_engine_t FIRED/CLEARED events into the sim_event ring, same
-// translation device_tick()'s own regular-tick loop does for the events
-// fault_engine_tick() returns (SIM_EVENT_FAULT_FIRED/CLEARED, a=slot_id).
-// Needed here too because fault_engine_fire_now() (SIMFW_CMD_FAULT_FIRE_NOW,
-// and SIMFW_CMD_TC_INJECT_FAULT which routes through the same call)
-// transitions a slot straight to FAULT_STATE_ACTIVE outside the regular
-// tick's ARMED->ACTIVE check -- fault_engine_tick()'s own event-emitting
-// branch (fault_engine.c) only fires for a slot it *itself* observes
-// transition from ARMED, so a slot that was already forced ACTIVE by
-// fire_now() is invisible to it and the FIRED event would otherwise never
-// reach the ring. `report.py`/scenario expectations key off ring events, so
-// a fire_now()-triggered fault needs its own explicit push here.
-static void push_fault_events_to_ring(device_t *d, const fault_event_t *events, size_t count)
-{
-    for (size_t i = 0; i < count; i++) {
-        sim_event_type_t type = (events[i].kind == FAULT_EVENT_FIRED) ? SIM_EVENT_FAULT_FIRED : SIM_EVENT_FAULT_CLEARED;
-        ring_push(d, type, (uint8_t)events[i].slot_id, 0u, 0.0f);
-    }
-}
-
 // --- fault_sched.c's target_kind_of(), ported verbatim (see that file) -----
 typedef enum { TK_TC, TK_ZONE, TK_CT, TK_SYSTEM, TK_INVALID } target_kind_t;
 
@@ -537,6 +517,23 @@ static void device_tick(device_t *d)
     }
     for (uint8_t z = 0; z < d->params.zone_count; z++) {
         if (d->zone_duty_override_active[z]) duty[z] = d->zone_duty_override_value[z];
+    }
+
+    // K4 is the mechanical safety pilot relay: it gates every zone's duty
+    // *after* both the relay-derived base and any fault_sched duty override
+    // (sim_engine.c's sim_engine_tick(), ported verbatim -- see that
+    // function's own comment for the full PLAN.md/docs/HARDWARE.md
+    // rationale). FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST
+    // (FT_WELDED_K4_CURRENT_PERSIST here) is unaffected: recompute_overrides()
+    // routes it straight onto the CT channel's MANUAL mode (ct[c].mode = 1,
+    // forced amps), entirely bypassing this duty[]/current_a[] path -- see
+    // device_tick()'s CT-amps loop below, which only reads current_a[c] while
+    // a channel is in MODE 0 (MODEL).
+    bool k4_closed = (relay_mask & (1u << SIM_RELAY_BIT_K4)) != 0u;
+    if (!k4_closed) {
+        for (uint8_t z = 0; z < d->params.zone_count; z++) {
+            duty[z] = 0.0f;
+        }
     }
 
     thermal_model_params_t eff = d->params;
@@ -1055,12 +1052,18 @@ static bool dispatch_tc(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         float params[4] = {param0, 0, 0, 0};
         uint16_t sid = fault_engine_schedule(&d->fault_engine, slot_id, fault_kind, channel, &trig, &dur, &rep, params);
         if (sid == FAULT_ENGINE_INVALID_SLOT) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
-        fault_event_t events[2];
-        size_t n = fault_engine_fire_now(&d->fault_engine, sid, d->last_sim_time_s, events, 2);
-        if (n == 0) { rw_u8(w, SIMFW_CMD_STATUS_ERR_INTERNAL); return true; }
-        apply_edge_effects(d, events, n);
-        recompute_overrides(d);
-        push_fault_events_to_ring(d, events, n); // same gap as FAULT_FIRE_NOW, see that helper's comment
+        // Deferred fire, mirroring real firmware's handle_tc_inject_fault()/
+        // fault_sched_fire_now() (cmd_task.c/fault_sched.c): this only marks
+        // manual_fire_pending. The ARMED->ACTIVE transition, its FIRED event,
+        // and the resulting override writes/edge effects all happen on the
+        // very next device_tick() call, through the exact same
+        // fault_engine_tick()/apply_edge_effects()/recompute_overrides() path
+        // a triggered fire already goes through -- one event-emitting path,
+        // not two (fault_engine.h's own doc on fault_engine_fire_now()). This
+        // closes the gap the README used to document as a deliberate
+        // divergence: a fire_now-triggered fault is no longer invisible to
+        // the ring, on real firmware or here.
+        if (!fault_engine_fire_now(&d->fault_engine, sid)) { rw_u8(w, SIMFW_CMD_STATUS_ERR_INTERNAL); return true; }
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         rw_u16le(w, sid);
         return true;
@@ -1177,12 +1180,11 @@ static bool dispatch_ct(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 // in for the physical sense wire that a real fixture would use instead.
 // Once told, this harness treats the value exactly as it treats any other
 // sensed contact -- same relay_mask bit, same duty[]/edge-log/telemetry
-// path device_tick() already runs for K1/K2/K3/K5 (PLAN.md sec 2 loop 1)
-// -- see this file's own README.md "Known, virtual-only extensions"
-// section for the full writeup, including the verified finding that
-// device_tick()'s duty[]/current_a[] math does not gate on K4 today (a
-// property of REAL, unmodified sim_engine.c too -- not something this
-// pass could or should paper over here).
+// path device_tick() already runs for K1/K2/K3/K5 (PLAN.md sec 2 loop 1),
+// including K4's own veto over every zone's duty[]/current_a[] (see
+// device_tick()'s K4-gating block, ported from real firmware's
+// sim_engine.c af88ffc fix) -- see this file's own README.md "Known,
+// virtual-only extensions" section for the full writeup.
 //
 // Request: [u8 signal, u8 level]. signal uses the SAME 0..4 numbering as
 // RELAY_GET_STATES's reply order / edge_entry_t.signal (0 K1, 1 K2, 2 K3,
@@ -1486,14 +1488,12 @@ static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         return true;
     }
     case SIMFW_CMD_FAULT_FIRE_NOW: {
+        // Deferred fire, mirroring real firmware's handle_fault_fire_now()/
+        // fault_sched_fire_now() exactly (same ERR_BAD_ARGS-on-failure
+        // mapping) -- see TC_INJECT_FAULT's own comment above for the full
+        // "one event-emitting path, not two" rationale.
         uint16_t slot_id = ar_u16le(r);
-        if (r->overflow) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
-        fault_event_t events[2];
-        size_t n = fault_engine_fire_now(&d->fault_engine, slot_id, d->last_sim_time_s, events, 2);
-        if (n == 0) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BUSY); return true; }
-        apply_edge_effects(d, events, n);
-        recompute_overrides(d);
-        push_fault_events_to_ring(d, events, n); // see push_fault_events_to_ring()'s own comment
+        if (r->overflow || !fault_engine_fire_now(&d->fault_engine, slot_id)) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         return true;
     }
