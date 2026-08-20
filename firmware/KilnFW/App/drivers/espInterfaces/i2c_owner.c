@@ -202,7 +202,17 @@ esp_err_t i2c_owner_transfer(i2c_owner_t *owner,
         return ESP_ERR_INVALID_ARG;
     }
 
-    SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
+    /* Static, stack-resident semaphore -- same fix and same reason as
+     * uart_owner_transfer()'s 2026-08-20 change: xSemaphoreCreateBinary()
+     * per-call heap-allocates from internal SRAM, and this is the hottest
+     * transfer path on the bus (NS2009 touch polling every ~400ms). That
+     * churn was starving internal-SRAM allocations board-wide -- confirmed
+     * live via the device log (NS2009 "measure cmd failed: ESP_ERR_NO_MEM"
+     * every cycle) and is the suspected root cause of the still-open
+     * UART_TASK_ID_WIFI/AUTOTUNE registration failures and the AP
+     * connect/disconnect cycling seen on both a PC adapter and a phone. */
+    StaticSemaphore_t done_sem_storage;
+    SemaphoreHandle_t done_sem = xSemaphoreCreateBinaryStatic(&done_sem_storage);
     if (!done_sem) {
         return ESP_ERR_NO_MEM;
     }

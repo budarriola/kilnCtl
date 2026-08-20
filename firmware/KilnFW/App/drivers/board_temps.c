@@ -26,16 +26,31 @@ esp_err_t board_temps_start(void)
         return ESP_OK;
     }
 
-    /* Range picked wide (0-100 degC) rather than a tight span: this is a
-     * board-health "is anything cooking itself" indicator, not a
+    /* 2026-08-20 fix, found live on the bench: this file's original comment
+     * (below, kept for the record) assumed the driver picks whichever
+     * hardware range "best covers" the requested span. Reading the actual
+     * installed IDF v6.0.2 source
+     * (esp_driver_tsens/src/temperature_sensor.c's
+     * temperature_sensor_choose_best_range()) shows that is wrong: it
+     * requires the requested [range_min, range_max] to fall entirely INSIDE
+     * one single hardware bucket
+     * (esp_hal_ana_conv/esp32s3/temperature_sensor_periph.c's
+     * temperature_sensor_attributes[] -- five fixed buckets, e.g. (20,100),
+     * (-10,80), none of which contain [0,100] as a subset), or install()
+     * fails outright with "Cannot select the correct range" / "Out of
+     * testing range" -- exactly the error this board logged every boot.
+     * (-10, 80) is used here: an exact match for one whole bucket (±1 degC
+     * error, the second-best of the five), and realistically covers both a
+     * cold-startup enclosure reading and a genuinely hot one before this
+     * "is anything cooking itself" indicator needs to say so.
+     *
+     * Original comment, for the record (the "best covers" assumption in it
+     * is the bug, not a description of intent worth preserving otherwise):
+     * "Range picked wide (0-100 degC) rather than a tight span: this is a
+     * board-health 'is anything cooking itself' indicator, not a
      * calibration-grade measurement, and app_main has no a-priori bound on
-     * enclosure temperature worth encoding here. Per the temperature_sensor.h
-     * doc comment (as documented for IDF v5.0+ -- see this file's header
-     * comment on why that could not be checked against the actual installed
-     * toolchain this pass), the driver internally selects the on-die
-     * measurement range/attenuation that best covers whatever span is
-     * requested. */
-    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(0, 100);
+     * enclosure temperature worth encoding here." */
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
 
     esp_err_t err = temperature_sensor_install(&cfg, &s_tsens);
     if (err != ESP_OK) {

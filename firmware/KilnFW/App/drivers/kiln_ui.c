@@ -6,11 +6,13 @@
 
 #include "ui_page_board_health.h"
 #include "ui_page_config.h"
+#include "ui_page_diagnostics.h"
 #include "ui_page_history.h"
 #include "ui_page_home.h"
 #include "ui_page_network.h"
 #include "ui_page_safety.h"
 #include "ui_page_temperature.h"
+#include "ui_page_thermo_faults.h"
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
 #include "touch_cal_store.h"
@@ -90,6 +92,26 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("history", ui_page_history_build);
     if (err != ESP_OK) return err;
 
+    /* TODO.md's "Diagnostics / System info page" item, ESP-only half
+     * (firmware version, uptime, heap, ESP32-S3 die temp) -- see
+     * ui_page_diagnostics.c's header comment for what's deliberately still
+     * missing (safety-link stats, blocked on M5). Linked from
+     * ui_page_config.c's nav hub like every other diagnostic/settings
+     * page; the grid there is a fixed-height, internally scrollable
+     * container (LCD work-queue item 5), so a 9th entry costs no
+     * no-scroll budget the way the older stale comment on "touch_test"
+     * below once worried a 9th grid item would. */
+    err = kiln_ui_register_page("diagnostics", ui_page_diagnostics_build);
+    if (err != ESP_OK) return err;
+
+    /* MAX31856 fault/status page (per-channel SR fault bits, ~FAULT pin,
+     * SPI-transfer health) -- a separate page from "diagnostics" above,
+     * which is the ESP-only half and never touches the thermocouple ICs.
+     * See ui_page_thermo_faults.c's header comment. Linked from
+     * ui_page_config.c's nav hub like every other diagnostic page. */
+    err = kiln_ui_register_page("thermo_faults", ui_page_thermo_faults_build);
+    if (err != ESP_OK) return err;
+
     /* NS2009 touch calibration -- see ui_page_touch_cal.c/.h. Linked from
      * ui_page_config.c's nav hub like every other diagnostic/settings page. */
     err = kiln_ui_register_page("touch_cal", ui_page_touch_cal_build);
@@ -98,9 +120,12 @@ esp_err_t kiln_ui_init(void)
     /* ui_page_touch_cal.c's finish_calibration() navigates here right after
      * a fresh calibration saves -- lets it be checked by eye before trusting
      * every other page's buttons to it. Not reachable from the config nav
-     * hub (adding a 9th grid item there would blow its documented no-scroll
-     * height budget, see ui_page_config.c's header comment) -- re-running
-     * calibration from Config always passes through here again anyway. */
+     * hub -- not a budget concern any more (LCD work-queue item 5 made that
+     * grid a fixed-height, internally scrollable container, and this file's
+     * "diagnostics" registration above already added a 9th entry with no
+     * issue), just that a manual re-run always starts from "touch_cal" via
+     * Config's own nav button, so a second, separate path to "touch_test"
+     * would only be reachable mid-calibration anyway. */
     err = kiln_ui_register_page("touch_test", ui_page_touch_test_build);
     if (err != ESP_OK) return err;
 

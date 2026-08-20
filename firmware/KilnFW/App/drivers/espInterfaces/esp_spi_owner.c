@@ -142,7 +142,15 @@ esp_err_t spi_owner_transfer(spi_owner_t *owner,
         return ESP_ERR_INVALID_ARG;
     }
 
-    SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
+    /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
+     * and i2c_owner_transfer() (2026-08-20): this is the LCD's SPI flush
+     * path, the hottest transfer path on the whole board (every LVGL
+     * redraw), so its per-call heap churn was a prime suspect alongside the
+     * touch driver for the board-wide internal-SRAM starvation that was
+     * breaking Wi-Fi AP client handshakes (deauth reason 1 right after
+     * assoc). */
+    StaticSemaphore_t done_sem_storage;
+    SemaphoreHandle_t done_sem = xSemaphoreCreateBinaryStatic(&done_sem_storage);
     if (!done_sem) {
         return ESP_ERR_NO_MEM;
     }

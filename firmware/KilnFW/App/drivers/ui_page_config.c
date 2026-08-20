@@ -51,9 +51,11 @@
 // tradeoff ui_page_network.c's Scan/Saved lists and
 // ui_page_temperature.c's relay grid already make.
 //
-// Eight items (Touch Calibration added after this pass, see
-// ui_page_touch_cal.c/.h -- lands on the same 4-row grid with no height
-// regression since 8 is still an even row count):
+// Ten items (Touch Calibration, Diagnostics, and Thermocouple Faults added
+// after this pass, see ui_page_touch_cal.c/.h, ui_page_diagnostics.c/.h, and
+// ui_page_thermo_faults.c/.h -- all land on the same fixed-height,
+// internally scrollable grid LCD work-queue item 5 switched this to, so
+// growing the item count costs nothing beyond more scrolling inside `grid`):
 //   - Zones & Thermocouples, Relays & Rules -- still "not built yet"
 //     placeholders (non-clickable, dimmed text), unchanged from before this
 //     pass.
@@ -109,6 +111,18 @@ static void touch_cal_nav_cb(lv_event_t *e)
 {
     (void)e;
     kiln_ui_show("touch_cal");
+}
+
+static void diagnostics_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("diagnostics");
+}
+
+static void thermo_faults_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("thermo_faults");
 }
 
 /* A real, clickable nav cell (cb non-NULL) or an honest "not built yet"
@@ -219,6 +233,8 @@ lv_obj_t *ui_page_config_build(void)
     build_nav_item(grid, "Safety Processor", safety_nav_cb);
     build_nav_item(grid, "Temperature History", history_nav_cb);
     build_nav_item(grid, "Touch Calibration", touch_cal_nav_cb);
+    build_nav_item(grid, "Diagnostics", diagnostics_nav_cb);
+    build_nav_item(grid, "Thermocouple Faults", thermo_faults_nav_cb);
 
     lv_obj_t *back = lv_button_create(content);
     lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 44);

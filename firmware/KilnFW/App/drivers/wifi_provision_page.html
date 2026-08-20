@@ -124,6 +124,25 @@
     <button id="connectSubmitBtn" type="button">Connect</button>
     <button id="connectCancelBtn" type="button">Cancel</button>
   </div>
+
+  <h2>IP Address</h2>
+  <div class="mode-toggle">
+    <button id="ipModeDhcpBtn" type="button">DHCP</button>
+    <button id="ipModeStaticBtn" type="button">Static</button>
+  </div>
+  <div class="hint">DHCP (default) lets the home network assign this board's address
+    automatically. Static lets you fix it yourself.</div>
+  <form id="ipConfigForm">
+    <div id="staticIpFields" style="display:none">
+      <label for="staticIp">IP address</label>
+      <input type="text" id="staticIp" name="ip" maxlength="15" placeholder="192.168.1.50">
+      <label for="staticNetmask">Netmask</label>
+      <input type="text" id="staticNetmask" name="netmask" maxlength="15" placeholder="255.255.255.0">
+      <label for="staticGateway">Gateway</label>
+      <input type="text" id="staticGateway" name="gateway" maxlength="15" placeholder="192.168.1.1">
+    </div>
+    <button type="submit">Save</button>
+  </form>
 </div>
 
 <div id="apSection">
@@ -682,6 +701,62 @@ function renderStatus(s) {
   addRow('mDNS', 'kiln.local');
 }
 
+/* 2026-08-20, web-GUI-only DHCP/static IP toggle. Mirrors applyModeUi()'s
+ * "only touch the DOM when the value actually changed" pattern below so
+ * repeated /status polls don't fight an operator mid-edit -- the static
+ * fields themselves are only ever repopulated from a fresh poll() when the
+ * user isn't actively focused in one (same guard poll() already uses for
+ * apSsid/apPassword). */
+let lastIpMode = null;
+function applyIpModeUi(ipMode) {
+  if (ipMode === lastIpMode) return;
+  lastIpMode = ipMode;
+  document.getElementById('ipModeDhcpBtn').classList.toggle('active', ipMode !== 'static');
+  document.getElementById('ipModeStaticBtn').classList.toggle('active', ipMode === 'static');
+  document.getElementById('staticIpFields').style.display = ipMode === 'static' ? '' : 'none';
+}
+
+function submitIpConfig(mode) {
+  var rows = document.getElementById('statusRows');
+  var body;
+  if (mode === 'dhcp') {
+    body = 'mode=dhcp';
+  } else {
+    body = 'mode=static' +
+      '&ip=' + encodeURIComponent(document.getElementById('staticIp').value) +
+      '&netmask=' + encodeURIComponent(document.getElementById('staticNetmask').value) +
+      '&gateway=' + encodeURIComponent(document.getElementById('staticGateway').value);
+  }
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Applying…</span></li>';
+  fetch('/ip_config', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(function (r) {
+      if (!r.ok) throw new Error('rejected');
+      lastIpMode = null; /* force the next poll() to re-render the toggle/fields */
+      poll();
+    })
+    .catch(function () {
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">' +
+        'Could not save IP configuration (check the address/netmask/gateway)</span></li>';
+    });
+}
+
+document.getElementById('ipModeDhcpBtn').addEventListener('click', function () { submitIpConfig('dhcp'); });
+document.getElementById('ipConfigForm').addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  var wantStatic = document.getElementById('ipModeStaticBtn').classList.contains('active') ||
+                    document.getElementById('staticIpFields').style.display !== 'none';
+  submitIpConfig(wantStatic ? 'static' : 'dhcp');
+});
+document.getElementById('ipModeStaticBtn').addEventListener('click', function () {
+  /* Clicking "Static" just reveals the fields -- it does not itself submit,
+   * since ip/netmask/gateway are very likely still blank at that point.
+   * The form's own Save button (above) submits whichever mode is currently
+   * shown. */
+  document.getElementById('ipModeDhcpBtn').classList.remove('active');
+  document.getElementById('ipModeStaticBtn').classList.add('active');
+  document.getElementById('staticIpFields').style.display = '';
+});
+
 let polling = false;
 let lastMode = null;
 function applyModeUi(mode) {
@@ -709,6 +784,16 @@ function poll() {
     }
     if (s.mode === 'ap') {
       renderApQr(s.ap_ssid, s.ap_password);
+    }
+    applyIpModeUi(s.ip_mode);
+    if (document.activeElement !== document.getElementById('staticIp')) {
+      document.getElementById('staticIp').value = s.static_ip || '';
+    }
+    if (document.activeElement !== document.getElementById('staticNetmask')) {
+      document.getElementById('staticNetmask').value = s.static_netmask || '';
+    }
+    if (document.activeElement !== document.getElementById('staticGateway')) {
+      document.getElementById('staticGateway').value = s.static_gateway || '';
     }
     document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
     if (s.state === 'connecting' || s.state === 'reconnecting') {

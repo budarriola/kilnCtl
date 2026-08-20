@@ -15,18 +15,18 @@
 //      board_temps_start() installs and enables the peripheral exactly
 //      once; board_temps_get() just reads the last conversion.
 //
-//      *** NOT VERIFIED AGAINST THE INSTALLED TOOLCHAIN THIS PASS. *** This
-//      driver is written against the `temperature_sensor.h` surface as
-//      documented for ESP-IDF v5.0+ (this project targets v6.0.2 per
-//      README.md, and the API has been stable since its v5.0 introduction),
-//      but no managed_components/ manifest or installed IDF header was
-//      available to check against from inside this repo when this was
-//      written -- there was no way to grep an actual
-//      esp-idf/components/driver/temperature_sensor/include/ tree from here.
-//      Function names/signatures/return codes should be treated as
-//      "best available documentation," not "confirmed against this repo's
-//      toolchain." Build this file first and fix on compiler error before
-//      trusting it.
+//      *** Verified against the installed toolchain, 2026-08-20. *** The
+//      function names/signatures/return codes below were confirmed against
+//      the real installed `esp-idf/components/esp_driver_tsens/include/
+//      driver/temperature_sensor.h` (IDF v6.0.2). One real bug was found
+//      and fixed doing so: `board_temps_start()`'s original range request
+//      (0-100 degC) failed `temperature_sensor_install()` on every boot on
+//      real hardware ("Cannot select the correct range") -- the driver
+//      requires the requested range to fall entirely inside one fixed
+//      hardware bucket (`esp_hal_ana_conv/esp32s3/temperature_sensor_periph.c`),
+//      not "best effort covers" as this file previously assumed. See
+//      `board_temps_start()`'s own comment for the exact fix and the real
+//      bucket table.
 //
 //   2. Each active MAX31856's own cold-junction temperature
 //      (MAX31856Reading.cj_temperature_c) -- the IC's own local-ambient

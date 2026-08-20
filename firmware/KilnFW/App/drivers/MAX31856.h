@@ -119,6 +119,19 @@ extern "C" {
 #define MAX31856_MASK_CJHIGH  0x20u
 #define MAX31856_MASK_ALL     0x3Fu /* bits 7:6 are reserved */
 
+/* --- SR (fault status, 0Fh) bits ---
+ * SR shares its low 6 bit positions/names with the MASK register above
+ * (OPEN/OVUV/TCLOW/TCHIGH/CJLOW/CJHIGH) -- MAX31856_MASK_* may be read
+ * directly against MAX31856Reading::fault_status for those six. SR has two
+ * bits MASK does not: TCRANGE (0x40) and CJRANGE (0x80), "Register 0Fh: Fault
+ * Status Register" in the datasheet -- these can never be masked off ~FAULT,
+ * since MASK (02h) only has bits for the low six. No existing #define covered
+ * them before this; added here so a fault-status reader (e.g.
+ * ui_page_thermo_faults.c) can name all eight bits instead of six named ones
+ * plus two bare hex literals. */
+#define MAX31856_FAULT_TCRANGE 0x40u
+#define MAX31856_FAULT_CJRANGE 0x80u
+
 /* What MAX31856_start_all writes into MASK: open-circuit and over/undervoltage
  * unmasked (a broken thermocouple or a miswired input is exactly what the
  * ~FAULT line exists to report, and neither is a threshold the operator

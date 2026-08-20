@@ -113,6 +113,21 @@ typedef enum {
     WIFI_PROV_STATE_RECONNECTING,  /* home mode, AP+STA, was connected, retrying */
 } wifi_prov_state_t;
 
+/* 2026-08-20 (web-GUI-only addition): how the STA interface gets its IP once
+ * a home-network join succeeds. DHCP is the long-standing default behavior
+ * (ESP-IDF's STA netif runs a DHCP client unless told otherwise) -- nothing
+ * new happens for it. STATIC means the operator has supplied their own
+ * ip/netmask/gateway; see wifi_prov_set_static_ip(). Deliberately orthogonal
+ * to wifi_prov_mode_t (HOME vs AP): this only matters while in HOME mode and
+ * is silently irrelevant in AP mode (the AP interface's own IP,
+ * 192.168.4.1, is unrelated and not configurable here). */
+typedef enum {
+    WIFI_PROV_IP_MODE_DHCP = 0,
+    WIFI_PROV_IP_MODE_STATIC,
+} wifi_prov_ip_mode_t;
+
+#define WIFI_PROV_IPV4_STR_MAX 16 /* "255.255.255.255" + NUL */
+
 /* Brings up esp_netif/esp_wifi, initializes BOTH the `wifi_nvs` partition
  * (this module's own storage) and the default `nvs` partition (which the rest
  * of the firmware -- zones, rules, profiles, run_state, relay_cycles -- opens
@@ -293,6 +308,53 @@ typedef struct {
  * mode's whole point is no station-radio activity at all, and a scan (even
  * though it isn't a join) still means bringing the STA interface up. */
 esp_err_t wifi_prov_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count);
+
+/* ---- Static IP (2026-08-20, web-GUI-only) -------------------------------
+ * Web-only feature: there is deliberately no LCD UI and no UART-bridge
+ * subcommand for any of this -- wifi_provision_http.c/wifi_provision_page.html
+ * are the only callers. */
+
+/* Current IP mode for the STA interface -- direct read, same reasoning as
+ * wifi_prov_get_state()/wifi_prov_get_mode() (one aligned enum word, single
+ * store from the owner task, no read-modify-write to observe half-applied). */
+wifi_prov_ip_mode_t wifi_prov_get_ip_mode(void);
+
+/* NUL-terminated dotted-quad strings, valid only (i.e. non-empty) when
+ * wifi_prov_get_ip_mode() == WIFI_PROV_IP_MODE_STATIC; empty strings
+ * otherwise. Points at static storage, same lifetime/ownership contract as
+ * wifi_prov_get_ap_ssid() etc. Used by /status to prefill the web page's
+ * static-IP fields on load. */
+const char *wifi_prov_get_static_ip(void);
+const char *wifi_prov_get_static_netmask(void);
+const char *wifi_prov_get_static_gateway(void);
+
+/* Switches the STA interface back to DHCP (the default/original behavior).
+ * Persists the choice and, if a station join is currently active or in
+ * progress, forces a disconnect+reconnect so the netif picks the DHCP
+ * client back up rather than sitting on a stale static IP. Safe to call
+ * repeatedly / while already in DHCP mode (a no-op re-apply). */
+esp_err_t wifi_prov_set_dhcp(void);
+
+/* Validates ip/netmask/gateway as dotted-quad IPv4 strings (rejects anything
+ * else with ESP_ERR_INVALID_ARG -- malformed input never reaches
+ * esp_netif_set_ip_info()), persists them plus IP mode == STATIC, and -- if
+ * a station join is currently active or in progress -- applies it
+ * immediately: esp_netif_dhcpc_stop() + esp_netif_set_ip_info() before the
+ * next esp_wifi_connect(), forcing a disconnect+reconnect if already
+ * connected so the new address takes effect right away rather than only on
+ * the next boot. Each string must be non-NULL and NUL-terminated.
+ *
+ * A bad-but-well-formed config (unreachable gateway, wrong subnet) is NOT
+ * caught here -- IPv4 syntax is the only thing validated, same as any real
+ * router's static-IP form. The 802.11 association itself doesn't depend on
+ * L3 correctness, so the join can still reach WIFI_PROV_STATE_CONNECTED
+ * (GOT_IP fires locally once the static IP is applied, not from a DHCP
+ * handshake) even though the resulting address is unreachable -- this
+ * module's AP-fallback timer is keyed off state, so it will NOT bring the
+ * fallback AP back in that specific case. See wifi_prov.c's apply_sta_config()
+ * comment for the full reasoning; a human should double-check this tradeoff
+ * before this ships to hardware relied on for remote access. */
+esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway);
 
 #ifdef __cplusplus
 }

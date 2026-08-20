@@ -39,6 +39,7 @@ project rather than two.
 | [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
 | [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md) | Field updates for both processors: interlocks, one-password auth, ESP OTA partitioning |
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
+| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (second Pico): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI; also owns the `UnitTestFw` decommission (protocol lifted to `CommonFW`, then `firmware/UnitTestFw` + `hardware/UnitTestFixture` deleted — its §12) — planning only, nothing implemented |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
@@ -694,6 +695,131 @@ ILI9488 panel attached in this environment, so pixel-exact fit is still
 unconfirmed for every page — this closes "budgeted and scroll-disabled in
 code, with a real computed margin," not "confirmed to fit on the physical
 screen."
+
+**2026-08-19: no-scroll rule reaffirmed, touch-calibration cancel path built,
+temperature page's wrong Back target fixed.** Explicit user restatement: LCD
+pages must never require scrolling — still a hard requirement, unchanged.
+Auditing `ui_page_touch_cal.c` against it (see `firmware/KilnFW/docs/UI_PLAN.md`
+LCD work-queue item 6) surfaced a separate, related gap: the page had no
+cancel/back path once started (a full-screen transparent overlay was the only
+clickable object; every press advanced the calibration sequence with no way
+out short of finishing all points). **Fixed**: a corner "Cancel" button,
+z-ordered above the overlay, returns to `config` without ever calling
+`touch_cal_store_save()`. Hidden on a forced first-run boot (uncalibrated
+board — no working `config` screen to cancel back to yet), shown only for a
+deliberate re-calibration. While wiring that button, a Back-target sweep of
+every LCD page found `ui_page_temperature.c`'s Back button going to `"home"`
+instead of `"config"` — every sibling page reached from the config nav hub
+(`board_health`/`history`/`network`/`safety`) correctly returns to `config`;
+temperature alone skipped it. **Fixed** to match. Both changes build-clean
+(`idf.py -C firmware/KilnFW build`) and **flashed to the bench board via
+OpenOCD/JTAG, confirmed by live `get_fw_version()`.**
+
+**Same session, separate user report: "can't connect to the AP, worked
+before."** Device log (`get_device_log`) showed the real mechanism: a phone
+associates fine at the radio layer (`station ... join, AID=1`) but
+self-disconnects ~30-40s later (802.11 reason 8, station-initiated) in a
+repeating loop — matching `firmware/KilnFW/docs/WIFI_PROVISIONING.md`'s own
+documented gap, "No captive portal." Without one, a phone OS's connectivity-
+check probe gets no answer, the OS decides "no internet," and drops the
+network. **Fixed**: `wifi_prov.c` gained `dns_hijack_task()` (answers every
+DNS query with the AP's own IP, 192.168.4.1) and `wifi_provision_http.c`
+gained a 404→302-to-`/` redirect, so every OS's captive-portal probe now
+gets a hit and pops its sign-in browser instead of giving up. Flashed and
+running.
+
+**Verifying that fix surfaced a second, more serious bug**: the board was
+crash-looping roughly every 40s of uptime (`uart_proto: frame tx failed:
+ESP_ERR_NO_MEM` bursts, display corruption, then a fresh boot). Root cause:
+`uart_owner_transfer()` (`espInterfaces/uart_owner.c`) called
+`xSemaphoreCreateBinary()` — a heap allocation from internal SRAM — on
+*every single UART transfer*, and every bridge task (touch, display, log,
+wifi, control, profiles, autotune, ...) shares one owner and calls this
+constantly (one call per touch sample, one per LVGL flush). Under real
+interactive load this churns internal SRAM hard enough to transiently
+exhaust it. **Fixed**: switched to `xSemaphoreCreateBinaryStatic()` with a
+stack-resident `StaticSemaphore_t` — zero heap allocation on the hottest
+path in the UART stack. Also moved the new `dns_hijack_task()`'s
+`socket()`/`bind()` call (itself an internal-SRAM allocation) from right
+after netif creation to after `esp_wifi_start()` completes, out of the
+same contention window `uart_protocol.c`'s own
+`uart_protocol_register_task()` comment already documents (bench-observed
+2026-08-18, unrelated to this pass). Flashed; a ~328s bench window
+afterward showed zero `ESP_ERR_NO_MEM` bursts, versus one every ~40s
+before. **Open, not chased further this pass**: the UART WIFI bridge task
+(`UART_TASK_ID_WIFI` = 11) sometimes doesn't register at boot (PC-tool
+`wifi_get_status` NACKs "destination task not registered"), cause not
+found — but this only affects PC/MCP tooling's visibility into Wi-Fi
+state, not the AP itself (which comes up and accepts joins regardless, per
+the same log). See `firmware/KilnFW/TODO.md`'s UART section for the
+tracking entry.
+
+**2026-08-20: manual zone-control page declined by explicit user request**
+(no manual setpoint override bypassing a running profile) — dropped from
+`TODO.md`'s page-designs list. `ui_page_temperature.c` stays as-is (per-zone
+current reading + manual relay toggles, already built).
+
+**2026-08-20: Diagnostics/System-info page, ESP-only half, built.** New
+`ui_page_diagnostics.c/.h`, reachable from `ui_page_config.c`'s nav hub —
+firmware version/build, ESP uptime, current + worst-case-ever free heap,
+free PSRAM, ESP32-S3 die temp. Safety-link-stats half still blocked on M5.
+Build-clean, flashed via OpenOCD/JTAG, confirmed booting clean on the bench
+board. See `firmware/KilnFW/TODO.md`'s "Diagnostics / System info page"
+entry and `docs/UI_PLAN.md`'s LCD audit table.
+
+**2026-08-20: thermocouple fault status page + web DHCP/static IP, both via
+background subagents, both flashed.** Two explicit user requests, built in
+parallel by two coordinated subagents (non-overlapping files) and merged
+with a single combined build:
+- **Thermocouple fault status**, split into its own page per explicit
+  request ("diagnostics should be broken up into multiple pages"): new
+  `ui_page_thermo_faults.c/.h`, per-channel MAX31856 SR fault bits (added
+  `MAX31856_FAULT_TCRANGE`/`MAX31856_FAULT_CJRANGE` to `MAX31856.h` — these
+  existed only in prose comments before), `~FAULT` pin state, SPI health.
+  `ui_page_diagnostics.c` untouched.
+- **Web-only DHCP/static IP toggle** for the home network connection,
+  explicit request with an explicit boundary ("keep the lcd network
+  settings page simple" — `ui_page_network.c` untouched). New
+  `POST /ip_config` + extended `GET /status` in `wifi_provision_http.c`,
+  backend state/persistence/application in `wifi_prov.c/.h`, new UI section
+  on `wifi_provision_page.html`. **Known gap, not yet fixed**: a
+  wrong-but-parseable static IP doesn't trigger AP-fallback's normal
+  DHCP-timeout recovery (see `firmware/KilnFW/TODO.md`'s Wi-Fi section).
+  Not yet exercised against a real router (no live network in this
+  environment).
+
+Both changes: full combined `ninja` build clean, flashed via OpenOCD/JTAG,
+confirmed booting clean on the bench board
+(`get_fw_version()`/`get_device_log()`).
+
+**2026-08-20: explicit user request to test everything, found and fixed
+real bugs.** Full details in `firmware/KilnFW/TODO.md`'s new entry;
+summary:
+- **Fixed**: ESP32-S3 die-temperature sensor was failing to install on
+  every boot (wrong range request for the installed IDF driver's real
+  bucket table — read directly from source, not guessed). Confirmed fixed
+  live on the bench. This is the only temperature sensor actually present
+  on this bench right now (no MAX31856/thermocouple hardware attached,
+  confirmed via a live `thermo_read()` call) — nothing else to add support
+  for on the hardware side.
+- **Verified clean**: full back-button navigation audit (every
+  `kiln_ui_show()` call in every LCD page) — every hub page's Back goes
+  exactly one level up to `config`, no exceptions found beyond the
+  `ui_page_temperature.c` bug already fixed earlier this session.
+- **Added, not yet usable**: Playwright browser-automation MCP tool
+  (`.mcp.json`) — needs a session restart to load, and this dev
+  environment has no network path to the board's Wi-Fi AP regardless
+  (confirmed: adapter can't see the AP, no network joined). Web GUI
+  testing needs either a restart + reachable network, or testing from a
+  machine with physical/network proximity to the board.
+- **Investigated further, still open**: the `UART_TASK_ID_AUTOTUNE`/
+  `UART_TASK_ID_WIFI` task-registration failure noted earlier this session
+  turns out to be a persistent, not transient, `xTaskCreatePinnedToCore()`
+  failure — a retry loop and a stack-size reduction (matching a
+  same-complexity task that already works) both failed to fix it, ruling
+  out the simplest theories. Real root cause needs a coredump/backtrace,
+  not log-based diagnosis (the boot-time log pipeline itself drops lines
+  under the same load). Does not affect the AP's actual radio operation.
 
 The point at which the two processors become one system. Deliberately separate,
 because it changes what a bare main board will do.

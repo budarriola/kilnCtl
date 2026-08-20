@@ -204,7 +204,12 @@ static bool post_and_wait(owner_cmd_t *cmd, owner_result_t *result)
         return false;
     }
 
-    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
+     * and i2c_owner_transfer() (2026-08-20): removes this owner's
+     * contribution to the per-call internal-SRAM churn that was starving
+     * Wi-Fi AP client handshakes. */
+    StaticSemaphore_t done_storage;
+    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
     if (!done) {
         return false;
     }

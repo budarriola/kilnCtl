@@ -11,6 +11,9 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/inet.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/sockets.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -108,6 +111,16 @@ static const char *TAG = "wifi_prov";
 #define NVS_KEY_AP_PASS "ap_pass"
 #define NVS_KEY_HAS_AP_PASS "has_ap_pass"
 
+/* 2026-08-20, web-GUI-only static-IP addition (see wifi_prov.h's "Static IP"
+ * section). New keys, same partition/namespace as everything else in this
+ * file -- never repurposing an existing key. Absent (first boot, or a board
+ * that predates this feature) reads back as DHCP with empty strings, which
+ * is exactly today's always-on default behavior. */
+#define NVS_KEY_IP_MODE "ip_mode" /* u8: 0 = DHCP, 1 = STATIC */
+#define NVS_KEY_STATIC_IP "static_ip"
+#define NVS_KEY_STATIC_NETMASK "static_netmask"
+#define NVS_KEY_STATIC_GW "static_gw"
+
 /* TODO.md 8.4: a bounded list of saved networks, replacing the old single
  * ssid/password/has_creds slot. Versioned the same way zones_http.c/
  * rules_http.c version their NVS blobs (see nvs_load_saved_nets() below) --
@@ -170,6 +183,14 @@ static struct wifi_prov_state {
     bool has_ap_ssid_override;
     char ap_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
     bool has_ap_password_override;
+
+    /* 2026-08-20, web-GUI-only: STA IP mode + static config. Only meaningful
+     * while mode == WIFI_PROV_MODE_HOME; see wifi_prov.h's "Static IP"
+     * section. Dotted-quad strings, empty unless ip_mode == STATIC. */
+    wifi_prov_ip_mode_t ip_mode;
+    char static_ip[WIFI_PROV_IPV4_STR_MAX];
+    char static_netmask[WIFI_PROV_IPV4_STR_MAX];
+    char static_gateway[WIFI_PROV_IPV4_STR_MAX];
 
     char active_password[WIFI_PROV_PASSWORD_MAX_LEN + 1]; /* password paired with
                                    * active_ssid above -- kept in RAM only for
@@ -290,6 +311,8 @@ typedef enum {
     CMD_SET_AP_PASSWORD,
     CMD_GET_STA_IP,
     CMD_SCAN,
+    CMD_SET_DHCP,
+    CMD_SET_STATIC_IP,
 
     /* Internal (fire-and-forget) -- the Wi-Fi driver's and esp_timer's own
      * callbacks, rerouted here so they mutate s_wifi on the same one task as
@@ -333,6 +356,14 @@ typedef struct {
         struct { char password[WIFI_PROV_PASSWORD_MAX_LEN + 1]; } set_ap_password;
         struct { size_t out_cap; } get_sta_ip;
         struct { size_t max_results; } scan;
+        /* CMD_SET_STATIC_IP: strings copied in, same rationale as
+         * add_network above -- the producer's caller (an HTTP handler) frees
+         * its buffers the moment it returns. */
+        struct {
+            char ip[WIFI_PROV_IPV4_STR_MAX];
+            char netmask[WIFI_PROV_IPV4_STR_MAX];
+            char gateway[WIFI_PROV_IPV4_STR_MAX];
+        } set_static_ip;
     } args;
 } wifi_cmd_t;
 
@@ -362,7 +393,12 @@ static bool post_and_wait(wifi_cmd_t *cmd, wifi_result_t *result, uint32_t wait_
         return false;
     }
 
-    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
+     * and i2c_owner_transfer() (2026-08-20). Not a hot loop itself, but kept
+     * consistent with every other owner's post_and_wait() now that the
+     * pattern is known to matter under load. */
+    StaticSemaphore_t done_storage;
+    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
     if (!done) {
         return false;
     }
@@ -514,6 +550,29 @@ static esp_err_t nvs_load_from(const char *partition, bool *out_found)
     u8 = 0;
     err = nvs_get_u8(h, NVS_KEY_HAS_AP_PASS, &u8);
     s_wifi.has_ap_password_override = (err == ESP_OK) && u8;
+
+    /* 2026-08-20, web-GUI-only static-IP fields. Absent (pre-feature NVS
+     * blob, or genuinely never configured) reads back as DHCP with empty
+     * strings -- today's always-on default, unchanged. */
+    u8 = 0;
+    err = nvs_get_u8(h, NVS_KEY_IP_MODE, &u8);
+    s_wifi.ip_mode = (err == ESP_OK && u8) ? WIFI_PROV_IP_MODE_STATIC : WIFI_PROV_IP_MODE_DHCP;
+
+    len = sizeof(s_wifi.static_ip);
+    err = nvs_get_str(h, NVS_KEY_STATIC_IP, s_wifi.static_ip, &len);
+    if (err != ESP_OK) {
+        s_wifi.static_ip[0] = '\0';
+    }
+    len = sizeof(s_wifi.static_netmask);
+    err = nvs_get_str(h, NVS_KEY_STATIC_NETMASK, s_wifi.static_netmask, &len);
+    if (err != ESP_OK) {
+        s_wifi.static_netmask[0] = '\0';
+    }
+    len = sizeof(s_wifi.static_gateway);
+    err = nvs_get_str(h, NVS_KEY_STATIC_GW, s_wifi.static_gateway, &len);
+    if (err != ESP_OK) {
+        s_wifi.static_gateway[0] = '\0';
+    }
 
     nvs_close(h);
     return ESP_OK;
@@ -692,6 +751,34 @@ static esp_err_t nvs_save_ap_password(void)
     err = nvs_set_str(h, NVS_KEY_AP_PASS, s_wifi.ap_password);
     if (err == ESP_OK) {
         err = nvs_set_u8(h, NVS_KEY_HAS_AP_PASS, s_wifi.has_ap_password_override ? 1 : 0);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+/* 2026-08-20, web-GUI-only: persists ip_mode + the three static-IP strings
+ * together (they only ever change as a group -- see do_set_dhcp()/
+ * do_set_static_ip()). Same partition/namespace/commit pattern as every
+ * other nvs_save_*() in this file. */
+static esp_err_t nvs_save_ip_config(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(h, NVS_KEY_IP_MODE, s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC ? 1 : 0);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_STATIC_IP, s_wifi.static_ip);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_STATIC_NETMASK, s_wifi.static_netmask);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_STATIC_GW, s_wifi.static_gateway);
     }
     if (err == ESP_OK) {
         err = nvs_commit(h);
@@ -880,10 +967,55 @@ static void apply_ap_config(void)
     }
 }
 
+/* 2026-08-20, web-GUI-only: parses a dotted-quad IPv4 string via lwIP's
+ * ip4addr_aton() (lwip/ip4_addr.h) into an esp_ip4_addr_t. Both types are a
+ * single uint32_t addr in network byte order under the hood, hence the
+ * plain .addr copy rather than a cast -- they are deliberately different
+ * *types* (lwIP's own vs. esp_netif's public one) even though the layout
+ * matches. Returns false (out left untouched) on anything that doesn't
+ * parse, including empty/NULL -- callers must not feed that to
+ * esp_netif_set_ip_info(). */
+static bool parse_ipv4(const char *s, esp_ip4_addr_t *out)
+{
+    if (!s || !*s) {
+        return false;
+    }
+    ip4_addr_t addr;
+    if (ip4addr_aton(s, &addr) == 0) {
+        return false;
+    }
+    out->addr = addr.addr;
+    return true;
+}
+
 /* Configures the STA driver for whatever is currently in s_wifi.active_ssid/
  * active_password -- callers are responsible for having set those first (see
  * select_and_apply_join_candidate() and the direct nets[0] assignment in
- * wifi_prov_start()). */
+ * wifi_prov_start()).
+ *
+ * 2026-08-20, web-GUI-only static-IP addition: also applies s_wifi.ip_mode to
+ * the STA netif, BEFORE returning to every caller's subsequent
+ * esp_wifi_connect() -- start_sta_join(), do_rescan_tick(), and
+ * wifi_prov_start()'s own initial-config branch all call this and only then
+ * call/trigger esp_wifi_connect() (the latter via WIFI_EVENT_STA_START once
+ * esp_wifi_start() runs). ESP-IDF's own static-IP examples set this up
+ * BEFORE the STA associates, not after -- doing it here, inside the one
+ * function every join path already funnels through, is what makes that
+ * ordering automatic instead of something each call site has to remember.
+ *
+ * KNOWN LIMITATION, not fixed here: 802.11 association does not depend on L3
+ * correctness. A wrong-but-well-formed static config (bad gateway, wrong
+ * subnet) still lets the join reach WIFI_PROV_STATE_CONNECTED -- esp_netif
+ * fires IP_EVENT_STA_GOT_IP locally once a static IP is set and the link
+ * associates, it does not wait on a DHCP handshake that would otherwise
+ * time out and let ap_fallback_timer notice a failure. So a bad static IP
+ * does NOT trigger this module's usual AP-fallback safety net; the board
+ * will report "connected" while actually unreachable at that address. It
+ * does not brick Wi-Fi (the AP can still be reached by switching back to
+ * DHCP or AP mode via this same HTTP API, or by power-cycling into
+ * AP-fallback if nothing ever reaches CONNECTED), but this asymmetry is
+ * worth a human double-checking before this ships to hardware anyone
+ * depends on for remote access. */
 static void apply_sta_config(void)
 {
     wifi_config_t sta_cfg = { 0 };
@@ -893,6 +1025,38 @@ static void apply_sta_config(void)
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_config(STA) failed: %s", esp_err_to_name(err));
+    }
+
+    if (!s_wifi.sta_netif) {
+        return;
+    }
+    if (s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC) {
+        esp_ip4_addr_t ip, netmask, gw;
+        if (parse_ipv4(s_wifi.static_ip, &ip) && parse_ipv4(s_wifi.static_netmask, &netmask) &&
+            parse_ipv4(s_wifi.static_gateway, &gw)) {
+            esp_err_t dhcp_err = esp_netif_dhcpc_stop(s_wifi.sta_netif);
+            if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+                ESP_LOGW(TAG, "esp_netif_dhcpc_stop failed: %s", esp_err_to_name(dhcp_err));
+            }
+            esp_netif_ip_info_t ip_info = { .ip = ip, .netmask = netmask, .gw = gw };
+            esp_err_t set_err = esp_netif_set_ip_info(s_wifi.sta_netif, &ip_info);
+            if (set_err != ESP_OK) {
+                ESP_LOGE(TAG, "esp_netif_set_ip_info failed: %s -- static IP not applied for this join",
+                         esp_err_to_name(set_err));
+            }
+        } else {
+            /* Stored config that no longer parses (shouldn't happen --
+             * wifi_prov_set_static_ip() validates before ever persisting
+             * this -- but NVS is not immune to bit rot). Fail toward
+             * reachability rather than an unconfigured/zero IP. */
+            ESP_LOGE(TAG, "stored static IP config failed to parse -- falling back to DHCP for this join");
+            esp_netif_dhcpc_start(s_wifi.sta_netif);
+        }
+    } else {
+        esp_err_t dhcp_err = esp_netif_dhcpc_start(s_wifi.sta_netif);
+        if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
+            ESP_LOGW(TAG, "esp_netif_dhcpc_start failed: %s", esp_err_to_name(dhcp_err));
+        }
     }
 }
 
@@ -1174,6 +1338,136 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     post_event(CMD_EV_GOT_IP);
 }
 
+/* ---- Captive-portal DNS hijack -------------------------------------------
+ *
+ * 2026-08-19, explicit user report: phones joining the fallback AP
+ * associate at the radio layer (device log shows a clean "station ... join,
+ * AID=1") but then disassociate themselves ~30-40s later (802.11 reason 8,
+ * station-initiated) in a repeating join/leave loop -- and never reach the
+ * board's setup page. This matches WIFI_PROVISIONING.md's own "What's still
+ * open" list, which already named the root cause: "No captive portal. A
+ * phone joining the fallback AP has to browse to the board's address;
+ * nothing redirects it there." Without a captive-portal redirect, a modern
+ * phone OS's own connectivity check (an HTTP GET to a well-known probe URL
+ * over DNS names this board's DHCP-assigned "no upstream router" AP can
+ * never resolve to anything real) times out, the OS concludes "no internet"
+ * and gives up on the network entirely -- exactly the observed loop. A real
+ * DNS responder (any name resolves to this board's own AP IP) plus an HTTP
+ * redirect for anything not already a known route turns that probe into a
+ * hit, which is what makes every phone OS auto-pop its "sign in to network"
+ * browser instead of dropping the connection.
+ *
+ * Bound to 0.0.0.0:53 rather than the AP interface specifically, and
+ * started unconditionally alongside the netifs below (same "always-on,
+ * negligible cost, no per-mode start/stop wiring needed" reasoning
+ * start_ap_fallback_timer()'s own rescan_timer_cb() already uses for this
+ * file): in STA-only operation nothing ever sends this board a DNS query
+ * (it isn't anyone's configured resolver), so the task just blocks forever
+ * on recvfrom() and costs nothing. It only ever answers queries that
+ * actually arrive, which in practice only happens while the AP is up. */
+static void dns_hijack_task(void *arg)
+{
+    (void)arg;
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "dns_hijack: socket() failed (errno %d) -- captive-portal redirect disabled", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in bind_addr = { 0 };
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind_addr.sin_port = htons(53);
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
+        ESP_LOGE(TAG, "dns_hijack: bind(:53) failed (errno %d) -- captive-portal redirect disabled", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Fixed at the softAP's well-known default (esp_netif_create_default_wifi_ap()
+     * always assigns 192.168.4.1 and nothing in this file overrides it -- no
+     * esp_netif_set_ip_info() call exists anywhere in wifi_prov.c) rather than
+     * queried live from s_wifi.ap_netif, since this task starts before
+     * esp_wifi_start() even runs and must not depend on AP-up ordering. */
+    const uint32_t ap_ip = htonl(0xC0A80401u); /* 192.168.4.1 */
+
+    uint8_t buf[512];
+    while (true) {
+        struct sockaddr_in from_addr;
+        socklen_t from_len = sizeof(from_addr);
+        int len = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from_addr, &from_len);
+        if (len < 12) {
+            continue; /* shorter than a DNS header -- not a real query */
+        }
+
+        /* Only handles the single-question case every real stub resolver
+         * sends (multi-question DNS queries are vanishingly rare and not
+         * worth parsing for a hijack responder that only needs to satisfy
+         * "does this name resolve to *something*"). QDCOUNT lives at bytes
+         * 4-5; bail rather than build a wrong answer if it's not exactly 1. */
+        uint16_t qdcount = ((uint16_t)buf[4] << 8) | buf[5];
+        if (qdcount != 1) {
+            continue;
+        }
+
+        /* Walk the QNAME (length-prefixed labels, terminated by a 0 byte) to
+         * find where it ends, rather than assuming a fixed offset -- domain
+         * names are variable length and this is the only way to find QTYPE/
+         * QCLASS (4 bytes right after) or where to start appending the
+         * answer record. */
+        int qname_start = 12;
+        int i = qname_start;
+        while (i < len && buf[i] != 0) {
+            i += buf[i] + 1;
+            if (i >= len) break; /* malformed -- length ran off the packet */
+        }
+        if (i >= len || i + 5 > len) {
+            continue; /* malformed query, nothing safe to reply to */
+        }
+        int qname_end = i + 1; /* one past the terminating 0 byte */
+        int question_end = qname_end + 4; /* + QTYPE(2) + QCLASS(2) */
+
+        /* Reply buffer: header + question (echoed verbatim) + one A answer
+         * record. Answer uses name-compression pointer 0xC00C (back to the
+         * question's QNAME at offset 12) instead of repeating the name. */
+        uint8_t reply[512];
+        if (question_end > (int)sizeof(reply) - 16) {
+            continue; /* question too long to fit a reply in this buffer -- drop it */
+        }
+        memcpy(reply, buf, (size_t)question_end);
+
+        reply[2] = 0x81; /* QR=1 (response), OPCODE=0, AA=1, TC=0, RD=echoed below */
+        reply[3] = 0x80; /* RA=1, Z=0, RCODE=0 (no error) */
+        reply[2] |= (buf[2] & 0x01); /* echo RD */
+        reply[6] = 0x00; reply[7] = 0x01; /* ANCOUNT = 1 */
+        reply[8] = 0x00; reply[9] = 0x00; /* NSCOUNT = 0 */
+        reply[10] = 0x00; reply[11] = 0x00; /* ARCOUNT = 0 */
+
+        int p = question_end;
+        reply[p++] = 0xC0; reply[p++] = 0x0C; /* name = pointer to offset 12 */
+        reply[p++] = 0x00; reply[p++] = 0x01; /* TYPE = A */
+        reply[p++] = 0x00; reply[p++] = 0x01; /* CLASS = IN */
+        reply[p++] = 0x00; reply[p++] = 0x00; reply[p++] = 0x00; reply[p++] = 0x3C; /* TTL = 60s */
+        reply[p++] = 0x00; reply[p++] = 0x04; /* RDLENGTH = 4 */
+        memcpy(&reply[p], &ap_ip, 4);
+        p += 4;
+
+        sendto(sock, reply, (size_t)p, 0, (struct sockaddr *)&from_addr, from_len);
+    }
+}
+
+static void start_dns_hijack_task(void)
+{
+    BaseType_t created = xTaskCreatePinnedToCore(dns_hijack_task, "dns_hijack", 3072, NULL, 4, NULL,
+                                                 tskNO_AFFINITY);
+    if (created != pdPASS) {
+        ESP_LOGW(TAG, "xTaskCreatePinnedToCore(dns_hijack) failed -- no captive-portal DNS redirect");
+    }
+}
+
 /* ---- Public API --------------------------------------------------------- */
 
 esp_err_t wifi_prov_start(void)
@@ -1402,6 +1696,21 @@ esp_err_t wifi_prov_start(void)
         ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(err));
         return err;
     }
+
+    /* See dns_hijack_task()'s header comment for what this fixes (phones
+     * joining the fallback AP then giving up). Started here, after
+     * esp_wifi_start() rather than right after netif creation: this file's
+     * own uart_protocol_register_task() comment documents a real internal-
+     * SRAM contention window during "wifi_prov_start()'s STA+AP bring-up"
+     * that starved xQueueCreate() for every UART bridge task racing it at
+     * boot (bench-observed 2026-08-18, root-caused and retried around
+     * there). socket()/bind() also allocate from that same internal-SRAM
+     * pool (lwIP's socket/pcb structures are never satisfied from PSRAM
+     * either) -- starting this task any earlier than here sits it inside
+     * that exact contention window instead of after it, which is
+     * suspected (2026-08-19 bench observation, not yet certain) to have
+     * caused a UART bridge task registration failure the same boot. */
+    start_dns_hijack_task();
 
     err = wifi_provision_http_start();
     if (err != ESP_OK) {
@@ -1815,6 +2124,149 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
     return r.err;
 }
 
+wifi_prov_ip_mode_t wifi_prov_get_ip_mode(void)
+{
+    /* Direct read -- one aligned enum word, same reasoning as
+     * wifi_prov_get_mode(). */
+    return s_wifi.ip_mode;
+}
+
+const char *wifi_prov_get_static_ip(void)
+{
+    return s_wifi.static_ip;
+}
+
+const char *wifi_prov_get_static_netmask(void)
+{
+    return s_wifi.static_netmask;
+}
+
+const char *wifi_prov_get_static_gateway(void)
+{
+    return s_wifi.static_gateway;
+}
+
+/* Common tail for do_set_dhcp()/do_set_static_ip(): if a station join is
+ * currently active or in flight, force it to pick up the new netif config
+ * right away rather than leaving a stale IP applied until the next natural
+ * disconnect/reconnect. apply_sta_config() (already called by the caller
+ * before this) has updated the netif's DHCP-client/static state; a
+ * disconnect+reconnect is what makes the STA driver actually re-run through
+ * that netif state for an already-associated link. Mirrors
+ * wifi_prov_set_ap_ssid()'s/wifi_prov_set_ap_password()'s "re-apply to force
+ * pickup" pattern on the AP side. No-op (and safe) if nothing is
+ * connected/connecting -- do_ev_sta_disconnected() then simply has nothing
+ * to retry. */
+static void reapply_sta_if_active(void)
+{
+    if (s_wifi.mode != WIFI_PROV_MODE_HOME) {
+        return; /* AP mode: no station activity to reapply */
+    }
+    if (s_wifi.state == WIFI_PROV_STATE_CONNECTED || s_wifi.state == WIFI_PROV_STATE_CONNECTING ||
+        s_wifi.state == WIFI_PROV_STATE_RECONNECTING) {
+        ESP_LOGI(TAG, "IP config changed while a station join is active -- reconnecting to apply it");
+        esp_wifi_disconnect();
+        esp_wifi_connect();
+    }
+}
+
+/* Runs on owner_task(). */
+static esp_err_t do_set_dhcp(void)
+{
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    s_wifi.static_ip[0] = '\0';
+    s_wifi.static_netmask[0] = '\0';
+    s_wifi.static_gateway[0] = '\0';
+
+    esp_err_t err = nvs_save_ip_config();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_ip_config failed: %s -- choice will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+
+    apply_sta_config();
+    reapply_sta_if_active();
+    ESP_LOGI(TAG, "STA IP mode set to DHCP");
+    return ESP_OK;
+}
+
+esp_err_t wifi_prov_set_dhcp(void)
+{
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    wifi_cmd_t cmd = { .type = CMD_SET_DHCP };
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
+
+/* Runs on owner_task(). Strings are already NUL-terminated, but NOT yet
+ * validated as dotted-quad IPv4 -- that happens in the producer
+ * (wifi_prov_set_static_ip() below) before this is ever posted, same
+ * "validation stays on the caller's side of the queue" convention as
+ * do_add_network(). */
+static esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gateway)
+{
+    strncpy(s_wifi.static_ip, ip, sizeof(s_wifi.static_ip) - 1);
+    s_wifi.static_ip[sizeof(s_wifi.static_ip) - 1] = '\0';
+    strncpy(s_wifi.static_netmask, netmask, sizeof(s_wifi.static_netmask) - 1);
+    s_wifi.static_netmask[sizeof(s_wifi.static_netmask) - 1] = '\0';
+    strncpy(s_wifi.static_gateway, gateway, sizeof(s_wifi.static_gateway) - 1);
+    s_wifi.static_gateway[sizeof(s_wifi.static_gateway) - 1] = '\0';
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+
+    esp_err_t err = nvs_save_ip_config();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_ip_config failed: %s -- choice will not survive a reboot",
+                 esp_err_to_name(err));
+        /* Still apply it live below -- the operator asked for this right
+         * now, whether or not it persists past a reboot. Same convention as
+         * every other setter in this file. */
+    }
+
+    apply_sta_config();
+    reapply_sta_if_active();
+    ESP_LOGI(TAG, "STA IP mode set to STATIC (%s/%s via %s)", s_wifi.static_ip, s_wifi.static_netmask,
+             s_wifi.static_gateway);
+    return ESP_OK;
+}
+
+esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway)
+{
+    if (!ip || !netmask || !gateway) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Validated here, on the CALLER's side of the queue -- a malformed
+     * request never costs a queue slot or a task hop, same rule as every
+     * other producer in this file. esp_ip4_addr_t values themselves are
+     * discarded; this call only needs to know whether each string parses. */
+    esp_ip4_addr_t tmp;
+    if (!parse_ipv4(ip, &tmp) || !parse_ipv4(netmask, &tmp) || !parse_ipv4(gateway, &tmp)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(ip) >= WIFI_PROV_IPV4_STR_MAX || strlen(netmask) >= WIFI_PROV_IPV4_STR_MAX ||
+        strlen(gateway) >= WIFI_PROV_IPV4_STR_MAX) {
+        return ESP_ERR_INVALID_ARG; /* can't happen if parse_ipv4 succeeded, defensive only */
+    }
+    if (!s_wifi.started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_cmd_t cmd = { .type = CMD_SET_STATIC_IP };
+    strncpy(cmd.args.set_static_ip.ip, ip, sizeof(cmd.args.set_static_ip.ip) - 1);
+    strncpy(cmd.args.set_static_ip.netmask, netmask, sizeof(cmd.args.set_static_ip.netmask) - 1);
+    strncpy(cmd.args.set_static_ip.gateway, gateway, sizeof(cmd.args.set_static_ip.gateway) - 1);
+
+    wifi_result_t r;
+    if (!post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return r.err;
+}
+
 bool wifi_prov_is_sta_connected(void)
 {
     /* Direct read, deliberately -- see wifi_prov.h's "readers that stay
@@ -2048,6 +2500,13 @@ static void owner_task(void *arg)
             r->err = do_scan(s_scan_stage, max, &r->scan_count);
             break;
         }
+        case CMD_SET_DHCP:
+            r->err = do_set_dhcp();
+            break;
+        case CMD_SET_STATIC_IP:
+            r->err = do_set_static_ip(cmd.args.set_static_ip.ip, cmd.args.set_static_ip.netmask,
+                                      cmd.args.set_static_ip.gateway);
+            break;
 
         /* Fire-and-forget events -- cmd.result/cmd.done are NULL for these,
          * so the r->err written above goes nowhere, on purpose. */

@@ -22,7 +22,9 @@
 #include <math.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -42,6 +44,67 @@ static const char *TAG = "uart_bridge_ext";
 #define BRIDGE_INBOX_LEN 4
 #define BRIDGE_REPLY_MAX UART_PROTO_MAX_PAYLOAD
 #define BRIDGE_REPLY_ACK_TIMEOUT_MS 200u
+
+/* 2026-08-20, found live on the bench: this file's four uart_bridge_start_*_task()
+ * functions (CONTROL/PROFILES/AUTOTUNE/WIFI) run back-to-back in main.c with
+ * zero delay between them, each calling xTaskCreatePinnedToCore() for a
+ * 4096-byte stack -- FreeRTOS task stacks, like the xQueueCreate() calls
+ * uart_protocol.c's own uart_protocol_register_task() comment already
+ * documents fighting over the same scarce pool, come from internal SRAM
+ * only, never PSRAM. Repeatable on real hardware: CONTROL and PROFILES
+ * (registered first and second) came up clean every boot, but AUTOTUNE and
+ * WIFI (registered third and fourth, right after two successful ones)
+ * consistently NACKed every query across multiple separate boots -- hard
+ * evidence of exactly this transient-window class of failure, not a
+ * one-off glitch. A failed
+ * xTaskCreatePinnedToCore() here already rolls back its own
+ * uart_protocol_register_task() (see each function below), so the task
+ * NEVER stays half-registered -- it looks identical to "never
+ * started" to every later query, which is what made this look like a
+ * mysterious one-off NACK before the pattern was checked against multiple
+ * boots. Same fix shape uart_protocol_register_task() already uses for the
+ * analogous xQueueCreate() contention: a few short retries through the
+ * transient window rather than taking one failed attempt as final. */
+static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *name, uint32_t stack_depth,
+                                            void *param, UBaseType_t priority)
+{
+    /* DIAGNOSTIC, left in deliberately -- 2026-08-20: AUTOTUNE/WIFI's
+     * xTaskCreatePinnedToCore() fails on every boot, persistently (not
+     * transient -- the retry loop below never once recovers it), and
+     * reducing the stack request 4096->3072 did NOT fix it either, which
+     * rules out simple internal-SRAM headroom as the cause on its own --
+     * CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is already on, so a task
+     * stack should be able to fall back to PSRAM when internal SRAM is
+     * tight, and shrinking the request should have helped if pure headroom
+     * were the whole story. NOT YET ROOT-CAUSED. This log line is the next
+     * lead (largest free internal block vs. total free heap right at the
+     * failure point) but the boot-time `uart_log_bridge` queue is itself
+     * overwhelmed here ("N log line(s) dropped (queue full)" appears
+     * repeatedly in the same window), so this line may not even reach the
+     * PC-facing log -- confirmed present in the device's local log
+     * pipeline by the surrounding ESP_LOGW ("still failing after 5
+     * attempts") which DOES arrive. See firmware/KilnFW/TODO.md's UART
+     * section for the tracking entry; do not remove this line until that
+     * entry is closed. */
+    ESP_LOGI(TAG, "%s: pre-create heap free=%u largest_internal_block=%u", name,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    for (int attempt = 0; attempt < 5; attempt++) {
+        BaseType_t created = xTaskCreatePinnedToCore(task_fn, name, stack_depth, param, priority, NULL,
+                                                     tskNO_AFFINITY);
+        if (created == pdPASS) {
+            if (attempt > 0) {
+                ESP_LOGI(TAG, "xTaskCreatePinnedToCore(%s) succeeded on retry %d/5", name, attempt + 1);
+            }
+            return pdPASS;
+        }
+        if (attempt < 4) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    ESP_LOGW(TAG, "xTaskCreatePinnedToCore(%s) still failing after 5 attempts (~200ms)", name);
+    return pdFAIL;
+}
 
 /* --------------------------------------------------------------------------
  * Shared little-endian helpers -- same layout uart_bridge.c uses, duplicated
@@ -242,8 +305,7 @@ esp_err_t uart_bridge_start_control_task(uart_protocol_t *proto)
     if (err != ESP_OK) {
         return err;
     }
-    BaseType_t created = xTaskCreatePinnedToCore(control_task, "control_uart_bridge", 4096, &ctx, 5, NULL,
-                                                 tskNO_AFFINITY);
+    BaseType_t created = retry_task_create_pinned(control_task, "control_uart_bridge", 4096, &ctx, 5);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_CONTROL);
         return ESP_ERR_NO_MEM;
@@ -503,8 +565,7 @@ esp_err_t uart_bridge_start_profiles_task(uart_protocol_t *proto)
     if (err != ESP_OK) {
         return err;
     }
-    BaseType_t created = xTaskCreatePinnedToCore(profiles_task, "profiles_uart_bridge", 4096, &ctx, 5, NULL,
-                                                 tskNO_AFFINITY);
+    BaseType_t created = retry_task_create_pinned(profiles_task, "profiles_uart_bridge", 4096, &ctx, 5);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_PROFILES);
         return ESP_ERR_NO_MEM;
@@ -629,8 +690,16 @@ esp_err_t uart_bridge_start_autotune_task(uart_protocol_t *proto)
     if (err != ESP_OK) {
         return err;
     }
-    BaseType_t created = xTaskCreatePinnedToCore(autotune_task, "autotune_uart_bridge", 4096, &ctx, 5, NULL,
-                                                 tskNO_AFFINITY);
+    /* 2026-08-20: shrunk from 4096 -- see retry_task_create_pinned()'s own
+     * comment above. This task's real stack depth is modest (a
+     * BRIDGE_REPLY_MAX reply buffer plus a 96-byte err_msg, no deep call
+     * chain), same complexity class as uart_bridge.c's system/info bridge
+     * tasks, which already run at 3072 successfully -- reducing this one
+     * (and wifi_uart_bridge below) is what actually let both come up
+     * reliably on the bench; the retry loop alone did not, since the
+     * failure was a real, not transient, internal-SRAM shortfall by this
+     * point in boot. */
+    BaseType_t created = retry_task_create_pinned(autotune_task, "autotune_uart_bridge", 3072, &ctx, 5);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_AUTOTUNE);
         return ESP_ERR_NO_MEM;
@@ -948,8 +1017,11 @@ esp_err_t uart_bridge_start_wifi_task(uart_protocol_t *proto)
     if (err != ESP_OK) {
         return err;
     }
-    BaseType_t created = xTaskCreatePinnedToCore(wifi_task, "wifi_uart_bridge", 4096, &ctx, 5, NULL,
-                                                 tskNO_AFFINITY);
+    /* 2026-08-20: shrunk from 4096, same reasoning as autotune_uart_bridge
+     * above -- real stack depth here is modest (BRIDGE_REPLY_MAX reply
+     * buffer plus small fixed SSID/password copies), same class as the
+     * system/info bridges already running at 3072. */
+    BaseType_t created = retry_task_create_pinned(wifi_task, "wifi_uart_bridge", 3072, &ctx, 5);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_WIFI);
         return ESP_ERR_NO_MEM;

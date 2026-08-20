@@ -314,7 +314,20 @@ esp_err_t uart_owner_transfer(uart_owner_t *owner,
         return ESP_ERR_INVALID_ARG;
     }
 
-    SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
+    /* 2026-08-19: was xSemaphoreCreateBinary()/vSemaphoreDelete() -- a heap
+     * allocation from internal SRAM on every single transfer. Every bridge
+     * task (touch, display, log, wifi, control, profiles, autotune, ...)
+     * shares this one owner and calls this function constantly (a touch
+     * sample or an LVGL flush is one call each), so under real interactive
+     * load (bench-observed: touching the screen while the AP/Wi-Fi bridge
+     * was also active) many of these could be transiently alive at once,
+     * competing for the same internal-SRAM heap this file's sibling
+     * uart_protocol.c already documents as scarce and easy to starve (see
+     * its uart_protocol_register_task() comment on the same pool). Switched
+     * to a stack-resident static semaphore -- zero heap allocation for the
+     * single most frequently called path in the whole UART stack. */
+    StaticSemaphore_t done_sem_storage;
+    SemaphoreHandle_t done_sem = xSemaphoreCreateBinaryStatic(&done_sem_storage);
     if (!done_sem) {
         return ESP_ERR_NO_MEM;
     }

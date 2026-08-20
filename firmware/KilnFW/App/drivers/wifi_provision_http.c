@@ -125,6 +125,12 @@ static const char *mode_name(wifi_prov_mode_t m)
     return m == WIFI_PROV_MODE_AP ? "ap" : "home";
 }
 
+/* 2026-08-20, web-GUI-only static-IP addition (see wifi_prov.h). */
+static const char *ip_mode_name(wifi_prov_ip_mode_t m)
+{
+    return m == WIFI_PROV_IP_MODE_STATIC ? "static" : "dhcp";
+}
+
 /* Escapes '"' and '\\' for embedding an untrusted-ish string (a saved SSID,
  * which came from a POST body at some point) into a JSON string literal.
  * Anything else is passed through -- this is a status readout, not a strict
@@ -171,19 +177,32 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     int8_t sta_rssi = wifi_prov_get_sta_rssi();
     uint8_t ap_clients = wifi_prov_get_ap_client_count();
 
+    /* 2026-08-20, web-GUI-only: current STA IP mode and, if static, the
+     * configured values -- so the page can prefill its static-IP fields on
+     * load without a separate round trip. Dotted-quad strings, never
+     * user-supplied at read time (they came from a prior POST this same
+     * server validated), so no json_escape() needed -- same as sta_ip just
+     * above. */
+    const char *ip_mode = ip_mode_name(wifi_prov_get_ip_mode());
+    const char *static_ip = wifi_prov_get_static_ip();
+    const char *static_netmask = wifi_prov_get_static_netmask();
+    const char *static_gateway = wifi_prov_get_static_gateway();
+
     /* mode is the one explicit toggle the page renders; state is the
      * finer-grained detail of what's happening while home mode acts on a
      * join (unprovisioned/connecting/connected/reconnecting) -- both are
      * sent so the page can show one coherent switch plus a status line
      * without guessing at either from the other. */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24];
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":\"%s\",\"sta_connected\":%s,"
                      "\"sta_ip\":\"%s\",\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
-                     "\"ap_clients\":%u}",
+                     "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":\"%s\","
+                     "\"static_netmask\":\"%s\",\"static_gateway\":\"%s\"}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_escaped,
                      sta_connected ? "true" : "false", sta_ip, ap_ssid_escaped, ap_password_escaped,
-                     (int)sta_rssi, (unsigned)ap_clients);
+                     (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip, static_netmask,
+                     static_gateway);
     if (n < 0) {
         n = 0;
     }
@@ -382,6 +401,84 @@ static esp_err_t forget_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+/* 2026-08-20, web-GUI-only: POST /ip_config -- switches the STA interface
+ * between DHCP and a static IP. mode=dhcp needs no other fields; mode=static
+ * requires ip/netmask/gateway, each validated as dotted-quad IPv4 by
+ * wifi_prov_set_static_ip() itself (ESP_ERR_INVALID_ARG on anything else) --
+ * this handler never passes an unvalidated string to esp_netif. Deliberately
+ * a separate endpoint from /provision: that one's body-field dispatch
+ * (mode=home|ap, ap_ssid/ap_password, ssid/password) is already a 3-way
+ * branch on which fields are present, and ip_config's "mode" value space
+ * (dhcp/static) is unrelated to and easily confused with /provision's own
+ * "mode" field (home/ap) if merged into the same handler. */
+#define IP_CONFIG_BODY_MAX 128 /* "mode=static&ip=255.255.255.255&netmask=255.255.255.255&gateway=255.255.255.255" + slack */
+
+static esp_err_t ip_config_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > IP_CONFIG_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[IP_CONFIG_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            ESP_LOGW(TAG, "ip_config body read failed/short: %d", ret);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char mode_val[8]; /* "dhcp" (4) or "static" (6), plus NUL */
+    int mode_len = http_form_find_field(body, "mode", mode_val, sizeof(mode_val));
+    if (mode_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode missing or too long");
+        return ESP_OK;
+    }
+
+    if (mode_len == 4 && strncmp(mode_val, "dhcp", 4) == 0) {
+        esp_err_t err = wifi_prov_set_dhcp();
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not switch to DHCP");
+            return ESP_OK;
+        }
+        return httpd_resp_sendstr(req, "ok");
+    }
+    if (mode_len != 6 || strncmp(mode_val, "static", 6) != 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode must be 'dhcp' or 'static'");
+        return ESP_OK;
+    }
+
+    char ip[WIFI_PROV_IPV4_STR_MAX];
+    char netmask[WIFI_PROV_IPV4_STR_MAX];
+    char gateway[WIFI_PROV_IPV4_STR_MAX];
+    int ip_len = http_form_find_field(body, "ip", ip, sizeof(ip));
+    int netmask_len = http_form_find_field(body, "netmask", netmask, sizeof(netmask));
+    int gateway_len = http_form_find_field(body, "gateway", gateway, sizeof(gateway));
+    if (ip_len < 0 || netmask_len < 0 || gateway_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "static mode requires ip, netmask, and gateway");
+        return ESP_OK;
+    }
+
+    esp_err_t err = wifi_prov_set_static_ip(ip, netmask, gateway);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_set_static_ip failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_INVALID_ARG) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "ip/netmask/gateway must each be a valid dotted-quad IPv4 address");
+        } else {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set static IP");
+        }
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr(req, "ok");
+}
+
 static esp_err_t provision_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > PROV_BODY_MAX) {
@@ -499,6 +596,29 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+/* Captive-portal redirect, 2026-08-19 (explicit user report of phones
+ * joining the fallback AP then giving up -- see wifi_prov.c's
+ * dns_hijack_task() header comment for the full mechanism). Every phone
+ * OS's connectivity-check probe (Android's /generate_204, Apple's
+ * /hotspot-detect.html, Windows' /connecttest.txt, etc.) asks for a
+ * specific, never-registered path -- none of them are routes this server
+ * knows, so they all land here already, with no per-OS special-casing
+ * needed. A plain 302 to "/" is enough: index_get_handler() there already
+ * serves wifi_provision_page.html whenever the board isn't STA-connected,
+ * which is a different response than every probe expects (a 204 with no
+ * body, or specific known text) -- that mismatch is exactly what makes
+ * every major OS treat the network as "captive" and pop its own sign-in
+ * browser, no captive-portal-specific content negotiation required on this
+ * end. */
+static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t err)
+{
+    (void)err;
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 esp_err_t wifi_provision_http_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -580,6 +700,11 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t forget_uri = {
         .uri = "/forget", .method = HTTP_POST, .handler = forget_post_handler,
     };
+    /* 2026-08-20, web-GUI-only DHCP/static IP toggle -- see
+     * ip_config_post_handler()'s comment. */
+    static const httpd_uri_t ip_config_uri = {
+        .uri = "/ip_config", .method = HTTP_POST, .handler = ip_config_post_handler,
+    };
     /* TODO.md 10.6's shared-theme follow-up: registered here, not a 7th
      * *_http.c file, because this is the module that owns s_server -- see
      * the extern-symbol block's comment above for why that also makes it
@@ -618,9 +743,12 @@ esp_err_t wifi_provision_http_start(void)
     REGISTER_OR_LOG(&provision_uri);
     REGISTER_OR_LOG(&networks_uri);
     REGISTER_OR_LOG(&forget_uri);
+    REGISTER_OR_LOG(&ip_config_uri);
     REGISTER_OR_LOG(&theme_css_uri);
 
 #undef REGISTER_OR_LOG
+
+    httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_portal_404_handler);
 
     ESP_LOGI(TAG, "provisioning HTTP server up");
     return ESP_OK;

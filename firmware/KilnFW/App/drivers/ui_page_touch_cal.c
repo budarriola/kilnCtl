@@ -44,6 +44,9 @@ static const char *TAG = "ui_page_touch_cal";
 
 static lv_obj_t *s_target_circle;
 static lv_obj_t *s_progress_label;
+static lv_obj_t *s_cancel_btn;
+
+#define CANCEL_BTN_DRAWN_PX 28
 
 static int32_t s_target_x[POINT_COUNT];
 static int32_t s_target_y[POINT_COUNT];
@@ -216,6 +219,22 @@ static void overlay_press_cb(lv_event_t *e)
     show_point(s_current_point, s_current_cycle);
 }
 
+/* 2026-08-19: cancel/back path, added per explicit user request (UI_PLAN.md
+ * LCD work-queue item 6). Returns to "config" without calling
+ * touch_cal_store_save() -- a cancelled run must not persist a partial or
+ * garbage calibration. Deliberately does NOT reset s_current_point/cycle or
+ * the sample buffers here: on_screen_loaded() already does that
+ * unconditionally on every kiln_ui_show("touch_cal"), so a later
+ * re-calibration attempt always starts clean regardless of how the previous
+ * attempt ended. */
+static void cancel_press_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "calibration cancelled by user at point=%d/%d pass=%d/%d",
+              s_current_point + 1, POINT_COUNT, s_current_cycle + 1, CAL_CYCLES);
+    kiln_ui_show("config");
+}
+
 /* Fired every time this screen is loaded (kiln_ui.c builds a page's screen
  * object once and reuses it thereafter -- see kiln_ui_show()'s doc comment
  * -- so per-run state has to be reset here rather than only in build()).
@@ -229,6 +248,22 @@ static void on_screen_loaded(lv_event_t *e)
     memset(s_sample_raw_x, 0, sizeof(s_sample_raw_x));
     memset(s_sample_raw_y, 0, sizeof(s_sample_raw_y));
     show_point(0, 0);
+
+    /* Cancel only makes sense when a working touch mapping already exists to
+     * fall back to (kiln_ui.c's forced-first-boot comment: an uncalibrated
+     * board's other pages' buttons don't reliably work yet, so "cancel" would
+     * strand the user on a screen they can't navigate). On a forced first
+     * run there is nowhere safe to cancel to, so the button stays hidden and
+     * non-clickable -- overlay still owns the whole screen in that case,
+     * unchanged from before this pass. */
+    bool can_cancel = touch_cal_store_is_calibrated();
+    if (can_cancel) {
+        lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_cancel_btn, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_add_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_CLICKABLE);
+    }
 }
 
 lv_obj_t *ui_page_touch_cal_build(void)
@@ -268,6 +303,46 @@ lv_obj_t *ui_page_touch_cal_build(void)
     lv_obj_set_style_border_width(overlay, 0, 0);
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(overlay, overlay_press_cb, LV_EVENT_CLICKED, NULL);
+
+    /* Cancel button, created after `overlay` so it draws (and hit-tests) on
+     * top of it -- lv_indev_search_obj() checks highest z-order first, so a
+     * later sibling always wins a point that lands inside both. Sits in the
+     * top-left status-bar strip: compute_targets() already reserves
+     * UI_THEME_STATUS_BAR_HEIGHT_PX at the top before placing any grid
+     * target there, so this can't overlap a calibration point or shrink
+     * compute_targets()'s usable area (targets stay at the true screen edge,
+     * which compute_targets()'s own comment explains matters for the affine
+     * fit's extrapolation accuracy). Drawn small (28px, below
+     * UI_THEME_MIN_TOUCH_TARGET_PX) to fit the 32px-tall status-bar strip --
+     * same "invisible extended hit area" pattern UI_PLAN.md already names
+     * for ui_page_network.c's/ui_page_temperature.c's other shrunk buttons,
+     * restored toward 72px via ui_theme_apply_touch_area()'s
+     * compact_layout=false path below. Starts hidden; on_screen_loaded()
+     * decides visibility every time this page is shown, based on whether a
+     * working calibration already exists to cancel back to. */
+    s_cancel_btn = lv_button_create(scr);
+    lv_obj_set_size(s_cancel_btn, 64, CANCEL_BTN_DRAWN_PX);
+    lv_obj_set_pos(s_cancel_btn, UI_THEME_PADDING_PX / 2, UI_THEME_PADDING_PX / 2);
+    lv_obj_set_style_radius(s_cancel_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_bg_color(s_cancel_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(s_cancel_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_cancel_btn, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_style_border_opa(s_cancel_btn, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cancel_btn, 1, 0);
+    lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cancel_btn, LV_OBJ_FLAG_HIDDEN);
+    /* lv_button_create() objects are clickable by default -- explicitly
+     * remove it here too so a hidden-but-not-yet-shown button can never eat
+     * a touch meant for the overlay beneath it before on_screen_loaded()
+     * decides visibility for the first time. */
+    lv_obj_remove_flag(s_cancel_btn, LV_OBJ_FLAG_CLICKABLE);
+    ui_theme_apply_touch_area(s_cancel_btn, false);
+    lv_obj_add_event_cb(s_cancel_btn, cancel_press_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cancel_label = lv_label_create(s_cancel_btn);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_set_style_text_color(cancel_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_center(cancel_label);
 
     /* Also done in on_screen_loaded() (fired by kiln_ui_show()'s
      * lv_screen_load() right after this returns) -- set here too, so the

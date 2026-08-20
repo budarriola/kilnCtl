@@ -231,12 +231,46 @@ isn't covered by Dashboard/Profiles/Settings/Network today:
   from M0/M1 tooling, just not surfaced to the operator. Partly blocked on
   M5 for the link-stats half; the ESP-only half (heap/flash/IC temps) is
   buildable now.
-- **Manual zone control page.** Section 2/10.3's "Temperature" nav item is
-  currently a stub. Give it real per-zone content: current reading, manual
-  setpoint override (bypassing the profile, for e.g. drying/venting a kiln
-  without running a full program), and the zone's calibration offset —
-  same data `Settings → Thermocouples & Zones` edits, this is the
-  operate-time view of it rather than the configure-time one.
+  **ESP-only half built (2026-08-20)**: new `ui_page_diagnostics.c/.h`,
+  reachable from `ui_page_config.c`'s nav hub ("Diagnostics"). Shows
+  firmware version + build date/time (`esp_app_get_description()`), ESP
+  uptime (`esp_timer_get_time()`), current + worst-case-ever free heap
+  (`esp_get_free_heap_size()`/`esp_get_minimum_free_heap_size()` — the
+  worst-case number is particularly relevant after this session's own
+  internal-SRAM exhaustion crash-loop investigation, see ROADMAP.md's
+  2026-08-19 entry), free PSRAM (`heap_caps_get_free_size(MALLOC_CAP_SPIRAM)`),
+  and the ESP32-S3 die temperature (reusing `board_temps_get_live()` — not a
+  second read of the same hardware `ui_page_board_health.c` already shows).
+  "Flash-free" from the original wording deliberately dropped — this
+  board's dual-OTA-slot-plus-several-NVS-partitions layout (ROADMAP.md M8)
+  doesn't reduce to one honest "bytes free" number, see the page's own
+  header comment. Safety-link-stats half still blocked on M5, unchanged.
+  Build-clean, flashed via OpenOCD/JTAG, confirmed booting clean
+  (`get_fw_version()`/`get_device_log()` against the live board).
+  **2026-08-20, explicit user follow-up request: "for the diagnostic pages
+  i also want the ability to see the status of the thermocouple ics and
+  all of their possible faults. diagnostics should be broken up into
+  multiple pages."** Built as a SEPARATE page (`ui_page_thermo_faults.c/.h`,
+  `ui_page_diagnostics.c` left untouched), reachable from `ui_page_config.c`'s
+  nav hub as "Thermocouple Faults" — per-channel (3, `MAX31856_CHANNEL_COUNT`)
+  live fault status via `thermo_owner_command_read_all()` (the single-writer
+  bus owner, same call `safety_link.c` already uses — no second, racing
+  read of the SPI bus). Shows every SR fault bit
+  (OPEN/OVUV/TCLOW/TCHIGH/CJLOW/CJHIGH/TCRANGE/CJRANGE — the last two,
+  `MAX31856_FAULT_TCRANGE`/`MAX31856_FAULT_CJRANGE`, had no `#define` in
+  `MAX31856.h` before this pass, only prose comments; added alongside the
+  existing `MAX31856_MASK_*` constants), `~FAULT` pin state, and SPI-transfer
+  health per channel. No "clear faults" action — deliberately out of scope,
+  visibility only, per the user's request wording. Fixed-height (180px),
+  internally scrollable list of three 72px rows — see `docs/UI_PLAN.md`'s
+  LCD audit table for the worst-case-text-wrap budget math. Build-clean,
+  flashed via OpenOCD/JTAG, confirmed booting clean on the bench board.
+- ~~**Manual zone control page.**~~ **Declined by explicit user request
+  (2026-08-20)** — no manual setpoint override bypassing a running profile.
+  Section 2/10.3's "Temperature" nav item is not a stub any more regardless:
+  `ui_page_temperature.c` already built per-zone current reading + manual
+  relay toggles (see its own header comment and `docs/UI_PLAN.md`). Only the
+  setpoint-override half of this old bullet is what's being dropped.
 - **Backup / restore page.** Export saved profiles + zone/relay/network
   config as one downloadable blob (web) / to a file over the debug link
   (LCD is display-only for this, no removable storage), and re-import it —
@@ -333,6 +367,123 @@ AP-SSID field alongside it.
       log link. The RP2040 safety-processor firmware (not in this repo)
       doesn't need to know about a link whose entire purpose is "may or may
       not exist."
+
+**2026-08-20, explicit user request: DHCP/static IP for the home network
+connection, web GUI only** ("on the web gui i want the ability to choose
+between dhcp and static ip for the home network connection. keep the lcd
+network settings page simple" — `ui_page_network.c` deliberately untouched).
+
+- [x] `wifi_prov.h`/`.c`: new `wifi_prov_ip_mode_t` (`WIFI_PROV_IP_MODE_DHCP`/
+      `WIFI_PROV_IP_MODE_STATIC`), `wifi_prov_get_ip_mode()`,
+      `wifi_prov_get_static_ip/netmask/gateway()`, `wifi_prov_set_dhcp()`,
+      `wifi_prov_set_static_ip()`. Persisted to the existing `wifi_cfg` NVS
+      namespace/`wifi_nvs` partition (new keys `ip_mode`/`static_ip`/
+      `static_netmask`/`static_gw`), same commit pattern every other field
+      in this file uses. IPv4 dotted-quad validated via lwIP's
+      `ip4addr_aton()` before anything is persisted or applied. Owner-task
+      commands `CMD_SET_DHCP`/`CMD_SET_STATIC_IP`, same single-writer
+      command-queue discipline as every other mutation in this file.
+      Applied inside `apply_sta_config()` — the one function every STA join
+      path (`wifi_prov_start()`, `start_sta_join()`, `do_rescan_tick()`)
+      already funnels through — via `esp_netif_dhcpc_stop()` +
+      `esp_netif_set_ip_info()` before `esp_wifi_connect()`. Toggling mode
+      while already connected forces a disconnect/reconnect
+      (`reapply_sta_if_active()`) so the change takes effect immediately.
+- [x] `wifi_provision_http.c`: new `POST /ip_config` (form fields `mode`
+      dhcp|static, plus `ip`/`netmask`/`gateway` for static — same
+      Content-Length-checked-first, fixed-buffer, clean-400-on-malformed
+      discipline as `/provision`/`/forget`). `GET /status` JSON extended
+      with `ip_mode`/`static_ip`/`static_netmask`/`static_gateway`.
+- [x] `wifi_provision_page.html`: new "IP Address" section — DHCP/Static
+      toggle, three inputs shown only for Static, prefilled from `/status`,
+      submits to `/ip_config`. Same theme.css classes/touch-target sizing
+      as the rest of the page.
+- [ ] **Known gap, not yet fixed**: a wrong-but-parseable static IP (bad
+      gateway/subnet) still reaches `WIFI_PROV_STATE_CONNECTED` at the L2
+      layer, so `ap_fallback_timer`'s DHCP-timeout-triggered recovery does
+      not self-heal a bad static config — not a full lockout (switch back
+      to DHCP/AP via the same API, or power-cycle) but a real reachability
+      edge case worth closing before this is trusted on a remote/unattended
+      kiln. See `docs/UI_PLAN.md`'s web work-queue item 6.
+- [ ] **Not exercised against a real router this pass** — build-clean,
+      flashed, confirmed booting clean, but the actual DHCP/static toggle
+      behavior needs a live network to test against, which this environment
+      doesn't have.
+
+**2026-08-20: explicit user request to test everything found several real,
+separate bugs.** "go and test everything you can. add mcp tools where you
+need them. check all gui items through a web brouser and check the lcd
+through simulated klicks. make sure that back buttons only go back one
+page. also add support for the temp sensors you currently have access to."
+
+- [x] **ESP32-S3 die-temperature sensor fixed** — `board_temps.c`'s
+      `temperature_sensor_install()` was failing on every single boot
+      ("Cannot select the correct range"), confirmed live on the bench
+      before this fix. Root cause read directly from the installed IDF
+      v6.0.2 source: the requested (0, 100) range doesn't fit entirely
+      inside any one of the five fixed hardware buckets
+      `esp_hal_ana_conv/esp32s3/temperature_sensor_periph.c` defines — the
+      driver requires full containment, not "best coverage" as this file's
+      old comment assumed. **Fixed**: changed the request to (-10, 80), an
+      exact match for one whole bucket (±1°C error). Confirmed live on the
+      bench post-fix: `"Range [-10°C ~ 80°C], error < 1°C"` /
+      `"ESP32-S3 internal temperature sensor up"` now log cleanly every
+      boot. This is the one temperature sensor actually present and
+      reachable on this bench right now — no MAX31856/thermocouple hardware
+      is currently attached (`thermo_read()` returns "SPI read failed" on
+      all 3 channels, confirmed live), so there was nothing else to "add
+      support for" on the hardware side; the die sensor is what the new
+      Diagnostics page (above) now shows a real number for instead of "n/a".
+- [x] **Back-button navigation audit, full codebase sweep.** Grepped every
+      `kiln_ui_show()` call in every `ui_page_*.c` file and traced the
+      whole graph: `home` → `config` (Menu button) → any of 9 hub pages
+      (temperature/board_health/network/safety/history/touch_cal/
+      diagnostics/thermo_faults/[config's own Back → home]), each hub
+      page's Back → `config`, one hop, no exceptions. `touch_cal`'s Cancel
+      → `config` (this session's new addition), its normal
+      finish-calibration flow → `touch_test` → `home` (a deliberate linear
+      first-boot/re-cal flow, not a "back" button, unchanged from its own
+      documented design). No other page skips a level or goes to the wrong
+      target — the `ui_page_temperature.c` bug found and fixed earlier this
+      session was the only one.
+- [x] **Added a browser-automation MCP tool** (`@playwright/mcp`, via npx,
+      in `.mcp.json`) per explicit request, for testing the web GUI.
+      **Not usable this session** — MCP servers are loaded at session
+      start, so a newly-added one needs a reconnect/restart to become
+      available; also, this dev environment's Wi-Fi adapter cannot see the
+      `kilnCtl` AP at all (`netsh wlan show networks` found nothing) and
+      has no route to the board's network otherwise (confirmed via
+      `Get-NetIPAddress` — link-local-only, no real network joined) --
+      testing the web GUI (in a real browser or via raw HTTP) is not
+      possible from this environment regardless of the MCP tool, and needs
+      either physical/network proximity to the board or a session restart
+      plus a reachable network to attempt.
+- [ ] **UART bridge task registration bug, investigated further, still NOT
+      root-caused.** `UART_TASK_ID_AUTOTUNE` (10) and `UART_TASK_ID_WIFI`
+      (11) fail `xTaskCreatePinnedToCore()` on every single boot,
+      persistently — not the transient window
+      `uart_protocol_register_task()`'s own comment describes for its
+      analogous `xQueueCreate()` case. Added a retry loop
+      (`retry_task_create_pinned()`, same shape) AND shrunk both tasks'
+      stack request 4096→3072 (matching `uart_bridge.c`'s system/info
+      bridges' already-successful size for equivalent-complexity work) —
+      **neither fixed it**, which rules out plain internal-SRAM headroom as
+      the sole cause, especially since `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`
+      is already on and should let a stack fall back to PSRAM under
+      pressure. A diagnostic log line (free heap / largest internal free
+      block right before the failing call) was added and left in place —
+      it may itself be getting dropped by the same boot-time
+      `uart_log_bridge` queue-full condition visible in the surrounding
+      log (`"N log line(s) dropped (queue full)"`), which is why this
+      wasn't fully chased down this pass. CONTROL(8) and PROFILES(9),
+      registered immediately before these two in the same tight sequence,
+      succeed every boot. Does not affect the AP's actual radio-level
+      operation (phones can still join, per earlier session logs) — only
+      PC/MCP tooling's ability to query Wi-Fi/autotune state over UART.
+      Next step for whoever picks this up: get a real coredump or GDB
+      backtrace at the failure point rather than relying on
+      `uart_log_bridge`, which is demonstrably unreliable during this exact
+      boot window.
 
 ## 2. Web UI — Main / Dashboard page
 
@@ -4183,10 +4334,60 @@ dashboard but is the touchscreen's home, not a secondary view):
       status bar. **Added 2026-08-18 (separate follow-up within this same
       pass, see status update below) — not in the original page-designs
       list, added on explicit request.**
-- [ ] **Added to plan 2026-08-18, not yet built:** "Temperature" nav item's
-      stub above becomes the real manual-zone-control page from 0.5's new
-      page list — setpoint override + calibration readout, same getters
-      section 3's zone settings already exposes.
+- [x] ~~"Temperature" nav item's stub above becomes the real manual-zone-
+      control page from 0.5's new page list — setpoint override +
+      calibration readout."~~ **Declined by explicit user request
+      (2026-08-20)**, no manual setpoint override wanted. `ui_page_temperature.c`
+      is not a stub regardless — already built (2026-08-11 pass) with
+      per-zone current reading + manual relay toggles; that part stays.
+- [x] `ui_page_touch_cal.c` had no cancel/back path — full-screen overlay
+      was the only clickable object, every press advanced the sequence, no
+      way out short of finishing every point. **Fixed (2026-08-19)**: corner
+      "Cancel" button above the overlay in z-order, returns to `config`
+      without saving a partial calibration; hidden on a forced first-run
+      boot since no working `config` screen exists yet to cancel back to.
+      See `docs/UI_PLAN.md` LCD work-queue item 6. Build-clean, not
+      hardware-verified.
+- [x] `ui_page_temperature.c`'s Back button went to `"home"` instead of
+      `"config"` — every other page reached from the config nav hub
+      correctly returns to `config`; temperature alone skipped it. **Fixed
+      (2026-08-19)**, found during the touch-cal Cancel work above. See
+      `docs/UI_PLAN.md`'s "LCD navigation" note. Build-clean, not
+      hardware-verified.
+- [x] **AP captive portal, 2026-08-19, explicit user report ("can't connect
+      to the AP, worked before").** Device log showed phones associating
+      fine (`station ... join, AID=1`) then self-disconnecting ~30-40s
+      later (802.11 reason 8) in a loop — the documented
+      `docs/WIFI_PROVISIONING.md` "No captive portal" gap: a phone OS's
+      connectivity-check probe gets no answer and the OS gives up. **Fixed**:
+      `wifi_prov.c`'s `dns_hijack_task()` answers every DNS query with the
+      AP's own IP; `wifi_provision_http.c`'s new
+      `captive_portal_404_handler()` 302s anything unregistered to `/`.
+      Flashed and running (OpenOCD/JTAG).
+- [x] **UART stack heap-churn crash, found while verifying the above.** Board
+      was crash-looping ~every 40s (`ESP_ERR_NO_MEM` frame-tx failures,
+      display corruption, reboot). `uart_owner_transfer()`
+      (`espInterfaces/uart_owner.c`) called `xSemaphoreCreateBinary()` — an
+      internal-SRAM heap allocation — on every single UART transfer, shared
+      by every bridge task (touch/display/log/wifi/control/profiles/
+      autotune); under real interactive load this exhausts internal SRAM.
+      **Fixed**: switched to `xSemaphoreCreateBinaryStatic()`, zero heap
+      allocation. Also moved `dns_hijack_task()`'s `socket()`/`bind()` call
+      to after `esp_wifi_start()`, out of the internal-SRAM contention
+      window `uart_protocol.c`'s own `uart_protocol_register_task()`
+      comment documents. Flashed; ~328s bench window afterward showed zero
+      `ESP_ERR_NO_MEM` bursts (was one every ~40s before).
+- [ ] **Open, not chased down this pass:** `UART_TASK_ID_WIFI` (11) sometimes
+      doesn't register at boot — PC-tool `wifi_get_status`/`wifi_scan` NACK
+      "destination task not registered" even though `main.c` never logs a
+      "Failed to start wifi uart bridge task" error for that boot. Cause not
+      found (registration appears to succeed per the log, then the task is
+      later unreachable — no code path found that explicitly unregisters
+      it). Does NOT affect the AP itself, which comes up and accepts phone
+      joins regardless (confirmed in the same log) — only affects PC/MCP
+      tooling's ability to query Wi-Fi state over UART. Worth a dedicated
+      pass with more device-log instrumentation around
+      `uart_bridge_start_wifi_task()`'s call site.
 - [ ] **Added to plan 2026-08-18, not yet built:** Safety / Alarm page
       (0.5) — trip state, trip-event history, explicit clear-trip action.
       Blocked on M5's `TRIP_EVENT` frame; do not build against a stub data

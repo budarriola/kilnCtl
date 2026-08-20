@@ -55,7 +55,9 @@ reused by every other page's own comments rather than re-derived per file.
 | `ui_page_safety.c` | Fits — "Last trip" line was deliberately chosen over the fuller DIAG detail specifically because it was "the only field that fit the page's documented ~264px no-scroll budget" (own comment, also cited in `TODO.md`). | Compliant. | DIAG's warn/trip masks and context-health counters are HTTP-exposed but deliberately left off the LCD — an information-priority tradeoff worth revisiting once the page has more room (larger panel, or a details-on-tap affordance) rather than a bug, but flagged here since "usability" review should note it. |
 | `ui_page_board_health.c` | Fits — pad_all trimmed from 8px, own comment cites the ~264px budget directly. | Compliant. | Not reviewed further; no flagged gap in its own comments. |
 | `ui_page_history.c` | Fits — own comment states "leave a comfortable margin against ~264px." | Compliant. | Chart-only page moved off `ui_page_home.c`; adds one more nav hop from home (config hub → history) versus its old inline position on the home page. |
-| `ui_page_touch_cal.c` / `ui_page_touch_test.c` | Not budget-annotated in either file — these are calibration/diagnostic utility pages, not part of the normal operator flow, and don't carry the ~264px comment other pages do. | Unreviewed for this pass — recommend a quick pass to confirm they don't rely on page-level scrolling either, since the rule is universal, not just for the 8 "main" pages. | Not reviewed. |
+| `ui_page_touch_cal.c` / `ui_page_touch_test.c` | Not budget-annotated in either file — these are calibration/diagnostic utility pages, not part of the normal operator flow, and don't carry the ~264px comment other pages do. | Compliant (both clear `LV_OBJ_FLAG_SCROLLABLE`; see LCD work-queue item 4). | `ui_page_touch_cal.c`'s cancel/back path (LCD work-queue item 6, 2026-08-19) is now built. |
+| `ui_page_diagnostics.c` (new, 2026-08-20) | Fits — 7 stat rows in a fixed-height (180px), internally scrollable list, same sanctioned pattern as `ui_page_config.c`'s nav grid. | Compliant — outer containers clear `LV_OBJ_FLAG_SCROLLABLE`; the inner list is the sanctioned internally-scrollable exception, not page-level scroll. | None flagged — new page, TODO.md's "Diagnostics / System info page" ESP-only half. |
+| `ui_page_thermo_faults.c` (new, 2026-08-20, explicit user request) | Fits — 3 fixed-height (`UI_THEME_MIN_TOUCH_TARGET_PX`, 72px) channel rows in a fixed-height (180px), internally scrollable list, same pattern as `ui_page_diagnostics.c`. Worst case (all 8 fault bits set) reasoned to wrap to ≤2 text lines within the 72px row — not measured on real font metrics/hardware, see the page's own header comment. | Compliant on paper, same caveat as every other page this session: not visually confirmed on the physical panel. | Per-channel MAX31856 fault status (`fault_status` SR bits: OPEN/OVUV/TCLOW/TCHIGH/CJLOW/CJHIGH/TCRANGE/CJRANGE), `~FAULT` pin state, SPI-transfer health — split into its own page from `ui_page_diagnostics.c` per explicit user request ("diagnostics should be broken up into multiple pages"). No "clear faults" action — deliberately out of scope, visibility only. |
 
 **Two known-at-risk pages, concrete proposed fixes:**
 
@@ -183,6 +185,28 @@ are build+inspection-verified only until that's fixed, noted per item.
    scrollable container (same pattern as items 2/3 above) holding real
    72px-tall cells, rather than shrinking cells to fit all 8 on-screen at
    once. Build-clean only.
+6. **DONE (2026-08-19).** Added a "Cancel" button to `ui_page_touch_cal.c`:
+   a 64x28px `lv_button_create()` in the top-left status-bar strip
+   (`compute_targets()` already reserves `UI_THEME_STATUS_BAR_HEIGHT_PX`
+   there before placing any grid target, so this can't overlap a
+   calibration point or shrink the usable grid area), created *after*
+   `overlay` so it wins z-order hit-testing over it, extended toward
+   `UI_THEME_MIN_TOUCH_TARGET_PX` via `ui_theme_apply_touch_area(...,
+   false)` same as other shrunk buttons this doc already names. Calls
+   `kiln_ui_show("config")` without ever calling `touch_cal_store_save()`
+   — a cancelled run never persists a partial/garbage calibration.
+   **Deliberately hidden and non-clickable on a forced first-run boot**
+   (`touch_cal_store_is_calibrated() == false`, decided fresh in
+   `on_screen_loaded()` every time the page is shown): `kiln_ui.c`'s own
+   comment on why an uncalibrated board boots straight into this page
+   applies equally here — cancelling to "config" would strand the user on
+   a screen whose other buttons don't reliably work yet, since no working
+   touch mapping exists. Cancel only appears for a deliberate
+   re-calibration from the config nav hub, where a working calibration
+   (and therefore a working "config" screen to land on) already exists.
+   Build-clean (`idf.py -C firmware/KilnFW build` / ninja on the existing
+   configured build dir) — not flashed/visually confirmed, no ILI9488
+   panel attached in this environment this pass.
 
 ### Web
 
@@ -235,3 +259,110 @@ are build+inspection-verified only until that's fixed, noted per item.
    `max-width` container and is a deliberately fixed physical QR-code
    resolution, not a layout-overflow risk. No other fixed-width elements
    found. Verified by inspection/build only.
+6. **DONE (2026-08-20), explicit user request** ("on the web gui i want the
+   ability to choose between dhcp and static ip for the home network
+   connection. keep the lcd network settings page simple" — the second
+   sentence is why this is web-only, `ui_page_network.c` was deliberately
+   left untouched). New "IP Address" section on `wifi_provision_page.html`
+   under Networks: DHCP/Static toggle buttons + three text inputs (ip/
+   netmask/gateway), shown only for Static, prefilled from `GET /status`'s
+   new `ip_mode`/`static_ip`/`static_netmask`/`static_gateway` fields,
+   submitted to a new `POST /ip_config` (`wifi_provision_http.c`). Backend
+   in `wifi_prov.c`/`.h`: new `wifi_prov_ip_mode_t`, persisted to the
+   existing `wifi_cfg` NVS namespace, applied via
+   `esp_netif_dhcpc_stop()`/`esp_netif_set_ip_info()` inside
+   `apply_sta_config()` (the one function every STA join path already
+   funnels through) before `esp_wifi_connect()`. Uses the same theme.css
+   classes/touch-target sizing every other page here already follows — no
+   new design language introduced. **Known gap, flagged by the build
+   itself, not yet fixed**: a wrong-but-parseable static IP (bad gateway/
+   subnet) still reaches `WIFI_PROV_STATE_CONNECTED` at the L2 layer, so
+   `ap_fallback_timer`'s normal DHCP-timeout-triggered recovery does not
+   self-heal it — an operator can still switch back to DHCP/AP mode via
+   the same API, or power-cycle, so this isn't a full lockout, but it is a
+   real reachability edge case worth a closer look before this feature is
+   trusted on a remote/unattended kiln. Build-clean (`ninja`), flashed via
+   OpenOCD/JTAG, confirmed booting clean on the bench board — the actual
+   DHCP/static toggle behavior has NOT been exercised against a real
+   router this pass (no live network to test against in this environment).
+
+### LCD — planned: profile creation page (2026-08-19, not started)
+
+New `ui_page_profile_edit.c` (name tentative), reachable from
+`ui_page_config.c`'s nav hub grid (item 5's fixed-height scrollable grid has
+room for one more 72px cell). Scope, planning-only — no code written yet:
+
+1. **Graph view.** Reuse `ui_page_history.c`'s chart widget/drawing approach
+   (already on the nav hub, budget-fit) to render the profile curve
+   (time on X, temp on Y) built from the point list below, redrawn on every
+   point edit.
+2. **Point selection.** Left/Right buttons (existing 72px touch-target
+   pattern) step a "selected point" cursor across the profile's point list;
+   selected point highlighted on the graph (marker color/size change, no
+   new widget type needed).
+3. **Per-point fields**, edited via +/- stepper buttons (same pattern as
+   existing numeric-adjust UI elsewhere) once a point is selected:
+   - Hold temp (°F/°C per existing unit setting)
+   - Hold time (minutes)
+   - Ramp rate to reach this point from the previous one (°/hr)
+4. **Persistence.** Save writes through the existing profile storage path
+   (`profiles_save`/`profiles_get` MCP tools imply an existing profile
+   store/schema on the firmware side — reuse it rather than inventing a
+   parallel format; needs confirming against the actual struct before
+   implementation starts).
+5. **Budget risk, flagged up front:** graph + point list + 3 stepper fields +
+   Left/Right nav + Save/Back is a lot for the ~264px no-scroll budget in one
+   screen. Likely needs the graph and the point-editor to be two sub-views
+   (tab or Left/Right-reachable panes) rather than one stacked layout —
+   decide during implementation, not guessed here.
+6. **Not yet done:** no `.c`/`.h` file created, no nav-hub entry wired, no
+   estimate of actual pixel heights against budget. This entry exists so the
+   feature isn't lost, not as a claim of progress.
+
+### Web — planned: settings import/export and profile import/export (2026-08-19, not started)
+
+Two separate import/export features, kept independent (different data,
+different failure modes if merged into one blob):
+
+1. **Settings import/export.** Covers board/system config — Wi-Fi networks
+   (`wifi_add_network`/`wifi_get_networks` imply an existing store), zone
+   PID/model config (`control_set_zone_pid`/`control_set_zone_model`),
+   thermocouple channel config, safety thresholds. Export as a downloadable
+   JSON file from a new control on `rules_page.html` or a new dedicated
+   settings page; import via file-picker + upload, server-side validated
+   before applying (never apply un-validated fields directly over live
+   config).
+2. **Profile import/export.** Covers kiln firing profiles only
+   (`profiles_save`/`profiles_get`/`profiles_list` imply existing schema) —
+   export a single profile or all profiles as JSON from `profiles_page.html`,
+   import via file-picker + upload. Should reuse whatever point-list schema
+   the new LCD profile-creation page (above) ends up writing, so a profile
+   authored on the LCD round-trips through web export/import unchanged.
+3. **Shared mechanics, not shared data:** both likely want the same
+   file-picker + `POST` upload + JSON-parse-and-validate pattern on the
+   ESP32 HTTP server side, so implementation can share a helper, but the two
+   export files/endpoints stay separate (`/api/settings/export`,
+   `/api/profiles/export` style) — a settings file should never accidentally
+   double as a profile file or vice versa.
+4. **Not yet done:** no endpoints, no HTML controls, no schema audit against
+   the real firmware structs. Needs confirming actual field lists in
+   firmware source before implementation starts.
+
+### LCD navigation (found during item 6's work, 2026-08-19)
+
+While wiring `ui_page_touch_cal.c`'s new Cancel button, swept every LCD
+page's Back button target for the same bug class (going to the wrong
+screen). `ui_page_config.c` is the nav hub reached from `ui_page_home.c`'s
+Menu button; every page reached *from* that hub
+(`ui_page_board_health.c`, `ui_page_history.c`, `ui_page_network.c`,
+`ui_page_safety.c`) correctly calls `kiln_ui_show("config")` from its
+`back_btn_cb()`. **`ui_page_temperature.c` alone called
+`kiln_ui_show("home")`** — same hub-reached page, wrong target, skipping
+the menu it was actually opened from and dropping the user straight to
+the dashboard instead of one level back. **Fixed (2026-08-19)**: changed
+to `kiln_ui_show("config")`, matching every sibling page. Build-clean —
+not flashed/visually confirmed. No other page had this bug: `ui_config.c`
+itself correctly goes to `"home"` (it *is* the top level below home), and
+`ui_page_touch_test.c`'s "Done" button correctly goes to `"home"` per
+`ui_page_touch_cal.c`'s own comment on that page's deliberate flow
+(calibrate → verify → home, not calibrate → verify → config).

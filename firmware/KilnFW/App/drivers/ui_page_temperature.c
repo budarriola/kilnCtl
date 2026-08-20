@@ -101,7 +101,11 @@ static lv_obj_t *s_msg_label; /* last refusal (or "") -- see this file's header 
 static void back_btn_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("home");
+    /* 2026-08-19 fix: this page is reached from the config nav hub (same as
+     * board_health/history/network/safety, which all go back to "config"
+     * here) -- it was wrongly going to "home" instead, skipping the hub it
+     * was actually opened from. */
+    kiln_ui_show("config");
 }
 
 static void refresh_cb(lv_timer_t *timer)
