@@ -148,14 +148,14 @@ def test_until_trigger_fault_two_frame_sequence():
     pattern as the determinism probe above) rather than skip the coverage
     entirely.
 
-    NOTE: virtual_simfw.c predates FAULT_SET_UNTIL_TRIGGER and is owned by a
-    different tree/agent (do not modify it here) -- PROTOCOL.md sec 5.6 says
-    only that cmd_task.c (real firmware) implements the two-frame handshake;
-    nothing guarantees the virtual device's mock does yet. This test reports
-    what actually happens rather than assuming either outcome, and is
-    written so it stays meaningful once virtual_simfw does implement it."""
-    from kilnsim.link import SimLinkError
-    from kilnsim.protocol import CommandGroup, FaultCmd
+    virtual_simfw.c now implements the two-frame handshake (mirroring
+    cmd_task.c's handle_fault_schedule()/handle_fault_set_until_trigger()):
+    frame 1 (FAULT_SCHEDULE, duration_kind=UNTIL_TRIGGER) parks the fault's
+    fields without arming it; frame 2 (FAULT_SET_UNTIL_TRIGGER) supplies the
+    release trigger and performs the actual arm. This test drives both
+    frames for real and asserts the fault actually fires at its ARM trigger
+    (t=1) and clears at its release trigger (t=5)."""
+    from kilnsim.protocol import CommandGroup, EventType, FaultCmd
 
     yaml_text = """
 name: until_trigger_probe
@@ -187,43 +187,38 @@ expect: []
             link.send_command(CommandGroup.SYS, 4, {"value": scenario.timescale})  # SET_TIMESCALE
             link.send_command(CommandGroup.MODEL, 4, {"name": scenario.preset})  # LOAD_PRESET
 
-            try:
-                reply1 = link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
-                    "fault_slot": 0,
-                    "fault_type": "tc_noise",
-                    "target": "tc:0",
-                    "trigger": {"kind": "at_sim_time", "t": 1.0},
-                    "duration": {"kind": "until_trigger"},
-                    "params": [3.0, 0.0, 0.0, 0.0],
-                })
-            except SimLinkError as exc:
-                # Observed: virtual_simfw.c predates duration_kind==2 being
-                # an accepted value at all (PROTOCOL.md sec 5.6's gap-closure
-                # pass is real-firmware-only) and rejects frame 1 itself with
-                # ERR_BAD_ARGS -- not a PC-side encoder bug, and not this
-                # tree's to fix (see docstring above).
-                pytest.skip(
-                    f"virtual_simfw rejects FAULT_SCHEDULE(duration_kind=UNTIL_TRIGGER): {exc}"
-                )
+            reply1 = link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, {
+                "fault_slot": 0,
+                "fault_type": "tc_noise",
+                "target": "tc:0",
+                "trigger": {"kind": "at_sim_time", "t": 1.0},
+                "duration": {"kind": "until_trigger"},
+                "params": [3.0, 0.0, 0.0, 0.0],
+            })
             assert reply1["fault_slot"] == 0
 
-            try:
-                reply2 = link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
-                    "fault_slot": 0,
-                    "trigger": {"kind": "at_sim_time", "t": 5.0},
-                })
-            except SimLinkError as exc:
-                # Expected if virtual_simfw hasn't picked up cmd 0x05 yet
-                # (unregistered task/command -> NACK or ERR_NOT_IMPL/
-                # ERR_BAD_ARGS surfaced as SimLinkError) -- not a bug in the
-                # PC-side encoder under test here, see docstring above.
-                pytest.skip(
-                    f"virtual_simfw does not (yet) implement FAULT_SET_UNTIL_TRIGGER: {exc}"
-                )
-            else:
-                assert reply2["fault_slot"] == 0
+            reply2 = link.send_command(CommandGroup.FAULT, FaultCmd.SET_UNTIL_TRIGGER, {
+                "fault_slot": 0,
+                "trigger": {"kind": "at_sim_time", "t": 5.0},
+            })
+            assert reply2["fault_slot"] == 0
+
+            events = []
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                events.extend(link.read_events(timeout=0.2))
+                fired = [e for e in events if e.event_type == EventType.FAULT_FIRED]
+                cleared = [e for e in events if e.event_type == EventType.FAULT_CLEARED]
+                if fired and cleared:
+                    break
         finally:
             link.disconnect()
+
+    fired = [e for e in events if e.event_type == EventType.FAULT_FIRED]
+    cleared = [e for e in events if e.event_type == EventType.FAULT_CLEARED]
+    assert fired, "UNTIL_TRIGGER fault should fire once its ARM trigger (t=1) is reached"
+    assert cleared, "UNTIL_TRIGGER fault should clear once its release trigger (t=5) is reached"
+    assert fired[0].sim_time_us < cleared[0].sim_time_us
 
 
 def test_determinism_same_seed_same_scenario_byte_identical_events():

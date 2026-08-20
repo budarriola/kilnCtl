@@ -767,6 +767,19 @@ static bool dispatch_sys(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         return true;
     }
+    case SIMFW_CMD_SYS_GET_SIM_STATE: {
+        // Read-back companion to SET_TIMESCALE/SET_SEED (PROTOCOL.md sec 4;
+        // real firmware's handle_sys_get_sim_state()). No args. Reply:
+        // {status, u32 seed, u8 snapshot_valid, u32 timescale_x100,
+        // u64 sim_time_us} -- timescale_x100/sim_time_us report 0 before the
+        // first tick's snapshot exists, same as real firmware.
+        rw_u8(w, SIMFW_CMD_STATUS_OK);
+        rw_u32le(w, d->seed);
+        rw_u8(w, d->has_published ? 1u : 0u);
+        rw_u32le(w, d->has_published ? d->timescale_x100 : 0u);
+        rw_u64le(w, d->has_published ? d->snap_sim_time_us : 0u);
+        return true;
+    }
     default:
         rw_u8(w, SIMFW_CMD_STATUS_ERR_NOT_IMPL);
         return true;
@@ -1125,6 +1138,80 @@ static bool dispatch_io(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 // ===========================================================================
 // FAULT group (PROTOCOL.md sec 5.6)
 // ===========================================================================
+
+// --- cmd_task.c's decode_fault_trigger(), ported verbatim: decodes the
+// wire's compact fault_trigger_t encoding (u8 trigger_kind, f64 trigger_a,
+// f64 trigger_b, u16 trigger_ref, u8 trigger_edge, char[24] event_name),
+// shared by FAULT_SCHEDULE's own ARM trigger and FAULT_SET_UNTIL_TRIGGER's
+// release trigger (PROTOCOL.md sec 5.6: "byte-identical to FAULT_SCHEDULE's
+// own ARM-trigger fields"). Returns false (leaving *out zeroed) if
+// trigger_kind is out of range; does not itself inspect r->overflow, same as
+// cmd_task.c's version -- callers check that separately.
+static bool decode_fault_trigger_wire(ar_t *r, fault_trigger_t *out)
+{
+    uint8_t trigger_kind = ar_u8(r);
+    double trigger_a = ar_f64le(r);
+    double trigger_b = ar_f64le(r);
+    uint16_t trigger_ref = ar_u16le(r);
+    uint8_t trigger_edge = ar_u8(r);
+    char event_name[24];
+    ar_bytes(r, (uint8_t *)event_name, 24);
+
+    memset(out, 0, sizeof(*out));
+    if (trigger_kind > (uint8_t)FAULT_TRIGGER_MANUAL) return false;
+
+    out->kind = (fault_trigger_kind_t)trigger_kind;
+    switch (out->kind) {
+    case FAULT_TRIGGER_AT_SIM_TIME:
+        out->at_sim_time_s = trigger_a;
+        break;
+    case FAULT_TRIGGER_AT_ZONE_TEMP:
+        out->zone = (uint8_t)trigger_ref;
+        out->temp_c = (float)trigger_a;
+        out->temp_edge = (fault_temp_edge_t)trigger_edge;
+        break;
+    case FAULT_TRIGGER_ON_RELAY_EDGE:
+        out->relay = (uint8_t)trigger_ref;
+        out->delay_s = trigger_a;
+        out->relay_edge = (fault_relay_edge_t)trigger_edge;
+        break;
+    case FAULT_TRIGGER_ON_EVENT:
+        out->delay_s = trigger_a;
+        memcpy(out->event_name, event_name, sizeof(out->event_name));
+        break;
+    case FAULT_TRIGGER_AFTER_FAULT:
+        out->delay_s = trigger_a;
+        out->after_fault_slot = trigger_ref;
+        break;
+    case FAULT_TRIGGER_RANDOM_IN:
+        out->random_t0_s = trigger_a;
+        out->random_t1_s = trigger_b;
+        break;
+    case FAULT_TRIGGER_MANUAL:
+    default:
+        break;
+    }
+    return true;
+}
+
+// --- cmd_task.c's s_pending_until[]/pending_until_trigger_t, ported
+// verbatim: FAULT_SCHEDULE(duration_kind==UNTIL_TRIGGER) parks everything
+// but the release trigger here, indexed directly by slot_id (0..
+// FAULT_ENGINE_MAX_SLOTS-1, the same range the slot pool itself uses).
+// FAULT_SET_UNTIL_TRIGGER supplies the release trigger and performs the
+// actual fault_engine_schedule() call combining it with these parked
+// fields -- see PROTOCOL.md sec 5.6 for the full two-frame design.
+typedef struct {
+    bool pending;
+    uint8_t fault_type;
+    uint16_t target;
+    fault_trigger_t trigger;
+    fault_repeat_t repeat;
+    float params[4];
+} pending_until_trigger_t;
+
+static pending_until_trigger_t s_pending_until[FAULT_ENGINE_MAX_SLOTS];
+
 static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 {
     switch (cmd) {
@@ -1132,14 +1219,8 @@ static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         uint16_t slot_id = ar_u16le(r);
         uint8_t fault_type = ar_u8(r);
         uint16_t target = ar_u16le(r);
-        fault_trigger_t trig = {0};
-        trig.kind = (fault_trigger_kind_t)ar_u8(r);
-        trig.at_sim_time_s = ar_f64le(r); // trigger_a: overloaded field, see PROTOCOL.md 5.6
-        double trigger_b = ar_f64le(r);
-        uint16_t trigger_ref = ar_u16le(r);
-        uint8_t trigger_edge = ar_u8(r);
-        char event_name[24];
-        ar_bytes(r, (uint8_t *)event_name, 24);
+        fault_trigger_t trig;
+        bool trigger_ok = decode_fault_trigger_wire(r, &trig);
         uint8_t duration_kind = ar_u8(r);
         double duration_for_s = ar_f64le(r);
         uint8_t repeat_kind = ar_u8(r);
@@ -1149,7 +1230,7 @@ static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         float params[4];
         for (int i = 0; i < 4; i++) params[i] = ar_f32le(r);
 
-        if (r->overflow) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+        if (r->overflow || !trigger_ok) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
 
         target_kind_t kind = target_kind_of((fault_type_t)fault_type);
         if (kind == TK_INVALID) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
@@ -1157,44 +1238,37 @@ static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         if (kind == TK_ZONE && target >= THERMAL_MODEL_MAX_ZONES) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
         if (kind == TK_CT && target >= CT_NUM_CHANNELS) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
 
-        // Overloaded trigger_a field per PROTOCOL.md 5.6: reinterpret per
-        // trigger_kind, matching cmd_task.c's own layout comment exactly.
-        double trigger_a = trig.at_sim_time_s;
-        switch (trig.kind) {
-        case FAULT_TRIGGER_AT_SIM_TIME: trig.at_sim_time_s = trigger_a; break;
-        case FAULT_TRIGGER_AT_ZONE_TEMP:
-            trig.zone = (uint8_t)trigger_ref; trig.temp_c = (float)trigger_a;
-            trig.temp_edge = (fault_temp_edge_t)trigger_edge;
-            break;
-        case FAULT_TRIGGER_ON_RELAY_EDGE:
-            trig.relay = (uint8_t)trigger_ref; trig.delay_s = trigger_a;
-            trig.relay_edge = (fault_relay_edge_t)trigger_edge;
-            break;
-        case FAULT_TRIGGER_ON_EVENT:
-            trig.delay_s = trigger_a;
-            memcpy(trig.event_name, event_name, sizeof(trig.event_name));
-            break;
-        case FAULT_TRIGGER_AFTER_FAULT:
-            trig.delay_s = trigger_a; trig.after_fault_slot = trigger_ref;
-            break;
-        case FAULT_TRIGGER_RANDOM_IN:
-            trig.random_t0_s = trigger_a; trig.random_t1_s = trigger_b;
-            break;
-        case FAULT_TRIGGER_MANUAL:
-        default:
-            break;
-        }
-
-        fault_duration_t dur = {0};
-        dur.kind = (fault_duration_kind_t)duration_kind;
-        dur.for_s = duration_for_s;
-        if (dur.kind == FAULT_DURATION_UNTIL_TRIGGER) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; } // PROTOCOL.md 5.6 gap
-
         fault_repeat_t rep = {0};
         rep.kind = (fault_repeat_kind_t)repeat_kind;
         rep.period_s = repeat_period_s;
         rep.jitter_s = repeat_jitter_s;
         rep.n = repeat_n;
+
+        if (duration_kind == (uint8_t)FAULT_DURATION_UNTIL_TRIGGER) {
+            // Two-frame path (cmd_task.c's handle_fault_schedule(), PROTOCOL.md
+            // sec 5.6): park everything but the release trigger, do not arm
+            // yet. duration_for_s is ignored for this duration_kind.
+            if (slot_id >= FAULT_ENGINE_MAX_SLOTS) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+            s_pending_until[slot_id].pending = true;
+            s_pending_until[slot_id].fault_type = fault_type;
+            s_pending_until[slot_id].target = target;
+            s_pending_until[slot_id].trigger = trig;
+            s_pending_until[slot_id].repeat = rep;
+            memcpy(s_pending_until[slot_id].params, params, sizeof(params));
+            rw_u8(w, SIMFW_CMD_STATUS_OK);
+            rw_u16le(w, slot_id);
+            return true;
+        }
+
+        // A direct (PERMANENT/FOR) schedule on this slot_id supersedes any
+        // still-pending UNTIL_TRIGGER parked on it (frame 1 sent, frame 2
+        // never arrived) -- discard the stale entry so a later, unrelated
+        // SET_UNTIL_TRIGGER cannot resurrect it against this new schedule.
+        if (slot_id < FAULT_ENGINE_MAX_SLOTS) s_pending_until[slot_id].pending = false;
+
+        fault_duration_t dur = {0};
+        dur.kind = (fault_duration_kind_t)duration_kind;
+        dur.for_s = duration_for_s;
 
         uint16_t sid = fault_engine_schedule(&d->fault_engine, slot_id, fault_type, target, &trig, &dur, &rep, params);
         if (sid == FAULT_ENGINE_INVALID_SLOT) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
@@ -1203,8 +1277,41 @@ static bool dispatch_fault(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         rw_u16le(w, sid);
         return true;
     }
+    case SIMFW_CMD_FAULT_SET_UNTIL_TRIGGER: {
+        // Frame 2 of the UNTIL_TRIGGER two-frame design (PROTOCOL.md sec
+        // 5.6, cmd_task.c's handle_fault_set_until_trigger()): supplies the
+        // RELEASE trigger and performs the actual fault_engine_schedule()
+        // call, combining it with the fields FAULT_SCHEDULE parked in
+        // s_pending_until[slot_id].
+        uint16_t slot_id = ar_u16le(r);
+        fault_trigger_t release_trig;
+        bool trigger_ok = decode_fault_trigger_wire(r, &release_trig);
+        if (r->overflow || !trigger_ok || slot_id >= FAULT_ENGINE_MAX_SLOTS || !s_pending_until[slot_id].pending) {
+            rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+            return true;
+        }
+
+        pending_until_trigger_t *pend = &s_pending_until[slot_id];
+        fault_duration_t dur = {0};
+        dur.kind = FAULT_DURATION_UNTIL_TRIGGER;
+        dur.until_trigger = release_trig;
+
+        uint16_t sid = fault_engine_schedule(&d->fault_engine, slot_id, pend->fault_type, pend->target,
+                                              &pend->trigger, &dur, &pend->repeat, pend->params);
+        pend->pending = false; // consumed regardless of outcome -- resend FAULT_SCHEDULE to retry
+        if (sid == FAULT_ENGINE_INVALID_SLOT) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+        recompute_overrides(d);
+        rw_u8(w, SIMFW_CMD_STATUS_OK);
+        rw_u16le(w, sid);
+        return true;
+    }
     case SIMFW_CMD_FAULT_CANCEL: {
         uint16_t slot_id = ar_u16le(r);
+        // Discard any still-pending UNTIL_TRIGGER schedule on this slot too
+        // (frame 1 sent, frame 2 never arrived) -- nothing is armed in the
+        // fault engine yet to cancel for that case, but the parked intent
+        // should not survive an explicit cancel (PROTOCOL.md sec 5.6).
+        if (slot_id < FAULT_ENGINE_MAX_SLOTS) s_pending_until[slot_id].pending = false;
         if (r->overflow || !fault_engine_cancel(&d->fault_engine, slot_id)) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
         recompute_overrides(d);
         rw_u8(w, SIMFW_CMD_STATUS_OK);

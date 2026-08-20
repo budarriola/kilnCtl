@@ -75,18 +75,24 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
 
 ## Known, documented deviations from real SimFW firmware
 
-* **SYS `RESET_SIM`/`SET_TIMESCALE`/`SET_SEED` are implemented for real.**
-  `firmware/SimFW/docs/PROTOCOL.md` sec 4 documents these three as
-  *reserved* ids on real firmware today (`ERR_NOT_IMPL`) -- no handler
-  exists in `cmd_task.c` yet. `virtual_simfw` implements all three, because
-  `kilnsim`'s scenario runner needs a way to set the seed/timescale before a
-  run and no other path exists. This is a virtual-device-only extension,
-  clearly marked in `virtual_simfw.c`'s `dispatch_sys()` -- not a claim
-  about real firmware's behavior. `tools/PcTools/src/kilnsim/payloads.py`'s
-  encoder for these three commands was fixed in the same pass (it used to
-  silently drop `payload["value"]`/`payload["keep_params"]` entirely --
-  harmless against real firmware's stub, a real bug against anything that
-  actually reads them, which is exactly what this tool exposed).
+* **SYS `RESET_SIM`/`SET_TIMESCALE`/`SET_SEED`/`GET_SIM_STATE` now have real
+  handlers on both sides.** `virtual_simfw` implemented all three original
+  ids (`RESET_SIM`/`SET_TIMESCALE`/`SET_SEED`) before real firmware did --
+  `kilnsim`'s scenario runner needed a way to set the seed/timescale before
+  a run and no other path existed yet. A later gap-closure pass gave real
+  firmware's `cmd_task.c` its own handlers for all four ids (`PROTOCOL.md`
+  sec 4 now lists all four as **implemented**, including the new
+  `GET_SIM_STATE` (`0x07`), a read-back getter for whatever `SET_TIMESCALE`/
+  `SET_SEED` last set) -- so these are no longer a virtual-device-only
+  extension, and `virtual_simfw` gained a matching `GET_SIM_STATE` handler
+  in the same pass to close that drift. The one real remaining difference
+  is *how* they apply -- see the very next bullet: real firmware's are
+  queued to a tick boundary, `virtual_simfw`'s apply synchronously. (History
+  note: `tools/PcTools/src/kilnsim/payloads.py`'s encoder for the original
+  three was fixed in the pass that first added them to `virtual_simfw` -- it
+  used to silently drop `payload["value"]`/`payload["keep_params"]`
+  entirely, harmless against real firmware's then-stub, a real bug against
+  anything that actually reads them.)
 * **Commands apply synchronously on arrival, not queued to a tick
   boundary.** Real firmware's owner tasks all follow a "queue-then-apply-
   next-tick" doctrine (PLAN.md sec 4.5) so a command's effect always lands
@@ -117,6 +123,30 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
 * **No `RELAY_SET_CONTACT_FAULT`** -- matches real firmware/PROTOCOL.md
   exactly (deliberately not allocated; `FAULT_SCHEDULE`'s `welded_relay`/
   `stuck_open_relay` types are the real path either way).
+
+## FAULT group: `UNTIL_TRIGGER` two-frame handshake
+
+`FAULT_SCHEDULE`'s `duration_kind == 2` (`UNTIL_TRIGGER`) needs a second,
+full nested release trigger that does not fit alongside everything else in
+one 128-byte frame (`PROTOCOL.md` sec 5.6). `virtual_simfw` implements the
+same two-frame design real firmware's `cmd_task.c` does, mirrored faithfully
+(same status codes, same discard rules):
+
+1. `FAULT_SCHEDULE` with `duration_kind == 2` parks `fault_type`/`target`/
+   the ARM trigger/`repeat`/`params` into a per-slot pending entry
+   (`s_pending_until[slot_id]`, indexed `0..FAULT_ENGINE_MAX_SLOTS-1`) but
+   does **not** arm the slot yet. `duration_for_s` is ignored. Reply:
+   `[status, u16 slot_id echo]`.
+2. `FAULT_SET_UNTIL_TRIGGER` (`0x05`) supplies the release trigger and
+   performs the actual `fault_engine_schedule()` call, combining it with the
+   fields step 1 parked. `ERR_BAD_ARGS` if nothing is pending for that slot.
+   Reply: `[status, u16 slot_id echo]`.
+
+A direct `PERMANENT`/`FOR` `FAULT_SCHEDULE`, or a `FAULT_CANCEL`, on a slot
+discards any stale pending entry for it -- same as real firmware. The
+underlying `fault_engine.c` (compiled unmodified here) already supported
+`UNTIL_TRIGGER` durations natively; this closed the wire-level gap that kept
+`virtual_simfw` from ever reaching that code path.
 
 ## Build
 
