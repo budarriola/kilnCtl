@@ -213,10 +213,6 @@ never `[x]`.
       `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
       halts while DMA exhaustion limps, and the code's own idle-loop-fallback
       comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
-- [ ] **Expose the second DUT-power relay in `kilnsim`.** The firmware and
-      wire protocol are done (`f5cb4c3`), but the CLI, GUI, MCP tool, and
-      `MockSimLink` still surface only the main-domain relay, so no operator
-      can actually reach the safety-domain one. (M-E)
 - [ ] **S11 guard input** — `heat_commanded` is the last never-produced
       input in `safety_core_build_input()`, and it genuinely waits on Phase 6
       current sense. S9 was wired in `5f90325`.
@@ -303,7 +299,13 @@ never `[x]`.
       arithmetic or image alignment contradicts the `.pio` comments — turning
       the bug species that has bitten this file three times into a startup
       failure instead of a silent wrong answer
-- [x] Second DUT-power relay in firmware + protocol (`f5cb4c3`) —
+- [x] Second DUT-power relay end-to-end — firmware + protocol (`f5cb4c3`),
+      then CLI/GUI/MCP/`MockSimLink` (`0926213`). The **no combined "set
+      both"** property is now *test-enforced* on every surface, so a future
+      convenience helper cannot quietly reintroduce the ground-bonding
+      hazard. Fixing the mock mattered: it had hardcoded `DUT_POWER_GET` to
+      always return `True` with no `DUT_POWER_SET` handler at all, so DUT-power
+      tests had been passing against a mock that could not fail. Details —
       `EXP1_PIN_DUT_POWER_SAFETY = 10` for J19/safety, alongside the renamed
       `_MAIN` for J18. **Deliberately no combined "set both" command anywhere
       in the stack**, so bonding behavior across the two ground domains can
