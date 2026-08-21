@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 54,
   "timescale": 10.0,
-  "start_time": 1787277499.9560091,
+  "start_time": 1787290327.6459405,
   "events": [
     {
       "seq": 0,
@@ -46,7 +46,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 80000000,
+      "sim_time_us": 76000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S12"
@@ -88,10 +88,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 53,
-    "context_valid": 53,
+    "polls": 30,
+    "context_valid": 30,
     "any_current_present": 0,
-    "link_up": 53,
+    "link_up": 30,
     "max_zone_count": 3,
     "energized": 0
   }

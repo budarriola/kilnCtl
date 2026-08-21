@@ -116,30 +116,33 @@ expect:
                          # engine. The fault itself fires on the K4 edge with
                          # delay_s 0.
     blocked_on:
-      reason: "The fault DOES fire on the K4-open edge (verified: FAULT_FIRED
-               {welded_contactor} at the same sim-time as the RELAY_EDGE
-               {K4, open}), but its effect is invisible to a `dut:
-               current_present` clause, and that is a property of the REAL
-               firmware being mirrored, not of this file. WELDED_K4_CURRENT_
-               PERSIST deliberately bypasses the duty/current_a path and drives
-               the CT channel's wave synth directly (sim_engine.c's own comment
-               at that call site: 'wave_owner.c only reads
-               snap.zones[ch].current_a while a channel is in MODEL mode ...
-               amps read through regardless of what duty/current_a say
-               underneath'); virtual_simfw.c ports that verbatim. Telemetry's
-               per-zone i_amps field is snap.zones[].current_a -- the MODEL
-               value -- which K4 gates to zero the moment it opens. On real
-               hardware the DUT would see the persisted current through its own
-               CT ADC reading the synthesized waveform; this fixture has no CT
-               waveform and no DUT ADC, so nothing observable carries it.
-               Confirmed by reading sim_engine.c/telemetry.c/virtual_simfw.c,
-               not inferred from the FAIL."
-      phase: "No SaftyFW phase -- this is a fixture-observability gap. Closing
-              it means either giving virtual_simfw a CT-amps read the harness
-              can poll (a real SimFW command exists for the CT group; nothing
-              in kilnsim's `dut: current_present` mapping consults it), or
-              accepting that the persisted-current half of S9 is bench-only.
-              Either way it is not something this scenario file can express."
+      reason: "REWRITTEN: the observability gap this annotation used to
+               describe is CLOSED, and what blocks the clause now is the
+               expectation grammar, not the fixture. run_dut_scenarios.py now
+               reads the CT channels' synthesized amps through the fixture's
+               own real CT_GET_STATE command, so the persisted current IS
+               observed -- S9 genuinely escalates in this very run
+               (TRIP_INEFFECTIVE_LATCHED 9.2 s after K4 opens; see
+               `s9_escalates` below, which now PASSes). What this clause asks
+               for is different: report.py's _eval_event_then matches a
+               `dut: current_present` target as an EDGE (an entity-state event)
+               inside the window after its cause. A correctly persisting
+               current produces no such edge -- it was already present before
+               K4 opened (the welded SSR put 20 A on CT0 at t=70.2 s) and
+               simply never stops, and virtual_simfw fires the welded_contactor
+               fault in the SAME device_tick() that opens K4, so the CT does
+               not even dip for one sample. This is exactly the corollary
+               virtual_dut/README.md Finding 2 records for K4_open: a level
+               that was already true cannot be evidenced by a later edge.
+               Stating this scenario's real physical claim -- 'current does NOT
+               stop when K4 opens' -- needs a forbid-shaped clause
+               (e.g. forbid current_absent between the K4-open edge and
+               sim_end), which is a scenario-grammar change, deliberately not
+               made in the same pass that fixed the fixture."
+      phase: "No SaftyFW phase, and no longer a fixture phase either. Owned by
+              the scenario library / kilnsim.report grammar: either express the
+              persistence as a forbid clause, or accept that a `then:` edge
+              match cannot describe a level that never changed."
   - name: s9_escalates
     event: { type: relay_edge, relay: K4, edge: open }
     then:
@@ -148,35 +151,23 @@ expect:
                         # margin for the peak-hold decay and evaluation tick
       not_before_s: 8   # must not report ineffective before the decay window
                         # (τ≈1s) could plausibly have cleared a real trip
-    blocked_on:
-      reason: "NOT a SaftyFW gap any more, and this annotation has been
-               rewritten twice as the gaps closed under it. Both of the things
-               that used to block this clause are gone: relay_deenergized is
-               now genuinely produced (safety_core.c:
-               `.relay_deenergized = !relay_owner_is_energized()`, mirrored by
-               dut_core/main.c's `in.relay_deenergized = !s_energized`), and
-               the initiating S3 trip and its K4-open edge are both real in
-               this run (see `initial_trip` above). What remains is purely an
-               observability gap in this FIXTURE: S9's escalation needs
-               any_current_present to stay true AFTER K4 opens, and the
-               persisted current this scenario injects has no observable here
-               at all -- see `contactor_weld_engages_on_k4_open` above for the
-               mechanism, which is a faithful property of real sim_engine.c
-               rather than anything this file or SaftyFW does wrong. S9's
-               decision logic is therefore still unexercised end to end, but
-               for a reason that lives entirely on the fixture side now."
-      phase: "No SaftyFW phase. Same closure as
-              `contactor_weld_engages_on_k4_open`: a CT-amps observable the
-              harness can poll, or accept that S9's persisted-current half is
-              bench-only."
+    # The `blocked_on:` that used to sit here is REMOVED, not softened: this
+    # clause PASSes now. Its last blocker -- "the persisted current has no
+    # observable in this fixture" -- was closed by run_dut_scenarios.py reading
+    # the CT channels' synthesized amps through the fixture's own real
+    # CT_GET_STATE command, so current_any_present() stays true after K4 opens
+    # and S9's verification window completes for real. Measured: S3 trips at
+    # t=90.2 s, K4 opens, TRIP_INEFFECTIVE_LATCHED at t=100.4 s -- 9.2 s later,
+    # against trip_verify_s = 10 s plus one sim-second of telemetry
+    # quantization. relay_deenergized had already been genuinely produced since
+    # SaftyFW 5f90325. This is S9's decision logic exercised end to end for the
+    # first time.
   - name: stays_open_and_latched
     at_end: { dut: K4_open }
   - name: escalation_latched_at_end
     at_end: { event: trip_ineffective_latched }
-    blocked_on:
-      reason: "trip_ineffective can only latch via S9's escalation path
-               (see `s9_escalates` blocked_on above), which cannot run."
-      phase: "Same as the clause it depends on."
+    # `blocked_on:` removed for the same reason as `s9_escalates` above: the
+    # escalation path it depends on now runs, and this clause PASSes.
 manual_checks:
   - "Confirm the GUI/LCD escalates TRIP_INEFFECTIVE distinctly from a normal trip — e.g. a 'POWER IS STILL FLOWING — REMOVE IT AT THE BREAKER' style message, not the ordinary fault banner (SAFETY_MODEL.md §4 S9) — fixture cannot read display/web content"
 report_keep: [telemetry, events]

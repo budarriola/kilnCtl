@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 46,
   "timescale": 10.0,
-  "start_time": 1787278087.7544243,
+  "start_time": 1787290915.7941253,
   "events": [
     {
       "seq": 0,
@@ -932,28 +932,6 @@
       "a": 0,
       "b": 0,
       "f0": 0.0
-    },
-    {
-      "seq": 2000000001,
-      "sim_time_us": 51000000,
-      "event_type": "GUARD_WARN",
-      "payload": {
-        "guard": "S5"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000002,
-      "sim_time_us": 92000000,
-      "event_type": "GUARD_WARN",
-      "payload": {
-        "guard": "S5"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
     }
   ],
   "telemetry_samples": [],
@@ -972,25 +950,22 @@
     },
     {
       "name": "no_warn_storm",
-      "verdict": "FAIL",
-      "evidence": [
-        2000000001,
-        2000000002
-      ],
-      "detail": "event:guard_warn observed before the boundary (first at seq 2000000001)"
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_warn never observed before the boundary"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 31,
-    "context_valid": 31,
+    "polls": 18,
+    "context_valid": 18,
     "any_current_present": 0,
-    "link_up": 31,
+    "link_up": 18,
     "max_zone_count": 3,
     "energized": 0
   }

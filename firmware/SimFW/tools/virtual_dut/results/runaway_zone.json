@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 53,
   "timescale": 10.0,
-  "start_time": 1787277871.1444783,
+  "start_time": 1787290698.794545,
   "events": [
     {
       "seq": 2000000000,
@@ -48,10 +48,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 85,
-    "context_valid": 85,
+    "polls": 48,
+    "context_valid": 48,
     "any_current_present": 0,
-    "link_up": 85,
+    "link_up": 48,
     "max_zone_count": 3,
     "energized": 0
   }

@@ -124,7 +124,7 @@
 //        <ctx_age_ms> <relay_now_mask> <relay_recent_mask>
 //        <relay_on_continuous_ms> <amps0> <amps1> <amps2> <zone_count>
 //        [<zone_flags> <setpoint_c> <measured_c> <sample_counter>] * zone_count
-//        [<main_fault>]
+//        [<main_fault> [<dt_ms>]]
 //
 //        <main_fault> (S6a, discrete_task_main_fault()'s already-debounced
 //        active-low GPIO10 level: 1 == asserted) is OPTIONAL and trailing,
@@ -132,13 +132,33 @@
 //        pre-S6a line format keeps working unchanged. It is last because the
 //        zone block ahead of it is variable-length.
 //
+//        <dt_ms> (OPTIONAL, after <main_fault>; defaults to
+//        SAFTYFW_PERIOD_SAFETY_CORE_MS = 100) is how much simulated time this
+//        ONE tick represents, i.e. safety_guard_input_t.dt_s * 1000. It exists
+//        because this harness's caller observes the fixture at the fixture's
+//        own telemetry rate, not at the real 100 ms safety-core rate, and the
+//        two are not the same number (see ../run_dut_scenarios.py's
+//        "one tick per observed sample" comment and README.md Finding 0/8).
+//        Real safety_core_task() calls safety_guards_tick() once per REAL
+//        sample with dt_s = its own period; this field keeps that invariant --
+//        one call per observed sample -- while letting dt_s carry the true
+//        elapsed time, instead of the old scheme where the caller replayed a
+//        single sample across many 100 ms ticks and thereby manufactured
+//        consecutive-read streaks (S1/S5 count *reads*, not seconds) that the
+//        fixture never produced. Nothing in safety_guards.c treats dt_s as
+//        anything other than an additive time increment (every use is
+//        `state->..._elapsed_s += in->dt_s`), so a larger dt_s is exact for
+//        the time-based bars and simply honest about how many reads were
+//        actually seen.
+//
 //        -> decodes the 16-byte MAX31856 register image (32 hex chars,
 //        firmware/SimFW/docs/PROTOCOL.md sec 5.2's TC_GET_REGS `regs` field)
 //        via max31856_decode_regs() (see that file's own header comment for
 //        why this decode step exists and is not itself guard logic), builds
 //        one tick's safety_guard_input_t exactly as documented above, calls
-//        safety_guards_tick() once (dt_s fixed at SAFTYFW_PERIOD_SAFETY_
-//        CORE_MS/1000 = 0.1s, matching safety_core.c's own #define), then
+//        safety_guards_tick() once (dt_s = <dt_ms>/1000, defaulting to
+//        SAFTYFW_PERIOD_SAFETY_CORE_MS/1000 = 0.1s, safety_core.c's own
+//        #define, when the caller does not say otherwise), then
 //        applies relay_grace_tick()'s GRACE->ARMED timer check and, if this
 //        tick just tripped, relay_trip_transition()'s unconditional latch --
 //        the same two calls relay_owner_task()'s loop body makes every
@@ -218,7 +238,7 @@ static safety_guard_cfg_t s_cfg; // zero-initialized: "nothing commissioned"
                                   // simplification.
 static safety_guard_state_t s_state;
 static relay_owner_state_t s_relay_state;
-static uint32_t s_grace_elapsed_ticks;
+static uint32_t s_grace_elapsed_ms;   // GRACE timer, in simulated ms (see <dt_ms>)
 static bool s_energized;      // relay_owner.c's s_energized: only ENABLE can set it
 static bool s_enable_wanted;  // relay_owner's "command accepted during GRACE but not
                                // applied until ARMED" behavior needs the request kept
@@ -227,7 +247,7 @@ static void do_reset(void)
 {
     safety_guards_reset(&s_state);
     s_relay_state = RELAY_OWNER_STATE_GRACE; // relay_owner_task()'s first statement
-    s_grace_elapsed_ticks = 0;
+    s_grace_elapsed_ms = 0;
     s_energized = false;
     s_enable_wanted = false;
     printf("OK\n");
@@ -377,6 +397,15 @@ static void do_tick(tokens_t *t)
         main_fault = (int)tok_long(t);
     }
 
+    // Optional trailing <dt_ms> (see the TICK line format above). Absent ==
+    // the real safety-core period, which is what every caller written before
+    // the "one tick per observed sample" change sent implicitly.
+    long dt_ms = (long)SAFTYFW_PERIOD_SAFETY_CORE_MS;
+    if (t->next < t->count) {
+        dt_ms = tok_long(t);
+        if (dt_ms <= 0) { t->bad = true; }
+    }
+
     if (t->bad) {
         printf("ERR bad TICK args\n");
         fflush(stdout);
@@ -411,7 +440,7 @@ static void do_tick(tokens_t *t)
     in.main_fault_asserted = (main_fault != 0);
     in.heat_commanded = false;      // real safety_core.c's own hardcoded value
     in.reboot_grace_active = false; // no ANNOUNCE_REBOOT source in this fixture
-    in.dt_s = (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f;
+    in.dt_s = (float)dt_ms / 1000.0f;
 
     // "Stale context is no context" -- safety_core_build_input()'s own
     // three-way collapse (never received / stale / DEGRADED_NO_CONTEXT).
@@ -474,9 +503,19 @@ static void do_tick(tokens_t *t)
         s_energized = false; // relay_owner_task()'s CMD_TRIP case drives GPIO6 low unconditionally
         s_enable_wanted = false;
     } else {
-        s_grace_elapsed_ticks++;
+        // relay_owner_task() counts its GRACE timer in whole
+        // SAFTYFW_PERIOD_SAFETY_CORE_MS ticks because that is exactly how
+        // often it runs. Here one call can represent more (or less) than one
+        // period of simulated time -- see <dt_ms> above -- so the elapsed
+        // TIME is accumulated and converted to that same tick unit right at
+        // the call, rather than counting calls. relay_grace_tick()'s own
+        // comparison is untouched (it still gets "ticks elapsed" vs "ticks
+        // required"); this only stops a call from meaning a fixed 100 ms when
+        // it did not.
+        s_grace_elapsed_ms += (uint32_t)dt_ms;
         uint32_t grace_ticks = SAFTYFW_STARTUP_GRACE_MS / SAFTYFW_PERIOD_SAFETY_CORE_MS;
-        s_relay_state = relay_grace_tick(s_relay_state, s_grace_elapsed_ticks, grace_ticks);
+        uint32_t elapsed_ticks = s_grace_elapsed_ms / SAFTYFW_PERIOD_SAFETY_CORE_MS;
+        s_relay_state = relay_grace_tick(s_relay_state, elapsed_ticks, grace_ticks);
         (void)apply_energize_request(); // GRACE -> ARMED makes a held request take effect
     }
 

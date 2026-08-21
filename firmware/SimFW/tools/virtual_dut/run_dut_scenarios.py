@@ -133,6 +133,34 @@ Together these are what make S3 and S4 provokable at all: both need
 ``any_current_present`` (S3 positively, S4 by its absence), current flows
 only when a zone relay is closed *and* K4 permits, and K4 closes only after
 an enable request survives GRACE.
+
+One tick per observed sample (changed 2026-08-20, this pass)
+------------------------------------------------------------
+This script used to convert each poll's elapsed sim time into
+``max(1, delta // 100ms)`` guard ticks and replay the SAME telemetry-derived
+TC sample across all of them. That did not merely coarsen the time base: S5
+and S1 count consecutive *reads*, so replaying one sample N times
+**manufactured read streaks the fixture never observed** (this is what made
+``tc_flaky``'s ``no_warn_storm`` FAIL), and the ``max(1, ...)`` floor
+simultaneously over-ticked polls shorter than 100 ms and ran the guard clock
+fast (README.md Finding 8). Both were the same arithmetic seen from opposite
+ends. The rule is now: **one guard tick per observed sample, with ``dt_s``
+equal to the sim time that actually elapsed since the previous sample, and no
+tick at all when the fixture published nothing new** -- see
+:func:`plan_tick_dt_ms` for the full reasoning and for what it costs (a
+scenario whose telemetry is too coarse to resolve its own stimulus now shows a
+quiet guard instead of a manufactured trip).
+
+Current is read from the CT channels, not from the model (this pass)
+--------------------------------------------------------------------
+``FT_WELDED_K4_CURRENT_PERSIST`` -- the welded line contactor S9 exists to
+catch -- forces a CT channel to MANUAL amps and bypasses ``duty[]``/
+``current_a[]`` entirely, exactly as real ``sim_engine.c`` does. Telemetry's
+per-zone ``i_amps`` is the MODEL current, which K4 gates to zero the moment it
+opens, so the "K4 open but current still flowing" half of S9's signature had no
+observable here at all. Every current observation now comes from
+:func:`read_ct_amps` (the fixture's own real ``CT_GET_STATE`` command), feeding
+both the DUT's ``any_current_present`` and the ``dut: current_present`` edges.
 """
 from __future__ import annotations
 
@@ -153,7 +181,7 @@ sys.path.insert(0, str(PCTOOLS_SRC))
 
 from kilnsim import runner as kr  # noqa: E402  (path insert must run first)
 from kilnsim.link import TcpSimLink  # noqa: E402
-from kilnsim.protocol import CommandGroup, Event, EventType, IoCmd, ModelCmd, SysCmd, TcCmd  # noqa: E402
+from kilnsim.protocol import CommandGroup, CtCmd, Event, EventType, IoCmd, ModelCmd, SysCmd, TcCmd  # noqa: E402
 from kilnsim.report import evaluate_expectations  # noqa: E402
 from kilnsim.scenario import Scenario, compile_faults, load_scenario  # noqa: E402
 
@@ -310,6 +338,123 @@ def _run_duration_with_actions(scenario: Scenario, actions: list) -> float:
     return min(_ACTION_MAX_RUN_DURATION_S, max(base, want))
 
 
+def plan_tick_dt_ms(sim_time_us: int, last_sim_time_us: Optional[int]) -> Optional[int]:
+    """How much simulated time this poll's SINGLE guard tick represents, or
+    ``None`` when this poll observed nothing new and must not tick at all.
+
+    This is the whole of the batching rule, deliberately in one pure function
+    so it is testable (see ``test_virtual_dut_harness.py``) and so the rule
+    itself is legible rather than buried in the poll loop:
+
+        **one guard tick per observed fixture sample, with dt_s equal to the
+        sim time that actually elapsed since the previous observed sample.**
+
+    What it replaces, and why. The previous rule was
+    ``n_steps = max(1, sim_delta_us // 100_000)`` -- one 100 ms tick per 100 ms
+    of elapsed sim time, all of them fed the *same* TC reading, because that is
+    the only reading the poll fetched. safety_guards.c counts *reads* as well
+    as seconds (S5: 10 consecutive bad reads AND 5 s; S1: 3 consecutive
+    readings), so replaying one sample across N ticks did not merely coarsen
+    the time base -- it **manufactured consecutive-read streaks the fixture
+    never observed**, and those streaks cleared count bars that the real
+    sample stream never would have. `tc_flaky` (900 ms bad / 900 ms good at
+    `timescale: 10`, i.e. one telemetry frame per 5 sim-seconds) is the case
+    that made it visible: a batch landing in a bad phase synthesized ~50
+    consecutive bad reads out of a single bad sample.
+
+    There is no honest filler value for the other N-1 ticks. Repeating the
+    sample invents reads; dropping ``tc_valid`` invents *bad* reads. So the
+    batch must not tick more than once per observed sample -- the tick count
+    now equals the sample count exactly, and the elapsed time is carried by
+    ``dt_s`` instead, which is exact: every use of ``dt_s`` in
+    safety_guards.c is ``state->..._elapsed_s += in->dt_s``, so a single tick
+    of 5.0 s and fifty ticks of 0.1 s advance every time-based bar identically.
+
+    Two consequences, both of them the truth rather than a workaround:
+
+    - The harness can no longer over-tick a poll that covered less than 100 ms
+      of sim time, so README.md Finding 8's "guard clock runs fast, every timer
+      fires early" bias is gone as well -- it was the same ``max(1, ...)``
+      floor seen from the other end. A poll that observes no new sample now
+      ticks zero times instead of one.
+    - Count-based bars (S5's 10 reads, S1's 3 readings) now need the fixture to
+      actually *present* that many samples. A scenario whose telemetry is too
+      coarse to resolve its own stimulus will therefore show a quiet guard
+      rather than a manufactured trip -- read that as "this run did not observe
+      it", which is what ``--trace``'s ``samples=`` counter is for, and lower
+      ``timescale`` (never ``--poll-interval``) to see more.
+    """
+    if last_sim_time_us is None or sim_time_us <= last_sim_time_us:
+        return None
+    dt_ms = (sim_time_us - last_sim_time_us) // 1000
+    return int(dt_ms) if dt_ms > 0 else None
+
+
+def read_ct_state(link: TcpSimLink, channels: int = 3) -> list:
+    """Per-CT-channel ``(mode, amps)``, via the fixture's real
+    ``CT_GET_STATE`` command (PROTOCOL.md sec 5.3, ``kilnsim.protocol.CtCmd``
+    id 4) -- the value ``wave_owner``'s channel actually carries, not the
+    thermal model's ``current_a``. ``mode`` is ``ct_wave_mode_t``:
+    0 == MODEL, 1 == MANUAL.
+
+    The two are the same number while a channel is in MODEL mode (device_tick:
+    ``ct[c].amps = current_a[c]``), and deliberately different while it is in
+    MANUAL: ``FT_WELDED_K4_CURRENT_PERSIST`` (the welded-line-contactor fault
+    S9 exists to catch) forces the channel to MANUAL at its ``params[0]``
+    amps, bypassing ``duty[]``/``current_a[]`` entirely -- real
+    ``sim_engine.c`` does exactly the same thing, by design, and telemetry's
+    per-zone ``i_amps`` is the MODEL value, which K4 gates to zero the instant
+    it opens. Reading ``i_amps`` therefore made the "K4 open but current still
+    flowing" half of S9's signature -- the entire point of the guard --
+    unobservable in this harness. On real hardware the DUT sees that current
+    through its own CT ADC off the synthesized waveform; this readback is that
+    ADC's stand-in, and it is the fixture's own already-existing command, not
+    a new virtual-only extension.
+    """
+    out = []
+    for ch in range(channels):
+        state = link.send_command(CommandGroup.CT, CtCmd.GET_STATE, {"channel": ch})
+        out.append((int(state.get("mode", 0)), float(state.get("amps", 0.0))))
+    return out
+
+
+def telemetry_with_ct_amps(telemetry: dict, ct_state: list) -> dict:
+    """A shallow copy of ``telemetry`` whose per-zone ``i_amps`` carry the CT
+    channel's synthesized amps **for channels in MANUAL mode only** (see
+    :func:`read_ct_state`).
+
+    ``kilnsim.runner._TelemetryEdgeTracker`` derives the ``current_present``
+    entity-state edges a scenario's ``dut: current_present`` clause matches on,
+    and it reads ``zones[].i_amps``. kilnsim is a read-only library here, so
+    the substitution happens on the sample handed to it: the tracker keeps
+    deciding what "present" means (its own 0.05 A test), it is just no longer
+    shown a number that a persisted, K4-bypassing current cannot reach.
+
+    Why MANUAL only, rather than always taking the CT value: a MODEL-mode
+    channel *is* ``current_a[c]`` (device_tick assigns it every tick), so the
+    two numbers agree -- but they are not sampled at the same instant. The
+    telemetry frame is a snapshot stamped with the sim time it was published
+    at, while ``CT_GET_STATE`` is answered live, up to one broadcast period
+    later. Substituting a live reading into an older frame moves an edge
+    slightly *earlier* in the recorded stream than the fixture's own EVT
+    stream reports the relay edge that caused it, which is enough to put a
+    `then: {within_s: ...}` clause's evidence on the wrong side of its cause
+    (measured: `enabled_firing_healthy`'s current edge landing at 60.8 s
+    against a K4-close edge at 61.0 s). Taking the frame's own consistent
+    number whenever it is meaningful, and the CT's only when the CT is
+    carrying something the model path cannot express, keeps both properties.
+    """
+    out = dict(telemetry)
+    zones = []
+    for i, z in enumerate(telemetry.get("zones", [])):
+        z2 = dict(z)
+        if i < len(ct_state) and ct_state[i][0] != 0:  # MANUAL
+            z2["i_amps"] = ct_state[i][1]
+        zones.append(z2)
+    out["zones"] = zones
+    return out
+
+
 class DutCore:
     """Thin subprocess wrapper around dut_core.exe's line protocol (see
     dut_core/main.c's header comment for the exact protocol)."""
@@ -350,7 +495,8 @@ class DutCore:
             raise RuntimeError(f"dut_core ENABLE failed: {reply!r}")
         return reply.split()[1] == "1"
 
-    def tick(self, regs: bytes, estop: bool, ctx: dict) -> dict:
+    def tick(self, regs: bytes, estop: bool, ctx: dict, dt_ms: int = 100,
+             main_fault: bool = False) -> dict:
         hex_regs = regs.hex()
         zone_args = "".join(
             f" {z['flags']} {z['setpoint_c']!r} {z['measured_c']!r} {z['sample_counter']}"
@@ -366,6 +512,7 @@ class DutCore:
             f" {ctx['relay_on_continuous_ms']}"
             f" {ctx['amps'][0]!r} {ctx['amps'][1]!r} {ctx['amps'][2]!r}"
             f" {len(ctx['zones'])}{zone_args}"
+            f" {1 if main_fault else 0} {int(dt_ms)}"
         )
         reply = self._send(line)
         parts = reply.split()
@@ -640,8 +787,12 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
         wire_tracker = kr._TelemetryEdgeTracker()
         guard_tracker = _GuardEdgeTracker()
         fixture_ctx = _FixtureContext()
+        # "polls" is now literally the number of guard ticks, because there is
+        # exactly one tick per observed sample (plan_tick_dt_ms) -- a poll that
+        # saw no new sample does not tick and is not counted.
         reach = {"polls": 0, "context_valid": 0, "any_current_present": 0,
                  "link_up": 0, "max_zone_count": 0, "energized": 0}
+        samples = 0
         pending_actions = list(actions)  # sorted by sim-time, consumed below
 
         last_sim_time_us = 0
@@ -657,6 +808,16 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
             now = time.time()
             if telemetry and now - last_dut_poll >= poll_interval_s:
                 last_dut_poll = now
+                # Current is observed through the CT channels whenever the
+                # model path cannot carry what they are synthesizing -- see
+                # read_ct_state()/telemetry_with_ct_amps() for why that is
+                # exactly the S9 case and why a MODEL-mode channel keeps using
+                # the telemetry frame's own consistently-stamped number. Both
+                # consumers see the same observation: the wire tracker (which
+                # owns the `dut: current_present` edges) and _FixtureContext
+                # (which feeds the real current_any_present() in dut_core).
+                ct_state = read_ct_state(link)
+                telemetry = telemetry_with_ct_amps(telemetry, ct_state)
                 collected.extend(wire_tracker.observe(telemetry))
 
                 sim_time_us = int(telemetry.get("sim_time_us", 0))
@@ -682,23 +843,21 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                 reg_reply = link.send_command(CommandGroup.TC, TcCmd.GET_REGS, {"channel": TC_CHANNEL_SAFETY})
                 regs = bytes(reg_reply.get("regs", bytes(16)))
 
-                # Batch-tick dut_core to cover the elapsed sim time in real
-                # SAFTYFW_PERIOD_SAFETY_CORE_MS (100ms) steps -- see
-                # run_dut_scenarios.py's module docstring / README.md for
-                # why this is a documented approximation (the same TC
-                # reading is replayed for every step in one batch) rather
-                # than a per-100ms live poll. The context/current/link facts
-                # built from this same telemetry sample are replayed across
-                # the batch for exactly the same reason and with exactly the
-                # same documented consequence (coarser time resolution on a
-                # changing input, never a change to any guard's own logic).
+                # ONE guard tick per observed fixture sample, carrying the
+                # sim time that actually elapsed since the previous sample --
+                # see plan_tick_dt_ms() for the full rationale, including why
+                # the old "replay this sample across N 100ms ticks" batching
+                # manufactured consecutive-read streaks (and, symmetrically,
+                # over-ticked short polls). A poll that observed no new sample
+                # ticks zero times: there is nothing new for the guards to
+                # decide on, and inventing a tick for it was the same error in
+                # miniature.
                 ctx_facts = fixture_ctx.observe(telemetry)
-                step_us = int(SAFETY_CORE_TICK_S * 1_000_000)
-                n_steps = max(1, (sim_time_us - last_sim_time_us) // step_us) if sim_time_us > last_sim_time_us else 1
-                n_steps = min(n_steps, 20_000)  # sanity cap
+                dt_ms = plan_tick_dt_ms(sim_time_us, last_sim_time_us)
                 result = None
-                for i in range(n_steps):
-                    result = dut.tick(regs, estop, ctx_facts)
+                if dt_ms is not None:
+                    result = dut.tick(regs, estop, ctx_facts, dt_ms=dt_ms)
+                    samples += 1
                 last_sim_time_us = max(sim_time_us, last_sim_time_us)
                 if result is not None:
                     # Guard-reachability accounting: how many polls actually
@@ -713,14 +872,16 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                             reach[key] += 1
                     reach["max_zone_count"] = max(reach["max_zone_count"], result["eff_zone_count"])
                     if trace:
-                        # Per-poll diagnostic for exactly the failure mode
-                        # README.md warns about: one poll batching many
-                        # 100ms guard ticks against a single telemetry
-                        # sample. `steps` is how many ticks this poll
-                        # replayed; a large value next to a short guard
-                        # window (S3's 20s) is the signal that a verdict
-                        # needs a slower timescale before it is believed.
-                        print(f"    trace t={sim_time_us/1e6:8.2f}s steps={n_steps:5d} "
+                        # Per-poll diagnostic. `dt` is how much sim time this
+                        # poll's single guard tick carried, and `samples` is
+                        # how many ticks the run has done in total -- i.e. how
+                        # many observations a count-based bar (S5's 10 reads,
+                        # S1's 3 readings) has actually been given. A `dt`
+                        # much larger than the real 100 ms safety-core period
+                        # next to a short guard window is the signal that a
+                        # verdict needs a slower `timescale` before it is
+                        # believed (README.md Finding 0/8).
+                        print(f"    trace t={sim_time_us/1e6:8.2f}s dt={dt_ms:6d}ms n={samples:5d} "
                               f"relay_now={ctx_facts['relay_now_mask']} "
                               f"on_ms={ctx_facts['relay_on_continuous_ms']:6d} "
                               f"amps={ctx_facts['amps'][0]:6.2f} "

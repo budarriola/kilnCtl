@@ -56,7 +56,10 @@ substitute.
                                        │     REGS(channel=safety)       │
                                        │   - builds a PUSH_CONTEXT-     │
                                        │     equivalent from telemetry  │
-                                       │   - batch-ticks dut_core.exe   │
+                                       │   - reads CT amps (CT_GET_STATE)│
+                                       │   - ticks dut_core.exe ONCE per│
+                                       │     observed sample (dt = real │
+                                       │     elapsed sim time)          │
                                        │   - synthesizes guard_warn/    │
                                        │     guard_trip/K4 Events       │
                                        │   - calls evaluate_expectations│
@@ -220,6 +223,12 @@ and the newly-unblocked guards split three ways —
 - **S13 stays dormant deliberately** (uncommissioned `borrowed_zone_index`,
   `tc_source` defaulting to `OWN_J7`) — a commissioning gap, same category
   as S1's `abs_max_temp_c`.
+
+> **The `tc_flaky` paragraph immediately below is HISTORY as of Finding 11.**
+> The batching it describes ("one batch replays a single TC sample across
+> ~2.5 s of sim time ... synthesizes ~25 consecutive bad reads") was removed
+> in this pass; its instruction — "either fix the batching or record that this
+> scenario needs a finer poll" — was carried out by fixing the batching.
 
 One event-stream change worth reading carefully: `tc_flaky` previously
 showed an S6b trip and now shows an **S5 trip** at t≈247 s. That is not a
@@ -426,8 +435,12 @@ current needs K4 closed; K4 closes only on an operator enable that survives
 the 60 s startup grace; nothing issued one. `dut_core.exe` had had the
 `ENABLE` command ready for exactly this.
 
-### 8. This harness's guard clock is only accurate when each poll covers
-   ≥ 100 ms of sim time
+### 8. ~~This harness's guard clock is only accurate when each poll covers
+   ≥ 100 ms of sim time~~ **FIXED in this pass — see Finding 11.** The
+   `max(1, ...)` floor described below no longer exists: one tick per observed
+   sample carries the true elapsed `dt_s`, so the guard clock is exact at any
+   poll interval and the measurements in the table below are history. Kept
+   unedited because it is the measurement that pinned the bias.
 
 Not a DUT finding — a harness one, discovered while validating Finding 7's
 trip times, and it inverts the obvious intuition that a finer
@@ -508,6 +521,11 @@ This scenario needs `timescale: 1` or below (or a batching fix) before its
 verdict means anything. It was deliberately **not** re-tuned here, so a clock
 fix and a scenario change could not be conflated.
 
+> **Superseded by Finding 11**: the batching fix is the option that was taken.
+> `no_warn_storm` now PASSes, and the same file re-run at `--timescale 0.2`
+> (0.1 sim-seconds per frame — the real MAX31856 cadence) stays quiet across
+> 453 guard ticks, so the anti-nuisance claim itself is measured, not assumed.
+
 ### 10. `welded_ssr_midfire` and `welded_contactor_s9` were dead tests — now
    live, and what is left blocking them is a different, smaller thing
 
@@ -558,6 +576,110 @@ blocker is gone: `relay_deenergized` is now genuinely produced
 what stops it here is only that the fixture has nowhere to put the persisted
 current. Finding 4's table row for S9, and the "still dormant" table in
 `results/SCENARIO_RESULTS.md`, are stale on that point.
+
+### 11. The batching was manufacturing data, and S9's persisted current had
+   no observable — both fixed here
+
+Two fixture defects, both closed in this pass, both regression-covered by
+`test_virtual_dut_harness.py` (run it directly: it needs no pytest).
+
+**(a) A tick batch could synthesize consecutive-read streaks the fixture never
+observed.** The old rule was `n_steps = max(1, sim_delta_us // 100_000)`, with
+the single TC sample fetched at the start of the poll replayed for every tick
+in the batch. `safety_guards.c` counts *reads* as well as seconds (S5: 10
+consecutive bad reads **and** 5 s; S1: 3 consecutive readings), so at
+`timescale: 10` — one telemetry frame per 5 sim-seconds — one bad sample became
+~50 consecutive bad reads and cleared a count bar nothing had actually cleared.
+That is what `tc_flaky`'s `no_warn_storm` had been failing on since Finding 0.
+
+The `timescale` workaround was rejected on purpose: it leaves the trap armed
+for every future scenario. There is also no honest filler for the other N-1
+ticks — repeating the sample invents reads, and dropping `tc_valid` invents
+*bad* reads — so the batch must simply not tick more than once per observed
+sample. The rule now is **one tick per observed sample, `dt_s` = the sim time
+that actually elapsed since the previous sample, and no tick at all when the
+fixture published nothing new** (`plan_tick_dt_ms()` in
+`run_dut_scenarios.py`; `dut_core.exe`'s `TICK` line gained an optional
+trailing `<dt_ms>`, defaulting to the real 100 ms period). Every `dt_s` use in
+`safety_guards.c` is `+= in->dt_s`, so time-based bars are unaffected to the
+microsecond; only the invented reads are gone. Finding 8's opposite-sign bias
+(the `max(1, ...)` floor over-ticking short polls and running every guard timer
+fast) disappears with the same change — `relay_grace`'s 60 s startup timer is
+now driven by accumulated `dt_ms` instead of a call count, so K4 arms at a true
+60 s rather than 58.6 s.
+
+**What it costs, said plainly:** a count-based bar can now only be cleared by
+real observations, so a scenario whose telemetry is too coarse to resolve its
+own stimulus shows a **quiet guard** instead of a manufactured trip. `tc_flaky`
+is exactly that case and its `no_warn_storm` verdict must be read with the
+caveat below.
+
+**(b) S9's persisted current now has an observable.**
+`FT_WELDED_K4_CURRENT_PERSIST` forces the CT channel to MANUAL amps and
+bypasses `duty[]`/`current_a[]` (real `sim_engine.c` does the same, by design),
+while this harness read per-zone `i_amps` — the MODEL current, which K4 gates
+to zero. Current is now read through the fixture's own **real** `CT_GET_STATE`
+command (`kilnsim.protocol.CtCmd.GET_STATE`, PROTOCOL.md sec 5.3 — not a new
+virtual-only extension), by `read_ct_amps()`, and feeds both consumers: the
+DUT's `any_current_present` (through the real `current_any_present()`) and the
+`dut: current_present` edges (`telemetry_with_ct_amps()` substitutes the CT
+value into the sample handed to `kilnsim.runner`'s edge tracker, which is
+read-only library code). In MODEL mode the two numbers are identical, so
+nothing else in the suite changes meaning.
+
+One subtlety worth keeping: the substitution applies to **MANUAL channels
+only**. A telemetry frame is a snapshot stamped with the sim time it was
+published at, while `CT_GET_STATE` is answered live, up to one broadcast
+period later — so feeding a live reading into an older frame moves an edge
+*earlier* in the recorded stream than the EVT-stream relay edge that caused
+it. Measured while building this: substituting unconditionally put
+`enabled_firing_healthy`'s current-present edge at 60.8 s against a K4-close
+edge at 61.0 s, failing two clauses that had been correctly passing. Taking
+the frame's own number whenever it is meaningful, and the CT's only when the
+CT carries something the model path cannot express, keeps both properties.
+
+**Measured, whole suite before vs after (22 scenarios, same seeds):
+5 PASS / 10 BLOCKED / 7 FAIL → 5 PASS / 11 BLOCKED / 6 FAIL.** Exactly four
+expectation verdicts moved, all of them upward, none downward:
+
+| Scenario | Clause | Before | After | Why |
+|---|---|---|---|---|
+| `tc_flaky` | `no_warn_storm` | **FAIL** | **PASS** | The manufactured streak is gone: with one tick per sample, no S5 warn is produced at all. **Read the caveat below before treating this as proof of the scenario's own claim.** (Scenario verdict FAIL → BLOCKED; its other clause, `no_trip_from_flapping`, is still the pre-existing K4-never-closes BLOCKED.) |
+| `welded_contactor_s9` | `s9_escalates` | BLOCKED | **PASS** | S9 genuinely escalates for the first time: S3 trips at t=90.2 s, K4 opens, the welded contactor keeps 20 A on CT0, and `TRIP_INEFFECTIVE_LATCHED` lands **9.2 s after K4 opened** (9.8 s on a re-run — the committed report), against S9's 10 s `trip_verify_s` and one sim-second of telemetry quantization. Its `blocked_on:` is now flagged STALE by `report.py`. |
+| `welded_contactor_s9` | `escalation_latched_at_end` | BLOCKED | **PASS** | Follows the clause above; also flagged STALE. |
+| `enabled_firing_healthy` | (none) | PASS | PASS | Listed because it moved *during* development and moved back: see the MANUAL-only note above. Its K4 now closes at a true **60.8 s** rather than 58.6 s, which is the `max(1, ...)` bias leaving. |
+
+**`tc_flaky`'s PASS at its own `timescale: 10` is honest but under-resolved —
+so it was separately checked at full resolution, and it holds there too.** The
+suite run took **18 samples** across ~96 sim-seconds (one frame per 5
+sim-seconds), so the guards saw isolated single bad reads, never the *9*
+consecutive the scenario's own comment derives from a 900 ms bad phase at the
+MAX31856's ~100 ms cadence. That run only proves a coarse sampler no longer
+fabricates a streak. Re-running the same file with `--timescale 0.2`
+(0.5 / timescale = **0.1 sim-seconds per frame**, i.e. the real conversion
+cadence, ~8 min of wall time) presents the scenario's actual stimulus:
+
+    453 guard ticks over 45.2 sim-seconds — **zero** S5 warns, zero trips.
+
+That is the claim the scenario was written to make, measured: a 900 ms bad run
+is ~9 consecutive bad reads, one short of `BAD_READ_COUNT_DEFAULT` = 10, and
+the good phase resets the streak (`safety_guards.c`: `s5_bad_streak = 0`).
+**The clause was not re-tuned in either direction** — the FAIL was removed by
+removing the fabrication, not by changing what is asserted. A scenario-library
+follow-up worth considering (not made here): drop `tc_flaky`'s `timescale` to
+0.2 so its own default run is the meaningful one.
+
+**What did NOT move**, and is worth stating: `welded_contactor_s9`'s
+`contactor_weld_engages_on_k4_open` is still BLOCKED, and the persisted
+current is now genuinely observable — so its `blocked_on:` reason ("no
+observable at all") is stale and has been rewritten in the scenario file. The
+real reason is Finding 2's corollary applied to current: `report.py` matches
+`then: {dut: current_present}` against an **edge**, and a correctly persisting
+current produces none — it was already present before K4 opened (the weld) and
+simply never stops. `virtual_simfw` fires the `welded_contactor` fault in the
+same `device_tick()` that opens K4, so the CT never even dips. Expressing
+"current did not stop" needs a `forbid:`-shaped clause, not a `then:` — a
+scenario-grammar question, not a fixture gap.
 
 ## Known, documented limitations
 
@@ -626,32 +748,45 @@ MCP surface at the same live process a `virtual_dut` run is using, e.g. to
 watch a run interactively while it executes. Nothing under `tools/PcTools/`
 was modified to add multi-client support.
 
-### Known approximation: batch ticking
+### Sampling rule: one guard tick per observed sample — REPLACES batch ticking
 
-`safety_core.c` ticks every 100ms of real (or, on real hardware, RTOS)
-time. This harness has no independent 100ms clock of its own --
-`run_dut_scenarios.py` polls `virtual_simfw`'s telemetry (and the safety
-channel's `TC_GET_REGS`) on a wall-clock cadence (`--poll-interval`,
-default 0.25s), then sends `dut_core.exe` however many 100ms `TICK`s are
-needed to cover the sim-time that elapsed since the last poll, **replaying
-the single TC reading fetched at the start of that interval for every tick
-in the batch**. This is a documented approximation of this harness's own
-polling loop, not a change to `safety_guards.c`'s logic (which still
-receives a real dt_s=0.1 every call) -- its practical effect is coarser
-time resolution on a *changing* TC reading (e.g. S1's 3-consecutive-reading
-streak could, in principle, see the same batched value 3+ times in a row
-where real 100ms sampling might have seen it change), and a few seconds of
-extra delay before a long timer (S6b's 120s, S11's 600s, S5's 60s) is
-observed to complete, purely from `--poll-interval` granularity -- visible
-in the S6b finding above (tripped at "147s" sim-time against a 120s
-threshold).
+> The section that used to sit here described the **batch-ticking
+> approximation** (`n_steps = max(1, sim_delta_us // 100ms)`, the same TC
+> sample replayed for every tick in the batch). That approximation was
+> removed in this pass — it was not a neutral coarsening, it manufactured
+> data. See Finding 11 below.
 
-**Lowering `--poll-interval` does NOT simply tighten this, and past a point
-it makes the guard clock wrong in the opposite direction** -- see Finding 8
-above for the measurements. The batching arithmetic floors at one tick per
-poll, so once a poll covers less than 100ms of sim time the DUT is
-*over*-ticked and every guard timer fires early. Lower `timescale` instead,
-and use `--trace` to confirm `steps=` stays above 1.
+`safety_core.c` ticks every 100 ms of real (or, on real hardware, RTOS)
+time and reads a fresh TC sample on each of those ticks. This harness has no
+independent 100 ms clock and, more to the point, **no independent 100 ms
+sample source**: `run_dut_scenarios.py` observes the fixture at the fixture's
+own telemetry rate (~2 Hz of wall time, i.e. `0.5 / timescale` sim-seconds per
+frame). The rule that follows from that, and the one implemented now, is:
+
+> **One `TICK` per observed sample, carrying `dt_s` equal to the sim time
+> that actually elapsed since the previous observed sample. No tick at all
+> when the fixture published nothing new.**
+
+Two invariants come out of it, and they are what make a verdict readable:
+
+- **Tick count == sample count.** No guard ever sees a read the fixture did
+  not produce, so a consecutive-read bar (S5's 10, S1's 3) can only be cleared
+  by real consecutive observations.
+- **Integrated `dt_s` == elapsed sim time, exactly.** Every use of `dt_s` in
+  `safety_guards.c` is `state->..._elapsed_s += in->dt_s`, so one tick of 5.0 s
+  and fifty ticks of 0.1 s advance every time-based bar identically. The
+  `max(1, ...)` floor's "guard clock runs fast" bias (Finding 8) is gone with
+  it — it was the same arithmetic seen from the other end.
+
+The cost, stated plainly: a scenario whose telemetry is too coarse to resolve
+its own stimulus now shows a **quiet guard** rather than a manufactured trip.
+That is a resolution limit made visible instead of hidden, but it is still a
+resolution limit — read a quiet count-based guard together with `--trace`'s
+`dt=`/`n=` fields (how much sim time one tick carried, and how many samples the
+run has taken at all), and lower `timescale` — never `--poll-interval` — when a
+scenario needs to see finer structure. Lowering `--poll-interval` below the
+fixture's own broadcast rate now buys nothing at all: polls that observe no new
+sample simply do not tick.
 
 ### Context and current: wired, but the fixture cannot drive all of it
 
