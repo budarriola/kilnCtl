@@ -192,6 +192,24 @@ static struct wifi_prov_state {
     char static_netmask[WIFI_PROV_IPV4_STR_MAX];
     char static_gateway[WIFI_PROV_IPV4_STR_MAX];
 
+    /* 2026-08-21, TODO.md section 1 "known gap" fix: a wrong-but-parseable
+     * static IP reaches IP_EVENT_STA_GOT_IP at the L2 layer (association
+     * alone, no DHCP handshake to fail) -- see apply_sta_config()'s doc
+     * comment. do_ev_got_ip() used to trust that event unconditionally and
+     * drop the fallback AP the instant it fired, which left an operator who
+     * fat-fingered a gateway/subnet with NO way to reach the board except a
+     * saved-good network rejoining later or a power cycle. This flag is the
+     * fix: for a STATIC join, GOT_IP alone no longer proves reachability, so
+     * the AP stays up until something PROVES it -- specifically, an actual
+     * HTTP request arriving on the static address itself (see
+     * wifi_prov_note_possible_static_reachability(), called from
+     * wifi_provision_http.c's handlers). Irrelevant for DHCP joins, where a
+     * real lease from a real DHCP server is already proof enough. Always
+     * false at boot and reset false on every new static-IP write
+     * (do_set_static_ip()) -- a stale "confirmed" from a previous, possibly
+     * different, static config must never be trusted. */
+    bool static_ip_confirmed;
+
     char active_password[WIFI_PROV_PASSWORD_MAX_LEN + 1]; /* password paired with
                                    * active_ssid above -- kept in RAM only for
                                    * apply_sta_config() to use, same as every
@@ -322,6 +340,13 @@ typedef enum {
     CMD_EV_GOT_IP,
     CMD_TMR_AP_FALLBACK,
     CMD_TMR_RESCAN,
+    /* Posted by wifi_prov_note_possible_static_reachability() -- see
+     * s_wifi.static_ip_confirmed's comment. Fire-and-forget, same as the
+     * event/timer callbacks above; the actual getsockname()/compare check
+     * runs on the CALLER's (http worker) task before this is ever posted,
+     * same "validation stays off owner_task()" split as every producer in
+     * this file -- only the resulting state mutation runs on owner_task(). */
+    CMD_CONFIRM_STATIC_REACHABLE,
 } wifi_cmd_type_t;
 
 typedef struct {
@@ -1003,19 +1028,25 @@ static bool parse_ipv4(const char *s, esp_ip4_addr_t *out)
  * function every join path already funnels through, is what makes that
  * ordering automatic instead of something each call site has to remember.
  *
- * KNOWN LIMITATION, not fixed here: 802.11 association does not depend on L3
+ * KNOWN L2/L3 GAP, still true: 802.11 association does not depend on L3
  * correctness. A wrong-but-well-formed static config (bad gateway, wrong
  * subnet) still lets the join reach WIFI_PROV_STATE_CONNECTED -- esp_netif
  * fires IP_EVENT_STA_GOT_IP locally once a static IP is set and the link
  * associates, it does not wait on a DHCP handshake that would otherwise
- * time out and let ap_fallback_timer notice a failure. So a bad static IP
- * does NOT trigger this module's usual AP-fallback safety net; the board
- * will report "connected" while actually unreachable at that address. It
- * does not brick Wi-Fi (the AP can still be reached by switching back to
- * DHCP or AP mode via this same HTTP API, or by power-cycling into
- * AP-fallback if nothing ever reaches CONNECTED), but this asymmetry is
- * worth a human double-checking before this ships to hardware anyone
- * depends on for remote access. */
+ * time out and let ap_fallback_timer notice a failure. This module cannot
+ * make GOT_IP itself prove reachability -- that would need an active probe
+ * (ARP/ping the gateway) this file doesn't have the dependencies for.
+ *
+ * 2026-08-21 FIX (TODO.md section 1's "known gap"): what changed is what
+ * do_ev_got_ip() DOES with an unconfirmed static GOT_IP -- it no longer
+ * drops the fallback AP on trust alone. See s_wifi.static_ip_confirmed's
+ * comment: the AP now stays up alongside the (possibly-bad) static join
+ * until an actual HTTP request arrives addressed to the static IP itself,
+ * proving something on the LAN can actually reach it. A bad static config
+ * therefore now self-heals to "AP still up, reachable, no power-cycle
+ * needed" instead of the old "reports connected, actually stranded until a
+ * saved network rejoins or someone power-cycles it." A GOOD static config
+ * still ends up STA-only, just one HTTP round-trip later than before. */
 static void apply_sta_config(void)
 {
     wifi_config_t sta_cfg = { 0 };
@@ -1420,11 +1451,6 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 static void do_ev_got_ip(void)
 {
     cancel_ap_fallback_timer();
-    ESP_LOGI(TAG, "station joined, dropping fallback AP");
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
-    }
     s_wifi.state = WIFI_PROV_STATE_CONNECTED;
 
     /* Capture RSSI of the connected network */
@@ -1432,6 +1458,90 @@ static void do_ev_got_ip(void)
     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
         s_wifi.sta_rssi = ap_info.rssi;
     }
+
+    /* 2026-08-21 fix, TODO.md section 1: GOT_IP under a STATIC config proves
+     * only L2 association, not that the configured gateway/subnet are
+     * actually correct (see apply_sta_config()'s comment). Do NOT drop the
+     * fallback AP on that alone -- stay APSTA until
+     * wifi_prov_note_possible_static_reachability() posts
+     * CMD_CONFIRM_STATIC_REACHABLE, proving a request actually reached this
+     * board at the static address. Until then the AP is the ONLY thing
+     * standing between a bad static config and a stranded operator, so it
+     * must not be torn down here. */
+    if (s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC && !s_wifi.static_ip_confirmed) {
+        ESP_LOGW(TAG,
+                 "static IP join reached L2 (GOT_IP) but is NOT YET CONFIRMED reachable -- "
+                 "keeping the fallback AP up until a request arrives via %s",
+                 s_wifi.static_ip);
+        return;
+    }
+
+    ESP_LOGI(TAG, "station joined, dropping fallback AP");
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+    }
+}
+
+/* Runs on owner_task(), posted for by wifi_prov_note_possible_static_
+ * reachability() below. Idempotent: a second confirmation (e.g. two page
+ * loads racing) is a harmless no-op once static_ip_confirmed is already
+ * true. */
+static void do_confirm_static_reachable(void)
+{
+    if (s_wifi.ip_mode != WIFI_PROV_IP_MODE_STATIC || s_wifi.static_ip_confirmed) {
+        return;
+    }
+    s_wifi.static_ip_confirmed = true;
+    ESP_LOGI(TAG, "static IP %s confirmed reachable by an incoming HTTP request -- dropping fallback AP",
+             s_wifi.static_ip);
+    if (s_wifi.state != WIFI_PROV_STATE_CONNECTED) {
+        return; /* nothing to tear down -- state changed again since GOT_IP */
+    }
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_mode(STA) failed: %s", esp_err_to_name(err));
+    }
+}
+
+/* Public entry point for confirming a STATIC join is actually reachable --
+ * called from wifi_provision_http.c's handlers with the fd of the socket
+ * that just served a request. Deliberately does the getsockname()/string
+ * compare HERE, on the caller's (http worker) thread, rather than posting
+ * the raw fd across to owner_task(): the socket is only valid for the
+ * duration of this one request, and by the time owner_task() got around to
+ * it, httpd could have already closed or reused it. Reading s_wifi.ip_mode/
+ * static_ip/static_ip_confirmed without the queue is the same convention
+ * every other getter in this file already uses (e.g.
+ * wifi_prov_get_static_ip()) -- s_wifi's "one writer" rule is about who
+ * MUTATES it, not who may read a snapshot of a string field. Only the
+ * actual mutation (do_confirm_static_reachable()) is funneled through
+ * owner_task(). */
+void wifi_prov_note_possible_static_reachability(int sockfd)
+{
+    if (sockfd < 0) {
+        return;
+    }
+    if (s_wifi.ip_mode != WIFI_PROV_IP_MODE_STATIC || s_wifi.static_ip_confirmed) {
+        return; /* nothing to confirm -- DHCP mode, or already confirmed */
+    }
+    struct sockaddr_in local_addr = { 0 };
+    socklen_t addr_len = sizeof(local_addr);
+    if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
+        return;
+    }
+    char ip_str[16];
+    if (!inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, sizeof(ip_str))) {
+        return;
+    }
+    if (strcmp(ip_str, s_wifi.static_ip) != 0) {
+        /* This request landed on some OTHER local address -- almost always
+         * the fallback AP's own IP, which is still up precisely because
+         * reachability isn't confirmed yet. That is not proof of anything
+         * and must not be treated as confirmation. */
+        return;
+    }
+    post_event(CMD_CONFIRM_STATIC_REACHABLE);
 }
 
 static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -2284,6 +2394,7 @@ static esp_err_t do_set_dhcp(void)
     s_wifi.static_ip[0] = '\0';
     s_wifi.static_netmask[0] = '\0';
     s_wifi.static_gateway[0] = '\0';
+    s_wifi.static_ip_confirmed = false; /* irrelevant in DHCP mode, reset for hygiene */
 
     esp_err_t err = nvs_save_ip_config();
     if (err != ESP_OK) {
@@ -2324,6 +2435,10 @@ static esp_err_t do_set_static_ip(const char *ip, const char *netmask, const cha
     strncpy(s_wifi.static_gateway, gateway, sizeof(s_wifi.static_gateway) - 1);
     s_wifi.static_gateway[sizeof(s_wifi.static_gateway) - 1] = '\0';
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    /* A new (or re-typed) static config is unproven until something proves
+     * it -- never carry a previous confirmation over to different numbers.
+     * See s_wifi.static_ip_confirmed's comment and do_ev_got_ip(). */
+    s_wifi.static_ip_confirmed = false;
 
     esp_err_t err = nvs_save_ip_config();
     if (err != ESP_OK) {
@@ -2639,6 +2754,9 @@ static void owner_task(void *arg)
             break;
         case CMD_TMR_RESCAN:
             do_rescan_tick();
+            break;
+        case CMD_CONFIRM_STATIC_REACHABLE:
+            do_confirm_static_reachable();
             break;
         }
 

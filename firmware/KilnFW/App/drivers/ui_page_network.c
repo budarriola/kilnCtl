@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "kiln_ui.h"
+#include "ui_confirm.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "wifi_prov.h"
@@ -59,15 +60,29 @@
 // code is real work the panel doesn't need to repeat every second for data
 // that changes on the order of minutes, if ever, during one boot.
 //
-// Known gap, documented rather than silently missing (TODO.md 10.9's own
-// "needs its own design pass" note): the board's own AP identity
-// (SSID/password) is READ-ONLY on this page. 10.9's bullet list only asks
-// for AP identity "display", not an edit form, and unlike the scan-then-
-// connect flow (SSID pre-filled from the tap, only the password needs a
-// keyboard) editing the AP's own SSID would need free-text SSID entry with
-// no scan result to pre-fill it from -- a second keyboard flow this pass
-// does not build. wifi_provision_page.html remains the only way to change
-// the board's own AP identity.
+// 2026-08-21 AP-identity edit (TODO.md 10.9): the board's own AP SSID/
+// password is no longer read-only here -- a small "Edit" button next to
+// "This board's access point" opens a full-screen modal (build_ap_edit_modal(),
+// same shape as build_connect_modal() above: two lv_textarea fields sharing
+// one lv_keyboard, focus-switched via LV_EVENT_FOCUSED) pre-filled with the
+// current wifi_prov_get_ap_ssid()/_get_ap_password() values. Reuses the
+// existing wifi_prov_set_ap_ssid()/_set_ap_password() setters
+// wifi_provision_http.c's POST handler already calls -- no parallel setter is
+// added here, per TODO.md 10.1a's shared-backend rule. Save validates length
+// client-side against the exact same rule the setters themselves enforce
+// (WIFI_PROV_SSID_MAX_LEN=32, ssid 1-32 chars; WIFI_PROV_PASSWORD_MAX_LEN=64,
+// password either blank/open or 8-63 chars, WPA2-PSK's real floor) so a
+// rejection is explained on the spot rather than surfacing as an opaque
+// ESP_ERR_INVALID_SIZE from the setter. Since "already-associated clients are
+// kicked and must rejoin" per wifi_prov_set_ap_ssid()/_set_ap_password()'s own
+// header comments -- including this very panel if it happens to be tethered
+// through the AP being edited -- Save does not apply anything itself: it
+// opens ui_confirm.c's shared Yes/Cancel dialog with that exact consequence
+// spelled out, and only the confirm callback (ap_edit_confirm_apply_cb) kicks
+// off the actual change, on a worker task (ap_identity_job_t, same
+// off-lvgl_port_task shape as connect_job_t above -- apply_ap_config() plus a
+// forced AP-mode reapply to kick clients is real radio work, not a cheap NVS
+// write like forget_row_clicked_cb()'s case).
 // 2026-08-18 no-scroll pass: `scr`/`content`/the connect modal below
 // explicitly clear LV_OBJ_FLAG_SCROLLABLE, and several rows/buttons were
 // shrunk (mode toggle and Scan button from UI_THEME_MIN_TOUCH_TARGET_PX/72px
@@ -448,6 +463,70 @@ static lv_obj_t *s_ap_password_label;
 static lv_obj_t *s_ap_qr;
 static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN];
 
+/* ---- AP identity edit modal -- see this file's 2026-08-21 header comment.
+ * Same "full-screen overlay built once, toggled hidden" shape as
+ * s_connect_modal above. */
+static lv_obj_t *s_ap_edit_modal;
+static lv_obj_t *s_ap_edit_ssid_ta;
+static lv_obj_t *s_ap_edit_password_ta;
+static lv_obj_t *s_ap_edit_status_label;
+static lv_obj_t *s_ap_edit_kb;
+
+/* ---- Async AP-identity-apply job -- same shape as connect_job_t above.
+ * ssid/password are copied into these module statics (while still on
+ * lvgl_port_task, from the confirm dialog's on_confirm callback) before the
+ * worker task starts; the worker never touches an LVGL widget. */
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool busy;
+    bool done;
+    esp_err_t err;
+} ap_identity_job_t;
+
+static ap_identity_job_t s_ap_identity_job;
+static char s_ap_identity_job_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+static char s_ap_identity_job_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+
+static void ap_identity_worker_task(void *arg)
+{
+    (void)arg;
+    esp_err_t err = wifi_prov_set_ap_ssid(s_ap_identity_job_ssid, strlen(s_ap_identity_job_ssid));
+    if (err == ESP_OK) {
+        /* Only apply the password if the SSID change actually took --
+         * partial application (new name, old password silently kept) would
+         * be a confusing half-applied state to hand back to the operator. */
+        err = wifi_prov_set_ap_password(s_ap_identity_job_password, strlen(s_ap_identity_job_password));
+    }
+    xSemaphoreTake(s_ap_identity_job.lock, portMAX_DELAY);
+    s_ap_identity_job.err = err;
+    s_ap_identity_job.done = true;
+    s_ap_identity_job.busy = false;
+    xSemaphoreGive(s_ap_identity_job.lock);
+    vTaskDelete(NULL);
+}
+
+static void ap_edit_modal_close(void);
+
+/* Applies a completed ap_identity_worker_task result -- polled from
+ * refresh_cb() same as apply_connect_job_result() above. */
+static void apply_ap_identity_job_result(void)
+{
+    if (!s_ap_identity_job.lock) return;
+    xSemaphoreTake(s_ap_identity_job.lock, portMAX_DELAY);
+    bool done = s_ap_identity_job.done;
+    esp_err_t err = s_ap_identity_job.err;
+    if (done) s_ap_identity_job.done = false;
+    xSemaphoreGive(s_ap_identity_job.lock);
+    if (!done) return;
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AP identity change failed: %s", esp_err_to_name(err));
+        lv_label_set_text(s_ap_edit_status_label, "Could not apply -- try again");
+        return;
+    }
+    ap_edit_modal_close();
+}
+
 /* ---- Pending-forget context, for the confirm msgbox's footer button cb.
  * Only one confirm dialog can be open at a time, so a single static buffer
  * is enough -- set right before lv_msgbox_create() below. */
@@ -738,6 +817,7 @@ static void refresh_cb(lv_timer_t *timer)
 
     apply_scan_job_result();
     apply_connect_job_result();
+    apply_ap_identity_job_result();
 
     char status_buf[64];
     wifi_status_ui_get_text(status_buf, sizeof(status_buf));
@@ -905,6 +985,202 @@ static lv_obj_t *build_ap_stat_row(lv_obj_t *parent, const char *name)
     return value;
 }
 
+/* ---- AP identity edit modal ---- */
+
+static void ap_edit_modal_close(void)
+{
+    lv_obj_add_flag(s_ap_edit_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ap_edit_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    ap_edit_modal_close();
+}
+
+/* Focus-switches the shared keyboard to whichever field the operator just
+ * tapped -- same "one lv_keyboard, two textareas" trick a single-field modal
+ * (build_connect_modal() above) doesn't need, since that one only ever has
+ * one textarea. */
+static void ap_edit_ssid_focus_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_keyboard_set_textarea(s_ap_edit_kb, s_ap_edit_ssid_ta);
+}
+
+static void ap_edit_password_focus_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_keyboard_set_textarea(s_ap_edit_kb, s_ap_edit_password_ta);
+}
+
+/* Called after the operator confirms the "this will disconnect clients"
+ * dialog (see ap_edit_save_cb() below) -- ssid/password have already been
+ * validated and copied into the job's module buffers by then, so this only
+ * has to kick off the worker task. */
+static void ap_edit_confirm_apply_cb(void *user_data)
+{
+    (void)user_data;
+    if (!s_ap_identity_job.lock) {
+        lv_label_set_text(s_ap_edit_status_label, "Could not apply -- try again");
+        return;
+    }
+
+    xSemaphoreTake(s_ap_identity_job.lock, portMAX_DELAY);
+    bool already_busy = s_ap_identity_job.busy;
+    if (!already_busy) {
+        s_ap_identity_job.busy = true;
+        s_ap_identity_job.done = false;
+    }
+    xSemaphoreGive(s_ap_identity_job.lock);
+    if (already_busy) return;
+
+    lv_label_set_text(s_ap_edit_status_label, "Applying...");
+
+    BaseType_t created = xTaskCreate(ap_identity_worker_task, "wifi_ap_id_ui", 4096, NULL, 5, NULL);
+    if (created != pdPASS) {
+        xSemaphoreTake(s_ap_identity_job.lock, portMAX_DELAY);
+        s_ap_identity_job.busy = false;
+        xSemaphoreGive(s_ap_identity_job.lock);
+        lv_label_set_text(s_ap_edit_status_label, "Could not start");
+    }
+}
+
+/* Save: validates against the exact same rule wifi_prov_set_ap_ssid()/
+ * _set_ap_password() themselves enforce (see this file's 2026-08-21 header
+ * comment) so a bad value is explained here rather than surfacing as a bare
+ * ESP_ERR_INVALID_SIZE from the setter, then hands off to ui_confirm.c's
+ * shared dialog -- changing the AP's own identity drops any client connected
+ * through it (possibly this very panel), so nothing is applied until the
+ * operator explicitly confirms that consequence. */
+static void ap_edit_save_cb(lv_event_t *e)
+{
+    (void)e;
+    const char *ssid = lv_textarea_get_text(s_ap_edit_ssid_ta);
+    const char *password = lv_textarea_get_text(s_ap_edit_password_ta);
+    size_t ssid_len = strlen(ssid);
+    size_t password_len = strlen(password);
+
+    if (ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
+        lv_label_set_text(s_ap_edit_status_label, "SSID must be 1-32 characters");
+        return;
+    }
+    if (password_len > 0 && password_len < 8) {
+        lv_label_set_text(s_ap_edit_status_label, "Password must be blank (open) or 8-63 characters");
+        return;
+    }
+    if (password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
+        lv_label_set_text(s_ap_edit_status_label, "Password must be blank (open) or 8-63 characters");
+        return;
+    }
+
+    snprintf(s_ap_identity_job_ssid, sizeof(s_ap_identity_job_ssid), "%s", ssid);
+    snprintf(s_ap_identity_job_password, sizeof(s_ap_identity_job_password), "%s", password);
+    lv_label_set_text(s_ap_edit_status_label, "");
+
+    ui_confirm_params_t confirm = {
+        .title = "Change access point identity?",
+        .body = "This changes the board's own Wi-Fi network name and/or password. "
+                "Any device connected through it -- including this panel, if it is "
+                "connected over this AP -- will be disconnected immediately and must "
+                "rejoin using the new name/password.",
+        .confirm_label = "Apply",
+        .confirm_color = UI_THEME_ACCENT_5,
+        .on_confirm = ap_edit_confirm_apply_cb,
+        .user_data = NULL,
+    };
+    ui_confirm_show(&confirm);
+}
+
+/* Edit button -- prefills both fields with the identity currently in effect
+ * (wifi_prov_get_ap_ssid()/_get_ap_password(), the same values this page
+ * already shows in plain text just above the button) rather than opening to
+ * blank fields the operator would have to re-type from scratch. */
+static void ap_edit_open_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_textarea_set_text(s_ap_edit_ssid_ta, wifi_prov_get_ap_ssid());
+    lv_textarea_set_text(s_ap_edit_password_ta, wifi_prov_get_ap_password());
+    lv_label_set_text(s_ap_edit_status_label, "");
+    lv_obj_remove_flag(s_ap_edit_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Same full-screen-overlay shape as build_connect_modal() above, with a
+ * second textarea (SSID, plain text -- not lv_textarea_set_password_mode())
+ * sharing the one keyboard via focus-switching (ap_edit_ssid_focus_cb()/
+ * ap_edit_password_focus_cb() above). */
+static void build_ap_edit_modal(lv_obj_t *scr)
+{
+    s_ap_edit_modal = lv_obj_create(scr);
+    lv_obj_add_flag(s_ap_edit_modal, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(s_ap_edit_modal, lv_pct(100), lv_pct(100));
+    lv_obj_set_pos(s_ap_edit_modal, 0, 0);
+    lv_obj_set_style_bg_color(s_ap_edit_modal, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_ap_edit_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_ap_edit_modal, 0, 0);
+    lv_obj_set_style_pad_all(s_ap_edit_modal, UI_THEME_PADDING_PX, 0);
+    lv_obj_set_flex_flow(s_ap_edit_modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(s_ap_edit_modal, UI_THEME_PADDING_PX / 4, 0);
+    lv_obj_remove_flag(s_ap_edit_modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(s_ap_edit_modal);
+    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(title, "Edit access point identity");
+
+    s_ap_edit_ssid_ta = lv_textarea_create(s_ap_edit_modal);
+    lv_obj_set_width(s_ap_edit_ssid_ta, lv_pct(100));
+    lv_textarea_set_one_line(s_ap_edit_ssid_ta, true);
+    lv_textarea_set_max_length(s_ap_edit_ssid_ta, WIFI_PROV_SSID_MAX_LEN);
+    lv_textarea_set_placeholder_text(s_ap_edit_ssid_ta, "Network name (1-32 chars)");
+    lv_obj_add_event_cb(s_ap_edit_ssid_ta, ap_edit_ssid_focus_cb, LV_EVENT_FOCUSED, NULL);
+
+    s_ap_edit_password_ta = lv_textarea_create(s_ap_edit_modal);
+    lv_obj_set_width(s_ap_edit_password_ta, lv_pct(100));
+    lv_textarea_set_one_line(s_ap_edit_password_ta, true);
+    lv_textarea_set_password_mode(s_ap_edit_password_ta, true);
+    lv_textarea_set_max_length(s_ap_edit_password_ta, WIFI_PROV_PASSWORD_MAX_LEN);
+    lv_textarea_set_placeholder_text(s_ap_edit_password_ta, "Password (blank = open, else 8-63 chars)");
+    lv_obj_add_event_cb(s_ap_edit_password_ta, ap_edit_password_focus_cb, LV_EVENT_FOCUSED, NULL);
+
+    s_ap_edit_status_label = lv_label_create(s_ap_edit_modal);
+    lv_obj_set_style_text_color(s_ap_edit_status_label, UI_THEME_ACCENT_5, 0);
+    lv_label_set_text(s_ap_edit_status_label, "");
+
+    lv_obj_t *btn_row = lv_obj_create(s_ap_edit_modal);
+    lv_obj_set_width(btn_row, lv_pct(100));
+    lv_obj_set_height(btn_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_all(btn_row, 0, 0);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_gap(btn_row, UI_THEME_PADDING_PX, 0);
+
+    lv_obj_t *save_btn = lv_button_create(btn_row);
+    lv_obj_set_height(save_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_flex_grow(save_btn, 1);
+    lv_obj_set_style_bg_color(save_btn, UI_THEME_ACCENT_4, 0);
+    lv_obj_add_event_cb(save_btn, ap_edit_save_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *save_label = lv_label_create(save_btn);
+    lv_label_set_text(save_label, "Save");
+    lv_obj_center(save_label);
+    lv_obj_update_layout(save_btn);
+    ui_theme_apply_touch_area(save_btn, false);
+
+    lv_obj_t *cancel_btn = lv_button_create(btn_row);
+    lv_obj_set_height(cancel_btn, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_flex_grow(cancel_btn, 1);
+    lv_obj_set_style_bg_color(cancel_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_add_event_cb(cancel_btn, ap_edit_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel_label = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_center(cancel_label);
+    lv_obj_update_layout(cancel_btn);
+    ui_theme_apply_touch_area(cancel_btn, false);
+
+    s_ap_edit_kb = lv_keyboard_create(s_ap_edit_modal);
+    lv_keyboard_set_textarea(s_ap_edit_kb, s_ap_edit_ssid_ta);
+}
+
 static void build_connect_modal(lv_obj_t *scr)
 {
     s_connect_modal = lv_obj_create(scr);
@@ -982,7 +1258,8 @@ lv_obj_t *ui_page_network_build(void)
     s_scan_job.lock = xSemaphoreCreateMutex();
     s_mode_job.lock = xSemaphoreCreateMutex();
     s_connect_job.lock = xSemaphoreCreateMutex();
-    if (!s_scan_job.lock || !s_mode_job.lock || !s_connect_job.lock) {
+    s_ap_identity_job.lock = xSemaphoreCreateMutex();
+    if (!s_scan_job.lock || !s_mode_job.lock || !s_connect_job.lock || !s_ap_identity_job.lock) {
         /* Never observed to actually fail (three tiny allocations, this
          * late in boot) -- but per this codebase's "never crash on a
          * resource failure" convention (see wifi_prov.h's header comment),
@@ -1232,10 +1509,37 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_pad_gap(s_ap_section, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(s_ap_section, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *ap_title = lv_label_create(s_ap_section);
+    /* Title + Edit button share one row rather than Edit getting its own
+     * full-width row below -- keeps this section's height essentially
+     * unchanged from before the edit feature existed (this page's content
+     * budget has no slack to spare, see this file's header comment). */
+    lv_obj_t *ap_title_row = lv_obj_create(s_ap_section);
+    lv_obj_set_width(ap_title_row, lv_pct(100));
+    lv_obj_set_height(ap_title_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(ap_title_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ap_title_row, 0, 0);
+    lv_obj_set_style_pad_all(ap_title_row, 0, 0);
+    lv_obj_set_flex_flow(ap_title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ap_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *ap_title = lv_label_create(ap_title_row);
     lv_obj_set_style_text_color(ap_title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(ap_title, "This board's access point");
-    lv_obj_set_width(ap_title, lv_pct(100));
+    lv_obj_set_flex_grow(ap_title, 1);
+
+    lv_obj_t *ap_edit_btn = lv_button_create(ap_title_row);
+    lv_obj_set_height(ap_edit_btn, 32);
+    lv_obj_set_width(ap_edit_btn, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(ap_edit_btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(ap_edit_btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(ap_edit_btn, ap_edit_open_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ap_edit_label = lv_label_create(ap_edit_btn);
+    lv_obj_set_style_text_color(ap_edit_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(ap_edit_label, "Edit");
+    lv_obj_center(ap_edit_label);
+    lv_obj_set_style_pad_hor(ap_edit_btn, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_update_layout(ap_edit_btn);
+    ui_theme_apply_touch_area(ap_edit_btn, true);
 
     lv_obj_t *ap_rows = lv_obj_create(s_ap_section);
     lv_obj_set_width(ap_rows, lv_pct(100));
@@ -1266,10 +1570,14 @@ lv_obj_t *ui_page_network_build(void)
      * including the icons while a connect attempt is in progress. */
     ui_topbar_raise(&tb);
 
-    /* Connect modal -- built last so it's the topmost child in z-order
-     * (LVGL's hit-test walks children highest-index-first, ui_theme.h's
-     * header comment), covering the whole screen while shown. */
+    /* Connect modal and AP-identity-edit modal -- built last so they're the
+     * topmost children in z-order (LVGL's hit-test walks children highest-
+     * index-first, ui_theme.h's header comment), covering the whole screen
+     * while shown. Only one of the two is ever visible at a time (Connect is
+     * reachable only from the home-mode scan list, AP-edit only from the
+     * AP-mode section), so their relative order doesn't matter. */
     build_connect_modal(scr);
+    build_ap_edit_modal(scr);
 
     /* Pages are never torn down (kiln_ui.h's header comment) -- same
      * "create once, keep refreshing forever" timer lifetime as every other

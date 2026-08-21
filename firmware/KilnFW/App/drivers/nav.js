@@ -53,6 +53,7 @@
     { href: '/diagnostics', label: 'Diagnostics' },
     { href: '/diagnostics/thermo', label: 'Thermocouple faults' },
     { href: '/safety', label: 'Safety processor' },
+    { href: '/settings/backup', label: 'Backup & restore' },
     { href: '/settings#danger', label: 'Reset' },
   ];
 

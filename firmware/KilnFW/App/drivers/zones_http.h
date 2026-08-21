@@ -38,6 +38,25 @@
 extern "C" {
 #endif
 
+/* Sanity bounds for the stored FOPDT plant model, shared by
+ * zones_config_set_model() and any caller that must reject an out-of-range
+ * model BEFORE writing anything (backup_http.c's import validation pass is
+ * the reason these moved here, 2026-08-21: they used to be private #defines
+ * in zones_http.c, so the import path could only check "finite and
+ * non-negative" in its own first pass and had to let zones_config_set_model()
+ * catch the real ceiling at commit time -- too late, since earlier entries in
+ * the same import may already have been written to NVS by then. Now both
+ * paths gate on the exact same two constants, so a whole-import validation
+ * pass can refuse an out-of-range model before any write happens.
+ *
+ * These are typo/garbage filters, not physics: a kiln's static gain is order
+ * 100-1000 degC per unit duty and its time constant order 1e3 s, so the
+ * ceilings sit an order of magnitude clear of anything a real fit produces
+ * while still rejecting a decimal-point slip. 86400 s (one day) is a hard "no
+ * thermal process on this board is slower than this" bound. */
+#define ZONE_MODEL_K_MAX 5000.0f
+#define ZONE_MODEL_TIME_MAX_S 86400.0f
+
 /* Loads zones_cfg from NVS (namespace "kiln_cfg", key "zones_cfg";
  * ESP_ERR_NVS_NOT_FOUND is not an error -- mirrors wifi_prov.c's nvs_load,
  * defaults to thermo_count/relay_count 0, i.e. nothing configured yet) and

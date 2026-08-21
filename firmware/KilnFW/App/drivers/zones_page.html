@@ -367,6 +367,18 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<p class="hint">Checking more than one channel averages their valid readings into this ' +
     'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
     'same as an unplugged/faulted thermocouple.</p>' +
+    /* Dynamic per-zone caution line, kept blank/hidden until
+     * updateThermoWarnings() (below) fills it in on load and on every
+     * checkbox change -- NOT a save-blocking validation: zones_http.c's own
+     * POST handler allows an explicit zero thermo_mask (it is the documented
+     * "deliberately clearing a zone's thermocouple" case, see
+     * parse_zone_fields()'s comment) and does not forbid the same channel
+     * feeding two zones either (thermo_combine.c reads a mask per zone with
+     * no notion of exclusivity). Both are legal states this page must not
+     * silently hide -- an operator who fat-fingered a checkbox should see it
+     * before saving, not discover it later as a zone that mysteriously never
+     * reaches temperature. */
+    '<p class="thermowarn hint" style="display:none"></p>' +
     /* 2026-08-21, TODO.md owner-report item 1/2 -- the owner's actual
        complaint: "in the thermocouples settings page i dont see anywhere i
        can select my thermocouple type." This is CONFIG, not a live sensor
@@ -442,6 +454,64 @@ function zoneBlock(z, i, relayCount, thermoCount) {
   return div;
 }
 
+/* TODO.md 10.8's last open item: neither "zero channels selected" nor "same
+ * channel feeds two zones" is rejected by zones_http.c's POST handler (see
+ * the comment on .thermowarn above), so this is advisory only -- lets an
+ * operator see the consequence of their checkbox choices before Save, never
+ * blocks Save itself. Re-run on load and on every thermobit change
+ * (delegated listener below), so it never goes stale against what's actually
+ * checked. */
+function updateThermoWarnings() {
+  var blocks = document.getElementById('zones').querySelectorAll('.zone');
+  var byChannel = {}; /* channel bit -> array of zone indices that checked it */
+  blocks.forEach(function (div) {
+    div.querySelectorAll('.thermobit').forEach(function (cb) {
+      if (!cb.checked) return;
+      var bit = cb.dataset.bit;
+      (byChannel[bit] = byChannel[bit] || []).push(div.dataset.index);
+    });
+  });
+  blocks.forEach(function (div) {
+    var warn = div.querySelector('.thermowarn');
+    var checked = [];
+    div.querySelectorAll('.thermobit').forEach(function (cb) {
+      if (cb.checked) checked.push(cb.dataset.bit);
+    });
+    var lines = [];
+    if (checked.length === 0) {
+      lines.push('No thermocouple selected -- this zone cannot read a temperature or control ' +
+                 'anything until at least one channel above is checked.');
+    }
+    var shared = checked.filter(function (bit) { return byChannel[bit].length > 1; });
+    if (shared.length > 0) {
+      var others = {};
+      shared.forEach(function (bit) {
+        byChannel[bit].forEach(function (zi) { if (zi !== div.dataset.index) others[zi] = true; });
+      });
+      var otherList = Object.keys(others);
+      if (otherList.length > 0) {
+        lines.push('Channel' + (shared.length > 1 ? 's' : '') + ' ' +
+                   shared.map(function (b) { return (parseInt(b, 10) + 1); }).join(', ') +
+                   ' also feed' + (shared.length > 1 ? '' : 's') + ' zone' +
+                   (otherList.length > 1 ? 's' : '') + ' ' + otherList.join(', ') +
+                   ' -- allowed, but the same sensor will be averaged into more than one zone\'s ' +
+                   'control temperature.');
+      }
+    }
+    if (lines.length > 0) {
+      warn.textContent = lines.join(' ');
+      warn.style.display = '';
+      warn.className = 'thermowarn hint verdict-warn';
+    } else {
+      warn.style.display = 'none';
+      warn.textContent = '';
+    }
+  });
+}
+document.getElementById('zones').addEventListener('change', function (e) {
+  if (e.target.classList.contains('thermobit')) updateThermoWarnings();
+});
+
 function renderZones() {
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
@@ -460,6 +530,7 @@ function renderZones() {
     var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */ };
     el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
   }
+  updateThermoWarnings();
 }
 
 function loadCurrent() {

@@ -19,6 +19,7 @@
 #include "board_temps.h"
 #include "dashboard_http.h"
 #include "diagnostics_http.h"
+#include "backup_http.h"
 #include "settings_http.h"
 #include "factory_reset.h"
 #include "ILI9488.h"
@@ -999,6 +1000,18 @@ void app_main(void)
     if (ota_http_err != ESP_OK) {
         ESP_LOGW(TAG, "ota_http_start failed: %s -- no /api/ota/challenge this boot",
                  esp_err_to_name(ota_http_err));
+    }
+
+    // TODO.md 0.5 / UI_PLAN.md's settings+profile import/export, unified into
+    // one Backup & Restore page (backup_http.c). Registered AFTER
+    // ota_http_start() just above, deliberately: its import handler calls
+    // ota_http_check_interlocks() before writing anything, which reads the
+    // io/thermo_bus/safety pointers ota_http_start() just stashed -- calling
+    // it before that point would see stale/unset state.
+    esp_err_t backup_err = backup_http_start();
+    if (backup_err != ESP_OK) {
+        ESP_LOGW(TAG, "backup_http_start failed: %s -- no /settings/backup page this boot",
+                 esp_err_to_name(backup_err));
     }
 
     // Development-only /api/sim (fault injection into the simulated plant).

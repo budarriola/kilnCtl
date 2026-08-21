@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Backup &amp; Restore</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- TODO.md 0.5's settings import/export item and UI_PLAN.md's separately
+     named import/export item, built as ONE page -- see backup_http.h's
+     header comment for the full scope note (what is and is not included,
+     and why Wi-Fi credentials never are). Same shared chrome as every other
+     page: nav.js derives the header from <title>, app.js supplies the
+     sticky Stop banner + kcConfirm this page's destructive Restore action
+     uses. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --fault-color: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --fault-color: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --fault-color: var(--ui-accent-5);
+  }
+  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
+          padding: 1em; margin: 1em 0; }
+  a.button, button { display: inline-block; padding: 0.5em 1em; border-radius: 4px;
+         border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
+         text-decoration: none; cursor: pointer; font-size: 1em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<h1>Backup &amp; Restore</h1>
+
+<div class="card">
+  <h2 style="margin-top:0;border-top:none;padding-top:0;">Export</h2>
+  <p>Downloads a single JSON file: your saved fire profiles, plus the zone
+  tuning settings that support a full restore -- PID gains, the fitted plant
+  model, and thermocouple type per channel.</p>
+  <p><strong>This file does NOT include Wi-Fi credentials</strong> (see
+  Restore below for why), and it does NOT include zone wiring -- names,
+  relay/thermocouple assignment, guard thresholds, temperature limits, or
+  heater timing. Those live only on the
+  <a href="/settings/zones">Thermocouples &amp; Zones</a> page today and must
+  be set up directly on a replacement board.</p>
+  <p><a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a></p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0;border-top:none;padding-top:0;">Restore</h2>
+  <p>Restoring OVERWRITES the profiles/zone-tuning fields named above with
+  whatever the file contains -- an existing profile in the same slot ID is
+  replaced. <strong>Wi-Fi credentials are never touched by this</strong>: a
+  backup made on one board and restored onto another does not carry that
+  first board's Wi-Fi network over, on purpose -- a kiln that changed
+  physical location very likely also changed which Wi-Fi network it should
+  join, and this page has no way to know whether that's true, so it never
+  guesses. Set up Wi-Fi on the <a href="/wifi">Wi-Fi</a> page after
+  restoring, same as on a brand-new board.</p>
+  <p>Restore is refused outright (nothing is written) while a profile is
+  running, the heaters are commanded on, or a firmware update is already in
+  progress -- the same check this board's own OTA update uses before writing
+  anything. The whole file is validated before any single field is written;
+  a malformed or truncated upload changes nothing and reports why.</p>
+  <p>
+    <input type="file" id="restoreFile" accept="application/json,.json">
+    <button type="button" id="restoreBtn">Restore from file</button>
+  </p>
+  <p id="restoreStatus"></p>
+</div>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+
+document.getElementById('restoreBtn').addEventListener('click', function () {
+  var input = document.getElementById('restoreFile');
+  var status = document.getElementById('restoreStatus');
+  if (!input.files || !input.files[0]) {
+    status.textContent = 'Choose a backup file first.';
+    return;
+  }
+  if (!kcConfirm('This overwrites saved profiles and zone tuning (PID/model/thermocouple type) with the ' +
+               'contents of this file. Wi-Fi credentials are not affected. Continue?')) {
+    return;
+  }
+  status.textContent = 'Reading file...';
+  var reader = new FileReader();
+  reader.onload = function () {
+    status.textContent = 'Uploading...';
+    fetch('/api/backup/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: reader.result,
+    }).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (res) {
+      status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+    }).catch(function () {
+      status.textContent = 'Upload failed -- check the connection and try again.';
+    });
+  };
+  reader.onerror = function () {
+    status.textContent = 'Could not read that file.';
+  };
+  reader.readAsText(input.files[0]);
+});
+</script>
+</body>
+</html>

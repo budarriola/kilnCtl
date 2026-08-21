@@ -70,19 +70,11 @@ static const char *TAG = "zones_http";
 
 #define ZONE_NAME_MAX_LEN 15
 
-/* Sanity bounds for the stored FOPDT plant model, shared by
- * zones_config_set_model() and the POST parser so the two paths cannot
- * drift apart and accept different things -- a model written by autotune
- * must survive a whole-page round-trip through the browser unchanged, and
- * that only holds if both gates are the same gate.
- *
- * These are typo/garbage filters, not physics: a kiln's static gain is
- * order 100-1000 degC per unit duty and its time constant order 1e3 s, so
- * the ceilings sit an order of magnitude clear of anything a real fit
- * produces while still rejecting a decimal-point slip. 86400 s (one day) is
- * a hard "no thermal process on this board is slower than this" bound. */
-#define ZONE_MODEL_K_MAX 5000.0f
-#define ZONE_MODEL_TIME_MAX_S 86400.0f
+/* Sanity bounds for the stored FOPDT plant model -- ZONE_MODEL_K_MAX and
+ * ZONE_MODEL_TIME_MAX_S now live in zones_http.h (moved there 2026-08-21) so
+ * backup_http.c's import validation pass can reject an out-of-range model
+ * BEFORE any write happens, the same as zones_config_set_model() enforces at
+ * commit time -- see zones_http.h for the full rationale. */
 
 /* Embedded via EMBED_TXTFILES in CMakeLists.txt -- same convention as
  * wifi_provision_http.c's embedded pages. */

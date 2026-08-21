@@ -349,12 +349,27 @@ esp_err_t wifi_prov_set_dhcp(void);
  * router's static-IP form. The 802.11 association itself doesn't depend on
  * L3 correctness, so the join can still reach WIFI_PROV_STATE_CONNECTED
  * (GOT_IP fires locally once the static IP is applied, not from a DHCP
- * handshake) even though the resulting address is unreachable -- this
- * module's AP-fallback timer is keyed off state, so it will NOT bring the
- * fallback AP back in that specific case. See wifi_prov.c's apply_sta_config()
- * comment for the full reasoning; a human should double-check this tradeoff
- * before this ships to hardware relied on for remote access. */
+ * handshake) even though the resulting address is unreachable.
+ *
+ * 2026-08-21 fix (TODO.md section 1's "known gap"): that GOT_IP alone no
+ * longer tears down the fallback AP for a static join -- see wifi_prov.c's
+ * apply_sta_config() comment and s_wifi.static_ip_confirmed. The AP stays up
+ * until wifi_prov_note_possible_static_reachability() (below) reports a real
+ * HTTP request actually reached the board at the static address, so a bad
+ * config is reachable via the AP indefinitely rather than only until the
+ * next power cycle. */
 esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway);
+
+/* 2026-08-21: called by wifi_provision_http.c's handlers with the fd of the
+ * socket that just served an HTTP request (httpd_req_to_sockfd(req)), so
+ * this module can tell whether that request arrived on the STA static
+ * address specifically -- the one piece of ground truth GOT_IP alone can't
+ * provide. A no-op unless ip_mode is STATIC and not yet confirmed; matching
+ * the static IP drops the fallback AP (see do_ev_got_ip()/
+ * do_confirm_static_reachable() in wifi_prov.c). Cheap and safe to call
+ * unconditionally on every request -- most calls are a few direct-read
+ * comparisons and return immediately. */
+void wifi_prov_note_possible_static_reachability(int sockfd);
 
 #ifdef __cplusplus
 }

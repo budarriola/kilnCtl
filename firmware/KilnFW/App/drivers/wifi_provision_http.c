@@ -105,6 +105,11 @@ static esp_err_t app_js_get_handler(httpd_req_t *req)
 
 static esp_err_t wifi_page_get_handler(httpd_req_t *req)
 {
+    /* 2026-08-21, TODO.md section 1 fix: a direct hit on /wifi is one of the
+     * ways an operator proves a static IP is actually reachable -- see
+     * wifi_prov_note_possible_static_reachability()'s doc comment. Cheap
+     * no-op unless ip_mode is STATIC and unconfirmed. */
+    wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
     return send_embedded_gzip_html(req, "wifi_provision_page.html",
                                    wifi_provision_page_html_gz_start, wifi_provision_page_html_gz_end);
 }
@@ -116,6 +121,11 @@ static esp_err_t wifi_page_get_handler(httpd_req_t *req)
  * routes underneath either way; this just decides which one "/" means. */
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
+    /* 2026-08-21, TODO.md section 1 fix: this is the single most likely hit
+     * an operator makes right after typing a newly-configured static IP into
+     * a browser, so it's the primary confirmation point -- see
+     * wifi_prov_note_possible_static_reachability()'s doc comment. */
+    wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
     if (wifi_prov_is_sta_connected()) {
         return send_embedded_gzip_html(req, "main_page.html", main_page_html_gz_start, main_page_html_gz_end);
     }
@@ -174,6 +184,13 @@ static void json_escape(const char *src, char *out, size_t out_cap)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
+    /* 2026-08-21, TODO.md section 1 fix: /status is polled periodically by
+     * every page's nav/status widget, so this is the confirmation path for a
+     * tab that was already open (or a bookmark) before a static-IP join
+     * landed -- see wifi_prov_note_possible_static_reachability()'s doc
+     * comment. Cheap no-op unless ip_mode is STATIC and unconfirmed. */
+    wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
+
     char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
     json_escape(wifi_prov_get_saved_ssid(), ssid_escaped, sizeof(ssid_escaped));
 
