@@ -204,17 +204,19 @@ never `[x]`.
 - [ ] **S11 guard input** — `heat_commanded` is the last never-produced
       input in `safety_core_build_input()`, and it genuinely waits on Phase 6
       current sense. S9 was wired in `5f90325`.
-- [ ] **`virtual_simfw` advances sim by timescale² per wall second.** Its loop
-      scales the tick accumulator by timescale, then each tick advances sim by
-      `100 ms × timescale`. At `timescale: 10` its 2 Hz telemetry lands one
-      frame per ~50 sim-seconds — coarser than some guard windows. A real bug,
-      found while writing the K4 scenarios (`virtual_dut/README.md` Finding 7).
-- [ ] **`at_zone_temp: 400` is unreachable in `welded_ssr_midfire` and
-      `welded_contactor_s9`.** `fast_test` asymptotes at ~505 °C with a ~200 s
-      time constant, so 400 °C needs ~304 sim-seconds against a ~195 s run.
-      Recorded in both files as a second, independent blocker.
-- [ ] **`no_warn_storm` scenario FAIL** — pre-existing, survives a fine poll
-      interval, still unexplained. Deliberately not loosened.
+- [ ] **`no_warn_storm` still FAILs, and is deliberately not loosened.** Root
+      cause is now pinned: 2 Hz telemetry at `timescale: 10` cannot resolve the
+      scenario's 900 ms alternation, so each poll's ~50-tick batch manufactures
+      streaks from a single TC sample. Needs `timescale ≤ 1` or a batching fix.
+      The `ca62e8b` clock fix moved its warns from t≈146/196 to t≈51/92 but
+      did not change the verdict.
+- [ ] **S9's persisted current has no observable in `virtual_dut`.**
+      `WELDED_K4_CURRENT_PERSIST` drives the CT wave synth directly (as real
+      `sim_engine.c` does), while telemetry reports the MODEL current, which K4
+      gates to zero. **This is now S9's only blocker** — `relay_deenergized` is
+      genuinely produced (`5f90325`). Closing it means giving `virtual_simfw` a
+      CT-amps read the harness can poll, or accepting that half of S9 is
+      bench-only.
 - [ ] **MCP tool to push calibration constants into `SaftyFW` flash** — no
       such path exists today.
 
@@ -254,6 +256,14 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] `virtual_simfw` timescale² bug fixed (`ca62e8b`), with a regression test
+      asserting the *shape* (≈5×, not ≈25×) so a slow CI box cannot explain a
+      reintroduction away. Exposed two vacuous PASSes: `no_early_trip` in
+      `mainfault_tc_disconnect`/`safety_tc_frozen` had been passing only
+      because the first telemetry frame arrived after the fault
+- [x] Both dead `at_zone_temp: 400` triggers fixed (`ca62e8b`) —
+      `welded_ssr_midfire` now trips S3 at 303.8 s, `welded_contactor_s9`
+      converted to an `at_sim_time` trigger
 - [x] DMA-fed first-byte path replacing Plan A, plus `~DRDY` (`4221f70`).
       `max31856_pio_engine_init()` now **rejects** a config whose pin
       arithmetic or image alignment contradicts the `.pio` comments — turning
