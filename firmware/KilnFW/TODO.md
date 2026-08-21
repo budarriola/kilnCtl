@@ -775,6 +775,57 @@ page. also add support for the temp sensors you currently have access to."
       The ELF archive added earlier paid for itself here — the dump matched
       `KilnCtrl-8d74854bdf3e.elf`, an image already overwritten on the board.
 
+- [x] **Bench verification round, 2026-08-20** — the four items that had been
+      carried as "open, needs hardware" are now closed or closed-with-reason.
+      - **Captive portal, end to end from a real associated client.** Earlier
+        passes only proved the probe handlers respond over the station
+        interface; this one joined the dev PC's Wi-Fi to `kilnCtl` (DHCP lease
+        192.168.4.2, board reporting `ap_clients=1`). DNS for every name tried
+        — `captive.apple.com`, `www.msftconnecttest.com`,
+        `connectivitycheck.gstatic.com`, `example.com`, and a `.invalid` name —
+        resolves to 192.168.4.1. All six OS probe paths (Windows
+        `/connecttest.txt` `/redirect` `/ncsi.txt`, Apple
+        `/hotspot-detect.html`, Android `/generate_204` ×2) and an arbitrary
+        deep path answer `302 -> /`; `/` serves the provisioning page. The
+        portal works as a user meets it.
+      - **OTA: auth verified, transfer blocked by a working interlock.** Wrong
+        password gives 403; the correct password passes the HMAC challenge and
+        is then refused `409: safety link is down`. Challenge nonces differ per
+        request. The bulk-transfer path stays unexercised and will remain so
+        until the RP2040 carries safety firmware — that is the interlock doing
+        its job, not a gap in the OTA code.
+      - **Autotune.** Both `step` and `relay` start on a configured zone and
+        trip `guard tripped: sensor invalid for 3 consecutive reads` within
+        three reads, which is correct with no thermocouple attached. Abort
+        works from both states; `accept` refuses with "nothing to accept". The
+        accept path's NVS write is not reachable without a live sensor, but is
+        now structurally covered by the flash-safe executor.
+      - **35-minute soak on the final build.** 110 polling ticks across nine
+        surfaces, **zero** failures, uptime monotonic 95,351 ms -> 2,196,401 ms
+        with no reset. Note for whoever reads a future soak log: a keyword
+        search for "assert" matches `isolated fault line ASSERTED`, which is
+        ordinary safety-link noise on a board with no RP2040 firmware, not a
+        panic.
+      - Also verified in passing: the Wi-Fi credential write path
+        (`wifi_add_network` / `wifi_forget`), which confirms the documented
+        claim that `wifi_prov`'s owner task made that path safe from the
+        PSRAM-stack hazard.
+      **A real bug fell out of the portal test** — the board served HTTP while
+      reporting `RECONNECTING` with no IP, permanently. Fixed in commit
+      `5b4d464`; see the comment on `reconcile_sta_state()` in `wifi_prov.c`.
+
+- [ ] **Wi-Fi driver log lines arrive with an empty body.** Every ~30 s the
+      device log shows a bare `W (576091) wifi:` with nothing after the colon,
+      so the ESP-IDF Wi-Fi driver's own diagnostics are effectively invisible
+      through `uart_log_bridge`. Noticed 2026-08-20 during the soak; not
+      chased. Suspicion worth checking first: the Wi-Fi library emits some
+      lines through a path that does not land in `uart_log_vprintf()` as a
+      single formatted call (header and body arriving as separate writes would
+      produce exactly this), rather than the bridge truncating them. Low
+      severity — no functional impact — but it means a real Wi-Fi driver
+      complaint would be silently unreadable, which is the sort of thing that
+      costs a day later.
+
 ## 2. Web UI — Main / Dashboard page
 
 Live thermocouple/relay status and manual relay control are DONE and
