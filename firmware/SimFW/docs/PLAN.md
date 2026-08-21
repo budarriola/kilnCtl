@@ -196,12 +196,6 @@ never `[x]`.
       sample point) at that clock. Running the fixture at 200 MHz sysclk would
       buy the ~125 ns *design* deadline as well — margin, not correctness.
       Datasheet arithmetic, not measured; see `docs/SPI_ACCESS_AUDIT.md` §9.
-- [ ] **Latent trap: PWM pacer slice 3 shadows GPIO6/7/22/23.** The pacer binds
-      no pin today, but any future `gpio_set_function(6|7|22, GPIO_FUNC_PWM)`
-      would put its free-running carrier onto SPI A's `SCLK`/`MOSI` or
-      `FAULT_MAIN_2`. Inherent at 25-of-26 occupancy — no slice is free of
-      claimed pins, so moving the pacer does not help. See `HARDWARE.md`
-      §0 item 9.
 - [ ] **DMA claim failures degrade silently — arguably the wrong default for
       this fixture.** All four claim sites use `required = false`, and
       `main.c` discards `wave_owner_start()`'s return with `(void)`, so a 12th
@@ -264,6 +258,12 @@ never `[x]`.
 - [x] `docs/BOM.md`, `docs/BENCH_RUNBOOK.md`, `docs/HARDWARE.md`,
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
+- [x] PWM pacer / channel-B pin trap closed by **detection** (`3dfb4e3`) —
+      avoidance was impossible at 25-of-26 GPIO occupancy, since no PWM slice
+      is free of claimed pins. `_Static_assert` on each CT channel's GPIO
+      against the six reachable-but-owned pins (6/7/17/19/21/22), plus a lint
+      for hardcoded-literal `gpio_set_function` calls and for the guard block
+      being deleted. Both layers negative-tested
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
