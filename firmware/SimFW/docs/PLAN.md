@@ -230,6 +230,14 @@ never `[x]`.
       unpowered. (§11 item 9)
 - [ ] **DUT-power inrush measurement** — the ~60 A / ~190 µs figure rests on
       an *assumed* source resistance. (§11 item 5)
+- [ ] **S6a is bench-only.** It cannot be provoked in `virtual_dut` for two
+      *fixture-side* reasons (`a420c27`): `virtual_simfw.c` has no
+      I2C-expander/opto emulation for the Fault line, so `fault_line_asserted`
+      is read in three places and written in none; and `run_dut_scenarios.py`
+      would not forward it to `dut_core.exe`'s TICK `<main_fault>` field
+      anyway. **SaftyFW's own `main_fault_asserted` wiring is complete and
+      correct** — earlier annotations blaming SaftyFW were wrong and have been
+      rewritten.
 - [ ] **Verify every provisional GPIO assignment** in `HARDWARE.md`
 - [ ] **`UnitTestFw` decommission** — gated on proving the replacement link on
       real hardware. (§12)
@@ -297,6 +305,14 @@ never `[x]`.
       with the Pico, not a cache read — `safety_drain_inbox_ex()` captures the
       raw 28-byte frame by length (the `GET_FW_VERSION` shared-id convention)
       while background frames still flow through the normal cache-apply path
+- [x] Guard scenario coverage brought up to the new reachability (`a420c27`).
+      **S2** provoked via a new `dut.zone_setpoints:` capability (trip at
+      267.0 s); **S11** provoked in both directions — a trip at 664.0 s *and* a
+      new no-fault ~650 s control run that never trips, so the trip case is
+      demonstrably not vacuous; **S10** given a genuine WARN case (294.0 s)
+      alongside its existing anti-nuisance one. Suite: 25 scenarios,
+      10 PASS / 10 BLOCKED / 5 FAIL, and the original 22 alone went 5→7 PASS
+      with **no FAIL moving**
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
