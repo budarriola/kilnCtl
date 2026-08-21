@@ -185,13 +185,22 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [ ] **DECIDE: fixture sysclk, or cap the masters at 4 MHz.** The DMA-fed
-      path (`4221f70`) takes ~150–215 ns at the default 125 MHz sysclk. That
-      misses the ~125 ns *design* deadline but meets the ~250 ns *hard*
-      deadline (the master's real MISO sample point) at 4 MHz. Running the
-      fixture at **200 MHz sysclk** brings it to ~95–135 ns and meets both at
-      4 MHz. Datasheet arithmetic, not measured. See
-      `docs/SPI_ACCESS_AUDIT.md` §9.
+- [ ] **DECIDE: fixture sysclk — but the pressure is lower than it looked.**
+      **Both masters already run at 4 MHz today**, and deliberately:
+      `CONFIG_KILNCTL_THERMO_SPI_CLOCK_HZ=4000000` (KilnFW `sdkconfig:3728`)
+      and `SPI_OWNER_BAUDRATE_HZ 4000000u` (`SaftyFW/src/spi_owner.c:13`,
+      whose comment says it matches KilnFW's default). So "cap the masters at
+      4 MHz" is not a change, it is the status quo. The DMA-fed path
+      (`4221f70`) takes ~150–215 ns at the stock 125 MHz sysclk, which
+      **already meets the ~250 ns hard deadline** (the master's real MISO
+      sample point) at that clock. Running the fixture at 200 MHz sysclk would
+      buy the ~125 ns *design* deadline as well — margin, not correctness.
+      Datasheet arithmetic, not measured; see `docs/SPI_ACCESS_AUDIT.md` §9.
+- [ ] **§3.2.1 and M-A's exit criterion still say 5 MHz; nothing runs at
+      5 MHz.** At 5 MHz the hard deadline tightens to ~200 ns and the margin
+      largely disappears, which is what made this timing question look worse
+      than it is. Either correct these to 4 MHz or state 5 MHz as a
+      deliberate headroom target that the masters do not currently use.
 - [ ] **`check_single_owner.ps1` needs re-thinking before a third DMA
       claimant.** `hardware/dma.h` now has two owners (`ct_wave_pwm`,
       `max31856_pio_engine`) — justified, disjoint IRQ vectors, both claim via
