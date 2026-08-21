@@ -1147,12 +1147,94 @@ static void cancel_ap_fallback_timer(void)
     }
 }
 
+/* ---- Ground-truth reconciliation ---------------------------------------
+ *
+ * 2026-08-20, bench-observed bug this exists to fix. After an AP -> home
+ * switch (wifi_prov_set_mode(HOME) -> do_set_mode() -> start_sta_join()),
+ * the station really did join and stayed joined -- the board answered
+ * `GET http://192.168.1.156/api/status` with a 200 and a valid JSON body,
+ * and the host ARP table mapped 192.168.1.156 to 1c-db-d4-92-f4-7c, the
+ * board's STA MAC (its AP BSSID is ...:7d, i.e. STA = AP-1), so it held a
+ * real DHCP lease on the LAN. Meanwhile this module reported
+ * state=WIFI_PROV_STATE_RECONNECTING(4), sta_connected=false, sta_ip="",
+ * rssi=-127, and stayed that way indefinitely (30+ s of polling).
+ *
+ * Mechanism, confirmed by reading the paths rather than guessing: state is
+ * only ever set to WIFI_PROV_STATE_CONNECTED in do_ev_got_ip(), i.e. only
+ * on IP_EVENT_STA_GOT_IP. A WIFI_EVENT_STA_DISCONNECTED that lands AFTER
+ * that GOT_IP -- a queued retry/auth failure from the join attempt itself,
+ * or the AP interface teardown do_ev_got_ip() performs with
+ * esp_wifi_set_mode(WIFI_MODE_STA) -- runs do_ev_sta_disconnected(), which
+ * unconditionally forces state back to RECONNECTING and calls
+ * esp_wifi_connect(). Since the station never actually dropped, that
+ * connect returns ESP_ERR_WIFI_CONN (already connected) and NO further
+ * GOT_IP is ever generated, so nothing exists that can put the state back.
+ * The bad state is then permanent, and it also re-arms the AP fallback
+ * timer (which raises the AP again) and keeps do_rescan_tick() scanning
+ * and re-connecting on a link that is fine.
+ *
+ * The repair is to stop trusting the event stream as the sole source of
+ * truth. esp_wifi_sta_get_ap_info() (are we associated?) plus
+ * esp_netif_get_ip_info() (do we hold a non-zero lease?) are authoritative
+ * and do not depend on having caught, or not caught, any particular event.
+ * Both helpers below run ONLY on owner_task() -- they are called from
+ * do_*() bodies, never from an event handler or a caller thread, so the
+ * file's "s_wifi has exactly one writer" rule is unchanged. */
+static bool sta_link_is_live(int8_t *out_rssi)
+{
+    if (!s_wifi.sta_netif) {
+        return false;
+    }
+    wifi_ap_record_t ap_info = { 0 };
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+        return false; /* not associated with anything */
+    }
+    esp_netif_ip_info_t ip_info = { 0 };
+    if (esp_netif_get_ip_info(s_wifi.sta_netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
+        return false; /* associated but no lease -- a join genuinely in progress */
+    }
+    if (out_rssi) {
+        *out_rssi = ap_info.rssi;
+    }
+    return true;
+}
+
+/* Runs on owner_task(). Returns true if the station is demonstrably up
+ * (association + non-zero IP), repairing s_wifi.state/sta_rssi if they
+ * disagreed. Callers use the return value to decide whether a "recover the
+ * link" action is needed at all. */
+static bool reconcile_sta_state(void)
+{
+    if (s_wifi.mode != WIFI_PROV_MODE_HOME) {
+        return false; /* AP mode: the station is intentionally not in use */
+    }
+    int8_t rssi = -127;
+    if (!sta_link_is_live(&rssi)) {
+        return false;
+    }
+    s_wifi.sta_rssi = rssi;
+    if (s_wifi.state != WIFI_PROV_STATE_CONNECTED) {
+        ESP_LOGW(TAG,
+                 "state said %d but the station is associated with a live IP -- correcting to CONNECTED",
+                 (int)s_wifi.state);
+        s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+        cancel_ap_fallback_timer();
+    }
+    return true;
+}
+
 /* Runs on owner_task(), posted for by ap_fallback_timer_cb() below (which runs
  * on the esp_timer service task and does nothing but post). */
 static void do_ap_fallback_tick(void)
 {
     if (s_wifi.state == WIFI_PROV_STATE_CONNECTED) {
         return; /* reconnected before the timer fired */
+    }
+    /* 2026-08-20: and don't raise the AP over a state that merely LOOKS
+     * unconnected -- same ground-truth check as do_rescan_tick(), for the
+     * same reason (reconcile_sta_state()'s header). */
+    if (reconcile_sta_state()) {
+        return;
     }
     ESP_LOGW(TAG, "station join did not land within the timeout -- bringing the fallback AP up");
     /* Mode first, then config -- the current mode here can be STA-only (see
@@ -1193,6 +1275,16 @@ static void do_rescan_tick(void)
 {
     if (s_wifi.mode != WIFI_PROV_MODE_HOME || s_wifi.state == WIFI_PROV_STATE_CONNECTED ||
         s_wifi.saved_nets.count == 0) {
+        return;
+    }
+    /* 2026-08-20: second half of the fix described at reconcile_sta_state().
+     * Suppressing the one known bad event path is not enough -- ANY missed or
+     * mis-ordered event could leave state disagreeing with the radio, and
+     * nothing else in this file ever re-checks. This periodic tick is the
+     * natural self-heal point: if the station is in fact associated with a
+     * live IP, repair the state and skip the retry entirely rather than
+     * scanning and re-connecting a link that is already up. */
+    if (reconcile_sta_state()) {
         return;
     }
     ESP_LOGI(TAG, "periodic rescan: looking for a saved network while in AP fallback");
@@ -1268,6 +1360,21 @@ static void do_ev_sta_disconnected(void)
         s_wifi.sta_rssi = -127; /* lost connection */
         if (s_wifi.mode == WIFI_PROV_MODE_AP || s_wifi.saved_nets.count == 0) {
             return; /* not attempting station at all */
+        }
+        /* 2026-08-20: a disconnect event is NOT proof the station is down.
+         * See reconcile_sta_state()'s header for the bench evidence -- a
+         * stale disconnect arriving after GOT_IP (queued join retry, or the
+         * AP teardown do_ev_got_ip() does) used to pin state at RECONNECTING
+         * forever on a link that was serving HTTP. Ask the driver instead:
+         * if we are still associated AND still hold a lease, this event
+         * describes something that already healed (or never applied to the
+         * current association), so leave the working link alone. Touching
+         * the radio here would be actively harmful -- esp_wifi_connect() on
+         * an established link just returns ESP_ERR_WIFI_CONN, and the
+         * fallback-timer re-arm below would raise the AP for no reason. */
+        if (reconcile_sta_state()) {
+            ESP_LOGI(TAG, "ignoring stale STA disconnect -- association and IP are both still live");
+            return;
         }
         bool was_connected = (s_wifi.state == WIFI_PROV_STATE_CONNECTED);
         s_wifi.state = was_connected ? WIFI_PROV_STATE_RECONNECTING : WIFI_PROV_STATE_CONNECTING;
@@ -2278,6 +2385,14 @@ bool wifi_prov_is_sta_connected(void)
  * producer copies it out. */
 static esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r)
 {
+    /* 2026-08-20: on-query reconciliation. This getter already runs on
+     * owner_task() precisely because it is compound state, which makes it a
+     * legal place to repair that state (a caller-thread read is not). If the
+     * radio says we're associated with a live IP, fix the enum here rather
+     * than reporting "no IP" for up to a rescan interval while the board is
+     * demonstrably reachable -- the failure documented at
+     * reconcile_sta_state(). */
+    (void)reconcile_sta_state();
     if (s_wifi.state != WIFI_PROV_STATE_CONNECTED || !s_wifi.sta_netif) {
         return ESP_ERR_INVALID_STATE;
     }
