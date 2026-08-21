@@ -293,6 +293,17 @@ dashboard card order, shared `/nav.js`+`/app.js`, sticky Stop,
 connection-lost banner, write auth, and the one new `/api/status` field set
 it needs); keep the two in sync when either changes.
 
+Follow-up decisions the same day, all recorded in that section: auth gates
+writes only with server-side multi-user session tokens built on
+`ota_auth.{c,h}`; **manual relay toggles move off the dashboard to their own
+`/settings/manual` page** (a deliberate divergence from
+`ui_page_temperature.c` — a phone in a pocket is not a panel on a kiln);
+diagnostics becomes two web pages, not three, since the web can scroll;
+polling stays (no SSE/WebSocket, section 2's push question still open); the
+whole thing lands in one implementation pass including auth; and **TLS for
+both this UI and OTA (section 9.3) is planned but explicitly not authorized
+to build yet**.
+
 ## 1. Wi-Fi provisioning and resilience — DONE, verified on hardware (2026-08-10)
 
 Implemented in `App/drivers/wifi_prov.{c,h}` and
@@ -3735,6 +3746,21 @@ sdkconfig/driver changes.
       the AP password, because that is the credential. Prose exists in
       `UPDATE_PROTOCOL.md` §2; left unchecked since nothing user-visible (the
       OTA web page, §9.6, not yet built) says it yet.
+- [ ] **TLS, requested 2026-08-20 — planned in `docs/UI_PLAN.md` §6 of the
+      "Web page structure rework" section, explicitly plan-only for now, not
+      authorized to build.** The challenge/HMAC scheme above is unaffected
+      and stays exactly as it is (it proves knowledge of the AP password
+      without sending it, which TLS does not do). What TLS adds *here* is
+      confidentiality and integrity of the image transfer itself, which today
+      crosses the LAN in clear. It is **not** image signing — TLS protects
+      the wire, secure boot / signed images protect against a malicious image
+      arriving over a perfectly valid TLS connection; those stay separate and
+      signing is not planned. Because `ota_http.c`'s routes ride the shared
+      `esp_http_server` instance, switching that instance to
+      `httpd_ssl_start()` gives OTA TLS with no per-route change in this
+      section. See UI_PLAN §6 for the cert design (on-device ECDSA P-256
+      self-signed, fingerprint shown on the LCD), the AP-mode plain-HTTP
+      exception, and the internal-SRAM cost with PSRAM off (§9.1a).
 
 ### 9.4 Interlocks
 

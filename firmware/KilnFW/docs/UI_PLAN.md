@@ -377,6 +377,7 @@ section discharges in the web direction.
 | `GET /settings` | `settings_page.html` (**new**) | Nav hub, the web twin of `ui_page_config.c`. Links only, no live data. |
 | `GET /settings/zones` | `zones_page.html` | unchanged route/content |
 | `GET /settings/relays` | `rules_page.html` | unchanged route/content |
+| `GET /settings/manual` | `manual_page.html` (**new**) | Manual relay toggles, moved off the dashboard — decided 2026-08-20, see §2 item 6 |
 | `GET /wifi` | `wifi_provision_page.html` | unchanged; reached from `/settings`, not from `/` |
 | `GET /profiles` | `profiles_page.html` | unchanged route; reachable from both `/` (operator flow) and `/settings` |
 | `GET /readiness` | `readiness_page.html` | unchanged route; summarized as a card on `/` |
@@ -385,7 +386,7 @@ section discharges in the web direction.
 | `GET /diagnostics` | `diagnostics_page.html` (**new**) | Web twin of `ui_page_diagnostics.c` + `ui_page_board_health.c` |
 | `GET /diagnostics/thermo` | `thermo_faults_page.html` (**new**) | Web twin of `ui_page_thermo_faults.c` |
 
-Four new pages, four new routes plus their embedded-file symbols.
+Five new pages, five new routes plus their embedded-file symbols.
 `max_uri_handlers` is **56** in `wifi_provision_http.c` today (WEB_UI.md's
 "40" is stale) against roughly 32 registered, so there is real headroom — but
 the 2026-08-11 lesson stands: `httpd_register_uri_handler` failure is logged
@@ -414,9 +415,16 @@ safety-relevant controls first per section 0.5's "fewest taps to Stop" rule:
 5. **History chart.** `#historyChart` moves down the page rather than off it
    — this is exactly the card the LCD had to relocate to `ui_page_history.c`
    for budget, and the scroll allowance is what lets the web keep it inline.
-6. **Quick relay toggles.** Keep, below the chart, behind the confirm
-   affordance in §4 — a manual relay override on a mobile page a pocket can
-   brush is the most dangerous control here.
+6. ~~**Quick relay toggles.**~~ **Moved off the dashboard entirely
+   (decided 2026-08-20).** They get their own page, `/settings/manual`,
+   reached from the settings hub. The dashboard becomes pure monitoring
+   plus profile run controls — nothing on `/` can energize an element
+   outside a running profile. This is a deliberate divergence from the LCD,
+   where `ui_page_temperature.c` carries per-zone manual toggles: a phone
+   in a pocket can brush a screen in a way a panel mounted on a kiln
+   cannot, so the two surfaces get different answers to the same question.
+   The extra taps are the point, and the page still keeps §4.5's confirm
+   step on top of the added distance.
 7. **Footer link to `/settings`.** One link, replacing the current
    five-link "Settings" block and the "Danger zone" section, both of which
    move to the settings hub.
@@ -429,6 +437,10 @@ safety-relevant controls first per section 0.5's "fewest taps to Stop" rule:
 - The `Danger zone` block moves to `/settings` under its own heading, keeps
   its distinct accent-5 styling, and gains the confirm step in §4. Nothing
   destructive stays one tap from the dashboard.
+- The manual relay toggles move to `/settings/manual` (§2 item 6). They keep
+  reading `relays[]` from `/api/status` and posting to the existing
+  `POST /api/relay` — no new endpoint, only a new page that owns the
+  control.
 
 #### 4. Cross-cutting improvements worth doing in the same pass
 
@@ -538,8 +550,10 @@ route split and can be dropped without breaking it.
    can reach the IP can switch a relay" to "anyone who can passively sniff
    the LAN can", which is the right increment for a device on a home
    network — but it is not a substitute for keeping the kiln off an
-   untrusted network. TLS on the ESP32 is out of scope here (cert
-   provisioning on a LAN-only device with no name is its own project).
+   untrusted network. **This caveat is temporary: TLS is now planned (§6,
+   requested 2026-08-20) and closes exactly this gap.** The session layer
+   is still designed to be correct without it, and is brought up over plain
+   HTTP first so a handshake bug and an auth bug stay distinguishable.
 
    **Open sub-question, not blocking:** whether the AP password is the
    right credential long-term, or whether a separate "web password" should
@@ -587,7 +601,98 @@ Deliberately **not** mirrored from the LCD: touch calibration and touch test
 with no meaning in a browser. That is the "that makes sense" qualifier in the
 request.
 
-#### 6. Not yet done
+#### 6. TLS for the web UI *and* OTA (decided 2026-08-20 — **plan only, do not build yet**)
+
+Requested explicitly alongside the build-order answer: *"i also want tls for
+both ota and this. for now plan only."* This is the piece that turns §4.6's
+session token from "sniffable on the LAN" into a real credential, and it
+applies to OTA's existing challenge/upload path too — an unencrypted firmware
+upload is a bigger exposure than an unencrypted status poll. Nothing in this
+subsection is authorized for implementation yet; it exists so the design
+decisions are recorded before the front-end work locks assumptions in.
+
+**Server**: swap `httpd_start()` in `wifi_provision_http.c` for
+`httpd_ssl_start()` (`esp_https_server`, already in ESP-IDF, no new
+dependency). Every other module reaches the server through
+`wifi_provision_http_get_server()`, so **no other `.c` file's registration
+code changes** — this is the same single-hub property that made `theme.css`
+cheap. `httpd_ssl_config_t` wraps the existing `httpd_config_t`, so the three
+deliberate deviations already documented in WEB_UI.md (`lru_purge_enable`,
+`max_uri_handlers`, `stack_size`) carry over unchanged.
+
+**Certificate — self-signed, generated on the device at first boot.** There
+is no CA that will issue for a LAN device with no public name, and a cert
+shipped in the firmware image would be identical on every board and
+extractable from the binary — worse than self-signed.
+
+- **ECDSA P-256, not RSA-2048.** Roughly an order of magnitude faster to
+  handshake on an ESP32-S3, far smaller key/cert, and a much smaller mbedTLS
+  footprint. RSA's only advantage here is ancient-client compatibility, which
+  a phone browser does not need.
+- Generated once on first boot, persisted in NVS (its own namespace,
+  alongside the existing `wifi_cfg`/`kiln_nvs` sections — see section 8.1's
+  one-partition-per-concern rule and 8.2's boot-time compatibility check,
+  which the cert section needs to participate in like every other section).
+- CN/SAN covering the mDNS name (`kiln.local`) **and** the current IP. IP
+  SANs go stale on a DHCP lease change — plan for regeneration on IP change,
+  or accept name-only access and make mDNS the supported path. Decide during
+  implementation; it is the one genuinely fiddly part.
+- **Show the certificate fingerprint on the LCD.** `ui_page_diagnostics.c`
+  is the natural home. This is what makes self-signed defensible rather than
+  a shrug: the user can compare the browser's "this certificate is untrusted"
+  fingerprint against the physical panel in front of them and know they are
+  talking to *their* kiln and not something else answering on that IP. A
+  browser warning nobody can verify is theater; one you can check against
+  the device is real authentication.
+
+**Port and redirect layout.**
+
+- HTTPS on 443. A plain-HTTP listener stays on 80 that does nothing but
+  `301` to the HTTPS URL, so a bookmarked/typed `http://kiln.local` still
+  lands.
+- **AP-mode provisioning stays plain HTTP.** Phone captive-portal detection
+  breaks on TLS, and a fresh board's AP has no name and no trusted cert
+  anyway, so a TLS handshake there buys nothing and costs the setup flow.
+  `wifi_provision_page.html` served over the fallback AP is the one
+  deliberate exception; every STA-mode route is TLS. Worth stating in the UI
+  so it is not mistaken for an oversight.
+
+**Cost, and the constraint that decides it: PSRAM is off** (section 9.1a,
+"decided: stays off"). Each concurrent TLS session costs mbedTLS handshake
+and record buffers out of internal SRAM, and this firmware has already hit
+internal-SRAM exhaustion once (ROADMAP.md's 2026-08-19 crash-loop entry).
+That makes the following non-optional rather than tuning:
+
+- Cap concurrent TLS sessions well below the plain-HTTP connection count,
+  and lean on `lru_purge_enable` — which is already set for exactly this
+  "a stuck client must not lock a phone out" reason.
+- Reduce `MBEDTLS_SSL_IN_CONTENT_LEN`/`OUT_CONTENT_LEN` from the 16 KB
+  default; this UI's largest body is `zones_post_handler`'s ~3.2 KB, so
+  4 KB is generous. This is the single biggest RAM lever available.
+- Enable TLS session resumption/tickets — §4.3's shared poller reconnects
+  regularly, and a full ECDHE handshake every 2 s per client is the one
+  workload that would actually hurt.
+- Measure `esp_get_minimum_free_heap_size()` before and after with two or
+  three phones connected. `ui_page_diagnostics.c` already displays exactly
+  that worst-case-ever number — the instrument for this is built.
+
+**OTA over TLS.** `ota_http.c`'s routes ride the same server, so they inherit
+TLS with no per-route change; the challenge/HMAC scheme stays exactly as it
+is (defense in depth, and it is what proves knowledge of the AP password
+without sending it). What TLS adds for OTA specifically is confidentiality
+and integrity of the *image transfer* — today a firmware upload crosses the
+LAN in clear. Note it does **not** replace image signing: TLS protects the
+wire, secure boot / signed images protect against a malicious image
+delivered over a perfectly good TLS connection. Those are separate, and
+signing is not in this plan.
+
+**Sequencing.** TLS lands *after* the §4.6 session layer works over plain
+HTTP, not before — otherwise a handshake bug and an auth bug are
+indistinguishable during bring-up. Once TLS is on, revisit §4.6's honest
+limitation paragraph: the "token is sniffable on the LAN" caveat is exactly
+what this closes.
+
+#### 7. Not yet done
 
 No new `.html` file, no new route, no `CMakeLists.txt` `EMBED_TXTFILES`
 entry, no handler registered, no shared `/nav.js` or `/app.js`, no field
@@ -597,6 +702,31 @@ section is a plan entry so the request isn't lost, not a claim of progress.
 gated, reads open, server-side session tokens, multi-user); the only
 sub-question left there is whether a separate web password eventually
 replaces the AP password, which does not block starting.
+
+**Decisions taken 2026-08-20, recorded so implementation doesn't re-litigate
+them:**
+
+- **Scope of the first implementation pass: everything, auth included** —
+  the route split (§1–3), the shared `/nav.js` + `/app.js`, sticky Stop, the
+  connection-lost banner, the confirm steps, and §4.6's session layer land
+  together rather than as separate passes. Consequence to plan around: this
+  is one large diff mixing a front-end restructure with new firmware
+  security code, so the auth layer wants its own commit inside that pass and
+  its own review attention — the failure mode of a bug there is not a
+  cosmetic one.
+- **Manual relay toggles: their own page** (`/settings/manual`), off the
+  dashboard. §2 item 6 and §3.
+- **Diagnostics: two web pages, not three** — `/diagnostics` merges the
+  LCD's diagnostics and board-health content (the web can scroll, so the
+  ~264px split that forced them apart on the panel doesn't apply), and
+  `/diagnostics/thermo` stays separate.
+- **Live updates: polling stays** — §4.3's single shared, visibility-aware,
+  backing-off `/api/status` poll. No SSE, no WebSocket, no
+  `CONFIG_HTTPD_WS_SUPPORT`. TODO.md section 2's push question stays open
+  pending evidence from someone actually watching a real firing.
+- **TLS for both the web UI and OTA: planned, not authorized** — §6 is
+  design only by explicit instruction ("for now plan only"). Nothing in it
+  gets built in the pass above.
 
 ### LCD navigation (found during item 6's work, 2026-08-19)
 
