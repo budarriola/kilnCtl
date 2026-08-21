@@ -497,17 +497,44 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
      * does NOT make plain xTaskCreate* use PSRAM -- that needs
      * xTaskCreatePinnedToCoreWithCaps() with an explicit MALLOC_CAP_SPIRAM.
      *
-     * Safe for this task specifically: its stack holds LVGL's own bookkeeping,
-     * not DMA buffers. The frame data handed to the ILI9488 comes from LVGL's
-     * draw buffers, which are already allocated in PSRAM (see the buffer
-     * allocation above and the "PSRAM buffers" note in the log line below),
-     * and any transfer needing DMA-capable memory requests MALLOC_CAP_DMA and
-     * is unaffected by where this stack lives. */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(lvgl_port_task, "lvgl", 8192, NULL, 4, NULL,
-                                                         tskNO_AFFINITY,
-                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+     * REVERTED TO INTERNAL SRAM, 2026-08-20 (same day). The PSRAM stack above
+     * CRASHED THE BOARD, and the reasoning that justified it was wrong.
+     *
+     * It said: "Safe for this task specifically: its stack holds LVGL's own
+     * bookkeeping, not DMA buffers." That considered DMA and missed the real
+     * constraint. A task whose stack is in PSRAM must never be running when
+     * the flash cache is disabled -- PSRAM is reached THROUGH that cache, so
+     * the stack itself vanishes mid-call. ESP-IDF asserts on exactly this:
+     *
+     *   Crashed task: 'lvgl'
+     *   assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+     *                  cache_utils.c:126 (esp_task_stack_is_sane_cache_disabled())
+     *
+     * Reproduced by tapping "Touch Calibration", whose page writes calibration
+     * data to NVS (touch_cal_store.c) from an LVGL event callback -- i.e. on
+     * this task. Any UI callback that persists anything does the same, so this
+     * was not an obscure corner: it was every settings write in the UI.
+     *
+     * Internal SRAM is affordable again now that the fragmentation this
+     * comment's first half describes has been fixed at its source: LVGL's own
+     * allocator moved to PSRAM (lvgl_mem_psram.c) and the Wi-Fi/lwIP pools
+     * with it (CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP), taking the largest
+     * contiguous internal block at this point in boot from ~2.5KB to ~17KB --
+     * comfortably more than the 8KB needed here. main.c's heap_stage() prints
+     * that figure per stage if it ever needs rechecking.
+     *
+     * Do NOT move this back to PSRAM to save internal SRAM. The draw buffers
+     * (allocated above) are the large PSRAM win and they stay there; this
+     * stack must remain somewhere reachable with the cache down. */
+    BaseType_t created = xTaskCreatePinnedToCore(lvgl_port_task, "lvgl", 8192, NULL, 4, NULL,
+                                                 tskNO_AFFINITY);
     if (created != pdPASS) {
-        ESP_LOGE(TAG, "Failed to start lvgl_port_task");
+        /* Deliberately NOT falling back to a PSRAM stack: that is the
+         * configuration that crashes on the first settings write, and a UI
+         * that reboots the controller is worse than no UI. */
+        ESP_LOGE(TAG, "Failed to start lvgl_port_task: no internal stack available "
+                      "(largest internal block %u B) -- no local display this boot",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return ESP_ERR_NO_MEM;
     }
 

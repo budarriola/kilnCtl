@@ -85,6 +85,29 @@ static const char *TAG = "uart_bridge_ext";
  * momentarily fragmented), just no longer the primary defense against the
  * WiFi-driver race, which moving off internal SRAM removes at the source.
  *
+ * HAZARD -- A PSRAM STACK MUST NOT BE LIVE WHILE THE FLASH CACHE IS DOWN.
+ * PSRAM is reached THROUGH the flash cache, so any task with its stack there
+ * must never be the one running when the cache is disabled -- its stack
+ * vanishes mid-call. ESP-IDF asserts on it:
+ *
+ *   assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+ *                  cache_utils.c:126 (esp_task_stack_is_sane_cache_disabled())
+ *
+ * Confirmed on hardware 2026-08-20: the LVGL task had a PSRAM stack for the
+ * same reason these do, and rebooted the board the moment a UI callback wrote
+ * touch-calibration data to NVS. Its stack is now internal again; see
+ * lvgl_port.c.
+ *
+ * That makes any NVS/flash write reachable from THESE tasks a latent reboot.
+ * The Wi-Fi bridge looks exposed but is not: wifi_prov_add_network() and
+ * friends post to the wifi_prov owner task, which has an ordinary internal
+ * stack, and the write happens there. `profiles_uart_bridge` is the one to
+ * check first -- it calls profiles_http_save() DIRECTLY, on this task. Not
+ * reproduced yet only because saving a profile requires a configured zone and
+ * this bench board has none (no thermocouple daughterboard). NOT VERIFIED
+ * SAFE. Before trusting it, either test it on a board with zones configured
+ * or move the write behind an owner task with an internal stack.
+ *
  * STACK SIZING FOR TASKS CREATED HERE -- read before shrinking one.
  * Because the stack comes from PSRAM (~8MB free) and not internal SRAM, its
  * size costs nothing scarce. Shrinking one of these to save memory saves
