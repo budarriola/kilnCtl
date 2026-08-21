@@ -154,6 +154,168 @@ the CT channel, GP0/1 stays valid regardless — no reason to move it again.
 
 ---
 
+## 1b. DMA channel budget
+
+The RP2040 has **12 DMA channels** (`NUM_DMA_CHANNELS`), a single global pool
+with no per-peripheral partitioning, and **2 DMA IRQ vectors**. Unlike GPIOs,
+nothing in the build reserves one implicitly: `CMakeLists.txt` links
+`hardware_dma` and nothing else that claims a channel (no pico-sdk stdio
+backend is enabled, and TinyUSB's RP2040 device port is FIFO-driven), so every
+claim in the fixture comes from one of the two files below. Same convention as
+§1: this table is authoritative, and a third claimant must update it in the
+same commit.
+
+### 1b.1 The claim table
+
+Both owners claim through `dma_claim_unused_channel()`, so the *identities*
+below are allocation-order outcomes, not fixed assignments. What is fixed is
+the **count** each subsystem takes and the vector it owns.
+
+| Owner file | Role | Count | Scales with | DMA IRQ |
+|---|---|---|---|---|
+| `ct_wave_pwm.c` | CT sine carrier: streams a 256-entry `uint16_t` duty table into one PWM slice's channel-A compare halfword, paced by pacer slice 3's wrap DREQ | 3 | `CT_WAVE_PWM_NUM_CHANNELS` (1 per CT zone) | `DMA_IRQ_1` |
+| `max31856_pio_engine.c` (bus A, PIO0) | `dma_sniff[i]` — one per RX state machine, armed on that SM's RX-FIFO-not-empty DREQ, `transfer_count = 1`, captures the next transaction's address word into `bus->addr_capture`, chains to load | 3 | `channel_count` (1 per emulated chip) | `DMA_IRQ_0` |
+| `max31856_pio_engine.c` (bus A, PIO0) | `dma_load` — no DREQ, fires the instant sniff chains to it; its one write to the data channel's `al3_read_addr_trig` both supplies the read address and starts it, and raises `DMA_IRQ_0` | 1 | fixed, per bus | `DMA_IRQ_0` |
+| `max31856_pio_engine.c` (bus A, PIO0) | `dma_data` — 512-byte read-address ring into the TX FIFO, paced by TX-FIFO-not-full; this is the channel that actually puts response bytes on MISO | 1 | fixed, per bus | `DMA_IRQ_0` (status polled, IRQ not enabled on it) |
+| `max31856_pio_engine.c` (bus B, PIO1) | `dma_sniff[0]` | 1 | `channel_count` | `DMA_IRQ_0` |
+| `max31856_pio_engine.c` (bus B, PIO1) | `dma_load` | 1 | fixed, per bus | `DMA_IRQ_0` |
+| `max31856_pio_engine.c` (bus B, PIO1) | `dma_data` | 1 | fixed, per bus | `DMA_IRQ_0` |
+
+### 1b.2 The arithmetic
+
+```
+ct_wave_pwm.c        = CT_WAVE_PWM_NUM_CHANNELS                     = 3
+bus A (spi_emu_a.c)  = SPI_EMU_A_CHANNEL_COUNT (3) + load 1 + data 1 = 5
+bus B (spi_emu_b.c)  = SPI_EMU_B_CHANNEL_COUNT (1) + load 1 + data 1 = 3
+                                                               total = 11
+RP2040 total                                                         = 12
+                                                             SPARE   =  1
+```
+
+General form, so the next change can be checked without re-reading the code:
+
+```
+channels = 3 (CT zones) + sum over buses of (chips_on_bus + 2)
+```
+
+**11 of 12 claimed, 1 spare — independently verified against the source, not
+carried over from the commit message that first stated it.** The two vectors
+are disjoint (`DMA_IRQ_1` for CT, `DMA_IRQ_0` shared by both SPI buses via
+`s_dma_irq_installed`), and neither driver pokes another owner's channel
+registers.
+
+Claim order at boot: `ct_wave_pwm_init()` runs inside `wave_owner_start()`
+**before** `vTaskStartScheduler()`, while both SPI engines claim from their own
+task bodies **after** it. So CT takes the low channel numbers and the SPI
+engines take the rest — but nothing depends on that, and nothing should.
+
+### 1b.3 Why none of the 11 is slack
+
+Every one of the 8 SPI-side channels sits in the first-byte path that
+`docs/SPI_ACCESS_AUDIT.md` §9 exists to describe. That path was moved off the
+CPU because an ISR-staged version could not meet the deadline, so "free a
+channel by having the CPU do it" is not available here at any price:
+
+* **Sniff channels cannot be pooled across chips.** A DMA channel waits on
+  exactly one DREQ. Each emulated chip has its own RX state machine and
+  therefore its own RX-FIFO-not-empty DREQ, and all of a bus's chips are idle
+  and eligible simultaneously — the fixture does not know which CS will fall
+  next. One pooled sniffer would catch one chip and miss the other two.
+* **The load channel is the one deliberate luxury, and it is still not
+  free-able.** `max31856_pio_engine.c`'s own header notes that sniff could
+  write `al3_read_addr_trig` directly, saving the hop and ~5 sysclk cycles.
+  That would free 1 channel per bus (2 total) *and* be faster — but it
+  destroys `bus->addr_capture`, the only place the address byte survives as a
+  value in SRAM. `handle_load_done()` needs it to set `txn_is_write`, to call
+  `max31856_regs_cs_assert()`, and hence for the whole write-transaction and
+  ~DRDY-release path. Recovering it instead from the data channel's
+  `read_addr`/`transfer_count` at CS rise depends on abort semantics that
+  cannot be tested without fixture hardware. **Not recommended.**
+* **The data channel is per-bus and per-PIO by construction** (its DREQ is
+  that bus's TX FIFO). Nothing to share.
+
+### 1b.4 The one channel that could be freed, if one is ever needed
+
+**`ct_wave_pwm.c` can go from 3 channels to 2, at zero CPU cost, by pairing
+two CT zones onto one PWM slice.** An RP2040 PWM slice's `CC` register packs
+channel A in bits [15:0] and channel B in [31:16], so a single 32-bit DMA
+transfer sets *both* duties at once. Two zones moved to an adjacent even/odd
+GPIO pair (a slice's A and B outputs, e.g. GPIO16/17) would share one DMA
+channel streaming a 256-entry `uint32_t` interleaved table; the third zone
+keeps its own slice and channel. Total table bytes are unchanged, the pacer
+DREQ is unchanged, and the CPU stays entirely out of the loop.
+
+Costs, stated so the trade is visible: the two paired zones share one
+completion IRQ and therefore one zero-crossing table-swap event (harmless —
+they are already phase-locked to the same pacer slice); GPIO17 is currently
+assigned to `DRDY_MAIN_2` in §1 and would have to move; and the clean
+one-zone-one-slice symmetry `ct_wave_pwm.c`'s header argues for is lost.
+
+**All three zones cannot collapse onto one channel.** A slice has only two
+channels, and a single DMA channel cannot write three slices' `CC` registers:
+they are 20 bytes apart, which is neither a power-of-two write ring nor a
+uniform increment.
+
+A read-address ring on the CT channels would *not* free a channel either. It
+would let the table free-run without re-arming, which would retire the
+`DMA_IRQ_1` handler — but that handler is what performs the zero-crossing-gated
+table swap, which is the feature.
+
+### 1b.5 What happens today if a claim fails
+
+**Every DMA claim in the fixture passes `required = false`. Nothing panics on
+DMA exhaustion; everything degrades, and today nothing reports the
+degradation.**
+
+| Call site | Arg | On failure |
+|---|---|---|
+| `ct_wave_pwm.c:191` (per CT zone) | `false` | `ct_wave_pwm_init()` returns `false` → `wave_owner_start()` returns `false` → `main.c` discards it with `(void)`. Boot continues. The PWM carriers are already running at fixed mid-scale, so all three CT outputs sit at DC silence forever; the `wave_owner` task is never created, so every `ct_wave_*` command fails at the queue check. Channels claimed for earlier zones are not released. |
+| `max31856_pio_engine.c:628` (`dma_data`) | `false` | `..._init()` returns `false` → the owner task enters a 1 s idle loop forever. That bus answers no SPI traffic. |
+| `max31856_pio_engine.c:629` (`dma_load`) | `false` | Same, but `dma_data` is already claimed and leaked. |
+| `max31856_pio_engine.c:653` (per `dma_sniff[i]`) | `false` | Same, plus a sharper hazard — see below. |
+
+Three things about this posture are worth stating plainly:
+
+1. **The failure is silent.** `main.c` explicitly `(void)`s every `_start()`,
+   on the documented grounds that "every task body is currently just an idle
+   loop with nothing that can fail beyond `xTaskCreate()` itself". That is no
+   longer true of `wave_owner_start()`, which now really can fail on DMA
+   exhaustion. A 12th claim gives a fixture that boots, enumerates, and
+   answers commands while quietly having no CT output or one dead SPI bus.
+2. **Nothing is unwound.** Neither init releases already-claimed DMA channels,
+   PIO state machines, or PIO program space on the failure path, so a partial
+   failure permanently strands channels the next subsystem might have used.
+3. **A mid-loop sniff failure on bus A is worse than an idle bus.**
+   `max31856_pio_engine_init()` publishes `s_bus_for_pio_index[]` early and
+   arms `dma_load` (with `DMA_IRQ_0` enabled on it) and `dma_sniff[0..i-1]`
+   before the failing claim. `max31856_pio_engine_start_irq()` is never
+   reached for that bus — but the *other* bus installs the shared `DMA_IRQ_0`
+   handler, which walks both entries and only skips a bus whose `dma_load < 0`.
+   A half-initialised bus therefore still services `handle_load_done()` and
+   unmasks PIO IRQ sources on a bus that was never brought up. Recorded as an
+   audit finding; not fixed here.
+
+**Asymmetry worth knowing:** the PIO claims in the same function use
+`pio_claim_unused_sm(pio, true)` — `required = true`, which **panics**. So SM
+exhaustion halts the fixture while DMA exhaustion limps. The `if (sm < 0)
+return false` guards after those calls, and `spi_emu_a.c`'s comment explaining
+the idle-loop fallback "if the PIO block cannot supply 4 state machines", both
+describe a path that cannot be taken.
+
+### 1b.6 Correction to §0 item 7
+
+§0 item 7's first bullet states that `spi_emu_a/b.c` and
+`max31856_pio_engine.c` "use PIO FIFOs and a GPIO IRQ, never DMA", and that
+`ct_wave_pwm.c`'s choice of `DMA_IRQ_1` was therefore an unnecessary guess.
+That was true when §0 was written and is **false as of commit `4221f70`**
+(`docs/SPI_ACCESS_AUDIT.md` §9's DMA-fed Plan B). The SPI engines now claim 8
+of the 12 channels and own `DMA_IRQ_0`. `ct_wave_pwm.c`'s defensive pick of
+`DMA_IRQ_1` turned out to be exactly right, and is now load-bearing rather
+than harmless. §1's pin map already carries the `DMA_IRQ_1` row; `DMA_IRQ_0`
+belongs to `max31856_pio_engine.c` and binds no pin.
+
+---
+
 ## 2. PIO pin-adjacency constraints (NOT freely reassignable)
 
 `max31856_spi_slave.pio`'s RX and TX programs use fixed relative-GPIO-offset
@@ -579,6 +741,10 @@ Windows Device Manager directly:
 
 - Design rationale for every signal above: `firmware/SimFW/docs/PLAN.md`
   sections 2, 3.1–3.7, 14.
+- DMA channel budget (§1b): `firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9 for
+  why the 8 SPI-side channels exist and why none of them can be given back to
+  the CPU; `firmware/SimFW/tools/check_single_owner.ps1` for the
+  `hardware/dma.h` two-owner rule that mirrors it.
 - Main-board authoritative wiring: `firmware/KilnFW/docs/HARDWARE.md`,
   `firmware/SaftyFW/docs/HARDWARE.md`, `firmware/SaftyFW/docs/
   CURRENT_SENSE.md`.
