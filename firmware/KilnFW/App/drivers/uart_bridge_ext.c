@@ -25,6 +25,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
@@ -796,18 +797,58 @@ static size_t wifi_build_scan(uint8_t *out)
     return o;
 }
 
+/* Scan cache for wifi_build_networks() only.
+ *
+ * WIFI_CMD_GET_NETWORKS lists the SAVED networks; the scan exists solely to
+ * annotate each with in-range/RSSI. It was doing a full blocking radio scan on
+ * EVERY call, which measured 2.7s per request against 0.2s for every other
+ * bridge command on this link -- the scan was the entire difference. Repeating
+ * a 2.7s radio scan to refresh a decoration on a list that changes rarely is
+ * not a good trade, especially for a UI that polls.
+ *
+ * Cached for WIFI_NETWORKS_SCAN_CACHE_US. The cost is that in-range/RSSI can
+ * be up to that stale; the saved-network list itself is always live, since
+ * only the annotation comes from here. An explicit WIFI_CMD_SCAN still forces
+ * a fresh scan -- when the user asks to scan, they get a real scan.
+ *
+ * `static` also deliberately moves this 20-entry array (~720 bytes) OFF the
+ * stack. This function runs on wifi_uart_bridge, whose stack overflowed and
+ * rebooted the board (see uart_bridge_start_wifi_task); this array was one of
+ * the larger contributors.
+ *
+ * No locking: touched only from wifi_task(), which is single-threaded. Do not
+ * call wifi_build_networks() from anywhere else without revisiting that. */
+#define WIFI_NETWORKS_SCAN_CACHE_US (30 * 1000 * 1000)
+
+static wifi_prov_scan_result_t s_networks_scan[20];
+static size_t                  s_networks_scan_count;
+static int64_t                 s_networks_scan_us; /* 0 = never scanned */
+
 static size_t wifi_build_networks(uint8_t *out)
 {
     wifi_prov_saved_network_t saved[8];
     size_t saved_count = 0;
     wifi_prov_get_saved_networks(saved, sizeof(saved) / sizeof(saved[0]), &saved_count);
 
-    wifi_prov_scan_result_t scanned[20];
-    size_t scan_count = 0;
-    esp_err_t scan_err = wifi_prov_scan(scanned, sizeof(scanned) / sizeof(scanned[0]), &scan_count);
-    if (scan_err != ESP_OK) {
-        scan_count = 0;
+    int64_t now_us = esp_timer_get_time();
+    if (s_networks_scan_us == 0 || (now_us - s_networks_scan_us) >= WIFI_NETWORKS_SCAN_CACHE_US) {
+        size_t    fresh_count = 0;
+        esp_err_t scan_err = wifi_prov_scan(s_networks_scan,
+                                            sizeof(s_networks_scan) / sizeof(s_networks_scan[0]),
+                                            &fresh_count);
+        /* On failure keep whatever the previous scan found rather than
+         * dropping every annotation: a stale RSSI is more useful than none,
+         * and a failed scan is usually transient (radio busy). The timestamp
+         * is still advanced so a persistently failing scan cannot turn this
+         * back into a scan-on-every-call path. */
+        if (scan_err == ESP_OK) {
+            s_networks_scan_count = fresh_count;
+        }
+        s_networks_scan_us = now_us;
     }
+
+    const wifi_prov_scan_result_t *scanned = s_networks_scan;
+    size_t                         scan_count = s_networks_scan_count;
 
     const char *active_ssid = wifi_prov_get_saved_ssid();
     bool sta_connected = wifi_prov_is_sta_connected();
