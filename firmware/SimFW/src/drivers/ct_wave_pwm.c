@@ -88,8 +88,88 @@
 #include "pico/platform.h"
 
 // --- GPIO / slice assignment (see file header) ------------------------------
-static const uint8_t CT_WAVE_GPIO[CT_WAVE_PWM_NUM_CHANNELS] = { 16u, 18u, 20u };
+// Named as individual macros, not just array literals, so the compile-time
+// guard block below can _Static_assert each one against the forbidden-pin
+// list -- an array initializer alone cannot be a _Static_assert operand.
+#define CT_WAVE_GPIO_0 16u
+#define CT_WAVE_GPIO_1 18u
+#define CT_WAVE_GPIO_2 20u
+static const uint8_t CT_WAVE_GPIO[CT_WAVE_PWM_NUM_CHANNELS] = { CT_WAVE_GPIO_0, CT_WAVE_GPIO_1, CT_WAVE_GPIO_2 };
 #define CT_WAVE_PACER_SLICE 3u
+
+// --- Compile-time guard: the "PWM pacer / CT channel-B" latent trap --------
+// (docs/HARDWARE.md section 0 item 9, found by the pin-map reconciliation in
+// commit 1d32e84). RP2040's fixed GPIO->PWM mux table gives slice N exactly
+// four candidate output pins: channel A on GPIO(2N) and GPIO(2N+16), channel
+// B on GPIO(2N+1) and GPIO(2N+17). That mapping is silicon, not a choice this
+// file makes -- so it applies just as much to the pacer slice (which binds no
+// pin today, on purpose) and to each CT channel's own slice's unused channel-B
+// pin as it does to the three channel-A pins this file actually drives.
+//
+// Two of those never-bound-today pin groups collide with docs/HARDWARE.md
+// section 1's non-PWM owners:
+//   - Pacer slice 3 (CT_WAVE_PACER_SLICE)'s own candidates: GPIO6 (SPI bus A
+//     SCLK), GPIO7 (SPI bus A MOSI), GPIO22 (FAULT_MAIN_2). GPIO23 is not a
+//     header pin on a stock Pico.
+//   - Each CT channel's slice's channel-B pin (channel-A GPIO + 1): GPIO17
+//     (DRDY_MAIN_2), GPIO19 (FAULT_MAIN_0), GPIO21 (FAULT_MAIN_1).
+//
+// Nothing calls gpio_set_function(..., GPIO_FUNC_PWM) on any of those six
+// pins today (arm_dma() only ever writes the CC register's channel-A
+// halfword, never touches channel B's function select, and the pacer slice
+// is pwm_init()'d with no gpio_set_function() call at all) -- but the trap is
+// that *nothing stops a future edit from adding one*, and every one of the
+// six is either a PIO-function signal (SCLK/MOSI) or a SIO open-drain
+// ~FAULT/~DRDY line owned elsewhere, so a stray PWM carrier there is a real
+// hardware fault, not a style nit.
+//
+// tools/check_single_owner.ps1's single-owner rule already makes this file
+// the ONLY place in the tree that may include hardware/pwm.h, so every
+// gpio_set_function(pin, GPIO_FUNC_PWM) call in the whole codebase lives
+// here. The _Static_assert block below therefore fully covers the one path
+// this driver actually uses to pick a pin (the CT_WAVE_GPIO_* macros feeding
+// the array above) -- reassigning any of them to a forbidden pin is a build
+// error, not a silent hardware fault. It does NOT by itself catch a brand
+// new hardcoded gpio_set_function(6, GPIO_FUNC_PWM)-style call added
+// elsewhere in this file bypassing the macros entirely; that residual case
+// is covered by check_single_owner.ps1's PWM SAFETY RULES section, which
+// also fails loudly if this whole guard block is ever deleted.
+#define CT_WAVE_PWM_FORBIDDEN_GPIO_6  6u  // SPI bus A SCLK   (spi_emu_a.c)     -- pacer slice 3 channel-A candidate
+#define CT_WAVE_PWM_FORBIDDEN_GPIO_7  7u  // SPI bus A MOSI   (spi_emu_a.c)     -- pacer slice 3 channel-B candidate
+#define CT_WAVE_PWM_FORBIDDEN_GPIO_17 17u // DRDY_MAIN_2      (spi_emu_a.c)     -- CT ch0 slice's own channel-B pin
+#define CT_WAVE_PWM_FORBIDDEN_GPIO_19 19u // FAULT_MAIN_0     (HARDWARE.md sec1)-- CT ch1 slice's own channel-B pin
+#define CT_WAVE_PWM_FORBIDDEN_GPIO_21 21u // FAULT_MAIN_1     (HARDWARE.md sec1)-- CT ch2 slice's own channel-B pin
+#define CT_WAVE_PWM_FORBIDDEN_GPIO_22 22u // FAULT_MAIN_2     (HARDWARE.md sec1)-- pacer slice 3 channel-A candidate
+
+#define CT_WAVE_PWM_GPIO_IS_FORBIDDEN(gpio)                                   \
+    ((gpio) == CT_WAVE_PWM_FORBIDDEN_GPIO_6  ||                               \
+     (gpio) == CT_WAVE_PWM_FORBIDDEN_GPIO_7  ||                               \
+     (gpio) == CT_WAVE_PWM_FORBIDDEN_GPIO_17 ||                               \
+     (gpio) == CT_WAVE_PWM_FORBIDDEN_GPIO_19 ||                               \
+     (gpio) == CT_WAVE_PWM_FORBIDDEN_GPIO_21 ||                               \
+     (gpio) == CT_WAVE_PWM_FORBIDDEN_GPIO_22)
+
+_Static_assert(!CT_WAVE_PWM_GPIO_IS_FORBIDDEN(CT_WAVE_GPIO_0),
+               "ct_wave_pwm.c: CT_WAVE_GPIO_0 is assigned to a GPIO that "
+               "docs/HARDWARE.md section 1 gives to a non-PWM owner (SPI bus "
+               "A SCLK/MOSI, or a FAULT_MAIN_*/DRDY_MAIN_2 open-drain line) -- "
+               "gpio_set_function(..., GPIO_FUNC_PWM) on that pin would put a "
+               "free-running PWM carrier onto a claimed signal line. See "
+               "docs/HARDWARE.md section 0 item 9.");
+_Static_assert(!CT_WAVE_PWM_GPIO_IS_FORBIDDEN(CT_WAVE_GPIO_1),
+               "ct_wave_pwm.c: CT_WAVE_GPIO_1 is assigned to a GPIO that "
+               "docs/HARDWARE.md section 1 gives to a non-PWM owner (SPI bus "
+               "A SCLK/MOSI, or a FAULT_MAIN_*/DRDY_MAIN_2 open-drain line) -- "
+               "gpio_set_function(..., GPIO_FUNC_PWM) on that pin would put a "
+               "free-running PWM carrier onto a claimed signal line. See "
+               "docs/HARDWARE.md section 0 item 9.");
+_Static_assert(!CT_WAVE_PWM_GPIO_IS_FORBIDDEN(CT_WAVE_GPIO_2),
+               "ct_wave_pwm.c: CT_WAVE_GPIO_2 is assigned to a GPIO that "
+               "docs/HARDWARE.md section 1 gives to a non-PWM owner (SPI bus "
+               "A SCLK/MOSI, or a FAULT_MAIN_*/DRDY_MAIN_2 open-drain line) -- "
+               "gpio_set_function(..., GPIO_FUNC_PWM) on that pin would put a "
+               "free-running PWM carrier onto a claimed signal line. See "
+               "docs/HARDWARE.md section 0 item 9.");
 
 // --- Carrier config (see file header arithmetic) ----------------------------
 #define CT_WAVE_CARRIER_WRAP   255u   // 8-bit resolution: 256 duty levels

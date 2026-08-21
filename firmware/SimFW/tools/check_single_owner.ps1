@@ -364,7 +364,94 @@ if (Test-Path $mainPath) {
 }
 
 # ---------------------------------------------------------------------------
-if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0) {
+# PWM SAFETY RULES
+#
+# docs/HARDWARE.md section 0 item 9 (the pin-map re-check, commit 1d32e84)
+# found a latent trap: PWM slice 3 (the CT waveform generator's free-running
+# pacer, drivers/ct_wave_pwm.c) binds no GPIO today, but its own candidate
+# outputs -- and each CT channel's own slice's unused channel-B pin -- land on
+# six GPIOs docs/HARDWARE.md section 1 gives to non-PWM owners:
+#
+#   GPIO6/7   -- SPI bus A SCLK/MOSI (spi_emu_a.c, PIO function)
+#   GPIO17    -- DRDY_MAIN_2 (spi_emu_a.c, SIO open-drain)
+#   GPIO19/21 -- FAULT_MAIN_0/1 (unowned in code yet, but claimed in section 1)
+#   GPIO22    -- FAULT_MAIN_2 (unowned in code yet, but claimed in section 1)
+#
+# A future gpio_set_function(<one of those>, GPIO_FUNC_PWM) is legal C that
+# would silently put a free-running PWM carrier onto a claimed signal line.
+# The include rule above already makes drivers/ct_wave_pwm.{c,h} the ONLY
+# place in the tree allowed to include hardware/pwm.h, so it is also the only
+# place gpio_set_function(..., GPIO_FUNC_PWM) can legitimately appear. Two
+# checks, same split as the DMA section above:
+#
+#   1. COMPILE-TIME (the primary guard). drivers/ct_wave_pwm.c defines each
+#      CT channel's GPIO as its own macro (CT_WAVE_GPIO_0/1/2) specifically so
+#      a _Static_assert can check each one against the six forbidden pins --
+#      reassigning a channel to a forbidden GPIO is a build error. This
+#      script cannot run the compiler, so it confirms the guard block is
+#      still present (not deleted) rather than re-deriving it.
+#   2. LINT (this section). Independently greps every file for a literal-pin
+#      gpio_set_function(<N>, GPIO_FUNC_PWM) call and checks N against the
+#      forbidden list directly -- this catches a hardcoded call added
+#      somewhere that bypasses the CT_WAVE_GPIO_* macros entirely, which the
+#      _Static_assert above cannot see.
+#
+# See docs/HARDWARE.md section 0 item 9 for the full derivation.
+$pwmFailures = @()
+
+# GPIO -> "signal (owner)" exactly as docs/HARDWARE.md section 1 assigns it.
+# Plain @{}, not [ordered]@{} -- PowerShell's OrderedDictionary indexer
+# treats an integer key as a POSITIONAL index rather than a dictionary key
+# (verified: $h[22] on an [ordered]@{22=...} silently returns $null instead
+# of the value), which would make every lookup below resolve to an empty
+# string instead of failing loudly. A plain Hashtable's indexer does not have
+# that trap.
+$pwmForbiddenGpios = @{
+    6  = "SPI bus A SCLK (spi_emu_a.c) -- pacer slice 3's own channel-A candidate output"
+    7  = "SPI bus A MOSI (spi_emu_a.c) -- pacer slice 3's own channel-B candidate output"
+    17 = "DRDY_MAIN_2 (spi_emu_a.c) -- CT zone 0's own PWM slice's unused channel-B pin"
+    19 = "FAULT_MAIN_0 (docs/HARDWARE.md section 1, no owner file yet) -- CT zone 1's own PWM slice's unused channel-B pin"
+    21 = "FAULT_MAIN_1 (docs/HARDWARE.md section 1, no owner file yet) -- CT zone 2's own PWM slice's unused channel-B pin"
+    22 = "FAULT_MAIN_2 (docs/HARDWARE.md section 1, no owner file yet) -- pacer slice 3's own channel-A candidate output"
+}
+
+# --- Rule 1: lint every literal-pin gpio_set_function(N, GPIO_FUNC_PWM) ----
+foreach ($f in $files) {
+    $rel = $f.FullName.Substring($srcRoot.Length + 1) -replace '\\', '/'
+    $codeLines = Get-CodeOnlyLines -Path $f.FullName
+    for ($i = 0; $i -lt $codeLines.Count; $i++) {
+        $line = $codeLines[$i]
+        if ($line -match 'gpio_set_function\s*\(\s*([0-9]+)\s*u?\s*,\s*GPIO_FUNC_PWM\b') {
+            $pin = [int]$Matches[1]
+            if ($pwmForbiddenGpios.ContainsKey($pin)) {
+                $pwmFailures += "$($rel):$($i + 1): gpio_set_function(GPIO$pin, GPIO_FUNC_PWM) -- GPIO$pin is $($pwmForbiddenGpios[$pin]).`n      Binding a PWM function here would put a free-running carrier onto that claimed line. See docs/HARDWARE.md section 0 item 9.`n      Line: $($line.Trim())"
+            }
+        }
+    }
+}
+
+# --- Rule 2: the compile-time guard block must still exist -----------------
+# Mirrors the DMA section's "assertion missing" check: this lint's literal-pin
+# regex cannot see the CT_WAVE_GPIO_* macro path the real code uses (the pin
+# comes in through a variable, not a literal, at the actual call site), so the
+# _Static_assert block in drivers/ct_wave_pwm.c is the primary guard for that
+# path, not this script. If it disappears, say so rather than passing
+# silently on a codebase that is once again unguarded.
+$ctWavePath = Join-Path $srcRoot "drivers\ct_wave_pwm.c"
+if (Test-Path $ctWavePath) {
+    $ctWaveCode = (Get-CodeOnlyLines -Path $ctWavePath) -join "`n"
+    $requiredAsserts = @("CT_WAVE_GPIO_0", "CT_WAVE_GPIO_1", "CT_WAVE_GPIO_2")
+    foreach ($macroName in $requiredAsserts) {
+        if ($ctWaveCode -notmatch ('_Static_assert\s*\(\s*!CT_WAVE_PWM_GPIO_IS_FORBIDDEN\s*\(\s*' + [regex]::Escape($macroName) + '\s*\)')) {
+            $pwmFailures += "drivers/ct_wave_pwm.c: the compile-time PWM-pin guard for $macroName (_Static_assert(!CT_WAVE_PWM_GPIO_IS_FORBIDDEN($macroName), ...)) is missing.`n      That assertion is the compile-time half of docs/HARDWARE.md section 0 item 9's guard -- it is what turns reassigning a CT channel onto GPIO6/7/17/19/21/22 into a build error instead of a fixture that silently drives a PWM carrier onto a claimed SPI/FAULT/DRDY line. Restore it; do not rely on this script's lint alone, since the lint only sees literal-pin call sites."
+        }
+    }
+} else {
+    $pwmFailures += "PWM safety: drivers/ct_wave_pwm.c not found, so the compile-time guard block could not be confirmed."
+}
+
+# ---------------------------------------------------------------------------
+if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0 -or $pwmFailures.Count -gt 0) {
     if ($failures.Count -gt 0) {
         Write-Host "SINGLE-OWNER CHECK FAILED:" -ForegroundColor Red
         foreach ($f in $failures) {
@@ -377,10 +464,17 @@ if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0) {
             Write-Host "  $f" -ForegroundColor Red
         }
     }
-    throw "$($failures.Count) single-owner violation(s) and $($dmaFailures.Count) DMA safety violation(s) found -- see docs/PLAN.md section 4 ('every hardware interface has exactly one owner task') and docs/HARDWARE.md section 1b (DMA channel budget)"
+    if ($pwmFailures.Count -gt 0) {
+        Write-Host "PWM SAFETY CHECK FAILED:" -ForegroundColor Red
+        foreach ($f in $pwmFailures) {
+            Write-Host "  $f" -ForegroundColor Red
+        }
+    }
+    throw "$($failures.Count) single-owner violation(s), $($dmaFailures.Count) DMA safety violation(s) and $($pwmFailures.Count) PWM safety violation(s) found -- see docs/PLAN.md section 4 ('every hardware interface has exactly one owner task'), docs/HARDWARE.md section 1b (DMA channel budget) and docs/HARDWARE.md section 0 item 9 (PWM pacer/channel-B latent trap)"
 }
 
 Write-Host "Single-owner check passed: hardware/i2c.h, hardware/pio.h, hardware/pwm.h, hardware/dma.h and tusb.h each appear only in their declared owner file(s)."
 $vectorSummary = ($dmaIrqSites | Sort-Object Vector | ForEach-Object { "$($_.Vector)->$($_.File)" }) -join ', '
 Write-Host "DMA safety check passed: every channel taken via dma_claim_unused_channel(); raw channel registers touched only by the owners; DMA vectors disjoint by file [$vectorSummary]; $dmaTotal of $dmaChannelsTotal channels claimed (HARDWARE.md section 1b)."
+Write-Host "PWM safety check passed: no gpio_set_function(..., GPIO_FUNC_PWM) call binds GPIO6/7/17/19/21/22 (SPI bus A SCLK/MOSI, DRDY_MAIN_2, FAULT_MAIN_0/1/2 -- HARDWARE.md section 0 item 9), and drivers/ct_wave_pwm.c's compile-time guard block is present."
 exit 0
