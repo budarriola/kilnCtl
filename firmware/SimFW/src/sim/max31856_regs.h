@@ -61,7 +61,18 @@ extern "C" {
 
 #define MAX31856_WRITE_BIT   0x80u
 #define MAX31856_WRITE_ADDR(reg) ((uint8_t)((reg) | MAX31856_WRITE_BIT))
-#define MAX31856_ADDR_MASK(byte) ((uint8_t)((byte) & 0x0Fu)) /* strips write bit + reserved */
+/* The part's address counter is 7 bits wide, not 4: the datasheet (MAX31856
+ * rev 2, page 15, "Serial Interface") says the address "continues to
+ * increment through all memory locations as long as CS remains low... the
+ * address will loop from 7Fh/FFh to 00h/80h", and that "invalid memory
+ * addresses report an FFh value". Only 00h..0Fh are real registers; 10h..7Fh
+ * exist in the address space but read back FFh and swallow writes. Masking
+ * to 4 bits (as this header used to) would alias 15h onto CR1 instead of
+ * reporting FFh, and would wrap a long burst back to CR0 after SR instead of
+ * running out into the FFh region. */
+#define MAX31856_ADDR_MASK(byte) ((uint8_t)((byte) & 0x7Fu)) /* strips only the write bit */
+#define MAX31856_ADDR_SPACE  0x80u /* 7-bit address counter: 00h..7Fh, then wraps */
+#define MAX31856_INVALID_ADDR_VALUE 0xFFu /* datasheet: "Invalid memory addresses report an FFh value" */
 
 /* --- CR0 bits --- */
 #define MAX31856_CR0_CMODE       0x80u
@@ -230,15 +241,18 @@ void max31856_regs_init(max31856_channel_t *ch, uint32_t rng_seed);
 void max31856_regs_cs_assert(max31856_channel_t *ch, uint8_t addr_byte);
 
 /* Clocks one byte out for a read transaction (post-corruption). Auto-
- * increments the internal address, wrapping at MAX31856_REG_COUNT (matches
- * the part: reading past SR wraps back to CR0). Undefined byte value (0x00)
- * if called outside an open read transaction. */
+ * increments the internal 7-bit address, wrapping at MAX31856_ADDR_SPACE
+ * (00h..7Fh then back to 00h, per the datasheet's "loop from 7Fh/FFh to
+ * 00h/80h"); addresses 10h..7Fh are not implemented registers and read back
+ * MAX31856_INVALID_ADDR_VALUE. Undefined byte value (0x00) if called outside
+ * an open read transaction. */
 uint8_t max31856_regs_clock_read_byte(max31856_channel_t *ch);
 
 /* Clocks one byte in for a write transaction and applies write-back rules
- * (read-only registers ignored, self-clearing bits, CJ-disable-gated
- * writability) immediately. Auto-increments and wraps like the read side.
- * No-op if called outside an open write transaction. */
+ * (read-only registers ignored, unimplemented 10h..7Fh addresses ignored,
+ * self-clearing bits, CJ-disable-gated writability) immediately.
+ * Auto-increments and wraps like the read side. No-op if called outside an
+ * open write transaction. */
 void max31856_regs_clock_write_byte(max31856_channel_t *ch, uint8_t data_in);
 
 /* Ends the transaction. */

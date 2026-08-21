@@ -88,6 +88,16 @@
 ;       datasheet), so shifting LEFT from a clean zero for 8 bits leaves the
 ;       MSB-first assembled byte in the LOW 8 bits of the pushed FIFO word --
 ;       the C side reads it with `word & 0xFF`, not `word >> 24`.
+;   TX (IN side -- the CS idle/active test, NOT a byte stream):
+;       sm_config_set_in_shift(shift_right=false, autopush=false, 32).
+;       MANDATORY. The `in pins, N` / `mov x, isr` / `jmp x!=y` sequence in
+;       both TX programs compares against a `set`-loaded constant (7 on bus
+;       A, 1 on bus B). Only shifting LEFT lands the N sampled CS bits in
+;       ISR[N-1:0] where those constants mean something; the pico-sdk
+;       DEFAULT is shift-RIGHT, which parks them at ISR[31:32-N] (0xE0000000
+;       for an idle bus A) so the compare never matches, MISO is never
+;       tri-stated, and the SM never returns to poll_idle. This was a real
+;       shipped bug -- see docs/SPI_ACCESS_AUDIT.md D1.
 ;   TX: sm_config_set_out_shift(shift_right=false, autopull=true,
 ;       threshold=8). OUT shifts LEFT and emits the current MSB of a 32-bit
 ;       OSR each time, so the C side must LEFT-JUSTIFY each response byte

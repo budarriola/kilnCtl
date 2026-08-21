@@ -136,6 +136,14 @@ static void apply_write_rule(max31856_channel_t *ch, uint8_t addr, uint8_t value
      * behavior TC_GET_MASTER_CONFIG reports on). */
     ch->master_has_written = true;
 
+    if (addr >= MAX31856_REG_COUNT) {
+        /* 10h..7Fh are inside the part's 7-bit address space but are not
+         * implemented registers (datasheet page 15: invalid addresses read
+         * FFh); a write there changes nothing. The attempt still counts
+         * above, same reasoning as the read-only case below. */
+        return;
+    }
+
     switch (addr) {
     case MAX31856_REG_LTCBH:
     case MAX31856_REG_LTCBM:
@@ -212,8 +220,10 @@ uint8_t max31856_regs_clock_read_byte(max31856_channel_t *ch)
     if (!ch->cs_low || ch->txn_is_write) {
         return 0x00u;
     }
-    uint8_t byte = ch->read_snapshot[ch->txn_addr];
-    ch->txn_addr = (uint8_t)((ch->txn_addr + 1u) % MAX31856_REG_COUNT);
+    uint8_t byte = (ch->txn_addr < MAX31856_REG_COUNT)
+                       ? ch->read_snapshot[ch->txn_addr]
+                       : (uint8_t)MAX31856_INVALID_ADDR_VALUE;
+    ch->txn_addr = (uint8_t)((ch->txn_addr + 1u) % MAX31856_ADDR_SPACE);
 
     if (ch->corruption.dead_mode != MAX31856_DEAD_NONE) {
         return apply_dead_mode(ch->corruption.dead_mode, byte);
@@ -227,7 +237,7 @@ void max31856_regs_clock_write_byte(max31856_channel_t *ch, uint8_t data_in)
         return;
     }
     apply_write_rule(ch, ch->txn_addr, data_in);
-    ch->txn_addr = (uint8_t)((ch->txn_addr + 1u) % MAX31856_REG_COUNT);
+    ch->txn_addr = (uint8_t)((ch->txn_addr + 1u) % MAX31856_ADDR_SPACE);
 }
 
 void max31856_regs_cs_deassert(max31856_channel_t *ch)

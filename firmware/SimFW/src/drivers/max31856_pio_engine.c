@@ -33,6 +33,68 @@ static void tx_push_byte(max31856_pio_bus_t *bus, uint8_t channel, uint8_t byte)
     bus->last_tx_channel = channel;
 }
 
+// --- Shared TX state-machine stall bookkeeping ------------------------------
+// The RP2040 PIO latches a sticky per-SM TXSTALL bit in FDEBUG whenever an
+// OUT's autopull found the TX FIFO empty and had to wait. Two helpers so the
+// two very different meanings of that bit never get confused:
+//
+//  * tx_clear_stall() -- "this stall was structural, not a defect". The TX SM
+//    unavoidably stalls at the start of EVERY transaction: it enters its
+//    byte_loop on the first SCLK edge after CS falls, but the response byte
+//    cannot exist until the whole address byte has been received eight clocks
+//    later. Counting that as an underrun would make first_byte_late fire once
+//    per transaction forever and render the "a run with nonzero underruns is
+//    invalid" rule useless.
+//  * tx_note_stall() -- "this stall happened AFTER a response byte was
+//    already staged", i.e. the ISR genuinely fell behind the master's clock
+//    mid-burst. That is the real, countable underrun.
+static uint32_t tx_stall_bit(const max31856_pio_bus_t *bus)
+{
+    return 1u << (PIO_FDEBUG_TXSTALL_LSB + bus->sm_tx);
+}
+
+static void tx_clear_stall(max31856_pio_bus_t *bus)
+{
+    bus->pio->fdebug = tx_stall_bit(bus); // write-1-to-clear
+}
+
+static void tx_note_stall(max31856_pio_bus_t *bus, uint8_t channel)
+{
+    uint32_t bit = tx_stall_bit(bus);
+    if ((bus->pio->fdebug & bit) != 0u) {
+        bus->pio->fdebug = bit;
+        bus->stats[channel].first_byte_late++;
+    }
+}
+
+// Returns the shared TX state machine to a known, byte-aligned, tri-stated
+// idle state. MUST run at every CS deassert.
+//
+// Why: the ISR necessarily stages one more response byte than the master ever
+// clocks out. For an N-register read the master clocks N+1 bytes (address +
+// N), and the RX side sees N+1 bytes, so it stages N+1 responses -- but the
+// TX SM can only emit one bit per SCLK cycle and the first byte-time is spent
+// receiving the address, so at most N bytes ever leave on MISO. Without this
+// reset the surplus byte (plus any bits left mid-OSR, plus anything a write
+// transaction left stalled) survives into the NEXT CS assertion and leads it,
+// shifting every subsequent transaction's MISO stream by a byte and
+// accumulating until the 4-deep TX FIFO jams. pio_sm_restart() is what clears
+// the OSR/ISR shift counters and the stalled state; clear_fifos() drops the
+// surplus bytes; the jmp re-enters the program at its `set y, N` preamble so
+// the idle-compare constant is reloaded.
+static void tx_reset(max31856_pio_bus_t *bus)
+{
+    pio_sm_set_enabled(bus->pio, bus->sm_tx, false);
+    pio_sm_clear_fifos(bus->pio, bus->sm_tx);
+    pio_sm_restart(bus->pio, bus->sm_tx);
+    pio_sm_exec(bus->pio, bus->sm_tx, pio_encode_jmp(bus->offset_tx));
+    // Tri-state MISO explicitly rather than waiting the ~5 cycles the
+    // program's own poll_idle pass would take to do it.
+    pio_sm_set_pindirs_with_mask(bus->pio, bus->sm_tx, 0u, 1u << bus->miso_gpio);
+    tx_clear_stall(bus);
+    pio_sm_set_enabled(bus->pio, bus->sm_tx, true);
+}
+
 // Drains every byte currently sitting in `channel`'s RX FIFO and advances
 // that channel's max31856_regs_t transaction state accordingly. Because
 // bus A's three RX SMs are individually gated by their own CS line (only
@@ -72,6 +134,10 @@ static void handle_channel_rx_bytes(max31856_pio_bus_t *bus, uint8_t channel)
                 uint8_t resp = max31856_regs_clock_read_byte(ch);
                 tx_push_byte(bus, channel, resp);
             }
+            // Either way the SM has been stalling since CS fell, for the
+            // structural reason tx_clear_stall() documents. Discard that
+            // stall so only genuine mid-burst underruns get counted below.
+            tx_clear_stall(bus);
             // Write transactions stage nothing -- MISO is don't-care while
             // the master is sending register data; the real chip drives
             // whatever it likes on MISO during a write and every master
@@ -89,25 +155,14 @@ static void handle_channel_rx_bytes(max31856_pio_bus_t *bus, uint8_t channel)
             // one byte-time ahead of when the master will clock it out,
             // exactly mirroring the auto-increment addressing
             // max31856_regs_clock_read_byte() already implements.
+            //
+            // Checked BEFORE staging: a stall latched since the previous
+            // byte means the SM ran dry with the master still clocking --
+            // the real underrun.
+            tx_note_stall(bus, channel);
             uint8_t resp = max31856_regs_clock_read_byte(ch);
             tx_push_byte(bus, channel, resp);
         }
-    }
-}
-
-// PLAN.md 3.2.1's "first-byte-late events (TX FIFO underrun detected by
-// PIO)... counted, never silent." The RP2040 PIO block latches a per-SM
-// TXSTALL bit in FDEBUG whenever a state machine executes an OUT/PULL that
-// needed to autopull from an empty TX FIFO and had to wait -- exactly the
-// underrun this design's shared TX SM can hit if the ISR falls behind the
-// master's clock. Write-1-to-clear per the RP2040 datasheet's FDEBUG
-// description, so each poll only reports genuinely NEW stalls.
-static void poll_tx_underrun(max31856_pio_bus_t *bus)
-{
-    uint32_t stall_bit = 1u << (PIO_FDEBUG_TXSTALL_LSB + bus->sm_tx);
-    if ((bus->pio->fdebug & stall_bit) != 0u) {
-        bus->pio->fdebug = stall_bit; // write-1-to-clear
-        bus->stats[bus->last_tx_channel].first_byte_late++;
     }
 }
 
@@ -123,7 +178,6 @@ static void poll_bus_rx(max31856_pio_bus_t *bus)
     for (uint8_t i = 0; i < bus->channel_count; i++) {
         handle_channel_rx_bytes(bus, i);
     }
-    poll_tx_underrun(bus);
 }
 
 static void irq_handler_pio0(void)
@@ -159,12 +213,20 @@ static void gpio_cs_deassert_callback(uint gpio, uint32_t events)
             // closing the transaction, so a burst that finished exactly at
             // CS-rise is not left stranded.
             handle_channel_rx_bytes(bus, ch);
-            poll_tx_underrun(bus);
             if (bus->txn_open[ch]) {
+                if (!bus->txn_is_write[ch]) {
+                    // A stall still latched at the end of a read means the
+                    // last response byte(s) went out late.
+                    tx_note_stall(bus, ch);
+                }
                 max31856_regs_cs_deassert(bus->channels[ch]);
                 bus->txn_open[ch] = false;
                 bus->txn_is_write[ch] = false;
             }
+            // Unconditional: even a transaction that never opened (a CS
+            // glitch with no complete address byte) must not leave the
+            // shared TX SM mid-byte or holding staged data.
+            tx_reset(bus);
             return;
         }
     }
@@ -245,6 +307,20 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus, PIO pio,
     sm_config_set_out_pins(&tc, miso_gpio, 1);          // drives MISO's value
     sm_config_set_set_pins(&tc, miso_gpio, 1);           // drives MISO's pindir (tri-state control)
     sm_config_set_out_shift(&tc, false, true, 8);         // shift-left, autopull, 8-bit threshold (see .pio header's shift contract)
+    // MANDATORY, not cosmetic. Both TX programs test CS with
+    //     in pins, N ; mov x, isr ; jmp x!=y, active
+    // against a SET-loaded constant (7 for bus A's three CS lines, 1 for bus
+    // B's one). `in` places the sampled bits at whichever end of the ISR the
+    // shift direction says, and pio_get_default_sm_config() -- which
+    // *_program_get_default_config() starts from -- leaves IN shifting RIGHT.
+    // Shifting right into a zeroed ISR puts the N bits at ISR[31:32-N], so an
+    // all-idle bus A reads back 0xE0000000, never 7, and the compare takes
+    // the "active" branch unconditionally: MISO would be driven permanently
+    // instead of tri-stated, and neither the idle poll nor the per-bit
+    // mid-byte CS re-check would ever fire. Shifting LEFT lands the bits in
+    // ISR[N-1:0] so the constants mean what the programs say they mean.
+    // autopush stays off (the ISR is scratch here, never a byte stream).
+    sm_config_set_in_shift(&tc, false, false, 32);
     sm_config_set_clkdiv(&tc, 1.0f);
     pio_sm_init(pio, bus->sm_tx, bus->offset_tx, &tc);
     pio_sm_set_consecutive_pindirs(pio, bus->sm_tx, miso_gpio, 1, false); // tri-stated at boot, matching the idle state the TX program itself will re-derive on its first poll_idle pass

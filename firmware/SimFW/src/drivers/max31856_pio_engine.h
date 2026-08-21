@@ -42,7 +42,21 @@ typedef struct {
     uint32_t bytes_tx;          // total bytes pushed to the (possibly shared) TX FIFO on this channel's behalf
     uint32_t protocol_errors;   // malformed-transaction class: a byte arrived with no channel slot able to account for it (should never happen; see .c)
     uint32_t write_conflicts;   // a write-data byte arrived while this channel's tracked transaction state says "no write open" (RX/txn-state desync)
-    uint32_t first_byte_late;   // TX FIFO underrun observed for this channel: the shared TX SM had to stall (autopull found the FIFO empty) while this channel was selected
+    // TX FIFO underrun observed for this channel AFTER a response byte had
+    // already been staged -- i.e. the ISR genuinely fell behind the master's
+    // clock mid-burst. The structural stall every transaction begins with
+    // (the TX SM enters its byte_loop on the first SCLK edge after CS falls,
+    // but the first response byte cannot exist until the address byte has
+    // finished arriving eight clocks later) is discarded, not counted -- see
+    // tx_clear_stall()/tx_note_stall() in the .c file. Counting it would make
+    // this fire once per transaction forever.
+    //
+    // NOTE the name is now narrower than it reads: lateness of the FIRST
+    // response byte specifically is NOT observable in-band, because that
+    // stall is indistinguishable from the structural one. It shows up as
+    // wrong data at the master (tools/spi_test_master's
+    // suspected_first_byte_late heuristic) or on a logic-analyzer capture.
+    uint32_t first_byte_late;
 } max31856_pio_stats_t;
 
 // One physical bus (one PIO block: RX SM(s) + one shared TX SM).

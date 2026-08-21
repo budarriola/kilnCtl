@@ -60,16 +60,115 @@ static void test_auto_increment(void)
     max31856_regs_read_burst(&ch, MAX31856_REG_CJHF, out, sizeof(out));
     TEST_CHECK(memcmp(data, out, sizeof(data)) == 0, "6-register auto-increment burst round-trips exactly");
 
-    /* Address wraps at MAX31856_REG_COUNT (matches the real part reading
-     * past SR back to CR0). Write a marker at CR0, then read starting near
-     * the end of the map across the wrap. */
+    /* The address counter is 7 bits wide, NOT 4. Datasheet page 15: the
+     * address "continues to increment through all memory locations as long
+     * as CS remains low... the address will loop from 7Fh/FFh to 00h/80h",
+     * and "invalid memory addresses report an FFh value". So running off the
+     * end of the 16 real registers walks into 10h..7Fh (all FFh) rather than
+     * wrapping straight back to CR0. */
     max31856_regs_write_burst(&ch, MAX31856_REG_CR0, (const uint8_t[]){0x81u}, 1);
-    uint8_t wrap_out[3] = {0};
-    /* SR (0x0F) is read-only/live, so read LTCBM(0x0D), LTCBL(0x0E), SR(0x0F) then wrap to CR0(0x00). */
-    uint8_t wrap4[4] = {0};
-    max31856_regs_read_burst(&ch, MAX31856_REG_LTCBL, wrap4, 4); /* LTCBL, SR, CR0(wrap), CR1 */
-    TEST_CHECK(wrap4[2] == 0x81u, "auto-increment address wraps from SR (0x0F) back to CR0 (0x00)");
-    (void)wrap_out;
+    uint8_t past_end[4] = {0};
+    max31856_regs_read_burst(&ch, MAX31856_REG_LTCBL, past_end, 4); /* LTCBL(0x0E), SR(0x0F), 0x10, 0x11 */
+    TEST_CHECK(past_end[2] == 0xFFu && past_end[3] == 0xFFu,
+               "reading past SR (0x0F) reports FFh for the unimplemented 10h.. addresses, not a wrap to CR0");
+
+    /* The real wrap is at 0x7F -> 0x00. Start at 0x7E so byte 2 lands on
+     * CR0 and byte 3 on CR1. */
+    uint8_t wrap_out[4] = {0};
+    max31856_regs_read_burst(&ch, 0x7Eu, wrap_out, 4);
+    TEST_CHECK(wrap_out[0] == 0xFFu && wrap_out[1] == 0xFFu,
+               "0x7E/0x7F are unimplemented and report FFh");
+    TEST_CHECK(wrap_out[2] == 0x81u, "auto-increment address wraps from 0x7F back to CR0 (0x00)");
+    TEST_CHECK(wrap_out[3] == ch.regs[MAX31856_REG_CR1], "...and continues into CR1 (0x01)");
+
+    /* Writes into the unimplemented region are swallowed and must not alias
+     * back onto a real register (a 4-bit mask would have aliased 0x15 onto
+     * CR1). */
+    uint8_t cr1_before = ch.regs[MAX31856_REG_CR1];
+    max31856_regs_write_burst(&ch, 0x15u, (const uint8_t[]){0x5Au}, 1);
+    TEST_CHECK(ch.regs[MAX31856_REG_CR1] == cr1_before,
+               "a write to unimplemented address 0x15 does not alias onto CR1 (0x05-style 4-bit masking)");
+}
+
+/* --- The exact transaction shapes the two real SPI masters emit ------------
+ * Enumerated in docs/SPI_ACCESS_AUDIT.md; this test is that document's
+ * executable half. Every shape below is a single CS assertion, address byte
+ * first, MSB-first, with NO write-then-read phase change inside one CS. */
+static void test_real_master_transaction_shapes(void)
+{
+    TEST_SECTION("max31856_regs -- real masters' transaction shapes");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 7);
+
+    /* Shape W1 (both masters): 2 bytes -- 80h|reg, value. KilnFW
+     * MAX31856.c:154 max31856_write_u8 -> max31856_write_burst;
+     * SaftyFW max31856.c:39 max31856_write_u8. */
+    max31856_regs_cs_assert(&ch, MAX31856_WRITE_ADDR(MAX31856_REG_CR1));
+    max31856_regs_clock_write_byte(&ch, 0x23u);
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(ch.regs[MAX31856_REG_CR1] == 0x23u, "W1: 2-byte single-register write lands");
+
+    /* Shape W2 (KilnFW only): address byte + N data bytes, one CS.
+     * MAX31856.c:888-893 writes CJHF..CJLF (2) and LTHFTH..LTHFTL (2) and
+     * LTLFTH..LTLFTL (2) as three separate 3-byte transactions. */
+    max31856_regs_cs_assert(&ch, MAX31856_WRITE_ADDR(MAX31856_REG_LTHFTH));
+    max31856_regs_clock_write_byte(&ch, 0x12u);
+    max31856_regs_clock_write_byte(&ch, 0x34u);
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(ch.regs[MAX31856_REG_LTHFTH] == 0x12u && ch.regs[MAX31856_REG_LTHFTL] == 0x34u,
+               "W2: 3-byte two-register auto-increment write lands in both registers");
+
+    /* Shape R1 (both masters, the hot path): address byte 0Ah, then 6 dummy
+     * bytes clocking CJTH, CJTL, LTCBH, LTCBM, LTCBL, SR. KilnFW
+     * MAX31856.c:1038; SaftyFW max31856.c:191. Ends exactly on SR -- neither
+     * master ever runs the auto-increment past 0x0F. */
+    ch.regs[MAX31856_REG_CJTH] = 0x19u;
+    ch.regs[MAX31856_REG_CJTL] = 0x00u;
+    ch.regs[MAX31856_REG_LTCBH] = 0x01u;
+    ch.regs[MAX31856_REG_LTCBM] = 0x92u;
+    ch.regs[MAX31856_REG_LTCBL] = 0x60u;
+    ch.regs[MAX31856_REG_SR] = 0x00u;
+
+    max31856_regs_cs_assert(&ch, MAX31856_REG_CJTH); /* bit 7 clear == read */
+    uint8_t r1[6];
+    for (int i = 0; i < 6; i++) {
+        r1[i] = max31856_regs_clock_read_byte(&ch);
+    }
+    TEST_CHECK(ch.txn_addr == MAX31856_REG_COUNT,
+               "R1: the 6-register burst from CJTH ends exactly past SR (no wrap reached)");
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(r1[0] == 0x19u && r1[1] == 0x00u && r1[2] == 0x01u && r1[3] == 0x92u &&
+                   r1[4] == 0x60u && r1[5] == 0x00u,
+               "R1: CJTH..SR come back in address order");
+
+    /* Shape R2 (KilnFW only): 2 bytes -- address 0Fh + 1 dummy, a lone SR
+     * poll. MAX31856.c:1146. */
+    ch.regs[MAX31856_REG_SR] = MAX31856_FAULT_OPEN;
+    max31856_regs_cs_assert(&ch, MAX31856_REG_SR);
+    uint8_t sr = max31856_regs_clock_read_byte(&ch);
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(sr == MAX31856_FAULT_OPEN, "R2: single-register SR read");
+
+    /* A read transaction must never mutate registers, and a write
+     * transaction must never produce meaningful MISO data -- the two
+     * directions are decided once, by bit 7 of the address byte, and never
+     * change inside one CS assertion. That is the whole "no write-then-read
+     * within one CS" answer, asserted rather than assumed. */
+    uint8_t before[MAX31856_REG_COUNT];
+    memcpy(before, ch.regs, sizeof(before));
+    max31856_regs_cs_assert(&ch, MAX31856_REG_CR0); /* read */
+    (void)max31856_regs_clock_read_byte(&ch);
+    max31856_regs_clock_write_byte(&ch, 0xFFu); /* wrong-direction byte: ignored */
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(memcmp(before, ch.regs, sizeof(before)) == 0,
+               "a data byte clocked in during a READ transaction never writes a register");
+
+    max31856_regs_cs_assert(&ch, MAX31856_WRITE_ADDR(MAX31856_REG_CR1)); /* write */
+    uint8_t during_write = max31856_regs_clock_read_byte(&ch);
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(during_write == 0x00u,
+               "a read byte requested during a WRITE transaction returns the don't-care 0x00, not register data");
 }
 
 static void test_fault_bits_from_thresholds(void)
@@ -440,6 +539,7 @@ void run_test_max31856_regs(void)
 {
     test_write_read_verbatim();
     test_auto_increment();
+    test_real_master_transaction_shapes();
     test_fault_bits_from_thresholds();
     test_interrupt_mode_latches_until_faultclr();
     test_oneshot_self_clears();
