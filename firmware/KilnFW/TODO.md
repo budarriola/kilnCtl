@@ -511,6 +511,33 @@ page. also add support for the temp sensors you currently have access to."
       UART link. Every affected surface eventually returned good data on a
       later retry in the same bench session; this is link congestion, not a
       registration failure, and is out of scope for this entry.
+      **UPDATE 2026-08-20 — that intermittency is RESOLVED, and it was not
+      link congestion.** Measured per task rather than in aggregate (10 calls
+      each, same script):
+      ```
+      get_fw_version(INFO)  med 0.200      io_read           med 0.200
+      control_get_zones     med 0.200      wifi_get_status   med 0.200
+      wifi_get_networks     med 2.700   <-- the whole problem
+      ```
+      One command was slow, not the link. `wifi_build_networks()` ran a full
+      blocking radio scan on every call; everything else queued behind it,
+      which is what made unrelated queries (INFO/task 6 especially) look
+      randomly slow. Fixed by caching that scan — `wifi_get_networks` now
+      measures med 0.200.
+      Re-measured afterwards, 60 consecutive `get_fw_version` calls:
+      **0 failures**, min 0.005, med 0.152, p90 0.347, max 0.760 — only 2 of
+      60 above 0.5s. The INFO task is healthy.
+      One thing NOT to conclude, checked and disproved: under a rapid burst
+      the device logs `no reply for msg N to dev1/task3` (task 3 = INFO),
+      which looks like the device retransmitting replies the host already
+      received. A controlled single request produced ZERO such lines, so it
+      is load-dependent, not a per-reply cost. Do not "fix" it on the
+      strength of the burst logs alone.
+      Also worth recording, since it misled this session: the constant
+      `no reply ... to dev2/task7` warnings are on the SAFETY link (UART1),
+      which is a separate `uart_protocol` instance with its OWN `tx_lock`.
+      They cannot congest the PC link on UART0, however alarming the volume
+      looks.
 - [x] **Internal-DRAM fragmentation — MEASURED and largely RESOLVED
       (2026-08-20), verified live on the bench.** The entry above fixed the
       *symptom* (task stacks that couldn't be allocated) by moving those
@@ -6294,6 +6321,40 @@ queue set in place) — full migration, not a patch.
       candidate triggers not yet tried this pass (concurrent profile-adjacent
       reads under load, longer soak, or Wi-Fi station-join churn instead of
       AP-mode add/forget, since AP mode was the only mode exercised here).
+
+      **RESOLVED 2026-08-20. It was a stack overflow in `wifi_uart_bridge`.**
+      Caught by coredump-to-flash, which this entry had considered and
+      declined. The escalation order above was reasonable but the cheap
+      routes could not have found this: the panic handler writes to the
+      USB-Serial-JTAG console, which `uart_log_bridge` never sees, and the
+      reset-reason line reports only *that* a panic happened, never where.
+      Enabling coredump WAS the step that mattered, and it needed both a
+      bigger partition (64K held nothing; the dump is 82KB, or 679KB with
+      DRAM capture) and `CAPTURE_DRAM=y` to name the task at all.
+
+      The dump said it outright:
+      ```
+      Panic reason: ***ERROR*** A stack overflow in task wifi_uart_bridg
+                    has been detected.
+             TCB             NAME PRIO C/B  STACK USED/FREE
+      0x3fcc0a7c  wifi_uart_bridg      7/5         3440/376
+      ```
+      3440 bytes used against a 3072-byte stack, while the host polled
+      `wifi_get_status`. The 3072 came from this same session's shrink of
+      wifi/autotune bridge stacks 4096 -> 3072 as an internal-SRAM
+      workaround — a workaround that freed nothing, because those stacks
+      were already allocated from PSRAM. Fixed by sizing them from the
+      measured figure instead of an estimate (wifi -> 8192, autotune ->
+      4096); see `uart_bridge_ext.c`.
+
+      Note for the next person: the guess above about a "PSRAM-stack hazard"
+      in `retry_task_create_pinned()` was in the right FILE for the wrong
+      REASON. The hazard is not PSRAM; it is that this helper's stack sizes
+      were being set by reading each handler's visible locals, which misses
+      the ESP-IDF driver call chain underneath. Verified separately that
+      PSRAM-stacked tasks (`lvgl`, `link_watchdog`) resolve full backtraces
+      in a coredump, so PSRAM stacks are not a diagnosability problem
+      either.
 - [~] **Phase 3: `profile_executor` command queue — REVIEWED AND
       DELIBERATELY SKIPPED (2026-08-19).** Marked `[~]`, not `[x]`: nothing
       was built, and this is a decision to record, not work to come back to
