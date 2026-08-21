@@ -1,9 +1,12 @@
 ; max31856_spi_slave.pio -- PIO SPI *slave* engines for the MAX31856
-; emulation buses. docs/PLAN.md section 3.2.1 is the authoritative design
-; (RX/TX state machines, mode-1 SPI, the 1.6us first-byte-latency problem,
-; the multi-CS-on-bus-A / single-CS-on-bus-B asymmetry). This file is the
-; PIO half; the C glue that loads/configures/drives these programs lives in
-; max31856_pio_engine.c right next to this file.
+; emulation buses. docs/PLAN.md section 3.2.1 is the authoritative design for
+; the RX/TX state machine split, mode-1 SPI and the multi-CS-on-bus-A /
+; single-CS-on-bus-B asymmetry -- but NOT for the first-byte latency budget:
+; that section's 1.6us figure was shown to be wrong by ~8x in
+; docs/SPI_ACCESS_AUDIT.md section 6 item 2, and the DMA-fed "Plan B" that
+; replaced it is described below and in max31856_pio_engine.h. This file is
+; the PIO half; the C glue that loads/configures/drives these programs lives
+; in max31856_pio_engine.c right next to this file.
 ;
 ; ============================================================================
 ; MODE-1 EDGE RESOLUTION (see the RX program comment below for the full
@@ -43,6 +46,19 @@
 ; criterion) before fully trusting the fixture.
 ; ============================================================================
 ;
+; ============================================================================
+; PLAN B (DMA-fed). docs/SPI_ACCESS_AUDIT.md section 6 item 2 corrected the
+; first-byte budget from "one byte-time" to "half an SCLK period" -- ~125 ns
+; at 4 MHz -- because the address byte's VALUE is only known after its last
+; bit is latched on falling edge 8, while the first response bit must be on
+; MISO by rising edge 9. No RP2040 ISR does that, so the CPU is out of the
+; response path entirely and the RX program below does one extra job: it
+; assembles the address byte directly into a POINTER INTO THE RESPONSE IMAGE
+; (src/sim/max31856_resp_image.h), which a DMA control channel hands to a data
+; channel's read-address trigger. See max31856_pio_engine.c's "PLAN B DATA
+; FLOW" comment for the full chain and its cycle budget.
+; ============================================================================
+;
 ; --- Pin-mapping contract every program below assumes (enforced by the C
 ; glue's sm_config_set_*_pins calls in max31856_pio_engine.c, not by pioasm
 ; itself -- get this wrong in the .c file and these programs silently watch
@@ -58,8 +74,10 @@
 ;     SCLK at gpio (MOSI_gpio - 1) so (SCLK - MOSI) mod 32 == 31. This only
 ;     works because PIO pin-index arithmetic always wraps mod 32 regardless
 ;     of how many real GPIOs exist (RP2040 exposes far fewer than 32, so the
-;     wrap is a deliberate, standard trick, not an accident) -- see
-;     max31856_pio_engine.c's PIN LAYOUT comment for the concrete numbers.
+;     wrap is a deliberate, standard trick, not an accident). The concrete
+;     numbers live in spi_emu_a.c / spi_emu_b.c's pin blocks, and
+;     max31856_pio_engine_init() REJECTS a config that does not satisfy the
+;     arithmetic rather than trusting the call site to have read this.
 ;
 ;   max31856_spi_tx_a    (bus A: 3 CS lines share one physical MISO):
 ;     IN_BASE       = first of 3 *consecutive* CS gpios (CS0,CS1,CS2) --
@@ -82,12 +100,34 @@
 ;
 ; --- Shift-direction / byte-justification contract (also enforced by the C
 ; glue, called out here so the two files can be cross-checked) ---
-;   RX: sm_config_set_in_shift(shift_right=false, autopush=true, threshold=8).
-;       ISR is explicitly zeroed at the start of every byte (`mov isr,null`,
-;       and autopush itself clears ISR on every push per the RP2040
-;       datasheet), so shifting LEFT from a clean zero for 8 bits leaves the
-;       MSB-first assembled byte in the LOW 8 bits of the pushed FIFO word --
-;       the C side reads it with `word & 0xFF`, not `word >> 24`.
+;   RX: sm_config_set_in_shift(shift_right=false, autopush=true,
+;       threshold=10). TEN, not eight -- this is the Plan B change and the C
+;       glue must match it exactly -- max31856_pio_engine.c sets it in
+;       max31856_pio_engine_init()'s RX loop, and config_is_sane() there
+;       checks the pin arithmetic these offsets depend on.
+;       Each byte is assembled as:
+;           mov isr, x        ; ISR <- image_base >> 10, shift counter <- 0
+;                             ;   (MOV to ISR resets the input shift counter,
+;                             ;    RP2040 datasheet section 3.4.5 "MOV")
+;           8 x in pins, 1    ; ISR = (base>>10)<<8 | byte
+;           in null, 2        ; ISR = (base>>10)<<10 | byte<<2 = base | byte*4
+;                             ;   and the 10th shifted bit fires autopush.
+;       So every pushed FIFO word is a WORD-ALIGNED POINTER INTO THE 256-ENTRY
+;       RESPONSE IMAGE, not a bare byte:
+;           - the first word of a transaction is consumed by the SNIFF DMA
+;             channel and ends up in the data channel's read-address trigger,
+;             with no CPU involvement and no arithmetic anywhere;
+;           - every later word is consumed by the CPU, which recovers the
+;             data byte with `(word >> 2) & 0xFF`.
+;       Preloading the base on EVERY byte (not just the first) is deliberate:
+;       it means the program has no "is this the address byte" state to get
+;       wrong, so a missed CS-rise edge can never mis-frame the next
+;       transaction -- it just re-enters byte_start with a correct pointer.
+;       Which word is the address byte is decided entirely by the SNIFF
+;       channel's transfer count of 1, i.e. by the DMA, not by the PIO.
+;       The image base MUST be 1024-byte aligned for the OR-into-the-top-bits
+;       trick to be an OR at all; max31856_pio_engine_publish_image() checks
+;       that at run time and refuses a misaligned image.
 ;   TX (IN side -- the CS idle/active test, NOT a byte stream):
 ;       sm_config_set_in_shift(shift_right=false, autopush=false, 32).
 ;       MANDATORY. The `in pins, N` / `mov x, isr` / `jmp x!=y` sequence in
@@ -105,11 +145,12 @@
 
 ; ---------------------------------------------------------------------------
 ; RX: samples MOSI on SCLK's FALLING edge, one whole byte at a time
-; (autopush, 8 bits), gated by this channel's own CS line. Falls back to a
-; clean byte boundary (`mov isr, null`) whenever CS is seen high, whether
-; that is between transactions or an out-of-protocol mid-byte deassert -- a
-; well-behaved master never does the latter, but this program does not
-; assume it.
+; (autopush at the 10-bit threshold: 8 sampled bits plus 2 zero bits of
+; word-scaling -- see the shift-direction contract above), gated by this
+; channel's own CS line. Falls back to a clean byte boundary whenever CS is
+; seen high, whether that is between transactions or an out-of-protocol
+; mid-byte deassert -- a well-behaved master never does the latter, but this
+; program does not assume it.
 ;
 ; MODE-1 EDGE DERIVATION (see file header for the full source list -- this
 ; is the short version, worked from first principles so it's checkable):
@@ -127,17 +168,32 @@
 ; sample) on "SCLK falling". This program used to sample on the rising edge
 ; (textbook mode 0); it has been corrected to sample on falling to actually
 ; be mode 1.
+;
+; PLAN B ADDITION: this SM's own TX FIFO carries the response-image base
+; (>> 10) published by the CPU, and X caches it so `pull noblock` on an empty
+; FIFO re-supplies it (RP2040: a non-blocking PULL on an empty TX FIFO
+; behaves as MOV OSR, X). The CPU republishes by a single 32-bit
+; pio_sm_put() -- one atomic store -- which is what makes the double-banked
+; response image tear-proof: the SM adopts a new bank only at `idle`, i.e.
+; only while CS is high, so a burst in flight keeps reading the bank it
+; started on. Y is the per-byte bit counter, so both scratch registers are
+; spoken for and the program has no spare state; keep it that way.
 .program max31856_spi_rx
-resync:
-    mov isr, null              ; clear any partial byte + reset the autopush shift counter (datasheet: MOV to ISR resets both)
-wait_cs:
-    jmp pin, wait_cs           ; loop while CS (this SM's jmp_pin) reads HIGH, i.e. deasserted
+idle:
+    pull noblock               ; adopt a newly published image base, else re-supply the cached one from X
+    mov x, osr                  ; X = image_base >> 10 (the cache `pull noblock` falls back to)
+    jmp pin, idle                ; CS (this SM's jmp_pin) HIGH == deasserted -> keep polling, keep the bank fresh
+byte_start:
+    mov isr, x                  ; preload the image base; also resets the input shift counter (see header)
+    set y, 7                     ; 8 bits per byte: one `in` below plus 7 loop passes
 bit_loop:
-    wait 1 pin 31               ; SCLK rising edge (offset 31 == SCLK, wraparound from IN_BASE=MOSI, see header) -- mode-1 leading edge: this is when the master drives its next MOSI bit, NOT our sample point
-    wait 0 pin 31                ; SCLK falling edge -- mode-1 trailing edge: MOSI has settled, this IS the sample point
-    in pins, 1                  ; sample MOSI into ISR; autopush fires to the RX FIFO every 8 bits
-    jmp pin, resync               ; CS deasserted (mid-byte or at a boundary) -> resync for the next transaction
-    jmp bit_loop
+    wait 1 pin 31                 ; SCLK rising edge (offset 31 == SCLK, wraparound from IN_BASE=MOSI, see header) -- mode-1 leading edge: this is when the master drives its next MOSI bit, NOT our sample point
+    wait 0 pin 31                  ; SCLK falling edge -- mode-1 trailing edge: MOSI has settled, this IS the sample point
+    in pins, 1                    ; sample MOSI into ISR, MSB first
+    jmp pin, idle                  ; CS deasserted (mid-byte or at a boundary) -> abandon this byte and re-poll
+    jmp y--, bit_loop
+    in null, 2                      ; shift in the 2 low zero bits -> ISR is now image_base | (byte * 4), and the 10-bit autopush threshold fires here
+    jmp byte_start                   ; next byte in the same CS window; no per-byte CS wait, framing comes from the bit count
 
 ; ---------------------------------------------------------------------------
 ; TX (bus A variant): shared MISO shifter for all 3 emulated channels on the
@@ -162,7 +218,7 @@ active:
     set pindirs, 1                 ; drive MISO -- at least one CS asserted
 byte_loop:
     wait 1 pin 29                   ; SCLK rising edge (mode-1 leading edge) -> safe to change MISO
-    out pins, 1                      ; shift next bit out; autopull refills the OSR from the TX FIFO at the 8-bit threshold, BLOCKING (stalling this SM) if the FIFO is empty -- this stall IS the first-byte-late / underrun condition PLAN.md 3.2.1 requires counted, never silent; max31856_pio_engine.c's ISR detects it (see that file's stats comment)
+    out pins, 1                      ; shift next bit out; autopull refills the OSR from the TX FIFO at the 8-bit threshold, BLOCKING (stalling this SM) if the FIFO is empty. Under Plan B the FIFO is fed by the DMA data channel, so this stall is STRUCTURAL at the start of every transaction (nothing can exist there until the address byte has been decoded) and is NOT what the underrun counter watches -- max31856_pio_engine.c counts underruns from the DMA's own delivered-byte count instead; see that file's stats comment
     wait 0 pin 29                     ; SCLK falling edge (mode-1 trailing edge) -- hold the bit steady through the master's sample window
     in pins, 3                         ; re-check CS state every bit (cheaper than a separate SM, and CS can legitimately deassert mid-byte on an aborted transaction)
     mov x, isr

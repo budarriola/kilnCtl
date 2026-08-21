@@ -129,6 +129,7 @@ set(SIMFW_APP_SOURCES
     src/tasks/spi_emu_b.c
     src/drivers/max31856_pio_engine.c
     src/sim/max31856_regs.c
+    src/sim/max31856_resp_image.c
     src/tasks/sim_engine.c
     src/tasks/fault_sched.c
     src/tasks/wave_owner.c

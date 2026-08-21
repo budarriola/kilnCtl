@@ -208,6 +208,27 @@ typedef struct {
     uint8_t txn_addr;          /* next register address to touch (auto-incrementing) */
     uint8_t read_snapshot[MAX31856_REG_COUNT]; /* coherency snapshot for an open read */
 
+    /* --- ~DRDY state (datasheet page 15, "DRDY": "The DRDY output goes low
+     * when a new conversion result is available in the Linearized
+     * Thermocouple Temperature register. When a read-operation of the
+     * Linearized Thermocouple Temperature register or the Cold-Junction
+     * Temperature Register (if enabled) completes, DRDY returns high.")
+     *
+     * drdy_asserted is the LOGICAL pin state: true == ~DRDY low == "a fresh
+     * conversion result is waiting". Power-on value is false (high), which
+     * memset() in max31856_regs_init() already gives.
+     *
+     * txn_touched_drdy accumulates, across one open READ transaction, whether
+     * any byte clocked out came from a DRDY-releasing address. The release
+     * fires at max31856_regs_cs_deassert(), not per byte, because the
+     * datasheet says the read "completes" -- and because both real masters
+     * read the whole CJTH..SR block as one burst and sample ~DRDY *before*
+     * it (KilnFW MAX31856.c:1023-1029, SaftyFW max31856.c:187-188), so the
+     * only thing an early release could do is corrupt an in-burst sample
+     * neither master takes. */
+    bool drdy_asserted;
+    bool txn_touched_drdy;
+
     /* Master-write bookkeeping (TC_GET_MASTER_CONFIG, PLAN.md 5.2/3.2): set
      * true the first time apply_write_rule() ever runs for this channel --
      * i.e. the first data byte of the first write transaction the master
@@ -272,6 +293,49 @@ void max31856_regs_read_burst(max31856_channel_t *ch, uint8_t addr, uint8_t *out
  * conversion happened this call" (e.g. CMODE off and no pending one-shot)
  * without an API break. */
 bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, float true_cj_c);
+
+/* --- ~DRDY ---------------------------------------------------------------
+ *
+ * Current ~DRDY pin level: true = asserted (electrically LOW). See the
+ * drdy_asserted field comment for the datasheet quote this implements.
+ *
+ * Asserted by max31856_regs_advance_conversion() whenever that call actually
+ * represents a conversion the part would have performed -- i.e. CR0.CMODE is
+ * set (automatic conversion mode) or a CR0.ONESHOT is pending. In "normally
+ * off" mode with no one-shot the real part converts nothing, so no ~DRDY edge
+ * is produced even though this emulator still refreshes LTCB.
+ *
+ * Released (returns high) at CS deassert of any READ transaction that clocked
+ * out at least one byte from:
+ *   - LTCBH/LTCBM/LTCBL (0Ch..0Eh), always; or
+ *   - CJTH/CJTL (0Ah..0Bh), only while the internal cold-junction sensor is
+ *     enabled (CR0.CJ_DISABLE clear) -- the datasheet's "(if enabled)"
+ *     qualifier, and register 0Ah's own text: "when the cold-junction
+ *     temperature sensor is enabled, a read of this register will reset the
+ *     DRDY pin high". With CJ_DISABLE set, 0Ah/0Bh are master-owned
+ *     read/write scratch and reading them releases nothing.
+ * Both real masters' temperature bursts start at 0Ah and run through 0Fh, so
+ * they hit the release either way. */
+bool max31856_regs_drdy_asserted(const max31856_channel_t *ch);
+
+/* --- Read-path primitives shared with the DMA response image ---------------
+ * These two exist so max31856_resp_image.c (which builds the byte image the
+ * PIO/DMA responder streams onto MISO with no CPU in the path) and
+ * max31856_regs_clock_read_byte() (the reference model, and the only path the
+ * host tests used before) can never drift apart: both call these, so a change
+ * to the register map or a corruption knob lands on the wire and in the model
+ * in exactly one edit. A host test asserts the two agree byte-for-byte.
+ *
+ * raw_read_value: what address `addr` (7-bit space) reports out of `regs`,
+ * before corruption -- regs[addr] for 00h..0Fh, MAX31856_INVALID_ADDR_VALUE
+ * for 10h..7Fh. `regs` is a caller-chosen image so the reference model can
+ * pass its coherency snapshot while the image builder passes the live one. */
+uint8_t max31856_regs_raw_read_value(const uint8_t *regs, uint8_t addr);
+
+/* apply_read_corruption: layers dead_mode / bit_error_rate on one outgoing
+ * byte. Consumes RNG state (hence the non-const channel), exactly as
+ * max31856_regs_clock_read_byte() does. */
+uint8_t max31856_regs_apply_read_corruption(max31856_channel_t *ch, uint8_t byte);
 
 /* Current ~FAULT pin level: true = asserted (low). Derived from SR & the
  * effective mask (TCRANGE/CJRANGE always unmaskable, per the datasheet and

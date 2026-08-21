@@ -535,6 +535,135 @@ static void test_master_has_written_flag(void)
     TEST_CHECK(ch.regs[MAX31856_REG_SR] == sr_before, "...even though the read-only register's value is unchanged");
 }
 
+/* --- ~DRDY -----------------------------------------------------------------
+ * Datasheet page 15: "The DRDY output goes low when a new conversion result is
+ * available in the Linearized Thermocouple Temperature register. When a
+ * read-operation of the Linearized Thermocouple Temperature register or the
+ * Cold-Junction Temperature Register (if enabled) completes, DRDY returns
+ * high." Page 24 (register 0Ah): "when the cold-junction temperature sensor is
+ * enabled, a read of this register will reset the DRDY pin high."
+ *
+ * Both real masters depend on the release edge and sample ~DRDY BEFORE their
+ * burst precisely because the burst clears it (KilnFW MAX31856.c:1023-1029,
+ * SaftyFW max31856.c:187-188), so getting the release wrong would test their
+ * freshness logic against a lie. Before this pass there was no ~DRDY
+ * implementation anywhere in SimFW at all. */
+static void arm_auto_conversion(max31856_channel_t *ch)
+{
+    max31856_regs_init(ch, 0x31856u);
+    max31856_regs_write_burst(ch, MAX31856_REG_CR0, (const uint8_t[]){MAX31856_CR0_CMODE}, 1);
+}
+
+static void test_drdy_assert_conditions(void)
+{
+    TEST_SECTION("~DRDY -- asserts only when the part would really have converted");
+
+    max31856_channel_t ch;
+    max31856_regs_init(&ch, 0x31856u);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false, "power-on: ~DRDY is high (no result waiting)");
+
+    /* CR0 defaults to 00h: normally-off mode, no one-shot. The real part
+     * performs no conversion, so there is no result and no DRDY edge -- even
+     * though this emulator still refreshes LTCB. */
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false,
+               "normally-off with no one-shot: no conversion, so no ~DRDY edge");
+
+    /* One-shot: converts once, raises ~DRDY, and self-clears. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CR0, (const uint8_t[]){MAX31856_CR0_ONESHOT}, 1);
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true, "a pending one-shot's result asserts ~DRDY");
+    TEST_CHECK((ch.regs[MAX31856_REG_CR0] & MAX31856_CR0_ONESHOT) == 0u, "...and the one-shot bit self-cleared");
+
+    /* Automatic conversion mode. */
+    arm_auto_conversion(&ch);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false, "arming CMODE alone does not assert ~DRDY");
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true, "CMODE: each conversion asserts ~DRDY");
+}
+
+static void test_drdy_release_by_read(void)
+{
+    TEST_SECTION("~DRDY -- which reads release it, and exactly when");
+
+    max31856_channel_t ch;
+    uint8_t buf[8];
+
+    /* R1, the burst both masters actually issue: 0Ah..0Fh. */
+    arm_auto_conversion(&ch);
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    max31856_regs_read_burst(&ch, MAX31856_REG_CJTH, buf, 6);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false,
+               "R1 (the real masters' CJTH..SR burst) releases ~DRDY");
+
+    /* R2, KilnFW's SR-only poll, must NOT release: SR is neither the
+     * linearized temperature register nor the cold-junction register. */
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    max31856_regs_read_burst(&ch, MAX31856_REG_SR, buf, 1);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true,
+               "R2 (SR only) does NOT release ~DRDY -- a fault poll must not look like a data read");
+
+    /* Reading only the linearized temperature registers does release. */
+    max31856_regs_read_burst(&ch, MAX31856_REG_LTCBH, buf, 3);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false, "an LTCBH..LTCBL read releases ~DRDY");
+
+    /* A config-register read does not. */
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    max31856_regs_read_burst(&ch, MAX31856_REG_CR0, buf, 3);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true, "reading CR0/CR1/MASK does not release ~DRDY");
+
+    /* A WRITE that lands on 0Ah does not release either -- the datasheet says
+     * a read-operation releases it. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CJTH, (const uint8_t[]){0x11u}, 1);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true, "a write touching 0Ah does not release ~DRDY");
+
+    /* The release happens when the read COMPLETES, not on the byte itself:
+     * a master that sampled ~DRDY mid-burst would still see it low. Both real
+     * masters sample before the burst, so this only matters for fidelity --
+     * but the datasheet is explicit about "completes". */
+    max31856_regs_cs_assert(&ch, MAX31856_REG_CJTH);
+    (void)max31856_regs_clock_read_byte(&ch);
+    (void)max31856_regs_clock_read_byte(&ch);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true, "~DRDY is still low part-way through the releasing read");
+    max31856_regs_cs_deassert(&ch);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false, "...and returns high when the read completes");
+
+    /* And a fresh conversion re-asserts it. */
+    max31856_regs_advance_conversion(&ch, 501.0f, 25.0f);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true, "the next conversion asserts ~DRDY again");
+}
+
+static void test_drdy_cj_disable_qualifier(void)
+{
+    TEST_SECTION("~DRDY -- the datasheet's '(if enabled)' qualifier on the cold-junction read");
+
+    max31856_channel_t ch;
+    uint8_t buf[4];
+
+    /* With CJ_DISABLE set, 0Ah/0Bh stop being the cold-junction temperature
+     * register and become master-owned scratch, so reading them releases
+     * nothing. */
+    arm_auto_conversion(&ch);
+    max31856_regs_write_burst(&ch, MAX31856_REG_CR0,
+                               (const uint8_t[]){(uint8_t)(MAX31856_CR0_CMODE | MAX31856_CR0_CJ_DISABLE)}, 1);
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    max31856_regs_read_burst(&ch, MAX31856_REG_CJTH, buf, 2);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == true,
+               "with CJ_DISABLE set, reading 0Ah/0Bh does NOT release ~DRDY");
+
+    /* ...but the LTCB half of the same span still does. */
+    max31856_regs_read_burst(&ch, MAX31856_REG_CJTH, buf, 4);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false,
+               "...while a burst that reaches LTCBH releases it regardless of CJ_DISABLE");
+
+    /* Re-enable the sensor and the cold-junction read releases again. */
+    max31856_regs_write_burst(&ch, MAX31856_REG_CR0, (const uint8_t[]){MAX31856_CR0_CMODE}, 1);
+    max31856_regs_advance_conversion(&ch, 500.0f, 25.0f);
+    max31856_regs_read_burst(&ch, MAX31856_REG_CJTH, buf, 2);
+    TEST_CHECK(max31856_regs_drdy_asserted(&ch) == false,
+               "with the sensor enabled again, a 0Ah/0Bh read releases ~DRDY");
+}
+
 void run_test_max31856_regs(void)
 {
     test_write_read_verbatim();
@@ -553,4 +682,7 @@ void run_test_max31856_regs(void)
     test_corruption_cj_fault_offset_and_sr_bits();
     test_corruption_severity_order_shorted_beats_drift_stuck_beats_both();
     test_master_has_written_flag();
+    test_drdy_assert_conditions();
+    test_drdy_release_by_read();
+    test_drdy_cj_disable_qualifier();
 }

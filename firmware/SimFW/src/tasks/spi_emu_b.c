@@ -16,6 +16,7 @@
 #include "task_priorities.h"
 #include "drivers/max31856_pio_engine.h"
 #include "sim/max31856_regs.h"
+#include "sim/max31856_resp_image.h"
 #include "sim/sim_snapshot.h"
 #include "sim/tc_fault_state.h"
 
@@ -34,10 +35,18 @@
 #define SPI_EMU_B_MOSI_GPIO 13u
 #define SPI_EMU_B_MISO_GPIO 14u
 #define SPI_EMU_B_CS0_GPIO  15u
+// Safety-side ~DRDY (PLAN.md 3.6's "DRDY + ~FAULT (safety side) | 2 | direct
+// GPIO, via isolator"). See spi_emu_a.c's DRDY block for the whole free-pin
+// derivation this number comes out of.
+#define SPI_EMU_B_DRDY_GPIO 27
 
 static TaskHandle_t s_task_handle = NULL;
 static max31856_channel_t s_channel;
 static max31856_pio_bus_t s_bus;
+
+// Double-banked response image -- see spi_emu_a.c's identical declaration and
+// max31856_resp_image.h for why the alignment is load-bearing.
+static MAX31856_RESP_IMAGE_ALIGN max31856_resp_image_t s_images[MAX31856_PIO_ENGINE_BANKS];
 
 static void spi_emu_b_task_fn(void *arg)
 {
@@ -45,13 +54,25 @@ static void spi_emu_b_task_fn(void *arg)
 
     max31856_regs_init(&s_channel, 0xB1u); // fixed, deterministic seed -- see spi_emu_a.c's identical rationale
 
-    const uint cs_gpio[SPI_EMU_B_CHANNEL_COUNT] = { SPI_EMU_B_CS0_GPIO };
-    max31856_channel_t *const channel_ptrs[SPI_EMU_B_CHANNEL_COUNT] = { &s_channel };
-
     // pio1 is the pico-sdk global PIO1 instance handle -- bus B per PLAN.md
     // section 2's connection diagram ("PIO1: SPI slave engine B").
-    if (!max31856_pio_engine_init(&s_bus, pio1, SPI_EMU_B_SCLK_GPIO, SPI_EMU_B_MOSI_GPIO, SPI_EMU_B_MISO_GPIO,
-                                    cs_gpio, SPI_EMU_B_CHANNEL_COUNT, channel_ptrs)) {
+    max31856_pio_engine_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.pio = pio1;
+    cfg.sclk_gpio = SPI_EMU_B_SCLK_GPIO;
+    cfg.mosi_gpio = SPI_EMU_B_MOSI_GPIO;
+    cfg.miso_gpio = SPI_EMU_B_MISO_GPIO;
+    cfg.channel_count = SPI_EMU_B_CHANNEL_COUNT;
+    cfg.cs_gpio[0] = SPI_EMU_B_CS0_GPIO;
+    cfg.drdy_gpio[0] = SPI_EMU_B_DRDY_GPIO;
+    cfg.channels[0] = &s_channel;
+    for (uint8_t b = 0; b < MAX31856_PIO_ENGINE_BANKS; b++) {
+        max31856_resp_image_init(&s_images[b]);
+        cfg.images[0][b] = &s_images[b];
+    }
+    max31856_resp_image_publish(&s_images[0], &s_channel);
+
+    if (!max31856_pio_engine_init(&s_bus, &cfg)) {
         for (;;) {
             vTaskDelay(pdMS_TO_TICKS(1000)); // see spi_emu_a.c's identical fallback comment
         }
@@ -88,6 +109,11 @@ static void spi_emu_b_task_fn(void *arg)
             // tc_fault_state.h's documented second step -- see spi_emu_a.c's
             // identical comment.
             s_channel.regs[MAX31856_REG_SR] |= (uint8_t)(override.force_sr_bits & (MAX31856_FAULT_OPEN | MAX31856_FAULT_OVUV));
+
+            // See spi_emu_a.c's identical call: this is the only path from
+            // this task's register model to MISO, and it also re-derives
+            // ~DRDY.
+            (void)max31856_pio_engine_refresh_image(&s_bus, 0);
         }
 
         vTaskDelay(pdMS_TO_TICKS(SPI_EMU_B_SCAN_DELAY_MS));

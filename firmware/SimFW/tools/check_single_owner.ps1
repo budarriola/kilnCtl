@@ -101,8 +101,21 @@ $rules = @(
     },
     @{
         Name    = "hardware/dma.h"
+        # Two owners, deliberately. The DMA block is twelve independent
+        # channels, not one shared interface, and both drivers take theirs
+        # through dma_claim_unused_channel() -- so they can no more collide
+        # than two tasks claiming different GPIOs can (which is exactly the
+        # reasoning this file's header already applies to hardware/gpio.h).
+        # ct_wave_pwm.c claims 3 and owns DMA_IRQ_1; max31856_pio_engine.c
+        # claims 8 (a sniff channel per emulated SPI channel, plus a load and
+        # a data channel per bus -- docs/SPI_ACCESS_AUDIT.md section 6's
+        # DMA-fed Plan B, which is what removed the CPU from the SPI response
+        # path) and owns DMA_IRQ_0. 11 of 12 channels, 2 of 2 vectors, no
+        # overlap. A THIRD claimant would need this rule re-thought, not just
+        # another entry added: there is one channel left.
         Pattern = '#include\s*["<]hardware/dma\.h'
-        Allowed = @("drivers/ct_wave_pwm.c", "drivers/ct_wave_pwm.h")
+        Allowed = @("drivers/ct_wave_pwm.c", "drivers/ct_wave_pwm.h",
+                    "drivers/max31856_pio_engine.c", "drivers/max31856_pio_engine.h")
     },
     @{
         Name    = "tusb.h (TinyUSB)"

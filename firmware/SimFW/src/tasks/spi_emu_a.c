@@ -15,6 +15,7 @@
 #include "task_priorities.h"
 #include "drivers/max31856_pio_engine.h"
 #include "sim/max31856_regs.h"
+#include "sim/max31856_resp_image.h"
 #include "sim/sim_snapshot.h"
 #include "sim/tc_fault_state.h"
 
@@ -50,9 +51,31 @@
 #define SPI_EMU_A_CS1_GPIO  10u
 #define SPI_EMU_A_CS2_GPIO  11u
 
+// ~DRDY outputs (PLAN.md 3.6's "DRDY x3 ... direct GPIO, open-drain
+// emulation"). Also PROVISIONAL. Picked from what the other three provisional
+// claims leave free -- i2c_owner.c has 4/5, this file 6-11, spi_emu_b.c
+// 12-15, ct_wave_pwm.c 16/18/20 -- which leaves 2, 3, 17, 19, 21, 22 and
+// 26-28. 21/22/26 are taken here for main-side DRDY; 27 goes to bus B; the
+// remaining 2/3/17/19 are the natural home for the four ~FAULT lines PLAN.md
+// 3.6 also budgets but which nothing drives yet.
+#define SPI_EMU_A_DRDY0_GPIO 21
+#define SPI_EMU_A_DRDY1_GPIO 22
+#define SPI_EMU_A_DRDY2_GPIO 26
+
 static TaskHandle_t s_task_handle = NULL;
 static max31856_channel_t s_channels[SPI_EMU_A_CHANNEL_COUNT];
 static max31856_pio_bus_t s_bus;
+
+// Double-banked response images -- the bytes the PIO/DMA responder actually
+// streams onto MISO with no CPU in the path. Two banks per channel so a
+// publish can never tear a burst in flight; see max31856_resp_image.h and
+// max31856_pio_engine.h's MAX31856_PIO_ENGINE_BANKS comment. The alignment is
+// load-bearing, not decorative: the PIO builds the DMA read pointer by OR-ing
+// the address byte into the base's low bits, and
+// max31856_pio_engine_init() refuses a misaligned image rather than letting
+// that OR quietly produce a wrong pointer.
+static MAX31856_RESP_IMAGE_ALIGN max31856_resp_image_t
+    s_images[SPI_EMU_A_CHANNEL_COUNT][MAX31856_PIO_ENGINE_BANKS];
 
 // Deterministic per-channel RNG seeds (max31856_regs_init's rng_seed drives
 // the noise/bit-error corruption knobs) -- fixed, not derived from anything
@@ -63,17 +86,36 @@ static void spi_emu_a_task_fn(void *arg)
 {
     (void)arg;
 
-    for (uint8_t i = 0; i < SPI_EMU_A_CHANNEL_COUNT; i++) {
-        max31856_regs_init(&s_channels[i], s_channel_rng_seeds[i]);
-    }
-
-    const uint cs_gpio[SPI_EMU_A_CHANNEL_COUNT] = { SPI_EMU_A_CS0_GPIO, SPI_EMU_A_CS1_GPIO, SPI_EMU_A_CS2_GPIO };
-    max31856_channel_t *const channel_ptrs[SPI_EMU_A_CHANNEL_COUNT] = { &s_channels[0], &s_channels[1], &s_channels[2] };
+    static const uint s_cs_gpio[SPI_EMU_A_CHANNEL_COUNT] = { SPI_EMU_A_CS0_GPIO, SPI_EMU_A_CS1_GPIO, SPI_EMU_A_CS2_GPIO };
+    static const int s_drdy_gpio[SPI_EMU_A_CHANNEL_COUNT] = { SPI_EMU_A_DRDY0_GPIO, SPI_EMU_A_DRDY1_GPIO, SPI_EMU_A_DRDY2_GPIO };
 
     // pio0 is the pico-sdk global PIO0 instance handle -- bus A per PLAN.md
     // section 2's connection diagram ("PIO0: SPI slave engine A").
-    if (!max31856_pio_engine_init(&s_bus, pio0, SPI_EMU_A_SCLK_GPIO, SPI_EMU_A_MOSI_GPIO, SPI_EMU_A_MISO_GPIO,
-                                    cs_gpio, SPI_EMU_A_CHANNEL_COUNT, channel_ptrs)) {
+    max31856_pio_engine_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.pio = pio0;
+    cfg.sclk_gpio = SPI_EMU_A_SCLK_GPIO;
+    cfg.mosi_gpio = SPI_EMU_A_MOSI_GPIO;
+    cfg.miso_gpio = SPI_EMU_A_MISO_GPIO;
+    cfg.channel_count = SPI_EMU_A_CHANNEL_COUNT;
+
+    for (uint8_t i = 0; i < SPI_EMU_A_CHANNEL_COUNT; i++) {
+        max31856_regs_init(&s_channels[i], s_channel_rng_seeds[i]);
+        for (uint8_t b = 0; b < MAX31856_PIO_ENGINE_BANKS; b++) {
+            // FFh everywhere until the first publish -- the datasheet's own
+            // answer for an address that reports nothing, and far better than
+            // whatever uninitialised RAM would put on the wire if a master
+            // clocked this bus before the first scan.
+            max31856_resp_image_init(&s_images[i][b]);
+            cfg.images[i][b] = &s_images[i][b];
+        }
+        max31856_resp_image_publish(&s_images[i][0], &s_channels[i]);
+        cfg.cs_gpio[i] = s_cs_gpio[i];
+        cfg.drdy_gpio[i] = s_drdy_gpio[i];
+        cfg.channels[i] = &s_channels[i];
+    }
+
+    if (!max31856_pio_engine_init(&s_bus, &cfg)) {
         // Nothing sane to do if the PIO block cannot supply 4 state machines
         // for a bus that owns it exclusively (3 RX + 1 shared TX) -- this
         // should only happen if PIO0 was already partially claimed by a
@@ -146,6 +188,17 @@ static void spi_emu_a_task_fn(void *arg)
                 // masked to just those two bits per that header's own
                 // defensive-masking note.
                 s_channels[i].regs[MAX31856_REG_SR] |= (uint8_t)(override.force_sr_bits & (MAX31856_FAULT_OPEN | MAX31856_FAULT_OVUV));
+
+                // Publish the freshly-converted registers into the bank the
+                // hardware is NOT reading, hand the new base over, and
+                // re-derive ~DRDY. This is the ONLY path by which anything
+                // this task computes reaches MISO -- under Plan B the DMA
+                // never touches s_channels[] -- so a conversion that is not
+                // followed by a refresh is a conversion the DUT never sees.
+                // Called unconditionally every scan rather than only after a
+                // register change, so corruption.bit_error_rate keeps
+                // re-rolling; see max31856_resp_image.h's FIDELITY NOTE.
+                (void)max31856_pio_engine_refresh_image(&s_bus, i);
             }
         }
 

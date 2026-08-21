@@ -181,6 +181,7 @@ void max31856_regs_cs_assert(max31856_channel_t *ch, uint8_t addr_byte)
     ch->cs_low = true;
     ch->txn_is_write = (addr_byte & MAX31856_WRITE_BIT) != 0u;
     ch->txn_addr = MAX31856_ADDR_MASK(addr_byte);
+    ch->txn_touched_drdy = false;
     if (!ch->txn_is_write) {
         /* Coherency snapshot: the whole burst reads from this copy, so a
          * conversion committed mid-transaction (which a well-behaved caller
@@ -215,20 +216,50 @@ static uint8_t apply_bit_errors(max31856_channel_t *ch, uint8_t byte)
     return byte;
 }
 
+uint8_t max31856_regs_raw_read_value(const uint8_t *regs, uint8_t addr)
+{
+    return (addr < MAX31856_REG_COUNT) ? regs[addr]
+                                       : (uint8_t)MAX31856_INVALID_ADDR_VALUE;
+}
+
+uint8_t max31856_regs_apply_read_corruption(max31856_channel_t *ch, uint8_t byte)
+{
+    if (ch->corruption.dead_mode != MAX31856_DEAD_NONE) {
+        return apply_dead_mode(ch->corruption.dead_mode, byte);
+    }
+    return apply_bit_errors(ch, byte);
+}
+
+/* Addresses whose read releases ~DRDY. LTCB always; CJTH/CJTL only while the
+ * internal cold-junction sensor is enabled -- see max31856_regs.h's
+ * max31856_regs_drdy_asserted() comment for the datasheet wording. */
+static bool addr_releases_drdy(const max31856_channel_t *ch, uint8_t addr)
+{
+    switch (addr) {
+    case MAX31856_REG_LTCBH:
+    case MAX31856_REG_LTCBM:
+    case MAX31856_REG_LTCBL:
+        return true;
+    case MAX31856_REG_CJTH:
+    case MAX31856_REG_CJTL:
+        return (ch->regs[MAX31856_REG_CR0] & MAX31856_CR0_CJ_DISABLE) == 0u;
+    default:
+        return false;
+    }
+}
+
 uint8_t max31856_regs_clock_read_byte(max31856_channel_t *ch)
 {
     if (!ch->cs_low || ch->txn_is_write) {
         return 0x00u;
     }
-    uint8_t byte = (ch->txn_addr < MAX31856_REG_COUNT)
-                       ? ch->read_snapshot[ch->txn_addr]
-                       : (uint8_t)MAX31856_INVALID_ADDR_VALUE;
+    uint8_t byte = max31856_regs_raw_read_value(ch->read_snapshot, ch->txn_addr);
+    if (addr_releases_drdy(ch, ch->txn_addr)) {
+        ch->txn_touched_drdy = true;
+    }
     ch->txn_addr = (uint8_t)((ch->txn_addr + 1u) % MAX31856_ADDR_SPACE);
 
-    if (ch->corruption.dead_mode != MAX31856_DEAD_NONE) {
-        return apply_dead_mode(ch->corruption.dead_mode, byte);
-    }
-    return apply_bit_errors(ch, byte);
+    return max31856_regs_apply_read_corruption(ch, byte);
 }
 
 void max31856_regs_clock_write_byte(max31856_channel_t *ch, uint8_t data_in)
@@ -243,6 +274,13 @@ void max31856_regs_clock_write_byte(max31856_channel_t *ch, uint8_t data_in)
 void max31856_regs_cs_deassert(max31856_channel_t *ch)
 {
     ch->cs_low = false;
+    if (ch->txn_touched_drdy) {
+        /* "When a read-operation of the Linearized Thermocouple Temperature
+         * register or the Cold-Junction Temperature Register (if enabled)
+         * completes, DRDY returns high." -- the read completes here. */
+        ch->drdy_asserted = false;
+        ch->txn_touched_drdy = false;
+    }
 }
 
 void max31856_regs_write_burst(max31856_channel_t *ch, uint8_t addr, const uint8_t *data, size_t len)
@@ -341,6 +379,18 @@ bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, f
         ch->regs[MAX31856_REG_SR] = computed_sr;
     }
 
+    /* ~DRDY goes low when a new conversion result is available in LTCB. Only
+     * when the part would actually have converted: CMODE set (automatic) or a
+     * one-shot pending. In "normally off" mode with no one-shot the real part
+     * produces no result and therefore no ~DRDY edge -- this emulator still
+     * refreshes LTCB above (long-standing behaviour, deliberately not changed
+     * here), but it must not lie about the pin. Note this is evaluated
+     * against the CR0 sampled at entry, i.e. *before* the ONESHOT self-clear
+     * below, so the one-shot's own result does raise ~DRDY. */
+    if (cr0 & (MAX31856_CR0_CMODE | MAX31856_CR0_ONESHOT)) {
+        ch->drdy_asserted = true;
+    }
+
     /* ONESHOT self-clears once its one conversion has happened. */
     if (cr0 & MAX31856_CR0_ONESHOT) {
         uint8_t oneshot_bit = MAX31856_CR0_ONESHOT; /* not a constant expr below: silences C4310 */
@@ -348,6 +398,11 @@ bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, f
     }
 
     return true;
+}
+
+bool max31856_regs_drdy_asserted(const max31856_channel_t *ch)
+{
+    return ch->drdy_asserted;
 }
 
 bool max31856_regs_fault_pin_asserted(const max31856_channel_t *ch)

@@ -8,7 +8,9 @@
 // Real body: owns 3 max31856_channel_t register images (src/sim/
 // max31856_regs.h) and the PIO SPI slave engine that answers a real SPI
 // master's reads/writes against them (src/drivers/max31856_pio_engine.h),
-// per docs/PLAN.md section 3.2.1's "Plan A -- ISR staging" design. The task's
+// per docs/SPI_ACCESS_AUDIT.md section 6's DMA-fed "Plan B" (which replaced
+// PLAN.md 3.2.1's "Plan A -- ISR staging" once the first-byte budget turned
+// out to be ~125 ns rather than 1.6 us). The task's
 // own loop periodically reads sim_snapshot_read() and feeds each channel's
 // simulated temperature into the register model at roughly the datasheet's
 // ~100 ms nominal conversion cadence (PLAN.md 3.2) -- independent of
@@ -58,7 +60,7 @@ max31856_pio_stats_t spi_emu_a_get_stats(uint8_t channel);
 // (max31856_pio_engine_channel_busy(), max31856_pio_engine.h) as the
 // single source of truth for "is CS low right now", and write
 // transactions mutate ch->regs[] directly from IRQ context while CS is
-// low (max31856_pio_engine.c's handle_channel_rx_bytes() calls
+// low (max31856_pio_engine.c's handle_data_byte() calls
 // max31856_regs_clock_write_byte() straight through) -- so "busy" is
 // already exactly the condition this getter must refuse to sample across.
 // Option (b) would mean a *second* copy of every register plus a commit
@@ -66,8 +68,8 @@ max31856_pio_stats_t spi_emu_a_get_stats(uint8_t channel);
 // the engine already has; option (a) needs no new state at all.
 //
 // This is called from cmd_task (a different task, and normally a
-// different core -- spi_emu_a's IRQ is pinned to core 1 per PLAN.md
-// 3.2.1's Plan A) than the one mutating regs[], so a single busy check
+// different core -- spi_emu_a's IRQs are pinned to core 1) than the one
+// mutating regs[], so a single busy check
 // immediately before the copy is not quite enough: CS could assert
 // between the check and the memcpy. The implementation therefore also
 // re-checks busy *and* the channel's transaction counter

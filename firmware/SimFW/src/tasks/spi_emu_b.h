@@ -9,7 +9,7 @@
 // max31856_regs.h) and the PIO SPI slave engine (src/drivers/
 // max31856_pio_engine.h) answering the safety Pico's SPI master against it,
 // fed from sim_snapshot_read()'s T_safety_reported_c. See spi_emu_a.h's
-// header comment for the shared design notes (Plan A ISR staging, task-loop
+// header comment for the shared design notes (the DMA-fed Plan B, task-loop
 // cadence, build-vs-hardware-timing verification status) -- not repeated
 // here.
 #ifndef SIMFW_TASKS_SPI_EMU_B_H

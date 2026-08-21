@@ -336,3 +336,104 @@ of the corrected latency budget.
   required, and now has three specific things to confirm: MISO goes Hi-Z
   between transactions, transaction *k+1* is not byte-shifted relative to
   transaction *k*, and MOSI is sampled on falling edges.
+
+---
+
+## 9. Resolution of §6 items 1 and 2 (implemented 2026-08-20)
+
+Both gaps §6 raised have been closed. §6 is left as written — it is the
+finding, not the fix — and this section records what was built against it.
+
+### 9.1 Plan B, DMA-fed, is now what ships
+
+`max31856_pio_engine.c` no longer stages response bytes from an ISR. The chain
+is PIO + DMA only:
+
+```
+PIO RX SM ─ assembles each MOSI byte straight into a word-aligned POINTER
+            into the channel's 256-entry response image
+   │ RX-FIFO-not-empty DREQ
+   ▼
+DMA "sniff"  (per RX SM, transfer_count = 1) → bus->addr_capture, chains to
+   ▼
+DMA "load"   (per bus) → data channel's al3_read_addr_trig  (sets the read
+   │                     address AND starts it), raises DMA_IRQ_0
+   ▼
+DMA "data"   (per bus) → PIO TX FIFO, paced by TX-FIFO-not-full, 512-byte
+                         read-address ring
+   ▼
+PIO TX SM ─ MISO
+```
+
+The address byte never becomes a *value* anyone has to act on: the PIO
+assembles it as `image_base | (addr << 2)` by preloading the ISR with
+`base >> 10` and using a **10-bit** autopush threshold (8 sampled bits plus
+`in null, 2` of word scaling). The 1024-byte alignment that makes that OR an
+OR is checked at run time, not asserted in a comment.
+
+Which word is the address byte is decided solely by the sniff channel's
+transfer count of 1. The PIO program is deliberately *stateless* about it — it
+preloads the base on every byte — so a missed CS edge cannot mis-frame a
+transaction, only re-enter the byte loop with a correct pointer.
+
+**Does it meet 125 ns? Honestly: not at the default 125 MHz sysclk.** Summing
+RP2040 §2.5 semantics and published single-transfer DMA latencies, the path is
+~19–27 sysclk cycles ≈ **150–215 ns at 125 MHz**. That misses the *design*
+deadline (first response bit present at SCLK rising edge 9) but clears the
+*hard* deadline (the master's own sample point at falling edge 9, i.e. a full
+SCLK period minus setup: 250 ns at 4 MHz, 200 ns at 5 MHz) with margin at
+4 MHz and little at 5 MHz. Raising sysclk to 200 MHz puts the path at
+~95–135 ns and meets the design deadline at 4 MHz. **This is arithmetic from
+the datasheet, not a measurement** — see §8. The recommendation for the
+coordinator is: run the fixture at 200 MHz, or hold the masters to 4 MHz, and
+treat the Saleae capture as the arbiter.
+
+Design notes on the three constraints that had to survive:
+
+* **MISO tri-state (D1).** Unchanged and preserved: the TX programs and D1's
+  `sm_config_set_in_shift(&tc, false, false, 32)` are untouched. `tx_reset()`
+  still re-tri-states explicitly at every CS rise.
+* **Image coherence.** Not the `sim_snapshot.h` seqlock — a DMA channel cannot
+  retry a torn read, so optimistic-read-and-retry is unavailable to it. The
+  same *shape* is used at the granularity the hardware can consume: each
+  channel has **two response-image banks**, the owner task publishes into the
+  bank the hardware is not pointed at, and hands over the new base with one
+  atomic 32-bit `pio_sm_put()`. The RX SM adopts a new base only at its `idle`
+  loop, i.e. only while CS is high, so a burst in flight always finishes out of
+  the coherent bank it started on. The retired bank is not rewritten for
+  another full 20 ms scan against a 34 µs worst-case transaction, and the
+  publish is additionally gated on `channel_busy()`.
+* **D2 (surplus TX bytes).** Still necessary — more so, since the data channel
+  runs ahead by up to five words — and preserved: `tx_reset()` at CS rise,
+  now explicitly ordered *after* stopping the data channel so the DMA cannot
+  refill the FIFO that was just cleared.
+* **D3 (`first_byte_late`).** Made structural rather than bookkept.
+  `FDEBUG.TXSTALL` is no longer read at all, because the TX SM still stalls
+  structurally at the start of every transaction. The counter is now derived
+  from the data channel's own delivered-word count (`delivered < bytes the
+  master clocked` ⇒ unambiguous starvation), plus one new genuinely observable
+  case: the CS-rise handler finding the *next* transaction's address word
+  already waiting when it re-arms the sniff channel. First-byte lateness
+  *within* the 125 ns window remains unobservable in-band, as §6 noted.
+
+Known, deliberate fidelity change: `corruption.bit_error_rate` is now applied
+when the image is published rather than per byte clocked, so it re-rolls every
+20 ms scan instead of every byte. `dead_mode` — the knob that matters for
+fault injection — is exact either way. Recorded here rather than quietly
+absorbed.
+
+### 9.2 ~DRDY exists
+
+Implemented in both halves §6 item 1 asked for.
+
+* **Register machine** (`max31856_regs.c`, pure and host-tested):
+  `drdy_asserted` is raised by `advance_conversion()` **only when the part
+  would really have converted** — CR0.CMODE set, or a one-shot pending. It is
+  released at `cs_deassert()` of a read transaction that clocked out any of
+  LTCBH/LTCBM/LTCBL, or CJTH/CJTL **while CR0.CJ_DISABLE is clear** (the
+  datasheet's "(if enabled)" qualifier, p15 and p24). Release is at completion,
+  not per byte, per the datasheet's "completes". An SR-only poll (R2) does
+  *not* release — which matters, because KilnFW issues R2 as a fault poll.
+* **Pin**: open-drain emulation per PLAN §3.6 — the output latch is parked low
+  forever and the *direction* is the control, so the fixture never drives the
+  net high. Provisional GPIOs: 21/22/26 main-side, 27 safety-side.

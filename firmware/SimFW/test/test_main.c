@@ -11,6 +11,7 @@ int g_test_count = 0;
 
 void run_test_thermal_model(void);
 void run_test_max31856_regs(void);
+void run_test_max31856_resp_image(void);
 void run_test_sine_synth(void);
 void run_test_fault_engine(void);
 void run_test_tc_fault_state(void);
@@ -24,6 +25,7 @@ int main(void)
 {
     run_test_thermal_model();
     run_test_max31856_regs();
+    run_test_max31856_resp_image();
     run_test_sine_synth();
     run_test_fault_engine();
     run_test_tc_fault_state();
