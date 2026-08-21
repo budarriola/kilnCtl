@@ -78,6 +78,18 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
  * (no-op) for an out-of-range or already-unused id. */
 bool profiles_http_delete(uint8_t id);
 
+/* Read-only accessor for the validation bounds profiles_http.c enforces at
+ * save time (PROFILE_TARGET_C_MIN/MAX, PROFILE_RAMP_C_PER_HR_MIN/MAX,
+ * PROFILE_DWELL_MIN_MAX -- see profiles_http.c's #defines, which stay the
+ * single source of truth; this just hands them out so a caller like the LCD
+ * profile builder (ui_page_profile_builder_segment.c) can feed them to its
+ * numeric keypad as min/max and make an out-of-range value impossible to
+ * enter, instead of duplicating the numbers and hoping they stay in sync.
+ * Any output pointer may be NULL if that bound isn't needed. */
+void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
+                              float *out_ramp_c_per_hr_min, float *out_ramp_c_per_hr_max,
+                              uint32_t *out_dwell_min_max);
+
 #ifdef __cplusplus
 }
 #endif

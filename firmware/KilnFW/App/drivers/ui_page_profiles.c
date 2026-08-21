@@ -4,12 +4,13 @@
 
 #include "kiln_ui.h"
 #include "profiles_builtin.h"
+#include "ui_page_profile_builder_zones.h"
 #include "ui_page_profiles_mine.h"
 #include "ui_theme.h"
 
 static const char *TAG = "ui_page_profiles";
 
-/* Single-page hub, three destinations -- see this file's header. Arithmetic
+/* Single-page hub, four destinations -- see this file's header. Arithmetic
  * (same style as ui_page_config.c's paged-hub comment, against the same real
  * ~267px content budget that file's header measured on hardware):
  *
@@ -19,8 +20,10 @@ static const char *TAG = "ui_page_profiles";
  *                                                 ------
  *                                                  196px  <= 267px  OK
  *
- * Three items fit a single 2x2 grid page with one empty cell -- no paging
- * needed, unlike ui_page_config.c's ten-item hub. */
+ * Four items exactly fill a single 2x2 grid page -- no paging needed, unlike
+ * ui_page_config.c's ten-item hub. "New Profile" (this pass's LCD builder,
+ * ui_page_profile_builder_zones.c) is the fourth cell, filling what used to
+ * be an empty one -- confirmed there was room before adding it, not assumed. */
 #define UI_PAGE_PROFILES_GRID_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 2 + UI_THEME_PADDING_PX / 2)
 
 static void back_btn_cb(lv_event_t *e)
@@ -47,6 +50,13 @@ static void restore_hidden_cb(lv_event_t *e)
     (void)e;
     esp_err_t err = profiles_builtin_restore_all();
     ESP_LOGI(TAG, "restore hidden builtins: %s", esp_err_to_name(err));
+}
+
+static void new_profile_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_page_profile_builder_start_new();
+    kiln_ui_show("profile_builder_zones");
 }
 
 static void build_nav_item(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
@@ -115,6 +125,7 @@ lv_obj_t *ui_page_profiles_build(void)
     build_nav_item(grid, "My Profiles", mine_nav_cb);
     build_nav_item(grid, "Built-ins (28)", builtins_nav_cb);
     build_nav_item(grid, "Restore hidden", restore_hidden_cb);
+    build_nav_item(grid, "New Profile", new_profile_nav_cb);
 
     lv_obj_t *nav_row = lv_obj_create(content);
     lv_obj_set_width(nav_row, lv_pct(100));

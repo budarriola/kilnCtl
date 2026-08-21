@@ -532,6 +532,17 @@ bool profiles_http_delete(uint8_t id)
     return true;
 }
 
+void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
+                              float *out_ramp_c_per_hr_min, float *out_ramp_c_per_hr_max,
+                              uint32_t *out_dwell_min_max)
+{
+    if (out_target_c_min) *out_target_c_min = PROFILE_TARGET_C_MIN;
+    if (out_target_c_max) *out_target_c_max = PROFILE_TARGET_C_MAX;
+    if (out_ramp_c_per_hr_min) *out_ramp_c_per_hr_min = PROFILE_RAMP_C_PER_HR_MIN;
+    if (out_ramp_c_per_hr_max) *out_ramp_c_per_hr_max = PROFILE_RAMP_C_PER_HR_MAX;
+    if (out_dwell_min_max) *out_dwell_min_max = PROFILE_DWELL_MIN_MAX;
+}
+
 /* ---- HTML page ------------------------------------------------------------ */
 
 /* TODO.md 10.6a: content negotiation lives in web_encoding.h's shared

@@ -12,6 +12,7 @@
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "ui_confirm.h"
+#include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_segments.h"
 #include "ui_theme.h"
 #include "zones_http.h"
@@ -25,7 +26,13 @@ static const char *TAG = "ui_page_profile_detail";
  *     gap ......................................... 4px
  *     info card (name/family/segments, ~64px) ... ~64px
  *     gap ......................................... 4px
- *     action row: Segments + Start @ 72px ....... 72px
+ *     action row: Segments + Edit + Start,      .. 72px
+ *       three flex_grow(1) buttons in one 72px row
+ *       (row height is unchanged by adding a third
+ *       button -- only each button's width shrinks,
+ *       and even a three-way split of ~480px content
+ *       width leaves each button comfortably over the
+ *       72px touch-width minimum)
  *     gap ......................................... 4px
  *     nav row (Back) .............................. 44px
  *                                                 ------
@@ -129,6 +136,19 @@ static void segments_nav_cb(lv_event_t *e)
     (void)e;
     ui_page_profile_segments_prepare();
     kiln_ui_show("profile_segments");
+}
+
+static void edit_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Editing a BUILT-IN must mean "save a copy" -- profiles_http_save()
+     * treats requested_id >= PROFILES_MAX_COUNT as "first free slot" and
+     * ui_page_profile_builder_review.c's slot picker only ever offers the 8
+     * real user slots either way, so a builtin id (>= PROFILE_BUILTIN_ID_BASE)
+     * structurally cannot be the save target -- see
+     * ui_page_profile_builder_zones.h's header comment. */
+    ui_page_profile_builder_start_edit(s_profile_id);
+    kiln_ui_show("profile_builder_zones");
 }
 
 static void confirm_start_cb(void *user_data)
@@ -272,6 +292,7 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
 
     build_action_button(action_row, "Segments", UI_THEME_COLOR_CARD, segments_nav_cb);
+    build_action_button(action_row, "Edit", UI_THEME_COLOR_CARD, edit_btn_cb);
     build_action_button(action_row, "Start", UI_THEME_ACCENT_4, start_btn_cb);
 
     lv_obj_t *nav_row = lv_obj_create(scr);

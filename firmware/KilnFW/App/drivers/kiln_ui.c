@@ -10,6 +10,9 @@
 #include "ui_page_history.h"
 #include "ui_page_home.h"
 #include "ui_page_network.h"
+#include "ui_page_profile_builder_review.h"
+#include "ui_page_profile_builder_segment.h"
+#include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_detail.h"
 #include "ui_page_profile_segments.h"
 #include "ui_page_profiles.h"
@@ -146,6 +149,18 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("profile_detail", ui_page_profile_detail_build);
     if (err != ESP_OK) return err;
     err = kiln_ui_register_page("profile_segments", ui_page_profile_segments_build);
+    if (err != ESP_OK) return err;
+
+    /* CREATE/EDIT flow off the Profiles hub's new "New Profile" cell (and
+     * ui_page_profile_detail.c's "Edit" action): Step 1 name+zones, Step 2
+     * one segment per screen (paged), Step 3 review + slot-picker save. See
+     * ui_page_profile_builder_zones.h for the full flow description and why
+     * editing a builtin is always a copy. */
+    err = kiln_ui_register_page("profile_builder_zones", ui_page_profile_builder_zones_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profile_builder_segment", ui_page_profile_builder_segment_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profile_builder_review", ui_page_profile_builder_review_build);
     if (err != ESP_OK) return err;
 
     /* ui_page_touch_cal.c's finish_calibration() navigates here right after

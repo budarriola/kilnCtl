@@ -14,12 +14,12 @@
 // a generic message (a thermal-guard-latched refusal and a ramp-rate-ceiling
 // refusal are different problems needing different operator action).
 //
-// BUILDER HOOK: creating or editing a profile on the LCD is a separate,
-// out-of-scope task. If that work ever lands, the natural place for an
-// "Edit" action is this screen, next to START -- nothing here reserves a
-// specific button slot for it (this screen only has room for one action row
-// today, see the pixel arithmetic in the .c file), so that future pass will
-// need its own budget accounting, not just a bolt-on button.
+// EDIT: this screen's action row now has a third button, "Edit", next to
+// Segments/Start -- see ui_page_profile_builder_zones.h for the CREATE/EDIT
+// flow it hands off to. Editing a BUILT-IN always starts the builder's draft
+// as a copy (profiles_http_save()'s "first free slot" convention and the
+// builder's slot picker both only ever target real user slots), never an
+// in-place overwrite of the const builtin table.
 #ifndef UI_PAGE_PROFILE_DETAIL_H
 #define UI_PAGE_PROFILE_DETAIL_H
 
