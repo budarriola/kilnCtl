@@ -196,11 +196,12 @@ never `[x]`.
       sample point) at that clock. Running the fixture at 200 MHz sysclk would
       buy the ~125 ns *design* deadline as well — margin, not correctness.
       Datasheet arithmetic, not measured; see `docs/SPI_ACCESS_AUDIT.md` §9.
-- [ ] **`~DRDY` pin assignments contradict `HARDWARE.md` §1.** The SPI engines
-      claim GPIO 21/22/26 (main) and 27 (safety), but §1 assigns those to
-      `FAULT_MAIN_1/2`, `DRDY_SAFETY`, and `FAULT_SAFETY`. §1's own preamble
-      says a pin claimant must cite the table. **This would be wired wrong at
-      bring-up.** Found by the DMA budget audit (`a27d1b1`).
+- [ ] **Latent trap: PWM pacer slice 3 shadows GPIO6/7/22/23.** The pacer binds
+      no pin today, but any future `gpio_set_function(6|7|22, GPIO_FUNC_PWM)`
+      would put its free-running carrier onto SPI A's `SCLK`/`MOSI` or
+      `FAULT_MAIN_2`. Inherent at 25-of-26 occupancy — no slice is free of
+      claimed pins, so moving the pacer does not help. See `HARDWARE.md`
+      §0 item 9.
 - [ ] **DMA claim failures degrade silently — arguably the wrong default for
       this fixture.** All four claim sites use `required = false`, and
       `main.c` discards `wave_owner_start()`'s return with `(void)`, so a 12th
@@ -280,6 +281,10 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] `~DRDY` pin contradiction resolved in favour of `HARDWARE.md` §1
+      (`1d32e84`) — the code was wrong, not the table. `4221f70` had
+      re-derived pins from a pre-§1 view of the tree. Full pin sweep found no
+      other collisions
 - [x] DMA channel budget audited and documented (`a27d1b1`,
       `docs/HARDWARE.md` §1b) — 11/12 claimed, verified from source
 - [x] `virtual_simfw` timescale² bug fixed (`ca62e8b`), with a regression test
@@ -743,6 +748,12 @@ design error could hide behind the fixture's ground strap.
   breadboard bring-up — but the standard test library must run with it out.
 
 ### 3.6 Pico pin budget (draft — verify against traced pinouts before layout)
+
+> **The authoritative GPIO *numbers* live in `docs/HARDWARE.md` §1, not here.**
+> This section budgets pin *counts* only. Treating it as sufficient is exactly
+> how `4221f70` came to re-derive four `~DRDY` pins that §1 had already
+> assigned (resolved in `1d32e84`; see `HARDWARE.md` §0 item 8). If you are
+> claiming a pin in code, cite §1 or update it in the same commit.
 
 | Function | Pins | Notes |
 |---|---|---|
