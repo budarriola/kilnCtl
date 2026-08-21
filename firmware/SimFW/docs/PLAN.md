@@ -115,14 +115,6 @@ never `[x]`.
       an *assumed* source resistance; still unmeasured, but now gated by an
       explicit step in `docs/BENCH_RUNBOOK.md` rather than only a to-do
       here (`9c90d7b`). (§11 item 5)
-- [ ] **S6a is narrower than bench-only now.** The ESP-asserted path fires in
-      `virtual_dut` via a new `set_main_fault` operator action
-      (`mainfault_esp_asserted.yaml`/`mainfault_no_nuisance_trip.yaml`, both
-      non-vacuous, `safety_guards.c` unmodified). **Still bench-only:**
-      `mainfault_tc_disconnect.yaml`'s two clauses — a different causal chain
-      (TC fault → KilnFW guard-6 → Fault-line opto → `fault_line_asserted`) —
-      since `virtual_simfw.c` still has no I2C-expander/opto emulation for
-      that line.
 - [ ] **Verify every provisional GPIO assignment** in `HARDWARE.md`
 - [ ] **`UnitTestFw` decommission** — gated on proving the replacement link on
       real hardware. (§12)
@@ -133,6 +125,11 @@ never `[x]`.
 
 All finished work has been moved into `DESIGN_NOTES.md` (see its table of
 contents) rather than kept here — this plan only tracks what's left.
+
+- [x] S6a's last fixture-emulation gap closed — real KilnFW guard-6 now
+      drives `fault_line_asserted` in `virtual_dut`, non-vacuously
+      (`94f2fc3`); every fixture-emulation and harness gap in the 27-scenario
+      suite is closed — `DESIGN_NOTES.md` §10
 
 ---
 
@@ -236,8 +233,11 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   `virtual_simfw`+`virtual_dut` (`DESIGN_NOTES.md` §10) — real `SimFW`
   simulation code and real `SaftyFW` guard code, on a PC, with no RP2040 at
   all — but "real `KilnFW`+`SaftyFW`" in this exit criterion means silicon,
-  and none has run. Latest `virtual_dut` run: 24 PASS / 3 BLOCKED / 0 FAIL
-  across all 27 (`63acef8`) — see `firmware/SimFW/tools/
+  and none has run. Latest `virtual_dut` run: 25 PASS / 2 BLOCKED / 0 FAIL
+  across all 27 (`53eb463`) — every fixture-emulation and harness gap in the
+  suite is now closed; the 2 BLOCKED are `main_safety_skew` (S1) and
+  `tc_stuck` (S13), both uncommissioned-field gaps (`abs_max_temp_c`,
+  `borrowed_zone_index`), not code — see `firmware/SimFW/tools/
   virtual_dut/results/SCENARIO_RESULTS.md` for the per-scenario pattern.
 - [~] **M-H — Standard library complete.** All 16 scenarios written and run.
   **Exit:** each maps to its `GUARD_TEST_MATRIX.md` rows and that file is

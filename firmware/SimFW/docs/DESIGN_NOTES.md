@@ -892,6 +892,18 @@ first two layers in cost, and it is genuinely useful, not a toy:
   ~500 ms of *wall* time can't be observed, producing a flaky pass/fail race
   rather than a clean failure. This is why `power_blip`'s windows widened
   from 0.2 s/1 s to 25 s.
+- **The harness now composes three real firmwares' unmodified source in one
+  loop** (`94f2fc3`): SimFW's `src/sim/*`, KilnFW's `thermal_guard.c` (via
+  `virtual_kiln`'s `kiln_core.exe`), and SaftyFW's `safety_guards.c` (via
+  `virtual_dut`'s `dut_core.exe`). The opt-in `dut.kiln_guard6:` scenario
+  field spawns `kiln_core.exe`, ticks KilnFW's real guard-6 against the TC
+  channel a scenario's fault targets, and asserts the fault line only when
+  that real code trips for `THERMAL_GUARD_TRIP_SENSOR_INVALID` —
+  SaftyFW's S6a then decides for itself. This is distinct from
+  `mainfault_esp_asserted.yaml`'s `set_main_fault` path, which asserts the
+  line directly and still exists to test S6a in isolation. Non-vacuity was
+  confirmed by a negative control: disconnecting a *different* TC channel
+  than `kiln_guard6` watches produces a genuine FAIL.
 
 **What this layer is not:** hardware verification. Neither tool's README
 claims otherwise — no real SPI bus, no real relay coil, no real ESP, no
