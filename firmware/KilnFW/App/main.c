@@ -35,6 +35,7 @@
 #include "nvs_report.h"
 #include "ota_http.h"
 #include "profile_executor.h"
+#include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "readiness_http.h"
 #include "relay_cycles.h"
@@ -855,6 +856,16 @@ void app_main(void)
     if (rules_err != ESP_OK) {
         ESP_LOGW(TAG, "rules_http_start failed: %s -- no Relays & Rules page this boot",
                  esp_err_to_name(rules_err));
+    }
+    // The shipped Digital Fire schedule catalogue's persisted hidden-mask.
+    // Must load before profiles_http_start() registers the read paths that
+    // consult it, or the first listing after boot would show hidden entries.
+    // Non-fatal like every settings module here: a failed load means the
+    // catalogue simply shows everything this boot.
+    esp_err_t builtin_err = profiles_builtin_start();
+    if (builtin_err != ESP_OK) {
+        ESP_LOGW(TAG, "profiles_builtin_start failed: %s -- built-in schedules shown unfiltered this boot",
+                 esp_err_to_name(builtin_err));
     }
     esp_err_t profiles_err = profiles_http_start();
     if (profiles_err != ESP_OK) {

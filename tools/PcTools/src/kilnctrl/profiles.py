@@ -78,8 +78,40 @@ class ProfilesClient:
         self.link.unregister_task(self.task_id)
 
     # -- requests ------------------------------------------------------------
-    def list(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "list[ProfileSummary]":
-        return self._query(PROFILES_CMD_LIST, devices.profiles_list(), timeout)  # type: ignore[return-value]
+    def list(
+        self, start_id: int = 0, timeout: float = DEFAULT_REPLY_TIMEOUT_S
+    ) -> "list[ProfileSummary]":
+        """One page of the listing: existing profiles with ``id >= start_id``
+        that fit in a single 253-byte reply frame (~13 entries).
+
+        Prefer :meth:`list_all` unless you specifically want one page.
+        """
+        return self._query(PROFILES_CMD_LIST, devices.profiles_list(start_id), timeout)  # type: ignore[return-value]
+
+    def list_all(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "list[ProfileSummary]":
+        """Every profile the board has: the 8 user slots plus the visible
+        shipped catalogue (ids 128+), assembled by paging :meth:`list`.
+
+        The catalogue is 28 entries and a summary record is up to 19 bytes, so
+        the whole listing cannot fit in one frame -- hence the paging. Hidden
+        built-ins are omitted by the firmware, exactly as on the web UI.
+        """
+        out: "list[ProfileSummary]" = []
+        seen: "set[int]" = set()
+        start_id = 0
+        while start_id <= 0xFF:
+            page = self.list(start_id, timeout)
+            if not page:
+                break
+            for summary in page:
+                if summary.id not in seen:
+                    seen.add(summary.id)
+                    out.append(summary)
+            next_start = max(s.id for s in page) + 1
+            if next_start <= start_id:
+                break  # firmware did not advance -- refuse to spin
+            start_id = next_start
+        return out
 
     def get(self, profile_id: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "Optional[ProfileDetail]":
         return self._query(PROFILES_CMD_GET, devices.profiles_get(profile_id), timeout)  # type: ignore[return-value]

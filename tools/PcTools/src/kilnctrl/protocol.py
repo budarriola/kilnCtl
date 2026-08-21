@@ -285,8 +285,21 @@ PROFILES_CMD_ACK_LAST_RUN = 0x0A
 #: SAVE's id byte requesting "first free slot" -- mirrors POST /api/profile's
 #: empty/-1/out-of-range id field.
 PROFILES_SAVE_ID_NEW = 0xFF
-#: Max profile slots (id 0..7).
+#: Max user profile slots (writable ids 0..7). NVS-backed, see profiles_http.c.
 PROFILES_MAX_COUNT = 8
+
+#: First id of the read-only shipped catalogue -- mirrors
+#: ``PROFILE_BUILTIN_ID_BASE`` in ``App/drivers/profiles_builtin.h``. Ids
+#: ``PROFILES_BUILTIN_ID_BASE + index`` address the firing schedules that ship
+#: in flash: readable and runnable, never writable. The two id ranges do not
+#: overlap by construction, so any id is unambiguously one or the other. This
+#: is the single place the number 128 appears on the PC side.
+PROFILES_BUILTIN_ID_BASE = 128
+
+
+def profile_id_is_builtin(profile_id: int) -> bool:
+    """True if ``profile_id`` addresses a shipped read-only schedule."""
+    return profile_id >= PROFILES_BUILTIN_ID_BASE
 #: Bytes per segment in a SAVE request / GET reply (target_c f32, ramp f32, dwell_min u32).
 PROFILES_SEGMENT_LEN = 12
 

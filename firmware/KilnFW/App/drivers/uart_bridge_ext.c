@@ -36,6 +36,7 @@
 #include "autotune_engine.h"
 #include "kiln_io.h"
 #include "profile_executor.h"
+#include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "run_state.h"
 #include "uart_task_ids.h"
@@ -587,34 +588,88 @@ typedef struct {
     QueueHandle_t inbox;
 } profiles_ctx_t;
 
-static size_t profiles_build_list(uint8_t *out)
+/* Appends one summary record if it fits. Returns false when the frame is
+ * full, which is the signal to stop the page here. */
+static bool profiles_list_append(uint8_t *out, size_t *io, uint8_t id, const profile_t *p)
+{
+    size_t name_len = strlen(p->name);
+    /* Bail before overrunning the frame rather than truncate a profile
+     * entry mid-record -- a short page is still useful (the client asks for
+     * the next one), a mis-parsed record is not. */
+    if (*io + 1 + 1 + name_len + 1 + 1 > BRIDGE_REPLY_MAX) {
+        return false;
+    }
+    out[(*io)++] = id;
+    *io = bx_put_lstring(out, BRIDGE_REPLY_MAX, *io, p->name);
+    out[(*io)++] = p->zone_mask;
+    out[(*io)++] = p->segment_count;
+    return true;
+}
+
+/* LIST is PAGED, because the catalogue does not fit in one frame.
+ *
+ * A summary record is 1 (id) + 1 (name len) + <=15 (name) + 1 (zone_mask) +
+ * 1 (segment_count) = up to 19 bytes, and BRIDGE_REPLY_MAX is 253 with 2
+ * bytes of header, so ~13 records per frame against 8 user slots plus 28
+ * shipped schedules. Rather than invent a second command, LIST takes an
+ * optional `start_id` byte and enumerates every EXISTING profile with
+ * id >= start_id in ascending id order -- user slots 0..7 first, then the
+ * builtin catalogue at PROFILE_BUILTIN_ID_BASE.. -- stopping when the frame
+ * fills. The client pages by re-asking with (last id + 1) until a reply
+ * comes back with count == 0. The reply layout is unchanged, so an old
+ * client that sends no argument still parses this fine; it simply sees the
+ * first page (start_id 0) instead of "all of them", which was already the
+ * documented behaviour of the break above.
+ *
+ * Hidden builtins are skipped here, matching GET /api/profiles. They stay
+ * reachable by direct GET, same as on the HTTP side. */
+static size_t profiles_build_list(uint8_t *out, uint8_t start_id)
 {
     size_t o = 0;
     out[o++] = PROFILES_CMD_LIST;
     size_t count_pos = o++;
     uint8_t count = 0;
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+
+    for (uint16_t id = start_id; id < PROFILES_MAX_COUNT; id++) {
+        profile_t p;
+        if (!profiles_http_get((uint8_t)id, &p)) {
+            continue;
+        }
+        if (!profiles_list_append(out, &o, (uint8_t)id, &p)) {
+            goto done;
+        }
+        count++;
+    }
+
+    for (size_t i = 0; i < g_builtin_profile_count; i++) {
+        uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+        if (id < start_id || profiles_builtin_is_hidden(id)) {
+            continue;
+        }
         profile_t p;
         if (!profiles_http_get(id, &p)) {
             continue;
         }
-        size_t name_len = strlen(p.name);
-        /* Bail before overrunning the frame rather than truncate a profile
-         * entry mid-record -- an incomplete LIST is still useful (GUI can
-         * page with GET per id), a mis-parsed one is not. */
-        if (o + 1 + 1 + name_len + 1 + 1 > BRIDGE_REPLY_MAX) {
-            break;
+        if (!profiles_list_append(out, &o, id, &p)) {
+            goto done;
         }
-        out[o++] = id;
-        o = bx_put_lstring(out, BRIDGE_REPLY_MAX, o, p.name);
-        out[o++] = p.zone_mask;
-        out[o++] = p.segment_count;
         count++;
     }
+
+done:
     out[count_pos] = count;
     return o;
 }
 
+/* GET serves a user slot and a builtin catalogue id alike -- profiles_http_get()
+ * resolves both (and fills a builtin's zone_mask from the configured zones), so
+ * there is deliberately no id-range test here.
+ *
+ * Reply budget, worst case: 1 (subcmd) + 1 (ok) + 1 (id) + 1 (name len) + 15
+ * (PROFILE_NAME_MAX_LEN) + 1 (zone_mask) + 1 (segment_count) + 12 segments x
+ * 12 bytes = 165 bytes, against BRIDGE_REPLY_MAX = UART_PROTO_MAX_PAYLOAD =
+ * 253. A full 12-segment builtin fits with 88 bytes to spare; the clamp below
+ * never binds today. */
 static size_t profiles_build_get(uint8_t *out, uint8_t id)
 {
     size_t o = 0;
@@ -709,7 +764,9 @@ static void profiles_handle_message(void *vargs)
     {
         switch (subcmd) {
             case PROFILES_CMD_LIST: {
-                size_t len = profiles_build_list(reply);
+                /* Optional start_id byte -- absent means "from the top". */
+                uint8_t start_id = (msg.length >= 2) ? msg.payload[1] : 0u;
+                size_t len = profiles_build_list(reply, start_id);
                 bx_reply(ctx->proto, &msg, UART_TASK_ID_PROFILES, reply, len);
                 break;
             }
@@ -769,7 +826,18 @@ static void profiles_handle_message(void *vargs)
             }
             case PROFILES_CMD_DELETE: {
                 if (!bx_args_ok("profiles", &msg, 2)) break;
-                bool ok = profiles_http_delete(msg.payload[1]);
+                uint8_t del_id = msg.payload[1];
+                /* Same refusal profile_delete_post_handler() gives: a builtin
+                 * is a const table in flash and cannot be erased. Say so and
+                 * point at hide, rather than at "no such profile" -- which
+                 * would be a lie about an id GET and START both accept. */
+                if (profiles_builtin_id_valid(del_id)) {
+                    bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false,
+                                    "built-in schedule is read-only; hide it instead "
+                                    "(POST /api/profile/builtin/hide)");
+                    break;
+                }
+                bool ok = profiles_http_delete(del_id);
                 bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, ok,
                                 ok ? NULL : "no such profile");
                 break;

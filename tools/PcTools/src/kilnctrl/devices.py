@@ -51,6 +51,8 @@ from .protocol import (
     PROFILES_CMD_SAVE,
     PROFILES_CMD_START,
     PROFILES_CMD_STOP,
+    PROFILES_BUILTIN_ID_BASE,
+    PROFILES_MAX_COUNT,
     PROFILES_SAVE_ID_NEW,
     PROFILES_SEGMENT_LEN,
     SYSTEM_CMD_FACTORY_RESET,
@@ -1571,8 +1573,12 @@ def parse_display_response(payload: bytes) -> "tuple[int, DisplayId]":
 # INJECT is the piece that lets this side "send touches as if from the
 # screen": the firmware's screen_idle state machine treats an injected press
 # exactly like a real NS2009 one -- it resets the auto-blank idle timer and
-# wakes the panel if it is currently blanked. x/y are carried on the wire for
-# a future UI-hit-test use; they do not affect that decision today.
+# wakes the panel if it is currently blanked. x/y are SCREEN PIXEL
+# coordinates that are also fed straight into LVGL's input device
+# (lvgl_port_inject_touch(), downstream of the NS2009 calibration transform)
+# so an injected press really does hit-test buttons/containers/pages exactly
+# like a finger would -- see mcp_server.py's touch_inject() docstring for the
+# full press/release/drag contract.
 # ---------------------------------------------------------------------------
 
 
@@ -2376,6 +2382,11 @@ class ProfileSummary:
     zone_mask: int
     segment_count: int
 
+    @property
+    def builtin(self) -> bool:
+        """True for a shipped read-only schedule (id >= 128)."""
+        return self.id >= PROFILES_BUILTIN_ID_BASE
+
 
 @dataclass(frozen=True)
 class ProfileDetail:
@@ -2385,6 +2396,11 @@ class ProfileDetail:
     name: str
     zone_mask: int
     segments: "list[ProfileSegment]"
+
+    @property
+    def builtin(self) -> bool:
+        """True for a shipped read-only schedule (id >= 128)."""
+        return self.id >= PROFILES_BUILTIN_ID_BASE
 
 
 @dataclass(frozen=True)
@@ -2439,14 +2455,45 @@ def _pack_str8(text: str, max_len: int, name: str) -> bytes:
     return struct.pack("<B", len(encoded)) + encoded
 
 
-def profiles_list() -> bytes:
-    """0x01 LIST request (query): no args."""
-    return struct.pack("<B", PROFILES_CMD_LIST)
+def _check_readable_profile_id(profile_id: int, name: str = "profile_id") -> int:
+    """Validate an id for a READ/RUN operation (GET, START).
+
+    Two disjoint ranges are legal: user slots ``0..PROFILES_MAX_COUNT-1`` and
+    the read-only shipped catalogue at ``PROFILES_BUILTIN_ID_BASE..255``
+    (``profiles_builtin.h``). The gap between them is not addressable, and the
+    firmware -- not this check -- decides whether a given catalogue index
+    actually exists.
+    """
+    if 0 <= profile_id < PROFILES_MAX_COUNT:
+        return profile_id
+    if PROFILES_BUILTIN_ID_BASE <= profile_id <= 0xFF:
+        return profile_id
+    raise ValueError(
+        f"{name} must be a user slot 0..{PROFILES_MAX_COUNT - 1} or a built-in "
+        f"schedule {PROFILES_BUILTIN_ID_BASE}..255, got {profile_id}"
+    )
+
+
+def profiles_list(start_id: int = 0) -> bytes:
+    """0x01 LIST request (query), PAGED.
+
+    Returns every existing profile with ``id >= start_id`` in ascending id
+    order (user slots first, then the shipped catalogue) that fits in one
+    253-byte reply frame. Page by re-asking with ``last id + 1`` until a reply
+    comes back empty -- :meth:`kilnctrl.profiles.ProfilesClient.list_all` does
+    exactly that. ``start_id=0`` with no paging yields only the first page,
+    which is what the un-argumented request has always returned.
+    """
+    return struct.pack("<BB", PROFILES_CMD_LIST, _check_u8(start_id, "start_id"))
 
 
 def profiles_get(profile_id: int) -> bytes:
-    """0x02 GET request (query): id 0-7."""
-    return struct.pack("<BB", PROFILES_CMD_GET, _check_range(profile_id, 0, 7, "profile_id"))
+    """0x02 GET request (query): a user slot 0-7 or a built-in schedule 128+.
+
+    A built-in's full 12-segment reply is 165 bytes against a 253-byte frame,
+    so nothing here needs paging.
+    """
+    return struct.pack("<BB", PROFILES_CMD_GET, _check_readable_profile_id(profile_id))
 
 
 def profiles_save(
@@ -2456,9 +2503,18 @@ def profiles_save(
     segment_count, then 12 bytes/segment (target_c f32, ramp f32, dwell u32).
 
     Replies ok/fail (see :func:`parse_profiles_response`).
+
+    A ``profile_id`` in the built-in range means "save a copy into the first
+    free user slot", not "overwrite the built-in" -- the catalogue is const
+    data in flash and cannot be written. That is the same redirect the HTTP
+    side performs (``profiles_http_save()``'s SAVE-VS-COPY note), and the
+    reply's ``id`` field reports the slot it actually landed in, so nothing
+    about it is silent.
     """
-    if profile_id != PROFILES_SAVE_ID_NEW:
-        _check_range(profile_id, 0, 7, "profile_id")
+    if profile_id != PROFILES_SAVE_ID_NEW and not (
+        PROFILES_BUILTIN_ID_BASE <= profile_id <= 0xFF
+    ):
+        _check_range(profile_id, 0, PROFILES_MAX_COUNT - 1, "profile_id")
     if not 1 <= len(segments) <= 12:
         raise ValueError(f"segment count must be 1..12, got {len(segments)}")
     body = struct.pack("<BB", PROFILES_CMD_SAVE, profile_id)
@@ -2475,8 +2531,15 @@ def profiles_save(
 
 
 def profiles_delete(profile_id: int) -> bytes:
-    """0x04 DELETE request: id 0-7. Replies ok/fail."""
-    return struct.pack("<BB", PROFILES_CMD_DELETE, _check_range(profile_id, 0, 7, "profile_id"))
+    """0x04 DELETE request: a user slot 0-7. Replies ok/fail.
+
+    Built-in ids are accepted on the wire so the firmware can answer with its
+    own refusal ("read-only; hide it instead"), matching the HTTP side rather
+    than failing differently here.
+    """
+    return struct.pack(
+        "<BB", PROFILES_CMD_DELETE, _check_readable_profile_id(profile_id)
+    )
 
 
 def profiles_get_exec_status() -> bytes:
@@ -2485,8 +2548,13 @@ def profiles_get_exec_status() -> bytes:
 
 
 def profiles_start(profile_id: int) -> bytes:
-    """0x06 START request: id 0-7. Replies ok/fail (+ error text on failure)."""
-    return struct.pack("<BB", PROFILES_CMD_START, _check_range(profile_id, 0, 7, "profile_id"))
+    """0x06 START request: a user slot 0-7 or a built-in schedule 128+.
+
+    Replies ok/fail (+ error text on failure). A built-in runs with every
+    configured zone selected -- the catalogue is zone-agnostic, so
+    ``profiles_http_get()`` fills the mask from the Zones settings.
+    """
+    return struct.pack("<BB", PROFILES_CMD_START, _check_readable_profile_id(profile_id))
 
 
 def profiles_stop() -> bytes:

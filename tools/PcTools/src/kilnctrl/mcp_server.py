@@ -80,6 +80,7 @@ from .link_hub import get_shared_link
 from .profiles import ProfilesClient, ProfilesQueryError
 from .protocol import (
     PROFILES_SAVE_ID_NEW,
+    profile_id_is_builtin,
     THERMO_CHANNEL_ALL,
     UART_TASK_ID_DISPLAY,
     UART_TASK_ID_IO,
@@ -2222,29 +2223,53 @@ def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: fl
 # ---------------------------------------------------------------------------
 @_tool()
 def profiles_list() -> str:
-    """List saved profiles: id, name, zone_mask, segment count."""
+    """List every profile on the board: id, name, zone_mask, segment count.
+
+    Covers both id spaces -- the 8 writable user slots (ids 0-7) and the
+    read-only firing schedules that ship in flash (ids 128+). The listing is
+    paged over the link because the full catalogue does not fit in one frame;
+    that is handled here. Schedules the user has hidden are not listed.
+    """
     try:
-        summaries = _profiles.list()
+        summaries = _profiles.list_all()
     except ProfilesQueryError as exc:
         return f"error: {exc}"
     if not summaries:
         return "no saved profiles"
-    return "\n".join(
-        f"#{s.id} {s.name!r} zone_mask=0x{s.zone_mask:X} segments={s.segment_count}"
-        for s in summaries
-    )
+    user = [s for s in summaries if not s.builtin]
+    builtin = [s for s in summaries if s.builtin]
+
+    def fmt(s) -> str:
+        tag = " [built-in, read-only]" if s.builtin else ""
+        return (
+            f"#{s.id} {s.name!r} zone_mask=0x{s.zone_mask:X} "
+            f"segments={s.segment_count}{tag}"
+        )
+
+    lines = [fmt(s) for s in user] or ["(no user profiles saved)"]
+    if builtin:
+        lines.append(f"-- {len(builtin)} built-in schedule(s) --")
+        lines.extend(fmt(s) for s in builtin)
+    return "\n".join(lines)
 
 
 @_tool()
 def profiles_get(profile_id: int) -> str:
-    """Read one profile's full segment list (target_c, ramp_c_per_hr, dwell_min per segment)."""
+    """Read one profile's full segment list (target_c, ramp_c_per_hr, dwell_min per segment).
+
+    ``profile_id`` is either a writable user slot (0-7) or one of the
+    read-only firing schedules shipped in flash (ids 128 and up -- see
+    profiles_list). A built-in reports the zone mask it would run with, taken
+    from the configured zones.
+    """
     try:
         detail = _profiles.get(profile_id)
-    except ProfilesQueryError as exc:
+    except (ProfilesQueryError, ValueError) as exc:
         return f"error: {exc}"
     if detail is None:
         return f"no such profile #{profile_id}"
-    lines = [f"#{detail.id} {detail.name!r} zone_mask=0x{detail.zone_mask:X}"]
+    tag = " [built-in, read-only]" if detail.builtin else ""
+    lines = [f"#{detail.id} {detail.name!r} zone_mask=0x{detail.zone_mask:X}{tag}"]
     for i, seg in enumerate(detail.segments):
         lines.append(
             f"  segment {i}: target={seg.target_c:.1f}C ramp={seg.ramp_c_per_hr:.1f}C/hr "
@@ -2255,11 +2280,15 @@ def profiles_get(profile_id: int) -> str:
 
 @_tool()
 def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str) -> str:
-    """Create (profile_id=-1) or overwrite a profile.
+    """Create (profile_id=-1) or overwrite a user profile (slots 0-7).
 
     ``segments_json`` is a JSON array of
     ``{"target_c": .., "ramp_c_per_hr": .., "dwell_min": ..}`` objects, one per
     segment, in firing order.
+
+    Passing a built-in id (128+) does NOT overwrite the shipped schedule --
+    those are read-only flash -- it saves the submitted profile as a copy into
+    the first free user slot. The reply names the slot it landed in.
     """
     try:
         raw_segments = json.loads(segments_json)
@@ -2288,10 +2317,20 @@ def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str
 
 @_tool()
 def profiles_delete(profile_id: int) -> str:
-    """Delete a saved profile. Refused if it is the one currently running."""
+    """Delete a saved user profile (slots 0-7). Refused if it is the one currently running.
+
+    Built-in schedules (ids 128+) cannot be deleted -- they are const data in
+    flash. Hide one instead, via the web UI / POST /api/profile/builtin/hide,
+    which is reversible.
+    """
+    if profile_id_is_builtin(profile_id):
+        return (
+            f"refused - #{profile_id} is a built-in read-only schedule and cannot be "
+            f"deleted; hide it instead (web UI / POST /api/profile/builtin/hide)"
+        )
     try:
         ok = _profiles.delete(profile_id)
-    except ProfilesQueryError as exc:
+    except (ProfilesQueryError, ValueError) as exc:
         return f"error: {exc}"
     return f"ok - deleted #{profile_id}" if ok else f"refused - could not delete #{profile_id}"
 
@@ -2323,11 +2362,16 @@ def profiles_get_exec_status() -> str:
 
 @_tool()
 def profiles_start(profile_id: int) -> str:
-    """Start firing a saved profile. This is the tool that turns on heat --
-    same interlocks as the GUI/HTTP start button, nothing weaker."""
+    """Start firing a profile. This is the tool that turns on heat --
+    same interlocks as the GUI/HTTP start button, nothing weaker.
+
+    ``profile_id`` is a user slot (0-7) or one of the read-only schedules
+    shipped in flash (ids 128+); both run the same way. A built-in fires every
+    configured zone, since the catalogue itself is zone-agnostic.
+    """
     try:
         result = _profiles.start(profile_id)
-    except ProfilesQueryError as exc:
+    except (ProfilesQueryError, ValueError) as exc:
         return f"error: {exc}"
     if not result.ok:
         return f"refused: {result.error}"

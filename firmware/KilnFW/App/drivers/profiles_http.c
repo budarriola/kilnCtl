@@ -11,6 +11,8 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
+#include "profile_feasibility.h"
+#include "profiles_builtin.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
 #include "zones_http.h"
@@ -348,7 +350,36 @@ static void migrate_from_default_partition(void)
 
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
-    if (!out || id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
+    if (!out) {
+        return false;
+    }
+
+    /* Builtin catalogue ids (>= PROFILE_BUILTIN_ID_BASE) resolve here too, so
+     * that every existing consumer of this getter -- profile_executor_run()
+     * above all -- can run a shipped schedule with no new code path and no
+     * new id validation to get wrong. The id ranges do not overlap by
+     * construction (128 vs 0..7), so there is no ambiguity to resolve.
+     *
+     * A hidden entry is still returned: hiding is a listing preference, not a
+     * deletion, and an in-flight or stored reference to one must not dangle.
+     *
+     * zone_mask: the catalogue is zone-agnostic and profiles_builtin_get()
+     * therefore leaves the mask 0, but profile_executor_run() rejects a
+     * zero mask ("profile targets no zones"). Filling in every configured
+     * zone here is the only sensible reading of "run this schedule" on a
+     * board whose zones are already declared on the Zones page, and it keeps
+     * the executor untouched. A user who wants a subset saves a copy into a
+     * slot (see profiles_http_save) and edits the mask there. */
+    if (profiles_builtin_id_valid(id)) {
+        if (!profiles_builtin_get(id, out)) {
+            return false;
+        }
+        uint8_t n = zones_config_get_thermo_count();
+        out->zone_mask = (n >= 8) ? 0xFFu : (uint8_t)((1u << n) - 1u);
+        return out->zone_mask != 0;
+    }
+
+    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
         return false;
     }
     *out = s_profiles.profiles[id];
@@ -400,6 +431,14 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         }
     }
 
+    /* SAVE-VS-COPY, for a save aimed at a builtin catalogue id: the catalogue
+     * lives in .rodata and cannot be written, so "overwrite it" is not a
+     * thing that can happen. Rather than fail, this redirects to "save a copy
+     * into a user slot" -- which is exactly what the existing API shape
+     * already does with any id >= PROFILES_MAX_COUNT ("first free slot"), so
+     * builtin ids need no special case to land on the right behaviour, only
+     * this note saying it is deliberate. The caller learns the real slot from
+     * *out_id, so nothing is silent about it. */
     uint8_t target_id;
     if (requested_id < PROFILES_MAX_COUNT) {
         target_id = requested_id;
@@ -462,6 +501,13 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
 
 bool profiles_http_delete(uint8_t id)
 {
+    /* A builtin is read-only and cannot be deleted -- it is a const table in
+     * flash. The user-facing equivalent is hiding it
+     * (POST /api/profile/builtin/hide), which is reversible; see
+     * profiles_builtin.h. Refuse rather than pretend. */
+    if (profiles_builtin_id_valid(id)) {
+        return false;
+    }
     if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
         return false;
     }
@@ -509,6 +555,149 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
+/* ---- Builtin catalogue JSON ------------------------------------------------
+ *
+ * RESPONSE-SIZE FINDING, which is why the catalogue gets its own endpoint
+ * rather than being appended to GET /api/profile's detail object:
+ *   - The UART CONTROL bridge caps a reply at BRIDGE_REPLY_MAX, which is
+ *     UART_PROTO_MAX_PAYLOAD (uart_bridge.c) -- a few hundred bytes. Nothing
+ *     resembling a catalogue fits through it, so the catalogue is HTTP-only
+ *     and the UART profile commands are left alone entirely.
+ *   - Every existing JSON handler in this file builds into ONE stack buffer
+ *     and snprintf-truncates on overflow (see the APPEND macros). The
+ *     catalogue is 28 entries x up to 12 segments plus a title and slug --
+ *     roughly 25 KB. That is far past any sane stack buffer on this target,
+ *     so this endpoint is the one place in the file that streams with
+ *     httpd_resp_send_chunk() and reuses a single ~1 KB per-entry buffer.
+ *     Building the whole thing in one buffer would have silently truncated
+ *     the tail of the catalogue, which is the failure mode most likely to go
+ *     unnoticed until a schedule is missing on the page.
+ *
+ * GET /api/profiles keeps its existing single-buffer shape but is likewise
+ * chunked now, because it lists the catalogue's summaries alongside the user
+ * slots.
+ */
+
+/* Escapes into a caller buffer and returns it, for use inline in a printf
+ * argument list. */
+static const char *esc(const char *src, char *buf, size_t cap)
+{
+    json_escape(src, buf, cap);
+    return buf;
+}
+
+/* Appends one builtin entry's summary (no segments) to a chunked response. */
+static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builtin_profile_t *b, bool first)
+{
+    profile_t p;
+    profile_seg_verdict_t rollup = PROFILE_SEG_UNKNOWN;
+    if (profiles_builtin_get(id, &p)) {
+        rollup = profile_feasibility_profile_mask(0, &p, NULL, 0);
+    }
+
+    char code_e[PROFILE_NAME_MAX_LEN * 2 + 1];
+    char title_e[128];
+    char slug_e[64];
+    char chunk[384];
+    int n = snprintf(chunk, sizeof(chunk),
+                     "%s{\"id\":%u,\"builtin\":true,\"name\":\"%s\",\"code\":\"%s\",\"title\":\"%s\","
+                     "\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\",\"hidden\":%s,"
+                     "\"zone_mask\":0,\"segment_count\":%u,\"feasibility\":\"%s\"}",
+                     first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
+                     esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
+                     esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
+                     profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
+                     profile_feasibility_verdict_str(rollup));
+    if (n < 0) {
+        return ESP_OK;
+    }
+    return httpd_resp_send_chunk(req, chunk, (size_t)((size_t)n < sizeof(chunk) ? (size_t)n : sizeof(chunk) - 1));
+}
+
+/* Full builtin entry: summary fields + every segment with its own verdict. */
+static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_profile_t *b, bool first)
+{
+    profile_t p;
+    profile_seg_verdict_t per_seg[PROFILE_MAX_SEGMENTS];
+    profile_seg_verdict_t rollup = PROFILE_SEG_UNKNOWN;
+    for (size_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        per_seg[i] = PROFILE_SEG_UNKNOWN;
+    }
+    if (profiles_builtin_get(id, &p)) {
+        rollup = profile_feasibility_profile_mask(0, &p, per_seg, PROFILE_MAX_SEGMENTS);
+    }
+
+    char code_e[PROFILE_NAME_MAX_LEN * 2 + 1];
+    char title_e[128];
+    char slug_e[64];
+    char chunk[384];
+    int n = snprintf(chunk, sizeof(chunk),
+                     "%s{\"id\":%u,\"builtin\":true,\"read_only\":true,\"name\":\"%s\",\"code\":\"%s\","
+                     "\"title\":\"%s\",\"slug\":\"%s\",\"url\":\"https://digitalfire.com/schedule/%s\","
+                     "\"hidden\":%s,\"zone_mask\":0,\"segment_count\":%u,\"feasibility\":\"%s\","
+                     "\"segments\":[",
+                     first ? "" : ",", id, esc(b->code, code_e, sizeof(code_e)),
+                     esc(b->code, code_e, sizeof(code_e)), esc(b->title, title_e, sizeof(title_e)),
+                     esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
+                     profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
+                     profile_feasibility_verdict_str(rollup));
+    if (n > 0) {
+        esp_err_t err = httpd_resp_send_chunk(req, chunk, (size_t)n);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    for (uint8_t i = 0; i < b->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+        n = snprintf(chunk, sizeof(chunk),
+                     "%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,\"feasibility\":\"%s\"}",
+                     i == 0 ? "" : ",", (double)b->segments[i].target_c,
+                     (double)b->segments[i].ramp_c_per_hr, (unsigned long)b->segments[i].dwell_min,
+                     profile_feasibility_verdict_str(per_seg[i]));
+        if (n > 0) {
+            esp_err_t err = httpd_resp_send_chunk(req, chunk, (size_t)n);
+            if (err != ESP_OK) {
+                return err;
+            }
+        }
+    }
+    return httpd_resp_send_chunk(req, "]}", 2);
+}
+
+/* GET /api/profiles/builtin -- the whole catalogue, segments and verdicts
+ * included. ?all=1 includes hidden entries (the "restore" UI needs to show
+ * what it would restore); the default omits them. */
+static esp_err_t builtin_list_get_handler(httpd_req_t *req)
+{
+    bool include_hidden = false;
+    char query[48];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[8];
+        if (httpd_query_key_value(query, "all", val, sizeof(val)) == ESP_OK && val[0] == '1') {
+            include_hidden = true;
+        }
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
+    bool first = true;
+    for (size_t i = 0; i < g_builtin_profile_count && err == ESP_OK; i++) {
+        uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+        if (!include_hidden && profiles_builtin_is_hidden(id)) {
+            continue;
+        }
+        err = send_builtin_full(req, id, &g_builtin_profiles[i], first);
+        first = false;
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, "]", 1);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0); /* terminate the chunked response */
+    }
+    return err;
+}
+
 static esp_err_t profiles_list_get_handler(httpd_req_t *req)
 {
     char json[PROFILES_MAX_COUNT * 96 + 16];
@@ -533,17 +722,37 @@ static esp_err_t profiles_list_get_handler(httpd_req_t *req)
         const profile_t *p = &s_profiles.profiles[id];
         char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
         json_escape(p->name, name_escaped, sizeof(name_escaped));
-        APPEND("%s{\"id\":%u,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u}", first ? "" : ",", id,
-               name_escaped, p->zone_mask, p->segment_count);
+        APPEND("%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u}",
+               first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count);
         first = false;
     }
-    APPEND("]");
 
 #undef APPEND
 
 send:
+    /* Chunked, because the visible builtin summaries appended after the user
+     * slots would not fit alongside them in one stack buffer -- see the
+     * response-size note above builtin_list_get_handler(). Segments are
+     * deliberately NOT included here; a listing does not need 136 of them,
+     * and GET /api/profile?id=<builtin> / GET /api/profiles/builtin serve
+     * them when something actually does. */
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t err = httpd_resp_send_chunk(req, json, o);
+    for (size_t i = 0; i < g_builtin_profile_count && err == ESP_OK; i++) {
+        uint8_t bid = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+        if (profiles_builtin_is_hidden(bid)) {
+            continue; /* "removed by the user" -- see /api/profiles/builtin?all=1 */
+        }
+        err = send_builtin_summary(req, bid, &g_builtin_profiles[i], first);
+        first = false;
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, "]", 1);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err;
 }
 
 static esp_err_t profile_detail_get_handler(httpd_req_t *req)
@@ -560,13 +769,32 @@ static esp_err_t profile_detail_get_handler(httpd_req_t *req)
     }
     char *end = NULL;
     long id = strtol(id_str, &end, 10);
-    if (end == id_str || id < 0 || id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
+    if (end == id_str || id < 0 || id > 255) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
+        return ESP_OK;
+    }
+
+    /* Builtin catalogue entry: served read-only, hidden or not (hiding is a
+     * listing preference, so a direct reference must still resolve). */
+    if (profiles_builtin_id_valid((uint8_t)id)) {
+        const builtin_profile_t *b = profiles_builtin_entry((uint8_t)id);
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t berr = send_builtin_full(req, (uint8_t)id, b, true);
+        if (berr == ESP_OK) {
+            berr = httpd_resp_send_chunk(req, NULL, 0);
+        }
+        return berr;
+    }
+
+    if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
 
     const profile_t *p = &s_profiles.profiles[id];
-    char json[128 + PROFILE_MAX_SEGMENTS * 64];
+    /* Sized for the per-segment "feasibility":"unreachable" field added
+     * alongside the three numeric ones -- ~112 bytes per segment worst case. */
+    char json[224 + PROFILE_MAX_SEGMENTS * 112];
     size_t o = 0;
     int n;
 
@@ -579,14 +807,27 @@ static esp_err_t profile_detail_get_handler(httpd_req_t *req)
         o += (size_t)n;                                                                            \
     } while (0)
 
+    /* Same model-based feasibility the catalogue entries carry -- a user's own
+     * profile deserves the identical answer, and the UI can then colour both
+     * kinds with one rule. */
+    profile_seg_verdict_t per_seg[PROFILE_MAX_SEGMENTS];
+    for (size_t si = 0; si < PROFILE_MAX_SEGMENTS; si++) {
+        per_seg[si] = PROFILE_SEG_UNKNOWN;
+    }
+    profile_seg_verdict_t rollup =
+        profile_feasibility_profile_mask(p->zone_mask, p, per_seg, PROFILE_MAX_SEGMENTS);
+
     char name_escaped[PROFILE_NAME_MAX_LEN * 2 + 1];
     json_escape(p->name, name_escaped, sizeof(name_escaped));
-    APPEND("{\"id\":%ld,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,\"segments\":[", id,
-           name_escaped, p->zone_mask, p->segment_count);
+    APPEND("{\"id\":%ld,\"builtin\":false,\"read_only\":false,\"name\":\"%s\",\"zone_mask\":%u,"
+           "\"segment_count\":%u,\"feasibility\":\"%s\",\"segments\":[",
+           id, name_escaped, p->zone_mask, p->segment_count,
+           profile_feasibility_verdict_str(rollup));
     for (uint8_t i = 0; i < p->segment_count; i++) {
         const profile_segment_t *s = &p->segments[i];
-        APPEND("%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu}", i == 0 ? "" : ",",
-               (double)s->target_c, (double)s->ramp_c_per_hr, (unsigned long)s->dwell_min);
+        APPEND("%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu,\"feasibility\":\"%s\"}",
+               i == 0 ? "" : ",", (double)s->target_c, (double)s->ramp_c_per_hr,
+               (unsigned long)s->dwell_min, profile_feasibility_verdict_str(per_seg[i]));
     }
     APPEND("]}");
 
@@ -856,6 +1097,12 @@ static esp_err_t profile_delete_post_handler(httpd_req_t *req)
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
     char *end = NULL;
     long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
+    if (id_len > 0 && end != id_val && id >= 0 && id <= 255 && profiles_builtin_id_valid((uint8_t)id)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "built-in schedules are read-only and cannot be deleted -- "
+                            "hide it instead (POST /api/profile/builtin/hide)");
+        return ESP_OK;
+    }
     if (id_len <= 0 || end == id_val || id < 0 || id >= PROFILES_MAX_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
@@ -873,6 +1120,79 @@ static esp_err_t profile_delete_post_handler(httpd_req_t *req)
                  esp_err_to_name(err));
     }
     return httpd_resp_sendstr(req, "ok");
+}
+
+/* ---- Builtin hide / unhide / restore ---------------------------------------
+ *
+ * "Remove this shipped schedule" cannot be a delete -- the catalogue is a
+ * const table in flash -- so it is a persisted hide, and unhiding is
+ * therefore always possible. See profiles_builtin.h.
+ *
+ * POST /api/profile/builtin/hide     body: id=<128..>&hidden=0|1
+ * POST /api/profile/builtin/restore  body: (none) -- unhides everything
+ */
+
+static bool read_small_body(httpd_req_t *req, char *buf, size_t cap)
+{
+    if ((size_t)req->content_len >= cap) {
+        return false;
+    }
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, buf + received, req->content_len - received);
+        if (ret <= 0) {
+            return false;
+        }
+        received += (size_t)ret;
+    }
+    buf[received] = '\0';
+    return true;
+}
+
+static esp_err_t builtin_hide_post_handler(httpd_req_t *req)
+{
+    char body[65];
+    if (!read_small_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
+        return ESP_OK;
+    }
+
+    char id_val[8];
+    int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
+    char *end = NULL;
+    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
+    if (id_len <= 0 || end == id_val || id < 0 || id > 255 || !profiles_builtin_id_valid((uint8_t)id)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such built-in schedule");
+        return ESP_OK;
+    }
+
+    /* Missing "hidden" defaults to 1: the endpoint is named "hide", so the
+     * request with no qualifier means hide. Unhiding takes an explicit
+     * hidden=0. */
+    char hid_val[8];
+    int hid_len = http_form_find_field(body, "hidden", hid_val, sizeof(hid_val));
+    bool hidden = (hid_len <= 0) || (hid_val[0] != '0');
+
+    esp_err_t err = profiles_builtin_set_hidden((uint8_t)id, hidden);
+    char json[128];
+    int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"id\":%ld,\"hidden\":%s,\"persisted\":%s}",
+                     "true", id, hidden ? "true" : "false", err == ESP_OK ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+static esp_err_t builtin_restore_post_handler(httpd_req_t *req)
+{
+    char body[65];
+    if (req->content_len > 0 && !read_small_body(req, body, sizeof(body))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large or read failed");
+        return ESP_OK;
+    }
+    esp_err_t err = profiles_builtin_restore_all();
+    char json[96];
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"persisted\":%s}", err == ESP_OK ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }
 
 esp_err_t profiles_http_start(void)
@@ -924,6 +1244,15 @@ esp_err_t profiles_http_start(void)
     static const httpd_uri_t delete_uri = {
         .uri = "/api/profile/delete", .method = HTTP_POST, .handler = profile_delete_post_handler,
     };
+    static const httpd_uri_t builtin_list_uri = {
+        .uri = "/api/profiles/builtin", .method = HTTP_GET, .handler = builtin_list_get_handler,
+    };
+    static const httpd_uri_t builtin_hide_uri = {
+        .uri = "/api/profile/builtin/hide", .method = HTTP_POST, .handler = builtin_hide_post_handler,
+    };
+    static const httpd_uri_t builtin_restore_uri = {
+        .uri = "/api/profile/builtin/restore", .method = HTTP_POST, .handler = builtin_restore_post_handler,
+    };
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/profiles) failed: %s", esp_err_to_name(err));
@@ -947,6 +1276,24 @@ esp_err_t profiles_http_start(void)
     err = httpd_register_uri_handler(server, &delete_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/delete) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = httpd_register_uri_handler(server, &builtin_list_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/profiles/builtin) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &builtin_hide_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/builtin/hide) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &builtin_restore_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/profile/builtin/restore) failed: %s",
+                 esp_err_to_name(err));
         return err;
     }
 

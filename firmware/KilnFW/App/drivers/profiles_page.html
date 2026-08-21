@@ -68,6 +68,28 @@
   .hint { font-size: 0.8em; color: var(--muted); margin: 0.2em 0 0; }
   .s-ramp.near-ceiling { border-color: var(--warn); }
   .s-ramp.over-ceiling { border-color: var(--err); }
+  /* Builtin catalogue + feasibility colouring. Colours come only from the
+     --err/--warn/--muted names declared above, so both theme variants and the
+     light/dark toggle keep working -- no literal hex here on purpose. The
+     three "not ok" verdicts differ in kind, not just degree:
+       too_fast    -> --err
+       unreachable -> --err too, but bolded + wavy-underlined so the worse
+                      verdict is distinguishable at a glance
+       unknown     -> --muted italic (autotune has never run; deliberately
+                      NOT red, so red keeps meaning "really infeasible"). */
+  .fz-too_fast { color: var(--err); }
+  .fz-unreachable { color: var(--err); font-weight: bold;
+                    text-decoration: underline wavy; }
+  .fz-unknown { color: var(--muted); font-style: italic; }
+  .ci { border-left: 4px solid transparent; padding-left: 0.5em; margin: 0.25em 0; }
+  .ci.fz-too_fast, .ci.fz-unreachable, .ci.fz-unknown { border-left-color: currentColor; }
+  .ci > summary { cursor: pointer; font-size: 0.9em; }
+  .ci table { width: 100%; border-collapse: collapse; font-size: 0.85em; margin: 0.4em 0; }
+  .ci th, .ci td { border-bottom: 1px solid var(--border); padding: 0.2em 0.4em; text-align: right; }
+  .ci th:first-child, .ci td:first-child { text-align: left; }
+  .badge { font-size: 0.75em; border: 1px solid currentColor; border-radius: var(--ui-radius);
+           padding: 0 0.4em; margin-left: 0.4em; white-space: nowrap; }
+  .credits { font-size: 0.85em; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -82,6 +104,15 @@ runs its own PID/bang-bang loop and thermal guards independently.</p>
 
 <h2>Saved profiles</h2>
 <div id="list"><p class="empty">Loading&hellip;</p></div>
+
+<h2>Shipped schedules <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
+<p class="hint">Read-only reference schedules stored in flash. Expand one to see its
+steps. A step marked <span class="fz-too_fast">too fast</span> or
+<span class="fz-unreachable">unreachable</span> is one this kiln's tuned model says
+it cannot fire; <span class="fz-unknown">untuned</span> just means no autotune has
+run for a zone yet, so nothing is known either way.</p>
+<div id="cat"><p class="empty">Loading&hellip;</p></div>
+<div id="catMsg"></div>
 
 <h2 id="editorTitle">New profile</h2>
 <label for="pname">Name</label>
@@ -100,6 +131,13 @@ selected zone has caught up, TODO.md 6A.5)</label>
   <button id="newBtn" type="button">New</button>
 </div>
 <div id="msg"></div>
+
+<h2>Credits</h2>
+<p class="credits">The shipped schedules above are third-party firing schedules published by
+Digital Fire and reproduced here for convenience. See
+<a href="https://digitalfire.com/schedule">digitalfire.com/schedule</a> for the originals
+and the notes that go with them. They are provided as a starting point only -- verify
+any schedule against your own kiln and clay before firing it.</p>
 
 <script>
 var editingId = null;
@@ -236,6 +274,10 @@ function resetEditor() {
 function loadList() {
   fetch('/api/profiles').then(function (r) { return r.json(); }).then(function (list) {
     var el = document.getElementById('list');
+    /* /api/profiles lists the visible builtin summaries alongside the user
+     * slots now; the catalogue owns those, so this section shows user slots
+     * only (they are the only editable/deletable ones). */
+    list = list.filter(function (p) { return !p.builtin; });
     if (list.length === 0) {
       el.innerHTML = '<p class="empty">No saved profiles.</p>';
       return;
@@ -266,6 +308,168 @@ function loadList() {
     document.getElementById('list').innerHTML = '<p class="empty">Could not load profiles.</p>';
   });
 }
+
+/* ---- Shipped (builtin) catalogue -------------------------------------- *
+ * One fetch of /api/profiles/builtin?all=1 covers both jobs: it carries the
+ * hidden entries (so we know whether "Restore removed" is worth showing) and
+ * every segment, so no per-schedule round trip is needed on expand. */
+var FZ_LABEL = { too_fast: 'too fast', unreachable: 'unreachable', unknown: 'untuned' };
+var FZ_WHY = {
+  too_fast: 'Commanded ramp exceeds what the zone can sustain (heating headroom, or -- on a falling ramp -- the kiln\'s natural cooling rate; there is no active cooling).',
+  unreachable: 'The kiln cannot reach this temperature at all with its tuned model.',
+  unknown: 'No tuned model -- run autotune for the zone before trusting this.',
+};
+
+/* Matches the editor's "0=none" convention: 0 is not a rate, it means run
+ * with no rate limit at all. Spelling it "max" keeps a bare 0 from reading
+ * like "do not heat". */
+function rampText(r) { return (r > 0) ? String(r) : 'max'; }
+
+function fzMark(el, verdict) {
+  if (verdict && verdict !== 'ok') {
+    el.classList.add('fz-' + verdict);
+    el.title = FZ_WHY[verdict] || verdict;
+  }
+}
+
+function catalogueItem(p) {
+  var d = document.createElement('details');
+  d.className = 'ci';
+  fzMark(d, p.feasibility);
+
+  var s = document.createElement('summary');
+  s.appendChild(document.createTextNode(p.title || p.name));
+  if (p.feasibility && p.feasibility !== 'ok') {
+    var b = document.createElement('span');
+    b.className = 'badge';
+    b.textContent = FZ_LABEL[p.feasibility] || p.feasibility;
+    s.appendChild(b);
+  }
+  s.appendChild(document.createTextNode(' (' + p.segment_count + ' steps)'));
+  d.appendChild(s);
+
+  var rows = '';
+  (p.segments || []).forEach(function (seg, i) {
+    var v = seg.feasibility;
+    var cls = (v && v !== 'ok') ? ' class="fz-' + v + '" title="' + (FZ_WHY[v] || '') + '"' : '';
+    rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td>' + rampText(seg.ramp_c_per_hr) +
+            '</td><td>' + seg.target_c + '</td><td>' + seg.dwell_min + '</td></tr>';
+  });
+  var tbl = document.createElement('div');
+  tbl.className = 'table-scroll';
+  tbl.innerHTML = '<table><tr><th>Step</th><th>Ramp &deg;C/hr</th><th>Target &deg;C</th>' +
+                  '<th>Hold min</th></tr>' + rows + '</table>';
+  d.appendChild(tbl);
+
+  if (p.feasibility && p.feasibility !== 'ok') {
+    var cap = document.createElement('p');
+    cap.className = 'hint';
+    cap.textContent = FZ_WHY[p.feasibility] || '';
+    d.appendChild(cap);
+  }
+
+  var acts = document.createElement('div');
+  var useBtn = document.createElement('button');
+  useBtn.type = 'button';
+  useBtn.className = 'small';
+  useBtn.textContent = 'Use / Save a copy';
+  useBtn.addEventListener('click', function () { copyBuiltin(p); });
+  var hideBtn = document.createElement('button');
+  hideBtn.type = 'button';
+  hideBtn.className = 'small';
+  hideBtn.textContent = 'Remove';
+  hideBtn.addEventListener('click', function () { hideBuiltin(p.id); });
+  acts.appendChild(useBtn);
+  acts.appendChild(hideBtn);
+  if (p.url) {
+    var a = document.createElement('a');
+    a.href = p.url;
+    a.textContent = ' source';
+    a.style.marginLeft = '0.5em';
+    a.style.fontSize = '0.85em';
+    acts.appendChild(a);
+  }
+  d.appendChild(acts);
+  return d;
+}
+
+function loadCatalogue() {
+  fetch('/api/profiles/builtin?all=1').then(function (r) { return r.json(); }).then(function (list) {
+    var el = document.getElementById('cat');
+    el.innerHTML = '';
+    var hiddenCount = 0;
+    list.forEach(function (p) {
+      if (p.hidden) { hiddenCount++; return; }
+      el.appendChild(catalogueItem(p));
+    });
+    if (!el.firstChild) {
+      el.innerHTML = '<p class="empty">All shipped schedules have been removed.</p>';
+    }
+    var rb = document.getElementById('restoreBtn');
+    rb.style.display = hiddenCount > 0 ? '' : 'none';
+    rb.textContent = 'Restore ' + hiddenCount + ' removed';
+  }).catch(function () {
+    document.getElementById('cat').innerHTML = '<p class="empty">Could not load shipped schedules.</p>';
+  });
+}
+
+/* Saving with a builtin id means "copy into the first free user slot" (the
+ * board picks the slot and reports it back). The catalogue itself is
+ * zone-agnostic -- zone_mask 0 -- and the board rejects that, so a copy needs
+ * the zone selection from the editor below; when none is picked yet, prefill
+ * the editor instead of posting something that would only be refused. */
+function copyBuiltin(p) {
+  var msg = document.getElementById('catMsg');
+  var mask = selectedZoneMask();
+  if (mask === 0) {
+    loadIntoEditor(p);
+    msg.innerHTML = '<span class="warn">Pick the zone(s) below, then press Save profile.</span>';
+    return;
+  }
+  var params = ['id=' + p.id, 'name=' + encodeURIComponent(p.name),
+                'zone_mask=' + mask, 'seg_count=' + p.segments.length];
+  p.segments.forEach(function (seg, i) {
+    params.push('seg' + i + '_target=' + seg.target_c);
+    params.push('seg' + i + '_ramp=' + seg.ramp_c_per_hr);
+    params.push('seg' + i + '_dwell=' + seg.dwell_min);
+  });
+  msg.textContent = 'Copying…';
+  fetch('/api/profile', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+    .then(function (res) {
+      if (!res.ok || res.data.ok === false) {
+        msg.innerHTML = '<span class="err">' + (res.data.error || 'copy failed') + '</span>';
+        return;
+      }
+      msg.textContent = 'Saved a copy into profile slot ' + res.data.id + '.';
+      loadList();
+    }).catch(function () {
+      msg.innerHTML = '<span class="err">Copy failed -- could not reach the board.</span>';
+    });
+}
+
+function loadIntoEditor(p) {
+  editingId = p.id; /* a builtin id: the board turns the save into a copy */
+  document.getElementById('editorTitle').textContent = 'Copy of: ' + (p.title || p.name);
+  document.getElementById('pname').value = p.name;
+  var container = document.getElementById('segments');
+  container.innerHTML = '';
+  p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function builtinPost(path, body) {
+  return fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+  }).then(function () { loadCatalogue(); loadList(); });
+}
+
+function hideBuiltin(id) { builtinPost('/api/profile/builtin/hide', 'id=' + id + '&hidden=1'); }
+
+document.getElementById('restoreBtn').addEventListener('click', function () {
+  builtinPost('/api/profile/builtin/restore', '');
+});
 
 function editProfile(id) {
   fetch('/api/profile?id=' + id).then(function (r) { return r.json(); }).then(function (p) {
@@ -333,7 +537,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     });
 });
 
-loadZones().then(function () { resetEditor(); loadList(); });
+loadZones().then(function () { resetEditor(); loadList(); loadCatalogue(); });
 
 (function () {
   var btn = document.getElementById('themeBtn');

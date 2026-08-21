@@ -68,6 +68,7 @@ from .protocol import (
     IO_DIGITAL_COUNT,
     IO_RELAY_COUNT,
     PROFILES_SAVE_ID_NEW,
+    profile_id_is_builtin,
     THERMO_CHANNEL_COUNT,
     UART_TASK_ID_AUTOTUNE,
     UART_TASK_ID_CONTROL,
@@ -931,7 +932,7 @@ class KilnCtrlApp:
             return
         self.profiles_status_var.set("Querying profile list...")
         self.query_async(
-            "List profiles", lambda: self.profiles_client.list(), self._apply_profiles_list,
+            "List profiles", lambda: self.profiles_client.list_all(), self._apply_profiles_list,
             error_types=(ProfilesQueryError,),
         )
 
@@ -941,10 +942,16 @@ class KilnCtrlApp:
         self._profiles_summaries = summaries
         self.profiles_listbox.delete(0, "end")
         for s in summaries:
+            tag = "  [built-in]" if s.builtin else ""
             self.profiles_listbox.insert(
-                "end", f"[{s.id}] {s.name}  zones=0x{s.zone_mask:02X}  segments={s.segment_count}"
+                "end",
+                f"[{s.id}] {s.name}  zones=0x{s.zone_mask:02X}  segments={s.segment_count}{tag}",
             )
-        self.profiles_status_var.set(f"{len(summaries)} profile(s).")
+        n_builtin = sum(1 for s in summaries if s.builtin)
+        n_user = len(summaries) - n_builtin
+        self.profiles_status_var.set(
+            f"{n_user} user profile(s), {n_builtin} built-in schedule(s)."
+        )
 
     def _on_profile_select(self, _event: object) -> None:
         pass  # selection is read explicitly by profile_load_async/start_async
@@ -975,7 +982,15 @@ class KilnCtrlApp:
                 self.profile_segments_text.insert(
                     "end", f"{seg.target_c}, {seg.ramp_c_per_hr}, {seg.dwell_min}\n"
                 )
-            self.profiles_status_var.set(f"Loaded profile {pid}: {detail.name!r}")
+            if detail.builtin:
+                # The id field now holds a built-in id; saving from here is a
+                # save-as-copy into the first free user slot, not an overwrite.
+                self.profiles_status_var.set(
+                    f"Loaded built-in schedule {pid}: {detail.name!r} -- read-only; "
+                    f"Save Profile stores a copy in the first free user slot."
+                )
+            else:
+                self.profiles_status_var.set(f"Loaded profile {pid}: {detail.name!r}")
 
         self.query_async(
             f"Get profile {pid}", lambda: self.profiles_client.get(pid), apply,
@@ -1035,6 +1050,14 @@ class KilnCtrlApp:
         pid = self._selected_profile_id()
         if pid is None:
             self.profiles_status_var.set("Delete: select a profile first.")
+            return
+        if profile_id_is_builtin(pid):
+            # Same refusal the firmware and the web UI give: the catalogue is
+            # const data in flash. Hiding is the reversible equivalent.
+            self.profiles_status_var.set(
+                f"Delete {pid}: REFUSED -- built-in schedules are read-only; "
+                f"hide it from the web UI instead."
+            )
             return
         if not messagebox.askyesno("Delete profile", f"Delete profile {pid}?", parent=self.root):
             return

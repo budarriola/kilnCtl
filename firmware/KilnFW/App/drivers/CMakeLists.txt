@@ -129,6 +129,11 @@ idf_component_register(SRCS "MAX31856.c"
                        "zones_http.c"
                        "rules_http.c"
                        "profiles_http.c"
+                       # profiles_builtin.c is hand-written and #includes the
+                       # machine-generated profiles_builtin_table.inc, which is
+                       # NOT listed here (it is not a translation unit).
+                       "profiles_builtin.c"
+                       "profile_feasibility.c"
                        "readiness_http.c"
                        "board_temps.c"
                        "pid.c"
