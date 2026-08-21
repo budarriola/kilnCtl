@@ -116,13 +116,46 @@ reports (over the existing kilnctrl MCP path or SWD)". Both were checked.
   in this package is in the same state: read, not run, against real
   hardware. This is not a gap in this tool's plumbing, it's the honest
   state of the bench.
-- **No MCP tool exists to push calibration constants (`k_ct_v_per_a`, etc.)
-  to the RP2040's own flash** — `current_sense_commissioning.py` already
-  found this while covering CURRENT_SENSE.md §5 step 3. Irrelevant to this
-  tool specifically (this calibration lives on the fixture side, not
-  `SaftyFW`'s own `k_ct_v_per_a`), but worth knowing it's a real gap in the
-  broader "commission the current-sense system" story if a future task
-  needs to write `SaftyFW` calibration constants from a script.
+- **A PC-side sender for `SAFETY_CMD_SET_CT_CAL`/`GET_CT_CAL` now exists:
+  `push_ct_cal.py`, in this directory.** `current_sense_commissioning.py`
+  found the original gap (no MCP tool could push calibration constants into
+  the RP2040's own flash); once `SaftyFW` grew `config_store.h`'s `ct_cal`
+  record and the wire commands `SAFETY_CMD_SET_CT_CAL` (0x19) /
+  `SAFETY_CMD_GET_CT_CAL`/`CT_CAL` (0x1A), that gap became closable from the
+  PC side without touching `tools/PcTools/src/kilnctrl/**` — `push_ct_cal.py`
+  builds those frames in pure Python (mirroring `firmware/CommonFW/include/
+  kilnlink/kilnlink_set_ct_cal.h`/`kilnlink_get_ct_cal.h`/`kilnlink_ct_cal.h`
+  byte-for-byte), inverts the stored fit exactly the way
+  `gen_ct_cal_table.py` does (reusing its `load_channels()`, not
+  reimplementing the arithmetic), refuses a table whose `crosstalk_passed`
+  is false or whose gain isn't invertible, sends one channel per frame with
+  an explicit `calibrated` flag (a channel absent from the JSON table is
+  pushed as an explicit `calibrated=False`, never a fabricated
+  gain=1/offset=0), and then issues `GET_CT_CAL` and compares the readback
+  against what was sent before declaring success.
+
+  **This is NOT provably wired end to end against real hardware, and not
+  only because no CT hardware exists.** While building this, it became
+  clear that `firmware/KilnFW/App/drivers/uart_bridge.c`'s
+  `safety_bridge_task()` has no `case` for `SAFETY_CMD_SET_CT_CAL` or
+  `GET_CT_CAL`/`CT_CAL` — both fall into its `default: rejected = true`
+  branch and are silently dropped on the ESP (logged locally, nothing
+  returned over the PC link), and `safety_link.c` has no forwarder for
+  either command onto the isolated RP2040 link. So a real ESP running the
+  KilnFW currently checked into this repo will ACK a `SET_CT_CAL` send
+  (task 7 exists and ACKs at the transport layer regardless of whether the
+  subcommand is recognised) and then silently discard it, and a
+  `GET_CT_CAL` query will time out. `firmware/KilnFW/**` is out of scope
+  for the task that built `push_ct_cal.py`; closing this needs a small
+  addition to `uart_bridge.c`'s switch and a forwarder in `safety_link.c`
+  before a bench run can push a table for real. `push_ct_cal.py`'s own
+  module docstring has the full account, and `tools/PcTools/tests/
+  test_ct_calibration.py`'s `PushCtCalWireTest`/`BuildPushesFromJsonTest`/
+  `PushAndVerifyTest` cover everything provable without that firmware work
+  or real analog hardware: frame encoding/decoding, fit inversion, the
+  crosstalk/gain refusal gates, the explicit-uncalibrated path, and
+  push+verify (including a caught readback mismatch) against an in-memory
+  fake `config_store`.
 - SWD (`debug_probe.py`, `mcp__kilnctrl__debug_read_memory`) was not used.
   It could, in principle, read `current_sense.c`'s live state directly out
   of RAM, but that means halting the target (or reading racy live memory)
@@ -251,5 +284,6 @@ run one command instead of an afternoon of spreadsheet work, nothing more.
 | `readback.py` | DUT readback: real (`KilnctrlSafetyReadback`) and synthetic (`SyntheticDutReadback`) implementations of one shared interface. |
 | `fixture.py` | Thin wrapper over `kilnsim`'s real `CT` command group. |
 | `calibrate_ct.py` | CLI orchestrator — the one command. |
+| `push_ct_cal.py` | Pushes a saved JSON table into `SaftyFW`'s `config_store.h` via `SET_CT_CAL`/`GET_CT_CAL`, inverting the fit and verifying the readback. See "Readback path" above for what is and isn't proven. |
 
 Tests: `tools/PcTools/tests/test_ct_calibration.py`.

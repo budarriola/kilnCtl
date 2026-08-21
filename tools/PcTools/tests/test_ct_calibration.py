@@ -41,6 +41,8 @@ sys.path.insert(0, str(_CT_CAL_DIR))
 import calibration_table as ct  # noqa: E402
 import crosstalk as xt  # noqa: E402
 import fit  # noqa: E402
+import push_ct_cal as push  # noqa: E402
+from gen_ct_cal_table import TableError  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +266,251 @@ class CalibrationTableTest(unittest.TestCase):
         table = ct.CalibrationTable.new(crosstalk_passed=True, channels={0: self._good_channel(0)})
         with self.assertRaises(ct.CalibrationTableError):
             table.get(2)
+
+
+# ---------------------------------------------------------------------------
+# push_ct_cal.py -- wire encode/decode, inversion reuse, and push+verify
+# against a fake config_store transport (no real link, no real hardware --
+# see push_ct_cal.py's module docstring for the KilnFW-side gap this cannot
+# paper over).
+# ---------------------------------------------------------------------------
+class PushCtCalWireTest(unittest.TestCase):
+    def test_encode_set_ct_cal_calibrated_round_trips_through_ct_cal_reply_shape(self):
+        p = push.ChannelPush(channel=1, calibrated=True, gain=0.0345, offset=-1.2)
+        frame = push.encode_set_ct_cal(p)
+        self.assertEqual(len(frame), push.SET_CT_CAL_LEN)
+        self.assertEqual(frame[0], push.SET_CT_CAL_CMD)
+        self.assertEqual(frame[1], 1)  # channel
+        self.assertEqual(frame[2], 1)  # calibrated
+
+    def test_encode_set_ct_cal_uncalibrated_forces_zero_gain_offset(self):
+        # Even if a caller built a ChannelPush with stale numbers next to
+        # calibrated=False, the encoded frame must carry 0.0/0.0 -- never a
+        # fabricated "identity" calibration on the wire.
+        p = push.ChannelPush(channel=0, calibrated=False, gain=99.0, offset=99.0)
+        frame = push.encode_set_ct_cal(p)
+        decoded_cal, decoded_gain, decoded_offset = struct_unpack_channel(frame[2:])
+        self.assertEqual(decoded_cal, 0)
+        self.assertEqual(decoded_gain, 0.0)
+        self.assertEqual(decoded_offset, 0.0)
+
+    def test_encode_set_ct_cal_rejects_out_of_range_channel(self):
+        with self.assertRaises(push.CtCalWireError):
+            push.encode_set_ct_cal(push.ChannelPush(channel=3, calibrated=True, gain=1.0, offset=0.0))
+
+    def test_encode_get_ct_cal_is_one_byte(self):
+        self.assertEqual(push.encode_get_ct_cal(), bytes([push.GET_CT_CAL_CMD]))
+
+    def test_decode_ct_cal_reply_round_trips_all_channels(self):
+        pushes = (
+            push.ChannelPush(0, True, 28.4, 0.12),
+            push.ChannelPush(1, False, 0.0, 0.0),
+            push.ChannelPush(2, True, 30.9, -0.05),
+        )
+        payload = _encode_fake_reply(pushes)
+        decoded = push.decode_ct_cal_reply(payload)
+        self.assertEqual(len(decoded), 3)
+        for sent, got in zip(pushes, decoded):
+            self.assertEqual(sent.channel, got.channel)
+            self.assertEqual(sent.calibrated, got.calibrated)
+            if sent.calibrated:
+                self.assertAlmostEqual(sent.gain, got.gain, places=4)
+                self.assertAlmostEqual(sent.offset, got.offset, places=4)
+
+    def test_decode_ct_cal_reply_rejects_wrong_length(self):
+        with self.assertRaises(push.CtCalWireError):
+            push.decode_ct_cal_reply(bytes([push.CT_CAL_REPLY_CMD, 0, 0]))
+
+    def test_decode_ct_cal_reply_rejects_wrong_cmd_byte(self):
+        good = _encode_fake_reply((push.ChannelPush(0, False, 0.0, 0.0),) * 3)
+        bad = bytes([0x02]) + good[1:]
+        with self.assertRaises(push.CtCalWireError):
+            push.decode_ct_cal_reply(bad)
+
+
+def struct_unpack_channel(chunk: bytes):
+    import struct as _struct
+
+    return _struct.unpack("<Bff", chunk)
+
+
+def _encode_fake_reply(channels) -> bytes:
+    out = bytearray([push.CT_CAL_REPLY_CMD])
+    for c in channels:
+        out += push._CT_CAL_CHANNEL_STRUCT.pack(1 if c.calibrated else 0, c.gain, c.offset)
+    return bytes(out)
+
+
+class BuildPushesFromJsonTest(unittest.TestCase):
+    """Exercises the inversion reuse (gen_ct_cal_table.load_channels) and the
+    "uncalibrated channel stays explicitly uncalibrated" requirement."""
+
+    def _write(self, tmp_dir: Path, raw: dict) -> Path:
+        p = Path(tmp_dir) / "cal.json"
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        return p
+
+    def test_inverts_fit_exactly_like_gen_ct_cal_table(self):
+        import tempfile
+
+        # measured_a = 25 * commanded + 2  =>  gain = 1/25, offset = -2/25
+        raw = {
+            "schema_version": 1,
+            "crosstalk_passed": True,
+            "channels": {"0": {"gain": 25.0, "offset": 2.0, "r2": 0.999, "n_points": 10}},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, raw)
+            pushes = push.build_pushes_from_json(path)
+        self.assertEqual(len(pushes), 3)
+        ch0 = pushes[0]
+        self.assertTrue(ch0.calibrated)
+        self.assertAlmostEqual(ch0.gain, 1.0 / 25.0, places=9)
+        self.assertAlmostEqual(ch0.offset, -2.0 / 25.0, places=9)
+
+    def test_missing_channel_is_explicit_uncalibrated_not_identity(self):
+        import tempfile
+
+        raw = {
+            "schema_version": 1,
+            "crosstalk_passed": True,
+            "channels": {
+                "0": {"gain": 25.0, "offset": 2.0, "r2": 0.999, "n_points": 10},
+                "2": {"gain": 30.0, "offset": -1.0, "r2": 0.995, "n_points": 10},
+            },
+        }
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, raw)
+            pushes = push.build_pushes_from_json(path)
+        by_channel = {p.channel: p for p in pushes}
+        self.assertTrue(by_channel[0].calibrated)
+        self.assertTrue(by_channel[2].calibrated)
+        # Channel 1 was never in the table -- must be explicit uncalibrated,
+        # not a silently-fabricated gain=1/offset=0 "identity" pass-through.
+        self.assertFalse(by_channel[1].calibrated)
+        self.assertEqual(by_channel[1].gain, 0.0)
+        self.assertEqual(by_channel[1].offset, 0.0)
+
+    def test_refuses_table_that_failed_crosstalk(self):
+        import tempfile
+
+        raw = {
+            "schema_version": 1,
+            "crosstalk_passed": False,
+            "channels": {"0": {"gain": 25.0, "offset": 2.0, "r2": 0.999, "n_points": 10}},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, raw)
+            with self.assertRaises(TableError):
+                push.build_pushes_from_json(path)
+
+    def test_refuses_non_invertible_gain(self):
+        import tempfile
+
+        raw = {
+            "schema_version": 1,
+            "crosstalk_passed": True,
+            "channels": {"0": {"gain": 0.0, "offset": 2.0, "r2": 0.999, "n_points": 10}},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, raw)
+            with self.assertRaises(TableError):
+                push.build_pushes_from_json(path)
+
+
+class _FakeConfigStoreTransport:
+    """In-memory stand-in for SaftyFW's config_store.c CT_CAL read-modify-write
+    semantics (config_store.h's `config_store_get_ct_cal()` /
+    `link_task_handle_set_ct_cal()`) -- NOT a hardware model and NOT a claim
+    about real ESP/Pico firmware behavior (see push_ct_cal.py's module
+    docstring: the real ESP does not relay these commands at all today).
+    Just enough of the documented wire behavior -- start every channel
+    uncalibrated, and each SET_CT_CAL overwrites exactly one channel without
+    disturbing the others -- to exercise push_and_verify() end to end
+    without any real link."""
+
+    def __init__(self, num_channels: int = 3) -> None:
+        self._channels = [push.ChannelPush(c, False, 0.0, 0.0) for c in range(num_channels)]
+        self.sent_frames: list[bytes] = []
+
+    def send_set_ct_cal(self, payload: bytes) -> None:
+        self.sent_frames.append(payload)
+        _cmd, channel, calibrated, gain, offset = push._SET_CT_CAL_STRUCT.unpack(payload)
+        self._channels[channel] = push.ChannelPush(channel, bool(calibrated), gain, offset)
+
+    def query_ct_cal(self, payload: bytes, timeout: float) -> bytes:
+        assert payload == push.encode_get_ct_cal()
+        return _encode_fake_reply(tuple(self._channels))
+
+    def close(self) -> None:
+        pass
+
+
+class PushAndVerifyTest(unittest.TestCase):
+    def test_calibrated_channels_push_and_verify_clean(self):
+        transport = _FakeConfigStoreTransport()
+        pushes = (
+            push.ChannelPush(0, True, 0.04, -0.08),
+            push.ChannelPush(1, True, 0.0317, 0.02),
+            push.ChannelPush(2, False, 0.0, 0.0),
+        )
+        results = push.push_and_verify(transport, pushes, log=lambda line="": None)
+        self.assertTrue(all(r.matches for r in results))
+        self.assertEqual(len(transport.sent_frames), 3)
+
+    def test_uncalibrated_channel_lands_as_uncalibrated_not_identity(self):
+        transport = _FakeConfigStoreTransport()
+        # Only channel 0 calibrated -- channels 1 and 2 explicit uncalibrated,
+        # matching what build_pushes_from_json() would produce for a table
+        # missing those channels.
+        pushes = (
+            push.ChannelPush(0, True, 0.04, -0.08),
+            push.ChannelPush(1, False, 0.0, 0.0),
+            push.ChannelPush(2, False, 0.0, 0.0),
+        )
+        push.push_and_verify(transport, pushes, log=lambda line="": None)
+        self.assertFalse(transport._channels[1].calibrated)
+        self.assertFalse(transport._channels[2].calibrated)
+        # And pushing channel 0 must never have disturbed 1/2's flags, which
+        # were already uncalibrated by construction here, so also check the
+        # read-modify-write claim the other direction: pushing 1 leaves 0 alone.
+        transport2 = _FakeConfigStoreTransport()
+        push.push_and_verify(
+            transport2,
+            (push.ChannelPush(0, True, 10.0, 1.0),),
+            log=lambda line="": None,
+        )
+        self.assertFalse(transport2._channels[1].calibrated)
+        self.assertFalse(transport2._channels[2].calibrated)
+        self.assertTrue(transport2._channels[0].calibrated)
+
+    def test_verify_catches_a_readback_mismatch(self):
+        class _LyingTransport(_FakeConfigStoreTransport):
+            def query_ct_cal(self, payload: bytes, timeout: float) -> bytes:
+                # Simulate a firmware bug: channel 0 comes back with the
+                # wrong gain even though what was sent (and stored, per the
+                # base class) was correct.
+                corrupted = list(self._channels)
+                corrupted[0] = push.ChannelPush(0, True, corrupted[0].gain + 5.0, corrupted[0].offset)
+                return _encode_fake_reply(tuple(corrupted))
+
+        transport = _LyingTransport()
+        pushes = (push.ChannelPush(0, True, 0.04, -0.08),)
+        with self.assertRaises(push.VerifyMismatchError) as ctx:
+            push.push_and_verify(transport, pushes, log=lambda line="": None)
+        self.assertIn("channel 0", str(ctx.exception))
+
+    def test_verify_catches_a_calibrated_flag_mismatch(self):
+        class _FlagFlipTransport(_FakeConfigStoreTransport):
+            def query_ct_cal(self, payload: bytes, timeout: float) -> bytes:
+                corrupted = list(self._channels)
+                corrupted[0] = push.ChannelPush(0, False, 0.0, 0.0)  # firmware "forgot" it
+                return _encode_fake_reply(tuple(corrupted))
+
+        transport = _FlagFlipTransport()
+        pushes = (push.ChannelPush(0, True, 0.04, -0.08),)
+        with self.assertRaises(push.VerifyMismatchError):
+            push.push_and_verify(transport, pushes, log=lambda line="": None)
 
 
 # ---------------------------------------------------------------------------
