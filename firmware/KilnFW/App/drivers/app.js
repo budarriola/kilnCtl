@@ -34,24 +34,19 @@
 
   // ---- Unit preference (°C/°F) --------------------------------------
   //
-  // UI_PLAN.md item 7 ("Unit parity", "4 item 7" in the old numbering): the
-  // web should honour the same °F/°C setting the LCD uses. Checked before
-  // writing anything here -- grepped every ui_page_*.c, board_temps.{c,h},
-  // zones_http.c, and every NVS key string in firmware/KilnFW for unit/
-  // fahrenheit/celsius (case-insensitive): there is no such setting anywhere.
-  // No NVS namespace stores a unit preference, no ui_page_*.c reads or writes
-  // one, and /api/status (and every other JSON endpoint) returns plain
-  // Celsius floats with no accompanying unit field. So there is nothing on
-  // the board side to "honour" yet -- the LCD itself has no °F mode today,
-  // it always shows Celsius. Building a shared settings subsystem (NVS key +
-  // API field + LCD toggle) to honour would be inventing scope no one asked
-  // for yet, and touching ui_page_*.c is out of bounds for this pass anyway.
-  // So this is deliberately just a client-side, localStorage-persisted
-  // display toggle: it does NOT share state with the LCD, and switching it
-  // here has zero effect on, and zero awareness of, what the panel shows.
-  // Making the two surfaces actually agree would need the LCD side to grow
-  // its own stored preference and an API field carrying it to the browser --
-  // that is the follow-on work, not this pass.
+  // UI_PLAN.md item 7 ("Unit parity"): the web should honour the same
+  // Fahrenheit/Celsius setting the LCD uses. This USED to be a client-side,
+  // localStorage-only toggle with an explicit disclaimer that it could not
+  // agree with the LCD, because nothing on the board stored a unit
+  // preference at all. It now does (2026-08-21): unit_pref.c (App/drivers)
+  // persists the choice to NVS, GET /api/status reports it as the additive
+  // "temp_unit" field ("C" or "F"), and POST /api/unit_pref (form body
+  // "unit=C"/"unit=F") is the write side -- the exact same board-is-the-
+  // source-of-truth model the LCD's Configuration-hub toggle uses
+  // (ui_page_config.c). This module replaces the old localStorage-only
+  // mechanism entirely: the device is now the one place this preference
+  // lives, and a page here reflects it rather than keeping its own
+  // independent copy.
   //
   // Conversion is display-only by construction: kcUnit.fmt()/toDisplay() take
   // a Celsius number and hand back a STRING or NUMBER for reading, never
@@ -60,16 +55,51 @@
   // segment targets, autotune setpoints, ...) still holds and sends whatever
   // raw °C number it always did -- a setpoint posted in the wrong unit is a
   // real hazard on a kiln, so this toggle touches rendered text only.
-  var KC_UNIT_KEY = 'kilnctl-unit';
   window.kcUnit = (function () {
+    // In-memory cache of the device's last-known answer -- 'c' until the
+    // first successful read, matching unit_pref.c's own shipped-default
+    // fallback on a fresh board. updateFromStatus() below is how a page
+    // that already polls GET /api/status for its own data (main_page.html's
+    // poll()) keeps this in sync for free, with no second network round trip
+    // spent just on this one field.
+    var cached = 'c';
+
     function get() {
-      return localStorage.getItem(KC_UNIT_KEY) === 'f' ? 'f' : 'c';
+      return cached;
     }
+    // Called with the *decoded* GET /api/status JSON body (not raw text) by
+    // any page that already fetches it -- see main_page.html's poll(). A
+    // response with no "temp_unit" key (a firmware predating this feature)
+    // leaves `cached` exactly where it was: the additive-field contract this
+    // field's own comment on the firmware side documents means an old/new
+    // client/firmware pairing degrades to "assume Celsius", not a throw.
+    function updateFromStatus(status) {
+      if (!status || typeof status.temp_unit !== 'string') return;
+      var next = status.temp_unit.toLowerCase() === 'f' ? 'f' : 'c';
+      if (next !== cached) {
+        cached = next;
+        window.dispatchEvent(new Event('kcunitchange'));
+      }
+    }
+    // Posts the new preference to the device. Updates the in-memory cache
+    // (and fires kcunitchange) optimistically -- same "assume the write
+    // succeeds" convention every other settings control on these pages
+    // uses -- rather than waiting on the network round trip before the UI
+    // reflects the tap. A failed POST is only logged; the next
+    // GET /api/status poll (via updateFromStatus above) is what would
+    // correct `cached` back if the device actually rejected or failed to
+    // persist it.
     function set(u) {
-      localStorage.setItem(KC_UNIT_KEY, u === 'f' ? 'f' : 'c');
-      // Pages that cache their last-rendered API payload listen for this to
-      // re-render in the new unit without waiting for the next poll tick.
+      var next = u === 'f' ? 'f' : 'c';
+      cached = next;
       window.dispatchEvent(new Event('kcunitchange'));
+      fetch('/api/unit_pref', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'unit=' + (next === 'f' ? 'F' : 'C'),
+      }).catch(function (err) {
+        console.warn('unit preference POST failed (will retry on next status poll):', err);
+      });
     }
     // Celsius in, a plain number in the selected unit out. null/undefined/NaN
     // pass through as null so callers can keep their own "n/a" handling.
@@ -86,7 +116,10 @@
       if (decimals === undefined) decimals = 1;
       return toDisplay(c).toFixed(decimals) + ' ' + label();
     }
-    return { get: get, set: set, toDisplay: toDisplay, label: label, fmt: fmt };
+    return {
+      get: get, set: set, toDisplay: toDisplay, label: label, fmt: fmt,
+      updateFromStatus: updateFromStatus,
+    };
   })();
 
   // Small toggle button, inserted next to each page's own #themeBtn (every
@@ -97,12 +130,16 @@
     var el = document.createElement('button');
     el.type = 'button';
     el.className = 'kc-unit-btn theme-btn';
-    el.title = 'Toggle °C/°F display on this device only -- does not change what the LCD shows (see app.js)';
+    el.title = 'Toggle Celsius/Fahrenheit display -- persisted on the device, same setting the LCD shows (see app.js)';
     function refresh() { el.textContent = window.kcUnit.label(); }
     refresh();
+    // Listens rather than refreshing only on click: updateFromStatus() (from
+    // this page's own poll, or from another browser tab's POST landing on
+    // the device) can change `cached` without this button being the cause,
+    // and the button text must not go stale in that case.
+    window.addEventListener('kcunitchange', refresh);
     el.addEventListener('click', function () {
       window.kcUnit.set(window.kcUnit.get() === 'f' ? 'c' : 'f');
-      refresh();
     });
     var themeBtn = document.getElementById('themeBtn');
     if (themeBtn && themeBtn.parentNode) {
@@ -112,6 +149,17 @@
     }
     return el;
   }
+
+  // One-time initial read on every page load, independent of whether the
+  // page also polls /api/status for its own data -- a page that does not
+  // (most of them; only main_page.html's poll() calls updateFromStatus()
+  // itself on its own cadence) would otherwise show Celsius indefinitely.
+  // Best-effort: a failed fetch here just leaves `cached` at its 'c' default,
+  // same as a board with no saved preference yet.
+  fetch('/api/status')
+    .then(function (r) { return r.json(); })
+    .then(function (status) { window.kcUnit.updateFromStatus(status); })
+    .catch(function () { /* leave cached at its default -- see comment above */ });
 
   // ---- Connection-lost banner -----------------------------------------
   //

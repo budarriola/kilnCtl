@@ -967,10 +967,42 @@
  * SET_ZONE_PID / SET_ZONE_MODEL response payload:
  *   byte0 = the subcommand echoed back (0x02 / 0x03)
  *   byte1 = ok (0/1)
+ *
+ *   0x04 GET_UNIT_PREF  (no args) -- QUERY, see below. Added 2026-08-21 for
+ *                        the shared display-unit preference (unit_pref.h) --
+ *                        this is an ADDITIVE subcommand on the existing
+ *                        CONTROL task, not a protocol version bump: adding a
+ *                        new subcmd value does not reorder or resize any
+ *                        existing field, which is the only thing
+ *                        UART_PROTOCOL_VERSION exists to guard (see this
+ *                        file's version-bump discipline elsewhere). An older
+ *                        PC-tools build that has never heard of 0x04 simply
+ *                        never sends it and is unaffected.
+ *   0x05 SET_UNIT_PREF  byte1 = 0 (Celsius) or 1 (Fahrenheit)
+ *                        DISPLAY-ONLY preference -- see unit_pref.h's header
+ *                        comment. Does not touch any stored/transmitted
+ *                        temperature value anywhere else in this protocol;
+ *                        every zone/profile temperature on this link remains
+ *                        Celsius regardless of this setting. Answers with a
+ *                        one-byte ok/fail reply, same reasoning as
+ *                        SET_ZONE_PID/SET_ZONE_MODEL: an out-of-range value
+ *                        (anything but 0/1) is exactly the kind of mistake a
+ *                        GUI needs to see immediately rather than have
+ *                        silently ignored.
+ *
+ * GET_UNIT_PREF response payload:
+ *   byte0 = CONTROL_CMD_GET_UNIT_PREF (0x04)
+ *   byte1 = current unit_pref_t (0 = Celsius, 1 = Fahrenheit)
+ *
+ * SET_UNIT_PREF response payload:
+ *   byte0 = the subcommand echoed back (0x05)
+ *   byte1 = ok (0/1)
  */
 #define CONTROL_CMD_GET_ZONES    0x01u
 #define CONTROL_CMD_SET_ZONE_PID 0x02u
 #define CONTROL_CMD_SET_ZONE_MODEL 0x03u
+#define CONTROL_CMD_GET_UNIT_PREF 0x04u
+#define CONTROL_CMD_SET_UNIT_PREF 0x05u
 
 /* --- PROFILES (task_id = UART_TASK_ID_PROFILES) ---
  * Fire profile storage (mirrors profiles_http.c's /api/profiles, /api/profile,

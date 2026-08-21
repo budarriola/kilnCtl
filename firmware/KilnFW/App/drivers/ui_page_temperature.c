@@ -125,10 +125,15 @@ static void refresh_cb(lv_timer_t *timer)
          * against a temperature that stopped moving; "--" is the honest
          * answer, and it matches what the web page and the PC tools show for
          * the same reading. */
+        /* ROADMAP.md 2026-08-21 shared unit preference -- see ui_page_home.c's
+         * identical block for the full reasoning (same dashboard_get_status()
+         * snapshot, same ABSOLUTE-not-rate conversion). */
         if (ch && ch->valid && !ch->stale) {
-            snprintf(buf, sizeof(buf), "%.1f C", (double)ch->temp_c);
+            snprintf(buf, sizeof(buf), "%.1f %s",
+                     (double)unit_pref_convert(ch->temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
+                     unit_pref_suffix(ds.temp_unit));
         } else {
-            snprintf(buf, sizeof(buf), "-- C");
+            snprintf(buf, sizeof(buf), "-- %s", unit_pref_suffix(ds.temp_unit));
         }
         lv_label_set_text(s_zone[zi].temp_label, buf);
     }

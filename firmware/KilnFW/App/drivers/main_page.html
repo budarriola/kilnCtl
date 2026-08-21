@@ -528,6 +528,11 @@ function pollExec() {
 
 function poll() {
   fetch('/api/status').then(r => r.json()).then(function (data) {
+    // 2026-08-21: keeps app.js's kcUnit cache current from the same response
+    // this page already fetches for its own rendering -- no second request
+    // just to learn the device's unit preference (see app.js's own
+    // one-time-fetch fallback for pages that never poll /api/status at all).
+    window.kcUnit.updateFromStatus(data);
     renderChannels(data);
   }).catch(function () {});
   pollExec();

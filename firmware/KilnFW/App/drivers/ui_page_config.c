@@ -7,6 +7,7 @@
 #include "kiln_ui.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "unit_pref.h"
 
 static const char *TAG = "ui_page_config";
 
@@ -132,6 +133,53 @@ static void profiles_nav_cb(lv_event_t *e)
     kiln_ui_show("profiles");
 }
 
+/* ROADMAP.md 2026-08-21 "a real shared temperature-unit setting": the hub's
+ * one free cell (page 2 holds 5 of 6, per this file's own "Paged hub"
+ * comment above -- verified against the current build, not assumed) becomes
+ * a live in-place toggle rather than a navigation destination. This is
+ * deliberate, not a shortcut: adding a whole new LCD page/route requires
+ * registering it in kiln_ui.c's page table (kiln_ui_register_page()), and
+ * kiln_ui.c is off-limits this pass (another agent owns the bench/safety
+ * work there right now). A toggle cell needs no new route -- it calls
+ * unit_pref_set() directly and repaints its own label, so this hub file is
+ * the only LCD file this feature needed to touch to get an on-device
+ * control, which is also arguably the more discoverable place for it
+ * anyway (no extra tap to a sub-page for a single binary choice). */
+static lv_obj_t *s_units_cell_label;
+
+static void units_cell_set_label(void)
+{
+    if (!s_units_cell_label) {
+        return;
+    }
+    char buf[32]; /* was 24 -- too small for "Units: Fahrenheit\n(tap for C)" (30 chars +
+                   * NUL); gcc's format-truncation check caught this at -Werror build time. */
+    if (unit_pref_get() == UNIT_PREF_FAHRENHEIT) {
+        snprintf(buf, sizeof(buf), "Units: Fahrenheit\n(tap for C)");
+    } else {
+        snprintf(buf, sizeof(buf), "Units: Celsius\n(tap for F)");
+    }
+    lv_label_set_text(s_units_cell_label, buf);
+}
+
+static void units_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    unit_pref_t next =
+        unit_pref_get() == UNIT_PREF_FAHRENHEIT ? UNIT_PREF_CELSIUS : UNIT_PREF_FAHRENHEIT;
+    esp_err_t err = unit_pref_set(next);
+    if (err != ESP_OK) {
+        /* Live value still took effect (unit_pref_set() updates RAM before
+         * attempting the NVS write) -- only persistence failed, same
+         * "reported but not treated as user-facing failure" convention
+         * dashboard_http.c's unit_pref_post_handler() uses for the same
+         * case. A silent log line is enough here: the label below already
+         * shows the operator the choice took effect this session. */
+        ESP_LOGW(TAG, "unit preference applied but not persisted -- will not survive a reboot");
+    }
+    units_cell_set_label();
+}
+
 /* --- Paged hub, 2026-08-21 ------------------------------------------------
  * This hub used to be a single fixed-height container that scrolled
  * internally, then (2026-08-20) a paged grid with its own bottom nav row
@@ -163,9 +211,14 @@ static void profiles_nav_cb(lv_event_t *e)
  * Three rows of two cells is six cells per page -- up from four -- so the
  * same eleven destinations now fit on two pages (6 + 5) instead of three.
  * Page assignments below were re-split accordingly. A twelfth item still
- * fits page 1 (which now holds 5 of 6); a thirteenth needs a third page, and
- * UI_CONFIG_HUB_PAGE_COUNT plus the switch in ui_page_config_build() are the
- * only two places to change.
+ * fits page 1 [sic -- page 2] (which now holds 5 of 6); a thirteenth needs a
+ * third page, and UI_CONFIG_HUB_PAGE_COUNT plus the switch in
+ * ui_page_config_build() are the only two places to change.
+ *
+ * 2026-08-21: that twelfth slot is now used -- the shared temperature-unit
+ * toggle (build_unit_toggle_item()) fills page 2's one remaining cell, so
+ * both hub pages are now full (6 + 6). A thirteenth destination genuinely
+ * needs a third page now; there is no more free room.
  *
  * The active page index is deliberately module state that survives leaving
  * this screen: kiln_ui.c never tears a page down, so a user who reaches
@@ -322,6 +375,36 @@ static void build_nav_item(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
     }
 }
 
+/* The units toggle cell -- same shape/size as build_nav_item()'s real
+ * (clickable) cells, but two-line text and its own click handler
+ * (units_toggle_cb) instead of a kiln_ui_show() navigation, and it keeps a
+ * handle to its label so units_cell_set_label() can repaint it in place
+ * after every toggle (and on rebuild, so a reboot with a saved Fahrenheit
+ * preference shows the right text immediately rather than a stale
+ * "Celsius" the operator has to tap once to correct). */
+static void build_unit_toggle_item(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_button_create(parent);
+    lv_obj_set_width(row, lv_pct(48));
+    lv_obj_set_height(row, UI_THEME_MIN_TOUCH_TARGET_PX);
+    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(row, units_toggle_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_center(label);
+
+    s_units_cell_label = label;
+    units_cell_set_label(); /* paint the real current preference, not a placeholder */
+
+    lv_obj_update_layout(row);
+    ui_theme_apply_touch_area(row, true);
+}
+
 lv_obj_t *ui_page_config_build(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
@@ -387,6 +470,11 @@ lv_obj_t *ui_page_config_build(void)
     build_nav_item(s_hub_pages[1], "Diagnostics", diagnostics_nav_cb);
     build_nav_item(s_hub_pages[1], "Thermocouple Faults", thermo_faults_nav_cb);
     build_nav_item(s_hub_pages[1], "Profiles", profiles_nav_cb);
+    /* 12th destination, in the one cell page 2 had free (5 of 6 -- confirmed
+     * against this file's own "Paged hub" comment before adding this, not
+     * assumed). See build_unit_toggle_item()'s comment for why this is an
+     * in-place toggle rather than a new kiln_ui_show() route. */
+    build_unit_toggle_item(s_hub_pages[1]);
 
     /* content is created after the topbar's icon proxy, so without this it
      * would sit above the proxy in z-order and win taps in the overlap

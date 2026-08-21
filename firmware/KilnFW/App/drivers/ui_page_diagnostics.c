@@ -14,6 +14,7 @@
 #include "nvs_flash.h"
 
 #include "board_temps.h"
+#include "unit_pref.h"
 #include "kiln_ui.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
@@ -376,7 +377,12 @@ static void refresh_cb(lv_timer_t *timer)
     board_temps_t bt;
     board_temps_get_live(&bt);
     if (bt.esp32_valid) {
-        snprintf(buf, sizeof(buf), "%.1f C", (double)bt.esp32_c);
+        /* ROADMAP.md 2026-08-21 shared unit preference -- ABSOLUTE
+         * conversion, same reasoning as ui_page_board_health.c's identical
+         * ESP32-die-temperature row. */
+        unit_pref_t unit = unit_pref_get();
+        snprintf(buf, sizeof(buf), "%.1f %s", (double)unit_pref_convert(bt.esp32_c, unit, UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(unit));
         lv_obj_set_style_text_color(s_esp32_temp_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     } else {
         snprintf(buf, sizeof(buf), "n/a");

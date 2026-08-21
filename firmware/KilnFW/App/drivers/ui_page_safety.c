@@ -41,16 +41,23 @@ static void refresh_cb(lv_timer_t *timer)
     dashboard_status_t ds;
     dashboard_get_status(&ds);
 
+    /* ROADMAP.md 2026-08-21 shared unit preference -- ABSOLUTE conversion,
+     * same reasoning as ui_page_home.c's identical block (these are live
+     * sensor readings, not rates). */
     if (ds.safety_temp_valid) {
         char buf[24];
-        snprintf(buf, sizeof(buf), "Safety temp: %.1f C", (double)ds.safety_temp_c);
+        snprintf(buf, sizeof(buf), "Safety temp: %.1f %s",
+                 (double)unit_pref_convert(ds.safety_temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(ds.temp_unit));
         lv_label_set_text(s_safety_temp_label, buf);
     } else {
         lv_label_set_text(s_safety_temp_label, "Safety temp: ---");
     }
     if (ds.enclosure_temp_valid) {
         char buf[28];
-        snprintf(buf, sizeof(buf), "Enclosure temp: %.1f C", (double)ds.enclosure_temp_c);
+        snprintf(buf, sizeof(buf), "Enclosure temp: %.1f %s",
+                 (double)unit_pref_convert(ds.enclosure_temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(ds.temp_unit));
         lv_label_set_text(s_enclosure_temp_label, buf);
     } else {
         lv_label_set_text(s_enclosure_temp_label, "Enclosure temp: ---");

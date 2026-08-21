@@ -38,6 +38,7 @@
 #include "ota_http.h"
 #include "profile_executor.h"
 #include "profiles_builtin.h"
+#include "unit_pref.h"
 #include "profiles_http.h"
 #include "readiness_http.h"
 #include "relay_cycles.h"
@@ -849,6 +850,21 @@ void app_main(void)
     // skipped, same non-fatal convention as dashboard_http_start: a missing
     // settings page is never a reason to fail app_main or touch the
     // control/safety path.
+    // 2026-08-21, ROADMAP.md "a real shared temperature-unit setting":
+    // dashboard_http_start() was already called above this block, but it
+    // only registers the handler here -- it does not read unit_pref_get()
+    // until the first request actually arrives (dashboard_get_status()),
+    // and the LCD's first redraw tick is likewise well after app_main
+    // returns, so loading the preference here (before either can be polled)
+    // is still in time for both. Same non-fatal convention as every module
+    // in this block: a failed load means Celsius for this boot only, never a
+    // reason to fail app_main.
+    esp_err_t unit_pref_err = unit_pref_start();
+    if (unit_pref_err != ESP_OK) {
+        ESP_LOGW(TAG, "unit_pref_start failed: %s -- defaulting to Celsius this boot",
+                 esp_err_to_name(unit_pref_err));
+    }
+
     esp_err_t zones_err = zones_http_start();
     if (zones_err != ESP_OK) {
         ESP_LOGW(TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",

@@ -27,6 +27,7 @@
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "safety_link.h"
+#include "unit_pref.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -200,6 +201,19 @@ typedef struct {
     size_t   heap_spiram_free;
     size_t   heap_spiram_largest_free_block;
     size_t   heap_spiram_min_free;
+
+    /* 2026-08-21, ROADMAP.md "a real shared temperature-unit setting": the
+     * device-side source of truth (unit_pref.c), read here so the LCD home
+     * page (ui_page_home.c) and GET /api/status's "temp_unit" field can never
+     * disagree about which unit is currently selected -- same
+     * shared-backend rule TODO.md 10.1a already established for every other
+     * field on this struct. DISPLAY-ONLY: nothing else in this struct (every
+     * temp_c/cj_c/safety_temp_c/etc. field above) is converted by this value
+     * -- those all stay Celsius here, exactly as before this field existed.
+     * Each renderer calls unit_pref_convert(..., temp_unit, ...) itself at
+     * the point it formats a label, which is the actual "convert at the
+     * boundary" this preference's header comment asks for. */
+    unit_pref_t temp_unit;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);

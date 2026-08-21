@@ -6,6 +6,7 @@
 #include "MAX31856.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "unit_pref.h"
 
 // TODO.md 10.7's LCD-side board-health page -- see this file's header
 // comment for why it's a separate page. Every number here comes from
@@ -56,9 +57,16 @@ static void refresh_cb(lv_timer_t *timer)
     board_temps_t bt;
     board_temps_get_live(&bt);
 
+    /* ROADMAP.md 2026-08-21 shared unit preference. unit_pref_get() is O(1)
+     * RAM-only, no need to route this through dashboard_get_status() -- see
+     * unit_pref.h. ABSOLUTE conversion in both spots below: these are live
+     * sensor readings, never rates. */
+    unit_pref_t unit = unit_pref_get();
+
     char buf[32];
     if (bt.esp32_valid) {
-        snprintf(buf, sizeof(buf), "%.1f C", (double)bt.esp32_c);
+        snprintf(buf, sizeof(buf), "%.1f %s", (double)unit_pref_convert(bt.esp32_c, unit, UNIT_PREF_KIND_ABSOLUTE),
+                 unit_pref_suffix(unit));
         lv_obj_set_style_text_color(s_esp32_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     } else {
         snprintf(buf, sizeof(buf), "n/a");
@@ -70,7 +78,9 @@ static void refresh_cb(lv_timer_t *timer)
         bool valid = (ch < bt.thermo_count) && bt.thermo_cj_valid[ch];
         char cbuf[32];
         if (valid) {
-            snprintf(cbuf, sizeof(cbuf), "%.1f C", (double)bt.thermo_cj_c[ch]);
+            snprintf(cbuf, sizeof(cbuf), "%.1f %s",
+                     (double)unit_pref_convert(bt.thermo_cj_c[ch], unit, UNIT_PREF_KIND_ABSOLUTE),
+                     unit_pref_suffix(unit));
             lv_obj_set_style_text_color(s_cj_label[ch], UI_THEME_COLOR_TEXT_PRIMARY, 0);
         } else {
             snprintf(cbuf, sizeof(cbuf), "n/a");

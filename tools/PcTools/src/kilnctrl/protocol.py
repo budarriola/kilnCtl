@@ -277,6 +277,18 @@ CONTROL_CMD_SET_ZONE_MODEL = 0x03
 #: Bytes per zone record in a GET_ZONES reply (uart_task_ids.h).
 CONTROL_ZONE_RECORD_LEN = 31
 
+# 2026-08-21 (ROADMAP.md shared unit preference): additive subcommands on the
+# existing CONTROL task -- no UART_PROTOCOL_VERSION bump, since neither
+# reorders/resizes an existing field (see uart_task_ids.h's doc comment).
+# DISPLAY-ONLY: every zone/profile temperature on this link is still Celsius
+# regardless of this setting -- see App/drivers/unit_pref.h.
+CONTROL_CMD_GET_UNIT_PREF = 0x04
+CONTROL_CMD_SET_UNIT_PREF = 0x05
+
+#: unit_pref_t wire values (App/drivers/unit_pref.h) -- 0 = Celsius, 1 = Fahrenheit.
+UNIT_PREF_CELSIUS = 0
+UNIT_PREF_FAHRENHEIT = 1
+
 # --- PROFILES subcommands (task_id = UART_TASK_ID_PROFILES) -----------------
 PROFILES_CMD_LIST = 0x01
 PROFILES_CMD_GET = 0x02

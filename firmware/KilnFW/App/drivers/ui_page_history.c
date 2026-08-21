@@ -7,6 +7,7 @@
 #include "profile_executor.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "unit_pref.h"
 #include "zones_http.h"
 
 // See ui_page_history.h for why this page exists (moved off ui_page_home.c
@@ -116,11 +117,18 @@ static void refresh_cb(lv_timer_t *timer)
         s_chart_desired_pts[i] = LV_CHART_POINT_NONE;
     }
 
+    /* ROADMAP.md 2026-08-21 shared unit preference. batch[i].actual_c/
+     * desired_c are live/target temperature READINGS (absolute, not rates),
+     * straight from profile_executor.c's history ring buffer -- that buffer
+     * itself is unaffected (still Celsius on the wire/in RAM, per
+     * unit_pref.h's display-only rule); only this chart's rendering of it
+     * converts, same boundary point as every other renderer in this pass. */
+    unit_pref_t unit = unit_pref_get();
     bool have_range = false;
     float lo = 0.0f, hi = 0.0f;
     for (size_t i = 0; i < got; i++) {
-        float a = batch[i].actual_c;
-        float d = batch[i].desired_c;
+        float a = unit_pref_convert(batch[i].actual_c, unit, UNIT_PREF_KIND_ABSOLUTE);
+        float d = unit_pref_convert(batch[i].desired_c, unit, UNIT_PREF_KIND_ABSOLUTE);
         s_chart_actual_pts[pad + i] = isnan(a) ? LV_CHART_POINT_NONE : (int32_t)lroundf(a);
         s_chart_desired_pts[pad + i] = isnan(d) ? LV_CHART_POINT_NONE : (int32_t)lroundf(d);
         if (!isnan(a)) {

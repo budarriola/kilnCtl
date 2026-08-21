@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp -- unit_pref_post_handler's "fahrenheit"/"celsius" match */
 
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -21,6 +22,7 @@
 #include "run_state.h"
 #include "sim_backend.h"
 #include "uart_task_ids.h"
+#include "unit_pref.h"
 #include "wifi_provision_http.h"
 #include "zones_http.h"
 
@@ -258,6 +260,11 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     out->heap_spiram_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+
+    /* 2026-08-21: the shared display-unit preference (unit_pref.c) -- see
+     * dashboard_http.h's field comment. unit_pref_get() is O(1) RAM-only, so
+     * this costs nothing extra on either the HTTP or LCD poll path. */
+    out->temp_unit = unit_pref_get();
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req)
@@ -434,6 +441,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
            (unsigned long)ds.heap_spiram_free, (unsigned long)ds.heap_spiram_largest_free_block,
            (unsigned long)ds.heap_spiram_min_free);
 
+    /* 2026-08-21, ROADMAP.md "a real shared temperature-unit setting":
+     * ADDITIVE field -- every field above this line is unchanged, so an
+     * older main_page.html/app.js that has never heard of "temp_unit" keeps
+     * working exactly as before. "C" or "F", matching unit_pref_suffix() --
+     * a short string rather than a bare 0/1 so a client reading this JSON by
+     * hand (or a future integration) does not have to know this firmware's
+     * internal enum encoding. DISPLAY-ONLY: nothing above this line (every
+     * temp_c/cj_c/safety_temp_c/etc.) is itself converted -- those stay
+     * Celsius; a client that wants to *show* Fahrenheit converts using this
+     * field, the same boundary point unit_pref_convert() enforces on the LCD
+     * side. */
+    APPEND(",\"temp_unit\":\"%s\"", unit_pref_suffix(ds.temp_unit));
+
     APPEND("}");
 
 #undef APPEND
@@ -576,6 +596,62 @@ static esp_err_t relay_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "relay command failed");
         return ESP_OK;
     }
+}
+
+/* ---- Unit preference (ROADMAP.md, 2026-08-21) -----------------------------
+ * POST /api/unit_pref -- the write side of the shared display-unit setting
+ * (unit_pref.c). Same application/x-www-form-urlencoded, bounded-body-then-
+ * validate-then-commit shape every other settings POST in this codebase uses
+ * (relay_post_handler above, zones_http.c's zones_post_handler). DISPLAY-ONLY:
+ * this never touches a stored/transmitted temperature anywhere else -- see
+ * unit_pref.h's header comment. */
+#define UNIT_PREF_BODY_MAX 16 /* "unit=fahrenheit" plus headroom -- generous over the ~14-byte worst case */
+
+static esp_err_t unit_pref_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > UNIT_PREF_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[UNIT_PREF_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char unit_val[12];
+    int unit_len = http_form_find_field(body, "unit", unit_val, sizeof(unit_val));
+    unit_pref_t pref;
+    /* Accepts either the short suffix ("C"/"F", matching unit_pref_suffix())
+     * or the full word ("celsius"/"fahrenheit", matching what a browser
+     * <select> naturally submits) -- case-insensitive on the full word since
+     * that one is more likely to be hand-typed by a future integration.
+     * Anything else is refused rather than defaulted, same "reject
+     * outright, never guess" discipline as zones_http.c's field parsers. */
+    if (unit_len > 0 && (strcmp(unit_val, "F") == 0 || strcasecmp(unit_val, "fahrenheit") == 0)) {
+        pref = UNIT_PREF_FAHRENHEIT;
+    } else if (unit_len > 0 && (strcmp(unit_val, "C") == 0 || strcasecmp(unit_val, "celsius") == 0)) {
+        pref = UNIT_PREF_CELSIUS;
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unit must be \"C\" or \"F\"");
+        return ESP_OK;
+    }
+
+    if (unit_pref_set(pref) != ESP_OK) {
+        /* Live value still took effect (unit_pref_set() updates RAM before
+         * attempting the NVS write) -- only persistence failed, so this is
+         * reported but not treated as a request failure the client needs to
+         * retry differently. */
+        ESP_LOGW(TAG, "unit preference applied but not persisted -- will not survive a reboot");
+    }
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 /* ---- Profile executor (TODO.md section 6) --------------------------------- */
@@ -1314,6 +1390,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t autotune_trace_uri = {
         .uri = "/api/autotune/trace.csv", .method = HTTP_GET, .handler = autotune_trace_csv_get_handler,
     };
+    static const httpd_uri_t unit_pref_uri = {
+        .uri = "/api/unit_pref", .method = HTTP_POST, .handler = unit_pref_post_handler,
+    };
     esp_err_t err = httpd_register_uri_handler(server, &status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/status) failed: %s", esp_err_to_name(err));
@@ -1397,6 +1476,11 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = httpd_register_uri_handler(server, &autotune_trace_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/autotune/trace.csv) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &unit_pref_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/unit_pref) failed: %s", esp_err_to_name(err));
         return err;
     }
 

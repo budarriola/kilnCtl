@@ -40,6 +40,7 @@
 #include "profiles_http.h"
 #include "run_state.h"
 #include "uart_task_ids.h"
+#include "unit_pref.h"
 #include "wifi_prov.h"
 #include "zones_http.h"
 
@@ -524,6 +525,24 @@ static void control_handle_message(void *vargs)
                 float tau_s = bx_f32_le(&msg.payload[6]);
                 float dead_time_s = bx_f32_le(&msg.payload[10]);
                 bool ok = zones_config_set_model(zi, k_dc, tau_s, dead_time_s);
+                bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                break;
+            }
+            case CONTROL_CMD_GET_UNIT_PREF: {
+                /* 2026-08-21 (ROADMAP.md shared unit preference): additive
+                 * QUERY-style subcommand, see uart_task_ids.h's doc comment
+                 * for why this needs no protocol version bump. */
+                uint8_t reply2[2];
+                reply2[0] = CONTROL_CMD_GET_UNIT_PREF;
+                reply2[1] = (uint8_t)unit_pref_get();
+                bx_reply(ctx->proto, &msg, UART_TASK_ID_CONTROL, reply2, sizeof(reply2));
+                break;
+            }
+            case CONTROL_CMD_SET_UNIT_PREF: {
+                if (!bx_args_ok("control", &msg, 2)) break;
+                uint8_t raw = msg.payload[1];
+                bool ok = (raw == (uint8_t)UNIT_PREF_CELSIUS || raw == (uint8_t)UNIT_PREF_FAHRENHEIT) &&
+                          unit_pref_set((unit_pref_t)raw) == ESP_OK;
                 bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
                 break;
             }
