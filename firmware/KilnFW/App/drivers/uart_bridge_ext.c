@@ -529,6 +529,14 @@ static void control_handle_message(void *vargs)
             }
             default:
                 ESP_LOGW(TAG, "control: unknown subcmd 0x%02X -- rejected", subcmd);
+                /* Every other reply path here uses bx_reply_ok_err, but an
+                 * unrecognized subcmd was falling through unanswered -- the
+                 * transport ACK (uart_protocol.c, before this switch ever
+                 * runs) already told the host "delivered", and with no reply
+                 * that looked identical to "executed". Same gap uart_bridge.c
+                 * closes with bridge_reply_unsupported(); see its comment. */
+                bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, false,
+                                "unknown subcommand");
                 break;
         }
     }
@@ -879,6 +887,8 @@ static void profiles_handle_message(void *vargs)
             }
             default:
                 ESP_LOGW(TAG, "profiles: unknown subcmd 0x%02X -- rejected", subcmd);
+                bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false,
+                                "unknown subcommand");
                 break;
         }
     }
@@ -1021,6 +1031,8 @@ static void autotune_handle_message(void *vargs)
             }
             default:
                 ESP_LOGW(TAG, "autotune: unknown subcmd 0x%02X -- rejected", subcmd);
+                bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_AUTOTUNE, subcmd, false,
+                                "unknown subcommand");
                 break;
         }
     }
@@ -1410,6 +1422,8 @@ static void wifi_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "wifi: unknown subcmd 0x%02X -- rejected", subcmd);
+                bx_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_WIFI, subcmd, false,
+                                "unknown subcommand");
                 break;
         }
     }

@@ -187,6 +187,30 @@ static void bridge_reply(uart_protocol_t *proto, const uart_proto_message_t *msg
     bridge_note_link_activity();
 }
 
+/* Sent from a bridge task's default: case -- a subcommand byte this firmware
+ * build has never heard of. uart_protocol.c's handle_raw_frame() ACKs the
+ * frame at the transport layer the instant it lands in this task's inbox,
+ * *before* the switch statement below ever runs -- that ACK only proves
+ * delivery, not that the command did anything. Falling into default: with no
+ * reply left the two indistinguishable to a host that only checks the
+ * transport ACK, which is exactly how SET_CT_CAL (commit 5fb6928) got ACKed
+ * and silently discarded: safety_bridge_task() simply had no case for it.
+ *
+ * Echoes the unrecognized subcmd byte back with an explicit ok=0 -- the same
+ * {subcmd, ok} shape uart_bridge_ext.c's bx_reply_ok_err() already uses for
+ * known-but-refused commands, so a PC client that already understands that
+ * convention needs no new parser to recognize this as a rejection. A PC
+ * client that does not read this reply is unaffected: it still only sees the
+ * transport ACK, exactly as before this change. See uart_task_ids.h and
+ * tools/PcTools' TODO for which callers need updating to actually look for
+ * it. */
+static void bridge_reply_unsupported(uart_protocol_t *proto, const uart_proto_message_t *msg,
+                                     uint8_t src_task, uint8_t subcmd)
+{
+    uint8_t reply[2] = { subcmd, 0 };
+    bridge_reply(proto, msg, src_task, reply, sizeof(reply));
+}
+
 /* An unsolicited push (an auto-report tick). Shorter ACK timeout than a reply:
  * a report that can't be delivered is stale by the time the retries run out,
  * and the next tick carries newer data anyway. */
@@ -526,6 +550,7 @@ static void thermo_bridge_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "thermo: unknown subcmd 0x%02X -- rejected", subcmd);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd);
                 rejected = true;
                 break;
         }
@@ -911,6 +936,7 @@ static void io_bridge_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "io: unknown subcmd 0x%02X -- rejected", subcmd);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_IO, subcmd);
                 rejected = true;
                 break;
         }
@@ -1180,6 +1206,7 @@ static void display_bridge_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "display: unknown subcmd 0x%02X -- rejected", subcmd);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd);
                 rejected = true;
                 break;
         }
@@ -1296,6 +1323,7 @@ static void touch_bridge_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "touch: unknown subcmd 0x%02X -- rejected", subcmd);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_TOUCH, subcmd);
                 rejected = true;
                 break;
         }
@@ -1493,6 +1521,7 @@ static void safety_bridge_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "safety: unknown subcmd 0x%02X -- rejected", subcmd);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_SAFETY, subcmd);
                 rejected = true;
                 break;
         }
@@ -1600,6 +1629,7 @@ static void system_bridge_task(void *arg)
             }
             default:
                 ESP_LOGW(TAG, "system: unknown subcmd 0x%02X -- rejected", msg.payload[0]);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_SYSTEM, msg.payload[0]);
                 break;
         }
     }
@@ -1773,6 +1803,7 @@ static void info_bridge_task(void *arg)
                 break;
             default:
                 ESP_LOGW(TAG, "info: unknown subcmd 0x%02X -- rejected", msg.payload[0]);
+                bridge_reply_unsupported(ctx->proto, &msg, UART_TASK_ID_INFO, msg.payload[0]);
                 continue;
         }
 
