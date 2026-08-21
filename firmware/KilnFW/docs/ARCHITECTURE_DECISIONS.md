@@ -116,6 +116,115 @@ the plan.
   `POST /api/unit_pref`, UART `CONTROL_CMD_GET/SET_UNIT_PREF`, and the LCD's
   Configuration-hub toggle all read/write the same setting.
 
+## LCD thermocouple-type page
+
+- Third config-hub page (`ui_page_tc_types.c`), added 2026-08-21 because both
+  existing config hub pages were genuinely full. One row per channel plus the
+  safety processor, naming the type rather than the raw nibble, cycling
+  B/E/J/K/N/R/S/T on tap. `zones_http` gained per-channel
+  `get/set_tc_type`/`set_safety_tc_type`, shaped after `get/set_pid`.
+- Deliberately does **not** push to the MAX31856 register on write: the
+  existing web `POST /api/zones` doesn't either (only the boot-time apply
+  does), so LCD and web behave identically rather than the LCD acquiring a
+  side effect the web lacks.
+
+## Config hub page 1 — the tap-target dump undercounts by design
+
+Page 1 of the Configuration hub genuinely holds 6 items; the first two are
+non-clickable "not built yet" placeholders. `kiln_ui.c`'s tap-target dump
+only lists widgets carrying `LV_OBJ_FLAG_CLICKABLE`, so those two
+placeholders never appear in a dump even though they render. Reading a
+tap-target dump as a visual layout scan will therefore misreport an empty
+top row that isn't actually empty — check the rendered page, not just the
+dump, before concluding a layout is broken.
+
+## Profile builder: Celsius-only editable fields
+
+Profile pages honour the °C/°F display preference (segments list, builder
+review) — but the profile builder's three *editable* callbacks
+(`ui_page_profile_builder_segment.c`) deliberately stay Celsius. Converting
+them needs the min/max bounds, the num pad's seed value, and the stored
+result all converted, and `ui_num_pad_params_t` has no partial-conversion
+mode. Captions read "Target C" so what's being typed is never ambiguous —
+this is a visible, intentional seam, not a wrong setpoint, and must not be
+"fixed" by an agent unaware of the constraint. Commented at the exact spots
+in the source.
+
+## Idle chart / pinned dots
+
+The dashboard chart (web `main_page.html` and LCD `ui_page_home.c`) is always
+shown above the profile-picker/Start row, rather than appearing only once a
+profile is running. While idle, current per-channel temperatures render as
+dots pinned to the left edge, updated in place (no line, no trend, no
+rightward march); a profile start hands over to the existing trend rendering
+unchanged. Deliberately no backend change — the history ring's sampling
+gate, reset-at-start, and `elapsed_s` semantics are untouched; the idle dots
+come from live readings both surfaces already poll (`/api/status` on the
+web, the same zone reading `build_zone_row()` uses on the LCD). This mattered
+because a second ring buffer would cost ~23KB against ~4167 bytes of
+internal DRAM free after LVGL start.
+
+LCD home chart is deliberately smaller/simpler than the history detail
+page's (70px vs 110px, 30 points vs 60, actual-only, no legend) — a
+content-budget trade, not an oversight; the desired-vs-actual comparison
+stays on the history page. Its 120-byte backing array is kept separate from
+`ui_page_history.c`'s arrays deliberately, since those are that chart's live
+backing store and must not be aliased across two pages.
+
+## Backup / restore
+
+`backup_http.c` + `backup_page.html` (shipped 2026-08-21) export/import a
+JSON blob that is **deliberately narrower** than the zones page: only PID
+gains, FOPDT model, per-channel tc_type, and safety tc_type round-trip,
+because those are the only four things `zones_http.h` exposes a getter *and*
+setter for. Zone name, relay/thermocouple wiring, guard thresholds, temp
+limits, and heater timing have getters only — exporting them would produce a
+file that silently fails to restore, so they're excluded and the page states
+this. Wi-Fi credentials are excluded in both directions: restoring them onto
+a board on a different network either fails outright or silently joins
+whatever shares the SSID.
+
+Export streams JSON through a 256-byte chunk buffer, never a whole-document
+heap buffer. Import validates every entry in a first pass and commits only
+in a second, so a malformed file writes nothing; an unknown version is
+refused outright rather than migrated on a guess. `ZONE_MODEL_K_MAX`/
+`ZONE_MODEL_TIME_MAX_S` were moved (not mirrored) from `zones_http.c` into
+`zones_http.h` so the validation pass and `zones_config_set_model()`'s
+commit-time check cannot drift — closes a real half-applied-restore hole
+where an out-of-range plant model was only caught after earlier entries had
+already reached NVS.
+
+Import gates on `ota_http_check_interlocks()` (safety link must be up), not
+`heat_interlock` (the latter answers "may heat run during an update", the
+opposite question) — this is a deliberate reuse of the OTA gate, not a bug,
+but it means restore is refused whenever the safety link is down. Each
+exported zone object carries a `"_":0` sentinel (`backup_http.c:214`) used
+purely as a trailing-comma guard in the streaming writer — junk in an
+otherwise user-facing format that consumers must ignore; recorded here so
+nobody "fixes" it as a stray field without understanding why it's there.
+
+## Static-IP AP-fallback fix
+
+A wrong-but-parseable static IP (bad gateway/subnet) still associates at L2,
+so `esp_netif` raises `GOT_IP` with no real DHCP exchange having happened,
+and `do_ev_got_ip()` used to tear down the fallback AP on that signal alone —
+reporting `CONNECTED` while actually unreachable. Fixed 2026-08-21: a static
+join now stays in APSTA until an HTTP request is proven to have arrived at
+the static address (`getsockname()` on the request-handling thread, since
+the socket only lives for that request; the resulting state change is
+posted to `owner_task` to preserve the single-writer invariant). DHCP join
+behavior is unchanged. Worst case is now "AP stays up longer than needed",
+never "both AP and station are down with no recovery."
+
+## Zones page advisory warnings
+
+`zones_page.html` warns (does not block) on a zone with no thermocouples
+assigned and on a channel feeding two zones. Neither condition is blocked
+because the backend contract already allows both: `zones_http.c` documents
+accepting `thermo_mask=0`, and `thermo_combine()` has no exclusivity concept.
+Refusing either in the UI would contradict what the backend already permits,
+so advisory-only is the correct behavior, not a shortcut.
+
 ## OTA-adjacent decisions
 
 - ESP first when both processors need updating (USB-recoverable, and the

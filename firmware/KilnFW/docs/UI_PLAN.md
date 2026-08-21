@@ -24,7 +24,7 @@ or restore anything below — it is a lookup, not a table of contents.
 | 3, LCD items 1-6 | Status-card overrun fix, relay-row height cap, touch-target borders, touch-cal/test budget check, config-hub grid scrolling, touch-cal Cancel button | Completed, removed (touch-hit-testing gotchas kept in `BRINGUP_HAZARDS.md`) |
 | 3, Web items 1-6 | Table `.table-scroll` wrapper, button min-height, AP-mode QR viewport, coupling-matrix zone count, fixed-width canvas audit, DHCP/static IP toggle | Completed, removed |
 | LCD: profile creation page (planned) | New profile-builder page (graph view, point stepper) | Built as `ui_page_profile_builder_{zones,segment,review}.c` — see `ARCHITECTURE_DECISIONS.md` ("Page organization"); note the shipped flow uses stepper cards, not the originally-planned graph/drag view |
-| Web: settings/profile import-export (planned) | Same feature, pre-prune draft | Still open — see "Open: settings import/export and profile import/export" above |
+| Web: settings/profile import-export (planned) | Same feature, pre-prune draft | Settings half partially built as `backup_http.c` 2026-08-21; profile half still open — see "Open: settings import/export (partial) and profile import/export" above |
 | Web: page structure rework (planned) | Route map, dashboard reorg | Built — `safety_page.html`, `diagnostics_page.html`, `manual_page.html`, `settings_page.html` trimmed to the danger zone, `main_page.html` reordered/trimmed, `nav.js`/`app.js` — see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
 | Web: global-chrome rework (planned 2026-08-21) | Drop-down nav, Home button, dashboard reorder, settings trim | Built same day — see `ARCHITECTURE_DECISIONS.md` ("Page organization", "Global chrome rework") |
 | 4 item 1 | Shared `nav.js` header + bottom nav bar | Built, then the bottom nav was deleted entirely in the chrome rework — `ARCHITECTURE_DECISIONS.md` ("Page organization") |
@@ -46,20 +46,14 @@ or tablet. and the lcd should not require scrolling." That budget rule and
 its arithmetic convention are recorded once in `ARCHITECTURE_DECISIONS.md`
 ("LVGL / LCD rendering" section) rather than re-derived per page here.
 
-## Open: settings import/export and profile import/export
+## Open: settings import/export (partial) and profile import/export
 
 Two separate import/export features, kept independent (different data,
-different failure modes if merged into one blob). **Not started** — no
-endpoints, no HTML controls, no schema audit against the real firmware
-structs yet.
+different failure modes if merged into one blob).
 
-1. **Settings import/export.** Covers board/system config — Wi-Fi networks
-   (`wifi_add_network`/`wifi_get_networks` imply an existing store), zone
-   PID/model config (`control_set_zone_pid`/`control_set_zone_model`),
-   thermocouple channel config, safety thresholds. Export as a downloadable
-   JSON file from a new control (settings hub, once built — see below);
-   import via file-picker + upload, server-side validated before applying
-   (never apply un-validated fields directly over live config).
+1. **Settings import/export** — partial (`backup_http.c`, see
+   `docs/ARCHITECTURE_DECISIONS.md` "Backup / restore"). Open items tracked
+   in `firmware/KilnFW/TODO.md` section 0.5.
 2. **Profile import/export.** Covers kiln firing profiles only
    (`profiles_save`/`profiles_get`/`profiles_list` imply existing schema) —
    export a single profile or all profiles as JSON from `profiles_page.html`,

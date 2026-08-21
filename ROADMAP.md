@@ -226,9 +226,8 @@ because it changes what a bare main board will do.
       power — built and wired to the same status cache the wire frames land
       in; reads null/"---" today because no Pico has ever sent the frames on
       this bench (M0), not because of a code gap
-- [ ] **Known open bug**: a wrong-but-parseable static IP does not trigger
-      AP-fallback's normal DHCP-timeout recovery — see
-      `firmware/KilnFW/TODO.md`'s Wi-Fi section
+- [ ] **AP-fallback fix unverified end to end** — needs a router with both
+      correct and deliberately-wrong static config; see `KilnFW/TODO.md` Wi-Fi
 
 **2026-08-20: a large batch of UI, Wi-Fi, and boot-stability bugs were found
 and fixed during a full hardware test pass** — profile/readiness reporting,

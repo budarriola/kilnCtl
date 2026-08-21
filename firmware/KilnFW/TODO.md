@@ -56,8 +56,12 @@ in the fewest taps (phone-screen constraint). Built as described.
 - ~~**Manual zone control page.**~~ **Declined by explicit user request
   (2026-08-20)** — no manual setpoint override bypassing a running profile.
   `ui_page_temperature.c` (per-zone reading + manual relay toggles) stays.
-- **Backup / restore page — OPEN, not built.** Export/import saved
-  profiles + zone/relay/network config as one blob. No blockers.
+- Backup/restore, LCD tc-type page (`docs/ARCHITECTURE_DECISIONS.md`):
+  - [ ] Restore blocked here by the safety-link interlock (unverified
+        kind/version rejection); right gate for restore vs. firmware write
+        is open. Setters still needed for `zones_http.h`'s remaining fields.
+        No host-test harness reaches `backup_http.c`/`wifi_prov.c`; export's
+        `"_":0` sentinel is cosmetic junk to ignore.
 
 **Web page structure rework — DONE (2026-08-20/21).** `settings_page.html`
 (now trimmed to just the danger zone), `manual_page.html`, `safety_page.html`,
@@ -84,11 +88,9 @@ race, coredump partition sizing, UART log congestion) — condensed writeups in
 
 Open items, not yet fixed:
 
-- [ ] **Known gap**: a wrong-but-parseable static IP (bad gateway/subnet) reaches
-      `CONNECTED` at the L2 layer, so `ap_fallback_timer`'s DHCP-timeout recovery
-      does not self-heal a bad static config — not a full lockout (switch back to
-      DHCP/AP via the same API, or power-cycle) but a real reachability edge case.
-      See `docs/UI_PLAN.md`'s web work-queue item 6.
+- [ ] **AP-fallback fix unverified end to end** (`ARCHITECTURE_DECISIONS.md`,
+      "Static-IP AP-fallback fix") — needs a router with both correct and
+      deliberately-wrong static config, plus a second device.
 - [ ] **Not exercised against a real router**: the DHCP/static toggle is
       build-verified and flashed but has no live network in this environment to
       confirm actual join behavior against.
@@ -106,9 +108,14 @@ be browsable with every card marked hardware-absent when the daughterboard/
 expander are missing, rather than crashing or lying. `docs/WEB_UI.md` has the
 full page/API inventory.
 
+Idle-state chart behavior: `docs/ARCHITECTURE_DECISIONS.md`, "Idle chart / pinned dots".
+
 - [ ] **Still polled (2s), not pushed.** `CONFIG_HTTPD_WS_SUPPORT` is off; not
       yet justified. Revisit (WebSocket or SSE) if 2s polling proves too coarse
       once real hardware is attached and watched during a firing.
+- [ ] **Pixel-level appearance of the idle dots was not visually confirmed**
+      — no framebuffer readback and the browser was not driven during
+      verification; only the API/serving behavior was checked.
 
 ## 3. Web UI — Settings page
 
@@ -127,6 +134,9 @@ design in `docs/ARCHITECTURE_DECISIONS.md`).
 Max-ramp-rate ceiling is a **user-entered** value (`max_ramp_c_per_hr`), not
 estimated from PID tuning/observed performance — the estimated alternative was
 deliberately left undesigned as "more work, needs a design of its own."
+(Profile-page °C/°F display and its builder-editable-field seam:
+`docs/ARCHITECTURE_DECISIONS.md`, "Profile builder: Celsius-only editable
+fields".)
 
 ## 4. Web UI — Network settings page — DONE, folded into section 1
 
@@ -867,9 +877,6 @@ both read the same `board_temps_get_live()` getter (10.1a''s shared-backend
 rule) — deliberately a separate page/route from the main dashboard, since
 this is board-health diagnostic data, not kiln-process data.
 
-- [ ] **No styled web *page* for `GET /api/board_temps`** — only the LCD side
-      got a page this pass; the JSON endpoint has no HTML equivalent yet.
-
 ### 10.8 Multi-thermocouple-per-zone (cross-reference: section 3)
 
 DONE — a zone can have more than one thermocouple assigned
@@ -883,11 +890,6 @@ host-tested `App/drivers/thermo_combine.{c,h}`. Both `profile_executor.c`
 path consume the combined value; `thermal_guard.c`'s guard 6 extends to
 "all assigned thermocouples invalid" for free, since it was already written
 against an opaque `sensor_ok` bool.
-
-- [ ] **`zones_page.html` has no UI for assigning more than one channel to a
-      zone.** The config model, combiner, and control/guard read paths all
-      support it; only the web settings page to actually set a multi-bit
-      `thermo_mask` is missing (MCP/API callers can still set it directly).
 
 ### 10.9 LCD network settings page + QR codes for AP/site connect
 
@@ -911,10 +913,6 @@ build a non-working image. All now pinned in the committed
 mode, each verified by deleting `sdkconfig` and reconfiguring from
 `sdkconfig.defaults` alone. Worth checking this class of gap again after any
 future menuconfig change.
-
-- [ ] **Editing the board''s own AP SSID/password from the LCD is not
-      built** — `ui_page_network.c` shows them read-only;
-      `wifi_provision_page.html` remains the only way to change them.
 
 ### 10.10 Safety processor GUI panel (ROADMAP.md M6)
 
