@@ -123,7 +123,12 @@ function faultText(bits) {
   return FAULT_BITS.filter(([b]) => bits & b).map(([, t]) => t).join(', ');
 }
 
+// Cached so the °C/°F toggle (app.js's kcUnit) can re-render immediately on
+// change rather than waiting up to 2s for the next poll() tick -- see the
+// 'kcunitchange' listener near the bottom of this script block.
+var lastChannelsData = null;
 function renderChannels(data) {
+  lastChannelsData = data;
   const el = document.getElementById('channels');
   if (!data.thermo_ready) {
     el.innerHTML = '<p class="empty">No thermocouple board attached.</p>';
@@ -135,6 +140,10 @@ function renderChannels(data) {
     div.className = 'card';
     let detail;
     if (ch.spi_failed) {
+      // Not a reading at all (the transport failed), so no kc-live-value --
+      // dimming a "SPI read failed" fault label on disconnect would suggest
+      // the fault itself might be stale/wrong, when it is exactly as current
+      // as any other fault_status bit already read this poll.
       detail = '<span class="fault">SPI read failed</span>';
     } else if (!ch.valid) {
       detail = '<span class="fault">' + (faultText(ch.fault_status) || 'invalid reading') + '</span>';
@@ -148,7 +157,12 @@ function renderChannels(data) {
       } else if (ch.stale) {
         staleTag = ' <span class="stale">(stale, ' + (ch.age_ms / 1000).toFixed(0) + 's old)</span>';
       }
-      detail = ch.temp_c.toFixed(1) + ' &deg;C (CJ ' + ch.cj_c.toFixed(1) + ' &deg;C)' + staleTag;
+      // Process temp and cold-junction temp are both live device readings --
+      // kc-live-value on each independently (not the whole <span class=temp>)
+      // so the staleTag text itself, which already says "stale"/"no reading
+      // yet" in words, isn't ALSO dimmed on top of its own wording.
+      detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' +
+               ' (CJ <span class="kc-live-value">' + window.kcUnit.fmt(ch.cj_c) + '</span>)' + staleTag;
     }
     div.innerHTML = '<span>Channel ' + ch.channel + '</span><span class="temp">' + detail + '</span>';
     el.appendChild(div);
@@ -231,6 +245,15 @@ function zoneName(zi) {
 // picker below. The banner exists to answer the question a brownout leaves
 // behind -- "did it stop because I stopped it, or because the power went
 // out" -- and then get out of the way once acknowledged.
+// Deliberately NO kc-live-value anywhere in this banner: TODO.md 6A.3 /
+// this function's own header comment already establish that this is a
+// report on a firing that is ALREADY OVER, not live status -- the numbers
+// here (target_c, segment progress) describe a past moment, frozen at
+// write time, and don't change or go stale when the current connection
+// drops. Dimming them on disconnect would falsely imply they're a live
+// reading whose truth depends on the device answering right now; they
+// aren't. The °C figure below still runs through kcUnit.fmt() for unit
+// parity, just without the live-value class.
 function renderLastRun(st) {
   const el = document.getElementById('lastRunBanner');
   const lr = st.last_run;
@@ -248,7 +271,7 @@ function renderLastRun(st) {
       ' &mdash; ' + (names.join(', ') || 'no zones') + '</span></div>' +
     '<div class="row"><span>Segment</span><span>' + (lr.segment_index + 1) + ' / ' + lr.segment_count +
       ' (' + (lr.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
-    '<div class="row"><span>Target at that point</span><span>' + lr.target_c.toFixed(1) + ' &deg;C</span></div>' +
+    '<div class="row"><span>Target at that point</span><span>' + window.kcUnit.fmt(lr.target_c) + '</span></div>' +
     '<div class="row"><span>Into the segment</span><span>' + fmtDuration(lr.segment_elapsed_s) + '</span></div>' +
     // Uptime, not a clock time: the board has no RTC and no guaranteed SNTP,
     // so an absolute timestamp here would be fabricated. See run_state.h.
@@ -269,7 +292,15 @@ function renderLastRun(st) {
   });
 }
 
+// This card is the live-status opposite of renderLastRun above: everything
+// in it -- exec state, segment/dwell progress, target and per-zone actual
+// temperatures, relay on/off -- describes what the board is doing RIGHT NOW
+// and goes stale the instant the connection heartbeat (app.js) starts
+// failing, so it all gets kc-live-value. Zone names and the profile title
+// are config, not readings -- left unmarked.
+var lastExecStData = null;
 function renderExec(st) {
+  lastExecStData = st;
   const card = document.getElementById('execCard');
   const picker = document.getElementById('runPicker');
   if (st.state === 'idle') {
@@ -285,29 +316,29 @@ function renderExec(st) {
   let html = '<div class="exec-card">' +
     '<div class="row"><span>' + (profileTitleById[st.profile_id] || st.profile_name) +
     ' &mdash; ' + zoneNames.join(', ') + '</span>' +
-    '<span class="exec-state state-' + st.state + '">' + st.state + '</span></div>' +
-    '<div class="row"><span>Segment</span><span>' + (st.segment_index + 1) + ' / ' + st.segment_count +
+    '<span class="exec-state state-' + st.state + ' kc-live-value">' + st.state + '</span></div>' +
+    '<div class="row"><span>Segment</span><span class="kc-live-value">' + (st.segment_index + 1) + ' / ' + st.segment_count +
     ' (' + (st.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
-    '<div class="row"><span>Shared target</span><span>' + st.target_c.toFixed(1) + ' &deg;C</span></div>';
+    '<div class="row"><span>Shared target</span><span class="kc-live-value">' + window.kcUnit.fmt(st.target_c) + '</span></div>';
   if (st.ramp_lock_held) {
     var laggingNames = [];
     for (var lb = 0; lb < 8; lb++) { if (st.ramp_lock_lagging_mask & (1 << lb)) laggingNames.push(zoneName(lb)); }
-    html += '<div class="row fault"><span>Ramp-lock held</span><span>waiting on ' +
+    html += '<div class="row fault"><span>Ramp-lock held</span><span class="kc-live-value">waiting on ' +
             (laggingNames.join(', ') || 'a zone') + '</span></div>';
   }
   (st.zones || []).forEach(function (z) {
-    html += '<div class="row"><span>' + zoneName(z.zone) + '</span><span>' +
-      (z.actual_valid ? z.actual_c.toFixed(1) + ' &deg;C' : 'no reading') +
+    html += '<div class="row"><span>' + zoneName(z.zone) + '</span><span class="kc-live-value">' +
+      (z.actual_valid ? window.kcUnit.fmt(z.actual_c) : 'no reading') +
       (z.faulted ? ' &mdash; FAULTED' : (z.relay_on ? ' &mdash; ON' : ' &mdash; off')) + '</span></div>';
     if (z.faulted) {
-      html += '<div class="row fault">' + zoneName(z.zone) + ': ' + z.fault_reason + '</div>';
+      html += '<div class="row fault kc-live-value">' + zoneName(z.zone) + ': ' + z.fault_reason + '</div>';
     }
   });
   if (st.dwelling && st.state === 'running') {
-    html += '<div class="row"><span>Dwell remaining</span><span>' + fmtDuration(st.dwell_remaining_s) + '</span></div>';
+    html += '<div class="row"><span>Dwell remaining</span><span class="kc-live-value">' + fmtDuration(st.dwell_remaining_s) + '</span></div>';
   }
   if (st.state === 'faulted' && st.fault_reason) {
-    html += '<div class="row fault">' + st.fault_reason + '</div>';
+    html += '<div class="row fault kc-live-value">' + st.fault_reason + '</div>';
   }
   html += '</div>';
 
@@ -391,6 +422,15 @@ function parseHistoryCsv(text) {
   return rows;
 }
 
+// The chart canvas itself carries no kc-live-value: a <canvas> is one opaque
+// bitmap to the DOM, not text nodes/elements the .kc-stale rule's opacity
+// selector can reach, and re-drawing it fully transparent on every stale
+// tick just to fake the same dimming effect would be a second, duplicate
+// staleness indicator fighting the one the banner already gives (this data
+// is also on a materially slower 15s poll than the 2-3s heartbeat, so its
+// own staleness lags the banner's anyway). The axis/legend TEXT this
+// function draws is still unit-converted below for UI_PLAN.md item 7 parity,
+// same as every other on-screen °C figure.
 function drawHistoryChart(rows) {
   var canvas = document.getElementById('historyChart');
   var empty = document.getElementById('historyEmpty');
@@ -438,8 +478,8 @@ function drawHistoryChart(rows) {
   ctx.strokeRect(padL, padT, plotW, plotH);
 
   ctx.fillStyle = muted; ctx.font = '10px sans-serif';
-  ctx.fillText(tMaxV.toFixed(0) + 'C', 2, padT + 8);
-  ctx.fillText(tMinV.toFixed(0) + 'C', 2, padT + plotH);
+  ctx.fillText(window.kcUnit.toDisplay(tMaxV).toFixed(0) + window.kcUnit.label(), 2, padT + 8);
+  ctx.fillText(window.kcUnit.toDisplay(tMinV).toFixed(0) + window.kcUnit.label(), 2, padT + plotH);
   ctx.fillText('1.0', cssW - padR + 4, padT + 8);
   ctx.fillText('0.0', cssW - padR + 4, padT + plotH);
 
@@ -498,6 +538,15 @@ loadZones().then(function () { loadProfileList(); poll(); });
 pollHistory();
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
 window.addEventListener('resize', pollHistory);
+
+// UI_PLAN.md item 7: re-render immediately on a °C/°F toggle instead of
+// waiting out poll()'s own 2s interval -- re-uses the last payload each
+// render function already cached rather than re-fetching from the board.
+window.addEventListener('kcunitchange', function () {
+  if (lastChannelsData) renderChannels(lastChannelsData);
+  if (lastExecStData) { renderExec(lastExecStData); renderLastRun(lastExecStData); }
+  pollHistory();
+});
 
 (function () {
   var btn = document.getElementById('themeBtn');

@@ -127,13 +127,24 @@ if the Pico's diagnostics are too stale to trust.</p>
   function set(id, text, cls) {
     var el = document.getElementById(id);
     el.textContent = text;
-    el.className = 'value' + (cls ? ' ' + cls : '');
+    el.className = 'value kc-live-value' + (cls ? ' ' + cls : '');
   }
-  function fmtC(v) { return (v == null) ? 'n/a' : v.toFixed(1) + ' °C'; }
+  function fmtC(v) { return window.kcUnit.fmt(v); }
 
   var lastTripLatched = false;
+  var lastSafetyStatus = null;
 
+  // Every row on this page is either the safety link's current state (link
+  // status, protocol negotiation, diag counters) or an actively-latched
+  // trip -- there is no static config or build-time constant here at all,
+  // so set()/row() mark kc-live-value unconditionally rather than threading
+  // a flag through every call site. The trip card's Age/temperature/
+  // threshold stay live too, even though they describe a past trip moment,
+  // because the trip is still LATCHED (current alarm state) until cleared --
+  // unlike main_page.html's last-run banner, which reports a firing that is
+  // already fully over either way.
   function render(st) {
+    lastSafetyStatus = st;
     set('safetyReady', st.safety_ready ? 'linked' : 'not linked', st.safety_ready ? 'ok' : 'warn');
 
     if (!st.link_version_known) {
@@ -186,7 +197,7 @@ if the Pico's diagnostics are too stale to trust.</p>
   }
 
   function row(label, value) {
-    return '<div class="row"><span class="label">' + escHtml(label) + '</span><span class="value">' +
+    return '<div class="row"><span class="label">' + escHtml(label) + '</span><span class="value kc-live-value">' +
            escHtml(value) + '</span></div>';
   }
   function hex(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(2, '0'); }
@@ -258,6 +269,12 @@ if the Pico's diagnostics are too stale to trust.</p>
   });
   poll();
   schedule();
+
+  // UI_PLAN.md item 7: re-render the two temperature rows in the new unit
+  // immediately on toggle, from the cached last-good payload.
+  window.addEventListener('kcunitchange', function () {
+    if (lastSafetyStatus) render(lastSafetyStatus);
+  });
 })();
 </script>
 </body>

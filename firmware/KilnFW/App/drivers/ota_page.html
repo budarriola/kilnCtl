@@ -285,20 +285,25 @@ function setPickersVisible(visible) {
   document.getElementById('picoPicker').style.display = visible ? '' : 'none';
 }
 
+// Whether the kiln is idle right now is exactly a live device reading (a
+// firing that starts a second after this loads makes "Idle" wrong
+// immediately) -- kc-live-value on the box's text, same class the box
+// itself already carries for its ready/blocker styling.
 function loadInterlock() {
   var box = document.getElementById('interlockBox');
+  box.classList.add('kc-live-value');
   return fetch('/api/ota/interlock').then(function (r) { return r.json(); }).then(function (s) {
     if (s.ok) {
-      box.className = 'ready';
+      box.className = 'ready kc-live-value';
       box.textContent = 'Idle -- updates are allowed.';
     } else {
-      box.className = 'blocker';
+      box.className = 'blocker kc-live-value';
       box.textContent = 'Blocked: ' + (s.reason || 'kiln is not idle');
     }
     setPickersVisible(s.ok);
     return s.ok;
   }).catch(function () {
-    box.className = 'blocker';
+    box.className = 'blocker kc-live-value';
     box.textContent = 'Could not read interlock state -- assume blocked.';
     setPickersVisible(false);
     return false;
@@ -309,6 +314,16 @@ function loadInterlock() {
  * GET /api/ota/esp/status -- phase/percent/version/commit/dirty/build_date/
  * active_slot/inactive_slot/inactive_version/last_update (App/drivers/
  * ota_http.c, extended this session -- see TODO.md 9.6). */
+// version/commit/build_date are exactly the "build-time constants like
+// firmware version" the live-reading definition excludes explicitly -- they
+// don't change between polls of a board that hasn't been reflashed, so no
+// kc-live-value. active_slot/inactive_slot are also which-partition-is-
+// which config, not a moment-to-moment reading. last_update is a report on
+// an update that already finished -- same "already over" reasoning as
+// main_page.html's renderLastRun, so it stays unmarked too. The progress bar
+// (phase/percent) is the one thing here that is genuinely live: it only
+// exists while a write/verify is actively in flight and is meaningless the
+// instant the connection to report it drops.
 function renderEspInfo(s) {
   var info = document.getElementById('espInfo');
   info.innerHTML =
@@ -332,6 +347,7 @@ function renderEspInfo(s) {
 
   var wrap = document.getElementById('espProgressWrap');
   var bar = document.getElementById('espProgressBar');
+  bar.classList.add('kc-live-value');
   if (s.phase === 'writing' || s.phase === 'verifying' || s.phase === 'finalizing') {
     wrap.style.display = '';
     bar.style.width = s.percent + '%';
@@ -365,9 +381,13 @@ function pollEspStatus() {
  * also no A/B "active/inactive slot" concept on the Pico side in this
  * protocol at all -- the RP2040 has one firmware image, not two OTA
  * partitions -- so this section has no slot row, unlike the ESP one. */
+// Same live/static split as renderEspInfo above: protocol_version is fixed
+// per firmware build (not a moment-to-moment reading), so unmarked; relay
+// phase and the last relay error are both current link/relay state and get
+// kc-live-value.
 function renderPicoInfo(s) {
   var info = document.getElementById('picoInfo');
-  var html = '<dt>Relay phase</dt><dd>' + s.phase + '</dd>';
+  var html = '<dt>Relay phase</dt><dd class="kc-live-value">' + s.phase + '</dd>';
   if (s.protocol_version_known) {
     html += '<dt>Protocol version</dt><dd>' + s.protocol_version +
       ' (min compatible ' + s.protocol_min_compatible + ')</dd>' +
@@ -377,12 +397,13 @@ function renderPicoInfo(s) {
   }
   html += '<dt>Build commit / date</dt><dd>not available over this link -- see page source comment</dd>';
   if (s.last_error) {
-    html += '<dt>Last relay error</dt><dd>' + s.last_error + '</dd>';
+    html += '<dt>Last relay error</dt><dd class="kc-live-value">' + s.last_error + '</dd>';
   }
   info.innerHTML = html;
 
   var wrap = document.getElementById('picoProgressWrap');
   var bar = document.getElementById('picoProgressBar');
+  bar.classList.add('kc-live-value');
   var active = ['begin', 'erasing', 'sending', 'retransmit', 'finishing'].indexOf(s.phase) !== -1;
   if (active) {
     wrap.style.display = '';

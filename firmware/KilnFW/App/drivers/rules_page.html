@@ -135,10 +135,14 @@ function loadCycles() {
       body.innerHTML = '<tr><td colspan="2">No count reported.</td></tr>';
       return;
     }
+    // Lifetime relay-cycle counts are read live off /api/status (same
+    // endpoint the dashboard uses) and climb over the board's actual
+    // operating life -- a genuine live reading, not a static spec sheet
+    // number, so kc-live-value applies to the count cell.
     var html = '';
     for (var i = 0; i < cycles.length; i++) {
       var warn = cycles[i] >= 80000 ? ' style="color:#b00"' : '';
-      html += '<tr><td>' + (i + 1) + '</td><td' + warn + '>' + cycles[i].toLocaleString() + '</td></tr>';
+      html += '<tr><td>' + (i + 1) + '</td><td class="kc-live-value"' + warn + '>' + cycles[i].toLocaleString() + '</td></tr>';
     }
     body.innerHTML = html;
   }).catch(function () {

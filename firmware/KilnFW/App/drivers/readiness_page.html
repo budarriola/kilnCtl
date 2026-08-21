@@ -110,11 +110,16 @@ firing; it is a checklist, not a gate.</p>
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       var mark = MARK[it.status] || '?';
+      // mark/detail are the live checklist verdict and its live-measured
+      // explanation (each item's current status/detail as read this poll,
+      // per readiness_http.c) -- kc-live-value on both. it.label is the
+      // item's fixed name ("Wi-Fi configured", etc.), never changes with the
+      // board's state, so it stays unmarked.
       html += '<div class="item status-' + it.status + '">' +
-              '<div class="mark">' + mark + '</div>' +
+              '<div class="mark kc-live-value">' + mark + '</div>' +
               '<div class="body">' +
               '<div class="label">' + esc(it.label) + '</div>' +
-              '<div class="detail">' + esc(it.detail) + '</div>' +
+              '<div class="detail kc-live-value">' + esc(it.detail) + '</div>' +
               (it.fix_url ? '<a class="fix" href="' + esc(it.fix_url) + '">Fix this &rarr;</a>' : '') +
               '</div></div>';
     }

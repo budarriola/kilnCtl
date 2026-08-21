@@ -77,6 +77,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/thermo_task.c
     src/tasks/current_task.c
     src/tasks/uart_owner.c
+    src/tasks/console_uart.c
     src/tasks/link_frame.c
     src/tasks/link_task.c
     src/tasks/reboot_announce.c

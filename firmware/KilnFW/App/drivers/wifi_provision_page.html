@@ -664,13 +664,20 @@ function renderStatus(s) {
   var rows = document.getElementById('statusRows');
   rows.innerHTML = '';
 
-  function addRow(label, value) {
+  // addRow's optional `live` flag marks the value cell kc-live-value.
+  // Mode/mDNS-hostname/AP-network-name are this board's configuration (what
+  // it's set to), not a reading that goes stale on disconnect, so those stay
+  // unmarked; connection Status, IP address, Signal (RSSI), and connected-
+  // client count all describe the link's condition RIGHT NOW and are exactly
+  // the "Wi-Fi RSSI"/"link stats" examples the live-reading definition names
+  // explicitly, so those are marked.
+  function addRow(label, value, live) {
     var li = document.createElement('li');
     var labelEl = document.createElement('span');
     labelEl.className = 'status-label';
     labelEl.textContent = label;
     var valueEl = document.createElement('span');
-    valueEl.className = 'status-value';
+    valueEl.className = 'status-value' + (live ? ' kc-live-value' : '');
     valueEl.textContent = value;
     li.appendChild(labelEl);
     li.appendChild(valueEl);
@@ -682,19 +689,19 @@ function renderStatus(s) {
   if (s.mode === 'home') {
     addRow('Status', s.state === 'connected' ? 'Connected' :
                       s.state === 'connecting' ? 'Joining…' :
-                      s.state === 'reconnecting' ? 'Reconnecting…' : 'Not connected');
+                      s.state === 'reconnecting' ? 'Reconnecting…' : 'Not connected', true);
     if (s.ssid && s.state !== 'unprovisioned') {
-      addRow('Network', s.ssid || '—');
+      addRow('Network', s.ssid || '—', true);
     }
     if (s.sta_ip) {
-      addRow('IP Address', s.sta_ip);
+      addRow('IP Address', s.sta_ip, true);
     }
     if (s.sta_connected) {
       var rssiEl = document.createElement('li');
       var label = document.createElement('span');
       label.className = 'status-label'; label.textContent = 'Signal';
       var value = document.createElement('span');
-      value.className = 'status-value ' + rssiClass(s.sta_rssi);
+      value.className = 'status-value kc-live-value ' + rssiClass(s.sta_rssi);
       value.textContent = rssiBar(s.sta_rssi);
       rssiEl.appendChild(label); rssiEl.appendChild(value);
       rows.appendChild(rssiEl);
@@ -702,7 +709,7 @@ function renderStatus(s) {
   } else {
     addRow('Status', 'Active');
     addRow('AP Network', s.ap_ssid || '—');
-    addRow('Clients', s.ap_clients || '0');
+    addRow('Clients', s.ap_clients || '0', true);
   }
 
   addRow('mDNS', 'kilnctl.local');

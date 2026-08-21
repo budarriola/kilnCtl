@@ -67,11 +67,14 @@ function setRelay(relay, on) {
   }).then(poll).catch(poll);
 }
 
+// The button's ON/OFF text and its relay-on/relay-off styling are both a
+// live relay-state reading (this poll's /api/status), not a static label --
+// kc-live-value alongside the existing state classes.
 function relayRow(r) {
   const div = document.createElement('div');
   div.className = 'card';
   const btn = document.createElement('button');
-  btn.className = 'relay-toggle ' + (r.on ? 'relay-on' : 'relay-off');
+  btn.className = 'relay-toggle kc-live-value ' + (r.on ? 'relay-on' : 'relay-off');
   btn.textContent = r.on ? 'ON' : 'OFF';
   btn.addEventListener('click', function () {
     var turningOn = !r.on;

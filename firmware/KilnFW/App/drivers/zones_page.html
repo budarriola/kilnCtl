@@ -209,7 +209,15 @@ across a band twice this wide)</label>
 <h3>Run status</h3>
 <button id="atAbortBtn" type="button">Abort</button>
 <button id="atAcceptBtn" type="button" disabled>Accept proposed gains</button>
-<p id="atStatus" class="hint">Idle.</p>
+<!-- kc-live-value on the whole paragraph rather than per-field spans: while
+     a test is running this line IS the live status (elapsed time, sample
+     count, current temperature, cycle progress) and should dim the instant
+     the connection heartbeat fails, same as any other live reading. Once a
+     run is 'done' the line becomes a settled measured result rather than a
+     live figure, but leaving the class on is harmless there -- a finished
+     result still came from the board and a disconnect still means it can't
+     be refreshed/re-verified right now. -->
+<p id="atStatus" class="hint kc-live-value">Idle.</p>
 
 <h3>Cross-zone coupling matrix</h3>
 <p class="hint">Filled in one row at a time: when zone i's autotune step test
@@ -497,12 +505,12 @@ function pollAutotune() {
     var el = document.getElementById('atStatus');
     var acceptBtn = document.getElementById('atAcceptBtn');
     var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + s.zone + ', ' + s.elapsed_s + 's elapsed, ' +
-               s.sample_count + ' samples' + (s.actual_valid ? ', ' + s.actual_c.toFixed(1) + '°C now' : '') + '.';
+               s.sample_count + ' samples' + (s.actual_valid ? ', ' + window.kcUnit.fmt(s.actual_c) + ' now' : '') + '.';
     /* Cycle progress is the only honest progress bar a relay run has: the
        elapsed time says nothing about how far along it is, because how long a
        cycle takes is the quantity being measured. */
     if (s.method === 'relay' && (s.state === 'relay_approach' || s.state === 'relay_cycling')) {
-      line += ' Target ' + s.relay_setpoint_c.toFixed(0) + '°C, d=' + s.relay_d.toFixed(2) +
+      line += ' Target ' + window.kcUnit.toDisplay(s.relay_setpoint_c).toFixed(0) + window.kcUnit.label() + ', d=' + s.relay_d.toFixed(2) +
               ', h=±' + s.relay_h_c.toFixed(1) + '°C, ' + s.relay_cycles_seen + ' of ' +
               s.relay_cycles_target + ' cycles complete.';
     }
@@ -510,6 +518,12 @@ function pollAutotune() {
       line += ' Reason: ' + s.abort_reason;
     }
     if (s.state === 'done' && s.method === 'relay' && s.relay_valid) {
+      // relay_h_c is a hysteresis HALF-WIDTH (a delta/span, like the ramp
+      // rates elsewhere), not an absolute temperature reading, so it is left
+      // in raw °C -- converting a delta the same way as an absolute reading
+      // would silently change its meaning (a 2.0°C band is not "35.6" of
+      // anything in °F terms without also converting the *scale*, which
+      // would need deg-per-deg math this page doesn't otherwise do).
       line += ' Measured Ku=' + s.relay_ku.toFixed(4) + ' duty/°C, Tu=' + s.relay_tu_s.toFixed(0) +
               's (' + (s.relay_tu_s / 60).toFixed(1) + ' min), amplitude ±' + s.relay_amplitude_c.toFixed(1) +
               '°C over ' + s.relay_cycles_used + ' cycles. Proposed (' + s.rule + ') Kp=' +

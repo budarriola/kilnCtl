@@ -112,7 +112,16 @@ the same measurement.</p>
     return d.innerHTML;
   }
 
+  // Every field this page shows -- fault bits, FAULT pin, SPI transport
+  // health, staleness, cold-junction temperature, and the matched zone's
+  // control fault_guard -- is a live per-channel reading straight off this
+  // poll's /api/status and /api/profile_exec, so the whole per-channel card
+  // is marked kc-live-value (title excepted: "Channel N" is just the fixed
+  // channel index, not a reading). CJ temp also runs through kcUnit.fmt for
+  // unit parity (UI_PLAN.md item 7).
+  var lastStatus = null, lastExecSt = null;
   function render(st, execSt) {
+    lastStatus = st; lastExecSt = execSt;
     var channels = st.channels || [];
     var zones = (execSt && execSt.zones) || [];
     var el = document.getElementById('channels');
@@ -129,13 +138,13 @@ the same measurement.</p>
       for (var z = 0; z < zones.length; z++) {
         if (zones[z].zone === c.channel) { zone = zones[z]; break; }
       }
-      html += '<div class="chan' + (faulted ? ' faulted' : '') + '">' +
+      html += '<div class="chan kc-live-value' + (faulted ? ' faulted' : '') + '">' +
               '<div class="title">Channel ' + c.channel + '</div>' +
               '<div class="faults ' + (c.fault_status ? 'faulted' : 'ok') + '">' + escHtml(summary) + '</div>' +
               '<div class="subrow">FAULT pin: ' + (c.fault_status ? '<span class="bad">yes</span>' : 'no') +
               '  &middot;  SPI: ' + (c.spi_failed ? '<span class="bad">FAILED</span>' : 'ok') +
               '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
-              '  &middot;  CJ: ' + (c.cj_c != null ? c.cj_c.toFixed(1) + ' °C' : 'n/a') + '</div>' +
+              '  &middot;  CJ: ' + window.kcUnit.fmt(c.cj_c) + '</div>' +
               (zone ? '<div class="subrow">Control fault_guard: ' +
                      (zone.faulted ? '<span class="bad">' + escHtml(zone.fault_guard) + '</span>' : 'none') +
                      '</div>' : '') +
@@ -181,6 +190,12 @@ the same measurement.</p>
   });
   poll();
   schedule();
+
+  // UI_PLAN.md item 7: re-render CJ temperatures in the new unit immediately
+  // on toggle, from the cached last-good payload.
+  window.addEventListener('kcunitchange', function () {
+    if (lastStatus) render(lastStatus, lastExecSt);
+  });
 })();
 </script>
 </body>

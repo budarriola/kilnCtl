@@ -31,6 +31,7 @@
 #include "max31856.h"
 #include "spi_owner.h"
 
+#include "tasks/console_uart.h"
 #include "tasks/current_task.h"
 #include "tasks/discrete_task.h"
 #include "tasks/link_task.h"
@@ -39,6 +40,7 @@
 #include "tasks/safety_core.h"
 #include "tasks/thermo_task.h"
 #include "tasks/uart_owner.h"
+#include "tasks/update_task.h"
 #include "tasks/watchdog_task.h"
 
 #define SAFTYFW_WATCHDOG_TIMEOUT_MS 1000
@@ -82,6 +84,15 @@ int main(void)
     gpio_init(SAFTYFW_PIN_RELAY);
     gpio_put(SAFTYFW_PIN_RELAY, 0);      // set the output latch to LOW before...
     gpio_set_dir(SAFTYFW_PIN_RELAY, GPIO_OUT); // ...making the pin an output, so it is never briefly undriven-low/undriven-high
+
+    // Console UART0 (GP16/GP17, debug probe bridge) as early as possible --
+    // ahead of even stdio/watchdog/config, deliberately, so a hang or crash
+    // anywhere below this line still leaves a boot banner on the wire. This
+    // is the M0 liveness proof: a console that comes up before anything that
+    // could go wrong has had a chance to. See console_uart.h and
+    // docs/HARDWARE.md section 7b.
+    console_uart_init();
+    console_uart_puts("\r\n=== SaftyFW boot ===\r\n");
 
     // stdio/clocks: safe to bring up now that GPIO6 is settled. Needed for
     // SAFTYFW_ENABLE_USB_STDIO builds later (TODO.md Phase 2) and harmless
@@ -214,6 +225,15 @@ int main(void)
     (void)current_task_start();
     (void)link_task_start();
     (void)log_task_start();
+    // update_task registered a WATCHDOG_CHECKIN_UPDATE_TASK bit (Phase 10)
+    // but was never actually started here -- that bit could then never be
+    // set, s_checkin_mask could never equal WATCHDOG_CHECKIN_ALL_MASK, and
+    // watchdog_task_fn() (watchdog_task.c) would never call watchdog_update(),
+    // so the 1 s hardware watchdog fired forever. Root cause of the bench
+    // reset loop found 2026-08-21; see ROADMAP.md.
+    (void)update_task_start();
+
+    console_uart_puts("SaftyFW: tasks started, entering scheduler\r\n");
 
     // --- Step 8/9: GRACE -> ARMED. ---------------------------------------------
     // Built (Phase 5, 2026-08-16): relay_owner's own INIT/GRACE/ARMED/

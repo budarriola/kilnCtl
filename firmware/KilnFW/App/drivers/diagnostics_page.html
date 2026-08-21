@@ -141,30 +141,44 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     return (d > 0 ? d + 'd ' : '') + pad(h) + ':' + pad(m) + ':' + pad(sec);
   }
-  function set(id, text) { document.getElementById(id).textContent = text; }
+  function set(id, text, live) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.classList.toggle('kc-live-value', !!live);
+  }
 
   var lastGoodAt = null;
   var failCount = 0;
+  var lastStatus = null, lastBoardTemps = null;
 
+  // set()'s third arg marks the value kc-live-value. fw_version/fw_build are
+  // exactly the "build-time constants like firmware version" the live-
+  // reading definition excludes -- unmarked. reset_reason describes a single
+  // past event (this boot's start), not a figure that changes poll to poll,
+  // so it stays unmarked too (same reasoning as main_page.html's last-run
+  // banner: a fact about something already over). Uptime, both heap
+  // sections, subsystem readiness, zone-config validity, and power draw are
+  // all named explicitly by the live-reading definition ("heap/uptime
+  // figures") or are clearly the board's current state -- all marked.
   function renderStatus(st) {
     set('fwVersion', st.fw_version_known ? (st.fw_version || 'n/a') : 'n/a');
     set('fwBuild', st.fw_version_known ? (st.fw_build || 'n/a') : 'n/a');
-    set('uptime', fmtUptime(st.uptime_s));
+    set('uptime', fmtUptime(st.uptime_s), true);
     set('resetReason', st.reset_reason || 'n/a');
 
     var hi = st.heap_internal || {}, hs = st.heap_spiram || {};
-    set('heapIntFree', fmtKB(hi.free));
-    set('heapIntLargest', fmtKB(hi.largest_free_block));
-    set('heapIntMin', fmtKB(hi.min_free));
-    set('heapSpiFree', fmtKB(hs.free));
-    set('heapSpiLargest', fmtKB(hs.largest_free_block));
-    set('heapSpiMin', fmtKB(hs.min_free));
+    set('heapIntFree', fmtKB(hi.free), true);
+    set('heapIntLargest', fmtKB(hi.largest_free_block), true);
+    set('heapIntMin', fmtKB(hi.min_free), true);
+    set('heapSpiFree', fmtKB(hs.free), true);
+    set('heapSpiLargest', fmtKB(hs.largest_free_block), true);
+    set('heapSpiMin', fmtKB(hs.min_free), true);
 
-    set('ioReady', st.io_ready ? 'ready' : 'not attached');
-    set('thermoReady', st.thermo_ready ? 'ready' : 'not attached');
-    set('safetyReady', st.safety_ready ? 'linked' : 'not linked');
-    set('zonesValid', st.zones_config_valid ? 'valid' : 'FAILED TO LOAD');
-    set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a');
+    set('ioReady', st.io_ready ? 'ready' : 'not attached', true);
+    set('thermoReady', st.thermo_ready ? 'ready' : 'not attached', true);
+    set('safetyReady', st.safety_ready ? 'linked' : 'not linked', true);
+    set('zonesValid', st.zones_config_valid ? 'valid' : 'FAILED TO LOAD', true);
+    set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a', true);
 
     var nvsCard = document.getElementById('nvsCard');
     if (st.nvs_sections && st.nvs_sections.length) {
@@ -173,7 +187,7 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
         var s = st.nvs_sections[i];
         var ok = s.present && s.mounted;
         html += '<div class="row"><span class="label">' + escHtml(s.name) + '</span>' +
-                '<span class="value" style="color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '">' +
+                '<span class="value kc-live-value" style="color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '">' +
                 (s.present ? 'present' : 'MISSING') + (s.mounted ? ', mounted' : ', NOT MOUNTED') +
                 '</span></div>';
       }
@@ -183,14 +197,16 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
     }
   }
 
+  // ESP32 die temp and each MAX31856's cold-junction reading are live board-
+  // health temperatures -- both kc-live-value and run through kcUnit.fmt for
+  // unit parity (UI_PLAN.md item 7), same as every other °C figure.
   function renderBoardTemps(bt) {
-    function fmtC(v) { return (v == null) ? 'n/a' : v.toFixed(1) + ' °C'; }
-    set('esp32Temp', fmtC(bt.esp32_c));
+    set('esp32Temp', window.kcUnit.fmt(bt.esp32_c), true);
     var rows = '';
     var cj = bt.thermo_cj_c || [];
     for (var i = 0; i < cj.length; i++) {
       rows += '<div class="row"><span class="label">MAX31856 ch ' + i + ' cold-junction</span>' +
-              '<span class="value">' + fmtC(cj[i]) + '</span></div>';
+              '<span class="value kc-live-value">' + window.kcUnit.fmt(cj[i]) + '</span></div>';
     }
     document.getElementById('cjRows').innerHTML = rows || '<div class="row"><span class="label">MAX31856 channels</span><span class="value">n/a</span></div>';
   }
@@ -216,8 +232,9 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
       fetch('/api/status').then(function (r) { return r.json(); }),
       fetch('/api/board_temps').then(function (r) { return r.json(); })
     ]).then(function (results) {
-      renderStatus(results[0]);
-      renderBoardTemps(results[1]);
+      lastStatus = results[0]; lastBoardTemps = results[1];
+      renderStatus(lastStatus);
+      renderBoardTemps(lastBoardTemps);
       lastGoodAt = Date.now();
       failCount = 0;
       setStale(null);
@@ -246,6 +263,12 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
   });
   poll();
   schedule();
+
+  // UI_PLAN.md item 7: re-render the two board-health temperatures in the
+  // new unit immediately on toggle, from the cached last-good payload.
+  window.addEventListener('kcunitchange', function () {
+    if (lastBoardTemps) renderBoardTemps(lastBoardTemps);
+  });
 })();
 </script>
 </body>

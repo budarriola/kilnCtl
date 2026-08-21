@@ -265,6 +265,14 @@ function checkRamp(input) {
   }
 }
 
+// Deliberately NOT run through kcUnit here (UI_PLAN.md item 2's own
+// "conversion is display-only" rule): this is a user-entered/edited form
+// input whose raw value gets POSTed straight to /api/profile as seg*_target,
+// and profiles_http.c has always taken that number as Celsius. Converting
+// what's typed here without also converting it back before the POST would
+// silently double-apply a °F/°C error into a real firing setpoint -- exactly
+// the hazard the task called out. The label spells out "&deg;C" explicitly
+// so an operator with the toggle set to °F still knows what unit to type.
 function segmentRow(seg) {
   var div = document.createElement('div');
   div.className = 'seg';
@@ -391,16 +399,24 @@ function catalogueItem(p) {
   s.appendChild(document.createTextNode(' (' + p.segment_count + ' steps)'));
   d.appendChild(s);
 
+  // Ramp rate stays in raw °C/hr -- it is a RATE, not a temperature reading,
+  // and this table's own header names the unit explicitly, so it is left
+  // out of the °C/°F toggle (UI_PLAN.md item 7 is about temperatures, not
+  // every number with a degree symbol in it anywhere). Target is a genuine
+  // temperature and does convert. Neither of these is a live device reading
+  // (this is a read-only reference schedule baked into flash, not something
+  // that goes stale when the connection drops), so no kc-live-value here --
+  // just unit-converted the same as every other on-screen °C figure.
   var rows = '';
   (p.segments || []).forEach(function (seg, i) {
     var v = seg.feasibility;
     var cls = isMarked(v) ? ' class="fz-' + v + '" title="' + (FZ_WHY[v] || '') + '"' : '';
     rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td>' + rampText(seg.ramp_c_per_hr) +
-            '</td><td>' + seg.target_c + '</td><td>' + seg.dwell_min + '</td></tr>';
+            '</td><td>' + window.kcUnit.toDisplay(seg.target_c).toFixed(0) + '</td><td>' + seg.dwell_min + '</td></tr>';
   });
   var tbl = document.createElement('div');
   tbl.className = 'table-scroll';
-  tbl.innerHTML = '<table><tr><th>Step</th><th>Ramp &deg;C/hr</th><th>Target &deg;C</th>' +
+  tbl.innerHTML = '<table><tr><th>Step</th><th>Ramp &deg;C/hr</th><th>Target ' + window.kcUnit.label() + '</th>' +
                   '<th>Hold min</th></tr>' + rows + '</table>';
   d.appendChild(tbl);
 
@@ -595,6 +611,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
 });
 
 loadZones().then(function () { resetEditor(); loadList(); loadCatalogue(); });
+
+// UI_PLAN.md item 7: re-render the catalogue's Target column in the new
+// unit immediately on toggle. loadList()'s user-slot cards show zone/segment
+// COUNTS only, no temperatures, so they don't need a re-render here.
+window.addEventListener('kcunitchange', function () { loadCatalogue(); });
 
 (function () {
   var btn = document.getElementById('themeBtn');

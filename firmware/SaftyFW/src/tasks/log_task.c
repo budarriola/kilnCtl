@@ -18,6 +18,7 @@
 #include "task_priorities.h"
 #include "watchdog_task.h"
 
+#include "console_uart.h"
 #include "link_task.h"
 #include "tx_watermark.h"
 
@@ -122,6 +123,20 @@ static void log_task_mirror_usb(const log_entry_t *e)
 }
 #endif
 
+// Console mirror to UART0 (GP16/GP17, the debug probe's UART bridge) --
+// console_uart.h's header comment explains why this is unconditional rather
+// than gated like the USB mirror above: those pins carry nothing else on
+// this board, so there is no back-feed/TinyUSB tradeoff to gate. This is the
+// only place log entries reach the console; nothing else in this firmware
+// should printf/puts directly (docs/ARCHITECTURE.md section 1's three-
+// transport list -- this is the "RTT/UART bridge" secondary path's plain-
+// UART leg).
+static void log_task_mirror_console(const log_entry_t *e)
+{
+    console_uart_write(e->msg, e->len);
+    console_uart_puts("\r\n");
+}
+
 static void log_task_fn(void *arg)
 {
     (void)arg;
@@ -134,6 +149,7 @@ static void log_task_fn(void *arg)
 #ifdef SAFTYFW_ENABLE_USB_STDIO
             log_task_mirror_usb(&entry);
 #endif
+            log_task_mirror_console(&entry);
             // TX-reserve watermark (docs/ARCHITECTURE.md section 1, rule 1):
             // check BEFORE ever touching link_task/uart_owner, so a full-ish
             // ring loses log lines here, never telemetry frames -- Frame A/B

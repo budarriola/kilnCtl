@@ -112,13 +112,28 @@ button { min-height: var(--ui-touch); }
                   margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center; }
 .kc-conn-banner[hidden] { display: none; }
 /* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
-   item 4's "dim its values" wording. Deliberately opt-in per page: no
-   existing element carries .kc-live-value yet (that is a per-page
-   annotation task left for whichever pass wires each page's specific
-   numeric fields to it), so this rule is inert until a page adopts it --
-   recorded as a known gap in this pass's report rather than silently
-   assumed to already work everywhere. */
+   item 4's "dim its values" wording. Every *_page.html now annotates its
+   live device-reading elements with .kc-live-value (temperatures, relay/
+   exec state, link stats, heap/uptime figures, profile progress, Wi-Fi
+   RSSI) -- see each page's own script for the specific spans/elements this
+   was applied to and, in a per-file comment, what was deliberately left
+   unmarked (static labels, user-entered form values, build-time constants
+   like firmware version). */
 .kc-stale .kc-live-value { opacity: 0.45; }
+
+/* UI_PLAN.md item 7 ("Unit parity"): client-only °C/°F display toggle,
+   injected by app.js's buildUnitBtn() next to each page's own #themeBtn.
+   Reuses .theme-btn's exact box (same fixed top/right corner, same border/
+   radius/padding) so it reads as a matching pair of small icon toggles, not
+   a new control style; the offset below just shifts it one button-width to
+   the left so the two don't overlap. */
+/* button.kc-unit-btn (not just .kc-unit-btn) deliberately: every page's own
+   <style> block also redeclares a plain `.theme-btn { right: 0.8em; ... }`
+   rule (same specificity, and it loads AFTER this shared theme.css file in
+   the cascade), which would otherwise win the `right` property and overlap
+   the two buttons. The extra type-selector bumps specificity so this offset
+   always wins regardless of per-page load order. */
+button.kc-unit-btn { right: 3.4em; }
 
 /* UI_PLAN.md "web page structure" section, items 2-4 (settings hub +
    manual-relay split, 2026-08-2x pass): settings_page.html and

@@ -55,8 +55,18 @@
 // --- Console UART0, debug-probe bridge only (see docs/ARCHITECTURE.md sec 1)
 // UART1 is taken by the isolated link, so the console/RTT-adjacent bench path
 // uses UART0 on the one free pin pair this board has.
-#define SAFTYFW_PIN_UART0_TX     17 // GP17 -> probe UART0 RX
-#define SAFTYFW_PIN_UART0_RX     16 // GP16 <- probe UART0 TX
+//
+// CORRECTED 2026-08-21: these two were swapped relative to the silicon.
+// RP2040 IO_BANK0 funcsel tables (pico-sdk
+// src/rp2040/hardware_regs/include/hardware/regs/io_bank0.h) are explicit:
+// GPIO16's funcsel 2 is UART0_TX, GPIO17's funcsel 2 is UART0_RX -- there is
+// no funcsel on GPIO16 that produces UART0_RX or vice versa, so the Pico
+// cannot be configured the other way regardless of what a #define says. This
+// matches docs/HARDWARE.md section 7b's table (GP16 -> probe RX / Pico
+// UART0 TX, GP17 -> probe TX / Pico UART0 RX), which was already correct;
+// only this header disagreed with it.
+#define SAFTYFW_PIN_UART0_TX     16 // GP16, Pico UART0 TX -> probe's RX
+#define SAFTYFW_PIN_UART0_RX     17 // GP17, Pico UART0 RX <- probe's TX
 
 // --- Heartbeat LED (watchdog_task), TODO.md Phase 2 "physical heartbeat" ---
 // GPIO25 is NOT part of A1's own schematic/net list above -- it is never
