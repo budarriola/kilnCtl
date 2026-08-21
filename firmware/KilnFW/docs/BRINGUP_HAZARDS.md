@@ -90,6 +90,31 @@ replies. Fixed with `uart_protocol_send_limited()` (explicit max-retries
 param), log bridge capped to 1 retry. Also added exponential backoff on the
 safety poll task's sleep while `no_reply_streak` climbs.
 
+## Thermal guard 3 (welded-contact) rate computed over mismatched intervals (2026-08-12)
+
+`thermal_guard.c`'s guard 3 measured a temperature rise from the start of the
+off-window but divided by elapsed time since the *settle* window ended, so
+the first tick past settle divided by a too-small `dt` and reported an
+implausible rate (e.g. "rose 4.3C (rate 257.74C/min)"). Worse than a cosmetic
+bug: any zone idling at duty 0 and drifting up slightly (a dwell, a
+neighbour's heat, ordinary coasting after a ramp) could trip a false
+welded-contact fault instead of the guard the scenario was meant to exercise.
+**Fix**: latch a second baseline when the settle window ends so rise and
+elapsed time cover the same interval; the 20 °C absolute-margin check still
+references the original baseline. Lesson: a guard's rate math needs its own
+baseline per phase — reusing an earlier phase's baseline for a later phase's
+elapsed-time denominator silently produces nonsense under exactly the
+condition (idle, low duty) most likely to trigger the guard.
+
+## `fault_guard` numbering does not match the guard numbers used elsewhere
+
+`/api/profile_exec` exposes the raw `thermal_guard_trip_t` enum as
+`fault_guard`, which is off-by-one-ish against the guard numbers everywhere
+else in the docs (`fault_guard: 7` means guard 6, guard 7 reports 8, guard 5
+reports 5 or 6 depending which limit was crossed). Documented in
+`docs/GUARD_TEST_MATRIX.md`, not fixed — a wire-format change, not a bug fix.
+Read `fault_guard` values through that matrix's mapping, never at face value.
+
 ## Wi-Fi mode-switch ordering bug (2026-08-13)
 
 `esp_wifi_set_config(AP)` failed with `ESP_ERR_WIFI_MODE` on every boot:
@@ -139,6 +164,8 @@ and the call-site comment are in `ui_topbar.c`.
 
 ## Full detail
 
-Dated, hardware-verification-tagged entries for all of the above (and more)
-live in `docs/PROJECT_STATUS.md`. This file exists to keep the *recurring,
-reusable* lessons in one place rather than buried in a changelog.
+This file keeps the *recurring, reusable* lesson from each hazard; it does
+not carry the full session narrative of how each was found. `git log` and
+the commits/dates named above are the record of that; `docs/PROJECT_STATUS.md`
+keeps only current status and its own short-lived session log, not a
+permanent archive of superseded narrative.

@@ -45,12 +45,79 @@ the plan.
   executor. Config/persistence built (`rules_http.{c,h}`); the evaluator
   itself was never built — saved rules are inert.
 
+## PID / thermal guard / autotune
+
+- **Guard 8 (cross-zone plausibility)** compares a zone's reading against
+  every other zone's worst-disagreeing peer (not an average — an average
+  lets one badly-wrong channel hide behind a healthy one), trips after a
+  sustained window (600 s default), and blocks only its own zone. Ships with
+  `cross_zone_max_delta_c` defaulting to 0 = **disabled** — the threshold
+  needs a measured cross-gain matrix from a real coupled kiln, not a firmware
+  constant, and no such matrix has ever been captured on hardware. Armable
+  per-zone from Settings without a rebuild; `cross_zone_period_s` stays a
+  firmware constant on purpose (arming needs one knob, not two).
+- **Relative Gain Array** (`pid_autotune_rga()`) computes RGA over the
+  largest principal sub-block whose every cell is measured, refusing an
+  incomplete, singular, or non-finite matrix outright — a wrong RGA would
+  tell an operator their zones are independent when nobody measured that.
+  Cross-gain cells are filled by autotune's step test recording every
+  configured zone's reading at each tick, not just the zone under test.
+- **Feedforward** (`u_ff = (T_sp - T_amb)/K_dc + (dT_sp/dt)*tau/K_dc`) takes
+  its rate from the segment's commanded ramp, not a tick-to-tick difference
+  (timing noise at 1 Hz, amplified by tau). Ambient is the MAX31856 cold
+  junction sampled once at firing start, not re-sampled, since it warms with
+  the board over a long firing. Stays exactly 0 without an identified model
+  or on a non-finite `K_dc`/`tau`. `pid_seed_bumpless()` subtracts the ff
+  term internally (moved from the caller) so the bumpless-transfer seed
+  stays exact with feedforward live.
+- **Relay-feedback autotune** reuses the step-test engine's lock, tick task,
+  trace buffer, and relay-authority claim rather than a parallel state
+  machine; accepting a relay-test result writes gains but never a plant
+  model, since a relay test measures one frequency-response point and a
+  model from a prior step test must survive it.
+- **Electrical load staggering** is phase-offset only:
+  `heater_output_seed_phase()` truncates a zone's first time-proportioned
+  window (permanent shift, not a one-time transient), assigned by each
+  zone's rank among a run's active zones. The `max_simultaneous_relays` cap
+  (the harder half) was deliberately not built — capping correctly means
+  either changing what the pure `heater_output` module computes or
+  overriding its output in a way that desyncs its internal bookkeeping from
+  real hardware state, and neither was worked out with confidence.
+- **Config reload while running** (`zones_config_generation()`, bumped only
+  when in-RAM config actually changes) is checked once per control tick,
+  after readings are stored and before control math, so an edit can never be
+  half-applied across the decide/apply split. Tuning gains land bumplessly;
+  mode/relay-mask changes force relays off under the old mask first; guard
+  threshold edits apply immediately and are logged at WARN — chosen over
+  requiring idle, since an operator correcting a ceiling for the ware
+  currently in the kiln needs it to take effect now. A reload never touches
+  latched trip state — editing a threshold must not become an undocumented
+  way to clear a trip.
+- **Unowned-relay sweep**: every tick, `profile_executor.c` forces off the
+  intersection of (what the expander shows physically closed) ∩ (what this
+  run ever commanded) ∩ (complement of what may legitimately hold it —
+  active zones regardless of fault state, plus any zone under autotune).
+  The "commanded by this run" term is what stops the sweep from chattering
+  off a relay an operator is holding manually.
+- **Relay contact-cycle accounting** persists lifetime on/off transition
+  totals per relay in its own NVS key (`relay_cyc`), deliberately separate
+  from the `zones_cfg` blob (whose loader treats any size change as
+  corruption and would wipe every user's zone setup on an unrelated growth).
+  Writes at most once per 10 minutes plus a flush on halt; counts saturate
+  rather than wrap.
+- **Reboot breadcrumb** (`run_state.{c,h}`) persists a fixed-size record
+  (profile, zone mask, segment, target, elapsed, phase, fault guard/reason)
+  to its own NVS key on every meaningful transition plus a 300 s refresh —
+  not per tick (~200 writes over a 12h firing vs. ~43,000). A clean stop is
+  recorded distinctly from an unplanned loss of power; nothing currently
+  *acts* on a recovered record (no auto-resume), it is display/ack only.
+
 ## Historical data / graph buffer
 
 - RAM-only ring buffer, discarded on reboot (no persisted per-firing log).
 - One sample per 30s; sized for a 24h firing (2880 samples).
-- Packed to 8 bytes/sample (single-zone) after a 2026-08-12 DRAM-exhaustion
-  incident — see `docs/PROJECT_STATUS.md`.
+- Packed to 8 bytes/sample (single-zone) after a DRAM-exhaustion incident —
+  see `docs/BRINGUP_HAZARDS.md`.
 
 ## Page organization
 
@@ -242,8 +309,8 @@ so advisory-only is the correct behavior, not a shortcut.
 
 - Enabled 2026-08-17 once LVGL needed draw buffers for the ILI9488 (the
   named trigger from the original off-by-default decision). See
-  `docs/PROJECT_STATUS.md`'s DRAM/PSRAM entries for the measured effects
-  and the two internal-SRAM fires this caused/fixed along the way.
+  `docs/BRINGUP_HAZARDS.md` for the measured effects and the two
+  internal-SRAM fires this caused/fixed along the way.
 - GPIO 33-37 must stay unassigned (consumed by the R8 module's own PSRAM
   regardless of software config).
 

@@ -335,6 +335,21 @@ has 7.
   ADC reports (kilnctrl MCP path or SWD), fit gain/offset, store the table in
   fixture flash keyed by channel — this doubles as `CURRENT_SENSE.md` §5's
   commissioning check (one relay commanded → exactly one channel responds).
+- **Calibration tooling and persistence, built ahead of the real bench run
+  they need to produce data.** `tools/ct_calibration/` (PC side) holds the
+  sweep runner (`calibrate_ct.py`/`fixture.py`/`readback.py`), the fit
+  (`fit.py`), a crosstalk gate (`crosstalk.py`), and a versioned table format
+  (`calibration_table.py`); `push_ct_cal.py` writes a fitted table to
+  `SaftyFW` and verifies it by reading it back rather than trusting the
+  write. `SaftyFW` persists the table in its own flash via `config_store`
+  (`ct_amps_cal.h`, `config_store.c`/`config_store_flash.c`), addressed
+  through `SET_CT_CAL`/`GET_CT_CAL` link commands (`current_task.c`,
+  `link_task.c`), which `KilnFW`'s `safety_link`/`uart_bridge` relay end to
+  end. The mechanism rejects a corrupted record wholesale rather than
+  accepting a partially-valid one, and every channel ships flagged
+  uncalibrated until a real sweep populates it. **None of this has run
+  against real CT/transformer hardware** — see M-D in `PLAN.md` §10; the
+  tooling and persistence chain existing does not change that status.
 
 ### 3.4 Relay sensing and discrete I/O
 

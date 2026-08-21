@@ -129,86 +129,10 @@ never `[x]`.
 - [ ] **Fixture hardware form factor** — breadboard vs a real
       `hardware/SimFixture/` board. Not answerable until M-E. (§11 item 6)
 
-### 0.3 Done (see `DESIGN_NOTES.md` for detail)
+### 0.3 Done
 
-- [x] All `src/sim/` modules and FreeRTOS owner tasks implemented, no stubs
-      remain — `DESIGN_NOTES.md` §§3–4
-- [x] `benchproto` extracted into `CommonFW`, host-tested, spoken by SimFW's
-      CDC link and `kilnsim` — `DESIGN_NOTES.md` §12
-- [x] `kilnsim` PC toolset (CLI, Tk GUI, MCP server, scenario loader, report
-      generator) — `DESIGN_NOTES.md` §6
-- [x] 27-scenario standard library — `DESIGN_NOTES.md` §8
-- [x] PIO SPI mode-1 clocking bug found and fixed — `DESIGN_NOTES.md` §14
-- [x] `virtual_simfw`/`virtual_dut`/`virtual_kiln`, the fourth software-only
-      verification layer — `DESIGN_NOTES.md` §10
-- [x] SaftyFW guard-input wiring complete except S1/S13 (deliberate
-      commissioning gaps) — `DESIGN_NOTES.md` §11, live table
-      `SaftyFW/docs/GUARD_TEST_MATRIX.md` §6
-- [x] CT calibration tooling (`tools/ct_calibration/`) — fit, crosstalk gate,
-      versioned table; firmware apply-path also done — `DESIGN_NOTES.md` §3.3
-- [x] `docs/BOM.md`, `docs/BENCH_RUNBOOK.md`, `docs/HARDWARE.md`,
-      `docs/PROTOCOL.md` written
-- [x] Transformer ratio corrected 1:1 → ~3:1 — `DESIGN_NOTES.md` §3.3
-- [x] PWM pacer / channel-B pin trap closed by detection
-      (`_Static_assert` + lint, both negative-tested) — `DESIGN_NOTES.md` §14
-- [x] SaftyFW persists CT calibration in its own flash (`config_store.ct_cal`
-      + `SET_CT_CAL`/`GET_CT_CAL`), with explicit uncalibrated flags and a
-      reject-whole-record-on-corruption rule
-- [x] `forbid.after`/`before` clause bounds added to the scenario schema,
-      backward compatible — `DESIGN_NOTES.md` §8.1
-- [x] `tc_flaky` timescale fixed (10 → 0.2) so its anti-nuisance claim is
-      proven by its own default run; swept all scenarios for the same issue
-- [x] Guard reachability closed (S6a/S9/S11/context wiring) — see §0.2's S6a
-      bench-only note and `DESIGN_NOTES.md` §11 for the full history
-- [x] CT calibration push path (`push_ct_cal.py`), verifies by `GET_CT_CAL`
-      read-back, reuses the generator's inversion/refusal gates
-- [x] KilnFW relays `SET_CT_CAL`/`GET_CT_CAL` (`5fb6928`), closing the
-      calibration chain end to end
-- [x] Guard scenario coverage brought up to the new reachability — S2/S11/S10
-      all now have genuine trip/warn cases, not just anti-nuisance ones
-- [x] S9 wired and firing end to end: S3 trips, K4 opens, welded contactor
-      holds, `TRIP_INEFFECTIVE_LATCHED` lands (`3c6763a`)
-- [x] `virtual_dut`'s batch-ticking approximation removed, replaced by
-      one tick per observed sample — `DESIGN_NOTES.md` §10
-- [x] DMA ownership rule redesigned — acquisition-based invariant plus
-      `_Static_assert` budget check; three places to update when adding a
-      claimant — `DESIGN_NOTES.md` §4.6
-- [x] `~DRDY` pin contradiction resolved in favor of `HARDWARE.md` §1
-      (`1d32e84`) — `DESIGN_NOTES.md` §14
-- [x] DMA channel budget audited and documented — 11/12 claimed
-      (`DESIGN_NOTES.md` §4.6)
-- [x] `virtual_simfw` timescale² bug fixed, with a shape-asserting
-      regression test; exposed and fixed two vacuous PASSes
-- [x] DMA-fed first-byte path implemented, replacing ISR-staging — meets the
-      hard SPI deadline at 4 MHz — `DESIGN_NOTES.md` §3.2.1
-- [x] Second DUT-power relay, end to end (firmware + protocol + CLI/GUI/MCP),
-      with "no combined set-both" test-enforced on every surface —
-      `DESIGN_NOTES.md` §3.4
-- [x] CT calibration mechanism in firmware, shipped table all-uncalibrated
-      by design — `DESIGN_NOTES.md` §3.3
-- [x] SPI access-pattern audit (`docs/SPI_ACCESS_AUDIT.md`) — found and fixed
-      four responder defects — `DESIGN_NOTES.md` §3.2.1
-- [x] USB identity claimed: `2E8A:F00A` fixture / `2E8A:F00B`
-      `spi_test_master` — also fixed a real auto-detect bug — `DESIGN_NOTES.md`
-      §13
-- [x] All 11 bridge `default:` branches now reply `ok=0` instead of silently
-      ACKing an unimplemented subcommand (`c91ed50`)
-- [x] Stale `push_ct_cal.py` docstring describing an already-closed KilnFW
-      relay gap fixed (`4680b5e`)
-- [x] `power_blip`'s fixture-fidelity gap closed (`dut_power_on` now gates
-      K1/K2/K3/K5 + `link_up`) and S6a made genuinely provokable via a new
-      `set_main_fault` operator action — 27 scenarios, 24 PASS / 3 BLOCKED
-      (`63acef8`)
-- [x] DMA claim failures now call `simfw_fatal(subsystem, reason)`, blinking
-      GPIO25 then panicking with the subsystem named — chosen over a health
-      flag since SimFW has no console at that point, and it matches the
-      neighbouring PIO SM claims' existing panic; verified by draining all
-      12 channels and disassembling the ARM build (`f9cc7b5`)
-- [x] `max31856_pio_engine_init()`'s `!publish_base(...)` failure path now
-      routes to `simfw_fatal()` (proven unreachable, not a normal unwind
-      case), and `simfw_fatal()` now halts the whole board via a cross-core
-      SIO FIFO signal, not just the calling core — `DESIGN_NOTES.md` §4.6.1
-      (`13a90b0`)
+All finished work has been moved into `DESIGN_NOTES.md` (see its table of
+contents) rather than kept here — this plan only tracks what's left.
 
 ---
 
