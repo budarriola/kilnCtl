@@ -213,15 +213,6 @@ never `[x]`.
       `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
       halts while DMA exhaustion limps, and the code's own idle-loop-fallback
       comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
-- [ ] **`check_single_owner.ps1`'s `hardware/dma.h` rule encodes the wrong
-      invariant.** It checks *who includes the header*; the real invariant is
-      *how a channel is acquired* (`dma_claim_unused_channel`, never
-      `dma_channel_claim(n)` or raw `dma_hw->ch[n]`) plus disjoint IRQ
-      vectors. Today a third owner is a one-line allowlist edit that passes CI
-      while silently exhausting the pool. **11 of 12 claimed, 1 spare**
-      (`3 + Σ_buses (chips_on_bus + 2)`); one is recoverable by packing two CT
-      zones into one PWM slice's `CC`, none on the SPI side without
-      reintroducing CPU work into the first-byte path.
 - [ ] **Expose the second DUT-power relay in `kilnsim`.** The firmware and
       wire protocol are done (`f5cb4c3`), but the CLI, GUI, MCP tool, and
       `MockSimLink` still surface only the main-domain relay, so no operator
@@ -281,6 +272,18 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] DMA ownership rule redesigned (`4396857`). `check_single_owner.ps1` now
+      enforces two different things: for I2C/PIO/PWM/USB, §4's single-owner
+      doctrine by include; for DMA the include allowlist is **only an owner
+      gate**, and the real invariant is acquisition
+      (`dma_claim_unused_channel` only, no fixed-number claims, no raw
+      `dma_hw->` outside owners), one exclusive handler per DMA vector in
+      distinct files, and the §1b channel budget — which is *also* a
+      `_Static_assert` in `src/main.c` against the SDK's real
+      `NUM_DMA_CHANNELS`. The lint fails if that assertion is deleted, so
+      neither half can become the only defence. **Adding a third DMA claimant
+      means updating §1b's table, the script's `$dmaBudgetTerms`, and
+      `SIMFW_DMA_CHANNELS_CLAIMED` — all three, same commit.**
 - [x] `~DRDY` pin contradiction resolved in favour of `HARDWARE.md` §1
       (`1d32e84`) — the code was wrong, not the table. `4221f70` had
       re-derived pins from a pre-§1 view of the tree. Full pin sweep found no
