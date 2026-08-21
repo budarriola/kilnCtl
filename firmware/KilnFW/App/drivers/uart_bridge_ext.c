@@ -82,7 +82,19 @@ static const char *TAG = "uart_bridge_ext";
  * retry loop stays: it's still valid insurance against genuine transient
  * contention (e.g. two of these racing each other, or PSRAM itself
  * momentarily fragmented), just no longer the primary defense against the
- * WiFi-driver race, which moving off internal SRAM removes at the source. */
+ * WiFi-driver race, which moving off internal SRAM removes at the source.
+ *
+ * STACK SIZING FOR TASKS CREATED HERE -- read before shrinking one.
+ * Because the stack comes from PSRAM (~8MB free) and not internal SRAM, its
+ * size costs nothing scarce. Shrinking one of these to save memory saves
+ * memory that was never under pressure, while spending real safety margin.
+ * On 2026-08-20 wifi_uart_bridge was trimmed 4096 -> 3072 on an estimate of
+ * its "modest" depth; it later overflowed at a measured 3440 bytes and
+ * rebooted the board, which is the long-unexplained "spontaneous reboot"
+ * this project chased for days. Size these generously, and size them from
+ * the STACK USED figure in a coredump rather than from reading the
+ * function's own locals -- the ESP-IDF driver call chain underneath a
+ * handler is invisible in the source here and is what dominates. */
 static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *name, uint32_t stack_depth,
                                             void *param, UBaseType_t priority)
 {
@@ -699,16 +711,17 @@ esp_err_t uart_bridge_start_autotune_task(uart_protocol_t *proto)
     if (err != ESP_OK) {
         return err;
     }
-    /* 2026-08-20: shrunk from 4096 -- see retry_task_create_pinned()'s own
-     * comment above. This task's real stack depth is modest (a
-     * BRIDGE_REPLY_MAX reply buffer plus a 96-byte err_msg, no deep call
-     * chain), same complexity class as uart_bridge.c's system/info bridge
-     * tasks, which already run at 3072 successfully -- reducing this one
-     * (and wifi_uart_bridge below) is what actually let both come up
-     * reliably on the bench; the retry loop alone did not, since the
-     * failure was a real, not transient, internal-SRAM shortfall by this
-     * point in boot. */
-    BaseType_t created = retry_task_create_pinned(autotune_task, "autotune_uart_bridge", 3072, &ctx, 5);
+    /* Restored to 4096 on 2026-08-20, having been shrunk to 3072 earlier the
+     * same day. The shrink was a workaround for internal-SRAM exhaustion at
+     * task-creation time; that shortfall is fixed at its source now (LVGL's
+     * allocator and the Wi-Fi/lwIP pools moved to PSRAM), and more to the
+     * point THIS STACK IS NOT IN INTERNAL SRAM AT ALL -- retry_task_create_
+     * pinned() allocates it from PSRAM, of which ~8MB is free. Shrinking it
+     * therefore bought nothing and cost margin.
+     *
+     * Not hypothetical: the identical shrink applied to wifi_uart_bridge
+     * below overflowed its stack and rebooted the board. See that call. */
+    BaseType_t created = retry_task_create_pinned(autotune_task, "autotune_uart_bridge", 4096, &ctx, 5);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_AUTOTUNE);
         return ESP_ERR_NO_MEM;
@@ -1026,11 +1039,32 @@ esp_err_t uart_bridge_start_wifi_task(uart_protocol_t *proto)
     if (err != ESP_OK) {
         return err;
     }
-    /* 2026-08-20: shrunk from 4096, same reasoning as autotune_uart_bridge
-     * above -- real stack depth here is modest (BRIDGE_REPLY_MAX reply
-     * buffer plus small fixed SSID/password copies), same class as the
-     * system/info bridges already running at 3072. */
-    BaseType_t created = retry_task_create_pinned(wifi_task, "wifi_uart_bridge", 3072, &ctx, 5);
+    /* 8192, raised from 3072. THIS TASK'S STACK OVERFLOW REBOOTED THE BOARD.
+     *
+     * It is the "spontaneous reboot" this project chased for days. Caught
+     * 2026-08-20 by the first coredump the firmware ever successfully wrote:
+     *
+     *   Panic reason: ***ERROR*** A stack overflow in task wifi_uart_bridg
+     *                 has been detected.
+     *          TCB             NAME PRIO C/B  STACK USED/FREE
+     *   0x3fcc0a7c  wifi_uart_bridg      7/5         3440/376
+     *
+     * 3440 bytes used against a 3072 request. The earlier estimate quoted
+     * here -- "real stack depth is modest (BRIDGE_REPLY_MAX reply buffer
+     * plus small fixed SSID/password copies)" -- counted only THIS file's
+     * own locals and missed the ESP-IDF Wi-Fi driver call chain underneath
+     * WIFI_CMD_SCAN / status queries, which dominates. Reasoning about stack
+     * depth from the visible frame is how this got sized wrong; the figure
+     * above is measured.
+     *
+     * Sized at 8192, not 4096: 4096 is only ~19% above the observed
+     * high-water, and that high-water came from an ordinary bench session,
+     * not a worst case (a scan returning the full WIFI_WIRE_MAX_SCAN_ENTRIES
+     * set with a deeper driver path can only be larger). The stack comes
+     * from PSRAM via retry_task_create_pinned(), so the extra 4KB costs no
+     * internal SRAM whatsoever -- there is no reason to be thrifty here, and
+     * being thrifty is exactly what rebooted the kiln controller. */
+    BaseType_t created = retry_task_create_pinned(wifi_task, "wifi_uart_bridge", 8192, &ctx, 5);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_WIFI);
         return ESP_ERR_NO_MEM;
