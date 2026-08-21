@@ -11,7 +11,7 @@ the full account. Short version:
   whose `current_a` field is exactly `SaftyFW`'s `current_task`/ADC readout
   as seen by the ESP over the existing isolated UART link, itself polled by
   the PC over the existing kilnctrl USB link. That is precisely "the
-  existing kilnctrl MCP path" PLAN.md 3.3 names. It has been read, not run:
+  existing kilnctrl MCP path" DESIGN_NOTES.md 3.3 names. It has been read, not run:
   no RP2040 in this repo answers `SAFETY_CMD_GET_STATUS` with real current
   data yet (`tools/PcTools/scripts/current_sense_commissioning.py`'s module
   docstring says the same thing about the exact same link, for the exact

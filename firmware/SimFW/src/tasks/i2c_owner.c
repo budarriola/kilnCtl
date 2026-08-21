@@ -2,7 +2,7 @@
 // GPIO choice, and the queue-then-apply-next-tick contract every public
 // setter uses. This is the single place in SimFW that calls into
 // hardware/i2c.h, hardware/gpio.h (for SDA/SCL only) or drivers/mcp23017.h
-// (docs/PLAN.md section 4's single-owner-per-peripheral doctrine).
+// (docs/DESIGN_NOTES.md section 4's single-owner-per-peripheral doctrine).
 #include "i2c_owner.h"
 
 #include <string.h>
@@ -32,7 +32,7 @@
 #define MCP23017_ADDR_1 0x20u
 #define MCP23017_ADDR_2 0x21u
 
-// --- Exp1 (0x20) pin roles (docs/PLAN.md section 3.7) ----------------------
+// --- Exp1 (0x20) pin roles (docs/DESIGN_NOTES.md section 3.7) ----------------------
 #define EXP1_PIN_K1          0u
 #define EXP1_PIN_K2          1u
 #define EXP1_PIN_K3          2u
@@ -138,7 +138,7 @@ static void edge_log_push_locked(i2c_owner_signal_t signal, bool level, uint64_t
     } else {
         // Full: overwrite the oldest entry and advance head -- the seq gap
         // this creates for a slow reader is the intended, documented loss
-        // signal (i2c_owner.h / PLAN.md section 8.2), not a bug to avoid.
+        // signal (i2c_owner.h / DESIGN_NOTES.md section 8.2), not a bug to avoid.
         index = s_edge_log_head;
         s_edge_log_head = (s_edge_log_head + 1u) % I2C_OWNER_EDGE_LOG_CAPACITY;
     }
@@ -161,9 +161,9 @@ static bool signal_from_exp1_pin(uint8_t pin, i2c_owner_signal_t *out)
     }
 }
 
-// One-time bring-up of exp1's fixed pin roles (docs/PLAN.md section 3.7):
+// One-time bring-up of exp1's fixed pin roles (docs/DESIGN_NOTES.md section 3.7):
 // relay-sense + fault-line inputs (no internal pull-up -- the fixture drives
-// a wetting voltage through the sensed contact per PLAN.md section 3.4, an
+// a wetting voltage through the sensed contact per DESIGN_NOTES.md section 3.4, an
 // internal pull-up would fight that), E-stop/DUT-power outputs idling
 // de-asserted, J20 IO_3/IO_4 and the 6 spares defaulted to input+pullup (a
 // safe, non-driving default for pins whose direction a future test may
@@ -197,7 +197,7 @@ static void configure_exp1(void)
     }
 }
 
-// Exp2 is generic/spare per this pass (docs/PLAN.md section 3.6's `~FAULT`
+// Exp2 is generic/spare per this pass (docs/DESIGN_NOTES.md section 3.6's `~FAULT`
 // fallback role is speculative future work, deliberately not wired here) --
 // every pin defaults to input+pullup, the same safe non-driving default
 // exp1's spares get.
@@ -255,7 +255,7 @@ static void apply_pending_commands(void)
 }
 
 // One scan tick: refresh both expanders' raw GPIO words, debounce exp1's
-// sense mask, and log/publish any confirmed edges. Docs/PLAN.md section 4.1:
+// sense mask, and log/publish any confirmed edges. Docs/DESIGN_NOTES.md section 4.1:
 // "relay-sense debounced scan (5-10 ms)".
 static void scan_tick(void)
 {

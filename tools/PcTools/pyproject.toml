@@ -13,7 +13,7 @@ dependencies = [
     # package still works if the wheel is missing, and the About window's
     # pinout PNG deliberately uses tk.PhotoImage instead.
     "pillow>=10.0",
-    # kilnsim's scenario.py (firmware/SimFW/docs/PLAN.md sec 8.1) loader.
+    # kilnsim's scenario.py (firmware/SimFW/docs/DESIGN_NOTES.md sec 8.1) loader.
     "pyyaml>=6.0",
 ]
 

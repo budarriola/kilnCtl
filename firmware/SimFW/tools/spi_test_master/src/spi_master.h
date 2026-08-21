@@ -35,7 +35,7 @@ extern "C" {
 #define SPI_MASTER_CS_COUNT   4u
 extern const uint8_t spi_master_cs_gpio[SPI_MASTER_CS_COUNT];
 
-// Datasheet/PLAN.md 3.2 default: SPI mode 1 (CPOL=0, CPHA=1) -- what the
+// Datasheet/DESIGN_NOTES.md 3.2 default: SPI mode 1 (CPOL=0, CPHA=1) -- what the
 // real MAX31856 masters (KilnFW/SaftyFW drivers) use, confirmed against
 // their actual SPI config and the MAX31856 datasheet's Table 5 (see
 // max31856_spi_slave.pio's header for the full derivation). That file's
@@ -54,7 +54,7 @@ uint32_t spi_master_set_rate_hz(uint32_t hz);
 uint32_t spi_master_get_rate_hz(void);
 
 // cpha: 0 or 1 (CPOL is always held at 0 -- neither real master uses
-// CPOL=1, and PLAN.md 3.2 never mentions it). Returns false for an
+// CPOL=1, and DESIGN_NOTES.md 3.2 never mentions it). Returns false for an
 // out-of-range cpha value (no change made).
 bool spi_master_set_mode(uint8_t cpha);
 uint8_t spi_master_get_mode(void);

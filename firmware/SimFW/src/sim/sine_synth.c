@@ -1,5 +1,5 @@
 // sine_synth.c -- see sine_synth.h for the table/sample/distortion/zero-
-// crossing contract (PLAN.md section 3.3).
+// crossing contract (DESIGN_NOTES.md section 3.3).
 #include "sine_synth.h"
 
 #include <math.h>

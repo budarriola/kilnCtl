@@ -9,7 +9,7 @@ server, CLI, and GUI in `tools/PcTools`.
 
 **Status: software complete, hardware-gated.** The pico-sdk + FreeRTOS-Kernel
 (SMP) CMake project and every single-owner task from
-[`docs/PLAN.md`](docs/PLAN.md) section 4.1's task map are fully implemented
+[`docs/DESIGN_NOTES.md`](docs/DESIGN_NOTES.md) section 4.1's task map are fully implemented
 under `src/` — PIO MAX31856 SPI slave emulation, CT waveform synthesis, I2C/
 expander/relay/E-stop/DUT-power drivers, and the sim-engine/fault-scheduler
 orchestration are all real code, not stubs. It builds clean under the real
@@ -27,7 +27,7 @@ No fixture hardware has ever been built or connected to a bench ESP32/Pico.
 The single biggest unproven risk is still the PIO SPI slave's real-world
 timing — no Saleae capture exists proving mode-1 transactions against a real
 master at 4 MHz, the thermocouple SPI clock's decided ceiling on both real
-masters (`docs/PLAN.md` section 10 / section 3.2.1, milestone M-A; enforced
+masters (`docs/PLAN.md` section 10 / `docs/DESIGN_NOTES.md` section 3.2.1, milestone M-A; enforced
 by a Kconfig `range` on KilnFW plus a matching `_Static_assert` on SaftyFW —
 the separate display SPI symbol stays at 20 MHz, unaffected). A real SPI-mode
 bug *was* found and fixed during implementation: the PIO engine originally

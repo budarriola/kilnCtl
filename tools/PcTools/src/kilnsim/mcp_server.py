@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """MCP server (stdio) exposing SimFW's control link as tools.
 
-``firmware/SimFW/docs/PLAN.md`` section 6.1's tool table. A separate MCP
-server from ``kilnctrl``'s (PLAN.md sec 6: "since it is a different device
+``firmware/SimFW/docs/DESIGN_NOTES.md`` section 6.1's tool table. A separate MCP
+server from ``kilnctrl``'s (DESIGN_NOTES.md sec 6: "since it is a different device
 with a different port"), following the same registration pattern
 (``mcp.server.mcpserver.MCPServer``, falling back to the pre-2.0
 ``mcp.server.fastmcp.FastMCP`` -- same decorator/run API either way) so an
@@ -12,7 +12,7 @@ immediately.
 ``run_test_scenario`` is the composite tool: it loads the YAML, compiles its
 faults, arms them on the link, drains the EVT stream, evaluates
 expectations, and stores the report for a later ``get_test_report`` call
-(PLAN.md sec 6.1). Everything else here is a thin 1:1 wrapper over
+(DESIGN_NOTES.md sec 6.1). Everything else here is a thin 1:1 wrapper over
 :class:`~kilnsim.link.SimLink`.
 
 Defaults to :class:`~kilnsim.link.MockSimLink` when no hardware is
@@ -109,7 +109,7 @@ def sim_disconnect() -> str:
 
 @_tool()
 def sim_get_state() -> str:
-    """Full telemetry snapshot as JSON (PLAN.md sec 5.3's telemetry frame shape)."""
+    """Full telemetry snapshot as JSON (DESIGN_NOTES.md sec 5.3's telemetry frame shape)."""
     import json
     state = _link.send_command(CommandGroup.SYS, 100)  # kilnsim-local GET_STATE convenience, see link.py
     return json.dumps(state, indent=2)
@@ -124,7 +124,7 @@ def sim_reset(keep_params: bool = False) -> str:
 
 @_tool()
 def sim_load_preset(name: str) -> str:
-    """Load a named thermal-model preset (PLAN.md sec 4.3: fast_test/small_kiln/three_zone/stress)."""
+    """Load a named thermal-model preset (DESIGN_NOTES.md sec 4.3: fast_test/small_kiln/three_zone/stress)."""
     _link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": name})
     return f"preset loaded: {name}"
 
@@ -134,7 +134,7 @@ def sim_load_preset(name: str) -> str:
 # ---------------------------------------------------------------------------
 @_tool()
 def sim_set_zone_params(zone: int, params: dict) -> str:
-    """Set one zone's thermal-model parameters (PLAN.md sec 4.3's per-zone table)."""
+    """Set one zone's thermal-model parameters (DESIGN_NOTES.md sec 4.3's per-zone table)."""
     _link.send_command(CommandGroup.MODEL, ModelCmd.SET_ZONE_PARAMS, {"zone": zone, "params": params})
     return f"zone {zone} params applied"
 
@@ -167,7 +167,7 @@ def sim_set_seed(value: int) -> str:
 @_tool()
 def tc_get_regs(channel: int) -> str:
     """Register image + shadow truth for one emulated MAX31856 channel
-    (PLAN.md sec 5.2: "the pair is what makes 'the DUT was lied to, this is
+    (DESIGN_NOTES.md sec 5.2: "the pair is what makes 'the DUT was lied to, this is
     the truth' assertions possible")."""
     import json
     reply = _link.send_command(CommandGroup.TC, TcCmd.GET_REGS, {"channel": channel})
@@ -176,7 +176,7 @@ def tc_get_regs(channel: int) -> str:
 
 @_tool()
 def tc_inject_fault(channel: int, fault_type: str, params: Optional[dict] = None) -> str:
-    """Inject a TC fault (PLAN.md sec 7.1's thermocouple/sensor fault catalog). Returns a fault slot id."""
+    """Inject a TC fault (DESIGN_NOTES.md sec 7.1's thermocouple/sensor fault catalog). Returns a fault slot id."""
     reply = _link.send_command(
         CommandGroup.TC, TcCmd.INJECT_FAULT,
         {"channel": channel, "fault_type": fault_type, "params": params or {}},
@@ -193,7 +193,7 @@ def tc_clear_fault(channel: int, fault_slot: int) -> str:
 
 @_tool()
 def tc_set_mode(channel: int, mode: str, manual_temp: Optional[float] = None) -> str:
-    """Set channel ``mode`` to "model" or "manual" (PLAN.md sec 5: every
+    """Set channel ``mode`` to "model" or "manual" (DESIGN_NOTES.md sec 5: every
     mutable thing has a mode). ``manual_temp`` is required for "manual"."""
     if mode not in ("model", "manual"):
         raise ValueError("mode must be 'model' or 'manual'")
@@ -227,7 +227,7 @@ def ct_set_amps(channel: int, amps: float) -> str:
 
 @_tool()
 def ct_set_distortion(channel: int, distortion: dict) -> str:
-    """Set CT distortion knobs (dc_offset, clipping, dropout, freq_hz -- PLAN.md sec 3.3)."""
+    """Set CT distortion knobs (dc_offset, clipping, dropout, freq_hz -- DESIGN_NOTES.md sec 3.3)."""
     _link.send_command(CommandGroup.CT, CtCmd.SET_DISTORTION, {"channel": channel, "distortion": distortion})
     return f"CT {channel} distortion set"
 
@@ -329,13 +329,13 @@ def io_set_dir(pin: str, is_input: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
-# FAULT scheduler (PLAN.md sec 7)
+# FAULT scheduler (DESIGN_NOTES.md sec 7)
 # ---------------------------------------------------------------------------
 @_tool()
 def fault_schedule(fault_type: str, target: str, trigger: dict,
                     duration: Optional[dict] = None, repeat: Optional[dict] = None,
                     params: Optional[list] = None) -> str:
-    """Arm a scheduled fault per PLAN.md sec 7.2's trigger/duration/repeat spec.
+    """Arm a scheduled fault per DESIGN_NOTES.md sec 7.2's trigger/duration/repeat spec.
     Returns the assigned fault slot id."""
     payload = {
         "fault_type": fault_type,
@@ -381,7 +381,7 @@ def run_test_scenario(path: str, seed: Optional[int] = None, timescale: Optional
     report. Returns a run id for :func:`get_test_report`.
 
     This call is synchronous against a MockSimLink (nothing to wait on) and
-    against real hardware runs to completion before returning -- PLAN.md sec
+    against real hardware runs to completion before returning -- DESIGN_NOTES.md sec
     6.1 sketches it as async with progress events; that streaming form is a
     follow-on once a real fixture exists to observe timing against. This
     version already delivers the composite behavior the tool table promises:
@@ -422,7 +422,7 @@ def run_test_scenario(path: str, seed: Optional[int] = None, timescale: Optional
 
 @_tool()
 def get_test_report(run_id: int) -> str:
-    """Full report JSON for a previous :func:`run_test_scenario` call (PLAN.md sec 8.2)."""
+    """Full report JSON for a previous :func:`run_test_scenario` call (DESIGN_NOTES.md sec 8.2)."""
     with _reports_lock:
         report = _reports.get(run_id)
     if report is None:

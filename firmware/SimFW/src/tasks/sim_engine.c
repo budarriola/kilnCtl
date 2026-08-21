@@ -12,7 +12,7 @@
 // --- Tick order (deterministic, single task, single thread of execution) ---
 //   1. Drain the MODEL-group command queue (params/preset/ambient/
 //      timescale/seed/reset/force-temp/clear-manual), applied at this tick
-//      boundary (PLAN.md 4.5's queue-then-apply-next-tick doctrine).
+//      boundary (DESIGN_NOTES.md 4.5's queue-then-apply-next-tick doctrine).
 //   2. Read this tick's inputs: relay states + E-stop + DUT power from
 //      i2c_owner's existing public getters (i2c_owner.h; this file never
 //      touches I2C0 itself).
@@ -32,7 +32,7 @@
 //   5. Apply MANUAL zone-temp overrides (pin T_zone/T_tc, post-physics).
 //   6. Advance sim_time_us by dt_s (wall period * timescale).
 //   7. Compute current_a[] per zone from the *effective* duty/health used
-//      in step 4 (PLAN.md 3.3's formula) -- so a welded-relay fault's
+//      in step 4 (DESIGN_NOTES.md 3.3's formula) -- so a welded-relay fault's
 //      forced duty correctly shows up as CT current too.
 //   8. Publish the snapshot (seq-counter protocol).
 //   9. Detect relay edges vs. last tick's mask; push SIM_EVENT_RELAY_EDGE
@@ -112,7 +112,7 @@ static float s_zone_manual_temp_c[THERMAL_MODEL_MAX_ZONES];
 // s_params) + lag filter state + MANUAL override (task-context-only, same
 // discipline as s_zone_manual above) -----------------------------------
 static sim_engine_safety_tc_params_t s_safety_tc_params = {
-    .weight = { 1.0f, 0.0f, 0.0f, 0.0f }, // PLAN.md 4.3 default: zone 0
+    .weight = { 1.0f, 0.0f, 0.0f, 0.0f }, // DESIGN_NOTES.md 4.3 default: zone 0
     .lag_s = 5.0f,
 };
 static float s_safety_tc_state_c = 25.0f; // lag filter's running value
@@ -385,7 +385,7 @@ static void sim_engine_tick(void)
         if (s_zone_health_override_active[z]) {
             eff_params.zones[z].element_health = s_zone_health_override_value[z];
         }
-        // Thermal-mass surprise (PLAN.md 7.1): step-change C/k_loss.
+        // Thermal-mass surprise (DESIGN_NOTES.md 7.1): step-change C/k_loss.
         // C <= 0 is ignored -- see sim_engine.h's doc on this override for
         // why (avoids handing thermal_model_tick() a divide-by-zero).
         if (s_zone_thermal_override_active[z]) {
@@ -394,7 +394,7 @@ static void sim_engine_tick(void)
             }
             eff_params.zones[z].k_loss = s_zone_thermal_override_k_loss[z];
         }
-        // Sensor-vs-element lag stress (PLAN.md 7.1): step-change tc_lag_s.
+        // Sensor-vs-element lag stress (DESIGN_NOTES.md 7.1): step-change tc_lag_s.
         if (s_zone_tc_lag_override_active[z]) {
             eff_params.zones[z].tc_lag_s = s_zone_tc_lag_override_value[z];
         }
@@ -418,7 +418,7 @@ static void sim_engine_tick(void)
 
     s_sim_time_us += (uint64_t)(dt_s * 1.0e6f);
 
-    // --- Safety-side TC: blend of *true* zone temps (PLAN.md section 2's
+    // --- Safety-side TC: blend of *true* zone temps (DESIGN_NOTES.md section 2's
     // "the same zone temperatures feed the safety-side emulated MAX31856")
     // + its own first-order lag (same formula as thermal_model.c's TC lag,
     // deliberately mirrored here rather than in that locked file: dT/dt =
@@ -447,7 +447,7 @@ static void sim_engine_tick(void)
         safety_reported_c = s_safety_manual_temp_c;
     }
 
-    // --- current_a[] : PLAN.md 3.3's formula, using the *effective*
+    // --- current_a[] : DESIGN_NOTES.md 3.3's formula, using the *effective*
     // duty/health this tick actually used, so fault overrides show up in
     // current too. ---------------------------------------------------------
     float current_a[THERMAL_MODEL_MAX_ZONES] = { 0 };

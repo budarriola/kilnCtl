@@ -1,6 +1,6 @@
 """YAML scenario loader/validator + fault-schedule compiler.
 
-Implements ``firmware/SimFW/docs/PLAN.md`` section 8.1's scenario file shape
+Implements ``firmware/SimFW/docs/DESIGN_NOTES.md`` section 8.1's scenario file shape
 exactly (name, version, exercises, preset, timescale, seed, overrides,
 dut, faults[], expect[] with event/then, forbid, at_end forms, report_keep,
 optional manual_checks).
@@ -38,7 +38,7 @@ class ScenarioError(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# expect clause shapes (PLAN.md sec 8.1 example: event/then, forbid, at_end)
+# expect clause shapes (DESIGN_NOTES.md sec 8.1 example: event/then, forbid, at_end)
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class EventThenExpect:
@@ -73,7 +73,7 @@ ExpectClause = Union[EventThenExpect, ForbidExpect, AtEndExpect]
 
 @dataclass(frozen=True)
 class FaultSpec:
-    """One entry of the scenario's ``faults:`` list, pre-parse of PLAN.md
+    """One entry of the scenario's ``faults:`` list, pre-parse of DESIGN_NOTES.md
     sec 7.2's trigger/duration/repeat spec into :mod:`kilnsim.protocol`
     dataclasses (done by :func:`_parse_trigger` etc below, at load time)."""
 
@@ -113,12 +113,12 @@ class Scenario:
 
     def content_hash(self) -> str:
         """Stable hash of the scenario's raw content, for report.py's
-        scenario-identity field (PLAN.md sec 8.2: "scenario name/version/hash")."""
+        scenario-identity field (DESIGN_NOTES.md sec 8.2: "scenario name/version/hash")."""
         return hashlib.sha256(yaml.safe_dump(self.raw, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
-# trigger / duration / repeat parsing (PLAN.md sec 7.2)
+# trigger / duration / repeat parsing (DESIGN_NOTES.md sec 7.2)
 # ---------------------------------------------------------------------------
 def _parse_trigger(data: dict) -> Trigger:
     if not isinstance(data, dict) or len(data) != 1:
@@ -232,7 +232,7 @@ def _parse_fault(data: dict) -> FaultSpec:
 
 
 def _parse_blocked_on(data: dict, name: str) -> Optional[dict]:
-    """``blocked_on:`` (PLAN.md sec 8.1's template, `welded_ssr_midfire.yaml`'s
+    """``blocked_on:`` (DESIGN_NOTES.md sec 8.1's template, `welded_ssr_midfire.yaml`'s
     header comment) -- an optional sibling of event/then/forbid/at_end on any
     ``expect:`` entry, marking an expectation that cannot pass against
     today's DUT by design of the roadmap, not by a defect in the guard, the
@@ -279,7 +279,7 @@ _REQUIRED_TOP_KEYS = ("name", "version")
 
 
 def load_scenario(path: Union[str, Path]) -> Scenario:
-    """Load and validate a scenario YAML file per PLAN.md sec 8.1.
+    """Load and validate a scenario YAML file per DESIGN_NOTES.md sec 8.1.
 
     Raises :class:`ScenarioError` on any structural problem -- missing
     required fields, a malformed trigger/duration/repeat, an ``expect``
@@ -387,7 +387,7 @@ def load_scenario_text(text: str, source_path: Optional[Path] = None) -> Scenari
 def compile_faults(scenario: Scenario) -> list:
     """Turn ``scenario.faults`` into :class:`~kilnsim.protocol.FaultScheduleCommand`
     objects, one per entry, in file order (slot ids assigned by that order --
-    PLAN.md sec 7.3: "trigger evaluation order is slot order", so the
+    DESIGN_NOTES.md sec 7.3: "trigger evaluation order is slot order", so the
     compiled order is meaningful and preserved here).
     """
     compiled = []

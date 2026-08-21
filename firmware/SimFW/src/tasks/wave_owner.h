@@ -1,17 +1,17 @@
-// wave_owner.h -- single owner of the PWM slices + DMA (docs/PLAN.md section
+// wave_owner.h -- single owner of the PWM slices + DMA (docs/DESIGN_NOTES.md section
 // 4.1 task map): "60 Hz synthesis, amplitude/phase/distortion updates at
 // zero-crossings." Drives the three CT sine-wave channels (section 3.3) into
 // J13/J15/J17 via isolation transformers, through src/drivers/ct_wave_pwm.h
 // (this task's private driver -- nothing else may touch those PWM slices or
-// DMA channels, single-owner-per-peripheral doctrine, PLAN.md section 4's
+// DMA channels, single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's
 // opening paragraph).
 //
 // Public API below mirrors i2c_owner.h's queue-then-apply-next-tick
 // contract: every setter posts a command to wave_owner's own queue and
-// returns immediately (never blocks the hard-real-time core-1 task, PLAN.md
+// returns immediately (never blocks the hard-real-time core-1 task, DESIGN_NOTES.md
 // section 4.5's "nothing ever blocks ... wave_owner -- a full queue toward
 // them is a counted drop plus event, never a stall"). This is also the
-// eventual backing for the future CT command group (PLAN.md section 5's
+// eventual backing for the future CT command group (DESIGN_NOTES.md section 5's
 // CT_SET_MODE / CT_SET_AMPS / CT_SET_DISTORTION / CT_GET_STATE), which
 // cmd_task.c will wire up once the USB protocol lands -- not this pass's
 // scope, but the API shape here is written to match that sketch directly.
@@ -25,14 +25,14 @@
 extern "C" {
 #endif
 
-// PLAN.md 3.6: "CT sine PWM x3". Channel index i corresponds to
+// DESIGN_NOTES.md 3.6: "CT sine PWM x3". Channel index i corresponds to
 // sim_snapshot_t.zones[i] (sim/sim_snapshot.h) -- only the first
 // CT_WAVE_NUM_CHANNELS of SIM_SNAPSHOT_MAX_ZONES zones have a CT channel;
-// PLAN.md 3.1's optional 4th zone is explicitly "a zone with no dedicated
+// DESIGN_NOTES.md 3.1's optional 4th zone is explicitly "a zone with no dedicated
 // CT/TC".
 #define CT_WAVE_NUM_CHANNELS 3u
 
-// Every mutable CT signal has a mode (PLAN.md section 5's MODEL/MANUAL
+// Every mutable CT signal has a mode (DESIGN_NOTES.md section 5's MODEL/MANUAL
 // doctrine): MODEL tracks sim_snapshot_t.zones[channel].current_a every
 // tick; MANUAL freezes at the last ct_wave_set_amps() value.
 typedef enum {
@@ -40,11 +40,11 @@ typedef enum {
     CT_WAVE_MODE_MANUAL = 1,
 } ct_wave_mode_t;
 
-// Distortion knobs, PLAN.md 3.3: "DC offset, clipping, dropout". Mirrors
+// Distortion knobs, DESIGN_NOTES.md 3.3: "DC offset, clipping, dropout". Mirrors
 // sine_synth.h's sine_channel_cfg_t distortion fields exactly (this struct
 // is what gets copied into a sine_channel_cfg_t each recompute) plus one
 // field sine_synth.h intentionally has no notion of: apply_immediately,
-// PLAN.md 3.3's "unless a distortion knob says otherwise -- step-in-mid-
+// DESIGN_NOTES.md 3.3's "unless a distortion knob says otherwise -- step-in-mid-
 // cycle is itself a selectable distortion" -- see ct_wave_pwm.h's top
 // comment for how that maps onto the DMA table swap.
 typedef struct {
@@ -55,7 +55,7 @@ typedef struct {
     bool apply_immediately; // false (default): gate at the next zero crossing; true: step now
 } ct_wave_distortion_t;
 
-// Read-only snapshot for CT_GET_STATE (PLAN.md section 5), i2c_owner.h's
+// Read-only snapshot for CT_GET_STATE (DESIGN_NOTES.md section 5), i2c_owner.h's
 // i2c_owner_relay_states_t-style plain struct returned by value.
 typedef struct {
     ct_wave_mode_t mode;
@@ -78,32 +78,32 @@ bool wave_owner_start(void);
 // channel's distortion.apply_immediately is set.
 bool ct_wave_set_mode(uint8_t channel, ct_wave_mode_t mode);
 
-// Only meaningful in MANUAL mode (PLAN.md section 5: "CT_SET_AMPS"); a
+// Only meaningful in MANUAL mode (DESIGN_NOTES.md section 5: "CT_SET_AMPS"); a
 // pending MANUAL amps value is still stored while in MODEL mode (so
 // switching to MANUAL later starts from something sane), but has no effect
 // on the output until the channel is actually in MANUAL mode.
 bool ct_wave_set_amps(uint8_t channel, float amps);
 
-// Per-channel phase offset (PLAN.md 3.3: "0/120/240 (three-phase-ish) or 0
+// Per-channel phase offset (DESIGN_NOTES.md 3.3: "0/120/240 (three-phase-ish) or 0
 // (in-phase, default)" -- selectable, not restricted to those three values).
 bool ct_wave_set_phase(uint8_t channel, float phase_deg);
 
-// Replaces channel's distortion config wholesale (PLAN.md section 5:
+// Replaces channel's distortion config wholesale (DESIGN_NOTES.md section 5:
 // "CT_SET_DISTORTION"). Pass a zeroed/false struct to clear all distortion.
 bool ct_wave_set_distortion(uint8_t channel, const ct_wave_distortion_t *distortion);
 
-// PLAN.md section 5: "CT_GET_STATE". Returns false (out left unmodified) for
+// DESIGN_NOTES.md section 5: "CT_GET_STATE". Returns false (out left unmodified) for
 // an out-of-range channel.
 bool ct_wave_get_state(uint8_t channel, ct_wave_channel_state_t *out);
 
-// Calibration hook (PLAN.md 3.3's "amplitude (in simulated amps, fixture
+// Calibration hook (DESIGN_NOTES.md 3.3's "amplitude (in simulated amps, fixture
 // converts via calibration table)"). Converts a target current in simulated
 // amps into a PWM full-scale fraction (0..1, 0 = mid-scale/silent,
 // 1 = maximum swing the carrier's 8-bit resolution allows).
 //
 // Implemented as clamp(gain[channel] * amps + offset[channel], 0, 1) against
 // the compiled-in per-channel table in sim/ct_calibration.h -- the arithmetic
-// PLAN.md 3.3 and tools/ct_calibration/README.md's "Remaining firmware work"
+// DESIGN_NOTES.md 3.3 and tools/ct_calibration/README.md's "Remaining firmware work"
 // section specify.
 //
 // M-D IS NOT CLOSED. No CT hardware exists on this bench and no calibration

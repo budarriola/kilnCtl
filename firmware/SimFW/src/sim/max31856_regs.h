@@ -1,10 +1,10 @@
 // max31856_regs -- pure, host-testable MAX31856 register-file emulator for
-// SimFW. docs/PLAN.md section 3.2 is authoritative for the register map and
+// SimFW. docs/DESIGN_NOTES.md section 3.2 is authoritative for the register map and
 // behavioral rules; this header/.c implement it.
 //
 // Register addresses, bit layouts, and fixed-point scales below are
 // cross-checked against this repo's own MAX31856 masters, which must not
-// need a single driver change to talk to the emulator (PLAN.md 3.2's own
+// need a single driver change to talk to the emulator (DESIGN_NOTES.md 3.2's own
 // requirement):
 //   - firmware/KilnFW/App/drivers/MAX31856.h (ESP32-S3, three channels, J6)
 //   - firmware/SaftyFW/src/max31856.h (RP2040 A1, one channel, J7 -- a
@@ -20,7 +20,7 @@
 // N-data-bytes, auto-incrementing shape. Convenience burst helpers wrap that
 // for callers that do not need per-byte control (most host tests).
 //
-// Coherency guarantee (PLAN.md 3.2.1): "a multi-byte LTCB read is always
+// Coherency guarantee (DESIGN_NOTES.md 3.2.1): "a multi-byte LTCB read is always
 // internally consistent -- same guarantee the real chip gives." This is
 // implemented by snapshotting the live register image at CS-assert time for
 // a read transaction; nothing mutates that snapshot until CS deasserts, no
@@ -107,9 +107,9 @@ extern "C" {
 #define MAX31856_TC_THRESHOLD_C_PER_LSB 0.0625f    /* LTHFTH/L, LTLFTH/L, int16 */
 #define MAX31856_CJ_OFFSET_C_PER_LSB    0.0625f    /* CJTO, int8 */
 #define MAX31856_CJ_TEMP_C_PER_LSB      (1.0f / 256.0f)  /* CJTH:CJTL, int16 */
-#define MAX31856_TC_TEMP_C_PER_LSB      0.0078125f /* LTCBH/M/L, 19-bit code (PLAN.md 3.2) */
+#define MAX31856_TC_TEMP_C_PER_LSB      0.0078125f /* LTCBH/M/L, 19-bit code (DESIGN_NOTES.md 3.2) */
 
-/* Dead-channel corruption modes (PLAN.md 3.2's corruption-knob list). All
+/* Dead-channel corruption modes (DESIGN_NOTES.md 3.2's corruption-knob list). All
  * three force every byte of a read transaction on this channel regardless
  * of address; HIGH_Z is functionally identical to ALL_ONE at this register
  * level (a floating bus idling high) -- the distinction only matters at the
@@ -122,7 +122,7 @@ typedef enum {
     MAX31856_DEAD_HIGH_Z,
 } max31856_dead_mode_t;
 
-/* PLAN.md 3.2's per-channel corruption knobs. */
+/* DESIGN_NOTES.md 3.2's per-channel corruption knobs. */
 typedef struct {
     bool stuck_ltcb;              /* freeze the reported TC temp (incl. SR
                                     * comparisons derived from it) at its
@@ -138,7 +138,7 @@ typedef struct {
     bool spurious_fault_pin;        /* force ~FAULT asserted regardless of
                                       * SR/MASK */
 
-    bool shorted;                   /* PLAN.md 7.1 "Shorted TC": reported TC
+    bool shorted;                   /* DESIGN_NOTES.md 7.1 "Shorted TC": reported TC
                                       * temperature is forced to the reported
                                       * CJ temperature (near-ambient/CJ)
                                       * regardless of the true zone
@@ -154,7 +154,7 @@ typedef struct {
                                       * definite claim (same severity
                                       * doctrine fault_sched.c documents for
                                       * its own zone-level overrides). */
-    float drift_offset_c;           /* PLAN.md 7.1 "Drifting TC": calibration-
+    float drift_offset_c;           /* DESIGN_NOTES.md 7.1 "Drifting TC": calibration-
                                       * drift ramp offset, degC, added to the
                                       * true TC reading before noise/
                                       * quantization. This module has no time
@@ -167,7 +167,7 @@ typedef struct {
                                       * instantaneous value, never an
                                       * accumulator this module integrates
                                       * itself. 0 = no drift. */
-    float cj_fault_offset_c;        /* PLAN.md 7.1 "CJ fault": added to the
+    float cj_fault_offset_c;        /* DESIGN_NOTES.md 7.1 "CJ fault": added to the
                                       * internally-sensed CJ temperature
                                       * (true_cj_c + CJTO) before quantizing
                                       * into CJTH:CJTL and before the
@@ -229,7 +229,7 @@ typedef struct {
     bool drdy_asserted;
     bool txn_touched_drdy;
 
-    /* Master-write bookkeeping (TC_GET_MASTER_CONFIG, PLAN.md 5.2/3.2): set
+    /* Master-write bookkeeping (TC_GET_MASTER_CONFIG, DESIGN_NOTES.md 5.2/3.2): set
      * true the first time apply_write_rule() ever runs for this channel --
      * i.e. the first data byte of the first write transaction the master
      * ever issues, even one targeting a read-only address (an attempted
@@ -237,7 +237,7 @@ typedef struct {
      * false->true, never cleared except by max31856_regs_init() -- this is
      * what lets a caller distinguish "the DUT configured this channel
      * wrong" from "the DUT never configured this channel at all", which
-     * PLAN.md 5.2 calls out as "a different and equally important
+     * DESIGN_NOTES.md 5.2 calls out as "a different and equally important
      * failure." A plain bool read/write is used deliberately (no snapshot,
      * no coherency machinery): it is monotonic and single-byte, so a reader
      * on another core can never observe a torn value the way a multi-byte

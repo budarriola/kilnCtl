@@ -19,7 +19,7 @@ typedef struct {
     uint32_t mismatches;          // bytes that did not match
     uint32_t suspected_first_byte_late; // transactions where byte[0] mismatched but every
                                           // later byte in the same transaction matched --
-                                          // the master-side signature of PLAN.md 3.2.1's
+                                          // the master-side signature of DESIGN_NOTES.md 3.2.1's
                                           // "first-byte-late" TX-FIFO-underrun failure mode
                                           // (see ../README.md's troubleshooting table). This
                                           // is a heuristic, not a direct underrun detector --
@@ -48,7 +48,7 @@ bool seq_single_read(uint8_t addr, uint8_t expect, seq_stats_t *stats);
 bool seq_write_readback(uint8_t addr, const uint8_t *data, uint8_t len, seq_stats_t *stats);
 
 // Pure multi-byte auto-increment read of `len` bytes starting at `addr`,
-// compared against caller-supplied `expect[len]`. The case PLAN.md 3.2.1's
+// compared against caller-supplied `expect[len]`. The case DESIGN_NOTES.md 3.2.1's
 // 1.6us latency budget is really about.
 bool seq_autoinc_read(uint8_t addr, const uint8_t *expect, uint8_t len, seq_stats_t *stats);
 

@@ -1,6 +1,6 @@
 """Transport layer to SimFW: :class:`SimLink` and its two implementations.
 
-PLAN.md sec 2/5: SimFW talks native USB CDC using ``benchproto``
+DESIGN_NOTES.md sec 2/5: SimFW talks native USB CDC using ``benchproto``
 (``firmware/CommonFW/include/benchproto/``, spec in
 ``firmware/CommonFW/docs/BENCHPROTO.md``), with SimFW's own command-group
 numbering and payload byte layouts documented in
@@ -360,7 +360,7 @@ class _FramedSimLink(SimLink):
         """PROTOCOL.md sec 6 "Loss visibility": a gap between consecutive
         received EVT `seq` values is, by itself, enough to detect loss --
         this is that client-side check. ``evt_seq_gap_count`` is exposed so
-        report.py (PLAN.md 5.3: "the PC's report generator refuses to
+        report.py (DESIGN_NOTES.md 5.3: "the PC's report generator refuses to
         certify a run with a sequence gap") can inspect it after a run."""
         if self._last_evt_seq is not None and seq != self._last_evt_seq + 1:
             gap = seq - self._last_evt_seq - 1
@@ -901,7 +901,7 @@ class MockSimLink(SimLink):
         # here so `kilnsim state --mock` has something to show immediately.
         if group is CommandGroup.SYS and cmd == 100:  # GET_STATE (kilnsim-local convenience)
             return dict(self._state)
-        # Generic fallback: most PLAN.md 5-table commands are fire-and-forget
+        # Generic fallback: most DESIGN_NOTES.md 5-table commands are fire-and-forget
         # writes (SET_*, INJECT_FAULT, RELAY_SET_CONTACT_FAULT, IO_WRITE...);
         # answering them all with a plain ack keeps every CLI/MCP wrapper
         # testable without a bespoke script for each one.

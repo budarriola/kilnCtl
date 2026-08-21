@@ -176,7 +176,7 @@ static void test_zero_length_payload(void)
  * no second *production* implementation to check against yet -- these guard
  * against benchproto_frame.c regressing from its own frozen spec, and are
  * the baseline SimFW's future PC-side `kilnsim` link layer should be
- * checked against once it exists (see PLAN.md sec 6's "prove-it-twice"
+ * checked against once it exists (see DESIGN_NOTES.md sec 6's "prove-it-twice"
  * note). */
 
 static void test_vector_data_with_payload(void)

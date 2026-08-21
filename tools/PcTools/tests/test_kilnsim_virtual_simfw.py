@@ -482,7 +482,7 @@ def test_virtual_only_relay_set_sense_command():
 
 
 def test_determinism_same_seed_same_scenario_byte_identical_events():
-    """PLAN.md sec 4.2/7.2's core testing contract: "the same scenario + seed
+    """DESIGN_NOTES.md sec 4.2/7.2's core testing contract: "the same scenario + seed
     => the same run, byte-for-byte in the event log" -- run twice against two
     independent virtual_simfw processes and diff the event logs field by
     field. Uses a small synthetic scenario with an EVERY+jitter repeat
@@ -493,7 +493,7 @@ def test_determinism_same_seed_same_scenario_byte_identical_events():
 
     Deliberately AT_SIM_TIME, not RANDOM_IN, for the *trigger* itself: this
     harness applies FAULT_SCHEDULE synchronously on TCP arrival rather than
-    queuing it to a fixed tick boundary the way real firmware's PLAN.md 4.5
+    queuing it to a fixed tick boundary the way real firmware's DESIGN_NOTES.md 4.5
     "queue-then-apply-next-tick" doctrine does (see this test file's own
     module docstring and virtual_simfw.c's file-header "known deviations"),
     so the exact tick a slot first becomes ARMED can vary a little with
@@ -547,7 +547,7 @@ expect: []
     # The trigger's own absolute firing time is NOT byte-identical across
     # runs, and that is expected, not a bug: this harness applies
     # FAULT_SCHEDULE synchronously as soon as its TCP frame is decoded
-    # rather than queuing it to a fixed tick boundary (PLAN.md 4.5's real-
+    # rather than queuing it to a fixed tick boundary (DESIGN_NOTES.md 4.5's real-
     # firmware "queue-then-apply-next-tick" doctrine, see this test file's
     # module docstring and virtual_simfw.c's "known deviations"). Between
     # LOAD_PRESET (which resets sim_time to 0) and FAULT_SCHEDULE arriving,
@@ -558,7 +558,7 @@ expect: []
     # armed, so it can fire "late" by a different amount each run. This is
     # not specific to a simplification either -- it is a property any live,
     # asynchronously-commanded system has (real hardware over USB CDC would
-    # have the same setup-latency variance); PLAN.md 4.2/7.2's determinism
+    # have the same setup-latency variance); DESIGN_NOTES.md 4.2/7.2's determinism
     # contract is about the simulator's *own* evaluation being a pure
     # function of (sim state, seed), not about pinning real-world command
     # latency to zero.
@@ -577,5 +577,5 @@ expect: []
     n = min(len(gaps1), len(gaps2))
     assert gaps1[:n] == gaps2[:n], (
         "same scenario + same seed must draw the same repeat-jitter sequence from the "
-        "seeded PRNG (PLAN.md sec 4.2/7.2's determinism contract)"
+        "seeded PRNG (DESIGN_NOTES.md sec 4.2/7.2's determinism contract)"
     )

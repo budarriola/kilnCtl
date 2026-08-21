@@ -1,5 +1,5 @@
 // Host tests for sine_synth.c: table correctness, distortion modes, and
-// zero-crossing detection (PLAN.md section 13.1 / section 3.3).
+// zero-crossing detection (PLAN.md section 13.1 / DESIGN_NOTES.md section 3.3).
 #include "test_common.h"
 #include "../src/sim/sine_synth.h"
 

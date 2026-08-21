@@ -67,7 +67,7 @@ static void thermal_override_apply(bool active, float C_over, float k_loss_over,
 // MAIN_SAFETY_DISAGREE case + the post-loop
 // sim_engine_set_safety_tc_fault_override() call: offsets accumulate
 // additively across every ACTIVE slot of this type (slot order, matching
-// PLAN.md 7.3's deterministic tiebreak), and params[1]==0.0 (the value an
+// DESIGN_NOTES.md 7.3's deterministic tiebreak), and params[1]==0.0 (the value an
 // unspecified gain param is left at) means "leave the default gain of 1.0
 // alone" rather than "use gain 0".
 static void safety_disagree_compose(const float *offsets, const float *gains, int n,
@@ -132,7 +132,7 @@ static void test_safety_tc_fault_override_gain_offset(void)
     float out = safety_tc_step(100.0f, 5.0f, 0.1f, 100.0f, true, 80.0f, 1.5f, false, 0.0f);
     TEST_CHECK_NEAR(out, 230.0f, 1e-4, "fault override applies gain then offset to the lag output");
 
-    // PLAN.md section 8 scenario 8: a pure +80 degC skew (gain left at 1.0).
+    // DESIGN_NOTES.md section 8 scenario 8: a pure +80 degC skew (gain left at 1.0).
     out = safety_tc_step(400.0f, 5.0f, 0.1f, 400.0f, true, 80.0f, 1.0f, false, 0.0f);
     TEST_CHECK_NEAR(out, 480.0f, 1e-4, "gain==1.0 leaves the pure offset skew from main_safety_skew.yaml intact");
 }

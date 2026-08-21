@@ -3,7 +3,7 @@
 
 /* The single source of truth for benchproto's wire protocol version.
  * Consumers (first: SimFW's usb_owner task and the fresh `kilnsim` PC
- * tools, per firmware/SimFW/docs/PLAN.md sec 4.4/5.1) should alias their
+ * tools, per firmware/SimFW/docs/DESIGN_NOTES.md sec 4.4/5.1) should alias their
  * own "protocol version" constant to this one rather than keeping a second
  * number -- see CommonFW/README.md's kilnlink "Versioning" section, the
  * same discipline applies here.

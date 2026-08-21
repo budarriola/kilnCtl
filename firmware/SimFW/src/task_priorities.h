@@ -1,5 +1,5 @@
 // task_priorities.h -- priorities, core affinity and periods for every SimFW
-// task, verbatim from docs/PLAN.md section 4.1 (task map). One place, so a
+// task, verbatim from docs/DESIGN_NOTES.md section 4.1 (task map). One place, so a
 // task file never invents its own number and the table can be diffed
 // against the doc. Mirrors ../../SaftyFW/src/task_priorities.h's structure
 // and discipline.
@@ -7,40 +7,40 @@
 // Higher FreeRTOS priority number = higher priority (standard FreeRTOS
 // convention).
 //
-// The core split is PLAN.md section 4.1's closing paragraph: "Core 1 is
+// The core split is DESIGN_NOTES.md section 4.1's closing paragraph: "Core 1 is
 // reserved for the hard-real-time producers (SPI emulation response
 // pre-compute, waveform DMA feeding); core 0 does everything elastic." That
 // is a real-time-budget split, not a safety-isolation one the way SaftyFW's
 // trip-path/link-path split is -- but it is still load-bearing: SIMFW_PRIO_*
 // and SIMFW_CORE_*_PATH are the single source of truth for it, so if you are
-// changing a value here, change docs/PLAN.md section 4.1 in the same commit.
+// changing a value here, change docs/DESIGN_NOTES.md section 4.1 in the same commit.
 #ifndef SIMFW_TASK_PRIORITIES_H
 #define SIMFW_TASK_PRIORITIES_H
 
 #include "FreeRTOS.h"
 
 // Without configUSE_CORE_AFFINITY, vTaskCoreAffinitySet() compiles, links,
-// and silently does nothing -- the core split in PLAN.md section 4.1
+// and silently does nothing -- the core split in DESIGN_NOTES.md section 4.1
 // evaporates with no build error and no runtime symptom until it matters.
 // Caught here, at compile time, in every translation unit that includes
 // this header, rather than trusted to a FreeRTOSConfig.h nobody re-reads.
 // Same guard SaftyFW's own task_priorities.h carries.
 #if !defined(configUSE_CORE_AFFINITY) || (configUSE_CORE_AFFINITY != 1)
-#error "configUSE_CORE_AFFINITY must be 1 -- see PLAN.md section 4.1: " \
+#error "configUSE_CORE_AFFINITY must be 1 -- see DESIGN_NOTES.md section 4.1: " \
        "without it vTaskCoreAffinitySet() is a no-op and the core split " \
        "silently evaporates."
 #endif
 
 #if !defined(configNUMBER_OF_CORES) || (configNUMBER_OF_CORES != 2)
-#error "configNUMBER_OF_CORES must be 2 -- SimFW's core split (PLAN.md " \
+#error "configNUMBER_OF_CORES must be 2 -- SimFW's core split (DESIGN_NOTES.md " \
        "section 4.1) assumes both RP2040 cores are schedulable."
 #endif
 
 // Core affinity masks. RP2040 core numbers, not priorities.
 #define SIMFW_CORE_RT_PATH       (1u << 1) // core 1: hard-real-time producers (SPI emulation, waveform DMA)
-#define SIMFW_CORE_ELASTIC_PATH  (1u << 0) // core 0: everything elastic (PLAN.md section 4.1)
+#define SIMFW_CORE_ELASTIC_PATH  (1u << 0) // core 0: everything elastic (DESIGN_NOTES.md section 4.1)
 
-// Priorities, highest first, per PLAN.md section 4.1's "Core / Prio"
+// Priorities, highest first, per DESIGN_NOTES.md section 4.1's "Core / Prio"
 // columns. configMAX_PRIORITIES must exceed the highest value used here
 // (see FreeRTOSConfig.h).
 //
@@ -65,12 +65,12 @@
 #define SIMFW_PRIO_TELEMETRY     2 // periodic state frames to USB
 #define SIMFW_PRIO_LOG_TASK      1 // deferred logging, drop-counting, never blocks producers
 
-// Periods, in ticks, for tasks with a fixed period per PLAN.md section 4.1 /
+// Periods, in ticks, for tasks with a fixed period per DESIGN_NOTES.md section 4.1 /
 // 4.3. configTICK_RATE_HZ is 1000 (FreeRTOSConfig.h), so pdMS_TO_TICKS is
 // exact here. Only sim_engine has a doc-stated fixed cadence today; the
 // others are event-driven (usb_owner, cmd_task) or will get a real period
 // once their bodies land -- no placeholder period is defined for those so a
 // stub loop's vTaskDelay() argument is never mistaken for a frozen contract.
-#define SIMFW_PERIOD_SIM_ENGINE_MS   100 // 10 Hz, PLAN.md section 4.3
+#define SIMFW_PERIOD_SIM_ENGINE_MS   100 // 10 Hz, DESIGN_NOTES.md section 4.3
 
 #endif // SIMFW_TASK_PRIORITIES_H

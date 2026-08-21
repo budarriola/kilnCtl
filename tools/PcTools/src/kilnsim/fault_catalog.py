@@ -14,7 +14,7 @@ missing piece: `fault_type_to_id` / `parse_target` below.
 
 The catalog table's *names* were taken from firmware/SimFW/scenarios/*.yaml's
 real `type:` values (grepped 2026-08-20, 14 distinct names) plus every other
-PLAN.md sec 7.1 fault fault_sched.h actually implements (so a scenario using
+DESIGN_NOTES.md sec 7.1 fault fault_sched.h actually implements (so a scenario using
 a name none of the 16 shipped files happen to use today still resolves).
 Numeric ids mirror fault_sched.h's `fault_sched_fault_type_t` enum order
 exactly -- see that header (and its mirror in
@@ -67,13 +67,13 @@ _TARGET_KIND = {
 
 #: scenario YAML `type:` name -> numeric fault_sched_fault_type_t. Includes
 #: every name actually used in firmware/SimFW/scenarios/*.yaml (grepped
-#: 2026-08-20) plus the PLAN.md sec 7.1 catalog's other documented names, so
+#: 2026-08-20) plus the DESIGN_NOTES.md sec 7.1 catalog's other documented names, so
 #: a name absent from the 16 shipped scenarios still resolves if a new
 #: scenario uses it.
 FAULT_TYPE_NAMES = {
     "disconnected_tc": TC_DISCONNECTED,
     "tc_disconnected": TC_DISCONNECTED,
-    "broken_intermittent_tc": TC_DISCONNECTED,  # PLAN.md 7.1: no separate type --
+    "broken_intermittent_tc": TC_DISCONNECTED,  # DESIGN_NOTES.md 7.1: no separate type --
                                                  # "intermittent" comes from the
                                                  # scenario's own repeat/duration spec
     "flaky_noise_tc": TC_NOISE,

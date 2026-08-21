@@ -1,9 +1,9 @@
 // i2c_owner.h -- single owner of I2C0 and both on-board MCP23017 expanders
-// (docs/PLAN.md section 4.1 task map): "All expander traffic; relay-sense
+// (docs/DESIGN_NOTES.md section 4.1 task map): "All expander traffic; relay-sense
 // debounced scan (5-10 ms), E-stop/DUT-power outputs." Covers both
 // MCP23017s (section 3.7's allocation table); the optional PCA9685
 // (section 3.7) is not wired by this pass. Single-owner-per-peripheral
-// doctrine, PLAN.md section 4's opening paragraph: no other task file may
+// doctrine, DESIGN_NOTES.md section 4's opening paragraph: no other task file may
 // touch I2C0, its GPIO (SDA/SCL), or either mcp23017_t handle -- everything
 // outside this .c file goes through the queue-based command API and the
 // mutex-guarded snapshot/edge-log readers declared below, exactly the same
@@ -21,16 +21,16 @@
 //     through a common relay downstream. GPB3-7 = 5 spare (default
 //     in+pullup).
 //   MCP23017 #2 (0x21): all 16 pins spare/generic (default in+pullup) --
-//     PLAN.md section 3.6's documented fallback (moving the main-side
+//     DESIGN_NOTES.md section 3.6's documented fallback (moving the main-side
 //     `~FAULT` x3 lines here if Pico GPIO ever runs out) is speculative
 //     future work and is deliberately NOT hard-wired here; i2c_owner_io_*()
 //     below is generic enough that a later pass can adopt that fallback
 //     without touching this file's pin-role table for exp1.
 //
-// I2C0 GPIO pins: PROVISIONAL. docs/PLAN.md section 3.6's pin budget table
+// I2C0 GPIO pins: PROVISIONAL. docs/DESIGN_NOTES.md section 3.6's pin budget table
 // lists "I2C0 SDA/SCL | 2 | both MCP23017s, optional PCA9685" but does not
 // assign specific GPIO numbers (no docs/HARDWARE.md traced pinout exists
-// yet -- PLAN.md section 9 lists it as not-yet-written). This file picks
+// yet -- DESIGN_NOTES.md section 9 lists it as not-yet-written). This file picks
 // GPIO4 (SDA) / GPIO5 (SCL), the RP2040's conventional I2C0 default pins,
 // as a placeholder -- see I2C_OWNER_SDA_GPIO/I2C_OWNER_SCL_GPIO in
 // i2c_owner.c. Confirm or correct against the real board once HARDWARE.md
@@ -54,10 +54,10 @@ bool i2c_owner_start(void);
 
 // --- Relay-sense / fault-line snapshot ------------------------------------
 // One debounced reading of every signal MCP23017 #1's relay-sense scan
-// covers. Filled by i2c_owner's scan loop only (docs/PLAN.md section 4.1);
+// covers. Filled by i2c_owner's scan loop only (docs/DESIGN_NOTES.md section 4.1);
 // i2c_owner_get_relay_states() returns a mutex-protected copy, safe to call
 // from any other task (e.g. the future cmd_task RELAY_GET_STATES handler,
-// PLAN.md section 5).
+// DESIGN_NOTES.md section 5).
 typedef struct {
     bool     k1_closed; // relay sense inputs: true = contact sensed closed
     bool     k2_closed;
@@ -71,7 +71,7 @@ typedef struct {
 
 i2c_owner_relay_states_t i2c_owner_get_relay_states(void);
 
-// --- Edge log (PLAN.md section 5.2 "RELAY_GET_EDGES") ---------------------
+// --- Edge log (DESIGN_NOTES.md section 5.2 "RELAY_GET_EDGES") ---------------------
 // Which signal an edge belongs to -- covers the same six debounced bits as
 // i2c_owner_relay_states_t above (relay sense k1..k4 plus the fault line),
 // named "relay edge" to match PLAN.md's RELAY_GET_EDGES command even though
@@ -86,17 +86,17 @@ typedef enum {
 } i2c_owner_signal_t;
 
 typedef struct {
-    uint32_t seq;      // monotonic, gap = report generator's loss detection (PLAN.md section 8.2)
+    uint32_t seq;      // monotonic, gap = report generator's loss detection (DESIGN_NOTES.md section 8.2)
     i2c_owner_signal_t signal;
     bool     level;    // new (post-edge) level
     uint64_t time_us;  // time_us_64() at the debounced confirmation -- wall clock, not sim clock
                         // (i2c_owner does not own the sim clock; a later pass that wires this
-                        // into sim_engine's snapshot can translate, PLAN.md section 4.5)
+                        // into sim_engine's snapshot can translate, DESIGN_NOTES.md section 4.5)
 } i2c_owner_relay_edge_t;
 
 // Edge log ring buffer size. 64 entries: generous headroom for a burst of
 // relay activity between two PC polls at the default 2 Hz telemetry rate
-// (PLAN.md section 5.3) without wrapping, while staying tiny next to the 32
+// (DESIGN_NOTES.md section 5.3) without wrapping, while staying tiny next to the 32
 // KiB heap budget (FreeRTOSConfig.h) -- revisit if a scenario is found that
 // legitimately produces more than 64 edges between polls.
 #define I2C_OWNER_EDGE_LOG_CAPACITY 64u
@@ -106,27 +106,27 @@ typedef struct {
 // entries copied. If more entries exist than fit in max_out, the caller's
 // next call should pass the seq of the last entry it received -- if the
 // ring has since wrapped past what the caller last saw, the returned run
-// will start after a gap, which is exactly the loss condition PLAN.md
+// will start after a gap, which is exactly the loss condition DESIGN_NOTES.md
 // section 8.2 says report generation must flag, not silently paper over.
 size_t i2c_owner_get_relay_edges(i2c_owner_relay_edge_t *out, size_t max_out, uint32_t since_seq);
 
 // --- Commanded outputs ------------------------------------------------------
 // Both post a command to i2c_owner's internal queue and return immediately;
-// the output is actually driven on i2c_owner's next scan tick (docs/PLAN.md
+// the output is actually driven on i2c_owner's next scan tick (docs/DESIGN_NOTES.md
 // section 4.1's ~8 ms cadence -- see mcp23017.h's MCP23017_DEBOUNCE_SCAN_MS),
 // not synchronously with this call, because only i2c_owner's own task
 // context may touch I2C0 (single-owner doctrine, file header above). Returns
 // false if the command could not be queued (queue full); true means queued,
 // not yet applied.
 //
-// open == true: E-stop loop is opened (tripped) -- PLAN.md section 3.4's
+// open == true: E-stop loop is opened (tripped) -- DESIGN_NOTES.md section 3.4's
 // "an optoMOS/relay on the fixture sits in the E-stop loop so tests can open
 // it mid-firing." open == false: loop closed (normal/default-configurable
 // per the same section -- this pass drives whatever the caller commands and
 // does not itself pick a boot-time default; see i2c_owner.c's init comment).
 bool i2c_owner_set_estop(bool open);
 
-// on == true: DUT 12V power relay closed (board powered). PLAN.md section
+// on == true: DUT 12V power relay closed (board powered). DESIGN_NOTES.md section
 // 3.4's `power_blip` scenario support.
 //
 // Two independent relays, two independent setters -- docs/HARDWARE.md
@@ -155,7 +155,7 @@ bool i2c_owner_set_dut_power_safety(bool on); // relay #2 -> J19 (GND_Safty)
 bool i2c_owner_set_dut_power(bool on);
 
 // Last-commanded (not sensed -- there is no separate feedback line for
-// either output per PLAN.md section 3.4) state, mutex-read like the relay
+// either output per DESIGN_NOTES.md section 3.4) state, mutex-read like the relay
 // snapshot above. Reflects the state after the most recent applied command,
 // not necessarily the most recent queued one if several are in flight.
 bool i2c_owner_get_estop_open(void);
@@ -163,14 +163,14 @@ bool i2c_owner_get_dut_power_main_on(void);
 bool i2c_owner_get_dut_power_safety_on(void);
 bool i2c_owner_get_dut_power_on(void); // deprecated alias for _main_on() -- see i2c_owner_set_dut_power()'s comment
 
-// --- Generic expander I/O (PLAN.md section 5 IO group: IO_SET_DIR,
+// --- Generic expander I/O (DESIGN_NOTES.md section 5 IO group: IO_SET_DIR,
 // IO_WRITE, IO_READ) -------------------------------------------------------
 // Addresses any pin on either expander by (expander, pin 0..15: 0..7 = port
 // A, 8..15 = port B) -- covers J20 IO_3/IO_4 and exp1's 6 spares (pins
 // 8..15 on I2C_OWNER_EXP_1) and all 16 of exp2's pins generically
 // (I2C_OWNER_EXP_2), per this pass's instruction to expose MCP23017 #2
 // generically rather than hard-wire its documented-but-speculative `~FAULT`
-// fallback role (PLAN.md section 3.6).
+// fallback role (DESIGN_NOTES.md section 3.6).
 //
 // Exp1 pins 0..7 (relay sense, fault-line sense, E-stop drive, DUT-power
 // relay #1/main) and pin 10 (DUT-power relay #2/safety) are reserved for the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command CT calibration runner -- `firmware/SimFW/docs/PLAN.md`
+"""One-command CT calibration runner -- `firmware/SimFW/docs/DESIGN_NOTES.md`
 section 3.3's calibration procedure (milestone M-D), and
 `firmware/SaftyFW/docs/CURRENT_SENSE.md` section 5's commissioning check,
 run together in a single bench-day pass:
@@ -9,7 +9,7 @@ run together in a single bench-day pass:
      confirm exactly one DUT current-sense channel responds and it's the
      right one. Gates everything after it -- a calibration built on top of
      an unproven channel mapping is worse than none.
-  2. **Sweep + fit** (PLAN.md 3.3 exit criterion): for each channel, sweep
+  2. **Sweep + fit** (DESIGN_NOTES.md 3.3 exit criterion): for each channel, sweep
      the commanded amplitude across N points, read back what `SaftyFW`'s
      current-sense channel reports, least-squares fit gain/offset, reject
      the fit if it isn't credible (see `fit.py`'s `evaluate_fit`).
@@ -59,7 +59,7 @@ from kilnsim.link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpS
 import fixture  # noqa: E402
 from readback import DutReadback, KilnctrlSafetyReadback, SyntheticDutReadback  # noqa: E402
 
-DEFAULT_POINTS = 10  # PLAN.md 3.3: "sweep commanded amplitude across ~10 points"
+DEFAULT_POINTS = 10  # DESIGN_NOTES.md 3.3: "sweep commanded amplitude across ~10 points"
 DEFAULT_AMPS_MIN = 0.0
 DEFAULT_AMPS_MAX = 1.0  # today, this IS the raw 0..1 PWM-scale range (identity placeholder)
 DEFAULT_SETTLE_S = 0.2
@@ -110,7 +110,7 @@ def _make_dut_readback(args) -> DutReadback:
             channel_models=models, commanded=args._commanded_state, seed=args.mock_dut_seed
         )
 
-    # Real path: the existing kilnctrl SAFETY link, exactly what PLAN.md 3.3
+    # Real path: the existing kilnctrl SAFETY link, exactly what DESIGN_NOTES.md 3.3
     # calls "the existing kilnctrl MCP path" -- see readback.py's module
     # docstring for the full chain and its honesty caveats.
     sys.path.insert(0, str(_PCTOOLS_SRC))
@@ -210,7 +210,7 @@ def run_sweep(
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "One-command CT calibration: PLAN.md 3.3 (M-D) sweep+fit, plus the "
+            "One-command CT calibration: DESIGN_NOTES.md 3.3 (M-D) sweep+fit, plus the "
             "CURRENT_SENSE.md Sec.5 one-channel-responds crosstalk gate."
         )
     )
@@ -270,7 +270,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def log(line: str = "") -> None:
         print(line)
 
-    log("=== SimFW CT calibration (PLAN.md 3.3 / CURRENT_SENSE.md Sec.5) ===")
+    log("=== SimFW CT calibration (DESIGN_NOTES.md 3.3 / CURRENT_SENSE.md Sec.5) ===")
     log(f"channels={channels} points={args.points} amps=[{args.amps_min},{args.amps_max}] "
         f"min_r2={args.min_r2} crosstalk_threshold_a={args.crosstalk_threshold_a}")
 

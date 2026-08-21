@@ -1,5 +1,5 @@
 // fault_engine.c -- see fault_engine.h for the trigger/duration/repeat
-// contract and the determinism guarantee (PLAN.md sections 7.1-7.3).
+// contract and the determinism guarantee (DESIGN_NOTES.md sections 7.1-7.3).
 #include "fault_engine.h"
 
 #include <string.h>
@@ -217,7 +217,7 @@ static bool check_fire_condition(fault_engine_t *eng, fault_slot_t *slot, const 
         return true;
     }
     /* After the first firing, EVERY/N_TIMES re-arm on a pure period timer
-     * decoupled from the original trigger (PLAN.md 7.2's "EVERY t [jitter
+     * decoupled from the original trigger (DESIGN_NOTES.md 7.2's "EVERY t [jitter
      * j]" reads as a periodic timer, not "re-wait for the same event") --
      * this also keeps re-arm evaluation independent of whatever transient
      * per-trigger bookkeeping (has_scheduled_fire, etc.) the first firing

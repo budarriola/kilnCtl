@@ -23,7 +23,7 @@ upstream provided:
    ``fault_id`` (for ``event:`` clauses) -- see that module's own docstring.
    Nothing before this module ever built those payloads: real wire EVT
    frames only carry raw ``(seq, sim_time_us, event_type, a, b, f0)``
-   (PROTOCOL.md sec 6), and PLAN.md 5.3's TELEMETRY frame is the *only*
+   (PROTOCOL.md sec 6), and DESIGN_NOTES.md 5.3's TELEMETRY frame is the *only*
    source for some observations report.py needs (``fault_line_asserted``,
    ``estop_open``, current-presence) that never appear in the EVT stream at
    all. :func:`_translate_wire_event` and :func:`_poll_telemetry_edges`
@@ -53,9 +53,9 @@ _SYNTHETIC_SEQ_BASE = 1_000_000_000
 _RELAY_ENTITY_BY_BIT = ("K1", "K2", "K3", "K5", "K4")  # sim_snapshot.h's sim_relay_bit_t order
 
 # Reasonable defaults for scenarios that never got explicit numbers to run
-# by (a scenario file has no "how long does this run" field, PLAN.md sec
+# by (a scenario file has no "how long does this run" field, DESIGN_NOTES.md sec
 # 8.1's frozen shape) -- see estimate_run_duration_s()'s own doc comment.
-_DEFAULT_AT_ZONE_TEMP_ESTIMATE_S = 150.0  # PLAN.md 4.3: fast_test preset's
+_DEFAULT_AT_ZONE_TEMP_ESTIMATE_S = 150.0  # DESIGN_NOTES.md 4.3: fast_test preset's
                                             # "full firing in ~2 min" plus margin
 _MIN_RUN_DURATION_S = 45.0
 _MAX_RUN_DURATION_S = 600.0
@@ -65,7 +65,7 @@ _TRAILING_MARGIN_S = 20.0
 def estimate_run_duration_s(scenario: Scenario) -> float:
     """How long (in **sim-clock** seconds) to run before declaring the
     scenario over and evaluating its `expect` clauses. Approximate by
-    necessity -- PLAN.md sec 8.1's scenario schema has no explicit "run
+    necessity -- DESIGN_NOTES.md sec 8.1's scenario schema has no explicit "run
     duration" field -- computed from the latest thing in the file that could
     plausibly still need to happen: every fault's trigger time (an
     AT_SIM_TIME trigger's own `t`, or a generous fallback for triggers whose
@@ -174,7 +174,7 @@ class _TelemetryEdgeTracker:
 
 
 def _apply_overrides(link: SimLink, overrides: dict) -> None:
-    """``overrides: {"zones[0].R_element": 12.0, ...}`` (PLAN.md sec 8.1) --
+    """``overrides: {"zones[0].R_element": 12.0, ...}`` (DESIGN_NOTES.md sec 8.1) --
     read-modify-write per zone via MODEL GET/SET_ZONE_PARAMS, the same
     pattern cmd_task.c's own SET_TC_LAG handler uses for a single-field
     change (no owner API needs a standalone per-field setter)."""
@@ -248,7 +248,7 @@ def run_scenario(link: SimLink, scenario: Scenario, *, seed: Optional[int] = Non
     `scenario.expect` and returns the :class:`~kilnsim.report.Report`.
 
     Real time actually elapsed is `duration_s / timescale` (the device's own
-    sim-clock/wall-clock relationship, PLAN.md sec 4.2) plus a small fixed
+    sim-clock/wall-clock relationship, DESIGN_NOTES.md sec 4.2) plus a small fixed
     poll overhead -- against `virtual_simfw` at the scenarios' own
     `timescale: 10`, this keeps a full run in the tens-of-seconds range.
     """

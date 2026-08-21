@@ -1,10 +1,10 @@
 // mcp23017.h -- register-level driver for the Microchip MCP23017 16-bit I2C
-// I/O expander, used twice on this board (docs/PLAN.md section 3.7): #1 at
+// I/O expander, used twice on this board (docs/DESIGN_NOTES.md section 3.7): #1 at
 // 0x20 (relay sense, E-stop drive, DUT-power relay, J20 IO_3/IO_4, spares),
 // #2 at 0x21 (spare I/O, generic). This file is a plain register/pin
 // accessor with no RTOS dependency and no opinion about which pins mean
 // what -- that mapping lives in the owning task (src/tasks/i2c_owner.c),
-// per the single-owner doctrine documented there and in PLAN.md section 4's
+// per the single-owner doctrine documented there and in DESIGN_NOTES.md section 4's
 // opening paragraph. Mirrors how ../../SaftyFW/src/max31856.c is a plain
 // transport-level driver called by its owner task (thermo_task), not a task
 // itself.
@@ -111,7 +111,7 @@ bool mcp23017_pin_read(const mcp23017_t *dev, uint8_t pin, bool *level);
 // mcp23017_pin_read() calls.
 bool mcp23017_read_gpio_word(const mcp23017_t *dev, uint16_t *word);
 
-// --- Debounce helper (docs/PLAN.md section 4.1: "relay-sense debounced
+// --- Debounce helper (docs/DESIGN_NOTES.md section 4.1: "relay-sense debounced
 // scan (5-10 ms)") --------------------------------------------------------
 // Simple N-consecutive-identical-reading debounce, applied to a 16-bit raw
 // GPIO word and a mask selecting which bits are actually debounced (other

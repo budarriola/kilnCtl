@@ -1,10 +1,10 @@
 // thermal_model.c -- see thermal_model.h for the physics and the
-// substep/timescale contract (PLAN.md section 4.3).
+// substep/timescale contract (DESIGN_NOTES.md section 4.3).
 #include "thermal_model.h"
 
 #include <string.h>
 
-/* PLAN.md 4.3: "the 'fast unit-test kiln' preset ... uses 4 Euler substeps
+/* DESIGN_NOTES.md 4.3: "the 'fast unit-test kiln' preset ... uses 4 Euler substeps
  * per tick". This is the base substep count at timescale==1; timescale
  * multiplies it. */
 #define THERMAL_MODEL_BASE_SUBSTEPS 4u
@@ -16,7 +16,7 @@ void thermal_model_load_preset(thermal_preset_id_t preset, thermal_model_params_
     switch (preset) {
     case THERMAL_PRESET_FAST_TEST:
         /* Seconds-scale time constants so a full "firing" completes in
-         * about 2 minutes of wall time (PLAN.md 4.3) -- small thermal mass,
+         * about 2 minutes of wall time (DESIGN_NOTES.md 4.3) -- small thermal mass,
          * short TC lag, 3 zones (matches the board's 3 main-side channels). */
         out_params->zone_count = 3;
         out_params->V_mains = 240.0f;
@@ -38,7 +38,7 @@ void thermal_model_load_preset(thermal_preset_id_t preset, thermal_model_params_
         break;
 
     case THERMAL_PRESET_SMALL_KILN:
-        /* Single-zone dominant, ~1h scale behavior (PLAN.md 4.3). */
+        /* Single-zone dominant, ~1h scale behavior (DESIGN_NOTES.md 4.3). */
         out_params->zone_count = 1;
         out_params->V_mains = 240.0f;
         out_params->T_ambient = 25.0f;
@@ -52,7 +52,7 @@ void thermal_model_load_preset(thermal_preset_id_t preset, thermal_model_params_
 
     case THERMAL_PRESET_THREE_ZONE:
         /* Realistic 3-zone with top/middle/bottom coupling and the classic
-         * bottom-zone-lags asymmetry (PLAN.md 4.3): bottom has more mass and
+         * bottom-zone-lags asymmetry (DESIGN_NOTES.md 4.3): bottom has more mass and
          * a longer TC lag than top. */
         out_params->zone_count = 3;
         out_params->V_mains = 240.0f;
@@ -82,7 +82,7 @@ void thermal_model_load_preset(thermal_preset_id_t preset, thermal_model_params_
     default:
         /* Deliberately awkward: huge lag, weak coupling, low mass -- a
          * preset PID tuning hates, for robustness work not regression
-         * (PLAN.md 4.3). */
+         * (DESIGN_NOTES.md 4.3). */
         out_params->zone_count = 3;
         out_params->V_mains = 240.0f;
         out_params->T_ambient = 25.0f;

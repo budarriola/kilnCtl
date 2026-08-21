@@ -2,7 +2,7 @@
 // debounce parameters. Transport is pico-sdk's hardware/i2c.h blocking API
 // -- fine here: i2c_owner's scan period is 8 ms (mcp23017.h), nowhere near a
 // hard-real-time budget the way spi_emu_a/b or wave_owner's core-1 paths are
-// (PLAN.md section 4.1), so a blocking I2C transaction costing a handful of
+// (DESIGN_NOTES.md section 4.1), so a blocking I2C transaction costing a handful of
 // microseconds per byte at 400 kHz is not a concern.
 #include "mcp23017.h"
 

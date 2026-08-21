@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for kilnsim.scenario -- the YAML scenario loader/validator and
-fault-schedule compiler, per firmware/SimFW/docs/PLAN.md section 8.1's
+fault-schedule compiler, per firmware/SimFW/docs/DESIGN_NOTES.md section 8.1's
 schema.
 
 No hardware, no link -- pure text-in, dataclasses-out.
@@ -25,7 +25,7 @@ from kilnsim.scenario import (  # noqa: E402
     load_scenario_text,
 )
 
-#: The exact example from PLAN.md section 8.1.
+#: The exact example from DESIGN_NOTES.md section 8.1.
 WELDED_SSR_YAML = """
 name: welded_ssr_midfire
 version: 1
@@ -56,7 +56,7 @@ report_keep: [telemetry, events]
 
 
 class LoadPlanExampleTests(unittest.TestCase):
-    """The PLAN.md sec 8.1 example must parse cleanly end to end."""
+    """The DESIGN_NOTES.md sec 8.1 example must parse cleanly end to end."""
 
     def setUp(self):
         self.scenario = load_scenario_text(WELDED_SSR_YAML)

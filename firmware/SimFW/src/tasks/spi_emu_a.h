@@ -1,19 +1,19 @@
-// spi_emu_a.h -- single owner of PIO0 + DMA (docs/PLAN.md section 4.1 task
+// spi_emu_a.h -- single owner of PIO0 + DMA (docs/DESIGN_NOTES.md section 4.1 task
 // map): "3-channel MAX31856 register machine, ESP bus." This is bus A from
 // section 3.2.1 -- three CS lines (CS0/CS1/CS2) sharing SCLK/MOSI/MISO into
 // the ESP32-S3's thermocouple bus (J6). Single-owner-per-peripheral
-// doctrine, PLAN.md section 4's opening paragraph: no other task file may
+// doctrine, DESIGN_NOTES.md section 4's opening paragraph: no other task file may
 // touch PIO0 or its DMA channels.
 //
 // Real body: owns 3 max31856_channel_t register images (src/sim/
 // max31856_regs.h) and the PIO SPI slave engine that answers a real SPI
 // master's reads/writes against them (src/drivers/max31856_pio_engine.h),
 // per docs/SPI_ACCESS_AUDIT.md section 6's DMA-fed "Plan B" (which replaced
-// PLAN.md 3.2.1's "Plan A -- ISR staging" once the first-byte budget turned
+// DESIGN_NOTES.md 3.2.1's "Plan A -- ISR staging" once the first-byte budget turned
 // out to be ~125 ns rather than 1.6 us). The task's
 // own loop periodically reads sim_snapshot_read() and feeds each channel's
 // simulated temperature into the register model at roughly the datasheet's
-// ~100 ms nominal conversion cadence (PLAN.md 3.2) -- independent of
+// ~100 ms nominal conversion cadence (DESIGN_NOTES.md 3.2) -- independent of
 // sim_engine's own 10 Hz tick rate, per this pass's task instructions -- and
 // also reads src/sim/tc_fault_state.h (fault_sched's per-channel corruption-
 // knob overrides) each pass, applying it to the channel before advancing the
@@ -43,15 +43,15 @@ extern "C" {
 bool spi_emu_a_start(void);
 
 // Read-only instrumentation access for any other task (e.g. a future
-// telemetry/cmd_task pass -- not wired up by this pass, PLAN.md 3.2.1:
+// telemetry/cmd_task pass -- not wired up by this pass, DESIGN_NOTES.md 3.2.1:
 // "underruns are counted, never silent"). channel is 0..2 (CS0..CS2).
 max31856_pio_stats_t spi_emu_a_get_stats(uint8_t channel);
 
-// Coherent register-image getter (closes the PLAN.md 5.2/3.2.1 gap: this
+// Coherent register-image getter (closes the DESIGN_NOTES.md 5.2/3.2.1 gap: this
 // header previously exported no accessor for a channel's live
 // max31856_channel_t.regs[], only instrumentation counters).
 //
-// COHERENCY GUARANTEE AND WHY THIS APPROACH: PLAN.md 3.2.1 requires that
+// COHERENCY GUARANTEE AND WHY THIS APPROACH: DESIGN_NOTES.md 3.2.1 requires that
 // "a multi-byte LTCB read is always internally consistent" and that the
 // register image is never sampled mid-transaction. The two options PLAN.md
 // lists are (a) a busy/retry indication keyed off CS, or (b) a PIO-engine-
@@ -77,9 +77,9 @@ max31856_pio_stats_t spi_emu_a_get_stats(uint8_t channel);
 // assertion) immediately after the copy; if either changed, the copy may
 // have torn and is discarded. This is a bounded, non-blocking retry loop
 // (a seqlock-style optimistic read, the same pattern the zone snapshot
-// uses elsewhere in this repo, PLAN.md 4.5) -- it never spins waiting on
+// uses elsewhere in this repo, DESIGN_NOTES.md 4.5) -- it never spins waiting on
 // the ISR and never introduces a lock the IRQ/PIO path could stall on
-// (PLAN.md 4.5's "nothing may block spi_emu_*" is about spi_emu_a/b's own
+// (DESIGN_NOTES.md 4.5's "nothing may block spi_emu_*" is about spi_emu_a/b's own
 // hot path, which this getter runs nowhere near).
 //
 // Returns true and fills out_regs[MAX31856_REG_COUNT] with a coherent
@@ -93,7 +93,7 @@ bool spi_emu_a_get_reg_image(uint8_t channel, uint8_t out_regs[MAX31856_REG_COUN
 // True once the master has ever written any byte to this channel (any
 // register address, including a write attempt at a read-only one) --
 // distinguishes "the DUT configured this channel wrong" from "the DUT
-// never configured this channel at all" (PLAN.md 5.2's
+// never configured this channel at all" (DESIGN_NOTES.md 5.2's
 // TC_GET_MASTER_CONFIG). Backed by max31856_channel_t.master_has_written
 // (src/sim/max31856_regs.h), a monotonic single-byte flag that needs no
 // busy/retry protection the way the 16-byte reg image does -- see that

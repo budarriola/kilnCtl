@@ -9,11 +9,12 @@ feeds it bytes (or already-decoded frames) and drives its retry timing
 itself.
 
 **First consumer:** `SimFW` (the bench test-fixture Pico, see
-[`../../SimFW/docs/PLAN.md`](../../SimFW/docs/PLAN.md) sections 4.4, 5, 5.1,
-and 12), speaking it over native USB CDC to its PC-side `kilnsim` tools.
+[`../../SimFW/docs/DESIGN_NOTES.md`](../../SimFW/docs/DESIGN_NOTES.md) sections 4.4, 5, 5.1
+(and [`../../SimFW/docs/PLAN.md`](../../SimFW/docs/PLAN.md) §12 for the still-pending
+`UnitTestFw` decommission steps), speaking it over native USB CDC to its PC-side `kilnsim` tools.
 Framing, CRC, reliability, and task registration are implemented once here;
 `SimFW`'s command groups (`SYS`/`MODEL`/`TC`/`CT`/`RELAY`/`IO`/`FAULT`/`EVT`,
-PLAN.md sec 5) register as addressable tasks the same way this document's
+DESIGN_NOTES.md sec 5) register as addressable tasks the same way this document's
 section 4 describes.
 
 ## 1. Relationship to `kilnlink`
@@ -98,7 +99,7 @@ never calls `kilnlink_crc16_ccitt_false()`.
 
 `BENCHPROTO_FRAME_MAX_PAYLOAD` is 128 (not `kilnlink`'s or `KilnFW`'s
 current 253) — a deliberately generous, round default for the request/reply
-payloads `SimFW`'s command groups need (PLAN.md sec 5.2's representative
+payloads `SimFW`'s command groups need (DESIGN_NOTES.md sec 5.2's representative
 payloads are all comfortably under half of it); raise it, up to the 255 hard
 ceiling the one-byte `LENGTH` field allows, the same way `KilnFW` raised its
 own copy of this constant if a future payload genuinely needs the headroom.
@@ -152,7 +153,7 @@ interpret payload bytes at all.
   hand-off succeeded — see `benchproto_link_mark_delivered()`'s doc
   comment) but does not itself own an inbox to observe as full or not.
 - `BROADCAST` frames are the unsolicited, fire-and-forget case (`SimFW`'s
-  TELEMETRY/EVT frames, PLAN.md sec 5.3): never ACKed, never NACKed, never
+  TELEMETRY/EVT frames, DESIGN_NOTES.md sec 5.3): never ACKed, never NACKed, never
   deduped. A `BROADCAST` to an unregistered task is silently dropped
   (`IGNORE`, not `NACK_UNROUTABLE`) — the receiver is never obliged to
   reply to a broadcast either way, matching `KilnFW`'s own broadcast
@@ -200,7 +201,7 @@ Task IDs only need to be unique within their own device — exactly
 
 `firmware/UnitTestFw`'s prototype registered `DAC`/`AD9833`/`INFO`/`OLED`/
 `LOG`/`SYSTEM`/`PCF8575` this way; `SimFW`'s own task table (its command
-groups, PLAN.md sec 5) is defined by `SimFW` itself, not by this library —
+groups, DESIGN_NOTES.md sec 5) is defined by `SimFW` itself, not by this library —
 `benchproto` only provides the registration mechanism
 (`benchproto_link_register_task()` / `_unregister_task()` /
 `_is_registered()`), not any fixed numbering. `BENCHPROTO_MAX_TASKS = 16`
@@ -215,7 +216,7 @@ small once a real firmware's task count grew past it — see
   INFO/LOG/SYSTEM payload sections do not have a `benchproto` equivalent
   here — those were `UnitTestFw`-specific device commands, out of scope for
   a hardware-agnostic library. `SimFW`'s own `PROTOCOL.md`
-  (`firmware/SimFW/docs/PROTOCOL.md`, "written with the code" per PLAN.md
+  (`firmware/SimFW/docs/PROTOCOL.md`, "written with the code" per DESIGN_NOTES.md
   sec 9) is where its `SYS`/`MODEL`/`TC`/`CT`/`RELAY`/`IO`/`FAULT`/`EVT`
   payload layouts belong, following this document's conventions (section 3's
   endianness rule, section 6's task-registration model).
@@ -228,12 +229,12 @@ small once a real firmware's task count grew past it — see
   independent Python re-implementation of the spec, inlined in
   `test/test_benchproto_frame.c`, but that Python code does not live
   anywhere as a real, reusable module yet). `SimFW`'s PC-side `kilnsim` link
-  layer (PLAN.md sec 6, "the extraction's independent second
+  layer (DESIGN_NOTES.md sec 6, "the extraction's independent second
   implementation — the same prove-it-twice pattern the kilnlink codecs
   used") is expected to become that second implementation and should be
   checked against this same manifest once it exists.
 - **Version/capability negotiation.** `UART_PROTOCOL.md`'s `GET_FW_VERSION`/
-  boot-time version push and `SimFW`'s planned `GET_CAPS` (PLAN.md sec 5.1)
+  boot-time version push and `SimFW`'s planned `GET_CAPS` (DESIGN_NOTES.md sec 5.1)
   are payload-level conventions layered *on top of* `benchproto`, not part
   of the envelope or reliability layer itself — `benchproto_version.h`
   supplies the version *number* both ends should compare, not the exchange

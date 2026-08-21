@@ -1,4 +1,4 @@
-// spi_emu_a.c -- see spi_emu_a.h. Real body: PLAN.md section 3.2.1's PIO
+// spi_emu_a.c -- see spi_emu_a.h. Real body: DESIGN_NOTES.md section 3.2.1's PIO
 // SPI slave engine driving 3 max31856_channel_t register images (main-side
 // channels behind J6, CS0/CS1/CS2), fed from sim_snapshot_read()'s
 // T_tc_reported_c per zone.
@@ -34,11 +34,11 @@
 
 // --- Bus A pin configuration (PROVISIONAL -- no fixture hardware has ever
 // been wired; docs/HARDWARE.md section 1 is the authoritative pin map and is
-// itself labelled provisional, docs/PLAN.md section 3.6/11.1).
+// itself labelled provisional, docs/DESIGN_NOTES.md section 3.6/PLAN.md open question 11.1).
 // i2c_owner.c already claims GPIO4/5
 // for I2C0 (its own header comment marks that pair provisional too); this
 // module picks a DIFFERENT, disjoint block: GPIO6-11, six consecutive pins
-// matching PLAN.md 3.6's pin-budget table order (SCLK, MOSI, MISO, CS0, CS1,
+// matching DESIGN_NOTES.md 3.6's pin-budget table order (SCLK, MOSI, MISO, CS0, CS1,
 // CS2). The consecutive numbering is not just documentation-tidiness -- the
 // PIO programs in max31856_spi_slave.pio rely on fixed relative-offset
 // arithmetic between SCLK/MOSI/CS0 (see that file's header comment), and
@@ -53,12 +53,12 @@
 #define SPI_EMU_A_CS1_GPIO  10u
 #define SPI_EMU_A_CS2_GPIO  11u
 
-// ~DRDY outputs (PLAN.md 3.6's "DRDY x3 ... direct GPIO, open-drain
+// ~DRDY outputs (DESIGN_NOTES.md 3.6's "DRDY x3 ... direct GPIO, open-drain
 // emulation"). Also PROVISIONAL. These numbers come from docs/HARDWARE.md
 // section 1's pin table -- DRDY_MAIN_0/1/2 = GPIO2/3/17, wired to J6 pins
 // 17/15/13 (`thermoDrdy_0..2`) per that document's section 3.1 -- NOT from a
 // fresh derivation here. An earlier revision of this file picked 21/22/26 by
-// re-deriving "what is still free" from PLAN.md 3.6 alone, unaware section 1
+// re-deriving "what is still free" from DESIGN_NOTES.md 3.6 alone, unaware section 1
 // had already assigned all eight DRDY/~FAULT lines; that collided head-on
 // with FAULT_MAIN_1 (21), FAULT_MAIN_2 (22) and DRDY_SAFETY (26). Section 1
 // wins and this file follows it, per section 1's own rule that a driver
@@ -90,7 +90,7 @@ static MAX31856_RESP_IMAGE_ALIGN max31856_resp_image_t
 
 // Deterministic per-channel RNG seeds (max31856_regs_init's rng_seed drives
 // the noise/bit-error corruption knobs) -- fixed, not derived from anything
-// time-based, so a run is reproducible per PLAN.md 4.2's replayability rule.
+// time-based, so a run is reproducible per DESIGN_NOTES.md 4.2's replayability rule.
 static const uint32_t s_channel_rng_seeds[SPI_EMU_A_CHANNEL_COUNT] = { 0xA1u, 0xA2u, 0xA3u };
 
 static void spi_emu_a_task_fn(void *arg)
@@ -100,7 +100,7 @@ static void spi_emu_a_task_fn(void *arg)
     static const uint s_cs_gpio[SPI_EMU_A_CHANNEL_COUNT] = { SPI_EMU_A_CS0_GPIO, SPI_EMU_A_CS1_GPIO, SPI_EMU_A_CS2_GPIO };
     static const int s_drdy_gpio[SPI_EMU_A_CHANNEL_COUNT] = { SPI_EMU_A_DRDY0_GPIO, SPI_EMU_A_DRDY1_GPIO, SPI_EMU_A_DRDY2_GPIO };
 
-    // pio0 is the pico-sdk global PIO0 instance handle -- bus A per PLAN.md
+    // pio0 is the pico-sdk global PIO0 instance handle -- bus A per DESIGN_NOTES.md
     // section 2's connection diagram ("PIO0: SPI slave engine A").
     max31856_pio_engine_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -131,7 +131,7 @@ static void spi_emu_a_task_fn(void *arg)
         // for a bus that owns it exclusively (3 RX + 1 shared TX) -- this
         // should only happen if PIO0 was already partially claimed by a
         // bug elsewhere, which the single-owner-per-peripheral doctrine
-        // (PLAN.md section 4) says should never occur. Idle rather than
+        // (DESIGN_NOTES.md section 4) says should never occur. Idle rather than
         // spin/crash so the rest of the system (other tasks) stays alive
         // for USB/telemetry to at least report the failure once that path
         // exists.
@@ -142,17 +142,17 @@ static void spi_emu_a_task_fn(void *arg)
 
     // Must be called from core 1 (this task's own core, per
     // SIMFW_CORE_RT_PATH below) -- irq_set_exclusive_handler binds to
-    // whichever core calls it, and PLAN.md 3.2.1's Plan A requires the
+    // whichever core calls it, and DESIGN_NOTES.md 3.2.1's Plan A requires the
     // address-byte-triggered IRQ to run on core 1.
     max31856_pio_engine_start_irq(&s_bus);
 
     for (;;) {
-        // Task-loop half of PLAN.md 3.2.1's split: NOT the byte-level SPI
+        // Task-loop half of DESIGN_NOTES.md 3.2.1's split: NOT the byte-level SPI
         // response path (that is entirely IRQ-driven in
         // max31856_pio_engine.c/the PIO programs) -- this loop only pulls
         // fresh truth from sim_snapshot_read() and pushes it into each
         // channel's register model at roughly the datasheet's ~100 ms
-        // nominal conversion cadence (PLAN.md 3.2), independent of
+        // nominal conversion cadence (DESIGN_NOTES.md 3.2), independent of
         // sim_engine's own 10 Hz tick and of this loop's own 20 ms scan
         // period (the scan runs faster than the update cadence so a channel
         // that was mid-transaction on one pass gets a fresh chance to
@@ -162,7 +162,7 @@ static void spi_emu_a_task_fn(void *arg)
             for (uint8_t i = 0; i < SPI_EMU_A_CHANNEL_COUNT && i < snap.zone_count; i++) {
                 if (max31856_pio_engine_channel_busy(&s_bus, i)) {
                     // A transaction is open on this channel right now --
-                    // PLAN.md 3.2.1's coherency rule: register-image commits
+                    // DESIGN_NOTES.md 3.2.1's coherency rule: register-image commits
                     // happen "only between transactions, never while that
                     // channel's CS is low." Skip this channel for this pass;
                     // the next 20 ms scan will catch it, well inside the

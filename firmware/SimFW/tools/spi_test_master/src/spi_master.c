@@ -9,7 +9,7 @@
 const uint8_t spi_master_cs_gpio[SPI_MASTER_CS_COUNT] = { 20u, 21u, 22u, 26u };
 
 static uint32_t s_rate_hz = 1000000u; // 1 MHz default -- slow/forgiving start point for the sweep
-static uint8_t s_cpha = 1u;           // mode 1 default, matches PLAN.md 3.2
+static uint8_t s_cpha = 1u;           // mode 1 default, matches DESIGN_NOTES.md 3.2
 static uint8_t s_selected_cs = 0u;
 
 static void deassert_all_cs(void) {

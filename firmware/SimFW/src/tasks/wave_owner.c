@@ -1,5 +1,5 @@
 // wave_owner.c -- see wave_owner.h for the public API and design summary.
-// Real body: docs/PLAN.md section 3.3's synthesis detail, milestone M-D
+// Real body: docs/DESIGN_NOTES.md section 3.3's synthesis detail, milestone M-D
 // (section 10), implemented against src/drivers/ct_wave_pwm.h (the PWM+DMA
 // driver, this task's private peripheral) and src/sim/sine_synth.h (the
 // pure waveform math, reused verbatim -- not reimplemented here) plus
@@ -31,7 +31,7 @@ _Static_assert(CT_CAL_NUM_CHANNELS == CT_WAVE_NUM_CHANNELS,
 #define WAVE_OWNER_STACK_WORDS  (configMINIMAL_STACK_SIZE * 2u) // headroom for 3x 256-entry uint16_t table scratch buffers
 #define WAVE_OWNER_TICK_MS      10u  // 100 Hz command/model-poll rate; DMA (not this loop) is what actually feeds samples in steady state
 
-// Nominal synthesis sample rate per docs/PLAN.md 3.3: 256 entries x 60 Hz.
+// Nominal synthesis sample rate per docs/DESIGN_NOTES.md 3.3: 256 entries x 60 Hz.
 // The real hardware pacer (ct_wave_pwm.c) lands at ~15,361.19 Hz, not this
 // exact value, for the integer-wrap-register reasons documented in that
 // file's header comment (~0.0077% off) -- irrelevant at the software-model
@@ -76,7 +76,7 @@ static ct_wave_channel_state_t s_channel_state[CT_WAVE_NUM_CHANNELS];
 
 // Last configuration actually pushed to ct_wave_pwm for each channel, so the
 // task only recomputes/reloads a 256-entry table when something actually
-// changed (steady state should cost ~nothing on core 1, matching PLAN.md
+// changed (steady state should cost ~nothing on core 1, matching DESIGN_NOTES.md
 // 4.1's "hard-real-time producers" framing -- the DMA does the steady-state
 // work, this loop is not meant to burn cycles every 10 ms recomputing an
 // unchanged waveform).
@@ -95,7 +95,7 @@ static wave_owner_applied_cfg_t s_applied_cfg[CT_WAVE_NUM_CHANNELS];
 // Software-side zero-crossing tracking, one reference phase per channel, so
 // a config change that lands just after a real zero crossing can be pushed
 // immediately instead of waiting up to one full ~16.7 ms cycle for
-// ct_wave_pwm's own DMA-completion-boundary gate (PLAN.md 3.3: "apply ...
+// ct_wave_pwm's own DMA-completion-boundary gate (DESIGN_NOTES.md 3.3: "apply ...
 // at zero crossings only"). This is a latency optimization layered on top
 // of the driver's own always-correct hardware-level gate (ct_wave_pwm.h's
 // top comment) -- if this software detection misses a crossing between two

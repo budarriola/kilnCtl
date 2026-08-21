@@ -1,11 +1,11 @@
 // ct_wave_pwm.c -- see ct_wave_pwm.h for the design summary. This is the
 // only file that touches these 3 PWM slices, the pacer slice, or their 3 DMA
-// channels (docs/PLAN.md section 4 single-owner doctrine); wave_owner.c is
+// channels (docs/DESIGN_NOTES.md section 4 single-owner doctrine); wave_owner.c is
 // its only caller.
 //
-// --- GPIO assignment (PROVISIONAL -- see docs/PLAN.md section 3.6) --------
+// --- GPIO assignment (PROVISIONAL -- see docs/DESIGN_NOTES.md section 3.6) --------
 //
-// PLAN.md 3.6's pin budget table lists "CT sine PWM x3 | 3 | + external RC
+// DESIGN_NOTES.md 3.6's pin budget table lists "CT sine PWM x3 | 3 | + external RC
 // and transformer" without pinning down which 3 GPIO -- that is this file's
 // job, pending a real docs/HARDWARE.md. Chosen here:
 //
@@ -21,7 +21,7 @@
 // They were picked specifically to avoid: GPIO4/GPIO5 (i2c_owner.c's I2C0
 // SDA/SCL, src/tasks/i2c_owner.c's header comment) and the low GPIO numbers
 // (0-15) a PIO-based SPI driver most conventionally reaches for first (6
-// contiguous pins for bus A, 4 for bus B, PLAN.md 3.6) -- at the time this
+// contiguous pins for bus A, 4 for bus B, DESIGN_NOTES.md 3.6) -- at the time this
 // file was written, spi_emu_a.c/spi_emu_b.c (the parallel PIO-SPI-engine
 // agent's files) were both still idling stubs with zero GPIO claims, so
 // there is nothing yet to conflict with in the repo -- but PIO state
@@ -36,7 +36,7 @@
 // Slice 3 was picked simply because it is not one of 0/1/2 (the three CT
 // channels above); it drives nothing externally and claims no header pin.
 //
-// --- Carrier frequency arithmetic (PLAN.md 3.3: "~244 kHz ... 8-bit
+// --- Carrier frequency arithmetic (DESIGN_NOTES.md 3.3: "~244 kHz ... 8-bit
 // resolution at 125 MHz sysclk") -----------------------------------------
 //
 // RP2040 PWM output frequency = sysclk / (clkdiv * (wrap + 1)).
@@ -48,9 +48,9 @@
 //     f_carrier = 125,000,000 / (2.0 * 256) = 125,000,000 / 512
 //               = 244,140.625 Hz  (~244.14 kHz -- matches the ~244 kHz
 //               target to within 0.06%, comfortably >> the ~1-2 kHz 2-pole
-//               RC corner PLAN.md 3.3 specifies).
+//               RC corner DESIGN_NOTES.md 3.3 specifies).
 //
-// --- Sample-rate (DMA pacer) arithmetic (PLAN.md 3.3: "256 entries per
+// --- Sample-rate (DMA pacer) arithmetic (DESIGN_NOTES.md 3.3: "256 entries per
 // cycle at 60 Hz -> table stepped at 15.36 kHz") ---------------------------
 //
 // 256 samples/cycle * 60 Hz = 15,360 Hz exactly -- the target sample rate.
@@ -306,7 +306,7 @@ void ct_wave_pwm_load_table(uint8_t channel, const uint16_t levels[SINE_SYNTH_TA
         return;
     }
 
-    // Mid-cycle step distortion path (PLAN.md 3.3): apply right now,
+    // Mid-cycle step distortion path (DESIGN_NOTES.md 3.3): apply right now,
     // wherever the carrier currently is in its cycle, instead of waiting for
     // the natural zero-crossing boundary the IRQ path gates on.
     uint32_t save = save_and_disable_interrupts();

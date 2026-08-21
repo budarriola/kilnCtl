@@ -1,12 +1,12 @@
 // ct_wave_pwm -- low-level RP2040 PWM+DMA driver for the 3 CT sine-wave
-// channels (docs/PLAN.md section 3.3 "Synthesis detail"). wave_owner.c is
-// this driver's sole caller/owner (PLAN.md section 4's single-owner-per-
+// channels (docs/DESIGN_NOTES.md section 3.3 "Synthesis detail"). wave_owner.c is
+// this driver's sole caller/owner (DESIGN_NOTES.md section 4's single-owner-per-
 // peripheral doctrine) -- nothing else may touch these PWM slices or DMA
 // channels.
 //
 // Design (see ct_wave_pwm.c for the full arithmetic derivation):
 //   - One dedicated, GPIO-less "pacer" PWM slice free-runs at the 15.36 kHz
-//     sample rate PLAN.md 3.3 specifies (256-entry table x 60 Hz); its wrap
+//     sample rate DESIGN_NOTES.md 3.3 specifies (256-entry table x 60 Hz); its wrap
 //     DREQ paces one DMA channel per CT channel.
 //   - Each CT channel gets its own PWM slice (~244 kHz carrier, 8-bit
 //     resolution) driving its own GPIO, and its own DMA channel that walks a
@@ -25,7 +25,7 @@
 //     content swapped in right there lands exactly at a zero crossing, with
 //     no separate zero-crossing polling needed in the steady-state path.
 //     ct_wave_pwm_load_table()'s `apply_immediately` argument is the
-//     explicit escape hatch for PLAN.md 3.3's "unless a distortion knob says
+//     explicit escape hatch for DESIGN_NOTES.md 3.3's "unless a distortion knob says
 //     otherwise -- step-in-mid-cycle is itself a selectable distortion".
 #ifndef SIMFW_DRIVERS_CT_WAVE_PWM_H
 #define SIMFW_DRIVERS_CT_WAVE_PWM_H
@@ -55,12 +55,12 @@ bool ct_wave_pwm_init(void);
 // apply_immediately == false (the default path): the table is staged and
 // swapped in by the DMA-completion IRQ the next time that channel's DMA
 // finishes its current 256-sample pass -- i.e. at the next rising zero
-// crossing (see this header's top comment). This is PLAN.md 3.3's normal
+// crossing (see this header's top comment). This is DESIGN_NOTES.md 3.3's normal
 // "amplitude changes ... apply at zero crossings only" behavior.
 //
 // apply_immediately == true: the running DMA transfer is aborted and the new
 // table takes effect at whatever sample the carrier is on right now -- a
-// deliberate mid-cycle step, PLAN.md 3.3's "step-in-mid-cycle is itself a
+// deliberate mid-cycle step, DESIGN_NOTES.md 3.3's "step-in-mid-cycle is itself a
 // selectable distortion" path. Callers only set this when a distortion
 // config explicitly asks for it.
 //

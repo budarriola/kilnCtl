@@ -1,6 +1,6 @@
-// telemetry.h -- REAL BODY (docs/PLAN.md section 4.1 task map): "Periodic
+// telemetry.h -- REAL BODY (docs/DESIGN_NOTES.md section 4.1 task map): "Periodic
 // state frames to USB (temps, relay states, active faults, sim clock)."
-// Owns no peripheral (single-owner-per-peripheral doctrine, PLAN.md section
+// Owns no peripheral (single-owner-per-peripheral doctrine, DESIGN_NOTES.md section
 // 4's opening paragraph) -- it reads the zone snapshot and event ring
 // sim_engine publishes (src/sim/sim_snapshot.h), the instrumentation
 // counters spi_emu_a/b and fault_sched expose, and the fault-line sense
@@ -13,11 +13,11 @@
 // path is telemetry's own work") and disambiguated by a frame-kind byte 0
 // (SIMFW_EVT_FRAME_KIND_* , cmd_ids.h) documented in docs/PROTOCOL.md
 // section 6:
-//   - TELEMETRY: periodic, default 2 Hz (PLAN.md section 5.3), rate settable
+//   - TELEMETRY: periodic, default 2 Hz (DESIGN_NOTES.md section 5.3), rate settable
 //     via telemetry_set_rate_hz() -- a future SYS or MODEL command lands
 //     here once one exists.
 //   - EVT: one frame per sim_engine event-ring entry, drained and forwarded
-//     promptly (PLAN.md section 4.5/5.3: "unsolicited, immediate"; "nothing
+//     promptly (DESIGN_NOTES.md section 4.5/5.3: "unsolicited, immediate"; "nothing
 //     ever blocks... a full queue toward them is a counted drop").
 //
 // Both frame kinds are sent via usb_owner_send_broadcast() (usb_owner.h) --
@@ -35,13 +35,13 @@
 extern "C" {
 #endif
 
-// PLAN.md section 5.3: "default 2 Hz, rate settable."
+// DESIGN_NOTES.md section 5.3: "default 2 Hz, rate settable."
 #define TELEMETRY_DEFAULT_RATE_HZ 2u
 // A future SYS/MODEL command validates against this before calling
 // telemetry_set_rate_hz() -- 0 is rejected (would mean "never", which is
 // what stopping the task would mean, not a rate); an upper bound keeps a
 // pathological request from starving usb_owner's TX path or wave_owner/
-// spi_emu_* on the same core (PLAN.md section 4.5's "nothing ever blocks"
+// spi_emu_* on the same core (DESIGN_NOTES.md section 4.5's "nothing ever blocks"
 // rule -- telemetry itself must stay a well-behaved, bounded producer).
 #define TELEMETRY_MAX_RATE_HZ     50u
 
@@ -68,13 +68,13 @@ uint32_t telemetry_get_rate_hz(void);
 
 // Count of sim_event_ring_drain() calls that observed a sequence gap
 // (sim_snapshot.h: "the caller can detect the gap by comparing the
-// returned first event's seq to the value it expected") -- PLAN.md 5.3:
+// returned first event's seq to the value it expected") -- DESIGN_NOTES.md 5.3:
 // "the PC's report generator refuses to certify a run with a sequence gap."
 uint32_t telemetry_get_evt_seq_gap_count(void);
 
 // Count of BROADCAST sends (TELEMETRY or EVT frames) that
 // usb_owner_send_broadcast() reported as failed (CDC TX path busy/short --
-// PLAN.md 4.5's drop policy: "a full queue toward them is a counted drop
+// DESIGN_NOTES.md 4.5's drop policy: "a full queue toward them is a counted drop
 // plus event, never a stall"). Distinct from the seq-gap counter above:
 // this one is "we tried to send N frames and M were lost on the wire out",
 // the other is "the ring itself outran us before we ever tried."
@@ -84,7 +84,7 @@ uint32_t telemetry_get_send_drop_count(void);
 // number of events drained from the ring in a single telemetry period since
 // boot (sim_snapshot.h exposes no direct "current fill" reader, only a
 // drain call, so this is the closest telemetry can measure without adding
-// an API to sim_engine's own file -- PLAN.md 5.3 lists "event-ring
+// an API to sim_engine's own file -- DESIGN_NOTES.md 5.3 lists "event-ring
 // high-water mark" as a telemetry-frame field, and this is that field's
 // value).
 uint32_t telemetry_get_evt_ring_high_water_mark(void);

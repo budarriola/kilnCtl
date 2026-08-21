@@ -1,19 +1,19 @@
 // thermal_model -- pure, host-testable per-zone RC thermal model for SimFW.
-// docs/PLAN.md section 4.3 is authoritative for the math and the parameter
+// docs/DESIGN_NOTES.md section 4.3 is authoritative for the math and the parameter
 // table; this header/](.c) implement it verbatim, no FreeRTOS/pico-sdk.
 //
 //   C_zone * dT/dt = P_heater(t) - k_loss*(T - T_ambient)
 //                    - sum_j k_couple[j]*(T - T_neighbor_j)
 //   P_heater = duty(relay chain) * V_mains^2 / R_element * element_health
 //
-// Forward Euler, substepped: PLAN.md 4.3 says the "fast unit-test kiln"
+// Forward Euler, substepped: DESIGN_NOTES.md 4.3 says the "fast unit-test kiln"
 // preset (time constants of seconds) needs 4 Euler substeps per 10 Hz tick
 // instead of a fancier integrator, and "at time-scale N the substep count
 // multiplies by N so accuracy does not degrade when runs are accelerated" --
 // thermal_model_tick()'s `timescale` argument is exactly that N.
 //
 // A configurable first-order TC lag sits between true zone temperature and
-// the *reported* TC temperature (PLAN.md 4.3: "several guards care about the
+// the *reported* TC temperature (DESIGN_NOTES.md 4.3: "several guards care about the
 // difference between element temperature and sensed temperature").
 //
 // All math in float; state in plain Celsius (not Kelvin-offset internally --
@@ -28,10 +28,10 @@
 extern "C" {
 #endif
 
-/* PLAN.md section 3.1/4.3: "1-4 zones (default 3)". */
+/* DESIGN_NOTES.md section 3.1/4.3: "1-4 zones (default 3)". */
 #define THERMAL_MODEL_MAX_ZONES 4u
 
-/* Per-zone parameters, PLAN.md 4.3's table verbatim (all settable over USB
+/* Per-zone parameters, DESIGN_NOTES.md 4.3's table verbatim (all settable over USB
  * in the real firmware; here just a plain struct). k_couple[j] is this
  * zone's coupling coefficient to zone j -- the caller is responsible for
  * keeping the matrix symmetric (k_couple[i].k_couple[j] == k_couple[j].k_couple[i])
@@ -48,7 +48,7 @@ typedef struct {
     float T0;                                    /* initial temperature, degC */
 } thermal_zone_params_t;
 
-/* Globals, PLAN.md 4.3: "V_mains (default 240), T_ambient". Process noise and
+/* Globals, DESIGN_NOTES.md 4.3: "V_mains (default 240), T_ambient". Process noise and
  * safety-TC blend are sim_engine/fault_engine concerns layered on top of this
  * pure model, not part of it. */
 typedef struct {
@@ -58,7 +58,7 @@ typedef struct {
     float T_ambient;                              /* degC */
 } thermal_model_params_t;
 
-/* PLAN.md 4.3's four named presets. */
+/* DESIGN_NOTES.md 4.3's four named presets. */
 typedef enum {
     THERMAL_PRESET_FAST_TEST = 0,   /* seconds-scale time constants, ~2 min full firing */
     THERMAL_PRESET_SMALL_KILN,      /* single-zone dominant, ~1h scale */
@@ -68,7 +68,7 @@ typedef enum {
 } thermal_preset_id_t;
 
 /* Fills *out_params with the named preset's parameter table. Presets are
- * starting points (PLAN.md 4.3: "scenarios may override any parameter") --
+ * starting points (DESIGN_NOTES.md 4.3: "scenarios may override any parameter") --
  * the caller is free to mutate the result before calling thermal_model_init. */
 void thermal_model_load_preset(thermal_preset_id_t preset, thermal_model_params_t *out_params);
 
@@ -92,7 +92,7 @@ void thermal_model_init(thermal_model_state_t *state, const thermal_model_params
  *
  * dt_s is the tick period (wall-clock or sim-clock seconds, whichever the
  * caller's clock domain is -- this module has no clock of its own).
- * timescale multiplies the substep count per PLAN.md 4.3's accuracy-at-speed
+ * timescale multiplies the substep count per DESIGN_NOTES.md 4.3's accuracy-at-speed
  * rule; pass 1 for real time, N for an N x accelerated run. timescale==0 is
  * treated as 1 (never divide the substep count to zero). */
 void thermal_model_tick(thermal_model_state_t *state,

@@ -1,5 +1,5 @@
 // ct_calibration -- pure, host-testable per-channel CT amplitude calibration
-// for SimFW. docs/PLAN.md section 3.3 ("amplitude (in simulated amps, fixture
+// for SimFW. docs/DESIGN_NOTES.md section 3.3 ("amplitude (in simulated amps, fixture
 // converts via calibration table)") is the requirement; this module is the
 // arithmetic half of it.
 //

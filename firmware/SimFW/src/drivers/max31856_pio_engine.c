@@ -135,7 +135,7 @@ static bool publish_base(max31856_pio_bus_t *bus, uint8_t channel, const max3185
 
 // --- ~DRDY ------------------------------------------------------------------
 
-// Open-drain emulation (PLAN.md 3.6): asserted drives the line low, released
+// Open-drain emulation (DESIGN_NOTES.md 3.6): asserted drives the line low, released
 // returns it to Hi-Z and lets the DUT's pull-up take it high. Never drives
 // high, so a DUT that also drives the net cannot be fought.
 static void drdy_sync(max31856_pio_bus_t *bus, uint8_t channel)

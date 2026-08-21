@@ -12,7 +12,7 @@
  * from what portmacro.h / rp2040_config.h actually read, not guessed --
  * same sourcing SaftyFW's copy used.
  *
- * docs/PLAN.md section 4.1 (task map) and section 3.6 (pin budget) are the
+ * docs/DESIGN_NOTES.md section 4.1 (task map) and section 3.6 (pin budget) are the
  * authority for the SMP configuration below (configNUMBER_OF_CORES,
  * configUSE_CORE_AFFINITY, the 1000 Hz tick) -- if this file and that
  * section disagree, the doc wins and this file is wrong.
@@ -20,9 +20,9 @@
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 
-/* ---- SMP (docs/PLAN.md section 4.1) --------------------------------------
+/* ---- SMP (docs/DESIGN_NOTES.md section 4.1) --------------------------------------
  * Both RP2040 cores usable, and core affinity is how the task map's "core 1
- * = hard-real-time producers, core 0 = everything elastic" split (PLAN.md
+ * = hard-real-time producers, core 0 = everything elastic" split (DESIGN_NOTES.md
  * section 4.1's closing paragraph) actually gets enforced -- see
  * task_priorities.h's compile-time assert of these same two values. */
 #define configNUMBER_OF_CORES                   2
@@ -65,7 +65,7 @@
 /* ---- Software timers -------------------------------------------------------
  * Not used by this skeleton's task stubs (every periodic stub drives its own
  * vTaskDelay loop), left on for the same reason SaftyFW leaves it on: cheap,
- * and the fault-trigger timing fault_sched will eventually own (PLAN.md
+ * and the fault-trigger timing fault_sched will eventually own (DESIGN_NOTES.md
  * section 7.2/7.3) is a natural fit for one-shot software timers. */
 #define configUSE_TIMERS                        1
 #define configTIMER_TASK_PRIORITY               (configMAX_PRIORITIES - 1)
@@ -82,7 +82,7 @@
  * skeleton's ten idle task stubs use only configMINIMAL_STACK_SIZE each, so
  * there is ample headroom today -- revisit once real task bodies (USB CDC
  * buffers, PIO/DMA descriptors, the zone snapshot and event ring from
- * PLAN.md section 4.5) land and actually pressure it. */
+ * DESIGN_NOTES.md section 4.5) land and actually pressure it. */
 #define configSUPPORT_STATIC_ALLOCATION         1
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
 #define configTOTAL_HEAP_SIZE                   (32 * 1024)
@@ -104,7 +104,7 @@
 #define configRECORD_STACK_HIGH_ADDRESS         1
 
 /* configASSERT -- halt in place so a debugger attached over SWD (this bench
- * fixture's flashing/debug path, PLAN.md section 3.1) can inspect exactly
+ * fixture's flashing/debug path, DESIGN_NOTES.md section 3.1) can inspect exactly
  * where the assertion fired, rather than resetting and masking the bug
  * behind a watchdog-looking reboot. Same policy SaftyFW uses.
  *

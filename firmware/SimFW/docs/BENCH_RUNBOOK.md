@@ -161,7 +161,7 @@ neither was true by the time it was written). Check
 `firmware/SaftyFW/src/tasks/safety_core.c`'s `safety_core_build_input()`
 directly for what a guard's inputs actually are before writing off a
 surprising result as expected incompleteness. Full detail lives in
-`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §6 and `docs/PLAN.md`'s status
+`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §6 and `docs/DESIGN_NOTES.md`'s status
 header — read those if a specific guard's behavior needs explaining to
 someone else, but verify against the source before repeating either.
 
@@ -265,7 +265,7 @@ pip install pyserial   # not vendored anywhere in this repo
 python firmware\SimFW\tools\spi_test_master\run_soak.py --port COM<master-port>
 ```
 Default sweep: 100 kHz → 5 MHz, 10,000 transactions per rate point.
-**Correction: the M-A target rate is now 4 MHz, not 5 MHz.** `docs/PLAN.md`
+**Correction: the M-A target rate is now 4 MHz, not 5 MHz.** `docs/DESIGN_NOTES.md`
 §3.2.1 decided 2026-08-20 that the thermocouple SPI clock is capped at 4 MHz
 on both real masters (`KILNCTL_THERMO_SPI_CLOCK_HZ`'s Kconfig `range` on the
 ESP32-S3 plus a matching `_Static_assert` on `SPI_OWNER_BAUDRATE_HZ` in
@@ -295,7 +295,7 @@ kilnsim --port COMx state
 ```
 and inspect the SPI transaction/underrun counters before and after the soak
 — nonzero underruns invalidate the run regardless of what the soak table
-says (PLAN.md §3.2.1: "a test run with nonzero underruns is flagged invalid
+says (DESIGN_NOTES.md §3.2.1: "a test run with nonzero underruns is flagged invalid
 in telemetry").
 
 ### Step 4 — CT synthesis into a scope/DMM
@@ -502,7 +502,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 
 ### SPI (M-A) symptoms — see `tools/spi_test_master/README.md`'s own table for the authoritative version; summarized:
 
-| Symptom | Likely cause (PLAN.md §3.2.1 reference) |
+| Symptom | Likely cause (DESIGN_NOTES.md §3.2.1 reference) |
 |---|---|
 | All reads `0xFF` / slave never responds | MISO not tri-stating/driving correctly, CS wiring idle-low instead of idle-high, or GND not shared between the two Picos |
 | All reads `0x00` | MISO stuck low, or the RX program's CS `jmp_pin` mapping wrong |
@@ -517,7 +517,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 |---|---|
 | No waveform at all | PWM GPIO not wired, RC filter component missing/wrong values, or `wave_owner` mode is still MODEL (not MANUAL) and the thermal model has no simulated current on that zone yet — set `ct mode <ch> manual` first |
 | Waveform present but wildly wrong amplitude | Expected — the shipped calibration table is deliberately all-uncalibrated (identity behavior), not a fixture fault; do not chase this as a bug this session |
-| Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built (ratio decided as ~3:1 step-up, `docs/PLAN.md` §3.3/§11 item 2, but the physical coupling network has not been built — still open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
+| Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built (ratio decided as ~3:1 step-up, `docs/DESIGN_NOTES.md` §3.3, `docs/PLAN.md` §11 item 2, but the physical coupling network has not been built — still open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
 
 ### Isolator / K4 / relay-sense-wetting-circuit symptoms
 
@@ -553,7 +553,7 @@ evidence, not just "tried it":
    milestone (M-A through M-H) currently reads "Status: NOT MET" or
    "PARTIALLY MET" for its hardware half. Update the specific milestone(s)
    this session actually touched — e.g. if M-A's Saleae capture passed at
-   4 MHz (the current cap, PLAN.md §3.2.1) with zero underruns over ≥10k
+   4 MHz (the current cap, DESIGN_NOTES.md §3.2.1) with zero underruns over ≥10k
    transactions, M-A's status changes from NOT MET to MET, with the capture
    as cited evidence. Do not mark a milestone met on the strength of the
    sweep table alone — the exit criterion is the capture.
@@ -572,7 +572,7 @@ evidence, not just "tried it":
    instruction to re-run `virtual_dut` and update in the same change).
 5. **Any new scenario report JSON** (`--report out.json` from step 10 or any
    `kilnsim run`) belongs in `tools/PcTools/logs/kilnsim/reports/` per
-   `docs/PLAN.md` §8.2's stated convention — this is the CI-archivable
+   `docs/DESIGN_NOTES.md` §8.2's stated convention — this is the CI-archivable
    artifact, don't let it evaporate as a stray file in your working
    directory.
 6. If this session found a **new** contradiction, wiring gap, or open
@@ -588,7 +588,7 @@ evidence, not just "tried it":
 real, non-trivial bench time** — flashing two boards, wiring a 6-wire+GND
 harness correctly, running a 10,000-transaction sweep across the tool's rate
 points, then re-running at 4 MHz specifically (the real masters' hard cap,
-`docs/PLAN.md` §3.2.1) while a Saleae capture is armed, then reviewing that
+`docs/DESIGN_NOTES.md` §3.2.1) while a Saleae capture is armed, then reviewing that
 capture. Budget most of a first session for this alone if it's attempted at
 all.
 

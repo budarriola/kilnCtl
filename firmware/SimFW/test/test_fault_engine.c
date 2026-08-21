@@ -1,5 +1,5 @@
 // Host tests for fault_engine.c: trigger-type coverage, duration/repeat
-// coverage, and -- the plan's core replayability contract (PLAN.md sections
+// coverage, and -- the plan's core replayability contract (DESIGN_NOTES.md sections
 // 7.2/4.2) -- a determinism test proving the same trigger sequence and seed
 // produce a byte-identical event sequence every time.
 #include <string.h>
@@ -518,7 +518,7 @@ static void test_cancel_on_armed_slot_is_immediate_and_silent(void)
                "fault_engine_cancel() itself, not deferred to this tick");
 }
 
-/* The core replayability contract (PLAN.md 7.2/4.2): the same trigger
+/* The core replayability contract (DESIGN_NOTES.md 7.2/4.2): the same trigger
  * sequence + the same seed must produce a byte-identical event log. Builds
  * a scenario mixing several trigger kinds (AT_SIM_TIME, AT_ZONE_TEMP,
  * ON_RELAY_EDGE, RANDOM_IN) plus an EVERY repeat, runs it through a

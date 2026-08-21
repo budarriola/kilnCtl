@@ -271,7 +271,7 @@ should say so rather than being listed as coverage.
 that plugs into the main board in place of the real thermocouple
 daughterboard and the rest of the kiln, driven from a PC by `kilnsim`
 (`tools/PcTools/src/kilnsim/`). Its owning plan is
-`firmware/SimFW/docs/PLAN.md`; section 8 there defines a 17-scenario
+`firmware/SimFW/docs/DESIGN_NOTES.md`; section 8 there defines a 17-scenario
 standard test library (`firmware/SimFW/scenarios/*.yaml`), and each scenario
 file declares an `exercises:` list of the guard IDs it is meant to provoke.
 This section is that cross-reference in the other direction — guard → the
@@ -299,7 +299,7 @@ recorded per section 4's convention.
 | S6a | `mainfault_tc_disconnect` |
 | S6b | `power_blip` |
 | S7 | `estop_at_boot`, `estop_midfire` |
-| S8 | `runaway_zone` (S8 itself ships disabled per `SAFETY_MODEL.md`; this scenario documents expected *current* behavior, ready for when S8 gets a measured threshold — `PLAN.md` section 8 item 12) |
+| S8 | `runaway_zone` (S8 itself ships disabled per `SAFETY_MODEL.md`; this scenario documents expected *current* behavior, ready for when S8 gets a measured threshold — `DESIGN_NOTES.md` section 8 item 12) |
 | S9 | `welded_contactor_s9` |
 | S10 | `main_safety_skew`, `tc_noise_storm`, `main_safety_disagree_s10` |
 | S11 | `safety_tc_frozen`, `safety_healthy_reading_s11` |
@@ -370,7 +370,7 @@ here for completeness rather than omitted silently.
   makes KilnFW's own guard 6 assert a live `SAFETY_FAULT_SRC_THERMO`,
   pulling the Pico's `mainFault` input low and tripping S6a — the only path
   this fixture has to provoke S6a at all, since the `Fault` line is
-  ESP-driven and the fixture only senses it (PLAN.md §3.4).
+  ESP-driven and the fixture only senses it (DESIGN_NOTES.md §3.4).
 - A new scenario, `safety_tc_frozen.yaml`, closes the S11 gap: it freezes
   the safety-side channel (`tc:safety`) via the existing `stuck_tc` fault
   type and expects a trip once `frozen_window_s` (600s default) elapses

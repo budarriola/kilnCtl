@@ -1,12 +1,12 @@
 // cmd_ids.h -- SimFW's own benchproto task/device/command-id table (docs/
-// PLAN.md section 5's command-group table, section 5.1's task-registration
+// DESIGN_NOTES.md section 5's command-group table, section 5.1's task-registration
 // model). This is SimFW-specific numbering layered on top of `benchproto`
 // (firmware/CommonFW/include/benchproto/), exactly the split
 // BENCHPROTO.md section 7 describes: "SimFW's own task table ... is defined
 // by SimFW itself, not by this library." The authoritative human-readable
 // copy of this table is docs/PROTOCOL.md -- keep the two in sync in the same
 // commit, the same discipline task_priorities.h's header comment asks of
-// docs/PLAN.md section 4.1.
+// docs/DESIGN_NOTES.md section 4.1.
 //
 // Owned by cmd_task.c (the one place that registers/dispatches these ids);
 // usb_owner.c includes it only for SIMFW_DEVICE_HOST/SIMFW_DEVICE_TARGET,
@@ -25,7 +25,7 @@ extern "C" {
 #define SIMFW_DEVICE_HOST   0u
 #define SIMFW_DEVICE_TARGET 1u
 
-// Command-group task ids (PLAN.md sec 5's table, sec 5.1: "Each command
+// Command-group task ids (DESIGN_NOTES.md sec 5's table, sec 5.1: "Each command
 // group ... registers as an addressable task"). Unique within this device
 // only (BENCHPROTO.md sec 6) -- the PC side's own task ids are a completely
 // separate numbering (kilnsim's own concern, tools/PcTools, not this file).
@@ -38,12 +38,12 @@ extern "C" {
 #define SIMFW_TASK_ID_FAULT 7u
 #define SIMFW_TASK_ID_EVT   8u
 
-// SYS group command ids (PLAN.md sec 5's row: PING, GET_VERSION, RESET_SIM,
+// SYS group command ids (DESIGN_NOTES.md sec 5's row: PING, GET_VERSION, RESET_SIM,
 // SET_TIMESCALE, SET_SEED, GET_CAPS). All six now have real handlers in
 // cmd_task.c (gap-closure pass, docs/PROTOCOL.md section 4): RESET_SIM/
 // SET_TIMESCALE/SET_SEED are thin decode-then-call wrappers over
 // sim_engine.h's sim_engine_reset()/_set_timescale()/_set_seed(). GET_SIM_STATE
-// is a new id this pass adds (not in PLAN.md sec 5's original sketch, same
+// is a new id this pass adds (not in DESIGN_NOTES.md sec 5's original sketch, same
 // "first-class getter for what a client just set" reasoning cmd_ids.h
 // already documents for IO_ESTOP_GET/IO_DUT_POWER_GET above) so a client can
 // read back the seed/timescale it set (or that a fresh boot defaulted to)
@@ -103,7 +103,7 @@ extern "C" {
 #define SIMFW_CMD_TC_GET_MASTER_CONFIG 0x06u
 
 // --- CT group command ids (SIMFW_TASK_ID_CT) -- docs/PROTOCOL.md section 5.3,
-// backed by wave_owner.h. CT_SET_PHASE is not in PLAN.md section 5's original
+// backed by wave_owner.h. CT_SET_PHASE is not in DESIGN_NOTES.md section 5's original
 // sketch but wave_owner.h exposes ct_wave_set_phase() as a first-class public
 // setter, so it is wired up too rather than left stranded. ---
 #define SIMFW_CMD_CT_SET_MODE       0x01u
@@ -114,7 +114,7 @@ extern "C" {
 
 // --- RELAY group command ids (SIMFW_TASK_ID_RELAY) -- docs/PROTOCOL.md
 // section 5.4, backed by i2c_owner.h's relay-sense snapshot/edge-log readers.
-// RELAY_SET_CONTACT_FAULT (PLAN.md section 5's sketch) is deliberately NOT
+// RELAY_SET_CONTACT_FAULT (DESIGN_NOTES.md section 5's sketch) is deliberately NOT
 // allocated here: i2c_owner.h exposes no such setter (relay sense is
 // read-only from this task's perspective by design -- a "welded contact" is
 // modeled at sim_engine's duty-override level), so the FAULT group's
@@ -125,9 +125,9 @@ extern "C" {
 
 // --- IO group command ids (SIMFW_TASK_ID_IO) -- docs/PROTOCOL.md section 5.5,
 // backed by i2c_owner.h's generic expander I/O plus its E-stop/DUT-power
-// setters. DUT_POWER_SET is PLAN.md section 3.4's post-section-5 addition,
+// setters. DUT_POWER_SET is DESIGN_NOTES.md section 3.4's post-section-5 addition,
 // added to this group per this pass's instructions. ESTOP_GET/DUT_POWER_GET
-// are not in PLAN.md section 5's sketch but i2c_owner.h exposes
+// are not in DESIGN_NOTES.md section 5's sketch but i2c_owner.h exposes
 // i2c_owner_get_estop_open()/_get_dut_power_on() as first-class public
 // getters, so they are wired up too (a client cannot otherwise read back
 // what it last commanded). DUT_POWER_SAFETY_SET/GET (0x09/0x0A) are this
@@ -176,14 +176,14 @@ extern "C" {
 // PROTOCOL.md section 6): it is unsolicited BROADCAST-only traffic, and
 // telemetry.c sends two different frame shapes from the same
 // SIMFW_TASK_ID_EVT source, disambiguated by this byte 0 of the payload
-// (PLAN.md 5.3's "Telemetry frame" and "EVT frame" are two distinct
+// (DESIGN_NOTES.md 5.3's "Telemetry frame" and "EVT frame" are two distinct
 // layouts sharing one wire source task). Kept in its own block, separate
 // from every SIMFW_CMD_* table above, since it is not a command id at all
 // -- do not add it to any group's command dispatch table in cmd_task.c. ---
-#define SIMFW_EVT_FRAME_KIND_TELEMETRY 0x01u /* periodic state frame, PLAN.md 5.3 */
-#define SIMFW_EVT_FRAME_KIND_EVENT     0x02u /* one sim_snapshot.h sim_event_t, PLAN.md 5.3 */
+#define SIMFW_EVT_FRAME_KIND_TELEMETRY 0x01u /* periodic state frame, DESIGN_NOTES.md 5.3 */
+#define SIMFW_EVT_FRAME_KIND_EVENT     0x02u /* one sim_snapshot.h sim_event_t, DESIGN_NOTES.md 5.3 */
 
-// GET_CAPS's fixed capability numbers (PLAN.md sec 4.1's task map and sec
+// GET_CAPS's fixed capability numbers (DESIGN_NOTES.md sec 4.1's task map and sec
 // 4.3's thermal-model section): zone count is a 1-4 runtime parameter,
 // default 3; spi_emu_a/b give 3 main-side + 1 safety-side TC channels;
 // wave_owner gives 3 CT channels; the board's relay/TC/CT channel counts
@@ -197,7 +197,7 @@ extern "C" {
 #define SIMFW_CAPS_RELAY_CHANNELS     3u
 // One bit per command group now that MODEL/TC/CT/RELAY/IO/FAULT all have
 // real handlers (this pass, docs/PROTOCOL.md section 5) -- "this group has a
-// real implementation, not just a stub", per PLAN.md 5.1's own reasoning for
+// real implementation, not just a stub", per DESIGN_NOTES.md 5.1's own reasoning for
 // GET_CAPS existing at all. TC's group is now fully implemented, including
 // TC_GET_MASTER_CONFIG (PROTOCOL.md section 5.2). Bit ordering matches
 // SIMFW_TASK_ID_* minus 2 (SYS has no bit -- "always fully present by

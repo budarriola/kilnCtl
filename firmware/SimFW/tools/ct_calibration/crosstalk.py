@@ -1,4 +1,4 @@
-"""Crosstalk / channel-mapping check: PLAN.md 3.3's "[the calibration
+"""Crosstalk / channel-mapping check: DESIGN_NOTES.md 3.3's "[the calibration
 procedure] doubles as the `CURRENT_SENSE.md` §5 commissioning check (one
 relay commanded -> exactly one channel responds)."
 

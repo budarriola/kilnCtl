@@ -8,16 +8,16 @@ top of* that library, exactly the split BENCHPROTO.md section 7 describes:
 "`SimFW`'s own `PROTOCOL.md` ... is where its SYS/MODEL/TC/CT/RELAY/IO/
 FAULT/EVT payload layouts belong."
 
-Written with the code (docs/PLAN.md section 9): the numeric source of truth
+Written with the code (docs/DESIGN_NOTES.md section 9): the numeric source of truth
 is `src/tasks/cmd_ids.h`; keep the two in sync in the same commit, same
-discipline `task_priorities.h`'s header comment asks of PLAN.md section
+discipline `task_priorities.h`'s header comment asks of DESIGN_NOTES.md section
 4.1's task table.
 
 ## 1. Transport
 
 Native USB CDC (TinyUSB device stack), one interface, full speed only. No
 pico-sdk `stdio_usb` — the CDC interface belongs entirely to `usb_owner`
-(`src/tasks/usb_owner.c`), the single owner of the USB peripheral (PLAN.md
+(`src/tasks/usb_owner.c`), the single owner of the USB peripheral (DESIGN_NOTES.md
 section 4's opening paragraph). VID/PID `0xCafe`/`0x4001`
 (`src/tasks/usb_descriptors.c`) — a placeholder pair (this is a one-off bench
 fixture, never mass produced), same one TinyUSB's own examples use, chosen
@@ -67,7 +67,7 @@ multi-byte fields inside a payload are little-endian (BENCHPROTO.md section
 ## 3. Command groups and task ids
 
 Each row registers as an addressable `benchproto` task (`benchproto_link_register_task()`,
-done once at boot by `cmd_task_start()`) — PLAN.md section 5.1's task-registration model.
+done once at boot by `cmd_task_start()`) — DESIGN_NOTES.md section 5.1's task-registration model.
 
 | Group | `SIMFW_TASK_ID_*` | Value | Status |
 |---|---|---|---|
@@ -78,7 +78,7 @@ done once at boot by `cmd_task_start()`) — PLAN.md section 5.1's task-registra
 | RELAY | `SIMFW_TASK_ID_RELAY` | 5 | **implemented** (section 5.4) |
 | IO | `SIMFW_TASK_ID_IO` | 6 | **implemented** (section 5.5) |
 | FAULT | `SIMFW_TASK_ID_FAULT` | 7 | **implemented** (section 5.6) |
-| EVT | `SIMFW_TASK_ID_EVT` | 8 | **TELEMETRY + EVT broadcast implemented** (`telemetry.c`) — unsolicited BROADCAST only (PLAN.md sec 5.3), no inbound request handling exists or ever will |
+| EVT | `SIMFW_TASK_ID_EVT` | 8 | **TELEMETRY + EVT broadcast implemented** (`telemetry.c`) — unsolicited BROADCAST only (DESIGN_NOTES.md sec 5.3), no inbound request handling exists or ever will |
 
 A "stub" group *is* registered (so a request to it gets a real ACK with
 `ERR_NOT_IMPL`, never a silent drop or a NACK) — only its dispatch table
@@ -98,7 +98,7 @@ to change shape for this.
 | `SET_TIMESCALE` | `0x04` | **implemented** |
 | `SET_SEED` | `0x05` | **implemented** |
 | `GET_CAPS` | `0x06` | **implemented** |
-| `GET_SIM_STATE` | `0x07` | **implemented** (gap-closure pass; new id, not in PLAN.md sec 5's original sketch) |
+| `GET_SIM_STATE` | `0x07` | **implemented** (gap-closure pass; new id, not in DESIGN_NOTES.md sec 5's original sketch) |
 
 ### `PING` (request: `[0x01]`, no args)
 
@@ -131,7 +131,7 @@ else in the payload — same discipline `UART_PROTOCOL.md`'s own
 
 ### `GET_CAPS` (request: `[0x06]`, no args)
 
-Reply — the version block above, followed by capability fields (PLAN.md
+Reply — the version block above, followed by capability fields (DESIGN_NOTES.md
 section 5.1: "protocol version, SimFW version + git hash, zone count
 limits, channel counts, and a feature bitmask"):
 
@@ -139,7 +139,7 @@ limits, channel counts, and a feature bitmask"):
 byte0..(9+N)   version block, identical layout to GET_VERSION above
 byte(10+N)     zone_count_min      -- SIMFW_CAPS_ZONE_COUNT_MIN (1)
 byte(11+N)     zone_count_max      -- SIMFW_CAPS_ZONE_COUNT_MAX (4)
-byte(12+N)     zone_count_default  -- SIMFW_CAPS_ZONE_COUNT_DEFAULT (3), PLAN.md sec 4.3
+byte(12+N)     zone_count_default  -- SIMFW_CAPS_ZONE_COUNT_DEFAULT (3), DESIGN_NOTES.md sec 4.3
 byte(13+N)     tc_main_channels    -- SIMFW_CAPS_TC_MAIN_CHANNELS (3), spi_emu_a
 byte(14+N)     tc_safety_channels  -- SIMFW_CAPS_TC_SAFETY_CHANNELS (1), spi_emu_b
 byte(15+N)     ct_channels         -- SIMFW_CAPS_CT_CHANNELS (3), wave_owner
@@ -148,7 +148,7 @@ byte(17+N)..+3 feature_bitmask, u32 LE -- SIMFW_CAPS_FEATURE_BITMASK, 0 today
 ```
 
 `feature_bitmask` bits (added this pass, `cmd_ids.h`'s `SIMFW_CAPS_FEATURE_BIT_*`):
-"this group has a real implementation, not just a stub", per PLAN.md
+"this group has a real implementation, not just a stub", per DESIGN_NOTES.md
 section 5.1's own reasoning for `GET_CAPS` existing at all — so `kilnsim`
 can refuse gracefully against a mismatched or partially-built firmware.
 
@@ -169,7 +169,7 @@ Today's value is `0x0000003F` (all six bits set).
 
 Thin decode-then-call wrapper over `sim_engine_reset()` (`sim_engine.h`):
 `keep_params` 1 reinitializes state from the current zone params' `T0`;
-0 reloads the last-selected preset first (PLAN.md 6.1's `sim_reset` tool
+0 reloads the last-selected preset first (DESIGN_NOTES.md 6.1's `sim_reset` tool
 doc: "model to T0"). Resets `sim_time_us` to 0, clears MANUAL overrides, and
 resets the event ring's sequence number to 0 — does **not** clear
 `fault_sched`'s armed/active slots (`FAULT_CANCEL` each explicitly, or send
@@ -180,14 +180,14 @@ Reply: `[status]`.
 
 ### `SET_TIMESCALE` (request: `[0x04, u32 timescale_x100 LE]`)
 
-`sim_engine_set_timescale()` — PLAN.md 4.2/5.2's x100 fixed point (1000 ==
+`sim_engine_set_timescale()` — DESIGN_NOTES.md 4.2/5.2's x100 fixed point (1000 ==
 10.00x accelerated, 100 == 1.00x real time, 0 treated as 1.00x by
 `sim_engine` itself). Queued, same contract as `RESET_SIM` above. Reply:
 `[status]`.
 
 ### `SET_SEED` (request: `[0x05, u32 seed LE]`)
 
-`sim_engine_set_seed()` — PLAN.md 4.2's determinism contract ("the same
+`sim_engine_set_seed()` — DESIGN_NOTES.md 4.2's determinism contract ("the same
 scenario + seed => the same run, byte-for-byte"); a scenario runner sends
 this (and typically `RESET_SIM`) before a fresh run's first tick. Also seeds
 the TELEMETRY frame's own `seed` field (section 6) once wired — see that
@@ -199,7 +199,7 @@ section's note. Queued, same contract as `RESET_SIM` above. Reply:
 Read-back companion to `SET_TIMESCALE`/`SET_SEED` — neither setter's value
 was otherwise readable back over the wire except via the TELEMETRY frame's
 `seed` field (section 6), which says nothing about `timescale_x100`. New id
-this pass adds (not in PLAN.md section 5's original sketch), same
+this pass adds (not in DESIGN_NOTES.md section 5's original sketch), same
 "first-class getter for what a client just set" reasoning `cmd_ids.h`
 already documents for `IO_ESTOP_GET`/`IO_DUT_POWER_GET`.
 
@@ -225,7 +225,7 @@ fields read 0 rather than a stale value.
 
 All six groups below call only their owning task's public API
 (`sim_engine.h`, `fault_sched.h`, `i2c_owner.h`, `wave_owner.h`,
-`spi_emu_a.h`/`spi_emu_b.h`) — never another task's private state (PLAN.md
+`spi_emu_a.h`/`spi_emu_b.h`) — never another task's private state (DESIGN_NOTES.md
 section 4.5, `cmd_task.c`'s own file header). Every setter is a decode-then-
 call wrapper over that owner's existing queue-then-apply-next-tick command
 surface; nothing here adds a new peripheral access path.
@@ -259,7 +259,7 @@ reply is `[status, zone, <same 40 bytes as above>]`.
 
 `SET_AMBIENT` request: `[f32 ambient_c]`. `LOAD_PRESET` request:
 `[u8 preset]` (`thermal_preset_id_t`: 0 `fast_test`, 1 `small_kiln`,
-2 `three_zone`, 3 `stress`, PLAN.md 4.3).
+2 `three_zone`, 3 `stress`, DESIGN_NOTES.md 4.3).
 
 `SET_TEMP` request: `[u8 zone, u8 mode, f32 temp_c]` — `mode` 0 returns the
 zone to MODEL (`sim_engine_clear_zone_manual()`, `temp_c` ignored), `mode` 1
@@ -298,7 +298,7 @@ counters). Both headers now export:
 - `spi_emu_a_get_reg_image(channel, out_regs[16])` /
   `spi_emu_b_get_reg_image(channel, out_regs[16])` — copies the channel's
   current 16-byte register image. **Coherency guarantee:** never blocks
-  (PLAN.md 4.5) and never returns a torn image. It reads
+  (DESIGN_NOTES.md 4.5) and never returns a torn image. It reads
   `max31856_pio_engine_channel_busy()` (already tracked by the PIO engine as
   "CS is low right now") immediately before *and* after the `memcpy`, plus
   the channel's transaction counter before/after, and only reports success
@@ -337,7 +337,7 @@ byte40-43  u32 spi protocol_errors
 byte44-47  u32 spi first_byte_late (TX FIFO underrun count)
 ```
 
-Together, `byte3-18` (when valid) and `byte19-26` are PLAN.md 5.2's full "the
+Together, `byte3-18` (when valid) and `byte19-26` are DESIGN_NOTES.md 5.2's full "the
 DUT was lied to, this is the truth" pair: the register image the DUT
 actually reads over SPI, plus the shadow truth it was never shown.
 
@@ -360,7 +360,7 @@ byte2  flags: bit0 configured (spi_emu_a/b_channel_configured() --
        busy/retry semantics as GET_REGS's identically-named bit)
 byte3  CR0 -- 0 if reg_image_valid is clear
 byte4  CR1 -- TC TYPE[3:0] is bits[3:0], AVGSEL[2:0] is bits[6:4]
-       (PLAN.md 3.2's CR1 row); 0 if reg_image_valid is clear
+       (DESIGN_NOTES.md 3.2's CR1 row); 0 if reg_image_valid is clear
 byte5  MASK -- 0 if reg_image_valid is clear
 ```
 
@@ -373,7 +373,7 @@ mid-transaction (bit1 clear, `byte3-5` all zero) — callers must check bit1
 before trusting `byte3-5`, but bit0 alone already answers "did the DUT ever
 configure this channel at all," independent of whether this particular poll
 caught it mid-transaction. This is exactly the "configured wrong" vs. "never
-configured" distinction PLAN.md 5.2 calls out as "a different and equally
+configured" distinction DESIGN_NOTES.md 5.2 calls out as "a different and equally
 important failure" from a bad TC-type value: `configured=0` means never
 configured; `configured=1` with `reg_image_valid=1` and a wrong CR1 means
 configured wrong.
@@ -395,7 +395,7 @@ to blend/lag-driven reporting or pinning it, without touching any zone's
 MAIN-side override. `channel >= 4` or `mode` outside `{0, 1}` returns
 `ERR_BAD_ARGS`.
 
-A `main_safety_skew`-style scenario (PLAN.md section 8, test 8) can now pin
+A `main_safety_skew`-style scenario (DESIGN_NOTES.md section 8, test 8) can now pin
 the SAFETY channel's reported temperature independently of every zone's own
 truth/MAIN-reported values via either command above — the owner-API gap this
 section used to document here is closed (`sim_engine.h`'s
@@ -424,7 +424,7 @@ Channel is `0..CT_WAVE_NUM_CHANNELS-1` (3).
 | `SET_AMPS` | `0x02` | `ct_wave_set_amps()` |
 | `SET_DISTORTION` | `0x03` | `ct_wave_set_distortion()` |
 | `GET_STATE` | `0x04` | `ct_wave_get_state()` |
-| `SET_PHASE` | `0x05` | `ct_wave_set_phase()` — not in PLAN.md 5's original sketch; wired up because `wave_owner.h` exposes it as a first-class public setter |
+| `SET_PHASE` | `0x05` | `ct_wave_set_phase()` — not in DESIGN_NOTES.md 5's original sketch; wired up because `wave_owner.h` exposes it as a first-class public setter |
 
 `SET_MODE` request: `[u8 channel, u8 mode]` (`ct_wave_mode_t`: 0 MODEL, 1
 MANUAL). `SET_AMPS`: `[u8 channel, f32 amps]`. `SET_PHASE`:
@@ -467,7 +467,7 @@ of `status + count + 8 * 14-byte entries` = 114 bytes always fits the
 wanting more than 8 polls again with `since_seq` set to the last entry's
 `seq` (`i2c_owner.h`'s own documented pagination contract).
 
-**`RELAY_SET_CONTACT_FAULT`** (PLAN.md section 5's sketch) is **not
+**`RELAY_SET_CONTACT_FAULT`** (DESIGN_NOTES.md section 5's sketch) is **not
 allocated**: `i2c_owner.h` exposes no such setter by design (relay sense is
 read-only from this task's perspective; a "welded contact" is modeled at
 `sim_engine`'s duty-override level). The FAULT group's `WELDED_RELAY` /
@@ -488,10 +488,10 @@ read-only from this task's perspective; a "welded contact" is modeled at
 | `DUT_POWER_SAFETY_SET` | `0x09` | `i2c_owner_set_dut_power_safety()` |
 | `DUT_POWER_SAFETY_GET` | `0x0A` | `i2c_owner_get_dut_power_safety_on()` |
 
-`DUT_POWER_SET` is PLAN.md section 3.4's addition (the DUT 12 V power relay
+`DUT_POWER_SET` is DESIGN_NOTES.md section 3.4's addition (the DUT 12 V power relay
 was added to the plan after section 5's original command table was written)
 — placed in the IO group per this pass's instructions. `ESTOP_GET`/
-`DUT_POWER_GET` are not in PLAN.md 5's original sketch either, but
+`DUT_POWER_GET` are not in DESIGN_NOTES.md 5's original sketch either, but
 `i2c_owner.h` exposes both getters as first-class public API and a client
 otherwise has no way to read back what it last commanded, so they are wired
 up too.
@@ -543,7 +543,7 @@ args, reply `[status, on]`.
 | `SET_UNTIL_TRIGGER` | `0x05` | `fault_sched_schedule()` (frame 2 of the `UNTIL_TRIGGER` two-frame design, see below) |
 
 **`SCHEDULE`** request is a compact re-encoding of `fault_engine.h`'s
-`fault_trigger_t`/`fault_duration_t`/`fault_repeat_t` — **not** PLAN.md
+`fault_trigger_t`/`fault_duration_t`/`fault_repeat_t` — **not** DESIGN_NOTES.md
 5.2's original `{u8 kind, f32 a, f32 b, u8 zone/relay}` sketch, which
 predates `fault_engine.h` and cannot address an `AFTER_FAULT` slot id (needs
 16 bits, PLAN.md's sketch only offers 8) or carry `ON_EVENT`'s name string
@@ -659,7 +659,7 @@ subsection above in the same commit.
 
 ## 6. EVT group (`SIMFW_TASK_ID_EVT` = 8) — TELEMETRY + EVT broadcast frames
 
-PLAN.md section 5.3 describes two unsolicited frame shapes — a periodic
+DESIGN_NOTES.md section 5.3 describes two unsolicited frame shapes — a periodic
 TELEMETRY frame and a per-event EVT frame — both driven by `telemetry.c`
 (this pass's real body), both sent as `BENCHPROTO_MSG_BROADCAST` frames
 (never ACKed, NACKed, or deduped, BENCHPROTO.md sec 4) with `src_task =
@@ -679,7 +679,7 @@ of the payload**, `SIMFW_EVT_FRAME_KIND_*` (`cmd_ids.h`):
 Periodic, default `TELEMETRY_DEFAULT_RATE_HZ` = 2 Hz, rate settable via
 `telemetry_set_rate_hz()` (`telemetry.h`) — no `SIMFW_CMD_*` sets it over
 the wire yet (a future SYS or MODEL command calls that function once one
-exists, per PLAN.md sec 5.3 "rate settable"). All multi-byte fields
+exists, per DESIGN_NOTES.md sec 5.3 "rate settable"). All multi-byte fields
 little-endian (section 2's convention), `zone_count` copied verbatim from
 `sim_snapshot_t` (`src/sim/sim_snapshot.h`, 1–`SIM_SNAPSHOT_MAX_ZONES`):
 
@@ -716,7 +716,7 @@ One frame per `sim_event_ring_drain()` entry (`src/sim/sim_snapshot.h`),
 forwarded promptly — drained on every pass of `telemetry`'s internal poll
 loop (`TELEMETRY_EVT_POLL_MS`, `telemetry.c`), independent of and much
 faster than the TELEMETRY frame's own rate, so an event is never held back
-behind a slow-rate telemetry period (PLAN.md sec 5.3: "unsolicited,
+behind a slow-rate telemetry period (DESIGN_NOTES.md sec 5.3: "unsolicited,
 immediate"):
 
 ```
@@ -732,7 +732,7 @@ byte16-19    f0, f32 LE           -- sim_event_t.f0
 
 20 bytes total, fixed size.
 
-### Loss visibility (PLAN.md sec 5.3: "the PC's report generator refuses to
+### Loss visibility (DESIGN_NOTES.md sec 5.3: "the PC's report generator refuses to
 certify a run with a sequence gap")
 
 Every EVT frame's own `seq` is enough for a PC client to detect loss on its
@@ -765,7 +765,7 @@ gap-closure pass that implemented `SYS_SET_SEED`, section 4.)
   a plain FIFO: since every SYS handler today is a small, synchronous,
   non-blocking computation, replies are for all practical purposes
   processed in the order requests arrive. A future group with a
-  slower/blocking handler must preserve that property (PLAN.md section
+  slower/blocking handler must preserve that property (DESIGN_NOTES.md section
   4.5's "nothing ever blocks" rule extends to `cmd_task`'s own handlers) or
   this ordering assumption needs revisiting.
 - **Duplicate-ACK cache is one slot per task id**, not per outstanding

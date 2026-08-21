@@ -1,6 +1,6 @@
 // telemetry.c -- see telemetry.h. Real body: the periodic TELEMETRY frame
-// (docs/PLAN.md section 5.3, default 2 Hz, rate settable) and the EVT-ring
-// drain/forward (immediate, PLAN.md section 4.5/5.3). Byte layouts are
+// (docs/DESIGN_NOTES.md section 5.3, default 2 Hz, rate settable) and the EVT-ring
+// drain/forward (immediate, DESIGN_NOTES.md section 4.5/5.3). Byte layouts are
 // docs/PROTOCOL.md section 6's authoritative copy; keep the two in sync in
 // the same commit, same discipline this codebase asks everywhere else.
 //
@@ -8,7 +8,7 @@
 // (src/sim/sim_snapshot.h), spi_emu_a/b's instrumentation counters, fault_sched's
 // slot list, and i2c_owner's relay/fault-line snapshot, then hands built
 // frames to usb_owner_send_broadcast() (usb_owner.h) -- never touches USB
-// CDC directly (single-owner-per-peripheral doctrine, PLAN.md section 4's
+// CDC directly (single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's
 // opening paragraph).
 #include "telemetry.h"
 
@@ -35,7 +35,7 @@
 
 // The event ring is drained on every pass of this loop, independent of the
 // (possibly much slower) TELEMETRY frame rate, so an EVT frame is never
-// held behind a slow telemetry period -- PLAN.md 5.3: EVT is "unsolicited,
+// held behind a slow telemetry period -- DESIGN_NOTES.md 5.3: EVT is "unsolicited,
 // immediate". 20 ms (50 Hz) is comfortably faster than sim_engine's own
 // 10 Hz tick (the fastest thing that can produce events), so a burst of a
 // few events in one sim_engine tick still drains within one or two polls.
@@ -178,7 +178,7 @@ static void telemetry_drain_and_forward_events(void)
         // wrapped past what we last drained. Count it (PROTOCOL.md section
         // 6's loss-visibility contract) and log it -- this is exactly the
         // "a run with a sequence gap must never be silently certified"
-        // condition PLAN.md 5.3 calls out, so it is worth a line even
+        // condition DESIGN_NOTES.md 5.3 calls out, so it is worth a line even
         // though the TELEMETRY frame's own counter already carries it.
         s_evt_seq_gap_count++;
         log_task_log(LOG_LEVEL_WARN, "telemetry", "event ring seq gap detected");

@@ -9,7 +9,7 @@ per-channel gain/offset constants ``ct_cal_default_table()`` returns.
 Why a generated header at all: ``firmware/SimFW/src/`` has no
 config/flash-persistence subsystem (unlike ``firmware/SaftyFW/src/
 config_store.c``), and building one is a real firmware subsystem. A
-checked-in, regenerated header gets PLAN.md 3.3's *behavior* with no new
+checked-in, regenerated header gets DESIGN_NOTES.md 3.3's *behavior* with no new
 firmware subsystem -- the interim path ct_calibration/README.md's "Remaining
 firmware work" section names. A per-unit flashable table is the follow-up.
 

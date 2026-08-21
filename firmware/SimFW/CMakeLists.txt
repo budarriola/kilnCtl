@@ -1,16 +1,16 @@
 # SimFW -- kiln simulator / unit-test fixture firmware, RP2040, pico-sdk +
-# FreeRTOS-Kernel (SMP port). docs/PLAN.md section 4 is the authority for
+# FreeRTOS-Kernel (SMP port). docs/DESIGN_NOTES.md section 4 is the authority for
 # every choice below (toolchain, RTOS, warnings level, single-image); if
 # this file and that doc disagree, the doc wins.
 #
-# Adapted from ../SaftyFW/CMakeLists.txt, which is the template PLAN.md
+# Adapted from ../SaftyFW/CMakeLists.txt, which is the template DESIGN_NOTES.md
 # section 4.4 names ("SaftyFW's CMake + pico_sdk + FreeRTOS import layout is
 # the template"). The one deliberate structural difference: SimFW is a
 # plain, SINGLE-IMAGE target. There is no A/B bootloader slot scheme here --
 # SaftyFW's SaftyFW_slotA/SaftyFW_slotB machinery exists because that board
 # needs field OTA updates over an isolated link with no physical access;
 # SimFW is a bench tool that sits on a desk next to whoever is using it, so
-# BOOTSEL drag-and-drop or SWD (docs/PLAN.md section 3.1/9) is the whole
+# BOOTSEL drag-and-drop or SWD (docs/DESIGN_NOTES.md section 3.1/9) is the whole
 # flashing story and a second linked image buys nothing.
 #
 # Requires, on the machine building this (none of these are vendored into
@@ -57,15 +57,15 @@ pico_sdk_init()
 # FreeRTOS_Kernel_import.cmake's own comment.
 include(${CMAKE_CURRENT_LIST_DIR}/FreeRTOS_Kernel_import.cmake)
 
-# `benchproto` -- SimFW's USB control protocol core (docs/PLAN.md sections
-# 4.4/5/12, firmware/CommonFW/docs/BENCHPROTO.md): framing, CRC, reliability/
+# `benchproto` -- SimFW's USB control protocol core (docs/DESIGN_NOTES.md
+# sections 4.4/5, docs/PLAN.md section 12, firmware/CommonFW/docs/BENCHPROTO.md): framing, CRC, reliability/
 # retry/dedup, task registration, now lifted into CommonFW as its own
 # library. Pulled in the same mechanism SaftyFW uses for kilnlink
 # (../SaftyFW/CMakeLists.txt: `add_subdirectory(.../CommonFW kilnlink)`) --
 # CommonFW/CMakeLists.txt defines both `kilnlink` and `benchproto` as
 # sibling targets from one project; only `benchproto` is linked below
 # (target_link_libraries), since SimFW still never speaks on the kilnlink
-# wire (the safety link's compatibility floor, PLAN.md section 4.4 --
+# wire (the safety link's compatibility floor, DESIGN_NOTES.md section 4.4 --
 # unchanged from this file's previous header comment on that point).
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW benchproto)
 
@@ -92,20 +92,20 @@ add_custom_target(simfw_build_info ALL
 # hardware_pio/hardware_irq ARE linked below: spi_emu_a/b now have real
 # bodies (src/drivers/max31856_pio_engine.{c,h} + src/drivers/
 # max31856_spi_slave.pio, PIO0/PIO1 SPI slave emulation of the MAX31856
-# register file, src/sim/max31856_regs.{c,h}), docs/PLAN.md section 3.2.1/
+# register file, src/sim/max31856_regs.{c,h}), docs/DESIGN_NOTES.md section 3.2.1/
 # M-A's proof-of-concept milestone -- see max31856_spi_slave.pio's header
 # comment for the build-verified-not-hardware-timing-verified caveat.
 # hardware_i2c IS linked below too: i2c_owner now has a real body
-# (src/drivers/mcp23017.{c,h} + I2C0 init), docs/PLAN.md section 4.1's
+# (src/drivers/mcp23017.{c,h} + I2C0 init), docs/DESIGN_NOTES.md section 4.1's
 # relay-sense/E-stop/DUT-power milestone.
 # hardware_pwm/hardware_dma ARE linked below too: wave_owner now has a real
 # body (src/drivers/ct_wave_pwm.{c,h} + 3-channel PWM/DMA CT synthesis),
-# docs/PLAN.md section 4.1/3.3's CT-waveform milestone -- see
+# docs/DESIGN_NOTES.md section 4.1/3.3's CT-waveform milestone -- see
 # src/drivers/ct_wave_pwm.c's header comment for the GPIO/carrier/sample-rate
 # arithmetic. src/sim/sine_synth.c is linked alongside it: wave_owner.c calls
 # into it (256-entry table, distortion, zero-crossing detection) rather than
-# reimplementing any of that pure math, per docs/PLAN.md section 3.3/13's
-# "pure, host-testable" sim/ modules being the single source of truth.
+# reimplementing any of that pure math, per docs/DESIGN_NOTES.md section 3.3 and
+# docs/PLAN.md section 13's "pure, host-testable" sim/ modules being the single source of truth.
 # src/sim/ct_calibration.c is linked for the same reason: wave_owner.c's
 # ct_wave_amps_to_pwm_scale() delegates the per-channel
 # clamp(gain*amps + offset, 0, 1) mapping to it rather than doing that
@@ -114,7 +114,7 @@ add_custom_target(simfw_build_info ALL
 # src/sim/ct_calibration_defaults.h (tools/gen_ct_cal_table.py) and are
 # all-uncalibrated/identity today -- no CT hardware, no calibration run yet.
 # tinyusb_device/pico_unique_id (below) back usb_owner's real body: native
-# USB CDC framing/dispatch over `benchproto` (docs/PLAN.md section 4.1's
+# USB CDC framing/dispatch over `benchproto` (docs/DESIGN_NOTES.md section 4.1's
 # usb_owner/cmd_task rows) -- src/tusb_config.h and
 # src/tasks/usb_descriptors.c are usb_owner's own descriptor/config half, see
 # usb_owner.h's header comment. Add each remaining library in the same
@@ -149,7 +149,7 @@ add_executable(SimFW ${SIMFW_APP_SOURCES})
 
 add_dependencies(SimFW simfw_build_info)
 
-# PIO SPI slave engines (docs/PLAN.md section 3.2.1, M-A -- the project's
+# PIO SPI slave engines (docs/DESIGN_NOTES.md section 3.2.1, M-A -- the project's
 # highest-risk item): src/drivers/max31856_spi_slave.pio holds the RX/TX
 # state machine programs spi_emu_a/b's real bodies load via
 # src/drivers/max31856_pio_engine.c. pico_generate_pio_header() runs pioasm
@@ -189,7 +189,7 @@ target_link_libraries(SimFW PRIVATE
 # separate stdio_usb wrapper would fight it for the same peripheral, so it
 # stays off, matching the single-owner-per-peripheral doctrine every other
 # task in this project follows. There is no UART0 debug-probe bridge code in
-# this pass either (docs/PLAN.md section 3.6: "Debug UART (to Debug Probe) |
+# this pass either (docs/DESIGN_NOTES.md section 3.6: "Debug UART (to Debug Probe) |
 # 2 | same bench pattern as SaftyFW" -- reserved, not wired). Matches
 # SaftyFW's own reasoning for disabling both by default.
 pico_enable_stdio_usb(SimFW 0)
@@ -201,5 +201,5 @@ pico_enable_stdio_uart(SimFW 0)
 # no prebuilt binary for this pico-sdk version and building it from source
 # needs a host C/C++ compiler that is not set up here (only arm-none-eabi-gcc
 # is configured). The plain .elf below is what OpenOCD/SWD flashes anyway;
-# BOOTSEL drag-and-drop (PLAN.md section 3.1/9) needs a .uf2, so re-enable
+# BOOTSEL drag-and-drop (DESIGN_NOTES.md section 3.1/9) needs a .uf2, so re-enable
 # this line once picotool is available if that flashing path is wanted.

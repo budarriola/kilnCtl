@@ -36,7 +36,7 @@
 //   - Relay sense (K1/K2/K3/K5/K4) and the ESP-driven `Fault` line default
 //     open/deasserted and stay there unless something explicitly reports
 //     otherwise -- a real DUT has no wire to do that (real hardware only
-//     ever senses a contact, PLAN.md sec 3.4), so RELAY_GET_STATES/
+//     ever senses a contact, DESIGN_NOTES.md sec 3.4), so RELAY_GET_STATES/
 //     RELAY_GET_EDGES stay at their defaults against a real DUT. A
 //     *virtual* DUT, with no physical relay coil to close in the first
 //     place, can report a sensed state through a new virtual-only command,
@@ -114,8 +114,8 @@ typedef enum {
 
 #define CT_NUM_CHANNELS 3u
 #define TC_NUM_CHANNELS TC_FAULT_CHANNEL_COUNT /* 4 */
-#define TICK_PERIOD_MS 100.0f /* 10 Hz, PLAN.md 4.1's sim_engine tick */
-#define TELEMETRY_RATE_HZ 2.0f /* PLAN.md 5.3 default */
+#define TICK_PERIOD_MS 100.0f /* 10 Hz, DESIGN_NOTES.md 4.1's sim_engine tick */
+#define TELEMETRY_RATE_HZ 2.0f /* DESIGN_NOTES.md 5.3 default */
 #define EDGE_LOG_CAPACITY 64u
 
 // ===========================================================================
@@ -471,7 +471,26 @@ static void apply_edge_effects(device_t *d, const fault_event_t *events, size_t 
         } else if (ft == FT_AMBIENT_SHIFT && ev->kind == FAULT_EVENT_FIRED) {
             d->params.T_ambient = slot->params[0];
         } else if (ft == FT_DUT_POWER_CUT) {
+            bool was_on = d->dut_power_on;
             d->dut_power_on = (ev->kind != FAULT_EVENT_FIRED);
+            // SIM_EVENT_DUT_POWER (sim_snapshot.h) has no real-firmware
+            // producer to port from -- unlike every other event this ring
+            // carries, a real ESP32-S3 never fakes cutting its own power,
+            // so real sim_engine.c only ever tracks dut_power_on as a
+            // snapshot field (line ~483, `s_pub_snapshot.dut_power_on =
+            // dut_power_on`), never as a discrete edge. This fixture's own
+            // FT_DUT_POWER_CUT fault is the one thing that can toggle it,
+            // so this is the only place the edge can be detected and
+            // reported. Without this, kilnsim.runner's own
+            // `_translate_wire_event()`/`EventType.DUT_POWER` handling
+            // (already written, already wired into WIRE_EVENT_TYPES) had
+            // nothing to translate: a scenario's `event: {type: dut_power,
+            // state: off}` trigger could never fire, no matter what the
+            // fault did internally (power_blip.yaml's
+            // relay_deenergize_no_current_during_blip/safe_resume clauses).
+            if (d->dut_power_on != was_on) {
+                ring_push(d, SIM_EVENT_DUT_POWER, 0u, d->dut_power_on ? 1u : 0u, 0.0f);
+            }
         }
     }
 }
@@ -648,7 +667,7 @@ static void device_tick(device_t *d)
         } else {
             true_tc_c = safety_reported_c;
         }
-        true_cj_c = 25.0f; // fixed simulated cold-junction ambient (PLAN.md 3.2:
+        true_cj_c = 25.0f; // fixed simulated cold-junction ambient (DESIGN_NOTES.md 3.2:
                             // "default: slow ambient drift" -- a constant is a
                             // documented simplification; nothing in the
                             // required scenarios needs CJ drift over time)
@@ -853,7 +872,7 @@ static bool dispatch_sys(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         // Virtual-device extension, but the wire shape itself is NOT a
         // virtual-only choice: PROTOCOL.md sec 4 / real firmware's
         // cmd_task.c's handle_sys_set_timescale() both document/decode
-        // `u32 timescale_x100 LE` (PLAN.md 4.2/5.2's x100 fixed point,
+        // `u32 timescale_x100 LE` (DESIGN_NOTES.md 4.2/5.2's x100 fixed point,
         // 0 treated as 1.00x by sim_engine itself) -- this handler
         // previously decoded a raw f32 here, a real protocol mismatch that
         // happened to still round-trip against kilnsim's own (also
@@ -867,7 +886,7 @@ static bool dispatch_sys(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
     }
     case SIMFW_CMD_SYS_SET_SEED: {
         // Virtual-device extension. Request: [u32 seed]. Re-seeds the fault
-        // engine's PRNG immediately (fault_engine_init() -- PLAN.md 7.2's
+        // engine's PRNG immediately (fault_engine_init() -- DESIGN_NOTES.md 7.2's
         // determinism contract is anchored on this seed).
         uint32_t v = ar_u32le(r);
         if (r->overflow) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
@@ -1005,7 +1024,28 @@ static bool dispatch_tc(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         rw_u8(w, channel);
         rw_u8(w, flags);
-        rw_bytes(w, d->tc[channel].regs, MAX31856_REG_COUNT);
+        // Real hardware never reads d->tc[channel].regs[] directly -- every
+        // byte crosses max31856_resp_image.c's per-transaction corruption
+        // (max31856_regs_apply_read_corruption(), the same helper real
+        // firmware's SPI/DMA response image calls) before it reaches the
+        // bus. This handler used to hand back the raw, uncorrupted regs[]
+        // unconditionally, which meant FT_TC_FLAKY_SPI's bit_error_rate
+        // (set only via this same max31856_channel_t's corruption struct)
+        // never had any effect on anything a virtual_dut poll could
+        // observe: virtual_dut/dut_core.exe's only way to see TC content is
+        // this command. A dead_mode-forced channel (already baked into
+        // regs[] elsewhere) is unaffected -- apply_read_corruption() takes
+        // the dead_mode branch first and does not consume the RNG in that
+        // case -- so this only changes behavior for a channel whose
+        // bit_error_rate is actually nonzero, i.e. only while a flaky_spi
+        // fault is active on it.
+        {
+            uint8_t corrupted[MAX31856_REG_COUNT];
+            for (uint8_t i = 0; i < MAX31856_REG_COUNT; i++) {
+                corrupted[i] = max31856_regs_apply_read_corruption(&d->tc[channel], d->tc[channel].regs[i]);
+            }
+            rw_bytes(w, corrupted, MAX31856_REG_COUNT);
+        }
         rw_f32le(w, true_c);
         rw_f32le(w, reported_c);
         rw_u8(w, (uint8_t)ovr.corruption.dead_mode);
@@ -1161,7 +1201,7 @@ static bool dispatch_ct(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 // deliberately NOT added to firmware/SimFW/src/tasks/cmd_ids.h (that header
 // is real firmware's numeric source of truth and is read-only for this
 // pass regardless). On real hardware the fixture only ever SENSES relay
-// contacts through the MCP23017 (PLAN.md sec 3.4) -- there is no wire, no
+// contacts through the MCP23017 (DESIGN_NOTES.md sec 3.4) -- there is no wire, no
 // GPIO, no physical mechanism by which a DUT could ever tell the fixture
 // "I closed this contact"; the fixture watches the contact, it does not
 // take dictation from the board. cmd_ids.h's own comment on this group
@@ -1180,7 +1220,7 @@ static bool dispatch_ct(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 // in for the physical sense wire that a real fixture would use instead.
 // Once told, this harness treats the value exactly as it treats any other
 // sensed contact -- same relay_mask bit, same duty[]/edge-log/telemetry
-// path device_tick() already runs for K1/K2/K3/K5 (PLAN.md sec 2 loop 1),
+// path device_tick() already runs for K1/K2/K3/K5 (DESIGN_NOTES.md sec 2 loop 1),
 // including K4's own veto over every zone's duty[]/current_a[] (see
 // device_tick()'s K4-gating block, ported from real firmware's
 // sim_engine.c af88ffc fix) -- see this file's own README.md "Known,
@@ -1679,10 +1719,10 @@ static void device_init(device_t *d, uint32_t seed)
     memset(d, 0, sizeof(*d));
     d->timescale_x100 = 100; // 1.00x default
     d->seed = seed;
-    d->safety_weight[0] = 1.0f; // PLAN.md 4.3 default: zone 0
+    d->safety_weight[0] = 1.0f; // DESIGN_NOTES.md 4.3 default: zone 0
     d->safety_lag_s = 5.0f;
     d->safety_fault_gain = 1.0f;
-    d->dut_power_on = true; // default: board powered (PLAN.md 3.4 -- fixture
+    d->dut_power_on = true; // default: board powered (DESIGN_NOTES.md 3.4 -- fixture
                              // does not itself pick an E-stop default, but a
                              // DUT power relay defaulting OFF would make
                              // every scenario start with a dead board)

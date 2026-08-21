@@ -1,19 +1,19 @@
 // --- Gap-closure pass (see this file's/sim_engine.c's inline doc for each
-// addition): sim_engine_get_seed() (telemetry.c's documented gap, PLAN.md
+// addition): sim_engine_get_seed() (telemetry.c's documented gap, DESIGN_NOTES.md
 // 5.3's "seed" telemetry field); the safety-TC blend/lag/MANUAL/fault-
-// override API (PLAN.md 4.3: "The safety-side TC reads a configurable blend
+// override API (DESIGN_NOTES.md 4.3: "The safety-side TC reads a configurable blend
 // of zone temps... with its own lag and its own fault knobs"); and three new
 // fault-only zone overrides (thermal-mass surprise, TC-lag stress) mirroring
 // the existing duty/health override pair's NOT-queued, fault_sched-only
 // contract. ------------------------------------------------------------------
-// sim_engine.h -- REAL BODY (milestone M-C, docs/PLAN.md section 4.1):
+// sim_engine.h -- REAL BODY (milestone M-C, docs/DESIGN_NOTES.md section 4.1):
 // "Thermal model tick (10 Hz), computes zone temps, element currents;
 // publishes snapshot." Owns no peripheral (single-owner-per-peripheral
-// doctrine, PLAN.md section 4's opening paragraph) -- it is the sole writer
+// doctrine, DESIGN_NOTES.md section 4's opening paragraph) -- it is the sole writer
 // of the zone snapshot (section 4.5: "one struct, sim_engine sole writer,
 // double-buffered with a sequence counter"), consumed by spi_emu_a/b (reg
 // images), wave_owner (amplitudes) and telemetry. The pure thermal-model
-// math itself lives in src/sim/thermal_model.c (PLAN.md section 9 repo
+// math itself lives in src/sim/thermal_model.c (DESIGN_NOTES.md section 9 repo
 // layout, section 13 "host-testable") -- this task only ticks it and
 // publishes the result, it does not implement the model.
 //
@@ -55,12 +55,12 @@ extern "C" {
 // SIMFW_CORE_ELASTIC_PATH (task_priorities.h), ticking at
 // SIMFW_PERIOD_SIM_ENGINE_MS (10 Hz). Also creates this module's internal
 // command queue, snapshot/event-ring guards, and initializes the thermal
-// model from THERMAL_PRESET_FAST_TEST (PLAN.md 4.3: "the default for
+// model from THERMAL_PRESET_FAST_TEST (DESIGN_NOTES.md 4.3: "the default for
 // automated regression"). Returns false if task/queue/mutex creation
 // failed.
 bool sim_engine_start(void);
 
-// --- MODEL-group command surface (PLAN.md section 5) ------------------------
+// --- MODEL-group command surface (DESIGN_NOTES.md section 5) ------------------------
 // All setters below queue a command applied at sim_engine's next tick
 // boundary (mirrors i2c_owner.c's queue-then-apply-next-tick pattern, per
 // this pass's own instructions) and are safe to call from any task. Getters
@@ -83,14 +83,14 @@ bool sim_engine_load_preset(thermal_preset_id_t preset);
 // Sets thermal_model_params_t.T_ambient globally.
 bool sim_engine_set_ambient(float ambient_c);
 
-// Sets the sim-clock time-scale, PLAN.md 4.2/5.2: x100 fixed point (1000 ==
+// Sets the sim-clock time-scale, DESIGN_NOTES.md 4.2/5.2: x100 fixed point (1000 ==
 // 10.00x accelerated, 100 == 1.00x real time, 0 treated as 1.00x). Affects
 // both the substep count thermal_model_tick() uses (accuracy-at-speed,
-// PLAN.md 4.3) and how far sim_time_us advances per wall tick.
+// DESIGN_NOTES.md 4.3) and how far sim_time_us advances per wall tick.
 bool sim_engine_set_timescale(uint32_t timescale_x100);
 
 // Seeds sim_engine's own PRNG stream (reserved for future process-noise
-// use, PLAN.md 4.3's "PRNG-driven process noise level... default 0 for
+// use, DESIGN_NOTES.md 4.3's "PRNG-driven process noise level... default 0 for
 // byte-exact replays" -- this pass stores the seed but the model runs with
 // noise disabled, so nothing yet consumes it beyond storage; wiring actual
 // process noise is future work, left out deliberately rather than adding
@@ -99,20 +99,20 @@ bool sim_engine_set_seed(uint32_t seed);
 
 // Fresh run: reinitializes thermal_model_state_t from the current params'
 // T0 (keep_params == true) or reloads the last-selected preset first
-// (keep_params == false, matching PLAN.md 6.1's sim_reset tool doc: "model
+// (keep_params == false, matching DESIGN_NOTES.md 6.1's sim_reset tool doc: "model
 // to T0"). Resets sim_time_us to 0, clears all MANUAL zone-temp overrides,
-// and resets the event ring's next sequence number to 0 (PLAN.md 6.1: "...
+// and resets the event ring's next sequence number to 0 (DESIGN_NOTES.md 6.1: "...
 // event seq reset"). Does NOT clear fault_sched's armed/active slots --
 // that pool is fault_sched's own state, out of this function's scope.
 bool sim_engine_reset(bool keep_params);
 
-// MANUAL-mode override (PLAN.md 5's TC/MODEL command groups' "SET_TEMP
+// MANUAL-mode override (DESIGN_NOTES.md 5's TC/MODEL command groups' "SET_TEMP
 // (force a zone temp)"): pins zone `zone`'s reported T_true_c/T_tc_reported_c
 // to temp_c every tick until sim_engine_clear_zone_manual() is called or a
 // preset/reset clears it. The underlying thermal model keeps ticking
 // underneath (so current_a/duty bookkeeping is unaffected), but the
 // zone's *reported* temperature never drifts from temp_c while MANUAL is
-// active -- PLAN.md 5's "MANUAL (frozen at an operator-set value)".
+// active -- DESIGN_NOTES.md 5's "MANUAL (frozen at an operator-set value)".
 bool sim_engine_force_zone_temp(uint8_t zone, float temp_c);
 
 // Returns zone `zone` to MODEL mode (the model's own computed temperature
@@ -133,7 +133,7 @@ bool sim_engine_clear_zone_manual(uint8_t zone);
 uint32_t sim_engine_get_seed(void);
 
 // --- Safety-side TC: blend of zone temps + its own lag + its own fault
-// knobs (PLAN.md 4.3: "The safety-side TC reads a configurable blend of zone
+// knobs (DESIGN_NOTES.md 4.3: "The safety-side TC reads a configurable blend of zone
 // temps (default: zone 0), with its own lag and its own fault knobs, so
 // main-vs-safety disagreement scenarios are first-class") -----------------
 // There is exactly ONE physical safety-side MAX31856 channel
@@ -143,7 +143,7 @@ uint32_t sim_engine_get_seed(void);
 // sim_snapshot_t.zones[i].T_safety_reported_c slot (sim_snapshot.h's LOCKED
 // field shape is unchanged; this just fills it in correctly instead of the
 // previous "zone i's own T_tc_reported_c stands in" placeholder) so GUI/
-// telemetry consumers that already index by zone (PLAN.md 6.3's "truth vs
+// telemetry consumers that already index by zone (DESIGN_NOTES.md 6.3's "truth vs
 // reported vs safety-reported per zone" strip chart) see the one safety
 // number lined up against every zone's own truth line for comparison, with
 // no special-casing needed on the reader side.
@@ -151,7 +151,7 @@ typedef struct {
     // Blend weight per zone (need not sum to 1 -- the caller's
     // responsibility, mirroring thermal_zone_params_t.k_couple's "this
     // module does not enforce it" doctrine). Default (sim_engine_start()):
-    // weight[0] = 1, rest 0 -- PLAN.md 4.3's "default: zone 0".
+    // weight[0] = 1, rest 0 -- DESIGN_NOTES.md 4.3's "default: zone 0".
     float weight[THERMAL_MODEL_MAX_ZONES];
     // First-order lag time constant, seconds, applied to the blended target
     // exactly like thermal_model.c's own TC lag formula
@@ -170,7 +170,7 @@ bool sim_engine_set_safety_tc_params(const sim_engine_safety_tc_params_t *params
 // out is NULL.
 bool sim_engine_get_safety_tc_params(sim_engine_safety_tc_params_t *out);
 
-// MANUAL-mode override for the safety channel ONLY (PLAN.md 5's TC/MODEL
+// MANUAL-mode override for the safety channel ONLY (DESIGN_NOTES.md 5's TC/MODEL
 // groups' "TC_SET_MODE"/"SET_TEMP" extended to channel SAFETY, which
 // cmd_task.c's handle_tc_force_temp()/handle_tc_set_mode() currently reject
 // for channel==TC_FAULT_CHANNEL_SAFETY with ERR_BAD_ARGS pending this API --
@@ -188,7 +188,7 @@ bool sim_engine_force_safety_temp(float temp_c);
 // sim_engine_clear_zone_manual()).
 bool sim_engine_clear_safety_manual(void);
 
-// --- fault_sched's safety-TC fault hook (PLAN.md 7.1's "Main/safety
+// --- fault_sched's safety-TC fault hook (DESIGN_NOTES.md 7.1's "Main/safety
 // disagree: Skew safety TC vs zone truth by an offset/gain") --------------
 // NOT queued, same invariant as sim_engine_set_zone_duty_override()/
 // _health_override() below: fault_sched_tick() is sim_engine.c's own
@@ -200,7 +200,7 @@ bool sim_engine_clear_safety_manual(void);
 // blend+lag result. Do not call from any other task.
 bool sim_engine_set_safety_tc_fault_override(bool active, float offset_c, float gain);
 
-// --- fault_sched's power-path fault hook (PLAN.md 7.1's "Power path
+// --- fault_sched's power-path fault hook (DESIGN_NOTES.md 7.1's "Power path
 // faults" table) -------------------------------------------------------------
 // Unlike every setter above, these two are NOT queued: their only intended
 // caller is fault_sched_tick() (fault_sched.h), which sim_engine.c itself
@@ -216,7 +216,7 @@ bool sim_engine_set_safety_tc_fault_override(bool active, float offset_c, float 
 // duty this tick is `duty` (0..1) regardless of what the relay-derived
 // mapping says -- covers welded/shorted relay (duty forced 1 while the
 // relay reads open), stuck-open relay (duty forced 0 while the relay reads
-// closed), and runaway-zone (duty forced 1) faults, all from PLAN.md 7.1's
+// closed), and runaway-zone (duty forced 1) faults, all from DESIGN_NOTES.md 7.1's
 // power-path and system-fault tables.
 bool sim_engine_set_zone_duty_override(uint8_t zone, bool active, float duty);
 
@@ -229,7 +229,7 @@ bool sim_engine_set_zone_duty_override(uint8_t zone, bool active, float duty);
 // last set, with no baseline-tracking needed on fault_sched's side.
 bool sim_engine_set_zone_health_override(uint8_t zone, bool active, float health);
 
-// sim_engine_set_zone_thermal_override(): PLAN.md 7.1 system table,
+// sim_engine_set_zone_thermal_override(): DESIGN_NOTES.md 7.1 system table,
 // "Thermal-mass surprise: Step-change model params mid-run (lid opened,
 // load added)". While active, zone `zone`'s effective C (thermal mass,
 // J/degC) and k_loss (loss to ambient, W/degC) this tick are `C`/`k_loss`
@@ -246,7 +246,7 @@ bool sim_engine_set_zone_health_override(uint8_t zone, bool active, float health
 // (0 is a legitimate "lost its loss path" value) and is applied verbatim.
 bool sim_engine_set_zone_thermal_override(uint8_t zone, bool active, float C, float k_loss);
 
-// sim_engine_set_zone_tc_lag_override(): PLAN.md 7.1 system table,
+// sim_engine_set_zone_tc_lag_override(): DESIGN_NOTES.md 7.1 system table,
 // "Sensor-vs-element lag stress: Crank TC lag to provoke overshoot". While
 // active, zone `zone`'s effective tc_lag_s this tick is `tc_lag_s`
 // regardless of the stored parameter value -- same override contract as

@@ -11,7 +11,7 @@ extern "C" {
 /* benchproto -- the wire envelope for a hardened, addressed, request/reply
  * protocol for bench/instrument-fixture firmwares talking to a PC over a
  * serial-shaped link (UART, USB CDC, ...). First consumer: SimFW's USB CDC
- * link to its PC-side `kilnsim` tools (firmware/SimFW/docs/PLAN.md sec
+ * link to its PC-side `kilnsim` tools (firmware/SimFW/docs/DESIGN_NOTES.md sec
  * 4.4, 5, 5.1, 12). Lifted and generalized from
  * firmware/UnitTestFw/UnitTest/docs/UART_PROTOCOL.md, which described this
  * same shape for a UART link before UnitTestFw was retired -- see
@@ -37,7 +37,7 @@ extern "C" {
 
 /* One byte holds the wire LENGTH field, so 255 is the hard ceiling; 128 is
  * a deliberately generous, round default for the request/reply payloads
- * SimFW's command groups need (see PLAN.md sec 5.2's representative
+ * SimFW's command groups need (see DESIGN_NOTES.md sec 5.2's representative
  * payloads -- the largest sketched there, FAULT_SCHEDULE, is well under
  * half of this). Raise it (up to 255) the same way KilnFW raised its own
  * copy of this constant from 128 to 253 if a future payload genuinely
@@ -67,7 +67,7 @@ extern "C" {
  * (benchproto_link.h drives the state machine around them). BROADCAST is
  * fire-and-forget: no ACK is ever sent or expected for it, and the
  * receiver never dedups it -- the shape SimFW's unsolicited TELEMETRY/EVT
- * frames want (PLAN.md sec 5.3), where the sender must never block on a
+ * frames want (DESIGN_NOTES.md sec 5.3), where the sender must never block on a
  * reply. */
 typedef enum {
     BENCHPROTO_MSG_DATA = 0x01,

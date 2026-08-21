@@ -1,10 +1,10 @@
-// log_task.h -- REAL BODY (docs/PLAN.md section 4.1 task map): "Deferred
+// log_task.h -- REAL BODY (docs/DESIGN_NOTES.md section 4.1 task map): "Deferred
 // logging, drop-counting, never blocks producers." Lowest priority in the
 // system, always droppable -- mirrors ../../SaftyFW/src/tasks/log_task.h's
 // doctrine: a log line must never be able to displace a telemetry frame,
 // and no producer task ever blocks waiting for this one.
 //
-// --- Transport decision (PLAN.md section 5.3 does not pin this down; this
+// --- Transport decision (DESIGN_NOTES.md section 5.3 does not pin this down; this
 // pass's own call, documented per the pass instructions) -------------------
 // SaftyFW's log_task sends each line out over its own wire as its own frame
 // type (link_task_send_log(), a fixed kilnlink task id). SimFW does NOT do
@@ -12,11 +12,11 @@
 // (log_task_get_entries() below) that a future LOG-style query command can
 // read, and are never sent unsolicited over USB CDC.
 //
-// Reasoning: PLAN.md 5.3 gives `telemetry` (default 2 Hz, EVT frames
+// Reasoning: DESIGN_NOTES.md 5.3 gives `telemetry` (default 2 Hz, EVT frames
 // immediate) sole ownership of SimFW's unsolicited-broadcast bandwidth --
 // benchproto's BROADCAST frames are also the only unacknowledged, unretried
 // wire traffic this link has (BENCHPROTO.md sec 4), so anything sent that
-// way is exactly the traffic PLAN.md 4.5's drop policy is built to protect
+// way is exactly the traffic DESIGN_NOTES.md 4.5's drop policy is built to protect
 // telemetry/EVT from having to compete with. A bench-tool's debug log is
 // not on that protected path (unlike SaftyFW's Frame A/B, which the safety
 // link genuinely needs both to succeed) -- a poll-based query is simpler
@@ -60,7 +60,7 @@ bool log_task_start(void);
 
 // Non-blocking enqueue -- callable from ANY task, on either core (the whole
 // point: a producer on SIMFW_CORE_RT_PATH must never risk a wait on this
-// lowest-priority task, PLAN.md 4.5's "nothing ever blocks" rule). Formats
+// lowest-priority task, DESIGN_NOTES.md 4.5's "nothing ever blocks" rule). Formats
 // "tag: message" (tag may be NULL to omit it) into a fixed-size entry and
 // posts it to log_task's internal queue with a zero timeout
 // (xQueueSend(..., 0)), the same non-blocking-producer shape every other

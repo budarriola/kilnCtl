@@ -1,4 +1,4 @@
-"""Tkinter GUI skeleton for kilnsim -- ``firmware/SimFW/docs/PLAN.md`` section 6.3.
+"""Tkinter GUI skeleton for kilnsim -- ``firmware/SimFW/docs/DESIGN_NOTES.md`` section 6.3.
 
 Panels: zone-temperature strip chart (truth vs reported vs safety-reported
 per zone), relay lamp row with edge history, per-TC panel (register hexdump,
@@ -16,7 +16,7 @@ against a real, responding device via :class:`~kilnsim.link.TcpSimLink` --
 "Link > Connect (virtual_simfw)..." -- not just
 :class:`~kilnsim.link.MockSimLink`. The zone chart, relay lamps, TC panel,
 CT panel, and I/O panel poll and command real replies; the fault-scheduler
-timeline's drag-to-re-time (PLAN.md 6.3) is the one piece still a documented
+timeline's drag-to-re-time (DESIGN_NOTES.md 6.3) is the one piece still a documented
 TODO (it lists/cancels/fires slots but doesn't re-time them visually) --
 lowest priority per this pass's own instructions. Session logging to
 ``tools/PcTools/logs/kilnsim/``, matching the existing console-capture
@@ -192,7 +192,7 @@ class KilnSimGui:
 # ---------------------------------------------------------------------------
 class ZoneChartPanel(ttk.Frame):
     """Zone-temperature strip chart: truth (red) vs TC-reported (blue) vs
-    safety-reported (green), per zone, over recent history -- PLAN.md sec
+    safety-reported (green), per zone, over recent history -- DESIGN_NOTES.md sec
     6.3's own description. Pulls one reading per :meth:`poll_live` tick
     (driven by :class:`KilnSimGui`'s 500ms timer) via
     :func:`kilnsim.link.get_state_snapshot`, which works uniformly whether
@@ -403,7 +403,7 @@ class TcPanel(ttk.Frame):
         self.fault_var = tk.StringVar(value="tc_disconnected")
         ttk.Combobox(
             fault_row, textvariable=self.fault_var,
-            # fault_catalog.FAULT_TYPE_NAMES' TC-kind entries (PLAN.md sec
+            # fault_catalog.FAULT_TYPE_NAMES' TC-kind entries (DESIGN_NOTES.md sec
             # 7.1) -- the panel used to offer "disconnected"/"shorted"/
             # "noisy"/... which are not catalog names at all and would
             # raise FaultCatalogError the instant Inject was clicked.
@@ -643,7 +643,7 @@ class IoPanel(ttk.Frame):
             power_safety_row, textvariable=self.power_safety_state_var, foreground="#8a2b00"
         ).pack(side=tk.LEFT, padx=12)
 
-        # A "spare pin" control, PLAN.md 6.3's "J20" -- the I2C-expander
+        # A "spare pin" control, DESIGN_NOTES.md 6.3's "J20" -- the I2C-expander
         # discrete I/O group (IO_SET_DIR/WRITE/READ, PROTOCOL.md sec 5.5)
         # beyond the fixed-role E-stop/DUT-power/relay-sense pins.
         j20_row = ttk.LabelFrame(self, text="J20 / spare expander pin")

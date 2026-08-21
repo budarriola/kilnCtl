@@ -388,7 +388,7 @@ the datasheet, not a measurement** — see §8. The recommendation for the
 coordinator is: run the fixture at 200 MHz, or hold the masters to 4 MHz, and
 treat the Saleae capture as the arbiter.
 
-**Decided 2026-08-20 (`docs/PLAN.md` §3.2.1), superseding the "run at
+**Decided 2026-08-20 (`docs/DESIGN_NOTES.md` §3.2.1), superseding the "run at
 200 MHz or hold to 4 MHz" recommendation above with the second option:** the
 thermocouple SPI clock is now capped at 4 MHz on both real masters, not left
 open. `KILNCTL_THERMO_SPI_CLOCK_HZ`'s Kconfig `range 100000 4000000` (KilnFW)

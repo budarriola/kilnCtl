@@ -15,7 +15,7 @@ and linked into both.
 request/reply protocol (framing, CRC16, retry/dedup, task registration) for
 bench/instrument firmwares talking to a PC, extracted from
 `firmware/UnitTestFw`'s UART prototype for `SimFW`'s USB-CDC link (see
-`firmware/SimFW/docs/PLAN.md` sec 4.4/12). It shares no code with `kilnlink`
+`firmware/SimFW/docs/DESIGN_NOTES.md` sec 4.4, `firmware/SimFW/docs/PLAN.md` sec 12). It shares no code with `kilnlink`
 — see `docs/BENCHPROTO.md` sec 1 for why the two look alike but are kept
 apart — and is host-tested the same way (`test_benchproto_frame.c`,
 `test_benchproto_link.c`, both wired into this file's `CMakeLists.txt`).

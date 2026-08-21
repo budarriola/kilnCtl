@@ -1,7 +1,7 @@
 """Python-side data model for SimFW's USB control protocol.
 
 This is the **stable contract layer**: dataclasses/enums for the command
-groups and payloads sketched in ``firmware/SimFW/docs/PLAN.md`` section 5
+groups and payloads sketched in ``firmware/SimFW/docs/DESIGN_NOTES.md`` section 5
 (command groups), 5.2 (representative payloads -- FAULT_SCHEDULE,
 TC_GET_REGS reply, RELAY_GET_EDGES reply) and 5.3 (telemetry frame, EVT frame
 fields), plus the trigger/duration/repeat spec in section 7.2 that
@@ -9,12 +9,12 @@ fields), plus the trigger/duration/repeat spec in section 7.2 that
 
 Everything in this module is shape, not wire bytes. The actual byte-level
 encoding is SimFW's job once its protocol core is lifted from
-``firmware/UnitTestFw`` into ``firmware/CommonFW`` (PLAN.md sec 4.4/12) --
+``firmware/UnitTestFw`` into ``firmware/CommonFW`` (DESIGN_NOTES.md sec 4.4, PLAN.md sec 12) --
 that happens in :mod:`kilnsim.link`, behind :class:`~kilnsim.link.SimLink`.
 Nothing in this module should need to change when that lift lands; only the
 encoder/decoder in ``link.py`` does.
 
-Command group / command numbering below is provisional (PLAN.md sec 5.2:
+Command group / command numbering below is provisional (DESIGN_NOTES.md sec 5.2:
 "byte layouts frozen in PROTOCOL.md at M-B") -- it exists so
 ``SimLink.send_command(group, cmd, payload)`` has something concrete to pass,
 not as a claim about the eventual wire values. Once ``PROTOCOL.md`` exists
@@ -29,7 +29,7 @@ from typing import Optional, Union
 
 
 # ---------------------------------------------------------------------------
-# Command groups / task registration (PLAN.md sec 5, 5.1)
+# Command groups / task registration (DESIGN_NOTES.md sec 5, 5.1)
 #
 # "Each command group above registers as an addressable task in the
 # protocol's task-registration model ... so the PC discovers the fixture's
@@ -48,7 +48,7 @@ class CommandGroup(enum.IntEnum):
     EVT = 8  # unsolicited only -- never a send_command() destination
 
 
-# --- SYS (PLAN.md sec 5) ----------------------------------------------------
+# --- SYS (DESIGN_NOTES.md sec 5) ----------------------------------------------------
 class SysCmd(enum.IntEnum):
     PING = 1
     GET_VERSION = 2
@@ -59,7 +59,7 @@ class SysCmd(enum.IntEnum):
     # PROTOCOL.md sec 4 "GET_SIM_STATE": read-back companion to
     # SET_TIMESCALE/SET_SEED, added in the same gap-closure pass that gave
     # real firmware's cmd_task.c real (non-stub) handlers for all four ids
-    # 0x03-0x07. Not in PLAN.md sec 5's original sketch.
+    # 0x03-0x07. Not in DESIGN_NOTES.md sec 5's original sketch.
     GET_SIM_STATE = 7
 
 
@@ -89,7 +89,7 @@ class CtCmd(enum.IntEnum):
     SET_AMPS = 2
     SET_DISTORTION = 3
     GET_STATE = 4
-    # PROTOCOL.md sec 5.3: "not in PLAN.md 5's original sketch; wired up
+    # PROTOCOL.md sec 5.3: "not in DESIGN_NOTES.md 5's original sketch; wired up
     # because wave_owner.h exposes it as a first-class public setter" --
     # payloads.py's _ct_encode/_ct_decode already handle cmd id 5, this enum
     # member was just missing.
@@ -100,7 +100,7 @@ class CtCmd(enum.IntEnum):
 class RelayCmd(enum.IntEnum):
     GET_STATES = 1
     GET_EDGES = 2  # timestamped edge log
-    # PLAN.md sec 5's original sketch had a SET_CONTACT_FAULT here, but
+    # DESIGN_NOTES.md sec 5's original sketch had a SET_CONTACT_FAULT here, but
     # PROTOCOL.md sec 5.4 documents it as deliberately **not allocated**:
     # i2c_owner.h exposes no such setter (relay sense is read-only from this
     # task's perspective by design). FAULT_SCHEDULE's WELDED_RELAY/
@@ -116,7 +116,7 @@ class IoCmd(enum.IntEnum):
     ESTOP_SET = 4
     FAULT_LINE_GET = 5
     DUT_POWER_SET = 6  # not in PLAN.md's sketch table but needed by 6.1's dut_power_set
-    # ESTOP_GET/DUT_POWER_GET (PROTOCOL.md sec 5.5): not in PLAN.md 5's
+    # ESTOP_GET/DUT_POWER_GET (PROTOCOL.md sec 5.5): not in DESIGN_NOTES.md 5's
     # original sketch either, but i2c_owner.h exposes both getters as
     # first-class public API and a client otherwise has no way to read back
     # what it last commanded, so SimFW wires them up too.
@@ -133,7 +133,7 @@ class IoCmd(enum.IntEnum):
     DUT_POWER_SAFETY_GET = 10
 
 
-# --- FAULT (scheduler, PLAN.md sec 7) -----------------------------------------
+# --- FAULT (scheduler, DESIGN_NOTES.md sec 7) -----------------------------------------
 class FaultCmd(enum.IntEnum):
     SCHEDULE = 1
     CANCEL = 2
@@ -145,7 +145,7 @@ class FaultCmd(enum.IntEnum):
     SET_UNTIL_TRIGGER = 5
 
 
-# --- EVT event types (PLAN.md sec 5.3, PROTOCOL.md sec 6) ---------------------
+# --- EVT event types (DESIGN_NOTES.md sec 5.3, PROTOCOL.md sec 6) ---------------------
 #
 # RELAY_EDGE..PROTOCOL_ERROR's *numeric values* below were corrected to match
 # firmware/SimFW/src/sim/sim_snapshot.h's real `sim_event_type_t` (0-based:
@@ -203,7 +203,7 @@ WIRE_EVENT_TYPES = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Modes (PLAN.md sec 5: "Every mutable thing has a mode: MODEL ... or MANUAL")
+# Modes (DESIGN_NOTES.md sec 5: "Every mutable thing has a mode: MODEL ... or MANUAL")
 # ---------------------------------------------------------------------------
 class Mode(str, enum.Enum):
     MODEL = "model"
@@ -211,7 +211,7 @@ class Mode(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
-# Fault trigger/duration/repeat spec (PLAN.md sec 7.2)
+# Fault trigger/duration/repeat spec (DESIGN_NOTES.md sec 7.2)
 # ---------------------------------------------------------------------------
 class TriggerKind(str, enum.Enum):
     AT_SIM_TIME = "at_sim_time"
@@ -281,7 +281,7 @@ class Repeat:
 
 
 # ---------------------------------------------------------------------------
-# FAULT_SCHEDULE request (PLAN.md sec 5.2)
+# FAULT_SCHEDULE request (DESIGN_NOTES.md sec 5.2)
 #
 #   {u16 fault_slot, u8 fault_type, u8 target,
 #    trigger{u8 kind, f32 a, f32 b, u8 zone/relay},
@@ -298,7 +298,7 @@ class Repeat:
 @dataclass
 class FaultScheduleCommand:
     fault_slot: int
-    fault_type: str  # catalog name, PLAN.md sec 7.1 (e.g. "welded_ssr", "tc_disconnect")
+    fault_type: str  # catalog name, DESIGN_NOTES.md sec 7.1 (e.g. "welded_ssr", "tc_disconnect")
     target: str  # e.g. "relay:K1", "tc:0", "ct:1"
     trigger: Trigger
     duration: Duration
@@ -307,7 +307,7 @@ class FaultScheduleCommand:
 
 
 # ---------------------------------------------------------------------------
-# TC_GET_REGS reply (PLAN.md sec 5.2): "the channel's full 16-byte register
+# TC_GET_REGS reply (DESIGN_NOTES.md sec 5.2): "the channel's full 16-byte register
 # image + the emulator's shadow state (actual simulated temp before
 # corruption, active fault list)".
 # ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ class TcRegs:
 
 
 # ---------------------------------------------------------------------------
-# RELAY_GET_EDGES reply (PLAN.md sec 5.2): "up to N {u8 relay, u8 edge,
+# RELAY_GET_EDGES reply (DESIGN_NOTES.md sec 5.2): "up to N {u8 relay, u8 edge,
 # u64 sim_time_us} drained from the edge log".
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -332,7 +332,7 @@ class RelayEdge:
 
 
 # ---------------------------------------------------------------------------
-# Telemetry frame (PLAN.md sec 5.3)
+# Telemetry frame (DESIGN_NOTES.md sec 5.3)
 # ---------------------------------------------------------------------------
 @dataclass
 class ZoneTelemetry:
@@ -439,7 +439,7 @@ class Event:
 
 
 # ---------------------------------------------------------------------------
-# GET_CAPS reply (PLAN.md sec 5.1): "protocol version, SimFW version + git
+# GET_CAPS reply (DESIGN_NOTES.md sec 5.1): "protocol version, SimFW version + git
 # hash, zone count limits, channel counts, and a feature bitmask".
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)

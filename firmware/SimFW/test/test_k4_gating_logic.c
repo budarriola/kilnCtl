@@ -32,7 +32,7 @@ static float zone_duty(bool zone_relay_closed, bool duty_override_active, float 
     return duty;
 }
 
-// Mirrors sim_engine.c's current_a[] formula (PLAN.md 3.3), fed the
+// Mirrors sim_engine.c's current_a[] formula (DESIGN_NOTES.md 3.3), fed the
 // *effective* (already K4-gated) duty -- so K4 opening zeroes both heat and
 // CT current together, from the same duty[] value, with no separate K4
 // check needed in this formula itself.

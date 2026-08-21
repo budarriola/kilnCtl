@@ -1,4 +1,4 @@
-# check_single_owner.ps1 -- enforces docs/PLAN.md section 4's central rule:
+# check_single_owner.ps1 -- enforces docs/DESIGN_NOTES.md section 4's central rule:
 #
 #   "every hardware interface has exactly one owner task; nobody else touches
 #   that peripheral."
@@ -28,7 +28,7 @@
 # I/O via i2c_owner.c's non-I2C GPIO helpers, CT sine synthesis via
 # ct_wave_pwm.c) with no single peripheral being shared -- a blanket
 # "hardware/gpio.h has one owner" rule would be false by construction, not a
-# real violation of PLAN.md section 4's rule (which is about one INTERFACE,
+# real violation of DESIGN_NOTES.md section 4's rule (which is about one INTERFACE,
 # not the GPIO block in the abstract).
 #
 # DMA is the one peripheral where the include rule is NOT the invariant, and
@@ -470,7 +470,7 @@ if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0 -or $pwmFailures.Count -g
             Write-Host "  $f" -ForegroundColor Red
         }
     }
-    throw "$($failures.Count) single-owner violation(s), $($dmaFailures.Count) DMA safety violation(s) and $($pwmFailures.Count) PWM safety violation(s) found -- see docs/PLAN.md section 4 ('every hardware interface has exactly one owner task'), docs/HARDWARE.md section 1b (DMA channel budget) and docs/HARDWARE.md section 0 item 9 (PWM pacer/channel-B latent trap)"
+    throw "$($failures.Count) single-owner violation(s), $($dmaFailures.Count) DMA safety violation(s) and $($pwmFailures.Count) PWM safety violation(s) found -- see docs/DESIGN_NOTES.md section 4 ('every hardware interface has exactly one owner task'), docs/HARDWARE.md section 1b (DMA channel budget) and docs/HARDWARE.md section 0 item 9 (PWM pacer/channel-B latent trap)"
 }
 
 Write-Host "Single-owner check passed: hardware/i2c.h, hardware/pio.h, hardware/pwm.h, hardware/dma.h and tusb.h each appear only in their declared owner file(s)."

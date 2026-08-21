@@ -16,7 +16,7 @@ extern "C" {
  * same shape firmware/UnitTestFw/UnitTest/docs/UART_PROTOCOL.md described
  * for its DAC/AD9833/OLED/PCF8575 task IDs, generalized here to be
  * transport-agnostic. SimFW's command groups (SYS/MODEL/TC/CT/RELAY/IO/
- * FAULT/EVT, PLAN.md sec 5) register as addressable tasks the same way.
+ * FAULT/EVT, DESIGN_NOTES.md sec 5) register as addressable tasks the same way.
  *
  * Freestanding C11, no allocation, no I/O, no globals -- CommonFW/README.md
  * rules 1-4 (written for kilnlink) apply equally here. In particular there

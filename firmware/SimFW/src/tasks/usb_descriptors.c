@@ -137,7 +137,7 @@ static char const *const string_desc_arr[] = {
 
 // RP2040's flash unique id is 8 bytes -> 16 hex chars, well under
 // PICO_UNIQUE_BOARD_ID_SIZE_BYTES*2+1; this doubles as a stable per-board
-// serial so `kilnsim`'s PC-side auto-detect (PLAN.md sec 6.1's
+// serial so `kilnsim`'s PC-side auto-detect (DESIGN_NOTES.md sec 6.1's
 // `sim_connect`, "auto-detect by USB VID/PID + protocol PING") can tell two
 // SimFW fixtures apart on the same host without relying on enumeration order.
 static char s_serial_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];

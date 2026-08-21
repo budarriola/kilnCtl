@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """check_scenarios.py -- validates every firmware/SimFW/scenarios/*.yaml
-against docs/PLAN.md section 8.1's scenario schema, matching this repo's
+against docs/DESIGN_NOTES.md section 8.1's scenario schema, matching this repo's
 other tools/check_*.ps1 grep-style CI checks in spirit (fail loudly, name the
 offending file, exit non-zero) even though this one is Python rather than
 PowerShell -- picked per this pass's own instructions because the real
@@ -170,16 +170,16 @@ def main() -> int:
             continue
         loaded += 1
 
-        # PLAN.md sec 8.1's required top-level keys beyond what the loader
+        # DESIGN_NOTES.md sec 8.1's required top-level keys beyond what the loader
         # itself enforces (name/version only) -- preset/timescale/seed/dut/
         # faults/expect/report_keep are all part of the documented shape.
         raw = scenario.raw
         for key in ("preset", "timescale", "seed", "dut", "faults", "expect", "report_keep"):
             if key not in raw:
-                failures.append(f"{rel}: missing top-level key {key!r} required by PLAN.md sec 8.1's schema")
+                failures.append(f"{rel}: missing top-level key {key!r} required by DESIGN_NOTES.md sec 8.1's schema")
 
         if "exercises" not in raw:
-            failures.append(f"{rel}: missing 'exercises' key (guard cross-reference, PLAN.md sec 8.1)")
+            failures.append(f"{rel}: missing 'exercises' key (guard cross-reference, DESIGN_NOTES.md sec 8.1)")
 
         # --- Layer 2: guard IDs -------------------------------------------
         for guard in scenario.exercises:
@@ -222,7 +222,7 @@ def main() -> int:
             if trigger_kind not in VALID_TRIGGER_KINDS:
                 failures.append(
                     f"{rel}: fault {f.id!r} trigger kind {trigger_kind!r} is not one of "
-                    f"PLAN.md sec 7.2's trigger kinds ({sorted(VALID_TRIGGER_KINDS)})"
+                    f"DESIGN_NOTES.md sec 7.2's trigger kinds ({sorted(VALID_TRIGGER_KINDS)})"
                 )
 
     if failures:
@@ -231,7 +231,7 @@ def main() -> int:
             print(f"  {f}", file=sys.stderr)
         print(
             f"\n{len(failures)} scenario violation(s) found across {len(scenario_files)} file(s) "
-            "-- see docs/PLAN.md section 8.1",
+            "-- see docs/DESIGN_NOTES.md section 8.1",
             file=sys.stderr,
         )
         return 1

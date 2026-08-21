@@ -14,7 +14,7 @@ concept") as the project's risk-first milestone: prove the PIO MAX31856
 `max31856_pio_engine.c`) can survive real SPI timing before any framework
 code is built on top of it. Its exit criterion is a Saleae capture of
 correct mode-1 multi-byte reads at **4 MHz** (the thermocouple SPI clock's
-decided ceiling on both real masters, `docs/PLAN.md` section 3.2.1 —
+decided ceiling on both real masters, `docs/DESIGN_NOTES.md` section 3.2.1 —
 originally targeted at 5 MHz before that cap was decided; this tool's own
 sweep still exercises rates above 4 MHz for headroom characterization, see
 below) with **zero TX underruns over >=10k transactions**.
@@ -134,7 +134,7 @@ printed by the firmware itself (`HELP`):
 |---|---|
 | `PING` | replies `PONG` -- connectivity check |
 | `RATE <hz>` | sets the SPI clock rate; replies `OK RATE <actual_hz>` (the RP2040's divider isn't exact for every value) |
-| `MODE <0\|1>` | sets CPHA (0 or 1); CPOL is always 0. Default 1 -- SPI mode 1 (CPOL=0, CPHA=1), matching PLAN.md 3.2 / the real KilnFW and SaftyFW MAX31856 drivers. See "The mode-1 edge resolution" below for why `MODE 0` exists as a diagnostic. |
+| `MODE <0\|1>` | sets CPHA (0 or 1); CPOL is always 0. Default 1 -- SPI mode 1 (CPOL=0, CPHA=1), matching DESIGN_NOTES.md 3.2 / the real KilnFW and SaftyFW MAX31856 drivers. See "The mode-1 edge resolution" below for why `MODE 0` exists as a diagnostic. |
 | `CS <0..3>` | selects which CS line the next transaction(s) assert |
 | `READ <addr_hex>` | single-byte read, replies `OK READ <addr> <value>` |
 | `WRITE <addr_hex> <val_hex>` | single-byte write, replies `OK` |
@@ -163,7 +163,7 @@ required cases without a separate mode per case:
    self-clearing bits or CJ-disable-gated writability (unlike CR0 or
    CJTH/CJTL), so "what we wrote" is an unambiguous oracle for "what must
    read back," and this exercises exactly the multi-byte auto-increment
-   read path PLAN.md 3.2.1's 1.6us latency budget is about. The pattern
+   read path DESIGN_NOTES.md 3.2.1's 1.6us latency budget is about. The pattern
    written is a cheap per-iteration LFSR-ish function of the iteration
    number, not a fixed constant, so a soak can't pass by accident of every
    iteration writing the same bytes back to themselves.
@@ -186,7 +186,7 @@ required cases without a separate mode per case:
 `STATS`/`SOAK DONE` report exactly what the task brief asks for:
 transactions attempted, bytes compared, mismatches, and *suspected*
 first-byte-late events -- a heuristic (byte[0] wrong, every later byte in
-the same transaction right) for PLAN.md 3.2.1's "TX FIFO underrun" failure
+the same transaction right) for DESIGN_NOTES.md 3.2.1's "TX FIFO underrun" failure
 mode, not a direct underrun detector. Only the slave's own PIO-side
 counters (`max31856_pio_stats_t.first_byte_late` in
 `../../src/drivers/max31856_pio_engine.h`) or a Saleae capture can prove an
@@ -202,7 +202,7 @@ python run_soak.py --port COM5
 Default sweep: 100 kHz, 500 kHz, 1, 2, 3, 4, 5 MHz, 10,000 transactions
 (iterations, each contributing 2 SPI transactions -- the write and the
 read) per rate point. **The M-A exit criterion's actual rate is 4 MHz** (the
-thermocouple SPI clock's decided cap on both real masters, `docs/PLAN.md`
+thermocouple SPI clock's decided cap on both real masters, `docs/DESIGN_NOTES.md`
 section 3.2.1) -- the 5 MHz point in this default sweep is kept as headroom
 characterization above the real ceiling, not as the pass bar; a slave that
 also passes at 5 MHz says something useful about margin, but only the
@@ -219,7 +219,7 @@ a Saleae capture (see below) before calling M-A done.
 **Why 10,000 per point, not just at 5 MHz:** the sweep's value is finding
 *where* (if anywhere) the slave starts failing, not just confirming pass/fail
 at the target rate. A slave that passes at 1 MHz but fails at 3 MHz tells you
-the 1.6us latency budget (PLAN.md 3.2.1) is the live issue and roughly how
+the 1.6us latency budget (DESIGN_NOTES.md 3.2.1) is the live issue and roughly how
 much margin is missing; a slave that fails at every rate including 100 kHz
 tells you the problem isn't timing at all (wrong edge, wrong pin, bad wiring
 -- see the troubleshooting table below).
@@ -229,11 +229,11 @@ any existing repo virtualenv; install it before running.
 
 ## Interpreting results / troubleshooting
 
-| Symptom | Likely cause (PLAN.md 3.2.1 reference) |
+| Symptom | Likely cause (DESIGN_NOTES.md 3.2.1 reference) |
 |---|---|
 | All reads come back `0xFF` (or the slave never seems to respond) | MISO not actually tri-stating/driving -- check the TX program's `set pindirs` logic in `max31856_spi_slave.pio`'s `max31856_spi_tx_a`/`tx_b`; or CS wiring is backwards (idle-low instead of idle-high, so the slave never sees an assert); or GND not shared between boards |
 | All reads come back `0x00` | MISO stuck driven low, or the RX program's channel/CS `jmp_pin` mapping is wrong so the slave never sees its own CS line assert and stays parked at `wait_cs` -- check `cs_gpio[]` ordering and the "must be consecutive ascending" contract in `max31856_pio_engine.h` |
-| First byte of a multi-byte read is wrong, every later byte is right | Classic first-byte-late / TX-FIFO-underrun signature -- PLAN.md 3.2.1's core risk. This is exactly what `suspected_first_byte_late` in `STATS`/`SOAK DONE` is counting. Means Plan A (ISR staging, `max31856_pio_engine.c`'s IRQ handler) is missing its <1us budget at this rate; PLAN.md's Plan B (precomputed full-image streaming) or a documented max-SCLK ceiling below 5 MHz is the next step |
+| First byte of a multi-byte read is wrong, every later byte is right | Classic first-byte-late / TX-FIFO-underrun signature -- DESIGN_NOTES.md 3.2.1's core risk. This is exactly what `suspected_first_byte_late` in `STATS`/`SOAK DONE` is counting. Means Plan A (ISR staging, `max31856_pio_engine.c`'s IRQ handler) is missing its <1us budget at this rate; PLAN.md's Plan B (precomputed full-image streaming) or a documented max-SCLK ceiling below 5 MHz is the next step |
 | Passes at low rates, starts failing intermittently above some N MHz | Same first-byte-late family, but the sweep is what actually finds N -- run `run_soak.py` and read off the first FAIL row. Compare N against the 1.6us budget's implied max rate |
 | Reads work but come back scrambled/garbage-looking specifically when a *different* CS was active on the previous transaction (multi-CS/bus A only) | MISO tri-state contention between channels -- two TX SMs (or one TX SM with the idle-test logic wrong) both think they should drive MISO. Check `poll_idle`/`x!=y` compare logic in `max31856_spi_tx_a` and that `cs_gpio[0..2]` really are 3 consecutive GPIOs as the header comment requires |
 | Every response byte is shifted by roughly one byte, or every bit looks off-by-one within a byte | Should not happen post-fix (see "The mode-1 edge resolution" below) unless the `.pio` has regressed -- diff `max31856_spi_rx`/`max31856_spi_tx_a`/`max31856_spi_tx_b` against the corrected version, or try `MODE 0` as a diagnostic to confirm it's an edge problem at all |
@@ -242,7 +242,7 @@ any existing repo virtualenv; install it before running.
 ### The mode-1 edge resolution (previously an open ambiguity -- now settled)
 
 `../../src/drivers/max31856_spi_slave.pio` originally had a header comment
-flagging an internal inconsistency in PLAN.md 3.2.1's wording, and the RX/TX
+flagging an internal inconsistency in DESIGN_NOTES.md 3.2.1's wording, and the RX/TX
 programs as first written sampled MOSI on SCLK's **rising** edge and changed
 MISO on SCLK's **falling** edge -- textbook SPI **mode 0** (CPHA=0), not the
 mode 1 (CPHA=1) every comment in that file claimed.
@@ -293,7 +293,7 @@ intended to send.
 1. Wire per the table above, flash both boards, connect the Saleae probes
    to the slave-side SCLK/MOSI/MISO/CS lines.
 2. Run `run_soak.py` at your target rate (**4 MHz** for the literal M-A
-   criterion -- the real masters' decided cap, `docs/PLAN.md` section
+   criterion -- the real masters' decided cap, `docs/DESIGN_NOTES.md` section
    3.2.1; a 5 MHz capture is optional extra headroom evidence, not a
    substitute) with `--count 10000` or more, starting the Saleae capture
    just before issuing the `SOAK` command and stopping it just after
@@ -310,7 +310,7 @@ iteration (cross-check a sample against this tool's own `STATS` output --
 zero mismatches), MISO is cleanly tri-stated (mid-rail/floating, not driven)
 whenever the relevant bus's CS lines are all idle-high, and there is no
 visible gap between the address byte's last clock edge and the first
-response bit's transition wider than the 1.6us budget (PLAN.md 3.2.1) --
+response bit's transition wider than the 1.6us budget (DESIGN_NOTES.md 3.2.1) --
 i.e., no visible "hang" on MISO after the address byte before data starts
 appearing. Zero TX underruns over the run is the number this tool's
 `suspected_first_byte_late` counter (cross-checked against the slave's own

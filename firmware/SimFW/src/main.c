@@ -1,10 +1,10 @@
 // main.c -- SimFW entry point. Build/task skeleton only: creates and
-// schedules the ten single-owner tasks from docs/PLAN.md section 4.1's task
+// schedules the ten single-owner tasks from docs/DESIGN_NOTES.md section 4.1's task
 // map, each currently an idling stub (src/tasks/*.c). No peripheral is
 // actually driven yet -- PIO SPI emulation, CT waveform synthesis, I2C/
 // expander logic and USB protocol handling are later work, filled into
 // these same task bodies without touching this file or any sibling task
-// file (single-owner-per-peripheral doctrine, PLAN.md section 4's opening
+// file (single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's opening
 // paragraph).
 //
 // Mirrors ../SaftyFW/src/main.c's shape (stdio bring-up, start every task in
@@ -76,7 +76,7 @@ _Static_assert(SIMFW_DMA_CHANNELS_CLAIMED <= NUM_DMA_CHANNELS,
 // choice -- cheap insurance, and the kernel requires these two hooks to
 // exist at link time regardless. Halting in place rather than resetting, so
 // a debugger attached over SWD (this bench fixture's flashing/debug path,
-// PLAN.md section 3.1) can see exactly where it happened instead of the
+// DESIGN_NOTES.md section 3.1) can see exactly where it happened instead of the
 // failure hiding behind a watchdog-looking reboot.
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
@@ -103,7 +103,7 @@ int main(void)
     stdio_init_all();
 
     // Start every task, in priority order (highest first), matching
-    // docs/PLAN.md section 4.1's table and SaftyFW's own main.c convention.
+    // docs/DESIGN_NOTES.md section 4.1's table and SaftyFW's own main.c convention.
     // Each _start() function pins its own task's core affinity
     // (task_priorities.h's SIMFW_CORE_RT_PATH / SIMFW_CORE_ELASTIC_PATH) --
     // this file does not set affinity itself, so there is exactly one place

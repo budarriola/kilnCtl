@@ -1,8 +1,8 @@
 // usb_owner.c -- see usb_owner.h. TinyUSB CDC init, a SLIP-style byte-stream
 // reader/writer for `benchproto_frame`'s codec, and the delivery/dedup/
-// task-registration decisions from `benchproto_link` (docs/PLAN.md section
+// task-registration decisions from `benchproto_link` (docs/DESIGN_NOTES.md section
 // 4.1, firmware/CommonFW/docs/BENCHPROTO.md). This is the ONE place that
-// touches the USB peripheral (single-owner doctrine, PLAN.md section 4's
+// touches the USB peripheral (single-owner doctrine, DESIGN_NOTES.md section 4's
 // opening paragraph) -- cmd_task never includes tusb.h or benchproto_link.h;
 // it only calls usb_owner_register_task()/usb_owner_send_reply()
 // (usb_owner.h) and reads from the queue usb_owner posts delivered requests

@@ -1,5 +1,5 @@
 """Unit tests for `firmware/SimFW/tools/ct_calibration/` -- the CT
-calibration runner built for `firmware/SimFW/docs/PLAN.md` section 3.3's
+calibration runner built for `firmware/SimFW/docs/DESIGN_NOTES.md` section 3.3's
 milestone M-D (amps -> PWM-scale calibration) and
 `firmware/SaftyFW/docs/CURRENT_SENSE.md` section 5's commissioning check.
 

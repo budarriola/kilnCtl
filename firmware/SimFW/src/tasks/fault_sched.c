@@ -4,7 +4,7 @@
 // is the real trigger-evaluation entry point).
 //
 // --- Composition strategy: "recompute, don't patch" ------------------------
-// PLAN.md 7.3: "Faults compose... genuinely conflicting pairs... resolve to
+// DESIGN_NOTES.md 7.3: "Faults compose... genuinely conflicting pairs... resolve to
 // the more severe one." Rather than tracking, per slot, which specific
 // fields of a shared target's override state it is responsible for (so a
 // CLEARED event can surgically undo exactly its own contribution), this
@@ -20,7 +20,7 @@
 // writes into tc_fault_state/sim_engine every 100 ms tick even when nothing
 // changed -- negligible at this rate.
 //
-// --- Known catalog gaps (PLAN.md 7.1) ---------------------------------------
+// --- Known catalog gaps (DESIGN_NOTES.md 7.1) ---------------------------------------
 // Closed by this pass: "Drifting TC", "Shorted TC", and "CJ fault" now have
 // real corruption knobs (max31856_regs.h's corruption.drift_offset_c/
 // .shorted/.cj_fault_offset_c, extended in a backward-compatible way -- the
@@ -30,7 +30,7 @@
 // HALF_WAVE_SSR/_PHASE_LOSS), straight onto wave_owner's existing public API
 // (ct_wave_set_distortion/_mode/_amps) -- wave_owner.c stopped being a stub
 // since this gap note was last written, and its distortion knobs already
-// covered "missing half-cycles" (PLAN.md 3.3's dropout_half_cycle) with no
+// covered "missing half-cycles" (DESIGN_NOTES.md 3.3's dropout_half_cycle) with no
 // new sine_synth/wave_owner code required. "Broken (intermittent) TC" still
 // needs no separate fault type -- it is TC_DISCONNECTED scheduled with an
 // EVERY/FOR repeat+duration spec, which fault_engine.h already expresses.
@@ -45,7 +45,7 @@
 // case (same edge-tracked pattern as HALF_WAVE_SSR/PHASE_LOSS -- no new
 // wave_owner code needed). Also added: FAULT_SCHED_TYPE_DUT_POWER_CUT for
 // scenarios/power_blip.yaml's `dut_power_cut`, even though it is explicitly
-// NOT one of PLAN.md 7.1's three catalog tables (that scenario's own
+// NOT one of DESIGN_NOTES.md 7.1's three catalog tables (that scenario's own
 // comment says so) -- its mechanism (i2c_owner_set_dut_power()) was already
 // public and its trigger/duration shape already fits FAULT_SCHEDULE, so
 // there was no reason to leave it as a PC-side-only capability. See each
@@ -344,7 +344,7 @@ static void recompute_overrides_locked(void)
                 safety_tc_gain = slot->params[1]; /* last slot in index order wins if more
                                                      * than one supplies an explicit gain --
                                                      * same "slot order is the deterministic
-                                                     * tiebreak" doctrine PLAN.md 7.3 states
+                                                     * tiebreak" doctrine DESIGN_NOTES.md 7.3 states
                                                      * for trigger evaluation order */
             }
             break;
@@ -366,7 +366,7 @@ static void recompute_overrides_locked(void)
     for (unsigned z = 0; z < THERMAL_MODEL_MAX_ZONES; z++) {
         /* STUCK_OPEN_RELAY (force 0) wins over WELDED/RUNAWAY (force 1) if
          * both somehow target the same zone -- "genuinely conflicting pairs
-         * resolve to the more severe one" (PLAN.md 7.3); a heater that
+         * resolve to the more severe one" (DESIGN_NOTES.md 7.3); a heater that
          * cannot possibly be conducting is the more severe/definite claim. */
         if (duty_force0[z]) {
             sim_engine_set_zone_duty_override((uint8_t)z, true, 0.0f);
@@ -387,7 +387,7 @@ static void recompute_overrides_locked(void)
     for (unsigned c = 0; c < CT_WAVE_NUM_CHANNELS; c++) {
         /* PHASE_LOSS (force to zero) wins over HALF_WAVE_SSR if both somehow
          * target the same channel -- "genuinely conflicting pairs resolve
-         * to the more severe one" (PLAN.md 7.3); a channel that cannot
+         * to the more severe one" (DESIGN_NOTES.md 7.3); a channel that cannot
          * possibly be conducting is the more severe/definite claim, same
          * doctrine as STUCK_OPEN_RELAY winning over WELDED_RELAY above. */
         if (ct_phase_loss[c]) {
@@ -452,7 +452,7 @@ static void apply_edge_effects(const fault_event_t *events, size_t count)
         } else if (ft == FAULT_SCHED_TYPE_DUT_POWER_CUT) {
             /* FIRED = power cut (relay opens), CLEARED = power restored --
              * see fault_sched.h's doc comment for why this type exists
-             * despite not being one of PLAN.md 7.1's three catalog tables. */
+             * despite not being one of DESIGN_NOTES.md 7.1's three catalog tables. */
             i2c_owner_set_dut_power(ev->kind != FAULT_EVENT_FIRED);
         }
     }

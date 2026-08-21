@@ -8,7 +8,7 @@ firmware's own SOAK command. Prints a table suitable for pasting directly
 into M-A's evidence writeup.
 
 Standalone, plain Python 3 + pyserial. Deliberately NOT part of the
-`kilnsim` PC-side package (that package doesn't exist yet -- see PLAN.md
+`kilnsim` PC-side package (that package doesn't exist yet -- see DESIGN_NOTES.md
 section 6 -- and this is a one-off bring-up utility for a *different*,
 scripted-test-master Pico, not the SimFW fixture itself). Requires pyserial:
 

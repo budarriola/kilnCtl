@@ -104,7 +104,7 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
     #
     # SET_TIMESCALE's wire shape (PROTOCOL.md sec 4 / real firmware's
     # cmd_task.c's `handle_sys_set_timescale()`) is `u32 timescale_x100 LE`
-    # (PLAN.md 4.2/5.2's x100 fixed point: 1000 == 10.00x, 100 == 1.00x),
+    # (DESIGN_NOTES.md 4.2/5.2's x100 fixed point: 1000 == 10.00x, 100 == 1.00x),
     # NOT a raw f32 -- this module previously encoded a bare f32 here,
     # matching `virtual_simfw.c`'s (also wrong) decoder rather than
     # PROTOCOL.md/real firmware, which would silently misbehave against
@@ -589,7 +589,7 @@ def _encode_trigger_fields(trigger: dict) -> bytes:
 def _encode_fault_schedule(payload: dict) -> bytes:
     slot_id = int(payload.get("fault_slot", payload.get("slot_id", 0)))
     # fault_type/target arrive as the scenario's own catalog strings (e.g.
-    # "welded_ssr" / "relay:K1", PLAN.md sec 7.1/8.1) -- fault_catalog.py is
+    # "welded_ssr" / "relay:K1", DESIGN_NOTES.md sec 7.1/8.1) -- fault_catalog.py is
     # the name<->wire-numeric translation this module never had (a bare
     # `_u8(payload.get("fault_type", 0))` would TypeError on a string, or
     # silently default to 0/TC_DISCONNECTED for a missing one). Also accept

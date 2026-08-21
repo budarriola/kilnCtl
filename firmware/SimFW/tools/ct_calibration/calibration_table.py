@@ -1,6 +1,6 @@
 """Calibration table persistence -- PC-side JSON file, not fixture flash.
 
-**Persistence decision, spelled out here because PLAN.md 3.3 says "store the
+**Persistence decision, spelled out here because DESIGN_NOTES.md 3.3 says "store the
 table in fixture flash keyed by channel" and this module deliberately does
 NOT do that.** `firmware/SimFW/src/` has no config/flash-persistence
 subsystem at all today (unlike `firmware/SaftyFW/src/config_store.c` +

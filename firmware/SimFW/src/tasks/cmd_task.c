@@ -1,5 +1,5 @@
 // cmd_task.c -- see cmd_task.h. Decodes/validates/dispatches every
-// delivered benchproto DATA frame (docs/PLAN.md section 5's command-group
+// delivered benchproto DATA frame (docs/DESIGN_NOTES.md section 5's command-group
 // table) and builds the reply usb_owner sends back as that frame's ACK
 // (usb_owner_send_reply(), usb_owner.h).
 //
@@ -32,7 +32,7 @@
 
 // MODEL/TC/CT/RELAY/IO/FAULT groups (this pass): each group's handlers call
 // only its owning task's public API below -- never another task's private
-// state (PLAN.md section 4.5/this file's own header comment). tc_fault_state.h
+// state (DESIGN_NOTES.md section 4.5/this file's own header comment). tc_fault_state.h
 // and sim_snapshot.h/max31856_regs.h are pulled in as READ-ONLY contracts
 // (sim_snapshot_read()/tc_fault_state_read() are documented multi-reader
 // APIs; nothing here ever calls the *_write side of either) purely to build
@@ -290,10 +290,10 @@ static void handle_sys_get_caps(const uint8_t *args, uint8_t args_len, uint8_t *
 
 // request: {u8 keep_params} -- sim_engine_reset()'s own bool: true = keep
 // the current zone params, reinit state from their T0; false = reload the
-// last-selected preset first (PLAN.md 6.1's sim_reset tool doc). Queued,
+// last-selected preset first (DESIGN_NOTES.md 6.1's sim_reset tool doc). Queued,
 // same as every other MODEL-group setter sim_engine.h documents (this
 // function lives in that header's MODEL-group command surface even though
-// it is exposed here under SYS, per PLAN.md sec 5's own command-group
+// it is exposed here under SYS, per DESIGN_NOTES.md sec 5's own command-group
 // table) -- a false return means the internal command queue was full, not
 // a bad argument.
 static void handle_sys_reset_sim(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
@@ -314,7 +314,7 @@ static void handle_sys_reset_sim(const uint8_t *args, uint8_t args_len, uint8_t 
     *out_len = w.len;
 }
 
-// request: {u32 timescale_x100} -- sim_engine_set_timescale(), PLAN.md 4.2/
+// request: {u32 timescale_x100} -- sim_engine_set_timescale(), DESIGN_NOTES.md 4.2/
 // 5.2's x100 fixed point (1000 == 10.00x, 100 == 1.00x real time, 0 treated
 // as 1.00x by sim_engine itself). Queued, same convention as above.
 static void handle_sys_set_timescale(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
@@ -336,7 +336,7 @@ static void handle_sys_set_timescale(const uint8_t *args, uint8_t args_len, uint
 }
 
 // request: {u32 seed} -- sim_engine_set_seed(). Queued, same convention as
-// above. PLAN.md 4.2's determinism contract ("the same scenario + seed =>
+// above. DESIGN_NOTES.md 4.2's determinism contract ("the same scenario + seed =>
 // the same run, byte-for-byte") is why a scenario runner sends this before
 // RESET_SIM/the first tick of a fresh run.
 static void handle_sys_set_seed(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
@@ -361,7 +361,7 @@ static void handle_sys_set_seed(const uint8_t *args, uint8_t args_len, uint8_t *
 // u8 snapshot_valid, u32 timescale_x100, u64 sim_time_us}. seed comes from
 // sim_engine_get_seed() (always available, even before the first tick).
 // timescale_x100/sim_time_us come from the published sim_snapshot_t --
-// sim_engine.h exposes no standalone timescale getter, but PLAN.md 4.5's
+// sim_engine.h exposes no standalone timescale getter, but DESIGN_NOTES.md 4.5's
 // snapshot already carries timescale_x100/sim_time_us for exactly this kind
 // of read, same source telemetry.c's own TELEMETRY frame uses. Before
 // sim_engine's first tick, sim_snapshot_read() returns false: snapshot_valid
@@ -520,7 +520,7 @@ static void handle_model_load_preset(const uint8_t *args, uint8_t args_len, uint
 
 // request: {u8 zone, u8 mode, f32 temp_c} -- mode 0 = return zone to MODEL
 // (sim_engine_clear_zone_manual, temp_c ignored), mode 1 = force MANUAL at
-// temp_c (sim_engine_force_zone_temp). PLAN.md section 5's "SET_TEMP (force a
+// temp_c (sim_engine_force_zone_temp). DESIGN_NOTES.md section 5's "SET_TEMP (force a
 // zone temp)" folded together with the clear path so one command id covers
 // both halves of sim_engine.h's MANUAL-mode pair.
 static void handle_model_set_temp(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
@@ -619,7 +619,7 @@ static const cmd_table_entry_t s_model_commands[] = {
 //              (sim_snapshot_t.T_true_c for this channel's zone)
 //   byte23-26  f32 shadow_reported_tc_c -- post-TC-lag, pre-corruption signal
 //              (T_tc_reported_c / T_safety_reported_c) -- together with
-//              byte3-18 (when valid) and byte19-22 this is PLAN.md 5.2's
+//              byte3-18 (when valid) and byte19-22 this is DESIGN_NOTES.md 5.2's
 //              full "the DUT was lied to, this is the truth" pair: the
 //              register image the DUT actually reads, plus the shadow
 //              truth it was never shown.
@@ -628,10 +628,10 @@ static const cmd_table_entry_t s_model_commands[] = {
 //   byte32-35  f32 bit_error_rate
 //   byte36-39  u32 spi transactions (spi_emu_a/b_get_stats().transactions)
 //   byte40-43  u32 spi protocol_errors
-//   byte44-47  u32 spi first_byte_late (TX FIFO underrun count, PLAN.md
+//   byte44-47  u32 spi first_byte_late (TX FIFO underrun count, DESIGN_NOTES.md
 //              3.2.1: "counted, never silent")
 //
-// reg_image_valid semantics: spi_emu_a/b's getters never block (PLAN.md
+// reg_image_valid semantics: spi_emu_a/b's getters never block (DESIGN_NOTES.md
 // 4.5) -- they retry a small, bounded number of times against the PIO
 // engine's busy/transaction-counter state (see spi_emu_a.h's coherency-
 // guarantee comment) and give up rather than risk a torn image. bit0
@@ -710,7 +710,7 @@ static void handle_tc_get_regs(const uint8_t *args, uint8_t args_len, uint8_t *o
 // sim_engine_force_safety_temp() -- the safety-side MANUAL override, which
 // pins T_safety_reported_c independently of every zone's own
 // T_true_c/T_tc_reported_c (sim_engine.h's blend/lag+MANUAL safety-TC API),
-// so a main-vs-safety disagreement scenario (PLAN.md section 8, test 8) can
+// so a main-vs-safety disagreement scenario (DESIGN_NOTES.md section 8, test 8) can
 // be expressed with either side pinned alone. Any other channel value is out
 // of range.
 static void handle_tc_force_temp(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
@@ -850,14 +850,14 @@ static void handle_tc_clear_fault(const uint8_t *args, uint8_t args_len, uint8_t
 //   byte1  channel (echo)
 //   byte2  flags: bit0 configured (spi_emu_a/b_channel_configured() --
 //          "has the master EVER written anything to this channel", not
-//          just "is it configured correctly" -- PLAN.md 5.2's own framing:
+//          just "is it configured correctly" -- DESIGN_NOTES.md 5.2's own framing:
 //          a test must be able to tell "configured wrong" apart from
 //          "never configured at all"), bit1 reg_image_valid (same
 //          busy/retry semantics as TC_GET_REGS's identically-named bit --
 //          see that handler's comment)
 //   byte3  CR0 (regs[MAX31856_REG_CR0]) -- 0 if reg_image_valid is clear
 //   byte4  CR1 (regs[MAX31856_REG_CR1]) -- TC TYPE[3:0] is bits[3:0],
-//          AVGSEL[2:0] is bits[6:4] (PLAN.md 3.2's CR1 row); 0 if
+//          AVGSEL[2:0] is bits[6:4] (DESIGN_NOTES.md 3.2's CR1 row); 0 if
 //          reg_image_valid is clear
 //   byte5  MASK (regs[MAX31856_REG_MASK]) -- 0 if reg_image_valid is clear
 // `configured` and `reg_image_valid` are independent: a channel can be
@@ -1308,7 +1308,7 @@ static const cmd_table_entry_t s_io_commands[] = {
 
 // FAULT_SCHEDULE request layout (docs/PROTOCOL.md section 5.6) -- a compact
 // re-encoding of fault_engine.h's fault_trigger_t/fault_duration_t/
-// fault_repeat_t (NOT PLAN.md 5.2's original "u8 kind, f32 a, f32 b, u8
+// fault_repeat_t (NOT DESIGN_NOTES.md 5.2's original "u8 kind, f32 a, f32 b, u8
 // zone/relay" sketch, which predates fault_engine.h and cannot address an
 // AFTER_FAULT slot id (needs 16 bits) or carry ON_EVENT's name string at
 // all):
@@ -1691,10 +1691,10 @@ static const cmd_table_entry_t s_fault_commands[] = {
 
 // --- Dispatch table --------------------------------------------------------
 
-// One row per command group (docs/PLAN.md section 5's table). `commands`/
+// One row per command group (docs/DESIGN_NOTES.md section 5's table). `commands`/
 // `command_count` are NULL/0 for every group but SYS today -- see this
 // file's header comment for why that is deliberate and how a later agent
-// extends it. Order matches PLAN.md section 5's table top-to-bottom, purely
+// extends it. Order matches DESIGN_NOTES.md section 5's table top-to-bottom, purely
 // for readability; cmd_task_dispatch() below looks up by task_id, not index.
 typedef struct {
     uint8_t task_id;

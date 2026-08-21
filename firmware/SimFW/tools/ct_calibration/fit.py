@@ -4,7 +4,7 @@ No I/O, no fixture, no DUT link -- everything here is plain floats in,
 plain dataclasses out, so it is fully testable without hardware
 (`tools/PcTools/tests/test_ct_calibration.py`).
 
-Context: `firmware/SimFW/docs/PLAN.md` section 3.3's calibration procedure
+Context: `firmware/SimFW/docs/DESIGN_NOTES.md` section 3.3's calibration procedure
 sweeps the fixture's *commanded* CT amplitude (today, per
 `wave_owner.c`'s `TODO(M-D calibration)` identity placeholder, this is the
 same 0..1 number the driver hands the PWM as a duty-scale fraction) and
@@ -25,7 +25,7 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-#: PLAN.md 3.3 says "sweep ... across ~10 points"; a fit from fewer than
+#: DESIGN_NOTES.md 3.3 says "sweep ... across ~10 points"; a fit from fewer than
 #: this is not what that procedure describes, regardless of how clean the
 #: numbers look, so `fit_linear` refuses to run below it rather than
 #: silently returning a 2-point "fit".
@@ -79,7 +79,7 @@ class LinearFit:
         DUT read `target_amps`, per this fit.
 
         This is exactly what a calibrated `ct_wave_amps_to_pwm_scale()`
-        needs to compute per PLAN.md 3.3 (see this package's README for the
+        needs to compute per DESIGN_NOTES.md 3.3 (see this package's README for the
         precise firmware change) -- `gain`/`offset` alone are the fit as
         measured; this method is the fit as *used*.
         """
@@ -104,7 +104,7 @@ def fit_linear(commanded: Sequence[float], measured: Sequence[float]) -> LinearF
     if n < MIN_SWEEP_POINTS:
         raise FitError(
             f"need at least {MIN_SWEEP_POINTS} sweep points to fit, got {n} "
-            "(PLAN.md 3.3: 'sweep commanded amplitude across ~10 points')"
+            "(DESIGN_NOTES.md 3.3: 'sweep commanded amplitude across ~10 points')"
         )
 
     mean_x = sum(commanded) / n

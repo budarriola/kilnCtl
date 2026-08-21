@@ -1,12 +1,12 @@
 # CT calibration runner
 
-Closes `firmware/SimFW/docs/PLAN.md` section 3.3's milestone **M-D**: turns
+Closes `firmware/SimFW/docs/DESIGN_NOTES.md` section 3.3's milestone **M-D**: turns
 "simulate 12 A" from a meaningless 0..1 PWM-duty fraction into a number that
 means 12 A *as `SaftyFW`'s current-sense channel measures it*. Also performs
 `firmware/SaftyFW/docs/CURRENT_SENSE.md` section 5's commissioning check
 ("one relay commanded -> exactly one channel responds", adapted here to
 driving one CT channel at a time instead of a relay) as a precondition,
-exactly as PLAN.md 3.3 says it should:
+exactly as DESIGN_NOTES.md 3.3 says it should:
 
 > This makes "simulate 12 A" mean 12 A as the DUT measures it, which is the
 > definition that matters, and it doubles as the CURRENT_SENSE.md §5
@@ -24,7 +24,7 @@ One command, three steps:
    built on an unproven channel mapping would silently swap two channels'
    gain/offset, which is worse than no calibration at all.
 2. **Sweep + fit.** For each channel, sweeps the commanded amplitude across
-   `--points` values (default 10, per PLAN.md 3.3: "~10 points"), reads back
+   `--points` values (default 10, per DESIGN_NOTES.md 3.3: "~10 points"), reads back
    what the DUT reports at each point, and fits `measured = gain * commanded
    + offset` by ordinary least squares. Reports R² and the max residual so a
    bad fit is visible, not just a number. A fit is **rejected** (not stored)
@@ -91,7 +91,7 @@ connection failure, `4` table-save failure.
 
 ## Readback path — what was found, and what wasn't
 
-PLAN.md 3.3 says to read back "what `SaftyFW`'s own `current_task`/ADC
+DESIGN_NOTES.md 3.3 says to read back "what `SaftyFW`'s own `current_task`/ADC
 reports (over the existing kilnctrl MCP path or SWD)". Both were checked.
 
 - **The kilnctrl MCP/UART path exists and is the one this tool uses.**
@@ -165,7 +165,7 @@ reports (over the existing kilnctrl MCP path or SWD)". Both were checked.
 
 ## Persistence decision: a PC-side file, not fixture flash
 
-PLAN.md 3.3 says "store the table in fixture flash keyed by channel." This
+DESIGN_NOTES.md 3.3 says "store the table in fixture flash keyed by channel." This
 tool does **not** do that, deliberately. `firmware/SimFW/src/` has no
 config/flash-persistence subsystem at all today — grepped for at the time
 this was written, zero hits, unlike `firmware/SaftyFW/src/config_store.c` +
@@ -227,7 +227,7 @@ above once rearranged). Where `gain[channel]`/`offset[channel]` come from
 is exactly the flash-persistence question above — the smallest change that
 needs no new firmware subsystem is a compiled-in table generated from this
 tool's JSON output (checked in, regenerated whenever a new bench
-calibration run is done), which gets the *behavior* PLAN.md 3.3 wants
+calibration run is done), which gets the *behavior* DESIGN_NOTES.md 3.3 wants
 without inventing flash storage; a real per-unit-flashable table is the
 Phase-9-style follow-up once SimFW gains its own `config_store`.
 

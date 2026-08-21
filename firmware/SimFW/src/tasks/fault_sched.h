@@ -1,6 +1,6 @@
-// fault_sched.h -- REAL BODY (milestone M-F, docs/PLAN.md section 4.1):
+// fault_sched.h -- REAL BODY (milestone M-F, docs/DESIGN_NOTES.md section 4.1):
 // "Trigger evaluation each tick; arms/fires scheduled faults." Owns no
-// peripheral directly (single-owner-per-peripheral doctrine, PLAN.md
+// peripheral directly (single-owner-per-peripheral doctrine, DESIGN_NOTES.md
 // section 4's opening paragraph) -- firing a fault means flipping the
 // target's override in the owning module (a TC corruption knob via
 // src/sim/tc_fault_state.h for spi_emu_a/b to read, a power-path override
@@ -10,13 +10,13 @@
 //
 // --- Why fault_sched_tick() is called BY sim_engine, not by an
 // independently-scheduled task loop -----------------------------------------
-// PLAN.md 4.1 lists fault_sched as its own 10 Hz task, and 4.1's closing
+// DESIGN_NOTES.md 4.1 lists fault_sched as its own 10 Hz task, and 4.1's closing
 // note says "fault_sched" evaluates "alongside sim_engine" -- section 4.1
 // also explicitly leaves the exact mechanism open ("driven by sim_engine
 // directly if that's architecturally cleaner -- your call, document it" per
 // this pass's own instructions). Two independently FreeRTOS-scheduled 10 Hz
 // tasks have no guaranteed relative tick order or alignment -- wall-clock
-// jitter between them is not itself a determinism problem (PLAN.md 7.2's
+// jitter between them is not itself a determinism problem (DESIGN_NOTES.md 7.2's
 // contract is about the *sim clock*, not wall time), but it DOES create a
 // real hazard here: fault_sched's overrides need to land inside the exact
 // sim_engine tick that reads them (duty overrides feeding
@@ -61,7 +61,7 @@ extern "C" {
 // task/mutex creation failed.
 bool fault_sched_start(void);
 
-// PLAN.md 7.1's fault catalog, restricted to the subset this pass's target
+// DESIGN_NOTES.md 7.1's fault catalog, restricted to the subset this pass's target
 // modules can actually express (see fault_sched.c's header comment for the
 // specific gaps and why): each value is fault_engine_schedule()'s opaque
 // `fault_type`, and its target_kind (below) says how `target` is
@@ -76,11 +76,11 @@ typedef enum {
     FAULT_SCHED_TYPE_TC_DEAD_IC,              /* params[0] = max31856_dead_mode_t as float */
     FAULT_SCHED_TYPE_TC_FLAKY_SPI,            /* params[0] = bit error rate, 0..1 */
     FAULT_SCHED_TYPE_TC_SPURIOUS_FAULT_PIN,   /* ~FAULT asserted regardless of SR */
-    FAULT_SCHED_TYPE_TC_SHORTED,               /* PLAN.md 7.1 "Shorted TC": reported TC
+    FAULT_SCHED_TYPE_TC_SHORTED,               /* DESIGN_NOTES.md 7.1 "Shorted TC": reported TC
                                                  * reads near-ambient/CJ regardless of the
                                                  * true zone temperature (max31856_regs.h's
                                                  * corruption.shorted) */
-    FAULT_SCHED_TYPE_TC_DRIFT,                 /* PLAN.md 7.1 "Drifting TC": params[0] =
+    FAULT_SCHED_TYPE_TC_DRIFT,                 /* DESIGN_NOTES.md 7.1 "Drifting TC": params[0] =
                                                  * drift rate, degC/s (signed -- negative
                                                  * ramps down). The offset actually written
                                                  * into max31856_corruption_t.drift_offset_c
@@ -92,7 +92,7 @@ typedef enum {
                                                  * accumulated incrementally, so a slower/
                                                  * faster polling rate never changes the
                                                  * total drift at a given sim time. */
-    FAULT_SCHED_TYPE_TC_CJ_FAULT,              /* PLAN.md 7.1 "CJ fault": params[0] = CJ
+    FAULT_SCHED_TYPE_TC_CJ_FAULT,              /* DESIGN_NOTES.md 7.1 "CJ fault": params[0] = CJ
                                                  * offset, degC, added to the internally-
                                                  * sensed CJ temperature (max31856_regs.h's
                                                  * corruption.cj_fault_offset_c) -- large
@@ -105,7 +105,7 @@ typedef enum {
      * reserved, same as ESTOP/AMBIENT_SHIFT below -- there is exactly one
      * physical safety-side TC channel, so no per-target indexing is
      * needed). */
-    FAULT_SCHED_TYPE_MAIN_SAFETY_DISAGREE,     /* PLAN.md 7.1 "Main/safety disagree:
+    FAULT_SCHED_TYPE_MAIN_SAFETY_DISAGREE,     /* DESIGN_NOTES.md 7.1 "Main/safety disagree:
                                                  * Skew safety TC vs zone truth by an
                                                  * offset/gain". params[0] = offset, degC
                                                  * (composes additively across concurrent
@@ -117,7 +117,7 @@ typedef enum {
                                                  * (the value an unspecified params[1]
                                                  * leaves at) is treated as "use gain
                                                  * 1.0", so a caller that only wants an
-                                                 * offset skew (PLAN.md 8 scenario 8's
+                                                 * offset skew (DESIGN_NOTES.md 8 scenario 8's
                                                  * "+80 degC") never has to think about
                                                  * gain at all; an explicit gain of
                                                  * exactly 0.0 is not expressible through
@@ -141,19 +141,19 @@ typedef enum {
     /* CT/waveform faults -- target is a CT channel index (wave_owner.h's
      * CT_WAVE_NUM_CHANNELS, 0..2 -- one fewer channel than
      * THERMAL_MODEL_MAX_ZONES, since the fixture only synthesizes CT for the
-     * first 3 zones, PLAN.md 3.1/3.6). Wired straight onto wave_owner's
+     * first 3 zones, DESIGN_NOTES.md 3.1/3.6). Wired straight onto wave_owner's
      * existing public API (ct_wave_set_distortion / ct_wave_set_mode /
      * ct_wave_set_amps) -- no new sine_synth/wave_owner code needed, both
-     * already expressed these knobs (PLAN.md 3.3's dropout_half_cycle, and
+     * already expressed these knobs (DESIGN_NOTES.md 3.3's dropout_half_cycle, and
      * MANUAL mode + amps=0 for a muted channel). */
-    FAULT_SCHED_TYPE_HALF_WAVE_SSR,    /* PLAN.md 7.1 "Half-waving SSR": params[0] == 0
+    FAULT_SCHED_TYPE_HALF_WAVE_SSR,    /* DESIGN_NOTES.md 7.1 "Half-waving SSR": params[0] == 0
                                          * drops the positive half-cycle, nonzero drops
                                          * the negative half (ct_wave_distortion_t's
                                          * dropout_negative_half) -- wired onto the
                                          * channel's existing distortion config, so it
                                          * composes with either CT_WAVE_MODE_MODEL or
                                          * _MANUAL and does not touch amplitude. */
-    FAULT_SCHED_TYPE_PHASE_LOSS,        /* PLAN.md 7.1 "Phase loss": one CT channel
+    FAULT_SCHED_TYPE_PHASE_LOSS,        /* DESIGN_NOTES.md 7.1 "Phase loss": one CT channel
                                           * forced to zero while the others keep
                                           * running. wave_owner.h has no separate
                                           * "override" concept for CT the way
@@ -166,12 +166,12 @@ typedef enum {
                                           * fault_sched.c: this competes with any
                                           * operator-set MANUAL mode on the same channel
                                           * for as long as the fault is active. */
-    FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST, /* PLAN.md 7.1 power-path table: "Welded K4
+    FAULT_SCHED_TYPE_WELDED_K4_CURRENT_PERSIST, /* DESIGN_NOTES.md 7.1 power-path table: "Welded K4
                                          * test support: Keep CT current flowing after K4
                                          * sensed open (S9 escalation)" -- the fixture's
                                          * stand-in for a real, mains-rated contactor welded
                                          * downstream of K4 (mains hardware itself is out of
-                                         * scope, PLAN.md section 1); target is the CT
+                                         * scope, DESIGN_NOTES.md section 1); target is the CT
                                          * channel whose synthesized current should keep
                                          * flowing regardless of K4/zone-duty state.
                                          * params[0] = forced amps. Same edge-triggered
@@ -185,7 +185,7 @@ typedef enum {
                                          * PHASE_LOSS wins (forced-zero is the more
                                          * severe/definite claim, same "genuinely
                                          * conflicting pairs resolve to the more severe
-                                         * one" doctrine PLAN.md 7.3 states and
+                                         * one" doctrine DESIGN_NOTES.md 7.3 states and
                                          * STUCK_OPEN_RELAY already applies against
                                          * WELDED_RELAY). */
 
@@ -198,12 +198,12 @@ typedef enum {
                                          * a fault_sched_system_target_t) */
     FAULT_SCHED_TYPE_AMBIENT_SHIFT,    /* params[0] = new T_ambient, degC. Applied as an
                                          * immediate step on FIRE via sim_engine_set_ambient()
-                                         * -- PLAN.md 7.1 describes a ramp; this pass
+                                         * -- DESIGN_NOTES.md 7.1 describes a ramp; this pass
                                          * implements the step-change simplification only,
                                          * documented in fault_sched.c. Not reverted on
                                          * CLEAR (ambient has no "previous value" concept
                                          * at this layer). target is ignored for this type. */
-    FAULT_SCHED_TYPE_THERMAL_MASS_SURPRISE, /* PLAN.md 7.1 system table: "Thermal-mass
+    FAULT_SCHED_TYPE_THERMAL_MASS_SURPRISE, /* DESIGN_NOTES.md 7.1 system table: "Thermal-mass
                                          * surprise: Step-change model params mid-run (lid
                                          * opened, load added)". target is a zone index
                                          * (NOT a fault_sched_system_target_t, same
@@ -214,19 +214,19 @@ typedef enum {
                                          * sim_engine_set_zone_thermal_override(),
                                          * level-recomputed every tick like the duty/health
                                          * overrides. */
-    FAULT_SCHED_TYPE_TC_LAG_STRESS,    /* PLAN.md 7.1 system table: "Sensor-vs-element lag
+    FAULT_SCHED_TYPE_TC_LAG_STRESS,    /* DESIGN_NOTES.md 7.1 system table: "Sensor-vs-element lag
                                          * stress: Crank TC lag to provoke overshoot".
                                          * target is a zone index (same exception as
                                          * THERMAL_MASS_SURPRISE/RUNAWAY_ZONE above).
                                          * params[0] = new tc_lag_s (s). Wired onto
                                          * sim_engine.h's
                                          * sim_engine_set_zone_tc_lag_override(). */
-    FAULT_SCHED_TYPE_DUT_POWER_CUT,    /* Not one of PLAN.md 7.1's three catalog tables --
+    FAULT_SCHED_TYPE_DUT_POWER_CUT,    /* Not one of DESIGN_NOTES.md 7.1's three catalog tables --
                                          * scenarios/power_blip.yaml's own comment says so
                                          * explicitly ("uses the fixture's dedicated DUT
                                          * 12V power relay ... a distinct fixture
                                          * capability from the TC/power-path/system fault
-                                         * catalog", PLAN.md section 3.4/6.2). Included
+                                         * catalog", DESIGN_NOTES.md section 3.4/6.2). Included
                                          * here anyway because the trigger/duration/repeat
                                          * spec the scenario file already uses (
                                          * `trigger: at_zone_temp`, `duration: for_s`) is
@@ -249,7 +249,7 @@ typedef enum {
 // Arms slot_id (0..FAULT_ENGINE_MAX_SLOTS-1) -- thin wrapper over
 // fault_engine_schedule() (fault_engine.h) that also validates fault_type/
 // target_kind pairing loosely (out-of-range zone/channel indices are
-// rejected; PLAN.md 7.2's trigger/duration/repeat structs pass through
+// rejected; DESIGN_NOTES.md 7.2's trigger/duration/repeat structs pass through
 // verbatim). Returns slot_id on success, FAULT_ENGINE_INVALID_SLOT
 // otherwise.
 uint16_t fault_sched_schedule(uint16_t slot_id,
@@ -297,7 +297,7 @@ bool fault_sched_fire_now(uint16_t slot_id);
 // Copies up to max_out slots (fault_engine.h's fault_slot_t, including
 // IDLE ones) starting at index 0 into out[]. Returns the number copied
 // (always FAULT_ENGINE_MAX_SLOTS today, capped by max_out) -- a thin,
-// mutex-guarded snapshot for the future FAULT_LIST command (PLAN.md
+// mutex-guarded snapshot for the future FAULT_LIST command (DESIGN_NOTES.md
 // section 5).
 size_t fault_sched_list(fault_slot_t *out, size_t max_out);
 

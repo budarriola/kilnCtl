@@ -30,9 +30,9 @@ Read this section first.
    something any of those four files could have known on their own, since
    none of them could see the others' choices.
 
-2. **Gap, not a collision: 10 GPIOs that PLAN.md section 3.6 budgets for have
-   no owning file yet.** The 8 direct-GPIO DRDY/`~FAULT` lines (PLAN.md
-   3.4/3.6, "decided") and the 2-pin debug UART to the Debug Probe (PLAN.md
+2. **Gap, not a collision: 10 GPIOs that DESIGN_NOTES.md section 3.6 budgets for have
+   no owning file yet.** The 8 direct-GPIO DRDY/`~FAULT` lines (DESIGN_NOTES.md
+   3.4/3.6, "decided") and the 2-pin debug UART to the Debug Probe (DESIGN_NOTES.md
    3.6, "same bench pattern as `SaftyFW`") are not claimed anywhere in
    `src/`. **This document assigns them for the first time** (§1) so that
    whoever writes that driver has a number to build against instead of
@@ -46,7 +46,7 @@ Read this section first.
 
 3. **The remaining budget fits with exactly the margin PLAN.md predicted.**
    15 pins already claimed + 10 pins newly assigned here = 25 of the Pico's
-   26 header GPIOs, 1 spare (GPIO28) — matching PLAN.md 3.6's "Total = 25 of
+   26 header GPIOs, 1 spare (GPIO28) — matching DESIGN_NOTES.md 3.6's "Total = 25 of
    the Pico's 26 header GPIO — tight but it fits" *before* anyone had actually
    done the arithmetic against all four files at once. Had any one of the
    four files picked one GPIO differently, this would not have come out even.
@@ -70,7 +70,7 @@ Read this section first.
    unintended 3.3 V rail or leaving the isolator side unpowered.
 
 6. **Resolved 2026-08-20 (`docs/BOM.md` §6): two relays, not one.** The
-   design gap this item originally flagged — the DUT-power relay (PLAN.md
+   design gap this item originally flagged — the DUT-power relay (DESIGN_NOTES.md
    3.4, "decided") being a single MCP23017 output bit
    (`EXP1_PIN_DUT_POWER`, `i2c_owner.c`) driving one relay, while the main
    board has *two independent* 12 V inputs, J18 (main domain) and J19
@@ -204,14 +204,14 @@ that claims that pin must cite this table.
 | 22 | `FAULT_MAIN_2` (open-drain) | *(none yet)* | GND_Main | J6 pin 14 (`thermoFault_2`) |
 | — | PWM pacer slice 3 (no GPIO bound) | `ct_wave_pwm.c` | n/a | n/a |
 | — | DMA_IRQ_1 (not a pin) | `ct_wave_pwm.c` | n/a | n/a |
-| 25 | Heartbeat LED (on-board, not a header pin) | *(none yet, PLAN.md 3.6)* | n/a | n/a |
+| 25 | Heartbeat LED (on-board, not a header pin) | *(none yet, DESIGN_NOTES.md 3.6)* | n/a | n/a |
 | 26 | `DRDY_SAFETY` (open-drain) | `spi_emu_b.c` (cites this table, §0 item 8) | crosses isolator → GND_Safty | J7 pin 4 (`thermoDrdy`) |
 | 27 | `FAULT_SAFETY` (open-drain) | *(none yet)* | crosses isolator → GND_Safty | J7 pin 3 (`thermoFault`) |
-| **28** | **SPARE — the one pin PLAN.md 3.6 leaves free** | — | — | — |
+| **28** | **SPARE — the one pin DESIGN_NOTES.md 3.6 leaves free** | — | — | — |
 
 **25 of 26 header GPIOs assigned, 1 spare (GPIO28).** (GPIO23/24 are not
 header pins on a stock Pico; GPIO25 is the on-board LED, also not a header
-pin — both excluded from the 26-pin budget, per PLAN.md 3.6's own framing.)
+pin — both excluded from the 26-pin budget, per DESIGN_NOTES.md 3.6's own framing.)
 
 ### Footnote: why GPIO0/1 for the debug UART, not GP16/17
 
@@ -440,7 +440,7 @@ Main board **J6** is a 1×20 **socket**; the real thermocouple daughterboard's
 **J5** is a 1×20 **header**, and per `firmware/KilnFW/docs/HARDWARE.md`
 ("Thermocouple daughterboard (J6 -> J5)") **the two mate in reverse pin
 order: J6 pin 1 = J5 pin 20.** The fixture unplugs the real daughterboard and
-plugs into J6 in its place (PLAN.md §2's connection diagram), so the
+plugs into J6 in its place (DESIGN_NOTES.md §2's connection diagram), so the
 fixture's own J6 plug must be wired exactly as J5 would be — meaning **the
 same reversal applies to the fixture's connector**, not just to the discarded
 daughterboard. Get this backwards and the fixture drives 5 V into what it
@@ -511,7 +511,7 @@ forcing a mismatched part.
 
 ### 3.3 Fixture → CT jacks (J13/J15/J17)
 
-Each channel: fixture PWM GPIO → 2-pole RC low-pass (PLAN.md 3.3) →
+Each channel: fixture PWM GPIO → 2-pole RC low-pass (DESIGN_NOTES.md 3.3) →
 isolation transformer primary (GND_Main-referenced) → transformer secondary
 (floating, isolated from **both** GND_Main and GND_Safty, exactly like a real
 CT) → jack tip/sleeve.
@@ -548,7 +548,7 @@ match the SX1509's `Relay1..4` scheme and reintroduces the trap.
 | K2 | J4 | `EXP1_PIN_K2` = 1 | GND_Main |
 | K3 | J8 | `EXP1_PIN_K3` = 2 | GND_Main |
 | K5 | J11 | `EXP1_PIN_K5` = 3 | GND_Main |
-| K4 | J10 | `EXP1_PIN_K4` = 4 | **contact is in GND_Safty; the wetting/opto stage must cross to GND_Main before this MCP23017 pin** (PLAN.md 3.4: "opto-isolated for K4") |
+| K4 | J10 | `EXP1_PIN_K4` = 4 | **contact is in GND_Safty; the wetting/opto stage must cross to GND_Main before this MCP23017 pin** (DESIGN_NOTES.md 3.4: "opto-isolated for K4") |
 
 Each sense circuit supplies a small wetting voltage through the relay's
 NO/COM (and optionally NC) contact into the expander input — see §5's
@@ -567,7 +567,7 @@ The safety board's E-stop connector (`J1` on the `SaftyProcessor` sheet,
 Phoenix 1935161, 2-pin — `SaftyFW/docs/HARDWARE.md` §5) normally carries a
 normally-closed button or a jumper; **as-built, with neither fitted, GPIO9
 floats high and reads permanent STOP.** The fixture becomes that jumper
-(PLAN.md 3.4): its E-stop optoMOS output wires across J1's two terminals in
+(DESIGN_NOTES.md 3.4): its E-stop optoMOS output wires across J1's two terminals in
 place of the button, driven by `EXP1_PIN_ESTOP_DRIVE` (exp1 pin 6,
 `i2c_owner.c`). `configure_exp1()` idles this pin **de-asserted (low)** at
 boot — confirm at bring-up whether that idle state presents a *closed*
@@ -604,17 +604,17 @@ pending a bench scope/current-probe capture, not a measured figure.
 
 ## 4. Isolation boundary map
 
-Per PLAN.md 3.5, restated against the pin map above:
+Per DESIGN_NOTES.md 3.5, restated against the pin map above:
 
 | Fixture signal group | Domain | Crosses via |
 |---|---|---|
 | I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, relay sense K1/K2/K3/K5, `Fault` line sense, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays — the MCP23017 output bits and the Pico-side I2C0 bus that drives them are GND_Main native for both; each relay's own *downstream* 12 V feed stays in its own domain, J18/main vs J19/safety, per §3.7) | GND_Main | — (native) |
 | SPI bus B, `DRDY_SAFETY`, `FAULT_SAFETY` | GND_Safty | two quad TI ISO7740DWR digital isolators (revised 2026-08-20 from a single 6-channel ISO7741-class part — see §3.2), powered from J7's safety-side rail (§0 item 5) on the isolated side |
-| 3× CT channels | floating (neither domain) | isolation transformer, **~3:1 step-up** (revised 2026-08-20 from an earlier 1:1 decision — a 1:1 ratio cannot reach the ADC's clipping boundary; see `PLAN.md` §3.3 and `docs/BOM.md` §3 for the arithmetic), per channel |
+| 3× CT channels | floating (neither domain) | isolation transformer, **~3:1 step-up** (revised 2026-08-20 from an earlier 1:1 decision — a 1:1 ratio cannot reach the ADC's clipping boundary; see `DESIGN_NOTES.md` §3.3 and `docs/BOM.md` §3 for the arithmetic), per channel |
 | K4 relay sense | GND_Safty at the contact, GND_Main at the MCP23017 | optocoupler in the wetting circuit (§3.4) |
 | E-stop | GND_Safty at J1 | optoMOS, GND_Main-side control |
 
-**Standing rule (PLAN.md 3.5, unchanged here):** a deliberate, labeled,
+**Standing rule (DESIGN_NOTES.md 3.5, unchanged here):** a deliberate, labeled,
 removable jumper may common the grounds for early breadboard bring-up, but
 **the standard test library must run with it out.** Bring-up step 5 (§6)
 exists specifically to verify this before the DUT is ever touched.
@@ -698,7 +698,7 @@ expands this same ten-step order in full.
   With the bring-up jumper **OUT**: verify **no continuity** between fixture
   GND_Main and GND_Safty; verify isolator and transformer orientation against
   §4's table. This is the single check protecting the real board from the
-  fixture becoming an unintended ground strap (PLAN.md 3.5, 15's top risk
+  fixture becoming an unintended ground strap (DESIGN_NOTES.md §3.5, PLAN.md §15's top risk
   row). **Do this with a meter, on the bench, every time the harness is
   rebuilt — not once and trusted forever.**
   No `kilnsim` command substitutes for a physical continuity check.
@@ -752,7 +752,7 @@ expands this same ten-step order in full.
 
 - [ ] **Step 10 — First closed-loop firing on `fast_test` preset.**
   Pass: `kilnsim run scenarios/baseline_firing.yaml` (once that scenario file
-  exists per PLAN.md §8) exits 0, with the DUT's PID visibly regulating a
+  exists per DESIGN_NOTES.md §8) exits 0, with the DUT's PID visibly regulating a
   simulated zone through relay cycling with no fixture intervention.
   Command: `kilnsim run <scenario.yaml> [--seed N] [--report out.json]`.
 
@@ -761,7 +761,7 @@ expands this same ten-step order in full.
 ## 7. USB identity
 
 The fixture Pico's native USB CDC link (`src/tasks/usb_owner.c` +
-`src/tasks/usb_descriptors.c`, PLAN.md section 4.1/5) presents a claimed,
+`src/tasks/usb_descriptors.c`, DESIGN_NOTES.md section 4.1/5) presents a claimed,
 fixture-specific USB identity so `kilnsim`'s PC-side auto-detect
 (`tools/PcTools/src/kilnsim/link.py`) cannot latch onto the wrong RP2040 on a
 bench that also has the `spi_test_master` reference Pico
@@ -829,7 +829,7 @@ Windows Device Manager directly:
 
 ## 8. Cross-reference
 
-- Design rationale for every signal above: `firmware/SimFW/docs/PLAN.md`
+- Design rationale for every signal above: `firmware/SimFW/docs/DESIGN_NOTES.md`
   sections 2, 3.1–3.7, 14.
 - DMA channel budget (§1b): `firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9 for
   why the 8 SPI-side channels exist and why none of them can be given back to

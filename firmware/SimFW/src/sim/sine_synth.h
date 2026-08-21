@@ -1,12 +1,12 @@
 // sine_synth -- pure, host-testable 60 Hz CT-waveform synthesis for SimFW.
-// docs/PLAN.md section 3.3 ("Synthesis detail") is authoritative.
+// docs/DESIGN_NOTES.md section 3.3 ("Synthesis detail") is authoritative.
 //
 // A 256-entry-per-cycle sine table, sampled at an arbitrary (time, phase)
 // point with linear interpolation between adjacent table entries, plus the
-// per-channel distortion knobs PLAN.md 3.3 lists: DC offset, clipping, and
+// per-channel distortion knobs DESIGN_NOTES.md 3.3 lists: DC offset, clipping, and
 // half-cycle dropout (as a failing zero-cross SSR would produce). Amplitude
 // changes and relay-driven on/off are supposed to apply only at zero
-// crossings (PLAN.md 3.3) -- sine_synth_zero_crossing() is the detector a
+// crossings (DESIGN_NOTES.md 3.3) -- sine_synth_zero_crossing() is the detector a
 // caller (wave_owner in the real firmware) uses to gate those changes; this
 // module does not gate anything itself, since it has no notion of "pending
 // parameter change" to gate.
@@ -28,7 +28,7 @@ extern "C" {
 void sine_synth_init_table(float table[SINE_SYNTH_TABLE_LEN]);
 
 /* Per-channel amplitude, phase, and distortion configuration
- * (PLAN.md 3.3: "amplitude ... phase, plus distortion knobs -- DC offset,
+ * (DESIGN_NOTES.md 3.3: "amplitude ... phase, plus distortion knobs -- DC offset,
  * clipping, dropout"). */
 typedef struct {
     float amplitude;         /* peak amplitude, simulated amps */
@@ -49,7 +49,7 @@ typedef struct {
  * 256 entries) at the given absolute time_s for a channel running at
  * freq_hz with cfg->phase_deg offset, in raw (undistorted, unit-amplitude)
  * form -- i.e. sin(2*pi*freq_hz*time_s + phase_rad). Exposed separately from
- * sine_synth_sample() because zero-crossing detection (PLAN.md 3.3) must
+ * sine_synth_sample() because zero-crossing detection (DESIGN_NOTES.md 3.3) must
  * operate on the *raw* reference waveform, not the possibly-clipped/
  * dropped-out one -- a real zero-cross SSR triggers off the AC line's own
  * zero crossing, not off its own already-distorted output. */
@@ -74,7 +74,7 @@ bool sine_synth_zero_crossing(float prev_raw, float curr_raw, bool *out_rising);
 
 /* The next zero-crossing time strictly after time_s for a channel at
  * freq_hz/phase_deg -- the value a caller gates a pending parameter change
- * on (PLAN.md 3.3). Crossings occur every half period; freq_hz must be > 0. */
+ * on (DESIGN_NOTES.md 3.3). Crossings occur every half period; freq_hz must be > 0. */
 float sine_synth_next_zero_crossing_time(float freq_hz, float phase_deg, float time_s);
 
 #ifdef __cplusplus

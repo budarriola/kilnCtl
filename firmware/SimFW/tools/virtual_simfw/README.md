@@ -107,7 +107,7 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   anything that actually reads them.)
 * **Commands apply synchronously on arrival, not queued to a tick
   boundary.** Real firmware's owner tasks all follow a "queue-then-apply-
-  next-tick" doctrine (PLAN.md sec 4.5) so a command's effect always lands
+  next-tick" doctrine (DESIGN_NOTES.md sec 4.5) so a command's effect always lands
   on a clean tick boundary. This harness applies every command directly
   the instant its TCP frame is decoded (there is no second thread to queue
   toward). The practical consequence: the exact sim-time at which a
@@ -118,7 +118,7 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   to the simplification -- any live, asynchronously-commanded system (real
   hardware over USB CDC included) has the same setup-latency variance. It
   does NOT affect the determinism contract the fixture actually promises
-  (PLAN.md 4.2/7.2): once a fault's own evaluation starts, every subsequent
+  (DESIGN_NOTES.md 4.2/7.2): once a fault's own evaluation starts, every subsequent
   `EVERY`+jitter re-arm interval is a pure function of the seeded PRNG
   stream, byte-for-byte identical run to run -- see
   `tools/PcTools/tests/test_kilnsim_virtual_simfw.py`'s determinism test
@@ -128,7 +128,7 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   its fire time relative to "now" at first evaluation and IS measurably
   affected by this wrinkle -- documented, not swept under the rug.
 * **CJ (cold-junction) temperature is a fixed 25 C**, not the "slow ambient
-  drift" PLAN.md sec 3.2 describes for the eventual real firmware. Nothing
+  drift" DESIGN_NOTES.md sec 3.2 describes for the eventual real firmware. Nothing
   in the required scenario set needs CJ drift over time; `cj_fault.yaml`
   injects an explicit CJ *offset*, which this simplification does not
   affect.
@@ -138,7 +138,7 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
 * **`SET_TIMESCALE`'s wire shape was a real protocol mismatch, fixed this
   pass.** This handler used to decode a raw `f32` argument; `PROTOCOL.md`
   sec 4 and real firmware's `cmd_task.c` (`handle_sys_set_timescale()`) both
-  document/decode `u32 timescale_x100 LE` (PLAN.md 4.2/5.2's x100 fixed
+  document/decode `u32 timescale_x100 LE` (DESIGN_NOTES.md 4.2/5.2's x100 fixed
   point). `tools/PcTools/src/kilnsim/payloads.py`'s encoder had the matching
   bug (also encoding a bare `f32`) -- the two happened to agree with each
   other, so the virtual harness stayed green throughout, but both disagreed
@@ -183,7 +183,7 @@ the physical fixture can actually do.
 
 * **`SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE` (RELAY group, wire id `0xF0`).** On
   real hardware the fixture only ever *senses* a relay's physical contact
-  (PLAN.md sec 3.4) -- there is no GPIO, no wire, no mechanism by which a
+  (DESIGN_NOTES.md sec 3.4) -- there is no GPIO, no wire, no mechanism by which a
   DUT could ever tell the fixture "I closed this contact"; `cmd_ids.h`'s own
   comment on the RELAY group already makes this explicit ("relay sense is
   read-only from this task's perspective by design"). This command was
@@ -215,7 +215,7 @@ the physical fixture can actually do.
     anywhere in the file. So this is a real, pre-existing property of
     SimFW's fixture thermal/current model (real firmware included), not
     something this harness introduced and not something this pass could fix
-    (`firmware/SimFW/src/**` is read-only here) -- PLAN.md sec 2 loop 2's
+    (`firmware/SimFW/src/**` is read-only here) -- DESIGN_NOTES.md sec 2 loop 2's
     "heater current appears ... only when the right relays are closed *and*
     K4 permits" is not yet implemented anywhere in the codebase this fixture
     is built from. `firmware/SimFW/tools/virtual_dut/results/

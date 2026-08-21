@@ -1,8 +1,8 @@
 // tusb_config.h -- TinyUSB device-stack configuration for SimFW's native USB
-// CDC link (docs/PLAN.md section 4.1/5, "USB CDC (TinyUSB): frame RX/TX,
+// CDC link (docs/DESIGN_NOTES.md section 4.1/5, "USB CDC (TinyUSB): frame RX/TX,
 // CRC, dispatch to command queue, telemetry TX"). Only src/tasks/usb_owner.c
 // and src/tasks/usb_descriptors.c include tusb.h -- single-owner-per-
-// peripheral doctrine (PLAN.md section 4's opening paragraph) extends to
+// peripheral doctrine (DESIGN_NOTES.md section 4's opening paragraph) extends to
 // "only the owner's translation units speak TinyUSB", not just "only the
 // owner's task touches the registers." This header itself is included by
 // TinyUSB's own sources (tusb.c etc, pulled in via the pico-sdk

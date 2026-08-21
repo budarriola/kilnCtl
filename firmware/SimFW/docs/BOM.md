@@ -102,7 +102,7 @@ CT model. The transformer has to comfortably cover the typical range and
 
 ### 3.2 What the Pico can actually drive into the primary
 
-From `docs/PLAN.md` §3.3: three GPIOs run ~244 kHz PWM, duty-modulated by a
+From `docs/DESIGN_NOTES.md` §3.3: three GPIOs run ~244 kHz PWM, duty-modulated by a
 60 Hz sine table, into a 2-pole RC low-pass (corner ~1–2 kHz). The RC output
 is a **unipolar** sine riding on a ~1.65 V DC bias (half of the 3.3 V logic
 rail), with a theoretical maximum swing of ±1.65 V at a 100 % modulation
@@ -133,7 +133,7 @@ V_pri,pk ≈ 1.5 V   →   V_pri,rms ≈ 1.5 / √2 ≈ 1.06 V
 n = V_sec,pk / V_pri,pk = 4.6 V / 1.5 V ≈ 3.07   →   call it 3:1
 ```
 
-**A 1:1 transformer (what `docs/PLAN.md` §3.3 currently says is "decided")
+**A 1:1 transformer (what `docs/DESIGN_NOTES.md` §3.3 currently says is "decided")
 cannot reach the 98 A clipping boundary** — at 1:1 the best the fixture can
 do is `V_ct,rms ≈ 1.06 V`, which on the 1 V/30 A model is only:
 
@@ -228,7 +228,7 @@ large margin. $0.86 ea, 273,541 in stock — no sourcing risk.
 
 ---
 
-## 6. DUT power relay — one vs. two (item 7, PLAN.md open question 5)
+## 6. DUT power relay — one vs. two (item 7, DESIGN_NOTES.md open question 5)
 
 `docs/HARDWARE.md` §0 item 6 already flags this as unresolved: the board has
 **two independent 12 V inputs**, J18 (main) and J19 (safety), each with its
@@ -292,7 +292,7 @@ I_pk ≈ 12 V / 0.2 Ω ≈ 60 A,  decaying with τ = R·C ≈ 0.2 Ω × 940 µF 
 
 This is a genuine estimate with an assumed, not measured, source
 resistance — **flagged in §9 as needing a real scope/current-probe capture**
-once hardware exists (PLAN.md open question 5 says exactly this: "inrush
+once hardware exists (DESIGN_NOTES.md open question 5 says exactly this: "inrush
 rating vs the board's actual inrush not measured"). Two mitigating factors
 worth noting even before that measurement: (1) a mechanical relay's
 contacts take several milliseconds to fully close, by which time a
@@ -373,8 +373,8 @@ pluggable, the fix is buying a $1 mating plug per connector, not a redesign.
 
 - `docs/HARDWARE.md` §0/§3/§5 — the pin map, connector mating tables, and
   the external-components list this BOM fills in.
-- `docs/PLAN.md` §3.3–3.7, §11 — design rationale and the open questions
-  this BOM resolves or narrows (items 2 and 5 in particular).
+- `docs/DESIGN_NOTES.md` §3.3–3.7 and `docs/PLAN.md` §11 — design rationale
+  and the open questions this BOM resolves or narrows (items 2 and 5 in particular).
 - `firmware/KilnFW/docs/HARDWARE.md` — J6/J20/relay terminal block/Power
   section facts cited above.
 - `firmware/SaftyFW/docs/HARDWARE.md`, `firmware/SaftyFW/docs/

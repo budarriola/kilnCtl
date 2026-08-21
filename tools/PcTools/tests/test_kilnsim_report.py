@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for kilnsim.report.evaluate_expectations -- the run-report
-expectation evaluator, per firmware/SimFW/docs/PLAN.md section 8.2. This is
+expectation evaluator, per firmware/SimFW/docs/DESIGN_NOTES.md section 8.2. This is
 the most valuable pure-logic piece in kilnsim (task brief): exercises
 event/then-within-deadline pass and fail, forbid-before violation, and
 at_end, all against synthetic event lists -- no hardware, no link.

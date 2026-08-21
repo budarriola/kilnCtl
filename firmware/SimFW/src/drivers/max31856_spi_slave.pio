@@ -1,5 +1,5 @@
 ; max31856_spi_slave.pio -- PIO SPI *slave* engines for the MAX31856
-; emulation buses. docs/PLAN.md section 3.2.1 is the authoritative design for
+; emulation buses. docs/DESIGN_NOTES.md section 3.2.1 is the authoritative design for
 ; the RX/TX state machine split, mode-1 SPI and the multi-CS-on-bus-A /
 ; single-CS-on-bus-B asymmetry -- but NOT for the first-byte latency budget:
 ; that section's 1.6us figure was shown to be wrong by ~8x in
@@ -85,7 +85,7 @@
 ;                     idle/active test word.
 ;     OUT_BASE/SET_BASE = MISO gpio  -- `out pins,1` drives MISO's value,
 ;                     `set pindirs,n` drives MISO's output-enable (tri-state
-;                     control -- PLAN.md 3.2.1: "MISO pin is tri-stated...
+;                     control -- DESIGN_NOTES.md 3.2.1: "MISO pin is tri-stated...
 ;                     whenever no CS is low, since three emulated chips share
 ;                     one physical MISO on bus A").
 ;     SCLK reached via offset 29 from IN_BASE (CS0 - SCLK == 3 in the chosen
@@ -229,7 +229,7 @@ byte_loop:
 
 ; ---------------------------------------------------------------------------
 ; TX (bus B variant): identical structure to tx_a, but only 1 CS line exists
-; (PLAN.md 3.2.1: "bus B has just 1 CS so tri-stating is optional/simpler
+; (DESIGN_NOTES.md 3.2.1: "bus B has just 1 CS so tri-stating is optional/simpler
 ; there" -- kept anyway, at zero extra pin-budget cost, purely so bus B does
 ; not need a third, near-duplicate C code path). `in pins, 1` / compare
 ; constant 1 replace tx_a's `in pins, 3` / constant 7.

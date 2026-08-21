@@ -1,5 +1,5 @@
 // fault_engine -- pure, host-testable fault-scheduling engine for SimFW.
-// docs/PLAN.md sections 7.1-7.3 are authoritative for the fault catalog, the
+// docs/DESIGN_NOTES.md sections 7.1-7.3 are authoritative for the fault catalog, the
 // standardized trigger/duration/repeat model, and the engine internals this
 // implements. This module knows nothing about *what* a fault does to a
 // target (that is TC/CT/relay/model-override territory in the real
@@ -7,10 +7,10 @@
 // clear, deterministically, and emits FIRED/CLEARED events for the caller
 // to act on.
 //
-// Determinism is the core contract (PLAN.md 7.2: "the same scenario + seed
+// Determinism is the core contract (DESIGN_NOTES.md 7.2: "the same scenario + seed
 // => the same run, byte-for-byte in the event log. That replayability rule
 // is the fixture's core testing contract."):
-//   - Trigger evaluation is slot-index order every tick (PLAN.md 7.3).
+//   - Trigger evaluation is slot-index order every tick (DESIGN_NOTES.md 7.3).
 //   - All randomness (RANDOM_IN trigger picks, EVERY/N_TIMES jitter) comes
 //     from a single seeded xorshift32 stream per engine instance -- same
 //     algorithm as firmware/CommonFW/test/test_fuzz.c's fuzzer and
@@ -30,7 +30,7 @@
 extern "C" {
 #endif
 
-#define FAULT_ENGINE_MAX_SLOTS  32u   /* PLAN.md 7.3: "fixed pool of fault slots (e.g. 32)" */
+#define FAULT_ENGINE_MAX_SLOTS  32u   /* DESIGN_NOTES.md 7.3: "fixed pool of fault slots (e.g. 32)" */
 #define FAULT_ENGINE_MAX_ZONES  4u    /* matches thermal_model.h's THERMAL_MODEL_MAX_ZONES */
 #define FAULT_ENGINE_MAX_RELAYS 8u    /* board has 5 (K1/K2/K3/K5/K4) + headroom */
 #define FAULT_ENGINE_MAX_NAME_LEN 24u
@@ -44,7 +44,7 @@ typedef enum {
                               * exhausted (N_TIMES) -- never re-arms */
 } fault_slot_state_t;
 
-/* PLAN.md 7.2's trigger kinds. */
+/* DESIGN_NOTES.md 7.2's trigger kinds. */
 typedef enum {
     FAULT_TRIGGER_AT_SIM_TIME = 0,
     FAULT_TRIGGER_AT_ZONE_TEMP,
@@ -198,7 +198,7 @@ uint16_t fault_engine_schedule(fault_engine_t *eng,
 bool fault_engine_cancel(fault_engine_t *eng, uint16_t slot_id);
 
 /* Requests an immediate fire of slot_id regardless of its trigger (the
- * FAULT_FIRE_NOW / MANUAL-trigger path, PLAN.md section 5/7.2). Valid only
+ * FAULT_FIRE_NOW / MANUAL-trigger path, DESIGN_NOTES.md section 5/7.2). Valid only
  * from ARMED; returns false otherwise (including an out-of-range slot_id).
  * On success, marks the slot's manual_fire_pending flag and returns true --
  * it does NOT transition the slot to ACTIVE or emit a FIRED event itself.
@@ -223,7 +223,7 @@ bool fault_engine_cancel(fault_engine_t *eng, uint16_t slot_id);
 bool fault_engine_fire_now(fault_engine_t *eng, uint16_t slot_id);
 
 /* Evaluates every ARMED/ACTIVE slot in slot-index order (0..31,
- * deterministic per PLAN.md 7.3), firing/expiring slots and writing
+ * deterministic per DESIGN_NOTES.md 7.3), firing/expiring slots and writing
  * FIRED/CLEARED events into out[] in the order they occur. Returns the
  * number of events written, capped at max_events (size out generously --
  * FAULT_ENGINE_MAX_SLOTS*2 covers the worst single-tick case of every slot

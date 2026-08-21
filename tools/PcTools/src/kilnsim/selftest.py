@@ -18,7 +18,7 @@ hardware or ``virtual_simfw`` (see that tool's README -- the same real
 every command group actually reachable and answering with a well-formed
 reply, TELEMETRY frames arriving at a sane cadence, EVT sequence-number
 continuity across a burst of events, and a determinism spot-check (same
-seed => same repeat-jitter interval sequence, PLAN.md sec 4.2/7.2's
+seed => same repeat-jitter interval sequence, DESIGN_NOTES.md sec 4.2/7.2's
 determinism contract, using the same "compare gaps between FAULT_FIRED
 events across two seeded runs" technique
 ``tools/PcTools/tests/test_kilnsim_virtual_simfw.py``'s own regression test
@@ -268,7 +268,7 @@ def _check_event_sequence_continuity(link: SimLink) -> "tuple[str, str]":
 
 def _fault_fired_gaps(link: SimLink, seed: int) -> "list[int]":
     """One determinism-probe run: reset+reseed+load a fast preset, arm an
-    EVERY+jitter FAULT_SCHEDULE (PLAN.md sec 7.2), drain FAULT_FIRED events
+    EVERY+jitter FAULT_SCHEDULE (DESIGN_NOTES.md sec 7.2), drain FAULT_FIRED events
     for a few seconds of accelerated sim time, return the sim_time_us gaps
     between consecutive fires -- the same "compare interval sequences, not
     absolute times" technique
@@ -331,7 +331,7 @@ def _check_determinism_spot(link: SimLink) -> "tuple[str, str]":
     if gaps1[:n] != gaps2[:n]:
         return STATUS_FAIL, (
             f"same seed (13) produced different EVERY+jitter interval sequences: "
-            f"{gaps1[:n]} vs {gaps2[:n]} -- determinism contract (PLAN.md sec 4.2/7.2) violated"
+            f"{gaps1[:n]} vs {gaps2[:n]} -- determinism contract (DESIGN_NOTES.md sec 4.2/7.2) violated"
         )
     return STATUS_PASS, f"seed 13 run twice: identical {n}-interval FAULT_FIRED gap sequence {gaps1[:n]}"
 

@@ -2,7 +2,7 @@
 // max31856_spi_slave.pio, implementing docs/SPI_ACCESS_AUDIT.md section 6's
 // "Plan B": the response path is PIO + DMA only, with no CPU in it at all.
 //
-// WHY NOT PLAN A. docs/PLAN.md section 3.2.1 budgeted 1.6 us for the first
+// WHY NOT PLAN A. docs/DESIGN_NOTES.md section 3.2.1 budgeted 1.6 us for the first
 // response byte, which SPI_ACCESS_AUDIT.md section 6 item 2 showed to be
 // wrong by about 8x: the address byte's VALUE is only known once its last bit
 // is latched on SCLK falling edge 8, and in mode 1 the first response bit
@@ -109,7 +109,7 @@ extern "C" {
 // rising-edge handler.
 #define MAX31856_PIO_ENGINE_DATA_WORDS 256u
 
-// Per-channel instrumentation, PLAN.md 3.2.1's "transactions, bytes, CRC-
+// Per-channel instrumentation, DESIGN_NOTES.md 3.2.1's "transactions, bytes, CRC-
 // class errors (malformed transactions), write conflicts, first-byte-late
 // events (TX FIFO underrun detected by PIO)... counted, never silent."
 typedef struct {
@@ -162,7 +162,7 @@ typedef struct {
 
     // ~DRDY output per channel, or -1 for "not wired on this build". Driven
     // open-drain (asserted = actively pulled low, released = input/Hi-Z), per
-    // PLAN.md 3.6's "direct GPIO, open-drain emulation".
+    // DESIGN_NOTES.md 3.6's "direct GPIO, open-drain emulation".
     int drdy_gpio[MAX31856_PIO_ENGINE_MAX_CHANNELS];
 
     // Caller-owned register images, not copied.

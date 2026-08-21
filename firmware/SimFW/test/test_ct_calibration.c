@@ -1,5 +1,5 @@
 // Host tests for ct_calibration.c -- the per-channel gain/offset mapping
-// wave_owner.c's ct_wave_amps_to_pwm_scale() now delegates to (PLAN.md
+// wave_owner.c's ct_wave_amps_to_pwm_scale() now delegates to (DESIGN_NOTES.md
 // section 3.3 / M-D, and firmware/SimFW/tools/ct_calibration/README.md's
 // "Remaining firmware work").
 //

@@ -1,5 +1,5 @@
 // max31856_regs.c -- see max31856_regs.h for the register map, coherency
-// guarantee, and corruption-knob contract (PLAN.md section 3.2).
+// guarantee, and corruption-knob contract (DESIGN_NOTES.md section 3.2).
 #include "max31856_regs.h"
 
 #include <math.h>
@@ -88,7 +88,7 @@ static float cj16_to_c(int16_t raw)
 }
 
 /* 19-bit two's-complement TC code, packed into the top 19 bits of a 24-bit
- * word (low 5 bits always 0) -- PLAN.md 3.2's "quantized to 0.0078125 degC
+ * word (low 5 bits always 0) -- DESIGN_NOTES.md 3.2's "quantized to 0.0078125 degC
  * LSB". */
 #define TC_CODE19_MIN (-262144)
 #define TC_CODE19_MAX (262143)
@@ -164,7 +164,7 @@ static void apply_write_rule(max31856_channel_t *ch, uint8_t addr, uint8_t value
         }
         /* ONESHOT is left set here -- it self-clears in
          * max31856_regs_advance_conversion() ("self-clears after one
-         * conversion", PLAN.md 3.2), not at write time. */
+         * conversion", DESIGN_NOTES.md 3.2), not at write time. */
         return;
     }
 
@@ -310,7 +310,7 @@ bool max31856_regs_advance_conversion(max31856_channel_t *ch, float true_tc_c, f
     /* --- cold junction: internal sensor unless CJ_DISABLE is set ---
      * Computed before the TC block below because corruption.shorted needs
      * the reported CJ value to build its "reads near-ambient/CJ" result
-     * (PLAN.md 7.1 "Shorted TC"). */
+     * (DESIGN_NOTES.md 7.1 "Shorted TC"). */
     float reported_cj_c;
     if (cr0 & MAX31856_CR0_CJ_DISABLE) {
         /* Master owns CJTH:CJTL when the internal sensor is off -- do not

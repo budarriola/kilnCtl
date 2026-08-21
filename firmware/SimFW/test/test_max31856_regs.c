@@ -30,7 +30,7 @@ static void test_write_read_verbatim(void)
     TEST_CHECK(ch.regs[MAX31856_REG_MASK] == 0xFFu, "power-on MASK == FFh");
 
     /* CR1 (TC type + AVGSEL) reads back exactly what was written -- this is
-     * the "assert the DUT configured TC type correctly" test point PLAN.md
+     * the "assert the DUT configured TC type correctly" test point DESIGN_NOTES.md
      * 3.2 calls out. */
     max31856_regs_write_burst(&ch, MAX31856_REG_CR1, (const uint8_t[]){0x23u}, 1);
     uint8_t readback = 0;
@@ -500,7 +500,7 @@ static void test_corruption_severity_order_shorted_beats_drift_stuck_beats_both(
 static void test_master_has_written_flag(void)
 {
     TEST_SECTION("max31856_regs -- master_has_written (TC_GET_MASTER_CONFIG's "
-                  "configured-vs-never-configured distinction, PLAN.md 5.2)");
+                  "configured-vs-never-configured distinction, DESIGN_NOTES.md 5.2)");
 
     max31856_channel_t ch;
     max31856_regs_init(&ch, 15);

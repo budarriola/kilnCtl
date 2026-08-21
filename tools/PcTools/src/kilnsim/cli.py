@@ -1,4 +1,4 @@
-"""``kilnsim`` console script -- ``firmware/SimFW/docs/PLAN.md`` section 6.2.
+"""``kilnsim`` console script -- ``firmware/SimFW/docs/DESIGN_NOTES.md`` section 6.2.
 
 Subcommands: ``state``, ``preset <name>``, ``fault <target> <type>
 [--at-temp N] [--zone N]``, ``estop <open|closed>``, ``power
@@ -210,7 +210,7 @@ def cmd_run(args) -> int:
     #        alert on if they choose to; callers that want "don't block CI
     #        on known gaps" treat 2 as non-fatal.
     #   1 -- FAIL. A genuine expectation failure, or the run itself was
-    #        invalid (SPI underrun / event-seq gap, PLAN.md sec 8.2).
+    #        invalid (SPI underrun / event-seq gap, DESIGN_NOTES.md sec 8.2).
     if report.passed:
         return 0
     if report.blocked:
@@ -410,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("fault", help="schedule a fault")
     sp.add_argument("target", help="e.g. tc0, relay:K1, ct1")
-    sp.add_argument("fault_type", help="fault catalog name, PLAN.md sec 7.1")
+    sp.add_argument("fault_type", help="fault catalog name, DESIGN_NOTES.md sec 7.1")
     sp.add_argument("--at-temp", type=float, default=None, dest="at_temp")
     sp.add_argument("--zone", type=int, default=None)
     sp.set_defaults(func=cmd_fault)

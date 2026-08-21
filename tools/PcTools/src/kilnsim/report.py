@@ -1,6 +1,6 @@
 """Run-report construction and expectation evaluation.
 
-Implements ``firmware/SimFW/docs/PLAN.md`` section 8.2's run-report JSON
+Implements ``firmware/SimFW/docs/DESIGN_NOTES.md`` section 8.2's run-report JSON
 shape: scenario name/version/hash, firmware versions, seed, timescale, start
 time, full event list, telemetry samples, per-expectation
 ``{name, PASS|FAIL|SKIPPED|BLOCKED, evidence: [event seqs]}``, overall
@@ -8,7 +8,7 @@ verdict, and validity flags (SPI underruns, event-seq gaps => run invalid,
 not failed).
 
 BLOCKED (added this pass) is a fourth verdict class for an expectation that
-carries a scenario ``blocked_on: {reason, phase}`` annotation (PLAN.md sec
+carries a scenario ``blocked_on: {reason, phase}`` annotation (DESIGN_NOTES.md sec
 8.1's template, ``firmware/SimFW/scenarios/welded_ssr_midfire.yaml``'s header
 comment) and did not pass -- known, tracked DUT incompleteness, distinct
 from a genuine FAIL. See the ``BLOCKED`` module constant and
@@ -22,9 +22,9 @@ most valuable piece to get right and unit test hard (see
 
 Event/observation convention
 -----------------------------
-PLAN.md sec 8.1 says an ``expect`` clause's ``dut:`` field "reference[s] DUT
+DESIGN_NOTES.md sec 8.1 says an ``expect`` clause's ``dut:`` field "reference[s] DUT
 observations the fixture can see (relay states, fault line, E-stop loop)".
-The wire-level shape of those observations is not frozen yet (PLAN.md sec
+The wire-level shape of those observations is not frozen yet (DESIGN_NOTES.md sec
 5.2/12), so this module works against a normalized, already-decoded form:
 whatever assembles the event list before handing it to
 :func:`evaluate_expectations` (eventually ``run_test_scenario`` in
@@ -56,7 +56,7 @@ from typing import Any, Optional
 from .protocol import Event, EventType, WIRE_EVENT_TYPES
 from .scenario import EventThenExpect, ForbidExpect, AtEndExpect, Scenario
 
-#: Verdict strings, matching PLAN.md sec 8.2's "PASS|FAIL|SKIPPED", plus
+#: Verdict strings, matching DESIGN_NOTES.md sec 8.2's "PASS|FAIL|SKIPPED", plus
 #: BLOCKED (added this pass -- see the "blocked_on" section below).
 PASS = "PASS"
 FAIL = "FAIL"
@@ -120,7 +120,7 @@ class ExpectationResult:
 
 @dataclass
 class ValidityFlags:
-    """PLAN.md sec 8.2: "validity flags (SPI underruns, event-seq gaps =>
+    """DESIGN_NOTES.md sec 8.2: "validity flags (SPI underruns, event-seq gaps =>
     run invalid, not failed)"."""
 
     spi_underrun: bool = False
@@ -201,9 +201,9 @@ class Report:
 #   {"event": {"type": "guard_trip", "guard": "S6a"}}  -- type + payload filters
 #
 # firmware/SimFW/scenarios/*.yaml (written in parallel against this same
-# PLAN.md sec 8.1 schema) use every one of these forms, so this module
+# DESIGN_NOTES.md sec 8.1 schema) use every one of these forms, so this module
 # resolves them generically rather than assuming the single ``dut:
-# <entity>_<state>`` shorthand PLAN.md sec 8.1's own inline example shows.
+# <entity>_<state>`` shorthand DESIGN_NOTES.md sec 8.1's own inline example shows.
 # ---------------------------------------------------------------------------
 def _parse_dut_flag(flag: str) -> tuple:
     """``"K4_open"`` -> ``("K4", True)``. Raises :class:`ReportError` if the
@@ -265,7 +265,7 @@ def _event_type_from_name(type_name: str) -> EventType:
 def _entity_state_events(events: list, entity: str) -> list:
     """Events observing ``entity``'s boolean state, in seq order (input is
     assumed already time/seq ordered -- the event ring's own guarantee,
-    PLAN.md sec 4.5)."""
+    DESIGN_NOTES.md sec 4.5)."""
     out = []
     for e in events:
         payload = e.payload or {}
@@ -529,7 +529,7 @@ def _apply_blocked_on(clause, result: ExpectationResult) -> ExpectationResult:
     policy is actually applied. Called once per clause, after the normal
     ``_eval_event_then``/``_eval_forbid``/``_eval_at_end`` evaluation, so the
     per-clause evaluators themselves stay ignorant of ``blocked_on:``
-    entirely (PLAN.md 8.1's `_parse_expect` already tolerated the key
+    entirely (DESIGN_NOTES.md 8.1's `_parse_expect` already tolerated the key
     without reading it; this is report.py's own new consumer).
 
     - No ``blocked_on:`` on the clause: ``result`` is returned unchanged.
@@ -572,14 +572,14 @@ def evaluate_expectations(scenario: Scenario, events: list,
                            start_time: Optional[float] = None,
                            fw_versions: Optional[dict] = None) -> Report:
     """Check ``scenario.expect`` against a captured, seq-ordered ``events``
-    list and build the run :class:`Report` (PLAN.md sec 8.2).
+    list and build the run :class:`Report` (DESIGN_NOTES.md sec 8.2).
 
     Overall verdict is PASS only if every expectation is PASS or SKIPPED and
     the validity flags are clean (a SKIPPED expectation does not fail the
     run -- it means its triggering condition never arose -- so a run with
     any SKIPPED expectation and no FAILs is reported PASS with those SKIPPED
     entries visible, matching "SKIPPED" being a first-class verdict alongside
-    PASS/FAIL in PLAN.md sec 8.2 rather than a synonym for FAIL).
+    PASS/FAIL in DESIGN_NOTES.md sec 8.2 rather than a synonym for FAIL).
 
     A clause carrying a scenario ``blocked_on:`` annotation (see the
     ``BLOCKED`` module constant's own doc comment) that does not pass is
@@ -610,7 +610,7 @@ def evaluate_expectations(scenario: Scenario, events: list,
         event_seq_gap=_check_event_seq_gap(events),
     )
 
-    # Overall verdict (PLAN.md sec 8.2, extended this pass for BLOCKED):
+    # Overall verdict (DESIGN_NOTES.md sec 8.2, extended this pass for BLOCKED):
     #   FAIL    -- the run is invalid, or at least one expectation is a
     #              genuine FAIL (a blocked_on-annotated clause that didn't
     #              pass is BLOCKED, not FAIL, so it never lands here).
@@ -625,7 +625,7 @@ def evaluate_expectations(scenario: Scenario, events: list,
     #   PASS    -- everything else (every expectation PASS or SKIPPED, run
     #              valid) -- unchanged from the pre-BLOCKED behavior.
     if not validity.valid:
-        overall = FAIL  # an invalid run cannot be certified PASS, PLAN.md sec 8.2
+        overall = FAIL  # an invalid run cannot be certified PASS, DESIGN_NOTES.md sec 8.2
     elif any(r.verdict == FAIL for r in results):
         overall = FAIL
     elif any(r.verdict == BLOCKED for r in results):

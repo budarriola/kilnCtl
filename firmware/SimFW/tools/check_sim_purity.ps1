@@ -1,10 +1,10 @@
-# check_sim_purity.ps1 -- enforces docs/PLAN.md section 9's repo-layout
-# promise and section 13.1's testing-strategy premise for firmware/SimFW/src/sim/:
+# check_sim_purity.ps1 -- enforces docs/DESIGN_NOTES.md section 9's repo-layout
+# promise and docs/PLAN.md section 13 item 1's testing-strategy premise for firmware/SimFW/src/sim/:
 #
 #   "Model is pure C, no RTOS dependencies, host-testable with the same
-#   MSVC/CMake harness pattern SaftyFW/test uses." (PLAN.md section 4.3)
+#   MSVC/CMake harness pattern SaftyFW/test uses." (DESIGN_NOTES.md section 4.3)
 #
-#   "everything in src/sim/ is pure and runs on the PC" (PLAN.md section 13.1)
+#   "everything in src/sim/ is pure and runs on the PC" (PLAN.md section 13 item 1)
 #
 # This is what lets the SAME source files compile both into the RP2040
 # firmware image and into the MSVC/CMake host test suite (~4955 checks as of
@@ -169,7 +169,7 @@ if ($failures.Count -gt 0) {
     foreach ($f in $failures) {
         Write-Host "  $f" -ForegroundColor Red
     }
-    throw "$($failures.Count) src/sim/ purity violation(s) found -- see docs/PLAN.md sections 4.3/9/13.1"
+    throw "$($failures.Count) src/sim/ purity violation(s) found -- see docs/DESIGN_NOTES.md sections 4.3/9, docs/PLAN.md section 13 item 1"
 }
 
 Write-Host "Sim purity check passed: $($files.Count) file(s) under src/sim/ have no FreeRTOS/pico-sdk/TinyUSB includes, and every GCC-only inline-asm use is behind an _MSC_VER split."

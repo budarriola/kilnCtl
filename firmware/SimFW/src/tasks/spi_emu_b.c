@@ -1,4 +1,4 @@
-// spi_emu_b.c -- see spi_emu_b.h. Real body: PLAN.md section 3.2.1's PIO
+// spi_emu_b.c -- see spi_emu_b.h. Real body: DESIGN_NOTES.md section 3.2.1's PIO
 // SPI slave engine driving 1 max31856_channel_t register image (safety-side
 // channel behind J7, CS0), fed from sim_snapshot_read()'s
 // T_safety_reported_c. See spi_emu_a.c's header comment for the design
@@ -35,7 +35,7 @@
 #define SPI_EMU_B_MOSI_GPIO 13u
 #define SPI_EMU_B_MISO_GPIO 14u
 #define SPI_EMU_B_CS0_GPIO  15u
-// Safety-side ~DRDY (PLAN.md 3.6's "DRDY + ~FAULT (safety side) | 2 | direct
+// Safety-side ~DRDY (DESIGN_NOTES.md 3.6's "DRDY + ~FAULT (safety side) | 2 | direct
 // GPIO, via isolator"). GPIO26 = `DRDY_SAFETY` per docs/HARDWARE.md section
 // 1, wired to J7 pin 4 (`thermoDrdy`) through the fixture->board ISO7740DWR
 // (section 3.2). Its partner `FAULT_SAFETY` is GPIO27, adjacent on purpose:
@@ -60,7 +60,7 @@ static void spi_emu_b_task_fn(void *arg)
 
     max31856_regs_init(&s_channel, 0xB1u); // fixed, deterministic seed -- see spi_emu_a.c's identical rationale
 
-    // pio1 is the pico-sdk global PIO1 instance handle -- bus B per PLAN.md
+    // pio1 is the pico-sdk global PIO1 instance handle -- bus B per DESIGN_NOTES.md
     // section 2's connection diagram ("PIO1: SPI slave engine B").
     max31856_pio_engine_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -99,11 +99,11 @@ static void spi_emu_b_task_fn(void *arg)
 
             // T_safety_reported_c lives per-zone in sim_snapshot_t (not as a
             // single top-level field) -- sim_snapshot.h's struct comment:
-            // "the safety-side blend + its own lag, PLAN.md 4.3". PLAN.md
+            // "the safety-side blend + its own lag, DESIGN_NOTES.md 4.3". DESIGN_NOTES.md
             // 4.3 states the blend defaults to zone 0 with no separate
             // blend-weight fields published in sim_snapshot_t as of this
             // pass, so zone 0's value is read directly here, matching that
-            // default; a configurable blend across zones (PLAN.md 4.3's
+            // default; a configurable blend across zones (DESIGN_NOTES.md 4.3's
             // "safety-TC blend weights") is sim_engine's own computation to
             // do upstream of this snapshot field, not something for this
             // task to re-derive.

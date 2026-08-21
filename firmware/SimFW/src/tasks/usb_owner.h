@@ -1,7 +1,7 @@
 // usb_owner.h -- Single owner of the USB CDC (TinyUSB) interface (docs/
-// PLAN.md section 4.1 task map): "Frame RX/TX, CRC, dispatch to command
+// DESIGN_NOTES.md section 4.1 task map): "Frame RX/TX, CRC, dispatch to command
 // queue, telemetry TX." Nobody else may touch the USB peripheral --
-// single-owner-per-peripheral doctrine, PLAN.md section 4's opening
+// single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's opening
 // paragraph. Only this file and usb_descriptors.c include tusb.h; no other
 // task file should include TinyUSB headers or call its API -- route
 // everything through the two functions this header exports for cmd_task's
@@ -70,7 +70,7 @@ bool usb_owner_send_reply(uint8_t responding_task_id, uint8_t dst_device, uint8_
 
 // Sends an unsolicited BROADCAST frame (BENCHPROTO_MSG_BROADCAST,
 // BENCHPROTO.md sec 4: "never ACKed, never NACKed, never deduped") --
-// docs/PLAN.md section 5.3's TELEMETRY/EVT frames. Added alongside
+// docs/DESIGN_NOTES.md section 5.3's TELEMETRY/EVT frames. Added alongside
 // usb_owner_send_reply() (this pass, telemetry.c's real body): usb_owner
 // remains the CDC's sole owner (this header's file comment), so the
 // "actual outbound BROADCAST path" docs/PROTOCOL.md section 6 calls
@@ -89,7 +89,7 @@ bool usb_owner_send_reply(uint8_t responding_task_id, uint8_t dst_device, uint8_
 // `payload`/`length` is the frame body (length may be 0). Never queued or
 // retried: if the CDC TX path is busy (mutex contention) or the write is
 // short, this returns false immediately and the caller counts it as a
-// dropped frame rather than blocking or retrying (PLAN.md 4.5's drop
+// dropped frame rather than blocking or retrying (DESIGN_NOTES.md 4.5's drop
 // policy: "nothing ever blocks... a full queue toward them is a counted
 // drop"). Not cached for DUPLICATE_REACK resend the way usb_owner_send_reply()'s
 // ACKs are -- BROADCAST frames are never acknowledged or retried by

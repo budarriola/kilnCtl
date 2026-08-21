@@ -1,12 +1,12 @@
-// cmd_task.h -- Per docs/PLAN.md section 4.1 task map: "Decode/validate
+// cmd_task.h -- Per docs/DESIGN_NOTES.md section 4.1 task map: "Decode/validate
 // commands, route to owners, build replies." Owns no peripheral itself
-// (single-owner-per-peripheral doctrine, PLAN.md section 4's opening
+// (single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's opening
 // paragraph) -- it is the one place that turns a decoded, delivered
 // benchproto DATA frame (handed to it by usb_owner via the queue exposed
 // below) into a dispatch against its own command table, and hands the reply
 // back to usb_owner (usb_owner_send_reply(), usb_owner.h) to go out as that
 // frame's ACK. No owner task's state is ever touched directly from here
-// (PLAN.md section 4.5: "No command touches another task's state
+// (DESIGN_NOTES.md section 4.5: "No command touches another task's state
 // directly") -- true today by construction: every group but SYS is still a
 // stub (see cmd_task.c's dispatch table), so nothing here reaches into
 // spi_emu_a/b, wave_owner, i2c_owner, or sim_engine yet.

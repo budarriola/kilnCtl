@@ -1,14 +1,14 @@
 // tc_fault_state -- shared contract between fault_sched (sole writer) and
-// spi_emu_a/b (readers) for TC/sensor-fault corruption state, PLAN.md
+// spi_emu_a/b (readers) for TC/sensor-fault corruption state, DESIGN_NOTES.md
 // section 7's fault-injection framework applied to the "Thermocouple /
 // sensor faults" catalog (section 7.1).
 //
 // Why this header exists (see fault_sched.c's own header comment for the
 // full reasoning): firing a TC/sensor fault means "flipping the target's
-// override in the owning module" (PLAN.md 7.3) -- but the owning module for
+// override in the owning module" (DESIGN_NOTES.md 7.3) -- but the owning module for
 // TC corruption is max31856_regs.c's per-channel max31856_channel_t, which
 // lives inside spi_emu_a/b, a module fault_sched must never touch directly
-// (single-owner-per-peripheral doctrine, PLAN.md section 4). This header is
+// (single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4). This header is
 // the minimal, independently-host-testable interface both sides agree on --
 // fault_sched writes, spi_emu_a/b reads, exactly the same shape sim_snapshot.h
 // already established for sim_engine/its readers.
@@ -16,7 +16,7 @@
 // Ownership: fault_sched.c is the ONLY writer (tc_fault_state_write/_clear).
 // spi_emu_a.c (channels MAIN_0..MAIN_2) and spi_emu_b.c (channel SAFETY) are
 // the intended readers, called from each owner's own task context -- the
-// slow write-back half of their loop (PLAN.md 3.2.1: "the spi_emu_* task
+// slow write-back half of their loop (DESIGN_NOTES.md 3.2.1: "the spi_emu_* task
 // drains [RX FIFO writes]... after CS-rise... and raises a
 // master_config_changed event"), never from PIO/ISR context, since this
 // module is not designed for sub-microsecond latency. The expected call
@@ -46,7 +46,7 @@
 extern "C" {
 #endif
 
-/* One entry per physical MAX31856 channel the fixture emulates (PLAN.md
+/* One entry per physical MAX31856 channel the fixture emulates (DESIGN_NOTES.md
  * section 1/3.2: three main-side channels behind J6, CS0/CS1/CS2, one
  * safety-side channel behind J7). MAIN_0/1/2 index-match the natural
  * CS0/CS1/CS2 <-> zone0/1/2 mapping sim_engine.c documents and assumes for
