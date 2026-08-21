@@ -251,7 +251,7 @@ _PIN_CONFIG_REPLY = bytes([len(_PIN_CONFIG_ENTRIES)]) + b"".join(
 #: A GET_FW_VERSION reply as build_fw_version_reply() emits it: protocol
 #: version (u16 LE) first at a fixed offset, then dirty/commit/datetime.
 _FW_VERSION_REPLY = (
-    bytes([2, 0])  # UART_PROTOCOL_VERSION = 2, matches devices.UART_PROTOCOL_VERSION
+    bytes([5, 0])  # UART_PROTOCOL_VERSION = 5, matches devices.UART_PROTOCOL_VERSION
     + bytes([1, 7])
     + b"a1b2c3d"
     + bytes([20])
@@ -300,7 +300,7 @@ def info_checks() -> None:
     check("every reported gpio is on the diagram", pin_overlay.unmapped_gpios(entries), [])
 
     version = devices.parse_fw_version_response(_FW_VERSION_REPLY)
-    check("fw version protocol_version", version.protocol_version, 2)
+    check("fw version protocol_version", version.protocol_version, 5)
     check("fw version compatible", version.compatible, True)
     check("fw version dirty flag", version.dirty, True)
     check("fw version commit", version.commit, "a1b2c3d")
@@ -802,9 +802,13 @@ def display_checks() -> None:
         ("text size 9 rejected", lambda: devices.display_set_text_style(0, 0, 9)),
         ("odd blit chunk rejected", lambda: devices.display_blit_data(b"\x01")),
         ("empty blit chunk rejected", lambda: devices.display_blit_data(b"")),
-        ("oversize blit chunk rejected", lambda: devices.display_blit_data(b"\x00" * 128)),
+        # limit is UART_PROTO_MAX_PAYLOAD - 1 = 252 bytes; use 254 (still even)
+        # so this stays oversize regardless of future payload-size changes as
+        # long as they don't also grow past 254.
+        ("oversize blit chunk rejected", lambda: devices.display_blit_data(b"\x00" * 254)),
         ("zero-size blit window rejected", lambda: devices.display_blit_begin(0, 0, 0, 10)),
-        ("text over 127 bytes rejected", lambda: devices.display_print("x" * 128)),
+        # limit is UART_PROTO_MAX_PAYLOAD - 1 = 252 bytes.
+        ("text over 252 bytes rejected", lambda: devices.display_print("x" * 253)),
     ):
         try:
             fn()
@@ -815,10 +819,13 @@ def display_checks() -> None:
     # Chunking: every frame must fit the payload limit and hold whole pixels,
     # because an odd byte count is a firmware-side error and a short frame
     # would silently shift every pixel after it.
-    check("blit chunk size is 63 pixels", devices.DISPLAY_BLIT_CHUNK_PIXELS, 63)
+    # UART_PROTO_MAX_PAYLOAD is 253 as of uart_task_ids.h version 3
+    # (2026-08-11), so a blit chunk holds (253-1)//2 = 126 pixels, not the
+    # old 128-payload figure of 63.
+    check("blit chunk size is 126 pixels", devices.DISPLAY_BLIT_CHUNK_PIXELS, 126)
     pixels = bytes(range(256)) * 2  # 512 bytes = 256 pixels
     chunks = list(devices.iter_blit_chunks(pixels))
-    check("chunk count for 256 pixels", len(chunks), 5)  # 63*4 + 4
+    check("chunk count for 256 pixels", len(chunks), 3)  # 126*2 + 4
     check("every chunk fits the payload limit", all(len(c) <= UART_PROTO_MAX_PAYLOAD for c in chunks), True)
     check("every chunk holds whole pixels", all((len(c) - 1) % 2 == 0 for c in chunks), True)
     check(
@@ -1553,9 +1560,16 @@ def hardening_checks() -> None:
         lambda: Frame.from_raw(bytes([0x55, 0, 1, 0, 1, 1, 1, 0, 0, 0])),
     )
     # Pure noise must never yield a frame, and must never grow the decoder's
-    # buffer without bound.
+    # buffer without bound. NOTE: bytes(range(256)) is NOT valid noise for
+    # this -- it contains FRAME_DELIM (0x7E) and FRAME_ESC (0x7D) exactly
+    # once each per 256-byte cycle, so the decoder correctly treats those as
+    # real frame boundaries and returns the (garbage) bytes between them.
+    # That is FrameDecoder doing its job, not a bug -- CRC/structure
+    # validation happens one layer up, in Frame.from_raw(). Excluding those
+    # two byte values keeps this a real no-delimiter-ever-seen test.
     dec = FrameDecoder()
-    got = dec.feed(bytes(range(256)) * 8)
+    noise = bytes(b for b in range(256) if b not in (FRAME_DELIM, FRAME_ESC)) * 8
+    got = dec.feed(noise)
     check("noise stream yields no frames", got, [])
     check("decoder buffer stays bounded", len(dec._buf) <= 138, True)
 
@@ -1578,12 +1592,22 @@ def hardening_checks() -> None:
         ("READ_FAULTS count 9 rejected", bytes([0x06, 9]) + bytes(27)),
         ("READ_FAULTS channel 5 rejected", bytes([0x06, 1, 5, 0x01, 0xFF])),
         ("READ_REG channel 9 rejected", bytes([0x09, 9, 0x02, 1, 0xAA])),
-        ("READ_REG len 0 rejected", bytes([0x09, 0, 0x02, 0])),
         ("READ_REG len 17 rejected", bytes([0x09, 0, 0x02, 17]) + bytes(17)),
         ("READ_REG header truncated rejected", bytes([0x09, 0, 0x02])),
         ("subcommand-only READ payload rejected", bytes([0x05])),
     ):
         _expect_raises(label, devices.ThermoResponseError, lambda b=bad: devices.parse_thermo_response(b))
+
+    # READ_REG len=0 is NOT a malformed reply as of uart_bridge.c's
+    # THERMO_CMD_READ_REG case (2026-08-20): the firmware now replies with a
+    # 0-length body instead of dropping the reply when the channel's SPI read
+    # failed. parse_thermo_response() must accept it structurally; only
+    # ThermoClient.read_reg() -- which knows the PC never legitimately asks
+    # for 0 bytes -- turns it into an error for the caller.
+    zero_len_reg = bytes([0x09, 0, 0x02, 0])
+    subcommand, zero_regs = devices.parse_thermo_response(zero_len_reg)
+    check("READ_REG len 0 accepted as a failure marker", subcommand, 0x09)
+    check("READ_REG len 0 carries no data bytes", zero_regs.data, b"")
 
     # NaN stays legal: it is how the firmware reports a channel whose SPI read
     # failed, and dropping it would hide a real fault.
@@ -1865,7 +1889,7 @@ def main() -> int:
         check("short frame raises", True, True)
 
     print("\n== task ids and protocol version (uart_task_ids.h) ==")
-    check("protocol version == 2", devices.UART_PROTOCOL_VERSION, 2)
+    check("protocol version == 5", devices.UART_PROTOCOL_VERSION, 5)
     check("task id THERMO == 1", devices.UART_TASK_ID_THERMO, 1)
     check("task id IO == 2", devices.UART_TASK_ID_IO, 2)
     check("task id INFO == 3", devices.UART_TASK_ID_INFO, 3)
