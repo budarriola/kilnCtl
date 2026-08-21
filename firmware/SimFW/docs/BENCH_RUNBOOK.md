@@ -99,15 +99,17 @@ you know your SWD wiring supports it.
   kilnsim state
   ```
   Pass: JSON telemetry snapshot, no transport error, protocol/firmware
-  version fields populated. **Caution:** `kilnsim`'s serial autodetect
-  matches on VID:PID `2E8A:000A` — this is explicitly a **placeholder**
-  (Raspberry Pi's generic example-board CDC ID, `tools/PcTools/src/kilnsim/
-  link.py`'s own comment), not an ID `SimFW` has claimed for itself. If more
-  than one RP2040-based CDC device is plugged in (fixture Pico,
-  `spi_test_master` Pico, or even the Debug Probe itself), autodetect may
-  pick the wrong port or refuse with "no SimFW-looking port found." Use
-  `kilnsim --port COMx state` explicitly whenever more than one Pico is
-  attached — which will be most of this session.
+  version fields populated. `kilnsim`'s serial autodetect now matches on
+  `2E8A:F00A`, a fixture-specific PID `SimFW` claims for itself
+  (`docs/HARDWARE.md`'s "USB identity" section) — it no longer shares an ID
+  with the `spi_test_master` Pico (`2E8A:F00B`, also fixture-specific as of
+  the same change) or the Debug Probe (`2E8A:0004`/`2E8A:000C`), so the
+  original three-way collision this caution used to warn about is resolved.
+  **Still pass `--port COMx` explicitly if more than one SimFW fixture is on
+  the bench at once**: autodetect (`SerialSimLink.list_candidate_ports()`)
+  matches on VID:PID only, not serial number, and silently picks the first
+  match (`candidates[0]`) when several ports share `2E8A:F00A` — a real
+  scenario the moment a second fixture exists, not a hypothetical.
 - **spi_test_master Pico:** open its CDC port in any terminal, press Enter,
   confirm the `spi_test_master ready...` banner, then type `PING` and
   confirm `PONG`. This tool is *not* built into SimFW's CMake and does not

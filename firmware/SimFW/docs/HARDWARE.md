@@ -499,7 +499,76 @@ expands this same ten-step order in full.
 
 ---
 
-## 7. Cross-reference
+## 7. USB identity
+
+The fixture Pico's native USB CDC link (`src/tasks/usb_owner.c` +
+`src/tasks/usb_descriptors.c`, PLAN.md section 4.1/5) presents a claimed,
+fixture-specific USB identity so `kilnsim`'s PC-side auto-detect
+(`tools/PcTools/src/kilnsim/link.py`) cannot latch onto the wrong RP2040 on a
+bench that also has the `spi_test_master` reference Pico
+(`tools/spi_test_master/`) and the safety processor's Debug Probe plugged in
+at the same time.
+
+| | Value | Source |
+|---|---|---|
+| VID | `0x2E8A` | Raspberry Pi's own vendor ID, reused informally (see below) |
+| PID | `0xF00A` | Fixture-specific, chosen for this project |
+| Manufacturer string | `kilnCtl` | `src/tasks/usb_descriptors.c` |
+| Product string | `SimFW Bench Fixture` | `src/tasks/usb_descriptors.c` |
+| Serial number | RP2040 flash unique ID, 16 hex chars | `src/tasks/usb_descriptors.c`, via `pico_get_unique_board_id_string()` |
+
+**VID choice:** this fixture is a one-off in-house bench tool, never mass
+produced and never sold, so no formal USB-IF VID has been (or will be)
+purchased for it. Rather than TinyUSB's own generic `0xCafe` placeholder
+(what this firmware used before this section existed), it informally reuses
+Raspberry Pi's VID `0x2E8A` — the RP2040 this fixture runs on is itself a
+Raspberry Pi part, and every other RP2040 on this bench (the `spi_test_master`
+Pico, the Debug Probe) already enumerates under that same VID via pico-sdk's
+own stock descriptors. This is informal, undocumented-by-RPi use of their VID
+for a tool that will never ship — accepted deliberately for that reason, not
+a claim of Raspberry Pi's endorsement or a formal sub-license.
+
+**PID choice — checked against:** the RPi-documented PIDs under `0x2E8A`
+found in this toolchain's pico-sdk checkout and general RPi USB-ID
+references:
+
+| PID | What it is | Where confirmed |
+|---|---|---|
+| `0x0003` | RP2040 BOOTSEL / bootrom mass-storage mode | RPi USB ID references (not vendored in this pico-sdk checkout — the bootrom isn't pico-sdk source) |
+| `0x0004` | Picoprobe / Debug Probe, CDC interface | RPi USB ID references |
+| `0x0009` | pico-sdk stock `stdio_usb` CDC, non-RP2040 boards (e.g. RP2350) | confirmed directly: `src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c`, `#if PICO_RP2040 ... #else #define USBD_PID (0x0009)` |
+| `0x000A` | pico-sdk stock `stdio_usb` CDC, RP2040 boards — **this project's own old placeholder**, and still `spi_test_master`'s pre-this-change default | confirmed directly: same file, `#define USBD_PID (0x000a) // Raspberry Pi Pico SDK CDC for RP2040` |
+| `0x000C` | Raspberry Pi Debug Probe, CMSIS-DAP v2 interface | RPi USB ID references |
+
+All of these are low, sequentially-allocated values. `0xF00A` sits far
+outside that range — a deliberate nod to the old placeholder PID (`0x000A`)
+this fixture used to share with every other stock pico-sdk CDC example —
+so a newly-registered official RPi PID (which has so far only ever grown
+that low range upward) cannot collide with it. `tools/spi_test_master/`
+(`CMakeLists.txt`) claims the adjacent `0xF00B` for the same reason, one
+digit apart so the two bench tools are easy to tell apart by eye in a USB
+descriptor dump; see that file's own comment for the pico-sdk
+`USBD_PID`/`USBD_PRODUCT` override mechanism it uses (stock
+`pico_enable_stdio_usb`, not a hand-written descriptor file like this
+fixture's own).
+
+**Distinguishing the three bench RP2040s by eye:** `kilnsim`'s auto-detect
+matches on VID:PID (`tools/PcTools/src/kilnsim/link.py`'s `SIMFW_VID_PID =
+"2E8A:F00A"`) plus a protocol PING, so it should already pick the right port
+without operator help in the common case. For a human checking `lsusb` /
+Windows Device Manager directly:
+
+- **SimFW fixture Pico:** `2E8A:F00A`, product string "SimFW Bench Fixture",
+  serial = RP2040 flash unique ID.
+- **`spi_test_master` reference Pico:** `2E8A:F00B`, product string
+  "spi_test_master (kilnCtl bench)", serial = its own RP2040 flash unique ID
+  (pico-sdk's stock `stdio_usb` fills this in automatically, same mechanism).
+- **Safety processor's Debug Probe:** `2E8A:0004` (CDC) / `2E8A:000C`
+  (CMSIS-DAP) — untouched, not this project's firmware.
+
+---
+
+## 8. Cross-reference
 
 - Design rationale for every signal above: `firmware/SimFW/docs/PLAN.md`
   sections 2, 3.1–3.7, 14.

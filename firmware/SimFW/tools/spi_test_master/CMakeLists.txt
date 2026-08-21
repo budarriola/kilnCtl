@@ -66,6 +66,27 @@ target_link_libraries(spi_test_master PRIVATE
 pico_enable_stdio_usb(spi_test_master 1)
 pico_enable_stdio_uart(spi_test_master 0)
 
+# pico-sdk's stock pico_stdio_usb descriptors default to Raspberry Pi's own
+# VID:PID (2E8A:000A -- src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c
+# in the pico-sdk checkout) and a generic "Pico" product string. That is the
+# same generic ID any other stock pico-sdk CDC example on the bench would
+# also present, and it happens to be the exact ID `kilnsim`'s USB auto-detect
+# used to treat as SimFW's own placeholder (../../docs/HARDWARE.md's "USB
+# identity" section) -- so on a bench with this tool, the SimFW fixture, and
+# other stock Pico boards all plugged in, a generic "which one is which"
+# ambiguity is easy to hit. pico_stdio_usb's descriptors honor USBD_PID/
+# USBD_PRODUCT overrides via #ifndef guards, so this is a compile-definition
+# override, not a hand-written descriptor file: keep this tool's own VID
+# (still Raspberry Pi's, same informal-reuse basis as SimFW's) but move off
+# the shared generic PID/string. 0xF00B mirrors SimFW's own 0xF00A choice
+# (docs/HARDWARE.md) -- same "far outside RPi's documented low PID range"
+# reasoning, one digit apart so the two bench tools are easy to tell apart
+# by eye in a USB descriptor dump.
+target_compile_definitions(spi_test_master PRIVATE
+    USBD_PID=0xF00B
+    "USBD_PRODUCT=\"spi_test_master (kilnCtl bench)\""
+)
+
 # picotool is not set up in this environment (same gap ../../CMakeLists.txt
 # and ../../../SaftyFW/CMakeLists.txt document) -- pico_add_extra_outputs()
 # (which would generate the .uf2 for BOOTSEL drag-and-drop) is left disabled.

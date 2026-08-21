@@ -25,18 +25,32 @@
 // Device Descriptor
 //--------------------------------------------------------------------+
 
-// A bench-fixture-specific VID/PID pair has not been allocated (this is a
-// one-off test fixture, never mass produced) -- 0xCafe is TinyUSB's own
-// well-known placeholder VID (see the vendored example this file mirrors),
-// reused here for the same reason that example uses it: it is a real,
-// harmless value that every OS's generic CDC-ACM driver binds to happily,
-// and this device is never meant to ship or be sold. PID's low bit set
-// (0x4001) marks "CDC present, nothing else" using the same auto-PID bitmap
-// convention the mirrored example documents, so a future SimFW revision that
-// adds another USB class does not collide with this one's driver binding on
-// Windows.
-#define SIMFW_USB_VID 0xCafeu
-#define SIMFW_USB_PID 0x4001u
+// A bench-fixture-specific VID/PID pair has not been formally allocated
+// (this is a one-off test fixture, never mass produced), but multiple
+// RP2040-class devices sit on the same bench at once -- this fixture Pico,
+// the spi_test_master reference Pico (tools/spi_test_master/), and the
+// safety processor's Debug Probe -- so a shared/generic ID is a real hazard,
+// not a cosmetic one: `kilnsim`'s PC-side auto-detect
+// (tools/PcTools/src/kilnsim/link.py) could silently talk to, or try to
+// reset, the wrong device. Per docs/HARDWARE.md's "USB identity" section
+// (the claimed-ID authority -- update that doc first if either value below
+// ever changes), this firmware informally borrows Raspberry Pi's own VID
+// (0x2E8A) rather than TinyUSB's 0xCafe placeholder used previously, but
+// picks a PID well outside every RPi-documented PID under that VID seen in
+// this toolchain's pico-sdk checkout and general RPi USB ID references
+// (0x0003 RP2040 BOOTSEL/bootrom, 0x0004 Picoprobe/Debug Probe CDC, 0x0009
+// non-RP2040 pico-sdk stdio CDC, 0x000A RP2040 pico-sdk stdio CDC --
+// confirmed directly in this checkout's
+// lib/pico-sdk/src/rp2_common/pico_stdio_usb/stdio_usb_descriptors.c --
+// 0x000C Debug Probe CMSIS-DAP). Those are all low, sequentially-allocated
+// values; 0xF00A sits far outside that range (a nod to the old placeholder
+// PID, 0x000A, this fixture used to share with generic pico-sdk CDC
+// examples) so a newly-registered official RPi PID -- which has so far only
+// ever grown that low range -- cannot collide with it. This is informal use
+// of RPi's VID for an in-house bench tool that will never ship; accepted
+// as such, not a claim of RPi's endorsement.
+#define SIMFW_USB_VID 0x2E8Au
+#define SIMFW_USB_PID 0xF00Au
 #define SIMFW_USB_BCD 0x0200u
 
 tusb_desc_device_t const desc_device = {

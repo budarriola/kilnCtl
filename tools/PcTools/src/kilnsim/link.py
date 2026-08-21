@@ -69,10 +69,15 @@ except ImportError:  # pragma: no cover - exercised implicitly by CI without pys
 
 import socket as _socket
 
-#: SimFW's placeholder USB VID:PID. Raspberry Pi's own default RP2040 CDC
-#: VID:PID (2E8A:000A, the "Board CDC" example) until SimFW claims its own --
-#: swap this out once firmware/SimFW/docs/HARDWARE.md documents a real one.
-SIMFW_VID_PID = "2E8A:000A"
+#: SimFW's claimed USB VID:PID -- Raspberry Pi's VID (0x2E8A, informal reuse,
+#: never shipped/sold) with a fixture-specific PID chosen well outside every
+#: RPi-documented PID under that VID (bootrom 0x0003, Debug Probe CDC 0x0004,
+#: pico-sdk stdio CDC 0x0009/0x000A, Debug Probe CMSIS-DAP 0x000C), so this
+#: fixture Pico cannot be confused with the spi_test_master reference Pico or
+#: the safety processor's Debug Probe on the same bench. See
+#: firmware/SimFW/docs/HARDWARE.md's "USB identity" section for the full
+#: reasoning and firmware/SimFW/src/tasks/usb_descriptors.c for where it's set.
+SIMFW_VID_PID = "2E8A:F00A"
 
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
