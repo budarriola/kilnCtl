@@ -2,31 +2,20 @@
   "scenario": {
     "name": "runaway_zone",
     "version": 1,
-    "hash": "0b601a063370fc758965195f1ea986538eed620c407b4c2512da2d9848627d07"
+    "hash": "e1a4b030ccec505eb698d93b3e7483d1375920ac7b85924bcbae8398728ab7a8"
   },
   "fw_versions": {},
   "seed": 53,
   "timescale": 10.0,
-  "start_time": 1787269214.1984723,
+  "start_time": 1787271623.0920749,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 42000000,
+      "sim_time_us": 43000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
         "state": true
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000001,
-      "sim_time_us": 145000000,
-      "event_type": "GUARD_TRIP",
-      "payload": {
-        "guard": "S6b"
       },
       "a": 0,
       "b": 0,
@@ -39,10 +28,10 @@
       "name": "s3_catches_it_first",
       "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (fault_fired {'slot': 'runaway'}) never occurred [BLOCKED: context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's whole block (in->any_current_present && !in->relay_commanded_recently) lives inside safety_guards.c's context_valid-gated else-branch and is unconditionally reset while context_valid is false, so this cannot fire against present-day SaftyFW regardless of what the fixture does.]",
+      "detail": "triggering event (fault_fired {'slot': 'runaway'}) never occurred [BLOCKED: RESOLVED on the SaftyFW side, still blocked on the fixture. The previous reason here -- 'context_valid is never set true by safety_core_build_input()' -- was fixed by commit f304392: context_valid, any_current_present and relay_commanded_recently are all populated for real now (virtual_dut measures context_valid true on every poll of this scenario), so S3 is EVALUATED every tick instead of being force-reset. What it never sees is current: firmware/SimFW/src/tasks/sim_engine.c gates heater duty and CT current on K4, K4 never closes (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so any_current_present is false for the whole run (measured 0 of ~83 polls), and S3's `any_current_present && !relay_commanded_recently` condition can never be true.]",
       "blocked_on": {
-        "reason": "context_valid is never set true by safety_core_build_input() (firmware/SaftyFW/src/tasks/safety_core.c) -- S3's whole block (in->any_current_present && !in->relay_commanded_recently) lives inside safety_guards.c's context_valid-gated else-branch and is unconditionally reset while context_valid is false, so this cannot fire against present-day SaftyFW regardless of what the fixture does.",
-        "phase": "Phase 7 (link_task) is built and already publishes this context -- link_task_publish_context()/ link_task_get_context_snapshot() (firmware/SaftyFW/src/tasks/ link_task.c) parse and cache every SAFETY_CMD_PUSH_CONTEXT (0x07) frame today. The real gap is one layer up: safety_core.c's safety_core_build_input() never calls link_task_get_context_snapshot() at all (see its own TODO at safety_core.c:208-210), so context_valid stays at its zero-init false regardless of what the ESP sends. A wiring gap in an already-built producer/consumer pair, not a missing Phase 7 deliverable."
+        "reason": "RESOLVED on the SaftyFW side, still blocked on the fixture. The previous reason here -- 'context_valid is never set true by safety_core_build_input()' -- was fixed by commit f304392: context_valid, any_current_present and relay_commanded_recently are all populated for real now (virtual_dut measures context_valid true on every poll of this scenario), so S3 is EVALUATED every tick instead of being force-reset. What it never sees is current: firmware/SimFW/src/tasks/sim_engine.c gates heater duty and CT current on K4, K4 never closes (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so any_current_present is false for the whole run (measured 0 of ~83 polls), and S3's `any_current_present && !relay_commanded_recently` condition can never be true.",
+        "phase": "Not a SaftyFW phase gap any more -- safety_core_build_input() reads link_task's published context via link_task_get_context_snapshot() and reduces it with the pure context_reduce_zones()/current_any_present() helpers in src/snapshots.h. The remaining gap is SimFW-side and circular: no current flows because K4 is open, and K4 is open because no scenario performs the operator enable. Breaking it needs a scenario that issues ENABLE (dut_core.exe supports it) or a fault that forces CT current independently of duty, e.g. welded_k4_current_persist, which bypasses the duty path entirely."
       }
     },
     {
@@ -57,5 +46,12 @@
     "spi_underrun": false,
     "event_seq_gap": false,
     "valid": true
+  },
+  "dut_input_reachability": {
+    "polls": 83,
+    "context_valid": 83,
+    "any_current_present": 0,
+    "link_up": 83,
+    "max_zone_count": 3
   }
 }

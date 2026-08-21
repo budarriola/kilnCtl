@@ -54,6 +54,8 @@ substitute.
                                        │      helpers as a library)     │
                                        │   - polls telemetry + TC_GET_  │
                                        │     REGS(channel=safety)       │
+                                       │   - builds a PUSH_CONTEXT-     │
+                                       │     equivalent from telemetry  │
                                        │   - batch-ticks dut_core.exe   │
                                        │   - synthesizes guard_warn/    │
                                        │     guard_trip/K4 Events       │
@@ -68,6 +70,8 @@ substitute.
                                        │ ── real, unmodified: ──        │
                                        │   safety_guards.c               │
                                        │   tasks/relay_grace.c          │
+                                       │   snapshots.h (context_reduce_ │
+                                       │     zones/current_any_present) │
                                        └───────────────────────────────┘
                 TCP (benchproto, multi-client -- up to 4)
  virtual_dut ───────────────────────────────────────────► virtual_simfw.exe
@@ -96,14 +100,15 @@ protocol -- RESOLVED" below).
 
 | File | Why it is safe to host-compile |
 |---|---|
-| `firmware/SaftyFW/src/safety_guards.c` | Pure function of `(config, input, state) -> verdict`. No `#include` of FreeRTOS/pico-sdk/link headers by design (its own header comment: "no FreeRTOS, no pico-sdk, no logging, no I/O, no time source of its own"). Already host-tested by `firmware/SaftyFW/test/build_host_tests.ps1` (`test_safety_guards.c`, part of that script's ~525 checks). |
+| `firmware/SaftyFW/src/safety_guards.c` | Pure function of `(config, input, state) -> verdict`. No `#include` of FreeRTOS/pico-sdk/link headers by design (its own header comment: "no FreeRTOS, no pico-sdk, no logging, no I/O, no time source of its own"). Already host-tested by `firmware/SaftyFW/test/build_host_tests.ps1` (`test_safety_guards.c`, part of that script's 549 checks). |
 | `firmware/SaftyFW/src/tasks/relay_grace.c` | The two pure state-transition functions (`relay_grace_tick`, `relay_trip_transition`) factored out of `relay_owner_task()`'s FreeRTOS loop specifically so they could be host-tested (`relay_grace.h`'s own header comment: "Deliberately free of FreeRTOS/pico-sdk... buildable and testable on the host"). Already covered by `build_host_tests.ps1`'s `test_relay_grace.c`. |
+| `firmware/SaftyFW/src/snapshots.h` | Header-only, `static inline`, no SDK dependency by design (its own doc comment explains why the two reduction helpers live here rather than in `link_frame.c`). `context_reduce_zones()` and `current_any_present()` are the exact functions `safety_core_build_input()` calls, so `dut_core/main.c` calls them too instead of reimplementing them. Already host-tested by `build_host_tests.ps1`'s `test_snapshots.c` (24 checks). |
 
 ### Explicitly NOT compiled, and why (out of scope, not stubbed)
 
 | File | Why it cannot be host-compiled | What this means for coverage |
 |---|---|---|
-| `firmware/SaftyFW/src/tasks/safety_core.c` | `#include "FreeRTOS.h"`, `"pico/time.h"`, `thermo_task.h`, `discrete_task.h`, `relay_owner.h`'s task, `reboot_announce.h`, `watchdog_task.h` -- the real FreeRTOS task that owns the safety-core loop and cannot run unmodified on a PC. | `dut_core/main.c` is a from-scratch, host-only replacement for this file's **outer loop only** (build the input struct, call the two library functions, apply the same two relay-state calls `relay_owner_task()` would). It is written to reproduce `safety_core_build_input()`'s exact current field-by-field behavior -- see "Faithfulness to `safety_core_build_input()`" below, including several fields that are honestly always false today because the real function never sets them either. |
+| `firmware/SaftyFW/src/tasks/safety_core.c` | `#include "FreeRTOS.h"`, `"pico/time.h"`, `thermo_task.h`, `discrete_task.h`, `relay_owner.h`'s task, `reboot_announce.h`, `watchdog_task.h` -- the real FreeRTOS task that owns the safety-core loop and cannot run unmodified on a PC. | `dut_core/main.c` is a from-scratch, host-only replacement for this file's **outer loop only** (build the input struct, call the two library functions, apply the same two relay-state calls `relay_owner_task()` would). It is written to reproduce `safety_core_build_input()`'s exact current field-by-field behavior -- see "Faithfulness to `safety_core_build_input()`" below, including several fields that are honestly always false today because the real function never sets them either. **It calls the real `context_reduce_zones()`/`current_any_present()` (see `snapshots.h` above) rather than re-deriving them; only the FreeRTOS-shaped glue around them is hand-written here.** |
 | `firmware/SaftyFW/src/tasks/relay_owner.c` | `#include "FreeRTOS.h"`, `"queue.h"`, `"hardware/gpio.h"` -- the GPIO6-owning task itself. | Not needed: its only non-FreeRTOS logic (`relay_grace_tick`/`relay_trip_transition`) is already factored into `relay_grace.c` above, which IS compiled. `relay_owner.c`'s queue/command dispatch is reproduced structurally (not logically -- there is no logic there beyond "call relay_grace.c and set a GPIO") by `dut_core/main.c`. |
 | `firmware/SaftyFW/src/max31856.c` | `#include "spi_owner.h"`, `"hardware/gpio.h"` -- real SPI transactions against real hardware. There is no real SPI bus in this fixture at all (`virtual_simfw`'s own README: "no real SPI bytes ever flow"). | `dut_core/max31856_decode.c` reproduces only this file's two **pure, static** fixed-point register-decode functions (`max31856_decode_cj`/`max31856_decode_tc`) and its `TC_INVALIDATING_FAULTS` rule, byte-for-byte, with a header comment explaining exactly why and citing the source. This is register arithmetic (a datasheet fact), not a safety decision -- no threshold, timing rule, or trip condition lives in this file. |
 | Everything else under `firmware/SaftyFW/src/` (`thermo_task.c`, `discrete_task.c`, `current_task.c`, `link_task.c`, `config_store*.c`, `update/*`, `bootloader/*`, ...) | Not needed by `safety_guards.c`/`relay_grace.c`'s dependency graph, and/or FreeRTOS/hardware-shaped. | No guard behavior from these is exercised or claimed. |
@@ -128,29 +133,112 @@ function does. `dut_core/main.c` reproduces the same set, field for field:
 - `dt_s` -- fixed `0.1f`, matching `safety_core.c`'s own
   `SAFTYFW_PERIOD_SAFETY_CORE_MS` (100).
 
+**Derived from real fixture data by the REAL, unmodified SaftyFW helpers**
+(rewritten 2026-08-20, after SaftyFW commit `f304392` gave
+`safety_core_build_input()` real producers for all of these):
+- `context_valid`, `zone_count`, `max_zone_setpoint_c`,
+  `nearest_zone_measured_c` -- `run_dut_scenarios.py`'s `_FixtureContext`
+  builds a `context_snapshot_t` per poll from `virtual_simfw` telemetry (the
+  same physical facts a real ESP's `SAFETY_CMD_PUSH_CONTEXT` carries), and
+  `dut_core/main.c` runs the **real** `context_reduce_zones()` from
+  `firmware/SaftyFW/src/snapshots.h` over it, behind the same
+  `CONTEXT_MAX_AGE_MS` staleness test `safety_core.c` applies. The helper is
+  `#include`d and compiled, not copied.
+- `any_current_present` -- the real `current_any_present()` from the same
+  header, over the fixture's per-zone CT amps, with the same
+  `i_present_a` = 2.0 A default substitution `safety_core.c` does.
+- `relay_commanded_recently` / `_continuously` -- from the context frame's
+  `relay_recent_mask` and a continuous-on-duration measured the way
+  `link_task_get_relay_on_continuous_ms()` measures it, compared against
+  `correlation_window_s` (150 s) exactly as `safety_core.c` compares it.
+- `link_up` -- the telemetry stream's own liveness, standing in for
+  `link_task_link_up()`'s "CRC-valid frame within `LINK_UP_RECENCY_MS`".
+
 **Set to a fixed value, matching `safety_core.c`'s own current code exactly
 (not a harness simplification):**
 - `heat_commanded = false` -- `safety_core.c`'s own comment: *"no current
   sense yet, Phase 6"*. See "Finding: S11 cannot trip" below.
+- `sample_counter_advancing = false` -- `safety_core.c` leaves it false on
+  purpose: S13 needs a commissioned `borrowed_zone_index` that exists
+  nowhere in the codebase. Guessing zone 0 here would invent a commissioning
+  decision and hide the gap.
 - `reboot_grace_active = false` -- no `SAFETY_CMD_ANNOUNCE_REBOOT` source
   exists in this fixture (there is no ESP in the loop at all).
 
-**Left at zero because `safety_core_build_input()`'s own struct literal
-never names them either** (this is the important one -- see "Finding:
-several guards are structurally unreachable in current SaftyFW" below):
-`context_valid`, `zone_count`, `max_zone_setpoint_c`,
-`nearest_zone_measured_c`, `any_current_present`,
-`relay_commanded_recently`, `relay_commanded_continuously`,
-`sample_counter_advancing`, `main_fault_asserted`, `link_up`,
-`relay_deenergized`.
+**Still left at zero because `safety_core_build_input()`'s own struct literal
+still does not name them:** `main_fault_asserted`, `relay_deenergized`.
+
+**The one field with no fixture producer at all:** `setpoint_c`. Nothing in
+`kilnsim` or `virtual_simfw` carries a zone setpoint -- a scenario's
+`dut: {profile: cone6_fast}` names a KilnFW profile that nothing here
+executes. It is sent as **NaN**, never a guessed number, so S2's
+`tc_c > max_zone_setpoint_c + margin` is false rather than trippable against
+an invented ceiling. S2 is reachable on the real target; it is simply not
+provokable here.
 
 ## Findings
 
-These are the genuine disagreements/gaps this pass turned up, each judged
-against the real source, not guessed:
+These are the genuine disagreements/gaps this tool turned up, each judged
+against the real source, not guessed.
 
-### 1. `link_up` is never set to `true` anywhere in current SaftyFW -- S6b
-   (LINK_DEAD) trips unconditionally, in every scenario, around t≈120s
+> **Findings 1, 2 and 4 below are HISTORY as of SaftyFW commit `f304392`.**
+> They are kept, struck through where wrong, because they are what this
+> tool was built to find and they are what the `blocked_on:` annotations in
+> `firmware/SimFW/scenarios/*.yaml` were originally written against. Finding
+> 0 is the current state.
+
+### 0. What `f304392` changed, and what this fixture can now see
+
+`safety_core_build_input()` gained real producers for `context_valid`,
+`zone_count`/`max_zone_setpoint_c`/`nearest_zone_measured_c`,
+`any_current_present`, `relay_commanded_recently`/`_continuously` and
+`link_up`; `relay_owner_command_energize()` gained its first caller
+(`SAFETY_CMD_REQUEST_ENABLE` 0x02 → `safety_core_request_enable()`).
+
+Measured, by re-running all 19 scenarios before and after this directory was
+brought up to date with it:
+
+| | Before | After |
+|---|---|---|
+| Scenarios where S6b's unconditional hard-backstop trip fired | **16 of 19** | **0 of 19** |
+| Polls presenting `context_valid = true` to the guards | 0 | **every poll of every scenario** |
+| Guards force-reset every tick by `!context_valid` (S2/S3/S4/S10/S13) | all 5 | **none** |
+| Expectation verdicts changed | — | **none** (see below) |
+
+**Not one expectation verdict flipped**, and that is itself the finding:
+every K4-based clause is still dominated by K4 sitting open from sim-time 0,
+and the newly-unblocked guards split three ways —
+
+- **S10 is now genuinely exercised.** `main_safety_skew`'s `s10_stays_quiet`
+  (+80 °C skew must stay under `tc_disagreement_c` = 200 °C) was a vacuous
+  PASS before and is a real anti-nuisance PASS now.
+- **S2 is reachable but not provokable here**: no setpoint producer exists
+  in this fixture (see "Faithfulness" above).
+- **S3/S4 are reachable but not provokable here**: `sim_engine.c` gates
+  heater duty and CT current on K4, K4 never closes because nothing issues
+  the operator enable, so `any_current_present` is false and no relay is
+  ever commanded on — measured 0 of 1 229 polls across the suite.
+- **S13 stays dormant deliberately** (uncommissioned `borrowed_zone_index`,
+  `tc_source` defaulting to `OWN_J7`) — a commissioning gap, same category
+  as S1's `abs_max_temp_c`.
+
+One event-stream change worth reading carefully: `tc_flaky` previously
+showed an S6b trip and now shows an **S5 trip** at t≈247 s. That is not a
+newly-discovered S5 defect and not a wrong scenario expectation — it is this
+tool's own documented batch-ticking approximation. At the default
+`--poll-interval 0.25` and `timescale: 10`, one batch replays a single TC
+sample across ~2.5 s of sim time, which cannot resolve `tc_flaky`'s 900 ms
+bad/900 ms good alternation at all, so a batch that lands in a bad phase
+synthesizes ~25 consecutive bad reads and clears S5's 10-read AND 5 s bars.
+Re-running the same scenario at `--poll-interval 0.02` makes the trip
+disappear (the S5 warns remain — a separate, pre-existing question this pass
+did not change). S6b's trip was simply latching first before, masking it.
+**Do not lower `--poll-interval` only for `tc_flaky` and call it green;
+either fix the batching or record that this scenario needs a finer poll.**
+
+### 1. ~~`link_up` is never set to `true` anywhere in current SaftyFW -- S6b
+   (LINK_DEAD) trips unconditionally, in every scenario, around t≈120s~~
+   **FIXED by `f304392`** -- kept below as the original finding
 
 `safety_core_build_input()`'s struct literal never names `link_up`, so it
 is `false` from the first tick of every boot (real hardware included, not
@@ -174,8 +262,25 @@ discovery this whole fixture exists to produce" -- reported here, not
 silently worked around by inventing a `link_up = true` in this harness
 (which would hide the gap, not verify it).
 
-### 2. K4 is never energized in current SaftyFW -- every "held closed then
-   trips" scenario expectation fails from t=0
+### 2. K4 is never energized in a `virtual_dut` run -- every "held closed
+   then trips" scenario expectation fails from t=0
+   **(cause changed by `f304392`; the observable is unchanged)**
+
+`relay_owner_command_energize()` now HAS a caller —
+`safety_core_request_enable()`, reached from `link_task.c`'s
+`SAFETY_CMD_REQUEST_ENABLE` (0x02) decoder. But that path is driven only by
+an explicit operator/PC command (KilnFW's `uart_bridge.c` →
+`safety_link_request_enable()`, i.e. PcTools' `safety_request_enable`);
+**KilnFW does not request enable automatically when a profile runs**, and no
+scenario in `firmware/SimFW/scenarios/` models that operator step. So K4
+still sits open for every run. `dut_core.exe` accepts an `ENABLE` command
+(mirroring `relay_owner`'s TRIPPED-refuses / GRACE-defers / ARMED-honours
+behavior) for whoever writes the first scenario that needs it;
+`run_dut_scenarios.py` deliberately never sends one, because deciding *when*
+a scenario would issue it is a scenario-library design decision, not
+something a harness should invent.
+
+The original finding, now superseded in its cause:
 
 The only caller of `relay_owner_command_energize()` would be Phase 7's
 link_task/GUI, which does not exist yet -- nothing in the current SaftyFW
@@ -211,8 +316,11 @@ frozen reading is held. **Confirmed: S11 correctly does not trip** in this
 harness, for the same documented reason it cannot trip on real current
 firmware.
 
-### 4. S2, S3, S4, S9, S10, S13 are also structurally unreachable today --
-   a broader version of the S11 finding
+### 4. ~~S2, S3, S4, S9, S10, S13 are also structurally unreachable today~~
+   **Superseded by Finding 0**: S2/S3/S4/S10 became reachable in `f304392`,
+   S13's block turned out to be a commissioning gap rather than a wiring
+   gap, and only S9 (`relay_deenergized`) is still unreachable for the
+   reason stated here. Original text:
 
 Not previously called out in any scenario's `manual_checks`, but the same
 root cause: `context_valid` is never set `true` by
@@ -363,12 +471,40 @@ in the S6b finding above (tripped at "147s" sim-time against a 120s
 threshold). Lowering `--poll-interval` tightens this at the cost of wall
 time per scenario.
 
-### No context path, no current sense -- see Finding 4
+### Context and current: wired, but the fixture cannot drive all of it
 
-Not a limitation of this harness specifically; a faithful reproduction of
-current SaftyFW's own incompleteness (Phase 6/7 TODOs). Re-run this suite
-once `current_task.c`/`link_task.c` land and `safety_core_build_input()`
-starts setting these fields for real.
+The context/current/link path is now real end to end (Finding 0). What this
+fixture still cannot generate on its own:
+
+- **A setpoint.** No producer exists anywhere in `kilnsim`/`virtual_simfw`.
+  Sent as NaN. S2 cannot be exercised here.
+- **CT current.** `sim_engine.c` gates heater duty on K4; K4 never closes.
+  S3/S4 cannot be exercised here.
+- **A commanded zone relay.** No virtual KilnFW/PID exists to close
+  K1..K3, and the `welded_relay`-class faults that would force one are
+  triggered on zone temperatures the fixture never reaches while duty is
+  gated off. S4's positive half cannot be presented.
+
+All three are fixture/scenario-library gaps, not SaftyFW gaps. Read a quiet
+S2/S3/S4 in a `virtual_dut` run as "no stimulus", never as evidence about
+the guard.
+
+### Keeping this harness honest when `safety_core.c` changes
+
+`dut_core/main.c` is an independent stand-in for
+`safety_core_build_input()`, because the real function is FreeRTOS/pico-sdk
+shaped. `f304392` is the cautionary case: it changed the real function but
+not this file, and the re-run's byte-identical verdicts were briefly read as
+"the fix changed nothing" when in fact the fixture was still mirroring the
+pre-fix code. Two rules follow:
+
+1. **Compile the real thing wherever it is compilable.** `dut_core/main.c`
+   `#include`s `firmware/SaftyFW/src/snapshots.h` and calls the real
+   `context_reduce_zones()`/`current_any_present()`. Any new pure helper
+   `safety_core_build_input()` gains should go in an SDK-free header so this
+   harness can compile it too, rather than being hand-mirrored a second time.
+2. **Mirror the FreeRTOS-shaped glue in the same commit** that changes it,
+   and say so in that commit's message.
 
 ## Building
 

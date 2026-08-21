@@ -400,37 +400,80 @@ This was established two ways, cross-checked against each other:
    second, independent confirmation rather than trusting the source reading
    alone.
 
-**Bottom line: only S5, S6b, S7, and S12 can structurally fire in current
-`SaftyFW`.** The other 9 guards are blocked, each for a specific,
-individually-verified reason — not "the same reason" repeated nine times:
+> **Revised 2026-08-20 (commit `f304392`, fixture caught up in the commit
+> this revision ships with).** The table below was written against a
+> `safety_core_build_input()` whose C99 struct literal simply never named
+> `context_valid`, `link_up`, `any_current_present`,
+> `relay_commanded_recently`/`_continuously`, `zone_count`,
+> `max_zone_setpoint_c` or `nearest_zone_measured_c`. `f304392` wired all of
+> them to real producers (`link_task`'s published `context_snapshot_t`,
+> `link_task_link_up()`, `link_task_get_relay_on_continuous_ms()`,
+> `current_task`'s ADC snapshot, via the new pure `context_reduce_zones()`/
+> `current_any_present()` helpers in `src/snapshots.h`) and gave
+> `relay_owner_command_energize()` its first caller
+> (`SAFETY_CMD_REQUEST_ENABLE` (0x02) → `safety_core_request_enable()`).
+> **S2, S3, S4 and S10 are reachable as of that commit; S6b no longer trips
+> unconditionally.** The rows below are updated in place; the struck reasons
+> are kept as history because they are what the `blocked_on:` annotations in
+> `firmware/SimFW/scenarios/*.yaml` were written against.
+>
+> The `virtual_dut` re-run confirming this is in
+> `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`. Read its
+> **"reachable" vs "provokable by this fixture"** distinction carefully: a
+> guard being reachable on the RP2040 does not mean `virtual_dut` can
+> currently drive it (the fixture has no setpoint producer for S2, no
+> current for S3/S4 because nothing closes a relay, and no operator enable
+> step for K4).
+
+**Bottom line as of `f304392`: S2, S3, S4, S5, S6b, S7, S10 and S12 can
+structurally fire; S1, S6a, S9, S11 and S13 remain blocked.** (Before
+`f304392`: only S5, S6b, S7, S12 — and S6b only in the degenerate sense of
+tripping unconditionally.) Each remaining block is a specific,
+individually-verified reason — not "the same reason" repeated:
 
 | Guard | Reachable today? | Blocking input | Why the input is absent |
 |---|---|---|---|
 | S1 | **No** | `cfg->abs_max_temp_c` | Defaults to 0, and `safety_guards.h`'s own convention is 0 = "not commissioned, never trip" (a deliberate safety choice, not a bug). Guard logic is otherwise fully wired to real `tc_c`; will trip correctly the instant a real ceiling is commissioned via `config_store` (Phase 9, already built — see M3 above). **This is a config gap, not a missing-producer gap** — different in kind from every row below it. |
-| S2 | **No** | `in->context_valid` | Never set true by `safety_core_build_input()` — no field for it in the struct literal. Guard resets its own accumulator every tick context is invalid, per `safety_guards.c`'s own "stale context is no context" discipline. |
-| S3 | **No** | `in->context_valid` | Same as S2. |
-| S4 | **No** | `in->context_valid` | Same as S2. |
+| S2 | **Yes** (since `f304392`) | — | `context_valid` is now computed from `link_task_get_context_snapshot()` + `link_task_get_degraded_no_context()` + a `CONTEXT_MAX_AGE_MS` (5 s) staleness test, and `zone_count`/`max_zone_setpoint_c` come from the pure `context_reduce_zones()`. ~~Never set true by `safety_core_build_input()` — no field for it in the struct literal.~~ **Reachable, but `virtual_dut` cannot provoke it**: the fixture has no setpoint producer at all (no ESP, no PID), so it sends `setpoint_c = NaN` rather than a guessed ceiling — see `virtual_dut/README.md`. S2 needs a real ESP (or a scenario that supplies setpoints) to be exercised. |
+| S3 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `any_current_present` now comes from `current_task`'s real ADC snapshot via the pure `current_any_present()`, and `relay_commanded_recently` from `ctx.relay_recent_mask`. ~~Same as S2.~~ **Not provokable by `virtual_dut` today** for an unrelated, fixture-side reason: `sim_engine.c` gates heater duty/CT current on K4, and K4 never closes there because nothing issues the operator-initiated `SAFETY_CMD_REQUEST_ENABLE` — so `any_current_present` is false for the whole run. |
+| S4 | **Yes** (since `f304392`) | — | Same as S3, plus `relay_commanded_continuously`, computed here from `link_task_get_relay_on_continuous_ms()` against `correlation_window_s` (an AND over the window, which neither wire mask alone answers). ~~Same as S2.~~ Same fixture-side non-provokability as S3 (no relay is ever commanded on in a `virtual_dut` run). |
 | S5 | **Yes** | — | `tc_valid`/`tc_c`/`fault_bits`/`spi_failed` all come from `thermo_task`'s real snapshot, unconditionally, no gating field at all. |
 | S6a | **No** | `in->main_fault_asserted` | Never set by `safety_core_build_input()` — **notably, the producer already exists and works**: `discrete_task_main_fault()` is a real, debounced (200 ms) reading of GPIO10, called nowhere near `safety_core_build_input()` even though `discrete_task_estop_pressed()` (the sibling function, for S7) is called two lines away in the same function. This is a one-line wiring omission, not a missing Phase. |
-| S6b | **Trips unconditionally** | `in->link_up` | Never set true — no field for it in the struct literal, and `safety_core.c` carries its own `TODO (Phase 7): context_snapshot_t is read here too, once link_task publishes one`, confirming this is known, not accidental. `link_task.c` itself is substantially built (ROADMAP M5) — the gap is specifically that `safety_core` never reads from it. Net effect: the elapsed-silence timer accumulates from the first tick of every boot and trips the hard backstop (`link_dead_hard_s`, default 120 s) regardless of any other condition, roughly 2 minutes into every boot. On a bench this presents as a mystery nuisance trip, not a real link failure. |
+| S6b | **Yes** (since `f304392`) — no longer unconditional | — | `link_up` now comes from `link_task_link_up()` (a CRC-valid frame decoded within `LINK_UP_RECENCY_MS` = 1000 ms; recorded before the BROADCAST filter, so any well-formed frame counts). ~~Never set true — no field for it in the struct literal … the elapsed-silence timer accumulates from the first tick of every boot and trips the hard backstop (`link_dead_hard_s`, default 120 s) regardless of any other condition, roughly 2 minutes into every boot.~~ **That nuisance trip is gone and measured gone**: it fired in 16 of 19 `virtual_dut` scenarios before this fix and in 0 of 19 after, with no other change to the scenarios. |
 | S7 | **Yes** | — | `estop_pressed` comes from `discrete_task_estop_pressed()`, a real, debounced (50 ms) GPIO9 reading, called directly in `safety_core_build_input()`. |
-| S9 | **No** | `in->relay_deenergized` | Never computed — nothing plumbs `relay_owner_is_energized()`'s inverse into the input struct. S9 only evaluates once already tripped, so this also can never be exercised while every other guard above it is blocked, compounding the gap. Separately, and independently: K4 is never energized in the first place today (`relay_owner_command_energize()` has zero callers anywhere in the tree — see ROADMAP M4), so "K4 was energized, then a trip de-energized it" cannot happen yet regardless of S9's own wiring. |
-| S10 | **No** | `in->context_valid` | Same as S2. |
+| S9 | **No** | `in->relay_deenergized` | Never computed — nothing plumbs `relay_owner_is_energized()`'s inverse into the input struct. This is the one row `f304392` did not move at all. The second, independent half of this row has changed, though: ~~K4 is never energized in the first place today (`relay_owner_command_energize()` has zero callers anywhere in the tree)~~ — `relay_owner_command_energize()` now has a caller, `safety_core_request_enable()`, reached from `link_task.c`'s `SAFETY_CMD_REQUEST_ENABLE` (0x02) decoder. That caller is only ever driven by an explicit operator/PC command (KilnFW's `uart_bridge.c` → `safety_link_request_enable()`, i.e. PcTools' `safety_request_enable`), **not** automatically when a profile runs, so K4 still sits open through every `virtual_dut` scenario — no scenario models the operator enable step. |
+| S10 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `nearest_zone_measured_c` comes from `context_reduce_zones()`'s nearest-match search (never the mean). ~~Same as S2.~~ **And genuinely exercised**: `main_safety_skew`'s `s10_stays_quiet` (an +80 °C skew must stay under `tc_disagreement_c` = 200 °C) is now a real anti-nuisance PASS in `virtual_dut` rather than a vacuous one — the first guard this fix turns from "cannot evaluate" into "evaluated and correct" against fixture data. |
 | S11 | **No** | `in->heat_commanded` | Hardcoded `false` in `safety_core_build_input()` — its own comment: "no current sense yet, Phase 6." Already flagged in this file's §5 notes for `safety_tc_frozen.yaml`; recorded here as the general row. |
-| S12 | **Yes** | — | `cj_c` comes from the same real `thermo_task` snapshot as S1/S5/S11, with **no** `context_valid` or `link_up` gating at all — the guard's own code puts it before the context-gated block. Not observed firing in this pass's `virtual_dut` run, but for an unrelated, scenario-file reason: `cj_fault.yaml` has no numeric fault offset, so the simulated cold junction never actually moves (`virtual_dut/README.md` Finding 6) — not a guard defect. |
-| S13 | **No** | `in->context_valid` | Same as S2 (S13 is additionally gated on `cfg->tc_source`, which defaults to a value that keeps it inactive anyway — but `context_valid` alone already blocks it). |
+| S12 | **Yes** | — | `cj_c` comes from the same real `thermo_task` snapshot as S1/S5/S11, with **no** `context_valid` or `link_up` gating at all — the guard's own code puts it before the context-gated block. ~~Not observed firing … `cj_fault.yaml` has no numeric fault offset~~ — that scenario-file gap was closed (`params: [70.0]`) and S12 has since been observed genuinely warning *and* tripping in `cj_fault`. |
+| S13 | **No** | `in->sample_counter_advancing` + `cfg->tc_source` | ~~Same as S2 (S13 is additionally gated on `cfg->tc_source` …).~~ `context_valid` no longer blocks it, but the two remaining blocks are both **commissioning gaps, not producer gaps** — the same category as S1's row above, and deliberately left that way by `f304392`. Deciding whether a zone's `sample_counter` advanced requires a commissioned `borrowed_zone_index` (0..2) naming *which* context zone is the borrowed channel; that field is documented (`SAFETY_MODEL.md` §3, `CONFIG_REFERENCE.md`) but exists nowhere in the codebase — no `config_store` field, no `safety_guard_cfg_t` field — so `safety_core_build_input()` leaves `sample_counter_advancing` false rather than hardcoding zone 0 and being silently wrong on any installation whose borrowed zone is not zone 0. Independently, `cfg->tc_source` defaults to `OWN_J7`, which `safety_guards.c` gates the whole S13 block on. |
 
 **Read this table honestly, not as a verdict on guard quality.** Every guard
 above's *logic* passed its host-test row in section 2 — the code that
 decides "should this trip" is correct against the inputs it is given. What
-this table adds is that most of those inputs are never given today, because
-the parts of `SaftyFW` that would produce them (link context, Phase 7;
-current sense, Phase 6; commissioning, Phase 9's remaining piece) are not
-finished — exactly what `SAFETY_MODEL.md` and `SaftyFW/TODO.md` already say
-about those phases. **What's new here is not the incompleteness — it's a
-precise, per-guard accounting of what it means in practice**, obtained by
-reading the actual code rather than inferring from phase checklists, and
-independently confirmed by running that same code.
+this table adds is which of those inputs are actually given.
+
+**Three distinct states, easy to conflate — keep them apart:**
+
+1. **Not reachable** — `safety_core.c` never produces the input, so the
+   guard's branch cannot run at all. After `f304392` this is only S6a
+   (`main_fault_asserted`, a one-line wiring omission on an existing,
+   working `discrete_task_main_fault()` producer), S9 (`relay_deenergized`),
+   and S11 (`heat_commanded`, still hardcoded `false`).
+2. **Reachable but not commissioned** — the input path is complete; a
+   per-kiln config value that has no default, and deliberately must not be
+   guessed, keeps the guard quiet. S1 (`abs_max_temp_c`) and S13
+   (`borrowed_zone_index` + `tc_source`). This is a safety choice, not a bug.
+3. **Reachable, but not provokable by `virtual_dut`** — the firmware is
+   done; the *fixture* cannot generate the stimulus. S2 (no setpoint
+   producer anywhere in `kilnsim`/`virtual_simfw`), S3 and S4 (no CT current
+   and no commanded relay, because `sim_engine.c` gates heater duty on K4
+   and no scenario issues the operator enable). Do not read a quiet S3 in a
+   `virtual_dut` run as evidence about S3.
+
+Only S5, S6b, S7, S10 and S12 are simultaneously reachable, commissioned and
+provokable by the fixture today — and only those five have `virtual_dut`
+evidence behind them. Everything else in the "Yes" column is a source-level
+verdict awaiting a stimulus.
 
 **Re-checking this table:** re-run `firmware/SimFW/tools/virtual_dut/
 run_dut_scenarios.py` against the 19 scenarios any time `link_task`
@@ -439,3 +482,18 @@ newly-reachable guards will show real `guard_warn`/`guard_trip` events in
 `results/SCENARIO_RESULTS.md` where they previously showed none. Update this
 table's "Reachable today?" column in the same change, per this file's own
 "keep this file current" rule at the top.
+
+**And re-check the fixture itself in the same pass.** `f304392` is the
+cautionary case: it changed `safety_core_build_input()` but not
+`virtual_dut/dut_core/main.c`, which is an *independent hand-written
+stand-in* for that function (the real one is FreeRTOS-shaped and cannot be
+host-compiled). The re-run produced byte-identical verdicts and was briefly
+recorded as "no delta", when in fact the fixture was simply still mirroring
+the pre-fix code. `dut_core/main.c` now `#include`s
+`firmware/SaftyFW/src/snapshots.h` and calls the **real**
+`context_reduce_zones()`/`current_any_present()` rather than reimplementing
+them, so that class of silent drift is limited to the FreeRTOS-shaped glue
+around them. Any future change to `safety_core_build_input()` must be
+mirrored there in the same commit, and any pure helper it gains should live
+in `snapshots.h` (or another SDK-free header) so the fixture can compile the
+real thing instead of copying it.

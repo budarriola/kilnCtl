@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 44,
   "timescale": 10.0,
-  "start_time": 1787269320.6178148,
+  "start_time": 1787271729.14341,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 44000000,
+      "sim_time_us": 45000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S5"
@@ -34,7 +34,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 44000000,
+      "sim_time_us": 45000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -46,7 +46,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 94000000,
+      "sim_time_us": 96000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S5"
@@ -86,5 +86,12 @@
     "spi_underrun": false,
     "event_seq_gap": false,
     "valid": true
+  },
+  "dut_input_reachability": {
+    "polls": 56,
+    "context_valid": 56,
+    "any_current_present": 0,
+    "link_up": 56,
+    "max_zone_count": 3
   }
 }

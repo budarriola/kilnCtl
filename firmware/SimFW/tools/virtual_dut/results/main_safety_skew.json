@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 49,
   "timescale": 20.0,
-  "start_time": 1787269157.364018,
+  "start_time": 1787271566.408003,
   "events": [
     {
       "seq": 0,
@@ -23,18 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 176000000,
-      "event_type": "GUARD_TRIP",
-      "payload": {
-        "guard": "S6b"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000001,
-      "sim_time_us": 176000000,
+      "sim_time_us": 188000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -71,5 +60,12 @@
     "spi_underrun": false,
     "event_seq_gap": false,
     "valid": true
+  },
+  "dut_input_reachability": {
+    "polls": 39,
+    "context_valid": 39,
+    "any_current_present": 0,
+    "link_up": 39,
+    "max_zone_count": 1
   }
 }

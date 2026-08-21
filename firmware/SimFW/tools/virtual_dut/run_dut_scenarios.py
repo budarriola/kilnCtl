@@ -55,17 +55,45 @@ in the first place -- so the loop is now genuinely wired end-to-end, but
 produces no numerically different scenario results, for two independent
 and separately-verified reasons, not because the wiring is a no-op.
 
+Context, link liveness and CT current (added 2026-08-20, after SaftyFW
+commit ``f304392``): ``safety_core_build_input()`` now reads link_task's
+published ``context_snapshot_t``, ``link_task_link_up()``,
+``link_task_get_relay_on_continuous_ms()`` and ``current_task``'s ADC
+snapshot, so a harness that keeps hardcoding those to false is no longer a
+faithful mirror -- it is a stale one. This script therefore builds a
+``PUSH_CONTEXT``-equivalent every poll out of `virtual_simfw`'s own
+telemetry (the very same physical facts a real ESP would report: per-zone
+measured temperature, which zones are active, which relays are commanded,
+per-zone CT amps) and hands it to ``dut_core.exe``, which runs the **real**
+``context_reduce_zones()``/``current_any_present()`` helpers from
+``firmware/SaftyFW/src/snapshots.h`` over it. See ``_FixtureContext`` below
+for the per-field sourcing, including the one field the fixture genuinely
+has no producer for.
+
 What this script still does NOT do (see README.md for the full, honest
 list):
-  - It does NOT invent context (context_valid stays false, matching
-    safety_core_build_input()'s real current struct literal), so S2/S3/S4/
-    S9/S10/S13 correctly never fire here -- not a gap in this script, a
-    faithfully-reproduced gap in current SaftyFW (see README.md).
+  - It does not know any zone's **setpoint**. There is no ESP and no PID in
+    this fixture; nothing anywhere in `kilnsim`/`virtual_simfw` carries a
+    setpoint (the scenarios' ``dut: {profile: ...}`` key names a KilnFW
+    profile that nothing here executes). ``setpoint_c`` is therefore sent as
+    NaN -- "unknown", never a guessed number -- which makes S2's own
+    ``tc_c > max_zone_setpoint_c + margin`` test false rather than inventing
+    a ceiling for S2 to trip on. S2 is reachable on the real target after
+    ``f304392``; it is simply not provokable by this fixture.
+  - It does not issue ``SAFETY_CMD_REQUEST_ENABLE``. ``f304392`` gave
+    ``relay_owner_command_energize()`` its first caller, but that caller is
+    reached only from an explicit operator/PC command (KilnFW's
+    ``uart_bridge.c`` ``SAFETY_CMD_REQUEST_ENABLE`` case, i.e. PcTools'
+    ``safety_request_enable`` MCP tool) -- KilnFW does *not* request enable
+    automatically when a profile runs. No scenario models that operator
+    step, so K4 still never closes here. ``dut_core.exe`` has an ``ENABLE``
+    command ready for the scenario that eventually does.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -186,11 +214,37 @@ class DutCore:
         if reply != "OK":
             raise RuntimeError(f"dut_core RESET failed: {reply!r}")
 
-    def tick(self, regs: bytes, estop: bool) -> dict:
+    def enable(self, enable: bool) -> bool:
+        """Mirrors link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder ->
+        safety_core_request_enable() -> relay_owner_command_energize(). No
+        scenario calls this today -- see the module docstring for why (the
+        real caller is an operator/PC command, not an automatic KilnFW
+        action) -- but the path exists so one can."""
+        reply = self._send(f"ENABLE {1 if enable else 0}")
+        if not reply.startswith("OK "):
+            raise RuntimeError(f"dut_core ENABLE failed: {reply!r}")
+        return reply.split()[1] == "1"
+
+    def tick(self, regs: bytes, estop: bool, ctx: dict) -> dict:
         hex_regs = regs.hex()
-        reply = self._send(f"TICK {hex_regs} {1 if estop else 0}")
+        zone_args = "".join(
+            f" {z['flags']} {z['setpoint_c']!r} {z['measured_c']!r} {z['sample_counter']}"
+            for z in ctx["zones"]
+        )
+        line = (
+            f"TICK {hex_regs} {1 if estop else 0}"
+            f" {1 if ctx['link_up'] else 0}"
+            f" {1 if ctx['ctx_present'] else 0}"
+            f" {1 if ctx['ctx_degraded'] else 0}"
+            f" {ctx['ctx_age_ms']}"
+            f" {ctx['relay_now_mask']} {ctx['relay_recent_mask']}"
+            f" {ctx['relay_on_continuous_ms']}"
+            f" {ctx['amps'][0]!r} {ctx['amps'][1]!r} {ctx['amps'][2]!r}"
+            f" {len(ctx['zones'])}{zone_args}"
+        )
+        reply = self._send(line)
         parts = reply.split()
-        if len(parts) != 15:
+        if len(parts) != 19:
             raise RuntimeError(f"dut_core TICK: malformed reply {reply!r}")
         return {
             "is_tripped": parts[0] == "1",
@@ -208,6 +262,13 @@ class DutCore:
             "tc_c": float(parts[12]),
             "cj_c": float(parts[13]),
             "fault_bits": int(parts[14]),
+            # Derived by dut_core.exe using the REAL snapshots.h helpers --
+            # echoed back so guard-reachability can be reported without
+            # re-deriving any of it in Python.
+            "context_valid": parts[15] == "1",
+            "eff_zone_count": int(parts[16]),
+            "any_current_present": parts[17] == "1",
+            "link_up": parts[18] == "1",
         }
 
     def close(self) -> None:
@@ -239,6 +300,126 @@ def start_virtual_simfw(seed: int) -> subprocess.Popen:
         proc.kill()
         raise RuntimeError("virtual_simfw.exe did not report a listening port")
     return proc, port
+
+
+class _FixtureContext:
+    """Builds the `SAFETY_CMD_PUSH_CONTEXT`-equivalent facts `dut_core.exe`
+    needs, out of `virtual_simfw`'s telemetry.
+
+    This is not "inventing context": every field below is a physical fact the
+    fixture already reports, mapped onto the wire field a real ESP would
+    carry it in (`CommonFW/docs/LINK_PROTOCOL.md` sec 4 /
+    `firmware/SaftyFW/src/snapshots.h`'s `context_snapshot_t`). The one field
+    with no fixture producer at all (`setpoint_c`) is sent as NaN rather than
+    guessed -- see the module docstring.
+
+    The *reductions* over these facts (`context_reduce_zones()`,
+    `current_any_present()`, the `CONTEXT_MAX_AGE_MS` staleness test, the
+    `correlation_window_s` comparison) are deliberately NOT done here: they
+    are done in `dut_core.exe`, by the real, unmodified SaftyFW code, exactly
+    as `safety_core_build_input()` does them.
+    """
+
+    # snapshots.h's CONTEXT_ZONE_FLAG_* (per-zone flags byte).
+    ZONE_FLAG_MEASURED_VALID = 0x01
+    ZONE_FLAG_ACTIVE = 0x02
+    ZONE_FLAG_RELAY_ON = 0x04
+
+    # link_task.c's LINK_UP_RECENCY_MS: link_up is "a CRC-valid frame within
+    # the last second". The fixture's stand-in for "a frame arrived" is "the
+    # telemetry stream advanced". Both this and CONTEXT_MAX_AGE_MS are
+    # measured in WALL milliseconds, not sim milliseconds: on the real Pico
+    # they are `to_ms_since_boot()`/tick quantities compared against a real
+    # ESP poll period (~200 ms), and the fixture's telemetry broadcast is
+    # likewise a real-time stream (~2 Hz here) whose rate does not scale with
+    # `timescale`. Scaling them by timescale would make a healthy 2 Hz
+    # broadcast read as a dead link at timescale 10 purely as an artifact of
+    # the run being compressed.
+    LINK_UP_RECENCY_MS = 1000
+
+    # How far back `relay_recent_mask` ORs. SAFETY_MODEL.md sec 4 S3 wants
+    # "anything commanded on in the last correlation_window_s"; 150s is
+    # safety_guards.c's own CORRELATION_WINDOW_S_DEFAULT, the same number
+    # safety_core.c substitutes when cfg->correlation_window_s is 0.
+    RECENT_WINDOW_S = 150.0
+
+    def __init__(self):
+        self.prev_sim_us: Optional[int] = None
+        self.last_advance_wall: Optional[float] = None
+        self.relay_history: list = []  # [(sim_us, mask)]
+        self.on_since_us: Optional[int] = None
+
+    def observe(self, telemetry: dict) -> dict:
+        sim_us = int(telemetry.get("sim_time_us", 0))
+        now_wall = time.time()
+        advanced = self.prev_sim_us is None or sim_us > self.prev_sim_us
+        if advanced:
+            self.last_advance_wall = now_wall
+        self.prev_sim_us = sim_us
+
+        # Age in WALL ms since the telemetry stream last advanced (see
+        # LINK_UP_RECENCY_MS above for why wall and not sim). A stalled/dead
+        # fixture stream is exactly what a stalled/dead ESP link looks like
+        # from safety_core's side, and it ages out through the same
+        # CONTEXT_MAX_AGE_MS / LINK_UP_RECENCY_MS tests dut_core.exe applies.
+        stall_wall_s = 0.0 if self.last_advance_wall is None else (now_wall - self.last_advance_wall)
+        age_ms = int(stall_wall_s * 1000.0)
+
+        # Zone relays K1/K2/K3 -> context relay bits 0..2 (LINK_PROTOCOL.md
+        # sec 4's "relays 1-4, as actually commanded"). kilnsim's own bit
+        # order is K1,K2,K3,K5,K4 (`sim_snapshot.h`'s sim_relay_bit_t), so
+        # masking the low three bits is the K1..K3 set and nothing else --
+        # K5 (fixture DUT power) and K4 (the safety pilot the DUT itself
+        # owns) are deliberately not reported to the DUT as zone relays.
+        relay_mask = int(telemetry.get("relay_state_mask", 0)) & 0x07
+
+        self.relay_history.append((sim_us, relay_mask))
+        cutoff_us = sim_us - int(self.RECENT_WINDOW_S * 1_000_000)
+        self.relay_history = [(t, m) for (t, m) in self.relay_history if t >= cutoff_us]
+        recent_mask = 0
+        for _, m in self.relay_history:
+            recent_mask |= m
+
+        if relay_mask != 0:
+            if self.on_since_us is None:
+                self.on_since_us = sim_us
+        else:
+            self.on_since_us = None
+        relay_on_ms = 0 if self.on_since_us is None else max(0, (sim_us - self.on_since_us) // 1000)
+
+        zones = []
+        amps = [0.0, 0.0, 0.0]
+        for i, z in enumerate(telemetry.get("zones", [])[:3]):
+            measured = float(z.get("t_tc_reported", float("nan")))
+            flags = self.ZONE_FLAG_ACTIVE  # every zone the fixture models is part of the firing
+            if math.isfinite(measured):
+                flags |= self.ZONE_FLAG_MEASURED_VALID
+            if relay_mask & (1 << i):
+                flags |= self.ZONE_FLAG_RELAY_ON
+            zones.append({
+                "flags": flags,
+                # No producer anywhere in this fixture -- NaN means unknown.
+                "setpoint_c": float("nan"),
+                "measured_c": measured,
+                # S13 is deliberately dormant in safety_core.c too (no
+                # commissioned borrowed_zone_index exists); dut_core.exe
+                # hardcodes sample_counter_advancing=false to match, so this
+                # field is carried for struct fidelity and read by nothing.
+                "sample_counter": 0,
+            })
+            amps[i] = float(z.get("i_amps", 0.0))
+
+        return {
+            "link_up": age_ms < self.LINK_UP_RECENCY_MS and self.last_advance_wall is not None,
+            "ctx_present": self.last_advance_wall is not None,
+            "ctx_degraded": False,  # no version-mismatch path exists in this fixture
+            "ctx_age_ms": age_ms,
+            "relay_now_mask": relay_mask,
+            "relay_recent_mask": recent_mask,
+            "relay_on_continuous_ms": relay_on_ms,
+            "amps": amps,
+            "zones": zones,
+        }
 
 
 class _GuardEdgeTracker:
@@ -332,6 +513,9 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
         collected: list = []
         wire_tracker = kr._TelemetryEdgeTracker()
         guard_tracker = _GuardEdgeTracker()
+        fixture_ctx = _FixtureContext()
+        reach = {"polls": 0, "context_valid": 0, "any_current_present": 0,
+                 "link_up": 0, "max_zone_count": 0}
 
         last_sim_time_us = 0
         start_wall = time.time()
@@ -358,15 +542,31 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                 # run_dut_scenarios.py's module docstring / README.md for
                 # why this is a documented approximation (the same TC
                 # reading is replayed for every step in one batch) rather
-                # than a per-100ms live poll.
+                # than a per-100ms live poll. The context/current/link facts
+                # built from this same telemetry sample are replayed across
+                # the batch for exactly the same reason and with exactly the
+                # same documented consequence (coarser time resolution on a
+                # changing input, never a change to any guard's own logic).
+                ctx_facts = fixture_ctx.observe(telemetry)
                 step_us = int(SAFETY_CORE_TICK_S * 1_000_000)
                 n_steps = max(1, (sim_time_us - last_sim_time_us) // step_us) if sim_time_us > last_sim_time_us else 1
                 n_steps = min(n_steps, 20_000)  # sanity cap
                 result = None
                 for i in range(n_steps):
-                    result = dut.tick(regs, estop)
+                    result = dut.tick(regs, estop, ctx_facts)
                 last_sim_time_us = max(sim_time_us, last_sim_time_us)
                 if result is not None:
+                    # Guard-reachability accounting: how many polls actually
+                    # presented each context/current/link precondition to the
+                    # real guard code. Printed per scenario (never used to
+                    # decide any verdict) so "S3 did not fire" can be read as
+                    # "S3 was evaluated and stayed quiet" vs "S3 was gated
+                    # off" without re-deriving anything in Python.
+                    reach["polls"] += 1
+                    for key in ("context_valid", "any_current_present", "link_up"):
+                        if result[key]:
+                            reach[key] += 1
+                    reach["max_zone_count"] = max(reach["max_zone_count"], result["eff_zone_count"])
                     collected.extend(guard_tracker.observe(sim_time_us, result))
                     # Close the loop: feed relay_owner_task()'s real,
                     # unmodified decision (dut_core's `energized`, straight
@@ -386,7 +586,9 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
             scenario, collected, spi_underrun=False,
             seed=run_seed, timescale=run_timescale, start_time=start_wall,
         )
-        return report.to_dict()
+        out = report.to_dict()
+        out["dut_input_reachability"] = dict(reach)
+        return out
     finally:
         link.disconnect()
         dut.close()
@@ -429,6 +631,11 @@ def main() -> int:
         out_path = args.out / f"{scenario.name}.json"
         out_path.write_text(json.dumps(report, indent=2))
         print(f"  verdict: {report['verdict']}  (report: {out_path})")
+        r = report.get("dut_input_reachability", {})
+        if r.get("polls"):
+            print(f"    inputs: {r['polls']} polls, context_valid {r['context_valid']}, "
+                  f"link_up {r['link_up']}, any_current_present {r['any_current_present']}, "
+                  f"max eligible zones {r['max_zone_count']}")
         for exp in report["expectations"]:
             print(f"    [{exp['verdict']:>7}] {exp['name']}: {exp['detail']}")
         if report["verdict"] == "FAIL":

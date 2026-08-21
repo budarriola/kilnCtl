@@ -35,26 +35,27 @@ expect:
       within_s: 13       # borrowed_stale_s = 10s (SAFETY_MODEL.md §4 S13) + margin
       not_before_s: 9
     blocked_on:
-      reason: "context_valid is never set true by safety_core_build_input()
-               (firmware/SaftyFW/src/tasks/safety_core.c) -- S13's staleness
-               tracking (state->s13_stale_elapsed_s/s13_warn) lives inside
-               safety_guards.c's context_valid-gated else-branch and is
-               force-reset to 0/false while context_valid is false, so this
-               cannot warn against present-day SaftyFW regardless of what
-               the fixture does."
-      phase: "Phase 7 (link_task) is built and already publishes this
-              context, sample_counter included -- link_task_publish_
-              context()/link_task_get_context_snapshot() (firmware/SaftyFW/
-              src/tasks/link_task.c) parse and cache every
-              SAFETY_CMD_PUSH_CONTEXT (0x07) frame today, and
-              context_zone_t.sample_counter (snapshots.h) is already part
-              of that decoded struct. The real gap is one layer up:
-              safety_core.c's safety_core_build_input() never calls
-              link_task_get_context_snapshot() at all (see its own TODO at
-              safety_core.c:208-210), so context_valid stays at its
-              zero-init false regardless of what the ESP sends. A wiring
-              gap in an already-built producer/consumer pair, not a
-              missing Phase 7 deliverable."
+      reason: "Re-diagnosed after SaftyFW commit f304392. The previous reason
+               -- 'context_valid is never set true' -- no longer holds:
+               context_valid is true on every poll of this scenario now. S13
+               is still dormant, for two reasons that are both COMMISSIONING
+               gaps rather than wiring gaps, and both deliberate. (1)
+               safety_core_build_input() leaves sample_counter_advancing false
+               on purpose: deciding whether the borrowed channel advanced
+               requires a commissioned borrowed_zone_index (0..2) naming which
+               context zone is the borrowed one, and that field exists nowhere
+               in the codebase (no config_store field, no safety_guard_cfg_t
+               field) -- hardcoding zone 0 would invent a commissioning
+               decision and be silently wrong on any kiln whose borrowed zone
+               is not zone 0. (2) safety_guards.c gates the whole S13 block on
+               cfg->tc_source being BORROWED_ZONE or BOTH, and it defaults to
+               OWN_J7. Same category as S1's abs_max_temp_c."
+      phase: "Phase 9 (commissioning), not Phase 7. config_store exists but
+              has no borrowed_zone_index or tc_source field wired into
+              s_guard_cfg, which is still a zero-initialized static in
+              safety_core.c. Until a real installation's borrowed zone is
+              commissioned there is nothing correct for this fixture, or the
+              firmware, to assert."
   - name: trips_after_stale_trip_deadline
     event: { type: fault_fired, slot: stuck }
     then:
@@ -62,11 +63,18 @@ expect:
       within_s: 65       # borrowed_stale_trip_s = 60s (SAFETY_MODEL.md §4 S13) + margin
       not_before_s: 58
     blocked_on:
-      reason: "Same context_valid gap as `sample_counter_goes_stale` above --
-               S13 cannot warn, so it certainly cannot escalate to a trip."
-      phase: "Same as `sample_counter_goes_stale` above -- link_task
-              already publishes this context; safety_core_build_input()
-              just never reads it. Not a Phase 7 existence gap."
+      reason: "Same two commissioning gaps as `sample_counter_goes_stale`
+               above (uncommissioned borrowed_zone_index, tc_source defaulting
+               to OWN_J7) -- S13 cannot warn, so it certainly cannot escalate
+               to a trip. Separately, and independently, K4 is open from sim-
+               time 0 so there would be no K4_open edge for this clause to
+               match even if S13 did trip."
+      phase: "Phase 9 (commissioning), not Phase 7. config_store exists but
+              has no borrowed_zone_index or tc_source field wired into
+              s_guard_cfg, which is still a zero-initialized static in
+              safety_core.c. Until a real installation's borrowed zone is
+              commissioned there is nothing correct for this fixture, or the
+              firmware, to assert."
 manual_checks:
   - "Confirm SaftyFW is commissioned with tc_source=BORROWED_ZONE or BOTH before running this scenario — S13 only evaluates in those modes (SAFETY_MODEL.md §3/§4 S13); under tc_source=OWN_J7 this same fault, fired on tc:safety instead, would exercise S11 (frozen_window_s=600s) rather than S13, and that commissioning state is not something the fixture itself can verify or set"
 report_keep: [telemetry, events]

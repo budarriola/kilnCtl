@@ -43,28 +43,21 @@ expect:
   - name: no_trip_ever
     forbid: { dut: K4_open, before: { sim_end: true } }
     blocked_on:
-      reason: "This forbid clause is currently satisfied for the wrong
-               reason: K4 starts de-energized (open) at boot and stays that
-               way -- relay_owner_command_energize() is fully built
-               (firmware/SaftyFW/src/tasks/relay_owner.c) but called by
-               nothing in the current source tree -- so K4_open is already
-               true at sim-time 0. Separately, this scenario's own exercised
-               guards S1/S10 also cannot evaluate at all today (S1:
-               abs_max_temp_c uncommissioned, Phase 9; S10: context_valid
-               never populated, Phase 7), so 'no trip ever' is not
-               exercising the anti-nuisance behavior it names either way."
-      phase: "For K4 energize: link_task exists but has no
-              LINK_FRAME_REQUEST_ENABLE_CMD case (SAFETY_CMD_REQUEST_ENABLE
-              0x02, already sent by KilnFW) -- a genuinely missing decoder,
-              Phase 7 work not yet done. For S10's context_valid: link_task
-              already publishes context (link_task_get_context_snapshot());
-              safety_core_build_input() just never reads it -- a wiring
-              gap, not a Phase 7 existence gap. For S1's abs_max_temp_c:
-              config_store now exists (Phase 9, config_store.{c,h}/
-              config_store_flash.c) but has no abs_max_temp_c field yet
-              (only tc_type is wired), and safety_core.c never reads
-              config_store for guard thresholds at all -- s_guard_cfg is a
-              zero-initialized static, never populated from flash."
+      reason: "Partially resolved. S10 is no longer blocked: commit f304392
+               populates context_valid/zone_count/nearest_zone_measured_c, and
+               S10 is now genuinely evaluated against this scenario's noise
+               (virtual_dut measures context_valid true on every poll). S1
+               remains blocked on uncommissioned abs_max_temp_c (Phase 9). The
+               forbid clause itself is still satisfied for the wrong reason,
+               though: K4 is open from sim-time 0 because no scenario issues
+               the operator SAFETY_CMD_REQUEST_ENABLE, so 'no trip ever' still
+               is not proving the anti-nuisance behavior it names."
+      phase: "For S10: done (f304392). For S1's abs_max_temp_c: Phase 9 --
+              config_store exists but has no abs_max_temp_c field, and
+              safety_core.c never reads config_store for guard thresholds at
+              all (s_guard_cfg is a zero-initialized static). For K4 energize:
+              no longer a missing decoder; the gap is that no scenario
+              performs the operator enable step."
   - name: no_fault_line_latch
     forbid: { dut: fault_line_asserted, before: { sim_end: true } }
 manual_checks:
