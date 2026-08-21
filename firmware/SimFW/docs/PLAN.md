@@ -194,9 +194,10 @@ never `[x]`.
       rules out Plan A entirely. See `docs/SPI_ACCESS_AUDIT.md` §6 for the
       DMA-fed Plan B sketch. This is the biggest open *design* risk in the
       fixture.
-- [ ] **Second DUT-power relay output bit.** The two-relay decision is made
-      (§11 item 5) but `i2c_owner.c` still exposes only one
-      `EXP1_PIN_DUT_POWER`. Spare expander capacity exists. (M-E)
+- [ ] **Expose the second DUT-power relay in `kilnsim`.** The firmware and
+      wire protocol are done (`f5cb4c3`), but the CLI, GUI, MCP tool, and
+      `MockSimLink` still surface only the main-domain relay, so no operator
+      can actually reach the safety-domain one. (M-E)
 - [ ] **S11 guard input** — `heat_commanded` is the last never-produced
       input in `safety_core_build_input()`, and it genuinely waits on Phase 6
       current sense. S9 was wired in `5f90325`.
@@ -250,6 +251,12 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] Second DUT-power relay in firmware + protocol (`f5cb4c3`) —
+      `EXP1_PIN_DUT_POWER_SAFETY = 10` for J19/safety, alongside the renamed
+      `_MAIN` for J18. **Deliberately no combined "set both" command anywhere
+      in the stack**, so bonding behavior across the two ground domains can
+      never be a silent default; the legacy command keeps its narrower
+      main-only meaning rather than being widened
 - [x] CT calibration **mechanism** in firmware (`f93b2eb`) —
       `src/sim/ct_calibration.{c,h}` applies
       `clamp(gain[ch]*amps + offset[ch], 0, 1)`, with a generated compiled-in
@@ -1366,10 +1373,12 @@ than left to be inferred.
    isolation the rest of the fixture is built to preserve — so the design
    uses two independent relays, each on its own bench-supply channel, which
    also lets scenarios brown out one domain independently of the other.
-   **Not yet implemented in code:** `i2c_owner.c` still exposes only
-   `EXP1_PIN_DUT_POWER` (one bit); a second named MCP23017 output is needed
-   (spare capacity exists, `docs/HARDWARE.md` §3.7) — a firmware follow-on,
-   not a parts gap. **Still genuinely open, not just an estimate needing a
+   **Implemented 2026-08-20 (`f5cb4c3`):** `i2c_owner.c` now exposes
+   `EXP1_PIN_DUT_POWER_MAIN` (pin 7, J18) and `EXP1_PIN_DUT_POWER_SAFETY`
+   (pin 10, J19), with separate protocol commands and no combined "set both"
+   call in the stack, so the two domains can never be ganged by default.
+   `kilnsim`'s CLI/GUI/MCP surfaces still expose only the main relay — see
+   §0.1. **Still genuinely open, not just an estimate needing a
    part:** relay inrush rating vs the board's actual inrush has not been
    measured. `docs/BOM.md` §6 gives an estimate — ~60 A peak / ~190 µs decay
    from ~940 µF per-domain bulk capacitance (confirmed via
