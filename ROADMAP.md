@@ -793,6 +793,13 @@ found — but this only affects PC/MCP tooling's visibility into Wi-Fi
 state, not the AP itself (which comes up and accepts joins regardless, per
 the same log). See `firmware/KilnFW/TODO.md`'s UART section for the
 tracking entry.
+**CLOSED 2026-08-20**: same root cause as the AUTOTUNE/WIFI registration
+failure below — internal-DRAM exhaustion at task-creation time, fixed by
+moving LVGL's allocator and the Wi-Fi/lwIP pools to PSRAM rather than by
+shrinking the tasks that were failing. All 12 UART tasks now register every
+boot; verified across many reboots, and an 18-surface read-only smoke test
+(every bridge: INFO/IO/THERMO/SAFETY/CONTROL/PROFILES/AUTOTUNE/WIFI/TOUCH/
+OTA/SYSTEM) returned 18 ok, 0 failed.
 
 **2026-08-20: manual zone-control page declined by explicit user request**
 (no manual setpoint override bypassing a running profile) — dropped from
@@ -860,6 +867,26 @@ summary:
   out the simplest theories. Real root cause needs a coredump/backtrace,
   not log-based diagnosis (the boot-time log pipeline itself drops lines
   under the same load). Does not affect the AP's actual radio operation.
+  - **RESOLVED 2026-08-20 — and the stack-size reduction above turned out
+    to be actively harmful.** The registration failure was internal-DRAM
+    exhaustion: `xTaskCreatePinnedToCore()` always takes both TCB and stack
+    from internal SRAM, and the largest contiguous internal block collapses
+    from 163840 bytes at `app_main` entry to a few KB by the time these
+    tasks are created. Fixed at the source rather than by shrinking
+    consumers — LVGL's allocator and the Wi-Fi/lwIP pools now come from
+    PSRAM (`lvgl_mem_psram.c`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`),
+    which took the end-of-boot largest block from 2560 to 17408 bytes.
+    `main.c`'s `heap_stage()` prints that figure per bring-up step, which
+    is what located Wi-Fi as the single 100KB consumer.
+    The stack-size reduction mentioned above (4096 -> 3072) did not fix the
+    registration failure AND later caused the board's long-unexplained
+    spontaneous reboot: `wifi_uart_bridge` overflowed at a measured 3440
+    bytes. It freed nothing either, because those stacks were already
+    allocated from PSRAM. Both are restored and sized from measurement.
+    The call for "a coredump/backtrace, not log-based diagnosis" was
+    exactly right — and coredump-to-flash did not work until its partition
+    was grown (64K could not hold an 82KB dump) and `CAPTURE_DRAM` enabled
+    to recover task names. See `firmware/KilnFW/TODO.md` section 1.
 
 The point at which the two processors become one system. Deliberately separate,
 because it changes what a bare main board will do.
