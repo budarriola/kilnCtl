@@ -211,6 +211,32 @@ static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *n
  * on top of the NVS/esp_flash call chain underneath them. Do not trim this
  * from reading the visible locals -- that is precisely the mistake that
  * overflowed wifi_uart_bridge; size it from a coredump's STACK USED figure.
+ *
+ * THE WORKER MUST BE CREATED EARLY IN app_main -- DO NOT MAKE THIS LAZY AGAIN.
+ * 2026-08-20, on hardware, with the three MAX31856 thermocouple ICs fitted (an
+ * extra internal-DRAM consumer at boot): the worker was created lazily from the
+ * first of uart_bridge_start_control/_profiles/_autotune_task(), which app_main
+ * calls AFTER lvgl_port_start(). That is the single tightest moment of the whole
+ * boot -- LVGL takes its own 8192-byte internal stack right there:
+ *
+ *   W app_main: heap stage uart_bridges_1  largest= 15360 delta= -8192 dram_free= 27227
+ *   W app_main: heap stage lvgl_start      largest=  7680 delta= -7680 dram_free= 15519
+ *   E uart_bridge_ext: flash-safe worker: task creation failed (internal SRAM)
+ *
+ * 7680 largest free internal block, 8192 wanted. The worker failed, all three
+ * start functions correctly returned ESP_ERR_NO_MEM, and tasks 8/9/10 were
+ * never registered: control_get_zones / profiles_list / autotune_get_status all
+ * answered "destination task not registered on the peer" for the rest of the
+ * boot. The board otherwise ran fine, which is exactly what made it easy to
+ * miss.
+ *
+ * Fix: app_main now calls uart_bridge_ext_start_flash_worker() explicitly at
+ * the "executor+autotune" heap stage (largest free internal block ~31744),
+ * before display/LVGL bring-up. Shrinking BX_WORKER_STACK to fit the 7680 hole
+ * is NOT an alternative -- see the sizing note above; this stack carries
+ * profiles_http_save()'s whole NVS chain plus the reply buffers. Move the
+ * allocation, not the size. bx_worker_ensure_started() stays as an idempotent
+ * fallback so the lazy path still works if the explicit call is ever skipped.
  * ======================================================================== */
 
 #define BX_WORKER_STACK 8192
@@ -241,15 +267,18 @@ static void bx_worker_task(void *arg)
     }
 }
 
-/* Called only from the uart_bridge_start_*_task() functions, which app_main
- * calls back-to-back on a single thread -- hence a plain static bool guard
- * with no locking of its own. Returns false if the worker could not be
- * created; callers MUST fail the start rather than fall through to running
- * handlers on their PSRAM stack, which is the bug this whole file is about. */
+/* Called from uart_bridge_ext_start_flash_worker() (the normal path, early in
+ * app_main) and as a fallback from the uart_bridge_start_*_task() functions,
+ * which app_main calls back-to-back on a single thread -- hence a plain static
+ * bool guard with no locking of its own. Idempotent: a second call after a
+ * successful create is a no-op returning true. Returns false if the worker
+ * could not be created; callers MUST fail the start rather than fall through to
+ * running handlers on their PSRAM stack, which is the bug this file is about. */
+static bool s_bx_started = false;
+
 static bool bx_worker_ensure_started(void)
 {
-    static bool s_started = false;
-    if (s_started) {
+    if (s_bx_started) {
         return true;
     }
 
@@ -270,7 +299,7 @@ static bool bx_worker_ensure_started(void)
         goto fail;
     }
 
-    s_started = true;
+    s_bx_started = true;
     return true;
 
 fail:
@@ -278,6 +307,18 @@ fail:
     if (s_bx_done) { vSemaphoreDelete(s_bx_done); s_bx_done = NULL; }
     if (s_bx_lock) { vSemaphoreDelete(s_bx_lock); s_bx_lock = NULL; }
     return false;
+}
+
+/* Public early-init entry point -- see the "MUST BE CREATED EARLY" note above.
+ * Idempotent; app_main calls this once, well before LVGL takes its own internal
+ * stack, so the 8192-byte internal allocation lands while there is still ~31 KB
+ * of contiguous internal DRAM rather than the 7680 left after lvgl_start. */
+esp_err_t uart_bridge_ext_start_flash_worker(void)
+{
+    if (!bx_worker_ensure_started()) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 /* Runs fn(arg) on the internal-stack worker and blocks until it returns.

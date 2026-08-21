@@ -85,6 +85,17 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto);
  * RX-flush primitive lives. */
 esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *owner);
 
+/* Creates the shared flash-safe executor task that CONTROL/PROFILES/AUTOTUNE
+ * (tasks 8/9/10) run their message handlers on -- see the HAZARD and "MUST BE
+ * CREATED EARLY" comment blocks in uart_bridge_ext.c. Its stack is 8192 bytes
+ * of INTERNAL SRAM, so app_main MUST call this early, before display/LVGL
+ * bring-up: after lvgl_port_start() the largest free internal block has been
+ * measured at 7680 and the create fails, silently costing all three of those
+ * bridge surfaces. Idempotent, and the three start functions still call the
+ * same code lazily as a fallback -- but they return ESP_ERR_NO_MEM if it has
+ * to run that late and fails. */
+esp_err_t uart_bridge_ext_start_flash_worker(void);
+
 /* CONTROL (task 8): zone config reads + narrow PID/model writes -- see
  * uart_task_ids.h for the scope cap versus /api/zones. No hardware handle
  * needed; everything routes through zones_http.c's public getters/setters. */

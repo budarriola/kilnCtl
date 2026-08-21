@@ -790,6 +790,24 @@ void app_main(void)
         ESP_LOGW(TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(autotune_err));
     }
 
+    // --- Flash-safe executor for the CONTROL/PROFILES/AUTOTUNE bridges -------
+    // Started HERE, and deliberately not down with the bridge tasks that use
+    // it: its 8192-byte stack must come from internal SRAM (see the HAZARD
+    // block in uart_bridge_ext.c) and internal DRAM is at its tightest right
+    // after lvgl_port_start() below -- measured 7680 largest free block on
+    // 2026-08-20 with the three MAX31856s fitted, which is under 8192 and cost
+    // all three of those bridge surfaces for a whole boot. At this stage the
+    // largest free block is ~31744. Do not move this later.
+    if (uart_bridge_ext_start_flash_worker() != ESP_OK) {
+        ESP_LOGE(TAG, "flash-safe executor failed to start (internal SRAM, largest block %u B) -- "
+                      "the CONTROL, PROFILES and AUTOTUNE uart bridges (tasks 8/9/10) will NOT "
+                      "start this boot: no zone PID/model reads or writes, no fire-profile list/"
+                      "save/delete or profile execution over the PC link, no autotune status or "
+                      "control. Kiln control from the PC GUI is unavailable; the HTTP dashboard "
+                      "and the thermo/io/safety bridges are unaffected.",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+
     heap_stage("executor+autotune");
 
     // --- Dashboard HTTP API (live status + manual relay control) -----------
@@ -1066,14 +1084,32 @@ void app_main(void)
     // so starting them unconditionally (no io_ready/thermo_bus.initialized
     // gate) matches those modules' own "safe with nothing attached" design.
     if (pc_link_ready) {
-        if (uart_bridge_start_control_task(&uart_proto) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start control uart bridge task");
+        // The three below share the flash-safe executor started at the
+        // "executor+autotune" stage above; ESP_ERR_NO_MEM from any of them
+        // means that worker is not up (see uart_bridge_ext.c). Named
+        // individually and spelled out, because a dead bridge here is silent
+        // from the board's point of view -- it only shows up on the PC as
+        // "destination task not registered on the peer".
+        esp_err_t control_task_err = uart_bridge_start_control_task(&uart_proto);
+        if (control_task_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start control uart bridge task: %s%s", esp_err_to_name(control_task_err),
+                     control_task_err == ESP_ERR_NO_MEM
+                         ? " -- flash-safe executor unavailable; NO zone PID/model reads or writes over the PC link this boot"
+                         : "");
         }
-        if (uart_bridge_start_profiles_task(&uart_proto) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start profiles uart bridge task");
+        esp_err_t profiles_task_err = uart_bridge_start_profiles_task(&uart_proto);
+        if (profiles_task_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start profiles uart bridge task: %s%s", esp_err_to_name(profiles_task_err),
+                     profiles_task_err == ESP_ERR_NO_MEM
+                         ? " -- flash-safe executor unavailable; NO fire-profile list/save/delete or profile execution over the PC link this boot"
+                         : "");
         }
-        if (uart_bridge_start_autotune_task(&uart_proto) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start autotune uart bridge task");
+        esp_err_t autotune_task_err = uart_bridge_start_autotune_task(&uart_proto);
+        if (autotune_task_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start autotune uart bridge task: %s%s", esp_err_to_name(autotune_task_err),
+                     autotune_task_err == ESP_ERR_NO_MEM
+                         ? " -- flash-safe executor unavailable; NO autotune status or control over the PC link this boot"
+                         : "");
         }
         if (uart_bridge_start_wifi_task(&uart_proto) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start wifi uart bridge task");

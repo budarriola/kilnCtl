@@ -54,7 +54,7 @@
 //     isn't reliable on every phone/network.
 // Neither lv_qrcode_update() call runs on every UI_PAGE_NETWORK_REFRESH_MS
 // tick -- each is gated on the underlying string actually having changed
-// (s_ap_qr_last/s_dashboard_qr_last/s_ip_qr_last), since re-encoding a QR
+// (s_ap_qr_last/s_dashboard_qr_last), since re-encoding a QR
 // code is real work the panel doesn't need to repeat every second for data
 // that changes on the order of minutes, if ever, during one boot.
 //
@@ -191,10 +191,7 @@ static lv_obj_t *s_manage_btn_label;
 static lv_obj_t *s_sta_qr_row;
 static lv_obj_t *s_dashboard_qr;
 static lv_obj_t *s_dashboard_qr_caption;
-static lv_obj_t *s_ip_qr;
-static lv_obj_t *s_ip_qr_caption;
 static char s_dashboard_qr_last[80];
-static char s_ip_qr_last[40];
 static bool s_list_showing_saved = true;  /* which of Scan/Saved is visible */
 static bool s_manage_open = false;        /* connected-mode: list view vs QR view */
 
@@ -815,10 +812,6 @@ static void refresh_cb(lv_timer_t *timer)
             lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
         }
 
-        char ip[16];
-        if (wifi_prov_get_sta_ip(ip, sizeof(ip)) != ESP_OK) {
-            ip[0] = '\0';
-        }
         char mdns_host[MDNS_NAME_BUF_LEN];
         char dashboard_url[80];
         if (mdns_hostname_get(mdns_host) == ESP_OK) {
@@ -828,11 +821,6 @@ static void refresh_cb(lv_timer_t *timer)
         }
         update_qr_if_changed(s_dashboard_qr, s_dashboard_qr_last, sizeof(s_dashboard_qr_last), dashboard_url);
         lv_label_set_text(s_dashboard_qr_caption, dashboard_url);
-
-        char ip_url[40];
-        snprintf(ip_url, sizeof(ip_url), "http://%s", ip[0] ? ip : "?");
-        update_qr_if_changed(s_ip_qr, s_ip_qr_last, sizeof(s_ip_qr_last), ip_url);
-        lv_label_set_text(s_ip_qr_caption, ip_url);
     } else if (mode == WIFI_PROV_MODE_AP) {
         uint8_t clients = wifi_prov_get_ap_client_count();
         snprintf(detail_buf, sizeof(detail_buf), "Clients: %u", (unsigned)clients);
@@ -1221,20 +1209,11 @@ lv_obj_t *ui_page_network_build(void)
     lv_label_set_text(s_dashboard_qr_caption, "http://kilnctl.local");
     s_dashboard_qr_last[0] = '\0';
 
-    lv_obj_t *ip_col = lv_obj_create(s_sta_qr_row);
-    lv_obj_set_size(ip_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(ip_col, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ip_col, 0, 0);
-    lv_obj_set_style_pad_all(ip_col, 0, 0);
-    lv_obj_set_flex_flow(ip_col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(ip_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_gap(ip_col, UI_THEME_PADDING_PX / 4, 0);
-    s_ip_qr = lv_qrcode_create(ip_col);
-    lv_qrcode_set_size(s_ip_qr, UI_PAGE_NETWORK_QR_SIZE_PX);
-    s_ip_qr_caption = lv_label_create(ip_col);
-    lv_obj_set_style_text_color(s_ip_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_ip_qr_caption, "http://--");
-    s_ip_qr_last[0] = '\0';
+    /* No raw-IP QR here. It existed as a fallback for clients that cannot
+     * resolve .local, but kilnctl.local was confirmed working from an Android
+     * phone on the bench 2026-08-20, and a second QR next to the first mostly
+     * invites scanning the wrong one. The IP is still on this page as text,
+     * which is what someone typing it by hand needs anyway. */
 
     /* Manage-networks toggle -- swaps between the QR row above and the
      * Scan/Saved list block, connected-mode only (refresh_cb hides this
