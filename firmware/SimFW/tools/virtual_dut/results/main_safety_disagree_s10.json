@@ -1,0 +1,82 @@
+{
+  "scenario": {
+    "name": "main_safety_disagree_s10",
+    "version": 1,
+    "hash": "0a6de41c69d5d83c26e8591bdc3626fada0591ee35e863db8eca66e29398d148"
+  },
+  "fw_versions": {},
+  "seed": 65,
+  "timescale": 20.0,
+  "start_time": 1787296562.0921977,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 22000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "skew",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 10000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 316000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S10"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s10_warns_after_sustained_disagreement",
+      "verdict": "PASS",
+      "evidence": [
+        0,
+        2000000001
+      ],
+      "detail": "event:guard_warn observed 294.000s after fault_fired"
+    },
+    {
+      "name": "no_warn_before_the_skew_fires",
+      "verdict": "PASS",
+      "evidence": [
+        0
+      ],
+      "detail": "event:guard_warn never observed inside the forbidden window"
+    }
+  ],
+  "verdict": "PASS",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  },
+  "dut_input_reachability": {
+    "polls": 46,
+    "context_valid": 46,
+    "any_current_present": 0,
+    "link_up": 46,
+    "max_zone_count": 1,
+    "energized": 0
+  }
+}

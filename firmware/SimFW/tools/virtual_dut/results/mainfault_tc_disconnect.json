@@ -2,12 +2,12 @@
   "scenario": {
     "name": "mainfault_tc_disconnect",
     "version": 1,
-    "hash": "9b5fbe95953f97d4f491f92bb3cc4e174872e43f58699404bd9f6a059823a502"
+    "hash": "e858af50c3ffd1c0aeaad5f1ed7da0334b8354440a20c616d1ed317a171b0208"
   },
   "fw_versions": {},
   "seed": 63,
   "timescale": 10.0,
-  "start_time": 1787292587.387287,
+  "start_time": 1787296466.9014,
   "events": [
     {
       "seq": 0,
@@ -54,19 +54,23 @@
       "evidence": [
         0
       ],
-      "detail": "event:guard_trip not observed within 3s after fault_fired (seq 0) [BLOCKED: firmware/SaftyFW/src/tasks/safety_core.c's safety_core_build_input() never sets main_fault_asserted -- discrete_task.c's discrete_task_main_fault() (a real, 200ms-debounced GPIO10 read) exists and is called nowhere in safety_core.c (grepped this pass; only discrete_task_estop_pressed() is called there for S7). safety_guards.c's S6a block only checks `if (in->main_fault_asserted)`, which is therefore always false, so S6a cannot trip against present-day SaftyFW regardless of what KilnFW's own GPIO10 line does -- this is true even though the fixture's half of the story (getting KilnFW to genuinely assert mainFault) works exactly as this scenario's own header comment describes.]",
+      "detail": "event:guard_trip not observed within 3s after fault_fired (seq 0) [BLOCKED: STALE REASON, SUPERSEDED 2026-08-20 -- kept below for history, real current reason follows. safety_core_build_input() now names `.main_fault_asserted = discrete_task_main_fault()` (immediately after `.estop_pressed`), so SaftyFW's own half of this signal is fully wired; that is no longer what blocks this clause. The real blocker is one level deeper, in the FIXTURE, not the firmware: `virtual_simfw.c`'s `fault_line_asserted` field (the Fault-opto sensing this harness's own header comment already says the fixture only 'senses', never drives) is set ONLY by real hardware's `i2c_owner.c`, reading a real I2C GPIO-expander pin (`EXP1_PIN_FAULT_LINE`) wired to the ESP's GPIO6 -> U1 opto. `virtual_simfw.c` has no I2C-expander emulation of that path at all (grepped this pass: `fault_line_asserted` is read in three places in virtual_simfw.c/cmd_task.c/telemetry.c and WRITTEN in none) -- it is zero-initialized and stays false for the entire life of the process, regardless of what TC fault is injected on tc:0. Disconnecting tc:0 has no code path to it at all: this fixture never executes KilnFW's own guard-6 logic (there is no KilnFW anywhere in virtual_simfw or virtual_dut, only the real SaftyFW guard code under test), so the 'ESP decides to assert its own fault output' step this scenario's header comment describes is not something any fault injection here can cause. Separately and independently, run_dut_scenarios.py's poll loop never reads `fault_line_asserted` from telemetry and passes it as dut_core.exe's optional TICK `<main_fault>` field at all (it always calls `dut.tick(...)` with the parameter's default, `main_fault=False`) -- so even a fixture that DID assert the Fault line would still need that wiring added before this scenario could see it. Both gaps are fixture-side; neither is a SaftyFW guard defect or a scenario-authoring gap. See GUARD_TEST_MATRIX.md \u00a76 for the full three-way accounting (SaftyFW input: wired; fixture Fault-line emulation: absent; orchestrator TICK wiring: absent).]",
       "blocked_on": {
-        "reason": "firmware/SaftyFW/src/tasks/safety_core.c's safety_core_build_input() never sets main_fault_asserted -- discrete_task.c's discrete_task_main_fault() (a real, 200ms-debounced GPIO10 read) exists and is called nowhere in safety_core.c (grepped this pass; only discrete_task_estop_pressed() is called there for S7). safety_guards.c's S6a block only checks `if (in->main_fault_asserted)`, which is therefore always false, so S6a cannot trip against present-day SaftyFW regardless of what KilnFW's own GPIO10 line does -- this is true even though the fixture's half of the story (getting KilnFW to genuinely assert mainFault) works exactly as this scenario's own header comment describes.",
-        "phase": "Unassigned -- unlike S1/S11/S3/S4/S9/S10/S13's Phase 9/7 gaps, no firmware/SaftyFW/docs/*.md roadmap phase currently tracks wiring discrete_task_main_fault() into safety_core_build_input(); discrete_task.c itself is a completed Phase 4/5 deliverable (its own header comment), so this looks like a plain missed wiring step rather than deliberately deferred work -- worth a SaftyFW-side ticket, not something this scenario library can fix (scenarios/*.yaml cannot touch firmware/SaftyFW/src)."
+        "reason": "STALE REASON, SUPERSEDED 2026-08-20 -- kept below for history, real current reason follows. safety_core_build_input() now names `.main_fault_asserted = discrete_task_main_fault()` (immediately after `.estop_pressed`), so SaftyFW's own half of this signal is fully wired; that is no longer what blocks this clause. The real blocker is one level deeper, in the FIXTURE, not the firmware: `virtual_simfw.c`'s `fault_line_asserted` field (the Fault-opto sensing this harness's own header comment already says the fixture only 'senses', never drives) is set ONLY by real hardware's `i2c_owner.c`, reading a real I2C GPIO-expander pin (`EXP1_PIN_FAULT_LINE`) wired to the ESP's GPIO6 -> U1 opto. `virtual_simfw.c` has no I2C-expander emulation of that path at all (grepped this pass: `fault_line_asserted` is read in three places in virtual_simfw.c/cmd_task.c/telemetry.c and WRITTEN in none) -- it is zero-initialized and stays false for the entire life of the process, regardless of what TC fault is injected on tc:0. Disconnecting tc:0 has no code path to it at all: this fixture never executes KilnFW's own guard-6 logic (there is no KilnFW anywhere in virtual_simfw or virtual_dut, only the real SaftyFW guard code under test), so the 'ESP decides to assert its own fault output' step this scenario's header comment describes is not something any fault injection here can cause. Separately and independently, run_dut_scenarios.py's poll loop never reads `fault_line_asserted` from telemetry and passes it as dut_core.exe's optional TICK `<main_fault>` field at all (it always calls `dut.tick(...)` with the parameter's default, `main_fault=False`) -- so even a fixture that DID assert the Fault line would still need that wiring added before this scenario could see it. Both gaps are fixture-side; neither is a SaftyFW guard defect or a scenario-authoring gap. See GUARD_TEST_MATRIX.md \u00a76 for the full three-way accounting (SaftyFW input: wired; fixture Fault-line emulation: absent; orchestrator TICK wiring: absent).",
+        "phase": "No SaftyFW phase applies -- the SaftyFW side is done. The gap is virtual_simfw's own I2C-expander/opto emulation, which is out of this scenario library's ownership (scenarios/*.yaml cannot touch firmware/SimFW/tools/virtual_simfw/src), and even closing it would only be half the fix without also wiring run_dut_scenarios.py's poll loop to read and forward `fault_line_asserted`. S6a is therefore not provokable through this harness at all today, by design of what the harness chooses to emulate -- not a wiring omission this pass can close."
       }
     },
     {
       "name": "fault_line_asserted",
-      "verdict": "FAIL",
+      "verdict": "BLOCKED",
       "evidence": [
         0
       ],
-      "detail": "dut:fault_line_asserted not observed within 3s after fault_fired (seq 0)"
+      "detail": "dut:fault_line_asserted not observed within 3s after fault_fired (seq 0) [BLOCKED: Same fixture-side gap as `mainfault_trips_s6a` immediately above: `virtual_simfw.c` has no producer that ever sets `fault_line_asserted` true (only real hardware's `i2c_owner.c` does), so this clause cannot pass against this fixture regardless of what fault is injected or when. This clause previously reported as a bare FAIL (no blocked_on annotation) -- SCENARIO_RESULTS.md's own honesty rule (report.py's BLOCKED-vs-FAIL distinction) says a clause blocked on known, tracked fixture incompleteness should read as BLOCKED, not FAIL; a bare FAIL here was accurate about the outcome but did not carry the reason, and made the suite look more broken than it is.]",
+      "blocked_on": {
+        "reason": "Same fixture-side gap as `mainfault_trips_s6a` immediately above: `virtual_simfw.c` has no producer that ever sets `fault_line_asserted` true (only real hardware's `i2c_owner.c` does), so this clause cannot pass against this fixture regardless of what fault is injected or when. This clause previously reported as a bare FAIL (no blocked_on annotation) -- SCENARIO_RESULTS.md's own honesty rule (report.py's BLOCKED-vs-FAIL distinction) says a clause blocked on known, tracked fixture incompleteness should read as BLOCKED, not FAIL; a bare FAIL here was accurate about the outcome but did not carry the reason, and made the suite look more broken than it is.",
+        "phase": "Same as `mainfault_trips_s6a` above -- virtual_simfw's Fault- line/opto emulation, out of this scenario library's ownership."
+      }
     },
     {
       "name": "trip_latched",
@@ -77,7 +81,7 @@
       "detail": "dut:K4_open held at end of run (last observed seq 2000000000)"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "BLOCKED",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,

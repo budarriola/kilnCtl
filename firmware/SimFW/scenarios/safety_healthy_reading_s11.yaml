@@ -1,0 +1,67 @@
+name: safety_healthy_reading_s11
+version: 1
+exercises: [S11]
+# S11's anti-nuisance control run (GUARD_TEST_MATRIX.md §1: "the only way to
+# know a guard does not [nuisance-]trip is to run a healthy kiln at it"),
+# written alongside safety_tc_frozen.yaml's genuine-trip case rather than
+# instead of it -- that file freezes tc:safety with `stuck_tc` and proves
+# S11 DOES trip after frozen_window_s (600s) of an identical reading with
+# heat commanded; this file runs the same operator actions (K4 closes, K1
+# stays commanded on for the whole run) with NO fault at all, for a
+# comparable span, and proves S11 stays silent throughout.
+#
+# The property under test is exactly safety_guards.c's own S11 code: the
+# window resets on ANY change in `in->tc_c`, bit for bit
+# (`in->tc_c != state->s11_last_c`), while heat_commanded is true. A live
+# MAX31856 conversion on an actual thermal system does not repeat exactly --
+# safety_core.c's own comment on this: "a real 19-bit MAX31856 reading on a
+# live thermal system does not repeat exactly, soak or not". This scenario
+# is the fixture-side measurement of that claim: virtual_simfw's ADC
+# emulation carries real noise/quantization on every conversion
+# (thermal_model.c), so a genuinely rising, genuinely noisy reading held for
+# ~650 real guard-ticks worth of run must never accumulate anywhere near the
+# 600s bar, because the window keeps getting reset by the reading's own
+# motion long before it could.
+preset: fast_test
+timescale: 10
+seed: 68
+overrides: {}
+dut:
+  profile: cone6_fast
+  # Same operator actions as safety_tc_frozen.yaml's post-2026-08-20 version,
+  # deliberately: K1 is commanded closed once and never commanded off, so
+  # current (and therefore heat_commanded) stays true for the whole run once
+  # K4 permits it -- the same "no PID, no duty-cycled gap" shape, just
+  # without the freeze fault.
+  operator_actions:
+    - { at_sim_time: 5, action: request_enable }
+    - { at_sim_time: 5, action: command_relay, relay: K1, state: closed }
+faults: []
+expect:
+  - name: current_flows_once_k4_permits
+    event: { type: relay_edge, relay: K4, edge: close }
+    then:
+      dut: current_present
+      within_s: 10
+  - name: s11_never_trips_on_a_live_reading
+    # The whole point of this scenario: a real, unfrozen, unfaulted
+    # thermocouple reading on a live thermal system, with heat commanded
+    # continuously, must never accumulate S11's frozen-window bar.
+    forbid: { event: { type: guard_trip, guard: S11 }, before: { sim_end: true } }
+  - name: k4_still_closed_after_a_full_s11_window
+    # Forces this scenario's own estimated run length out to ~650 sim-seconds
+    # (comparable to safety_tc_frozen.yaml's 600s frozen_window_s bar) so
+    # "S11 never trips" is a claim about a run of the same ORDER OF
+    # MAGNITUDE as the window it is not tripping, not a claim about 10
+    # seconds of healthy data. A genuine level-holding assertion in its own
+    # right too: no guard opened K4 across that whole span.
+    event: { type: relay_edge, relay: K4, edge: close }
+    then:
+      dut: K4_closed
+      within_s: 650
+      not_before_s: 0
+  - name: k4_still_closed_at_end
+    at_end: { dut: K4_closed }
+manual_checks:
+  - "Confirm SaftyFW is commissioned with tc_source=OWN_J7, BORROWED_ZONE, or BOTH before running -- S11 evaluates against whichever source is active (SAFETY_MODEL.md §4 S11)."
+report_keep: [telemetry, events]

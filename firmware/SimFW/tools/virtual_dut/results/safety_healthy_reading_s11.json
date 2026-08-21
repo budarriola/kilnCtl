@@ -1,28 +1,16 @@
 {
   "scenario": {
-    "name": "safety_tc_frozen",
+    "name": "safety_healthy_reading_s11",
     "version": 1,
-    "hash": "6f01c4823839dddaf8b6eb7d4e89a96ba5c89a010b3137670b5adfd5ec9a3e9c"
+    "hash": "cf496986a57d1c446458c5433fac20fdab8dcbe5866ca9d51aeeaac96e25e46b"
   },
   "fw_versions": {},
-  "seed": 61,
+  "seed": 68,
   "timescale": 10.0,
-  "start_time": 1787296773.3398383,
+  "start_time": 1787296691.407714,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 6000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "freeze",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 1,
       "sim_time_us": 7000000,
       "event_type": "RELAY_EDGE",
       "payload": {
@@ -36,7 +24,7 @@
       "f0": 0.0
     },
     {
-      "seq": 2,
+      "seq": 1,
       "sim_time_us": 64000000,
       "event_type": "RELAY_EDGE",
       "payload": {
@@ -50,38 +38,12 @@
       "f0": 0.0
     },
     {
-      "seq": 3,
-      "sim_time_us": 674000000,
-      "event_type": "RELAY_EDGE",
-      "payload": {
-        "entity": "K4",
-        "state": true,
-        "relay": "K4",
-        "edge": "open"
-      },
-      "a": 4,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
       "seq": 1000000000,
       "sim_time_us": 66000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
         "state": true
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 1000000001,
-      "sim_time_us": 675000000,
-      "event_type": "SIM_CLOCK_MARK",
-      "payload": {
-        "entity": "current",
-        "state": false
       },
       "a": 0,
       "b": 0,
@@ -110,57 +72,41 @@
       "a": 0,
       "b": 0,
       "f0": 0.0
-    },
-    {
-      "seq": 2000000002,
-      "sim_time_us": 670000000,
-      "event_type": "GUARD_TRIP",
-      "payload": {
-        "guard": "S11"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000003,
-      "sim_time_us": 670000000,
-      "event_type": "SIM_CLOCK_MARK",
-      "payload": {
-        "entity": "K4",
-        "state": true
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
     }
   ],
   "telemetry_samples": [],
   "expectations": [
     {
-      "name": "no_early_trip",
+      "name": "current_flows_once_k4_permits",
       "verdict": "PASS",
       "evidence": [
-        0
+        1,
+        1000000000
       ],
+      "detail": "dut:current_present observed 2.000s after relay_edge"
+    },
+    {
+      "name": "s11_never_trips_on_a_live_reading",
+      "verdict": "PASS",
+      "evidence": [],
       "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
-      "name": "frozen_window_trips_s11",
+      "name": "k4_still_closed_after_a_full_s11_window",
       "verdict": "PASS",
       "evidence": [
-        0,
-        2000000002
+        1,
+        1
       ],
-      "detail": "event:guard_trip observed 664.000s after fault_fired"
+      "detail": "dut:K4_closed observed 0.000s after relay_edge"
     },
     {
-      "name": "trip_latched",
+      "name": "k4_still_closed_at_end",
       "verdict": "PASS",
       "evidence": [
-        2000000003
+        2000000001
       ],
-      "detail": "dut:K4_open held at end of run (last observed seq 2000000003)"
+      "detail": "dut:K4_closed held at end of run (last observed seq 2000000001)"
     }
   ],
   "verdict": "PASS",
@@ -170,11 +116,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 153,
-    "context_valid": 153,
-    "any_current_present": 119,
-    "link_up": 153,
+    "polls": 144,
+    "context_valid": 144,
+    "any_current_present": 132,
+    "link_up": 144,
     "max_zone_count": 3,
-    "energized": 119
+    "energized": 133
   }
 }

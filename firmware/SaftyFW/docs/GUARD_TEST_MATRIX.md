@@ -1,6 +1,6 @@
 # Guard Test Matrix
 
-> **Status:** planning · **Last reviewed:** 2026-08-20
+> **Status:** planning · **Last reviewed:** 2026-08-21
 > **Keep this file current.** Add a row whenever a guard is added or a threshold
 > moves, and record results as they are obtained — this file is the evidence
 > that the safety case is real. Checklist at the bottom.
@@ -292,19 +292,45 @@ recorded per section 4's convention.
 | Guard | Scenario(s) that declare `exercises: [<guard>]` |
 |---|---|
 | S1 | `main_safety_skew`, `tc_noise_storm` |
-| S2 | `tc_noise_storm` |
-| S3 | `runaway_zone`, `welded_contactor_s9`, `welded_ssr_midfire` |
-| S4 | `broken_element`, `welded_ssr_midfire` |
+| S2 | `tc_noise_storm`, `s2_setpoint_overshoot` |
+| S3 | `runaway_zone`, `welded_contactor_s9`, `welded_ssr_midfire`, `stuck_load_no_command_s3`, `enabled_firing_healthy` |
+| S4 | `broken_element`, `welded_ssr_midfire`, `commanded_no_current_s4`, `enabled_firing_healthy` |
 | S5 | `cj_fault`, `spi_flaky_tc_ic`, `tc_disconnect_ramp`, `tc_disconnect_soak`, `tc_flaky` |
 | S6a | `mainfault_tc_disconnect` |
 | S6b | `power_blip` |
 | S7 | `estop_at_boot`, `estop_midfire` |
 | S8 | `runaway_zone` (S8 itself ships disabled per `SAFETY_MODEL.md`; this scenario documents expected *current* behavior, ready for when S8 gets a measured threshold — `PLAN.md` section 8 item 12) |
 | S9 | `welded_contactor_s9` |
-| S10 | `main_safety_skew`, `tc_noise_storm` |
-| S11 | `safety_tc_frozen` |
+| S10 | `main_safety_skew`, `tc_noise_storm`, `main_safety_disagree_s10` |
+| S11 | `safety_tc_frozen`, `safety_healthy_reading_s11` |
 | S12 | `cj_fault` |
 | S13 | `tc_stuck` |
+
+**2026-08-21 update: which of the above actually PROVOKE their guard today,
+not merely declare it (25 scenario files now, `virtual_dut` re-run against
+all of them).** The table above answers "does a scenario targeting this
+guard exist"; it does not say whether that scenario's own `expect:` clauses
+actually pass against present-day SaftyFW through this fixture. That
+distinction matters enough that it gets its own accounting:
+
+| Guard | Fires for real in `virtual_dut` today? | Which scenario, and how |
+|---|---|---|
+| S1 | No | Blocked on `abs_max_temp_c` commissioning (see §6) — `main_safety_skew`'s S1 clause is `BLOCKED`, not evaluable regardless of the fixture. |
+| S2 | **Yes** | `s2_setpoint_overshoot` (new this pass): `GUARD_TRIP {S2}` at 267.0s after K4 closes. `tc_noise_storm`'s S2 citation is still not provoked — that file declares no `setpoint_c`, so S2 stays structurally inactive there (not "quiet because healthy"). |
+| S3 | **Yes** | `stuck_load_no_command_s3` (genuine trip, 19.4s after the weld), `welded_contactor_s9` (initiating trip, 19.4s), `welded_ssr_midfire` (mid-fire trip after the 150s correlation window, 179.0s), `enabled_firing_healthy` (genuine anti-nuisance: current commanded, S3 stays quiet for the whole run). `runaway_zone` still cannot reach it — see §6. |
+| S4 | **Yes** | `commanded_no_current_s4` (genuine WARN, 150.8s after K1 closes, K4 stays closed — the WARN-only property proven positively) and `enabled_firing_healthy` (genuine anti-nuisance). `broken_element`/`welded_ssr_midfire`'s own S4 clauses remain `BLOCKED` (no `operator_actions:` in those specific files). |
+| S5 | **Yes** | `tc_flaky`'s `no_warn_storm`, `cj_fault`'s `s5_never_trips_on_cj_alone` — no `context_valid`/K4 gating at all on this guard. |
+| S6a | **No — see §6, not provokable through this harness at all** | `mainfault_tc_disconnect`'s two S6a clauses are both `BLOCKED` on a fixture-level gap, not a SaftyFW gap. |
+| S6b | Only the anti-nuisance half | `power_blip`'s `mainfault_reads_healthy_during_blip` PASSes; its trip-side clause (`s6b_stays_at_warn_not_trip`) stays `BLOCKED` for an unrelated K4-boot-open reason (see the scenario file). |
+| S7 | **Yes** | `estop_at_boot`/`estop_midfire` both PASS on their observable clauses. |
+| S9 | **Yes** | `welded_contactor_s9`: `TRIP_INEFFECTIVE_LATCHED` 9.6s after K4 opens, current genuinely persists through the open contact (`contactor_weld_engages_on_k4_open` PASSes via a `forbid …/after:` clause form). |
+| S10 | **Yes** | `main_safety_disagree_s10` (new this pass): genuine `GUARD_WARN {S10}` at 294.0s after a +250°C skew, with `main_safety_skew`'s 80°C sub-threshold skew as the standing anti-nuisance control (`s10_stays_quiet`, unchanged, still PASSing). |
+| S11 | **Yes, both directions** | `safety_tc_frozen` (fixed this pass): genuine `GUARD_TRIP {S11}` at 664.0s after the freeze fault, with `operator_actions:` now supplying the closed K4 + current the guard's `heat_commanded` gate needs. `safety_healthy_reading_s11` (new this pass): the same operator actions, no fault, run for a comparable ~650s span — S11 never trips, because a live ADC reading is never bit-identical tick to tick. |
+| S12 | **Yes** | `cj_fault`'s own history (see the "2026-08-20 follow-up" note above) already established this; unchanged this pass. |
+| S13 | No | Blocked on two commissioning gaps (`borrowed_zone_index`, `tc_source`) — see §6. `tc_stuck`'s clauses stay `BLOCKED`. |
+
+Full detail, measured numbers, and exact `blocked_on:` reasoning for every
+non-PASS clause: `firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md`.
 
 Two scenarios (`baseline_firing`, `partial_element`) declare an empty
 `exercises: []` — they are regression/behavior baselines (no-fault firing,
@@ -425,8 +451,10 @@ This was established two ways, cross-checked against each other:
 > current for S3/S4 because nothing closes a relay, and no operator enable
 > step for K4).
 
-**Bottom line as of `f304392`: S2, S3, S4, S5, S6b, S7, S10 and S12 can
-structurally fire; S1, S6a, S9, S11 and S13 remain blocked.** (Before
+**Bottom line as of `f304392` (superseded — see the 2026-08-21 update below
+the reachability table further down: S6a/S9/S11 have since been wired too,
+and only S1/S6a/S13 remain blocked): S2, S3, S4, S5, S6b, S7, S10 and S12
+can structurally fire; S1, S6a, S9, S11 and S13 remain blocked.** (Before
 `f304392`: only S5, S6b, S7, S12 — and S6b only in the degenerate sense of
 tripping unconditionally.) Each remaining block is a specific,
 individually-verified reason — not "the same reason" repeated:
@@ -434,16 +462,16 @@ individually-verified reason — not "the same reason" repeated:
 | Guard | Reachable today? | Blocking input | Why the input is absent |
 |---|---|---|---|
 | S1 | **No** | `cfg->abs_max_temp_c` | Defaults to 0, and `safety_guards.h`'s own convention is 0 = "not commissioned, never trip" (a deliberate safety choice, not a bug). Guard logic is otherwise fully wired to real `tc_c`; will trip correctly the instant a real ceiling is commissioned via `config_store` (Phase 9, already built — see M3 above). **This is a config gap, not a missing-producer gap** — different in kind from every row below it. |
-| S2 | **Yes** (since `f304392`) | — | `context_valid` is now computed from `link_task_get_context_snapshot()` + `link_task_get_degraded_no_context()` + a `CONTEXT_MAX_AGE_MS` (5 s) staleness test, and `zone_count`/`max_zone_setpoint_c` come from the pure `context_reduce_zones()`. ~~Never set true by `safety_core_build_input()` — no field for it in the struct literal.~~ **Reachable, but `virtual_dut` cannot provoke it**: the fixture has no setpoint producer at all (no ESP, no PID), so it sends `setpoint_c = NaN` rather than a guessed ceiling — see `virtual_dut/README.md`. S2 needs a real ESP (or a scenario that supplies setpoints) to be exercised. |
-| S3 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `any_current_present` now comes from `current_task`'s real ADC snapshot via the pure `current_any_present()`, and `relay_commanded_recently` from `ctx.relay_recent_mask`. ~~Same as S2.~~ **Not provokable by `virtual_dut` today** for an unrelated, fixture-side reason: `sim_engine.c` gates heater duty/CT current on K4, and K4 never closes there because nothing issues the operator-initiated `SAFETY_CMD_REQUEST_ENABLE` — so `any_current_present` is false for the whole run. |
-| S4 | **Yes** (since `f304392`) | — | Same as S3, plus `relay_commanded_continuously`, computed here from `link_task_get_relay_on_continuous_ms()` against `correlation_window_s` (an AND over the window, which neither wire mask alone answers). ~~Same as S2.~~ Same fixture-side non-provokability as S3 (no relay is ever commanded on in a `virtual_dut` run). |
+| S2 | **Yes** (since `f304392`) | — | `context_valid` is now computed from `link_task_get_context_snapshot()` + `link_task_get_degraded_no_context()` + a `CONTEXT_MAX_AGE_MS` (5 s) staleness test, and `zone_count`/`max_zone_setpoint_c` come from the pure `context_reduce_zones()`. ~~Never set true by `safety_core_build_input()` — no field for it in the struct literal.~~ ~~Reachable, but `virtual_dut` cannot provoke it: the fixture has no setpoint producer at all (no ESP, no PID), so it sends `setpoint_c = NaN`.~~ **2026-08-21: now provokable.** `run_dut_scenarios.py` gained a `dut.zone_setpoints:` scenario field (a static, per-zone declared setpoint — the honest stand-in for a real ESP's PID target, same category as `operator_actions:`), and `s2_setpoint_overshoot.yaml` uses it: `GUARD_TRIP {S2}` measured 267.0 s after K4 closes. |
+| S3 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `any_current_present` now comes from `current_task`'s real ADC snapshot via the pure `current_any_present()`, and `relay_commanded_recently` from `ctx.relay_recent_mask`. ~~Same as S2.~~ ~~Not provokable by `virtual_dut` today: `sim_engine.c` gates heater duty/CT current on K4, and K4 never closes there because nothing issues the operator-initiated `SAFETY_CMD_REQUEST_ENABLE`.~~ **Provokable since the operator-actions pass** (a `dut.operator_actions:` scenario field that can issue `request_enable`/`command_relay`): `stuck_load_no_command_s3.yaml` trips it for real (19.4 s after an uncommanded weld) and `enabled_firing_healthy.yaml` is the anti-nuisance control (current commanded, S3 stays quiet for the whole run). `runaway_zone.yaml` still cannot reach it — that file schedules no `operator_actions:` of its own. |
+| S4 | **Yes** (since `f304392`) | — | Same as S3, plus `relay_commanded_continuously`, computed here from `link_task_get_relay_on_continuous_ms()` against `correlation_window_s` (an AND over the window, which neither wire mask alone answers). ~~Same as S2.~~ ~~Same fixture-side non-provokability as S3.~~ **Provokable since the operator-actions pass**: `commanded_no_current_s4.yaml` warns for real (150.8 s after K1 closes, K4 stays closed — the WARN-only property proven positively) and `enabled_firing_healthy.yaml` is the anti-nuisance control. `broken_element.yaml`/`welded_ssr_midfire.yaml`'s own S4 clauses stay `BLOCKED` — those specific files schedule no `operator_actions:`. |
 | S5 | **Yes** | — | `tc_valid`/`tc_c`/`fault_bits`/`spi_failed` all come from `thermo_task`'s real snapshot, unconditionally, no gating field at all. |
-| S6a | **Yes** (since the `main_fault_asserted` wiring) | — | `main_fault_asserted` now comes from `discrete_task_main_fault()`, called directly in `safety_core_build_input()` on the line immediately after `.estop_pressed` — the same shape as S7's row below. Polarity is straight through, no inversion: `discrete_task` samples `!gpio_get(SAFTYFW_PIN_MAIN_FAULT)` (active low, R8 pull-up) and debounces it 200 ms, so `true` already means "mainFault asserted", which is exactly what S6a trips on. ~~Never set by `safety_core_build_input()` — the producer already exists and works … a one-line wiring omission, not a missing Phase.~~ **Reachable, but no `virtual_dut` scenario asserts it**: the fixture senses the Fault line, it does not drive the Pico's GPIO10 — the harness now carries the level on the TICK line's optional trailing `<main_fault>` field (default 0), so it is wire-reachable rather than hardcoded false in C. |
-| S6b | **Yes** (since `f304392`) — no longer unconditional | — | `link_up` now comes from `link_task_link_up()` (a CRC-valid frame decoded within `LINK_UP_RECENCY_MS` = 1000 ms; recorded before the BROADCAST filter, so any well-formed frame counts). ~~Never set true — no field for it in the struct literal … the elapsed-silence timer accumulates from the first tick of every boot and trips the hard backstop (`link_dead_hard_s`, default 120 s) regardless of any other condition, roughly 2 minutes into every boot.~~ **That nuisance trip is gone and measured gone**: it fired in 16 of 19 `virtual_dut` scenarios before this fix and in 0 of 19 after, with no other change to the scenarios. |
+| S6a | **Yes** (since the `main_fault_asserted` wiring) | — | `main_fault_asserted` now comes from `discrete_task_main_fault()`, called directly in `safety_core_build_input()` on the line immediately after `.estop_pressed` — the same shape as S7's row below. Polarity is straight through, no inversion: `discrete_task` samples `!gpio_get(SAFTYFW_PIN_MAIN_FAULT)` (active low, R8 pull-up) and debounces it 200 ms, so `true` already means "mainFault asserted", which is exactly what S6a trips on. ~~Never set by `safety_core_build_input()` — the producer already exists and works … a one-line wiring omission, not a missing Phase.~~ ~~Reachable, but no `virtual_dut` scenario asserts it: the fixture senses the Fault line, it does not drive the Pico's GPIO10 — the harness now carries the level on the TICK line's optional trailing `<main_fault>` field (default 0), so it is wire-reachable rather than hardcoded false in C.~~ **2026-08-21: confirmed genuinely NOT provokable through this harness, at all, and precisely why (deeper than the wire-reachability note above suggested).** Two independent gaps, both fixture-side: (1) `virtual_simfw.c`'s `fault_line_asserted` — the thing this fixture *senses* on the Fault line — is written ONLY by real hardware's `i2c_owner.c` (a real I2C GPIO-expander pin wired to the ESP's GPIO6 → U1 opto); `virtual_simfw.c` has no I2C-expander emulation of that path at all (grepped: read in three places, written in none), so it is zero-initialized and stays false for the life of the process regardless of what TC fault is injected — there is no KilnFW anywhere in `virtual_simfw`/`virtual_dut` to execute the "ESP decides to assert its own fault output" step `mainfault_tc_disconnect.yaml`'s `disconnected_tc` fault is meant to provoke indirectly. (2) Independently, `run_dut_scenarios.py`'s poll loop never reads `fault_line_asserted` from telemetry and forwards it as `dut_core.exe`'s optional TICK `<main_fault>` field — it always sends the parameter's default (`False`). SaftyFW's own input is fully wired and correct; this is a harness limitation in what it chooses to emulate, not a wiring gap in SaftyFW, and not closable by another scenario. |
+| S6b | **Yes** (since `f304392`) — no longer unconditional | — | `link_up` now comes from `link_task_link_up()` (a CRC-valid frame decoded within `LINK_UP_RECENCY_MS` = 1000 ms; recorded before the BROADCAST filter, so any well-formed frame counts). ~~Never set true — no field for it in the struct literal … the elapsed-silence timer accumulates from the first tick of every boot and trips the hard backstop (`link_dead_hard_s`, default 120 s) regardless of any other condition, roughly 2 minutes into every boot.~~ **That nuisance trip is gone and measured gone**: it fired in 16 of 19 `virtual_dut` scenarios before this fix and in 0 of 19 after, with no other change to the scenarios. Anti-nuisance half provoked (`power_blip.yaml`'s `mainfault_reads_healthy_during_blip` PASSes); the trip-side half stays `BLOCKED` on an unrelated K4-boot-open clause-form issue, not on link_up itself. |
 | S7 | **Yes** | — | `estop_pressed` comes from `discrete_task_estop_pressed()`, a real, debounced (50 ms) GPIO9 reading, called directly in `safety_core_build_input()`. |
-| S9 | **Yes** (since the `relay_deenergized` wiring) | — | `relay_deenergized` now comes from `!relay_owner_is_energized()`, named in `safety_core_build_input()` right after `.reboot_grace_active` (the struct's own field order). ~~Never computed — nothing plumbs `relay_owner_is_energized()`'s inverse into the input struct. This is the one row `f304392` did not move at all.~~ **Polarity is one deliberate negation, cross-checked three ways**: `relay_owner.h` publishes the affirmative ("true only while GPIO6 is actually being driven high right now"), `safety_guards.h` asks for the negative ("set by the caller once relay_owner has actually de-energized K4"), and `safety_core_get_output_status()` — twenty lines below, same file, same getter — reads it with *no* `!` for its `out_relay_energized`; the two call sites differ by exactly one negation because the two field names are exact opposites. **No GRACE suppression, and none is needed**: K4 genuinely reads de-energized for the whole 60 s startup GRACE window, but `safety_guards_tick()` only evaluates S9 inside its `if (state->is_tripped)` branch and re-zeros `s9_verify_elapsed_s` at the bottom of every untripped tick, so this is *not* the free-running-timer shape that made S6b nuisance-trip every boot before `f304392`; and if a trip does land during GRACE, "K4 open yet current still flowing for `trip_verify_s`" is a real welded contactor regardless of GRACE. The second, independent half of this row: ~~K4 is never energized in the first place today (`relay_owner_command_energize()` has zero callers anywhere in the tree)~~ — `relay_owner_command_energize()` now has a caller, `safety_core_request_enable()`, reached from `link_task.c`'s `SAFETY_CMD_REQUEST_ENABLE` (0x02) decoder. That caller is only ever driven by an explicit operator/PC command (KilnFW's `uart_bridge.c` → `safety_link_request_enable()`, i.e. PcTools' `safety_request_enable`), **not** automatically when a profile runs, so K4 still sits open through every `virtual_dut` scenario — no scenario models the operator enable step. `virtual_dut` mirrors the new wiring with `in.relay_deenergized = !s_energized` (its `s_energized` already modelled `relay_owner.c`'s, so no TICK-protocol field was needed), which means the fixture now reports this input as *true* for whole runs — truthfully, since K4 really is open there. It still cannot escalate S9 on its own: `sim_engine.c` gates CT current on K4, so `any_current_present` stays false, the same fixture-side reason S3/S4 carry. |
-| S10 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `nearest_zone_measured_c` comes from `context_reduce_zones()`'s nearest-match search (never the mean). ~~Same as S2.~~ **And genuinely exercised**: `main_safety_skew`'s `s10_stays_quiet` (an +80 °C skew must stay under `tc_disagreement_c` = 200 °C) is now a real anti-nuisance PASS in `virtual_dut` rather than a vacuous one — the first guard this fix turns from "cannot evaluate" into "evaluated and correct" against fixture data. |
-| S11 | **Yes** (since the `heat_commanded` wiring) | — | `heat_commanded` now comes from the same `any_current_present` value S3/S4/S6b already read (`current_task`'s real ADC0/1/2 snapshot via `current_any_present()`), named in `safety_core_build_input()` right after `.main_fault_asserted`. ~~Hardcoded `false` in `safety_core_build_input()` — its own comment: "no current sense yet, Phase 6."~~ Deliberately **not** wired from `relay_commanded_recently`/`_continuously` even though both also approximate "heat commanded": `safety_guards.h`'s own header comment requires this field stay link-independent (no `context_snapshot_t`-derived fact), matching `SAFETY_MODEL.md` §6's own S11/S13 audit note ("S11 reads neither [`link_up` nor `context_valid`]") and S11's place on the "keeps running with authority over K4 even when the main controller is unknown" list (§6) — `current_any_present` is real, independent hardware (its own ADC), never context-gated, exactly like S6b's own unconditional use of the same value. **Nuisance-trip check**: an idle kiln draws no current, so `heat_commanded` is false and S11 stays dormant exactly as before (`SAFETY_MODEL.md` §4's own idle-kiln example); a real soak's SSR duty-cycling does not nuisance-trip either, because S11 compares `in->tc_c` bit-for-bit tick to tick, and a genuine 19-bit MAX31856 reading on a live thermal system does not repeat exactly regardless of whether current happens to be flowing that instant. Not yet provokable by `virtual_dut` for the same fixture-side reason as S3/S4: `sim_engine.c` gates CT current on K4, which never closes there. |
+| S9 | **Yes** (since the `relay_deenergized` wiring) | — | `relay_deenergized` now comes from `!relay_owner_is_energized()`, named in `safety_core_build_input()` right after `.reboot_grace_active` (the struct's own field order). ~~Never computed — nothing plumbs `relay_owner_is_energized()`'s inverse into the input struct. This is the one row `f304392` did not move at all.~~ **Polarity is one deliberate negation, cross-checked three ways**: `relay_owner.h` publishes the affirmative ("true only while GPIO6 is actually being driven high right now"), `safety_guards.h` asks for the negative ("set by the caller once relay_owner has actually de-energized K4"), and `safety_core_get_output_status()` — twenty lines below, same file, same getter — reads it with *no* `!` for its `out_relay_energized`; the two call sites differ by exactly one negation because the two field names are exact opposites. **No GRACE suppression, and none is needed**: K4 genuinely reads de-energized for the whole 60 s startup GRACE window, but `safety_guards_tick()` only evaluates S9 inside its `if (state->is_tripped)` branch and re-zeros `s9_verify_elapsed_s` at the bottom of every untripped tick, so this is *not* the free-running-timer shape that made S6b nuisance-trip every boot before `f304392`; and if a trip does land during GRACE, "K4 open yet current still flowing for `trip_verify_s`" is a real welded contactor regardless of GRACE. ~~K4 is never energized in the first place today (`relay_owner_command_energize()` has zero callers anywhere in the tree) … no scenario models the operator enable step.~~ **Provoked end to end since the operator-actions pass**: `welded_contactor_s9.yaml` issues `request_enable`, lets S3 trip on an uncommanded weld, then a second, persisted-current fault survives K4 opening — `TRIP_INEFFECTIVE_LATCHED` measured 9.6 s after K4 opens. |
+| S10 | **Yes** (since `f304392`) | — | Same `context_valid` wiring as S2; `nearest_zone_measured_c` comes from `context_reduce_zones()`'s nearest-match search (never the mean). ~~Same as S2.~~ **And genuinely exercised, both directions**: `main_safety_skew`'s `s10_stays_quiet` (an +80 °C skew must stay under `tc_disagreement_c` = 200 °C) is a real anti-nuisance PASS, and `main_safety_disagree_s10.yaml` (2026-08-21) is the genuine-WARN case at +250 °C: `GUARD_WARN {S10}` measured 294.0 s after the fault fires. S10 is WARN-only (no `SAFETY_TRIP_*` case exists for it), so this is as far as "trip" can mean for this guard. |
+| S11 | **Yes** (since the `heat_commanded` wiring) | — | `heat_commanded` now comes from the same `any_current_present` value S3/S4/S6b already read (`current_task`'s real ADC0/1/2 snapshot via `current_any_present()`), named in `safety_core_build_input()` right after `.main_fault_asserted`. ~~Hardcoded `false` in `safety_core_build_input()` — its own comment: "no current sense yet, Phase 6."~~ Deliberately **not** wired from `relay_commanded_recently`/`_continuously` even though both also approximate "heat commanded": `safety_guards.h`'s own header comment requires this field stay link-independent (no `context_snapshot_t`-derived fact), matching `SAFETY_MODEL.md` §6's own S11/S13 audit note ("S11 reads neither [`link_up` nor `context_valid`]") and S11's place on the "keeps running with authority over K4 even when the main controller is unknown" list (§6) — `current_any_present` is real, independent hardware (its own ADC), never context-gated, exactly like S6b's own unconditional use of the same value. ~~Not yet provokable by `virtual_dut`: `sim_engine.c` gates CT current on K4, which never closes there.~~ **Provoked both directions since 2026-08-21**: `safety_tc_frozen.yaml` (fixed this pass, gained `operator_actions:`) trips for real — `GUARD_TRIP {S11}` measured 664.0 s after the freeze fault, with K4 closed and current flowing continuously from ~61 s onward. `safety_healthy_reading_s11.yaml` (new) is the anti-nuisance control: identical setup, no fault, run for a comparable ~650 s span — S11 never trips, because a live, unfaulted ADC reading is never bit-identical between ticks (measured, not asserted: `virtual_simfw`'s own MAX31856 emulation carries real noise/quantization). |
 | S12 | **Yes** | — | `cj_c` comes from the same real `thermo_task` snapshot as S1/S5/S11, with **no** `context_valid` or `link_up` gating at all — the guard's own code puts it before the context-gated block. ~~Not observed firing … `cj_fault.yaml` has no numeric fault offset~~ — that scenario-file gap was closed (`params: [70.0]`) and S12 has since been observed genuinely warning *and* tripping in `cj_fault`. |
 | S13 | **No** | `in->sample_counter_advancing` + `cfg->tc_source` | ~~Same as S2 (S13 is additionally gated on `cfg->tc_source` …).~~ `context_valid` no longer blocks it, but the two remaining blocks are both **commissioning gaps, not producer gaps** — the same category as S1's row above, and deliberately left that way by `f304392`. Deciding whether a zone's `sample_counter` advanced requires a commissioned `borrowed_zone_index` (0..2) naming *which* context zone is the borrowed channel; that field is documented (`SAFETY_MODEL.md` §3, `CONFIG_REFERENCE.md`) but exists nowhere in the codebase — no `config_store` field, no `safety_guard_cfg_t` field — so `safety_core_build_input()` leaves `sample_counter_advancing` false rather than hardcoding zone 0 and being silently wrong on any installation whose borrowed zone is not zone 0. Independently, `cfg->tc_source` defaults to `OWN_J7`, which `safety_guards.c` gates the whole S13 block on. |
 
@@ -452,36 +480,52 @@ above's *logic* passed its host-test row in section 2 — the code that
 decides "should this trip" is correct against the inputs it is given. What
 this table adds is which of those inputs are actually given.
 
-**Three distinct states, easy to conflate — keep them apart:**
+**Three distinct states, easy to conflate — keep them apart (revised
+2026-08-21 — the picture below is CURRENT, not the `f304392`-era one two
+paragraphs up, which is kept for history):**
 
 1. **Not reachable** — `safety_core.c` never produces the input, so the
-   guard's branch cannot run at all. After `f304392` this is only S6a
-   (`main_fault_asserted`, a one-line wiring omission on an existing,
-   working `discrete_task_main_fault()` producer), S9 (`relay_deenergized`),
-   and S11 (`heat_commanded`, still hardcoded `false`).
+   guard's branch cannot run at all. **As of the S6a/S9/S11 wiring commits
+   (`5375bca`/`5f90325`/`6e98ae3`), this category is empty.** Every guard
+   input `safety_core_build_input()` is capable of producing, it produces.
 2. **Reachable but not commissioned** — the input path is complete; a
    per-kiln config value that has no default, and deliberately must not be
-   guessed, keeps the guard quiet. S1 (`abs_max_temp_c`) and S13
-   (`borrowed_zone_index` + `tc_source`). This is a safety choice, not a bug.
-3. **Reachable, but not provokable by `virtual_dut`** — the firmware is
-   done; the *fixture* cannot generate the stimulus. S2 (no setpoint
-   producer anywhere in `kilnsim`/`virtual_simfw`), S3 and S4 (no CT current
-   and no commanded relay, because `sim_engine.c` gates heater duty on K4
-   and no scenario issues the operator enable). Do not read a quiet S3 in a
-   `virtual_dut` run as evidence about S3.
+   guessed, keeps the guard quiet. **S1** (`abs_max_temp_c`) and **S13**
+   (`borrowed_zone_index` + `tc_source`) are the only two guards left in
+   this state, and both are deliberate safety choices, not bugs or gaps to
+   close.
+3. **Reachable and commissioned, but this specific fixture cannot generate
+   the stimulus** — the firmware is done; `virtual_dut`/`virtual_simfw`
+   lacks the emulation to provoke it. **As of 2026-08-21, this category is
+   also empty for every guard except S6a.** S2/S3/S4/S9/S11 were in this
+   category through most of this document's history and are not any more
+   (see their rows above for exactly what closed each one — a
+   `dut.zone_setpoints:`/`dut.operator_actions:` scenario capability in
+   every case, not a firmware change). **S6a is the one guard that stays
+   here permanently, for a reason specific to it**: it needs
+   `virtual_simfw.c` to emulate the I2C-expander/opto Fault-line sensing
+   path, which does not exist and is out of this scenario library's
+   ownership to add (`firmware/SimFW/tools/virtual_simfw/src/**`).
 
-Only S5, S6b, S7, S10 and S12 are simultaneously reachable, commissioned and
-provokable by the fixture today — and only those five have `virtual_dut`
-evidence behind them. Everything else in the "Yes" column is a source-level
-verdict awaiting a stimulus.
+**Bottom line, current as of 2026-08-21: every guard except S1, S6a and S13
+now has real `virtual_dut` evidence — a genuine PASS or FAIL against
+present-day SaftyFW, not just a "should be reachable" source-level verdict.**
+S1 and S13 are commissioning gaps (deliberate, not fixable by a scenario or
+a fixture change). S6a is the one guard this harness cannot provoke at all,
+for the fixture-emulation reason given in its row above — bench hardware is
+the only way to exercise it. See
+`firmware/SimFW/tools/virtual_dut/results/SCENARIO_RESULTS.md` for the exact
+measured numbers behind every "provoked" claim above.
 
 **Re-checking this table:** re-run `firmware/SimFW/tools/virtual_dut/
-run_dut_scenarios.py` against the 19 scenarios any time `link_task`
-(Phase 7) or `current_task` (Phase 6) wiring changes in `safety_core.c` —
-newly-reachable guards will show real `guard_warn`/`guard_trip` events in
-`results/SCENARIO_RESULTS.md` where they previously showed none. Update this
-table's "Reachable today?" column in the same change, per this file's own
-"keep this file current" rule at the top.
+run_dut_scenarios.py` against all scenarios (25 as of 2026-08-21) any time
+`link_task` (Phase 7) or `current_task` (Phase 6) wiring changes in
+`safety_core.c`, or any time a scenario's own `operator_actions:`/
+`zone_setpoints:` change — newly-reachable/newly-provoked guards will show
+real `guard_warn`/`guard_trip` events in `results/SCENARIO_RESULTS.md` where
+they previously showed none. Update this table's "Reachable today?" column
+in the same change, per this file's own "keep this file current" rule at
+the top.
 
 **And re-check the fixture itself in the same pass.** `f304392` is the
 cautionary case: it changed `safety_core_build_input()` but not

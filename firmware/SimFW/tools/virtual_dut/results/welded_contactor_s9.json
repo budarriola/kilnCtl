@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 43,
   "timescale": 2.0,
-  "start_time": 1787293102.994656,
+  "start_time": 1787297245.057458,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 60600000,
+      "sim_time_us": 60400000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -63,7 +63,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 70400000,
+      "sim_time_us": 70200000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -87,7 +87,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 60200000,
+      "sim_time_us": 60000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -99,7 +99,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 89800000,
+      "sim_time_us": 89600000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S3"
@@ -110,7 +110,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 89800000,
+      "sim_time_us": 89600000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -122,7 +122,7 @@
     },
     {
       "seq": 2000000004,
-      "sim_time_us": 100000000,
+      "sim_time_us": 99800000,
       "event_type": "TRIP_INEFFECTIVE_LATCHED",
       "payload": {},
       "a": 0,
@@ -139,7 +139,7 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 0.200s after fault_fired"
+      "detail": "dut:current_present observed 0.000s after fault_fired"
     },
     {
       "name": "initial_trip",
@@ -148,7 +148,7 @@
         1,
         2000000002
       ],
-      "detail": "event:guard_trip observed 19.600s after fault_fired"
+      "detail": "event:guard_trip observed 19.400s after fault_fired"
     },
     {
       "name": "contactor_weld_engages_on_k4_open",
@@ -165,7 +165,7 @@
         2,
         2000000004
       ],
-      "detail": "event:trip_ineffective_latched observed 9.800s after relay_edge"
+      "detail": "event:trip_ineffective_latched observed 9.600s after relay_edge"
     },
     {
       "name": "stays_open_and_latched",

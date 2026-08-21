@@ -1,28 +1,16 @@
 {
   "scenario": {
-    "name": "safety_tc_frozen",
+    "name": "s2_setpoint_overshoot",
     "version": 1,
-    "hash": "6f01c4823839dddaf8b6eb7d4e89a96ba5c89a010b3137670b5adfd5ec9a3e9c"
+    "hash": "b7cef2275c6da64270a6ccf365d90f1361784c97ba0a7ed62b1a986f10f153ef"
   },
   "fw_versions": {},
-  "seed": 61,
+  "seed": 66,
   "timescale": 10.0,
-  "start_time": 1787296773.3398383,
+  "start_time": 1787296651.5301447,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 6000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "freeze",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 1,
       "sim_time_us": 7000000,
       "event_type": "RELAY_EDGE",
       "payload": {
@@ -36,7 +24,7 @@
       "f0": 0.0
     },
     {
-      "seq": 2,
+      "seq": 1,
       "sim_time_us": 64000000,
       "event_type": "RELAY_EDGE",
       "payload": {
@@ -50,8 +38,8 @@
       "f0": 0.0
     },
     {
-      "seq": 3,
-      "sim_time_us": 674000000,
+      "seq": 2,
+      "sim_time_us": 334000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -77,7 +65,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 675000000,
+      "sim_time_us": 337000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -113,10 +101,10 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 670000000,
+      "sim_time_us": 331000000,
       "event_type": "GUARD_TRIP",
       "payload": {
-        "guard": "S11"
+        "guard": "S2"
       },
       "a": 0,
       "b": 0,
@@ -124,7 +112,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 670000000,
+      "sim_time_us": 331000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -138,29 +126,21 @@
   "telemetry_samples": [],
   "expectations": [
     {
-      "name": "no_early_trip",
+      "name": "s2_trips_after_sustained_overshoot",
       "verdict": "PASS",
       "evidence": [
-        0
-      ],
-      "detail": "event:guard_trip never observed inside the forbidden window"
-    },
-    {
-      "name": "frozen_window_trips_s11",
-      "verdict": "PASS",
-      "evidence": [
-        0,
+        1,
         2000000002
       ],
-      "detail": "event:guard_trip observed 664.000s after fault_fired"
+      "detail": "event:guard_trip observed 267.000s after relay_edge"
     },
     {
-      "name": "trip_latched",
+      "name": "no_trip_before_k4_closes",
       "verdict": "PASS",
       "evidence": [
-        2000000003
+        1
       ],
-      "detail": "dut:K4_open held at end of run (last observed seq 2000000003)"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     }
   ],
   "verdict": "PASS",
@@ -170,11 +150,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 153,
-    "context_valid": 153,
-    "any_current_present": 119,
-    "link_up": 153,
+    "polls": 77,
+    "context_valid": 77,
+    "any_current_present": 53,
+    "link_up": 77,
     "max_zone_count": 3,
-    "energized": 119
+    "energized": 53
   }
 }

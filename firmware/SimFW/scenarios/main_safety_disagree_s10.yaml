@@ -1,0 +1,70 @@
+name: main_safety_disagree_s10
+version: 1
+exercises: [S10]
+# main_safety_skew.yaml already exercises S10, but only as an anti-nuisance
+# check (`s10_stays_quiet`): its own +80°C skew is deliberately BELOW S10's
+# tc_disagreement_c default (200°C), so it can never make S10 fire, only
+# prove it does not fire on a sub-threshold skew. This scenario is S10's
+# genuine-WARN case, using the same fault mechanism at a larger, above-
+# threshold offset.
+#
+# S10 ("safety TC disagrees with every zone TC", SAFETY_MODEL.md §4) is
+# WARN-only -- safety_guards.c has no SAFETY_TRIP_* case for it, only
+# `state->s10_warn` -- so "genuine trip case" for this guard means a genuine
+# WARN, not an escalation to K4-open; there is none to have.
+#
+# No `dut.operator_actions:` needed here (unlike the S2/S3/S4/S11 scenarios
+# in this library): S10 is gated on `cfg->tc_placement_mode ==
+# SAFETY_TC_CHAMBER_AGREED` (the zero-initialized default) and
+# `in->zone_count > 0`, and zone eligibility
+# (`context_reduce_zones()`'s ACTIVE + MEASURED_VALID flags) comes from
+# `_FixtureContext.observe()` unconditionally for every zone the fixture
+# models, regardless of relay/K4 state (see run_dut_scenarios.py: "every
+# zone the fixture models is part of the firing"). S10 compares the
+# *safety* TC reading against the *nearest* zone TC reading; neither needs
+# current or a closed contactor.
+preset: small_kiln
+timescale: 20
+seed: 65
+overrides: {}
+dut:
+  profile: cone6_fast
+faults:
+  - id: skew
+    # Same fault type/target as main_safety_skew.yaml's `skew`, a much larger
+    # offset: +250°C, comfortably above tc_disagreement_c's 200°C default
+    # (SAFETY_MODEL.md §4 S10) rather than a number tuned to just clear the
+    # bar. params[1] (gain) omitted -> defaults to 1.0, an offset-only skew.
+    type: main_safety_disagree
+    target: tc:safety
+    trigger: { at_sim_time: { t: 20 } }
+    duration: permanent
+    params: [250.0]
+expect:
+  - name: s10_warns_after_sustained_disagreement
+    event: { type: fault_fired, slot: skew }
+    then:
+      event: { type: guard_warn, guard: S10 }
+      # Measured (2026-08-20/21, this pass, seed 65): GUARD_WARN {S10} at
+      # sim-time 314.0s, the `fault_fired` wire event at 22.0s (the fault's
+      # own trigger is at_sim_time 20, but the wire event is only reported
+      # once a telemetry poll observes it -- ~2s of quantization at
+      # timescale 20) -- i.e. 292.0s after the wire-reported fault_fired,
+      # a few seconds under the nominal tc_disagreement_time_s=300s measured
+      # from THAT event, because the guard's own internal accumulator starts
+      # from whichever tick first sees the skewed reading, which precedes
+      # the wire-reported fault_fired event by roughly one telemetry frame.
+      # within_s/not_before_s below bracket the measured 292.0s with real
+      # margin on both sides, not a guessed pair (the original 320/295
+      # bracket FAILed against this measurement: not_before_s=295 excluded
+      # the genuine 292.0s edge as "too early").
+      within_s: 330        # ~38s of margin above the measured 292.0s
+      not_before_s: 260    # ~32s of margin below the measured 292.0s -- and
+                           # still >85% of the nominal 300s bar, so this is
+                           # not a hollowed-out "must eventually happen"
+                           # check: a warn landing much earlier than this
+                           # would mean the 300s sustained-disagreement bar
+                           # was not actually enforced
+  - name: no_warn_before_the_skew_fires
+    forbid: { event: { type: guard_warn, guard: S10 }, before: { fault: skew } }
+report_keep: [telemetry, events]

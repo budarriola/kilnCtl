@@ -72,17 +72,42 @@ has no producer for.
 
 What this script still does NOT do (see README.md for the full, honest
 list):
-  - It does not know any zone's **setpoint**. There is no ESP and no PID in
-    this fixture; nothing anywhere in `kilnsim`/`virtual_simfw` carries a
-    setpoint (the scenarios' ``dut: {profile: ...}`` key names a KilnFW
-    profile that nothing here executes). ``setpoint_c`` is therefore sent as
-    NaN -- "unknown", never a guessed number -- which makes S2's own
-    ``tc_c > max_zone_setpoint_c + margin`` test false rather than inventing
-    a ceiling for S2 to trip on. S2 is reachable on the real target after
-    ``f304392``; it is simply not provokable by this fixture.
   - It does not know any zone's PID. Nothing here decides *when* a zone
     relay should be commanded on; a scenario that wants one on says so
     explicitly (see ``operator_actions`` below).
+
+Zone setpoints (added 2026-08-20, S2 provocation pass)
+--------------------------------------------------------
+The bullet that used to sit here -- "it does not know any zone's setpoint...
+`setpoint_c` is therefore sent as NaN" -- is now conditionally closed. There
+is still no ESP and no PID in this fixture, and this script still does not
+*compute* a setpoint from anything (no profile is executed). But a scenario
+may now say what it wants ``max_zone_setpoint_c`` to be, the same way it
+already says what it wants a relay commanded to: a static ``dut.
+zone_setpoints:`` mapping of zone index -> setpoint_c, read once per run and
+held constant for the whole scenario (there is no time-varying profile
+here, so a constant declared value is the honest ceiling to compare
+against, not a guessed ramp). E.g.::
+
+    dut:
+      profile: cone6_fast
+      zone_setpoints: { 0: 150.0 }
+
+is a real, physical fact a scenario author is allowed to assert (`a real
+ESP would be holding this PID setpoint for zone 0`), exactly the same
+category of honesty as `operator_actions`' `command_relay` standing in for
+KilnFW's PID actually closing a contact -- it is not inventing a number for
+a guard to trip on, it is declaring the input a real profile execution
+would supply, so `s2_setpoint_overshoot.yaml`'s trip can be measured against
+the SAME real `context_reduce_zones()` reduction `safety_core_build_input()`
+uses, not a synthetic one. Zones with no entry in the mapping keep
+`setpoint_c = NaN`, unchanged from before -- `context_reduce_zones()`'s own
+`z->setpoint_c > max_setpoint` comparison is false for a NaN either side, so
+an unset zone never wins the max and never poisons a real zone's value
+(verified: zone index 0 must be the one with a real value if any zone can be
+first, since the reduction's own `count == 0` branch takes whatever the
+first ELIGIBLE zone offers unconditionally -- see `_parse_zone_setpoints`
+below for the one constraint this implies).
 
 Operator actions (added 2026-08-20, this pass)
 ----------------------------------------------
@@ -268,8 +293,19 @@ _RELAY_SIGNAL_BY_NAME = {
 # fault-driven scenarios (that estimator only knows about faults, so a
 # scenario whose interesting moment is an operator action would otherwise be
 # cut off at the 45 s floor).
-_ACTION_TRAILING_MARGIN_S = 20.0
-_ACTION_MAX_RUN_DURATION_S = 600.0  # same ceiling kilnsim.runner clamps to
+_ACTION_TRAILING_MARGIN_S = 30.0
+# Was 600.0 ("same ceiling kilnsim.runner clamps to") until the S11 trip
+# scenario (safety_tc_frozen.yaml, 2026-08-20 pass): S11's frozen_window_s
+# (600 s) only starts counting once heat_commanded goes true, which itself
+# needs SAFTYFW_STARTUP_GRACE_MS (60 s) plus the operator's enable to land --
+# so a genuine S11 trip needs on the order of 660-700 sim-seconds, past
+# kilnsim.runner's own fixed 600 s ceiling (that ceiling is kilnsim's, not
+# editable from here, and correctly stays 600 for the non-operator-action
+# scenarios that still go through kr.estimate_run_duration_s() alone). This
+# script's own ceiling is a local orchestration knob, not a safety property,
+# so raising it to fit a real, physically-required run is not a fudge --
+# same reasoning as _ACTION_TRAILING_MARGIN_S being local to this file.
+_ACTION_MAX_RUN_DURATION_S = 900.0
 
 
 def _parse_operator_actions(scenario: Scenario) -> list:
@@ -315,6 +351,38 @@ def _parse_operator_actions(scenario: Scenario) -> list:
     return out
 
 
+def _parse_zone_setpoints(scenario: Scenario) -> dict:
+    """Reads the scenario's ``dut.zone_setpoints:`` mapping (see the module
+    docstring). Returns ``{zone_index: setpoint_c}``. Unknown/invalid entries
+    raise, same "no silently-ignored authored fact" policy as
+    :func:`_parse_operator_actions` -- a `zone_setpoints:` key with a typo'd
+    zone index should not quietly degrade back to NaN and produce another
+    `welded_ssr_midfire`-style dead-looking-real test.
+
+    Zone index 0 is not special in `context_reduce_zones()` (any eligible
+    zone can seed `max_setpoint` from `count == 0`), but THIS fixture's zone
+    ordering is fixed (`_FixtureContext.observe()` always emits zones 0..2 in
+    that order, mirroring `virtual_simfw`'s own zone array), so a caller that
+    wants a single declared setpoint to actually win the max should give it
+    to the lowest zone index it names -- documented here rather than enforced,
+    since a scenario naming setpoints for multiple zones may deliberately want
+    a specific one to dominate."""
+    dut_raw = (scenario.raw or {}).get("dut") or {}
+    raw = dut_raw.get("zone_setpoints") or {}
+    if not isinstance(raw, dict):
+        raise ValueError("dut.zone_setpoints must be a mapping of zone index -> setpoint_c")
+    out = {}
+    for k, v in raw.items():
+        try:
+            zi = int(k)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"dut.zone_setpoints: zone index must be an int, got {k!r}") from exc
+        if not (0 <= zi < 3):
+            raise ValueError(f"dut.zone_setpoints: zone index {zi} out of range (0..2)")
+        out[zi] = float(v)
+    return out
+
+
 def _run_duration_with_actions(scenario: Scenario, actions: list) -> float:
     """kilnsim.runner.estimate_run_duration_s() knows only about faults (its
     own docstring: "computed from ... every fault's trigger time"), so a
@@ -324,7 +392,9 @@ def _run_duration_with_actions(scenario: Scenario, actions: list) -> float:
     be stopped at that estimator's 45 s floor. Extend it by the same shape
     the estimator itself uses: latest scheduled moment + the longest
     ``within_s`` deadline any clause hangs off it + a trailing margin,
-    clamped to the same 600 s ceiling."""
+    clamped to this file's own ``_ACTION_MAX_RUN_DURATION_S`` ceiling (see
+    that constant's own comment for why it is no longer the same 600 s
+    kilnsim.runner uses)."""
     base = kr.estimate_run_duration_s(scenario)
     if not actions:
         return base
@@ -615,11 +685,17 @@ class _FixtureContext:
     # safety_core.c substitutes when cfg->correlation_window_s is 0.
     RECENT_WINDOW_S = 150.0
 
-    def __init__(self):
+    def __init__(self, zone_setpoints: Optional[dict] = None):
         self.prev_sim_us: Optional[int] = None
         self.last_advance_wall: Optional[float] = None
         self.relay_history: list = []  # [(sim_us, mask)]
         self.on_since_us: Optional[int] = None
+        # Zone index -> a scenario-declared constant setpoint_c (see the
+        # module docstring's "Zone setpoints" section and
+        # _parse_zone_setpoints()). Empty by default, matching every
+        # scenario written before this pass: every zone's setpoint_c stays
+        # NaN unless a scenario explicitly opts in.
+        self.zone_setpoints: dict = dict(zone_setpoints or {})
 
     def observe(self, telemetry: dict) -> dict:
         sim_us = int(telemetry.get("sim_time_us", 0))
@@ -670,8 +746,10 @@ class _FixtureContext:
                 flags |= self.ZONE_FLAG_RELAY_ON
             zones.append({
                 "flags": flags,
-                # No producer anywhere in this fixture -- NaN means unknown.
-                "setpoint_c": float("nan"),
+                # NaN ("unknown") unless the scenario declared a static
+                # setpoint for this zone index via dut.zone_setpoints: --
+                # see the module docstring's "Zone setpoints" section.
+                "setpoint_c": self.zone_setpoints.get(i, float("nan")),
                 "measured_c": measured,
                 # S13 is deliberately dormant in safety_core.c too (no
                 # commissioned borrowed_zone_index exists); dut_core.exe
@@ -761,6 +839,7 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
         run_seed = seed_override if seed_override is not None else scenario.seed
         run_timescale = timescale_override if timescale_override is not None else scenario.timescale
         actions = _parse_operator_actions(scenario)
+        zone_setpoints = _parse_zone_setpoints(scenario)
         run_duration = _run_duration_with_actions(scenario, actions)
 
         link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": run_seed})
@@ -786,7 +865,7 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
         collected: list = []
         wire_tracker = kr._TelemetryEdgeTracker()
         guard_tracker = _GuardEdgeTracker()
-        fixture_ctx = _FixtureContext()
+        fixture_ctx = _FixtureContext(zone_setpoints=zone_setpoints)
         # "polls" is now literally the number of guard ticks, because there is
         # exactly one tick per observed sample (plan_tick_dt_ms) -- a poll that
         # saw no new sample does not tick and is not counted.
