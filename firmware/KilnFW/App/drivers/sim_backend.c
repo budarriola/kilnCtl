@@ -165,6 +165,9 @@ esp_err_t sim_backend_read_all(MAX31856Reading *out, size_t max_readings, size_t
             r->fault_status = THERMO_FAULT_OPEN;
             r->fault_pin_asserted = true;
             r->tc_temperature_c = NAN;
+            /* Mirrors the real driver here too: a faulted channel produces no
+             * usable conversion, so its age never refreshes. */
+            r->age_ms = MAX31856_READING_AGE_UNKNOWN;
         } else {
             r->tc_temperature_c = reading_c;
         }

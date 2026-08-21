@@ -45,7 +45,16 @@ typedef struct {
     bool    valid;
     uint8_t fault_status;
     bool    spi_failed;
+    /* USER-FACING staleness: true only when age_ms exceeds
+     * KILN_TEMP_STALE_AGE_MS (MAX31856.h). This is deliberately NOT the
+     * driver's MAX31856Reading::stale, which means "no new conversion since
+     * the previous read" and is true for a perfectly good reading taken
+     * 200 ms ago. Every UI -- web, LCD, PC tools over UART -- judges
+     * staleness by this same rule so they cannot disagree. */
     bool    stale;
+    /* Milliseconds since this channel last produced a usable conversion;
+     * MAX31856_READING_AGE_UNKNOWN if it never has. */
+    uint32_t age_ms;
 } dashboard_channel_status_t;
 
 /* TODO.md 10.1a's shared-backend seam: everything status_get_handler()

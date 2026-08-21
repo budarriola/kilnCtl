@@ -110,6 +110,10 @@ static void owner_task(void *arg)
                     r.read_result.tc_temperature_c = NAN;
                     r.read_result.cj_temperature_c = NAN;
                     r.read_result.spi_failed = true;
+                    /* No conversion history exists for a channel that never
+                     * came up, so the age is genuinely unknown -- which the
+                     * UI layers already treat as "too old to trust". */
+                    r.read_result.age_ms = MAX31856_READING_AGE_UNKNOWN;
                 }
                 goto answer;
             }
@@ -297,6 +301,7 @@ esp_err_t thermo_owner_command_read(uint8_t channel, MAX31856Reading *out)
             out->tc_temperature_c = NAN;
             out->cj_temperature_c = NAN;
             out->spi_failed = true;
+            out->age_ms = MAX31856_READING_AGE_UNKNOWN;
         }
         return ESP_ERR_TIMEOUT;
     }

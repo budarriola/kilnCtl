@@ -69,26 +69,46 @@
   .s-ramp.near-ceiling { border-color: var(--warn); }
   .s-ramp.over-ceiling { border-color: var(--err); }
   /* Builtin catalogue + feasibility colouring. Colours come only from the
-     --err/--warn/--muted names declared above, so both theme variants and the
-     light/dark toggle keep working -- no literal hex here on purpose. The
-     three "not ok" verdicts differ in kind, not just degree:
-       too_fast    -> --err
-       unreachable -> --err too, but bolded + wavy-underlined so the worse
-                      verdict is distinguishable at a glance
-       unknown     -> --muted italic (autotune has never run; deliberately
-                      NOT red, so red keeps meaning "really infeasible"). */
-  .fz-too_fast { color: var(--err); }
-  .fz-unreachable { color: var(--err); font-weight: bold;
-                    text-decoration: underline wavy; }
-  .fz-unknown { color: var(--muted); font-style: italic; }
-  .ci { border-left: 4px solid transparent; padding-left: 0.5em; margin: 0.25em 0; }
-  .ci.fz-too_fast, .ci.fz-unreachable, .ci.fz-unknown { border-left-color: currentColor; }
+     --err/--muted names declared above, so both theme variants and the
+     light/dark toggle keep working -- no literal hex here on purpose.
+     Only the two verdicts a user can actually act on get marked at all:
+       too_fast    -> dark red card background (--err); this kiln's tuned
+                      model says the commanded ramp can't be sustained.
+       unreachable -> same dark red background, plus bold + wavy underline
+                      on the offending text so the worse verdict is still
+                      distinguishable at a glance once both are red.
+     "unknown" (no autotune has run for a zone yet) gets NO marking at all --
+     an untuned kiln can't be told apart from a fine schedule, so lighting up
+     every single profile with a badge would just be noise; see the one-line
+     notice above the list instead. Text inside a marked card is forced to a
+     fixed light colour rather than inheriting --fg, because --fg is a DARK
+     colour in light mode -- dark text on a dark red card would be unreadable
+     there even though the same rule looks fine in dark mode. */
+  .ci.fz-too_fast, .ci.fz-unreachable {
+    background: var(--err); border-radius: var(--ui-radius);
+    padding: 0.4em 0.6em; margin: 0.4em 0;
+  }
+  .ci.fz-too_fast, .ci.fz-unreachable,
+  .ci.fz-too_fast summary, .ci.fz-unreachable summary,
+  .ci.fz-too_fast .hint, .ci.fz-unreachable .hint,
+  .ci.fz-too_fast a, .ci.fz-unreachable a,
+  .ci.fz-too_fast .badge, .ci.fz-unreachable .badge,
+  .ci.fz-too_fast td, .ci.fz-unreachable td, .ci.fz-too_fast th, .ci.fz-unreachable th {
+    color: #fff;
+  }
+  .ci.fz-too_fast th, .ci.fz-unreachable th,
+  .ci.fz-too_fast td, .ci.fz-unreachable td { border-bottom-color: rgba(255,255,255,0.35); }
+  .ci.fz-unreachable summary, .ci.fz-unreachable .badge { font-weight: bold; text-decoration: underline wavy; }
+  .ci { margin: 0.25em 0; }
   .ci > summary { cursor: pointer; font-size: 0.9em; }
   .ci table { width: 100%; border-collapse: collapse; font-size: 0.85em; margin: 0.4em 0; }
   .ci th, .ci td { border-bottom: 1px solid var(--border); padding: 0.2em 0.4em; text-align: right; }
   .ci th:first-child, .ci td:first-child { text-align: left; }
   .badge { font-size: 0.75em; border: 1px solid currentColor; border-radius: var(--ui-radius);
            padding: 0 0.4em; margin-left: 0.4em; white-space: nowrap; }
+  .tune-notice { background: var(--card-bg); border: 1px solid var(--border);
+                 border-left: 4px solid var(--warn); border-radius: var(--ui-radius);
+                 padding: 0.6em 0.9em; margin-bottom: 0.6em; font-size: 0.9em; }
   .credits { font-size: 0.85em; color: var(--muted); }
 </style>
 </head>
@@ -107,10 +127,10 @@ runs its own PID/bang-bang loop and thermal guards independently.</p>
 
 <h2>Shipped schedules <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
 <p class="hint">Read-only reference schedules stored in flash. Expand one to see its
-steps. A step marked <span class="fz-too_fast">too fast</span> or
-<span class="fz-unreachable">unreachable</span> is one this kiln's tuned model says
-it cannot fire; <span class="fz-unknown">untuned</span> just means no autotune has
-run for a zone yet, so nothing is known either way.</p>
+steps. A schedule with a dark red background is not usable on this kiln as tuned --
+its ramp is faster than a zone can sustain, or its target is above what a zone can
+reach.</p>
+<div id="tuneNotice" class="tune-notice" style="display:none"></div>
 <div id="cat"><p class="empty">Loading&hellip;</p></div>
 <div id="catMsg"></div>
 
@@ -313,11 +333,14 @@ function loadList() {
  * One fetch of /api/profiles/builtin?all=1 covers both jobs: it carries the
  * hidden entries (so we know whether "Restore removed" is worth showing) and
  * every segment, so no per-schedule round trip is needed on expand. */
-var FZ_LABEL = { too_fast: 'too fast', unreachable: 'unreachable', unknown: 'untuned' };
+// "unknown" (no autotune run yet) is deliberately NOT in these tables: it is
+// not marked in the UI at all (see the .ci.fz-* CSS comment above), so there
+// is no label or per-item explanation for it -- just the one-time notice
+// above the list.
+var FZ_LABEL = { too_fast: 'too fast', unreachable: 'unreachable' };
 var FZ_WHY = {
   too_fast: 'Commanded ramp exceeds what the zone can sustain (heating headroom, or -- on a falling ramp -- the kiln\'s natural cooling rate; there is no active cooling).',
   unreachable: 'The kiln cannot reach this temperature at all with its tuned model.',
-  unknown: 'No tuned model -- run autotune for the zone before trusting this.',
 };
 
 /* Matches the editor's "0=none" convention: 0 is not a rate, it means run
@@ -325,8 +348,14 @@ var FZ_WHY = {
  * like "do not heat". */
 function rampText(r) { return (r > 0) ? String(r) : 'max'; }
 
+// Only these two verdicts are ever shown to the user (dark red card,
+// badge, tooltip). "unknown" is deliberately excluded -- see the FZ_LABEL
+// comment above -- so an untuned kiln renders every catalogue entry as an
+// ordinary, unmarked card instead of a wall of "untuned" noise.
+function isMarked(verdict) { return verdict === 'too_fast' || verdict === 'unreachable'; }
+
 function fzMark(el, verdict) {
-  if (verdict && verdict !== 'ok') {
+  if (isMarked(verdict)) {
     el.classList.add('fz-' + verdict);
     el.title = FZ_WHY[verdict] || verdict;
   }
@@ -339,7 +368,7 @@ function catalogueItem(p) {
 
   var s = document.createElement('summary');
   s.appendChild(document.createTextNode(p.title || p.name));
-  if (p.feasibility && p.feasibility !== 'ok') {
+  if (isMarked(p.feasibility)) {
     var b = document.createElement('span');
     b.className = 'badge';
     b.textContent = FZ_LABEL[p.feasibility] || p.feasibility;
@@ -351,7 +380,7 @@ function catalogueItem(p) {
   var rows = '';
   (p.segments || []).forEach(function (seg, i) {
     var v = seg.feasibility;
-    var cls = (v && v !== 'ok') ? ' class="fz-' + v + '" title="' + (FZ_WHY[v] || '') + '"' : '';
+    var cls = isMarked(v) ? ' class="fz-' + v + '" title="' + (FZ_WHY[v] || '') + '"' : '';
     rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td>' + rampText(seg.ramp_c_per_hr) +
             '</td><td>' + seg.target_c + '</td><td>' + seg.dwell_min + '</td></tr>';
   });
@@ -361,7 +390,7 @@ function catalogueItem(p) {
                   '<th>Hold min</th></tr>' + rows + '</table>';
   d.appendChild(tbl);
 
-  if (p.feasibility && p.feasibility !== 'ok') {
+  if (isMarked(p.feasibility)) {
     var cap = document.createElement('p');
     cap.className = 'hint';
     cap.textContent = FZ_WHY[p.feasibility] || '';
@@ -398,8 +427,10 @@ function loadCatalogue() {
     var el = document.getElementById('cat');
     el.innerHTML = '';
     var hiddenCount = 0;
+    var anyUnknown = false;
     list.forEach(function (p) {
       if (p.hidden) { hiddenCount++; return; }
+      if (p.feasibility === 'unknown') anyUnknown = true;
       el.appendChild(catalogueItem(p));
     });
     if (!el.firstChild) {
@@ -408,6 +439,18 @@ function loadCatalogue() {
     var rb = document.getElementById('restoreBtn');
     rb.style.display = hiddenCount > 0 ? '' : 'none';
     rb.textContent = 'Restore ' + hiddenCount + ' removed';
+
+    // One plain-language notice instead of a badge on every card (they'd all
+    // say the same thing until at least one zone is autotuned).
+    var notice = document.getElementById('tuneNotice');
+    if (anyUnknown) {
+      notice.style.display = '';
+      notice.innerHTML = 'This kiln has not been tuned yet, so these schedules can\'t be ' +
+        'checked against it. <a href="/settings/zones">Run autotune from the zone settings</a> ' +
+        'to enable that check.';
+    } else {
+      notice.style.display = 'none';
+    }
   }).catch(function () {
     document.getElementById('cat').innerHTML = '<p class="empty">Could not load shipped schedules.</p>';
   });

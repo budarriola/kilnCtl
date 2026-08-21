@@ -47,8 +47,10 @@
 //   - A single-line run-state summary (profile name + state) plus a
 //     time/progress line and a slim progress bar -- trimmed from the
 //     previous 4-widget profile card to fit the budget.
-//   - Start/Stop/Menu action row (Menu replaces the old separate
-//     Configuration+Temperature nav row -- see below).
+//   - A single merged Start/Stop action button, colour/label following run
+//     state (2026-08-20: was Start+Stop+Menu; Menu moved to a gear icon in
+//     the status bar and Start/Stop merged into one button -- see
+//     fire_btn_cb() and the status-bar build in ui_page_home_build()).
 //
 // What MOVED OFF this page, each reachable via kiln_ui_show() same as any
 // other secondary page (TODO.md 10.1's page-manager pattern), because they
@@ -102,8 +104,9 @@ static uint8_t s_zone_count; /* zones_config_get_thermo_count() at build time */
 static lv_obj_t *s_state_label;   /* "<profile> -- <state>" single line */
 static lv_obj_t *s_time_label;
 static lv_obj_t *s_progress_bar;
-static lv_obj_t *s_start_btn;
-static lv_obj_t *s_stop_btn;
+static lv_obj_t *s_fire_btn;      /* merged Start/Stop button */
+static lv_obj_t *s_fire_btn_label;
+static lv_obj_t *s_gear_btn;       /* Menu, now a gear icon top-right of the status bar */
 
 /* WiFi/IP/mDNS status readout, in the status bar. Text comes from
  * wifi_status_ui_get_text() (wifi_status_ui.c) -- see that module's header
@@ -150,10 +153,8 @@ static const char *exec_state_label(profile_exec_state_t s)
     }
 }
 
-static void start_btn_cb(lv_event_t *e)
+static void do_start(void)
 {
-    (void)e;
-
     /* Same action function dashboard_http.c's POST /api/profile_exec/start
      * handler calls (profile_exec_start_post_handler()) -- TODO.md 10.1a.
      *
@@ -190,12 +191,32 @@ static void start_btn_cb(lv_event_t *e)
     }
 }
 
-static void stop_btn_cb(lv_event_t *e)
+static void do_stop(void)
+{
+    /* Same action function dashboard_http.c's POST /api/profile_exec/stop
+     * handler calls -- TODO.md 10.1a. profile_executor_halt() itself is the
+     * only gate on a stop today -- no confirmation dialog exists anywhere in
+     * this call path (see this file's header/report note: flagged back to
+     * the requester rather than silently added here). */
+    profile_executor_halt();
+}
+
+/* Merged Start/Stop button (single user-visible request: "the start stop
+ * button should be one button on the lcd"). Idle/Done/Faulted -> "Start" +
+ * do_start(); Running/Paused -> "Stop" + do_stop(). One callback reads
+ * current state at click time rather than two callbacks each assuming a
+ * fixed action, so a state change between refresh_cb() ticks and the actual
+ * tap can never fire the stale action. */
+static void fire_btn_cb(lv_event_t *e)
 {
     (void)e;
-    /* Same action function dashboard_http.c's POST /api/profile_exec/stop
-     * handler calls -- TODO.md 10.1a. */
-    profile_executor_halt();
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+        do_stop();
+    } else {
+        do_start();
+    }
 }
 
 static void menu_nav_cb(lv_event_t *e)
@@ -214,7 +235,11 @@ static void menu_nav_cb(lv_event_t *e)
     kiln_ui_show("config");
 }
 
-static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_color_t bg, lv_event_cb_t cb)
+/* out_label, if non-NULL, receives the button's label widget so a caller can
+ * change its text/color later (the merged fire button's state-driven text --
+ * see fire_btn_cb()/refresh_cb()). */
+static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_color_t bg, lv_event_cb_t cb,
+                               lv_obj_t **out_label)
 {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_height(btn, UI_THEME_MIN_TOUCH_TARGET_PX);
@@ -227,12 +252,42 @@ static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_color_t bg,
     lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(label, text);
     lv_obj_center(label);
+    if (out_label) {
+        *out_label = label;
+    }
 
     /* TODO.md 10.4's touch hit-area helper (ui_theme.c) -- this is a sparse
      * button row, not a dense grid, so compact_layout=false. Forces an
      * immediate layout pass first: ui_theme_apply_touch_area() reads back
      * lv_obj_get_width/height(), which flex_grow leaves unresolved until
      * layout actually runs. */
+    lv_obj_update_layout(btn);
+    ui_theme_apply_touch_area(btn, false);
+
+    return btn;
+}
+
+/* Small icon button (the gear) -- sized to its content rather than
+ * flex_grow'd across a row, since it lives in the status bar next to the
+ * WiFi label, not in the action row. compact_layout=false when calling
+ * ui_theme_apply_touch_area(): this is a lone icon, not a dense grid cell, so
+ * it gets the generous "reach UI_THEME_MIN_TOUCH_TARGET_PX effective size"
+ * extension, same as build_button()'s row buttons -- see that helper's
+ * doc comment in ui_theme.h. */
+static lv_obj_t *build_icon_button(lv_obj_t *parent, const char *symbol, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(btn, UI_THEME_PADDING_PX / 2, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(label, symbol);
+    lv_obj_center(label);
+
     lv_obj_update_layout(btn);
     ui_theme_apply_touch_area(btn, false);
 
@@ -320,7 +375,14 @@ static void refresh_cb(lv_timer_t *timer)
                 break;
             }
         }
-        if (ch && ch->valid) {
+        /* ch->stale is the shared user-facing rule (older than
+         * KILN_TEMP_STALE_AGE_MS), not the driver's per-poll flag -- see
+         * dashboard_http.h. Showing a number that has not been refreshed in
+         * over ten seconds as if it were live is how a kiln gets watched
+         * against a temperature that stopped moving; "--" is the honest
+         * answer, and it matches what the web page and the PC tools show for
+         * the same reading. */
+        if (ch && ch->valid && !ch->stale) {
             snprintf(buf, sizeof(buf), "%.1f C", (double)ch->temp_c);
         } else {
             snprintf(buf, sizeof(buf), "-- C");
@@ -358,6 +420,18 @@ static void refresh_cb(lv_timer_t *timer)
                  exec_state_label(st.state));
     }
     lv_label_set_text(s_state_label, state_buf);
+
+    /* Merged fire button -- label and color follow the same st.state this
+     * function already polled above. Running/Paused reads "Stop" in the
+     * danger accent; everything else (Idle/Done/Faulted) reads "Start" in
+     * the start-ish accent. */
+    if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
+        lv_label_set_text(s_fire_btn_label, "Stop");
+        lv_obj_set_style_bg_color(s_fire_btn, UI_THEME_ACCENT_5, 0);
+    } else {
+        lv_label_set_text(s_fire_btn_label, "Start");
+        lv_obj_set_style_bg_color(s_fire_btn, UI_THEME_ACCENT_4, 0);
+    }
 
     /* Elapsed/remaining are per-SEGMENT, not whole-profile totals -- that is
      * all profile_executor_get_status() computes (see profile_executor.h),
@@ -421,11 +495,165 @@ lv_obj_t *ui_page_home_build(void)
     lv_label_set_text(title, "kilnCtl");
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
-    /* WiFi/IP/mDNS status readout -- right side of the same status bar. */
+    /* Gear (Menu) touch-target proxy -----------------------------------
+     *
+     * MEASURED ON HARDWARE (2026-08-20, injected touches + kiln_ui.c's
+     * tap-target dump -- facts, not guesses): with the gear as an ordinary
+     * child of the 32px status bar, its logged clickable rect was
+     * (450,12)-(471,35) -- a 21x23px box, centre (460,23). Tapping 15px to
+     * the LEFT of that box (still inside the bar vertically) hit, proving
+     * ui_theme_apply_touch_area()'s horizontal ext_click_area extension was
+     * being applied. Tapping 30px below/left of it -- outside the bar's
+     * own 32px vertical span -- did NOT hit, even though the button's own
+     * ext_click_area should have reached that far.
+     *
+     * Root cause: LVGL's hit test descends the widget tree and can only
+     * recurse into a child if the *parent's* own (possibly extended) area
+     * already contains the touch point. A child's ext_click_area can never
+     * reach past a parent that doesn't itself cover that point. The status
+     * bar is a fixed 32px tall box with no click extension of its own, so
+     * any child of it -- gear included -- was hard-capped at 32px of
+     * vertical reach no matter how generous its own ext_click_area was.
+     *
+     * Fix: this invisible object (s_gear_hit_area) is parented directly to
+     * `scr` (the page root), the same level as `bar` and `content`, so it
+     * is never clipped by the bar's height. It is moved to the foreground
+     * once `content` exists below (see the lv_obj_move_foreground() call
+     * after `content` is built) so it wins the hit test over both the bar
+     * and the content beneath it wherever they overlap.
+     *
+     * Sized 80 x 36px: 36 = UI_THEME_STATUS_BAR_HEIGHT_PX (32) + the real
+     * bar-to-content pad_gap (UI_THEME_PADDING_PX/2 = 4px, see the
+     * lv_obj_set_style_pad_gap(scr, ...) call above and the matching
+     * derivation in this file's build_zone_row()-area comments). That gap
+     * is the hardware-verified miss point (430,45) sits just past --
+     * absolute y=44 is where `content` begins, so this box stops exactly
+     * there and never reaches into the first content/zone row. Width 80 is
+     * generous sideways since nothing else in the status bar is clickable
+     * (the WiFi label is plain text), so widening left of the visual gear
+     * cannot steal a tap meant for another control.
+     *
+     * Transparent/borderless: purely a hit-target, not drawn. The real
+     * gear glyph is s_gear_btn, an ordinary child of this proxy positioned
+     * to land pixel-identical to where it used to sit as a bar child, so
+     * this is invisible on screen -- only the effective touch rectangle
+     * changed.
+     *
+     * DO NOT "tidy" the gear back into being a plain child of `bar` --
+     * that silently reintroduces the 21x23px touch target measured above.
+     *
+     * FLEX TRAP (hit on hardware once already, see history): `scr` is a
+     * flex-column container. A plain child added to it is placed IN THE
+     * FLOW as the next column item -- it does NOT keep whatever
+     * lv_obj_align() position you asked for, and its height is subtracted
+     * from the column's available space same as any other row. The first
+     * version of this fix skipped LV_OBJ_FLAG_FLOATING and the proxy was
+     * measured on hardware sitting at the BOTTOM of the screen (pushed
+     * there as the 3rd flow item after `bar` and `content`), while
+     * `content` shrank by the proxy's own height (267px -> 227px),
+     * breaking the no-scroll budget. LV_OBJ_FLAG_FLOATING (confirmed
+     * present in this vendored LVGL as of writing, components/lvgl/src/
+     * core/lv_obj.h) is what tells flex to skip the object entirely: it
+     * takes no space in the column and is positioned purely by its own
+     * align/coords, exactly like a normal absolutely-positioned overlay.
+     * It MUST be set before anything reads back this object's layout
+     * position/size (ext_click_area math, alignment of the visual gear
+     * glyph below, etc.) -- set it immediately after creation, first.
+     */
+    /* Named so the status-label width cap below (which must never let text
+     * reach under this proxy) is derived from the same number instead of
+     * repeating the literal 80 and silently drifting from it later. */
+    const int32_t gear_hit_area_w = 80;
+    lv_obj_t *gear_hit_area = lv_obj_create(scr);
+    lv_obj_add_flag(gear_hit_area, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(gear_hit_area, gear_hit_area_w, UI_THEME_STATUS_BAR_HEIGHT_PX + (UI_THEME_PADDING_PX / 2));
+    lv_obj_set_style_bg_opa(gear_hit_area, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(gear_hit_area, 0, 0);
+    lv_obj_set_style_pad_all(gear_hit_area, 0, 0);
+    lv_obj_remove_flag(gear_hit_area, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(gear_hit_area, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_flag(gear_hit_area, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(gear_hit_area, menu_nav_cb, LV_EVENT_CLICKED, NULL);
+
+    /* Visual gear glyph -- same look as before (build_icon_button(), same
+     * symbol, same click handler), just parented to the hit-area proxy
+     * above instead of to `bar`. Aligned so its on-screen position matches
+     * the old bar-relative RIGHT_MID placement exactly: the proxy's top
+     * edge coincides with the bar's top edge (both offset 0 from scr's own
+     * padding), so re-deriving "vertically centred in a
+     * UI_THEME_STATUS_BAR_HEIGHT_PX-tall band from that shared top edge"
+     * reproduces the identical pixel position. */
+    s_gear_btn = build_icon_button(gear_hit_area, LV_SYMBOL_SETTINGS, menu_nav_cb);
+    lv_obj_update_layout(s_gear_btn);
+    lv_obj_align(s_gear_btn, LV_ALIGN_TOP_RIGHT, 0,
+                 (UI_THEME_STATUS_BAR_HEIGHT_PX - lv_obj_get_height(s_gear_btn)) / 2);
+
+    /* WiFi/IP/mDNS status readout -- right side of the status bar, just
+     * left of the gear. Width capped so a long status string can't grow
+     * under/behind the gear's (invisible, extended) hit area; the label
+     * itself still just shows whatever wifi_status_ui_get_text() returns.
+     * align_to() works across the gear's new parent (gear_hit_area instead
+     * of bar) the same as before -- it resolves absolute coordinates, not
+     * a shared-parent relationship.
+     *
+     * WIDTH MUST BE SET EXPLICITLY, NOT INFERRED FROM align_to() --
+     * confirmed on hardware (2026-08-20 tap-target dump) after the user
+     * reported the WiFi text overlapping the gear once connected (long
+     * strings like "WiFi: 192.168.1.156 (kilnctl.local) -- Signal: -45
+     * dBm"). Measured facts: s_status_label's clickable/paint rect was
+     * (8,8)-(471,39) -- the FULL 463px bar width -- while the gear glyph
+     * sat at (450,12)-(471,35) and its hit proxy at (392,8)-(471,43). The
+     * label's box was underneath both. lv_obj_align_to() only sets a
+     * POSITION (an anchor point); it never constrains WIDTH, and this
+     * label's box was still sized to the full width of `bar` (its parent),
+     * so the fixed anchor point did nothing to stop the box -- and
+     * therefore the rendered text -- from running under the gear. Fix:
+     * cap the label's own width so its box can never reach the proxy,
+     * independent of parent width, then use LV_LABEL_LONG_DOT so any
+     * string that still doesn't fit ellipsises ("...") instead of
+     * overflowing into the gear. LV_LABEL_LONG_SCROLL_CIRCULAR was
+     * considered and rejected: this is an always-on kiln panel, and a
+     * perpetually scrolling label is a needless distraction and redraw
+     * cost. Text stays left-aligned (the label's default) so short
+     * strings look exactly as they did before.
+     *
+     * Width derivation (self-correcting if bar width or the proxy's width
+     * ever change -- no hardcoded 384/392 here, only the constants those
+     * numbers came from): cap = bar_width - gear_hit_area_w - gap, where
+     * gap is the same UI_THEME_PADDING_PX/2 offset already used below to
+     * keep the box off the proxy. With the measured 463px bar and the 80px
+     * proxy this resolves to ~379px, right edge ~x=387 -- left of the
+     * proxy's x=392 with a visible gap, gear glyph unaffected at
+     * (450,12)-(471,35). */
+    lv_obj_update_layout(bar);
+    int32_t bar_w = lv_obj_get_width(bar);
+    int32_t status_label_max_w = bar_w - gear_hit_area_w - (UI_THEME_PADDING_PX / 2);
+    /* Guard the subtraction. lv_obj_update_layout() above normally resolves
+     * the bar's lv_pct(100) against the screen, but this page is BUILT
+     * DETACHED (kiln_ui.c builds a page before it is ever shown), and a
+     * width read before layout resolves is 0 -- which would make this
+     * subtraction negative and the label either invisible or garbage. If
+     * that ever happens, fall back to the full bar width: a label that
+     * overlaps the gear is a cosmetic bug, a label that vanishes is a
+     * functional one, and the log line says which case this boot took. */
+    if (status_label_max_w <= 0) {
+        ESP_LOGW(TAG, "status label width fallback: bar_w=%ld resolved too small for the gear "
+                      "reservation (%ld) -- label may overlap the gear this boot",
+                 (long)bar_w, (long)gear_hit_area_w);
+        status_label_max_w = (bar_w > 0) ? bar_w : LV_SIZE_CONTENT;
+    } else {
+        ESP_LOGI(TAG, "status label width %ld of bar %ld (gear reserves %ld)",
+                 (long)status_label_max_w, (long)bar_w, (long)gear_hit_area_w);
+    }
     s_status_label = lv_label_create(bar);
     lv_obj_set_style_text_color(s_status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_obj_set_width(s_status_label, status_label_max_w);
+    lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_status_label, "WiFi: --");
-    lv_obj_align(s_status_label, LV_ALIGN_RIGHT_MID, 0, 0);
+    /* Anchor to gear_hit_area (the proxy), not s_gear_btn (the visual
+     * glyph) -- the proxy is the wider box and the one the label must
+     * actually clear. */
+    lv_obj_align_to(s_status_label, gear_hit_area, LV_ALIGN_OUT_LEFT_MID, -(UI_THEME_PADDING_PX / 2), 0);
 
     /* Content area -- deliberately NOT scrollable (see this file's header
      * comment for the ~264px budget this is sized against). */
@@ -438,6 +666,13 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* `content` is created after gear_hit_area, so without this it would
+     * sit above the proxy in z-order and win taps in the overlap region
+     * (the padding gap between the bar and the first zone row). Force the
+     * proxy back to the top so it keeps winning the hit test there --
+     * see the proxy's own comment above for why that matters. */
+    lv_obj_move_foreground(gear_hit_area);
 
     /* Zones (TODO.md 10.3: "each configured zone, its current temperature,
      * and its heater on/off status"). Widgets built for however many zones
@@ -486,10 +721,30 @@ lv_obj_t *ui_page_home_build(void)
     lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(s_progress_bar, UI_THEME_ACCENT_3, LV_PART_INDICATOR);
 
-    /* Start/Stop/Menu -- one row (was previously two: Start/Stop, then a
-     * separate Configuration/Temperature nav row). Menu replaces both old
-     * nav buttons; Temperature (manual relay control) is now one tap
-     * further away, via ui_page_config.c's hub -- see menu_nav_cb(). */
+    /* Single merged Start/Stop button -- one user-visible request ("the
+     * start stop button should be one button on the lcd"). Menu moved off
+     * this row entirely into the status bar as a gear (see the status-bar
+     * build above and menu_nav_cb()) per the other request, so this row is
+     * now just the one button. build_button() still grows it across the
+     * row's width via flex_grow(1).
+     *
+     * Action-row height arithmetic (2026-08-20, same style as
+     * ui_page_config.c's hub-page comment), against this page's ~264px
+     * content budget (see this file's header comment):
+     *
+     *     zone rows (up to 3, compact) ......... variable, unchanged
+     *     state card (2 lines + progress bar) .. unchanged
+     *     gap ................................... UI_THEME_PADDING_PX/2 = 4px
+     *     action row: 1 button @ 72px .......... 72px
+     *
+     * Previously this row held 3 buttons side by side but was still only
+     * 72px tall (build_button() fixes height, flex_grow only affects width) --
+     * removing Menu frees width (each remaining button gets more of the row),
+     * not height, exactly as expected: the row's own height contribution to
+     * the vertical budget is unchanged at 72px, and the page's total vertical
+     * budget is therefore unchanged or better (better because the gear also
+     * moved a former content-row width constraint out, not because the
+     * action row got shorter). */
     lv_obj_t *action_row = lv_obj_create(content);
     lv_obj_set_width(action_row, lv_pct(100));
     lv_obj_set_height(action_row, LV_SIZE_CONTENT);
@@ -499,9 +754,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_flex_flow(action_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_gap(action_row, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
-    s_start_btn = build_button(action_row, "Start", UI_THEME_ACCENT_4, start_btn_cb);
-    s_stop_btn = build_button(action_row, "Stop", UI_THEME_ACCENT_5, stop_btn_cb);
-    build_button(action_row, "Menu", UI_THEME_COLOR_CARD, menu_nav_cb);
+    s_fire_btn = build_button(action_row, "Start", UI_THEME_ACCENT_4, fire_btn_cb, &s_fire_btn_label);
 
     /* Pages are never torn down (kiln_ui.h's header comment), so a timer
      * created once here and never deleted matches that lifetime. */

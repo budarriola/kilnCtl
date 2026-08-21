@@ -128,7 +128,14 @@ static void refresh_cb(lv_timer_t *timer)
                 break;
             }
         }
-        if (ch && ch->valid) {
+        /* ch->stale is the shared user-facing rule (older than
+         * KILN_TEMP_STALE_AGE_MS), not the driver's per-poll flag -- see
+         * dashboard_http.h. Showing a number that has not been refreshed in
+         * over ten seconds as if it were live is how a kiln gets watched
+         * against a temperature that stopped moving; "--" is the honest
+         * answer, and it matches what the web page and the PC tools show for
+         * the same reading. */
+        if (ch && ch->valid && !ch->stale) {
             snprintf(buf, sizeof(buf), "%.1f C", (double)ch->temp_c);
         } else {
             snprintf(buf, sizeof(buf), "-- C");

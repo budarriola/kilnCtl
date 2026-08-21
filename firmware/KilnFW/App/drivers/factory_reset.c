@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 
 #include "http_form.h"
+#include "profiles_builtin.h"
 #include "wifi_provision_http.h"
 
 static const char *TAG = "factory_reset";
@@ -45,6 +46,16 @@ static const char *TAG = "factory_reset";
 typedef struct {
     const char *name;
     const char *const *partitions; /* NULL-terminated */
+    /* "Reset fire profiles" has to mean both halves of what a user sees on
+     * the /profiles page: the user slots are cleared AND every shipped
+     * schedule is visible again. The hidden-mask that removes a built-in
+     * from the listings lives in profiles_nvs, so erasing the partition does
+     * clear it -- but only as a side effect, and only for whoever reads it
+     * after the reboot; the copy profiles_builtin.c holds in RAM would
+     * still say "hidden" until then. Calling profiles_builtin_restore_all()
+     * explicitly makes the intent part of the scope definition rather than
+     * an accident of storage layout, and re-syncs the RAM copy. */
+    bool restore_builtin_profiles;
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -53,10 +64,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly },
-    { "kiln", kKilnOnly },
-    { "profiles", kProfilesOnly },
-    { "all", kAll },
+    { "wifi", kWifiOnly, false },
+    { "kiln", kKilnOnly, false },
+    { "profiles", kProfilesOnly, true },
+    { "all", kAll, true },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -88,6 +99,24 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
 {
     ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
     esp_err_t first_err = ESP_OK;
+
+    /* Before the erase, not after: nvs_flash_erase_partition() de-initializes
+     * the partition it wipes, so a save attempted afterwards would have
+     * nowhere to go. Doing it here leaves the RAM mask cleared and the flash
+     * copy both written and then erased -- consistent either way, and the
+     * shipped schedules are visible again immediately rather than only after
+     * the reboot below. */
+    if (scope->restore_builtin_profiles) {
+        esp_err_t restore_err = profiles_builtin_restore_all();
+        if (restore_err != ESP_OK) {
+            ESP_LOGW(TAG, "profiles_builtin_restore_all() reported %s -- the partition erase below "
+                          "clears the hidden mask regardless",
+                     esp_err_to_name(restore_err));
+        } else {
+            ESP_LOGW(TAG, "restored every shipped fire schedule to visible");
+        }
+    }
+
     for (size_t i = 0; scope->partitions[i] != NULL; i++) {
         const char *part = scope->partitions[i];
         esp_err_t err = nvs_flash_erase_partition(part);
@@ -173,7 +202,17 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, msg);
     } else {
-        httpd_resp_sendstr(req, "ok, rebooting");
+        /* Name what was restored, not just what was erased: "reset fire
+         * profiles" that only ever says "ok" leaves the operator guessing
+         * whether the shipped schedules came back. The reboot is stated
+         * because every listing the UI is showing right now is about to be
+         * re-read from an erased partition. */
+        if (scope->restore_builtin_profiles) {
+            httpd_resp_sendstr(req, "ok -- saved profiles cleared and all shipped schedules restored; "
+                                    "rebooting");
+        } else {
+            httpd_resp_sendstr(req, "ok, rebooting");
+        }
     }
     return ESP_OK;
 }

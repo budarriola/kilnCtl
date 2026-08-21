@@ -210,7 +210,39 @@ typedef struct {
     bool fault_pin_asserted;  /* ~FAULT GPIO is low right now */
     bool spi_failed;          /* the transfer failed; both temperatures are NaN */
     bool stale;               /* no new conversion since the previous read (see below) */
+    /* Milliseconds since this channel last produced a usable conversion (a
+     * new result, read successfully, with a non-NaN hot-junction
+     * temperature). MAX31856_READING_AGE_UNKNOWN when this driver has never
+     * seen one for this channel, or when the reading was fabricated by a
+     * layer that has no such history (a failed thermo_owner command).
+     *
+     * This is the number a USER-FACING layer should judge freshness by --
+     * see KILN_TEMP_STALE_AGE_MS below. */
+    uint32_t age_ms;
 } MAX31856Reading;
+
+/* "No new conversion this poll" vs "this number is too old to trust" are two
+ * different questions and the driver only answers the first one.
+ *
+ * MAX31856Reading::stale is the first: it is true whenever the caller polled
+ * faster than the part converts (or, with a DRDY provider, whenever ~DRDY
+ * says there is nothing new). That is honest and useful INSIDE the firmware
+ * -- safety_link.c uses it to count real conversions -- but it says nothing
+ * about the value's usefulness: a temperature from 200 ms ago is perfectly
+ * good and still gets stale = true.
+ *
+ * MAX31856Reading::age_ms is the second. Every user-facing surface (the web
+ * /api/status JSON, the LCD pages, the UART status record the PC tools show)
+ * must call a reading stale only when age_ms exceeds this single shared
+ * threshold, so the three UIs always agree with each other. 10 s is a few
+ * times the slowest configured conversion, so a healthy kiln never trips it
+ * and a genuinely wedged sensor trips it quickly. */
+#define KILN_TEMP_STALE_AGE_MS 10000u
+
+/* age_ms when no good conversion has ever been seen -- deliberately far past
+ * KILN_TEMP_STALE_AGE_MS so "never read" and "too old" need no special case
+ * at the UI layer. */
+#define MAX31856_READING_AGE_UNKNOWN UINT32_MAX
 
 typedef struct MAX31856Class MAX31856Class;
 
@@ -258,6 +290,13 @@ struct MAX31856Class {
      * dependencies to the ones every component already has. */
     bool result_pending;
     TickType_t next_result_due_tick;
+
+    /* Tick of the last conversion this channel actually produced a usable
+     * number from, for MAX31856Reading::age_ms. Separate from the two fields
+     * above on purpose: those track what is COMING, this tracks what was
+     * last GOT. has_good_result is false until the first one. */
+    bool has_good_result;
+    TickType_t last_good_tick;
 
     /* Last SR value that produced a WARN, so a permanently open thermocouple
      * logs once instead of once per auto-report tick. */

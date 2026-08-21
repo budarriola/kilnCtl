@@ -235,8 +235,14 @@ static void thermo_put_record(uint8_t *out, uint8_t channel, const MAX31856Readi
     bridge_put_f32_le(&out[1], r->tc_temperature_c);
     bridge_put_f32_le(&out[5], r->cj_temperature_c);
     out[9] = r->fault_status;
+    /* bit2 is the USER-FACING staleness answer, matching /api/status's
+     * "stale" and the LCD exactly: the reading is too old to trust, not
+     * merely "no new conversion since the last poll" (the driver's own
+     * MAX31856Reading::stale, which is true for a value a fraction of a
+     * second old whenever the host polls faster than the part converts).
+     * One threshold, KILN_TEMP_STALE_AGE_MS, for all three UIs. */
     out[10] = (uint8_t)((r->fault_pin_asserted ? 0x01u : 0u) | (r->spi_failed ? 0x02u : 0u) |
-                        (r->stale ? 0x04u : 0u));
+                        ((r->age_ms >= KILN_TEMP_STALE_AGE_MS) ? 0x04u : 0u));
     out[11] = 0;
 }
 

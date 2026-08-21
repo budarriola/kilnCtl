@@ -1678,7 +1678,21 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
     if (p.zone_mask == 0) {
-        if (err_msg) snprintf(err_msg, err_cap, "profile targets no zones");
+        /* Two different causes land here and the operator has to be able to
+         * tell them apart: a saved profile whose own mask is empty (edit the
+         * profile) versus a board with no thermocouples declared yet, which
+         * is what a built-in schedule's mask is derived from (configure the
+         * zones). Reporting either as "no such profile", as this path used
+         * to via profiles_http_get(), was simply false. */
+        if (err_msg) {
+            if (zones_config_get_thermo_count() == 0) {
+                snprintf(err_msg, err_cap,
+                         "no zones are configured yet -- set the thermocouple count and zone settings "
+                         "before firing (see /settings/zones)");
+            } else {
+                snprintf(err_msg, err_cap, "profile targets no zones");
+            }
+        }
         return false;
     }
     /* TODO.md 8.2 "Tie it to the guards, not only the UI": refuse explicitly

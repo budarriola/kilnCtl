@@ -237,6 +237,29 @@ static bool max31856_result_due(const MAX31856Class *ch)
     return (int32_t)(now - ch->next_result_due_tick) >= 0;
 }
 
+/* Milliseconds since this channel last produced a usable conversion, for
+ * MAX31856Reading::age_ms -- see MAX31856.h for why this exists alongside
+ * `stale`. Same unsigned-subtract-then-reinterpret trick as
+ * max31856_result_due() so it survives the tick counter wrapping; a negative
+ * difference (only reachable if the tick counter went backwards) is reported
+ * as 0 rather than as an enormous age. Caller holds the mutex. */
+static uint32_t max31856_age_ms(const MAX31856Class *ch)
+{
+    if (!ch->has_good_result) {
+        return MAX31856_READING_AGE_UNKNOWN;
+    }
+    int32_t elapsed = (int32_t)(xTaskGetTickCount() - ch->last_good_tick);
+    if (elapsed < 0) {
+        return 0;
+    }
+    uint64_t ms = (uint64_t)(uint32_t)elapsed * portTICK_PERIOD_MS;
+    /* Only reachable after weeks without a single good conversion, at which
+     * point the exact figure is meaningless and "unknown" is the honest
+     * answer -- and it is already far past KILN_TEMP_STALE_AGE_MS either
+     * way. */
+    return (ms >= MAX31856_READING_AGE_UNKNOWN) ? MAX31856_READING_AGE_UNKNOWN : (uint32_t)ms;
+}
+
 /* --- Fixed-point decoding (datasheet register bit-weight tables) ------- */
 
 /* CJTH:CJTL -- sign + 2^6..2^-6 with the low two bits of CJTL hard-wired to 0.
@@ -1023,6 +1046,7 @@ esp_err_t MAX31856_read(MAX31856Class *ch, MAX31856Reading *out)
     out->cj_temperature_c = NAN;
     out->spi_failed = true;
     out->stale = true;
+    out->age_ms = MAX31856_READING_AGE_UNKNOWN;
 
     if (!ch) {
         return ESP_ERR_INVALID_ARG;
@@ -1061,6 +1085,11 @@ esp_err_t MAX31856_read(MAX31856Class *ch, MAX31856Reading *out)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ch%u: temperature burst read failed: %s", ch->channel,
                  esp_err_to_name(err));
+        /* The temperatures stay NaN (staged above) -- but how long it has
+         * been since this channel last had a good one is still known, and is
+         * exactly what a UI needs to decide between "one bad poll" and "this
+         * sensor has been gone for a while". */
+        out->age_ms = max31856_age_ms(ch);
         max31856_unlock(ch);
         return err;
     }
@@ -1111,6 +1140,16 @@ esp_err_t MAX31856_read(MAX31856Class *ch, MAX31856Reading *out)
             max31856_disarm_result(ch); /* nothing more coming until asked */
         }
     }
+
+    /* Age bookkeeping. A conversion only counts as "good" if it is new AND
+     * carried a usable number: an open thermocouple keeps answering forever,
+     * and letting that refresh the age would hide a dead sensor behind a
+     * permanently young reading. */
+    if (fresh && !isnan(out->tc_temperature_c)) {
+        ch->last_good_tick = xTaskGetTickCount();
+        ch->has_good_result = true;
+    }
+    out->age_ms = max31856_age_ms(ch);
 
     max31856_log_faults(ch, out->fault_status);
 

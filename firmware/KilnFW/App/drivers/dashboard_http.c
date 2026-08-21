@@ -96,7 +96,14 @@ void dashboard_get_status(dashboard_status_t *out)
         out->channels[i].valid = valid;
         out->channels[i].fault_status = r->fault_status;
         out->channels[i].spi_failed = r->spi_failed;
-        out->channels[i].stale = r->stale;
+        /* The driver's r->stale answers "was there a new conversion this
+         * poll" -- honest at that layer, but useless as a UI signal, since
+         * polling faster than the part converts sets it on a value that is a
+         * fraction of a second old. What a user needs to know is whether the
+         * NUMBER is too old to trust, which is the age against one shared
+         * threshold. See KILN_TEMP_STALE_AGE_MS in MAX31856.h. */
+        out->channels[i].age_ms = r->age_ms;
+        out->channels[i].stale = (r->age_ms >= KILN_TEMP_STALE_AGE_MS);
     }
 
     out->safety_ready = s_dash.safety != NULL;
@@ -225,11 +232,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         APPEND(",\"channels\":[");
         for (size_t i = 0; i < ds.channel_count; i++) {
             const dashboard_channel_status_t *r = &ds.channels[i];
+            /* null, not a sentinel integer: "we have never had a good
+             * conversion from this channel" is not an age, and the same
+             * null-rather-than-0 convention the safety/board temps already
+             * use keeps a client from plotting UINT32_MAX as a number. */
+            char age_buf[16];
+            if (r->age_ms == MAX31856_READING_AGE_UNKNOWN) {
+                snprintf(age_buf, sizeof(age_buf), "null");
+            } else {
+                snprintf(age_buf, sizeof(age_buf), "%lu", (unsigned long)r->age_ms);
+            }
             APPEND(
                 "%s{\"channel\":%u,\"temp_c\":%.2f,\"cj_c\":%.2f,\"valid\":%s,\"fault_status\":%u,"
-                "\"spi_failed\":%s,\"stale\":%s}",
+                "\"spi_failed\":%s,\"stale\":%s,\"age_ms\":%s}",
                 i == 0 ? "" : ",", r->channel, (double)r->temp_c, (double)r->cj_c, r->valid ? "true" : "false",
-                r->fault_status, r->spi_failed ? "true" : "false", r->stale ? "true" : "false");
+                r->fault_status, r->spi_failed ? "true" : "false", r->stale ? "true" : "false",
+                age_buf);
         }
         APPEND("]");
     }

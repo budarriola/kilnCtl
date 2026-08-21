@@ -1125,6 +1125,21 @@ the kiln as `dT/dt = (K*u - (T - T_amb)) / tau`:
       0.0 C/hr ceiling"*. Badge and executor agree. A marking that disagreed
       with what pressing Start actually does would be worse than no marking.
 
+- [ ] **One global bridge stall in a 25-minute soak (2026-08-20), cause not
+      found.** 78 polling ticks, 77 clean; at t=1031s EVERY bridge surface
+      failed in the same tick -- control, profiles, autotune, wifi and touch
+      all returned "ACKed but no reply within 3.0 s" -- and the next tick was
+      clean again. The ACK proves the link and the owner task were alive, so
+      whatever blocked was downstream of frame delivery and hit all five
+      task inboxes at once. Note the shared flash-safe executor only
+      serialises control/profiles/autotune, so it cannot by itself explain
+      wifi and touch stalling in the same tick; suspect something that
+      blocks the whole dispatch path (a long flash/NVS operation, or the
+      log-bridge queue backing up -- "log line(s) dropped (queue full)"
+      appears in the same soak). Not reproduced since. Worth a targeted soak
+      that logs per-surface latency percentiles rather than pass/fail, so
+      the next occurrence carries evidence instead of a single FAIL line.
+
 ### 5A.2 Still open
 
 - [ ] **No LCD access to profiles at all** — pre-existing, but 28 shipped

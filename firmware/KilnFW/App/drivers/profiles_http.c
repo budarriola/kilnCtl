@@ -364,19 +364,30 @@ bool profiles_http_get(uint8_t id, profile_t *out)
      * deletion, and an in-flight or stored reference to one must not dangle.
      *
      * zone_mask: the catalogue is zone-agnostic and profiles_builtin_get()
-     * therefore leaves the mask 0, but profile_executor_run() rejects a
-     * zero mask ("profile targets no zones"). Filling in every configured
-     * zone here is the only sensible reading of "run this schedule" on a
-     * board whose zones are already declared on the Zones page, and it keeps
-     * the executor untouched. A user who wants a subset saves a copy into a
-     * slot (see profiles_http_save) and edits the mask there. */
+     * therefore leaves the mask 0. Filling in every configured zone here is
+     * the only sensible reading of "run this schedule" on a board whose
+     * zones are already declared on the Zones page, and it keeps the
+     * executor untouched. A user who wants a subset saves a copy into a
+     * slot (see profiles_http_save) and edits the mask there.
+     *
+     * This returns TRUE with a zero mask when no zones are configured yet.
+     * It used to return false, which made every caller report "no such
+     * profile" for a schedule that plainly exists and is plainly listed --
+     * the user-visible bug. A getter's answer to "does this profile exist"
+     * must not depend on whether a DIFFERENT subsystem has been configured;
+     * zone configuration is the executor's business, and
+     * profile_executor_run() already has an accurate message for a zero mask
+     * (see its "targets no zones" branch). The other three callers all cope:
+     * the UART LIST/GET paths simply report the schedule with mask 0 (which
+     * is what a zone-less board honestly has), and readiness_http.c only
+     * ever passes user-slot ids, which never reach this branch. */
     if (profiles_builtin_id_valid(id)) {
         if (!profiles_builtin_get(id, out)) {
             return false;
         }
         uint8_t n = zones_config_get_thermo_count();
         out->zone_mask = (n >= 8) ? 0xFFu : (uint8_t)((1u << n) - 1u);
-        return out->zone_mask != 0;
+        return true;
     }
 
     if (id >= PROFILES_MAX_COUNT || !(s_profiles.used_bitmap & (1u << id))) {

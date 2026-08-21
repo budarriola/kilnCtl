@@ -9,6 +9,7 @@
 #include "MAX31856.h"
 #include "dashboard_http.h"
 #include "nvs_report.h"
+#include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "web_encoding.h"
 #include "wifi_prov.h"
@@ -252,13 +253,27 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         first = false;
     }
 
-    /* 7. Calibration entered. Unlike max_temp_c/cross_zone_max_delta_c,
-     * cal_offset_c has no documented "0 is a deliberate choice" convention
-     * (a truly zero offset is also a plausible honest reading), so this is
-     * reported not_done rather than deliberately_off when unset -- an
-     * honest "cannot tell" rather than inventing a distinction the storage
-     * doesn't carry. Low-stakes item (not a safety guard), so this is
-     * informational only, never gates anything else. */
+    /* 7. Thermocouple calibration offsets. The storage cannot tell "never
+     * looked at" from "looked at and correctly left at zero" -- cal_offset_c
+     * has no separate reviewed bit -- and a thermocouple that reads true
+     * genuinely needs no offset. So an all-zero result is NOT an unfinished
+     * task: there is no action the operator must take, and reporting
+     * not_done for it (as this item used to) told them to go do something
+     * that does not exist.
+     *
+     * Chosen fix: report it accurately as an informational state and rename
+     * the item after what is actually being reported. The alternative --
+     * persisting a real "offsets reviewed" acknowledgement in kiln_nvs when
+     * the zones page is saved -- would be strictly more informative, but it
+     * buys a new NVS key, a migration for every board already in the field
+     * (all of which would read back "never reviewed" and start nagging), and
+     * a write coupling from zones_http.c into this module, all to add a
+     * checkbox to a low-stakes, non-safety item that gates nothing. Not
+     * worth it; if a "first-run walkthrough" ever needs that bit, that is
+     * the feature to add it with.
+     *
+     * deliberately_off is the closest of the four existing states: nothing
+     * is missing and no red cross is warranted. */
     {
         readiness_status_t st;
         char detail[80];
@@ -277,28 +292,59 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                     cal_count++;
                 }
             }
-            st = (cal_count > 0) ? READY_OK : READY_NOT_DONE;
-            snprintf(detail, sizeof(detail), "%u of %u zones have a non-zero calibration offset", cal_count,
-                     thermo_count);
+            if (cal_count > 0) {
+                st = READY_OK;
+                snprintf(detail, sizeof(detail), "%u of %u zones have a calibration offset applied",
+                         cal_count, thermo_count);
+            } else {
+                st = READY_DELIBERATELY_OFF;
+                snprintf(detail, sizeof(detail),
+                         "no offsets applied -- correct if your thermocouples read true");
+            }
         }
-        o = append_item(json, sizeof(json), o, first, "calibration", "Calibration entered", st, detail,
-                        "/settings/zones");
+        o = append_item(json, sizeof(json), o, first, "calibration", "Thermocouple calibration offsets", st,
+                        detail, "/settings/zones");
         first = false;
     }
 
-    /* 8. At least one profile saved. */
+    /* 8. At least one profile available to fire. The 28 shipped schedules
+     * (profiles_builtin.c) are as runnable as a user's own saved slots, so a
+     * board straight out of the box already satisfies this -- counting only
+     * user slots, as this item used to, told operators to go create a
+     * profile while a full catalogue sat on the /profiles page. Hidden
+     * built-ins do not count: hiding is the user's way of removing one from
+     * their listings, and something they cannot see is not something they
+     * can pick and fire.
+     *
+     * Renamed from "At least one fire profile saved" for the same reason:
+     * the thing satisfying it is shipped, not saved. */
     {
-        bool any = false;
+        uint8_t saved = 0;
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             profile_t p;
             if (profiles_http_get(id, &p)) {
-                any = true;
-                break;
+                saved++;
             }
         }
+        uint16_t builtin_visible = 0;
+        for (size_t i = 0; i < g_builtin_profile_count; i++) {
+            uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+            if (!profiles_builtin_is_hidden(id)) {
+                builtin_visible++;
+            }
+        }
+        bool any = (saved > 0) || (builtin_visible > 0);
+        char detail[96];
+        if (!any) {
+            snprintf(detail, sizeof(detail),
+                     "no profiles saved and every shipped schedule has been removed");
+        } else {
+            snprintf(detail, sizeof(detail), "%u saved, %u shipped schedule%s available", saved,
+                     (unsigned)builtin_visible, builtin_visible == 1 ? "" : "s");
+        }
         readiness_status_t st = any ? READY_OK : READY_NOT_DONE;
-        o = append_item(json, sizeof(json), o, first, "profile_saved", "At least one fire profile saved", st,
-                        any ? "at least one profile exists" : "no profiles saved yet", "/profiles");
+        o = append_item(json, sizeof(json), o, first, "profile_saved",
+                        "At least one fire profile available", st, detail, "/profiles");
         first = false;
     }
 

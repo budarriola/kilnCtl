@@ -185,8 +185,16 @@ function renderChannels(data) {
     } else if (!ch.valid) {
       detail = '<span class="fault">' + (faultText(ch.fault_status) || 'invalid reading') + '</span>';
     } else {
-      detail = ch.temp_c.toFixed(1) + ' &deg;C (CJ ' + ch.cj_c.toFixed(1) + ' &deg;C)' +
-                (ch.stale ? ' <span class="stale">(stale)</span>' : '');
+      // channels[].age_ms is null when no good conversion has ever been
+      // seen; channels[].stale means "older than 10s" (not "no new sample
+      // this poll"), so a reading under 10s old must never read as stale.
+      var staleTag = '';
+      if (ch.age_ms === null || ch.age_ms === undefined) {
+        staleTag = ' <span class="stale">(no reading yet)</span>';
+      } else if (ch.stale) {
+        staleTag = ' <span class="stale">(stale, ' + (ch.age_ms / 1000).toFixed(0) + 's old)</span>';
+      }
+      detail = ch.temp_c.toFixed(1) + ' &deg;C (CJ ' + ch.cj_c.toFixed(1) + ' &deg;C)' + staleTag;
     }
     div.innerHTML = '<span>Channel ' + ch.channel + '</span><span class="temp">' + detail + '</span>';
     el.appendChild(div);
@@ -262,10 +270,33 @@ function loadZones() {
 
 // -- Firing profile execution --------------------------------------------
 
+// Keyed by profile id, filled in by loadProfileList(); used wherever a
+// profile is later named by id only (running-exec card, previous-run
+// banner) so builtins show their full title there too, not just their code.
+var profileTitleById = {};
+
+// A builtin carries both a short `code` (what fits profile_t's 15-char name
+// field, e.g. "BQ1000") and the full human `title` ("Plainsman Electric
+// Bisque") -- show the title, with the code as parenthesised supporting
+// text when it differs and actually fits. A user-saved profile has only
+// `name`, which is already the real name the operator gave it.
+function profileDisplayName(p) {
+  if (p.title && p.title !== p.code) return p.title + (p.code ? ' (' + p.code + ')' : '');
+  return p.title || p.name;
+}
+
+function zoneListText(mask) {
+  var names = [];
+  for (var b = 0; b < 8; b++) { if (mask & (1 << b)) names.push(zoneName(b)); }
+  return names.join(', ') || 'no zones';
+}
+
 function loadProfileList() {
   return fetch('/api/profiles').then(function (r) { return r.json(); }).then(function (list) {
     const sel = document.getElementById('profileSelect');
     sel.innerHTML = '';
+    profileTitleById = {};
+    list.forEach(function (p) { profileTitleById[p.id] = profileDisplayName(p); });
     if (list.length === 0) {
       const opt = document.createElement('option');
       opt.textContent = 'No saved profiles -- create one first';
@@ -277,7 +308,7 @@ function loadProfileList() {
     list.forEach(function (p) {
       const opt = document.createElement('option');
       opt.value = p.id;
-      opt.textContent = p.name + ' (zone ' + p.zone + ')';
+      opt.textContent = profileDisplayName(p) + ' (' + zoneListText(p.zone_mask) + ')';
       sel.appendChild(opt);
     });
   }).catch(function () {});
@@ -314,7 +345,8 @@ function renderLastRun(st) {
     '<h3>' + (lr.interrupted
       ? 'Previous firing was interrupted &mdash; it never ended cleanly'
       : 'Previous firing ended (' + lr.phase + ')') + '</h3>' +
-    '<div class="row"><span>Profile</span><span>' + (lr.profile_name || ('id ' + lr.profile_id)) +
+    '<div class="row"><span>Profile</span><span>' +
+      (profileTitleById[lr.profile_id] || lr.profile_name || ('id ' + lr.profile_id)) +
       ' &mdash; ' + (names.join(', ') || 'no zones') + '</span></div>' +
     '<div class="row"><span>Segment</span><span>' + (lr.segment_index + 1) + ' / ' + lr.segment_count +
       ' (' + (lr.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
@@ -353,7 +385,8 @@ function renderExec(st) {
   for (var zb = 0; zb < 8; zb++) { if (st.zone_mask & (1 << zb)) zoneNames.push(zoneName(zb)); }
 
   let html = '<div class="exec-card">' +
-    '<div class="row"><span>' + st.profile_name + ' &mdash; ' + zoneNames.join(', ') + '</span>' +
+    '<div class="row"><span>' + (profileTitleById[st.profile_id] || st.profile_name) +
+    ' &mdash; ' + zoneNames.join(', ') + '</span>' +
     '<span class="exec-state state-' + st.state + '">' + st.state + '</span></div>' +
     '<div class="row"><span>Segment</span><span>' + (st.segment_index + 1) + ' / ' + st.segment_count +
     ' (' + (st.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
@@ -404,6 +437,28 @@ function execAction(action) {
   fetch('/api/profile_exec/' + action, { method: 'POST' }).then(pollExec).catch(pollExec);
 }
 
+// If a start attempt fails, decide whether it failed because the BOARD
+// isn't ready (missing zones, no thermocouple board, safety link down, ...)
+// or because the PROFILE itself is bad (e.g. a ramp rate over a zone's
+// ceiling). The start error is just free text, so there is no reliable way
+// to tell those apart from the string alone; instead ask the readiness
+// endpoint directly. Any item that is not "ok" and not "deliberately_off"
+// (that one was the operator's own choice, not something blocking them) is
+// a real blocker -- send the user there instead of a bare toast they can't
+// act on. Otherwise it's almost certainly profile-specific, so just show it.
+function redirectToReadinessIfBlocked(errMsg) {
+  fetch('/api/readiness').then(function (r) { return r.json(); }).then(function (j) {
+    var blocking = (j.items || []).some(function (it) {
+      return it.status !== 'ok' && it.status !== 'deliberately_off';
+    });
+    if (blocking) {
+      window.location.href = '/readiness';
+    } else {
+      alert(errMsg || 'failed to start');
+    }
+  }).catch(function () { alert(errMsg || 'failed to start'); });
+}
+
 document.getElementById('runBtn').addEventListener('click', function () {
   const id = document.getElementById('profileSelect').value;
   if (id === undefined || id === '') return;
@@ -411,7 +466,10 @@ document.getElementById('runBtn').addEventListener('click', function () {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'id=' + id,
   }).then(function (r) { return r.json(); }).then(function (result) {
-    if (result.ok === false) alert(result.error || 'failed to start');
+    if (result.ok === false) {
+      redirectToReadinessIfBlocked(result.error);
+      return;
+    }
     pollExec();
   }).catch(pollExec);
 });

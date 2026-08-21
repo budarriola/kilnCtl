@@ -144,7 +144,11 @@
  *     [5..8]  cold-junction temperature, f32 LE, degC
  *     [9]     fault status register (SR, THERMO_FAULT_* below)
  *     [10]    flags: bit0 = ~FAULT pin asserted (low), bit1 = SPI read failed,
- *                    bit2 = reading is stale (no conversion since last read)
+ *                    bit2 = reading is too old to trust (no usable conversion
+ *                           for KILN_TEMP_STALE_AGE_MS, 10 s -- see MAX31856.h;
+ *                           NOT "no conversion since last read", which is true
+ *                           of a perfectly good sub-second-old value whenever
+ *                           the host polls faster than the part converts)
  *     [11]    reserved, 0
  *   A channel whose SPI read failed still appears, with flags bit1 set and
  *   both temperatures set to NaN -- a missing channel is more confusing than
