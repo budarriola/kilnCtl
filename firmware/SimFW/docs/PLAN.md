@@ -208,15 +208,17 @@ never `[x]`.
       `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
       halts while DMA exhaustion limps, and the code's own idle-loop-fallback
       comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
-- [ ] **KilnFW does not relay `SET_CT_CAL`/`GET_CT_CAL`, and fails silently.**
-      `App/drivers/uart_bridge.c`'s `safety_bridge_task()` has no case for
-      0x19 or 0x1A — both hit `default: rejected = true` — and
-      `safety_link.c` has no forwarder onto the isolated RP2040 link. Because
-      task 7 ACKs at the transport layer regardless of subcommand, **a real
-      ESP would ACK a calibration push and silently discard it**, and
-      `GET_CT_CAL` would time out. This blocks any bench push *independently
-      of hardware availability* — distinct from §0.2's hardware-gated
-      calibration item. Found while writing the sender (`6b6bb57`).
+- [ ] **Any unimplemented bridge subcommand is silently ACKed — general, and
+      still open.** `firmware/KilnFW/App/drivers/uart_protocol.c` (~line 226)
+      sends the transport-layer ACK as soon as a frame lands in the
+      destination task's inbox, *before* that task's switch statement runs. So
+      a subcommand that hits `default: rejected = true` is still ACKed. This
+      affects **every** bridge task, not just the CT-cal commands that exposed
+      it (`5fb6928` implemented those two; it did not change this shape).
+      A caller cannot distinguish "done" from "silently dropped" for anything
+      unimplemented. Confirmed by tracing, reported not fixed.
+- [ ] **Stale docstring in `push_ct_cal.py`** — its "currently-unresolved
+      blocker" section describes the KilnFW relay gap that `5fb6928` closed.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -290,6 +292,11 @@ never `[x]`.
       drift. An absent channel is pushed as *explicitly* uncalibrated, never a
       fabricated identity. Lives in the SimFW tool, calling `kilnctrl` as a
       read-only library. Still blocked end to end by the KilnFW relay gap above
+- [x] KilnFW relays `SET_CT_CAL`/`GET_CT_CAL` (`5fb6928`), closing the
+      calibration chain end to end. `GET_CT_CAL` is a live blocking exchange
+      with the Pico, not a cache read — `safety_drain_inbox_ex()` captures the
+      raw 28-byte frame by length (the `GET_FW_VERSION` shared-id convention)
+      while background frames still flow through the normal cache-apply path
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
