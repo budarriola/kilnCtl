@@ -45,6 +45,43 @@ or tablet. and the lcd should not require scrolling." That budget rule and
 its arithmetic convention are recorded once in `ARCHITECTURE_DECISIONS.md`
 ("LVGL / LCD rendering" section) rather than re-derived per page here.
 
+## Open: web global-chrome rework (drop-down nav, dashboard reorder, settings trim)
+
+Owner spec, 2026-08-21. Supersedes the bottom-nav-bar description in
+`ARCHITECTURE_DECISIONS.md` ("Page organization") and the "still open"
+`GET /settings` nav-hub bullet below — `settings_page.html`'s hub already
+exists; this moves its links into the drop-down and cuts the page down to
+just the danger zone.
+
+**Chrome (`App/drivers/nav.js`, every page):**
+1. Delete the bottom nav bar entirely.
+2. Menu button opens a top-down, scrollable drop-down (was slide-up).
+3. Drop-down list = every link currently in `settings_page.html`'s "Board
+   configuration" section (readiness, zones, relays, manual, profiles, wifi,
+   ota, diagnostics, safety) **plus** a "Reset" item that goes to `/settings`
+   (the danger zone lives there once item 6 below lands).
+4. Add a Home button next to the menu button, linking to `/`.
+5. Remove the "kilnCtl" brand text; put the page name in the top bar in its
+   place, and delete the separate page-name heading every page currently
+   renders below the brand.
+
+**`/settings` (`settings_page.html`):** 6. Delete everything except the
+danger zone now that its links live in the drop-down.
+
+**Dashboard (`main_page.html`):**
+7. Remove cold-junction temperatures; show thermocouple temps only.
+8. Remove the Settings button from the history section.
+9. Reorder top-to-bottom to match the LCD: firing profile, then graph, then
+   thermocouple temps.
+10. Remove the "Thermocouples" and "Firing profiles" `<h2>` headings.
+11. Show each thermocouple's linked relay status next to its temperature.
+
+**Open design question (not mechanical — resolve during implementation):**
+the thermocouple-to-relay mapping isn't in `/api/status`; it's `thermo_mask`/
+`relay_mask` in the zones config (`zones_http.c`), so item 11 must join two
+data sources client-side. Decide the no-mapping case explicitly: default is
+to show **no relay state** for an unmapped channel, never a fabricated one.
+
 ## Open: settings import/export and profile import/export
 
 Two separate import/export features, kept independent (different data,
@@ -94,8 +131,9 @@ destructive including Start/Stop) wired into every existing page.
    Settings block (`<h2>Settings</h2>`, links to `/readiness`,
    `/settings/zones`, `/settings/relays`, `/wifi`, `/ota`), a Danger zone
    block, and the manual per-relay toggles — none of that has moved yet.
-2. **`GET /settings`** (new `settings_page.html`) — nav hub, the web twin of
-   `ui_page_config.c`. Should absorb the Settings block above.
+2. `settings_page.html` (nav hub) is built; its "global-chrome rework" open
+   item above now trims it back down to the danger zone once the drop-down
+   takes over its links.
 3. **`GET /settings/manual`** (new `manual_page.html`) — the manual relay
    toggles, moved off the dashboard per the 2026-08-20 decision: a phone in
    a pocket can brush a screen in a way a panel mounted on a kiln cannot, so
