@@ -256,6 +256,42 @@ static void test_current_any_present_null(void)
     TEST_CHECK(!current_any_present(NULL, 2.0f), "NULL -> not present, never a crash");
 }
 
+// --- link_firing_ceiling_should_apply ---------------------------------------
+// SAFETY_MODEL.md section 4, S1 / this task's own link-loss design question:
+// a firing ceiling must never be honoured once the context it arrived
+// alongside is stale or the link itself is down, but the RAW fact that the
+// ESP last claimed an active ceiling must not be conflated with whether that
+// claim is still current -- this is the pure combinator safety_core.c's
+// safety_core_build_input() calls every tick to decide.
+static void test_firing_ceiling_should_apply_both_true(void)
+{
+    TEST_SECTION("link_firing_ceiling_should_apply -- have_ceiling && context_valid -> true");
+    TEST_CHECK(link_firing_ceiling_should_apply(true, true),
+               "a recently-received active ceiling with fresh context is applied");
+}
+
+static void test_firing_ceiling_should_apply_link_loss(void)
+{
+    TEST_SECTION("link_firing_ceiling_should_apply -- link loss (context_valid==false) -> false, "
+                  "even with a previously-received ceiling");
+    TEST_CHECK(!link_firing_ceiling_should_apply(true, false),
+               "have_ceiling==true but context_valid==false (link down / stale / degraded) -> "
+               "must NOT apply -- this is the actual link-loss hazard this function exists to "
+               "prevent: a stale ceiling from a firing that may no longer be running must not "
+               "keep tightening (or, if a future change ever loosened the fallback, failing to "
+               "protect) S1 once the ESP has gone quiet");
+}
+
+static void test_firing_ceiling_should_apply_no_ceiling_ever(void)
+{
+    TEST_SECTION("link_firing_ceiling_should_apply -- no ceiling ever received -> false regardless "
+                  "of context");
+    TEST_CHECK(!link_firing_ceiling_should_apply(false, true),
+               "context fresh but no SET_FIRING_CEILING ever decoded as active -> false");
+    TEST_CHECK(!link_firing_ceiling_should_apply(false, false),
+               "neither fact true -> false");
+}
+
 void run_test_snapshots(void)
 {
     test_reduce_zones_invalid_context();
@@ -271,4 +307,8 @@ void run_test_snapshots(void)
     test_current_any_present_one_channel_above();
     test_current_any_present_exactly_at_threshold();
     test_current_any_present_null();
+
+    test_firing_ceiling_should_apply_both_true();
+    test_firing_ceiling_should_apply_link_loss();
+    test_firing_ceiling_should_apply_no_ceiling_ever();
 }

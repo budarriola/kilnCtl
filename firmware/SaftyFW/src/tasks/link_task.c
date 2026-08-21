@@ -5,8 +5,12 @@
 // context_snapshot_t, and now SAFETY_CMD_CLEAR_TRIP (0x0A) ->
 // safety_core_request_clear_trip(), and the receiver hardening
 // (resync-on-0x7E, bounded buffers, no allocation) LINK_PROTOCOL.md section 3
-// requires. SET_FIRING_CEILING and SET_CLOCK are still explicitly out of
-// scope for this pass -- see docs/TODO.md Phase 7's remaining checkboxes.
+// requires. A later pass wires SAFETY_CMD_SET_FIRING_CEILING (0x09) and
+// SAFETY_CMD_SET_CLOCK (0x0C): see link_task_handle_set_firing_ceiling() and
+// link_task_handle_set_clock() below, and link_frame.h's
+// link_frame_ceiling_is_active()/link_frame_firing_ceiling_should_apply()/
+// link_frame_clock_epoch_is_plausible() for the host-tested bounds/gating
+// logic each one leans on.
 // Parsing the context frame is only half of Phase 7: nothing here yet acts
 // on it (no S2/S3/S4/S6/S10 guard exists to disable on SIM_PLANT or reset on
 // a boot_id change -- see the comments at the PUSH_CONTEXT case below and
@@ -72,6 +76,7 @@
 
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_announce_reboot.h" // SAFETY_CMD_ANNOUNCE_REBOOT, see link_task_handle_announce_reboot()
+#include "kilnlink/kilnlink_ceiling.h" // SAFETY_CMD_SET_FIRING_CEILING, see link_task_handle_set_firing_ceiling()
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
 #include "kilnlink/kilnlink_diag.h"
@@ -79,6 +84,7 @@
 #include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL, see link_task_handle_get_ct_cal()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
+#include "kilnlink/kilnlink_set_clock.h" // SAFETY_CMD_SET_CLOCK, see link_task_handle_set_clock()
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h" // SAFETY_CMD_SET_CT_CAL, see link_task_handle_set_ct_cal()
 #include "kilnlink/kilnlink_trip.h"
@@ -257,6 +263,24 @@ static bool s_valid_frame_seen = false;
 // touched only from link_task_handle_push_context() below.
 static TickType_t s_relay_on_since_tick = 0;
 static bool s_relay_on_continuous = false;
+
+// SAFETY_CMD_SET_FIRING_CEILING (0x09) -- single-writer, touched only from
+// link_task_handle_set_firing_ceiling() (this task), read from any task via
+// link_task_get_firing_ceiling() (snapshots.h), same plain-read reasoning as
+// s_context_frames_ok/bad above. s_firing_ceiling_have is the ALREADY-bounds-
+// checked fact (link_frame_ceiling_is_active()) that the last decoded frame
+// named an active ceiling; s_firing_ceiling_c is only meaningful while it is
+// true. RAM-only, never config_store -- see link_task_handle_set_firing_
+// ceiling()'s own comment for why this is context, not commissioning.
+static bool s_firing_ceiling_have = false;
+static float s_firing_ceiling_c = 0.0f;
+
+// SAFETY_CMD_SET_CLOCK (0x0C) -- same single-writer shape as the ceiling
+// state just above. Purely diagnostic (LINK_PROTOCOL.md section 4: "no guard
+// may ever read this clock") -- see link_task_handle_set_clock()'s own
+// comment.
+static bool s_wall_clock_have = false;
+static uint64_t s_wall_clock_epoch_ms = 0;
 
 // --- TX ----------------------------------------------------------------
 
@@ -1015,6 +1039,104 @@ static void link_task_handle_announce_reboot(const kilnlink_frame_t *frame)
                  "link_up and every other guard are unaffected");
 }
 
+// SAFETY_CMD_SET_FIRING_CEILING (0x09), CommonFW/docs/LINK_PROTOCOL.md
+// section 4 / SAFETY_MODEL.md section 4, S1 -- "the highest target
+// temperature this firing will ever ask for", so S1's absolute ceiling can
+// tighten from a single fixed abs_max_temp_c to
+// min(abs_max_temp_c, firing_max_c + firing_margin_c) for the firing actually
+// running. RAM-only, deliberately NOT config_store: safety_guards.h's own
+// header comment on cfg.firing_max_c/firing_max_valid is explicit this is
+// "context, not config" -- it changes with whatever firing is running right
+// now, unlike tc_type/ct_cal (SAFETY_CMD_SET_CONFIG/SET_CT_CAL above), which
+// are bench-commissioned constants that must survive a reboot. Persisting a
+// firing's peak target across a power cycle would be actively wrong: the
+// next boot may run a completely different profile, and a stale persisted
+// ceiling would tighten (or, worse if ever loosened by a future change) S1
+// against a firing that is not the one happening.
+//
+// Never ACKs on the wire, same fire-and-forget shape as every other ESP->Pico
+// command in this file -- the ESP has no reason to know this landed beyond
+// whatever else it already polls (DIAG/FW_VERSION).
+//
+// Bounds checked at kilnlink_ceiling_decode() (wire shape: exactly 5 bytes,
+// cmd byte matches) AND, separately, by link_frame_ceiling_is_active()
+// (value shape: finite and strictly positive) -- the second check exists
+// because safety_guards.c's own min() clamp only defends S1 against a
+// firing_max_c that is too HIGH; a finite but negative value sails straight
+// through that clamp and would silently tighten S1 into nuisance trips. A
+// value that fails either check is treated as "no firing / no ceiling known"
+// (s_firing_ceiling_have = false), never half-accepted -- see
+// link_frame_ceiling_is_active()'s own header comment.
+//
+// s_firing_ceiling_have/_c only record what the ESP most recently claimed;
+// they say nothing about whether the link is currently up or the context
+// this ceiling arrived alongside is still fresh. That gating -- link loss
+// must revert S1 to abs_max_temp_c alone, not keep honouring a stale ceiling
+// from a firing that may no longer be running -- is safety_core.c's job
+// (link_frame_firing_ceiling_should_apply(), applied every tick in
+// safety_core_build_input() against its own already-computed context_valid),
+// the same "link_task publishes the raw fact, safety_core decides staleness"
+// split link_task_get_context_snapshot() already established.
+static void link_task_handle_set_firing_ceiling(const kilnlink_frame_t *frame)
+{
+    kilnlink_ceiling_t msg;
+    kilnlink_ceiling_status_t dstatus =
+        kilnlink_ceiling_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_CEILING_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+
+    if (link_frame_ceiling_is_active(msg.firing_max_c)) {
+        s_firing_ceiling_have = true;
+        s_firing_ceiling_c = msg.firing_max_c;
+    } else {
+        // 0/NaN ("no firing", the wire's own convention) or a value this
+        // build additionally rejects (negative, +/-Infinity) -- both collapse
+        // to "no active ceiling", never a half-accepted number.
+        s_firing_ceiling_have = false;
+        s_firing_ceiling_c = 0.0f;
+    }
+}
+
+// SAFETY_CMD_SET_CLOCK (0x0C), CommonFW/docs/LINK_PROTOCOL.md section 4 --
+// "The Pico has no RTC... Purely diagnostic -- no guard may ever read this
+// clock, or a bad time from the ESP becomes a safety input." This function
+// only stores the value (after a plausibility check) for a future log/diag
+// consumer; nothing in this codebase reads it back yet, by design (Frame D's
+// TRIP_EVENT wire layout is fixed and carries uptime_ms only, not a wall-clock
+// field -- adding one would be a wire-format change out of scope here, not a
+// consumer-wiring one). No guard, no S-numbered check, and no other safety
+// decision anywhere in this codebase is gated on s_wall_clock_have/_epoch_ms
+// -- grep-confirmed before writing this comment, and worth stating plainly
+// per the protocol doc's own warning.
+//
+// link_frame_clock_epoch_is_plausible() rejects an epoch far outside a
+// generous [2020, 2100) window -- implausible input is dropped rather than
+// stored and later confusing a trip-log correlation, but rejection here has
+// no safety consequence either way (this field decides nothing), unlike the
+// firing-ceiling bounds check above.
+static void link_task_handle_set_clock(const kilnlink_frame_t *frame)
+{
+    kilnlink_set_clock_t msg;
+    kilnlink_set_clock_status_t dstatus =
+        kilnlink_set_clock_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_SET_CLOCK_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+
+    if (!link_frame_clock_epoch_is_plausible(msg.epoch_ms)) {
+        log_task_log(LOG_LEVEL_WARN, "set_clock", "ignored, implausible epoch");
+        return;
+    }
+
+    s_wall_clock_have = true;
+    s_wall_clock_epoch_ms = msg.epoch_ms;
+}
+
 static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t unstuffed[LINK_RX_ASSEMBLY_MAX];
@@ -1075,6 +1197,12 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     case LINK_FRAME_SET_CT_CAL_CMD:
         link_task_handle_set_ct_cal(&frame);
         break;
+    case LINK_FRAME_SET_FIRING_CEILING_CMD:
+        link_task_handle_set_firing_ceiling(&frame);
+        break;
+    case LINK_FRAME_SET_CLOCK_CMD:
+        link_task_handle_set_clock(&frame);
+        break;
     case LINK_FRAME_GET_CT_CAL_CMD:
         // Same id as the reply (SAFETY_CMD_CT_CAL), distinguished by
         // direction and length: the ESP's request is exactly 1 byte, no
@@ -1108,12 +1236,10 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         update_task_handle_abort(frame.payload, frame.length);
         break;
     default:
-        // Everything else (SET_FIRING_CEILING, SET_CLOCK, ...) is genuinely
-        // out of scope this pass -- see this file's header comment and
-        // TODO.md Phase 7's remaining checkboxes. An
-        // unrecognised type is silently discarded, matching
-        // LINK_PROTOCOL.md's own additive-compatibility principle: "a peer
-        // that has never heard of it discards it."
+        // Everything else this build has no dispatch case for is genuinely
+        // out of scope -- an unrecognised type is silently discarded,
+        // matching LINK_PROTOCOL.md's own additive-compatibility principle:
+        // "a peer that has never heard of it discards it."
         break;
     }
 }
@@ -1299,6 +1425,11 @@ bool link_task_start(void)
     s_relay_on_since_tick = 0;
     s_relay_on_continuous = false;
 
+    s_firing_ceiling_have = false;
+    s_firing_ceiling_c = 0.0f;
+    s_wall_clock_have = false;
+    s_wall_clock_epoch_ms = 0;
+
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.
     s_context_lock = xSemaphoreCreateMutex();
@@ -1401,4 +1532,32 @@ uint32_t link_task_get_relay_on_continuous_ms(void)
     }
     TickType_t elapsed_ticks = xTaskGetTickCount() - s_relay_on_since_tick;
     return (uint32_t)elapsed_ticks * portTICK_PERIOD_MS;
+}
+
+bool link_task_get_firing_ceiling(float *out_firing_max_c)
+{
+    if (out_firing_max_c) {
+        *out_firing_max_c = 0.0f;
+    }
+    if (!s_firing_ceiling_have) {
+        return false;
+    }
+    if (out_firing_max_c) {
+        *out_firing_max_c = s_firing_ceiling_c;
+    }
+    return true;
+}
+
+bool link_task_get_wall_clock_epoch_ms(uint64_t *out_epoch_ms)
+{
+    if (out_epoch_ms) {
+        *out_epoch_ms = 0;
+    }
+    if (!s_wall_clock_have) {
+        return false;
+    }
+    if (out_epoch_ms) {
+        *out_epoch_ms = s_wall_clock_epoch_ms;
+    }
+    return true;
 }

@@ -393,6 +393,49 @@ static void test_decide_clear_trip(void)
                "tripped ESTOP, wire mask matches exactly -> ACCEPT");
 }
 
+// --- link_frame_ceiling_is_active (SET_FIRING_CEILING bounds check) --------
+// SAFETY_MODEL.md section 4, S1: 0/NaN means "no firing", and a hostile or
+// garbled negative value must be rejected outright (safety_guards.c's own
+// min() clamp only defends against a firing_max_c that is too HIGH -- see
+// this function's own header comment in link_frame.h for why negative sails
+// straight through that clamp otherwise).
+static void test_ceiling_is_active(void)
+{
+    TEST_SECTION("link_frame_ceiling_is_active -- SET_FIRING_CEILING bounds check");
+
+    TEST_CHECK(link_frame_ceiling_is_active(900.0f), "a normal positive value is active");
+    TEST_CHECK(link_frame_ceiling_is_active(0.0001f), "a tiny positive value is still active");
+
+    TEST_CHECK(!link_frame_ceiling_is_active(0.0f), "0.0 -- wire convention for 'no firing' -- not active");
+    TEST_CHECK(!link_frame_ceiling_is_active(-1.0f), "negative -- rejected, not silently clamped by the caller");
+    TEST_CHECK(!link_frame_ceiling_is_active(-900.0f),
+               "a large negative value is rejected the same as a small one");
+    TEST_CHECK(!link_frame_ceiling_is_active((float)NAN), "NaN -- wire convention for 'no firing' -- not active");
+    TEST_CHECK(!link_frame_ceiling_is_active((float)INFINITY), "+Infinity is rejected, not active");
+    TEST_CHECK(!link_frame_ceiling_is_active(-(float)INFINITY), "-Infinity is rejected, not active");
+}
+
+// --- link_frame_clock_epoch_is_plausible (SET_CLOCK bounds check) ---------
+static void test_clock_epoch_plausible(void)
+{
+    TEST_SECTION("link_frame_clock_epoch_is_plausible -- SET_CLOCK bounds check");
+
+    TEST_CHECK(link_frame_clock_epoch_is_plausible(1700000000000ULL),
+               "a real-world 2023-ish epoch is plausible");
+    TEST_CHECK(link_frame_clock_epoch_is_plausible(1577836800000ULL),
+               "the lower bound (2020-01-01) itself is plausible (inclusive)");
+    TEST_CHECK(link_frame_clock_epoch_is_plausible(4102444800000ULL),
+               "the upper bound (2100-01-01) itself is plausible (inclusive)");
+
+    TEST_CHECK(!link_frame_clock_epoch_is_plausible(0ULL), "epoch 0 (1970) is rejected");
+    TEST_CHECK(!link_frame_clock_epoch_is_plausible(1577836799999ULL),
+               "one millisecond below the lower bound is rejected");
+    TEST_CHECK(!link_frame_clock_epoch_is_plausible(4102444800001ULL),
+               "one millisecond above the upper bound is rejected");
+    TEST_CHECK(!link_frame_clock_epoch_is_plausible(UINT64_MAX),
+               "a garbled/maxed-out u64 is rejected");
+}
+
 void run_test_link_frame(void)
 {
     test_zero_zones();
@@ -402,4 +445,6 @@ void run_test_link_frame(void)
     test_versions_compatible();
     test_trip_mask_for_reason();
     test_decide_clear_trip();
+    test_ceiling_is_active();
+    test_clock_epoch_plausible();
 }

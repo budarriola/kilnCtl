@@ -202,6 +202,41 @@ static inline bool current_any_present(const current_snapshot_t *cur, float i_pr
     return cur->amps[0] > i_present_a || cur->amps[1] > i_present_a || cur->amps[2] > i_present_a;
 }
 
+// S1's firing-ceiling gate (SAFETY_MODEL.md section 4, S1 /
+// docs/GUARD_TEST_MATRIX.md section 6). `have_ceiling` is link_task_get_
+// firing_ceiling()'s own already-bounds-checked fact (link_frame_ceiling_
+// is_active() ran at RX time, in link_task.c, before the value was ever
+// stored); `context_valid` is safety_core.c's own already-computed "stale
+// context is no context" fact (SAFETY_MODEL.md section 5 rule 2,
+// CONTEXT_MAX_AGE_MS in safety_core.c). SAFETY_CMD_SET_FIRING_CEILING is sent
+// "repeated in every context frame's shadow" (CommonFW/docs/LINK_PROTOCOL.md
+// section 4), so it shares PUSH_CONTEXT's own liveness contract rather than
+// needing an independent staleness clock of its own.
+//
+// A pure one-line AND, factored out (rather than inlined at the one call
+// site in safety_core.c) for the same reason context_reduce_zones()/
+// current_any_present() are pure functions here rather than inline code in
+// safety_core_build_input(): it is the isolation-legal, host-testable half of
+// wiring SET_FIRING_CEILING, and it is short precisely because the actual
+// bounds-checking work already happened elsewhere (link_frame_ceiling_
+// is_active() at RX time) -- this only decides whether an already-valid fact
+// is still fresh enough to act on.
+//
+// On link loss (or a version-mismatch DEGRADED_NO_CONTEXT, folded into
+// context_valid the same way safety_core_build_input() already folds it for
+// every other context-dependent input), this returns false and S1 reverts to
+// abs_max_temp_c alone -- the same "goes inactive, not pessimistic" treatment
+// every other context-consuming guard (S2/S3/S4/S10) already gets, rather
+// than either trusting a stale ceiling forever (a hazard: a ceiling
+// tightened for a bisque firing silently still capping a cone-10 firing hours
+// later) or dropping S1 to some invented unclamped state -- abs_max_temp_c is
+// never unclamped, it is the hard, always-commissioned backstop this falls
+// back to.
+static inline bool link_firing_ceiling_should_apply(bool have_ceiling, bool context_valid)
+{
+    return have_ceiling && context_valid;
+}
+
 // --- Link-task boundary getters ---------------------------------------------
 // Declared here, not in link_task.h, for the same isolation reason as the
 // pure functions above -- these three are implemented in link_task.c (their
@@ -243,6 +278,35 @@ bool link_task_link_up(void);
 // safety_core_request_clear_trip() from link_task's CLEAR_TRIP handler), so
 // it must never own a mutable time accumulator of its own.
 uint32_t link_task_get_relay_on_continuous_ms(void);
+
+// The most recently decoded SAFETY_CMD_SET_FIRING_CEILING (0x09) value that
+// link_frame_ceiling_is_active() judged an active ceiling (finite, strictly
+// positive) -- link_task.c's RX handler already applies that bounds check
+// before ever storing a value here, so a caller never has to re-check it.
+// Returns false (and leaves `*out_firing_max_c` at 0.0f) if no such frame has
+// ever been decoded this boot, OR the most recent one carried 0/NaN/negative
+// (the wire's own "no firing" state) -- both collapse to the same "no active
+// ceiling" answer, matching context_snapshot_t's own "valid == false means
+// every other field is meaningless" convention. Deliberately NOT gated on
+// link liveness or context freshness in here: that combination is
+// safety_core.c's own job (link_frame_firing_ceiling_should_apply(),
+// src/tasks/link_frame.h) using its own already-computed context_valid, the
+// same division of labour link_task_get_context_snapshot() above already
+// establishes (link_task publishes the raw fact, safety_core decides what
+// "stale" means for it).
+bool link_task_get_firing_ceiling(float *out_firing_max_c);
+
+// The most recently decoded SAFETY_CMD_SET_CLOCK (0x0C) epoch, in Unix
+// milliseconds, if link_frame_clock_epoch_is_plausible() judged it plausible
+// at RX time. Purely diagnostic (LINK_PROTOCOL.md section 4: "no guard may
+// ever read this clock") -- no consumer exists in this codebase yet (nothing
+// here is time-based in a way that needs wall-clock time; trip timestamps
+// stay in milliseconds-since-boot, per Frame D's own fixed wire layout), so
+// this is published for a future log/diag consumer the same "exposed but
+// unconsumed" way link_task_get_context_snapshot() originally was. Returns
+// false (and leaves `*out_epoch_ms` at 0) if no plausible SET_CLOCK has ever
+// been decoded this boot.
+bool link_task_get_wall_clock_epoch_ms(uint64_t *out_epoch_ms);
 
 #ifdef __cplusplus
 }

@@ -243,6 +243,60 @@ typedef enum {
 link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
                                                           uint16_t wire_trip_mask);
 
+// --- ESP -> Pico: SAFETY_CMD_SET_FIRING_CEILING (0x09) -----------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as KILNLINK_CEILING_CMD
+// (kilnlink/kilnlink_ceiling.h) -- redefined here as a local dispatch id, same
+// convention as LINK_FRAME_CLEAR_TRIP_CMD above. The payload is decoded by
+// kilnlink_ceiling_decode() in src/tasks/link_task.c, not unpacked here -- a
+// fixed 5-byte frame with no variable-length fields, same reasoning as
+// CLEAR_TRIP/SET_CONFIG.
+#define LINK_FRAME_SET_FIRING_CEILING_CMD 0x09u
+
+// Bounds check factored out of link_task_handle_set_firing_ceiling() so it is
+// host-testable, same "extraction for the test matrix" reasoning as
+// link_frame_decide_clear_trip() above. LINK_PROTOCOL.md/SAFETY_MODEL.md
+// section 4, S1: "0 or NaN = no firing / no ceiling known", and the ceiling
+// "can only ever tighten" S1 via safety_guards.c's own min() clamp -- but that
+// clamp only defends against a firing_max_c that is too HIGH (isfinite() &&
+// too-large collapses to abs_max_temp_c). A finite but NEGATIVE firing_max_c
+// is not caught by that clamp at all: min(abs_max_temp_c, negative + 100) can
+// come out far BELOW abs_max_temp_c, silently tightening S1 into constant
+// nuisance trips from a single garbled or hostile byte. That is the "reject,
+// don't clamp" case this function exists for: only a strictly positive,
+// finite value is ever treated as an active ceiling; zero, negative, NaN, and
+// +/-Infinity all fall back to "no ceiling" (equivalent to firing_max_valid ==
+// false, i.e. S1 uses abs_max_temp_c alone), never a half-accepted number.
+bool link_frame_ceiling_is_active(float firing_max_c);
+
+// NOTE: the "should an already-active ceiling actually be applied to S1's cfg
+// this tick" gate is NOT here. That combinator needs `context_valid`, which
+// only safety_core.c computes, and safety_core.c is structurally forbidden
+// from #include-ing any header whose name contains "link" or "uart"
+// (docs/ARCHITECTURE.md section 2, tools/check_isolation.ps1) -- this header
+// is named link_frame.h precisely because it IS link-shaped. See
+// snapshots.h's link_firing_ceiling_should_apply() instead, the same
+// isolation-legal home context_reduce_zones()/current_any_present() already
+// use for pure helpers safety_core.c needs but link_frame.h cannot host.
+//
+// --- ESP -> Pico: SAFETY_CMD_SET_CLOCK (0x0C), optional ---------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
+// KILNLINK_SET_CLOCK_CMD (kilnlink/kilnlink_set_clock.h) -- redefined here as a
+// local dispatch id, same convention as LINK_FRAME_SET_FIRING_CEILING_CMD
+// above. Purely diagnostic (the Pico has no RTC): "no guard may ever read this
+// clock" is the protocol doc's own words, and nothing added by this pass
+// changes that -- see link_task_handle_set_clock()'s own comment.
+#define LINK_FRAME_SET_CLOCK_CMD 0x0Cu
+
+// Plausibility check factored out for host testing, same reasoning as
+// link_frame_ceiling_is_active() above: an implausible epoch (0, or absurdly
+// far from "now" in either direction) is rejected outright rather than stored
+// and later confusing a trip-log correlation with a bogus wall-clock time.
+// Bounds are generous software constants (2020-01-01 .. 2100-01-01 in Unix
+// milliseconds), not measured physical values -- this field is diagnostic
+// only, so "wide enough that no legitimate ESP clock is ever rejected" is the
+// only property that matters, not precision.
+bool link_frame_clock_epoch_is_plausible(uint64_t epoch_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2,6 +2,7 @@
 // dependency (host-testable).
 #include "link_frame.h"
 
+#include <math.h>
 #include <string.h>
 
 // Extracts the little-endian wire bytes of a 32-bit value. memcpy'ing the
@@ -190,4 +191,23 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
         return LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH;
     }
     return LINK_CLEAR_TRIP_ACCEPT;
+}
+
+bool link_frame_ceiling_is_active(float firing_max_c)
+{
+    // isfinite() rejects NaN and +/-Infinity; the strict > 0.0f rejects zero
+    // (the wire's own "no firing" convention) AND every negative value, which
+    // is the case safety_guards.c's min() clamp cannot catch on its own -- see
+    // this function's own header comment.
+    return isfinite(firing_max_c) && firing_max_c > 0.0f;
+}
+
+bool link_frame_clock_epoch_is_plausible(uint64_t epoch_ms)
+{
+    // 2020-01-01T00:00:00Z and 2100-01-01T00:00:00Z in Unix epoch
+    // milliseconds -- generous, documented software bounds (this function's
+    // own header comment), not measured physical constants.
+    const uint64_t min_epoch_ms = 1577836800000ULL;
+    const uint64_t max_epoch_ms = 4102444800000ULL;
+    return epoch_ms >= min_epoch_ms && epoch_ms <= max_epoch_ms;
 }

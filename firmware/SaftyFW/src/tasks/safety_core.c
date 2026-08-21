@@ -120,7 +120,16 @@ static TaskHandle_t s_task_handle = NULL;
 // guessed. Nothing here needs to set them.
 // TODO (Phase 9, config_store): load real commissioned values (abs_max_temp_c
 // above all) from flash once config_store.c exists. Until then this cfg is
-// permanently the conservative "nothing commissioned" state.
+// permanently the conservative "nothing commissioned" state -- with ONE
+// exception: firing_max_valid/firing_max_c ARE written every tick now, by
+// safety_core_build_input() below, from link_task's SET_FIRING_CEILING RX
+// state. That is deliberately not a config-store gap the same way
+// abs_max_temp_c is: safety_guards.h's own doc comment on those two fields is
+// explicit they are "context, not config" -- see safety_core_build_input()'s
+// own comment at the point they are set for the full reasoning. Note also
+// that as long as abs_max_temp_c stays uncommissioned (0), S1 never trips at
+// all regardless of firing_max_valid -- the min() clamp in safety_guards.c
+// only ever tightens a real abs_max_temp_c, it does not manufacture one.
 static safety_guard_cfg_t s_guard_cfg;
 static safety_guard_state_t s_guard_state;
 
@@ -251,6 +260,26 @@ static safety_guard_input_t safety_core_build_input(void)
         uint32_t age_ms = now_ms - ctx.timestamp_ms;
         context_valid = age_ms < CONTEXT_MAX_AGE_MS;
     }
+
+    // S1's firing ceiling (SAFETY_CMD_SET_FIRING_CEILING, SAFETY_MODEL.md
+    // section 4) -- pulled here, same "pulled, never pushed" discipline as
+    // the context snapshot just above. link_task_get_firing_ceiling() already
+    // applied its own bounds check at RX time (link_frame_ceiling_is_active(),
+    // src/tasks/link_frame.c); this file only decides whether that fact is
+    // still fresh enough to act on, via link_firing_ceiling_should_apply()
+    // (snapshots.h) against the SAME context_valid every other context-
+    // dependent input on this tick already uses -- link loss (or a stale/
+    // never-received context) reverts S1 to abs_max_temp_c alone rather than
+    // honouring a ceiling from a firing that may no longer be running. Written
+    // into s_guard_cfg directly (not safety_guard_input_t) because that is
+    // where safety_guards.h's own S1 implementation already reads
+    // firing_max_valid/firing_max_c from -- see that struct's field comment
+    // for why this context-shaped value lives in the config struct at all.
+    float firing_max_c = 0.0f;
+    bool have_firing_ceiling = link_task_get_firing_ceiling(&firing_max_c);
+    s_guard_cfg.firing_max_valid =
+        link_firing_ceiling_should_apply(have_firing_ceiling, context_valid);
+    s_guard_cfg.firing_max_c = s_guard_cfg.firing_max_valid ? firing_max_c : 0.0f;
 
     // S2/S10's zone reduction -- context_reduce_zones() (snapshots.h) is the
     // pure, host-tested function that turns the raw per-zone array into the
