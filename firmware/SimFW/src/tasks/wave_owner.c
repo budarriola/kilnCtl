@@ -18,8 +18,15 @@
 
 #include "task_priorities.h"
 #include "drivers/ct_wave_pwm.h"
+#include "sim/ct_calibration.h"
 #include "sim/sim_snapshot.h"
 #include "sim/sine_synth.h"
+
+// ct_calibration.h deliberately does not include this header (src/sim/ must
+// stay RTOS/SDK-free, tools/check_sim_purity.ps1), so the two channel counts
+// are asserted equal here, at the one place both are visible.
+_Static_assert(CT_CAL_NUM_CHANNELS == CT_WAVE_NUM_CHANNELS,
+               "ct_calibration.h's CT_CAL_NUM_CHANNELS must match wave_owner.h's CT_WAVE_NUM_CHANNELS");
 
 #define WAVE_OWNER_STACK_WORDS  (configMINIMAL_STACK_SIZE * 2u) // headroom for 3x 256-entry uint16_t table scratch buffers
 #define WAVE_OWNER_TICK_MS      10u  // 100 Hz command/model-poll rate; DMA (not this loop) is what actually feeds samples in steady state
@@ -75,6 +82,8 @@ static ct_wave_channel_state_t s_channel_state[CT_WAVE_NUM_CHANNELS];
 // unchanged waveform).
 typedef struct {
     bool valid;
+    uint8_t channel;  // which channel these constants/this config belong to -- the
+                       // calibration lookup is per channel, so build_table() must know it
     ct_wave_mode_t mode;
     float amps;
     float phase_deg;
@@ -111,11 +120,15 @@ static float clampf(float v, float lo, float hi)
 
 float ct_wave_amps_to_pwm_scale(uint8_t channel, float amps)
 {
-    (void)channel; // TODO(M-D calibration): per-channel gain/offset table, see wave_owner.h's doc comment
-    // IDENTITY placeholder (docs/PLAN.md 3.3's calibration procedure is
-    // M-D/bench-hardware work, out of scope here): amps is treated directly
-    // as a 0..1 PWM-scale fraction.
-    return clampf(amps, 0.0f, 1.0f);
+    // Per-channel clamp(gain*amps + offset, 0, 1), from the compiled-in
+    // calibration table (sim/ct_calibration.h). That table is all-
+    // UNCALIBRATED today -- no CT hardware exists and no calibration run has
+    // ever been taken -- so every channel still resolves to exact identity,
+    // clamp(amps, 0, 1), the same behavior this function has always had. The
+    // arithmetic lives in src/sim/ so it is host-testable; the table is
+    // regenerated from the PC-side runner's JSON by
+    // tools/gen_ct_cal_table.py (see ct_calibration.h).
+    return ct_cal_apply(ct_cal_default_table(), channel, amps);
 }
 
 // Builds one channel's 256-entry PWM duty-level table from its current
@@ -124,7 +137,7 @@ float ct_wave_amps_to_pwm_scale(uint8_t channel, float amps)
 static void build_table(const wave_owner_applied_cfg_t *cfg, uint16_t out_levels[SINE_SYNTH_TABLE_LEN])
 {
     sine_channel_cfg_t sc = {
-        .amplitude = ct_wave_amps_to_pwm_scale(0, cfg->amps), // channel arg unused by the identity placeholder today
+        .amplitude = ct_wave_amps_to_pwm_scale(cfg->channel, cfg->amps),
         .phase_deg = cfg->phase_deg,
         .dc_offset = cfg->distortion.dc_offset,
         .clip_fraction = cfg->distortion.clip_fraction,
@@ -148,6 +161,7 @@ static void build_table(const wave_owner_applied_cfg_t *cfg, uint16_t out_levels
 static bool applied_cfg_equal(const wave_owner_applied_cfg_t *a, const wave_owner_applied_cfg_t *b)
 {
     return a->valid == b->valid &&
+           a->channel == b->channel &&
            a->mode == b->mode &&
            a->amps == b->amps &&
            a->phase_deg == b->phase_deg &&
@@ -212,6 +226,7 @@ static void wave_owner_tick(uint64_t now_us)
 
         wave_owner_applied_cfg_t new_cfg = {
             .valid = true,
+            .channel = ch,
             .mode = mode,
             .amps = amps,
             .phase_deg = phase_deg,

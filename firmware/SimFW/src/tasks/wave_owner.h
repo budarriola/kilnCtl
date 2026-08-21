@@ -101,14 +101,20 @@ bool ct_wave_get_state(uint8_t channel, ct_wave_channel_state_t *out);
 // amps into a PWM full-scale fraction (0..1, 0 = mid-scale/silent,
 // 1 = maximum swing the carrier's 8-bit resolution allows).
 //
-// TODO(M-D calibration): this is an IDENTITY placeholder -- PLAN.md 3.3's
-// real calibration procedure ("for each channel, sweep commanded amplitude
-// across ~10 points, read back what SaftyFW's own current_task/ADC reports
-// ..., fit gain/offset, store the table in fixture flash keyed by channel")
-// needs bench hardware and SaftyFW ADC readback, both out of scope for this
-// pass. Until M-D, `amps` is treated directly as a 0..1 PWM-scale fraction
-// (clamped), i.e. "1.0 simulated amp" == full-scale swing -- not a real
-// current unit yet.
+// Implemented as clamp(gain[channel] * amps + offset[channel], 0, 1) against
+// the compiled-in per-channel table in sim/ct_calibration.h -- the arithmetic
+// PLAN.md 3.3 and tools/ct_calibration/README.md's "Remaining firmware work"
+// section specify.
+//
+// M-D IS NOT CLOSED. No CT hardware exists on this bench and no calibration
+// run has ever been taken, so the compiled-in table
+// (sim/ct_calibration_defaults.h, generated) marks every channel
+// UNCALIBRATED, and an uncalibrated channel falls back to exact IDENTITY:
+// `amps` is treated directly as a 0..1 PWM-scale fraction (clamped), i.e.
+// "1.0 simulated amp" == full-scale swing -- not a real current unit yet,
+// exactly as before. What this function gained is the *ability* to apply a
+// calibration once a real bench run produces one (regenerate the table with
+// tools/gen_ct_cal_table.py); the constants themselves stay hardware-gated.
 float ct_wave_amps_to_pwm_scale(uint8_t channel, float amps);
 
 #ifdef __cplusplus

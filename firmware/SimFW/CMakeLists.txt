@@ -106,6 +106,13 @@ add_custom_target(simfw_build_info ALL
 # into it (256-entry table, distortion, zero-crossing detection) rather than
 # reimplementing any of that pure math, per docs/PLAN.md section 3.3/13's
 # "pure, host-testable" sim/ modules being the single source of truth.
+# src/sim/ct_calibration.c is linked for the same reason: wave_owner.c's
+# ct_wave_amps_to_pwm_scale() delegates the per-channel
+# clamp(gain*amps + offset, 0, 1) mapping to it rather than doing that
+# arithmetic inline, so the code the firmware runs is the code the MSVC host
+# tests exercise. Its constants live in the generated
+# src/sim/ct_calibration_defaults.h (tools/gen_ct_cal_table.py) and are
+# all-uncalibrated/identity today -- no CT hardware, no calibration run yet.
 # tinyusb_device/pico_unique_id (below) back usb_owner's real body: native
 # USB CDC framing/dispatch over `benchproto` (docs/PLAN.md section 4.1's
 # usb_owner/cmd_task rows) -- src/tusb_config.h and
@@ -134,6 +141,7 @@ set(SIMFW_APP_SOURCES
     src/drivers/mcp23017.c
     src/drivers/ct_wave_pwm.c
     src/sim/sine_synth.c
+    src/sim/ct_calibration.c
 )
 
 add_executable(SimFW ${SIMFW_APP_SOURCES})

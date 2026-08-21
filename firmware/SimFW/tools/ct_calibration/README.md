@@ -154,12 +154,35 @@ Instead, `calibration_table.py` writes a versioned JSON file
   channel's fit was rejected (`CalibrationTable.save()`) — there is no
   "partial, trust it anyway" mode.
 
-### Remaining firmware work
+### Firmware side — done (the mechanism, not the calibration)
 
-`firmware/SimFW/src/tasks/wave_owner.c`'s `ct_wave_amps_to_pwm_scale()` is
-today an **identity placeholder** (`TODO(M-D calibration)`, per its own
-header comment): `pwm_scale = clamp(amps, 0, 1)`. To consume this tool's
-table, that function needs to become, per channel:
+**Status: the interim path described below has been implemented.**
+`firmware/SimFW/src/sim/ct_calibration.{c,h}` is a pure, host-tested module
+that performs exactly the per-channel arithmetic this section specifies, and
+`wave_owner.c`'s `ct_wave_amps_to_pwm_scale()` now delegates to it.
+`firmware/SimFW/tools/gen_ct_cal_table.py` regenerates the compiled-in
+default table (`src/sim/ct_calibration_defaults.h`) from this tool's JSON
+output, inverting the stored fit exactly as `to_command()` does.
+
+**This does not close M-D.** No CT hardware exists and this tool has never
+been run against real current-sense hardware, so no JSON table exists to
+generate from. The compiled-in table therefore marks **every channel
+UNCALIBRATED**, and an uncalibrated channel falls back to exact identity —
+`pwm_scale = clamp(amps, 0, 1)`, byte-for-byte the old behavior. What the
+firmware gained is the *ability to apply* a calibration the moment a real
+bench run produces one; the constants themselves stay hardware-gated.
+
+Regenerate after a bench run with:
+
+```powershell
+python firmware/SimFW/tools/gen_ct_cal_table.py --json <table.json>
+```
+
+The original specification of the change, kept for reference:
+
+`ct_wave_amps_to_pwm_scale()` was an **identity placeholder**
+(`TODO(M-D calibration)`): `pwm_scale = clamp(amps, 0, 1)`. To consume this
+tool's table, that function needed to become, per channel:
 
 ```c
 pwm_scale = clamp(gain[channel] * amps + offset[channel], 0.0f, 1.0f);
@@ -175,9 +198,9 @@ calibration run is done), which gets the *behavior* PLAN.md 3.3 wants
 without inventing flash storage; a real per-unit-flashable table is the
 Phase-9-style follow-up once SimFW gains its own `config_store`.
 
-This file was **not** modified by this task (constraint: no changes under
-`firmware/SimFW/src/**`) — the above is the precise, minimal change a
-follow-up firmware pass needs to make.
+That interim path is the one that was taken — see the status note at the top
+of this section. A real per-unit-flashable table is still the follow-up once
+SimFW gains its own `config_store`.
 
 ## Be honest about limits
 

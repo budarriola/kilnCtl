@@ -17,6 +17,7 @@ void run_test_tc_fault_state(void);
 void run_test_gap_closure_logic(void);
 void run_test_cmd_task_gap_closure(void);
 void run_test_k4_gating_logic(void);
+void run_test_ct_calibration(void);
 
 int main(void)
 {
@@ -28,6 +29,7 @@ int main(void)
     run_test_gap_closure_logic();
     run_test_cmd_task_gap_closure();
     run_test_k4_gating_logic();
+    run_test_ct_calibration();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
