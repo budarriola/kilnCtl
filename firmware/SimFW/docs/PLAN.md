@@ -102,16 +102,19 @@ never `[x]`.
       gate anything.** `SIM_EVENT_DUT_POWER`/`LINK_UP` are now emitted, but
       relay drive, CT current, and telemetry are all still unaffected by
       power state — the reason `power_blip`'s two clauses stay BLOCKED.
-- [ ] **`kilnsim`'s own scenario runner may never send
-      `SAFETY_CMD_REQUEST_ENABLE`** — not found anywhere in
-      `tools/PcTools/src/kilnsim/`. The *virtual* harness gained this via
-      `operator_actions:` in `run_dut_scenarios.py`, a different runner; if
-      true, a real bench closed-loop firing would never close K4. Needs
-      verification, not another guess.
-- [ ] **`test_determinism_same_seed_same_scenario_byte_identical_events` is
-      flaky** (passes in isolation; a live-process timing test) in
-      `tools/PcTools`. Determinism is M-F's exit criterion, so a flaky
-      determinism test may mask a real intermittent ordering bug.
+- [ ] **`kilnsim`'s wire protocol has no SAFETY command group at all**
+      (`protocol.py`: SYS/MODEL/TC/CT/RELAY/IO/FAULT/EVT) — it addresses only
+      the plant simulator (`virtual_simfw`, or the bench fixture Pico on real
+      hardware); the safety processor is a physically separate device
+      reachable only through `kilnctrl`. So `run_dut_scenarios.py`'s
+      `operator_actions:`/`request_enable` pattern **cannot** simply be
+      mirrored into `kilnsim`; it works there only because `dut_core.exe` is
+      SaftyFW's safety core running in-process. `eac3905` added a stderr
+      diagnostic hint when a non-passing run never saw a K4-close relay edge,
+      pointing at `safety_request_enable` and `BENCH_RUNBOOK.md` step 10 — the
+      hint never affects the verdict or exit code. **Still open:** deciding
+      how a bench closed-loop firing actually issues the enable — an operator
+      step via `kilnctrl`, or `kilnsim` gaining a `kilnctrl` dependency.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
