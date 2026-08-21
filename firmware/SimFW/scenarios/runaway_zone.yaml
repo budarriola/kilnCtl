@@ -1,7 +1,7 @@
 name: runaway_zone
 version: 1
 exercises: [S3, S8]
-# PLAN.md §8 item 12: "heat with relay open (model-forced); the S8-relevant
+# DESIGN_NOTES.md §8 item 12: "heat with relay open (model-forced); the S8-relevant
 # scenario (S8 itself ships disabled; scenario documents expected *current*
 # behavior and is ready for when S8 gets a measured threshold)."
 #
@@ -31,7 +31,7 @@ dut:
     - { at_sim_time: 5, action: request_enable }
 faults:
   - id: runaway
-    # PLAN.md §7.1 system-fault catalog: "Runaway zone | Force P_heater on
+    # DESIGN_NOTES.md §7.1 system-fault catalog: "Runaway zone | Force P_heater on
     # regardless of relay state (model-level)".
     type: runaway_zone
     target: zone:0

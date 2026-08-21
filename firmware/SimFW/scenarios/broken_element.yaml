@@ -4,7 +4,7 @@ exercises: [S4]
 # S4 — "Heat commanded but load inactive" — matches this scenario exactly:
 # relay closes, zero current on that CT, zone never heats (SAFETY_MODEL.md
 # §4 S4). S4 is WARN-only by design and never touches the relay; the
-# "profile abort" half of PLAN.md §8 item 9's description is a KilnFW-side
+# "profile abort" half of DESIGN_NOTES.md §8 item 9's description is a KilnFW-side
 # (thermal_guard "heating failed") decision, not a SaftyFW guard, so it is
 # not cited in `exercises` and is called out under manual_checks instead.
 preset: fast_test
@@ -33,7 +33,7 @@ dut:
     - { at_sim_time: 5, action: request_enable }
 faults:
   - id: broken
-    # PLAN.md §7.1: "Broken heater coil | Relay closes, zero current on that
+    # DESIGN_NOTES.md §7.1: "Broken heater coil | Relay closes, zero current on that
     # CT, zone doesn't heat".
     type: broken_heater_coil
     target: element:0

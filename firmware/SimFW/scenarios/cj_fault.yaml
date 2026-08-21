@@ -24,7 +24,7 @@ dut:
   profile: cone6_fast
 faults:
   - id: cj
-    # PLAN.md §7.1: "CJ fault | CJ high/low fault bits; wrong CJ
+    # DESIGN_NOTES.md §7.1: "CJ fault | CJ high/low fault bits; wrong CJ
     # temperature". Drives the simulated CJ temperature past cj_max_c.
     type: cj_fault
     target: tc:safety

@@ -3,7 +3,7 @@ version: 1
 exercises: [S6a]
 # S6a ("The ESP explicitly asserts fault", SAFETY_MODEL.md §4 S6) trips on
 # `mainFault` (GPIO10) reading LOW, debounced 200ms -- an unambiguous signal
-# the fixture cannot drive directly (PLAN.md §3.4: the `Fault` line is
+# the fixture cannot drive directly (DESIGN_NOTES.md §3.4: the `Fault` line is
 # ESP-driven, GPIO6 -> U1 opto -> the Pico's GPIO10, and the fixture only
 # *senses* it). The only way to provoke S6a through this fixture is to make
 # the real DUT (KilnFW) decide, on its own, to assert its fault output.
@@ -54,7 +54,7 @@ expect:
       within_s: 3         # no single frozen number exists for KilnFW's own
                            # "3 consecutive bad reads" cadence (MAX31856
                            # conversion cadence is "~100ms nominal",
-                           # PLAN.md §3.2) plus SaftyFW's 200ms mainFault
+                           # DESIGN_NOTES.md §3.2) plus SaftyFW's 200ms mainFault
                            # debounce (SAFETY_MODEL.md §4 S6a) -- generous
                            # margin used deliberately rather than a guessed
                            # precise figure

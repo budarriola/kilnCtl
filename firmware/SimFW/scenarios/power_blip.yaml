@@ -16,8 +16,8 @@ exercises: [S6b]
 # see by design) is a separate scenario:
 # firmware/SimFW/scenarios/mainfault_tc_disconnect.yaml.
 #
-# This fault is NOT one of PLAN.md §7.1's three catalog tables — it uses the
-# fixture's dedicated DUT 12V power relay (PLAN.md §3.4/§6.2), a distinct
+# This fault is NOT one of DESIGN_NOTES.md §7.1's three catalog tables — it uses the
+# fixture's dedicated DUT 12V power relay (DESIGN_NOTES.md §3.4/§6), a distinct
 # fixture capability from the TC/power-path/system fault catalog.
 preset: fast_test
 timescale: 10
@@ -55,7 +55,7 @@ faults:
     # welded_ssr_midfire.yaml/welded_contactor_s9.yaml for the identical
     # reason. t=90 gives K4's ~65s close a comfortable margin.
     trigger: { at_sim_time: { t: 90 } }
-    # 200ms off-time, matching PLAN.md §6.2's own CLI example
+    # 200ms off-time, matching DESIGN_NOTES.md §6's own CLI example
     # (`kilnsim power cycle --off-ms 200`) rather than a guessed duration.
     duration: { for_s: 0.2 }
 expect:
@@ -110,7 +110,7 @@ expect:
     # a faithful fixture would not necessarily drop link_up at all --a PASS
     # here mainly demonstrates S6b tolerates a blip this short without
     # incident, not that it correctly handles a longer, genuinely link-down
-    # blip. That is this scenario's own off-time choice (PLAN.md §6.2's CLI
+    # blip. That is this scenario's own off-time choice (DESIGN_NOTES.md §6's CLI
     # example), not a fixture gap.
   - name: safe_resume
     event: { type: dut_power, state: on }

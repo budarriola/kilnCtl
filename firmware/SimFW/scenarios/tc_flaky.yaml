@@ -4,7 +4,7 @@ exercises: [S5]
 # Anti-nuisance doctrine: intermittent OC at a ~0.5 Hz-class alternation must
 # NOT produce an instant trip. S5's streak-reset behavior is what should
 # absorb it (GUARD_TEST_MATRIX.md §2: "9 bad reads, then a good one -> No
-# trip, streak resets"; PLAN.md §8 item 5).
+# trip, streak resets"; DESIGN_NOTES.md §8 item 5).
 preset: fast_test
 # timescale 0.2, not the library's usual 10 -- deliberately, and unlike most
 # of this library's other timescale overrides this one is not about a guard
@@ -20,7 +20,7 @@ preset: fast_test
 # the alternation the scenario exists to test; it could only show that a
 # coarse sampler no longer FABRICATES a streak, not that the real ~100ms
 # MAX31856 cadence stays quiet. timescale 0.2 (one frame per 0.1 sim-seconds
-# -- the real MAX31856 auto-convert cadence, PLAN.md §3.2) is the setting
+# -- the real MAX31856 auto-convert cadence, DESIGN_NOTES.md §3.2) is the setting
 # this scenario's own claim needs, and its own comment on the `flaky` fault
 # below derives the 900ms/900ms split against exactly that cadence. Measured
 # at this setting: 453 guard ticks over 45.2 sim-seconds, zero S5 warns, zero
@@ -36,7 +36,7 @@ dut:
   profile: cone6_fast
 faults:
   - id: flaky
-    # PLAN.md §7.1: "Broken (intermittent) TC | Alternates connected/OC on a
+    # DESIGN_NOTES.md §7.1: "Broken (intermittent) TC | Alternates connected/OC on a
     # configurable duty/period". fault_sched.c's own header comment (2026-08-20
     # gap-closure pass) is explicit that this fault has no separate
     # FAULT_SCHED_TYPE_* of its own -- "'Broken (intermittent) TC' still needs
@@ -51,14 +51,14 @@ faults:
     # (`duration: {for_s: N}`, `repeat: {every: {period: N}}` --
     # confirmed by reading `_parse_duration`/`_parse_repeat` there), so the
     # "schema has no repeat/params fields yet" claim in the prior version of
-    # this comment was wrong on the PC-tooling side even though PLAN.md §8.1's
+    # this comment was wrong on the PC-tooling side even though DESIGN_NOTES.md §8.1's
     # own frozen-schema note is about the firmware wire format, not the YAML.
     #
     # Duty/period resolved (not a placeholder): safety_guards.c's S5
     # constants are BAD_READ_COUNT_DEFAULT = 10u and BAD_READ_TIME_S_DEFAULT
     # = 5.0f (safety_guards.c lines 13-14), and the MAX31856's nominal
-    # auto-convert cadence is ~100 ms (PLAN.md §3.2). A ~0.5 Hz (≈1s bad /
-    # ≈1s good) alternation, as originally suggested by PLAN.md §8 item 5's
+    # auto-convert cadence is ~100 ms (DESIGN_NOTES.md §3.2). A ~0.5 Hz (≈1s bad /
+    # ≈1s good) alternation, as originally suggested by DESIGN_NOTES.md §8 item 5's
     # own wording, gives a bad-phase run of ~10 conversions -- exactly AT the
     # count bar, not reliably under it. Using a 900 ms bad-phase / 900 ms
     # good-phase split instead gives ~9 consecutive bad reads per run
@@ -67,7 +67,7 @@ faults:
     # = 0`) before either bar is ever reached -- solidly inside the nuisance
     # region rather than skimming its edge -- while the resulting 1.8s
     # bad+good cycle (~0.56 Hz) still matches the "~0.5 Hz-class" figure
-    # PLAN.md §8 item 5 names. `repeat: every.period` is measured from the
+    # DESIGN_NOTES.md §8 item 5 names. `repeat: every.period` is measured from the
     # fault's CLEAR time to its next fire (fault_engine.c's
     # rearm_for_repeat(): `repeat_ready_at_s = clear_time_s + period_s`), so
     # it IS the 900ms good-phase length directly, not the full cycle --

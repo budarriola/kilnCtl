@@ -2,7 +2,7 @@ name: tc_disconnect_ramp
 version: 1
 exercises: [S5]
 # S5 — Safety thermocouple invalid, graduated WARN-then-TRIP
-# (SAFETY_MODEL.md §4 S5). This half of the pair (item 4 in PLAN.md §8)
+# (SAFETY_MODEL.md §4 S5). This half of the pair (item 4 in DESIGN_NOTES.md §8)
 # disconnects the safety-side TC early in the ramp; tc_disconnect_soak.yaml
 # is the same fault fired later, during the hold/soak portion.
 preset: fast_test

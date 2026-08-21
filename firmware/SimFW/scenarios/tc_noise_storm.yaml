@@ -16,7 +16,7 @@ dut:
   profile: cone6_fast
 faults:
   - id: noise
-    # PLAN.md §7.1: "Flaky TC (noise) | Gaussian/spike noise added to
+    # DESIGN_NOTES.md §7.1: "Flaky TC (noise) | Gaussian/spike noise added to
     # reported temperature". params[0] = noise sigma, degC
     # (fault_sched.h's FAULT_SCHED_TYPE_TC_NOISE doc comment; sigma is a
     # bench-tuning value, not something PLAN.md/SAFETY_MODEL.md states
@@ -30,7 +30,7 @@ faults:
     # (~0.006% of samples, i.e. occasional not sustained) while 3-sigma
     # (~150°C, covering the overwhelming majority of samples) stays well
     # under it -- "heavy enough to occasionally spike past a ceiling,
-    # never sustained" per PLAN.md §8 item 7's own description of this
+    # never sustained" per DESIGN_NOTES.md §8 item 7's own description of this
     # scenario, without guessing a specific S1 ceiling number (abs_max_temp_c
     # has no default -- SAFETY_MODEL.md §1 -- so no such number exists to
     # target precisely).

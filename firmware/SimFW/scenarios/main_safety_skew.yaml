@@ -5,7 +5,7 @@ exercises: [S1, S10]
 # +80°C hot relative to the real zone truth makes S1 trip at a LOWER real
 # chamber temperature than abs_max_temp_c — i.e. the skew makes the system
 # MORE conservative, not less, which is the "conservative side wins" outcome
-# PLAN.md §8 item 8 describes. S10 is cited as the accompanying nuisance
+# DESIGN_NOTES.md §8 item 8 describes. S10 is cited as the accompanying nuisance
 # check: 80°C is below S10's 200°C disagreement threshold, so the standing
 # skew must never itself produce an S10 WARN (SAFETY_MODEL.md §4 S1/S10).
 #
@@ -13,7 +13,7 @@ exercises: [S1, S10]
 # fast_test, because the point of this scenario is steady-state behavior
 # near S1's ceiling and S10's window, not a compressed 2-minute firing —
 # per the task's own note that scenarios like this benefit from a more
-# realistic time base (PLAN.md §4.3 `small_kiln`).
+# realistic time base (DESIGN_NOTES.md §4.3 `small_kiln`).
 preset: small_kiln
 timescale: 20
 seed: 49
@@ -22,8 +22,8 @@ dut:
   profile: cone6_fast
 faults:
   - id: skew
-    # PLAN.md §7.1: "Main/safety disagree | Skew safety TC vs zone truth by
-    # an offset/gain". Offset magnitude: +80°C (PLAN.md §8 item 8, stated
+    # DESIGN_NOTES.md §7.1: "Main/safety disagree | Skew safety TC vs zone truth by
+    # an offset/gain". Offset magnitude: +80°C (DESIGN_NOTES.md §8 item 8, stated
     # explicitly there). params[0] = offset degC
     # (fault_sched.h's FAULT_SCHED_TYPE_MAIN_SAFETY_DISAGREE doc comment);
     # params[1] (gain) deliberately omitted so it defaults to 1.0 per that

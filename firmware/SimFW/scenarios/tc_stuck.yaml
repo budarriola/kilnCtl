@@ -1,7 +1,7 @@
 name: tc_stuck
 version: 1
 exercises: [S13]
-# PLAN.md §8 item 6 labels this "frozen reading during ramp (S13/sample-
+# DESIGN_NOTES.md §8 item 6 labels this "frozen reading during ramp (S13/sample-
 # counter class)". S13 ("Borrowed channel not updating") is the guard whose
 # whole mechanism IS a frozen conversion: the ESP only advances a zone's
 # sample_counter when it consumes a genuinely fresh conversion
@@ -19,7 +19,7 @@ dut:
   profile: cone6_fast
 faults:
   - id: stuck
-    # PLAN.md §7.1: "Stuck TC | LTCB frozen at last value while zone keeps
+    # DESIGN_NOTES.md §7.1: "Stuck TC | LTCB frozen at last value while zone keeps
     # moving". Targets the main-side (ESP/bus A) zone-0 channel, since that
     # is the physical sensor a BORROWED_ZONE-configured safety processor is
     # reading via the context frame.

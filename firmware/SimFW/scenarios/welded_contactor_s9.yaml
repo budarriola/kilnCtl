@@ -63,11 +63,11 @@ faults:
     trigger: { at_sim_time: { t: 70 } }
     duration: permanent
   - id: welded_contactor
-    # PLAN.md §7.1 power-path catalog: "Welded K4 test support: Keep CT
+    # DESIGN_NOTES.md §7.1 power-path catalog: "Welded K4 test support: Keep CT
     # current flowing after K4 sensed open (S9 escalation)". This is the
     # fixture's stand-in for a real, mains-rated line contactor that is
     # physically welded downstream of K4 — the fixture cannot simulate mains
-    # hardware (out of scope, PLAN.md §1), so it keeps synthesizing current
+    # hardware (out of scope, DESIGN_NOTES.md §1), so it keeps synthesizing current
     # on the CT channel even after K4's own contacts are sensed open.
     type: welded_k4_current_persist
     target: ct:0

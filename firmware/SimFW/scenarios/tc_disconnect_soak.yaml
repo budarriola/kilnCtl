@@ -2,7 +2,7 @@ name: tc_disconnect_soak
 version: 1
 exercises: [S5]
 # S5 — Safety thermocouple invalid, graduated WARN-then-TRIP
-# (SAFETY_MODEL.md §4 S5). Second half of the pair (PLAN.md §8 item 4):
+# (SAFETY_MODEL.md §4 S5). Second half of the pair (DESIGN_NOTES.md §8 item 4):
 # same disconnected-TC fault as tc_disconnect_ramp.yaml, fired later, once
 # the zone is holding near its target instead of still climbing — the point
 # being that S5's grace/deadline behavior must be identical regardless of
@@ -26,7 +26,7 @@ faults:
     # Into the soak/hold portion of the fast_test profile. As with the ramp
     # variant, no exact "soak start" sim-time is defined in PLAN.md; this is
     # a judgment call picked to land well past the ramp in a ~2 min fast_test
-    # firing (PLAN.md §4.3).
+    # firing (DESIGN_NOTES.md §4.3).
     trigger: { at_sim_time: { t: 90 } }
     duration: permanent
 expect:

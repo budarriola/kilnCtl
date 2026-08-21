@@ -14,7 +14,7 @@
 
 **What is actually true right now.** Every task and every `src/sim/` module
 in this plan's architecture is implemented — no stubs remain anywhere in
-`firmware/SimFW/src/` — and the standard 19-scenario test library (§8 of
+`firmware/SimFW/src/` — and the standard 25-scenario test library (§8 of
 `DESIGN_NOTES.md`) exists as real YAML. That is **build-verified and
 host-test-verified**, not hardware-verified, and the two are not the same
 thing:
@@ -26,7 +26,7 @@ thing:
   `CommonFW` `benchproto` protocol library passes its own host tests (18/18)
   alongside the pre-existing `kilnlink` suite; `kilnsim` has its own pytest
   suite (59 passed + 17 subtests) and `kilnctrl`'s suite (104 passed) is
-  confirmed untouched; all 19 scenario YAML files load cleanly through
+  confirmed untouched; all 25 scenario YAML files load cleanly through
   `kilnsim`'s loader.
 - **Genuinely hardware-gated — nothing below has ever touched real
   silicon:** the PIO SPI slave timing proof at 4 MHz (M-A's exit criterion —
@@ -38,7 +38,7 @@ thing:
   currently an IDENTITY placeholder, explicitly marked
   `TODO(M-D calibration)`, not the real sweep-and-fit table); every
   relay-sense, E-stop, DUT-power, and ground-isolation claim in
-  `DESIGN_NOTES.md` §3; and every one of the 19 scenarios actually *running*
+  `DESIGN_NOTES.md` §3; and every one of the 25 scenarios actually *running*
   against a real `KilnFW`+`SaftyFW` pair (a scenario existing and loading is
   not the same as it having ever executed against hardware — see §10's
   milestone table).
@@ -91,16 +91,27 @@ never `[x]`.
       SM exhaustion halts while DMA exhaustion limps, and the code's own
       idle-loop-fallback comment describes an unreachable path. See
       `docs/HARDWARE.md` §1b.
-- [ ] **Any unimplemented bridge subcommand is silently ACKed — general, and
-      still open.** `firmware/KilnFW/App/drivers/uart_protocol.c` (~line 226)
-      sends the transport-layer ACK as soon as a frame lands in the
-      destination task's inbox, *before* that task's switch statement runs.
-      A subcommand that hits `default: rejected = true` is still ACKed. This
-      affects **every** bridge task, not just the CT-cal commands that
-      exposed it. A caller cannot distinguish "done" from "silently dropped"
-      for anything unimplemented. Confirmed by tracing, not fixed.
-- [ ] **Stale docstring in `push_ct_cal.py`** — its "currently-unresolved
-      blocker" section describes the KilnFW relay gap that `5fb6928` closed.
+- [ ] **Bridge ACK still precedes dispatch — narrower than it was.** Every
+      unimplemented subcommand's silent-ACK case is now fixed (`c91ed50`: all
+      11 `default:` branches reply `ok=0` with the echoed subcmd). **Still
+      open:** the transport ACKs on inbox delivery, before dispatch, so other
+      failure paths (truncated args, range refusals, ownership refusals) stay
+      silent by documented design; `tools/PcTools/src/kilnctrl` still only
+      checks the transport ACK and would need updating to benefit.
+- [ ] **`virtual_simfw.c` makes `dut_power_on` observable but still doesn't
+      gate anything.** `SIM_EVENT_DUT_POWER`/`LINK_UP` are now emitted, but
+      relay drive, CT current, and telemetry are all still unaffected by
+      power state — the reason `power_blip`'s two clauses stay BLOCKED.
+- [ ] **`kilnsim`'s own scenario runner may never send
+      `SAFETY_CMD_REQUEST_ENABLE`** — not found anywhere in
+      `tools/PcTools/src/kilnsim/`. The *virtual* harness gained this via
+      `operator_actions:` in `run_dut_scenarios.py`, a different runner; if
+      true, a real bench closed-loop firing would never close K4. Needs
+      verification, not another guess.
+- [ ] **`test_determinism_same_seed_same_scenario_byte_identical_events` is
+      flaky** (passes in isolation; a live-process timing test) in
+      `tools/PcTools`. Determinism is M-F's exit criterion, so a flaky
+      determinism test may mask a real intermittent ordering bug.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -133,7 +144,7 @@ never `[x]`.
       CDC link and `kilnsim` — `DESIGN_NOTES.md` §12
 - [x] `kilnsim` PC toolset (CLI, Tk GUI, MCP server, scenario loader, report
       generator) — `DESIGN_NOTES.md` §6
-- [x] 19-scenario standard library — `DESIGN_NOTES.md` §8
+- [x] 25-scenario standard library — `DESIGN_NOTES.md` §8
 - [x] PIO SPI mode-1 clocking bug found and fixed — `DESIGN_NOTES.md` §14
 - [x] `virtual_simfw`/`virtual_dut`/`virtual_kiln`, the fourth software-only
       verification layer — `DESIGN_NOTES.md` §10
@@ -187,6 +198,10 @@ never `[x]`.
 - [x] USB identity claimed: `2E8A:F00A` fixture / `2E8A:F00B`
       `spi_test_master` — also fixed a real auto-detect bug — `DESIGN_NOTES.md`
       §13
+- [x] All 11 bridge `default:` branches now reply `ok=0` instead of silently
+      ACKing an unimplemented subcommand (`c91ed50`)
+- [x] Stale `push_ct_cal.py` docstring describing an already-closed KilnFW
+      relay gap fixed (`4680b5e`)
 
 ---
 
@@ -196,7 +211,7 @@ Ordered by dependency and risk; each states its exit criterion — the thing
 that must be *demonstrated*, not just built. **Software for every milestone
 M-A through M-H has been written** (skeleton, protocol, thermal model, TC
 emulation, CT synthesis, relay/IO, fault engine, MCP/CLI/GUI, and the
-19-scenario library all exist in the tree). What follows is honest about
+25-scenario library all exist in the tree). What follows is honest about
 which exit criteria that satisfies and which it does not — build-verified
 and host-tested is not hardware-verified, and for this fixture almost every
 exit criterion as originally written specifically demands hardware evidence.
@@ -282,27 +297,28 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   every MANUAL mode.
   **Status: SOFTWARE MET, HARDWARE NOT MET.** `kilnsim`'s MCP server, CLI,
   GUI, scenario loader, and report generator all exist; the YAML schema is
-  frozen and all 19 scenario files parse cleanly through the loader. None of
+  frozen and all 25 scenario files parse cleanly through the loader. None of
   the named scenarios — or any other — has ever run against a real
   `KilnFW`+`SaftyFW` pair, so no scenario report has ever been archived from
   a live run, and the GUI's MANUAL-mode controls have never driven real
-  fixture hardware. All 19 scenarios *have* run against
+  fixture hardware. All 25 scenarios *have* run against
   `virtual_simfw`+`virtual_dut` (`DESIGN_NOTES.md` §10) — real `SimFW`
   simulation code and real `SaftyFW` guard code, on a PC, with no RP2040 at
   all — but "real `KilnFW`+`SaftyFW`" in this exit criterion means silicon,
-  and none has run. See `firmware/SimFW/tools/virtual_dut/results/
-  SCENARIO_RESULTS.md` for that run's pass/fail pattern.
+  and none has run. Latest `virtual_dut` run: 21 PASS / 4 BLOCKED / 0 FAIL
+  across all 25 (`100799d`, `d418bbf`) — see `firmware/SimFW/tools/
+  virtual_dut/results/SCENARIO_RESULTS.md` for the per-scenario pattern.
 - [~] **M-H — Standard library complete.** All 16 scenarios written and run.
   **Exit:** each maps to its `GUARD_TEST_MATRIX.md` rows and that file is
   updated in the same change; `kilnsim run --all` is a one-command
   regression gate.
-  **Status: LIBRARY MET (over-delivered: 19, not 16), "AND RUN" NOT MET
+  **Status: LIBRARY MET (over-delivered: 25, not 16), "AND RUN" NOT MET
   AGAINST REAL HARDWARE.** `GUARD_TEST_MATRIX.md` §5 cross-references guards
   to scenarios; its reachability subsection (§6) records, per guard, whether
-  it can currently fire at all. **None of the 19 scenarios has ever run
+  it can currently fire at all. **None of the 25 scenarios has ever run
   against real hardware** — "written" and "run" are different verbs in this
   milestone's own exit criterion, and only the first is true against
-  silicon today. All 19 *have* run against `virtual_simfw`+`virtual_dut`,
+  silicon today. All 25 *have* run against `virtual_simfw`+`virtual_dut`,
   which is real code but not real hardware — see `DESIGN_NOTES.md` §§10–11
   for what that run found (mostly: guards whose inputs weren't populated in
   `SaftyFW` at the time, since fixed, not scenario or fixture bugs).

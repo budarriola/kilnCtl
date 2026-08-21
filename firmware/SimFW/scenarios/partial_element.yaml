@@ -5,14 +5,14 @@ version: 1
 # checks see nothing but healthy behavior throughout (current present while
 # relay commanded on — neither S3's "no relay commanded" nor S4's "no
 # current" conditions are met). This is a KilnFW PID/ramp-rate regression
-# scenario, kept in the standard library per PLAN.md §8 item 10 even though
+# scenario, kept in the standard library per DESIGN_NOTES.md §8 item 10 even though
 # it has no GUARD_TEST_MATRIX.md mapping.
 exercises: []
 # Preset: a realistic 3-zone model with coupling/lag is used rather than
 # fast_test, because "slow ramp / ramp-rate handling" is the point of the
 # scenario and a compressed lumped-mass model would understate the effect
 # a 60%-power coil has on ramp shape (per the task's note that scenarios
-# like this benefit from `three_zone`, PLAN.md §4.3).
+# like this benefit from `three_zone`, DESIGN_NOTES.md §4.3).
 preset: three_zone
 timescale: 20
 seed: 51
@@ -35,8 +35,8 @@ dut:
     - { at_sim_time: 5, action: request_enable }
 faults:
   - id: partial
-    # PLAN.md §7.1: "Partially failed coil | Wrong element resistance ->
-    # wrong current + slow heating". Magnitude: ~60% power per PLAN.md §8
+    # DESIGN_NOTES.md §7.1: "Partially failed coil | Wrong element resistance ->
+    # wrong current + slow heating". Magnitude: ~60% power per DESIGN_NOTES.md §8
     # item 10 (stated there explicitly). params[0] = forced element_health,
     # 0..1 directly (fault_sched.h's FAULT_SCHED_TYPE_PARTIAL_ELEMENT doc
     # comment; sim_engine's P_heater = duty * V^2/R * element_health, so

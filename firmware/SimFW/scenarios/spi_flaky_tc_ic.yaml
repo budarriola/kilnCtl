@@ -5,10 +5,10 @@ exercises: [S5]
 # trip set explicitly includes "SPI transfer failure" as one of its three
 # trigger conditions (SAFETY_MODEL.md §4 S5: "Trips on: SPI transfer
 # failure, NaN, or THERMO_FAULT_OPEN / OVUV / TCRANGE"), giving this
-# scenario a direct guard mapping. PLAN.md §8 item 14's "no garbage temps
+# scenario a direct guard mapping. DESIGN_NOTES.md §8 item 14's "no garbage temps
 # accepted" half of the expectation is a driver-correctness property best
 # checked via the fixture's shadow-truth vs. reported-value comparison and
-# SPI error counters (PLAN.md §3.2.1) rather than a DUT-facing sensed
+# SPI error counters (DESIGN_NOTES.md §3.2.1) rather than a DUT-facing sensed
 # signal, and is called out under manual_checks.
 preset: fast_test
 timescale: 10
@@ -18,7 +18,7 @@ dut:
   profile: cone6_fast
 faults:
   - id: flaky_spi
-    # PLAN.md §7.1: "TC IC flaky SPI | Bit errors on MISO at configurable
+    # DESIGN_NOTES.md §7.1: "TC IC flaky SPI | Bit errors on MISO at configurable
     # rate".
     # TODO: still genuinely unresolved -- no bit-error-rate number is stated
     # anywhere in PLAN.md/SAFETY_MODEL.md, and it cannot be derived from the
@@ -35,7 +35,7 @@ faults:
     # crossing, is simply accepted as a garbled-but-plausible temperature --
     # there is nothing in the driver to catch it. That is a real, load-
     # bearing fact about current firmware behavior (worth flagging upstream:
-    # PLAN.md §8 item 14's "no garbage temps accepted" expectation currently
+    # DESIGN_NOTES.md §8 item 14's "no garbage temps accepted" expectation currently
     # has no mechanism to make it true for a corrupted-but-structurally-valid
     # transfer). No bench-derived rate exists, and none can be derived from
     # PLAN.md/SAFETY_MODEL.md -- but leaving params: unset makes
@@ -112,5 +112,5 @@ expect:
                          # same numeric pattern as tc_disconnect_*.yaml
       not_before_s: 55
 manual_checks:
-  - "Confirm via SWD/telemetry SPI CRC-class error counters (PLAN.md §3.2.1) that the driver's own sanity checks rejected the corrupted transfers rather than accepting a garbled temperature reading — not directly observable from the fixture's DUT-facing sensed signals alone"
+  - "Confirm via SWD/telemetry SPI CRC-class error counters (DESIGN_NOTES.md §3.2.1) that the driver's own sanity checks rejected the corrupted transfers rather than accepting a garbled temperature reading — not directly observable from the fixture's DUT-facing sensed signals alone"
 report_keep: [telemetry, events]

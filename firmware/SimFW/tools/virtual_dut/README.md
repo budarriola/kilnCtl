@@ -775,8 +775,8 @@ separately-verified facts explain why, neither of them a wiring failure:
    consults K4 when computing `duty[]`/`current_a[]` -- only K1/K2/K3 gate
    heater duty and CT current, in both the harness and real firmware alike.
    So even on a day K4 *did* close, that alone still would not gate
-   simulated heat/current in this fixture's model today (PLAN.md sec 2 loop
-   2's "K4 permits" clause is not implemented anywhere in the codebase this
+   simulated heat/current in this fixture's model today (DESIGN_NOTES.md §2
+   loop 2's "K4 permits" clause is not implemented anywhere in the codebase this
    fixture is built from). Confirming or fixing that is out of scope for
    both this pass and the one that added the RELAY command
    (`firmware/SimFW/src/**` is read-only in both).

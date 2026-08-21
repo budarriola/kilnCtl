@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
 # Signal / event vocabulary used throughout firmware/SimFW/scenarios/
-# (documented once, here, since this file is PLAN.md §8.1's own template)
+# (documented once, here, since this file is DESIGN_NOTES.md §8.1's own template)
 # ---------------------------------------------------------------------------
-# `expect` clauses follow PLAN.md §8.1's three forms: `event`+`then`, `forbid`,
+# `expect` clauses follow DESIGN_NOTES.md §8.1's three forms: `event`+`then`, `forbid`,
 # `at_end`. Within them:
 #
 #   dut:  <signal>        a boolean the fixture senses from the real board or
@@ -11,13 +11,13 @@
 #                          K4_open (== !K4_closed, spelled out for readability
 #                          at trip sites), estop_open, fault_line_asserted,
 #                          current_present (per-channel CT presence, from the
-#                          fixture's own I_amps telemetry, PLAN.md §5.3).
+#                          fixture's own I_amps telemetry, DESIGN_NOTES.md §5.3).
 #   event: { type: ..., slot/relay/guard: ... }
-#                          fixture EVT-stream events (PLAN.md §5.3): fault_fired,
+#                          fixture EVT-stream events (DESIGN_NOTES.md §5.3): fault_fired,
 #                          fault_cleared, relay_edge, guard_warn, guard_trip,
 #                          trip_ineffective_latched, link_up, dut_power.
 #   then: { dut: X, within_s: N }
-#                          upper-bound deadline (as in PLAN.md §8.1's example).
+#                          upper-bound deadline (as in DESIGN_NOTES.md §8.1's example).
 #   then: { ..., not_before_s: M }
 #                          added lower bound, same field, for asserting BOTH
 #                          bars of the nuisance-trip doctrine (SAFETY_MODEL.md
@@ -26,8 +26,8 @@
 #                          before M, must fire by N.
 #
 # Fault entries stick to exactly {id, type, target, trigger, duration} per
-# PLAN.md §8.1's frozen shape. Fault-type parameters ARE part of the frozen
-# shape (PLAN.md §5.2: "the four generic params carry fault-specific
+# DESIGN_NOTES.md §8.1's frozen shape. Fault-type parameters ARE part of the frozen
+# shape (DESIGN_NOTES.md §5.2: "the four generic params carry fault-specific
 # values"; §8.1 documents `params:` as a plain float list on the fault
 # entry, matched positionally to fault_sched.h's params[0..3] doc comment
 # for that fault type) -- give every fault that needs one a real, justified
@@ -39,7 +39,7 @@
 #
 # --- `blocked_on:` -- expectations that cannot pass against TODAY's
 # SaftyFW, distinct from `manual_checks:` -----------------------------------
-# `manual_checks:` (PLAN.md §8.1) is for things the FIXTURE cannot observe
+# `manual_checks:` (DESIGN_NOTES.md §8.1) is for things the FIXTURE cannot observe
 # (LCD/web content, commissioning state) -- a human checks those, and the
 # scenario's automated expectations are otherwise trustworthy. `blocked_on:`
 # is the opposite kind of gap: the automated expectation is well-formed and
@@ -182,7 +182,7 @@ faults:
     target: relay:K1
     # A zone-temperature trigger, kept rather than converted to at_sim_time
     # because "the SSR welds part-way up the ramp" is the physical story this
-    # scenario tells — PLAN.md §8 item 2's "40% of soak" has no exact sim-clock
+    # scenario tells — DESIGN_NOTES.md §8 item 2's "40% of soak" has no exact sim-clock
     # definition, and a temperature is the repeatable proxy for it. The number
     # is now one this run actually reaches; see the header note above for the
     # measured heating curve.

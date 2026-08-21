@@ -34,7 +34,7 @@ dut:
     - { at_sim_time: 5, action: command_relay, relay: K1, state: closed }
 faults:
   - id: freeze
-    # PLAN.md §7.1 TC/sensor fault catalog: "Stuck TC | LTCB frozen at last
+    # DESIGN_NOTES.md §7.1 TC/sensor fault catalog: "Stuck TC | LTCB frozen at last
     # value while zone keeps moving". Fired 5s in (near the start of the
     # ramp) so the ~600s frozen_window_s accumulates from as close to t=0 as
     # this library's convention allows (matching tc_disconnect_ramp.yaml's

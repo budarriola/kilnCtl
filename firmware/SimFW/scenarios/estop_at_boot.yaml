@@ -11,15 +11,15 @@ dut:
   profile: none
 faults:
   - id: estop_pre_boot
-    # PLAN.md §7.1 system-fault catalog "E-stop during firing" fault type,
+    # DESIGN_NOTES.md §7.1 system-fault catalog "E-stop during firing" fault type,
     # reused here at boot rather than mid-firing: the fixture opens the
     # E-stop loop BEFORE the DUT is power-cycled and holds it open through
     # boot — replicating the as-built no-jumper state (HARDWARE.md §5,
-    # PLAN.md §3.4: "the fixture *becomes* the jumper").
+    # DESIGN_NOTES.md §3.4: "the fixture *becomes* the jumper").
     type: estop_trip
     target: io:estop
     trigger: { manual: {} }   # armed by the runner before the DUT power
-                              # cycle it then issues (PLAN.md §7.2 MANUAL
+                              # cycle it then issues (DESIGN_NOTES.md §7.2 MANUAL
                               # trigger; §6.2 `kilnsim power cycle`)
     duration: permanent
 expect:

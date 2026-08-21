@@ -9,7 +9,7 @@ dut:
   profile: cone6_fast
 faults:
   - id: estop
-    # PLAN.md §7.1 system-fault catalog: "E-stop during firing | Open the
+    # DESIGN_NOTES.md §7.1 system-fault catalog: "E-stop during firing | Open the
     # E-stop loop at trigger". Held open for 5s then the fixture physically
     # re-closes the loop (simulating press-then-release) so the scenario can
     # also assert the trip does NOT auto-clear when the contact re-closes.
@@ -24,7 +24,7 @@ faults:
     # reaching it needed ~4.6 time constants (tau =
     # C/k_loss = 250 sim-s) = ~1150 sim-s = ~115s wall at this file's 10x
     # timescale -- nearly the whole ~2min wall-time fast_test is designed
-    # for (PLAN.md §4.3), just to reach the trigger, leaving almost no
+    # for (DESIGN_NOTES.md §4.3), just to reach the trigger, leaving almost no
     # margin for this scenario's own post-trigger deadlines. Lowered to
     # 400degC (reached in ~1.5 tau =~380 sim-s =~38s wall), matching the
     # trigger already used by welded_ssr_midfire.yaml/welded_contactor_s9.yaml

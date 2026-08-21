@@ -43,7 +43,7 @@ dut:
     - { at_sim_time: 5, action: request_enable }
 faults:
   - id: dead_element
-    # PLAN.md §7.1: "Broken heater coil | Relay closes, zero current on that
+    # DESIGN_NOTES.md §7.1: "Broken heater coil | Relay closes, zero current on that
     # CT, zone doesn't heat". FAULT_SCHED_TYPE_BROKEN_ELEMENT forces
     # element_health to 0 (fault_sched.h) and takes no params[], so there is
     # no magnitude to get wrong: current_a = V/R * duty * 0 = exactly 0A,
