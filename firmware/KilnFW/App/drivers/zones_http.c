@@ -616,6 +616,72 @@ bool zones_config_get_safety_tc_type(uint8_t *out_tc_type)
     return true;
 }
 
+/* 2026-08-21, LCD item 1 (TODO.md owner-report item 1/4's on-device half):
+ * the web zones page (zones_page.html) gained per-channel thermocouple type
+ * selection this same day, but only as an HTTP form field -- there was no
+ * public getter/setter an LCD page could call, only the POST body parser's
+ * private z%u_tctype handling above. Follows zones_config_get_pid()'s/
+ * zones_config_set_pid()'s exact shape (same zone_index bounds check, same
+ * "false means cannot answer" convention, setter bumps s_config_generation
+ * before nvs_save() so a running profile's next tick sees the new value
+ * whether or not the flash write itself succeeds) so this module keeps
+ * exactly one accessor pattern rather than growing a second one for LCD
+ * callers specifically.
+ *
+ * Deliberately does NOT call thermo_owner_command_config_channel() to push
+ * the new type to hardware immediately -- checked zones_http.c's own POST
+ * /api/zones handler (the web page's save path) before writing this, and it
+ * doesn't either: the only place this module ever calls that function is
+ * zones_http_start()'s boot-time apply, further down this file. So an LCD
+ * write and a web-page save now have the SAME behaviour (persisted
+ * immediately, taken into the running MAX31856 register only on the next
+ * boot) rather than the LCD accidentally doing more than the web form it is
+ * mirroring. If that boot-only gap is ever closed for the web path, this
+ * setter should gain the same live-apply call at the same time -- not
+ * silently drift ahead of it. */
+bool zones_config_get_tc_type(uint8_t zone_index, uint8_t *out_tc_type)
+{
+    if (!out_tc_type || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_tc_type = s_zones.cfg.zones[zone_index].tc_type;
+    return true;
+}
+
+bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (tc_type > ZONE_TC_TYPE_MAX_REAL) {
+        /* Same bound the POST parser enforces (parse_zone_fields()) -- a
+         * voltage-input mode is never a legal choice from an
+         * operator-facing "thermocouple type" control, LCD or web alike. */
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].tc_type = tc_type;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+/* Setter half of zones_config_get_safety_tc_type() above -- same "global,
+ * not per-zone" setting (the RP2040 safety processor's own MAX31856-equivalent
+ * type), same bound as the per-channel setter just above, same generation/
+ * nvs_save shape as every other setter in this file. safety_link.c's
+ * safety_sync_tc_type() is the consumer that notices the generation bump and
+ * re-mirrors this to the Pico -- this function does not talk to the safety
+ * link itself, matching the POST handler's own division of labor (this
+ * module owns storage only). */
+bool zones_config_set_safety_tc_type(uint8_t tc_type)
+{
+    if (tc_type > ZONE_TC_TYPE_MAX_REAL) {
+        return false;
+    }
+    s_zones.cfg.safety_tc_type = tc_type;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
 {
     if (!out_mask || zone_index >= s_zones.cfg.thermo_count) {

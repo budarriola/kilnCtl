@@ -840,8 +840,8 @@ void app_main(void)
     // board_temps_start() near the top of app_main.
     esp_err_t board_temps_http_err = board_temps_http_start(thermo_bus.initialized ? &thermo_bus : NULL);
     if (board_temps_http_err != ESP_OK) {
-        ESP_LOGW(TAG, "board_temps_http_start failed: %s -- no /api/board_temps this boot",
-                 esp_err_to_name(board_temps_http_err));
+        ESP_LOGW(TAG, "board_temps_http_start failed: %s -- no /api/board_temps or /board_temps "
+                      "page this boot", esp_err_to_name(board_temps_http_err));
     }
 
     // --- Settings/Profiles HTTP pages (TODO.md sections 3 and 5) -----------

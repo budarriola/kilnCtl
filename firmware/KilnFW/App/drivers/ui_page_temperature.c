@@ -191,6 +191,12 @@ static void relay_toggle_cb(lv_event_t *e)
         snprintf(msg, sizeof(msg), "Relay %u refused -- safety fault 0x%02X", (unsigned)ctx->relay_index,
                  (unsigned)sources);
         break;
+    case DASHBOARD_RELAY_ERR_UPDATING:
+        /* 2026-08-21: distinct from ERR_SAFETY above -- nothing is faulted,
+         * a firmware update is in progress (dashboard_http.h's
+         * DASHBOARD_RELAY_ERR_UPDATING comment). */
+        snprintf(msg, sizeof(msg), "Relay %u refused -- firmware update in progress", (unsigned)ctx->relay_index);
+        break;
     case DASHBOARD_RELAY_ERR_IO_FAIL:
     default:
         snprintf(msg, sizeof(msg), "Relay %u: command failed", (unsigned)ctx->relay_index);

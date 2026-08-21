@@ -92,6 +92,24 @@ bool zones_config_get_continue_on_zone_trip(void);
  * in zones_http.c for why 0 is not a safe "unconfigured" reading here. */
 bool zones_config_get_safety_tc_type(uint8_t *out_tc_type);
 
+/* 2026-08-21, LCD item 1: getter/setter pair for one channel's own
+ * thermocouple type -- see zones_config_get_pid()'s/zones_config_set_pid()'s
+ * doc comments for the shared "false means cannot answer"/generation-bump
+ * conventions this follows exactly. zone_index is 0-based, must be < the
+ * configured thermo_count (same bound zones_config_get_max_ramp() uses).
+ * zones_config_set_tc_type() rejects tc_type > 7 (ZONE_TC_TYPE_MAX_REAL in
+ * zones_http.c) -- a voltage-input mode is never legal from an
+ * operator-facing type selector, LCD or web. See zones_http.c's own comment
+ * on this pair for why the setter deliberately does NOT push the new value
+ * to the live MAX31856 register (the web POST path doesn't either; both take
+ * effect on the next boot only, today). */
+bool zones_config_get_tc_type(uint8_t zone_index, uint8_t *out_tc_type);
+bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type);
+
+/* Setter for zones_config_get_safety_tc_type()'s global RP2040-safety-
+ * processor setting. Same bound/shape as zones_config_set_tc_type() above. */
+bool zones_config_set_safety_tc_type(uint8_t tc_type);
+
 /* TODO.md 8.2 "Tie it to the guards, not only the UI". true only after a
  * real, trustworthy zones config is live -- a successful load (current
  * version, or an older version successfully migrated) or a fresh validated

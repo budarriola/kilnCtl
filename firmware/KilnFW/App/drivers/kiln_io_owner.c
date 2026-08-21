@@ -102,14 +102,25 @@ static SafetyLinkClass *s_safety;
  * setting one here would misreport an update-in-progress refusal as a
  * safety-link/thermal/PC fault to a caller reading *out_sources afterward.
  * The specific reason (which processor is updating) is logged here instead,
- * server-side -- dashboard_http.c/uart_bridge.c currently only surface the
+ * server-side -- dashboard_http.c/uart_bridge.c previously only surfaced the
  * generic KILN_IO_OWNER_RELAY_ERR_SAFETY/"blocked by safety fault" text for
- * ANY refusal from this function, which is accurate enough to keep the
- * kiln safe but not as specific as this codebase's "zone 2 is at 340 C"
- * standard; making the HTTP/UART response itself name "an ESP/Pico firmware
- * update is in progress" needs a small change in each of those two
- * off-limits files (see this pass's final report for the exact patch). */
-static bool relay_on_blocked(uint32_t *out_sources)
+ * ANY refusal from this function, which kept the kiln safe but misreported
+ * an update-in-progress refusal as a fault. 2026-08-21: fixed by having this
+ * function report WHICH reason it blocked for via *out_updating, so
+ * handle_set_relay()/handle_set_relay_mask() below can set the new, distinct
+ * KILN_IO_OWNER_RELAY_ERR_UPDATING (kiln_io_owner.h) instead of ERR_SAFETY
+ * when this is the reason -- dashboard_http.c and uart_bridge.c each gained a
+ * branch on that new value to surface this exact logged reason string to the
+ * caller instead of the generic "blocked by safety fault" text.
+ *
+ * out_updating is set true only when THIS check (the update interlock) is
+ * what blocked -- left false (never touched) when relay_authority_on_blocked()
+ * already blocked for a real safety-fault reason, so a caller that checks
+ * the flag only after seeing "blocked" at all never has to worry about a
+ * stale true from a previous call bleeding through: every call site below
+ * zero-initializes owner_result_t (memset in owner_task()) before calling
+ * this, so the default is always a clean false. */
+static bool relay_on_blocked(uint32_t *out_sources, bool *out_updating)
 {
     if (relay_authority_on_blocked(s_safety, out_sources)) {
         return true;
@@ -117,6 +128,9 @@ static bool relay_on_blocked(uint32_t *out_sources)
     char reason[HEAT_INTERLOCK_REASON_MAX];
     if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
         ESP_LOGW(TAG, "relay-on refused: %s", reason);
+        if (out_updating) {
+            *out_updating = true;
+        }
         return true;
     }
     return false;
@@ -136,7 +150,15 @@ static bool sx_write_reg_touches_relay_on(uint8_t reg, uint8_t new_byte, uint32_
     if ((new_byte & relay_bits_in_byte) == 0) {
         return false; /* doesn't set any relay pin high */
     }
-    return relay_on_blocked(out_sources);
+    /* This raw-register path only ever reported ERR_REFUSED_RELAY (a single,
+     * generic kiln_io_owner_sx_result_t value -- see kiln_io_owner.h's top
+     * comment) regardless of which check blocked it, unlike the two manual
+     * relay commands below; that generic result is out of scope for this
+     * pass's fix (the owner's report named relay_on_blocked()'s manual-relay
+     * callers specifically), so this call site keeps discarding the
+     * updating-vs-safety distinction rather than half-wiring it through a
+     * result type that has nowhere to carry it yet. */
+    return relay_on_blocked(out_sources, NULL);
 }
 
 static bool sx_set_dir_touches_relay(uint16_t dir_mask)
@@ -159,9 +181,13 @@ static void handle_set_relay(const owner_cmd_t *cmd, owner_result_t *r)
         r->relay_result = KILN_IO_OWNER_RELAY_ERR_OWNED;
         return;
     }
-    if (on && relay_on_blocked(&r->safety_sources)) {
-        r->relay_result = KILN_IO_OWNER_RELAY_ERR_SAFETY;
-        return;
+    if (on) {
+        bool updating = false;
+        if (relay_on_blocked(&r->safety_sources, &updating)) {
+            r->relay_result = updating ? KILN_IO_OWNER_RELAY_ERR_UPDATING
+                                        : KILN_IO_OWNER_RELAY_ERR_SAFETY;
+            return;
+        }
     }
     r->err = kiln_io_set_relay(s_io, relay, on);
     r->relay_result = (r->err == ESP_OK) ? KILN_IO_OWNER_RELAY_OK : KILN_IO_OWNER_RELAY_ERR_IO_FAIL;
@@ -179,9 +205,13 @@ static void handle_set_relay_mask(const owner_cmd_t *cmd, owner_result_t *r)
         }
     }
     bool any_on = (mask & value) != 0;
-    if (any_on && relay_on_blocked(&r->safety_sources)) {
-        r->relay_result = KILN_IO_OWNER_RELAY_ERR_SAFETY;
-        return;
+    if (any_on) {
+        bool updating = false;
+        if (relay_on_blocked(&r->safety_sources, &updating)) {
+            r->relay_result = updating ? KILN_IO_OWNER_RELAY_ERR_UPDATING
+                                        : KILN_IO_OWNER_RELAY_ERR_SAFETY;
+            return;
+        }
     }
     r->err = kiln_io_set_relay_mask(s_io, mask, value);
     r->relay_result = (r->err == ESP_OK) ? KILN_IO_OWNER_RELAY_OK : KILN_IO_OWNER_RELAY_ERR_IO_FAIL;

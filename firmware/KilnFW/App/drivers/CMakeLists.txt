@@ -56,7 +56,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css"
         "ota_page.html" "nav.js" "app.js"
         "diagnostics_page.html" "safety_page.html" "thermo_faults_page.html"
-        "settings_page.html" "manual_page.html")
+        "settings_page.html" "manual_page.html" "board_temps_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
@@ -102,6 +102,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "lvgl_mem_psram.c"
                        "ui_page_diagnostics.c"
                        "ui_page_thermo_faults.c"
+                       "ui_page_tc_types.c"
                        "ui_page_touch_cal.c"
                        "ui_page_touch_test.c"
                        "ui_page_profiles.c"

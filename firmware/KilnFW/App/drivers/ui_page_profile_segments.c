@@ -8,6 +8,7 @@
 #include "ui_page_profile_detail.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "unit_pref.h"
 
 /* Arithmetic (same style as every other page in this pass), against the real
  * ~267px content budget:
@@ -78,8 +79,24 @@ static void render_page(void)
         lv_obj_t *label = lv_label_create(row);
         lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
         char buf[64];
-        snprintf(buf, sizeof(buf), "Seg %u: %.0fC @ %.0fC/hr, dwell %umin", (unsigned)(i + 1),
-                 (double)s_prof.segments[i].target_c, (double)s_prof.segments[i].ramp_c_per_hr,
+        /* LCD item 2 (2026-08-21): this row is READ-ONLY (the row is not
+         * clickable -- see this file's own comment a few lines up), so both
+         * numbers are pure display and safe to run through unit_pref_convert()
+         * -- unlike ui_page_profile_builder_segment.c's editable target/ramp
+         * cards, nothing here can feed a converted value back into
+         * s_prof.segments[i], which stays Celsius in memory regardless of
+         * what's painted. Target is an ABSOLUTE reading (a real setpoint,
+         * +32 offset is correct); ramp is a RATE (magnitude only, no +32 --
+         * unit_pref.h's own comment: "a rate has no such point to add") AND
+         * its unit label changes alongside the number ("C/hr" -> "F/hr") --
+         * scaling the number while leaving the old label is the "silent
+         * corruption" case that header warns about. */
+        unit_pref_t pref = unit_pref_get();
+        float target_disp = unit_pref_convert(s_prof.segments[i].target_c, pref, UNIT_PREF_KIND_ABSOLUTE);
+        float ramp_disp = unit_pref_convert(s_prof.segments[i].ramp_c_per_hr, pref, UNIT_PREF_KIND_RATE);
+        const char *suffix = unit_pref_suffix(pref);
+        snprintf(buf, sizeof(buf), "Seg %u: %.0f%s @ %.0f%s/hr, dwell %umin", (unsigned)(i + 1),
+                 (double)target_disp, suffix, (double)ramp_disp, suffix,
                  (unsigned)s_prof.segments[i].dwell_min);
         lv_label_set_text(label, buf);
         lv_obj_center(label);

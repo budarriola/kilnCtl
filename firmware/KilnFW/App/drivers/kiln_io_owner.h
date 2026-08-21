@@ -100,6 +100,31 @@ typedef enum {
     KILN_IO_OWNER_RELAY_ERR_TIMEOUT,  /* owner task did not answer in time -- see
                                         * kiln_io_owner_start()'s doc comment; treat
                                         * exactly like ERR_IO_FAIL, fail closed */
+    /* 2026-08-21: refused because an ESP or Pico firmware update is in
+     * progress (the OTA/heating mutual interlock -- relay_on_blocked()'s
+     * ota_http_heat_blocked_by_update() half in kiln_io_owner.c). Until now
+     * this case was reported as ERR_SAFETY above, which reads as "something
+     * is FAULTED" to an operator when nothing is: no SAFETY_FAULT_SRC_* bit
+     * (safety_link.h) is set, an update is simply running. See
+     * relay_on_blocked()'s own comment in kiln_io_owner.c for the fix's full
+     * history and for why the specific reason string was already being
+     * logged server-side but never reaching dashboard_http.c/uart_bridge.c's
+     * callers.
+     *
+     * APPENDED here rather than inserted after ERR_SAFETY where it would read
+     * more naturally: this is a plain C enum with no explicit `= N` values,
+     * so every member below an insertion point shifts its numeric value.
+     * Checked before choosing append over insert -- neither
+     * kiln_io_owner_relay_result_t nor kiln_io_owner_sx_result_t crosses the
+     * UART wire (uart_bridge.c's SET_RELAY/SET_RELAY_MASK responses carry
+     * their own separate wire status byte, translated from this enum at each
+     * call site rather than sending this enum's raw numeric value -- see
+     * uart_bridge.c's dispatch for those two commands) and neither is
+     * persisted to NVS anywhere in this codebase, so an insertion could not
+     * actually have corrupted a stored or transmitted value here. Appending
+     * anyway costs nothing and rules the question out for good rather than
+     * relying on that "checked, currently true" fact staying true forever. */
+    KILN_IO_OWNER_RELAY_ERR_UPDATING,
 } kiln_io_owner_relay_result_t;
 
 typedef enum {

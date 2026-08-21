@@ -115,10 +115,10 @@ void board_temps_get_live(board_temps_t *out);
  * otherwise the handler calls MAX31856_read_all() itself each request --
  * this module does not own the bus, it only borrows the pointer to read it.
  *
- * TODO.md 10.7 scope note: this registers the JSON API only. No HTML page
- * for it yet (deferred, per 10.7's own text, to whichever future pass builds
- * the board-health web page) and no LCD/LVGL menu item -- both explicitly
- * out of scope for this pass. */
+ * TODO.md 10.7: registers the JSON API and its styled GET /board_temps page
+ * (board_temps_page.html, same gzip-embedded-asset shape as every other
+ * *_page.html here -- see diagnostics_http.c). No LCD/LVGL menu item --
+ * that stays out of scope for this pass. */
 esp_err_t board_temps_http_start(MAX31856BusClass *thermo_bus_or_null);
 
 #ifdef __cplusplus

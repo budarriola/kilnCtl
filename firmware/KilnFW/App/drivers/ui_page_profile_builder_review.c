@@ -13,6 +13,7 @@
 #include "ui_page_profile_builder_zones.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
+#include "unit_pref.h"
 #include "zones_http.h"
 
 static const char *TAG = "ui_page_profile_builder_review";
@@ -282,8 +283,15 @@ void ui_page_profile_builder_review_prepare(void)
             peak = d->segments[i].target_c;
         }
     }
+    /* LCD item 2 (2026-08-21): pure read-only display of an already-Celsius
+     * `peak` computed just above from segments[i].target_c -- this label
+     * never feeds back into the draft profile, so converting it for display
+     * is safe. ABSOLUTE kind: peak is a real temperature reading (the
+     * highest segment target), not a rate. */
+    unit_pref_t pref = unit_pref_get();
     char peakbuf[24];
-    snprintf(peakbuf, sizeof(peakbuf), "Peak %.0f C", (double)peak);
+    snprintf(peakbuf, sizeof(peakbuf), "Peak %.0f %s", (double)unit_pref_convert(peak, pref, UNIT_PREF_KIND_ABSOLUTE),
+             unit_pref_suffix(pref));
     lv_label_set_text(s_peak_label, peakbuf);
 
     profile_seg_verdict_t v = profile_feasibility_profile_mask(d->zone_mask, d, NULL, 0);

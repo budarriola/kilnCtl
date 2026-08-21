@@ -21,6 +21,7 @@
 #include "ui_page_profiles_family.h"
 #include "ui_page_profiles_mine.h"
 #include "ui_page_safety.h"
+#include "ui_page_tc_types.h"
 #include "ui_page_temperature.h"
 #include "ui_page_thermo_faults.h"
 #include "ui_page_touch_cal.h"
@@ -174,6 +175,15 @@ esp_err_t kiln_ui_init(void)
      * See ui_page_thermo_faults.c's header comment. Linked from
      * ui_page_config.c's nav hub like every other diagnostic page. */
     err = kiln_ui_register_page("thermo_faults", ui_page_thermo_faults_build);
+    if (err != ESP_OK) return err;
+
+    /* 2026-08-21, LCD item 1: per-channel/safety-processor thermocouple TYPE
+     * selection (Type B/E/J/K/N/R/S/T) -- see ui_page_tc_types.c's header
+     * comment for why this is its own page rather than folded into
+     * "thermo_faults" above. Linked from ui_page_config.c's nav hub's new
+     * third page (that file's UI_CONFIG_HUB_PAGE_COUNT went 2 -> 3 because
+     * both existing pages were already full -- see its own header comment). */
+    err = kiln_ui_register_page("tc_types", ui_page_tc_types_build);
     if (err != ESP_OK) return err;
 
     /* NS2009 touch calibration -- see ui_page_touch_cal.c/.h. Linked from

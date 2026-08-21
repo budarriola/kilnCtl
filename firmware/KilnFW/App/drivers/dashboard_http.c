@@ -13,9 +13,11 @@
 #include "esp_timer.h"
 
 #include "autotune_engine.h"
+#include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
 #include "kiln_io_owner.h"
 #include "nvs_report.h"
+#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see the ERR_UPDATING case below */
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
@@ -523,6 +525,29 @@ dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint3
         ESP_LOGW(TAG, "dashboard: relay %u ON refused -- safety fault sources 0x%02X", (unsigned)relay_index,
                  out_safety_sources ? (unsigned)*out_safety_sources : 0u);
         return DASHBOARD_RELAY_ERR_SAFETY;
+    case KILN_IO_OWNER_RELAY_ERR_UPDATING:
+        /* 2026-08-21: distinct from ERR_SAFETY above -- see
+         * dashboard_http.h's DASHBOARD_RELAY_ERR_UPDATING comment and
+         * kiln_io_owner.c's relay_on_blocked() for why this is not a fault.
+         * Re-derive the exact reason string relay_on_blocked() already
+         * logged once (kiln_io_owner.c does not hand it back through
+         * kiln_io_owner_relay_result_t, only the enum value) rather than
+         * inventing a second, possibly-drifting message here. */
+        {
+            char reason[HEAT_INTERLOCK_REASON_MAX];
+            if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
+                ESP_LOGW(TAG, "dashboard: relay %u ON refused -- %s", (unsigned)relay_index, reason);
+            } else {
+                /* Should not happen -- kiln_io_owner.c only returns this
+                 * result when that same check just returned true -- but the
+                 * update could in principle finish between that check and
+                 * this one, so fall back to a still-accurate generic reason
+                 * rather than printing an empty/stale string. */
+                ESP_LOGW(TAG, "dashboard: relay %u ON refused -- firmware update in progress",
+                         (unsigned)relay_index);
+            }
+        }
+        return DASHBOARD_RELAY_ERR_UPDATING;
     case KILN_IO_OWNER_RELAY_ERR_IO_FAIL:
     case KILN_IO_OWNER_RELAY_ERR_TIMEOUT:
     default:
@@ -590,6 +615,22 @@ static esp_err_t relay_post_handler(httpd_req_t *req)
         return ESP_OK;
     case DASHBOARD_RELAY_ERR_SAFETY:
         httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "blocked by safety fault");
+        return ESP_OK;
+    case DASHBOARD_RELAY_ERR_UPDATING:
+        /* 2026-08-21: distinct wording from ERR_SAFETY above -- see
+         * dashboard_http.h's DASHBOARD_RELAY_ERR_UPDATING comment. Re-derive
+         * the specific reason (which processor is updating) the same way
+         * dashboard_set_relay()'s own ERR_UPDATING case does, rather than a
+         * flat string, so a dashboard operator sees the same detail the
+         * server log already recorded. */
+        {
+            char reason[HEAT_INTERLOCK_REASON_MAX];
+            if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
+                httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, reason);
+            } else {
+                httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "firmware update in progress");
+            }
+        }
         return ESP_OK;
     case DASHBOARD_RELAY_ERR_IO_FAIL:
     default:

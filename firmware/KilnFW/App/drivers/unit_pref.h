@@ -93,24 +93,28 @@ typedef enum {
     // magnitude of a temperature difference, never an absolute reading --
     // and the caller MUST update the unit's label alongside the number (e.g.
     // "C/hr" -> "F/hr"): a rate scaled without its label changing is silent
-    // corruption, not a conversion. As of 2026-08-21 no call site in this
-    // codebase actually renders a rate in the display unit -- every rate
-    // field on both the LCD and the web UI is left in C/hr with its C/hr
-    // label (unit_pref.h's "if in doubt, leave a rate in C" rule) -- this
-    // variant exists so that decision is structural (a rate conversion is
-    // only ever one explicit function argument away from an absolute one,
-    // never the default) rather than because anything currently calls it.
+    // corruption, not a conversion. First real call sites landed 2026-08-21
+    // (LCD item 2): ui_page_profile_builder_segment.c's/
+    // ui_page_profile_segments.c's read-only ramp-rate displays, both of
+    // which change their "C/hr" label to unit_pref_suffix(pref)+"/hr" in the
+    // same snprintf call that does the conversion -- see those files' own
+    // comments. Every EDITABLE rate field (the same two files' numeric-pad
+    // entry paths) still deliberately stays in Celsius end to end; this kind
+    // exists so a future display-only rate conversion is one explicit
+    // function argument away rather than a copy-pasted ABSOLUTE call that
+    // silently adds a bogus +32.
     UNIT_PREF_KIND_RATE,
 } unit_pref_kind_t;
 
 // Converts an already-Celsius value to the given display unit, per `kind`
 // above. Celsius is always a no-op regardless of kind.
 //
-// Every call site in this codebase as of 2026-08-21 passes
-// UNIT_PREF_KIND_ABSOLUTE with a live sensor reading (board_temps/dashboard
-// channel/CJ/safety/enclosure temperatures) -- never a rate, and never with
-// UNIT_PREF_KIND_RATE (see that enumerator's comment for why one exists
-// anyway).
+// Most call sites pass UNIT_PREF_KIND_ABSOLUTE with a live sensor reading
+// (board_temps/dashboard channel/CJ/safety/enclosure temperatures) or a
+// read-only setpoint/peak display (ui_page_profile_builder_segment.c's/
+// ui_page_profile_builder_review.c's/ui_page_profile_segments.c's segment
+// target and peak labels, 2026-08-21). UNIT_PREF_KIND_RATE's first two real
+// callers landed the same day -- see that enumerator's comment.
 float unit_pref_convert(float value_c, unit_pref_t pref, unit_pref_kind_t kind);
 
 #ifdef __cplusplus

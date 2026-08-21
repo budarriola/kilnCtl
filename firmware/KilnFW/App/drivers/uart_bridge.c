@@ -15,11 +15,13 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "SX1509.h"
+#include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- IO_CMD_SET_RELAY[_MASK]'s ERR_UPDATING case */
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
 #include "kiln_ui.h"
 #include "lvgl_port.h"
+#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- same ERR_UPDATING case */
 #include "relay_authority.h"
 #include "settings.h"
 #include "thermo_owner.h"
@@ -772,6 +774,25 @@ static void io_bridge_task(void *arg)
                     rejected = true;
                     break;
                 }
+                if (rr == KILN_IO_OWNER_RELAY_ERR_UPDATING) {
+                    /* 2026-08-21: distinct from ERR_SAFETY above -- nothing
+                     * is faulted, an ESP/Pico firmware update is in progress
+                     * (kiln_io_owner.h's KILN_IO_OWNER_RELAY_ERR_UPDATING
+                     * comment). Re-derive the exact reason
+                     * relay_on_blocked() already logged once, same as
+                     * dashboard_http.c's dashboard_set_relay() does for this
+                     * same case. */
+                    char reason[HEAT_INTERLOCK_REASON_MAX];
+                    if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
+                        ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON: %s", subcmd,
+                                 msg.payload[1], reason);
+                    } else {
+                        ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- relay %u ON: firmware update "
+                                      "in progress", subcmd, msg.payload[1]);
+                    }
+                    rejected = true;
+                    break;
+                }
                 err = (rr == KILN_IO_OWNER_RELAY_OK) ? ESP_OK : ESP_FAIL;
                 break;
             }
@@ -805,6 +826,20 @@ static void io_bridge_task(void *arg)
                                   "relay ON while safety fault sources 0x%02X asserted (safety "
                                   "wins, see docs/SAFETY_MODEL.md)", subcmd, msg.payload[1],
                              msg.payload[2], (unsigned)sources);
+                    rejected = true;
+                    break;
+                }
+                if (rr == KILN_IO_OWNER_RELAY_ERR_UPDATING) {
+                    /* Same distinction as IO_CMD_SET_RELAY above. */
+                    char reason[HEAT_INTERLOCK_REASON_MAX];
+                    if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
+                        ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X/value 0x%02X: %s",
+                                 subcmd, msg.payload[1], msg.payload[2], reason);
+                    } else {
+                        ESP_LOGW(TAG, "io: subcmd 0x%02X refused -- mask 0x%02X/value 0x%02X: "
+                                      "firmware update in progress", subcmd, msg.payload[1],
+                                 msg.payload[2]);
+                    }
                     rejected = true;
                     break;
                 }

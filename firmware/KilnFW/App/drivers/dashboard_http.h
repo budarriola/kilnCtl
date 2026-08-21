@@ -232,6 +232,22 @@ typedef enum {
     DASHBOARD_RELAY_ERR_OWNED,        /* relay_authority_manual_blocked_by_owner() */
     DASHBOARD_RELAY_ERR_SAFETY,       /* relay_authority_on_blocked() (only checked for on==true) */
     DASHBOARD_RELAY_ERR_IO_FAIL,      /* kiln_io_set_relay() itself returned non-ESP_OK */
+    /* 2026-08-21: mirrors kiln_io_owner.h's new KILN_IO_OWNER_RELAY_ERR_UPDATING
+     * -- a manual relay-ON refused because an ESP/Pico firmware update is in
+     * progress, not because of any real safety fault. Previously
+     * dashboard_set_relay() mapped this case onto DASHBOARD_RELAY_ERR_SAFETY,
+     * which read as "something is faulted" to relay_post_handler()'s HTTP
+     * response and to ui_page_temperature.c's LCD message, when nothing was.
+     * APPENDED (not inserted after ERR_SAFETY) for the same reason
+     * kiln_io_owner.h's own new member was appended -- see that header's
+     * comment; this enum has the identical "no explicit numeric values, plain
+     * positional enum" shape. Checked this enum's other uses before choosing
+     * append over insert: only dashboard_http.c's own switch and
+     * ui_page_temperature.c's switch read it (both greppable, both updated
+     * alongside this), and it is not persisted or sent over the UART wire --
+     * uart_bridge.c has its own, separate translation directly off
+     * kiln_io_owner_relay_result_t, not off this type. */
+    DASHBOARD_RELAY_ERR_UPDATING,
 } dashboard_relay_result_t;
 
 /* TODO.md 10.1a's shared-backend seam, extracted from relay_post_handler()

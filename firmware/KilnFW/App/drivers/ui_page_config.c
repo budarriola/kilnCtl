@@ -133,6 +133,12 @@ static void profiles_nav_cb(lv_event_t *e)
     kiln_ui_show("profiles");
 }
 
+static void tc_types_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("tc_types");
+}
+
 /* ROADMAP.md 2026-08-21 "a real shared temperature-unit setting": the hub's
  * one free cell (page 2 holds 5 of 6, per this file's own "Paged hub"
  * comment above -- verified against the current build, not assumed) becomes
@@ -220,13 +226,33 @@ static void units_toggle_cb(lv_event_t *e)
  * both hub pages are now full (6 + 6). A thirteenth destination genuinely
  * needs a third page now; there is no more free room.
  *
+ * 2026-08-21, LCD item 1: that thirteenth destination arrived the same day
+ * -- "Thermocouple Types" (ui_page_tc_types.c/.h), the LCD equivalent of the
+ * web zones page's new per-channel/safety-processor type selector. Verified
+ * both existing pages were genuinely full (6 + 6, per the paragraph above)
+ * before touching the arithmetic here, not assumed from a possibly-stale
+ * comment. UI_CONFIG_HUB_PAGE_COUNT is now 3; page 3 holds exactly one real
+ * cell (Thermocouple Types) against its 6-cell capacity -- five cells free
+ * for whatever the fourteenth through eighteenth destinations turn out to
+ * be, no further hub surgery needed until then.
+ *
+ * A whole new page/route was chosen over reusing an existing thermocouple-
+ * related page: "Zones & Thermocouples" (page 1) is still an honest
+ * "not built yet" placeholder with no real content to attach a control to,
+ * and "Thermocouple Faults" (ui_page_thermo_faults.c) is a read-only,
+ * fast-refresh-timer live-fault monitor -- bolting a config-write control
+ * onto that page's refresh_cb() would mean either the fault page owning NVS
+ * writes it has no other business touching, or a config editor silently
+ * inheriting a 1500ms repaint timer it doesn't need. A dedicated page keeps
+ * both existing pages' contracts unchanged.
+ *
  * The active page index is deliberately module state that survives leaving
  * this screen: kiln_ui.c never tears a page down, so a user who reaches
  * Diagnostics from hub page 2 and presses Back returns to hub page 2 rather
  * than being dumped back on page 1. That keeps every sub-page's "Back goes
  * back exactly one level" contract intact -- Back lands on the hub view the
  * user actually came from. */
-#define UI_CONFIG_HUB_PAGE_COUNT     2
+#define UI_CONFIG_HUB_PAGE_COUNT     3
 #define UI_CONFIG_HUB_ITEMS_PER_PAGE 6
 #define UI_CONFIG_HUB_PAGE_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 3 + (UI_THEME_PADDING_PX / 2) * 2)
 
@@ -475,6 +501,12 @@ lv_obj_t *ui_page_config_build(void)
      * assumed). See build_unit_toggle_item()'s comment for why this is an
      * in-place toggle rather than a new kiln_ui_show() route. */
     build_unit_toggle_item(s_hub_pages[1]);
+
+    /* Page 3 (1 of 6 cells, 2026-08-21): "Thermocouple Types" -- see this
+     * file's "Paged hub" comment for why this got a third page instead of
+     * being squeezed onto an already-full page 1/2 or bolted onto an
+     * existing thermocouple-related page. */
+    build_nav_item(s_hub_pages[2], "Thermocouple Types", tc_types_nav_cb);
 
     /* content is created after the topbar's icon proxy, so without this it
      * would sit above the proxy in z-order and win taps in the overlap
