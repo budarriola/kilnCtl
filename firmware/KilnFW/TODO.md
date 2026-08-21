@@ -1115,6 +1115,16 @@ the kiln as `dT/dt = (K*u - (T - T_amb)) / tau`:
       schedules `ok`. The invented model was cleared afterwards so it cannot
       be mistaken for a real tuning.
 
+- [x] **The red mark predicts a real refusal, checked rather than assumed.**
+      `profile_feasibility.c` claims an unconfigured `max_ramp_c_per_hr` (0)
+      means "every rate is over the ceiling", mirroring what
+      `profile_executor.c` does at start. Verified on hardware 2026-08-20 with
+      a zone configured with a model but ceiling 0: the badge for C04PLTP went
+      `too_fast` on every rate-limited segment, and `profiles_start(137)` then
+      refused with *"segment 1: ramp rate 55.0 C/hr exceeds zone 0's current
+      0.0 C/hr ceiling"*. Badge and executor agree. A marking that disagreed
+      with what pressing Start actually does would be worse than no marking.
+
 ### 5A.2 Still open
 
 - [ ] **No LCD access to profiles at all** — pre-existing, but 28 shipped
@@ -1124,6 +1134,16 @@ the kiln as `dT/dt = (K*u - (T - T_amb)) / tau`:
       web dashboard or the PC link. An operator standing at the kiln cannot
       choose a schedule on the panel. Costs flash (see below) and a page
       design that survives the no-scroll rule.
+- [ ] **Known edge in the UNREACHABLE test (minor, found by review not by
+      failure).** `profile_feasibility_segment()` applies the steady-state
+      ceiling test to every segment, including *cooling* ones — but a cooling
+      target is reached by cooling, not by heating, so it is reachable by
+      construction. This only bites within `FEASIBILITY_CEILING_MARGIN_C`
+      (5 C) of the ceiling AND on a descending segment, e.g. cooling from
+      1218 C to 1216 C with a 1220 C ceiling, which no real schedule does.
+      Left alone deliberately rather than adding a branch to the hot path of
+      a check that is already conservative in the safe direction; the fix, if
+      it ever matters, is to gate the ceiling test on `target > start_c`.
 - [ ] **Flash headroom is the binding constraint now: 4% free (~59 KB).**
       The catalogue and its two modules cost ~11 KB, the page ~2.7 KB, and
       that tipped the reported figure from 5% to 4%. Anything sizeable from
