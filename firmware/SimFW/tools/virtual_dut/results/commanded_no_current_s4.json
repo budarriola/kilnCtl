@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 62,
   "timescale": 2.0,
-  "start_time": 1787296112.8011317,
+  "start_time": 1787326724.5478303,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 5400000,
+      "sim_time_us": 5600000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -37,7 +37,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 61000000,
+      "sim_time_us": 60400000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -51,7 +51,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 1000000,
+      "sim_time_us": 1200000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -63,7 +63,28 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 60000000,
+      "sim_time_us": 1200000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "safety_temp_valid",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 1200000,
+      "event_type": "LINK_UP",
+      "payload": {},
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 60200000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -74,8 +95,8 @@
       "f0": 0.0
     },
     {
-      "seq": 2000000002,
-      "sim_time_us": 156200000,
+      "seq": 2000000004,
+      "sim_time_us": 157200000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S4"
@@ -92,9 +113,9 @@
       "verdict": "PASS",
       "evidence": [
         1,
-        2000000002
+        2000000004
       ],
-      "detail": "event:guard_warn observed 150.800s after relay_edge"
+      "detail": "event:guard_warn observed 151.600s after relay_edge"
     },
     {
       "name": "no_current_ever_flows",
@@ -106,9 +127,9 @@
       "name": "s4_never_opens_k4",
       "verdict": "PASS",
       "evidence": [
-        2000000001
+        2000000003
       ],
-      "detail": "dut:K4_closed held at end of run (last observed seq 2000000001)"
+      "detail": "dut:K4_closed held at end of run (last observed seq 2000000003)"
     }
   ],
   "verdict": "PASS",
@@ -118,11 +139,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 215,
-    "context_valid": 215,
+    "polls": 313,
+    "context_valid": 313,
     "any_current_present": 0,
-    "link_up": 215,
+    "link_up": 313,
     "max_zone_count": 3,
-    "energized": 157
+    "energized": 229
   }
 }

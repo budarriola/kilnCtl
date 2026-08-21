@@ -2,16 +2,44 @@
   "scenario": {
     "name": "partial_element",
     "version": 1,
-    "hash": "ae376c2dea24f8c98bea34383812ae38c8b68f87fc1260ce032c2ba971fde673"
+    "hash": "513a37f0cc70259e146be8667242eac60b3c3d0e1114c863d1b49ac717fa0d23"
   },
   "fw_versions": {},
   "seed": 51,
   "timescale": 20.0,
-  "start_time": 1787296593.4421697,
+  "start_time": 1787326934.7308633,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 12000000,
+      "sim_time_us": 14000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 64000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K4",
+        "state": false,
+        "relay": "K4",
+        "edge": "close"
+      },
+      "a": 4,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 2,
+      "sim_time_us": 92000000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "partial",
@@ -22,12 +50,57 @@
       "f0": 0.0
     },
     {
+      "seq": 1000000000,
+      "sim_time_us": 70000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "current",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
       "seq": 2000000000,
-      "sim_time_us": 10000000,
+      "sim_time_us": 12000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
         "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 12000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "safety_temp_valid",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 12000000,
+      "event_type": "LINK_UP",
+      "payload": {},
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 62000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": false
       },
       "a": 0,
       "b": 0,
@@ -38,37 +111,31 @@
   "expectations": [
     {
       "name": "no_guard_trips",
-      "verdict": "BLOCKED",
-      "evidence": [
-        2000000000
-      ],
-      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.]",
-      "blocked_on": {
-        "reason": "This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.",
-        "phase": "No longer a missing-decoder gap on the SaftyFW side -- link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) today and relay_owner_command_energize() has its first caller. The remaining gap is on this side of the fence: no scenario issues the operator enable. firmware/SimFW/tools/virtual_dut/dut_core/main.c already accepts an ENABLE command mirroring relay_owner's TRIPPED-refuses / GRACE-defers / ARMED-honours behavior; run_dut_scenarios.py never sends one, because deciding WHEN a scenario would issue it is a scenario-library design question, not something a harness should invent. Owned by SimFW's scenario library, not by SaftyFW."
-      }
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
       "name": "current_still_present_just_reduced",
-      "verdict": "FAIL",
+      "verdict": "PASS",
       "evidence": [
-        0
+        2
       ],
-      "detail": "dut:current_present not observed within 5s after fault_fired (seq 0)"
+      "detail": "dut:current_absent never observed inside the forbidden window"
     }
   ],
-  "verdict": "FAIL",
+  "verdict": "PASS",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 14,
-    "context_valid": 14,
-    "any_current_present": 0,
-    "link_up": 14,
+    "polls": 30,
+    "context_valid": 30,
+    "any_current_present": 21,
+    "link_up": 30,
     "max_zone_count": 3,
-    "energized": 0
+    "energized": 23
   }
 }

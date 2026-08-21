@@ -41,23 +41,19 @@ faults:
     params: [50.0]
 expect:
   - name: no_trip_ever
-    forbid: { dut: K4_open, before: { sim_end: true } }
-    blocked_on:
-      reason: "Partially resolved. S10 is no longer blocked: commit f304392
-               populates context_valid/zone_count/nearest_zone_measured_c, and
-               S10 is now genuinely evaluated against this scenario's noise
-               (virtual_dut measures context_valid true on every poll). S1
-               remains blocked on uncommissioned abs_max_temp_c (Phase 9). The
-               forbid clause itself is still satisfied for the wrong reason,
-               though: K4 is open from sim-time 0 because no scenario issues
-               the operator SAFETY_CMD_REQUEST_ENABLE, so 'no trip ever' still
-               is not proving the anti-nuisance behavior it names."
-      phase: "For S10: done (f304392). For S1's abs_max_temp_c: Phase 9 --
-              config_store exists but has no abs_max_temp_c field, and
-              safety_core.c never reads config_store for guard thresholds at
-              all (s_guard_cfg is a zero-initialized static). For K4 energize:
-              no longer a missing decoder; the gap is that no scenario
-              performs the operator enable step."
+    # Deliberately NOT `forbid: {dut: K4_open, before: {sim_end: true}}`
+    # (the original form): vacuously satisfied by the K4-boot-open artifact
+    # (README.md Finding 2), and this scenario has no reason to add
+    # `dut.operator_actions:` to work around it -- none of S1/S2/S10 (the
+    # guards under test here) depend on K4's physical state or on any
+    # current flowing. Rewritten to key off GUARD_TRIP directly (no `guard:`
+    # filter -- the claim is that NOTHING trips from noise alone), the same
+    # fix already applied elsewhere in this pass. S1 still cannot trip at
+    # all today (abs_max_temp_c is uncommissioned, SAFETY_MODEL.md §1 /
+    # Phase 9) so this PASSing does not exercise S1's own bar -- read a
+    # quiet S1 as "not reachable", not as "proven anti-nuisance", same
+    # caveat as the rest of this suite's S1-adjacent scenarios.
+    forbid: { event: { type: guard_trip }, before: { sim_end: true } }
   - name: no_fault_line_latch
     forbid: { dut: fault_line_asserted, before: { sim_end: true } }
 manual_checks:

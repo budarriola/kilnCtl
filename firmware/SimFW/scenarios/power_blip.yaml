@@ -25,23 +25,36 @@ seed: 57
 overrides: {}
 dut:
   profile: cone6_fast
+  # Needed for two independent reasons: (1) the blip fault's own trigger is
+  # `at_zone_temp: {zone: 0, temp_c: 400}`, which fast_test's zone 0 only
+  # reaches under real commanded duty (K1 closed, K4 permitting current --
+  # nothing in this fixture heats a zone on its own); (2) `s6b_stays_at_warn_
+  # not_trip`'s forbid on K4_open needs K4 actually closed beforehand, or it
+  # is vacuously satisfied by the K4-boot-open artifact (README.md Finding 2)
+  # rather than by S6b genuinely staying at WARN through the blip.
+  operator_actions:
+    - { at_sim_time: 5, action: command_relay, relay: K1, state: closed }
+    - { at_sim_time: 5, action: request_enable }
 faults:
   - id: blip
     type: dut_power_cut
     target: io:dut_power
-    # Trigger lowered from 500degC to 400degC this pass -- fast_test's zone 0
-    # (unmodified defaults, thermal_model.c THERMAL_PRESET_FAST_TEST) has a
-    # physics asymptote of only ~505degC (V_mains^2/R_element/k_loss +
-    # T_ambient = 240^2/15/8 + 25 = 505degC), so a 500degC trigger sat 1%
-    # below the ceiling and needed ~115s wall time at 10x timescale to reach
-    # (~4.6 thermal time constants) -- consuming nearly all of fast_test's
-    # ~2min wall-time budget just to arrive, before this scenario's own
-    # post-trigger deadlines (safe_resume within_s: 30, etc.) even start.
-    # 400degC reaches in ~38s wall (~1.5 time constants), matching the
-    # trigger already used for the same "mid-fire" intent in
-    # welded_ssr_midfire.yaml/welded_contactor_s9.yaml. See
-    # estop_midfire.yaml's identical fix for the full derivation.
-    trigger: { at_zone_temp: { zone: 0, temp_c: 400, edge: rising } }
+    # Was `at_zone_temp: {zone: 0, temp_c: 400}` (a past pass's fix for an
+    # even-less-reachable 500degC trigger). That reasoning predates this
+    # file's own `dut.operator_actions:` (added this pass, see above): K4
+    # cannot close before the real 60s SAFTYFW_STARTUP_GRACE_MS elapses, so
+    # duty does not start until ~t=65s, and fast_test's zone 0 needs on the
+    # order of 300+s of full duty to climb from ambient to 400degC (measured
+    # elsewhere in this suite: welded_ssr_midfire.yaml's own header derives
+    # ~304s for the same preset/target) -- ~370s total, which timed out this
+    # scenario's run before the fault ever fired (measured: 253s wall-clock-
+    # equivalent sim time, zone still climbing, fault never triggered).
+    # Nothing about "mid-fire" requires a specific temperature -- only that
+    # current is genuinely flowing when the blip happens -- so this switches
+    # to `at_sim_time`, the same fix already applied to
+    # welded_ssr_midfire.yaml/welded_contactor_s9.yaml for the identical
+    # reason. t=90 gives K4's ~65s close a comfortable margin.
+    trigger: { at_sim_time: { t: 90 } }
     # 200ms off-time, matching PLAN.md §6.2's own CLI example
     # (`kilnsim power cycle --off-ms 200`) rather than a guessed duration.
     duration: { for_s: 0.2 }
@@ -57,41 +70,73 @@ expect:
       within_s: 1
     # relay outputs are expected to fail safe (de-energized) with the ESP
     # unpowered, so no CT current should flow during the blip
-  - name: s6b_stays_at_warn_not_trip
-    forbid: { dut: K4_open, before: { sim_end: true } }
     blocked_on:
-      reason: "One of the two original reasons here is now resolved, the other
-               is not. RESOLVED: link_up is no longer permanently false --
-               commit f304392 wired it to link_task_link_up() (a CRC-valid
-               frame within LINK_UP_RECENCY_MS), and S6b's unconditional ~120s
-               hard-backstop trip, which previously fired in 16 of 19
-               virtual_dut scenarios, now fires in none of them. This clause's
-               'stays at warn, not trip' claim is finally testable in
-               principle. NOT RESOLVED: K4 is still open from sim-time 0 (no
-               scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see
-               the K4 blocked_on entries elsewhere in this library), so the
-               forbid clause is still satisfied before the blip has had a
-               chance to prove anything."
-      phase: "link_up: done (f304392, link_task_link_up() +
-              safety_core_build_input() reading it). K4 energize: no longer a
-              missing decoder either -- link_task.c decodes
-              LINK_FRAME_REQUEST_ENABLE_CMD (0x02) and
-              relay_owner_command_energize() has its first caller. The
-              residual gap is scenario-side: nothing here performs the
-              operator enable step. Also note that a 0.2s blip is far shorter
-              than LINK_UP_RECENCY_MS (1000ms), so even a faithful fixture
-              would not necessarily drop link_up at all -- revisit this
-              clause's off-time against that constant before treating a PASS
-              here as evidence about S6b."
+      reason: "The FT_DUT_POWER_CUT fault's `dut_power_on` flag is now
+               genuinely observable (this pass wired a SIM_EVENT_DUT_POWER
+               edge -- see virtual_simfw.c's apply_edge_effects(), no
+               real-firmware analog exists to port since real hardware
+               never fakes cutting its own power), but it is still purely
+               OBSERVATIONAL in this fixture: nothing in virtual_simfw.c
+               ties `dut_power_on` to K1/K2/K3's driven state, to CT
+               current, or to telemetry/link delivery. Real hardware losing
+               its main-board 12V would presumably float its GPIO relay
+               drivers open (fail-safe) and stop transmitting; this
+               simulator keeps commanding relays and publishing telemetry
+               exactly as if nothing happened, so current never actually
+               stops during a blip here."
+      phase: "Fixture-emulation gap (category 1, GUARD_TEST_MATRIX.md-style
+               accounting): modeling 'board loses power -> its GPIO outputs
+               fail-safe -> current stops' is a real addition to
+               virtual_simfw.c's power model (gating relay/CT state on
+               dut_power_on inside device_tick()), not a one-line wiring
+               fix, and is left for a future pass rather than rushed into
+               this one alongside everything else it touches."
+  - name: s6b_stays_at_warn_not_trip
+    # Deliberately NOT `forbid: {dut: K4_open, before: {sim_end: true}}`
+    # (the original form): K4 is reported open from sim-time ~1s regardless
+    # of anything under test (README.md Finding 2's corollary), so a
+    # `before: sim_end` boundary spanning the whole run would flag that
+    # boot-open observation as a violation even now that the
+    # operator_actions above make K4 genuinely close later. Anchored on K4's
+    # own first close edge instead: "once K4 has closed, it must not open
+    # again" is exactly S6b's "stays at warn, not trip" claim, and does not
+    # care what K4 was doing before anyone commanded anything.
+    forbid: { dut: K4_open, after: { event: { type: relay_edge, relay: K4, edge: close } } }
     # quiet link + no current = "not an emergency... warn and keep
     # watching" (SAFETY_MODEL.md §4 S6) — this is the expected, SAFE
     # outcome of a brief blip with no current flowing, distinct from the
-    # 10s soft-trip path that applies only when current IS present
+    # 10s soft-trip path that applies only when current IS present.
+    # NOTE: a 0.2s blip is far shorter than LINK_UP_RECENCY_MS (1000ms), so
+    # a faithful fixture would not necessarily drop link_up at all --a PASS
+    # here mainly demonstrates S6b tolerates a blip this short without
+    # incident, not that it correctly handles a longer, genuinely link-down
+    # blip. That is this scenario's own off-time choice (PLAN.md §6.2's CLI
+    # example), not a fixture gap.
   - name: safe_resume
     event: { type: dut_power, state: on }
     then:
       event: { type: link_up }
       within_s: 30
+    blocked_on:
+      reason: "EventType.LINK_UP (protocol.py: 'kilnlink came back up (e.g.
+               after power_blip)' -- reserved with exactly this clause in
+               mind) had no producer at all before this pass; it now fires
+               on a genuine link_up rising edge (run_dut_scenarios.py's
+               _GuardEdgeTracker, reusing dut_core.exe's own
+               already-correct link_up decision). But this scenario's link
+               never actually drops to begin with, for the same root cause
+               as relays_deenergize_no_current_during_blip immediately
+               above: dut_power_on does not gate virtual_simfw's telemetry
+               publication, so the harness keeps seeing fresh frames
+               throughout the blip and link_up (measured: true on all 54
+               polls of this run) never has a falling edge to rise back
+               from."
+      phase: "Same fixture-emulation gap as relays_deenergize_no_current_
+               during_blip -- both need dut_power_on to actually suppress
+               something (relay drive / telemetry) inside virtual_simfw.c's
+               device_tick(), which this pass did not build. Once that
+               exists, this clause's own `within_s: 30` bracket remains the
+               open, genuinely-undocumented question flagged below."
     # TODO: still genuinely unresolvable from docs/code alone -- confirmed
     # for this pass by re-reading SAFETY_MODEL.md §4 S6's own text: "The
     # window is 20s (REBOOT_GRACE_WINDOW_MS, safety_core.c) ... a software

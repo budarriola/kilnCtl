@@ -2,20 +2,141 @@
   "scenario": {
     "name": "power_blip",
     "version": 1,
-    "hash": "bc264b6c5d83e16484d4b4a1f15de73cfae4fc34a361336dccde1dc7777ee1a7"
+    "hash": "2ef601d07d4cefa9ae1764a5a66c35d939b48ed7b432b6382f02f7693bd8829b"
   },
   "fw_versions": {},
   "seed": 57,
   "timescale": 10.0,
-  "start_time": 1787296601.00607,
+  "start_time": 1787326945.8633115,
   "events": [
     {
+      "seq": 0,
+      "sim_time_us": 7000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 63000000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K4",
+        "state": false,
+        "relay": "K4",
+        "edge": "close"
+      },
+      "a": 4,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 2,
+      "sim_time_us": 90000000,
+      "event_type": "DUT_POWER",
+      "payload": {
+        "entity": "dut_power",
+        "state": false
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3,
+      "sim_time_us": 91000000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "blip",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 4,
+      "sim_time_us": 91000000,
+      "event_type": "DUT_POWER",
+      "payload": {
+        "entity": "dut_power",
+        "state": true
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 5,
+      "sim_time_us": 92000000,
+      "event_type": "FAULT_CLEARED",
+      "payload": {
+        "fault_id": "blip",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 1000000000,
+      "sim_time_us": 65000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "current",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
       "seq": 2000000000,
-      "sim_time_us": 5000000,
+      "sim_time_us": 6000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
         "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 6000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "safety_temp_valid",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 6000000,
+      "event_type": "LINK_UP",
+      "payload": {},
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 62000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": false
       },
       "a": 0,
       "b": 0,
@@ -32,27 +153,35 @@
     },
     {
       "name": "relays_deenergize_no_current_during_blip",
-      "verdict": "SKIPPED",
-      "evidence": [],
-      "detail": "triggering event (dut_power {'state': False}) never occurred"
-    },
-    {
-      "name": "s6b_stays_at_warn_not_trip",
       "verdict": "BLOCKED",
       "evidence": [
-        2000000000
+        2
       ],
-      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: One of the two original reasons here is now resolved, the other is not. RESOLVED: link_up is no longer permanently false -- commit f304392 wired it to link_task_link_up() (a CRC-valid frame within LINK_UP_RECENCY_MS), and S6b's unconditional ~120s hard-backstop trip, which previously fired in 16 of 19 virtual_dut scenarios, now fires in none of them. This clause's 'stays at warn, not trip' claim is finally testable in principle. NOT RESOLVED: K4 is still open from sim-time 0 (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so the forbid clause is still satisfied before the blip has had a chance to prove anything.]",
+      "detail": "dut:current_absent not observed within 1s after dut_power (seq 2) [BLOCKED: The FT_DUT_POWER_CUT fault's `dut_power_on` flag is now genuinely observable (this pass wired a SIM_EVENT_DUT_POWER edge -- see virtual_simfw.c's apply_edge_effects(), no real-firmware analog exists to port since real hardware never fakes cutting its own power), but it is still purely OBSERVATIONAL in this fixture: nothing in virtual_simfw.c ties `dut_power_on` to K1/K2/K3's driven state, to CT current, or to telemetry/link delivery. Real hardware losing its main-board 12V would presumably float its GPIO relay drivers open (fail-safe) and stop transmitting; this simulator keeps commanding relays and publishing telemetry exactly as if nothing happened, so current never actually stops during a blip here.]",
       "blocked_on": {
-        "reason": "One of the two original reasons here is now resolved, the other is not. RESOLVED: link_up is no longer permanently false -- commit f304392 wired it to link_task_link_up() (a CRC-valid frame within LINK_UP_RECENCY_MS), and S6b's unconditional ~120s hard-backstop trip, which previously fired in 16 of 19 virtual_dut scenarios, now fires in none of them. This clause's 'stays at warn, not trip' claim is finally testable in principle. NOT RESOLVED: K4 is still open from sim-time 0 (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so the forbid clause is still satisfied before the blip has had a chance to prove anything.",
-        "phase": "link_up: done (f304392, link_task_link_up() + safety_core_build_input() reading it). K4 energize: no longer a missing decoder either -- link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) and relay_owner_command_energize() has its first caller. The residual gap is scenario-side: nothing here performs the operator enable step. Also note that a 0.2s blip is far shorter than LINK_UP_RECENCY_MS (1000ms), so even a faithful fixture would not necessarily drop link_up at all -- revisit this clause's off-time against that constant before treating a PASS here as evidence about S6b."
+        "reason": "The FT_DUT_POWER_CUT fault's `dut_power_on` flag is now genuinely observable (this pass wired a SIM_EVENT_DUT_POWER edge -- see virtual_simfw.c's apply_edge_effects(), no real-firmware analog exists to port since real hardware never fakes cutting its own power), but it is still purely OBSERVATIONAL in this fixture: nothing in virtual_simfw.c ties `dut_power_on` to K1/K2/K3's driven state, to CT current, or to telemetry/link delivery. Real hardware losing its main-board 12V would presumably float its GPIO relay drivers open (fail-safe) and stop transmitting; this simulator keeps commanding relays and publishing telemetry exactly as if nothing happened, so current never actually stops during a blip here.",
+        "phase": "Fixture-emulation gap (category 1, GUARD_TEST_MATRIX.md-style accounting): modeling 'board loses power -> its GPIO outputs fail-safe -> current stops' is a real addition to virtual_simfw.c's power model (gating relay/CT state on dut_power_on inside device_tick()), not a one-line wiring fix, and is left for a future pass rather than rushed into this one alongside everything else it touches."
       }
     },
     {
+      "name": "s6b_stays_at_warn_not_trip",
+      "verdict": "PASS",
+      "evidence": [
+        1
+      ],
+      "detail": "dut:K4_open never observed inside the forbidden window"
+    },
+    {
       "name": "safe_resume",
-      "verdict": "SKIPPED",
-      "evidence": [],
-      "detail": "triggering event (dut_power {'state': True}) never occurred"
+      "verdict": "BLOCKED",
+      "evidence": [
+        4
+      ],
+      "detail": "event:link_up not observed within 30s after dut_power (seq 4) [BLOCKED: EventType.LINK_UP (protocol.py: 'kilnlink came back up (e.g. after power_blip)' -- reserved with exactly this clause in mind) had no producer at all before this pass; it now fires on a genuine link_up rising edge (run_dut_scenarios.py's _GuardEdgeTracker, reusing dut_core.exe's own already-correct link_up decision). But this scenario's link never actually drops to begin with, for the same root cause as relays_deenergize_no_current_during_blip immediately above: dut_power_on does not gate virtual_simfw's telemetry publication, so the harness keeps seeing fresh frames throughout the blip and link_up (measured: true on all 54 polls of this run) never has a falling edge to rise back from.]",
+      "blocked_on": {
+        "reason": "EventType.LINK_UP (protocol.py: 'kilnlink came back up (e.g. after power_blip)' -- reserved with exactly this clause in mind) had no producer at all before this pass; it now fires on a genuine link_up rising edge (run_dut_scenarios.py's _GuardEdgeTracker, reusing dut_core.exe's own already-correct link_up decision). But this scenario's link never actually drops to begin with, for the same root cause as relays_deenergize_no_current_during_blip immediately above: dut_power_on does not gate virtual_simfw's telemetry publication, so the harness keeps seeing fresh frames throughout the blip and link_up (measured: true on all 54 polls of this run) never has a falling edge to rise back from.",
+        "phase": "Same fixture-emulation gap as relays_deenergize_no_current_ during_blip -- both need dut_power_on to actually suppress something (relay drive / telemetry) inside virtual_simfw.c's device_tick(), which this pass did not build. Once that exists, this clause's own `within_s: 30` bracket remains the open, genuinely-undocumented question flagged below."
+      }
     }
   ],
   "verdict": "BLOCKED",
@@ -62,11 +191,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 49,
-    "context_valid": 49,
-    "any_current_present": 0,
-    "link_up": 49,
+    "polls": 54,
+    "context_valid": 54,
+    "any_current_present": 36,
+    "link_up": 54,
     "max_zone_count": 3,
-    "energized": 0
+    "energized": 38
   }
 }

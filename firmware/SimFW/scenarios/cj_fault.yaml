@@ -8,7 +8,16 @@ exercises: [S5, S12]
 # S12 is the guard actually built for this: the graduated numeric CJ
 # over-temperature guard (SAFETY_MODEL.md §4 S12).
 preset: fast_test
-timescale: 10
+# timescale: 10 (5 sim-sec/telemetry-frame) could not resolve S12's
+# warns_at_60c bar: after the same-poll GUARD_WARN/FAULT_FIRED ordering fix
+# (run_dut_scenarios.py now tags a guard tick with the same live sim-state
+# read that produced its regs, not the possibly-stale cached telemetry
+# broadcast), the warn is observed 3s after fault_fired at timescale 10 --
+# correct ordering, but coarser than the guard's own real latency
+# (~0.2-0.3s, see s12_warns_at_60c's comment) can resolve. Lowered per
+# README Finding 8 / this task's own guidance ("to increase resolution
+# lower timescale, do NOT lower --poll-interval").
+timescale: 2
 seed: 54
 overrides: {}
 dut:
@@ -55,7 +64,17 @@ expect:
   - name: s12_trips_at_85c_sustained
     event: { type: fault_fired, slot: cj }
     then:
-      dut: K4_open
+      # dut: K4_open (as originally written) is vacuously satisfied by the
+      # same K4-boot-open artifact documented throughout this suite
+      # (README.md Finding 2 and its corollary): nothing in this file
+      # schedules dut.operator_actions:, so K4 is reported open from
+      # sim-time ~1s -- before the fault -- and a level-based `dut: K4_open`
+      # clause can never see an edge caused BY the trip. Rewritten to key
+      # off the GUARD_TRIP event itself, the same fix already applied to
+      # safety_tc_frozen's no_early_trip/frozen_window_trips_s11. Measured:
+      # GUARD_TRIP{S12} 60.2s after fault_fired (timescale 2 run) --
+      # matches cj_time_s = 60s almost exactly.
+      event: { type: guard_trip, guard: S12 }
       within_s: 65       # cj_time_s = 60s (SAFETY_MODEL.md §4 S12) + margin
       not_before_s: 58
 report_keep: [telemetry, events]

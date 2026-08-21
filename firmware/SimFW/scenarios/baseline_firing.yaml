@@ -12,6 +12,17 @@ seed: 1
 overrides: {}
 dut:
   profile: cone6_fast
+  # Closes the gap the previous blocked_on: annotation on `never_trips`
+  # described: without an operator enable and a commanded zone relay,
+  # nothing in current SaftyFW ever closes K4 (README.md Finding 2), so
+  # `never_trips`'s forbid was vacuously satisfied by the K4-boot-open
+  # artifact rather than by a genuinely healthy firing staying quiet, and
+  # `heat_actually_cycles`' own relay_edge trigger could never occur at all.
+  # Mirrors enabled_firing_healthy.yaml's pattern.
+  operator_actions:
+    - { at_sim_time: 5, action: command_relay, relay: K1, state: closed }
+    - { at_sim_time: 5, action: request_enable }
+    - { at_sim_time: 150, action: command_relay, relay: K1, state: open }
 faults: []
 expect:
   - name: never_faults
@@ -19,29 +30,13 @@ expect:
   - name: never_estops
     forbid: { dut: estop_open, before: { sim_end: true } }
   - name: never_trips
-    forbid: { dut: K4_open, before: { sim_end: true } }
-    blocked_on:
-      reason: "This forbid clause is still satisfied for the wrong reason:
-               K4 is open at sim-time 0 and never closes IN THIS FILE, so it
-               is already true before a healthy no-fault run has had any
-               chance to prove anything. NOTE (updated again, after the
-               operator-actions pass): nothing upstream is missing any more.
-               relay_owner_command_energize() has had a caller since
-               f304392, and run_dut_scenarios.py now replays a scenario's
-               own `dut.operator_actions:` list, so a scenario CAN issue
-               SAFETY_CMD_REQUEST_ENABLE and CAN command a zone relay --
-               enabled_firing_healthy.yaml does exactly that and observes K4
-               close at sim-time ~58s and stay closed for a whole healthy
-               firing. The only reason this clause is still vacuous is that
-               THIS file does not schedule those actions."
-      phase: "No phase, on either side of the fence: this is no longer DUT
-              incompleteness at all. Whoever next touches this scenario
-              should either add `dut.operator_actions:` here (an enable, and
-              a zone relay commanded on) and drop this annotation, or treat
-              enabled_firing_healthy.yaml as the library's healthy-firing
-              control run and retire this clause. Kept annotated only so the
-              suite reports it as a known-vacuous clause rather than a
-              green one."
+    # Deliberately NOT `forbid: {dut: K4_open, before: {sim_end: true}}`
+    # (the original form): see the module-level note above for why K4's
+    # own boot-open level artifact makes that form vacuous, and
+    # partial_element.yaml's own comment for the identical fix. No `guard:`
+    # filter -- this is a no-fault baseline run, so the claim is that
+    # NOTHING trips, not any one guard in particular.
+    forbid: { event: { type: guard_trip }, before: { sim_end: true } }
   - name: heat_actually_cycles
     event: { type: relay_edge, relay: K1, edge: close }
     then:

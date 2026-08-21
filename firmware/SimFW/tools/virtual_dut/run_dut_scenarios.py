@@ -217,6 +217,15 @@ DUT_CORE_EXE = HERE / "dut_core" / "build" / "dut_core.exe"
 # one safety-side MAX31856 channel behind J7/spi_emu_b, index 3 of 4.
 TC_CHANNEL_SAFETY = 3
 
+# MAX31856_FAULT_OPEN | MAX31856_FAULT_OVUV | MAX31856_FAULT_TCRANGE
+# (dut_core/max31856_decode.c's TC_INVALIDATING_FAULTS, itself ported from
+# firmware/SaftyFW/src/max31856.c) -- the SR bits that make a reading
+# untrustworthy and NaN out tc_c. Used to reconstruct
+# SAFETY_FLAG_TEMP_VALID's real producer (link_task.c's
+# `th_present && th.valid`) on this side of the link; see
+# _GuardEdgeTracker.observe()'s "safety_temp_valid" entity for why.
+_TC_INVALIDATING_FAULT_BITS = 0x01 | 0x02 | 0x40
+
 # safety_core.c's own #define, SAFTYFW_PERIOD_SAFETY_CORE_MS -- see
 # dut_core/main.c's header comment for why this is hand-copied rather than
 # imported from anywhere: there is nothing machine-readable to import it
@@ -789,6 +798,8 @@ class _GuardEdgeTracker:
         self.was_tripped = False
         self.warn_state = {"S5": False, "S12": False, "S4": False, "S10": False, "S13": False}
         self.last_k4_open: Optional[bool] = None  # None until first tick observed
+        self.last_temp_valid: Optional[bool] = None  # None until first tick observed
+        self.last_link_up: Optional[bool] = None  # None until first tick observed
 
     def _mk(self, sim_time_us: int, event_type: EventType, payload: dict) -> Event:
         seq = self.next_seq
@@ -820,6 +831,42 @@ class _GuardEdgeTracker:
         if self.last_k4_open is None or k4_open != self.last_k4_open:
             out.append(self._mk(sim_time_us, EventType.SIM_CLOCK_MARK, {"entity": "K4", "state": k4_open}))
         self.last_k4_open = k4_open
+
+        # SAFETY_FLAG_TEMP_VALID's real-firmware producer is link_task.c's
+        # `temp_valid = th_present && th.valid`, where thermo_task.c sets
+        # `snap.valid = ok && !reading.spi_failed` -- "ok" collapsing to
+        # exactly the same MAX31856 SR fault bits max31856_decode_regs()
+        # (dut_core/max31856_decode.c, ported byte-for-byte from
+        # firmware/SaftyFW/src/max31856.c) already decodes into `fault_bits`
+        # and NaNs `tc_c` on. dut_core.exe's own `tc_valid` is deliberately
+        # always true here (its own comment: it stands for "the SPI
+        # transaction succeeded", which this fixture's TC_GET_REGS always
+        # does) and its wire reply flattens a NaN `tc_c` back to 0.0, so
+        # neither field alone reconstructs `th.valid` on this side of the
+        # link -- but `fault_bits` is reported honestly, so the same
+        # invalidating-fault mask reproduces it exactly.
+        temp_valid = bool(tick_result["tc_valid"]) and (int(tick_result["fault_bits"]) & _TC_INVALIDATING_FAULT_BITS) == 0
+        if self.last_temp_valid is None or temp_valid != self.last_temp_valid:
+            out.append(self._mk(sim_time_us, EventType.SIM_CLOCK_MARK, {"entity": "safety_temp_valid", "state": temp_valid}))
+        self.last_temp_valid = temp_valid
+
+        # kilnsim.protocol.EventType.LINK_UP (103) is reserved with exactly
+        # this scenario in mind ("kilnlink came back up (e.g. after
+        # power_blip)") but nothing ever emitted it: dut_core.exe already
+        # echoes the real, unmodified link_up decision every tick
+        # (safety_core_build_input()'s own producer), so the rising edge is
+        # a level change on data this file already has, the same pattern as
+        # K4/safety_temp_valid above. Reported on EVERY edge (not just the
+        # rising one) so a scenario can also observe link going DOWN, even
+        # though only the "back up" direction has a name in
+        # power_blip.yaml today.
+        link_up = bool(tick_result["link_up"])
+        if self.last_link_up is None or link_up != self.last_link_up:
+            if link_up:
+                out.append(self._mk(sim_time_us, EventType.LINK_UP, {}))
+            else:
+                out.append(self._mk(sim_time_us, EventType.SIM_CLOCK_MARK, {"entity": "link_up", "state": False}))
+        self.last_link_up = link_up
 
         if tick_result["trip_ineffective"] and "trip_ineffective_latched_emitted" not in self.__dict__:
             self.trip_ineffective_latched_emitted = True
@@ -922,6 +969,26 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                 reg_reply = link.send_command(CommandGroup.TC, TcCmd.GET_REGS, {"channel": TC_CHANNEL_SAFETY})
                 regs = bytes(reg_reply.get("regs", bytes(16)))
 
+                # GET_REGS and this sim-state readback are both synchronous,
+                # live queries against the SAME device snapshot
+                # (virtual_simfw.c's TC_GET_REGS and SYS_GET_SIM_STATE
+                # handlers both read `d->snap_*`) -- unlike the *cached*
+                # `telemetry` broadcast fetched above, which can already be
+                # one broadcast interval stale by the time this poll
+                # iteration reaches it (the device's background sim thread
+                # keeps advancing between broadcasts). Tagging a guard tick
+                # with the stale telemetry time let a tick whose `regs`
+                # already reflected a just-fired fault get stamped BEFORE
+                # that fault's own FAULT_FIRED wire event -- measured on
+                # `cj_fault`: GUARD_WARN{S12} reported at sim-time 20s,
+                # FAULT_FIRED at 21s, so `s12_warns_at_60c`'s `then: {..,
+                # within_s: 1}` (anchored on FAULT_FIRED) never saw the warn
+                # it caused. Using the sim-state reply's own timestamp, which
+                # is guaranteed to match the regs snapshot instant, fixes the
+                # ordering without changing what either query returns.
+                sim_state_reply = link.send_command(CommandGroup.SYS, SysCmd.GET_SIM_STATE, {})
+                tick_sim_time_us = int(sim_state_reply.get("sim_time_us", sim_time_us))
+
                 # ONE guard tick per observed fixture sample, carrying the
                 # sim time that actually elapsed since the previous sample --
                 # see plan_tick_dt_ms() for the full rationale, including why
@@ -930,14 +997,16 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                 # over-ticked short polls). A poll that observed no new sample
                 # ticks zero times: there is nothing new for the guards to
                 # decide on, and inventing a tick for it was the same error in
-                # miniature.
+                # miniature. "New sample" is now judged against the regs
+                # snapshot's own time (tick_sim_time_us), not the possibly
+                # stale telemetry broadcast, for the same reason as above.
                 ctx_facts = fixture_ctx.observe(telemetry)
-                dt_ms = plan_tick_dt_ms(sim_time_us, last_sim_time_us)
+                dt_ms = plan_tick_dt_ms(tick_sim_time_us, last_sim_time_us)
                 result = None
                 if dt_ms is not None:
                     result = dut.tick(regs, estop, ctx_facts, dt_ms=dt_ms)
                     samples += 1
-                last_sim_time_us = max(sim_time_us, last_sim_time_us)
+                last_sim_time_us = max(tick_sim_time_us, last_sim_time_us)
                 if result is not None:
                     # Guard-reachability accounting: how many polls actually
                     # presented each context/current/link precondition to the
@@ -960,7 +1029,7 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                         # next to a short guard window is the signal that a
                         # verdict needs a slower `timescale` before it is
                         # believed (README.md Finding 0/8).
-                        print(f"    trace t={sim_time_us/1e6:8.2f}s dt={dt_ms:6d}ms n={samples:5d} "
+                        print(f"    trace t={tick_sim_time_us/1e6:8.2f}s dt={dt_ms:6d}ms n={samples:5d} "
                               f"relay_now={ctx_facts['relay_now_mask']} "
                               f"on_ms={ctx_facts['relay_on_continuous_ms']:6d} "
                               f"amps={ctx_facts['amps'][0]:6.2f} "
@@ -969,7 +1038,7 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                               f"rs={result['relay_state']} "
                               f"trip={int(result['is_tripped'])}/{result['reason']} "
                               f"s4={int(result['s4_warn'])}")
-                    collected.extend(guard_tracker.observe(sim_time_us, result))
+                    collected.extend(guard_tracker.observe(tick_sim_time_us, result))
                     # Close the loop: feed relay_owner_task()'s real,
                     # unmodified decision (dut_core's `energized`, straight
                     # from relay_grace.c/safety_guards.c -- not re-derived

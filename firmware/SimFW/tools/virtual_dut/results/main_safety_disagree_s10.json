@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 65,
   "timescale": 20.0,
-  "start_time": 1787296562.0921977,
+  "start_time": 1787326872.2417834,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 10000000,
+      "sim_time_us": 12000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +35,28 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 316000000,
+      "sim_time_us": 12000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "safety_temp_valid",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 12000000,
+      "event_type": "LINK_UP",
+      "payload": {},
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 320000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S10"
@@ -52,9 +73,9 @@
       "verdict": "PASS",
       "evidence": [
         0,
-        2000000001
+        2000000003
       ],
-      "detail": "event:guard_warn observed 294.000s after fault_fired"
+      "detail": "event:guard_warn observed 298.000s after fault_fired"
     },
     {
       "name": "no_warn_before_the_skew_fires",
@@ -72,10 +93,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 46,
-    "context_valid": 46,
+    "polls": 67,
+    "context_valid": 67,
     "any_current_present": 0,
-    "link_up": 46,
+    "link_up": 67,
     "max_zone_count": 1,
     "energized": 0
   }

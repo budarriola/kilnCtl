@@ -19,6 +19,20 @@ seed: 51
 overrides: {}
 dut:
   profile: cone6_fast
+  # Neither expectation below was actually testable without this: K4 never
+  # closes in current SaftyFW without an explicit operator enable (no
+  # scenario auto-issues one -- see enabled_firing_healthy.yaml's own
+  # comment for the full rationale), so `no_guard_trips`' forbid on
+  # dut:K4_open was vacuously satisfied by the K4-boot-open artifact
+  # (README.md Finding 2) rather than by any guard genuinely staying quiet,
+  # and `current_still_present_just_reduced` could never observe current at
+  # all (K4 gates duty/current to zero while open). Zone 0's relay closes
+  # and the operator enables before the partial-element fault fires at
+  # t=10, and is never commanded off, so the whole observation window is a
+  # real, current-carrying firing.
+  operator_actions:
+    - { at_sim_time: 5, action: command_relay, relay: K1, state: closed }
+    - { at_sim_time: 5, action: request_enable }
 faults:
   - id: partial
     # PLAN.md §7.1: "Partially failed coil | Wrong element resistance ->
@@ -32,43 +46,45 @@ faults:
     # than "partially failed" -- fixed this pass.
     type: partial_element_health
     target: element:0
-    trigger: { at_sim_time: { t: 10 } }
+    # t=90, not the original t=10: K4 cannot close before the real 60s
+    # SAFTYFW_STARTUP_GRACE_MS elapses after the t=5 operator enable added
+    # above (relay_grace.c), so a fault firing at t=10 would land on a
+    # de-energized zone and "current_still_present_just_reduced" could never
+    # observe anything -- current only exists once K4 has permitted it.
+    # t=90 gives K4's ~65s close a healthy margin before the fault fires
+    # into an already-flowing current.
+    trigger: { at_sim_time: { t: 90 } }
     duration: permanent
     params: [0.6]
 expect:
   - name: no_guard_trips
-    forbid: { dut: K4_open, before: { sim_end: true } }
-    blocked_on:
-      reason: "This forbid clause is still satisfied for the wrong reason: K4
-               is open at sim-time 0 and never closes, so it is already true
-               before anything under test has had a chance to say otherwise.
-               NOTE (updated after SaftyFW commit f304392): the previous
-               wording here -- 'relay_owner_command_energize() is called by
-               nothing in the current source tree' -- is no longer true. It
-               now has a caller, safety_core_request_enable(), reached from
-               link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That
-               path is driven only by an explicit operator/PC command
-               (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e.
-               PcTools' safety_request_enable MCP tool); KilnFW does NOT
-               request enable automatically when a profile runs, and no
-               scenario in this library models that operator step."
-      phase: "No longer a missing-decoder gap on the SaftyFW side --
-              link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) today
-              and relay_owner_command_energize() has its first caller. The
-              remaining gap is on this side of the fence: no scenario issues
-              the operator enable.
-              firmware/SimFW/tools/virtual_dut/dut_core/main.c already accepts
-              an ENABLE command mirroring relay_owner's TRIPPED-refuses /
-              GRACE-defers / ARMED-honours behavior; run_dut_scenarios.py
-              never sends one, because deciding WHEN a scenario would issue it
-              is a scenario-library design question, not something a harness
-              should invent. Owned by SimFW's scenario library, not by
-              SaftyFW."
+    # Deliberately NOT `forbid: {dut: K4_open, before: {sim_end: true}}`
+    # (the original form): K4 is reported open at sim-time ~1s, before the
+    # operator enable has had 60s to clear the real SAFTYFW_STARTUP_GRACE_MS
+    # -- that boot-open observation would make ANY scenario using this form
+    # spuriously violate the forbid regardless of what happens later
+    # (README.md Finding 2's corollary; the same reason
+    # enabled_firing_healthy.yaml uses an event:guard_trip forbid instead of
+    # a dut:K4_open one for its own S3/S4 anti-nuisance clauses). No
+    # `guard:` filter -- this scenario is not about any one guard
+    # (`exercises: []`), it is the claim that a partially-failed element by
+    # itself must not provoke ANY of them.
+    forbid: { event: { type: guard_trip }, before: { sim_end: true } }
   - name: current_still_present_just_reduced
-    event: { type: fault_fired, slot: partial }
-    then:
-      dut: current_present
-      within_s: 5
+    # Deliberately NOT `then: {dut: current_present, within_s: 5}` (the
+    # original form): current is already flowing well before the fault
+    # fires (K4 closes ~t=60, current present from ~t=70, fault at t=90 --
+    # on purpose, so the fault lands on an already-energized zone), so
+    # `current_present` produces no NEW edge for a `then:` clause to match
+    # after the fault -- it was already true. report.py's grammar docstring
+    # names exactly this case: a persisting level's negation stopping IS an
+    # edge, so "current must not stop" is a `forbid: {dut: current_absent,
+    # after: {...}}` (the same form already used by welded_contactor_s9's
+    # contactor_weld_engages_on_k4_open). This is the positive claim the
+    # scenario's own name makes -- reduced power, but current never drops
+    # to zero -- and it WOULD fail against BROKEN_ELEMENT (element_health
+    # forced to 0.0), the fault this one is deliberately not testing.
+    forbid: { dut: current_absent, after: { event: { type: fault_fired, slot: partial } } }
 manual_checks:
   - "Confirm KilnFW's profile executor handles the slower ramp sensibly (extended time-to-target, no spurious ramp-rate abort) — a KilnFW-side behavior, not directly assertable from fixture-sensed signals"
 report_keep: [telemetry, events]

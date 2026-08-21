@@ -240,23 +240,18 @@ expect:
                          # the nominal number would be asserting the fixture's
                          # sampling, not the guard's threshold.
   - name: no_early_trip
-    forbid: { dut: K4_open, before: { fault: weld } }
-    blocked_on:
-      reason: "Not about S3 at all: K4 is reported open from this harness's
-               very first observation, because nothing in current SaftyFW
-               energizes it until the operator enable survives the 60 s startup
-               grace -- and the first telemetry frame lands well before that.
-               So a `forbid: {dut: K4_open}` clause sees an 'open' edge at
-               sim-time ~1 s, long before the weld, no matter what any guard
-               decides. See firmware/SimFW/tools/virtual_dut/README.md Finding
-               2 and its corollary. `s3_waits_out_the_correlation_window` above
-               is the clause that genuinely tests early-trip behavior here, and
-               it keys off the guard_trip event rather than the K4 level for
-               exactly this reason."
-      phase: "No phase: nothing upstream is missing. This clause FORM
-              (`forbid: {dut: K4_open}`) cannot be meaningful while K4's boot
-              state is open and report.py matches edges rather than levels; a
-              scenario author should prefer the guard_trip form."
+    # Deliberately NOT `forbid: {dut: K4_open, before: {fault: weld}}` (the
+    # original form): K4 is reported open from this harness's very first
+    # observation, because nothing in current SaftyFW energizes it until the
+    # operator enable survives the 60s startup grace -- and the first
+    # telemetry frame lands well before that. So a level-based clause sees
+    # an "open" edge at sim-time ~1s, long before the weld, no matter what
+    # any guard decides (README.md Finding 2 and its corollary). Rewritten
+    # to key off the GUARD_TRIP event itself instead, the same fix already
+    # applied elsewhere in this pass -- `s3_waits_out_the_correlation_window`
+    # above made exactly this argument informally; this makes it the
+    # clause's own form instead of a workaround living beside it.
+    forbid: { event: { type: guard_trip }, before: { fault: weld } }
   - name: trip_latched
     at_end: { dut: K4_open }
   - name: current_decays_after_k4_opens

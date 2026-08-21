@@ -79,33 +79,22 @@ faults:
     repeat: { every: { period: 0.9 } }
 expect:
   - name: no_trip_from_flapping
-    forbid: { dut: K4_open, before: { sim_end: true } }
-    blocked_on:
-      reason: "This forbid clause is still satisfied for the wrong reason: K4
-               is open at sim-time 0 and never closes, so it is already true
-               before anything under test has had a chance to say otherwise.
-               NOTE (updated after SaftyFW commit f304392): the previous
-               wording here -- 'relay_owner_command_energize() is called by
-               nothing in the current source tree' -- is no longer true. It
-               now has a caller, safety_core_request_enable(), reached from
-               link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That
-               path is driven only by an explicit operator/PC command
-               (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e.
-               PcTools' safety_request_enable MCP tool); KilnFW does NOT
-               request enable automatically when a profile runs, and no
-               scenario in this library models that operator step."
-      phase: "No longer a missing-decoder gap on the SaftyFW side --
-              link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) today
-              and relay_owner_command_energize() has its first caller. The
-              remaining gap is on this side of the fence: no scenario issues
-              the operator enable.
-              firmware/SimFW/tools/virtual_dut/dut_core/main.c already accepts
-              an ENABLE command mirroring relay_owner's TRIPPED-refuses /
-              GRACE-defers / ARMED-honours behavior; run_dut_scenarios.py
-              never sends one, because deciding WHEN a scenario would issue it
-              is a scenario-library design question, not something a harness
-              should invent. Owned by SimFW's scenario library, not by
-              SaftyFW."
+    # Deliberately NOT `forbid: {dut: K4_open, before: {sim_end: true}}`
+    # (the original form): K4 is reported open from this harness's very
+    # first observation regardless of anything under test (README.md
+    # Finding 2), so that boundary was always vacuous, and fixing it by
+    # adding `dut.operator_actions:` here (as done for most of this
+    # library's other K4-boot-open clauses) is a poor trade for this
+    # specific file: K4 cannot close before the real 60s
+    # SAFTYFW_STARTUP_GRACE_MS, and at this scenario's deliberately slow
+    # `timescale: 0.2` (needed for S5's real-cadence sample resolution, see
+    # above) that alone costs 300+ wall-seconds before the flapping test
+    # under actual investigation even starts. Rewritten to key off the
+    # GUARD_TRIP event itself instead -- the same fix already applied
+    # elsewhere in this pass -- which needs no operator action at all: S5's
+    # trip decision does not depend on K4's physical contact state or on
+    # any current flowing.
+    forbid: { event: { type: guard_trip, guard: S5 }, before: { sim_end: true } }
   - name: no_warn_storm
     forbid: { event: { type: guard_warn, guard: S5 }, before: { sim_end: true } }
     # Resolved: see the `flaky` fault's own comment above for the derivation

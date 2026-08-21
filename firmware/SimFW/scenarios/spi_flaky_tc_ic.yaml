@@ -48,30 +48,66 @@ faults:
     # exists: params[0] = bit_error_rate, 0..1, independent per-bit flip
     # probability (fault_sched.h's FAULT_SCHED_TYPE_TC_FLAKY_SPI doc
     # comment; max31856_regs.c's apply_bit_errors(), applied per-bit to
-    # every byte of every read including the SR byte at 0x0F). 0.5 gives
-    # P(a given byte entirely unflipped) = 0.5^8 ≈ 0.4%, so the SR byte is
-    # disturbed on very nearly every read -- high enough to reliably (not
-    # just occasionally) knock some of S5's trip-relevant bits (OC/OVUV/
-    # TCRANGE) high often enough to accumulate the required 10-consecutive-
-    # bad-read streak well inside this scenario's deadlines, while still
-    # being genuinely probabilistic/intermittent rather than the
-    # deterministic full-inversion a rate of 1.0 would give (which would be
-    # indistinguishable from dead_tc_ic/TC_DEAD_IC, a different fault type
-    # this scenario is not testing).
+    # every byte of every read including the SR byte at 0x0F).
+    #
+    # 0.5 (this pass's prior value) turned out to rest on a miscomputed
+    # probability: "P(a given byte entirely unflipped) = 0.5^8 ~= 0.4%" is
+    # the wrong quantity. safety_guards.c's S5 bad-read test only cares
+    # about 3 of the SR byte's 8 bits (OPEN | OVUV | TCRANGE); the other 5
+    # can flip freely without producing a bad read. The quantity that
+    # matters is P(none of those 3 specific bits flip) = (1-rate)^3, which
+    # at rate=0.5 is 0.5^3 = 12.5% per read -- not rare. safety_guards.c
+    # resets s5_bad_streak/s5_bad_elapsed_s to 0 on ANY good read (S5's own
+    # two-bar accumulator, safety_guards.c lines ~262-264), so a ~1-in-8
+    # chance of a clean read repeatedly aborted the accumulation before it
+    # could reach blind_grace_s (60s): measured, this produced
+    # three separate bad-then-good cycles (safety_temp_valid toggling
+    # true/false/true/false/true/false) before a long enough unbroken bad
+    # run happened by chance, and GUARD_TRIP{S5} landed 92s after
+    # fault_fired instead of the ~65s a persistently-blind fault
+    # (tc_disconnect_*.yaml) gives. That is not wrong behavior -- it is
+    # SAFETY_MODEL.md §4 S5's stated design ("a wiggled connector ... should
+    # cost a warning and nothing else") working as intended against a
+    # fault that is, at 0.5, still genuinely likely to self-clear for a
+    # few seconds at a time. Raised to 0.95 -- P(none of the 3 bits flip) =
+    # 0.05^3 = 0.0125% per read, low enough that an unbroken bad run
+    # spanning the 60s window is the overwhelmingly likely outcome rather
+    # than a matter of which cycle happens to run long -- while still being
+    # a per-bit probabilistic flip, not the deterministic full-inversion a
+    # rate of 1.0 would give (indistinguishable from dead_tc_ic/TC_DEAD_IC,
+    # a different fault type this scenario is not testing).
     type: flaky_spi_tc_ic
     target: tc:safety
     trigger: { at_sim_time: { t: 20 } }
     duration: permanent
-    params: [0.5]
+    params: [0.95]
 expect:
   - name: not_an_instant_trip
-    forbid: { dut: K4_open, before: { sim_time_s: 5 } }
-    # S5 requires >= 10 consecutive bad reads AND >= 5s before even a WARN
-    # (SAFETY_MODEL.md §4 S5) — a single bit error must not trip anything
+    # Deliberately NOT `forbid: {dut: K4_open, before: {sim_time_s: 5}}`
+    # (the original form): K4 is reported open from this harness's very
+    # first observation (README.md Finding 2 -- nothing energizes it before
+    # a request_enable this file never issues), and that first observation
+    # can itself land anywhere in the first few sim-seconds depending on
+    # real-wall-clock poll timing, making a `dut: K4_open` boundary this
+    # close to sim-time 0 a coin flip unrelated to anything the guard
+    # decided (measured: PASSed in an earlier run of this exact file, FAILed
+    # in a later one, with no scenario change between them). Rewritten to
+    # key off the GUARD_TRIP event itself, the same fix already applied
+    # elsewhere in this pass -- S5 genuinely cannot trip this fast (its own
+    # two bars: >= 10 consecutive bad reads AND >= 5s, SAFETY_MODEL.md §4 S5).
+    forbid: { event: { type: guard_trip, guard: S5 }, before: { sim_time_s: 5 } }
   - name: warns_then_trips_like_disconnect
     event: { type: fault_fired, slot: flaky_spi }
     then:
-      dut: K4_open
+      # dut: K4_open (as originally written) is vacuously satisfied by the
+      # K4-boot-open artifact documented throughout this suite (README.md
+      # Finding 2 and its corollary): this file schedules no
+      # dut.operator_actions:, so K4 is reported open from sim-time ~1s --
+      # long before the fault -- and a level-based `dut: K4_open` clause can
+      # never see an edge caused BY the trip. Rewritten to key off the
+      # GUARD_TRIP event itself (same fix already applied elsewhere in this
+      # pass to cj_fault/tc_disconnect_ramp/tc_disconnect_soak).
+      event: { type: guard_trip, guard: S5 }
       within_s: 65       # blind_grace_s = 60s (SAFETY_MODEL.md §4 S5) + margin,
                          # same numeric pattern as tc_disconnect_*.yaml
       not_before_s: 55

@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 68,
   "timescale": 10.0,
-  "start_time": 1787296691.407714,
+  "start_time": 1787327024.5497053,
   "events": [
     {
       "seq": 0,
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 64000000,
+      "sim_time_us": 63000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -39,7 +39,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 66000000,
+      "sim_time_us": 65000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -51,7 +51,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 5000000,
+      "sim_time_us": 6000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -63,7 +63,28 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 61000000,
+      "sim_time_us": 6000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "safety_temp_valid",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 6000000,
+      "event_type": "LINK_UP",
+      "payload": {},
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 62000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -104,9 +125,9 @@
       "name": "k4_still_closed_at_end",
       "verdict": "PASS",
       "evidence": [
-        2000000001
+        2000000003
       ],
-      "detail": "dut:K4_closed held at end of run (last observed seq 2000000001)"
+      "detail": "dut:K4_closed held at end of run (last observed seq 2000000003)"
     }
   ],
   "verdict": "PASS",
@@ -116,11 +137,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 144,
-    "context_valid": 144,
-    "any_current_present": 132,
-    "link_up": 144,
+    "polls": 210,
+    "context_valid": 210,
+    "any_current_present": 192,
+    "link_up": 210,
     "max_zone_count": 3,
-    "energized": 133
+    "energized": 194
   }
 }

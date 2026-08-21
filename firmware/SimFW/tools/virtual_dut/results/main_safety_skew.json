@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 49,
   "timescale": 20.0,
-  "start_time": 1787296453.323681,
+  "start_time": 1787326896.2639217,
   "events": [
     {
       "seq": 0,
@@ -23,12 +23,33 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 10000000,
+      "sim_time_us": 12000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
         "state": true
       },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 12000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "safety_temp_valid",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 12000000,
+      "event_type": "LINK_UP",
+      "payload": {},
       "a": 0,
       "b": 0,
       "f0": 0.0
@@ -62,10 +83,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 26,
-    "context_valid": 26,
+    "polls": 37,
+    "context_valid": 37,
     "any_current_present": 0,
-    "link_up": 26,
+    "link_up": 37,
     "max_zone_count": 1,
     "energized": 0
   }
