@@ -216,19 +216,16 @@ never `[x]`.
 - [ ] **S11 guard input** — `heat_commanded` is the last never-produced
       input in `safety_core_build_input()`, and it genuinely waits on Phase 6
       current sense. S9 was wired in `5f90325`.
-- [ ] **`no_warn_storm` still FAILs, and is deliberately not loosened.** Root
-      cause is now pinned: 2 Hz telemetry at `timescale: 10` cannot resolve the
-      scenario's 900 ms alternation, so each poll's ~50-tick batch manufactures
-      streaks from a single TC sample. Needs `timescale ≤ 1` or a batching fix.
-      The `ca62e8b` clock fix moved its warns from t≈146/196 to t≈51/92 but
-      did not change the verdict.
-- [ ] **S9's persisted current has no observable in `virtual_dut`.**
-      `WELDED_K4_CURRENT_PERSIST` drives the CT wave synth directly (as real
-      `sim_engine.c` does), while telemetry reports the MODEL current, which K4
-      gates to zero. **This is now S9's only blocker** — `relay_deenergized` is
-      genuinely produced (`5f90325`). Closing it means giving `virtual_simfw` a
-      CT-amps read the harness can poll, or accepting that half of S9 is
-      bench-only.
+- [ ] **`kilnsim.report`'s `then:` targets match *edges*, so a level that
+      never changes cannot be evidenced.** This is why
+      `contactor_weld_engages_on_k4_open` still cannot pass: a correctly
+      persisting current produces no edge. Expressing "current did not stop"
+      needs a `forbid:`-shaped clause — a scenario-grammar change. Same class
+      as `virtual_dut/README.md` Finding 2's `K4_open` corollary.
+- [ ] **Lower `tc_flaky`'s own `timescale`** so its default run is the
+      meaningful one. Its anti-nuisance claim is now *measured* (453 guard
+      ticks, zero S5 warns at `--timescale 0.2`), but the suite's default run
+      only takes 18 samples.
 - [ ] **MCP tool to push calibration constants into `SaftyFW` flash** — no
       such path exists today.
 
@@ -267,7 +264,16 @@ never `[x]`.
 - [x] `docs/BOM.md`, `docs/BENCH_RUNBOOK.md`, `docs/HARDWARE.md`,
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
-- [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
+      now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
+      contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
+- [x] `virtual_dut`'s batch-ticking approximation **removed** (`3c6763a`) —
+      replaced by one tick per *observed* sample carrying a true `dt_s`, with
+      no tick when the fixture published nothing new. There is no honest
+      filler for the skipped ticks: repeating a sample invents reads, dropping
+      `tc_valid` invents *bad* ones. Fixed both bias directions at once, and
+      turned `no_warn_storm`'s FAIL into a PASS by removing the fabrication,
+      not by loosening the expectation
 - [x] DMA ownership rule redesigned (`4396857`). `check_single_owner.ps1` now
       enforces two different things: for I2C/PIO/PWM/USB, §4's single-owner
       doctrine by include; for DMA the include allowlist is **only an owner
