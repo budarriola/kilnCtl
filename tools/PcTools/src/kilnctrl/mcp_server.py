@@ -579,7 +579,7 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
     board (never esptool/`idf.py flash`, per CLAUDE.md). Always writes all
-    three images (bootloader @0x0, partition table @0x8000, app @0x10000),
+    three images (bootloader @0x0, partition table @0x8000, app @0x810000),
     each with `program_esp ... verify` (which only erases/rewrites a region
     if its content doesn't already match -- it does NOT do a bare full-chip
     erase), ending in a reset so the board boots the new app immediately.
@@ -615,7 +615,7 @@ def flash_firmware(board_cfg: str = "board/esp32s3-builtin.cfg", retry_once: boo
     tcl = (
         "program_esp build/bootloader/bootloader.bin 0x0 verify; "
         "program_esp build/partition_table/partition-table.bin 0x8000 verify; "
-        "program_esp build/KilnCtrl.bin 0x10000 verify reset exit"
+        "program_esp build/KilnCtrl.bin 0x810000 verify reset exit"
     )
     ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=kiln_fw_root, timeout_s=90)
     if ok:

@@ -56,10 +56,11 @@ the first 2 MB of flash; see `partitions.csv`'s header).
 |---|---|---|---|---|
 | `nvs` | data / nvs | `0x9000` | `0x6000` (24K) | zones, rules, profiles, run-state, relay cycles |
 | `phy_init` | data / phy | `0xf000` | `0x1000` (4K) | RF calibration |
-| `factory` | app / factory | `0x10000` | `0x177000` (1500K) | the application image |
+| `legacy_app` | data / undefined | `0x10000` | `0x177000` (1500K) | the hole `factory` left behind when it moved (2026-08-21); declared so nothing re-allocates it |
+| `factory` | app / factory | `0x810000` | `0x300000` (3072K) | the application image — **moved 2026-08-21**, see `partitions.csv` |
 | `wifi_nvs` | data / nvs | `0x187000` | `0x6000` (24K) | Wi-Fi credentials, mode, AP identity — **nothing else** |
 
-The first three rows are **byte-identical to ESP-IDF's stock
+The first two rows (and the `nvs`/`phy_init` offsets) are **byte-identical to ESP-IDF's stock
 `partitions_singleapp_large.csv`**, deliberately: this board had already been
 flashed with the stock layout and had live data sitting in `nvs`, so moving or
 resizing any of those three would have silently invalidated every stored blob

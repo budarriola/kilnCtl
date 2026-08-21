@@ -239,12 +239,26 @@ otadata       data, ota,      0x200000, 0x002000     8K
 # pad to the next 64K app-partition-alignment boundary  56K (gen_esp32part.py
 # requires app-type partitions on a 0x10000 boundary; otadata is data-type
 # and only needed 4K, so this gap is unavoidable, not wasted planning)
-ota_0         app,  ota_0,    0x210000, 0x200000  2048K   <- 1.75x the measured 1167K image
-ota_1         app,  ota_1,    0x410000, 0x200000  2048K
-pico_img      data, undefined,0x610000, 0x0E0000   896K   <- staging, see below (corrected
+ota_0         app,  ota_0,    0x210000, 0x300000  3072K   <- grown 2026-08-21, see below
+ota_1         app,  ota_1,    0x510000, 0x300000  3072K
+factory       app,  factory,  0x810000, 0x300000  3072K   <- MOVED here 2026-08-21 from 0x10000
+pico_img      data, undefined,0xB10000, 0x0E0000   896K   <- staging, see below (corrected
 #                                                            up from 512K, see note)
-# spare                       0x6F0000..0x1000000 ~9.29M  (16 MB part; still comfortably
-#                                                           under the 8 MB floor too)
+coredump      data, coredump, 0xBF0000, 0x100000  1024K
+# spare                       0xCF0000..0x1000000 ~3.06M
+#
+# 2026-08-21: factory MOVED off 0x10000 and all three app regions grew to
+# 3072K. ESP-IDF's build-time size check is min() over every app partition
+# (components/partition_table/check_sizes.py), so factory at 1500K set the
+# ceiling for the whole project even though the OTA slots were larger -- the
+# build was warning at 2% free with the image ~35 KB from a hard failure, and
+# factory could not grow in place because wifi_nvs sits at 0x187000. The
+# vacated 0x10000..0x187000 is declared `legacy_app` (data/undefined) so
+# nothing re-allocates it and the dead image bytes there are unambiguous. No
+# data partition moved, so nvs/wifi_nvs/kiln_nvs/profiles_nvs kept their
+# contents across the change -- verified on hardware: Wi-Fi credentials, zone
+# config and the profiles partition all survived, with no NVS reformat in the
+# boot log. Free space went 2% -> 52%.
 ```
 
 **Corrected from the original proposal, both against real numbers rather than

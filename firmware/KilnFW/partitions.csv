@@ -192,15 +192,90 @@
 #     UPDATE_* frame relay into pico_img, and the web/MCP surface are all still
 #     unbuilt -- this pass is the partition-table + rollback foundation only.
 #
+# --- factory moved off 0x10000, added 2026-08-21 (build hard-failure fix) --
+#
+# The build started failing/warning with "The smallest app partition is
+# nearly full (2% free)". ESP-IDF's own check (components/partition_table/
+# check_sizes.py) takes min(size) over ALL app-type partitions, not just the
+# one being linked -- so `factory` at 1500K (0x177000), unchanged since the
+# very first entry in this file, was the partition driving the warning even
+# though `ota_0`/`ota_1` at 2048K had headroom. KilnCtrl.bin had grown to
+# ~1,500,000 bytes, roughly 35 KB from turning that warning into a hard link
+# failure.
+#
+# `factory` could not simply be grown in place: it sits at 0x10000, boxed in
+# immediately above by `wifi_nvs` at 0x187000, and wifi_nvs/kiln_nvs/
+# profiles_nvs (below) are the live data partitions this table exists to
+# protect (see the byte-identical-first-three-entries note above) -- none of
+# them may move or resize. The only way to give `factory` room was to move it
+# somewhere with space, which meant also growing `ota_0`/`ota_1` to match (an
+# OTA image must fit in either slot, so all three app partitions need to be
+# the same size for `factory` to stay a meaningful recovery image after an
+# OTA update).
+#
+# What changed and what didn't:
+#   - `nvs`, `phy_init`, `wifi_nvs`, `kiln_nvs`, `profiles_nvs`, `otadata`:
+#     UNCHANGED offsets and sizes. No data partition moved. This was the hard
+#     constraint on the whole exercise -- the board in hand has live data in
+#     `nvs` at 0x9000 (since archived off separately as an extra safety net,
+#     but the layout does not rely on that archive; nothing here was allowed
+#     to assume it).
+#   - `legacy_app` (data/undefined, 0x10000, 0x177000): NEW placeholder entry.
+#     It exists only so `gen_esp32part.py` has a name for the flash that
+#     `factory` used to occupy -- otherwise that region is simply a gap in
+#     the table between `phy_init` and `wifi_nvs`. It is declared `undefined`
+#     (not `app`) and is never written to or read by this firmware; it is
+#     documentation-as-CSV, marking "this hole is accounted for, not spare."
+#   - `ota_0`: 0x210000, grown 2048K -> 3072K (0x200000 -> 0x300000).
+#     Offset unchanged (still the next 64K boundary after otadata + its pad).
+#   - `ota_1`: MOVED 0x410000 -> 0x510000 (to sit immediately after the
+#     larger ota_0), grown 2048K -> 3072K.
+#   - `factory`: MOVED 0x10000 -> 0x810000 (immediately after the larger
+#     ota_1), grown 1500K -> 3072K to match the OTA slots.
+#   - `pico_img`: MOVED 0x610000 -> 0xB10000 (pushed up by factory's new
+#     position). Size (0xE0000, 896K) and rationale unchanged -- see below.
+#     This is a transient relay-staging buffer with no persistent data, so
+#     the move carries no data-loss risk the way the NVS partitions would.
+#   - `coredump`: MOVED 0x6F0000 -> 0xBF0000. Size (0x100000, 1024K) and
+#     rationale unchanged -- see below. IMPORTANT: this move orphans any
+#     core dump already captured at the old location. If a bench dump is
+#     sitting there waiting to be read with espcoredump.py, read it out
+#     BEFORE flashing this table; once the new table is written, that flash
+#     region is contextually pico_img/factory territory and the old dump's
+#     bytes are no longer where any tool will look for them.
+#
+# Recomputed fit arithmetic (all app partitions now 64K-aligned by
+# construction, same as before):
+#   otadata:  0x200000 + 0x2000   = 0x202000
+#   ota_0:    0x210000 + 0x300000 = 0x510000
+#   ota_1:    0x510000 + 0x300000 = 0x810000
+#   factory:  0x810000 + 0x300000 = 0xB10000
+#   pico_img: 0xB10000 + 0xE0000  = 0xBF0000
+#   coredump: 0xBF0000 + 0x100000 = 0xCF0000
+#   spare:    0xCF0000 .. 0x1000000 (16 MB) = 0x310000 = 3,211,264 B ~= 3.06 MB
+#   check_sizes.py's min() is now over {ota_0, ota_1, factory} = 0x300000
+#   (3,145,728 B) each -- against the ~1.5 MB KilnCtrl.bin that's roughly 52%
+#   free, clearing the 2%-free warning by a wide margin.
+#
+# OPERATIONAL NOTE: `otadata` should be erased as part of applying this
+# change. otadata records which OTA slot (ota_0/ota_1) the bootloader should
+# boot from; that slot-selection state was written against the OLD ota_0/
+# ota_1 offsets and sizes. Leaving stale otadata in place risks the
+# bootloader trusting an old slot index/CRC against partitions that no
+# longer mean what they used to. Erasing it makes the bootloader fall back
+# to `factory` (now at 0x810000) -- the same no-serial-cable recovery path
+# `factory` was kept around for in the first place.
+#
 # Name,       Type, SubType, Offset,   Size,     Flags
 nvs,          data, nvs,     0x9000,   0x6000,
 phy_init,     data, phy,     0xf000,   0x1000,
-factory,      app,  factory, 0x10000,  0x177000,
+legacy_app,   data, undefined, 0x10000,  0x177000,
 wifi_nvs,     data, nvs,     0x187000, 0x6000,
 kiln_nvs,     data, nvs,     0x18D000, 0x10000,
 profiles_nvs, data, nvs,     0x19D000, 0x60000,
 otadata,      data, ota,       0x200000, 0x2000,
-ota_0,        app,  ota_0,     0x210000, 0x200000,
-ota_1,        app,  ota_1,     0x410000, 0x200000,
-pico_img,     data, undefined, 0x610000, 0xE0000,
-coredump,     data, coredump,  0x6F0000, 0x100000,
+ota_0,        app,  ota_0,     0x210000, 0x300000,
+ota_1,        app,  ota_1,     0x510000, 0x300000,
+factory,      app,  factory,   0x810000, 0x300000,
+pico_img,     data, undefined, 0xB10000, 0xE0000,
+coredump,     data, coredump,  0xBF0000, 0x100000,

@@ -47,7 +47,7 @@
         "-f",
         "board/esp32s3-builtin.cfg",
         "-c",
-        "program_esp build/bootloader/bootloader.bin 0x0 verify; program_esp build/partition_table/partition-table.bin 0x8000 verify; program_esp build/KilnCtrl.bin 0x10000 verify reset exit"
+        "program_esp build/bootloader/bootloader.bin 0x0 verify; program_esp build/partition_table/partition-table.bin 0x8000 verify; program_esp build/KilnCtrl.bin 0x810000 verify reset exit"
       ],
       "presentation": {
         "reveal": "always",
