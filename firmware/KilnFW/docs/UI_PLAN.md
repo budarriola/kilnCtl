@@ -464,12 +464,88 @@ route split and can be dropped without breaking it.
    latched trip, deleting a profile, and everything in the danger zone get an
    explicit confirm. Stop deliberately does **not** — stopping a firing must
    stay one tap.
-6. **Auth on writes, at least.** WEB_UI.md states it plainly: "there is no
-   other navigation and no authentication of any kind — anyone who can reach
-   the board's IP can switch a relay." OTA (section 9.3) already solved this
-   with an AP-password challenge; extend that same mechanism to the relay,
-   danger-zone, and clear-trip POSTs. Scope decision needed from the user
-   before building: whether read-only pages stay open.
+6. **Auth on writes, with a session token. Scope DECIDED by the user
+   (2026-08-20): writes only, plus an encrypted/authenticated session token
+   so the password is entered once per session, and more than one user may
+   be logged in at the same time.** WEB_UI.md states the current state
+   plainly: "there is no other navigation and no authentication of any kind
+   — anyone who can reach the board's IP can switch a relay."
+
+   - **Open, no auth:** every page (`GET /`, `/settings`, `/safety`,
+     `/diagnostics`, …) and every read endpoint (`GET /api/status`,
+     `/api/profile_exec`, `/api/readiness`, `/api/history.csv`,
+     `/api/zones`, `/api/rules`, `/api/profiles`, `/status`, `/scan`).
+     Monitoring a firing from a phone stays one tap, and §4.3's shared
+     poller never carries a credential.
+   - **Gated:** every state-changing POST — `POST /api/relay`,
+     `/api/profile_exec/{start,stop,pause,resume,ack_last_run}`,
+     `/api/profile`, `/api/profile/delete`, `/api/safety/clear_trip`,
+     `/api/zones`, `/api/rules`, `/api/control`, `/api/autotune/*`,
+     `/provision`, `/forget`, `/ip_config`, and the danger zone. OTA's
+     routes keep their own existing per-request challenge (below) — this
+     session layer sits alongside it, it does not replace it.
+
+   **Mechanism — reuse `App/drivers/ota_auth.{c,h}`, don't invent a second
+   scheme.** That module already implements exactly the primitives needed
+   and is proven on this board: `ota_auth_nonce_issue()`/`_check()`
+   (16 random bytes, single use, 30 s expiry, IP-bound),
+   `hmac_sha256()` over the nonce keyed by the AP password (so the password
+   itself is never sent over the wire), `ota_auth_constant_time_equal()`,
+   and `ota_auth_lockout_*()` for brute-force backoff. The login flow is
+   OTA's challenge/verify flow verbatim: `GET /api/auth/challenge` →
+   client HMACs the nonce with the AP password → `POST /api/auth/login`.
+   The only new part is what happens on success.
+
+   **Session tokens — server-side table, not a stateless signed cookie.**
+   On successful verify, the server mints a session and returns it:
+
+   - **Token**: 32 bytes from `esp_fill_random()`, hex-encoded. Random, not
+     derived — nothing about the password or the session is recoverable
+     from it, so there is no key to leak and no format to forge.
+   - **Storage**: a fixed-size RAM table (start at 8 slots) of
+     `{token_hash, client_ip, issued_ms, last_seen_ms}`, guarded by the
+     same mutex pattern `ota_http.c`'s `s_ota_lock` already uses. Store the
+     **SHA-256 of the token**, not the token — a RAM dump or a stray log
+     line then leaks nothing usable. Compare with
+     `ota_auth_constant_time_equal()`.
+   - **Multi-user**: the table is why this design was picked over a
+     stateless HMAC cookie. N independent sessions coexist naturally, each
+     with its own expiry, and any one can be revoked (logout, password
+     change, admin "sign out all") — a stateless signed token cannot be
+     revoked before it expires. Full table = evict the least-recently-seen
+     slot, same `lru_purge_enable` philosophy the HTTP server itself uses:
+     a stale session must never lock a real operator out.
+   - **Expiry**: sliding idle timeout (~30 min, refreshed on each
+     authenticated request) plus a hard absolute cap (~12 h). Both cleared
+     on reboot, since the table is RAM-only — deliberate, a power cycle
+     ends every session.
+   - **Transport**: `Set-Cookie: kiln_sid=…; HttpOnly; SameSite=Strict;
+     Path=/`. `HttpOnly` keeps it out of reach of page JS; `SameSite=Strict`
+     is the CSRF defense — without it any page in the browser can POST to
+     the board's IP and ride the cookie.
+   - **IP binding**: bind the session to the client IP that logged in, same
+     as OTA's nonce already does (`httpd_req_to_sockfd()` +
+     `getpeername()`). Cheap, and it kills a stolen-cookie replay from
+     another device on the LAN. Accept the cost: a phone that switches from
+     the fallback AP to the home network must log in again.
+
+   **Honest limitation, to state in the UI rather than paper over:** this
+   server is plain HTTP with no TLS, so while the *password* is never
+   transmitted (the HMAC challenge is the whole point), the *session token*
+   does travel in clear text on every gated request and can be sniffed by
+   anyone already on the same LAN. IP binding and the idle timeout narrow
+   that window; they do not close it. This raises the bar from "anyone who
+   can reach the IP can switch a relay" to "anyone who can passively sniff
+   the LAN can", which is the right increment for a device on a home
+   network — but it is not a substitute for keeping the kiln off an
+   untrusted network. TLS on the ESP32 is out of scope here (cert
+   provisioning on a LAN-only device with no name is its own project).
+
+   **Open sub-question, not blocking:** whether the AP password is the
+   right credential long-term, or whether a separate "web password" should
+   be settable. Reusing the AP password is what ships first — it is
+   already provisioned, already the OTA credential, and adds no new stored
+   secret.
 7. **Unit parity.** The web renders °C from the API; the LCD honors a °F/°C
    setting. The same value should read the same on both surfaces — pick up
    the board's unit setting rather than adding an independent web-only toggle.
@@ -515,9 +591,12 @@ request.
 
 No new `.html` file, no new route, no `CMakeLists.txt` `EMBED_TXTFILES`
 entry, no handler registered, no shared `/nav.js` or `/app.js`, no field
-added to `/api/status`. This section is a plan entry so the request isn't
-lost, not a claim of progress. Open question for the user before
-implementation starts: §4.6's auth scope (writes only, or the whole UI).
+added to `/api/status`, no session table and no `/api/auth/*` route. This
+section is a plan entry so the request isn't lost, not a claim of progress.
+§4.6's auth scope is no longer open — the user settled it 2026-08-20 (writes
+gated, reads open, server-side session tokens, multi-user); the only
+sub-question left there is whether a separate web password eventually
+replaces the AP password, which does not block starting.
 
 ### LCD navigation (found during item 6's work, 2026-08-19)
 
