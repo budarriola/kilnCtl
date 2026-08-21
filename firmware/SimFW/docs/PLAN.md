@@ -194,11 +194,6 @@ never `[x]`.
       rules out Plan A entirely. See `docs/SPI_ACCESS_AUDIT.md` §6 for the
       DMA-fed Plan B sketch. This is the biggest open *design* risk in the
       fixture.
-- [ ] **`wave_owner.c` amplitude mapping is still an IDENTITY placeholder.**
-      The calibration *tooling* now exists (`tools/ct_calibration/`); the
-      firmware side must become per-channel
-      `clamp(gain[ch]*amps + offset[ch], 0, 1)` fed from its JSON table.
-      (§3.3, M-D)
 - [ ] **Second DUT-power relay output bit.** The two-relay decision is made
       (§11 item 5) but `i2c_owner.c` still exposes only one
       `EXP1_PIN_DUT_POWER`. Spare expander capacity exists. (M-E)
@@ -255,6 +250,14 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] CT calibration **mechanism** in firmware (`f93b2eb`) —
+      `src/sim/ct_calibration.{c,h}` applies
+      `clamp(gain[ch]*amps + offset[ch], 0, 1)`, with a generated compiled-in
+      table (`tools/gen_ct_cal_table.py`). **The shipped table is
+      all-uncalibrated**, so bench behavior is unchanged; an explicit
+      `calibrated` flag keeps "nobody calibrated this" distinguishable from "this
+      channel genuinely fits y=x". Constants remain hardware-gated — this does
+      not close M-D
 - [x] First K4-closing scenarios (`8383a3a`) — S3 **trips** and S4 **warns**
       genuinely, with a healthy control case where both stay quiet. 22
       scenarios now, and `any_current_present` is no longer false suite-wide
@@ -1223,19 +1226,24 @@ than left to be inferred.
   `max31856_regs.c` are implemented and host-tested with golden traces. The
   bench half — a real `KilnFW` board displaying a plausible curve — has not
   happened; no board has ever been connected to this fixture.
-- [ ] **M-D — CT synthesis.** 3x 60 Hz with amplitude tracking, transformer
+- [~] **M-D — CT synthesis.** 3x 60 Hz with amplitude tracking, transformer
   coupling network built.
   **Exit:** calibration table fitted per 3.3 against `SaftyFW`'s own ADC
   readback; commanded 0→N A sweep reads back within ±5 % over the usable
   range; one-relay/one-channel commissioning check passes.
   **Status: NOT MET, and honestly further from met than the others.**
   `ct_wave_pwm.c`/`sine_synth.c`/`wave_owner.c` generate the waveform in
-  software and pass their host tests, but `wave_owner.c`'s per-channel
-  amplitude mapping is currently an explicit `TODO(M-D calibration)`
-  IDENTITY placeholder — the real sweep-fit-store calibration procedure this
-  exit criterion requires has not been written, separately from it never
-  having been run against real hardware. No transformer coupling network has
-  been built.
+  software and pass their host tests. **Updated 2026-08-20:** both halves of
+  the calibration *machinery* now exist and are tested — the PC-side
+  sweep/fit/crosstalk runner (`tools/ct_calibration/`, `13487b5`) and the
+  firmware apply-path (`src/sim/ct_calibration.{c,h}` + generated table,
+  `f93b2eb`). **What remains is entirely hardware-gated:** a real bench run
+  against real CT/transformer/ADC hardware to produce the first JSON table,
+  then regenerating the header from it. The shipped table is an explicit
+  "no data" marker, not placeholder constants. No transformer coupling
+  network has been built. §3.3's "store the table in fixture flash keyed by
+  channel" is also still unmet and waits on a SimFW `config_store`, which
+  does not exist.
 - [ ] **M-E — Relay sense + discrete I/O.** Expanders, E-stop, fault line, DUT
   power switch.
   **Exit:** heat loop closes end-to-end — DUT PID actually regulates a
