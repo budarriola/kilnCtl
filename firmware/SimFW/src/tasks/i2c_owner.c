@@ -40,24 +40,37 @@
 #define EXP1_PIN_K4          4u
 #define EXP1_PIN_FAULT_LINE  5u
 #define EXP1_PIN_ESTOP_DRIVE 6u
-#define EXP1_PIN_DUT_POWER   7u
+#define EXP1_PIN_DUT_POWER_MAIN   7u // fixture relay #1 -> J18 (GND_Main domain)
 #define EXP1_PIN_J20_IO3     8u
 #define EXP1_PIN_J20_IO4     9u
-// 10..15: 6 spare, default input+pullup.
+// docs/HARDWARE.md section 3.7 (resolved 2026-08-20, docs/BOM.md section 6):
+// two independent DUT-power relays, one per 12V input, so that no shared
+// copper ever bonds GND_Main and GND_Safty downstream of a single relay.
+// Pin 10 is the second relay's control bit, deliberately named *_SAFETY (not
+// "power2") so a reviewer sees a domain mismatch immediately if this bit
+// were ever wired to the wrong relay.
+#define EXP1_PIN_DUT_POWER_SAFETY 10u // fixture relay #2 -> J19 (GND_Safty domain)
+// 11..15: 5 spare, default input+pullup.
 
 #define EXP1_SENSE_MASK \
     ((uint16_t)((1u << EXP1_PIN_K1) | (1u << EXP1_PIN_K2) | (1u << EXP1_PIN_K3) | \
                 (1u << EXP1_PIN_K5) | (1u << EXP1_PIN_K4) | (1u << EXP1_PIN_FAULT_LINE)))
 
-// Pins 0..7 on exp1 are reserved fixed roles; the generic i2c_owner_io_*()
-// API refuses to touch them (i2c_owner.h's contract).
+// Pins 0..7 on exp1 are reserved fixed roles (relay sense, fault-line sense,
+// E-stop drive, DUT-power-main); pins 8..9 (J20 IO_3/IO_4) are generic i/o,
+// not reserved; pin 10 (DUT-power-safety) is reserved too, so the generic
+// i2c_owner_io_*() path can never be used to gang it with the main relay or
+// otherwise bypass its own named setter. Since the reserved set is no longer
+// one contiguous run (0..7, then 10 alone), io_pin_allowed() below checks
+// both explicitly instead of a single "<=" bound.
 #define EXP1_RESERVED_MAX_PIN 7u
 
 // --- Command queue (the only path any other task has to make i2c_owner
 // touch I2C0 -- see i2c_owner.h) --------------------------------------------
 typedef enum {
     I2C_OWNER_CMD_SET_ESTOP,
-    I2C_OWNER_CMD_SET_DUT_POWER,
+    I2C_OWNER_CMD_SET_DUT_POWER_MAIN,
+    I2C_OWNER_CMD_SET_DUT_POWER_SAFETY,
     I2C_OWNER_CMD_IO_SET_DIR,
     I2C_OWNER_CMD_IO_WRITE,
 } i2c_owner_cmd_type_t;
@@ -66,7 +79,9 @@ typedef struct {
     i2c_owner_cmd_type_t type;
     union {
         struct { bool open; } estop;
-        struct { bool on; } dut_power;
+        struct { bool on; } dut_power; // shared by both SET_DUT_POWER_MAIN/SAFETY -- which
+                                        // relay is which comes from cmd.type, never from a
+                                        // domain field a caller could get wrong
         struct { i2c_owner_expander_t exp; uint8_t pin; bool input; bool pullup; } io_set_dir;
         struct { i2c_owner_expander_t exp; uint8_t pin; bool level; } io_write;
     } u;
@@ -84,7 +99,9 @@ static mcp23017_t s_exp2;
 // --- Mutex-guarded reader state (single writer: this task's own loop) -----
 static i2c_owner_relay_states_t s_relay_states; // .valid starts false
 static bool s_estop_open;      // last-commanded, defaults to false (loop closed) until a command says otherwise -- see i2c_owner.h's setter comment
-static bool s_dut_power_on;    // last-commanded, defaults to false (off) at boot
+static bool s_dut_power_main_on;   // last-commanded, defaults to false (off) at boot -- relay #1 / J18 / GND_Main
+static bool s_dut_power_safety_on; // last-commanded, defaults to false (off) at boot -- relay #2 / J19 / GND_Safty.
+                                    // Independently commanded; never derived from s_dut_power_main_on.
 
 static i2c_owner_relay_edge_t s_edge_log[I2C_OWNER_EDGE_LOG_CAPACITY];
 static size_t   s_edge_log_count;  // number of valid entries (<= capacity)
@@ -160,10 +177,21 @@ static void configure_exp1(void)
 
     mcp23017_pin_write(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false);
     mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false);
-    mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER, false);
-    mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_DUT_POWER, false);
+    mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER_MAIN, false);
+    mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_DUT_POWER_MAIN, false);
 
-    for (uint8_t pin = EXP1_PIN_J20_IO3; pin <= 15u; pin++) {
+    // J20 IO_3/IO_4 (generic, input+pullup default) and the 5 true spares.
+    for (uint8_t pin = EXP1_PIN_J20_IO3; pin <= EXP1_PIN_J20_IO4; pin++) {
+        mcp23017_pin_set_dir(&s_exp1, pin, true);
+        mcp23017_pin_set_pullup(&s_exp1, pin, true);
+    }
+
+    // Relay #2 (safety domain, J19) idles de-asserted (off) too, just like
+    // relay #1 -- both DUT-power relays default to off at boot, independently.
+    mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER_SAFETY, false);
+    mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_DUT_POWER_SAFETY, false);
+
+    for (uint8_t pin = EXP1_PIN_DUT_POWER_SAFETY + 1u; pin <= 15u; pin++) {
         mcp23017_pin_set_dir(&s_exp1, pin, true);
         mcp23017_pin_set_pullup(&s_exp1, pin, true);
     }
@@ -197,10 +225,17 @@ static void apply_pending_commands(void)
                 state_unlock();
             }
             break;
-        case I2C_OWNER_CMD_SET_DUT_POWER:
-            if (mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER, cmd.u.dut_power.on)) {
+        case I2C_OWNER_CMD_SET_DUT_POWER_MAIN:
+            if (mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER_MAIN, cmd.u.dut_power.on)) {
                 state_lock();
-                s_dut_power_on = cmd.u.dut_power.on;
+                s_dut_power_main_on = cmd.u.dut_power.on;
+                state_unlock();
+            }
+            break;
+        case I2C_OWNER_CMD_SET_DUT_POWER_SAFETY:
+            if (mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER_SAFETY, cmd.u.dut_power.on)) {
+                state_lock();
+                s_dut_power_safety_on = cmd.u.dut_power.on;
                 state_unlock();
             }
             break;
@@ -370,13 +405,30 @@ bool i2c_owner_set_estop(bool open)
     return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
 }
 
-bool i2c_owner_set_dut_power(bool on)
+bool i2c_owner_set_dut_power_main(bool on)
 {
     if (!s_cmd_queue) {
         return false;
     }
-    i2c_owner_cmd_t cmd = { .type = I2C_OWNER_CMD_SET_DUT_POWER, .u.dut_power = { .on = on } };
+    i2c_owner_cmd_t cmd = { .type = I2C_OWNER_CMD_SET_DUT_POWER_MAIN, .u.dut_power = { .on = on } };
     return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool i2c_owner_set_dut_power_safety(bool on)
+{
+    if (!s_cmd_queue) {
+        return false;
+    }
+    i2c_owner_cmd_t cmd = { .type = I2C_OWNER_CMD_SET_DUT_POWER_SAFETY, .u.dut_power = { .on = on } };
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+// Deprecated alias, kept for backward compatibility -- see i2c_owner.h's
+// header comment above the declaration for why this means "main domain
+// only," never "both."
+bool i2c_owner_set_dut_power(bool on)
+{
+    return i2c_owner_set_dut_power_main(on);
 }
 
 bool i2c_owner_get_estop_open(void)
@@ -388,13 +440,30 @@ bool i2c_owner_get_estop_open(void)
     return v;
 }
 
-bool i2c_owner_get_dut_power_on(void)
+bool i2c_owner_get_dut_power_main_on(void)
 {
     bool v;
     state_lock();
-    v = s_dut_power_on;
+    v = s_dut_power_main_on;
     state_unlock();
     return v;
+}
+
+bool i2c_owner_get_dut_power_safety_on(void)
+{
+    bool v;
+    state_lock();
+    v = s_dut_power_safety_on;
+    state_unlock();
+    return v;
+}
+
+// Deprecated alias, kept for backward compatibility -- reports the main
+// relay only, matching i2c_owner_set_dut_power()'s "main domain only"
+// meaning above.
+bool i2c_owner_get_dut_power_on(void)
+{
+    return i2c_owner_get_dut_power_main_on();
 }
 
 static bool io_pin_allowed(i2c_owner_expander_t exp, uint8_t pin)
@@ -402,7 +471,8 @@ static bool io_pin_allowed(i2c_owner_expander_t exp, uint8_t pin)
     if (pin > 15u) {
         return false;
     }
-    if (exp == I2C_OWNER_EXP_1 && pin <= EXP1_RESERVED_MAX_PIN) {
+    if (exp == I2C_OWNER_EXP_1 &&
+        (pin <= EXP1_RESERVED_MAX_PIN || pin == EXP1_PIN_DUT_POWER_SAFETY)) {
         return false; // fixed-role pins -- see i2c_owner.h
     }
     return true;

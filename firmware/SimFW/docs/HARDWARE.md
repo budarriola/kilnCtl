@@ -79,10 +79,11 @@ Read this section first.
    check exists to catch, so better not to build it in. Two relays also let
    test scenarios brown out one domain independently of the other (a real
    test case: `SaftyFW` noticing a main-side power loss while its own domain
-   stays up, and vice versa). **Firmware follow-on, out of scope for this
-   document:** `i2c_owner.c` currently exposes one control bit; a second
-   named MCP23017 pin is needed (spare capacity exists per §3.7) — not done
-   here, flagged for whoever picks up the code change.
+   stays up, and vice versa). **Firmware closed (this pass):** `i2c_owner.c`
+   now exposes both relays as independently named/commanded outputs
+   (`EXP1_PIN_DUT_POWER_MAIN` = exp1 pin 7, `EXP1_PIN_DUT_POWER_SAFETY` =
+   exp1 pin 10, one of the 6 spare pins §3.7 recorded) — see §3.7 below and
+   `docs/PROTOCOL.md` §5.5 for the protocol-level detail.
 
 7. **Two things checked and found NOT to be problems, recorded so nobody
    re-litigates them:**
@@ -341,17 +342,23 @@ the as-built float.
 
 | From | Via | To |
 |---|---|---|
-| Bench supply (per-domain channel, or a dual-output supply) | fixture power-in connector → fixture relay #1 (`EXP1_PIN_DUT_POWER`, exp1 pin 7, existing) → fixture power-out connector | J18 (main 12 V in) |
-| Bench supply (independent channel) | fixture power-in connector → fixture relay #2 (**new control bit needed, not yet named in `i2c_owner.c`** — spare pins exist) → fixture power-out connector | J19 (safety 12 V in) |
+| Bench supply (per-domain channel, or a dual-output supply) | fixture power-in connector → fixture relay #1 (`EXP1_PIN_DUT_POWER_MAIN`, exp1 pin 7, existing) → fixture power-out connector | J18 (main 12 V in) |
+| Bench supply (independent channel) | fixture power-in connector → fixture relay #2 (`EXP1_PIN_DUT_POWER_SAFETY`, exp1 pin 10, added this pass — was a spare pin) → fixture power-out connector | J19 (safety 12 V in) |
 
 **Resolved (§0 item 6, `docs/BOM.md` §6): two independent relays, not one
 relay with a common downstream feed.** A single relay bridging both domains
 would bond `GND_Main` and `GND_Safty` through the shared 12 V return,
-defeating the isolation the rest of the fixture preserves. `i2c_owner.c`
-today implements only relay #1's control bit; relay #2 is a firmware
-follow-on (a second named MCP23017 output, capacity already exists per this
-section's spare-pin count), not yet wired in code. **Inrush sizing is a
-separate, still-open item** — see §5's DUT power relay row and
+defeating the isolation the rest of the fixture preserves. `i2c_owner.c` now
+implements both relays' control bits, each with its own named setter/getter
+(`i2c_owner_set/_get_dut_power_main_on()`, `..._safety_on()`) and its own
+protocol command (`DUT_POWER_SAFETY_SET`/`GET` = `0x09`/`0x0A`, alongside the
+pre-existing `DUT_POWER_SET`/`GET` = `0x06`/`0x08` which keep their original
+main-domain-only meaning — see `docs/PROTOCOL.md` §5.5). There is
+deliberately no combined "set both" call, so a caller always makes the
+two-domain decision explicitly rather than getting it as a side effect of
+one legacy command. Consumed 1 of the 6 spare pins recorded in this
+section's earlier pass, leaving 5 spare (exp1 pins 11..15). **Inrush sizing
+is a separate, still-open item** — see §5's DUT power relay row and
 `docs/BOM.md` §6's estimate (~60 A / ~190 µs from ~940 µF per-domain bulk
 capacitance and an assumed ~0.2 Ω source resistance) — this is an estimate
 pending a bench scope/current-probe capture, not a measured figure.
@@ -364,7 +371,7 @@ Per PLAN.md 3.5, restated against the pin map above:
 
 | Fixture signal group | Domain | Crosses via |
 |---|---|---|
-| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, relay sense K1/K2/K3/K5, `Fault` line sense, J20 IO_3/IO_4, debug UART, DUT-power relay control | GND_Main | — (native) |
+| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, relay sense K1/K2/K3/K5, `Fault` line sense, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays — the MCP23017 output bits and the Pico-side I2C0 bus that drives them are GND_Main native for both; each relay's own *downstream* 12 V feed stays in its own domain, J18/main vs J19/safety, per §3.7) | GND_Main | — (native) |
 | SPI bus B, `DRDY_SAFETY`, `FAULT_SAFETY` | GND_Safty | two quad TI ISO7740DWR digital isolators (revised 2026-08-20 from a single 6-channel ISO7741-class part — see §3.2), powered from J7's safety-side rail (§0 item 5) on the isolated side |
 | 3× CT channels | floating (neither domain) | isolation transformer, **~3:1 step-up** (revised 2026-08-20 from an earlier 1:1 decision — a 1:1 ratio cannot reach the ADC's clipping boundary; see `PLAN.md` §3.3 and `docs/BOM.md` §3 for the arithmetic), per channel |
 | K4 relay sense | GND_Safty at the contact, GND_Main at the MCP23017 | optocoupler in the wetting circuit (§3.4) |

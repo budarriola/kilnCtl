@@ -130,15 +130,31 @@ extern "C" {
 // are not in PLAN.md section 5's sketch but i2c_owner.h exposes
 // i2c_owner_get_estop_open()/_get_dut_power_on() as first-class public
 // getters, so they are wired up too (a client cannot otherwise read back
-// what it last commanded). ---
+// what it last commanded). DUT_POWER_SAFETY_SET/GET (0x09/0x0A) are this
+// pass's addition, backing relay #2 (docs/HARDWARE.md section 3.7 /
+// docs/BOM.md section 6's two-independent-relays resolution) -- DUT_POWER_SET/
+// GET (0x06/0x08) keep their original main-domain-only meaning rather than
+// being redefined to address both relays; see this file's comment on those
+// two ids. ---
 #define SIMFW_CMD_IO_SET_DIR       0x01u
 #define SIMFW_CMD_IO_WRITE         0x02u
 #define SIMFW_CMD_IO_READ          0x03u
 #define SIMFW_CMD_IO_ESTOP_SET     0x04u
 #define SIMFW_CMD_IO_FAULT_LINE_GET 0x05u
+// DUT_POWER_SET/GET (0x06/0x08): deprecated aliases for the main-domain
+// relay only (i2c_owner_set/_get_dut_power_main_on()) -- kept exactly as-is
+// for backward compatibility. Deliberately NOT redefined to mean "both
+// relays": the whole point of two independent relays (docs/HARDWARE.md
+// section 3.7 / docs/BOM.md section 6) is that GND_Main and GND_Safty never
+// get bonded through a shared control path, so ganging them by default here
+// would quietly reintroduce the exact failure mode two relays exist to
+// avoid. Use DUT_POWER_MAIN_SET/GET or DUT_POWER_SAFETY_SET/GET (0x09/0x0A)
+// for explicit, single-domain control -- see docs/PROTOCOL.md section 5.5.
 #define SIMFW_CMD_IO_DUT_POWER_SET 0x06u
 #define SIMFW_CMD_IO_ESTOP_GET     0x07u
 #define SIMFW_CMD_IO_DUT_POWER_GET 0x08u
+#define SIMFW_CMD_IO_DUT_POWER_SAFETY_SET 0x09u
+#define SIMFW_CMD_IO_DUT_POWER_SAFETY_GET 0x0Au
 
 // --- FAULT group command ids (SIMFW_TASK_ID_FAULT) -- docs/PROTOCOL.md
 // section 5.6, backed by fault_sched.h's schedule/cancel/fire_now/list API.

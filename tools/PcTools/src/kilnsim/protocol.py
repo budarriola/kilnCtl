@@ -122,6 +122,15 @@ class IoCmd(enum.IntEnum):
     # what it last commanded, so SimFW wires them up too.
     ESTOP_GET = 7
     DUT_POWER_GET = 8
+    # DUT_POWER_SAFETY_SET/GET (PROTOCOL.md sec 5.5, 2026-08-20): the fixture's
+    # second, independent DUT-power relay (J19/safety domain). DUT_POWER_SET/
+    # GET (6/8) above keep their original meaning -- main domain (J18) only --
+    # rather than being redefined to mean "both relays": the whole point of
+    # two relays is that GND_Main and GND_Safty never get bonded through a
+    # shared control path, so a legacy client using only the old command can
+    # never accidentally command the safety-domain relay too.
+    DUT_POWER_SAFETY_SET = 9
+    DUT_POWER_SAFETY_GET = 10
 
 
 # --- FAULT (scheduler, PLAN.md sec 7) -----------------------------------------

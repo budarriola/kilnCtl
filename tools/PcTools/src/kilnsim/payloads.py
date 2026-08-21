@@ -499,6 +499,10 @@ def _io_encode(cmd: int, payload: dict) -> bytes:
         return bytes([cmd])
     if cmd == 8:  # DUT_POWER_GET
         return bytes([cmd])
+    if cmd == 9:  # DUT_POWER_SAFETY_SET
+        return bytes([cmd, _bool_byte(payload["on"])])
+    if cmd == 10:  # DUT_POWER_SAFETY_GET
+        return bytes([cmd])
     raise PayloadError(f"IO: unknown command id {cmd}")
 
 
@@ -525,6 +529,10 @@ def _io_decode(cmd: int, status: int, data: bytes) -> dict:
     if cmd == 7:  # ESTOP_GET
         return {"open": bool(data[0])}
     if cmd == 8:  # DUT_POWER_GET
+        return {"on": bool(data[0])}
+    if cmd == 9:  # DUT_POWER_SAFETY_SET
+        return {}
+    if cmd == 10:  # DUT_POWER_SAFETY_GET
         return {"on": bool(data[0])}
     raise PayloadError(f"IO: unknown command id {cmd}")
 

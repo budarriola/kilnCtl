@@ -10,11 +10,16 @@
 // shape ../SaftyFW's owner tasks use for their own owned peripherals (e.g.
 // thermo_task being the only caller of max31856_read()/_configure()).
 //
-// Pin mapping (docs/PLAN.md section 3.7):
+// Pin mapping (docs/HARDWARE.md section 3.7, docs/BOM.md section 6):
 //   MCP23017 #1 (0x20): GPA0-4 = relay sense K1/K2/K3/K5/K4 (in),
 //     GPA5 = `Fault` line sense (in), GPA6 = E-stop optoMOS drive (out),
-//     GPA7 = DUT 12V power relay (out), GPB0/GPB1 = J20 IO_3/IO_4 (i/o,
-//     default in+pullup), GPB2-7 = 6 spare (default in+pullup).
+//     GPA7 = DUT 12V power relay #1 / main domain / J18 (out),
+//     GPB0/GPB1 = J20 IO_3/IO_4 (i/o, default in+pullup),
+//     GPB2 = DUT 12V power relay #2 / safety domain / J19 (out) --
+//     resolved 2026-08-20 (docs/BOM.md section 6): two independent relays,
+//     not one shared feed, so GND_Main and GND_Safty are never bonded
+//     through a common relay downstream. GPB3-7 = 5 spare (default
+//     in+pullup).
 //   MCP23017 #2 (0x21): all 16 pins spare/generic (default in+pullup) --
 //     PLAN.md section 3.6's documented fallback (moving the main-side
 //     `~FAULT` x3 lines here if Pico GPIO ever runs out) is speculative
@@ -123,6 +128,30 @@ bool i2c_owner_set_estop(bool open);
 
 // on == true: DUT 12V power relay closed (board powered). PLAN.md section
 // 3.4's `power_blip` scenario support.
+//
+// Two independent relays, two independent setters -- docs/HARDWARE.md
+// section 3.7 / docs/BOM.md section 6 (resolved 2026-08-20): the main board
+// has two electrically separate 12V inputs (J18/main, J19/safety) with no
+// shared copper downstream, so a single relay switching both would bond
+// GND_Main and GND_Safty through the shared return path and defeat the
+// isolation the rest of this fixture exists to preserve. There is
+// deliberately NO "set both" convenience call -- a caller that wants both
+// domains powered must call both setters explicitly, so a scenario author
+// (or reviewer) always sees two separate decisions, never one that silently
+// gangs the domains.
+bool i2c_owner_set_dut_power_main(bool on);   // relay #1 -> J18 (GND_Main)
+bool i2c_owner_set_dut_power_safety(bool on); // relay #2 -> J19 (GND_Safty)
+
+// Deprecated alias for i2c_owner_set_dut_power_main() / _get_dut_power_main_on(),
+// kept only for source/protocol backward compatibility with callers written
+// before relay #2 existed (this is also SIMFW_CMD_IO_DUT_POWER_SET/GET's
+// underlying call, docs/PROTOCOL.md section 5.5). Deliberately NOT redefined
+// to mean "both relays": ganging the two domains by default is exactly the
+// mistake two independent relays exist to prevent, so the old single command
+// keeps its original, narrower meaning -- main domain only -- rather than
+// growing new (and easy-to-miss) side effects on the safety domain. New
+// callers should use the explicit *_main()/*_safety() names above; this
+// alias may be removed once no caller depends on the unqualified name.
 bool i2c_owner_set_dut_power(bool on);
 
 // Last-commanded (not sensed -- there is no separate feedback line for
@@ -130,7 +159,9 @@ bool i2c_owner_set_dut_power(bool on);
 // snapshot above. Reflects the state after the most recent applied command,
 // not necessarily the most recent queued one if several are in flight.
 bool i2c_owner_get_estop_open(void);
-bool i2c_owner_get_dut_power_on(void);
+bool i2c_owner_get_dut_power_main_on(void);
+bool i2c_owner_get_dut_power_safety_on(void);
+bool i2c_owner_get_dut_power_on(void); // deprecated alias for _main_on() -- see i2c_owner_set_dut_power()'s comment
 
 // --- Generic expander I/O (PLAN.md section 5 IO group: IO_SET_DIR,
 // IO_WRITE, IO_READ) -------------------------------------------------------
@@ -142,10 +173,11 @@ bool i2c_owner_get_dut_power_on(void);
 // fallback role (PLAN.md section 3.6).
 //
 // Exp1 pins 0..7 (relay sense, fault-line sense, E-stop drive, DUT-power
-// relay) are reserved for the fixed roles above and are rejected here
-// (returns false) -- reconfiguring them through the generic path would let
-// a test silently break the relay-sense scan or the two safety-relevant
-// outputs.
+// relay #1/main) and pin 10 (DUT-power relay #2/safety) are reserved for the
+// fixed roles above and are rejected here (returns false) -- reconfiguring
+// them through the generic path would let a test silently break the
+// relay-sense scan or one of the three safety-relevant outputs. Pins 8/9
+// (J20 IO_3/IO_4) are generic, not reserved.
 typedef enum {
     I2C_OWNER_EXP_1 = 0, // 0x20
     I2C_OWNER_EXP_2 = 1, // 0x21

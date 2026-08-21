@@ -259,6 +259,13 @@ MCP23017 #1 has spare pins per `docs/HARDWARE.md` §3.7 (6 spare), so there
 is room — this just needs a second named pin and a firmware change, not a
 part.
 
+**Firmware closed (2026-08-20):** done — `EXP1_PIN_DUT_POWER_MAIN` (exp1 pin
+7, renamed from `EXP1_PIN_DUT_POWER`) and `EXP1_PIN_DUT_POWER_SAFETY` (exp1
+pin 10, new) are both independently commanded in `i2c_owner.c`, with the
+legacy single-relay protocol command kept as a main-domain-only alias, not
+redefined to gang both — see `docs/HARDWARE.md` §3.7 and `docs/PROTOCOL.md`
+§5.5. Spare count on exp1 is now 5, not 6.
+
 ### Inrush sizing
 
 Per-domain bulk capacitance at the regulator input: **940 µF** (2×470 µF,

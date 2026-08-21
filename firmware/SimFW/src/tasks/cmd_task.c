@@ -1254,6 +1254,42 @@ static void handle_io_dut_power_get(const uint8_t *args, uint8_t args_len, uint8
     *out_len = w.len;
 }
 
+// DUT_POWER_SAFETY_SET/GET (0x09/0x0A) -- relay #2 / J19 / GND_Safty, this
+// pass's addition (docs/HARDWARE.md section 3.7 / docs/BOM.md section 6).
+// Deliberately separate handlers calling i2c_owner_set/_get_dut_power_safety_on()
+// rather than reusing handle_io_dut_power_set/get() with a domain
+// parameter -- a shared handler invites a caller to gang both relays behind
+// one code path, exactly what two independent relays exist to avoid.
+static void handle_io_dut_power_safety_set(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                            uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint8_t on = ar_u8(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    rw_u8(&w, i2c_owner_set_dut_power_safety(on != 0) ? SIMFW_CMD_STATUS_OK : SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
+static void handle_io_dut_power_safety_get(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                            uint8_t out_cap)
+{
+    (void)args;
+    (void)args_len;
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    rw_u8(&w, SIMFW_CMD_STATUS_OK);
+    rw_u8(&w, i2c_owner_get_dut_power_safety_on() ? 1u : 0u);
+    *out_len = w.len;
+}
+
 static const cmd_table_entry_t s_io_commands[] = {
     {SIMFW_CMD_IO_SET_DIR, handle_io_set_dir},
     {SIMFW_CMD_IO_WRITE, handle_io_write},
@@ -1263,6 +1299,8 @@ static const cmd_table_entry_t s_io_commands[] = {
     {SIMFW_CMD_IO_DUT_POWER_SET, handle_io_dut_power_set},
     {SIMFW_CMD_IO_ESTOP_GET, handle_io_estop_get},
     {SIMFW_CMD_IO_DUT_POWER_GET, handle_io_dut_power_get},
+    {SIMFW_CMD_IO_DUT_POWER_SAFETY_SET, handle_io_dut_power_safety_set},
+    {SIMFW_CMD_IO_DUT_POWER_SAFETY_GET, handle_io_dut_power_safety_get},
 };
 
 // --- FAULT group handlers (fault_sched.h) -----------------------------------

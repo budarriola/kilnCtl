@@ -482,9 +482,11 @@ read-only from this task's perspective; a "welded contact" is modeled at
 | `READ` | `0x03` | `i2c_owner_io_read()` |
 | `ESTOP_SET` | `0x04` | `i2c_owner_set_estop()` |
 | `FAULT_LINE_GET` | `0x05` | `i2c_owner_get_relay_states()` (`.fault_line_asserted`) |
-| `DUT_POWER_SET` | `0x06` | `i2c_owner_set_dut_power()` |
+| `DUT_POWER_SET` | `0x06` | `i2c_owner_set_dut_power()` (deprecated alias for `_set_dut_power_main()`) |
 | `ESTOP_GET` | `0x07` | `i2c_owner_get_estop_open()` |
-| `DUT_POWER_GET` | `0x08` | `i2c_owner_get_dut_power_on()` |
+| `DUT_POWER_GET` | `0x08` | `i2c_owner_get_dut_power_on()` (deprecated alias for `_get_dut_power_main_on()`) |
+| `DUT_POWER_SAFETY_SET` | `0x09` | `i2c_owner_set_dut_power_safety()` |
+| `DUT_POWER_SAFETY_GET` | `0x0A` | `i2c_owner_get_dut_power_safety_on()` |
 
 `DUT_POWER_SET` is PLAN.md section 3.4's addition (the DUT 12 V power relay
 was added to the plan after section 5's original command table was written)
@@ -494,20 +496,41 @@ was added to the plan after section 5's original command table was written)
 otherwise has no way to read back what it last commanded, so they are wired
 up too.
 
+**Two independent DUT-power relays (resolved 2026-08-20, `docs/HARDWARE.md`
+section 3.7 / `docs/BOM.md` section 6):** the main board has two electrically
+separate 12 V inputs — J18 (main domain) and J19 (safety domain) — with no
+shared copper downstream, so a single relay switching both would bond
+`GND_Main` and `GND_Safty` through the shared return path and defeat the
+isolation the rest of the fixture preserves. The fixture therefore drives two
+independent relays from two independent MCP23017 output bits
+(`EXP1_PIN_DUT_POWER_MAIN` = exp1 pin 7, `EXP1_PIN_DUT_POWER_SAFETY` = exp1
+pin 10). `DUT_POWER_SET`/`GET` (`0x06`/`0x08`) are kept exactly as they were
+before relay #2 existed — **main domain only**, not "both relays" — because
+redefining a single legacy command to gang both domains by default would
+quietly reintroduce the exact bonding failure two relays exist to prevent.
+`DUT_POWER_SAFETY_SET`/`GET` (`0x09`/`0x0A`) are the new, explicit commands
+for the safety-domain relay. **There is no "set both" command**; a scenario
+that wants both domains powered issues both commands, so the decision to
+power two domains together is always visible at the call site, never
+implicit in one command's default behavior.
+
 `SET_DIR` request: `[u8 exp, u8 pin, u8 input, u8 pullup]` (`exp`: 0 =
 `I2C_OWNER_EXP_1` (0x20), 1 = `I2C_OWNER_EXP_2` (0x21); `pin` 0..15, 0..7 =
 port A, 8..15 = port B). `i2c_owner_io_set_dir()` returns `false` both for a
 reserved fixed-role exp1 pin (relay sense / fault-line sense / E-stop drive /
-DUT-power relay, pins 0..7 on `I2C_OWNER_EXP_1`) and for a transiently full
-command queue — indistinguishable from the bool alone, so this handler
-reports `ERR_BAD_ARGS` for both (the reserved-pin case is the far more likely
-cause for a well-behaved client). `WRITE`: `[u8 exp, u8 pin, u8 level]`.
+DUT-power relay main, pins 0..7 on `I2C_OWNER_EXP_1`, plus DUT-power relay
+safety on pin 10) and for a transiently full command queue —
+indistinguishable from the bool alone, so this handler reports
+`ERR_BAD_ARGS` for both (the reserved-pin case is the far more likely cause
+for a well-behaved client). `WRITE`: `[u8 exp, u8 pin, u8 level]`.
 `READ`: `[u8 exp, u8 pin]`, reply `[status, level]`.
 
 `ESTOP_SET`: `[u8 open]` (1 = loop opened/tripped). `ESTOP_GET`: no args,
 reply `[status, open]`. `FAULT_LINE_GET`: no args, reply
-`[status, asserted, u64 sample_time_us, valid]`. `DUT_POWER_SET`: `[u8 on]`.
-`DUT_POWER_GET`: no args, reply `[status, on]`.
+`[status, asserted, u64 sample_time_us, valid]`. `DUT_POWER_SET`: `[u8 on]`
+(main domain only). `DUT_POWER_GET`: no args, reply `[status, on]` (main
+domain only). `DUT_POWER_SAFETY_SET`: `[u8 on]`. `DUT_POWER_SAFETY_GET`: no
+args, reply `[status, on]`.
 
 ### 5.6 FAULT group (`SIMFW_TASK_ID_FAULT` = 7) — `fault_sched.h`
 
