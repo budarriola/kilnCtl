@@ -79,18 +79,17 @@ never `[x]`.
       `DESIGN_NOTES.md` §3.2.1 for the full two-deadline analysis (datasheet
       arithmetic, not measured — `docs/SPI_ACCESS_AUDIT.md` §9 has the
       source numbers).
-- [ ] **DMA claim failures degrade silently — arguably the wrong default for
-      this fixture.** All four claim sites use `required = false`, and
-      `main.c` discards `wave_owner_start()`'s return with `(void)`, so a
-      12th claim would let SimFW **boot looking healthy with no CT output or
-      a dead SPI bus**. Related: `main.c`'s comment justifying that discard
-      is stale; no failure path unwinds its claimed DMA channels / PIO SMs /
-      program space; a mid-loop sniff failure on bus A leaves a
-      half-initialised bus running `handle_load_done()`; and the PIO claims
-      beside them use `pio_claim_unused_sm(pio, true)`, which *panics* — so
-      SM exhaustion halts while DMA exhaustion limps, and the code's own
-      idle-loop-fallback comment describes an unreachable path. See
-      `docs/HARDWARE.md` §1b.
+- [ ] **`panic()` only halts the calling core.** `simfw_fatal()` (below)
+      halts `ct_wave_pwm`'s pre-scheduler claim outright, but the
+      post-scheduler `spi_emu_a`/`spi_emu_b` claims run on core 1 — a
+      failure there freezes core 1 while core 0 (`usb_owner`/telemetry)
+      keeps running with USB enumerated. The affected bus is provably dead
+      (frozen counters, every access fails) so it can't masquerade as
+      healthy, but it's not a whole-board halt. Needs cross-core signalling
+      or a watchdog to close.
+- [ ] **`max31856_pio_engine_init()`'s `!publish_base(...)` path leaks
+      already-enabled RX state machines** — a non-DMA leak `f9cc7b5`
+      deliberately left alone; flagged in `docs/HARDWARE.md`.
 - [ ] **Bridge ACK still precedes dispatch — narrower than it was.** Every
       unimplemented subcommand's silent-ACK case is now fixed (`c91ed50`: all
       11 `default:` branches reply `ok=0` with the echoed subcmd). **Still
@@ -116,12 +115,17 @@ never `[x]`.
 
 - [ ] **M-A SPI slave timing proof** — Saleae capture, ≥10k transactions,
       zero underruns. *The single biggest unretired risk in the plan.*
-- [ ] **CT calibration against `SaftyFW`'s real ADC readback** (M-D)
+- [ ] **CT calibration against `SaftyFW`'s real ADC readback** (M-D). The
+      ~3:1 transformer ratio behind it is still an unmeasured estimate, but
+      `docs/BENCH_RUNBOOK.md` step 4 now flags it as such explicitly
+      (`9c90d7b`) rather than leaving it only as an open question.
 - [ ] **J7 pin 1 continuity check** — the two main-board docs contradict each
       other; getting it wrong back-feeds a rail or leaves the isolator side
       unpowered. (§11 item 9)
 - [ ] **DUT-power inrush measurement** — the ~60 A / ~190 µs figure rests on
-      an *assumed* source resistance. (§11 item 5)
+      an *assumed* source resistance; still unmeasured, but now gated by an
+      explicit step in `docs/BENCH_RUNBOOK.md` rather than only a to-do
+      here (`9c90d7b`). (§11 item 5)
 - [ ] **S6a is narrower than bench-only now.** The ESP-asserted path fires in
       `virtual_dut` via a new `set_main_fault` operator action
       (`mainfault_esp_asserted.yaml`/`mainfault_no_nuisance_trip.yaml`, both
@@ -206,6 +210,11 @@ never `[x]`.
       K1/K2/K3/K5 + `link_up`) and S6a made genuinely provokable via a new
       `set_main_fault` operator action — 27 scenarios, 24 PASS / 3 BLOCKED
       (`63acef8`)
+- [x] DMA claim failures now call `simfw_fatal(subsystem, reason)`, blinking
+      GPIO25 then panicking with the subsystem named — chosen over a health
+      flag since SimFW has no console at that point, and it matches the
+      neighbouring PIO SM claims' existing panic; verified by draining all
+      12 channels and disassembling the ARM build (`f9cc7b5`)
 
 ---
 
