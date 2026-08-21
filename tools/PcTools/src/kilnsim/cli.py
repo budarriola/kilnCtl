@@ -149,6 +149,33 @@ def cmd_power(args) -> int:
     return 0
 
 
+def _warn_if_k4_never_closed(report) -> None:
+    """``kilnsim run``'s own :class:`~kilnsim.link.SimLink` reaches only the
+    plant/fixture simulator (:mod:`kilnsim.protocol`'s benchproto wire has no
+    SAFETY command group at all -- see :mod:`kilnsim.link`'s module
+    docstring and ``firmware/SimFW/docs/BENCH_RUNBOOK.md`` step 10). The real
+    safety processor is a second, physically separate device on its own USB
+    link, owned by the ``kilnctrl`` package, not this one -- so a
+    non-passing run whose K4 relay never closed at all is exactly as likely
+    to mean "nobody sent ``SAFETY_CMD_REQUEST_ENABLE``" as "a real defect",
+    and this module has no way to tell the two apart or fix the first one
+    itself (it holds no link to the device that command targets). This is a
+    diagnostic hint only -- printed, never asserted on -- so it can never
+    turn a genuine FAIL into a false PASS or vice versa."""
+    for e in report.events:
+        if e.event_type.name == "RELAY_EDGE" and e.payload.get("relay") == "K4" and e.payload.get("edge") == "close":
+            return
+    print(
+        "hint: K4 never closed during this run. If that's why an expectation "
+        "didn't pass, remember kilnsim's own link never reaches the safety "
+        "processor (it only drives the plant/fixture simulator) -- confirm "
+        "whether SAFETY_CMD_REQUEST_ENABLE was sent separately, e.g. via "
+        "`mcp__kilnctrl__safety_request_enable`, before or during this run "
+        "(BENCH_RUNBOOK.md step 10).",
+        file=sys.stderr,
+    )
+
+
 def cmd_run(args) -> int:
     try:
         scenario = load_scenario(args.scenario_path)
@@ -211,6 +238,9 @@ def cmd_run(args) -> int:
     #        on known gaps" treat 2 as non-fatal.
     #   1 -- FAIL. A genuine expectation failure, or the run itself was
     #        invalid (SPI underrun / event-seq gap, DESIGN_NOTES.md sec 8.2).
+    if not report.passed and not args.mock:
+        _warn_if_k4_never_closed(report)
+
     if report.passed:
         return 0
     if report.blocked:
