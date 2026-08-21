@@ -55,6 +55,18 @@
 //                            `tc_c > max_setpoint + margin` false rather
 //                            than inventing a ceiling for it to trip on).
 //   current_snapshot_t   <- the fixture's per-zone CT amps.
+//   main_fault_asserted  <- the TICK line's optional trailing <main_fault>
+//                            field, standing in for discrete_task_main_
+//                            fault(): safety_core_build_input() now names
+//                            this field (`.main_fault_asserted =
+//                            discrete_task_main_fault()`, immediately after
+//                            `.estop_pressed`), so leaving it hardcoded
+//                            false here would no longer mirror the real
+//                            function. The fixture SENSES the Fault line
+//                            rather than driving the Pico's GPIO10, so no
+//                            current scenario asserts it -- but the input is
+//                            now reachable from the wire, exactly like
+//                            <estop>, instead of being unreachable in C.
 //   link_up              <- the fixture telemetry stream's own liveness,
 //                            standing in for link_task_link_up()'s
 //                            "CRC-valid frame within LINK_UP_RECENCY_MS".
@@ -73,9 +85,6 @@
 //                                      exist anywhere in the codebase, and
 //                                      cfg->tc_source's OWN_J7 default keeps
 //                                      S13 dormant regardless)
-//   main_fault_asserted      = false (safety_core.c never names it; and this
-//                                      fixture senses the Fault line, it does
-//                                      not drive the Pico's GPIO10)
 //   relay_deenergized        = false (safety_core.c never names it)
 //   reboot_grace_active      = false (no SAFETY_CMD_ANNOUNCE_REBOOT source in
 //                                      this fixture -- there is no ESP here)
@@ -101,6 +110,13 @@
 //        <ctx_age_ms> <relay_now_mask> <relay_recent_mask>
 //        <relay_on_continuous_ms> <amps0> <amps1> <amps2> <zone_count>
 //        [<zone_flags> <setpoint_c> <measured_c> <sample_counter>] * zone_count
+//        [<main_fault>]
+//
+//        <main_fault> (S6a, discrete_task_main_fault()'s already-debounced
+//        active-low GPIO10 level: 1 == asserted) is OPTIONAL and trailing,
+//        defaulting to 0 when absent, so an orchestrator written against the
+//        pre-S6a line format keeps working unchanged. It is last because the
+//        zone block ahead of it is variable-length.
 //
 //        -> decodes the 16-byte MAX31856 register image (32 hex chars,
 //        firmware/SimFW/docs/PROTOCOL.md sec 5.2's TC_GET_REGS `regs` field)
@@ -339,6 +355,14 @@ static void do_tick(tokens_t *t)
         ctx.zones[i].sample_counter = (uint8_t)tok_long(t);
     }
 
+    // Optional trailing <main_fault> (see the TICK line format above): read
+    // only when the caller actually supplied it, so an orchestrator still
+    // sending the pre-S6a line shape does not fall into "ERR bad TICK args".
+    int main_fault = 0;
+    if (t->next < t->count) {
+        main_fault = (int)tok_long(t);
+    }
+
     if (t->bad) {
         printf("ERR bad TICK args\n");
         fflush(stdout);
@@ -356,15 +380,20 @@ static void do_tick(tokens_t *t)
     // sets valid=true and lets the SR fault bits speak for themselves
     // (already applied by max31856_decode_regs() above).
     safety_guard_input_t in;
-    memset(&in, 0, sizeof(in)); // main_fault_asserted / relay_deenergized stay
-                                  // false: safety_core_build_input()'s own C99
-                                  // struct literal still does not name either.
+    memset(&in, 0, sizeof(in)); // relay_deenergized stays false:
+                                  // safety_core_build_input()'s own C99 struct
+                                  // literal still does not name that one.
     in.tc_valid = true;
     in.tc_c = decoded.tc_c;
     in.cj_c = decoded.cj_c;
     in.fault_bits = decoded.fault_bits;
     in.spi_failed = false;
     in.estop_pressed = (estop != 0);
+    // S6a, sitting immediately after .estop_pressed exactly as it now does in
+    // safety_core_build_input(). discrete_task already inverted the active-low
+    // GPIO10 and debounced it 200ms, so the wire carries the same "1 ==
+    // asserted" level this field expects -- no inversion here either.
+    in.main_fault_asserted = (main_fault != 0);
     in.heat_commanded = false;      // real safety_core.c's own hardcoded value
     in.reboot_grace_active = false; // no ANNOUNCE_REBOOT source in this fixture
     in.dt_s = (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f;

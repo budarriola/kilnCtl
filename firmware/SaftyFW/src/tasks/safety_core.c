@@ -290,6 +290,13 @@ static safety_guard_input_t safety_core_build_input(void)
         .fault_bits = thermo.fault_bits,
         .spi_failed = thermo.spi_failed,
         .estop_pressed = discrete_task_estop_pressed(),
+        // S6a, the sibling of estop_pressed above and read exactly the same
+        // way: discrete_task samples GPIO10 as `!gpio_get(...)` (active low)
+        // and debounces it over 200ms, so a true here already MEANS
+        // "mainFault is asserted", which is the sense safety_guards.c's S6a
+        // block trips on directly. No inversion, and no extra conditioning,
+        // belongs at this call site -- same division of labour as S7's.
+        .main_fault_asserted = discrete_task_main_fault(),
         .heat_commanded = false,
         .context_valid = context_valid,
         .zone_count = zone_count,

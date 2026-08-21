@@ -935,6 +935,91 @@ static void test_s6(void)
         TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "reason is SAFETY_TRIP_MAIN_FAULT");
     }
 
+    /* Nuisance: the deasserted level is the one safety_core_build_input()
+     * now actually feeds from discrete_task_main_fault(), so it is worth
+     * proving it stays quiet against a NOISY-but-healthy background rather
+     * than only against base_input()'s all-quiet one -- current flowing, a
+     * relay commanded, a live link, a hot-but-legal thermocouple. Nothing
+     * here is S6a's business, and S6a must not borrow any of it. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = false;
+        in.link_up = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = true;
+        in.tc_c = 900.0f; /* hot, but well under abs_max_temp_c 1300 */
+        bool tripped = false;
+        for (int i = 0; i < 6000 && !tripped; i++) { /* 6000*0.1s = 10 minutes */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "deasserted mainFault never trips S6a over 10 minutes of busy-but-healthy ticks");
+        TEST_CHECK(s.reason != SAFETY_TRIP_MAIN_FAULT, "no SAFETY_TRIP_MAIN_FAULT latched while mainFault stays deasserted");
+    }
+
+    /* Trip: S6a is a level, not a window -- a mainFault that asserts partway
+     * through a long healthy run trips on exactly the tick it appears, with
+     * no accumulation and no credit from the quiet ticks before it. This is
+     * the behaviour the newly-wired safety_core_build_input() call site
+     * makes reachable: discrete_task publishes an already-debounced level
+     * that flips mid-run. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = false;
+        bool tripped = false;
+        for (int i = 0; i < 300 && !tripped; i++) { /* 30s of quiet first */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "sanity: 30s of deasserted mainFault is quiet");
+        in.main_fault_asserted = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "mainFault asserting mid-run trips S6a on that very tick");
+        TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "mid-run reason is SAFETY_TRIP_MAIN_FAULT");
+    }
+
+    /* Trip: S6a is unconditional -- it does not need context, current,
+     * heat, or a dead link to be believed. Everything else here says
+     * "perfectly healthy kiln"; the assertion alone still trips.
+     * SAFETY_MODEL.md section 4, S6a: "unambiguous, no further
+     * conditions". */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.main_fault_asserted = true;
+        in.link_up = true;
+        in.context_valid = true;
+        in.zone_count = 0;
+        in.any_current_present = false;
+        in.tc_valid = true;
+        in.tc_c = 20.0f;
+        in.dt_s = 0.001f; /* no window to accumulate, however short the tick */
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "mainFault trips S6a with everything else healthy");
+        TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "unconditional reason is SAFETY_TRIP_MAIN_FAULT");
+    }
+
+    /* Latch: releasing mainFault after the trip does not un-latch it on its
+     * own -- only safety_guards_clear() does, same contract as S7's. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t asserted = base_input();
+        asserted.main_fault_asserted = true;
+        safety_guards_tick(&s, &cfg, &asserted);
+        TEST_CHECK(s.is_tripped, "sanity: S6a tripped");
+        safety_guard_input_t released = base_input();
+        released.main_fault_asserted = false;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &released) == false, "releasing mainFault reports no NEW trip");
+        TEST_CHECK(s.is_tripped, "S6a stays latched after mainFault is released");
+        TEST_CHECK(s.reason == SAFETY_TRIP_MAIN_FAULT, "latched reason stays SAFETY_TRIP_MAIN_FAULT");
+    }
+
     /* Nuisance: S6b, a quiet link with NO current flowing never trips, no
      * matter how long, short of the unconditional 120s backstop --
      * SAFETY_MODEL.md section 2's "absence of information is not evidence
