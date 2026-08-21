@@ -17,6 +17,7 @@
 #include "SX1509.h"
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
+#include "kilnlink/kilnlink_set_ct_cal.h"
 #include "lvgl_port.h"
 #include "relay_authority.h"
 #include "settings.h"
@@ -1448,6 +1449,46 @@ static void safety_bridge_task(void *arg)
                  * could de-assert a fault that is still real. */
                 if (!bridge_args_ok("safety", &msg, 2)) { rejected = true; break; }
                 err = safety_link_set_fault(ctx->link, msg.payload[1] != 0);
+                break;
+            }
+            case SAFETY_CMD_SET_CT_CAL: {
+                /* Same 11-byte payload PC->ESP as ESP->Pico (uart_task_ids.h's
+                 * SAFETY_CMD_SET_CT_CAL doc comment) -- byte1 channel,
+                 * byte2 calibrated, bytes3..6 gain f32 LE, bytes7..10 offset
+                 * f32 LE. Fire-and-forget broadcast to the Pico, same shape
+                 * as SAFETY_CMD_SET_CONFIG above -- the PC observes the
+                 * outcome via the next GET_CT_CAL readback, not an ACK from
+                 * here. safety_link_send_set_ct_cal() does the wire-level
+                 * channel range check; a truncated frame is caught by
+                 * bridge_args_ok() first, same discipline every other
+                 * subcommand in this file follows. */
+                if (!bridge_args_ok("safety", &msg, KILNLINK_SET_CT_CAL_LEN)) {
+                    rejected = true;
+                    break;
+                }
+                if (!bridge_range_ok("safety", subcmd, "ct_cal channel", msg.payload[1], 0,
+                                     KILNLINK_SET_CT_CAL_NUM_CHANNELS - 1u)) {
+                    rejected = true;
+                    break;
+                }
+                err = safety_link_send_set_ct_cal(ctx->link, msg.payload[1], msg.payload[2] != 0,
+                                                  bridge_f32_le(&msg.payload[3]),
+                                                  bridge_f32_le(&msg.payload[7]));
+                break;
+            }
+            case SAFETY_CMD_GET_CT_CAL: {
+                /* Shared id with the reply (SAFETY_CMD_CT_CAL, 0x1A) --
+                 * request-vs-reply-by-length, same convention as
+                 * GET_FW_VERSION/Frame C. Unlike GET_STATUS/GET_DIAG this is
+                 * never answered from a cache: safety_link_get_ct_cal() does
+                 * a live, blocking round trip to the Pico and can genuinely
+                 * time out (ESP_ERR_TIMEOUT) if it never answers -- that
+                 * falls through to the generic "err != ESP_OK -> logged, no
+                 * reply" handling below, same as every other query in this
+                 * file whose driver call can fail. */
+                size_t got_len = 0;
+                err = safety_link_get_ct_cal(ctx->link, reply, sizeof(reply), &got_len);
+                reply_len = (err == ESP_OK) ? got_len : 0;
                 break;
             }
             default:

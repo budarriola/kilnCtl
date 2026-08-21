@@ -715,6 +715,47 @@
  * src/safety_guards.c's S6b block for the suppression logic. */
 #define SAFETY_CMD_ANNOUNCE_REBOOT 0x18u
 
+/* ESP->Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- the GUI/bench-tool's
+ * path to commissioning one channel of SaftyFW's config_store.h ct_cal
+ * record (firmware/SimFW/tools/ct_calibration/push_ct_cal.py's SET_CT_CAL
+ * step). Same value as kilnlink_set_ct_cal.h's KILNLINK_SET_CT_CAL_CMD,
+ * defined again here for the same "one place every subcommand on this wire
+ * is enumerated" reason SAFETY_CMD_CLEAR_TRIP/SET_CONFIG/ROLLBACK/
+ * ANNOUNCE_REBOOT are; safety_link.c's safety_link_send_set_ct_cal() encodes
+ * the payload through that shared codec, not by hand.
+ *
+ * Same 11-byte payload PC->ESP as ESP->Pico (KILNLINK_SET_CT_CAL_LEN, see
+ * kilnlink_set_ct_cal.h): byte1 = channel (0..2), byte2 = calibrated (0/1),
+ * bytes3..6 = gain f32 LE, bytes7..10 = offset f32 LE. Fire-and-forget
+ * broadcast to the Pico, same shape as SAFETY_CMD_SET_CONFIG: never ACKed on
+ * the wire by the Pico, the PC observes the outcome via the next
+ * GET_CT_CAL readback. */
+#define SAFETY_CMD_SET_CT_CAL 0x19u
+
+/* ESP->Pico request / Pico->ESP reply, CommonFW/docs/LINK_PROTOCOL.md sec 4/6
+ * -- kilnlink_get_ct_cal.h / kilnlink_ct_cal.h. Same value
+ * (KILNLINK_GET_CT_CAL_CMD == KILNLINK_CT_CAL_CMD == 0x1A) shared by request
+ * and reply, distinguished by direction and length exactly like
+ * SAFETY_CMD_GET_FW_VERSION/Frame C: the request is always 1 byte (cmd only,
+ * no arguments), the reply is always KILNLINK_CT_CAL_LEN (28) bytes.
+ *
+ * Doubles, additively, as the PC->ESP subcommand a bench tool sends on
+ * UART_TASK_ID_SAFETY (mirroring SAFETY_CMD_CLEAR_TRIP/SET_CONFIG's own
+ * PC->ESP use above) -- 1 byte, no arguments. Unlike GET_STATUS/GET_DIAG this
+ * is never answered from a cache: this driver caches no ct_cal state, so
+ * every GET_CT_CAL is a live, blocking round trip to the Pico
+ * (safety_link_get_ct_cal()) and can genuinely time out if it is absent, the
+ * same way safety_link_ping()/safety_link_request_enable() already can.
+ *
+ * CT_CAL reply payload (28 bytes, byte-for-byte KILNLINK_CT_CAL_LEN, see
+ * kilnlink_ct_cal.h -- relayed to the PC unmodified, not re-encoded):
+ *   byte0      = SAFETY_CMD_CT_CAL (0x1A)
+ *   bytes1..9  = channel 0: calibrated u8(1) + gain f32 LE(4) + offset f32 LE(4)
+ *   bytes10..18= channel 1: same 9-byte shape
+ *   bytes19..27= channel 2: same 9-byte shape */
+#define SAFETY_CMD_GET_CT_CAL 0x1Au
+#define SAFETY_CMD_CT_CAL     0x1Au
+
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u
 #define SAFETY_FLAG_ESTOP        0x04u

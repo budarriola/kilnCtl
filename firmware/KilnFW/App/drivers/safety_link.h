@@ -896,6 +896,60 @@ esp_err_t safety_link_send_rollback(SafetyLinkClass *link);
  * that has already begun. */
 esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CT_CAL (0x19) -- the
+ * GUI/bench-tool's path to commissioning one channel of SaftyFW's
+ * config_store.h ct_cal record (firmware/SimFW/tools/ct_calibration/
+ * push_ct_cal.py's SET_CT_CAL step, its own doc comment: "no path exists to
+ * push calibration constants back into SaftyFW's own flash" -- this closes
+ * that gap on the KilnFW side). Same fire-and-forget BROADCAST shape as
+ * safety_link_send_set_config(): the Pico's link_task.c never ACKs this on
+ * the wire, so there is no reply to wait for here -- success is observed by
+ * the caller polling GET_CT_CAL afterward, same "outcome via telemetry"
+ * pattern as everything else in this section.
+ *
+ * `channel` is validated locally against KILNLINK_SET_CT_CAL_NUM_CHANNELS (3)
+ * -- the wire-level range every sender of this frame agrees on
+ * (push_ct_cal.py's encode_set_ct_cal() performs the identical check on its
+ * side) -- same "catch it here, not just on the Pico" discipline
+ * safety_link_send_set_config() uses for tc_type. An uncalibrated channel
+ * sends explicit gain=0/offset=0 regardless of what the caller passed,
+ * mirroring push_ct_cal.py's own "belt and suspenders against stale numbers"
+ * choice, so a caller cannot accidentally leave a previous calibrated
+ * channel's numbers on the wire under calibrated=false.
+ *
+ * Returns ESP_ERR_INVALID_ARG if channel is out of range, ESP_ERR_INVALID_STATE
+ * if the driver isn't initialized, ESP_OK once the broadcast has been handed
+ * to the UART (not proof of Pico acceptance). Safe to call from any task,
+ * same as safety_link_send_set_config(). */
+esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bool calibrated,
+                                       float gain, float offset);
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4/6, SAFETY_CMD_GET_CT_CAL /
+ * SAFETY_CMD_CT_CAL (shared id 0x1A) -- kilnlink_get_ct_cal.h/kilnlink_ct_cal.h.
+ * Unlike every other safety_link_build_*_payload()/safety_link_get_status()
+ * in this file, this is NOT answered from a cache: this driver keeps no
+ * ct_cal state of its own, so every call is a live, blocking round trip to
+ * the Pico -- same "request now, wait for the specific reply, worst case
+ * ~SAFETY_LINK_ACK_TIMEOUT_MS * UART_PROTO_MAX_RETRIES + SAFETY_LINK_REPLY_
+ * TIMEOUT_MS with no peer" caveat safety_link_ping()/safety_link_request_
+ * enable() already carry. Call it from a bridge/app task, never from
+ * anything latency-critical.
+ *
+ * On success, copies the Pico's raw CT_CAL reply (byte-for-byte, cmd byte
+ * included) into `out` and sets *out_len -- the ESP relays this frame to the
+ * PC unmodified rather than decoding/re-encoding it, since the PC-facing
+ * SAFETY_CMD_CT_CAL reply and the Pico's own CT_CAL frame share the exact
+ * same 28-byte layout (kilnlink_ct_cal.h's own doc comment). `out_cap` must
+ * be at least KILNLINK_CT_CAL_LEN (28) bytes.
+ *
+ * Returns ESP_ERR_INVALID_ARG for a NULL/too-small `out`,
+ * ESP_ERR_INVALID_STATE if the driver isn't initialized, ESP_ERR_TIMEOUT if
+ * the request was never ACKed or no CT_CAL reply arrived within
+ * SAFETY_LINK_REPLY_TIMEOUT_MS, ESP_OK with *out_len == KILNLINK_CT_CAL_LEN
+ * on success. */
+esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out_cap,
+                                  size_t *out_len);
+
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded
  * in the bridge. `out` must have room for SAFETY_LINK_STATUS_PAYLOAD_LEN /

@@ -28,5 +28,8 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_set_config.c"
          "${KILNLINK_DIR}/src/kilnlink_rollback.c"
          "${KILNLINK_DIR}/src/kilnlink_announce_reboot.c"
+         "${KILNLINK_DIR}/src/kilnlink_set_ct_cal.c"
+         "${KILNLINK_DIR}/src/kilnlink_get_ct_cal.c"
+         "${KILNLINK_DIR}/src/kilnlink_ct_cal.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

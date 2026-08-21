@@ -15,8 +15,11 @@
 #include "kilnlink/kilnlink_announce_reboot.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_context.h"
+#include "kilnlink/kilnlink_ct_cal.h"
+#include "kilnlink/kilnlink_get_ct_cal.h"
 #include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
+#include "kilnlink/kilnlink_set_ct_cal.h"
 #include "kilnlink/kilnlink_version.h"
 
 /* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT's live-state sources. safety_link.h
@@ -879,8 +882,18 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
  * case and is silently discarded (LINK_PROTOCOL.md's own
  * additive-compatibility principle: "a peer that has never heard of it
  * discards it"), not counted as a frame error the way a genuinely malformed
- * GET_STATUS payload still is (inside safety_apply_status() itself). */
-static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
+ * GET_STATUS payload still is (inside safety_apply_status() itself).
+ *
+ * `out_ct_cal`/`out_got_ct_cal` (both optional, NULL together for every call
+ * site except safety_link_get_ct_cal()) let one caller also capture a
+ * SAFETY_CMD_CT_CAL (0x1A) reply verbatim while this same pass still applies
+ * every other frame the usual way -- CT_CAL is deliberately NOT cached
+ * anywhere on this side (safety_link_get_ct_cal()'s own doc comment: every
+ * GET_CT_CAL is a live round trip, never answered from a cache), so capturing
+ * the raw frame here, rather than adding a case to the switch below, is the
+ * only way a caller gets the bytes back at all. */
+static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
+                                   uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal)
 {
     uart_proto_message_t msg;
     bool got_status = false;
@@ -909,6 +922,12 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
             case SAFETY_CMD_TRIP_EVENT:
                 safety_apply_trip_event(link, &msg);
                 break;
+            case KILNLINK_CT_CAL_CMD: /* == SAFETY_CMD_GET_CT_CAL, shared id */
+                if (out_ct_cal && out_got_ct_cal && msg.length == KILNLINK_CT_CAL_LEN) {
+                    *out_ct_cal = msg;
+                    *out_got_ct_cal = true;
+                }
+                break;
             default:
                 break;
             }
@@ -916,6 +935,11 @@ static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
         wait = 0; /* only the first receive is allowed to block */
     }
     return got_status;
+}
+
+static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
+{
+    return safety_drain_inbox_ex(link, wait_ms, NULL, NULL);
 }
 
 /* One complete request/reply exchange, serialized against every other one on
@@ -1686,6 +1710,135 @@ esp_err_t safety_link_send_announce_reboot(SafetyLinkClass *link)
      * the wire). */
     return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
                                          UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_CT_CAL (0x19) -- see
+ * safety_link.h's doc comment for the full design rationale. This function
+ * only does the local channel-range check and the encode/send; the
+ * ARMED-refusal policy is entirely SaftyFW's (config_store_decide_write(),
+ * read-only reference from here), same split safety_link_send_set_config()
+ * uses for tc_type. */
+esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bool calibrated,
+                                       float gain, float offset)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (channel >= KILNLINK_SET_CT_CAL_NUM_CHANNELS) {
+        ESP_LOGW(TAG, "set_ct_cal: refused locally, channel=%u out of range 0-%u",
+                 (unsigned)channel, (unsigned)KILNLINK_SET_CT_CAL_NUM_CHANNELS - 1u);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* An uncalibrated channel sends explicit gain=0/offset=0 regardless of
+     * what the caller passed -- same "belt and suspenders against stale
+     * numbers" choice push_ct_cal.py's encode_set_ct_cal() makes on the PC
+     * side (see safety_link.h). */
+    kilnlink_set_ct_cal_t msg = {
+        .channel = channel,
+        .calibrated = calibrated ? 1u : 0u,
+        .gain = calibrated ? gain : 0.0f,
+        .offset = calibrated ? offset : 0.0f,
+    };
+    uint8_t payload[KILNLINK_SET_CT_CAL_LEN];
+    kilnlink_set_ct_cal_status_t status = KILNLINK_SET_CT_CAL_OK;
+    size_t len = kilnlink_set_ct_cal_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "set_ct_cal: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "set_ct_cal: sending, channel=%u calibrated=%u", (unsigned)channel,
+             (unsigned)msg.calibrated);
+    /* Same (dst_device, dst_task, src_task) triple as SET_CONFIG's own
+     * broadcast call site above -- fire-and-forget, no ACK expected
+     * (SaftyFW's link_task.c never replies to SET_CT_CAL on the wire). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
+}
+
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4/6, SAFETY_CMD_GET_CT_CAL /
+ * SAFETY_CMD_CT_CAL (shared id 0x1A) -- see safety_link.h's doc comment for
+ * the full contract. Structured like safety_exchange() (same xact_lock,
+ * same "drain anything already queued first" discipline, same
+ * SAFETY_LINK_ACK_TIMEOUT_MS/SAFETY_LINK_REPLY_TIMEOUT_MS budget) rather than
+ * calling it, because safety_exchange()'s `expect_status` parameter only
+ * ever watches for SAFETY_CMD_GET_STATUS -- there is no way to ask it to wait
+ * for a CT_CAL reply instead. safety_drain_inbox_ex()'s extra out-params
+ * exist for exactly this one caller. */
+esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out_cap,
+                                  size_t *out_len)
+{
+    if (!link || !out || out_cap < KILNLINK_CT_CAL_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_get_ct_cal_t req = {0};
+    uint8_t request[KILNLINK_GET_CT_CAL_LEN];
+    kilnlink_get_ct_cal_status_t req_status = KILNLINK_GET_CT_CAL_OK;
+    size_t req_len = kilnlink_get_ct_cal_encode(&req, request, sizeof(request), &req_status);
+    if (req_len == 0) {
+        ESP_LOGE(TAG, "get_ct_cal: encode failed (status=%d)", (int)req_status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "get_ct_cal: timed out after %ums waiting for the safety link "
+                      "transaction lock", (unsigned)SAFETY_XACT_LOCK_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* Anything already queued is a previous reply or an unsolicited push --
+     * fold it into the cache now (any CT_CAL frame in there is stale, from
+     * before our own request, so it is deliberately not captured), same as
+     * safety_exchange()'s own first drain. */
+    (void)safety_drain_inbox(link, 0);
+
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+
+    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                        UART_TASK_ID_SAFETY, request, req_len,
+                                        SAFETY_LINK_ACK_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return err;
+    }
+
+    uart_proto_message_t ct_cal_msg;
+    bool got_ct_cal = false;
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, &ct_cal_msg, &got_ct_cal);
+
+    if (!got_ct_cal) {
+        /* ACKed but no CT_CAL reply: same "protocol layer alive, application
+         * layer didn't answer" outcome safety_exchange()'s expect_status path
+         * counts as a timeout. */
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    memcpy(out, ct_cal_msg.payload, KILNLINK_CT_CAL_LEN);
+    if (out_len) {
+        *out_len = KILNLINK_CT_CAL_LEN;
+    }
+    xSemaphoreGive(link->xact_lock);
+    return ESP_OK;
 }
 
 esp_err_t safety_link_send_update_frame(SafetyLinkClass *link, const uint8_t *payload, size_t length)
