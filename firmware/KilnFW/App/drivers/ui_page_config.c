@@ -209,6 +209,11 @@ static void hub_show_page(uint8_t index)
  * go through kiln_ui_show(), so nothing else would: every cell on the screen
  * changes while the last dump on record still describes the previous page,
  * which would quietly mislead anything aiming an injected touch. */
+void ui_page_config_reset_to_first_page(void)
+{
+    hub_show_page(0);
+}
+
 static void hub_prev_cb(lv_event_t *e)
 {
     (void)e;

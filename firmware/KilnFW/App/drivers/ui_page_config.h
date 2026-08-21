@@ -21,6 +21,15 @@ extern "C" {
  * screen object. Called once by kiln_ui, on first kiln_ui_show("config"). */
 lv_obj_t *ui_page_config_build(void);
 
+/* Rewinds the hub to its first page. The hub is built once and kept, so its
+ * paging position otherwise persists for the life of the boot -- which is
+ * right when you press Back from a sub-page (you return to the page you left
+ * from) and wrong when you press Menu from the home page (you expect the top
+ * of the menu, not wherever you happened to be last time). Call this before
+ * kiln_ui_show("config") for the Menu case only. Safe before the page has
+ * been built. */
+void ui_page_config_reset_to_first_page(void);
+
 #ifdef __cplusplus
 }
 #endif

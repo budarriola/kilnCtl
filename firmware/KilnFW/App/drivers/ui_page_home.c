@@ -8,6 +8,7 @@
 #include "dashboard_http.h"
 #include "kiln_io.h"
 #include "kiln_ui.h"
+#include "ui_page_config.h"
 #include "profile_executor.h"
 #include "run_state.h"
 #include "ui_theme.h"
@@ -203,7 +204,13 @@ static void menu_nav_cb(lv_event_t *e)
     /* Single "Menu" button replaces the old separate Configuration and
      * Temperature nav buttons -- see this file's header comment on the
      * budget this page is fit to. Temperature (manual relay control) is now
-     * reached via ui_page_config.c's hub, one tap further than before. */
+     * reached via ui_page_config.c's hub, one tap further than before.
+     *
+     * Rewind the hub first: it is built once and keeps its paging position,
+     * so without this, Menu drops you on whichever hub page you were last on.
+     * Back from a sub-page deliberately still returns to the page you left
+     * from -- only Menu means "take me to the top of the menu". */
+    ui_page_config_reset_to_first_page();
     kiln_ui_show("config");
 }
 
