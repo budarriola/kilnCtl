@@ -207,9 +207,19 @@ never `[x]`.
       `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
       halts while DMA exhaustion limps, and the code's own idle-loop-fallback
       comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
-- [ ] **S11 guard input** — `heat_commanded` is the last never-produced
-      input in `safety_core_build_input()`, and it genuinely waits on Phase 6
-      current sense. S9 was wired in `5f90325`.
+- [ ] **S11 guard input — and it is NOT blocked on Phase 6, contrary to what
+      earlier notes here said.** S11 is `SAFETY_TRIP_FROZEN_SENSOR` (the
+      frozen-safety-reading guard), not a current guard; `heat_commanded` is
+      only its "and heat is happening" qualifier.
+      `safety_core.c:162-168` states it directly: Phase 6 **is** built and
+      `any_current_present` already reads it — `heat_commanded` stays false
+      because S11's wiring was out of scope for that pass. This is a small,
+      available wiring job, not a blocked one.
+- [ ] **PC-side sender for `SAFETY_CMD_SET_CT_CAL`.** SaftyFW can now store and
+      apply CT calibration (`1bd5d9d`), but `tools/ct_calibration/` still only
+      writes JSON. Needs a `tools/PcTools/src/kilnctrl` sender that inverts the
+      fit (`gain = 1/fit_gain`, `offset = -fit_offset/fit_gain`) before
+      transmitting.
 - [ ] **`kilnsim.report`'s `then:` targets match *edges*, so a level that
       never changes cannot be evidenced.** This is why
       `contactor_weld_engages_on_k4_open` still cannot pass: a correctly
@@ -220,8 +230,6 @@ never `[x]`.
       meaningful one. Its anti-nuisance claim is now *measured* (453 guard
       ticks, zero S5 warns at `--timescale 0.2`), but the suite's default run
       only takes 18 samples.
-- [ ] **MCP tool to push calibration constants into `SaftyFW` flash** — no
-      such path exists today.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -264,6 +272,13 @@ never `[x]`.
       against the six reachable-but-owned pins (6/7/17/19/21/22), plus a lint
       for hardcoded-literal `gpio_set_function` calls and for the guard block
       being deleted. Both layers negative-tested
+- [x] SaftyFW persists CT calibration in its own flash (`1bd5d9d`) —
+      `config_store.ct_cal` + `SAFETY_CMD_SET_CT_CAL`/`GET_CT_CAL`, using the
+      64 bytes already reserved so no `format_version` bump was needed.
+      Uncalibrated is an explicit flag: `0` (zero-init, and every pre-existing
+      record) and `0xFF` (erased flash) both decode as uncalibrated, and a
+      corrupt or unknown-version record rejects the *whole* record and falls
+      back to all-uncalibrated rather than a partially-trusted calibration
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
