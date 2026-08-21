@@ -1528,9 +1528,12 @@ than left to be inferred.
     the MCP-only workaround. §13.2's `kilnsim selftest` loopback mode is
     implemented and its own help text is explicit that hardware-only checks
     (SPI master loopback, CT→ADC loopback) report `NOT_RUNNABLE`, never
-    faked — still worth re-checking its exact behavior against its own
-    source before leaning on it, since it was landing concurrently with this
-    pass. (pre-M-A bring-up convenience)
+    faked. **Re-checked against source 2026-08-20 (`d9d54ca`): behavior
+    matches the help text exactly, and nothing fabricates a pass** — the
+    caveat that used to sit here is discharged. One stale *comment* was
+    corrected in passing (it cited a `FIRE_NOW` event-emission gap in
+    `virtual_simfw` that `7b1ef32` had already closed, before the comment's
+    own commit landed). See §13.2. (pre-M-A bring-up convenience)
 11. [x] ~~**NEW — `kilnsim`'s USB auto-detect matches a placeholder VID:PID, not
     one `SimFW` actually claims.** `tools/PcTools/src/kilnsim/link.py`
     defines `SIMFW_VID_PID = "2E8A:000A"` — Raspberry Pi's generic
@@ -1609,15 +1612,26 @@ appeared between 1 and 2 — see 13.4.
    ordering), sine-table generation. The register-machine vectors double as
    documentation of what the emulator claims to implement. **Real, done**:
    this is the layer the status header's 4873/4873-class numbers come from.
-2. [~] **Loopback tests** (fixture alone, no DUT): a `kilnsim selftest` mode —
-   PIO engines clocked by a scripted on-fixture master (spare PIO SM) to
-   verify the SPI path end-to-end; CT outputs looped to a spare ADC input
-   for amplitude sanity; expander read-after-write. Runs in CI-on-a-bench
-   without the main board attached. **Status: in progress, not yet landed as
-   of this pass** — this is being built concurrently by another session; do
-   not trust a specific implementation shape here until that work lands and
-   this section is updated again. It remains hardware-adjacent (needs real
-   fixture GPIO/SPI/I2C, just not the main board), unlike layer 4 below.
+2. [x] **Loopback tests** (fixture alone, no DUT): `kilnsim selftest`.
+   **Status: DONE — verified against its own source 2026-08-20**, superseding
+   this section's earlier "in progress, do not trust the shape" note.
+   `tools/PcTools/src/kilnsim/selftest.py` implements 9 checks, and **no check
+   fabricates a pass**: anything unverifiable reports a distinct
+   `NOT_RUNNABLE` status, and `_run_check` converts an unexpected exception to
+   `FAIL`, never to silence. Of the three checks originally named here:
+   - `expander_read_after_write` is **real** — a genuine `IO_SET_DIR`/`WRITE`/
+     `READ` round trip on hardware. It reports NOT_RUNNABLE only when
+     `GET_VERSION.fw_git_hash` identifies the link as `virtual_simfw`
+     (`"virtual"`) or `MockSimLink` (`"0000000"`), neither of which models
+     expander hardware — asserting there would be a false failure.
+   - `spi_master_loopback` and `ct_adc_loopback` are **permanently**
+     NOT_RUNNABLE from `kilnsim`, structurally rather than for want of work.
+     `tools/spi_test_master/` is a separate standalone RP2040 firmware with
+     its own plain-text line protocol — it does not speak `benchproto`, so
+     nothing reachable through `SimLink` can drive it; and CT→ADC loopback
+     needs a physical wire no wire-protocol command can observe.
+     `spi_test_master` remains the intended way to run the SPI check, as a
+     separate tool.
 3. [ ] **DUT integration** (the point of the project): the scenario library
    (section 8) against real `KilnFW`+`SaftyFW`. `kilnsim run` exit codes
    make it a scriptable gate; reports are the archived evidence. **Status:
