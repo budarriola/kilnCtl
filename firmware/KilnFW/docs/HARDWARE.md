@@ -41,9 +41,16 @@ below.
 ## SPI bus
 
 One bus (SCLK 12 / MOSI 11 / MISO 13), four chip selects: three MAX31856s across
-J6 and the display on J2. The thermocouple parts run SPI mode 1 at up to 5 MHz;
-the ILI9488 runs mode 0 and much faster, so each device gets its own device
-config on the shared bus.
+J6 and the display on J2. The thermocouple parts run SPI mode 1 and are **capped
+at 4 MHz** — the part is rated to 5 MHz, but the SimFW bench fixture's slave
+emulation cannot reliably meet the first-byte deadline above 4 MHz, and missing
+it silently shifts a register burst by one byte instead of faulting (see
+`firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9). The cap is enforced by a `range`
+on `KILNCTL_THERMO_SPI_CLOCK_HZ` and a `_Static_assert` in `MAX31856.c`.
+
+The ILI9488 runs mode 0 and much faster (`KILNCTL_DISPLAY_SPI_CLOCK_HZ`, 20 MHz),
+and is **not** subject to that cap: each device gets its own device config on the
+shared bus, and the two clock symbols are independent.
 
 ## I2C bus
 

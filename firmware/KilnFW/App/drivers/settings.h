@@ -34,9 +34,11 @@
 
 /* --- Shared SPI bus: 3x MAX31856 through J6, plus the ILI9488 on J2 ---
  * One bus, four chip selects. The thermocouple parts want SPI mode 1 and are
- * happy to ~5 MHz; the display wants mode 0 and much faster, so each device
- * is added to the bus with its own spi_device_interface_config_t rather than
- * the bus being configured once for everyone. */
+ * held to 4 MHz (see THERMO_SPI_CLOCK_HZ below); the display wants mode 0 and
+ * much faster, so each device is added to the bus with its own
+ * spi_device_interface_config_t rather than the bus being configured once for
+ * everyone. The two clocks are independent Kconfig symbols -- capping the
+ * thermocouples does not slow the display. */
 #if CONFIG_KILNCTL_SPI_HOST_SPI3
 #define KILN_SPI_HOST          SPI3_HOST
 #else
@@ -56,6 +58,12 @@
 #define THERMO_FAULT0_IO       CONFIG_KILNCTL_THERMO_FAULT0_IO
 #define THERMO_FAULT1_IO       CONFIG_KILNCTL_THERMO_FAULT1_IO
 #define THERMO_FAULT2_IO       CONFIG_KILNCTL_THERMO_FAULT2_IO
+/* Capped at 4 MHz by Kconfig `range`, re-checked by a _Static_assert in
+ * MAX31856.c. The part is rated to 5 MHz; the cap comes from the SimFW bench
+ * fixture's slave-emulation first-byte deadline, and overrunning it silently
+ * shifts a burst by one byte instead of faulting. Reasoning in MAX31856.c and
+ * SimFW/docs/SPI_ACCESS_AUDIT.md section 9. Unrelated to DISPLAY_SPI_CLOCK_HZ,
+ * which shares the bus but not this constraint. */
 #define THERMO_SPI_CLOCK_HZ    CONFIG_KILNCTL_THERMO_SPI_CLOCK_HZ
 /* Expander pins carrying ~DRDY for channels 0/1/2. */
 #define THERMO_DRDY0_EXP_PIN   8

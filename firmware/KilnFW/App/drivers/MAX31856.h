@@ -299,7 +299,8 @@ esp_err_t MAX31856_bus_init(MAX31856BusClass *bus,
 esp_err_t MAX31856_bus_deinit(MAX31856BusClass *bus);
 
 /* Attaches one part to an initialized bus: adds an SPI device (mode 1, MSB
- * first, THERMO_SPI_CLOCK_HZ), drives ~CS high, configures ~FAULT as an
+ * first, THERMO_SPI_CLOCK_HZ -- capped at 4 MHz, not merely defaulted there;
+ * MAX31856.c explains why), drives ~CS high, configures ~FAULT as an
  * input with the internal pull-up (the daughterboard's ~FAULT is an open-drain
  * output, so nothing else pulls it up), and seeds the register shadows from
  * the part's power-on defaults. Does not write any register -- call

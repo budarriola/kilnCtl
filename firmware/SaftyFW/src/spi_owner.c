@@ -8,9 +8,28 @@
 
 #include "board_pins.h"
 
-// The part's fSCL limit is 5 MHz; THERMOCOUPLE.md section 1 says to use
-// 4 MHz, matching THERMO_SPI_CLOCK_HZ's KilnFW default.
+// 4 MHz is a CEILING, not a default, and the assert below enforces it.
+//
+// The part's own fSCL limit is 5 MHz, so the silicon is not what caps this.
+// The SimFW bench fixture is: its PIO/DMA MAX31856 slave emulation has to have
+// the first response byte on MISO before the master's sample point, which is
+// one SCLK period minus setup -- about 250 ns at 4 MHz, tightening to about
+// 200 ns at 5 MHz. The implemented DMA-fed path takes about 150-215 ns at the
+// RP2040's stock 125 MHz sysclk, so 4 MHz has margin and 5 MHz largely does
+// not. Derivation: firmware/SimFW/docs/SPI_ACCESS_AUDIT.md section 9.
+//
+// Blowing the deadline produces no fault signal. The whole register burst
+// shifts one byte position and returns plausible-looking wrong temperatures --
+// on the safety processor, of all places. Hence an assert rather than a note.
+//
+// KilnFW holds its master to the same 4 MHz via a Kconfig `range` on
+// KILNCTL_THERMO_SPI_CLOCK_HZ plus a matching _Static_assert in MAX31856.c;
+// keep the two in step.
 #define SPI_OWNER_BAUDRATE_HZ 4000000u
+_Static_assert(SPI_OWNER_BAUDRATE_HZ <= 4000000u,
+               "SPI_OWNER_BAUDRATE_HZ exceeds the 4 MHz cap the SimFW slave "
+               "emulation's first-byte deadline requires -- see "
+               "SimFW/docs/SPI_ACCESS_AUDIT.md section 9");
 
 #define SPI_OWNER_LOCK_TIMEOUT_MS 2000u
 

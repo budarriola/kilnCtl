@@ -590,7 +590,14 @@ MAX31856 populated, and makes its own analog 3.3 V with an LT1962.
 Driver consequences (all of which `firmware/KilnFW/docs/MAX31856.md` already documents
 for the identical part — **read it, and port rather than reinvent**):
 
-- SPI **mode 1** (CPOL=0, CPHA=1), up to 5 MHz. The RP2040's SPI0 on
+- SPI **mode 1** (CPOL=0, CPHA=1). The part is rated to 5 MHz, but the master
+  is **capped at 4 MHz** (`SPI_OWNER_BAUDRATE_HZ`, enforced by a
+  `_Static_assert` in `src/spi_owner.c`): above that the SimFW bench fixture's
+  MAX31856 slave emulation cannot reliably meet its first-byte deadline, and
+  the failure mode is a burst shifted by one byte returning plausible wrong
+  temperatures rather than a fault — see
+  `firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9. KilnFW holds its master to the
+  same ceiling. The RP2040's SPI0 on
   GPIO0/1/2/3 supports this natively; `CS0` is driven manually as a GPIO
   rather than by the SPI block, so a multi-byte register burst stays in one
   chip-select frame.
