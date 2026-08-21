@@ -130,7 +130,7 @@ class IndividualCheckTests(unittest.TestCase):
     def test_command_groups_reachable_against_mock_defaults(self):
         status, detail = st._check_command_groups_reachable(self.link)
         self.assertEqual(status, st.STATUS_PASS)
-        self.assertIn("all 10 probed command groups", detail)
+        self.assertIn("all 11 probed command groups", detail)
 
     def test_command_groups_reachable_reports_specific_failures(self):
         self.link.script_response(CommandGroup.RELAY, 1, {}, error="simulated failure")

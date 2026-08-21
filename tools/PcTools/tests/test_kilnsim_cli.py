@@ -66,6 +66,11 @@ class IoSubcommandTests(_CapturedOutputTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), {"on": True})
 
+    def test_power_safety_get(self):
+        code, out, _ = self.run_cli(["--mock", "io", "power-safety-get"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), {"on": True})
+
 
 class CtSubcommandTests(_CapturedOutputTestCase):
     def test_state(self):
@@ -97,6 +102,63 @@ class CtSubcommandTests(_CapturedOutputTestCase):
     def test_bad_mode_rejected_by_argparse(self):
         with self.assertRaises(SystemExit):
             self.run_cli(["--mock", "ct", "mode", "0", "bogus"])
+
+
+class PowerSubcommandTests(_CapturedOutputTestCase):
+    """kilnsim power's two independent DUT-power relay domains
+    (PROTOCOL.md sec 5.5: main=J18, safety=J19) -- named by domain on the
+    command line and in the printed output, never by wire command number,
+    and always switched one domain per invocation (no "both" option)."""
+
+    def test_default_domain_is_main(self):
+        code, _, err = self.run_cli(["--mock", "power", "on"])
+        self.assertEqual(code, 0)
+        self.assertIn("connected", err)
+
+    def test_main_domain_reported_by_name(self):
+        code, out, _ = self.run_cli(["--mock", "power", "on"])
+        self.assertEqual(code, 0)
+        self.assertIn("(main)", out)
+
+    def test_safety_domain_reported_by_name(self):
+        code, out, _ = self.run_cli(["--mock", "power", "on", "--domain", "safety"])
+        self.assertEqual(code, 0)
+        self.assertIn("(safety)", out)
+
+    def test_off_and_cycle_actions_accept_domain(self):
+        for action in ("off", "cycle"):
+            for domain in ("main", "safety"):
+                code, out, _ = self.run_cli(
+                    ["--mock", "power", action, "--domain", domain, "--off-ms", "0"]
+                )
+                self.assertEqual(code, 0)
+                self.assertIn(f"({domain})", out)
+
+    def test_bad_domain_rejected_by_argparse(self):
+        with self.assertRaises(SystemExit):
+            self.run_cli(["--mock", "power", "on", "--domain", "both"])
+
+    def test_main_and_safety_use_distinct_wire_commands(self):
+        # Each domain's SET must land on its own IoCmd id -- a shared/merged
+        # command here would be exactly the main/safety mix-up this feature
+        # exists to prevent. Verified through MockSimLink's per-domain GET,
+        # driven directly (not through separate `--mock` CLI invocations,
+        # since each one gets its own throwaway MockSimLink).
+        from kilnsim.cli import _POWER_DOMAIN_SET_CMD
+        from kilnsim.link import MockSimLink
+        from kilnsim.protocol import CommandGroup, IoCmd
+
+        self.assertEqual(_POWER_DOMAIN_SET_CMD["main"], IoCmd.DUT_POWER_SET)
+        self.assertEqual(_POWER_DOMAIN_SET_CMD["safety"], IoCmd.DUT_POWER_SAFETY_SET)
+        self.assertNotEqual(_POWER_DOMAIN_SET_CMD["main"], _POWER_DOMAIN_SET_CMD["safety"])
+
+        link = MockSimLink()
+        link.connect("MOCK")
+        link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": False})
+        main_state = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
+        safety_state = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
+        self.assertEqual(main_state, {"on": False})
+        self.assertEqual(safety_state, {"on": True})  # untouched
 
 
 class RelaySubcommandTests(_CapturedOutputTestCase):

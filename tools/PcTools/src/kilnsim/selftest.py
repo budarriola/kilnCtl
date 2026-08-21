@@ -159,6 +159,11 @@ def _group_probes(link: SimLink) -> "list[tuple[str, Callable[[], dict]]]":
         ("RELAY/GET_EDGES", lambda: link.send_command(CommandGroup.RELAY, RelayCmd.GET_EDGES, {"since_seq": 0})),
         ("IO/ESTOP_GET", lambda: link.send_command(CommandGroup.IO, IoCmd.ESTOP_GET)),
         ("IO/DUT_POWER_GET", lambda: link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)),
+        # DUT_POWER_SAFETY_GET (PROTOCOL.md sec 5.5, resolved 2026-08-20): the
+        # fixture's second, independent DUT-power relay (J19/safety domain).
+        # A read-only probe, same as DUT_POWER_GET above -- reachability only,
+        # no state change.
+        ("IO/DUT_POWER_SAFETY_GET", lambda: link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)),
         ("IO/FAULT_LINE_GET", lambda: link.send_command(CommandGroup.IO, IoCmd.FAULT_LINE_GET)),
         ("FAULT/LIST", lambda: link.send_command(CommandGroup.FAULT, FaultCmd.LIST, {"start_index": 0, "max_count": 1})),
     ]

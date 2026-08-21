@@ -153,6 +153,51 @@ class GuiPanelLogicTests(unittest.TestCase):
         for name, preset in gui._CT_DISTORTION_PRESETS.items():
             self.assertTrue(set(preset).issubset(allowed), f"preset {name!r} has an unrecognized key: {preset}")
 
+    def test_io_panel_has_distinct_main_and_safety_power_state_vars(self):
+        # Two independent DUT-power relays (PROTOCOL.md sec 5.5) need two
+        # independent state variables on screen -- a shared var would hide a
+        # main/safety mix-up exactly like a shared mock state would.
+        panel = self.app.io_panel
+        self.assertTrue(hasattr(panel, "power_main_state_var"))
+        self.assertTrue(hasattr(panel, "power_safety_state_var"))
+        self.assertIsNot(panel.power_main_state_var, panel.power_safety_state_var)
+
+    def test_io_panel_domain_command_map_uses_distinct_wire_commands(self):
+        from kilnsim.protocol import IoCmd
+
+        panel = self.app.io_panel
+        self.assertEqual(panel._POWER_DOMAIN_SET_CMD["main"], IoCmd.DUT_POWER_SET)
+        self.assertEqual(panel._POWER_DOMAIN_SET_CMD["safety"], IoCmd.DUT_POWER_SAFETY_SET)
+        self.assertNotEqual(
+            panel._POWER_DOMAIN_SET_CMD["main"], panel._POWER_DOMAIN_SET_CMD["safety"]
+        )
+        # No "both" entry anywhere in the map -- exactly the two domains.
+        self.assertEqual(set(panel._POWER_DOMAIN_SET_CMD), {"main", "safety"})
+
+    def test_io_panel_power_click_sends_only_its_own_domain(self):
+        from kilnsim.protocol import CommandGroup, IoCmd
+
+        panel = self.app.io_panel
+        self.link._history.clear()
+
+        # _power() normally submits through the async work queue (a
+        # background thread); swap in a synchronous stand-in so the send
+        # happens deterministically within the test instead of racing a
+        # thread against assertions.
+        orig_submit = self.app.work.submit
+        self.app.work.submit = lambda fn, on_done: on_done(fn(), None)
+        try:
+            panel._power("main", False)
+            sent = [(g, c) for g, c, _p in self.link.sent_commands]
+            self.assertEqual(sent, [(CommandGroup.IO, IoCmd.DUT_POWER_SET)])
+
+            self.link._history.clear()
+            panel._power("safety", False)
+            sent = [(g, c) for g, c, _p in self.link.sent_commands]
+            self.assertEqual(sent, [(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_SET)])
+        finally:
+            self.app.work.submit = orig_submit
+
     def test_fault_scheduler_panel_populates_tree_from_faults_key(self):
         panel = self.app.fault_panel
         panel.tree.delete(*panel.tree.get_children())

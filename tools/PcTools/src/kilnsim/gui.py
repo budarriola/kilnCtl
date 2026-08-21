@@ -4,8 +4,10 @@ Panels: zone-temperature strip chart (truth vs reported vs safety-reported
 per zone), relay lamp row with edge history, per-TC panel (register hexdump,
 shadow truth, fault buttons, MODEL/MANUAL toggle + manual temp entry), CT
 panel (per-channel amps slider, distortion combo, live commanded-vs-
-calibrated readback), discrete I/O panel (E-stop, DUT power, J20, fault-line
-lamp), fault scheduler timeline (armed faults on a sim-time axis), scenario
+calibrated readback), discrete I/O panel (E-stop, two independent DUT-power
+relays -- main/J18 and safety/J19, each its own control, PROTOCOL.md sec
+5.5 -- J20, fault-line lamp), fault scheduler timeline (armed faults on a
+sim-time axis), scenario
 runner (load YAML, progress, live expectation status, report view).
 
 Now that ``firmware/SimFW/tools/virtual_simfw`` exists (a host program
@@ -587,8 +589,10 @@ class CtPanel(ttk.Frame):
 
 
 class IoPanel(ttk.Frame):
-    """E-stop, DUT power (with commanded-state readback), a spare-pin
-    (J20-style expander pin) read/write control, and the fault-line lamp."""
+    """E-stop, two independent DUT-power relay domains -- main (J18) and
+    safety (J19), each with its own On/Off buttons and commanded-state
+    readback, PROTOCOL.md sec 5.5 -- a spare-pin (J20-style expander pin)
+    read/write control, and the fault-line lamp."""
 
     def __init__(self, parent, app: KilnSimGui) -> None:
         super().__init__(parent)
@@ -602,12 +606,42 @@ class IoPanel(ttk.Frame):
         self.estop_state_var = tk.StringVar(value="(unknown)")
         ttk.Label(estop_row, textvariable=self.estop_state_var).pack(side=tk.LEFT, padx=12)
 
-        power_row = ttk.LabelFrame(self, text="DUT power")
+        # Two independent DUT-power relays (PROTOCOL.md sec 5.5, resolved
+        # 2026-08-20): main domain (J18) and safety domain (J19) are two
+        # separate MCP23017 output bits driving two separate relays, kept
+        # deliberately unable to be commanded together -- ganging them would
+        # bond GND_Main and GND_Safty through the shared 12V return and
+        # defeat the isolation the fixture exists to preserve. The two
+        # LabelFrames below are named by domain (never "relay 1/2") and the
+        # safety one is styled distinctly (bold, warning-colored label) so a
+        # domain mix-up is obvious on screen, not just in the code.
+        style = ttk.Style(self)
+        try:
+            style.configure("Safety.TLabelframe.Label", foreground="#8a2b00", font=("TkDefaultFont", 9, "bold"))
+        except tk.TclError:  # pragma: no cover - headless/theme-less test envs
+            pass
+
+        power_row = ttk.LabelFrame(self, text="DUT power -- MAIN (J18)")
         power_row.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(power_row, text="On", command=lambda: self._power(True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(power_row, text="Off", command=lambda: self._power(False)).pack(side=tk.LEFT, padx=4)
-        self.power_state_var = tk.StringVar(value="(unknown)")
-        ttk.Label(power_row, textvariable=self.power_state_var).pack(side=tk.LEFT, padx=12)
+        ttk.Button(power_row, text="On", command=lambda: self._power("main", True)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(power_row, text="Off", command=lambda: self._power("main", False)).pack(side=tk.LEFT, padx=4)
+        self.power_main_state_var = tk.StringVar(value="(unknown)")
+        ttk.Label(power_row, textvariable=self.power_main_state_var).pack(side=tk.LEFT, padx=12)
+
+        power_safety_row = ttk.LabelFrame(
+            self, text="DUT power -- SAFETY (J19)", style="Safety.TLabelframe"
+        )
+        power_safety_row.pack(fill=tk.X, padx=4, pady=4)
+        ttk.Button(power_safety_row, text="On", command=lambda: self._power("safety", True)).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(power_safety_row, text="Off", command=lambda: self._power("safety", False)).pack(
+            side=tk.LEFT, padx=4
+        )
+        self.power_safety_state_var = tk.StringVar(value="(unknown)")
+        ttk.Label(
+            power_safety_row, textvariable=self.power_safety_state_var, foreground="#8a2b00"
+        ).pack(side=tk.LEFT, padx=12)
 
         # A "spare pin" control, PLAN.md 6.3's "J20" -- the I2C-expander
         # discrete I/O group (IO_SET_DIR/WRITE/READ, PROTOCOL.md sec 5.5)
@@ -639,9 +673,16 @@ class IoPanel(ttk.Frame):
 
         self.app.work.submit(do_send, lambda result, exc: None)
 
-    def _power(self, on: bool) -> None:
+    #: domain name -> its own SET command (PROTOCOL.md sec 5.5). Named by
+    #: domain, never by wire command number, and there is deliberately no
+    #: "both" entry -- each button click commands exactly one relay.
+    _POWER_DOMAIN_SET_CMD = {"main": IoCmd.DUT_POWER_SET, "safety": IoCmd.DUT_POWER_SAFETY_SET}
+
+    def _power(self, domain: str, on: bool) -> None:
+        set_cmd = self._POWER_DOMAIN_SET_CMD[domain]
+
         def do_send():
-            return self.app.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": on})
+            return self.app.link.send_command(CommandGroup.IO, set_cmd, {"on": on})
 
         self.app.work.submit(do_send, lambda result, exc: None)
 
@@ -678,18 +719,20 @@ class IoPanel(ttk.Frame):
         def do_read():
             fault_line = self.app.link.send_command(CommandGroup.IO, IoCmd.FAULT_LINE_GET)
             estop = self.app.link.send_command(CommandGroup.IO, IoCmd.ESTOP_GET)
-            power = self.app.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
-            return fault_line, estop, power
+            power_main = self.app.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
+            power_safety = self.app.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
+            return fault_line, estop, power_main, power_safety
 
         def done(result, exc):
             self._busy = False
             if exc is not None:
                 return
-            fault_line, estop, power = result
+            fault_line, estop, power_main, power_safety = result
             asserted = bool((fault_line or {}).get("asserted", False))
             self.fault_lamp.itemconfig(self.fault_oval, fill="red" if asserted else "grey")
             self.estop_state_var.set("OPEN (tripped)" if (estop or {}).get("open") else "closed")
-            self.power_state_var.set("on" if (power or {}).get("on") else "off")
+            self.power_main_state_var.set("on" if (power_main or {}).get("on") else "off")
+            self.power_safety_state_var.set("on" if (power_safety or {}).get("on") else "off")
 
         self.app.work.submit(do_read, done)
 

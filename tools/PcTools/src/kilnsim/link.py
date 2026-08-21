@@ -638,6 +638,15 @@ class MockSimLink(SimLink):
             "estop_open": False,
             "fault_line_asserted": False,
             "active_fault_count": 0,
+            # Two independent DUT-power relays (PROTOCOL.md sec 5.5, resolved
+            # 2026-08-20): main domain (J18, DUT_POWER_SET/GET, cmd 6/8) and
+            # safety domain (J19, DUT_POWER_SAFETY_SET/GET, cmd 9/10) each get
+            # their own tracked bit here -- a mock that answered both GETs
+            # from one shared flag would hide exactly the main/safety mix-up
+            # bug this feature exists to catch. Both default to True/on,
+            # matching real firmware's power-on-by-default relay idle state.
+            "dut_power_main_on": True,
+            "dut_power_safety_on": True,
         }
 
     # -- test-double controls --------------------------------------------------
@@ -841,11 +850,24 @@ class MockSimLink(SimLink):
                 }
             if cmd == 7:  # ESTOP_GET
                 return {"open": self._state["estop_open"]}
-            if cmd == 8:  # DUT_POWER_GET
-                return {"on": True}
             if cmd == 4:  # ESTOP_SET
                 self._state["estop_open"] = bool(payload.get("open", False))
                 return {"ok": True}
+            # DUT_POWER_SET/GET (6/8, main domain / J18) and
+            # DUT_POWER_SAFETY_SET/GET (9/10, safety domain / J19) --
+            # PROTOCOL.md sec 5.5's "no combined set-both command" property
+            # holds here too: each pair only ever touches its own
+            # `dut_power_*_on` key, independently of the other.
+            if cmd == 6:  # DUT_POWER_SET (main)
+                self._state["dut_power_main_on"] = bool(payload.get("on", False))
+                return {}
+            if cmd == 8:  # DUT_POWER_GET (main)
+                return {"on": self._state["dut_power_main_on"]}
+            if cmd == 9:  # DUT_POWER_SAFETY_SET (safety)
+                self._state["dut_power_safety_on"] = bool(payload.get("on", False))
+                return {}
+            if cmd == 10:  # DUT_POWER_SAFETY_GET (safety)
+                return {"on": self._state["dut_power_safety_on"]}
         if group is CommandGroup.FAULT and cmd == 3:  # LIST
             return {"returned_count": 0, "faults": []}
         if group is CommandGroup.FAULT and cmd == 1:  # SCHEDULE

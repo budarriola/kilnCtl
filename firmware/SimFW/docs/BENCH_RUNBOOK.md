@@ -399,30 +399,32 @@ regardless of what you do here — section 2's table, `relay_owner_command_
 energize()` has no caller. Confirm K1/K2/K3/K5 edges track real commands;
 treat K4 staying open as expected, not a fixture defect.
 
-### Step 9 — E-stop, fault line, DUT power relay — one at a time
+### Step 9 — E-stop, fault line, DUT power relays — one at a time
 
 ```powershell
 kilnsim --port COMx estop open
 kilnsim --port COMx estop closed
 kilnsim --port COMx io fault-line
-kilnsim --port COMx power cycle --off-ms 500
+kilnsim --port COMx power cycle --off-ms 500 --domain main
+kilnsim --port COMx power cycle --off-ms 500 --domain safety
 ```
 **Pass (E-stop):** open/closed produces the expected STOP/healthy transition
 on `mcp__kilnctrl__safety_get_status`.
 **Pass (fault line):** a fault forced on the DUT's `Fault` GPIO shows up in
 `kilnsim io fault-line`'s reading.
-**Pass (DUT power):** the power cycle reboots the DUT and its telemetry
-shows the gap. **The J18/J19 question is design-resolved but not yet
-implemented** — `docs/HARDWARE.md` §0 item 6: the board's two independent
-12 V inputs (J18 main-domain, J19 safety-domain) need *two independent*
-relays, not one relay with the two domains commoned downstream of it (that
-would bond `GND_Main` and `GND_Safty` through the shared 12 V return and
-defeat the fixture's isolation — do **not** wire it that way even as a
-bench expedient). Today's code (`i2c_owner.c`) only drives one relay/one
-domain; a second relay's control bit is a firmware follow-on that has not
-landed. Until it does, this step only proves whichever single domain the
-fixture is actually wired to browns out — note which domain in your bench
-log (section 6).
+**Pass (DUT power):** each `--domain` cycle reboots only *that* domain's
+downstream load and its telemetry shows the gap for that domain — run the two
+commands **separately**, not back-to-back as a single "power both" action,
+and confirm each one leaves the other domain's supply undisturbed. Two
+independent relays exist (`docs/HARDWARE.md` §3.7, resolved 2026-08-20:
+`EXP1_PIN_DUT_POWER_MAIN`/`EXP1_PIN_DUT_POWER_SAFETY`, wire commands
+`DUT_POWER_SET`/`GET` (main, `0x06`/`0x08`) and `DUT_POWER_SAFETY_SET`/`GET`
+(safety, `0x09`/`0x0A`)) precisely so `GND_Main` and `GND_Safty` never get
+bonded through a shared control path — there is deliberately **no
+combined "power both" command** anywhere in `kilnsim` (CLI, GUI, or MCP), so
+do not "fix" that by scripting the two commands together into one bench
+step; note in your bench log (section 6) which domain(s) you actually
+exercised.
 
 ### Step 10 — First closed-loop firing attempt
 
@@ -494,7 +496,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 | Symptom | Likely cause |
 |---|---|
 | E-stop reads STOP no matter what `kilnsim estop` commands | `configure_exp1()`'s idle state (de-asserted/low at boot) may present as *open* (STOP) rather than *closed* (healthy) to GPIO9 — `docs/HARDWARE.md` §3.6 flags this as something to confirm at bring-up, not assumed either way |
-| DUT power cycle only browns out part of the board | J18/J19 dual-feed gap (§0 item 6) — see step 9 above |
+| Commanding one `--domain` power-cycles both J18 and J19 together | Two-relay wiring regression (`docs/HARDWARE.md` §3.7) — the domains must be electrically independent downstream of the relays; a shared feed reintroduces the `GND_Main`/`GND_Safty` bonding the fixture exists to prevent, so treat this as a hardware fault, not expected behavior |
 
 ---
 

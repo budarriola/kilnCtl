@@ -2,7 +2,9 @@
 
 Subcommands: ``state``, ``preset <name>``, ``fault <target> <type>
 [--at-temp N] [--zone N]``, ``estop <open|closed>``, ``power
-<cycle|on|off>``, ``run <scenario.yaml> [--seed N] [--report out.json]``
+<cycle|on|off> [--domain main|safety]`` (two independent DUT-power relays,
+PROTOCOL.md sec 5.5 -- main=J18 default, safety=J19; no combined "both"
+option, by design), ``run <scenario.yaml> [--seed N] [--report out.json]``
 (exit code = pass/fail/blocked -- the CI entry point: 0 PASS, 1 FAIL, 2
 BLOCKED-only -- see ``cmd_run``'s own comment for the full reasoning),
 ``monitor [--json]``.
@@ -115,20 +117,35 @@ def cmd_estop(args) -> int:
     return 0
 
 
+#: DUT power relay domain -> its own SET command (PROTOCOL.md sec 5.5): main
+#: (J18, the legacy DUT_POWER_SET) vs safety (J19, the new
+#: DUT_POWER_SAFETY_SET). Naming this by domain, not by wire command number,
+#: is deliberate -- a domain mix-up in a review or on a terminal should be
+#: obvious from the word "main"/"safety" alone. There is intentionally no
+#: "both" entry here: cmd_power only ever issues one domain's SET per
+#: invocation.
+_POWER_DOMAIN_SET_CMD = {
+    "main": IoCmd.DUT_POWER_SET,
+    "safety": IoCmd.DUT_POWER_SAFETY_SET,
+}
+
+
 def cmd_power(args) -> int:
     link = _make_link(args)
     _connect(link, args)
     action = args.action
+    domain = args.domain
+    set_cmd = _POWER_DOMAIN_SET_CMD[domain]
     on = {"on": True, "off": False, "cycle": False}[action]
     try:
-        link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": on})
+        link.send_command(CommandGroup.IO, set_cmd, {"on": on})
         if action == "cycle":
             time.sleep(max(0.0, args.off_ms) / 1000.0)
-            link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": True})
+            link.send_command(CommandGroup.IO, set_cmd, {"on": True})
     except SimLinkError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"dut power: {action}")
+    print(f"dut power ({domain}): {action}")
     return 0
 
 
@@ -230,6 +247,8 @@ def cmd_io(args) -> int:
             result = link.send_command(CommandGroup.IO, IoCmd.ESTOP_GET)
         elif args.io_command == "power-get":
             result = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
+        elif args.io_command == "power-safety-get":
+            result = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
         else:  # pragma: no cover - argparse `choices` already guards this
             print(f"error: unknown io subcommand {args.io_command!r}", file=sys.stderr)
             return 2
@@ -400,9 +419,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("state", choices=["open", "closed"])
     sp.set_defaults(func=cmd_estop)
 
-    sp = sub.add_parser("power", help="control the DUT's 12V power relay")
+    sp = sub.add_parser(
+        "power",
+        help="control a DUT 12V power relay (--domain main=J18 or safety=J19; there is no "
+             "'both' option -- the two domains are always switched separately)",
+    )
     sp.add_argument("action", choices=["cycle", "on", "off"])
     sp.add_argument("--off-ms", type=int, default=200, dest="off_ms")
+    sp.add_argument(
+        "--domain", choices=["main", "safety"], default="main",
+        help="which relay domain to command: main = J18 (default, legacy DUT_POWER_SET), "
+             "safety = J19 (DUT_POWER_SAFETY_SET). Run the command twice, once per domain, "
+             "to power-cycle both -- there is no single flag that does both at once.",
+    )
     sp.set_defaults(func=cmd_power)
 
     sp = sub.add_parser("run", help="run a scenario YAML; exit code 0=PASS, 1=FAIL, 2=BLOCKED-only")
@@ -442,7 +471,14 @@ def build_parser() -> argparse.ArgumentParser:
     iosp = io_sub.add_parser("estop-get", help="read back the E-stop loop's commanded state")
     iosp.set_defaults(func=cmd_io)
 
-    iosp = io_sub.add_parser("power-get", help="read back the DUT power relay's commanded state")
+    iosp = io_sub.add_parser(
+        "power-get", help="read back the main-domain (J18) DUT power relay's commanded state"
+    )
+    iosp.set_defaults(func=cmd_io)
+
+    iosp = io_sub.add_parser(
+        "power-safety-get", help="read back the safety-domain (J19) DUT power relay's commanded state"
+    )
     iosp.set_defaults(func=cmd_io)
 
     sp = sub.add_parser("ct", help="current-transformer emulation group")

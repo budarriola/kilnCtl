@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnsim.link import MockSimLink, SimLinkError  # noqa: E402
-from kilnsim.protocol import CommandGroup, Event, EventType, FaultCmd, SysCmd, TcCmd  # noqa: E402
+from kilnsim.protocol import CommandGroup, Event, EventType, FaultCmd, IoCmd, SysCmd, TcCmd  # noqa: E402
 
 
 class ConnectDisconnectTests(unittest.TestCase):
@@ -78,6 +78,53 @@ class BuiltInDefaultResponseTests(unittest.TestCase):
         self.link.send_command(CommandGroup.MODEL, 4, {"name": "fast_test"})
         self.assertEqual(len(self.link.sent_commands), 2)
         self.assertEqual(self.link.sent_commands[1], (CommandGroup.MODEL, 4, {"name": "fast_test"}))
+
+
+class DutPowerDomainTests(unittest.TestCase):
+    """MockSimLink must track main (J18, cmd 6/8) and safety (J19, cmd 9/10)
+    DUT-power relay state independently -- a mock that answered both GETs
+    from one shared flag would hide exactly the main/safety mix-up bug this
+    feature exists to catch (PROTOCOL.md sec 5.5)."""
+
+    def setUp(self):
+        self.link = MockSimLink()
+        self.link.connect()
+
+    def test_both_domains_default_on(self):
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET), {"on": True}
+        )
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET), {"on": True}
+        )
+
+    def test_main_set_only_affects_main(self):
+        self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": False})
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET), {"on": False}
+        )
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET), {"on": True}
+        )
+
+    def test_safety_set_only_affects_safety(self):
+        self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_SET, {"on": False})
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET), {"on": False}
+        )
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET), {"on": True}
+        )
+
+    def test_domains_can_hold_opposite_states_simultaneously(self):
+        self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": False})
+        self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_SET, {"on": True})
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET), {"on": False}
+        )
+        self.assertEqual(
+            self.link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET), {"on": True}
+        )
 
 
 class ScriptedResponseTests(unittest.TestCase):

@@ -265,11 +265,45 @@ def estop_set(state: str) -> str:
 
 @_tool()
 def dut_power_set(state: str) -> str:
-    """Switch the DUT's 12V power relay. ``state`` is "on" or "off"."""
+    """Switch the DUT's MAIN-domain (J18) 12V power relay. ``state`` is
+    "on" or "off". This is the legacy/default relay -- PROTOCOL.md sec 5.5's
+    DUT_POWER_SET -- and only ever affects J18; it does not touch the
+    safety-domain relay. Use ``dut_power_safety_set`` for J19."""
     if state not in ("on", "off"):
         raise ValueError("state must be 'on' or 'off'")
     _link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": state == "on"})
-    return f"dut power: {state}"
+    return f"dut power (main/J18): {state}"
+
+
+@_tool()
+def dut_power_get() -> str:
+    """Read back the MAIN-domain (J18) DUT power relay's commanded state."""
+    import json
+    reply = _link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
+    return json.dumps(reply, indent=2)
+
+
+@_tool()
+def dut_power_safety_set(state: str) -> str:
+    """Switch the DUT's SAFETY-domain (J19) 12V power relay. ``state`` is
+    "on" or "off". This is the fixture's second, independent DUT-power relay
+    (PROTOCOL.md sec 5.5's DUT_POWER_SAFETY_SET) -- it exists precisely so
+    J18 (main) and J19 (safety) can be switched independently without
+    bonding GND_Main and GND_Safty through a shared control path. There is
+    no combined "power both domains" tool; call ``dut_power_set`` separately
+    if the main domain also needs to change."""
+    if state not in ("on", "off"):
+        raise ValueError("state must be 'on' or 'off'")
+    _link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_SET, {"on": state == "on"})
+    return f"dut power (safety/J19): {state}"
+
+
+@_tool()
+def dut_power_safety_get() -> str:
+    """Read back the SAFETY-domain (J19) DUT power relay's commanded state."""
+    import json
+    reply = _link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
+    return json.dumps(reply, indent=2)
 
 
 @_tool()
