@@ -205,6 +205,15 @@ never `[x]`.
 - [ ] **S11 guard input** — `heat_commanded` is the last never-produced
       input in `safety_core_build_input()`, and it genuinely waits on Phase 6
       current sense. S9 was wired in `5f90325`.
+- [ ] **`virtual_simfw` advances sim by timescale² per wall second.** Its loop
+      scales the tick accumulator by timescale, then each tick advances sim by
+      `100 ms × timescale`. At `timescale: 10` its 2 Hz telemetry lands one
+      frame per ~50 sim-seconds — coarser than some guard windows. A real bug,
+      found while writing the K4 scenarios (`virtual_dut/README.md` Finding 7).
+- [ ] **`at_zone_temp: 400` is unreachable in `welded_ssr_midfire` and
+      `welded_contactor_s9`.** `fast_test` asymptotes at ~505 °C with a ~200 s
+      time constant, so 400 °C needs ~304 sim-seconds against a ~195 s run.
+      Recorded in both files as a second, independent blocker.
 - [ ] **`no_warn_storm` scenario FAIL** — pre-existing, survives a fine poll
       interval, still unexplained. Deliberately not loosened.
 - [ ] **MCP tool to push calibration constants into `SaftyFW` flash** — no
@@ -246,6 +255,9 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] First K4-closing scenarios (`8383a3a`) — S3 **trips** and S4 **warns**
+      genuinely, with a healthy control case where both stay quiet. 22
+      scenarios now, and `any_current_present` is no longer false suite-wide
 - [x] SPI access-pattern audit — `docs/SPI_ACCESS_AUDIT.md` (`46fa310`),
       which also found and fixed four responder defects: MISO permanently
       driven instead of tri-stated (three emulated chips share one physical
