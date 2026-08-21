@@ -161,7 +161,7 @@ _WIFI_AP_DEFAULT_HOST = "192.168.4.1"
 #: app_main's mdns_hostname_set("kiln") in KilnFW/App/main.c) -- resolves in
 #: both AP-fallback and station mode, so it's shown to the user as a
 #: network-independent alternative to the raw IP in the host field.
-_WIFI_MDNS_HOST = "kiln.local"
+_WIFI_MDNS_HOST = "kilnctl.local"
 
 #: Timeout for the Wi-Fi settings popup's HTTP calls to wifi_provision_http.c
 #: -- generous enough for a scan (which blocks the ESP's handler on the
@@ -1474,7 +1474,7 @@ class KilnCtrlApp:
             host_row, text="Refresh Status", command=self.wifi_settings_refresh_status_async
         ).pack(side="left")
 
-        # Also reachable at kiln.local -- the firmware advertises this over
+        # Also reachable at kilnctl.local -- the firmware advertises this over
         # mDNS unconditionally at boot (both AP-fallback and station mode),
         # so it works even when the IP above is stale or unknown. Shown as a
         # copy-pasteable hint, not wired as the host field's default: mDNS

@@ -389,23 +389,42 @@ void app_main(void)
                  esp_err_to_name(wifi_err));
     }
 
-    // Advertises this board as "kiln.local" over mDNS so the web UI/pc_tools
+    // Advertises this board as "kilnctl.local" over mDNS so the web UI/pc_tools
     // don't need the station's raw IP -- reachable from Wi-Fi's AP fallback
     // and station modes alike, same as the HTTP server itself. Needs the
     // netif/event loop wifi_prov_start() just brought up, but not a joined
     // network, so it runs unconditionally rather than gating on wifi_err:
-    // the AP fallback case still wants kiln.local to resolve. Non-fatal like
+    // the AP fallback case still wants kilnctl.local to resolve. Non-fatal like
     // everything else here -- no name resolution is not a reason to fail
     // app_main.
     heap_stage("wifi_prov");
 
     esp_err_t mdns_err = mdns_init();
     if (mdns_err == ESP_OK) {
-        mdns_hostname_set("kiln");
+        // Two names on purpose. "kilnctl" is the primary because it is the
+        // name a user has already been told twice by the time they type it --
+        // the AP SSID is kilnCtl and so is the mDNS instance name below -- and
+        // reported on the bench 2026-08-20: kilnctl.local was tried first and
+        // failed to resolve while the board was up and serving, because the
+        // hostname was "kiln" and only the hostname resolves. An instance name
+        // labels the _http service in a service browser; it never answers an
+        // A record.
+        //
+        // The old name was "kiln". There is deliberately no alias for it: a
+        // delegated hostname only answers A records for an address list the
+        // caller supplies and keeps up to date across every IP change, so
+        // mdns_delegate_hostname_add("kiln", NULL) registers a name that
+        // resolves to nothing -- tried on the bench 2026-08-20 and confirmed
+        // silent. Carrying a second name correctly would mean mirroring the
+        // station's address on every GOT_IP, which is real machinery for a
+        // convenience alias. Every in-repo reference was renamed instead; if
+        // an outside bookmark breaks, the raw IP and the LCD's second QR both
+        // still work.
+        mdns_hostname_set("kilnctl");
         mdns_instance_name_set("kilnCtl");
         mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     } else {
-        ESP_LOGW(TAG, "mdns_init failed: %s -- no kiln.local this boot", esp_err_to_name(mdns_err));
+        ESP_LOGW(TAG, "mdns_init failed: %s -- no kilnctl.local this boot", esp_err_to_name(mdns_err));
     }
 
     // --- I2C bus -----------------------------------------------------------

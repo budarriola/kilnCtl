@@ -49,7 +49,7 @@
 //     wifi_prov_get_state() == WIFI_PROV_STATE_UNPROVISIONED/AP_MODE):
 //     WIFI:T:WPA;S:<ap_ssid>;P:<ap_password>;; -- both iOS and Android
 //     camera apps parse this natively, no app needed.
-//   - sta_connected: http://kiln.local (mDNS hostname read the same way
+//   - sta_connected: http://kilnctl.local (mDNS hostname read the same way
 //     wifi_status_ui.c does) plus a second QR for the raw IP, since mDNS
 //     isn't reliable on every phone/network.
 // Neither lv_qrcode_update() call runs on every UI_PAGE_NETWORK_REFRESH_MS
@@ -824,7 +824,7 @@ static void refresh_cb(lv_timer_t *timer)
         if (mdns_hostname_get(mdns_host) == ESP_OK) {
             snprintf(dashboard_url, sizeof(dashboard_url), "http://%s.local", mdns_host);
         } else {
-            snprintf(dashboard_url, sizeof(dashboard_url), "http://kiln.local");
+            snprintf(dashboard_url, sizeof(dashboard_url), "http://kilnctl.local");
         }
         update_qr_if_changed(s_dashboard_qr, s_dashboard_qr_last, sizeof(s_dashboard_qr_last), dashboard_url);
         lv_label_set_text(s_dashboard_qr_caption, dashboard_url);
@@ -1193,7 +1193,7 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_width(s_saved_list, lv_pct(100));
     lv_obj_set_height(s_saved_list, 70);
 
-    /* STA-connected QR row -- dashboard (kiln.local) and raw-IP QRs, hidden
+    /* STA-connected QR row -- dashboard (kilnctl.local) and raw-IP QRs, hidden
      * until sta_connected (this file's header comment). */
     s_sta_qr_row = lv_obj_create(s_home_section);
     lv_obj_add_flag(s_sta_qr_row, LV_OBJ_FLAG_HIDDEN);
@@ -1218,7 +1218,7 @@ lv_obj_t *ui_page_network_build(void)
     lv_qrcode_set_size(s_dashboard_qr, UI_PAGE_NETWORK_QR_SIZE_PX);
     s_dashboard_qr_caption = lv_label_create(dash_col);
     lv_obj_set_style_text_color(s_dashboard_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_dashboard_qr_caption, "http://kiln.local");
+    lv_label_set_text(s_dashboard_qr_caption, "http://kilnctl.local");
     s_dashboard_qr_last[0] = '\0';
 
     lv_obj_t *ip_col = lv_obj_create(s_sta_qr_row);

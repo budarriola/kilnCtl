@@ -420,7 +420,7 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   appeared to be missing from the network.
   Persistence across a flash was then verified directly: reflashed
   bootloader + partition table + app, and the next boot joined straight from
-  `wifi_nvs` with no migration line. The board answers at `kiln.local`
+  `wifi_nvs` with no migration line. The board answers at `kilnctl.local`
   (192.168.1.156). Stated plainly because it is the one case people assume
   wrongly: **a full-chip `esptool erase_flash` still destroys everything,
   including this partition.**

@@ -1923,7 +1923,7 @@ def wifi_forget(ssid: str) -> str:
 # current station IP (from the UART-side WIFI tools, which always work even
 # with Wi-Fi itself down or never provisioned), fall back to the board's own
 # fallback-AP address. An explicit `host` argument always wins over both --
-# useful for kiln.local (mDNS) or a host on a network the UART link can't see
+# useful for kilnctl.local (mDNS) or a host on a network the UART link can't see
 # into (e.g. this MCP server's serial port is on a different PC than the one
 # actually joined to the board's Wi-Fi).
 #
@@ -1954,7 +1954,7 @@ def ota_get_challenge(host: Optional[str] = None) -> str:
     first step for a normal push. Useful to confirm the board's OTA HTTP
     surface is reachable at all, or to hand-verify the HMAC scheme.
 
-    `host`: board IP or hostname (e.g. "192.168.1.42" or "kiln.local").
+    `host`: board IP or hostname (e.g. "192.168.1.42" or "kilnctl.local").
     Defaults to the board's current station IP (via wifi_get_status()'s UART
     query) if connected, else the board's fallback-AP address 192.168.4.1.
     """
