@@ -25,15 +25,16 @@ or restore anything below — it is a lookup, not a table of contents.
 | 3, Web items 1-6 | Table `.table-scroll` wrapper, button min-height, AP-mode QR viewport, coupling-matrix zone count, fixed-width canvas audit, DHCP/static IP toggle | Completed, removed |
 | LCD: profile creation page (planned) | New profile-builder page (graph view, point stepper) | Built as `ui_page_profile_builder_{zones,segment,review}.c` — see `ARCHITECTURE_DECISIONS.md` ("Page organization"); note the shipped flow uses stepper cards, not the originally-planned graph/drag view |
 | Web: settings/profile import-export (planned) | Same feature, pre-prune draft | Still open — see "Open: settings import/export and profile import/export" above |
-| Web: page structure rework (planned) | Route map, dashboard reorg | Partly built (`safety_page.html`, `diagnostics_page.html`, `nav.js`/`app.js`) — see `ARCHITECTURE_DECISIONS.md` ("Page organization"); the `/settings` split is still open, see "Open: web page structure" above |
-| 4 item 1 | Shared `nav.js` header + bottom nav bar | Built — `ARCHITECTURE_DECISIONS.md` ("Page organization") |
+| Web: page structure rework (planned) | Route map, dashboard reorg | Built — `safety_page.html`, `diagnostics_page.html`, `manual_page.html`, `settings_page.html` trimmed to the danger zone, `main_page.html` reordered/trimmed, `nav.js`/`app.js` — see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
+| Web: global-chrome rework (planned 2026-08-21) | Drop-down nav, Home button, dashboard reorder, settings trim | Built same day — see `ARCHITECTURE_DECISIONS.md` ("Page organization", "Global chrome rework") |
+| 4 item 1 | Shared `nav.js` header + bottom nav bar | Built, then the bottom nav was deleted entirely in the chrome rework — `ARCHITECTURE_DECISIONS.md` ("Page organization") |
 | 4 item 2 | Sticky Stop control on every page | Built — `app.js`, `ARCHITECTURE_DECISIONS.md` |
 | 4 item 3 | Shared `/app.js` poller (single `/api/status` fetch, visibility-aware) | Built — `app.js`, `ARCHITECTURE_DECISIONS.md` |
-| 4 item 4 | Connection-lost banner, `.kc-stale`/`.kc-live-value` | Built (mechanism); still open per-page adoption — see "Open" items above |
+| 4 item 4 | Connection-lost banner, `.kc-stale`/`.kc-live-value` | Built and adopted on every page — `ARCHITECTURE_DECISIONS.md` ("Page organization") |
 | 4 item 5 | Confirm step for destructive actions | Built, and **corrected 2026-08-20**: Start and Stop both confirm now, not just destructive actions — see `ARCHITECTURE_DECISIONS.md` ("Page organization") and `App/drivers/ui_confirm.c` |
 | 4 item 6 | Auth / session-token layer, scope decision | Still open, explicitly deferred by the owner — see "Open" section above |
-| 4 item 7 | Unit parity (°F/°C) | Still open — see "Open: web page structure" item 7 above |
-| 4 item 8 | `main_page.html` trim as it splits | Still open — folded into "Open: web page structure" item 5 |
+| 4 item 7 | Unit parity (°F/°C) | Built — shared device-backed `unit_pref.c/.h`, see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
+| 4 item 8 | `main_page.html` trim as it splits | Built — see `ARCHITECTURE_DECISIONS.md` ("Page organization") |
 | 5. Data already on the wire | `/api/status` field inventory for new web pages | Completed, removed (fields now just exist in the API; nothing to track) |
 | 6. TLS for web UI and OTA | TLS plan | Still open, explicitly deferred by the owner — see "Open: TLS" section above |
 | 7. Not yet done / 2026-08-20 decisions | Recap of decided-but-unbuilt scope | Superseded by the "Open" sections above (this file now tracks only open work) |
@@ -44,43 +45,6 @@ usability and cleanup fixes... the webpage should be optimized for a phone
 or tablet. and the lcd should not require scrolling." That budget rule and
 its arithmetic convention are recorded once in `ARCHITECTURE_DECISIONS.md`
 ("LVGL / LCD rendering" section) rather than re-derived per page here.
-
-## Open: web global-chrome rework (drop-down nav, dashboard reorder, settings trim)
-
-Owner spec, 2026-08-21. Supersedes the bottom-nav-bar description in
-`ARCHITECTURE_DECISIONS.md` ("Page organization") and the "still open"
-`GET /settings` nav-hub bullet below — `settings_page.html`'s hub already
-exists; this moves its links into the drop-down and cuts the page down to
-just the danger zone.
-
-**Chrome (`App/drivers/nav.js`, every page):**
-1. Delete the bottom nav bar entirely.
-2. Menu button opens a top-down, scrollable drop-down (was slide-up).
-3. Drop-down list = every link currently in `settings_page.html`'s "Board
-   configuration" section (readiness, zones, relays, manual, profiles, wifi,
-   ota, diagnostics, safety) **plus** a "Reset" item that goes to `/settings`
-   (the danger zone lives there once item 6 below lands).
-4. Add a Home button next to the menu button, linking to `/`.
-5. Remove the "kilnCtl" brand text; put the page name in the top bar in its
-   place, and delete the separate page-name heading every page currently
-   renders below the brand.
-
-**`/settings` (`settings_page.html`):** 6. Delete everything except the
-danger zone now that its links live in the drop-down.
-
-**Dashboard (`main_page.html`):**
-7. Remove cold-junction temperatures; show thermocouple temps only.
-8. Remove the Settings button from the history section.
-9. Reorder top-to-bottom to match the LCD: firing profile, then graph, then
-   thermocouple temps.
-10. Remove the "Thermocouples" and "Firing profiles" `<h2>` headings.
-11. Show each thermocouple's linked relay status next to its temperature.
-
-**Open design question (not mechanical — resolve during implementation):**
-the thermocouple-to-relay mapping isn't in `/api/status`; it's `thermo_mask`/
-`relay_mask` in the zones config (`zones_http.c`), so item 11 must join two
-data sources client-side. Decide the no-mapping case explicitly: default is
-to show **no relay state** for an unmapped channel, never a fabricated one.
 
 ## Open: settings import/export and profile import/export
 
@@ -111,55 +75,6 @@ structs yet.
    double as a profile file or vice versa.
 4. Needs confirming actual field lists in firmware source before
    implementation starts.
-
-## Open: web page structure — settings hub and dashboard split
-
-Requested verbatim: *"rework the webpage structure. be sure to include
-everything that is included in the lcd that makes sense and more. i dont
-want everyhting mashed into the main page there should be a seprate page
-for settings. and the main page should be reminicient of the lcd main page
-but be allowed to scroll."*
-
-**Done already** (see `ARCHITECTURE_DECISIONS.md`): `safety_page.html`,
-`diagnostics_page.html` (merged with board-health), `thermo_faults_page.html`,
-shared `nav.js`/`app.js` (sticky Stop, connection-lost banner, confirm-on-
-destructive including Start/Stop) wired into every existing page.
-
-**Still open — the part that actually splits the dashboard:**
-
-1. `main_page.html` is still 670 lines and still carries its own inline
-   Settings block (`<h2>Settings</h2>`, links to `/readiness`,
-   `/settings/zones`, `/settings/relays`, `/wifi`, `/ota`), a Danger zone
-   block, and the manual per-relay toggles — none of that has moved yet.
-2. `settings_page.html` (nav hub) is built; its "global-chrome rework" open
-   item above now trims it back down to the danger zone once the drop-down
-   takes over its links.
-3. **`GET /settings/manual`** (new `manual_page.html`) — the manual relay
-   toggles, moved off the dashboard per the 2026-08-20 decision: a phone in
-   a pocket can brush a screen in a way a panel mounted on a kiln cannot, so
-   the dashboard becomes pure monitoring plus profile run controls once
-   this lands.
-4. The Danger zone block moves to `/settings` under its own heading, keeps
-   its distinct accent-5 styling, and already has the confirm step
-   (`app.js`) once it's there.
-5. Once the split lands, `main_page.html` should shrink materially — worth
-   measuring gzip'd flash cost before/after rather than assuming it's a
-   wash.
-6. **`.kc-stale .kc-live-value` is inert.** The connection-lost banner
-   (`app.js`) is wired to dim any element carrying both classes, but no
-   page annotates its live numeric fields with `.kc-live-value` yet. Fold
-   this into whichever page work touches each page's markup next, rather
-   than a separate pass.
-7. **Unit parity.** The web renders °C from the API; the LCD honors a °F/°C
-   setting. The same value should read the same on both surfaces — pick up
-   the board's unit setting rather than adding an independent web-only
-   toggle.
-
-`max_uri_handlers` is 56 in `wifi_provision_http.c` against roughly 32+3
-registered today (post diagnostics/safety/thermo) — recount against the
-actual cap before adding the two new routes above; a page that overflows
-the cap silently 404s (`httpd_register_uri_handler` failure is logged and
-non-fatal, per the 2026-08-11 lesson).
 
 ## Open, explicitly deferred by the owner: auth / session layer
 

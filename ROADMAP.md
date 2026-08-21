@@ -226,9 +226,6 @@ because it changes what a bare main board will do.
       power — built and wired to the same status cache the wire frames land
       in; reads null/"---" today because no Pico has ever sent the frames on
       this bench (M0), not because of a code gap
-- [ ] Web global-chrome rework (top drop-down nav, Home button, dashboard
-      reorder, `/settings` trimmed to the danger zone) — open, see
-      `firmware/KilnFW/docs/UI_PLAN.md` "Open: web global-chrome rework"
 - [ ] **Known open bug**: a wrong-but-parseable static IP does not trigger
       AP-fallback's normal DHCP-timeout recovery — see
       `firmware/KilnFW/TODO.md`'s Wi-Fi section

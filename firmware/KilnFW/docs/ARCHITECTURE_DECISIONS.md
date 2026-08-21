@@ -68,6 +68,18 @@ the plan.
   destinations across 2 pages (3 rows x 2 cells each, fixed-height
   internally-scrollable), up from the 7-destination/2-column layout of the
   2026-08-18 pass.
+- **LCD profile browse/select/start is built**, reachable from the
+  Configuration hub's "Profiles" cell: `ui_page_profiles.c` plus
+  `ui_page_profiles_mine.c`/`_family.c`/`_builtin_list.c`,
+  `ui_page_profile_detail.c`, and `ui_page_profile_segments.c`. This was
+  blocked on flash headroom (`factory` partition down to 4% free); that
+  blocker is gone now that the partition table was reworked (`factory`
+  moved to `0x810000`, capacity `0x300000`, ~51% free on the last build —
+  see TODO.md 9.1). Hardware-verified 2026-08-21 via injected touch:
+  home -> config -> a Start confirm dialog raised and cancelled with relays
+  confirmed off. The home page's Start button keeps its own fallback chain
+  (current non-idle profile, else last boot record) independent of the new
+  browse page.
 - **Profile creation departs from its original graph-view plan.** No
   `lv_chart` — the built flow is zone-pick -> per-segment ramp/hold-temp/
   hold-time editing via numeric-stepper cards (same pattern as other pages'
@@ -76,20 +88,33 @@ the plan.
   ~264px no-scroll budget without a second sub-view.
 - Web: `safety_page.html`, `diagnostics_page.html` (merges the LCD's
   diagnostics + board-health content since the web can scroll),
-  `diagnostics/thermo` (`thermo_faults_page.html`), plus shared `nav.js`
-  (header + bottom nav bar) and `app.js` (sticky Stop, connection-lost
-  banner that dims `.kc-live-value` under `.kc-stale`, confirm-on-destructive
-  including Start and Stop) are built and wired into all existing pages.
-  `GET /api/status` gained fw version, build string, uptime, reset reason
-  and heap figures for the new diagnostics page.
-- Still open, not built: a `/settings` nav-hub page and a `/settings/manual`
-  page (manual relay toggles moved off the dashboard) — `main_page.html`
-  still carries its own inline Settings block, Danger zone, and manual relay
-  toggles rather than the split described in `docs/UI_PLAN.md`. Backup/
-  restore (settings + profile import/export) is also not started.
-- `.kc-stale .kc-live-value` is wired to the connection-lost banner
-  (`app.js`) but no page annotates its live numeric fields with that class
-  yet, so the dim-on-stale behavior is inert until a page opts in.
+  `diagnostics/thermo` (`thermo_faults_page.html`), `settings/manual`
+  (`manual_page.html`, the per-relay toggles moved off the dashboard), plus
+  shared `nav.js` and `app.js` (sticky Stop, connection-lost banner that
+  dims `.kc-live-value` under `.kc-stale`, confirm-on-destructive including
+  Start and Stop) are built and wired into all existing pages. `GET
+  /api/status` gained fw version, build string, uptime, reset reason and
+  heap figures for the new diagnostics page. `.kc-live-value` is annotated
+  on every page's live numeric fields, so the stale-dim behavior is live
+  everywhere, not just wired.
+- **Global chrome rework (2026-08-21):** the bottom nav bar is gone;
+  `nav.js`'s Menu button opens a top-down scrollable drop-down holding all
+  10 board-configuration destinations plus a "Reset" item
+  (`/settings#danger`); a Home button sits next to Menu on every page except
+  the dashboard. The "kilnCtl" brand text and each page's duplicate `<h1>`
+  are replaced by the page name in the top bar. `settings_page.html` now
+  holds only the danger zone. `main_page.html` (dashboard) is reordered
+  execCard -> history canvas -> picker row (profile select, Start) ->
+  channels, with cold-junction temps, both section `<h2>`s, and the
+  history/settings prose removed. Each thermocouple's relay status is shown
+  by joining `/api/zones`' `thermo_mask`/`relay_mask` against `/api/status`'
+  relay bits client-side; a channel with no mapping shows no relay state
+  (never a fabricated one) — this was the one open design question and it
+  resolved to "no state over guessed state."
+- Unit preference (°C/°F) is shared and device-backed (`unit_pref.c/.h`),
+  not an independent per-surface toggle: `GET /api/status`'s `temp_unit`,
+  `POST /api/unit_pref`, UART `CONTROL_CMD_GET/SET_UNIT_PREF`, and the LCD's
+  Configuration-hub toggle all read/write the same setting.
 
 ## OTA-adjacent decisions
 

@@ -59,15 +59,13 @@ in the fewest taps (phone-screen constraint). Built as described.
 - **Backup / restore page — OPEN, not built.** Export/import saved
   profiles + zone/relay/network config as one blob. No blockers.
 
-**Web page structure rework — planned in `docs/UI_PLAN.md`, NOT built
-(2026-08-20).** Settings gets its own hub page (`GET /settings`), the
-dashboard becomes scrollable and LCD-like, and Safety/Diagnostics/
-Thermocouple-faults gain web equivalents (two web pages, not three, since
-the web can scroll). Follow-up decisions recorded there: server-side
-session-token auth on writes, manual relay toggles move to `/settings/manual`,
-polling stays (no push), and **TLS for this UI and OTA (section 9.3) is
-planned but not authorized to build**. See `docs/UI_PLAN.md` for the full
-route map/detail; keep it in sync with the LCD side per section 10.5.
+**Web page structure rework — DONE (2026-08-20/21).** `settings_page.html`
+(now trimmed to just the danger zone), `manual_page.html`, `safety_page.html`,
+`diagnostics_page.html`, `thermo_faults_page.html`, a scrollable/LCD-like
+dashboard reorder, and the top drop-down nav/Home button chrome rework are
+all built — see `docs/ARCHITECTURE_DECISIONS.md` ("Page organization").
+Still open, unauthorized-to-build: the session-token auth layer on writes
+and TLS for this UI and OTA (section 9.3) — see `docs/UI_PLAN.md`.
 
 ## 1. Wi-Fi provisioning and resilience — DONE, hardware-verified
 
@@ -168,28 +166,16 @@ what `profiles_start()` actually refuses. DONE and hardware-verified 2026-08-20.
 
 ### 5A.2 Still open
 
-- [ ] **No LCD access to profiles at all** — pre-existing, more visible now with
-      28 shipped schedules. No `ui_page_profiles.c`; the home page's Start uses a
-      fallback chain (current non-idle profile, else last boot record). An
-      operator at the kiln cannot choose a schedule on the panel. Costs flash
-      (see below) and a page design that survives the no-scroll rule.
 - [ ] **Known edge in the UNREACHABLE test (minor).** The steady-state ceiling
       test applies to *cooling* segments too, though a cooling target is reachable
       by construction. Only bites within 5°C of the ceiling on a descending
       segment, which no real schedule does. Left alone deliberately (already
       conservative in the safe direction); fix if it ever matters is to gate on
       `target > start_c`.
-- [ ] **Flash headroom is the binding constraint: 4% free (~59 KB) in the
-      `factory` app partition** — the smallest app partition on the board
-      (1500K; `ota_0`/`ota_1` are 2048K each). ~8.1 MB of the 16 MB chip
-      (`0x7F0000..0x1000000`) is still unallocated. Anything sizeable (an LCD
-      profiles page, TLS, a second language) needs the partition table
-      revisited first — relocate `factory` into the spare region and grow the
-      app slots, not shrink anything currently stored. Two hard constraints on
-      any repartition: app partitions must stay 64K-aligned, and the first three
-      partitions (`nvs`/`phy_init`/`factory`) must stay byte-identical to
-      ESP-IDF's stock `partitions_singleapp_large.csv` — live NVS data already
-      sits at `0x9000` on the physical board.
+
+LCD profile access (browse/select/start) and the flash-headroom constraint
+that used to block it are both done — see `docs/ARCHITECTURE_DECISIONS.md`
+("Page organization") and §9.1 above for the reworked partition table.
 
 ## 5. Web UI — Fire profile creation page
 
