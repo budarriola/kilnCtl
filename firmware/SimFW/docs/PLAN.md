@@ -14,7 +14,7 @@
 
 **What is actually true right now.** Every task and every `src/sim/` module
 in this plan's architecture is implemented — no stubs remain anywhere in
-`firmware/SimFW/src/` — and the standard 25-scenario test library (§8 of
+`firmware/SimFW/src/` — and the standard 27-scenario test library (§8 of
 `DESIGN_NOTES.md`) exists as real YAML. That is **build-verified and
 host-test-verified**, not hardware-verified, and the two are not the same
 thing:
@@ -26,7 +26,7 @@ thing:
   `CommonFW` `benchproto` protocol library passes its own host tests (18/18)
   alongside the pre-existing `kilnlink` suite; `kilnsim` has its own pytest
   suite (59 passed + 17 subtests) and `kilnctrl`'s suite (104 passed) is
-  confirmed untouched; all 25 scenario YAML files load cleanly through
+  confirmed untouched; all 27 scenario YAML files load cleanly through
   `kilnsim`'s loader.
 - **Genuinely hardware-gated — nothing below has ever touched real
   silicon:** the PIO SPI slave timing proof at 4 MHz (M-A's exit criterion —
@@ -38,7 +38,7 @@ thing:
   currently an IDENTITY placeholder, explicitly marked
   `TODO(M-D calibration)`, not the real sweep-and-fit table); every
   relay-sense, E-stop, DUT-power, and ground-isolation claim in
-  `DESIGN_NOTES.md` §3; and every one of the 25 scenarios actually *running*
+  `DESIGN_NOTES.md` §3; and every one of the 27 scenarios actually *running*
   against a real `KilnFW`+`SaftyFW` pair (a scenario existing and loading is
   not the same as it having ever executed against hardware — see §10's
   milestone table).
@@ -98,10 +98,6 @@ never `[x]`.
       failure paths (truncated args, range refusals, ownership refusals) stay
       silent by documented design; `tools/PcTools/src/kilnctrl` still only
       checks the transport ACK and would need updating to benefit.
-- [ ] **`virtual_simfw.c` makes `dut_power_on` observable but still doesn't
-      gate anything.** `SIM_EVENT_DUT_POWER`/`LINK_UP` are now emitted, but
-      relay drive, CT current, and telemetry are all still unaffected by
-      power state — the reason `power_blip`'s two clauses stay BLOCKED.
 - [ ] **`kilnsim`'s wire protocol has no SAFETY command group at all**
       (`protocol.py`: SYS/MODEL/TC/CT/RELAY/IO/FAULT/EVT) — it addresses only
       the plant simulator (`virtual_simfw`, or the bench fixture Pico on real
@@ -126,13 +122,14 @@ never `[x]`.
       unpowered. (§11 item 9)
 - [ ] **DUT-power inrush measurement** — the ~60 A / ~190 µs figure rests on
       an *assumed* source resistance. (§11 item 5)
-- [ ] **S6a is bench-only.** It cannot be provoked in `virtual_dut` for two
-      *fixture-side* reasons: `virtual_simfw.c` has no I2C-expander/opto
-      emulation for the Fault line, so `fault_line_asserted` is read in three
-      places and written in none; and `run_dut_scenarios.py` would not
-      forward it to `dut_core.exe`'s TICK `<main_fault>` field anyway.
-      **`SaftyFW`'s own `main_fault_asserted` wiring is complete and
-      correct** — this is a fixture-side gap, not a `SaftyFW` gap.
+- [ ] **S6a is narrower than bench-only now.** The ESP-asserted path fires in
+      `virtual_dut` via a new `set_main_fault` operator action
+      (`mainfault_esp_asserted.yaml`/`mainfault_no_nuisance_trip.yaml`, both
+      non-vacuous, `safety_guards.c` unmodified). **Still bench-only:**
+      `mainfault_tc_disconnect.yaml`'s two clauses — a different causal chain
+      (TC fault → KilnFW guard-6 → Fault-line opto → `fault_line_asserted`) —
+      since `virtual_simfw.c` still has no I2C-expander/opto emulation for
+      that line.
 - [ ] **Verify every provisional GPIO assignment** in `HARDWARE.md`
 - [ ] **`UnitTestFw` decommission** — gated on proving the replacement link on
       real hardware. (§12)
@@ -147,7 +144,7 @@ never `[x]`.
       CDC link and `kilnsim` — `DESIGN_NOTES.md` §12
 - [x] `kilnsim` PC toolset (CLI, Tk GUI, MCP server, scenario loader, report
       generator) — `DESIGN_NOTES.md` §6
-- [x] 25-scenario standard library — `DESIGN_NOTES.md` §8
+- [x] 27-scenario standard library — `DESIGN_NOTES.md` §8
 - [x] PIO SPI mode-1 clocking bug found and fixed — `DESIGN_NOTES.md` §14
 - [x] `virtual_simfw`/`virtual_dut`/`virtual_kiln`, the fourth software-only
       verification layer — `DESIGN_NOTES.md` §10
@@ -205,6 +202,10 @@ never `[x]`.
       ACKing an unimplemented subcommand (`c91ed50`)
 - [x] Stale `push_ct_cal.py` docstring describing an already-closed KilnFW
       relay gap fixed (`4680b5e`)
+- [x] `power_blip`'s fixture-fidelity gap closed (`dut_power_on` now gates
+      K1/K2/K3/K5 + `link_up`) and S6a made genuinely provokable via a new
+      `set_main_fault` operator action — 27 scenarios, 24 PASS / 3 BLOCKED
+      (`63acef8`)
 
 ---
 
@@ -214,7 +215,7 @@ Ordered by dependency and risk; each states its exit criterion — the thing
 that must be *demonstrated*, not just built. **Software for every milestone
 M-A through M-H has been written** (skeleton, protocol, thermal model, TC
 emulation, CT synthesis, relay/IO, fault engine, MCP/CLI/GUI, and the
-25-scenario library all exist in the tree). What follows is honest about
+27-scenario library all exist in the tree). What follows is honest about
 which exit criteria that satisfies and which it does not — build-verified
 and host-tested is not hardware-verified, and for this fixture almost every
 exit criterion as originally written specifically demands hardware evidence.
@@ -300,28 +301,28 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   every MANUAL mode.
   **Status: SOFTWARE MET, HARDWARE NOT MET.** `kilnsim`'s MCP server, CLI,
   GUI, scenario loader, and report generator all exist; the YAML schema is
-  frozen and all 25 scenario files parse cleanly through the loader. None of
+  frozen and all 27 scenario files parse cleanly through the loader. None of
   the named scenarios — or any other — has ever run against a real
   `KilnFW`+`SaftyFW` pair, so no scenario report has ever been archived from
   a live run, and the GUI's MANUAL-mode controls have never driven real
-  fixture hardware. All 25 scenarios *have* run against
+  fixture hardware. All 27 scenarios *have* run against
   `virtual_simfw`+`virtual_dut` (`DESIGN_NOTES.md` §10) — real `SimFW`
   simulation code and real `SaftyFW` guard code, on a PC, with no RP2040 at
   all — but "real `KilnFW`+`SaftyFW`" in this exit criterion means silicon,
-  and none has run. Latest `virtual_dut` run: 21 PASS / 4 BLOCKED / 0 FAIL
-  across all 25 (`100799d`, `d418bbf`) — see `firmware/SimFW/tools/
+  and none has run. Latest `virtual_dut` run: 24 PASS / 3 BLOCKED / 0 FAIL
+  across all 27 (`63acef8`) — see `firmware/SimFW/tools/
   virtual_dut/results/SCENARIO_RESULTS.md` for the per-scenario pattern.
 - [~] **M-H — Standard library complete.** All 16 scenarios written and run.
   **Exit:** each maps to its `GUARD_TEST_MATRIX.md` rows and that file is
   updated in the same change; `kilnsim run --all` is a one-command
   regression gate.
-  **Status: LIBRARY MET (over-delivered: 25, not 16), "AND RUN" NOT MET
+  **Status: LIBRARY MET (over-delivered: 27, not 16), "AND RUN" NOT MET
   AGAINST REAL HARDWARE.** `GUARD_TEST_MATRIX.md` §5 cross-references guards
   to scenarios; its reachability subsection (§6) records, per guard, whether
-  it can currently fire at all. **None of the 25 scenarios has ever run
+  it can currently fire at all. **None of the 27 scenarios has ever run
   against real hardware** — "written" and "run" are different verbs in this
   milestone's own exit criterion, and only the first is true against
-  silicon today. All 25 *have* run against `virtual_simfw`+`virtual_dut`,
+  silicon today. All 27 *have* run against `virtual_simfw`+`virtual_dut`,
   which is real code but not real hardware — see `DESIGN_NOTES.md` §§10–11
   for what that run found (mostly: guards whose inputs weren't populated in
   `SaftyFW` at the time, since fixed, not scenario or fixture bugs).

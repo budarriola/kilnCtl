@@ -368,7 +368,11 @@ has 7.
   (pin 10, J19), separate protocol commands, **deliberately no combined
   "set both" call anywhere in the stack** — including CLI/GUI/MCP, which is
   test-enforced (`0926213`) — so bonding the two ground domains can never be
-  a silent default.
+  a silent default. **K4 must never be masked on DUT power loss** (`63acef8`,
+  `virtual_simfw.c`): its coil is on the separate GND_Safty relay fed from
+  J19 and driven by the safety processor, while `FT_DUT_POWER_CUT` actuates
+  only the GND_Main relay — only K1/K2/K3/K5 float open when GND_Main loses
+  J18.
 
 ### 3.5 Isolation discipline
 
@@ -857,6 +861,11 @@ first two layers in cost, and it is genuinely useful, not a toy:
   `kilnsim`'s own report evaluator can score. See its own README for exactly
   which `SaftyFW` files are compiled verbatim, which are deliberately out of
   scope (and why), and its "Findings" section.
+- **`virtual_simfw`'s TELEMETRY broadcast is real-time-paced at 2 Hz
+  regardless of time-scale** (`63acef8`) — so a scenario window shorter than
+  ~500 ms of *wall* time can't be observed, producing a flaky pass/fail race
+  rather than a clean failure. This is why `power_blip`'s windows widened
+  from 0.2 s/1 s to 25 s.
 
 **What this layer is not:** hardware verification. Neither tool's README
 claims otherwise — no real SPI bus, no real relay coil, no real ESP, no
