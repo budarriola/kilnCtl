@@ -51,7 +51,14 @@ CHECKS: list[tuple[str, str, float]] = [
     ("SAFETY", "safety_get_status", 0.6),
     ("SAFETY", "safety_get_link_stats", 0.6),
     ("CONTROL", "control_get_zones", 0.6),
-    ("PROFILES", "profiles_list", 0.6),
+    # 1.4s, not the 0.6s the other single-round-trip queries get: since the 28
+    # shipped schedules landed (2026-08-20), a full listing is 36 summaries
+    # against a 253-byte UART_PROTO_MAX_PAYLOAD, so the client pages it in
+    # three round trips instead of one. Measured 0.601s median / 1.0s max on
+    # the bench right after that change. Raised deliberately with the reason
+    # recorded -- if this ever exceeds 1.4s, something has genuinely regressed
+    # rather than the budget being stale again.
+    ("PROFILES", "profiles_list", 1.4),
     ("PROFILES", "profiles_get_exec_status", 0.6),
     ("AUTOTUNE", "autotune_get_status", 0.6),
     ("WIFI", "wifi_get_status", 0.6),
