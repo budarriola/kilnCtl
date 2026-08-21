@@ -220,16 +220,6 @@ never `[x]`.
       writes JSON. Needs a `tools/PcTools/src/kilnctrl` sender that inverts the
       fit (`gain = 1/fit_gain`, `offset = -fit_offset/fit_gain`) before
       transmitting.
-- [ ] **`kilnsim.report`'s `then:` targets match *edges*, so a level that
-      never changes cannot be evidenced.** This is why
-      `contactor_weld_engages_on_k4_open` still cannot pass: a correctly
-      persisting current produces no edge. Expressing "current did not stop"
-      needs a `forbid:`-shaped clause — a scenario-grammar change. Same class
-      as `virtual_dut/README.md` Finding 2's `K4_open` corollary.
-- [ ] **Lower `tc_flaky`'s own `timescale`** so its default run is the
-      meaningful one. Its anti-nuisance claim is now *measured* (453 guard
-      ticks, zero S5 warns at `--timescale 0.2`), but the suite's default run
-      only takes 18 samples.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -279,6 +269,16 @@ never `[x]`.
       record) and `0xFF` (erased flash) both decode as uncalibrated, and a
       corrupt or unknown-version record rejects the *whole* record and falls
       back to all-uncalibrated rather than a partially-trusted calibration
+- [x] `forbid.after` clause form (`d5a43b0`) — a persisting level produces no
+      edge, but its *ending* does, so "current never stops after K4 opens" is
+      expressible as a `forbid` on `current_absent` after that edge.
+      `contactor_weld_engages_on_k4_open` now genuinely PASSes. Backward
+      compatible: `after:`/`before:` default to run start/end, so existing
+      `forbid` clauses are byte-identical in verdict
+- [x] `tc_flaky` timescale 10 → 0.2 (`d5a43b0`) — 449 guard ticks instead of
+      18, so its anti-nuisance claim is proven by its own default run. Swept
+      all 22 scenarios; no other has a repeat cycle shorter than the telemetry
+      cadence
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
