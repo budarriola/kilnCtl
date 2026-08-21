@@ -56,14 +56,42 @@
   .fault { color: var(--fault-color); font-size: 0.85em; }
   .stale { color: var(--muted); font-size: 0.85em; }
   .empty { color: var(--muted); font-style: italic; }
-  select { width: 100%; box-sizing: border-box; min-height: var(--ui-touch); padding: 0.5em; font-size: 1em;
+  /* 2026-08-21 dashboard reflow: profile <select> and Start button now sit
+     side by side (owner's explicit request) instead of stacked full-width.
+     flex-wrap so a narrow phone (this page's own body max-width is 480px,
+     but real viewports go well under that -- see the ~390px figure theme.css
+     cites for its own mobile rule) drops the button to its own line under
+     the select rather than the row overflowing and forcing horizontal
+     scroll; the select keeps flex:1 so it fills the row (or wraps to full
+     width) instead of leaving the button an arbitrary leftover sliver. */
+  #runPicker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em; }
+  select { flex: 1 1 200px; min-width: 0; box-sizing: border-box; min-height: var(--ui-touch); padding: 0.5em; font-size: 1em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
-           border-radius: var(--ui-radius); margin-bottom: 0.5em; }
+           border-radius: var(--ui-radius); margin-bottom: 0; }
   button.run-btn { padding: 0.6em 1.2em; font-size: 0.95em;
                     border-radius: var(--ui-radius);
                     border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
                     cursor: pointer; margin-right: 0.5em; margin-top: 0.3em; }
   button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
+  /* Owner's request: halve the Start button's height. theme.css's shared
+     `button { min-height: var(--ui-touch); }` rule (var(--ui-touch): 72px,
+     theme.css line 21) is exactly the "every real button gets a 72px touch
+     target" convention that UI_PLAN.md section 3 Web item 2 consolidated
+     there for all six pages -- halving to 36px directly contradicts it, and
+     that conflict is real, not a rule I can quietly route around. Scoped to
+     #runBtn only (not .run-btn generally, which would also shrink Pause/
+     Resume/Stop in the exec card -- not asked for and not done here), and
+     kept out of theme.css entirely so the other five pages' plain `button`
+     rule and every other button on THIS page are unaffected. To claw back
+     some of the lost tap area without growing the visible button back
+     toward 72px, #runBtn keeps position:relative and grows its actual hit
+     region with a transparent ::after extending 9px above and below the
+     visible box (36px visible + 9+9 = 54px effective hit height) -- an
+     invisible hit-area extension is the "padding/ext area rather than a
+     smaller hit box" alternative asked for, since the visible box itself
+     cannot be both half-height and still 72px tall. */
+  #runBtn { min-height: 36px; position: relative; margin-top: 0; }
+  #runBtn::after { content: ''; position: absolute; left: 0; right: 0; top: -9px; bottom: -9px; }
   .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
                padding: 0.7em 1em; margin-top: 0.5em; }
   .exec-card .row { display: flex; justify-content: space-between; margin-bottom: 0.3em; }
@@ -128,19 +156,34 @@
      intro text, the extra section labels no longer added information, only
      vertical space. -->
 <div id="execCard"></div>
+<!-- 2026-08-21 dashboard reflow: the history canvas now sits directly under
+     execCard, ABOVE the profile picker (owner's explicit ordering request),
+     matching the intuition that "what's happening" (live exec state, then
+     its trend) reads top-to-bottom before "what to start next." The old
+     <h2>History</h2> heading and its explanatory paragraph ("This run's
+     trend... Red marks are thermal-guard trips. Download CSV") are removed
+     outright, not just reordered -- with the graph sitting right under
+     execCard with no other canvas nearby, the intro text no longer told the
+     operator anything the picture didn't already. Removing that paragraph
+     also removes the page's only inline link to /api/history.csv; the route
+     itself is untouched and still serves the same CSV --
+     GET /api/history.csv -- it's just no longer linked from this page's
+     body text. The <p id="historyEmpty"> empty-state line is also gone
+     (same "no longer earns its space" call); drawHistoryChart() below no
+     longer references it at all -- see that function's own comment for how
+     the empty case is now handled (hide the canvas, nothing else) so no
+     dangling getElementById('historyEmpty') is left for the poll loop to
+     dereference into a TypeError. -->
+<canvas id="historyChart" width="600" height="220"></canvas>
 <div id="runPicker">
   <label for="profileSelect">Profile</label>
   <select id="profileSelect"></select>
   <button id="runBtn" type="button" class="run-btn primary">Start</button>
 </div>
-<p><a class="button" href="/profiles">Manage fire profiles</a></p>
-
-<h2>History</h2>
-<p>This run's trend: actual vs. desired temperature (left axis) and commanded
-duty (right axis, 0-1), one sample per 30s. Resets when a new profile starts.
-Red marks are thermal-guard trips. <a href="/api/history.csv">Download CSV</a></p>
-<canvas id="historyChart" width="600" height="220"></canvas>
-<p id="historyEmpty" class="empty">No history yet -- start a firing profile.</p>
+<!-- <p><a class="button" href="/profiles">Manage fire profiles</a></p> removed
+     2026-08-21: /profiles is still reachable from the shared drop-down menu
+     (nav.js's "Firing profiles" entry), so removing this button does not
+     orphan the destination. -->
 
 <!-- Item 8: the "Settings" button that used to follow the history section
      is gone -- /settings is reachable from the shared drop-down menu now
@@ -538,15 +581,19 @@ function parseHistoryCsv(text) {
 // function draws is still unit-converted below for UI_PLAN.md item 7 parity,
 // same as every other on-screen °C figure.
 function drawHistoryChart(rows) {
+  // 2026-08-21: #historyEmpty (the "No history yet" <p>) was removed from the
+  // markup above along with the History heading/intro paragraph -- this used
+  // to toggle canvas/empty visibility as a pair. There is no replacement text
+  // element now, by the same "no longer earns its space" call as the
+  // paragraph removal, so the empty case collapses to just hiding the
+  // canvas; getElementById('historyEmpty') is gone from this function
+  // entirely rather than left as a null a later line would dereference.
   var canvas = document.getElementById('historyChart');
-  var empty = document.getElementById('historyEmpty');
   if (!rows.length) {
     canvas.style.display = 'none';
-    empty.style.display = '';
     return;
   }
   canvas.style.display = '';
-  empty.style.display = 'none';
 
   var dpr = window.devicePixelRatio || 1;
   var cssW = canvas.clientWidth || 600, cssH = 220;
