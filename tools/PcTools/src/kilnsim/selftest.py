@@ -217,15 +217,14 @@ def _check_event_sequence_continuity(link: SimLink) -> "tuple[str, str]":
     # 30 is the top of that range, unlikely to collide with a real scenario
     # (the shipped scenario library uses small slot ids from 0).
     slot = 30
-    # Deliberately AT_SIM_TIME, not "manual"+FIRE_NOW: probing this against
-    # virtual_simfw found that FAULT_FIRE_NOW forces the slot's state
-    # (fault_sched_fire_now(), confirmed via FAULT_LIST going armed->active,
-    # fire_count incrementing) WITHOUT emitting a FAULT_FIRED EVT frame --
-    # a real gap in virtual_simfw's FIRE_NOW handler (reported, not
-    # something this tree can fix -- see this task's final report). A
-    # natural trigger-driven fire (evaluated on tick, the same path any real
-    # scenario's faults take) does emit the EVT frame correctly, which is
-    # what this check actually needs to exercise.
+    # AT_SIM_TIME, not "manual"+FIRE_NOW: this predates the fix in
+    # firmware/SimFW/src/sim/fault_engine.c (`fault_sched_fire_now()`) that
+    # closed FIRE_NOW's ring-event gap (see virtual_simfw's README, "now emit
+    # a FAULT_FIRED ring event on both real firmware and this harness") --
+    # FIRE_NOW is a legitimate alternative today. AT_SIM_TIME is kept anyway
+    # because it exercises the same tick-evaluated path any real scenario's
+    # faults take (the thing this check actually needs to prove works), not
+    # because FIRE_NOW is still broken.
     link.send_command(
         CommandGroup.FAULT, FaultCmd.SCHEDULE,
         {
