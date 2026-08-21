@@ -18,6 +18,7 @@
 #include "task.h"
 
 #include "drivers/ct_wave_pwm.h"
+#include "drivers/simfw_fatal.h"
 
 #include "tasks/cmd_task.h"
 #include "tasks/fault_sched.h"
@@ -105,6 +106,17 @@ int main(void)
     // at the equivalent point, kept here so bring-up order matches and so
     // it is a one-line change to enable a bench stdio path later.
     stdio_init_all();
+
+    // MUST run before vTaskStartScheduler() and before any core-1 task can
+    // possibly fire simfw_fatal() -- see simfw_fatal.h's "CROSS-CORE HALT"
+    // comment. Registers the SIO_IRQ_PROC0 handler that lets a core-1 fatal
+    // (spi_emu_a/b's DMA/PIO claims, SIMFW_CORE_RT_PATH) also halt core 0,
+    // so the fixture cannot keep answering USB/telemetry as if healthy while
+    // one bus is silently dead. Core 0 is the only core running at this
+    // point in boot (the FreeRTOS RP2040 SMP port launches core 1 lazily,
+    // inside vTaskStartScheduler() below), so irq_set_exclusive_handler()/
+    // irq_set_enabled() are guaranteed to bind to core 0's own NVIC here.
+    simfw_fatal_install_cross_core_halt();
 
     // Start every task, in priority order (highest first), matching
     // docs/DESIGN_NOTES.md section 4.1's table and SaftyFW's own main.c convention.

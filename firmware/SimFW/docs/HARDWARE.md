@@ -361,8 +361,9 @@ disassembly + `.rodata` inspection) that the forced failure reaches
 | `max31856_pio_engine.c` (`dma_data`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_data channel exhausted on pio%u ...")`. |
 | `max31856_pio_engine.c` (`dma_load`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_load channel exhausted on pio%u (dma_data already claimed; ...)")`. |
 | `max31856_pio_engine.c` (per `dma_sniff[i]`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_sniff[%u] channel exhausted on pio%u, channel_count=%u ...")` — halting here (rather than returning `false`) is also what closes the "mid-loop sniff failure is worse than an idle bus" hazard this section used to describe: `simfw_fatal()` never returns, so the half-initialised bus state (`s_bus_for_pio_index[]` published, `dma_load` armed with `DMA_IRQ_0` enabled) is never reachable by the other bus's shared `irq_handler_dma()`. |
+| `max31856_pio_engine.c` (`!publish_base(...)`, RX SM claim loop) | n/a (not a claim) | **Fixed, this pass.** `simfw_fatal("max31856_pio_engine", "publish_base failed for channel %u on pio%u ...")` instead of `return false` with `i` already-claimed-and-enabled RX state machines leaked. See the non-DMA-leak note below for why `simfw_fatal()` (not an unwind loop) is the right fix here too. |
 
-Two things about this posture are worth stating plainly:
+Three things about this posture are worth stating plainly:
 
 1. **The failure is no longer silent, for the two DMA-exhaustion call sites.**
    `main.c`'s comment about "nothing that can fail beyond `xTaskCreate()`" has
@@ -376,25 +377,63 @@ Two things about this posture are worth stating plainly:
    failing claim, so execution can never continue to a point where a
    previously-claimed-but-now-stranded DMA channel, PIO SM, or PIO program
    offset gets reused or serviced by anything else — there is no return path
-   left to unwind *from*. (A non-DMA leak this pass did not touch:
-   `max31856_pio_engine_init()`'s `!publish_base(...)` failure path, mid-loop
-   over already-enabled RX state machines, still returns `false` without
-   releasing them — out of scope for a DMA-claim-failure pass, flagged here so
-   it is not lost.)
+   left to unwind *from*.
+3. **The non-DMA leak this section used to flag — `max31856_pio_engine_init()`'s
+   `!publish_base(...)` failure path, mid-loop over already-enabled RX state
+   machines — is fixed too, and by the same mechanism, not by unwinding.**
+   `publish_base()` can only fail on `MAX31856_RESP_IMAGE_ALIGN` misalignment,
+   and `config_is_sane()` — this function's very first check — already walks
+   every `cfg->images[i][b]`, including the exact pointer
+   (`cfg->images[i][0]`, unchanged by the plain assignment that becomes
+   `bus->images[i][0]`) `publish_base()` is later handed, against the
+   identical alignment test. So the branch is **proven unreachable** for any
+   `cfg` that made it past `config_is_sane()`: firing it means that guarantee
+   was violated after the fact (memory corruption of `bus`/`cfg` between the
+   two checks), not a normal runtime condition — there is no well-defined
+   state to unwind *back to* when the invariant the caller relied on is
+   already false. Routed through `simfw_fatal()` rather than adding unwind
+   logic for a path that cannot be taken by construction, matching the
+   DMA-exhaustion precedent's "should be impossible; treat firing as a
+   programming error" posture. Verified by forcing `publish_base()` to always
+   fail (temporarily corrupting its `base` computation) and confirming via
+   ARM disassembly + `.rodata` inspection that the RX-SM-claim loop's first
+   iteration reaches `simfw_fatal()` with the new message string, not a
+   silent `return false`; reverted after confirming.
 
-**One caveat `simfw_fatal()` does NOT remove:** `panic()` (like the PIO
-precedent it matches) halts only the CALLING core. `ct_wave_pwm.c`'s claim
-runs pre-scheduler (single core), so it halts boot outright. `spi_emu_a.c`/
+**Cross-core halt: fixed, this pass.** `panic()` (like the PIO precedent it
+matches) halts only the CALLING core. `ct_wave_pwm.c`'s claim runs
+pre-scheduler (single core), so it halts boot outright — no core-1 task has
+been launched yet, so there is nothing to notify. `spi_emu_a.c`/
 `spi_emu_b.c`'s claims run from tasks pinned to `SIMFW_CORE_RT_PATH` (core 1,
-`task_priorities.h`) *after* the scheduler has started — a claim failure there
-freezes core 1 (and with it, that bus's activity, forever) while core 0
-(`usb_owner`/`telemetry`/`cmd_task`/etc., `SIMFW_CORE_ELASTIC_PATH`) keeps
-running and USB stays enumerated. The affected bus's own state is guaranteed
-to stop changing forever (frozen transaction counters, every read/write to it
-failing), so it cannot be mistaken for a *live, healthy* bus — but a true
-whole-board halt from a single-core panic would need cross-core signalling or
-a watchdog, which this pass did not add. Recorded for `docs/PLAN.md` §0.1 as
-a possible follow-up, not implemented here.
+`task_priorities.h`) *after* the scheduler has started, so a claim failure
+there used to freeze only core 1 while core 0 (`usb_owner`/`telemetry`/
+`cmd_task`/etc., `SIMFW_CORE_ELASTIC_PATH`) kept running and USB stayed
+enumerated. `simfw_fatal()` now pushes a sentinel word over the RP2040 SIO
+inter-core FIFO (`pico_multicore`) before doing anything else; a
+`SIO_IRQ_PROC0` handler installed once from `main()` (core 0, before
+`vTaskStartScheduler()` — the only point core 0 is guaranteed to be the only
+running core) receives it and halts core 0 too: interrupts disabled, spin
+forever, no scheduler tick, no task runs again. A **true whole-board halt**
+was chosen over the alternative of leaving core 0 alive but having
+`telemetry`/`cmd_task` refuse to report "healthy": the onboard LED
+`simfw_fatal()` already drives solid-on is the bench-visible "do not trust
+this fixture" signal a zero-tooling bench operator relies on, and a board
+that still answers USB traffic — even truthfully, even while reporting its
+own death — undermines that signal more than a "logged and continued"
+approach helps a remote operator who is not there to read a log. Only the
+core-1-originated direction is wired up (no core-0-originated `simfw_fatal()`
+call exists today); a future one would need the mirror (a `SIO_IRQ_PROC1`
+handler installed from code that actually runs on core 1) added at that time.
+Verified by disassembling the linked ELF: `simfw_fatal()` pushes
+`0xFA7A1004` before `panic()`; `simfw_fatal_install_cross_core_halt()` is
+called from `main()` before `vTaskStartScheduler()`; the installed handler
+compares each popped FIFO word against the same `0xFA7A1004` constant and,
+on match, executes `cpsid i` + an unconditional self-branch (never returns).
+As a negative control, the comparison constant was temporarily changed to a
+mismatched value and rebuilt: the disassembly then showed the handler
+draining and returning normally instead of reaching the halt block,
+confirming the branch is a genuine equality gate, not a tautology. Both
+forcing edits reverted after confirming.
 
 **Formerly an asymmetry, now consistent:** the PIO claims in the same
 functions use `pio_claim_unused_sm(pio, true)` — `required = true`, which

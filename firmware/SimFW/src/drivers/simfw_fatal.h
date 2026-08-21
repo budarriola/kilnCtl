@@ -31,20 +31,44 @@
 // sequence, e.g. ct_wave_pwm_init()'s DMA claims) and from inside a running
 // FreeRTOS task on either core (e.g. max31856_pio_engine_init(), called from
 // spi_emu_a.c/spi_emu_b.c's task bodies, which run AFTER the scheduler has
-// started). One thing it does NOT guarantee in the second case: pico-sdk's
-// panic() only halts the CALLING core. SimFW's core split
-// (task_priorities.h: SIMFW_CORE_RT_PATH = core 1 for spi_emu_a/b and
-// wave_owner, SIMFW_CORE_ELASTIC_PATH = core 0 for usb_owner/telemetry/
-// cmd_task/etc.) means a DMA exhaustion inside spi_emu_a/b halts core 1
-// while core 0 keeps scheduling -- USB stays enumerated and other
-// subsystems keep answering. What IS guaranteed: the affected bus's own
-// state stops changing forever (transaction counters frozen, reads/writes
-// to it fail every time, the onboard LED goes solid), so it cannot be
-// mistaken for a live, healthy bus -- it can only ever be mistaken for one
-// that a human has not yet looked at. Escalating to a true whole-board halt
-// from a single core would need cross-core signalling (or a watchdog) this
-// pass did not add; see the caller's own report for that as a follow-up.
+// started).
+//
+// CROSS-CORE HALT: pico-sdk's panic() only halts the CALLING core, and
+// SimFW's core split (task_priorities.h: SIMFW_CORE_RT_PATH = core 1 for
+// spi_emu_a/b and wave_owner, SIMFW_CORE_ELASTIC_PATH = core 0 for
+// usb_owner/telemetry/cmd_task/etc.) means a fatal raised from a core-1 task
+// body would, by that alone, leave core 0 scheduling -- USB stays
+// enumerated, telemetry keeps sending, cmd_task keeps answering, all while
+// the affected bus is permanently dead. For a fixture whose entire value is
+// being trustworthy at a bench, "give partial, stale answers forever" is a
+// worse failure mode than "go dark", so this function pushes a sentinel over
+// the RP2040 SIO inter-core FIFO (pico_multicore) before entering its own
+// halt; simfw_fatal_install_cross_core_halt() (called once from main(), core
+// 0, before vTaskStartScheduler()) installs the SIO_IRQ_PROC0 handler that
+// receives it and halts core 0 too -- interrupts disabled, spin forever, no
+// scheduler tick, no task runs again. The net effect: ANY simfw_fatal() call,
+// on either core, takes the WHOLE board down, not just the calling core. See
+// simfw_fatal.c for why a true halt was chosen over a "core 0 refuses to
+// report healthy" flag: the LED this function already drives solid-on is the
+// bench-visible "do not trust this fixture" signal; a half-alive board that
+// still answers protocol traffic (even truthfully) undermines that signal
+// more than it helps a remote operator, and a bench operator relies on the
+// LED, not on parsing telemetry, in the no-debugger case this file exists
+// for. Only the core-1-originated direction is wired up (no core-0-side
+// caller exists today -- ct_wave_pwm.c's claim runs pre-scheduler, so a
+// fatal there halts core 0 before core 1 even starts): a future simfw_fatal()
+// call from a core-0 task body would need the mirror (a SIO_IRQ_PROC1
+// handler installed from code that actually runs on core 1) added at that
+// time.
 void simfw_fatal(const char *subsystem, const char *reason_fmt, ...)
     __attribute__((noreturn, format(printf, 2, 3)));
+
+// Installs the SIO_IRQ_PROC0 handler that lets simfw_fatal() halt core 0 in
+// response to a fatal raised on core 1 -- see simfw_fatal()'s cross-core-halt
+// comment above. MUST be called from core 0, before vTaskStartScheduler()
+// (main.c does this once, early in main()): irq_set_exclusive_handler()/
+// irq_set_enabled() bind to whichever core calls them, and core 0 is the only
+// core running at that point in boot.
+void simfw_fatal_install_cross_core_halt(void);
 
 #endif // SIMFW_FATAL_H

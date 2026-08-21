@@ -4,7 +4,54 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "hardware/irq.h"
+#include "hardware/sync.h" // save_and_disable_interrupts()
+#include "pico/multicore.h"
 #include "pico/stdlib.h" // gpio_*, busy_wait_ms, panic()
+
+// --- Cross-core halt ---------------------------------------------------------
+// See simfw_fatal.h's "CROSS-CORE HALT" comment for the why. Mechanism: the
+// SIO peripheral gives each core a 4-deep hardware FIFO to the OTHER core,
+// with its own per-core IRQ (SIO_IRQ_PROC0 fires on core 0 when core 1
+// pushes, SIO_IRQ_PROC1 the reverse) -- pico_multicore wraps it. A single
+// magic word, pushed once per fatal, is all this needs: there is no reply,
+// no payload beyond "halt now", and the FIFO is otherwise unused anywhere in
+// this codebase (grepped: no other multicore_fifo_* call exists), so there
+// is no other traffic this could collide with or be mistaken for.
+#define SIMFW_FATAL_FIFO_SENTINEL 0xFA7A1004u // "FATAL" + core-independent tag; arbitrary but distinctive in a debugger's memory/register view
+
+// Runs in IRQ context on core 0 ONLY (bound by simfw_fatal_install_cross_core_halt()
+// being called from core 0 -- see simfw_fatal.h). Deliberately does NOT call
+// simfw_fatal() itself: that would re-run the LED blink sequence and race
+// core 1's own gpio_put() calls on the same GPIO25 (a real hazard -- both
+// cores would be mid-sequence on the same pin with no lock between them),
+// and panic()'s printf plumbing is not documented safe to re-enter from IRQ
+// context on top of whatever core 1 was doing when it panicked. All this
+// needs to guarantee is "core 0 never runs another scheduler tick or
+// services another task", which a bare disable-and-spin gives directly and
+// unconditionally.
+static void __not_in_flash_func(sio_fifo_irq_handler_core0)(void)
+{
+    while (multicore_fifo_rvalid()) {
+        uint32_t word = multicore_fifo_pop_blocking();
+        if (word == SIMFW_FATAL_FIFO_SENTINEL) {
+            save_and_disable_interrupts();
+            for (;;) {
+                tight_loop_contents();
+            }
+        }
+        // Any other word is unexpected (nothing else uses this FIFO) but not
+        // this handler's problem to diagnose -- drop it and keep draining so
+        // a spurious/garbage word can never mask the real sentinel behind it.
+    }
+    multicore_fifo_clear_irq();
+}
+
+void simfw_fatal_install_cross_core_halt(void)
+{
+    irq_set_exclusive_handler(SIO_IRQ_PROC0, sio_fifo_irq_handler_core0);
+    irq_set_enabled(SIO_IRQ_PROC0, true);
+}
 
 // Onboard LED, RP2040 Pico's own GPIO25 -- docs/HARDWARE.md section 1 lists
 // it as "Heartbeat LED (on-board, not a header pin) | *(none yet, DESIGN_NOTES.md
@@ -30,6 +77,18 @@ void simfw_fatal(const char *subsystem, const char *reason_fmt, ...)
     va_start(ap, reason_fmt);
     vsnprintf(reason, sizeof(reason), reason_fmt, ap);
     va_end(ap);
+
+    // Signal the other core FIRST, before spending ~2 s on the blink burst
+    // below -- so a core-1 fatal starts halting core 0 immediately rather
+    // than after this core's own LED sequence finishes. Harmless when there
+    // is no other core to receive it yet (ct_wave_pwm.c's claim runs
+    // pre-scheduler on core 0 alone, before core 1 has been launched by the
+    // FreeRTOS SMP port): the word just sits in core 1's inbox unread, and
+    // this core halts via panic() below regardless. multicore_fifo_push_blocking()
+    // cannot deadlock here in practice -- the SIO FIFO is 4 words deep, this
+    // is the only call site in the whole codebase that ever pushes to it
+    // (grepped), and a fatal fires at most once per boot.
+    multicore_fifo_push_blocking(SIMFW_FATAL_FIFO_SENTINEL);
 
     // Bench-visible signal first, independent of any tooling: fast blink
     // burst, then solid on. Runs even if the format/vsnprintf above somehow

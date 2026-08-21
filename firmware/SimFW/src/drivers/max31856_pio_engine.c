@@ -581,8 +581,36 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
         pio_sm_init(pio, bus->sm_rx[i], bus->offset_rx, &c);
         // Seed the image base BEFORE enabling, so the program's very first
         // `pull noblock` finds a real value rather than falling back to X=0.
+        //
+        // publish_base() can only fail on MAX31856_RESP_IMAGE_ALIGN
+        // misalignment, and config_is_sane() above (this function's very
+        // first check) already walked every cfg->images[i][b] -- including
+        // this exact pointer, cfg->images[i][0], unchanged by the plain
+        // assignment `bus->images[i][0] = cfg->images[i][0]` a few lines up
+        // -- against the identical alignment test. So this branch is
+        // PROVEN UNREACHABLE for any cfg that reached this point: if it ever
+        // fires, config_is_sane()'s guarantee has been violated after the
+        // fact (e.g. memory corruption of `bus` or `cfg` between the two
+        // checks), not a normal runtime condition an unwind path could
+        // meaningfully recover from -- there is no well-defined state to
+        // unwind BACK TO when the invariant the caller relied on is already
+        // false. Routed through simfw_fatal() rather than `return false`,
+        // matching the DMA-exhaustion precedent this file already
+        // established (docs/HARDWARE.md section 1b.5) for exactly this
+        // class of "should be impossible; treat firing as a programming
+        // error, not a degrade": a caller silently discarding this `false`
+        // (as every dma_claim_unused_channel() site here used to) would
+        // leave i-1 RX state machines already claimed AND enabled with no
+        // way for anything else to know, on top of the corruption that
+        // caused it.
         if (!publish_base(bus, i, bus->images[i][0])) {
-            return false;
+            simfw_fatal("max31856_pio_engine",
+                        "publish_base failed for channel %u on pio%u "
+                        "(image base misaligned despite config_is_sane() "
+                        "already validating it -- this should be "
+                        "unreachable and indicates memory corruption, not "
+                        "a normal runtime failure)",
+                        (unsigned)i, (unsigned)pio_get_index(pio));
         }
         pio_sm_set_enabled(pio, bus->sm_rx[i], true);
     }
