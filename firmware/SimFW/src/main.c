@@ -17,6 +17,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "drivers/ct_wave_pwm.h"
+
 #include "tasks/cmd_task.h"
 #include "tasks/fault_sched.h"
 #include "tasks/i2c_owner.h"
@@ -27,6 +29,47 @@
 #include "tasks/telemetry.h"
 #include "tasks/usb_owner.h"
 #include "tasks/wave_owner.h"
+
+// ---------------------------------------------------------------------------
+// DMA channel budget -- docs/HARDWARE.md section 1b.
+//
+// The RP2040's 12 DMA channels are one global pool with no per-peripheral
+// partitioning, and every claim in the fixture passes required = false, so
+// exhaustion does NOT panic: it degrades silently (section 1b.5 -- a fixture
+// that boots, enumerates and answers commands while having no CT output or one
+// dead SPI bus). Nothing at run time notices. So the budget is checked here,
+// at compile time, where a 13th channel is a build error instead of a bench
+// mystery.
+//
+// This file is the only translation unit that sees every DMA claimant's
+// count constant at once -- the drivers cannot check it themselves (a driver
+// including a task header would invert the layering) and no single owner can
+// see the others' numbers, which is precisely the class of mistake section 1b
+// exists to prevent. tools/check_single_owner.ps1 re-derives the same sum from
+// the same three headers, so the arithmetic is also enforced without a build,
+// and that script fails if this assertion is ever deleted.
+//
+// The formula is section 1b.2's closed form:
+//
+//     channels = CT zones + sum over buses of (chips_on_bus + 2)
+//
+// where the +2 per bus is that bus's `dma_load` + `dma_data` (section 1b.1),
+// and each bus's chip count is one `dma_sniff[i]` per emulated chip. If a
+// third DMA claimant is ever added, add its term here AND to section 1b's
+// table AND to check_single_owner.ps1's $dmaBudgetTerms -- all three, in the
+// same commit.
+#define SIMFW_DMA_CHANNELS_CLAIMED                                            \
+    (CT_WAVE_PWM_NUM_CHANNELS + (SPI_EMU_A_CHANNEL_COUNT + 2u) +              \
+     (SPI_EMU_B_CHANNEL_COUNT + 2u))
+
+_Static_assert(SIMFW_DMA_CHANNELS_CLAIMED <= NUM_DMA_CHANNELS,
+               "SimFW DMA budget exceeded: the CT wave synth and the two PIO "
+               "SPI buses together claim more than the RP2040's "
+               "NUM_DMA_CHANNELS channels. Every claim passes required=false, "
+               "so this would not panic at run time -- it would boot with a "
+               "dead CT output or a dead SPI bus. Free a channel (see "
+               "docs/HARDWARE.md section 1b.4, the only slack that exists) or "
+               "reduce a channel-count constant.");
 
 // FreeRTOSConfig.h turns on configCHECK_FOR_STACK_OVERFLOW (2) and
 // configUSE_MALLOC_FAILED_HOOK (1) unconditionally, matching SaftyFW's

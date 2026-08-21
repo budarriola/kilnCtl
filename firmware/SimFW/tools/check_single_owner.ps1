@@ -31,6 +31,20 @@
 # real violation of PLAN.md section 4's rule (which is about one INTERFACE,
 # not the GPIO block in the abstract).
 #
+# DMA is the one peripheral where the include rule is NOT the invariant, and
+# this script says so twice: once at the hardware/dma.h rule and once at the
+# "DMA SAFETY RULES" section near the bottom. The DMA block is a global pool
+# of 12 channels, so "who includes the header" cannot express what actually
+# keeps two owners apart -- under an include-only rule a third owner is a
+# one-line edit to an allowlist that passes CI while silently exhausting the
+# pool. The extra section checks how a channel is ACQUIRED
+# (dma_claim_unused_channel only, no fixed-number claims, no raw dma_hw->ch[]
+# from a non-owner), that the two DMA IRQ VECTORS are owned by different files
+# with one handler each, and that the total channel COUNT still fits in 12 --
+# the last derived from the firmware's own channel-count constants using
+# docs/HARDWARE.md section 1b.2's closed form, and backed by a _Static_assert
+# in src/main.c that the compiler evaluates against the SDK's NUM_DMA_CHANNELS.
+#
 # Usage: powershell -File firmware\SimFW\tools\check_single_owner.ps1
 $ErrorActionPreference = "Stop"
 
@@ -81,6 +95,12 @@ function Get-CodeOnlyLines {
     return $result
 }
 
+# The two files (plus their headers) that are allowed to own DMA channels.
+# Used both by the hardware/dma.h include rule and by the DMA safety rules
+# further down, so the two can never drift apart.
+$dmaOwnerFiles = @("drivers/ct_wave_pwm.c", "drivers/ct_wave_pwm.h",
+                   "drivers/max31856_pio_engine.c", "drivers/max31856_pio_engine.h")
+
 # Header -> regex matching its #include line -> allowed owner file(s),
 # relative to firmware/SimFW/src, forward-slash.
 $rules = @(
@@ -101,21 +121,19 @@ $rules = @(
     },
     @{
         Name    = "hardware/dma.h"
-        # Two owners, deliberately. The DMA block is twelve independent
-        # channels, not one shared interface, and both drivers take theirs
-        # through dma_claim_unused_channel() -- so they can no more collide
-        # than two tasks claiming different GPIOs can (which is exactly the
-        # reasoning this file's header already applies to hardware/gpio.h).
-        # ct_wave_pwm.c claims 3 and owns DMA_IRQ_1; max31856_pio_engine.c
-        # claims 8 (a sniff channel per emulated SPI channel, plus a load and
-        # a data channel per bus -- docs/SPI_ACCESS_AUDIT.md section 6's
-        # DMA-fed Plan B, which is what removed the CPU from the SPI response
-        # path) and owns DMA_IRQ_0. 11 of 12 channels, 2 of 2 vectors, no
-        # overlap. A THIRD claimant would need this rule re-thought, not just
-        # another entry added: there is one channel left.
+        # Two owners, deliberately -- and note this include rule is only the
+        # CHEAP OWNER GATE for DMA, not the invariant. The DMA block is twelve
+        # independent channels out of one global pool, not one shared
+        # interface, so "who includes the header" is the wrong question on its
+        # own: a third owner would be a one-line edit to this Allowed list
+        # that passes CI while silently exhausting the pool. What actually
+        # keeps the owners from colliding is checked separately below, in the
+        # DMA SAFETY RULES section: how a channel is acquired
+        # (dma_claim_unused_channel only), who may touch raw channel
+        # registers, disjoint IRQ vectors, and the total channel count against
+        # docs/HARDWARE.md section 1b's budget. Keep both.
         Pattern = '#include\s*["<]hardware/dma\.h'
-        Allowed = @("drivers/ct_wave_pwm.c", "drivers/ct_wave_pwm.h",
-                    "drivers/max31856_pio_engine.c", "drivers/max31856_pio_engine.h")
+        Allowed = $dmaOwnerFiles
     },
     @{
         Name    = "tusb.h (TinyUSB)"
@@ -149,13 +167,220 @@ foreach ($f in $files) {
     }
 }
 
-if ($failures.Count -gt 0) {
-    Write-Host "SINGLE-OWNER CHECK FAILED:" -ForegroundColor Red
-    foreach ($f in $failures) {
-        Write-Host "  $f" -ForegroundColor Red
+# ---------------------------------------------------------------------------
+# DMA SAFETY RULES
+#
+# The include rule above answers "who includes hardware/dma.h". That is a
+# useful cheap gate but it is NOT the invariant that keeps two DMA owners from
+# destroying each other, because the DMA block is a global pool of 12 channels
+# rather than one interface. The real invariant, from docs/HARDWARE.md section
+# 1b, has three parts, and all three are checked here:
+#
+#   1. ACQUISITION. A channel is only ever taken with dma_claim_unused_channel()
+#      -- never dma_channel_claim(n)/dma_claim_mask(), which name a fixed
+#      channel number and will happily take one another owner already holds
+#      (or, with required=true, panic at boot on a fixture that was fine
+#      yesterday). And raw dma_hw->ch[n] / dma_channel_hw_addr(n) register
+#      pokes stay inside the owner files, so nobody drives a channel they did
+#      not claim.
+#   2. VECTORS. The two DMA IRQ vectors are owned by different files, one
+#      irq_set_exclusive_handler() site each. irq_set_exclusive_handler()
+#      panics if a vector already has a handler, so a second site on one
+#      vector is a boot-time hard fault, not a subtle bug.
+#   3. BUDGET. The total number of channels claimed fits in the RP2040's 12.
+#      This one is a count, not a pattern, so it is not grepped: it is
+#      re-derived below from the same #define'd channel-count constants the
+#      firmware itself uses, matching section 1b.2's closed form. src/main.c
+#      carries the authoritative _Static_assert (same formula, checked against
+#      the SDK's own NUM_DMA_CHANNELS at compile time); this script re-derives
+#      it so the budget is also enforced without a toolchain, and refuses to
+#      pass if that _Static_assert has been removed.
+#
+# Why the budget matters more than it looks: every DMA claim in the fixture
+# passes required = false, so exhaustion is SILENT (section 1b.5). A 13th
+# channel does not panic -- it boots a fixture with no CT output or one dead
+# SPI bus.
+$dmaFailures = @()
+
+# --- Rule 1: acquisition ---------------------------------------------------
+$bannedAcquire = @(
+    @{
+        Pattern = 'dma_channel_claim\s*\('
+        What    = "dma_channel_claim(n)"
+        Fix     = "claim by number takes a specific channel out of the global pool, which is exactly how two owners collide. Use dma_claim_unused_channel(false) and keep the returned index, like drivers/ct_wave_pwm.c and drivers/max31856_pio_engine.c do."
+    },
+    @{
+        Pattern = 'dma_claim_mask\s*\('
+        What    = "dma_claim_mask(mask)"
+        Fix     = "same problem as dma_channel_claim(n) -- it names fixed channel numbers. Call dma_claim_unused_channel(false) once per channel needed."
     }
-    throw "$($failures.Count) single-owner violation(s) found -- see docs/PLAN.md section 4 ('every hardware interface has exactly one owner task')"
+)
+# Raw channel-register access. Legal, and used, inside the owner files (e.g.
+# max31856_pio_engine.c's data_stop() clears al1_ctrl and drives dma_hw->abort);
+# outside them it means poking a channel you never claimed.
+$bannedRawHw = @(
+    @{ Pattern = 'dma_hw\s*->';            What = "dma_hw-> (raw DMA register block access)" },
+    @{ Pattern = 'dma_channel_hw_addr\s*\('; What = "dma_channel_hw_addr(n)" }
+)
+
+# --- Rule 2: IRQ vectors ---------------------------------------------------
+# Every irq_set_exclusive_handler() call site, plus the #define aliases that
+# stand in for a vector token (ct_wave_pwm.c passes CT_WAVE_DMA_IRQ, not
+# DMA_IRQ_1).
+$dmaIrqSites = @()
+$dmaIrqAliases = @{}
+
+foreach ($f in $files) {
+    $rel = $f.FullName.Substring($srcRoot.Length + 1) -replace '\\', '/'
+    $codeLines = Get-CodeOnlyLines -Path $f.FullName
+    for ($i = 0; $i -lt $codeLines.Count; $i++) {
+        $line = $codeLines[$i]
+
+        foreach ($b in $bannedAcquire) {
+            if ($line -match $b.Pattern) {
+                $dmaFailures += "$($rel):$($i + 1): uses $($b.What) -- $($line.Trim())`n      Do this instead: $($b.Fix)`n      See docs/HARDWARE.md section 1b (DMA channel budget)."
+            }
+        }
+
+        if ($dmaOwnerFiles -notcontains $rel) {
+            foreach ($b in $bannedRawHw) {
+                if ($line -match $b.Pattern) {
+                    $dmaFailures += "$($rel):$($i + 1): uses $($b.What) from a non-owner file -- $($line.Trim())`n      Only [$($dmaOwnerFiles -join ', ')] may touch DMA channel registers, because only they claimed a channel. Go through that owner's public API instead.`n      See docs/HARDWARE.md section 1b (DMA channel budget)."
+                }
+            }
+        }
+
+        # Owners alias the vector behind a #define (ct_wave_pwm.c's
+        # CT_WAVE_DMA_IRQ), so matching the literal token alone would miss
+        # half the sites and quietly report "no conflict". Record the raw
+        # first argument here; resolve aliases per file below.
+        if ($line -match 'irq_set_exclusive_handler\s*\(\s*([A-Za-z_][0-9A-Za-z_]*)\s*,') {
+            $dmaIrqSites += [pscustomobject]@{
+                File   = $rel
+                Line   = $i + 1
+                Vector = $Matches[1]
+                Text   = $line.Trim()
+            }
+        }
+        if ($line -match '#define\s+([A-Za-z_][0-9A-Za-z_]*)\s+(DMA_IRQ_[0-9]+)\s*$') {
+            $dmaIrqAliases[$Matches[1]] = $Matches[2]
+        }
+    }
+}
+
+# Resolve one level of aliasing (#define CT_WAVE_DMA_IRQ DMA_IRQ_1), then drop
+# every site that is not a DMA vector -- PIO/UART/etc. exclusive handlers are
+# none of this rule's business.
+$dmaIrqSites = @($dmaIrqSites | ForEach-Object {
+    $v = $_.Vector
+    $hops = 0
+    while ($dmaIrqAliases.ContainsKey($v) -and $hops -lt 8) { $v = $dmaIrqAliases[$v]; $hops++ }
+    $_.Vector = $v
+    $_
+} | Where-Object { $_.Vector -match '^DMA_IRQ_[0-9]+$' })
+
+# Floor check: if hardware/dma.h is included by anyone but not one DMA vector
+# site can be resolved, this rule has stopped seeing the code (a renamed SDK
+# call, a new aliasing style) and would pass vacuously forever. Say so.
+if ($dmaIrqSites.Count -eq 0) {
+    $dmaFailures += "DMA IRQ vectors: hardware/dma.h has owners but no irq_set_exclusive_handler(DMA_IRQ_*) call site could be resolved anywhere in src/.`n      Either the DMA completion handlers were removed (then update docs/HARDWARE.md section 1b), or this check can no longer see them -- e.g. the vector is now passed as an expression rather than a plain identifier or a #define alias of one. Do not leave it passing vacuously."
+}
+
+foreach ($grp in ($dmaIrqSites | Group-Object Vector)) {
+    if ($grp.Count -gt 1) {
+        $where = ($grp.Group | ForEach-Object { "$($_.File):$($_.Line)" }) -join ', '
+        $dmaFailures += "$($grp.Name): installed by $($grp.Count) irq_set_exclusive_handler() call sites ($where) -- there must be exactly one.`n      irq_set_exclusive_handler() PANICS at boot if the vector already has a handler, so the second site bricks the fixture. Give the second claimant the other DMA vector, or route it through the existing handler (see max31856_pio_engine.c's s_dma_irq_installed guard, which is how one file services two SPI buses on one vector).`n      See docs/HARDWARE.md section 1b (DMA channel budget)."
+    }
+}
+foreach ($grp in ($dmaIrqSites | Group-Object File)) {
+    $vectors = @($grp.Group | ForEach-Object { $_.Vector } | Sort-Object -Unique)
+    if ($vectors.Count -gt 1) {
+        $dmaFailures += "$($grp.Name): owns more than one DMA IRQ vector ($($vectors -join ', ')) -- the two vectors must live in distinct files.`n      docs/HARDWARE.md section 1b's whole no-overlap argument is that DMA_IRQ_1 belongs to drivers/ct_wave_pwm.c and DMA_IRQ_0 to drivers/max31856_pio_engine.c. One file holding both means the vectors are no longer a partition between owners.`n      See docs/HARDWARE.md section 1b (DMA channel budget)."
+    }
+}
+
+# --- Rule 3: budget --------------------------------------------------------
+# docs/HARDWARE.md section 1b.2's closed form:
+#     channels = CT zones + sum over buses of (chips_on_bus + 2)
+# Each term names the header and the #define the firmware itself uses, so this
+# cannot drift from the code the way a hardcoded 11 would. Extra = the per-bus
+# dma_load + dma_data pair (section 1b.1).
+$dmaChannelsTotal = 12   # RP2040 NUM_DMA_CHANNELS; src/main.c's _Static_assert
+                         # checks against the SDK's own macro, not this copy.
+$dmaBudgetTerms = @(
+    @{ File = "drivers/ct_wave_pwm.h"; Const = "CT_WAVE_PWM_NUM_CHANNELS"; Extra = 0
+       Role = "CT sine carrier, 1 channel per CT zone" },
+    @{ File = "tasks/spi_emu_a.h";     Const = "SPI_EMU_A_CHANNEL_COUNT";  Extra = 2
+       Role = "SPI bus A, 1 sniff per emulated chip + dma_load + dma_data" },
+    @{ File = "tasks/spi_emu_b.h";     Const = "SPI_EMU_B_CHANNEL_COUNT";  Extra = 2
+       Role = "SPI bus B, 1 sniff per emulated chip + dma_load + dma_data" }
+)
+
+$dmaTotal = 0
+$dmaBreakdown = @()
+foreach ($term in $dmaBudgetTerms) {
+    $path = Join-Path $srcRoot ($term.File -replace '/', '\')
+    if (-not (Test-Path $path)) {
+        $dmaFailures += "DMA budget: cannot find $($term.File), which defines $($term.Const).`n      This check re-derives docs/HARDWARE.md section 1b.2's channel count from the firmware's own constants; if the file moved, update `$dmaBudgetTerms in this script (and section 1b's table) in the same commit."
+        continue
+    }
+    $val = $null
+    $termLines = Get-CodeOnlyLines -Path $path
+    foreach ($l in $termLines) {
+        if ($l -match ("#define\s+" + [regex]::Escape($term.Const) + "\s+\(?\s*([0-9]+)\s*[uU]?[lL]*\s*\)?\s*$")) {
+            $val = [int]$Matches[1]
+            break
+        }
+    }
+    if ($null -eq $val) {
+        $dmaFailures += "DMA budget: could not read a plain integer $($term.Const) out of $($term.File).`n      Section 1b.2's budget is derived from that constant. If it became computed rather than a literal #define, move the arithmetic here deliberately -- do not let the budget silently stop being checked."
+        continue
+    }
+    $sub = $val + $term.Extra
+    $dmaTotal += $sub
+    $dmaBreakdown += "    $($term.Const) ($val) + $($term.Extra) = $sub   [$($term.Role)]"
+}
+
+if ($dmaTotal -gt $dmaChannelsTotal) {
+    $dmaFailures += ("DMA budget exceeded: $dmaTotal channels claimed, RP2040 has $dmaChannelsTotal.`n" +
+        ($dmaBreakdown -join "`n") + "`n" +
+        "      Every claim in the fixture passes required=false, so this does NOT panic -- the fixture boots and silently has no CT output or a dead SPI bus (docs/HARDWARE.md section 1b.5).`n" +
+        "      Free a channel first: section 1b.4 documents the ONLY slack that exists (pair two CT zones onto one PWM slice, 3 -> 2 channels). Section 1b.3 explains why none of the 8 SPI-side channels can be given up.")
+}
+
+# The _Static_assert in src/main.c is the authoritative version of this check
+# (it is evaluated against the SDK's real NUM_DMA_CHANNELS, on the real
+# constants, by the compiler). This script's arithmetic is the no-toolchain
+# mirror of it -- so if the assertion disappears, say so rather than quietly
+# becoming the only line of defence.
+$mainPath = Join-Path $srcRoot "main.c"
+if (Test-Path $mainPath) {
+    $mainCode = (Get-CodeOnlyLines -Path $mainPath) -join "`n"
+    if ($mainCode -notmatch '_Static_assert\s*\(\s*SIMFW_DMA_CHANNELS_CLAIMED\s*<=\s*NUM_DMA_CHANNELS') {
+        $dmaFailures += "main.c: the DMA budget _Static_assert (SIMFW_DMA_CHANNELS_CLAIMED <= NUM_DMA_CHANNELS) is missing.`n      That assertion is the compile-time half of docs/HARDWARE.md section 1b's budget -- it is what turns a 13th DMA channel into a build error instead of a fixture that boots with a dead subsystem. Restore it; do not rely on this script alone."
+    }
+} else {
+    $dmaFailures += "DMA budget: src/main.c not found, so the compile-time _Static_assert could not be confirmed."
+}
+
+# ---------------------------------------------------------------------------
+if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0) {
+    if ($failures.Count -gt 0) {
+        Write-Host "SINGLE-OWNER CHECK FAILED:" -ForegroundColor Red
+        foreach ($f in $failures) {
+            Write-Host "  $f" -ForegroundColor Red
+        }
+    }
+    if ($dmaFailures.Count -gt 0) {
+        Write-Host "DMA SAFETY CHECK FAILED:" -ForegroundColor Red
+        foreach ($f in $dmaFailures) {
+            Write-Host "  $f" -ForegroundColor Red
+        }
+    }
+    throw "$($failures.Count) single-owner violation(s) and $($dmaFailures.Count) DMA safety violation(s) found -- see docs/PLAN.md section 4 ('every hardware interface has exactly one owner task') and docs/HARDWARE.md section 1b (DMA channel budget)"
 }
 
 Write-Host "Single-owner check passed: hardware/i2c.h, hardware/pio.h, hardware/pwm.h, hardware/dma.h and tusb.h each appear only in their declared owner file(s)."
+$vectorSummary = ($dmaIrqSites | Sort-Object Vector | ForEach-Object { "$($_.Vector)->$($_.File)" }) -join ', '
+Write-Host "DMA safety check passed: every channel taken via dma_claim_unused_channel(); raw channel registers touched only by the owners; DMA vectors disjoint by file [$vectorSummary]; $dmaTotal of $dmaChannelsTotal channels claimed (HARDWARE.md section 1b)."
 exit 0
