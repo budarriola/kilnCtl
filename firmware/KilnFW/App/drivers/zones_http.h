@@ -57,6 +57,60 @@ extern "C" {
 #define ZONE_MODEL_K_MAX 5000.0f
 #define ZONE_MODEL_TIME_MAX_S 86400.0f
 
+/* Every bound below moved out of zones_http.c (2026-08-21, backup-widening
+ * pass) for the identical reason ZONE_MODEL_K_MAX/ZONE_MODEL_TIME_MAX_S moved
+ * here first: backup_http.c's import validation pass must reject an
+ * out-of-range value in pass 1, before any write happens, using the EXACT
+ * same ceiling parse_zone_fields() (the POST /api/zones authority) and the
+ * new zones_config_set_*() setters below enforce -- not a hand-copied mirror
+ * that can silently drift out of sync with the real one. parse_zone_fields()
+ * in zones_http.c was rewritten to reference these same macros instead of
+ * its old inline literals. */
+
+/* zone_cfg_t::name -- the operator-entered per-zone label. */
+#define ZONE_NAME_MAX_LEN 15
+
+/* zone_cfg_t::cal_offset_c -- degC. */
+#define ZONE_CAL_OFFSET_MIN_C (-50.0f)
+#define ZONE_CAL_OFFSET_MAX_C 50.0f
+
+/* zone_cfg_t::max_ramp_c_per_hr -- 0 = never configured. */
+#define ZONE_MAX_RAMP_C_PER_HR_MAX 1000.0f
+
+/* zone_cfg_t::sanity_rate_c_per_min -- 0 = never configured (caller
+ * substitutes its own default, does NOT disable the check). */
+#define ZONE_SANITY_RATE_MAX_C_PER_MIN 20.0f
+
+/* zone_cfg_t::max_temp_c/min_temp_c (guard 5). 1400 mirrors
+ * profiles_http.c's PROFILE_TARGET_C_MAX -- profiles_http.c is a different
+ * pass's file this task does not own, so that constant could not be moved
+ * here too; the two are independently maintained and must be kept equal by
+ * hand if either ever changes. */
+#define ZONE_MAX_TEMP_C_MAX 1400.0f
+#define ZONE_MIN_TEMP_C_MIN (-50.0f)
+#define ZONE_MIN_TEMP_C_MAX 200.0f
+
+/* zone_cfg_t::heater_window_ms/heater_min_on_ms/heater_min_off_ms -- 0 = not
+ * configured (caller substitutes PROFILE_EXECUTOR_DEFAULT_*_MS). */
+#define ZONE_HEATER_WINDOW_MS_MAX 600000.0f
+#define ZONE_HEATER_MIN_ON_OFF_MS_MAX 60000.0f
+
+/* zone_cfg_t's 8 named guard-threshold overrides (TODO.md 6A.3) -- 0
+ * substitutes thermal_guard.c's own firmware default for every one of these,
+ * it does NOT disable the guard (opposite convention to cross_zone_max_delta_c
+ * below). Bounds are sanity ceilings against a typo'd submission, matching
+ * parse_zone_fields()'s own comment. */
+#define ZONE_GUARD_TIME_S_MAX 7200.0f
+#define ZONE_GUARD_RATE_C_PER_MIN_MAX 20.0f
+#define ZONE_GUARD_MARGIN_C_MAX 500.0f
+#define ZONE_GUARD_DEBOUNCE_TICKS_MAX 100.0f
+
+/* zone_cfg_t::cross_zone_max_delta_c (guard 8) -- 0 = not configured, which
+ * DISABLES the guard rather than substituting a default (see the getter's
+ * own doc comment for why this one field's convention is the opposite of the
+ * guard thresholds above). */
+#define ZONE_CROSS_ZONE_DELTA_C_MAX 1000.0f
+
 /* Loads zones_cfg from NVS (namespace "kiln_cfg", key "zones_cfg";
  * ESP_ERR_NVS_NOT_FOUND is not an error -- mirrors wifi_prov.c's nvs_load,
  * defaults to thermo_count/relay_count 0, i.e. nothing configured yet) and
@@ -80,6 +134,16 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr);
  * configured -- profiles_http.c uses this to reject a profile targeting a
  * zone that doesn't exist. */
 uint8_t zones_config_get_thermo_count(void);
+
+/* How many of the KILN_IO_RELAY_COUNT relays are currently configured on
+ * this board -- the same bound parse_zone_fields()'s z%u_relay_mask
+ * validation and zones_config_set_relay_mask() apply to a submitted
+ * relay_mask (a bit past this count references a relay that doesn't exist).
+ * backup_http.c's import validation pass needs this to reject an
+ * out-of-range relay_mask in pass 1, before any write happens -- the same
+ * reason zones_config_get_thermo_count() already existed for thermo_mask/
+ * zone_mask checks. */
+uint8_t zones_config_get_relay_count(void);
 
 /* TODO.md 6A.5 load-staggering: board-wide cap on relays energized at once
  * (0 = unlimited, the default). Global, not per-zone -- enforced by
@@ -153,6 +217,13 @@ bool zones_config_is_valid(void);
  * the schematic's Relay1..4 numbering per kiln_io.h). */
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask);
 
+/* Setter for zones_config_get_relay_mask() above -- same "false means cannot
+ * answer/rejected, nothing written" shape as every setter in this file.
+ * relay_mask is checked against the CURRENTLY configured relay_count, the
+ * same bound parse_zone_fields()'s z%u_relay_mask handling enforces (a bit
+ * past relay_count references a relay that does not exist on this board). */
+bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask);
+
 /* TODO.md 10.8: bit N-1 = MAX31856 channel N belongs to this zone's control
  * temperature, N in 1..MAX31856_CHANNEL_COUNT -- same bit-numbering
  * convention as relay_mask above, deliberately: it is the natural pattern
@@ -179,6 +250,17 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask);
  * zone_index. */
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask);
 
+/* Setter for zones_config_get_thermo_mask() above. Unlike the POST
+ * /api/zones handler's z%u_thermo_mask handling, this setter has no
+ * "omitted means preserve the legacy zone-i<->channel-i mapping" case --
+ * there is no such thing as "omitted" for a single explicit setter call, only
+ * a value the caller passes or doesn't call this at all. A caller (backup
+ * import) that wants "leave this zone's thermo_mask alone" simply does not
+ * call this setter for that zone, same as it does for every other optional
+ * field. thermo_mask is checked against the CURRENTLY configured
+ * thermo_count, same bound parse_zone_fields() enforces. */
+bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask);
+
 /* TODO.md 10.3: the operator-chosen name a zone_cfg_t already stores
  * (ZONE_NAME_MAX_LEN, currently 15 chars) but which, until now, had no
  * public accessor -- zones_http.c's own JSON responses read it straight off
@@ -195,6 +277,14 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask);
  * name. Callers must treat that the same as "no name" (e.g. fall back to a
  * generated "Zone N" label), not as a getter failure. */
 bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap);
+
+/* Setter for the getter above. Rejects (without writing anything) a name
+ * longer than ZONE_NAME_MAX_LEN -- the same "zone name too long" rejection
+ * parse_zone_fields() produces when http_form_find_field() returns -2 for
+ * z%u_name, applied here to a NUL-terminated C string instead of a form
+ * field. name may be NULL, treated the same as an empty string (clears the
+ * zone's name), matching a POST that omits z%u_name. */
+bool zones_config_set_name(uint8_t zone_index, const char *name);
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd);
 
@@ -248,6 +338,25 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
  * off because a field was left blank is the wrong default here. */
 bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min);
 
+/* Setter for the getter above. Same bound parse_zone_fields()'s z%u_sanity
+ * enforces (0..ZONE_SANITY_RATE_MAX_C_PER_MIN) -- 0 is legal here too (it's
+ * the documented "never configured" encoding, not a rejection). */
+bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min);
+
+/* Setter for zones_config_get_max_ramp() above. Same bound
+ * parse_zone_fields()'s z%u_ramp enforces
+ * (0..ZONE_MAX_RAMP_C_PER_HR_MAX). */
+bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr);
+
+/* Getter/setter pair for a zone's cal_offset_c -- applied at read time by
+ * zones_config_apply_cal() below, but until now there was no way to read the
+ * stored offset itself back out (only its already-applied effect on a
+ * reading). backup_http.c's export needs the raw stored value to round-trip
+ * it, the same reason every other field in this pass got one. Same bound
+ * parse_zone_fields()'s z%u_cal enforces. */
+bool zones_config_get_cal_offset(uint8_t zone_index, float *out_cal_offset_c);
+bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c);
+
 /* TODO.md 6A.1's three control modes. OFF: never commands heat (safe
  * default, and what a zone the board supports but the kiln doesn't use
  * should be set to). BANGBANG: relay on/off around setpoint with a fixed
@@ -262,6 +371,11 @@ typedef enum {
 
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode);
 
+/* Setter for the getter above. Same bound parse_zone_fields()'s z%u_mode
+ * enforces (0-2, i.e. <= ZONE_CONTROL_MODE_PID) -- any other numeric value
+ * is rejected, matching the POST handler's "out of range (0-2)" error. */
+bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode);
+
 /* Guard 5's absolute limits (TODO.md 6A.3). max_temp_c == 0 means "not set,
  * treated as no ceiling" -- matches the safe-default-vs-configured-zero
  * convention every other zone field uses (max_ramp_c_per_hr, sanity_rate).
@@ -270,6 +384,21 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
  * carries a real value. */
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c);
 
+/* Setter for the getter above. Bundled into ONE call, not two single-field
+ * setters, for the same reason zones_config_set_model() bundles its three
+ * fields: a rejected call must not leave one of the pair updated and the
+ * other stale. Checked: parse_zone_fields() -- the POST /api/zones authority
+ * this setter must match -- validates z%u_maxtemp and z%u_mintemp each
+ * against their OWN range independently and does NOT compare them to each
+ * other (no "max_temp_c >= min_temp_c" check exists anywhere in that path,
+ * confirmed by reading the whole handler); an operator can already save an
+ * inverted pair through the web page today. This setter deliberately mirrors
+ * that -- same two independent bounds, no invented combination check --
+ * rather than making backup import stricter than the page it is meant to
+ * match; see this pass's report for the same conclusion applied to
+ * heater_window_ms/min_on_ms/min_off_ms below. */
+bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float min_temp_c);
+
 /* TODO.md 6A.9: per-zone heater_output_cfg_t timing, page-configurable.
  * 0 in any of the three outputs means "not configured" -- the caller
  * (profile_executor.c/autotune_engine.c) substitutes its own
@@ -277,6 +406,18 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
  * answer is zero" convention as every other getter here. */
 bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float *out_min_on_ms,
                                  float *out_min_off_ms);
+
+/* Setter for the getter above, bundled for the same "no half-updated group"
+ * reason zones_config_set_temp_limits() is. Checked: parse_zone_fields()
+ * validates z%u_window/z%u_minon/z%u_minoff each against their OWN
+ * independent range (ZONE_HEATER_WINDOW_MS_MAX / ZONE_HEATER_MIN_ON_OFF_MS_MAX)
+ * and does NOT check min_on_ms/min_off_ms against window_ms -- no "min_on_ms
+ * + min_off_ms <= window_ms" or similar exists in that path. This setter
+ * matches that exactly, on purpose (see zones_config_set_temp_limits()'s
+ * comment for the same reasoning): the goal is parity with the POST
+ * authority, not a stricter gate that would make a backup restore reject a
+ * combination the web page itself would happily save. */
+bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms);
 
 /* Guard 8's cross-zone plausibility threshold (TODO.md 6A.3/6A.5), in degC.
  * 0 means "not configured", and here that DISABLES the guard rather than
@@ -288,6 +429,11 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
  * needs >=2 zones reporting to compare against, so it stays inert on a
  * single-zone kiln whatever this is set to. */
 bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_c);
+
+/* Setter for the getter above. Same bound parse_zone_fields()'s z%u_xzone
+ * enforces (0..ZONE_CROSS_ZONE_DELTA_C_MAX) -- 0 is legal (it's the
+ * documented "guard disabled" encoding, not a rejection). */
+bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c);
 
 /* TODO.md 6A.3's remaining named thresholds (wrong-dir rate/window,
  * off-settle, runaway rate/margin, drift period, sensor debounce count,
@@ -303,6 +449,21 @@ bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_
                                        float *out_runaway_rate_c_per_min, float *out_runaway_margin_c,
                                        float *out_drift_period_s, float *out_sensor_fault_debounce_ticks,
                                        float *out_frozen_window_s);
+
+/* Setter for the getter above, one bundled call matching
+ * zones_config_get_guard_thresholds()'s own "bundle the related group"
+ * precedent. Each of the 8 fields is checked against its own independent
+ * bound (ZONE_GUARD_TIME_S_MAX / ZONE_GUARD_RATE_C_PER_MIN_MAX /
+ * ZONE_GUARD_MARGIN_C_MAX / ZONE_GUARD_DEBOUNCE_TICKS_MAX, matching which
+ * ceiling parse_zone_fields() applies to each) -- rejecting any one field
+ * writes none of the eight, same discipline as zones_config_set_model().
+ * No cross-field check between any pair of these 8 exists in
+ * parse_zone_fields() either, so none is added here. */
+bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_window_s,
+                                       float wrong_dir_rate_c_per_min, float off_settle_s,
+                                       float runaway_rate_c_per_min, float runaway_margin_c,
+                                       float drift_period_s, float sensor_fault_debounce_ticks,
+                                       float frozen_window_s);
 
 /* Monotonic counter, incremented every time the stored zone config
  * changes -- TODO.md 6A.7's "config reload while running". A consumer

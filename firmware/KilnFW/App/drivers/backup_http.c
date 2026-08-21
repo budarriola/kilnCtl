@@ -20,25 +20,43 @@
 static const char *TAG = "backup_http";
 
 /* Bump if the exported JSON shape ever changes in a way older firmware
- * cannot read back -- see backup_import_apply()'s version check. Unlike
- * zones_http.c's ZONES_CFG_VERSION, there is no migration chain here (this is
- * the first version that has ever shipped): an import whose "version" is not
- * exactly this value is refused outright rather than guessed at, matching
- * this pass's "reject a version it does not understand rather than guessing"
- * brief. A migration path can be added the same way zones_http.c's was, if a
- * future format change needs one. */
-#define BACKUP_FORMAT_VERSION 1
+ * cannot read back -- see backup_import_apply()'s version check.
+ *
+ * 1 -> 2 (2026-08-21): the four fields zones_http.h had a get+set pair for
+ * (PID gains, plant model, tc_type, safety_tc_type) were the whole story at
+ * version 1; this pass added setters for everything else a zone stores
+ * (name, relay/thermo wiring, cal_offset_c, max_ramp/sanity_rate, control_mode,
+ * temp limits, heater timing, the 8 guard-threshold overrides, and
+ * cross_zone_max_delta_c -- see each new field's own comment in the "zone
+ * tuning entry" pass-1 loop below), so the export/import now covers all of
+ * it. Unlike zones_http.c's ZONES_CFG_VERSION there is still no migration
+ * chain: a version 2 body is a strict SUPERSET of what a version 1 body
+ * could contain (every new key is OPTIONAL per zone entry, exactly like
+ * model_k_dc/tc_type already were at version 1), so a genuine version 1
+ * export -- which simply never has any of the new keys -- imports cleanly
+ * under version 2's reader with no format-specific branch needed; only the
+ * NEW fields are left unset (not written) on such an import, which is
+ * correct: a version 1 export never claimed to carry them, so restoring one
+ * must not silently zero what the target board already has for those
+ * fields. A version 3+ body (this firmware does not understand it) is still
+ * refused outright, matching the "reject rather than guess" brief. */
+#define BACKUP_FORMAT_VERSION 2
+#define BACKUP_FORMAT_VERSION_MIN 1
 
 /* Generous headroom over a legitimate full backup (8 profiles x up to 12
- * segments, plus MAX31856_CHANNEL_COUNT zones' worth of PID/model/tc_type) --
- * checked against Content-Length before a single byte is read, same
- * discipline as every other untrusted-body handler in this codebase.
+ * segments, plus MAX31856_CHANNEL_COUNT zones' worth of PID/model/tc_type
+ * plus, as of version 2, every other per-zone field -- name/relay_mask/
+ * thermo_mask/cal_offset_c/max_ramp/sanity_rate/control_mode/temp limits/
+ * heater timing/8 guard thresholds/cross_zone_max_delta_c, roughly another
+ * ~20 keys per zone) -- checked against Content-Length before a single byte
+ * is read, same discipline as every other untrusted-body handler in this
+ * codebase. 12288 -> 16384 (2026-08-21) for the version-2 field growth.
  * Heap-allocated, not a stack array: this board's internal DRAM was measured
  * at ~4167 bytes free after LVGL start (see this file's header comment / the
  * task brief), and a 12 KB local array would be exactly the kind of stack
  * overflow KilnFW's 2026-08-21 boot-loop fix (commit aee6171) had to dig out
  * of a different file. */
-#define BACKUP_BODY_MAX 12288
+#define BACKUP_BODY_MAX 16384
 
 /* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
  * App/drivers/CMakeLists.txt -- same convention as every other *_page.html
@@ -205,6 +223,74 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
         }
         if (have_tc) {
             backup_stream_printf(&s, "\"tc_type\":%u,", tc_type);
+        }
+        /* 2026-08-21 (version 2): everything else a zone stores that used to
+         * be read-only -- see zones_http.h's now-added setter for each of
+         * these. All of these getters share zones_config_get_pid()'s own
+         * "false = zone_index unconfigured" convention, and zi already
+         * passed that check above (zones_config_get_pid() succeeded), so
+         * every one of these is guaranteed answerable here -- unlike
+         * have_model/have_tc above there is no "not yet measured" state for
+         * any of them to skip. */
+        {
+            char name[ZONE_NAME_MAX_LEN + 1];
+            zones_config_get_name(zi, name, sizeof(name));
+            char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
+            json_escape(name, name_escaped, sizeof(name_escaped));
+            uint8_t relay_mask = 0, thermo_mask = 0;
+            zones_config_get_relay_mask(zi, &relay_mask);
+            zones_config_get_thermo_mask(zi, &thermo_mask);
+            float cal_offset_c = 0.0f;
+            zones_config_get_cal_offset(zi, &cal_offset_c);
+            float max_ramp_c_per_hr = 0.0f;
+            zones_config_get_max_ramp(zi, &max_ramp_c_per_hr);
+            float sanity_rate_c_per_min = 0.0f;
+            zones_config_get_sanity_rate(zi, &sanity_rate_c_per_min);
+            zone_control_mode_t control_mode = ZONE_CONTROL_MODE_OFF;
+            zones_config_get_control_mode(zi, &control_mode);
+            float max_temp_c = 0.0f, min_temp_c = 0.0f;
+            zones_config_get_temp_limits(zi, &max_temp_c, &min_temp_c);
+            float window_ms = 0.0f, min_on_ms = 0.0f, min_off_ms = 0.0f;
+            zones_config_get_heater_cfg(zi, &window_ms, &min_on_ms, &min_off_ms);
+            float wrong_dir_window_s = 0.0f, wrong_dir_rate_c_per_min = 0.0f, off_settle_s = 0.0f,
+                  runaway_rate_c_per_min = 0.0f, runaway_margin_c = 0.0f, drift_period_s = 0.0f,
+                  sensor_fault_debounce_ticks = 0.0f, frozen_window_s = 0.0f;
+            zones_config_get_guard_thresholds(zi, &wrong_dir_window_s, &wrong_dir_rate_c_per_min, &off_settle_s,
+                                              &runaway_rate_c_per_min, &runaway_margin_c, &drift_period_s,
+                                              &sensor_fault_debounce_ticks, &frozen_window_s);
+            float cross_zone_max_delta_c = 0.0f;
+            zones_config_get_cross_zone_delta(zi, &cross_zone_max_delta_c);
+
+            /* Each fragment kept comfortably under backup_stream_printf()'s
+             * own tmp[192] scratch buffer (including formatted values, not
+             * just the format string) -- one big fragment covering all of
+             * these keys at once measured out to well over 192 bytes once
+             * values were substituted, which would have been silently
+             * truncated by that function's own overflow clamp rather than
+             * erroring, so this is split into several smaller calls instead
+             * of one that could quietly drop the tail of a zone's entry. */
+            backup_stream_printf(&s, "\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,",
+                                name_escaped, relay_mask, thermo_mask);
+            backup_stream_printf(&s, "\"cal_offset_c\":%.3f,\"max_ramp_c_per_hr\":%.2f,"
+                                "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,",
+                                (double)cal_offset_c, (double)max_ramp_c_per_hr, (double)sanity_rate_c_per_min,
+                                (unsigned)control_mode);
+            backup_stream_printf(&s, "\"max_temp_c\":%.1f,\"min_temp_c\":%.1f,\"heater_window_ms\":%.0f,"
+                                "\"heater_min_on_ms\":%.0f,\"heater_min_off_ms\":%.0f,",
+                                (double)max_temp_c, (double)min_temp_c, (double)window_ms, (double)min_on_ms,
+                                (double)min_off_ms);
+            backup_stream_printf(&s, "\"guard_wrong_dir_window_s\":%.1f,\"guard_wrong_dir_rate_c_per_min\":%.3f,"
+                                "\"guard_off_settle_s\":%.1f,",
+                                (double)wrong_dir_window_s, (double)wrong_dir_rate_c_per_min,
+                                (double)off_settle_s);
+            backup_stream_printf(&s, "\"guard_runaway_rate_c_per_min\":%.3f,\"guard_runaway_margin_c\":%.1f,"
+                                "\"guard_drift_period_s\":%.1f,",
+                                (double)runaway_rate_c_per_min, (double)runaway_margin_c,
+                                (double)drift_period_s);
+            backup_stream_printf(&s, "\"guard_sensor_fault_debounce_ticks\":%.0f,\"guard_frozen_window_s\":%.1f,"
+                                "\"cross_zone_max_delta_c\":%.1f,",
+                                (double)sensor_fault_debounce_ticks, (double)frozen_window_s,
+                                (double)cross_zone_max_delta_c);
         }
         /* Trailing comma above is always followed by a real key (a JSON
          * object can never end on ",}" here) since every entry that reaches
@@ -416,6 +502,29 @@ static bool json_field_num(const char *obj, const char *key, double *out)
     return true;
 }
 
+/* Parses an OPTIONAL bounded numeric field: absent is not an error (*out_has
+ * is set false, *out untouched), present-but-out-of-range or malformed IS an
+ * error. Used by backup_import_apply()'s zone-tuning pass 1b for every
+ * version-2 field, all of which are optional the same way model_k_dc/tc_type
+ * already were at version 1 -- a version-1 export simply never has these
+ * keys, and this is what lets it still import cleanly under the version-2
+ * reader (see BACKUP_FORMAT_VERSION's comment). */
+static bool json_field_opt_num(const char *obj, const char *key, double min, double max, double *out,
+                               bool *out_has, const char *field_desc, char *err_msg, size_t err_cap,
+                               unsigned entry_idx)
+{
+    if (!json_obj_find(obj, key)) {
+        *out_has = false;
+        return true;
+    }
+    if (!json_field_num(obj, key, out) || *out < min || *out > max) {
+        snprintf(err_msg, err_cap, "zone tuning entry %u: %s missing or out of range", entry_idx, field_desc);
+        return false;
+    }
+    *out_has = true;
+    return true;
+}
+
 static bool json_field_str(const char *obj, const char *key, char *out, size_t cap)
 {
     const char *v = json_obj_find(obj, key);
@@ -457,7 +566,18 @@ static bool json_field_str(const char *obj, const char *key, char *out, size_t c
  * zones_config_set_model() enforces at commit time (both now come from
  * zones_http.h, moved there 2026-08-21 for exactly this reason -- see that
  * header's comment) -- so an out-of-range plant model is refused here, before
- * any write happens, the same as every other field in this function. */
+ * any write happens, the same as every other field in this function.
+ *
+ * Version 2 (2026-08-21) added every other zone_cfg_t field zones_http.h
+ * gained a setter for this same pass -- name/relay_mask/thermo_mask/
+ * cal_offset_c/max_ramp_c_per_hr/sanity_rate_c_per_min/control_mode/temp
+ * limits/heater timing/the 8 guard-threshold overrides/cross_zone_max_delta_c.
+ * Every one is OPTIONAL per zone entry (same convention model_k_dc/tc_type
+ * already used), validated in THIS pass against the exact bound the new
+ * zones_config_set_*() setter enforces (json_field_opt_num()'s doc comment
+ * has the shared shape; the three bundled groups -- temp limits, heater
+ * timing, and the 8 guard thresholds -- are each all-or-nothing per entry,
+ * matching their bundled setter). */
 static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
 {
     double dver;
@@ -466,9 +586,10 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         snprintf(err_msg, err_cap, "not a kilnCtl backup file (missing/wrong \"kind\")");
         return false;
     }
-    if (!json_field_num(body, "version", &dver) || (int)dver != BACKUP_FORMAT_VERSION) {
-        snprintf(err_msg, err_cap, "unsupported backup version (this firmware understands version %d only)",
-                BACKUP_FORMAT_VERSION);
+    if (!json_field_num(body, "version", &dver) || (int)dver < BACKUP_FORMAT_VERSION_MIN ||
+        (int)dver > BACKUP_FORMAT_VERSION) {
+        snprintf(err_msg, err_cap, "unsupported backup version (this firmware understands versions %d-%d)",
+                BACKUP_FORMAT_VERSION_MIN, BACKUP_FORMAT_VERSION);
         return false;
     }
 
@@ -595,6 +716,54 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         float k_dc, tau_s, dead_time_s;
         bool has_tc;
         uint8_t tc_type;
+        /* Version 2 (2026-08-21): everything else zones_http.h gained a
+         * setter for this pass. Each has its own has_* flag, same
+         * optional-per-field convention as has_model/has_tc above -- see
+         * json_field_opt_num()'s comment for why "absent" must not be an
+         * error. */
+        bool has_name;
+        /* +2, not +1: json_field_str() silently truncates to cap-1 bytes with
+         * no way to tell the caller it did so, so a buffer sized exactly
+         * ZONE_NAME_MAX_LEN+1 could never actually observe an overlong name
+         * -- it would just come back pre-truncated to a fit, and the "name
+         * too long" check below would be permanently unreachable (dead)
+         * code. Sizing one byte larger than the real limit means ANY name
+         * whose true length exceeds ZONE_NAME_MAX_LEN still results in
+         * strlen(name) == ZONE_NAME_MAX_LEN+1 after the copy (truncated to
+         * fit this buffer, but still detectably over the limit), so the
+         * length check that follows can actually fire. See this pass's
+         * report for the negative test that proves it does. */
+        char name[ZONE_NAME_MAX_LEN + 2];
+        bool has_relay_mask;
+        uint8_t relay_mask;
+        bool has_thermo_mask;
+        uint8_t thermo_mask;
+        bool has_cal;
+        float cal_offset_c;
+        bool has_ramp;
+        float max_ramp_c_per_hr;
+        bool has_sanity;
+        float sanity_rate_c_per_min;
+        bool has_mode;
+        uint8_t control_mode;
+        /* max_temp_c/min_temp_c are a bundled pair (zones_config_set_temp_limits()
+         * takes both together) -- either both are present in the import or
+         * neither is, same "all-or-nothing" rule TODO already applies to
+         * model_k_dc/tau_s/dead_time_s just above. */
+        bool has_temp_limits;
+        float max_temp_c, min_temp_c;
+        /* heater_window_ms/min_on_ms/min_off_ms -- same bundled-pair rule. */
+        bool has_heater_cfg;
+        float heater_window_ms, heater_min_on_ms, heater_min_off_ms;
+        /* The 8 guard-threshold overrides -- same bundled-pair rule, all 8
+         * or none (zones_config_set_guard_thresholds() takes all 8
+         * together). */
+        bool has_guard;
+        float guard_wrong_dir_window_s, guard_wrong_dir_rate_c_per_min, guard_off_settle_s,
+            guard_runaway_rate_c_per_min, guard_runaway_margin_c, guard_drift_period_s,
+            guard_sensor_fault_debounce_ticks, guard_frozen_window_s;
+        bool has_cross_zone;
+        float cross_zone_max_delta_c;
     } zone_candidate_t;
     zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT];
     size_t zone_candidate_count = 0;
@@ -676,6 +845,198 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             zc->tc_type = (uint8_t)dtc;
         }
 
+        /* ---- Version 2 fields -- see zone_candidate_t's comment ---- */
+        if (json_field_str(ze, "name", zc->name, sizeof(zc->name))) {
+            /* Same rejection zones_config_set_name()/parse_zone_fields()'s
+             * z%u_name produce for a name over ZONE_NAME_MAX_LEN chars --
+             * see zc->name's own comment for why the buffer is sized one
+             * byte over the limit, which is what makes this reachable. */
+            if (strlen(zc->name) > ZONE_NAME_MAX_LEN) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: name too long", (unsigned)zone_candidate_count);
+                return false;
+            }
+            zc->has_name = true;
+        }
+
+        double drelay;
+        if (json_field_opt_num(ze, "relay_mask", 0, 255, &drelay, &zc->has_relay_mask, "relay_mask", err_msg,
+                               err_cap, (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_relay_mask) {
+            zc->relay_mask = (uint8_t)drelay;
+            /* Same bound zones_config_set_relay_mask()/parse_zone_fields()'s
+             * z%u_relay_mask enforce: only relays 1..relay_count on THIS
+             * board may be referenced. relay_count is a board-wide setting
+             * this module never writes, so it is read straight off the live
+             * config via zones_config_get_relay_count() (added this pass for
+             * exactly this check), same as thermo_count already was for the
+             * zone_mask/thermo_mask checks elsewhere in this function. */
+            uint8_t relay_count = zones_config_get_relay_count();
+            uint8_t valid_relay_bits = relay_count >= 8 ? 0xFFu : (uint8_t)((1u << relay_count) - 1u);
+            if ((zc->relay_mask & ~valid_relay_bits) != 0) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: relay_mask references an unconfigured relay",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+        }
+
+        double dthermo;
+        if (json_field_opt_num(ze, "thermo_mask", 0, 255, &dthermo, &zc->has_thermo_mask, "thermo_mask", err_msg,
+                               err_cap, (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_thermo_mask) {
+            zc->thermo_mask = (uint8_t)dthermo;
+            /* Same bound zones_config_set_thermo_mask()/parse_zone_fields()'s
+             * z%u_thermo_mask enforce -- valid_zone_bits was already
+             * computed above from thermo_count for the profile zone_mask
+             * check, and is the identical bound here (both are "which
+             * MAX31856 channels are configured on this board"). */
+            if ((zc->thermo_mask & ~valid_zone_bits) != 0) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: thermo_mask references an unconfigured thermocouple channel",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+        }
+
+        double dcal;
+        if (json_field_opt_num(ze, "cal_offset_c", (double)ZONE_CAL_OFFSET_MIN_C, (double)ZONE_CAL_OFFSET_MAX_C,
+                               &dcal, &zc->has_cal, "cal_offset_c", err_msg, err_cap,
+                               (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_cal) {
+            zc->cal_offset_c = (float)dcal;
+        }
+
+        double dramp;
+        if (json_field_opt_num(ze, "max_ramp_c_per_hr", 0, (double)ZONE_MAX_RAMP_C_PER_HR_MAX, &dramp,
+                               &zc->has_ramp, "max_ramp_c_per_hr", err_msg, err_cap,
+                               (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_ramp) {
+            zc->max_ramp_c_per_hr = (float)dramp;
+        }
+
+        double dsanity;
+        if (json_field_opt_num(ze, "sanity_rate_c_per_min", 0, (double)ZONE_SANITY_RATE_MAX_C_PER_MIN, &dsanity,
+                               &zc->has_sanity, "sanity_rate_c_per_min", err_msg, err_cap,
+                               (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_sanity) {
+            zc->sanity_rate_c_per_min = (float)dsanity;
+        }
+
+        double dmode;
+        if (json_field_opt_num(ze, "control_mode", 0, (double)ZONE_CONTROL_MODE_PID, &dmode, &zc->has_mode,
+                               "control_mode", err_msg, err_cap, (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_mode) {
+            zc->control_mode = (uint8_t)dmode;
+        }
+
+        double dmaxt, dmint;
+        bool has_maxt = json_field_num(ze, "max_temp_c", &dmaxt);
+        bool has_mint = json_field_num(ze, "min_temp_c", &dmint);
+        if (has_maxt || has_mint) {
+            if (!(has_maxt && has_mint)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: max_temp_c/min_temp_c must both be present together",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            if (dmaxt < 0 || dmaxt > (double)ZONE_MAX_TEMP_C_MAX || dmint < (double)ZONE_MIN_TEMP_C_MIN ||
+                dmint > (double)ZONE_MIN_TEMP_C_MAX) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: max_temp_c/min_temp_c out of range",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            zc->has_temp_limits = true;
+            zc->max_temp_c = (float)dmaxt;
+            zc->min_temp_c = (float)dmint;
+        }
+
+        double dwin, don, doff;
+        bool has_win = json_field_num(ze, "heater_window_ms", &dwin);
+        bool has_on = json_field_num(ze, "heater_min_on_ms", &don);
+        bool has_off = json_field_num(ze, "heater_min_off_ms", &doff);
+        if (has_win || has_on || has_off) {
+            if (!(has_win && has_on && has_off)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u: heater_window_ms/heater_min_on_ms/heater_min_off_ms must all be "
+                        "present together",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            if (dwin < 0 || dwin > (double)ZONE_HEATER_WINDOW_MS_MAX || don < 0 ||
+                don > (double)ZONE_HEATER_MIN_ON_OFF_MS_MAX || doff < 0 ||
+                doff > (double)ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: heater timing out of range",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            zc->has_heater_cfg = true;
+            zc->heater_window_ms = (float)dwin;
+            zc->heater_min_on_ms = (float)don;
+            zc->heater_min_off_ms = (float)doff;
+        }
+
+        {
+            double d1, d2, d3, d4, d5, d6, d7, d8;
+            bool h1 = json_field_num(ze, "guard_wrong_dir_window_s", &d1);
+            bool h2 = json_field_num(ze, "guard_wrong_dir_rate_c_per_min", &d2);
+            bool h3 = json_field_num(ze, "guard_off_settle_s", &d3);
+            bool h4 = json_field_num(ze, "guard_runaway_rate_c_per_min", &d4);
+            bool h5 = json_field_num(ze, "guard_runaway_margin_c", &d5);
+            bool h6 = json_field_num(ze, "guard_drift_period_s", &d6);
+            bool h7 = json_field_num(ze, "guard_sensor_fault_debounce_ticks", &d7);
+            bool h8 = json_field_num(ze, "guard_frozen_window_s", &d8);
+            bool any = h1 || h2 || h3 || h4 || h5 || h6 || h7 || h8;
+            if (any) {
+                if (!(h1 && h2 && h3 && h4 && h5 && h6 && h7 && h8)) {
+                    snprintf(err_msg, err_cap,
+                            "zone tuning entry %u: all 8 guard threshold overrides must be present together",
+                            (unsigned)zone_candidate_count);
+                    return false;
+                }
+                if (d1 < 0 || d1 > (double)ZONE_GUARD_TIME_S_MAX || d2 < 0 ||
+                    d2 > (double)ZONE_GUARD_RATE_C_PER_MIN_MAX || d3 < 0 || d3 > (double)ZONE_GUARD_TIME_S_MAX ||
+                    d4 < 0 || d4 > (double)ZONE_GUARD_RATE_C_PER_MIN_MAX || d5 < 0 ||
+                    d5 > (double)ZONE_GUARD_MARGIN_C_MAX || d6 < 0 || d6 > (double)ZONE_GUARD_TIME_S_MAX ||
+                    d7 < 0 || d7 > (double)ZONE_GUARD_DEBOUNCE_TICKS_MAX || d8 < 0 ||
+                    d8 > (double)ZONE_GUARD_TIME_S_MAX) {
+                    snprintf(err_msg, err_cap, "zone tuning entry %u: a guard threshold override is out of range",
+                            (unsigned)zone_candidate_count);
+                    return false;
+                }
+                zc->has_guard = true;
+                zc->guard_wrong_dir_window_s = (float)d1;
+                zc->guard_wrong_dir_rate_c_per_min = (float)d2;
+                zc->guard_off_settle_s = (float)d3;
+                zc->guard_runaway_rate_c_per_min = (float)d4;
+                zc->guard_runaway_margin_c = (float)d5;
+                zc->guard_drift_period_s = (float)d6;
+                zc->guard_sensor_fault_debounce_ticks = (float)d7;
+                zc->guard_frozen_window_s = (float)d8;
+            }
+        }
+
+        double dxzone;
+        if (json_field_opt_num(ze, "cross_zone_max_delta_c", 0, (double)ZONE_CROSS_ZONE_DELTA_C_MAX, &dxzone,
+                               &zc->has_cross_zone, "cross_zone_max_delta_c", err_msg, err_cap,
+                               (unsigned)zone_candidate_count) == false) {
+            return false;
+        }
+        if (zc->has_cross_zone) {
+            zc->cross_zone_max_delta_c = (float)dxzone;
+        }
+
         zone_candidate_count++;
     }
 
@@ -719,6 +1080,81 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
         }
         if (zc->has_tc && !zones_config_set_tc_type(zc->index, zc->tc_type)) {
             snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting tc_type",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        /* Version 2 fields -- see zone_candidate_t's comment. Every one of
+         * these setters was just validated against the exact same bound in
+         * pass 1 above, so a commit-time rejection here means a race with a
+         * concurrent config change between the two passes (same rationale
+         * as the PID/model/tc_type "should not happen" comments above), not
+         * a bug in this pass's own bounds. */
+        if (zc->has_name && !zones_config_set_name(zc->index, zc->name)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting name",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_relay_mask && !zones_config_set_relay_mask(zc->index, zc->relay_mask)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting relay_mask",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_thermo_mask && !zones_config_set_thermo_mask(zc->index, zc->thermo_mask)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting thermo_mask",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_cal && !zones_config_set_cal_offset(zc->index, zc->cal_offset_c)) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting cal_offset_c",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_ramp && !zones_config_set_max_ramp(zc->index, zc->max_ramp_c_per_hr)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting max_ramp_c_per_hr",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_sanity && !zones_config_set_sanity_rate(zc->index, zc->sanity_rate_c_per_min)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting sanity_rate_c_per_min",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_mode && !zones_config_set_control_mode(zc->index, (zone_control_mode_t)zc->control_mode)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting control_mode",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_temp_limits && !zones_config_set_temp_limits(zc->index, zc->max_temp_c, zc->min_temp_c)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting temp limits",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_heater_cfg &&
+            !zones_config_set_heater_cfg(zc->index, zc->heater_window_ms, zc->heater_min_on_ms,
+                                         zc->heater_min_off_ms)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting heater timing",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_guard &&
+            !zones_config_set_guard_thresholds(zc->index, zc->guard_wrong_dir_window_s,
+                                               zc->guard_wrong_dir_rate_c_per_min, zc->guard_off_settle_s,
+                                               zc->guard_runaway_rate_c_per_min, zc->guard_runaway_margin_c,
+                                               zc->guard_drift_period_s, zc->guard_sensor_fault_debounce_ticks,
+                                               zc->guard_frozen_window_s)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting guard thresholds",
+                    (unsigned)i, zc->index);
+            return false;
+        }
+        if (zc->has_cross_zone && !zones_config_set_cross_zone_delta(zc->index, zc->cross_zone_max_delta_c)) {
+            snprintf(err_msg, err_cap,
+                    "zone tuning entry %u (channel %u) rejected at commit setting cross_zone_max_delta_c",
                     (unsigned)i, zc->index);
             return false;
         }

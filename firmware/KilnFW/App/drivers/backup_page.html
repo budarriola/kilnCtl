@@ -50,15 +50,14 @@
 
 <div class="card">
   <h2 style="margin-top:0;border-top:none;padding-top:0;">Export</h2>
-  <p>Downloads a single JSON file: your saved fire profiles, plus the zone
-  tuning settings that support a full restore -- PID gains, the fitted plant
-  model, and thermocouple type per channel.</p>
+  <p>Downloads a single JSON file: your saved fire profiles, plus every zone
+  setting on the <a href="/settings/zones">Thermocouples &amp; Zones</a>
+  page -- PID gains, the fitted plant model, thermocouple type, name,
+  relay/thermocouple assignment, calibration offset, max ramp ceiling,
+  sanity-rate threshold, control mode, temperature limits, heater timing,
+  and the guard-threshold overrides.</p>
   <p><strong>This file does NOT include Wi-Fi credentials</strong> (see
-  Restore below for why), and it does NOT include zone wiring -- names,
-  relay/thermocouple assignment, guard thresholds, temperature limits, or
-  heater timing. Those live only on the
-  <a href="/settings/zones">Thermocouples &amp; Zones</a> page today and must
-  be set up directly on a replacement board.</p>
+  Restore below for why).</p>
   <p><a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a></p>
 </div>
 
@@ -109,8 +108,9 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
     status.textContent = 'Choose a backup file first.';
     return;
   }
-  if (!kcConfirm('This overwrites saved profiles and zone tuning (PID/model/thermocouple type) with the ' +
-               'contents of this file. Wi-Fi credentials are not affected. Continue?')) {
+  if (!kcConfirm('This overwrites saved profiles and every zone setting (PID/model/thermocouple type, ' +
+               'name, wiring, calibration, limits, timing, guard thresholds) with the contents of this ' +
+               'file. Wi-Fi credentials are not affected. Continue?')) {
     return;
   }
   status.textContent = 'Reading file...';

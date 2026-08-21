@@ -12,19 +12,21 @@
 //
 // SCOPE, and why it is narrower than "every setting on the board": this pass
 // owns settings_http.c/.h, profiles_http.c/.h, and their two *_page.html
-// files -- NOT zones_http.c/.h, rules_http.c/.h, or wifi_prov.c/.h, which
-// other work this same session owns. A backup can only round-trip a value
-// through a PUBLIC getter *and* a public SETTER; zones_http.h exposes get+set
-// pairs for exactly four things (per-channel PID gains, the FOPDT plant
+// files -- NOT rules_http.c/.h or wifi_prov.c/.h, which other work this same
+// session owns. zones_http.c/.h IS this file's to widen, though (2026-08-21,
+// backup format version 2): a backup can only round-trip a value through a
+// PUBLIC getter *and* a public SETTER, and zones_http.h originally exposed
+// get+set pairs for only four things (per-channel PID gains, the FOPDT plant
 // model, per-channel thermocouple type, and the RP2040 safety processor's own
-// thermocouple type) and read-only getters (no setter at all) for everything
-// else a zone stores -- name, relay/thermocouple wiring, guard thresholds,
-// temperature limits, heater timing, max ramp ceiling, control mode. Those
-// read-only fields are left OUT of this backup rather than exported as if
-// they could be restored and then silently doing nothing on import: an
-// operator restoring a backup onto a replacement board would reasonably
-// expect an exported field to come back, and a field that reads back but
-// can't be written is worse than one that was never offered.
+// thermocouple type) -- everything else a zone stores (name, relay/
+// thermocouple wiring, cal_offset_c, max ramp ceiling, sanity-rate threshold,
+// control mode, temperature limits, heater timing, the 8 guard-threshold
+// overrides, and cross_zone_max_delta_c) had a getter with no setter at all,
+// so it read back on export but could never actually be restored. This pass
+// added the missing setters to zones_http.h/.c and widened the export/import
+// in backup_http.c to match, closing that gap: a field that reads back but
+// can't be written is worse than one that was never offered, and now every
+// zone field is one or the other -- exported AND restorable.
 //
 // Fire profiles (profiles_http.h: profiles_http_get()/_save()/_delete(), a
 // complete CRUD API already) round-trip in full.

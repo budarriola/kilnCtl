@@ -18,6 +18,7 @@ void run_test_ota_interlock(void);
 void run_test_heat_interlock(void);
 void run_test_thermo_combine(void);
 void run_test_profile_feasibility(void);
+void run_test_wifi_prov(void);
 
 int main(void)
 {
@@ -32,6 +33,7 @@ int main(void)
     run_test_heat_interlock();
     run_test_thermo_combine();
     run_test_profile_feasibility();
+    run_test_wifi_prov();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

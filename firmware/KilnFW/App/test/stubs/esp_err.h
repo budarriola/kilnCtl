@@ -16,4 +16,27 @@ typedef int esp_err_t;
 #define ESP_ERR_INVALID_ARG 0x102
 #define ESP_ERR_INVALID_STATE 0x103
 
+/* 2026-08-21: added for the wifi_prov.c host tests (test_wifi_prov.c), which
+ * pull in wifi_prov.c's real ESP-IDF error-code vocabulary. Values are
+ * arbitrary but distinct -- nothing compares these against the real ESP-IDF
+ * numeric values, only against each other within this host build. */
+#define ESP_ERR_NO_MEM 0x101
+#define ESP_ERR_INVALID_SIZE 0x104
+#define ESP_ERR_NOT_SUPPORTED 0x106
+#define ESP_ERR_TIMEOUT 0x107
+#define ESP_ERR_NVS_NOT_FOUND 0x1102
+#define ESP_ERR_NVS_PART_NOT_FOUND 0x1103
+#define ESP_ERR_NVS_NO_FREE_PAGES 0x1104
+#define ESP_ERR_NVS_NEW_VERSION_FOUND 0x1105
+#define ESP_ERR_WIFI_CONN 0x3008
+#define ESP_ERR_WIFI_MODE 0x3009
+#define ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED 0x5001
+#define ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED 0x5002
+
+static inline const char *esp_err_to_name(esp_err_t e)
+{
+    (void)e;
+    return "ERR";
+}
+
 #endif // TEST_STUB_ESP_ERR_H

@@ -68,13 +68,14 @@ static const char *TAG = "zones_http";
  * register code that isn't a thermocouple. */
 #define ZONE_TC_TYPE_MAX_REAL THERMO_TC_T
 
-#define ZONE_NAME_MAX_LEN 15
-
-/* Sanity bounds for the stored FOPDT plant model -- ZONE_MODEL_K_MAX and
- * ZONE_MODEL_TIME_MAX_S now live in zones_http.h (moved there 2026-08-21) so
- * backup_http.c's import validation pass can reject an out-of-range model
- * BEFORE any write happens, the same as zones_config_set_model() enforces at
- * commit time -- see zones_http.h for the full rationale. */
+/* Sanity bounds for the stored FOPDT plant model, and every other per-zone
+ * field bound below -- ZONE_MODEL_K_MAX/ZONE_MODEL_TIME_MAX_S moved to
+ * zones_http.h 2026-08-21, and ZONE_NAME_MAX_LEN plus the rest of this
+ * file's per-field bounds moved there in the same pass right after, so
+ * backup_http.c's import validation pass and the new zones_config_set_*()
+ * setters can reject an out-of-range value BEFORE any write happens using
+ * the EXACT same ceiling parse_zone_fields() below enforces -- see
+ * zones_http.h for the full rationale. */
 
 /* Embedded via EMBED_TXTFILES in CMakeLists.txt -- same convention as
  * wifi_provision_http.c's embedded pages. */
@@ -551,6 +552,44 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
     return true;
 }
 
+/* Same bound parse_zone_fields()'s z%u_ramp enforces. 0 is legal (the
+ * documented "never configured" encoding). */
+bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(c_per_hr) || c_per_hr < 0.0f || c_per_hr > ZONE_MAX_RAMP_C_PER_HR_MAX) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].max_ramp_c_per_hr = c_per_hr;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
+bool zones_config_get_cal_offset(uint8_t zone_index, float *out_cal_offset_c)
+{
+    if (!out_cal_offset_c || zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    *out_cal_offset_c = s_zones.cfg.zones[zone_index].cal_offset_c;
+    return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_cal enforces. */
+bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(cal_offset_c) || cal_offset_c < ZONE_CAL_OFFSET_MIN_C || cal_offset_c > ZONE_CAL_OFFSET_MAX_C) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].cal_offset_c = cal_offset_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 uint32_t zones_config_generation(void)
 {
     return s_config_generation;
@@ -568,6 +607,11 @@ bool zones_config_is_valid(void)
 uint8_t zones_config_get_thermo_count(void)
 {
     return s_zones.cfg.thermo_count;
+}
+
+uint8_t zones_config_get_relay_count(void)
+{
+    return s_zones.cfg.relay_count;
 }
 
 uint8_t zones_config_get_max_simultaneous_relays(void)
@@ -683,6 +727,22 @@ bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
     return true;
 }
 
+/* Same bound parse_zone_fields()'s z%u_relay_mask handling enforces --
+ * relay_mask may only reference relays 1..relay_count. */
+bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    uint8_t valid_bits = s_zones.cfg.relay_count >= 8 ? 0xFF : (uint8_t)((1u << s_zones.cfg.relay_count) - 1u);
+    if ((relay_mask & ~valid_bits) != 0) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].relay_mask = relay_mask;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
 {
     if (!out_mask || zone_index >= s_zones.cfg.thermo_count) {
@@ -690,6 +750,25 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     }
     *out_mask = s_zones.cfg.zones[zone_index].thermo_mask;
     return true;
+}
+
+/* Same bound parse_zone_fields()'s explicit z%u_thermo_mask handling
+ * enforces -- thermo_mask may only reference channels 1..thermo_count.
+ * Unlike the POST handler this setter has no "omitted means preserve the
+ * legacy mapping" case -- see this function's header comment. */
+bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    uint8_t valid_bits =
+        s_zones.cfg.thermo_count >= 8 ? 0xFF : (uint8_t)((1u << s_zones.cfg.thermo_count) - 1u);
+    if ((thermo_mask & ~valid_bits) != 0) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].thermo_mask = thermo_mask;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap)
@@ -700,6 +779,25 @@ bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap)
     strncpy(out, s_zones.cfg.zones[zone_index].name, out_cap - 1);
     out[out_cap - 1] = '\0';
     return true;
+}
+
+/* Same rejection parse_zone_fields() produces for an overlong z%u_name
+ * (http_form_find_field() returning -2), applied to a NUL-terminated C
+ * string. NULL is treated as an empty name (clears it), matching a POST that
+ * omits the field. */
+bool zones_config_set_name(uint8_t zone_index, const char *name)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    size_t len = name ? strlen(name) : 0;
+    if (len > ZONE_NAME_MAX_LEN) {
+        return false;
+    }
+    strncpy(s_zones.cfg.zones[zone_index].name, name ? name : "", ZONE_NAME_MAX_LEN);
+    s_zones.cfg.zones[zone_index].name[ZONE_NAME_MAX_LEN] = '\0';
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
@@ -744,6 +842,21 @@ bool zones_config_get_sanity_rate(uint8_t zone_index, float *out_c_per_min)
     return true;
 }
 
+/* Same bound parse_zone_fields()'s z%u_sanity enforces. 0 is legal (the
+ * documented "never configured" encoding). */
+bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(c_per_min) || c_per_min < 0.0f || c_per_min > ZONE_SANITY_RATE_MAX_C_PER_MIN) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].sanity_rate_c_per_min = c_per_min;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_mode)
 {
     if (!out_mode || zone_index >= s_zones.cfg.thermo_count) {
@@ -751,6 +864,20 @@ bool zones_config_get_control_mode(uint8_t zone_index, zone_control_mode_t *out_
     }
     *out_mode = (zone_control_mode_t)s_zones.cfg.zones[zone_index].control_mode;
     return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_mode enforces (0-2). */
+bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if ((unsigned)mode > (unsigned)ZONE_CONTROL_MODE_PID) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].control_mode = (uint8_t)mode;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, float *out_min_temp_c)
@@ -764,6 +891,30 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
     return true;
 }
 
+/* Bundled setter -- see zones_http.h's comment on this pair for why NO
+ * max_temp_c >= min_temp_c cross-check is added here: parse_zone_fields()
+ * (the POST /api/zones authority) does not enforce one either, so this
+ * setter matches it exactly rather than becoming stricter than the page it
+ * mirrors. Both fields checked before either is written, same
+ * reject-nothing-half-applied discipline as zones_config_set_model(). */
+bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float min_temp_c)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(max_temp_c) || max_temp_c < 0.0f || max_temp_c > ZONE_MAX_TEMP_C_MAX) {
+        return false;
+    }
+    if (!isfinite(min_temp_c) || min_temp_c < ZONE_MIN_TEMP_C_MIN || min_temp_c > ZONE_MIN_TEMP_C_MAX) {
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    z->max_temp_c = max_temp_c;
+    z->min_temp_c = min_temp_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float *out_min_on_ms,
                                  float *out_min_off_ms)
 {
@@ -775,6 +926,33 @@ bool zones_config_get_heater_cfg(uint8_t zone_index, float *out_window_ms, float
     *out_min_on_ms = z->heater_min_on_ms;
     *out_min_off_ms = z->heater_min_off_ms;
     return true;
+}
+
+/* Bundled setter, same "no half-updated group" discipline as
+ * zones_config_set_model()/zones_config_set_temp_limits(). No
+ * min_on_ms/min_off_ms-vs-window_ms cross-check: parse_zone_fields() (the
+ * POST authority) does not enforce one either -- see
+ * zones_config_set_temp_limits()'s comment for the identical reasoning. */
+bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(window_ms) || window_ms < 0.0f || window_ms > ZONE_HEATER_WINDOW_MS_MAX) {
+        return false;
+    }
+    if (!isfinite(min_on_ms) || min_on_ms < 0.0f || min_on_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
+        return false;
+    }
+    if (!isfinite(min_off_ms) || min_off_ms < 0.0f || min_off_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    z->heater_window_ms = window_ms;
+    z->heater_min_on_ms = min_on_ms;
+    z->heater_min_off_ms = min_off_ms;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_window_s,
@@ -800,6 +978,60 @@ bool zones_config_get_guard_thresholds(uint8_t zone_index, float *out_wrong_dir_
     return true;
 }
 
+/* Bundled setter, same "reject nothing half-written" discipline as every
+ * bundled setter above. Each of the 8 fields checked against its own
+ * independent bound (matching which ceiling parse_zone_fields() applies to
+ * that specific key) -- no cross-field check between any pair of these 8,
+ * matching the POST authority's own lack of one. */
+bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_window_s,
+                                       float wrong_dir_rate_c_per_min, float off_settle_s,
+                                       float runaway_rate_c_per_min, float runaway_margin_c,
+                                       float drift_period_s, float sensor_fault_debounce_ticks,
+                                       float frozen_window_s)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(wrong_dir_window_s) || wrong_dir_window_s < 0.0f || wrong_dir_window_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    if (!isfinite(wrong_dir_rate_c_per_min) || wrong_dir_rate_c_per_min < 0.0f ||
+        wrong_dir_rate_c_per_min > ZONE_GUARD_RATE_C_PER_MIN_MAX) {
+        return false;
+    }
+    if (!isfinite(off_settle_s) || off_settle_s < 0.0f || off_settle_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    if (!isfinite(runaway_rate_c_per_min) || runaway_rate_c_per_min < 0.0f ||
+        runaway_rate_c_per_min > ZONE_GUARD_RATE_C_PER_MIN_MAX) {
+        return false;
+    }
+    if (!isfinite(runaway_margin_c) || runaway_margin_c < 0.0f || runaway_margin_c > ZONE_GUARD_MARGIN_C_MAX) {
+        return false;
+    }
+    if (!isfinite(drift_period_s) || drift_period_s < 0.0f || drift_period_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    if (!isfinite(sensor_fault_debounce_ticks) || sensor_fault_debounce_ticks < 0.0f ||
+        sensor_fault_debounce_ticks > ZONE_GUARD_DEBOUNCE_TICKS_MAX) {
+        return false;
+    }
+    if (!isfinite(frozen_window_s) || frozen_window_s < 0.0f || frozen_window_s > ZONE_GUARD_TIME_S_MAX) {
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    z->guard_wrong_dir_window_s = wrong_dir_window_s;
+    z->guard_wrong_dir_rate_c_per_min = wrong_dir_rate_c_per_min;
+    z->guard_off_settle_s = off_settle_s;
+    z->guard_runaway_rate_c_per_min = runaway_rate_c_per_min;
+    z->guard_runaway_margin_c = runaway_margin_c;
+    z->guard_drift_period_s = drift_period_s;
+    z->guard_sensor_fault_debounce_ticks = sensor_fault_debounce_ticks;
+    z->guard_frozen_window_s = frozen_window_s;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
+}
+
 bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_c)
 {
     if (!out_max_delta_c || zone_index >= s_zones.cfg.thermo_count) {
@@ -807,6 +1039,21 @@ bool zones_config_get_cross_zone_delta(uint8_t zone_index, float *out_max_delta_
     }
     *out_max_delta_c = s_zones.cfg.zones[zone_index].cross_zone_max_delta_c;
     return true;
+}
+
+/* Same bound parse_zone_fields()'s z%u_xzone enforces. 0 is legal (the
+ * documented "guard disabled" encoding). */
+bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    if (!isfinite(max_delta_c) || max_delta_c < 0.0f || max_delta_c > ZONE_CROSS_ZONE_DELTA_C_MAX) {
+        return false;
+    }
+    s_zones.cfg.zones[zone_index].cross_zone_max_delta_c = max_delta_c;
+    s_config_generation++;
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
@@ -1136,7 +1383,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
      * natural physical bound, so 0..1000 is just generous headroom over
      * anything a real PID loop on this hardware would ever be tuned to. */
     snprintf(key, sizeof(key), "z%u_cal", i);
-    if (!parse_float_field(body, key, -50.0f, 50.0f, &z->cal_offset_c)) {
+    if (!parse_float_field(body, key, ZONE_CAL_OFFSET_MIN_C, ZONE_CAL_OFFSET_MAX_C, &z->cal_offset_c)) {
         *err_reason = "zone cal_offset_c missing or out of range";
         return false;
     }
@@ -1156,7 +1403,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
         return false;
     }
     snprintf(key, sizeof(key), "z%u_ramp", i);
-    if (!parse_float_field(body, key, 0.0f, 1000.0f, &z->max_ramp_c_per_hr)) {
+    if (!parse_float_field(body, key, 0.0f, ZONE_MAX_RAMP_C_PER_HR_MAX, &z->max_ramp_c_per_hr)) {
         *err_reason = "zone max_ramp_c_per_hr missing or out of range";
         return false;
     }
@@ -1165,7 +1412,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
      * board's bang-bang control could plausibly produce, just a sanity bound
      * against a typo. */
     snprintf(key, sizeof(key), "z%u_sanity", i);
-    if (!parse_float_field(body, key, 0.0f, 20.0f, &z->sanity_rate_c_per_min)) {
+    if (!parse_float_field(body, key, 0.0f, ZONE_SANITY_RATE_MAX_C_PER_MIN, &z->sanity_rate_c_per_min)) {
         *err_reason = "zone sanity_rate_c_per_min missing or out of range";
         return false;
     }
@@ -1180,12 +1427,12 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
      * guard 5 limit tighter than what a profile could ever request would be
      * a contradiction between the two checks. */
     snprintf(key, sizeof(key), "z%u_maxtemp", i);
-    if (!parse_float_field(body, key, 0.0f, 1400.0f, &z->max_temp_c)) {
+    if (!parse_float_field(body, key, 0.0f, ZONE_MAX_TEMP_C_MAX, &z->max_temp_c)) {
         *err_reason = "zone max_temp_c missing or out of range";
         return false;
     }
     snprintf(key, sizeof(key), "z%u_mintemp", i);
-    if (!parse_float_field(body, key, -50.0f, 200.0f, &z->min_temp_c)) {
+    if (!parse_float_field(body, key, ZONE_MIN_TEMP_C_MIN, ZONE_MIN_TEMP_C_MAX, &z->min_temp_c)) {
         *err_reason = "zone min_temp_c missing or out of range";
         return false;
     }
@@ -1196,17 +1443,17 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
      * min_on/min_off is the same generosity relative to window_ms's own
      * range. */
     snprintf(key, sizeof(key), "z%u_window", i);
-    if (!parse_float_field(body, key, 0.0f, 600000.0f, &z->heater_window_ms)) {
+    if (!parse_float_field(body, key, 0.0f, ZONE_HEATER_WINDOW_MS_MAX, &z->heater_window_ms)) {
         *err_reason = "zone heater_window_ms missing or out of range";
         return false;
     }
     snprintf(key, sizeof(key), "z%u_minon", i);
-    if (!parse_float_field(body, key, 0.0f, 60000.0f, &z->heater_min_on_ms)) {
+    if (!parse_float_field(body, key, 0.0f, ZONE_HEATER_MIN_ON_OFF_MS_MAX, &z->heater_min_on_ms)) {
         *err_reason = "zone heater_min_on_ms missing or out of range";
         return false;
     }
     snprintf(key, sizeof(key), "z%u_minoff", i);
-    if (!parse_float_field(body, key, 0.0f, 60000.0f, &z->heater_min_off_ms)) {
+    if (!parse_float_field(body, key, 0.0f, ZONE_HEATER_MIN_ON_OFF_MS_MAX, &z->heater_min_off_ms)) {
         *err_reason = "zone heater_min_off_ms missing or out of range";
         return false;
     }
@@ -1223,7 +1470,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_wrong_dir_window_s)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_wrong_dir_window_s)) {
                 *err_reason = "zone guard_wrong_dir_window_s out of range";
                 return false;
             }
@@ -1233,7 +1480,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 20.0f, &z->guard_wrong_dir_rate_c_per_min)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_wrong_dir_rate_c_per_min)) {
                 *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
                 return false;
             }
@@ -1243,7 +1490,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_off_settle_s)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_off_settle_s)) {
                 *err_reason = "zone guard_off_settle_s out of range";
                 return false;
             }
@@ -1253,7 +1500,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 20.0f, &z->guard_runaway_rate_c_per_min)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_runaway_rate_c_per_min)) {
                 *err_reason = "zone guard_runaway_rate_c_per_min out of range";
                 return false;
             }
@@ -1263,7 +1510,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 500.0f, &z->guard_runaway_margin_c)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->guard_runaway_margin_c)) {
                 *err_reason = "zone guard_runaway_margin_c out of range";
                 return false;
             }
@@ -1273,7 +1520,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_drift_period_s)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_drift_period_s)) {
                 *err_reason = "zone guard_drift_period_s out of range";
                 return false;
             }
@@ -1283,7 +1530,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 100.0f, &z->guard_sensor_fault_debounce_ticks)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_DEBOUNCE_TICKS_MAX, &z->guard_sensor_fault_debounce_ticks)) {
                 *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
                 return false;
             }
@@ -1293,7 +1540,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 7200.0f, &z->guard_frozen_window_s)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_frozen_window_s)) {
                 *err_reason = "zone guard_frozen_window_s out of range";
                 return false;
             }
@@ -1312,7 +1559,7 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     {
         char probe[16];
         if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
-            if (!parse_float_field(body, key, 0.0f, 1000.0f, &z->cross_zone_max_delta_c)) {
+            if (!parse_float_field(body, key, 0.0f, ZONE_CROSS_ZONE_DELTA_C_MAX, &z->cross_zone_max_delta_c)) {
                 *err_reason = "zone cross_zone_max_delta_c out of range";
                 return false;
             }
