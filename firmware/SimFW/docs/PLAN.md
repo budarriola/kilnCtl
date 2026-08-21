@@ -185,15 +185,18 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [ ] **`~DRDY` is not implemented at all** in `firmware/SimFW/src/`, and the
-      "reading CJTH/LTCB releases `~DRDY`" side effect **both** real masters
-      depend on has no hook in the register machine. Found by the SPI access
-      audit; this is a functional gap, not a timing one.
-- [ ] **Re-plan the first-byte path.** The audit found PLAN §3.2.1's 1.6 µs
-      budget is wrong by ~8× (real budget ~125 ns at 4 MHz), which likely
-      rules out Plan A entirely. See `docs/SPI_ACCESS_AUDIT.md` §6 for the
-      DMA-fed Plan B sketch. This is the biggest open *design* risk in the
-      fixture.
+- [ ] **DECIDE: fixture sysclk, or cap the masters at 4 MHz.** The DMA-fed
+      path (`4221f70`) takes ~150–215 ns at the default 125 MHz sysclk. That
+      misses the ~125 ns *design* deadline but meets the ~250 ns *hard*
+      deadline (the master's real MISO sample point) at 4 MHz. Running the
+      fixture at **200 MHz sysclk** brings it to ~95–135 ns and meets both at
+      4 MHz. Datasheet arithmetic, not measured. See
+      `docs/SPI_ACCESS_AUDIT.md` §9.
+- [ ] **`check_single_owner.ps1` needs re-thinking before a third DMA
+      claimant.** `hardware/dma.h` now has two owners (`ct_wave_pwm`,
+      `max31856_pio_engine`) — justified, disjoint IRQ vectors, both claim via
+      `dma_claim_unused_channel`. **11 of 12 DMA channels are now claimed.** A
+      third claimant needs the rule redesigned, not another allowlist entry.
 - [ ] **Expose the second DUT-power relay in `kilnsim`.** The firmware and
       wire protocol are done (`f5cb4c3`), but the CLI, GUI, MCP tool, and
       `MockSimLink` still surface only the main-domain relay, so no operator
@@ -251,6 +254,11 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] DMA-fed first-byte path replacing Plan A, plus `~DRDY` (`4221f70`).
+      `max31856_pio_engine_init()` now **rejects** a config whose pin
+      arithmetic or image alignment contradicts the `.pio` comments — turning
+      the bug species that has bitten this file three times into a startup
+      failure instead of a silent wrong answer
 - [x] Second DUT-power relay in firmware + protocol (`f5cb4c3`) —
       `EXP1_PIN_DUT_POWER_SAFETY = 10` for J19/safety, alongside the renamed
       `_MAIN` for J18. **Deliberately no combined "set both" command anywhere
@@ -522,6 +530,19 @@ SCLK/MOSI/MISO; bus B has one CS. Design per engine:
 > plausible-looking wrong temperatures rather than an obvious fault. A
 > DMA-fed Plan B variant is sketched in `SPI_ACCESS_AUDIT.md` §6. Treat M-A's
 > POC as deciding between Plan B variants, not between A and B.
+>
+> **SUPERSEDED AGAIN 2026-08-20 (`4221f70`) — Plan A is gone; the DMA-fed path
+> is implemented, and the deadline turns out to be two deadlines.** The
+> ~125 ns figure is the *design* deadline (first response bit present at SCLK
+> rising edge 9). The master's actual MISO sample point is at falling edge 9,
+> giving a *hard* deadline of ~250 ns at 4 MHz / ~200 ns at 5 MHz. The
+> implemented chain measures ~150–215 ns at the default 125 MHz sysclk: it
+> **misses the design deadline but meets the hard deadline with margin at
+> 4 MHz**, and only barely at 5 MHz. 200 MHz sysclk brings it to ~95–135 ns
+> and meets both at 4 MHz. **All of this is RP2040 datasheet arithmetic, not
+> measurement** — the Saleae capture remains M-A's real gate. The Plan A /
+> ISR-staging design described above is superseded; see
+> `SPI_ACCESS_AUDIT.md` §9.
 
   2. **Plan B — precomputed full-image streaming:** if Plan A misses timing
      at 5 MHz, exploit MAX31856 read behavior — the TX FIFO is pre-loaded at
