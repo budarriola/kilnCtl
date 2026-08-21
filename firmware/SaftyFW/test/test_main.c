@@ -10,6 +10,7 @@ int g_test_count = 0;
 
 void run_test_safety_guards(void);
 void run_test_link_frame(void);
+void run_test_link_frame_wire(void);
 void run_test_bootloader_metadata(void);
 void run_test_update(void);
 void run_test_kilnlink_power(void);
@@ -18,11 +19,13 @@ void run_test_relay_grace(void);
 void run_test_config_store(void);
 void run_test_ct_amps_cal(void);
 void run_test_snapshots(void);
+void run_test_boot_checkin_coverage(void);
 
 int main(void)
 {
     run_test_safety_guards();
     run_test_link_frame();
+    run_test_link_frame_wire();
     run_test_bootloader_metadata();
     run_test_update();
     run_test_kilnlink_power();
@@ -31,6 +34,7 @@ int main(void)
     run_test_config_store();
     run_test_ct_amps_cal();
     run_test_snapshots();
+    run_test_boot_checkin_coverage();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -24,6 +24,7 @@ $sources = @(
     (Join-Path $testDir "test_main.c"),
     (Join-Path $testDir "test_safety_guards.c"),
     (Join-Path $testDir "test_link_frame.c"),
+    (Join-Path $testDir "test_link_frame_wire.c"),
     (Join-Path $testDir "test_bootloader_metadata.c"),
     (Join-Path $testDir "test_update.c"),
     (Join-Path $testDir "test_kilnlink_power.c"),
@@ -32,6 +33,7 @@ $sources = @(
     (Join-Path $testDir "test_config_store.c"),
     (Join-Path $testDir "test_ct_amps_cal.c"),
     (Join-Path $testDir "test_snapshots.c"),
+    (Join-Path $testDir "test_boot_checkin_coverage.c"),
     (Join-Path $srcDir "safety_guards.c"),
     (Join-Path $srcDir "config_store.c"),
     (Join-Path $srcDir "ct_amps_cal.c"),
@@ -44,7 +46,9 @@ $sources = @(
     (Join-Path $updateDir "received_ranges.c"),
     (Join-Path $updateDir "update_receiver.c"),
     (Join-Path $updateDir "confirm.c"),
-    (Join-Path $commonSrcDir "kilnlink_power.c")
+    (Join-Path $commonSrcDir "kilnlink_power.c"),
+    (Join-Path $commonSrcDir "kilnlink_frame.c"),
+    (Join-Path $commonSrcDir "kilnlink_crc.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
