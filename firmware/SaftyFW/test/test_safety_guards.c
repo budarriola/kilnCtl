@@ -442,11 +442,13 @@ static void test_s11(void)
     /* Nuisance: a cold, idle kiln (heat_commanded == false) sitting at a
      * perfectly constant reading for far longer than frozen_window_s must
      * never trip -- SAFETY_MODEL.md section 4, S11's own example. This is
-     * also the resolution of the context-free "heat commanded" ambiguity:
-     * with nothing wiring heat_commanded to a real signal yet, callers pass
-     * false, and false correctly keeps this guard dormant rather than
-     * either false-tripping every idle period or silently dropping its own
-     * qualifier. */
+     * also the resolution of the "heat commanded" wiring: safety_core now
+     * feeds heat_commanded from any_current_present (SaftyFW's own Phase 6
+     * current sense, S3/S4/S6b's producer too), and current_any_present is
+     * false whenever no element is actually drawing power -- an idle kiln
+     * with no current flowing still correctly presents heat_commanded ==
+     * false here, so this guard stays dormant exactly as before, not
+     * because nothing is wired but because nothing is actually heating. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -463,7 +465,15 @@ static void test_s11(void)
     }
 
     /* Nuisance: heat commanded, but the reading keeps changing -- a
-     * genuinely tracking sensor, however slowly, must never trip. */
+     * genuinely tracking sensor, however slowly, must never trip. This is
+     * the case the real wiring is expected to hit constantly: a steady soak
+     * with the SSR duty-cycling (any_current_present true on and off, so
+     * safety_core's heat_commanded tracks it) while a real 19-bit MAX31856
+     * reading naturally jitters tick to tick even at a "held" setpoint --
+     * SAFETY_MODEL.md section 4's own claim that a bit-identical reading
+     * "does not happen in a real thermal system" while energy is going in
+     * is exactly why this stays quiet and S11 does not become S6b's
+     * ~120s-into-every-boot nuisance shape (fixed by f304392). */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -478,6 +488,32 @@ static void test_s11(void)
             tripped = safety_guards_tick(&s, &cfg, &in);
         }
         TEST_CHECK(!tripped, "a reading that keeps changing never trips S11, even with heat commanded throughout");
+    }
+
+    /* Nuisance: a steady soak, modelled the way current_any_present's OR-
+     * across-three-channels wiring will actually present it -- heat_
+     * commanded flickers true/false tick to tick as the SSR duty-cycles
+     * around a held setpoint, while the reading itself keeps its own tiny
+     * jitter (never repeating bit-for-bit). Neither the flickering
+     * qualifier nor the jitter should ever accumulate into a trip: every
+     * heat_commanded == false tick resets the window per this guard's own
+     * "gating on a plain caller-supplied bool" contract, and every
+     * heat_commanded == true tick sees a changed in->tc_c, so the window
+     * never reaches frozen_window_s either way. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.tc_c = 850.0f;
+        in.dt_s = 30.0f;
+        bool tripped = false;
+        for (int i = 0; i < 40 && !tripped; i++) { /* 40*30s = 1200s, double frozen_window_s */
+            in.heat_commanded = (i % 2) == 0; /* SSR duty-cycling around the setpoint */
+            in.tc_c += ((i % 3) == 0) ? 0.05f : -0.02f; /* small real-sensor jitter, always different */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "a duty-cycling heat_commanded qualifier over a jittering steady soak never trips S11");
     }
 
     /* Trip: heat commanded, reading frozen for the full window. */

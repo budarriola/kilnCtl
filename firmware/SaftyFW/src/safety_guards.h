@@ -244,19 +244,24 @@ typedef struct {
     bool estop_pressed;
 
     /* S11's "and heat is happening" qualifier (SAFETY_MODEL.md section 4,
-     * S11), named for exactly what it is rather than for where it might one
-     * day come from: a plain fact the caller supplies, not link-derived
-     * data. In this phase nothing wires it to anything real (no current
-     * sense, no link context), so a caller with no better information
-     * should pass false. That is not a workaround -- false is the honest,
-     * conservative answer to "do you know heat is happening?" when the
-     * answer is "no", and passing it makes S11 correctly stay dormant on an
-     * idle kiln (the exact nuisance case SAFETY_MODEL.md section 4 warns
-     * about: "a cold, idle kiln legitimately sits at a constant reading for
-     * hours") without the guard ever having to guess or silently drop its
-     * own qualifier. Once current sensing or the link context exists,
-     * wiring a real "duty commanded" or "current present" signal in here
-     * is a one-line change at the call site, not a change to this module. */
+     * S11), named for exactly what it is rather than for where it might come
+     * from: a plain fact the caller supplies, not link-derived data.
+     * safety_core wires this from any_current_present -- SAFETY_MODEL.md's
+     * own S11 formula is "current flowing OR heat commanded", and current
+     * actually flowing is energy actually going in, which is what the
+     * guard's prose cares about ("a genuinely static value ... while energy
+     * is going in, does not happen in a real thermal system"). Deliberately
+     * NOT wired from relay_commanded_recently/_continuously below even
+     * though those also approximate "heat commanded": both are
+     * context-derived, and this field must stay link-independent (this
+     * struct's own header comment, and SAFETY_MODEL.md section 6's S11/S13
+     * audit note: "S11 reads neither [link_up nor context_valid]"), so that
+     * S11 keeps working -- keeps authority over K4 -- even with the link
+     * down or the main controller absent. On an idle kiln with no current
+     * flowing this is false, which is what keeps S11 correctly dormant (the
+     * exact nuisance case SAFETY_MODEL.md section 4 warns about: "a cold,
+     * idle kiln legitimately sits at a constant reading for hours") without
+     * the guard ever having to guess or silently drop its own qualifier. */
     bool heat_commanded;
 
     /* --- Context from the ESP, over the isolated link (SAFETY_MODEL.md

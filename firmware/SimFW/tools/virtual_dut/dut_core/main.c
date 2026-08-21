@@ -88,12 +88,23 @@
 //   context age /        <- carried on the wire from the orchestrator, which
 //   degraded_no_context     owns the only clock here; this file applies the
 //                            same CONTEXT_MAX_AGE_MS test safety_core.c does.
+//   heat_commanded        <- safety_core_build_input() now names this field
+//                            (`.heat_commanded = any_current_present`), so
+//                            this file sets it from the SAME already-computed
+//                            in.any_current_present value, right after that
+//                            field is assigned -- one producer, two
+//                            consumers, matching the real function exactly.
+//                            Deliberately NOT derived from context (relay_
+//                            commanded_recently/_continuously): safety_
+//                            guards.h's own header comment requires this
+//                            field stay link-independent, and current_
+//                            any_present already is (its own ADC snapshot,
+//                            no context_valid gate either in this file or
+//                            in safety_core.c).
 //
 // Fields still fixed here, each matching real, current safety_core.c
 // exactly (NOT a harness simplification -- re-read safety_core.c before
 // changing any of these):
-//   heat_commanded           = false (safety_core.c hardcodes it; S11 wiring
-//                                      is a separate, unlanded pass)
 //   sample_counter_advancing = false (safety_core.c deliberately leaves it
 //                                      false: S13 needs a commissioned
 //                                      borrowed_zone_index that does not
@@ -438,7 +449,10 @@ static void do_tick(tokens_t *t)
     // GPIO10 and debounced it 200ms, so the wire carries the same "1 ==
     // asserted" level this field expects -- no inversion here either.
     in.main_fault_asserted = (main_fault != 0);
-    in.heat_commanded = false;      // real safety_core.c's own hardcoded value
+    // heat_commanded is set below, right after any_current_present is
+    // computed -- safety_core_build_input() now wires it from that same
+    // value (`.heat_commanded = any_current_present`), so this file follows
+    // suit rather than assigning it here ahead of its producer existing.
     in.reboot_grace_active = false; // no ANNOUNCE_REBOOT source in this fixture
     in.dt_s = (float)dt_ms / 1000.0f;
 
@@ -468,6 +482,13 @@ static void do_tick(tokens_t *t)
     float i_present_a = (s_cfg.i_present_a > 0.0f) ? s_cfg.i_present_a
                                                     : SAFETY_CORE_I_PRESENT_A_DEFAULT;
     in.any_current_present = current_any_present(&current, i_present_a);
+
+    // S11's heat_commanded qualifier, mirroring safety_core_build_input()'s
+    // `.heat_commanded = any_current_present` -- the SAME value, computed
+    // once, fed to both fields, exactly as the real function now does. See
+    // this file's header comment for why this and not a context-derived
+    // fact is the right producer (link-independence).
+    in.heat_commanded = in.any_current_present;
 
     // S3/S4's relay-correlation facts -- both collapse to false whenever
     // context_valid is false, same as safety_core.c.

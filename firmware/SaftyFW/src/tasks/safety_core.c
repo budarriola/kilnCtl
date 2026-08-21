@@ -36,7 +36,7 @@
 #include "watchdog_task.h"
 
 #include "boot_reason.h"
-#include "current_task.h" // any_current_present (S3/S4/S6b) -- current_task is a real, independent
+#include "current_task.h" // any_current_present (S3/S4/S6b/S11) -- current_task is a real, independent
                            // Phase-6 producer (its own ADC, not link-derived), not link/uart-shaped,
                            // fine for check_isolation.ps1
 #include "discrete_task.h"
@@ -159,13 +159,45 @@ static safety_guard_input_t safety_core_build_input(void)
     // the fallback here needs no special-casing beyond the struct's
     // default field values.
     //
-    // heat_commanded stays false -- deliberately still out of scope for
-    // THIS pass, not because current_task doesn't exist (it does, Phase 6 is
-    // built, and any_current_present below now reads it), but because S11's
-    // own wiring is a separate, unauthorised-for-this-change gap: S11 is not
-    // one of the guards this pass's fix is scoped to. false remains the
-    // honest, conservative answer to "do you know heat is happening?" until
-    // that separate wiring lands.
+    // heat_commanded is now wired to any_current_present (computed a few
+    // lines below, alongside S3/S4/S6b's own use of it) -- SAFETY_MODEL.md
+    // section 4's S11 formula spells this out literally: "current flowing OR
+    // heat commanded during that window", and section 4's prose adds "a
+    // genuinely static value ... for ten minutes, while energy is going in,
+    // does not happen in a real thermal system." Current actually flowing
+    // IS energy going in, so it alone honestly answers "do you know heat is
+    // happening?" with "yes" -- no ESP claim required.
+    //
+    // Deliberately NOT relay_commanded_recently/_continuously, even though
+    // those also mean roughly "heat commanded": both are context-derived
+    // (ctx.relay_recent_mask / link_task_get_relay_on_continuous_ms()), and
+    // safety_guards.h's own header comment (line ~53) is explicit that this
+    // struct "has no link-derived field of any kind -- heat_commanded is a
+    // plain caller-supplied fact, not a context read." Wiring a context
+    // field here would make S11 silently go dormant under
+    // DEGRADED_NO_CONTEXT, contradicting SAFETY_MODEL.md's own S11/S13 audit
+    // note (section 6, "S11 reads neither [link_up nor context_valid] --
+    // three disjoint facts with no cross-reads") and the guard's place on
+    // the "keeps running with authority over K4 even when the main
+    // controller is an unknown quantity" list (section 6). any_current_
+    // present is a real, independent Phase 6 producer (its own ADC0/1/2),
+    // exactly like S6b's own unconditional (non-context-gated) use of it
+    // just below.
+    //
+    // Nuisance-trip check: does NOT reintroduce the S6b-class failure
+    // (tripping ~120s into every idle boot, fixed by f304392) because
+    // current_any_present is false on an idle kiln -- current only flows
+    // when an element is actually being driven, so a cold, idle kiln still
+    // satisfies "heat_commanded == false" and S11 stays dormant exactly as
+    // SAFETY_MODEL.md section 4 requires ("a cold, idle kiln legitimately
+    // sits at a constant reading for hours"). A real soak with the SSR duty-
+    // cycling also does not nuisance-trip: S11 compares in->tc_c bit-for-bit
+    // across ticks (state->s11_last_c), and a real 19-bit MAX31856 reading
+    // on a live thermal system does not repeat exactly, soak or not -- the
+    // window resets on the very next tick's noise. The only way to hold
+    // in->tc_c bit-identical for the full 600s default while current flows
+    // is a genuinely stuck reading, which is exactly the fault this guard
+    // exists to catch.
     thermo_snapshot_t thermo;
     (void)thermo_task_get_snapshot(&thermo);
 
@@ -231,7 +263,7 @@ static safety_guard_input_t safety_core_build_input(void)
                               &nearest_zone_measured_c);
     }
 
-    // S3/S4/S6b's current-presence fact -- current_task is a real, already-
+    // S3/S4/S6b/S11's current-presence fact -- current_task is a real, already-
     // running Phase 6 producer (its own ADC0/1/2, independent of the link;
     // SAFETY_MODEL.md section 3 -- "not an over/under-current guard", so this
     // is presence/absence only). current_any_present() (snapshots.h) applies
@@ -297,7 +329,7 @@ static safety_guard_input_t safety_core_build_input(void)
         // block trips on directly. No inversion, and no extra conditioning,
         // belongs at this call site -- same division of labour as S7's.
         .main_fault_asserted = discrete_task_main_fault(),
-        .heat_commanded = false,
+        .heat_commanded = any_current_present,
         .context_valid = context_valid,
         .zone_count = zone_count,
         .max_zone_setpoint_c = max_zone_setpoint_c,
