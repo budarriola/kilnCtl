@@ -697,6 +697,20 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
 
 ## M6 — Throw the liveness switch
 
+**2026-08-20: the Digital Fire firing schedules ship in flash.** All 28
+published schedules from https://digitalfire.com/schedule are now read-only
+built-in profiles (`profiles_builtin.c` + a generated `.inc`), credited on the
+web Profiles page, addressed in their own id space (128+) so they neither fit
+into nor evict the 8 user slots. Removing one is a *hide* recorded in NVS,
+because a `const` table in flash cannot be deleted; restore-all brings them
+back. `profile_feasibility.c` marks a schedule red when the zone's autotuned
+model says it cannot be fired -- too fast for the available heating headroom,
+too fast for natural cooling (an electric kiln has no active cooling), or a
+target above the kiln's steady-state ceiling, which is the worse
+"unreachable" verdict. With no tuned model the verdict is *unknown*, never
+red and never OK. Details, formulas and the two open items (no LCD access to
+profiles; flash now at 4% free) are in TODO.md section 5A.
+
 **2026-08-18: LCD pages rewritten to never require scrolling** (explicit user
 requirement). `ui_page_home.c` was stacking AP-QR + zones + the safety card +
 profile card + chart + nav onto one scrollable column — the code's own prior

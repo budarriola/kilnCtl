@@ -1043,6 +1043,95 @@ first-boot-vs-settings split; revisit only if the dashboard/settings nav
       `connected`/`reconnecting`) are unchanged except `local_only` was
       renamed to `ap` to match the mode value's own vocabulary.
 
+## 5A. Shipped firing schedules (Digital Fire catalogue) — DONE 2026-08-20
+
+The 28 published schedules at https://digitalfire.com/schedule ship in flash
+as read-only profiles, so a new board has real programs to fire without
+anyone typing a schedule in by hand. Credited on `profiles_page.html` and per
+entry via a source link.
+
+- [x] **Separate id space, not user slots.** `profiles_http.c` has exactly
+      `PROFILES_MAX_COUNT` = 8 slots addressed by a `uint8_t used_bitmap`,
+      and that 0..7 id space runs through NVS, the UART protocol, the web API
+      and the LCD. 28 entries neither fit it nor may evict the user's own
+      programs. The catalogue is therefore a `const` table in `.rodata` with
+      ids `PROFILE_BUILTIN_ID_BASE` (128) + index — high enough that any id
+      is unambiguously one or the other at every protocol boundary.
+- [x] **"Removable" is a hide, not a delete** — a `const` table in flash
+      cannot be erased. The choice lives in a 32-bit NVS mask (32 bits, one
+      per entry, unlike the 8-bit user bitmap that forced this design), with
+      `POST /api/profile/builtin/restore` to bring them all back. A delete
+      aimed at a built-in is **refused** with a message pointing at hide,
+      rather than silently hiding — silently doing something other than what
+      was asked is how a user learns not to trust the controls. A save aimed
+      at one means "copy into the first free user slot", which is what the
+      pre-existing `id >= PROFILES_MAX_COUNT` rule already did.
+- [x] **Generated, not transcribed.** `tools/scripts/gen_builtin_profiles.py`
+      emits `profiles_builtin_table.inc` from
+      `tools/scripts/scrape_digitalfire_schedules.py`'s JSON. 136 segments
+      typed by hand is 136 chances to misplace a digit, and a misplaced digit
+      here ruins a kiln load. The scraper parses the HTML `<table>` rather
+      than the rendered page **because the site's last column is CUMULATIVE
+      ELAPSED TIME, not hold time** — read via a summarizer first, which
+      reported BRTF05 as having a 2:48 hold when it has no hold at all. The
+      generator refuses to write to anything but the `.inc` so regenerating
+      cannot clobber the hand-written `profiles_builtin.c` around it.
+- [x] **Rate 0 means "no rate limit"** on the Bartlett-style controllers these
+      schedules were written for, and `profile_executor.c` already reads
+      `ramp_c_per_hr <= 0` exactly that way (setpoint jumps straight to the
+      segment target), so 0 imports unchanged and renders as "max" in the UI.
+- [x] **UART LIST is paged.** 8 user summaries + 28 built-ins is ~532 bytes
+      against a 253-byte `UART_PROTO_MAX_PAYLOAD`, so LIST takes an optional
+      `start_id` and the client pages until a page comes back empty. A single
+      profile GET was never at risk: worst case (15-char name, 12 segments)
+      is 165 of 253 bytes. Verified both numbers rather than assumed.
+
+### 5A.1 Feasibility marking — red when the tuning says it cannot be fired
+
+`profile_feasibility.c` judges each segment against the first-order model
+autotune produces (`k_dc`, `tau_s` via `zones_config_get_model()`), treating
+the kiln as `dT/dt = (K*u - (T - T_amb)) / tau`:
+
+- max **heating** rate at T is `(K - (T - T_amb)) / tau`, evaluated at the
+  segment's **top** end, where headroom is smallest;
+- max **cooling** rate is `(T - T_amb) / tau`, evaluated at its **bottom**
+  end. An electric kiln has no active cooling, so a commanded fast cool is
+  precisely the case that must go red — and it is the one a ceiling check on
+  heating rate alone would never catch;
+- a target above `T_amb + K` is `UNREACHABLE`, a worse and separate verdict
+  from `TOO_FAST`: the kiln cannot get there at all, at any rate;
+- the existing `max_ramp_c_per_hr` ceiling check still applies on top.
+- `dead_time_s` is deliberately not used: transport delay shifts *when* the
+  kiln responds, not the sustained rate it can hold.
+
+- [x] **With no tuned model the verdict is `UNKNOWN` — never OK, never red.**
+      Not knowing is not the same as being fine, and a red mark that really
+      meant "this zone was never autotuned" would train the user to ignore
+      red. The UI shows unknown in a muted style saying "no tuned model — run
+      autotune", which is the actionable statement.
+- [x] Verified on hardware with a deliberately weak model (K=1200, tau=3600,
+      ceiling ~1220 C): 11 schedules came back `unreachable` (the cone 6/10
+      ones targeting 1222-1300 C), 12 `too_fast`, and the 5 low-temperature
+      schedules `ok`. The invented model was cleared afterwards so it cannot
+      be mistaken for a real tuning.
+
+### 5A.2 Still open
+
+- [ ] **No LCD access to profiles at all** — pre-existing, but 28 shipped
+      schedules make it much more visible. There is no `ui_page_profiles.c`;
+      the home page's Start uses a fallback chain (current non-idle profile,
+      else the last boot record) and picking a specific profile requires the
+      web dashboard or the PC link. An operator standing at the kiln cannot
+      choose a schedule on the panel. Costs flash (see below) and a page
+      design that survives the no-scroll rule.
+- [ ] **Flash headroom is the binding constraint now: 4% free (~59 KB).**
+      The catalogue and its two modules cost ~11 KB, the page ~2.7 KB, and
+      that tipped the reported figure from 5% to 4%. Anything sizeable from
+      here — an LCD profiles page, TLS, a second language — needs the
+      partition table revisited first, not squeezed in. Note the coredump
+      partition is 1 MB (section 1's notes explain why 512 K was not enough),
+      so there is room to reorganise if it comes to that.
+
 ## 5. Web UI — Fire profile creation page
 
 **Backend and page built, undiscovered until this pass** — `profiles_http.c`/
