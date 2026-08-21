@@ -197,12 +197,9 @@ never `[x]`.
 - [ ] **Second DUT-power relay output bit.** The two-relay decision is made
       (§11 item 5) but `i2c_owner.c` still exposes only one
       `EXP1_PIN_DUT_POWER`. Spare expander capacity exists. (M-E)
-- [ ] **Claim a real USB VID:PID.** `kilnsim/link.py`'s
-      `SIMFW_VID_PID = "2E8A:000A"` is Raspberry Pi's generic example ID; with
-      three RP2040s on the bench, auto-detect can latch the wrong device.
-      (§11 item 11 — a bench hazard, not cosmetic)
-- [ ] **S9 / S11 guard inputs** — the last two never-produced inputs in
-      `safety_core_build_input()`. S11 waits on Phase 6 current sense.
+- [ ] **S11 guard input** — `heat_commanded` is the last never-produced
+      input in `safety_core_build_input()`, and it genuinely waits on Phase 6
+      current sense. S9 was wired in `5f90325`.
 - [ ] **`no_warn_storm` scenario FAIL** — pre-existing, survives a fine poll
       interval, still unexplained. Deliberately not loosened.
 - [ ] **MCP tool to push calibration constants into `SaftyFW` flash** — no
@@ -243,6 +240,11 @@ never `[x]`.
 - [x] `docs/BOM.md`, `docs/BENCH_RUNBOOK.md`, `docs/HARDWARE.md`,
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
+- [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] USB identity claimed — `2E8A:F00A` fixture / `2E8A:F00B`
+      `spi_test_master` (`55d81e5`). This also fixed a live bug: `link.py`
+      was matching `2E8A:000A` while the firmware actually shipped TinyUSB's
+      `0xCafe:0x4001`, so auto-detect could never have found the fixture.
 
 ---
 
@@ -1358,7 +1360,7 @@ than left to be inferred.
     faked — still worth re-checking its exact behavior against its own
     source before leaning on it, since it was landing concurrently with this
     pass. (pre-M-A bring-up convenience)
-11. [ ] **NEW — `kilnsim`'s USB auto-detect matches a placeholder VID:PID, not
+11. [x] ~~**NEW — `kilnsim`'s USB auto-detect matches a placeholder VID:PID, not
     one `SimFW` actually claims.** `tools/PcTools/src/kilnsim/link.py`
     defines `SIMFW_VID_PID = "2E8A:000A"` — Raspberry Pi's generic
     example-board CDC identifier, explicitly commented as a placeholder "until
@@ -1373,7 +1375,16 @@ than left to be inferred.
     worked on concurrently by another session; this item exists so a real
     VID:PID gets claimed and swapped in before it causes a bench mistake, not
     just worked around by operator discipline every time. (pre-M-A bring-up
-    hazard)
+    hazard)~~ **RESOLVED 2026-08-20 (`55d81e5`):** SimFW claims
+    **`2E8A:F00A`** and `spi_test_master` claims **`2E8A:F00B`**, both
+    documented in `docs/HARDWARE.md` §7 "USB identity" — which is exactly the
+    condition this item set for itself. Worse than described above was found
+    while fixing it: `link.py` matched `2E8A:000A` while the firmware actually
+    shipped TinyUSB's stock `0xCafe:0x4001`, so auto-detect could never have
+    found the fixture at all, only some other Pico. `BENCH_RUNBOOK.md` §1.2's
+    `--port` warning was softened but deliberately kept, because
+    `list_candidate_ports()` matches VID:PID only and takes `candidates[0]` —
+    two SimFW fixtures on one bench remain genuinely ambiguous.
 
 ---
 
