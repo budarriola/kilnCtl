@@ -25,7 +25,7 @@
 >   suite (104 passed) is confirmed untouched; all 17 scenario YAML files
 >   (section 8) load cleanly through `kilnsim`'s loader.
 > - **Genuinely hardware-gated — nothing below has ever touched real
->   silicon:** the PIO SPI slave timing proof at 5 MHz (M-A's exit
+>   silicon:** the PIO SPI slave timing proof at 4 MHz (M-A's exit
 >   criterion — no Saleae capture exists, no fixture hardware has ever been
 >   built or connected to a bench ESP32/Pico); the `UnitTestFw` decommission
 >   (section 12 — gated on SimFW's replacement link being *proven on real
@@ -196,11 +196,6 @@ never `[x]`.
       sample point) at that clock. Running the fixture at 200 MHz sysclk would
       buy the ~125 ns *design* deadline as well — margin, not correctness.
       Datasheet arithmetic, not measured; see `docs/SPI_ACCESS_AUDIT.md` §9.
-- [ ] **§3.2.1 and M-A's exit criterion still say 5 MHz; nothing runs at
-      5 MHz.** At 5 MHz the hard deadline tightens to ~200 ns and the margin
-      largely disappears, which is what made this timing question look worse
-      than it is. Either correct these to 4 MHz or state 5 MHz as a
-      deliberate headroom target that the masters do not currently use.
 - [ ] **`check_single_owner.ps1` needs re-thinking before a third DMA
       claimant.** `hardware/dma.h` now has two owners (`ct_wave_pwm`,
       `max31856_pio_engine`) — justified, disjoint IRQ vectors, both claim via
@@ -480,7 +475,8 @@ register map, with the emulator's behavior per register:
 
 Behavioral rules on top of the map:
 
-- **SPI mode 1, up to 5 MHz**, multi-byte auto-increment reads/writes, exactly
+- **SPI mode 1, capped at 4 MHz** (see the cap note in §3.2.1), multi-byte
+  auto-increment reads/writes, exactly
   as the datasheet describes — the masters' existing drivers must not need a
   single change to run against the fixture.
 - **Conversion timing:** in auto-convert mode, LTCB registers update on the
@@ -528,7 +524,7 @@ SCLK/MOSI/MISO; bus B has one CS. Design per engine:
   settled bit; MISO pin is tri-stated (pindir flip in the PIO program)
   whenever no CS is low, since three emulated chips share one physical
   MISO on bus A.
-- **First-byte path (the 1.6 µs problem — SEE CORRECTION BELOW):** at 5 MHz a
+- **First-byte path (the 1.6 µs problem — SEE CORRECTION BELOW):** at 4 MHz a
   byte takes 1.6 µs and the master's first clock for the *response* byte comes
   one byte-time after the address byte. A FreeRTOS task cannot bounce a queue in that window
   reliably; a core-1 ISR can (RP2040 interrupt latency ~1 µs is too tight to
@@ -562,12 +558,26 @@ SCLK/MOSI/MISO; bus B has one CS. Design per engine:
 > measurement** — the Saleae capture remains M-A's real gate. The Plan A /
 > ISR-staging design described above is superseded; see
 > `SPI_ACCESS_AUDIT.md` §9.
+>
+> **DECIDED 2026-08-20 — the thermocouple SPI clock is capped at 4 MHz on both
+> masters.** This is not a change: KilnFW
+> (`CONFIG_KILNCTL_THERMO_SPI_CLOCK_HZ`) and SaftyFW
+> (`SPI_OWNER_BAUDRATE_HZ`) were both already at 4 MHz. It is now an
+> *enforced ceiling with a recorded reason*, so the number cannot drift
+> upward without someone confronting this deadline. **At 4 MHz the
+> implemented DMA path meets the hard deadline at stock 125 MHz sysclk**, so
+> no fixture overclock is required for correctness — 200 MHz would buy the
+> tighter *design* deadline as margin only. The 5 MHz figures that used to
+> appear throughout this document were aspirational headroom no master ever
+> used, and they made this constraint look far tighter than it is.
+> **The display/LCD SPI bus is explicitly out of scope of this cap and is
+> unchanged.**
 
   2. **Plan B — precomputed full-image streaming:** if Plan A misses timing
-     at 5 MHz, exploit MAX31856 read behavior — the TX FIFO is pre-loaded at
+     at 4 MHz, exploit MAX31856 read behavior — the TX FIFO is pre-loaded at
      every CS-fall with the register image starting at address 0, and a
      small PIO/DMA trick skips to the addressed offset; or (fallback of the
-     fallback) the fixture documents a supported max SCLK below 5 MHz and
+     fallback) the fixture documents a supported max SCLK below 4 MHz and
      the masters' clock is dropped for bench builds. Dropping the DUT's
      clock is a last resort because the point is testing unmodified firmware.
 - **Register image coherency:** each channel keeps a 16-byte live image in
@@ -1634,7 +1644,7 @@ written, same keep-it-current rule as `SaftyFW/docs/HARDWARE.md`.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| 5 MHz first-byte latency not met | Core feature (TC emulation) degraded | M-A first, two-stage plan (3.2.1), documented lower-clock fallback as last resort |
+| First-byte latency not met at the capped 4 MHz | Core feature (TC emulation) degraded — and the failure mode is a whole burst shifted, returning *plausible* wrong temperatures, not an obvious fault | 4 MHz cap enforced on both masters (§3.2.1); DMA-fed path meets the hard deadline at stock sysclk; M-A's Saleae capture is the real gate |
 | Master driver access patterns surprise the responder | Emulation subtly wrong, flaky DUT reads | Open question 11.4: audit both drivers + Saleae capture of real traffic *before* freezing PIO programs |
 | J6 pinout traced wrong (reverse-order trap) | Possible damage on first plug-in | 11.1 resolved on paper *and* continuity-checked at bring-up step 5–6; series resistors on fixture bus-A lines for the first plug-in |
 | Ground strap through the fixture defeats isolation | Isolation-dependent behavior untestable; masks real design errors | 3.5 discipline; bring-up step 5 explicit continuity check; standard library runs jumper-out |
