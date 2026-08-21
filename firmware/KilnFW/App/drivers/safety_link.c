@@ -232,6 +232,14 @@ _Static_assert(sizeof(FW_GIT_COMMIT) <= KILNLINK_ANNOUNCE_MAX_COMMIT_LEN,
                "ANNOUNCE_VERSION commit hash no longer fits kilnlink_announce_t");
 _Static_assert(sizeof(FW_BUILD_DATE " " FW_BUILD_TIME) <= KILNLINK_ANNOUNCE_MAX_DATETIME_LEN,
                "ANNOUNCE_VERSION build datetime no longer fits kilnlink_announce_t");
+/* safety_link.h's peer_build_commit/peer_build_datetime buffers are sized by
+ * literal (64/32) rather than by #include, since that header stays free of
+ * the kilnlink dependency -- pin them equal to the real caps here, where both
+ * are already visible. */
+_Static_assert(sizeof(((SafetyLinkClass *)0)->peer_build_commit) == KILNLINK_ANNOUNCE_MAX_COMMIT_LEN,
+               "safety_link.h's peer_build_commit no longer matches KILNLINK_ANNOUNCE_MAX_COMMIT_LEN");
+_Static_assert(sizeof(((SafetyLinkClass *)0)->peer_build_datetime) == KILNLINK_ANNOUNCE_MAX_DATETIME_LEN,
+               "safety_link.h's peer_build_datetime no longer matches KILNLINK_ANNOUNCE_MAX_DATETIME_LEN");
 
 /* Builds the ESP's outbound ANNOUNCE_VERSION (0x0F) payload via the shared
  * CommonFW codec (kilnlink_announce_encode) -- same layout as Frame C
@@ -309,9 +317,14 @@ static void safety_link_send_announce_version_burst(SafetyLinkClass *link)
  * bytes 1-4 themselves aren't present (frame too short to say anything). */
 static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out_protocol,
                                      uint16_t *out_min_compatible, uint8_t *out_boot_id,
-                                     bool *out_have_boot_id)
+                                     bool *out_have_boot_id, bool *out_dirty,
+                                     uint8_t *out_commit, uint8_t *out_commit_len,
+                                     uint8_t *out_datetime, uint8_t *out_datetime_len,
+                                     uint8_t *out_config_version, uint16_t *out_config_crc,
+                                     bool *out_have_build)
 {
     *out_have_boot_id = false;
+    *out_have_build = false;
     if (len < 5u) {
         return false;
     }
@@ -321,11 +334,14 @@ static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out
     if (len < 7u) {
         return true; /* no dirty/commit_len byte to even start the tail */
     }
-    size_t i = 6; /* byte5 = dirty, not needed here */
+    *out_dirty = (p[5] != 0u);
+    size_t i = 6; /* byte5 = dirty, read above */
     uint8_t commit_len = p[i++];
     if ((size_t)commit_len + i > (size_t)len) {
-        return true; /* truncated commit -- the two fields we need are already set */
+        return true; /* truncated commit -- the fields already set stand */
     }
+    memcpy(out_commit, &p[i], commit_len);
+    *out_commit_len = commit_len;
     i += commit_len;
     if (i >= (size_t)len) {
         return true;
@@ -334,12 +350,30 @@ static bool safety_parse_fw_version(const uint8_t *p, uint8_t len, uint16_t *out
     if ((size_t)datetime_len + i > (size_t)len) {
         return true;
     }
+    memcpy(out_datetime, &p[i], datetime_len);
+    *out_datetime_len = datetime_len;
     i += datetime_len;
     if (i >= (size_t)len) {
         return true;
     }
-    *out_boot_id = p[i];
+    *out_boot_id = p[i++];
     *out_have_boot_id = true;
+
+    /* TODO.md owner-report item 5: config_version (u8) then config_crc (u16
+     * LE), CommonFW/docs/LINK_PROTOCOL.md sec 4's Frame C table -- only
+     * meaningful once both are actually present, hence the two-step length
+     * check rather than reusing out_have_boot_id for this too (an older/
+     * truncated Pico build that stops at boot_id must not report a fabricated
+     * config_crc of 0 as "commissioned with a real CRC of zero"). */
+    if (i >= (size_t)len) {
+        return true;
+    }
+    *out_config_version = p[i++];
+    if (i + 1u >= (size_t)len) {
+        return true;
+    }
+    *out_config_crc = (uint16_t)(p[i] | ((uint16_t)p[i + 1] << 8));
+    *out_have_build = true;
     return true;
 }
 
@@ -357,9 +391,19 @@ static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_mess
     uint16_t peer_min_compatible = 0;
     uint8_t peer_boot_id = 0;
     bool have_boot_id = false;
+    bool dirty = false;
+    uint8_t commit[64];
+    uint8_t commit_len = 0;
+    uint8_t datetime[32];
+    uint8_t datetime_len = 0;
+    uint8_t config_version = 0;
+    uint16_t config_crc = 0;
+    bool have_build = false;
 
     if (!safety_parse_fw_version(msg->payload, msg->length, &peer_protocol, &peer_min_compatible,
-                                  &peer_boot_id, &have_boot_id)) {
+                                  &peer_boot_id, &have_boot_id, &dirty, commit, &commit_len,
+                                  datetime, &datetime_len, &config_version, &config_crc,
+                                  &have_build)) {
         return; /* too short to read even bytes 1-4 -- malformed, discard */
     }
 
@@ -379,6 +423,19 @@ static void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_mess
         boot_id_changed = (!link->pico_boot_id_known) || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
         link->pico_boot_id_known = true;
+    }
+    /* TODO.md owner-report item 5: only overwrite the cached build/config
+     * identity once a frame actually reached that far -- a truncated reply
+     * must not clobber a previously-known-good value with a fabricated one. */
+    if (have_build) {
+        link->peer_build_known = true;
+        link->peer_build_dirty = dirty;
+        memcpy(link->peer_build_commit, commit, commit_len);
+        link->peer_build_commit_len = commit_len;
+        memcpy(link->peer_build_datetime, datetime, datetime_len);
+        link->peer_build_datetime_len = datetime_len;
+        link->peer_config_version = config_version;
+        link->peer_config_crc = config_crc;
     }
     safety_unlock(link);
 
@@ -1643,6 +1700,53 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
     }
     if (out_peer_min_compatible) {
         *out_peer_min_compatible = link->peer_min_compatible;
+    }
+    safety_unlock(link);
+    return ESP_OK;
+}
+
+/* TODO.md owner-report item 5 -- see safety_link.h's doc comment for the
+ * "known" gating rule. Copies commit/datetime out with explicit lengths
+ * (the wire strings are not null-terminated); commit_buf/datetime_buf may be
+ * NULL if the caller doesn't want them, same as any other optional out
+ * pointer here, but if non-NULL must have room for 64/32 bytes. */
+esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known,
+                                             bool *out_dirty, uint8_t *commit_buf,
+                                             uint8_t *out_commit_len, uint8_t *datetime_buf,
+                                             uint8_t *out_datetime_len,
+                                             uint8_t *out_config_version,
+                                             uint16_t *out_config_crc)
+{
+    if (!link || !out_known) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    *out_known = link->peer_build_known;
+    if (out_dirty) {
+        *out_dirty = link->peer_build_dirty;
+    }
+    if (commit_buf) {
+        memcpy(commit_buf, link->peer_build_commit, sizeof(link->peer_build_commit));
+    }
+    if (out_commit_len) {
+        *out_commit_len = link->peer_build_commit_len;
+    }
+    if (datetime_buf) {
+        memcpy(datetime_buf, link->peer_build_datetime, sizeof(link->peer_build_datetime));
+    }
+    if (out_datetime_len) {
+        *out_datetime_len = link->peer_build_datetime_len;
+    }
+    if (out_config_version) {
+        *out_config_version = link->peer_config_version;
+    }
+    if (out_config_crc) {
+        *out_config_crc = link->peer_config_crc;
     }
     safety_unlock(link);
     return ESP_OK;

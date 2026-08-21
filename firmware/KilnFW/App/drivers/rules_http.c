@@ -153,14 +153,29 @@ static esp_err_t nvs_load_from(const char *partition, rules_cfg_t *out_cfg, bool
     if (out_found) {
         *out_found = true;
     }
-    if (len != sizeof(*out_cfg)) {
-        ESP_LOGW(TAG, "rules_cfg blob from '%s' is the wrong size -- treating as unreadable",
+    /* BUG FIXED (matching zones_http.c's nvs_load_from()): this used to
+     * reject on `len != sizeof(*out_cfg)` BEFORE ever looking at `version`,
+     * which would misclassify an older (smaller, pre-growth) blob as
+     * corruption instead of running it through the migration chain below.
+     * Only a blob too short to even contain the `version` byte is
+     * genuinely unreadable; anything else is the version check's job. */
+    if (len < sizeof(out_cfg->version)) {
+        ESP_LOGW(TAG, "rules_cfg blob from '%s' is too short to contain a version -- treating as unreadable",
                  partition);
         memset(out_cfg, 0, sizeof(*out_cfg));
         return ESP_OK;
     }
 
     if (out_cfg->version == RULES_CFG_VERSION) {
+        if (len != sizeof(*out_cfg)) {
+            /* Current version but wrong size can only mean genuine
+             * corruption -- a real current-version blob is always written
+             * at exactly sizeof(*out_cfg). */
+            ESP_LOGW(TAG, "rules_cfg blob from '%s' claims current version but is the wrong size -- "
+                          "treating as unreadable", partition);
+            memset(out_cfg, 0, sizeof(*out_cfg));
+            return ESP_OK;
+        }
         return ESP_OK; /* current version -- happy path */
     }
     if (out_cfg->version < RULES_CFG_VERSION) {

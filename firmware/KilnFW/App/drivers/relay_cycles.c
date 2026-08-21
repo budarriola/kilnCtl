@@ -169,22 +169,44 @@ esp_err_t relay_cycles_init(void)
         relay_cycles_blob_t blob;
         size_t len = sizeof(blob);
         err = nvs_get_blob(h, NVS_KEY_CYCLES, &blob, &len);
-        if (err == ESP_OK && len == sizeof(blob) && blob.version == RELAY_CYCLES_VERSION) {
-            memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
-        } else if (err == ESP_OK && len == sizeof(blob) && blob.version > RELAY_CYCLES_VERSION) {
+        /* BUG FIXED (matching zones_http.c's nvs_load_from()): this used to
+         * gate BOTH the current-version and newer-version branches on
+         * `len == sizeof(blob)` before ever looking at `version`, which
+         * would misclassify a genuinely OLDER (smaller) blob as unreadable
+         * corruption instead of the version check below. Only a blob too
+         * short to even contain the `version` byte is genuinely ambiguous;
+         * everything else must be classified by version first, with the
+         * exact-size check applied only to the current-version case (a real
+         * current-version blob is always written at exactly sizeof(blob)). */
+        if (err == ESP_OK && len < sizeof(blob.version)) {
+            ESP_LOGW(TAG, "relay cycle blob is too short to contain a version -- starting at zero");
+        } else if (err == ESP_OK && blob.version == RELAY_CYCLES_VERSION) {
+            if (len != sizeof(blob)) {
+                ESP_LOGW(TAG, "relay cycle blob claims current version but is the wrong size -- starting at zero");
+            } else {
+                memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
+            }
+        } else if (err == ESP_OK && blob.version > RELAY_CYCLES_VERSION) {
             /* Newer than this firmware understands -- a firmware-rollback
              * case (TODO.md 8.1). Refuse to load rather than guess at a
              * layout this build doesn't know, and leave flash untouched so
              * a subsequent boot on the newer firmware still finds it. */
             ESP_LOGW(TAG, "relay cycle blob version %u is newer than this firmware's %u -- refusing to load, "
                      "leaving flash untouched", blob.version, RELAY_CYCLES_VERSION);
+        } else if (err == ESP_OK) {
+            /* blob.version < RELAY_CYCLES_VERSION: version 1 is the first
+             * this field has ever had, so there is no older layout to
+             * migrate from yet -- this is the hook point for when one
+             * exists. */
+            ESP_LOGW(TAG, "relay cycle blob version %u predates this firmware's %u with no migration defined -- "
+                     "starting at zero", blob.version, RELAY_CYCLES_VERSION);
         } else if (err != ESP_ERR_NVS_NOT_FOUND) {
             /* Missing (first boot, or nothing survived migration) is the
              * only case treated identically to "start at zero" without a
-             * warning; anything else (wrong size, unreadable, version 0 from
-             * some corrupt write) is logged as unreadable/corrupt data. */
+             * warning; anything else (unreadable) is logged as corrupt
+             * data. */
             memset(s_rc.counts, 0, sizeof(s_rc.counts));
-            ESP_LOGW(TAG, "relay cycle blob load failed or wrong size (%s) -- starting at zero",
+            ESP_LOGW(TAG, "relay cycle blob load failed (%s) -- starting at zero",
                      esp_err_to_name(err));
         }
         nvs_close(h);

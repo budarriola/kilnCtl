@@ -561,6 +561,39 @@ typedef struct {
     uint16_t peer_protocol_version;
     uint16_t peer_min_compatible;
 
+    /* TODO.md owner-report item 5 (2026-08-21): the rest of the Pico's own
+     * FW_VERSION (Frame C) reply -- dirty/commit/datetime/config_version/
+     * config_crc -- previously parsed only far enough to reach boot_id and
+     * then discarded (safety_parse_fw_version() skipped over commit/datetime
+     * purely to find their length, never copying them anywhere). Captured
+     * here so a caller (dashboard_http.c/safety_page.html,
+     * CommonFW/docs/LINK_PROTOCOL.md sec 7's "Show the safety processor's
+     * own build identity, not just the ESP's") can display which RP2040
+     * firmware is actually running and whether its config_store has ever
+     * been commissioned (config_crc == 0 alongside peer_build_known == true
+     * means it is still running compiled-in defaults). peer_build_known is
+     * false (and every other peer_build_* field meaningless) until at least
+     * one FW_VERSION frame has parsed far enough to reach config_crc -- a
+     * truncated/old-format frame that stops short of it leaves this false,
+     * same "don't report a stale/zero value as real" discipline as
+     * peer_version_known above. Strings are NOT null-terminated by the wire
+     * (kilnlink_announce.h's own convention) -- peer_build_commit_len/
+     * peer_build_datetime_len record how many bytes of each buffer are
+     * valid. */
+    bool    peer_build_known;
+    bool    peer_build_dirty;
+    /* Sized to kilnlink_announce.h's KILNLINK_ANNOUNCE_MAX_COMMIT_LEN (64) /
+     * MAX_DATETIME_LEN (32) by value, not by #include -- this header stays
+     * free of the kilnlink dependency (see the forward-declaration comment
+     * above); safety_link.c, which already includes kilnlink_announce.h,
+     * _Static_assert's these two literals equal to it. */
+    uint8_t peer_build_commit[64];
+    uint8_t peer_build_commit_len;
+    uint8_t peer_build_datetime[32];
+    uint8_t peer_build_datetime_len;
+    uint8_t  peer_config_version;
+    uint16_t peer_config_crc;
+
     /* Phase 10 (SaftyFW) / TODO.md 9.5: last-received UPDATE_STATUS,
      * applied the same way cached/cached_tick are (safety_apply_status()) --
      * see safety_apply_update_status() in safety_link.c. Guarded by
@@ -708,6 +741,21 @@ esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *out_k
                                                bool *out_compatible,
                                                uint16_t *out_peer_protocol,
                                                uint16_t *out_peer_min_compatible);
+
+/* TODO.md owner-report item 5: the rest of the Pico's FW_VERSION reply --
+ * build identity and config commissioning state -- see the SafetyLinkClass
+ * field comments above for exactly what "known" gates and why the strings
+ * are copied out with explicit lengths rather than null-terminated. Any
+ * out_* pointer may be NULL if the caller only wants a subset. commit_buf/
+ * datetime_buf must have room for at least 64/32 bytes respectively when
+ * non-NULL (the wire caps); *out_commit_len and *out_datetime_len are set to
+ * how many bytes of each were actually copied. Never blocks on the far side. */
+esp_err_t safety_link_get_peer_build_status(SafetyLinkClass *link, bool *out_known,
+                                             bool *out_dirty, uint8_t *commit_buf,
+                                             uint8_t *out_commit_len, uint8_t *datetime_buf,
+                                             uint8_t *out_datetime_len,
+                                             uint8_t *out_config_version,
+                                             uint16_t *out_config_crc);
 
 /* --- Isolated fault line (GPIO6, an ESP OUTPUT) ---
  * High asserts: it lights U1's LED, which pulls the Pico's mainFault input

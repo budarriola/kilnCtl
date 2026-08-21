@@ -206,6 +206,33 @@ void dashboard_get_status(dashboard_status_t *out)
                                                     &out->link_version_compatible,
                                                     &out->peer_protocol_version,
                                                     &out->peer_min_compatible);
+
+        /* TODO.md owner-report item 5: safety processor's own build identity
+         * + config CRC, straight from safety_link.c's FW_VERSION parse.
+         * Commit/datetime come back as explicit-length, non-NUL-terminated
+         * byte buffers (safety_link.h's own convention) -- copy into this
+         * struct's NUL-terminated char[] here, once, so every renderer
+         * (JSON below, any future LCD page) gets an ordinary C string
+         * instead of re-deriving the length itself. */
+        uint8_t commit_buf[64];
+        uint8_t commit_len = 0;
+        uint8_t datetime_buf[32];
+        uint8_t datetime_len = 0;
+        (void)safety_link_get_peer_build_status(s_dash.safety, &out->safety_build_known,
+                                                 &out->safety_build_dirty, commit_buf, &commit_len,
+                                                 datetime_buf, &datetime_len,
+                                                 &out->safety_config_version,
+                                                 &out->safety_config_crc);
+        if (commit_len > sizeof(out->safety_build_commit) - 1u) {
+            commit_len = sizeof(out->safety_build_commit) - 1u;
+        }
+        memcpy(out->safety_build_commit, commit_buf, commit_len);
+        out->safety_build_commit[commit_len] = '\0';
+        if (datetime_len > sizeof(out->safety_build_datetime) - 1u) {
+            datetime_len = sizeof(out->safety_build_datetime) - 1u;
+        }
+        memcpy(out->safety_build_datetime, datetime_buf, datetime_len);
+        out->safety_build_datetime[datetime_len] = '\0';
     } else {
         out->self_protocol_version = (uint16_t)UART_PROTOCOL_VERSION;
     }
@@ -397,6 +424,32 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         APPEND(",\"trip_event_age_ms\":%lu", (unsigned long)ds.trip_event_age_ms);
         APPEND(",\"trip_safety_tc_c\":%.1f", (double)ds.trip_safety_tc_c);
         APPEND(",\"trip_deciding_threshold\":%.1f", (double)ds.trip_deciding_threshold);
+    }
+
+    /* TODO.md owner-report item 5: the safety processor's own build identity
+     * + config CRC (CommonFW/docs/LINK_PROTOCOL.md sec 7: "Show the safety
+     * processor's own build identity, not just the ESP's"), null until a
+     * FW_VERSION frame has parsed far enough to report it -- see
+     * dashboard_http.h's safety_build_known comment. Escaped for the same
+     * "operator/build-time string, still worth escaping" reason
+     * fw_version/fw_build are above. */
+    APPEND(",\"safety_build_known\":%s", ds.safety_build_known ? "true" : "false");
+    if (ds.safety_build_known) {
+        char commit_esc[sizeof(ds.safety_build_commit) * 2 + 1];
+        char datetime_esc[sizeof(ds.safety_build_datetime) * 2 + 1];
+        json_escape(ds.safety_build_commit, commit_esc, sizeof(commit_esc));
+        json_escape(ds.safety_build_datetime, datetime_esc, sizeof(datetime_esc));
+        APPEND(",\"safety_build_dirty\":%s", ds.safety_build_dirty ? "true" : "false");
+        APPEND(",\"safety_build_commit\":\"%s\"", commit_esc);
+        APPEND(",\"safety_build_datetime\":\"%s\"", datetime_esc);
+        APPEND(",\"safety_config_version\":%u", (unsigned)ds.safety_config_version);
+        APPEND(",\"safety_config_crc\":%u", (unsigned)ds.safety_config_crc);
+    } else {
+        APPEND(",\"safety_build_dirty\":null");
+        APPEND(",\"safety_build_commit\":null");
+        APPEND(",\"safety_build_datetime\":null");
+        APPEND(",\"safety_config_version\":null");
+        APPEND(",\"safety_config_crc\":null");
     }
 
     /* TODO.md 8.2's "one boot-time report": present/mounted per NVS

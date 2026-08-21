@@ -102,6 +102,30 @@ uint8_t zones_config_get_thermo_count(void)
 }
 
 // ---------------------------------------------------------------------------
+// Cross-file control hooks for test_backup_import.c
+// ---------------------------------------------------------------------------
+// backup_http.c's import validation pass calls these same two zones_http.c
+// getters (zones_config_get_thermo_count()/zones_config_get_max_ramp()), and
+// this file's definitions above are the ONLY ones linked into the host test
+// binary -- test_backup_import.c must not redefine them (multiple-definition
+// link error), so it drives the same s_zones/s_thermo_count state through
+// these two small setters instead. STUB_MAX_ZONES (3) already equals
+// MAX31856_CHANNEL_COUNT, the same bound backup_http.c's zone entries are
+// checked against, so no separate size to keep in sync.
+void test_stub_zones_set_thermo_count(uint8_t n)
+{
+    s_thermo_count = n;
+}
+
+void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_hr)
+{
+    if (zone_index < STUB_MAX_ZONES) {
+        s_zones[zone_index].max_ramp_getter_answers = answers;
+        s_zones[zone_index].max_ramp_c_per_hr = c_per_hr;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

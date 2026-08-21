@@ -54,6 +54,20 @@
   .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
                   padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
   .stale-banner.show { display: block; }
+  .row .value.near { color: var(--warn); }
+  .row .value.past { color: var(--warn); font-weight: bold; }
+  .placement-note { font-size: 0.85em; color: var(--muted); margin: 0.2em 0 0; }
+  /* TRIP_INEFFECTIVE (S9) must not look like an ordinary trip -- see
+     CommonFW/docs/LINK_PROTOCOL.md sec 7: "Different required action, so it
+     must not look like the others." An ordinary trip means "investigate the
+     kiln"; this one means "go to the breaker, right now." */
+  .card.ineffective { background: var(--warn); border-color: var(--warn); }
+  .card.ineffective .row .label, .card.ineffective .row .value { color: #fff; }
+  .card.ineffective .row { border-bottom-color: rgba(255,255,255,0.35); }
+  .breaker-banner { display: none; background: #000; color: #fff; border: 2px solid var(--warn);
+                     border-radius: var(--ui-radius); padding: 0.6em 0.9em; margin-bottom: 0.6em;
+                     font-weight: bold; font-size: 1.05em; text-align: center; }
+  .breaker-banner.show { display: block; }
 </style>
 </head>
 <body>
@@ -70,6 +84,7 @@ new endpoint. "Clear trip" posts to the existing POST /api/safety/clear_trip
 on the web before this pass.</p>
 
 <div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
+<div id="breakerBanner" class="breaker-banner">TRIP_INEFFECTIVE -- power is still flowing. Go to the breaker.</div>
 
 <h2>Link status</h2>
 <div class="card">
@@ -80,9 +95,23 @@ on the web before this pass.</p>
 <h2>Temperatures &amp; power</h2>
 <div class="card">
   <div class="row"><span class="label">Safety-processor thermocouple</span><span class="value" id="safetyTemp">--</span></div>
+  <p class="placement-note" id="placementNote">Placement mode: not reported -- SaftyFW has no
+  commissioning read-back for <code>tc_placement_mode</code> yet (SaftyFW/TODO.md). Until that
+  exists this reading's relationship to the zone temperatures cannot be labelled either way --
+  see CommonFW/docs/LINK_PROTOCOL.md sec 7's "Label the safety temperature with its placement"
+  rule.</p>
   <div class="row"><span class="label">Enclosure temp (MAX31856 cold junction)</span><span class="value" id="enclosureTemp">--</span></div>
   <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
 </div>
+
+<h2>Safety-processor build</h2>
+<div class="card" id="buildCard">
+  <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
+</div>
+<p class="note">CommonFW/docs/LINK_PROTOCOL.md sec 7: "Show the safety processor's own build
+identity, not just the ESP's" -- two processors means two firmwares that can be out of sync, and
+a config CRC of 0 means the safety processor is still running compiled-in defaults nobody has
+commissioned.</p>
 
 <h2>Diagnostics (Frame B)</h2>
 <div class="card" id="diagCard">
@@ -160,9 +189,36 @@ if the Pico's diagnostics are too stale to trust.</p>
                          ' -- INCOMPATIBLE, ' + older + ' is older', 'warn');
     }
 
-    set('safetyTemp', fmtC(st.safety_temp_c));
-    set('enclosureTemp', fmtC(st.enclosure_temp_c));
+    // Threshold colouring: diag_state is the one live signal this wire
+    // actually carries about how close the safety processor is to tripping
+    // (SAFETY_LINK_DIAG_STATE_* -- 0 init, 1 grace, 2 armed, 3 WARN, 4
+    // TRIPPED). There is no per-field numeric threshold on the wire to
+    // compare safety_temp_c/enclosure_temp_c against directly (the only
+    // threshold value this link ever reports is trip_deciding_threshold, and
+    // only at the moment of a trip), so the honest thing this page can show
+    // is "the guard state machine watching this reading is currently
+    // warning/tripped" rather than inventing a threshold comparison it
+    // cannot back up. See tripCard below for the trip-specific colouring.
+    var tempCls = null;
+    if (st.diag_ever_received) {
+      if (st.diag_state === 4) tempCls = 'past';       // TRIPPED
+      else if (st.diag_state === 3) tempCls = 'near';  // WARN
+    }
+    set('safetyTemp', fmtC(st.safety_temp_c), tempCls);
+    set('enclosureTemp', fmtC(st.enclosure_temp_c), tempCls);
     set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a');
+
+    var buildCard = document.getElementById('buildCard');
+    if (st.safety_build_known) {
+      buildCard.innerHTML =
+        row('Commit', st.safety_build_commit + (st.safety_build_dirty ? ' (dirty)' : '')) +
+        row('Built', st.safety_build_datetime) +
+        row('Config version', st.safety_config_version) +
+        row('Config CRC', '0x' + hex16(st.safety_config_crc) +
+            (st.safety_config_crc === 0 ? ' -- UNCOMMISSIONED (compiled-in defaults)' : ''));
+    } else {
+      buildCard.innerHTML = row('Not yet announced this boot', 'n/a');
+    }
 
     var diagCard = document.getElementById('diagCard');
     if (st.diag_ever_received) {
@@ -180,21 +236,26 @@ if the Pico's diagnostics are too stale to trust.</p>
 
     var tripCard = document.getElementById('tripCard');
     var clearBtn = document.getElementById('clearTripBtn');
+    var breakerBanner = document.getElementById('breakerBanner');
     if (st.trip_event_ever_received) {
       var ageS = Math.round(st.trip_event_age_ms / 1000);
-      tripCard.className = 'card tripped';
+      var ineffective = st.trip_reason === SAFETY_TRIP_INEFFECTIVE;
+      tripCard.className = ineffective ? 'card ineffective' : 'card tripped';
       tripCard.innerHTML =
+        (ineffective ? row('!! TRIP_INEFFECTIVE !!', 'power still flowing -- breaker, not kiln') : '') +
         row('Reason (raw)', '0x' + hex(st.trip_reason)) +
         row('Age', ageS + 's ago') +
         row('Safety TC at trip', fmtC(st.trip_safety_tc_c)) +
         row('Deciding threshold', fmtC(st.trip_deciding_threshold));
       lastTripLatched = true;
       clearBtn.disabled = false;
+      breakerBanner.classList.toggle('show', ineffective);
     } else {
       tripCard.className = 'card';
       tripCard.innerHTML = row('No trip event received this boot', 'n/a');
       lastTripLatched = false;
       clearBtn.disabled = true;
+      breakerBanner.classList.remove('show');
     }
   }
 
@@ -203,6 +264,13 @@ if the Pico's diagnostics are too stale to trust.</p>
            escHtml(value) + '</span></div>';
   }
   function hex(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(2, '0'); }
+  function hex16(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(4, '0'); }
+  // SaftyFW's safety_trip_t (firmware/SaftyFW/docs/ARCHITECTURE.md) --
+  // SAFETY_TRIP_INEFFECTIVE = 10 (S9): the contactor is welded/bypassed and
+  // current is still flowing after the relay opened. Every other trip means
+  // "investigate the kiln"; this one means "the relay did not actually cut
+  // power -- go to the breaker."
+  var SAFETY_TRIP_INEFFECTIVE = 10;
   function escHtml(s) {
     var d = document.createElement('div');
     d.textContent = s == null ? '' : String(s);

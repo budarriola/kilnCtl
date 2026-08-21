@@ -121,8 +121,10 @@ from .protocol import (
     IO_REG_READ_MAX,
     IO_RELAY_COUNT,
     SAFETY_AGE_NEVER,
+    SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_GET_LINK_STATS,
     SAFETY_CMD_GET_STATUS,
+    SAFETY_CMD_GET_TRIP_EVENT,
     SAFETY_CMD_PING,
     SAFETY_CMD_REQUEST_ENABLE,
     SAFETY_CMD_ROLLBACK,
@@ -1772,6 +1774,28 @@ def safety_get_link_stats() -> bytes:
     return struct.pack("<B", SAFETY_CMD_GET_LINK_STATS)
 
 
+def safety_get_diag() -> bytes:
+    """0x0C GET_DIAG request (query): no args.
+
+    CommonFW/docs/LINK_PROTOCOL.md sec 7's "mirror all of it on the PC-link
+    SAFETY task" -- answered from the ESP's cache of the Pico's last DIAG
+    (Frame B) push, never a live round trip to the Pico. diag_ever_received
+    false means no such frame has arrived this ESP boot -- the expected state
+    with no Pico firmware attached, not an error.
+    """
+    return struct.pack("<B", SAFETY_CMD_GET_DIAG)
+
+
+def safety_get_trip_event() -> bytes:
+    """0x15 GET_TRIP_EVENT request (query): no args.
+
+    Same cache-only mirror as :func:`safety_get_diag`, for the Pico's last
+    TRIP_EVENT (Frame D) push -- "why did the kiln stop," preserved until a
+    newer trip replaces it (never cleared by CLEAR_TRIP itself).
+    """
+    return struct.pack("<B", SAFETY_CMD_GET_TRIP_EVENT)
+
+
 def safety_set_poll_period(period_ms: int) -> bytes:
     """0x05 SET_POLL_PERIOD: u16 LE ms, 0 = stop polling."""
     return struct.pack(
@@ -1926,17 +1950,88 @@ class SafetyLinkStats:
         )
 
 
+#: SaftyFW's safety_trip_t (firmware/SaftyFW/docs/ARCHITECTURE.md) --
+#: SAFETY_TRIP_INEFFECTIVE (S9, "the contactor is welded/bypassed and current
+#: is still flowing after the relay opened") is the one value a GUI must
+#: never render like an ordinary trip (CommonFW/docs/LINK_PROTOCOL.md sec 7:
+#: "Different required action, so it must not look like the others"). Kept
+#: here, not just in safety_page.html's own copy, so a PC-side caller can
+#: make the same distinction.
+SAFETY_TRIP_INEFFECTIVE = 10
+
+
+@dataclass(frozen=True)
+class SafetyDiag:
+    """Decoded GET_DIAG (0x0C) reply -- the ESP's cache of the Pico's last
+    DIAG (Frame B) push. Meaningless (all-zero) unless ``ever_received``."""
+
+    ever_received: bool
+    trip_reason: int
+    warn_mask: int
+    trip_mask: int
+    uptime_ms: int
+    boot_reason: int
+    context_age_100ms: int
+    context_frames_ok: int
+    context_frames_bad: int
+    tx_frames_dropped: int
+    state: int
+    flags: int
+
+    @property
+    def context_never_received(self) -> bool:
+        """True when no PUSH_CONTEXT frame has ever reached the Pico -- 255
+        (SAFETY_LINK_DIAG_CONTEXT_AGE_NEVER) is the sentinel, not a real age."""
+        return self.context_age_100ms == 0xFF
+
+
+@dataclass(frozen=True)
+class SafetyTripEvent:
+    """Decoded GET_TRIP_EVENT (0x15) reply -- the ESP's cache of the Pico's
+    last TRIP_EVENT (Frame D) push, preserved until a newer trip replaces it
+    (never cleared by CLEAR_TRIP). Meaningless (all-zero) unless
+    ``ever_received``."""
+
+    ever_received: bool
+    last_seq: int
+    trip_reason: int
+    uptime_ms: int
+    safety_tc_c: float
+    deciding_threshold: float
+    current_a: "tuple[float, float, float]"
+    relay_recent_mask: int
+    context_age_100ms: int
+    age_ms: int
+
+    @property
+    def ineffective(self) -> bool:
+        """True for SAFETY_TRIP_INEFFECTIVE (S9) -- see that constant's
+        comment for why this must render differently from every other trip."""
+        return self.ever_received and self.trip_reason == SAFETY_TRIP_INEFFECTIVE
+
+
 def parse_safety_response(
     payload: bytes,
-) -> "tuple[int, SafetyStatus | SafetyLinkStats]":
+) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent]":
     """Decode a SAFETY query reply into ``(subcommand, value)``.
 
     Layouts (uart_task_ids.h)::
 
-        GET_STATUS:     byte0=0x01, flags u8, tc f32, cj f32, SR u8,
-                        current1..3 f32, age u16 LE                (25 bytes)
-        GET_LINK_STATS: byte0=0x04, sent u32, received u32, crc u32,
-                        timeouts u32, poll period u16 LE           (19 bytes)
+        GET_STATUS:      byte0=0x01, flags u8, tc f32, cj f32, SR u8,
+                         current1..3 f32, age u16 LE                (25 bytes)
+        GET_LINK_STATS:  byte0=0x04, sent u32, received u32, crc u32,
+                         timeouts u32, poll period u16 LE           (19 bytes)
+        GET_DIAG:        byte0=0x0C, flags u8 (bit0 ever_received),
+                         trip_reason u8, warn_mask u16 LE, trip_mask u16 LE,
+                         uptime_ms u32 LE, boot_reason u8,
+                         context_age_100ms u8, context_frames_ok u32 LE,
+                         context_frames_bad u32 LE, tx_frames_dropped u32 LE,
+                         state u8, diag_flags u8                    (27 bytes)
+        GET_TRIP_EVENT:  byte0=0x15, flags u8 (bit0 ever_received),
+                         last_seq u8, trip_reason u8, uptime_ms u32 LE,
+                         safety_tc_c f32 LE, deciding_threshold f32 LE,
+                         current1..3 f32 LE, relay_recent_mask u8,
+                         context_age_100ms u8, age_ms u32 LE         (34 bytes)
     """
     if len(payload) < 1:
         raise SafetyResponseError("SAFETY response is empty")
@@ -1994,6 +2089,72 @@ def parse_safety_response(
             crc_errors=crc_errors,
             timeouts=timeouts,
             poll_period_ms=poll_period,
+        )
+
+    if subcommand == SAFETY_CMD_GET_DIAG:
+        if len(payload) != 27:
+            raise SafetyResponseError(
+                f"GET_DIAG response must be 27 bytes, got {len(payload)}"
+            )
+        (
+            flags,
+            trip_reason,
+            warn_mask,
+            trip_mask,
+            uptime_ms,
+            boot_reason,
+            context_age_100ms,
+            context_frames_ok,
+            context_frames_bad,
+            tx_frames_dropped,
+            state,
+            diag_flags,
+        ) = struct.unpack_from("<BBHHIBBIIIBB", payload, 1)
+        return subcommand, SafetyDiag(
+            ever_received=bool(flags & 0x01),
+            trip_reason=trip_reason,
+            warn_mask=warn_mask,
+            trip_mask=trip_mask,
+            uptime_ms=uptime_ms,
+            boot_reason=boot_reason,
+            context_age_100ms=context_age_100ms,
+            context_frames_ok=context_frames_ok,
+            context_frames_bad=context_frames_bad,
+            tx_frames_dropped=tx_frames_dropped,
+            state=state,
+            flags=diag_flags,
+        )
+
+    if subcommand == SAFETY_CMD_GET_TRIP_EVENT:
+        if len(payload) != 34:
+            raise SafetyResponseError(
+                f"GET_TRIP_EVENT response must be 34 bytes, got {len(payload)}"
+            )
+        (
+            flags,
+            last_seq,
+            trip_reason,
+            uptime_ms,
+            safety_tc_c,
+            deciding_threshold,
+            current1,
+            current2,
+            current3,
+            relay_recent_mask,
+            context_age_100ms,
+            age_ms,
+        ) = struct.unpack_from("<BBBIfffffBBI", payload, 1)
+        return subcommand, SafetyTripEvent(
+            ever_received=bool(flags & 0x01),
+            last_seq=last_seq,
+            trip_reason=trip_reason,
+            uptime_ms=uptime_ms,
+            safety_tc_c=safety_tc_c,
+            deciding_threshold=deciding_threshold,
+            current_a=(current1, current2, current3),
+            relay_recent_mask=relay_recent_mask,
+            context_age_100ms=context_age_100ms,
+            age_ms=age_ms,
         )
 
     raise SafetyResponseError(f"unknown SAFETY response subcommand 0x{subcommand:02X}")

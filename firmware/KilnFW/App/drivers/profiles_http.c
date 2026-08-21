@@ -185,18 +185,36 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         profile_persisted_t loaded;
         size_t len = sizeof(loaded);
         esp_err_t slot_err = nvs_get_blob(h, key, &loaded, &len);
-        if (slot_err != ESP_OK || len != sizeof(loaded)) {
-            /* The bitmap says used but the blob is missing/wrong-size --
-             * trust the blob, not the bitmap: mark THIS slot unused rather
-             * than hand a client a garbage-decoded profile. Other slots are
-             * unaffected. */
-            ESP_LOGW(TAG, "prof%u load from '%s' failed or wrong size (%s) -- marking unused", id, partition,
+        if (slot_err != ESP_OK) {
+            ESP_LOGW(TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
                      esp_err_to_name(slot_err));
+            out->used_bitmap &= ~(1u << id);
+            continue;
+        }
+        /* BUG FIXED (matching zones_http.c's nvs_load_from()): this used to
+         * reject on `len != sizeof(loaded)` BEFORE ever looking at
+         * `version`, which would misclassify an older (smaller,
+         * pre-growth) slot as corruption instead of running it through the
+         * migration chain below. Only a slot too short to even contain the
+         * `version` byte is genuinely ambiguous; everything else is the
+         * version check's job, with the exact-size check applied only to
+         * the current-version case. */
+        if (len < sizeof(loaded.version)) {
+            ESP_LOGW(TAG, "prof%u load from '%s' is too short to contain a version -- marking unused", id,
+                     partition);
             out->used_bitmap &= ~(1u << id);
             continue;
         }
 
         if (loaded.version == PROFILE_VERSION) {
+            if (len != sizeof(loaded)) {
+                /* Current version but wrong size can only mean genuine
+                 * corruption -- a real current-version slot is always
+                 * written at exactly sizeof(loaded). */
+                ESP_LOGW(TAG, "prof%u claims current version but is the wrong size -- marking unused", id);
+                out->used_bitmap &= ~(1u << id);
+                continue;
+            }
             out->profiles[id] = loaded.profile; /* current version -- happy path */
         } else if (loaded.version < PROFILE_VERSION) {
             /* Known older layout -- run it through the migration chain. */

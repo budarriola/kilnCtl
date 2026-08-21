@@ -40,10 +40,12 @@ import threading
 from typing import Optional
 
 from . import devices
-from .devices import SafetyLinkStats, SafetyResponseError, SafetyStatus
+from .devices import SafetyDiag, SafetyLinkStats, SafetyResponseError, SafetyStatus, SafetyTripEvent
 from .protocol import (
+    SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_GET_LINK_STATS,
     SAFETY_CMD_GET_STATUS,
+    SAFETY_CMD_GET_TRIP_EVENT,
     UART_TASK_ID_SAFETY,
     Device,
     Frame,
@@ -143,6 +145,31 @@ class SafetyClient:
         """
         value = self._query(
             SAFETY_CMD_GET_LINK_STATS, devices.safety_get_link_stats(), timeout
+        )
+        return value  # type: ignore[return-value]
+
+    def get_diag(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> SafetyDiag:
+        """Read the cached DIAG (Frame B) telemetry -- guard state, warn/trip
+        masks, PUSH_CONTEXT liveness -- the same data dashboard_http.c and
+        ui_page_safety.c already show, without needing Wi-Fi
+        (CommonFW/docs/LINK_PROTOCOL.md sec 7's "mirror all of it on the
+        PC-link SAFETY task"). ``ever_received`` is false (every other field
+        meaningless) until the Pico has actually pushed one -- the expected
+        state with no Pico firmware attached.
+        """
+        value = self._query(SAFETY_CMD_GET_DIAG, devices.safety_get_diag(), timeout)
+        return value  # type: ignore[return-value]
+
+    def get_trip_event(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> SafetyTripEvent:
+        """Read the cached TRIP_EVENT (Frame D) telemetry -- the last trip the
+        Pico latched, preserved until a newer one replaces it. Same
+        cache-only mirror as :meth:`get_diag`. Check
+        :attr:`SafetyTripEvent.ineffective` before treating a result like an
+        ordinary trip -- SAFETY_TRIP_INEFFECTIVE (S9) means the contactor
+        didn't actually open and calls for a different response entirely.
+        """
+        value = self._query(
+            SAFETY_CMD_GET_TRIP_EVENT, devices.safety_get_trip_event(), timeout
         )
         return value  # type: ignore[return-value]
 

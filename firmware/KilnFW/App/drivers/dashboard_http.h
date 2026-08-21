@@ -163,6 +163,21 @@ typedef struct {
     float    trip_safety_tc_c;
     float    trip_deciding_threshold;
 
+    /* TODO.md owner-report item 5 (2026-08-21): the safety processor's own
+     * build identity and config commissioning state, straight from
+     * safety_link_get_peer_build_status() -- same shared-backend rule as
+     * every other safety_link.h field above. safety_build_known is false
+     * (fields below meaningless) until at least one FW_VERSION frame parsed
+     * far enough to reach config_crc -- see safety_link.h's peer_build_known
+     * comment for why this is stricter than link_version_known. Strings are
+     * copied out with explicit lengths (not null-terminated on the wire). */
+    bool     safety_build_known;
+    bool     safety_build_dirty;
+    char     safety_build_commit[65];   /* peer_build_commit + NUL */
+    char     safety_build_datetime[33]; /* peer_build_datetime + NUL */
+    uint8_t  safety_config_version;
+    uint16_t safety_config_crc;
+
     /* UI_PLAN.md section 5's one genuinely-missing field set for the web
      * diagnostics page (ui_page_diagnostics.c's ESP-only half, section 8's
      * "Data already on the wire" note): firmware version/build strings,

@@ -262,6 +262,14 @@ SAFETY_CMD_SET_CONFIG = 0x16
 #: shows up as the link dropping and recovering with a new boot_id on the
 #: next GET_STATUS poll, not here.
 SAFETY_CMD_ROLLBACK = 0x17
+#: PC -> ESP queries, CommonFW/docs/LINK_PROTOCOL.md sec 7: "Mirror all of it
+#: on the PC-link SAFETY task as well" -- the same DIAG (Frame B) / TRIP_EVENT
+#: (Frame D) telemetry dashboard_http.c and ui_page_safety.c already read,
+#: answered from the ESP's cache only (never a live round trip to the Pico),
+#: same shape as GET_STATUS/GET_LINK_STATS above. See uart_task_ids.h's
+#: SAFETY_CMD_GET_DIAG doc comment for both response payload layouts.
+SAFETY_CMD_GET_DIAG = 0x0C
+SAFETY_CMD_GET_TRIP_EVENT = 0x15
 
 #: Age field in GET_STATUS: "no valid status has ever been received".
 SAFETY_AGE_NEVER = 0xFFFF
