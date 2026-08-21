@@ -278,6 +278,21 @@ isn't covered by Dashboard/Profiles/Settings/Network today:
   more than one kiln. Depends on nothing else in this plan; buildable
   whenever picked up.
 
+**2026-08-20, explicit user request — web page structure rework, planned in
+`docs/UI_PLAN.md`, not built.** "rework the webpage structure ... i dont want
+everyhting mashed into the main page there should be a seprate page for
+settings. and the main page should be reminicient of the lcd main page but be
+allowed to scroll." That request supersedes this section's grouping above in
+one respect: **Settings gets its own hub page at `GET /settings`** rather than
+existing only as a link block on the dashboard, and `main_page.html`'s
+"Danger zone" moves there with it. It also adds the web halves of the Safety,
+Diagnostics and Thermocouple-faults pages this section already lists, all of
+which now exist on the LCD but on no web page. `docs/UI_PLAN.md`'s "Web —
+planned: page structure rework" section is the detailed plan (route map,
+dashboard card order, shared `/nav.js`+`/app.js`, sticky Stop,
+connection-lost banner, write auth, and the one new `/api/status` field set
+it needs); keep the two in sync when either changes.
+
 ## 1. Wi-Fi provisioning and resilience — DONE, verified on hardware (2026-08-10)
 
 Implemented in `App/drivers/wifi_prov.{c,h}` and

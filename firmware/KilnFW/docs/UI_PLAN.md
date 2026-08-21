@@ -348,6 +348,177 @@ different failure modes if merged into one blob):
    the real firmware structs. Needs confirming actual field lists in
    firmware source before implementation starts.
 
+### Web — planned: page structure rework (2026-08-20, explicit user request, not started)
+
+Requested verbatim: *"rework the webpage structure. be sure to include
+everything that is included in the lcd that makes sense and more. i dont want
+everyhting mashed into the main page there should be a seprate page for
+settings. and the main page should be reminicient of the lcd main page but be
+allowed to scroll."*
+
+Today `main_page.html` (589 lines) is the whole product: Thermocouples,
+Relays, Firing profiles, History, a "Settings" link block and a "Danger zone"
+all stacked on one page, with the only other routes being `/profiles`,
+`/settings/zones`, `/settings/relays`, `/readiness`, `/wifi` and `/ota`. That
+is the "everything mashed into the main page" problem. Meanwhile the LCD has
+grown eleven pages (home, config hub, temperature, network, safety, board
+health, history, diagnostics, thermocouple faults, touch cal/test) and four
+of those have **no web equivalent at all** — safety, board health,
+diagnostics, thermocouple faults — even though `GET /api/status` already
+serves nearly every field they display (see "Data already on the wire"
+below). Section 10.5's Web/LCD parity rule is the standing obligation this
+section discharges in the web direction.
+
+#### 1. Target route map
+
+| Route | Page | Content |
+|---|---|---|
+| `GET /` | `main_page.html` (rewritten) | Dashboard only — LCD-home-shaped, scrollable. No settings blocks, no danger zone. |
+| `GET /settings` | `settings_page.html` (**new**) | Nav hub, the web twin of `ui_page_config.c`. Links only, no live data. |
+| `GET /settings/zones` | `zones_page.html` | unchanged route/content |
+| `GET /settings/relays` | `rules_page.html` | unchanged route/content |
+| `GET /wifi` | `wifi_provision_page.html` | unchanged; reached from `/settings`, not from `/` |
+| `GET /profiles` | `profiles_page.html` | unchanged route; reachable from both `/` (operator flow) and `/settings` |
+| `GET /readiness` | `readiness_page.html` | unchanged route; summarized as a card on `/` |
+| `GET /ota` | `ota_page.html` | unchanged; reached from `/settings` |
+| `GET /safety` | `safety_page.html` (**new**) | Web twin of `ui_page_safety.c`, plus the detail the LCD's ~264px budget forced off it |
+| `GET /diagnostics` | `diagnostics_page.html` (**new**) | Web twin of `ui_page_diagnostics.c` + `ui_page_board_health.c` |
+| `GET /diagnostics/thermo` | `thermo_faults_page.html` (**new**) | Web twin of `ui_page_thermo_faults.c` |
+
+Four new pages, four new routes plus their embedded-file symbols.
+`max_uri_handlers` is **56** in `wifi_provision_http.c` today (WEB_UI.md's
+"40" is stale) against roughly 32 registered, so there is real headroom — but
+the 2026-08-11 lesson stands: `httpd_register_uri_handler` failure is logged
+and non-fatal, so a page that overflows the cap silently 404s. Re-count and
+re-check the cap as part of this work rather than assuming.
+
+#### 2. The main page, LCD-shaped and scrollable
+
+`ui_page_home.c` after its 2026-08-18 slimming is: per-zone compact rows,
+run-state summary, and Start/Stop/Menu. The web dashboard should read as the
+same page — same card order, same `theme.css` palette and per-zone rotating
+accent it already uses — but is explicitly **allowed to scroll**, so it can
+carry the cards the LCD had to move off-page. Proposed order, top-down, with
+safety-relevant controls first per section 0.5's "fewest taps to Stop" rule:
+
+1. **Run state / profile summary.** Profile name, state (`state`, `phase`),
+   segment index of count, elapsed, dwell remaining, target vs actual.
+   Start / Pause / Resume / Stop. Stop styled with the accent-5 alarm color
+   and never below the fold — see the sticky-Stop item in §4.
+2. **Per-zone rows.** Zone name, current temp, setpoint, duty, relay state,
+   stale/fault marker — the LCD home row content, one row per zone.
+3. **Safety strip.** Armed / tripped / degraded plus the latest trip reason,
+   linking to `/safety`. New on the web; the LCD has had it since M6.
+4. **Readiness summary.** Pass/fail count from `GET /api/readiness` with a
+   link to the full `/readiness` checklist, replacing today's bare link.
+5. **History chart.** `#historyChart` moves down the page rather than off it
+   — this is exactly the card the LCD had to relocate to `ui_page_history.c`
+   for budget, and the scroll allowance is what lets the web keep it inline.
+6. **Quick relay toggles.** Keep, below the chart, behind the confirm
+   affordance in §4 — a manual relay override on a mobile page a pocket can
+   brush is the most dangerous control here.
+7. **Footer link to `/settings`.** One link, replacing the current
+   five-link "Settings" block and the "Danger zone" section, both of which
+   move to the settings hub.
+
+#### 3. What moves off the main page
+
+- The `Settings` `<h2>` block (`/readiness`, `/settings/zones`,
+  `/settings/relays`, `/wifi`, `/ota` buttons) becomes the body of
+  `/settings`.
+- The `Danger zone` block moves to `/settings` under its own heading, keeps
+  its distinct accent-5 styling, and gains the confirm step in §4. Nothing
+  destructive stays one tap from the dashboard.
+
+#### 4. Cross-cutting improvements worth doing in the same pass
+
+These are the "and more" half of the request. Each is independent of the
+route split and can be dropped without breaking it.
+
+1. **Shared nav, not six copies.** `theme.css` (10.6/10.6a) already proved
+   the shared-asset pattern — one gzipped `EMBED_TXTFILES` file, one route,
+   served from `wifi_provision_http.c`. Add `/nav.js` the same way: it
+   injects a consistent header (product name + hub link) and a
+   thumb-reachable bottom nav bar (Dashboard / Profiles / Settings) on every
+   page, retiring the ad-hoc `<a href="/">` back-links each settings page
+   hand-rolls today. **This supersedes 10.6's "duplicated `<style>` block, no
+   shared route" conclusion** — that reasoning was correct when no hub file
+   served all six pages, and `theme.css` has since made it obsolete.
+2. **Sticky Stop.** A fixed-position Stop control on *every* page, not just
+   the dashboard, active only while a profile is running
+   (`/api/profile_exec` already reports this). Section 0.5's own framing:
+   "this is a mobile control surface for hitting Stop quickly, not a desktop
+   admin panel." A user deep in the zones page today must navigate home first.
+3. **One shared poller.** Every page currently owns its own `setTimeout`
+   chain against a different endpoint at a different period. Move to a shared
+   `/app.js` poller: a single `/api/status` fetch, subscribers register for
+   the fields they render, polling **pauses on `document.visibilityState ===
+   "hidden"`** and backs off after consecutive failures. Fewer sockets and
+   less ESP CPU burned by a phone left on a bench with the page open.
+4. **Connection-lost banner.** Today a failed `fetch()` leaves the last good
+   numbers on screen indefinitely — a stale temperature that looks live is a
+   safety-relevant lie, not a cosmetic bug. Any page showing live data must
+   dim its values and show an explicit "disconnected, last update Ns ago"
+   banner once a poll fails.
+5. **Confirm step for destructive actions.** Forcing a relay on, clearing a
+   latched trip, deleting a profile, and everything in the danger zone get an
+   explicit confirm. Stop deliberately does **not** — stopping a firing must
+   stay one tap.
+6. **Auth on writes, at least.** WEB_UI.md states it plainly: "there is no
+   other navigation and no authentication of any kind — anyone who can reach
+   the board's IP can switch a relay." OTA (section 9.3) already solved this
+   with an AP-password challenge; extend that same mechanism to the relay,
+   danger-zone, and clear-trip POSTs. Scope decision needed from the user
+   before building: whether read-only pages stay open.
+7. **Unit parity.** The web renders °C from the API; the LCD honors a °F/°C
+   setting. The same value should read the same on both surfaces — pick up
+   the board's unit setting rather than adding an independent web-only toggle.
+8. **Trim `main_page.html` as it splits.** It is 589 lines carrying five
+   concerns; after §3 it should be materially smaller, and the shared
+   `/nav.js` + `/app.js` extraction should shrink the other five pages too.
+   Net embedded-flash cost of four new pages is expected to be roughly
+   neutral after gzip because of it — worth measuring, not assuming.
+
+#### 5. Data already on the wire
+
+`GET /api/status` already serves almost everything the four new pages
+display, which is why this is mostly a front-end restructure rather than a
+firmware feature:
+
+- **Safety page**: `diag_state`, `diag_trip_mask`, `diag_warn_mask`,
+  `diag_trip_reason`, `diag_ever_received`, `diag_context_frames_ok`/`_bad`,
+  `diag_tx_frames_dropped`, `trip_reason`, `trip_safety_tc_c`,
+  `trip_deciding_threshold`, `trip_event_age_ms`, `trip_event_ever_received`,
+  `safety_ready`, `safety_temp_c`, `link_version_compatible`,
+  `peer_protocol_version`, `self_protocol_version`. Clear-trip already has a
+  route: `POST /api/safety/clear_trip`. **This page is the surface that
+  action has never had** — TODO 0.5 records the send path as built
+  2026-08-19, while `ui_page_safety.c`'s ~264px budget had no room for the
+  button.
+- **Thermocouple faults page**: `fault_status` (all eight SR bits),
+  `fault_guard`, `spi_failed`, `stale`, `valid`, `cj_c`, per channel.
+  Visibility only, no "clear faults" action — same scope call as the LCD page.
+- **Diagnostics / board health page**: `enclosure_temp_c`, `nvs_sections`,
+  `io_ready`, `io_read_failed`, `thermo_ready`, `zones_config_valid`,
+  `mounted`, `uptime_at_write_s`, `power_w`. Firmware version/build strings
+  and the heap numbers `ui_page_diagnostics.c` shows are **not** in
+  `/api/status` today — that is the one genuinely new field set this section
+  needs, and it belongs in `/api/status` (or a small `/api/diag`) rather than
+  being obtained some other way.
+
+Deliberately **not** mirrored from the LCD: touch calibration and touch test
+(`ui_page_touch_cal.c` / `ui_page_touch_test.c`) — panel-hardware utilities
+with no meaning in a browser. That is the "that makes sense" qualifier in the
+request.
+
+#### 6. Not yet done
+
+No new `.html` file, no new route, no `CMakeLists.txt` `EMBED_TXTFILES`
+entry, no handler registered, no shared `/nav.js` or `/app.js`, no field
+added to `/api/status`. This section is a plan entry so the request isn't
+lost, not a claim of progress. Open question for the user before
+implementation starts: §4.6's auth scope (writes only, or the whole UI).
+
 ### LCD navigation (found during item 6's work, 2026-08-19)
 
 While wiring `ui_page_touch_cal.c`'s new Cancel button, swept every LCD
