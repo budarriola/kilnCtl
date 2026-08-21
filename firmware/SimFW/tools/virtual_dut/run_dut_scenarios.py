@@ -80,14 +80,59 @@ list):
     ``tc_c > max_zone_setpoint_c + margin`` test false rather than inventing
     a ceiling for S2 to trip on. S2 is reachable on the real target after
     ``f304392``; it is simply not provokable by this fixture.
-  - It does not issue ``SAFETY_CMD_REQUEST_ENABLE``. ``f304392`` gave
-    ``relay_owner_command_energize()`` its first caller, but that caller is
-    reached only from an explicit operator/PC command (KilnFW's
-    ``uart_bridge.c`` ``SAFETY_CMD_REQUEST_ENABLE`` case, i.e. PcTools'
-    ``safety_request_enable`` MCP tool) -- KilnFW does *not* request enable
-    automatically when a profile runs. No scenario models that operator
-    step, so K4 still never closes here. ``dut_core.exe`` has an ``ENABLE``
-    command ready for the scenario that eventually does.
+  - It does not know any zone's PID. Nothing here decides *when* a zone
+    relay should be commanded on; a scenario that wants one on says so
+    explicitly (see ``operator_actions`` below).
+
+Operator actions (added 2026-08-20, this pass)
+----------------------------------------------
+The bullet that used to sit here -- "it does not issue
+``SAFETY_CMD_REQUEST_ENABLE`` ... so K4 still never closes" -- is now
+closed. A scenario may carry an ``operator_actions:`` list under its own
+``dut:`` mapping, and this script replays it against the sim clock:
+
+    dut:
+      profile: cone6_fast
+      operator_actions:
+        - { at_sim_time: 5, action: request_enable }
+        - { at_sim_time: 5, action: command_relay, relay: K1, state: closed }
+
+Both action kinds model something a real system genuinely does, and neither
+invents DUT behavior:
+
+``request_enable``
+    ``dut_core.exe``'s ``ENABLE`` command, which is link_task.c's
+    ``SAFETY_CMD_REQUEST_ENABLE`` (0x02) decoder ->
+    ``safety_core_request_enable()`` -> ``relay_owner_command_energize()``.
+    On real hardware this is an operator/PC action (PcTools'
+    ``safety_request_enable`` MCP tool); KilnFW does *not* auto-enable on
+    profile start, which is exactly why it had to become a scenario-authored
+    step rather than something this harness performs on its own. The request
+    is issued once and then honoured by relay_owner's own state machine:
+    refused while TRIPPED, held-but-not-applied during the 60 s startup
+    GRACE, applied the moment it reaches ARMED. So K4 cannot close earlier
+    than sim-time 60 s no matter when the scenario asks -- that delay is the
+    real ``SAFTYFW_STARTUP_GRACE_MS``, not a harness fudge.
+
+``command_relay``
+    ``SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE`` on K1/K2/K3/K5 -- the same
+    virtual-only command this file already uses to feed K4's contact state
+    back into the fixture, applied to a zone relay instead. On real hardware
+    KilnFW's PID drives these; there is no KilnFW in this fixture, so the
+    scenario plays that role explicitly. This is honest rather than
+    circular: ``_FixtureContext`` derives ``relay_now_mask`` /
+    ``relay_recent_mask`` / ``relay_on_continuous_ms`` from the fixture's own
+    telemetry ``relay_state_mask``, and ``virtual_simfw``'s ported
+    ``device_tick()`` derives each zone's duty (and therefore its CT current)
+    from that same sensed contact -- so one command moves the physics and the
+    reported context together, the way a real closed contactor does. K4 is
+    refused here on purpose: it is owned by the ``energized`` feedback loop
+    below and must never be forced by a scenario.
+
+Together these are what make S3 and S4 provokable at all: both need
+``any_current_present`` (S3 positively, S4 by its absence), current flows
+only when a zone relay is closed *and* K4 permits, and K4 closes only after
+an enable request survives GRACE.
 """
 from __future__ import annotations
 
@@ -183,6 +228,86 @@ def _send_relay_set_sense(link: TcpSimLink, signal: int, level: bool) -> int:
     if reply.msg_type != bp.MsgType.ACK or not reply.payload:
         raise RuntimeError(f"RELAY_SET_SENSE: unexpected reply {reply.msg_type}")
     return reply.payload[0]
+
+
+_RELAY_SIGNAL_BY_NAME = {
+    "K1": _RELAY_SIGNAL_K1, "K2": _RELAY_SIGNAL_K2,
+    "K3": _RELAY_SIGNAL_K3, "K5": _RELAY_SIGNAL_K5,
+}
+
+# Trailing sim-seconds kept running after the last scheduled operator action's
+# own deadline, same role kilnsim.runner's _TRAILING_MARGIN_S plays for
+# fault-driven scenarios (that estimator only knows about faults, so a
+# scenario whose interesting moment is an operator action would otherwise be
+# cut off at the 45 s floor).
+_ACTION_TRAILING_MARGIN_S = 20.0
+_ACTION_MAX_RUN_DURATION_S = 600.0  # same ceiling kilnsim.runner clamps to
+
+
+def _parse_operator_actions(scenario: Scenario) -> list:
+    """Reads the scenario's ``dut.operator_actions:`` list (see the module
+    docstring). Returns a list of ``{"t": float, ...}`` dicts sorted by
+    sim-time. Unknown/invalid entries raise rather than being skipped: a
+    silently-ignored action is exactly the "dead test that looks like a real
+    one" failure mode `firmware/SimFW/scenarios/welded_ssr_midfire.yaml`'s
+    header comment warns about for missing `params:`."""
+    dut_raw = (scenario.raw or {}).get("dut") or {}
+    raw_actions = dut_raw.get("operator_actions") or []
+    if not isinstance(raw_actions, list):
+        raise ValueError("dut.operator_actions must be a list")
+    out = []
+    for entry in raw_actions:
+        if not isinstance(entry, dict):
+            raise ValueError(f"dut.operator_actions entry must be a mapping, got {entry!r}")
+        if "at_sim_time" not in entry:
+            raise ValueError(f"dut.operator_actions entry needs 'at_sim_time': {entry!r}")
+        t = float(entry["at_sim_time"])
+        kind = entry.get("action")
+        if kind == "request_enable":
+            out.append({"t": t, "kind": kind, "enable": bool(entry.get("enable", True))})
+        elif kind == "command_relay":
+            name = str(entry.get("relay", ""))
+            if name not in _RELAY_SIGNAL_BY_NAME:
+                raise ValueError(
+                    f"dut.operator_actions: relay {name!r} is not commandable by a scenario "
+                    f"(valid: {sorted(_RELAY_SIGNAL_BY_NAME)}; K4 is owned by the energized "
+                    f"feedback loop and must never be forced)"
+                )
+            state = str(entry.get("state", "closed")).lower()
+            if state not in ("closed", "open"):
+                raise ValueError(f"dut.operator_actions: relay state must be closed/open, got {state!r}")
+            out.append({"t": t, "kind": kind, "signal": _RELAY_SIGNAL_BY_NAME[name],
+                        "name": name, "closed": state == "closed"})
+        else:
+            raise ValueError(
+                f"dut.operator_actions: unknown action {kind!r} "
+                f"(valid: request_enable, command_relay)"
+            )
+    out.sort(key=lambda a: a["t"])
+    return out
+
+
+def _run_duration_with_actions(scenario: Scenario, actions: list) -> float:
+    """kilnsim.runner.estimate_run_duration_s() knows only about faults (its
+    own docstring: "computed from ... every fault's trigger time"), so a
+    scenario whose latest interesting moment is an operator action -- an
+    enable at t=5 whose K4 closure cannot happen before the real 60 s
+    SAFTYFW_STARTUP_GRACE_MS, then a 150 s correlation window on top -- would
+    be stopped at that estimator's 45 s floor. Extend it by the same shape
+    the estimator itself uses: latest scheduled moment + the longest
+    ``within_s`` deadline any clause hangs off it + a trailing margin,
+    clamped to the same 600 s ceiling."""
+    base = kr.estimate_run_duration_s(scenario)
+    if not actions:
+        return base
+    latest_action_s = max(a["t"] for a in actions)
+    deadline_tail = 0.0
+    for e in scenario.expect:
+        then = getattr(e, "then", None)
+        if isinstance(then, dict) and then.get("within_s") is not None:
+            deadline_tail = max(deadline_tail, float(then["within_s"]))
+    want = latest_action_s + deadline_tail + _ACTION_TRAILING_MARGIN_S
+    return min(_ACTION_MAX_RUN_DURATION_S, max(base, want))
 
 
 class DutCore:
@@ -479,7 +604,7 @@ class _GuardEdgeTracker:
 
 
 def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale_override: Optional[float],
-                      poll_interval_s: float) -> dict:
+                      poll_interval_s: float, trace: bool = False) -> dict:
     sim_proc, port = start_virtual_simfw(seed_override if seed_override is not None else scenario.seed)
     dut = DutCore(DUT_CORE_EXE)
     link = TcpSimLink()
@@ -488,7 +613,8 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
 
         run_seed = seed_override if seed_override is not None else scenario.seed
         run_timescale = timescale_override if timescale_override is not None else scenario.timescale
-        run_duration = kr.estimate_run_duration_s(scenario)
+        actions = _parse_operator_actions(scenario)
+        run_duration = _run_duration_with_actions(scenario, actions)
 
         link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": run_seed})
         link.send_command(CommandGroup.SYS, SysCmd.SET_TIMESCALE, {"value": run_timescale})
@@ -515,7 +641,8 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
         guard_tracker = _GuardEdgeTracker()
         fixture_ctx = _FixtureContext()
         reach = {"polls": 0, "context_valid": 0, "any_current_present": 0,
-                 "link_up": 0, "max_zone_count": 0}
+                 "link_up": 0, "max_zone_count": 0, "energized": 0}
+        pending_actions = list(actions)  # sorted by sim-time, consumed below
 
         last_sim_time_us = 0
         start_wall = time.time()
@@ -534,6 +661,24 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
 
                 sim_time_us = int(telemetry.get("sim_time_us", 0))
                 estop = bool(telemetry.get("estop_open", False))
+
+                # --- Scheduled operator actions (see the module docstring) --
+                # Fired against the SIM clock, at this poll's resolution: an
+                # action nominally at t=5 actually lands at the first poll
+                # whose telemetry reports sim_time >= 5. That quantization is
+                # bounded by virtual_simfw's own ~2 Hz telemetry broadcast
+                # (5 sim-seconds at timescale 10), the same coarseness every
+                # other fixture-observed quantity in this loop already has --
+                # so scenario deadlines are written with margin for it rather
+                # than to the nominal instant.
+                sim_time_s = sim_time_us / 1_000_000.0
+                while pending_actions and pending_actions[0]["t"] <= sim_time_s:
+                    act = pending_actions.pop(0)
+                    if act["kind"] == "request_enable":
+                        dut.enable(act["enable"])
+                    else:
+                        _send_relay_set_sense(link, act["signal"], act["closed"])
+
                 reg_reply = link.send_command(CommandGroup.TC, TcCmd.GET_REGS, {"channel": TC_CHANNEL_SAFETY})
                 regs = bytes(reg_reply.get("regs", bytes(16)))
 
@@ -563,10 +708,27 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                     # "S3 was evaluated and stayed quiet" vs "S3 was gated
                     # off" without re-deriving anything in Python.
                     reach["polls"] += 1
-                    for key in ("context_valid", "any_current_present", "link_up"):
+                    for key in ("context_valid", "any_current_present", "link_up", "energized"):
                         if result[key]:
                             reach[key] += 1
                     reach["max_zone_count"] = max(reach["max_zone_count"], result["eff_zone_count"])
+                    if trace:
+                        # Per-poll diagnostic for exactly the failure mode
+                        # README.md warns about: one poll batching many
+                        # 100ms guard ticks against a single telemetry
+                        # sample. `steps` is how many ticks this poll
+                        # replayed; a large value next to a short guard
+                        # window (S3's 20s) is the signal that a verdict
+                        # needs a slower timescale before it is believed.
+                        print(f"    trace t={sim_time_us/1e6:8.2f}s steps={n_steps:5d} "
+                              f"relay_now={ctx_facts['relay_now_mask']} "
+                              f"on_ms={ctx_facts['relay_on_continuous_ms']:6d} "
+                              f"amps={ctx_facts['amps'][0]:6.2f} "
+                              f"cur={int(result['any_current_present'])} "
+                              f"en={int(result['energized'])} "
+                              f"rs={result['relay_state']} "
+                              f"trip={int(result['is_tripped'])}/{result['reason']} "
+                              f"s4={int(result['s4_warn'])}")
                     collected.extend(guard_tracker.observe(sim_time_us, result))
                     # Close the loop: feed relay_owner_task()'s real,
                     # unmodified decision (dut_core's `energized`, straight
@@ -603,6 +765,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("scenarios", nargs="*", help="scenario YAML paths (default: all of firmware/SimFW/scenarios)")
     ap.add_argument("--poll-interval", type=float, default=0.25)
+    ap.add_argument("--timescale", type=float, default=None,
+                    help="override every scenario's own timescale -- lower it to shrink how much "
+                         "sim time one poll's tick batch covers (see --trace)")
+    ap.add_argument("--trace", action="store_true",
+                    help="print one diagnostic line per poll (sim time, batch size, relay/current/"
+                         "guard state) -- use when a trip's timing looks like a batching artifact")
     ap.add_argument("--out", type=Path, default=HERE / "results")
     args = ap.parse_args()
 
@@ -623,7 +791,7 @@ def main() -> int:
         scenario = load_scenario(path)
         print(f"=== {scenario.name} ===")
         try:
-            report = run_one_scenario(scenario, None, None, args.poll_interval)
+            report = run_one_scenario(scenario, None, args.timescale, args.poll_interval, args.trace)
         except Exception as exc:  # noqa: BLE001
             print(f"  ERROR running scenario: {exc}")
             overall_ok = False
@@ -635,6 +803,7 @@ def main() -> int:
         if r.get("polls"):
             print(f"    inputs: {r['polls']} polls, context_valid {r['context_valid']}, "
                   f"link_up {r['link_up']}, any_current_present {r['any_current_present']}, "
+                  f"K4 energized {r.get('energized', 0)}, "
                   f"max eligible zones {r['max_zone_count']}")
         for exp in report["expectations"]:
             print(f"    [{exp['verdict']:>7}] {exp['name']}: {exp['detail']}")

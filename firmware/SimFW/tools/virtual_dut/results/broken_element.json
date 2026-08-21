@@ -2,12 +2,12 @@
   "scenario": {
     "name": "broken_element",
     "version": 1,
-    "hash": "b1acbf738d760022a715dbdac65e0016e0f7781ee34a87d02d61ff232b6da3b6"
+    "hash": "7a3b592cf0a7b699ca370ac14b069f919d5aed9b24e5f7e3de61d8178ce8d5e5"
   },
   "fw_versions": {},
   "seed": 50,
   "timescale": 10.0,
-  "start_time": 1787271493.4523237,
+  "start_time": 1787274680.0491333,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 43000000,
+      "sim_time_us": 47000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -40,10 +40,10 @@
       "name": "s4_warns",
       "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred [BLOCKED: RESOLVED on the SaftyFW side, still blocked on the fixture. The old reason here -- 'context_valid is never set true by safety_core_build_input()' -- was fixed by commit f304392: context_valid, any_current_present and relay_commanded_continuously are all populated for real now, and virtual_dut confirms context_valid is true on every poll of this scenario. S4 is therefore EVALUATED every tick; it simply never warns, because `relay_commanded_continuously && !any_current_present` needs a relay commanded on continuously for correlation_window_s (150s) and no relay ever closes in a virtual_dut run: there is no KilnFW/PID in the loop to close K1, and this scenario's own `relay_edge K1 close` trigger never occurs for the same reason (the clause reports 'triggering event never occurred', not a guard verdict).]",
+      "detail": "triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred [BLOCKED: RESOLVED on both sides now -- what remains is local to THIS file. The original reason ('context_valid is never set true by safety_core_build_input()') was fixed by commit f304392. The follow-up reason ('nothing in the fixture ever commands a zone relay on') was fixed by the operator-actions pass: run_dut_scenarios.py replays a scenario's own `dut.operator_actions:` list, and commanded_no_current_s4.yaml -- the same broken-element stimulus, plus a commanded K1 and an operator enable -- drives S4 to a genuine WARN 152.8 sim-seconds after K1 closes. This scenario does not schedule those actions, so its own `relay_edge K1 close` trigger still never occurs and the clause still reports 'triggering event never occurred' rather than any verdict about S4.]",
       "blocked_on": {
-        "reason": "RESOLVED on the SaftyFW side, still blocked on the fixture. The old reason here -- 'context_valid is never set true by safety_core_build_input()' -- was fixed by commit f304392: context_valid, any_current_present and relay_commanded_continuously are all populated for real now, and virtual_dut confirms context_valid is true on every poll of this scenario. S4 is therefore EVALUATED every tick; it simply never warns, because `relay_commanded_continuously && !any_current_present` needs a relay commanded on continuously for correlation_window_s (150s) and no relay ever closes in a virtual_dut run: there is no KilnFW/PID in the loop to close K1, and this scenario's own `relay_edge K1 close` trigger never occurs for the same reason (the clause reports 'triggering event never occurred', not a guard verdict).",
-        "phase": "Not a SaftyFW phase gap any more. The remaining gap is SimFW-side: nothing in the fixture ever commands a zone relay on, so S4's positive half cannot be presented. Closing it needs either a virtual KilnFW/PID that drives K1..K3, or a scenario that forces a relay closed independently of heat (welded_relay-class faults already exist but are triggered on zone temperatures this fixture never reaches while K4 gates duty). See firmware/SimFW/tools/virtual_dut/README.md."
+        "reason": "RESOLVED on both sides now -- what remains is local to THIS file. The original reason ('context_valid is never set true by safety_core_build_input()') was fixed by commit f304392. The follow-up reason ('nothing in the fixture ever commands a zone relay on') was fixed by the operator-actions pass: run_dut_scenarios.py replays a scenario's own `dut.operator_actions:` list, and commanded_no_current_s4.yaml -- the same broken-element stimulus, plus a commanded K1 and an operator enable -- drives S4 to a genuine WARN 152.8 sim-seconds after K1 closes. This scenario does not schedule those actions, so its own `relay_edge K1 close` trigger still never occurs and the clause still reports 'triggering event never occurred' rather than any verdict about S4.",
+        "phase": "No phase: nothing upstream is missing. Either add `dut.operator_actions:` to this file (see commanded_no_current_s4.yaml) and delete this annotation, or treat that scenario as the library's live S4 test and retire this clause."
       }
     },
     {
@@ -52,10 +52,10 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.]",
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes IN THIS FILE, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated again, after the operator-actions pass): 'no scenario models the operator enable' is no longer true -- commanded_no_current_s4.yaml issues it, watches K4 close at ~58s, watches S4 warn, and then asserts the real design property this clause is reaching for (K4 STILL CLOSED at end of run, because S4 is WARN-only). That is the assertion this clause cannot make while K4 never closes.]",
       "blocked_on": {
-        "reason": "This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.",
-        "phase": "No longer a missing-decoder gap on the SaftyFW side -- link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) today and relay_owner_command_energize() has its first caller. The remaining gap is on this side of the fence: no scenario issues the operator enable. firmware/SimFW/tools/virtual_dut/dut_core/main.c already accepts an ENABLE command mirroring relay_owner's TRIPPED-refuses / GRACE-defers / ARMED-honours behavior; run_dut_scenarios.py never sends one, because deciding WHEN a scenario would issue it is a scenario-library design question, not something a harness should invent. Owned by SimFW's scenario library, not by SaftyFW."
+        "reason": "This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes IN THIS FILE, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated again, after the operator-actions pass): 'no scenario models the operator enable' is no longer true -- commanded_no_current_s4.yaml issues it, watches K4 close at ~58s, watches S4 warn, and then asserts the real design property this clause is reaching for (K4 STILL CLOSED at end of run, because S4 is WARN-only). That is the assertion this clause cannot make while K4 never closes.",
+        "phase": "No phase: nothing upstream is missing. Superseded in practice by commanded_no_current_s4.yaml's `s4_never_opens_k4` clause; retire this one, or give this file the operator actions that would make it meaningful."
       }
     }
   ],
@@ -70,6 +70,7 @@
     "context_valid": 79,
     "any_current_present": 0,
     "link_up": 79,
-    "max_zone_count": 3
+    "max_zone_count": 3,
+    "energized": 0
   }
 }

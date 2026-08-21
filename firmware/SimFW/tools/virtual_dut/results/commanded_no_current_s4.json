@@ -1,0 +1,128 @@
+{
+  "scenario": {
+    "name": "commanded_no_current_s4",
+    "version": 1,
+    "hash": "e6e3c6c392a776f463573b29b8285fd41a1b427b78e627eefac98ded35762c82"
+  },
+  "fw_versions": {},
+  "seed": 62,
+  "timescale": 2.0,
+  "start_time": 1787273814.9986682,
+  "events": [
+    {
+      "seq": 0,
+      "sim_time_us": 2200000,
+      "event_type": "FAULT_FIRED",
+      "payload": {
+        "fault_id": "dead_element",
+        "slot": 0
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 1,
+      "sim_time_us": 6800000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K1",
+        "state": false,
+        "relay": "K1",
+        "edge": "close"
+      },
+      "a": 0,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 2,
+      "sim_time_us": 59200000,
+      "event_type": "RELAY_EDGE",
+      "payload": {
+        "entity": "K4",
+        "state": false,
+        "relay": "K4",
+        "edge": "close"
+      },
+      "a": 4,
+      "b": 1,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 1800000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000001,
+      "sim_time_us": 58600000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "K4",
+        "state": false
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000002,
+      "sim_time_us": 158000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S4"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    }
+  ],
+  "telemetry_samples": [],
+  "expectations": [
+    {
+      "name": "s4_warns_after_the_correlation_window",
+      "verdict": "PASS",
+      "evidence": [
+        1,
+        2000000002
+      ],
+      "detail": "event:guard_warn observed 151.200s after relay_edge"
+    },
+    {
+      "name": "no_current_ever_flows",
+      "verdict": "PASS",
+      "evidence": [],
+      "detail": "dut:current_present never observed before the boundary"
+    },
+    {
+      "name": "s4_never_opens_k4",
+      "verdict": "PASS",
+      "evidence": [
+        2000000001
+      ],
+      "detail": "dut:K4_closed held at end of run (last observed seq 2000000001)"
+    }
+  ],
+  "verdict": "PASS",
+  "validity": {
+    "spi_underrun": false,
+    "event_seq_gap": false,
+    "valid": true
+  },
+  "dut_input_reachability": {
+    "polls": 373,
+    "context_valid": 373,
+    "any_current_present": 0,
+    "link_up": 373,
+    "max_zone_count": 3,
+    "energized": 323
+  }
+}

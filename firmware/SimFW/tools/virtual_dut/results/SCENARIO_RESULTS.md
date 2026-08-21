@@ -1,13 +1,93 @@
 # virtual_dut scenario results
 
 Full run against `virtual_simfw.exe` + `dut_core.exe` (real, unmodified
-`safety_guards.c` / `relay_grace.c` / `snapshots.h`), all 19 scenarios in
+`safety_guards.c` / `relay_grace.c` / `snapshots.h`), all 22 scenarios in
 `firmware/SimFW/scenarios/`. See `../README.md` for the architecture and the
 findings behind the PASS/FAIL/BLOCKED pattern below.
 
 ---
 
-## This revision: the fixture caught up with SaftyFW commit `f304392`
+## This revision: S3 and S4 actually fire
+
+The previous revision closed the context/current/link wiring and reported
+S3/S4 as "reachable but not provokable": `any_current_present` was measured
+true on **0 of 1 229 polls** across the whole suite, because
+`sim_engine.c` gates heater duty and CT current on K4, and K4 never closed.
+
+That was a chicken-and-egg, not a missing model. K4 closes only on an
+operator `SAFETY_CMD_REQUEST_ENABLE` that survives the real 60 s
+`SAFTYFW_STARTUP_GRACE_MS`, and KilnFW does not issue one automatically on
+profile start, so no scenario ever had. This pass gave scenarios a way to
+say so -- a `dut.operator_actions:` list, replayed against the sim clock by
+`run_dut_scenarios.py`, that can request enable and command K1..K3 on/off
+(see that file's module docstring for why each action models something a
+real system does) -- and wrote the first three scenarios that use it.
+
+### The three new scenarios
+
+| Scenario | Verdict | What it measured |
+|---|---|---|
+| `enabled_firing_healthy` | **PASS** | The S3/S4 anti-nuisance control run. K4 closes 52.2 s after K1 is commanded, current flows 1.4 s later, **125 of 564 polls carry real CT current**, K1 stays commanded for 195 sim-seconds (past S4's 150 s bar), and neither guard says anything. K4 still closed at end of run. |
+| `stuck_load_no_command_s3` | **PASS** | **S3 trips for real.** Enable at t=5 s -> K4 energized at t=58.8 s (60 s grace) -> welded SSR at t=70.2 s -> 16 A on CT0 at t=70.8 s with `relay_recent_mask == 0` -> **`GUARD_TRIP {S3}` at t=89.0 s** -> K4 opens at 89.8 s -> current gone at 91.0 s. |
+| `commanded_no_current_s4` | **PASS** | **S4 warns for real.** K1 commanded closed at t~6.8 s into a dead element, K4 energized at t=58.6 s and **closed for 323 of 373 polls**, zero current all run -> **`GUARD_WARN {S4}` at t=158.0 s**, 151.2 s after K1 closed (150 s `correlation_window_s`) -> and K4 is **still closed at end of run**, which is the WARN-only design property stated positively for the first time. |
+
+### Were the thresholds actually attainable?
+
+Deliberately, and checkably: **none of the three scenarios uses a
+temperature trigger.** Every trigger is `at_sim_time`, every guard bar is a
+time bar (60 s grace, 20 s `stuck_on_time_s`, 150 s `correlation_window_s`),
+and the current magnitude is set by the preset's own physics --
+`V_mains 240 / R_element 15 = 16.0 A` against `i_present_a`'s 2.0 A default,
+an 8x margin, not a number tuned to just clear a bar. Both faults used
+(`welded_ssr`, `broken_heater_coil`) take no `params[]` at all, so the
+"fault with no `params:` silently injects magnitude 0" trap cannot apply.
+
+The contrast is instructive: `welded_ssr_midfire`/`welded_contactor_s9`
+trigger their weld at `at_zone_temp 400 C`, which the `fast_test` preset
+**cannot reach** in those scenarios' time budget even with K4 closed --
+it asymptotes at ~505 C with a ~200 s time constant, so 400 C needs ~304
+sim-seconds of full duty against an estimated run duration of ~195 s. That
+is now recorded in those files' own `blocked_on:` notes as a second,
+independent blocker.
+
+### Timescale: 2, not 10 -- and why a finer `--poll-interval` is NOT the fix
+
+Two harness facts, both measured, both now in `../README.md` as Finding 8:
+
+1. `virtual_simfw` advances its sim clock by **timescale squared** per wall
+   second, so `timescale: 10` is 100x real time and its 2 Hz telemetry
+   broadcast lands one frame every ~50 sim-seconds -- coarser than S3's own
+   20 s window. The new scenarios use `timescale: 2` (~2 sim-seconds per
+   frame).
+2. `run_dut_scenarios.py` converts elapsed sim time to 100 ms guard ticks
+   with `max(1, delta // 100ms)`. Below 100 ms of sim per poll that floor
+   **over**-ticks the DUT and every guard timer fires early. Measured on
+   `stuck_load_no_command_s3`: at the scenario's own settings, K4 armed at
+   58.6 s (true 60) and S3 tripped after 18.2 s of current (true 20); at
+   `--timescale 1 --poll-interval 0.02`, K4 armed at 21.7 s and S3 "tripped"
+   after 7.4 s. The fine-grained run is the distorted one.
+
+`stuck_load_no_command_s3`'s `not_before_s` is therefore set at 15 s, one
+tick-batch below the real 20 s bar, with that reasoning written into the
+clause -- asserting `>= 20` would be asserting the fixture's sampling rather
+than the guard's threshold.
+
+### What did NOT change
+
+Every other scenario's verdict is identical to the previous revision.
+Four files' `blocked_on:` annotations were rewritten because their stated
+cause had become false ("no scenario models the operator enable" /
+"nothing in the fixture ever commands a zone relay on"): `baseline_firing`,
+`broken_element`, `welded_ssr_midfire`, `welded_contactor_s9`. Their
+verdicts are unchanged -- those clauses are still not passing, but the
+reason is now local to each file (it schedules no operator actions) rather
+than an upstream gap, and each annotation says so and names the new
+scenario that does the thing. They are candidates for retirement, not for
+another round of excuses.
+
+---
+
+## Previous revision: the fixture caught up with SaftyFW commit `f304392`
 
 `f304392` wired `safety_core_build_input()` to real producers for
 `context_valid`, `zone_count`/`max_zone_setpoint_c`/`nearest_zone_measured_c`,
@@ -65,7 +145,8 @@ result for these as "no stimulus", never as evidence about the guard:
   executes). `setpoint_c` is sent as NaN — unknown, never a guessed ceiling —
   so `tc_c > max_setpoint + margin` is false rather than trippable against a
   fabricated number.
-- **S3 / S4** — `sim_engine.c` gates heater duty and CT current on K4, and K4
+- **S3 / S4** (**superseded — see "This revision" above; both fire now**) —
+  `sim_engine.c` gates heater duty and CT current on K4, and K4
   never closes: `relay_owner_command_energize()` now has a caller, but it is
   reached only from an explicit operator/PC command
   (`SAFETY_CMD_REQUEST_ENABLE` → KilnFW's `uart_bridge.c` →
@@ -111,11 +192,13 @@ scenario requires a finer poll to be meaningful.
 
 `inputs:` lines report how many polls presented each guard precondition —
 they decide nothing, they just let "S3 stayed quiet" be distinguished from
-"S3 was never evaluated".
+"S3 was never evaluated". `K4 energized` is new this revision and is the
+fastest way to tell a scenario that exercised the power path from one that
+did not.
 
 ## baseline_firing -- overall: BLOCKED
 
-_Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 33 polls, context_valid 33, link_up 33, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** never_faults: dut:fault_line_asserted never observed before the boundary
 - **[PASS]** never_estops: dut:estop_open never observed before the boundary
@@ -124,29 +207,48 @@ _Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_cu
 
 ## broken_element -- overall: BLOCKED
 
-_Guard inputs presented this run: 79 polls, context_valid 79, link_up 79, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 79 polls, context_valid 79, link_up 79, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** s4_warns: triggering event (relay_edge {'relay': 'K1', 'edge': 'close'}) never occurred _(see this scenario's own `blocked_on:` for the current reason)_
 - **[BLOCKED]** s4_never_trips: dut:K4_open observed before the boundary (first at seq 2000000000) _(see this scenario's own `blocked_on:` for the current reason)_
 
 ## cj_fault -- overall: FAIL
 
-_Guard inputs presented this run: 53 polls, context_valid 53, link_up 53, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 53 polls, context_valid 53, link_up 53, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** s5_never_trips_on_cj_alone: event:guard_trip never observed before the boundary
 - **[FAIL]** s12_warns_at_60c: event:guard_warn not observed within 1s after fault_fired (seq 0)
 - **[FAIL]** s12_trips_at_85c_sustained: dut:K4_open not observed within 65s after fault_fired (seq 0)
 
+## commanded_no_current_s4 -- overall: PASS
+
+_Guard inputs presented this run: 373 polls, context_valid 373, link_up 373, any_current_present 0, K4 energized 323, max eligible zones 3._
+
+- **[PASS]** s4_warns_after_the_correlation_window: event:guard_warn observed 151.200s after relay_edge
+- **[PASS]** no_current_ever_flows: dut:current_present never observed before the boundary
+- **[PASS]** s4_never_opens_k4: dut:K4_closed held at end of run (last observed seq 2000000001)
+
+## enabled_firing_healthy -- overall: PASS
+
+_Guard inputs presented this run: 564 polls, context_valid 564, link_up 564, any_current_present 125, K4 energized 514, max eligible zones 3._
+
+- **[PASS]** k4_closes_after_startup_grace: dut:K4_closed observed 52.200s after relay_edge
+- **[PASS]** current_flows_once_k4_permits: dut:current_present observed 1.400s after relay_edge
+- **[PASS]** s3_never_trips_during_a_commanded_firing: event:guard_trip never observed before the boundary
+- **[PASS]** s4_never_warns_during_a_commanded_firing: event:guard_warn never observed before the boundary
+- **[PASS]** current_stops_when_the_zone_is_commanded_off: dut:current_absent observed 1.200s after relay_edge
+- **[PASS]** k4_still_closed_at_end: dut:K4_closed held at end of run (last observed seq 2000000001)
+
 ## estop_at_boot -- overall: PASS
 
-_Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** relay_never_energizes: dut:K4_closed never observed before the boundary
 - **[PASS]** still_open_at_end: dut:K4_open held at end of run (last observed seq 2000000000)
 
 ## estop_midfire -- overall: PASS
 
-_Guard inputs presented this run: 77 polls, context_valid 77, link_up 77, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 76 polls, context_valid 76, link_up 76, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[SKIPPED]** fast_trip: triggering event (fault_fired {'slot': 'estop'}) never occurred
 - **[SKIPPED]** stays_latched_after_physical_release: triggering event (fault_cleared {'slot': 'estop'}) never occurred
@@ -154,14 +256,14 @@ _Guard inputs presented this run: 77 polls, context_valid 77, link_up 77, any_cu
 
 ## main_safety_skew -- overall: BLOCKED
 
-_Guard inputs presented this run: 39 polls, context_valid 39, link_up 39, any_current_present 0, max eligible zones 1._
+_Guard inputs presented this run: 37 polls, context_valid 37, link_up 37, any_current_present 0, K4 energized 0, max eligible zones 1._
 
 - **[BLOCKED]** s1_trips_conservatively_early: event:guard_trip not observed within 120s after fault_fired (seq 0) _(see this scenario's own `blocked_on:` for the current reason)_
 - **[PASS]** s10_stays_quiet: event:guard_warn never observed before the boundary
 
 ## mainfault_tc_disconnect -- overall: FAIL
 
-_Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** no_early_trip: dut:K4_open never observed before the boundary
 - **[BLOCKED]** mainfault_trips_s6a: event:guard_trip not observed within 3s after fault_fired (seq 0) _(see this scenario's own `blocked_on:` for the current reason)_
@@ -170,14 +272,14 @@ _Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_cu
 
 ## partial_element -- overall: FAIL
 
-_Guard inputs presented this run: 21 polls, context_valid 21, link_up 21, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 20 polls, context_valid 20, link_up 20, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** no_guard_trips: dut:K4_open observed before the boundary (first at seq 2000000000) _(see this scenario's own `blocked_on:` for the current reason)_
 - **[FAIL]** current_still_present_just_reduced: dut:current_present not observed within 5s after fault_fired (seq 0)
 
 ## power_blip -- overall: BLOCKED
 
-_Guard inputs presented this run: 85 polls, context_valid 85, link_up 85, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 84 polls, context_valid 84, link_up 84, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** mainfault_reads_healthy_during_blip: event:guard_trip never observed before the boundary
 - **[SKIPPED]** relays_deenergize_no_current_during_blip: triggering event (dut_power {'state': False}) never occurred
@@ -186,14 +288,14 @@ _Guard inputs presented this run: 85 polls, context_valid 85, link_up 85, any_cu
 
 ## runaway_zone -- overall: BLOCKED
 
-_Guard inputs presented this run: 83 polls, context_valid 83, link_up 83, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 82 polls, context_valid 82, link_up 82, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** s3_catches_it_first: triggering event (fault_fired {'slot': 'runaway'}) never occurred _(see this scenario's own `blocked_on:` for the current reason)_
 - **[PASS]** s8_produces_no_trip_of_its_own_today: event:guard_trip never observed before the boundary
 
 ## safety_tc_frozen -- overall: BLOCKED
 
-_Guard inputs presented this run: 221 polls, context_valid 221, link_up 221, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 219 polls, context_valid 219, link_up 219, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** no_early_trip: dut:K4_open never observed before the boundary
 - **[BLOCKED]** frozen_window_trips_s11: event:guard_trip not observed within 605s after fault_fired (seq 0) _(see this scenario's own `blocked_on:` for the current reason)_
@@ -201,14 +303,24 @@ _Guard inputs presented this run: 221 polls, context_valid 221, link_up 221, any
 
 ## spi_flaky_tc_ic -- overall: FAIL
 
-_Guard inputs presented this run: 52 polls, context_valid 52, link_up 52, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 52 polls, context_valid 52, link_up 52, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[PASS]** not_an_instant_trip: dut:K4_open never observed before the boundary
 - **[FAIL]** warns_then_trips_like_disconnect: dut:K4_open not observed within 65s after fault_fired (seq 0)
 
+## stuck_load_no_command_s3 -- overall: PASS
+
+_Guard inputs presented this run: 245 polls, context_valid 245, link_up 245, any_current_present 18, K4 energized 26, max eligible zones 3._
+
+- **[PASS]** uncommanded_current_appears_with_the_weld: dut:current_present observed 0.600s after fault_fired
+- **[PASS]** s3_trips_on_uncommanded_load: event:guard_trip observed 18.800s after fault_fired
+- **[PASS]** s3_does_not_trip_before_there_is_any_current: event:guard_trip never observed before the boundary
+- **[PASS]** k4_opens_and_stays_open: dut:K4_open held at end of run (last observed seq 2000000003)
+- **[PASS]** current_stops_when_k4_opens: dut:current_absent observed 2.000s after guard_trip
+
 ## tc_disconnect_ramp -- overall: FAIL
 
-_Guard inputs presented this run: 56 polls, context_valid 56, link_up 56, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 55 polls, context_valid 55, link_up 55, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[FAIL]** warns_first: event:guard_warn not observed within 6s after fault_fired (seq 0)
 - **[FAIL]** trips_after_blind_grace: dut:K4_open not observed within 65s after fault_fired (seq 0)
@@ -216,7 +328,7 @@ _Guard inputs presented this run: 56 polls, context_valid 56, link_up 56, any_cu
 
 ## tc_disconnect_soak -- overall: FAIL
 
-_Guard inputs presented this run: 77 polls, context_valid 77, link_up 77, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 76 polls, context_valid 76, link_up 76, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[FAIL]** warns_first: event:guard_warn not observed within 6s after fault_fired (seq 0)
 - **[FAIL]** trips_after_blind_grace: dut:K4_open not observed within 65s after fault_fired (seq 0)
@@ -224,28 +336,28 @@ _Guard inputs presented this run: 77 polls, context_valid 77, link_up 77, any_cu
 
 ## tc_flaky -- overall: FAIL
 
-_Guard inputs presented this run: 36 polls, context_valid 36, link_up 36, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 36 polls, context_valid 36, link_up 36, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** no_trip_from_flapping: dut:K4_open observed before the boundary (first at seq 2000000000) _(see this scenario's own `blocked_on:` for the current reason)_
 - **[FAIL]** no_warn_storm: event:guard_warn observed before the boundary (first at seq 2000000001)
 
 ## tc_noise_storm -- overall: BLOCKED
 
-_Guard inputs presented this run: 33 polls, context_valid 33, link_up 33, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 32 polls, context_valid 32, link_up 32, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** no_trip_ever: dut:K4_open observed before the boundary (first at seq 2000000000) _(see this scenario's own `blocked_on:` for the current reason)_
 - **[PASS]** no_fault_line_latch: dut:fault_line_asserted never observed before the boundary
 
 ## tc_stuck -- overall: BLOCKED
 
-_Guard inputs presented this run: 53 polls, context_valid 53, link_up 53, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 52 polls, context_valid 52, link_up 52, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** sample_counter_goes_stale: event:guard_warn not observed within 13s after fault_fired (seq 0) _(see this scenario's own `blocked_on:` for the current reason)_
 - **[BLOCKED]** trips_after_stale_trip_deadline: dut:K4_open not observed within 65s after fault_fired (seq 0) _(see this scenario's own `blocked_on:` for the current reason)_
 
 ## welded_contactor_s9 -- overall: BLOCKED
 
-_Guard inputs presented this run: 84 polls, context_valid 84, link_up 84, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 83 polls, context_valid 83, link_up 83, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** initial_trip: triggering event (fault_fired {'slot': 'weld_ssr'}) never occurred _(see this scenario's own `blocked_on:` for the current reason)_
 - **[BLOCKED]** contactor_weld_engages_on_k4_open: triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred _(see this scenario's own `blocked_on:` for the current reason)_
@@ -255,9 +367,10 @@ _Guard inputs presented this run: 84 polls, context_valid 84, link_up 84, any_cu
 
 ## welded_ssr_midfire -- overall: BLOCKED
 
-_Guard inputs presented this run: 84 polls, context_valid 84, link_up 84, any_current_present 0, max eligible zones 3._
+_Guard inputs presented this run: 83 polls, context_valid 83, link_up 83, any_current_present 0, K4 energized 0, max eligible zones 3._
 
 - **[BLOCKED]** safety_trips: triggering event (fault_fired {'slot': 'weld'}) never occurred _(see this scenario's own `blocked_on:` for the current reason)_
 - **[SKIPPED]** no_early_trip: boundary fault 'weld' never fired
 - **[PASS]** trip_latched: dut:K4_open held at end of run (last observed seq 2000000000)
 - **[BLOCKED]** current_decays_after_k4_opens: triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred _(see this scenario's own `blocked_on:` for the current reason)_
+

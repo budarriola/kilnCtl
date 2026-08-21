@@ -2,16 +2,16 @@
   "scenario": {
     "name": "welded_contactor_s9",
     "version": 1,
-    "hash": "f8eee090ef0d0a59397ff27e1a6d1d607aaabbb6456bcc9f93d1ce1f1b0c458c"
+    "hash": "fbfe783e6b72ce6dcf6550147213fe9ea41fe98aaecb648f666bbee951aa3972"
   },
   "fw_versions": {},
   "seed": 43,
   "timescale": 10.0,
-  "start_time": 1787271804.458346,
+  "start_time": 1787274728.8127987,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 44000000,
+      "sim_time_us": 47000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -28,10 +28,10 @@
       "name": "initial_trip",
       "verdict": "BLOCKED",
       "evidence": [],
-      "detail": "triggering event (fault_fired {'slot': 'weld_ssr'}) never occurred [BLOCKED: RESOLVED on the SaftyFW side, still blocked on the fixture. The previous reason here -- 'context_valid is never set true by safety_core_build_input()' -- was fixed by commit f304392: context_valid, any_current_present and relay_commanded_recently are all populated for real now (virtual_dut measures context_valid true on every poll of this scenario), so S3 is EVALUATED every tick instead of being force-reset. What it never sees is current: firmware/SimFW/src/tasks/sim_engine.c gates heater duty and CT current on K4, K4 never closes (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so any_current_present is false for the whole run (measured 0 of ~83 polls), and S3's `any_current_present && !relay_commanded_recently` condition can never be true.]",
+      "detail": "triggering event (fault_fired {'slot': 'weld_ssr'}) never occurred [BLOCKED: S3 itself is no longer blocked ANYWHERE -- it trips for real now. stuck_load_no_command_s3.yaml issues the operator enable via `dut.operator_actions:`, K4 closes at sim-time ~58s, a welded SSR puts 16A on CT0 with nothing commanded, and S3 trips 18.2s later. What still blocks THIS clause is two things local to this file, neither of them a SaftyFW gap: (1) it schedules no operator actions, so K4 never closes here and sim_engine.c gates duty/current to zero (measured any_current_present true on 0 of 82 polls); (2) independently, its own `at_zone_temp 400C` trigger is unreachable in this run's time budget even with K4 closed -- the fast_test preset asymptotes at ~505C with a ~200s time constant, so 400C needs ~304 sim-seconds of full duty, against an estimated run duration of ~195s. The fault never fires, which is why the clause reports 'triggering event never occurred'.]",
       "blocked_on": {
-        "reason": "RESOLVED on the SaftyFW side, still blocked on the fixture. The previous reason here -- 'context_valid is never set true by safety_core_build_input()' -- was fixed by commit f304392: context_valid, any_current_present and relay_commanded_recently are all populated for real now (virtual_dut measures context_valid true on every poll of this scenario), so S3 is EVALUATED every tick instead of being force-reset. What it never sees is current: firmware/SimFW/src/tasks/sim_engine.c gates heater duty and CT current on K4, K4 never closes (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so any_current_present is false for the whole run (measured 0 of ~83 polls), and S3's `any_current_present && !relay_commanded_recently` condition can never be true.",
-        "phase": "Not a SaftyFW phase gap any more -- safety_core_build_input() reads link_task's published context via link_task_get_context_snapshot() and reduces it with the pure context_reduce_zones()/current_any_present() helpers in src/snapshots.h. The remaining gap is SimFW-side and circular: no current flows because K4 is open, and K4 is open because no scenario performs the operator enable. Breaking it needs a scenario that issues ENABLE (dut_core.exe supports it) or a fault that forces CT current independently of duty, e.g. welded_k4_current_persist, which bypasses the duty path entirely."
+        "reason": "S3 itself is no longer blocked ANYWHERE -- it trips for real now. stuck_load_no_command_s3.yaml issues the operator enable via `dut.operator_actions:`, K4 closes at sim-time ~58s, a welded SSR puts 16A on CT0 with nothing commanded, and S3 trips 18.2s later. What still blocks THIS clause is two things local to this file, neither of them a SaftyFW gap: (1) it schedules no operator actions, so K4 never closes here and sim_engine.c gates duty/current to zero (measured any_current_present true on 0 of 82 polls); (2) independently, its own `at_zone_temp 400C` trigger is unreachable in this run's time budget even with K4 closed -- the fast_test preset asymptotes at ~505C with a ~200s time constant, so 400C needs ~304 sim-seconds of full duty, against an estimated run duration of ~195s. The fault never fires, which is why the clause reports 'triggering event never occurred'.",
+        "phase": "No phase: nothing upstream is missing. Fixing this file means adding `dut.operator_actions:` AND replacing the 400C trigger with one the run can actually reach (a sim-time trigger after the 60s startup grace is what stuck_load_no_command_s3.yaml uses). Until then, treat stuck_load_no_command_s3.yaml as the library's live S3 test."
       }
     },
     {
@@ -41,7 +41,7 @@
       "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred [BLOCKED: Downstream of `initial_trip` above: this clause's trigger is the relay_edge{K4, open} event, which only occurs if S3 actually trips K4 -- since S3 cannot fire (see `initial_trip` blocked_on), the triggering edge never occurs either.]",
       "blocked_on": {
         "reason": "Downstream of `initial_trip` above: this clause's trigger is the relay_edge{K4, open} event, which only occurs if S3 actually trips K4 -- since S3 cannot fire (see `initial_trip` blocked_on), the triggering edge never occurs either.",
-        "phase": "Same as the clause it depends on -- the SaftyFW-side context_valid gap is closed (commit f304392); what remains is the fixture-side inability to present current / close K4. Not a Phase 7 gap."
+        "phase": "Same as the clause it depends on. No longer a fixture gap either: run_dut_scenarios.py can close K4 and present real CT current now (see stuck_load_no_command_s3.yaml, where S3 trips and K4 opens for real); this file simply does not ask it to. Any additional SaftyFW-side gap this clause names in its own `reason` -- e.g. relay_deenergized for S9 -- is unaffected by that and is still real."
       }
     },
     {
@@ -51,7 +51,7 @@
       "detail": "triggering event (relay_edge {'relay': 'K4', 'edge': 'open'}) never occurred [BLOCKED: Doubly blocked: (1) same relay_edge{K4, open} trigger dependency on S3 as `contactor_weld_engages_on_k4_open` above, and (2) even with a trip, S9's own escalation (safety_guards.c: `if (in->relay_deenergized) { ... }`) reads relay_deenergized, which safety_core_build_input() also never populates -- so S9 could not escalate even if something else produced a K4 open edge.]",
       "blocked_on": {
         "reason": "Doubly blocked: (1) same relay_edge{K4, open} trigger dependency on S3 as `contactor_weld_engages_on_k4_open` above, and (2) even with a trip, S9's own escalation (safety_guards.c: `if (in->relay_deenergized) { ... }`) reads relay_deenergized, which safety_core_build_input() also never populates -- so S9 could not escalate even if something else produced a K4 open edge.",
-        "phase": "Same as the clause it depends on -- the SaftyFW-side context_valid gap is closed (commit f304392); what remains is the fixture-side inability to present current / close K4. Not a Phase 7 gap."
+        "phase": "Same as the clause it depends on. No longer a fixture gap either: run_dut_scenarios.py can close K4 and present real CT current now (see stuck_load_no_command_s3.yaml, where S3 trips and K4 opens for real); this file simply does not ask it to. Any additional SaftyFW-side gap this clause names in its own `reason` -- e.g. relay_deenergized for S9 -- is unaffected by that and is still real."
       }
     },
     {
@@ -69,7 +69,7 @@
       "detail": "event:trip_ineffective_latched never occurred [BLOCKED: trip_ineffective can only latch via S9's escalation path (see `s9_escalates` blocked_on above), which cannot run.]",
       "blocked_on": {
         "reason": "trip_ineffective can only latch via S9's escalation path (see `s9_escalates` blocked_on above), which cannot run.",
-        "phase": "Same as the clause it depends on -- the SaftyFW-side context_valid gap is closed (commit f304392); what remains is the fixture-side inability to present current / close K4. Not a Phase 7 gap."
+        "phase": "Same as the clause it depends on. No longer a fixture gap either: run_dut_scenarios.py can close K4 and present real CT current now (see stuck_load_no_command_s3.yaml, where S3 trips and K4 opens for real); this file simply does not ask it to. Any additional SaftyFW-side gap this clause names in its own `reason` -- e.g. relay_deenergized for S9 -- is unaffected by that and is still real."
       }
     }
   ],
@@ -80,10 +80,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 84,
-    "context_valid": 84,
+    "polls": 83,
+    "context_valid": 83,
     "any_current_present": 0,
-    "link_up": 84,
-    "max_zone_count": 3
+    "link_up": 83,
+    "max_zone_count": 3,
+    "energized": 0
   }
 }

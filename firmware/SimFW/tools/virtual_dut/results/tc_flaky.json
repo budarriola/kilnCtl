@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 46,
   "timescale": 10.0,
-  "start_time": 1787271768.6335945,
+  "start_time": 1787274386.50755,
   "events": [
     {
       "seq": 0,
@@ -11207,7 +11207,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 47000000,
+      "sim_time_us": 44000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -11219,7 +11219,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 249000000,
+      "sim_time_us": 146000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S5"
@@ -11230,29 +11230,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 300000000,
-      "event_type": "GUARD_WARN",
-      "payload": {
-        "guard": "S5"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000003,
-      "sim_time_us": 402000000,
-      "event_type": "GUARD_WARN",
-      "payload": {
-        "guard": "S5"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000004,
-      "sim_time_us": 452000000,
+      "sim_time_us": 196000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S5"
@@ -11280,9 +11258,7 @@
       "name": "no_warn_storm",
       "verdict": "FAIL",
       "evidence": [
-        2000000001,
-        2000000002,
-        2000000003
+        2000000001
       ],
       "detail": "event:guard_warn observed before the boundary (first at seq 2000000001)"
     }
@@ -11298,6 +11274,7 @@
     "context_valid": 36,
     "any_current_present": 0,
     "link_up": 36,
-    "max_zone_count": 3
+    "max_zone_count": 3,
+    "energized": 0
   }
 }

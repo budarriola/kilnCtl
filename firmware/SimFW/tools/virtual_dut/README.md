@@ -214,10 +214,9 @@ and the newly-unblocked guards split three ways —
   PASS before and is a real anti-nuisance PASS now.
 - **S2 is reachable but not provokable here**: no setpoint producer exists
   in this fixture (see "Faithfulness" above).
-- **S3/S4 are reachable but not provokable here**: `sim_engine.c` gates
-  heater duty and CT current on K4, K4 never closes because nothing issues
-  the operator enable, so `any_current_present` is false and no relay is
-  ever commanded on — measured 0 of 1 229 polls across the suite.
+- **S3/S4 were reachable but not provokable here** — measured
+  `any_current_present` true on 0 of 1 229 polls across the whole suite.
+  **This is now fixed; see Finding 7.**
 - **S13 stays dormant deliberately** (uncommissioned `borrowed_zone_index`,
   `tc_source` defaulting to `OWN_J7`) — a commissioning gap, same category
   as S1's `abs_max_temp_c`.
@@ -389,9 +388,92 @@ nor a fixture bug -- the scenario file itself needs a `params: [40.0]`
 25C simulated cold junction) to actually drive S12.** Reported here since
 `firmware/SimFW/scenarios/` is out of scope for this task to edit.
 
+### 7. S3 and S4 are provokable now — and two of the things that "blocked"
+   them were wrong
+
+The gap Finding 0 recorded ("S3/S4 reachable but not provokable") was real,
+but its stated cause was only half right, and one of the reasons given in
+the "K4 physical loop" section below was simply **false**. Both are corrected
+here, and both were corrected by writing scenarios rather than by changing
+any DUT code.
+
+**What was actually missing:** nobody had ever told the fixture to do the two
+things a real system does — issue `SAFETY_CMD_REQUEST_ENABLE`, and command a
+zone relay on. `run_dut_scenarios.py` now replays a scenario's own
+`dut.operator_actions:` list (see that file's module docstring for the
+per-action rationale) and three new scenarios use it:
+
+| Scenario | What it proves | Measured |
+|---|---|---|
+| `enabled_firing_healthy` | S3 and S4 both stay quiet through a healthy, enabled, commanded firing | K4 closes 53.2 s after K1 is commanded (the real 60 s `SAFTYFW_STARTUP_GRACE_MS`), 125 of 564 polls carry real CT current, no `guard_trip`/`guard_warn` at all |
+| `stuck_load_no_command_s3` | **S3 genuinely TRIPS** | weld at t=70.2 s → 16 A on CT0 at t=70.8 s with `relay_recent_mask == 0` → `GUARD_TRIP {S3}` at **t=89.0 s** (18.2 s of current, against a 20 s `stuck_on_time_s`) → K4 opens at 89.6 s → current gone at 91.0 s |
+| `commanded_no_current_s4` | **S4 genuinely WARNS**, and does not touch K4 | K1 commanded at t≈5 s into a dead element, K4 closed for 323 of 373 polls, `GUARD_WARN {S4}` **152.8 s after K1 closes** (150 s `correlation_window_s`), K4 still closed at end of run |
+
+**The false blocker.** The section below used to claim, as its reason 2, that
+`virtual_simfw`'s `device_tick()` "never consults K4 when computing
+`duty[]`/`current_a[]`". That is not true, and neither is it true of real
+`sim_engine.c`: **both gate every zone's duty on K4**, after the relay-derived
+base and after any fault duty override (`sim_engine.c`'s own `k4_closed`
+block, ported verbatim into `virtual_simfw.c`). So the loop closure described
+below was never a no-op waiting on an unimplemented model — it was the load-
+bearing mechanism, and the moment K4 actually closed, current appeared on the
+very next telemetry frame (measured: 0.6 s of sim time). Reason 1 of that
+section (K4 is never energized) was correct at the time and is what these
+scenarios fix.
+
+**The real remaining blocker was a chicken-and-egg, not a missing model:**
+current needs K4 closed; K4 closes only on an operator enable that survives
+the 60 s startup grace; nothing issued one. `dut_core.exe` had had the
+`ENABLE` command ready for exactly this.
+
+### 8. This harness's guard clock is only accurate when each poll covers
+   ≥ 100 ms of sim time
+
+Not a DUT finding — a harness one, discovered while validating Finding 7's
+trip times, and it inverts the obvious intuition that a finer
+`--poll-interval` is always more faithful.
+
+`run_dut_scenarios.py` converts elapsed *sim* time into
+`SAFTYFW_PERIOD_SAFETY_CORE_MS` ticks with
+`n_steps = max(1, sim_delta_us // 100_000)`. That `max(1, ...)` floor means a
+poll covering **less** than 100 ms of sim time still costs the DUT a full
+100 ms tick, so the guard clock runs *fast* — every timer fires early, in
+proportion to the over-ticking. Measured on `stuck_load_no_command_s3`, whose
+two real bars are a 60 s startup grace and a 20 s `stuck_on_time_s`:
+
+| Run | Sim time per poll | K4 armed at | S3 tripped after |
+|---|---|---|---|
+| `timescale: 2`, `--poll-interval 0.25` (the scenario's own settings) | ~1.0 s | **58.6 s** (true: 60) | **18.2 s** (true: 20) |
+| `timescale: 2`, `--poll-interval 0.1` | ~0.4 s | 54.4 s | 16.2 s |
+| `--timescale 1 --poll-interval 0.02` | ~0.02 s → floored | **21.7 s** | **7.4 s** |
+
+The last row is not a more careful measurement of the guard; it is the
+harness ticking ~5× too fast. **Do not "verify" a suspicious trip by lowering
+`--poll-interval` alone** — check that `sim_delta_per_poll` stays at or above
+100 ms first (`--trace` prints `steps=` per poll; `steps=1` repeatedly is the
+warning sign), and lower `timescale` rather than the poll interval when you
+need finer resolution. The residual ~3 % fast bias in the top row comes from
+polls where the fixture republished the same sim time and still cost one
+tick.
+
+Note also that `virtual_simfw` advances its sim clock by **timescale²** per
+wall second (its main loop scales the tick accumulator by `timescale`, then
+each 100 ms tick advances sim by `100 ms × timescale`), so `timescale: 10`
+means 100× real time and a 2 Hz telemetry broadcast landing one frame every
+~50 sim-seconds — coarser than every guard window under test. The three new
+scenarios use `timescale: 2` for that reason, and say so in their own
+headers. Whether the squaring is intentional is a `virtual_simfw` question,
+not one this directory owns.
+
 ## Known, documented limitations
 
-### The K4 physical loop IS now closed -- and it changes nothing, for two separate, verified reasons
+### The K4 physical loop IS now closed -- and it changed nothing *at the time*, for one correct reason and one wrong one
+
+> **Superseded by Finding 7.** Reason 1 below was correct and has since been
+> fixed by scenarios that issue the operator enable. **Reason 2 below is
+> factually wrong** -- `virtual_simfw`'s `device_tick()` *does* gate
+> `duty[]`/`current_a[]` on K4, exactly as real `sim_engine.c` does. The text
+> is kept unedited beneath so the correction is legible; do not cite reason 2.
 
 A later pass than the one that wrote the finding below closed this gap.
 `firmware/SimFW/tools/virtual_simfw/` (owned by that pass, read-only for
@@ -468,8 +550,14 @@ where real 100ms sampling might have seen it change), and a few seconds of
 extra delay before a long timer (S6b's 120s, S11's 600s, S5's 60s) is
 observed to complete, purely from `--poll-interval` granularity -- visible
 in the S6b finding above (tripped at "147s" sim-time against a 120s
-threshold). Lowering `--poll-interval` tightens this at the cost of wall
-time per scenario.
+threshold).
+
+**Lowering `--poll-interval` does NOT simply tighten this, and past a point
+it makes the guard clock wrong in the opposite direction** -- see Finding 8
+above for the measurements. The batching arithmetic floors at one tick per
+poll, so once a poll covers less than 100ms of sim time the DUT is
+*over*-ticked and every guard timer fires early. Lower `timescale` instead,
+and use `--trace` to confirm `steps=` stays above 1.
 
 ### Context and current: wired, but the fixture cannot drive all of it
 
@@ -478,16 +566,19 @@ fixture still cannot generate on its own:
 
 - **A setpoint.** No producer exists anywhere in `kilnsim`/`virtual_simfw`.
   Sent as NaN. S2 cannot be exercised here.
-- **CT current.** `sim_engine.c` gates heater duty on K4; K4 never closes.
-  S3/S4 cannot be exercised here.
-- **A commanded zone relay.** No virtual KilnFW/PID exists to close
-  K1..K3, and the `welded_relay`-class faults that would force one are
-  triggered on zone temperatures the fixture never reaches while duty is
-  gated off. S4's positive half cannot be presented.
+- ~~**CT current.**~~ and ~~**A commanded zone relay.**~~ **Both resolved --
+  see Finding 7.** A scenario's `dut.operator_actions:` list can now issue
+  the operator enable (closing K4 after the real 60 s startup grace) and
+  command K1..K3 on/off, so heater duty, CT current and
+  `relay_commanded_recently`/`_continuously` are all genuinely presentable.
+  S3 trips and S4 warns for real in the three scenarios named in Finding 7.
+  There is still no PID deciding *when* a zone should be on -- a scenario
+  says so explicitly instead -- which is a modelling choice, not a gap.
 
-All three are fixture/scenario-library gaps, not SaftyFW gaps. Read a quiet
-S2/S3/S4 in a `virtual_dut` run as "no stimulus", never as evidence about
-the guard.
+Read a quiet **S2** in a `virtual_dut` run as "no stimulus", never as
+evidence about the guard. A quiet S3/S4 is only meaningful in a scenario that
+actually presents their inputs; the `inputs:` line's `any_current_present`
+and `K4 energized` counts are there to tell the two cases apart at a glance.
 
 ### Keeping this harness honest when `safety_core.c` changes
 
@@ -522,6 +613,8 @@ powershell -ExecutionPolicy Bypass -File build_host.ps1   # -> build\virtual_sim
 python firmware/SimFW/tools/virtual_dut/run_dut_scenarios.py
 # or a subset:
 python firmware/SimFW/tools/virtual_dut/run_dut_scenarios.py firmware/SimFW/scenarios/estop_midfire.yaml
+# diagnosing a suspicious trip time (see Finding 8 -- check `steps=` first):
+python firmware/SimFW/tools/virtual_dut/run_dut_scenarios.py firmware/SimFW/scenarios/stuck_load_no_command_s3.yaml --trace
 ```
 
 Per-scenario JSON reports (same shape `kilnsim.report.Report.to_dict()`
@@ -529,7 +622,7 @@ produces) are written to `results/<scenario>.json`.
 
 ## Per-scenario results
 
-See `results/SCENARIO_RESULTS.md` for the full run's output (all 18
+See `results/SCENARIO_RESULTS.md` for the full run's output (all 22
 scenarios), generated by the run in this pass. Headline pattern, per the
 findings above: `guard_trip`/`K4_open`-based expectations now genuinely
 evaluate (PASS or FAIL, not SKIP) against every scenario; most currently
