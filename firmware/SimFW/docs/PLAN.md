@@ -208,11 +208,15 @@ never `[x]`.
       `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
       halts while DMA exhaustion limps, and the code's own idle-loop-fallback
       comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
-- [ ] **PC-side sender for `SAFETY_CMD_SET_CT_CAL`.** SaftyFW can now store and
-      apply CT calibration (`1bd5d9d`), but `tools/ct_calibration/` still only
-      writes JSON. Needs a `tools/PcTools/src/kilnctrl` sender that inverts the
-      fit (`gain = 1/fit_gain`, `offset = -fit_offset/fit_gain`) before
-      transmitting.
+- [ ] **KilnFW does not relay `SET_CT_CAL`/`GET_CT_CAL`, and fails silently.**
+      `App/drivers/uart_bridge.c`'s `safety_bridge_task()` has no case for
+      0x19 or 0x1A — both hit `default: rejected = true` — and
+      `safety_link.c` has no forwarder onto the isolated RP2040 link. Because
+      task 7 ACKs at the transport layer regardless of subcommand, **a real
+      ESP would ACK a calibration push and silently discard it**, and
+      `GET_CT_CAL` would time out. This blocks any bench push *independently
+      of hardware availability* — distinct from §0.2's hardware-gated
+      calibration item. Found while writing the sender (`6b6bb57`).
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -279,6 +283,13 @@ never `[x]`.
       no struct field. S11 deliberately uses the ADC-derived current fact
       rather than the link-derived relay facts, so it keeps working, and keeps
       authority over K4, with the ESP link down
+- [x] CT calibration push path (`6b6bb57`) —
+      `tools/ct_calibration/push_ct_cal.py` sends one `SET_CT_CAL` per channel
+      then **verifies by `GET_CT_CAL` read-back**, reusing
+      `gen_ct_cal_table.py`'s inversion and refusal gates so the two cannot
+      drift. An absent channel is pushed as *explicitly* uncalibrated, never a
+      fabricated identity. Lives in the SimFW tool, calling `kilnctrl` as a
+      read-only library. Still blocked end to end by the KilnFW relay gap above
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
