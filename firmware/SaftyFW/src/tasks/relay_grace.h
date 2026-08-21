@@ -55,6 +55,23 @@ relay_owner_state_t relay_grace_tick(relay_owner_state_t state, uint32_t elapsed
 // trip further" guard might look more defensive).
 relay_owner_state_t relay_trip_transition(relay_owner_state_t state);
 
+// The Pico's OWN half of the mutual "heating is not allowed during updates"
+// interlock (ROADMAP.md M8): whether a request to newly ENERGIZE the relay
+// should be honoured given whether an update transfer is currently active on
+// THIS processor (update_task.c's s_transfer_active, read via
+// update_task_transfer_active()). Pure boolean, not a relay_owner_state_t
+// transition -- this is an ADDITIONAL precondition safety_core_request_
+// enable() applies before it ever calls relay_owner_command_energize(), not
+// a replacement for relay_owner's own ARMED/GRACE/TRIPPED gate, so it does
+// not belong in relay_owner_task()'s state machine itself.
+//
+// Never applies to de-energizing: callers must only consult this when
+// `enable` (the caller's own request) is true, matching this codebase's
+// "turning OFF is never gated" rule (relay_authority.h on the KilnFW side
+// states the identical rule for the same reason -- the safe direction must
+// always be reachable).
+bool relay_energize_allowed_during_update(bool update_in_progress);
+
 #ifdef __cplusplus
 }
 #endif

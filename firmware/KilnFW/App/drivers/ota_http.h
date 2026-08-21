@@ -35,6 +35,7 @@
 #include "esp_http_server.h"
 
 #include "MAX31856.h"
+#include "heat_interlock.h"
 #include "kiln_io.h"
 #include "ota_interlock.h"
 #include "safety_link.h"
@@ -177,6 +178,26 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // with a specific, human-readable refusal reason on OTA_INTERLOCK_REFUSED,
 // untouched on OTA_INTERLOCK_OK. May be NULL/0.
 ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap);
+
+// --- Heat interlock, the OTHER direction (TODO.md 9.4/ROADMAP.md M8's
+// mutual interlock: "updates are not allowed while the heaters are on or a
+// profile is running" AND "heating is not allowed during updates") --------
+//
+// Reads ota_http_update_in_progress() above -- the SAME single
+// cross-processor update mutex ota_http_check_interlocks() reads -- into a
+// heat_interlock_snapshot_t and calls heat_interlock_check()
+// (heat_interlock.h), the pure, host-tested half. Every heat-causing entry
+// point (profile_executor_run(), autotune_engine.c's begin_run_locked(),
+// kiln_io_owner.c's relay_on_blocked()) calls THIS function rather than
+// re-deriving a snapshot itself, so the decision lives in exactly one
+// shared predicate, mirroring ota_http_check_interlocks()'s own role for
+// the opposite direction.
+//
+// Returns true (and fills reason_out/reason_cap, same NULL/0-tolerant
+// contract as ota_http_check_interlocks()) if a heat-causing action should
+// be refused because an update is in progress on either processor; false
+// if it may proceed.
+bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap);
 
 // --- POST /api/ota/esp (TODO.md 9.5) -- the ESP's own self-update ---------
 //

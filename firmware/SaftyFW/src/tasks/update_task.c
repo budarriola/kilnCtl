@@ -178,7 +178,10 @@ static TaskHandle_t s_task_handle = NULL;
 
 // --- Active-transfer state (single transfer at a time, matches
 // UPDATE_PROTOCOL.md section 4's "one update at a time") ------------------
-static bool s_transfer_active = false;
+// volatile: read cross-task by update_task_transfer_active() (safety_core.c)
+// -- see update_task.h's doc comment on that getter for why a torn/stale
+// read here is safe-direction-only.
+static volatile bool s_transfer_active = false;
 static uint8_t s_target_slot = BOOTLOADER_SLOT_A;
 static uint32_t s_slot_flash_offset = 0;
 static update_image_header_t s_header;
@@ -1059,6 +1062,11 @@ static void update_task_fn(void *arg)
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_UPDATE_TASK);
     }
+}
+
+bool update_task_transfer_active(void)
+{
+    return s_transfer_active;
 }
 
 bool update_task_start(void)

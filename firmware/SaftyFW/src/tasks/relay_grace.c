@@ -19,3 +19,8 @@ relay_owner_state_t relay_trip_transition(relay_owner_state_t state)
     (void)state; // unconditional, by design -- see relay_grace.h's doc comment
     return RELAY_OWNER_STATE_TRIPPED;
 }
+
+bool relay_energize_allowed_during_update(bool update_in_progress)
+{
+    return !update_in_progress;
+}

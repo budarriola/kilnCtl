@@ -575,6 +575,25 @@ ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason
     return ota_interlock_check(&snap, zones, thermo_count, reason_out, reason_cap);
 }
 
+// See ota_http.h's doc comment above this function. The mirror-image glue
+// to ota_http_check_interlocks() above: same s_update_claim mutex, opposite
+// direction ("may heat proceed" instead of "may an update start").
+bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
+{
+    heat_interlock_snapshot_t snap = { 0 };
+    ota_http_context_t ctx;
+
+    snap.update_in_progress = ota_http_update_in_progress(&ctx);
+    if (snap.update_in_progress) {
+        // ESP_ROLLBACK collapses onto ESP -- see heat_interlock.h's doc
+        // comment on heat_interlock_update_context_t for why.
+        snap.update_context =
+            (ctx == OTA_HTTP_CONTEXT_PICO) ? HEAT_INTERLOCK_UPDATE_PICO : HEAT_INTERLOCK_UPDATE_ESP;
+    }
+
+    return heat_interlock_check(&snap, reason_out, reason_cap) != HEAT_INTERLOCK_OK;
+}
+
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
 static const char *OTA_MAC_HEADER = "X-Ota-Mac"; // shared by both /api/ota/esp and /api/ota/pico

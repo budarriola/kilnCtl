@@ -11,6 +11,7 @@
 
 #include "heater_output.h"
 #include "kiln_io_owner.h"
+#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "sim_backend.h"
@@ -733,6 +734,17 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * the lock NOT held on failure. */
 static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
 {
+    /* Direction B of the mutual OTA interlock (see profile_executor_run()'s
+     * identical check and ota_http.h's doc comment above
+     * ota_http_heat_blocked_by_update()): refuse to start EITHER autotune
+     * method while an update is in progress on either processor. Checked
+     * first, before any zone-config/relay-mask state, for the same
+     * "cheapest and orthogonal" reasoning ota_interlock_check() documents
+     * for its own mutex check. */
+    if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
+        return false;
+    }
+
     /* TODO.md 8.2 "Tie it to the guards, not only the UI": same explicit
      * refusal as profile_executor_run() -- must not rely on the relay_mask
      * check below happening to read 0 for a failed-to-load config too. */

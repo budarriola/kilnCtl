@@ -34,6 +34,7 @@ $sources = @(
     (Join-Path $testDir "test_sim_kiln.c"),
     (Join-Path $testDir "test_ota_auth.c"),
     (Join-Path $testDir "test_ota_interlock.c"),
+    (Join-Path $testDir "test_heat_interlock.c"),
     (Join-Path $testDir "test_thermo_combine.c"),
     (Join-Path $testDir "test_profile_feasibility.c"),
     (Join-Path $testDir "sim_plant.c"),
@@ -43,6 +44,7 @@ $sources = @(
     (Join-Path $driversDir "pid_autotune.c"),
     (Join-Path $driversDir "ota_auth.c"),
     (Join-Path $driversDir "ota_interlock.c"),
+    (Join-Path $driversDir "heat_interlock.c"),
     (Join-Path $driversDir "thermo_combine.c"),
     (Join-Path $driversDir "profile_feasibility.c")
 )

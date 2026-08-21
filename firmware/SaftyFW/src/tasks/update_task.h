@@ -88,6 +88,30 @@ void update_task_handle_abort(const uint8_t *payload, uint8_t length);
 // RETURN: it calls watchdog_reboot() and the RP2040 resets immediately.
 bool update_task_request_rollback(const char **out_reason);
 
+// True while an UPDATE_BEGIN...UPDATE_END/ABORT transfer is actively staged
+// (s_transfer_active, update_task.c) -- i.e. between a UPDATE_BEGIN this
+// task accepted and whichever of UPDATE_END/UPDATE_ABORT/an internal
+// retransmit-cap abort ends it. Read from safety_core.c
+// (safety_core_request_enable()) as this Pico's OWN, independent half of
+// the mutual "heating is not allowed during updates" interlock (ROADMAP.md
+// M8, docs/UPDATE_PROTOCOL.md section 1): the ESP is never consulted for
+// this -- update_task's own s_transfer_active is the ground truth for
+// whether THIS processor is mid-update, exactly the same
+// "this file legitimately reaches relay state only through
+// safety_core_get_output_status()" one-way channel this header's own top
+// comment documents for the opposite direction (update_task reading relay
+// state), now used in reverse (safety_core reading update state).
+//
+// s_transfer_active is written only by update_task_fn()'s own dispatch
+// (single writer); this getter is called from other tasks (safety_core.c),
+// so the backing variable is `volatile` -- a torn/stale read here can only
+// ever be "reads not-yet-true for one more poll", never "reads true when it
+// isn't", because the flag is set the instant UPDATE_BEGIN is accepted and
+// safety_core_request_enable() only runs on an explicit ESP-initiated
+// enable request, never on a fixed schedule that could race the flag's own
+// transition in the unsafe direction.
+bool update_task_transfer_active(void);
+
 #ifdef __cplusplus
 }
 #endif

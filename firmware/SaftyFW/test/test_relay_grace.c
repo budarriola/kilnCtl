@@ -71,6 +71,18 @@ static void test_trip_transition_unconditional(void)
                "not an error)");
 }
 
+static void test_energize_allowed_during_update(void)
+{
+    TEST_SECTION("relay_energize_allowed_during_update -- the Pico's own half of the mutual "
+                 "'heating is not allowed during updates' interlock");
+
+    TEST_CHECK(relay_energize_allowed_during_update(false) == true,
+               "no update transfer active -- a new energize request is allowed");
+    TEST_CHECK(relay_energize_allowed_during_update(true) == false,
+               "an update transfer is active on this processor -- a new energize request is refused, "
+               "independent of anything the ESP believes");
+}
+
 void run_test_relay_grace(void)
 {
     test_grace_not_yet_elapsed();
@@ -78,4 +90,5 @@ void run_test_relay_grace(void)
     test_grace_tick_other_states_unchanged();
     test_trip_during_grace_latches();
     test_trip_transition_unconditional();
+    test_energize_allowed_during_update();
 }

@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "relay_authority.h"
 
 static const char *TAG = "kiln_io_owner";
@@ -84,9 +85,41 @@ static SafetyLinkClass *s_safety;
  * sx_write_reg_touches_relay_on()/sx_set_dir_touches_relay(), unchanged in
  * substance. ---- */
 
+/* This is the ONE choke point every MANUAL relay-ON command reaches
+ * (handle_set_relay()/handle_set_relay_mask() below, called from
+ * dashboard_http.c's /api/relay [and, via ui_page_temperature.c, the LCD's
+ * manual override] and uart_bridge.c's SET_RELAY/SET_RELAY_MASK) -- so
+ * direction B of the mutual OTA interlock ("heating is not allowed during
+ * updates", the OWNER's requirement) is enforced here rather than in any of
+ * those three callers, none of which need to change or even know this
+ * exists. Checked AFTER the existing safety-fault gate (relay_authority_
+ * on_blocked() -- unchanged, not weakened) so a genuine safety fault is
+ * still reported first if both are true.
+ *
+ * out_sources is left untouched (whatever relay_authority_on_blocked()
+ * already wrote, i.e. 0 if it did not block) when refused for THIS reason:
+ * an update in progress is not a SAFETY_FAULT_SRC_* bit (safety_link.h), and
+ * setting one here would misreport an update-in-progress refusal as a
+ * safety-link/thermal/PC fault to a caller reading *out_sources afterward.
+ * The specific reason (which processor is updating) is logged here instead,
+ * server-side -- dashboard_http.c/uart_bridge.c currently only surface the
+ * generic KILN_IO_OWNER_RELAY_ERR_SAFETY/"blocked by safety fault" text for
+ * ANY refusal from this function, which is accurate enough to keep the
+ * kiln safe but not as specific as this codebase's "zone 2 is at 340 C"
+ * standard; making the HTTP/UART response itself name "an ESP/Pico firmware
+ * update is in progress" needs a small change in each of those two
+ * off-limits files (see this pass's final report for the exact patch). */
 static bool relay_on_blocked(uint32_t *out_sources)
 {
-    return relay_authority_on_blocked(s_safety, out_sources);
+    if (relay_authority_on_blocked(s_safety, out_sources)) {
+        return true;
+    }
+    char reason[HEAT_INTERLOCK_REASON_MAX];
+    if (ota_http_heat_blocked_by_update(reason, sizeof(reason))) {
+        ESP_LOGW(TAG, "relay-on refused: %s", reason);
+        return true;
+    }
+    return false;
 }
 
 static bool sx_write_reg_touches_relay_on(uint8_t reg, uint8_t new_byte, uint32_t *out_sources)

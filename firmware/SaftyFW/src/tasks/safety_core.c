@@ -44,6 +44,7 @@
                               // S6b -- see that header's own doc comment for why this,
                               // and not link_task.h, is the safe way to cross the
                               // link->safety_core boundary tools/check_isolation.ps1 enforces.
+#include "relay_grace.h" // relay_energize_allowed_during_update() -- see safety_core_request_enable()
 #include "relay_owner.h"
 #include "safety_guards.h"
 #include "snapshots.h" // context_snapshot_t + link_task_get_context_snapshot()/
@@ -54,6 +55,11 @@
                         // on that section for the full reasoning, and reboot_announce.h's
                         // comment just above for the precedent this follows.
 #include "thermo_task.h"
+#include "update_task.h" // update_task_transfer_active() -- NOT link/uart-shaped (no "link"/"uart"
+                          // substring, tools/check_isolation.ps1's actual grep target), and this
+                          // file already has precedent for reaching into a sibling task for one
+                          // narrow fact (current_task.h/thermo_task.h above) rather than the link
+                          // itself -- see safety_core_request_enable() for the one call site.
 
 #define SAFETY_CORE_STACK_WORDS   configMINIMAL_STACK_SIZE
 
@@ -551,8 +557,21 @@ bool safety_core_request_clear_trip(void)
 
 bool safety_core_request_enable(bool enable)
 {
-    // See safety_core.h's doc comment: deliberately a thin forward, no
-    // second policy layer. relay_owner_command_energize() already refuses
+    // The Pico's OWN half of the mutual "heating is not allowed during
+    // updates" interlock (ROADMAP.md M8) -- checked BEFORE forwarding to
+    // relay_owner, and only when `enable` is requesting ON: de-energizing
+    // is never refused, same "safe direction always reachable" rule
+    // relay_energize_allowed_during_update()'s own doc comment states. This
+    // does not consult the ESP at all -- update_task_transfer_active()
+    // reads THIS processor's own s_transfer_active, so a Pico mid-transfer
+    // refuses a new energize request even if the ESP's own interlock
+    // (KilnFW's ota_interlock.c) somehow disagreed or was bypassed.
+    if (enable && !relay_energize_allowed_during_update(update_task_transfer_active())) {
+        return false;
+    }
+    // See safety_core.h's doc comment: deliberately a thin forward beyond
+    // the check above, no second policy layer duplicating relay_owner's
+    // own state machine. relay_owner_command_energize() already refuses
     // while TRIPPED, accepts-but-never-applies during GRACE, and only
     // actually drives GPIO6 high while ARMED.
     return relay_owner_command_energize(enable);

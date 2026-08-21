@@ -12,6 +12,7 @@
 #include "autotune_engine.h"
 #include "heater_output.h"
 #include "kiln_io_owner.h"
+#include "ota_http.h" /* ota_http_heat_blocked_by_update() -- heat_interlock.h's own doc comment */
 #include "pid.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
@@ -1705,6 +1706,17 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                      "zone config failed to load or has not been saved -- this kiln cannot be started "
                      "until zone config loads cleanly (see /settings/zones)");
         }
+        return false;
+    }
+    // Direction B of the mutual OTA interlock (ota_interlock.h/.c is
+    // direction A -- "no update while heating"; this is "no heating while
+    // updating"): refuse to start a profile while an update is in progress
+    // on either processor. heat_interlock.c is the shared pure predicate;
+    // ota_http_heat_blocked_by_update() is its ESP-IDF glue, same split as
+    // ota_http_check_interlocks()/ota_interlock_check(). Checked here,
+    // before the mutex/feasibility checks below, since it's cheapest and
+    // orthogonal to zone state.
+    if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
         return false;
     }
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
