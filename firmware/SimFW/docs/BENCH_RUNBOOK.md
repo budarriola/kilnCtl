@@ -1,7 +1,7 @@
 # SimFW — First Hardware Bench Session Runbook
 
 > **Status:** planning — no fixture hardware has ever existed · **Last
-> reviewed:** 2026-08-20
+> reviewed:** 2026-08-21
 > **Keep this file current.** Every command below is real (checked against
 > `tools/PcTools/src/kilnsim/cli.py`) and every claim about behavior is
 > either read directly from source or explicitly marked as a prediction.
@@ -23,6 +23,22 @@ real `KilnFW`/`SaftyFW` pair. Today's session is very likely to be entirely
 about steps 1–5 below (Pico alone, through the ground-domain check) — do not
 expect to reach a closed-loop firing in one sitting. Section 7 gives a
 realistic plan.
+
+**Measure before you trust.** Several numbers below read as settled facts
+but are arithmetic from an assumption, not a bench reading. None of the
+following have ever been measured on this hardware:
+
+| Figure | Status | Where it comes from |
+|---|---|---|
+| DUT-power inrush, ~60 A / ~190 µs (step 9) | **Derived.** Assumes ~0.2 Ω source+ESR resistance that was never measured. | `docs/BOM.md` §6 |
+| CT transformer ratio, ~3:1 (step 4/§5) | **Derived, medium confidence.** Built on a ~1.5 Vpk usable-Pico-drive estimate; the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its own datasheet. | `docs/DESIGN_NOTES.md` §3.3, `docs/HARDWARE.md` §5 |
+| SPI first-byte timing budget, ~250 ns / ~1.6 µs (step 3) | **Derived.** RP2040-datasheet arithmetic; no Pico has ever been attached to confirm it. | `docs/SPI_ACCESS_AUDIT.md` §9, `docs/DESIGN_NOTES.md` §3.2.1 |
+| Relay debounce, ~24 ms worst case (step 8) | Derived from `mcp23017.h`'s stated debounce constant, not bench-timed. | `mcp23017.h` |
+| "Plausible, non-zero temperatures" on the DUT (step 6) | **Not proof the SPI framing is correct.** See step 6's note below — a whole-burst byte shift produces exactly this symptom. | §4 step 6, `docs/SPI_ACCESS_AUDIT.md` D2 |
+
+Treat every "Pass" criterion below that rests on one of these figures as
+provisional until the cited measurement is actually taken — a derived number
+that happens to match reality on the bench is still luck, not verification.
 
 ---
 
@@ -315,6 +331,15 @@ because no bench calibration run has ever populated real per-channel
 constants; behavior today is identity, same as the old placeholder. Judge
 this step on waveform cleanliness (frequency, shape, no carrier ripple
 bleeding through), not on absolute calibrated amplitude.
+**Also unmeasured: the transformer's ~3:1 step-up ratio itself.** It's built
+on a ~1.5 Vpk usable-Pico-drive estimate the project itself calls
+medium-confidence, and the candidate part's (Triad TY-300P) actual turns
+ratio has never been checked against its datasheet (`docs/DESIGN_NOTES.md`
+§3.3, `docs/HARDWARE.md` §5). If the transformer is populated this session,
+treat any voltage reading at the safety board's ADC as informational, not as
+confirmation the ratio is right — a wrong ratio here reads as a misleading
+current value on the DUT side, not damage (the safety board's clamp diodes
+D12/D13 are the backstop, per §5's CT troubleshooting row below).
 **NO-GO:** see §5's CT row.
 
 ### Step 5 — GROUND-DOMAIN CHECK BEFORE FIRST DUT CONTACT
@@ -362,9 +387,26 @@ real daughterboard's J5 header mates in *reverse* pin order (J6 pin 1 = J5
 pin 20), and the fixture's own plug must be wired the same reversed way the
 daughterboard's header is — **not** pin-for-pin straight through. Verify
 against `docs/HARDWARE.md` §3.1's full mating table before applying power;
-getting this backwards risks driving 5 V into a clock line. Consider fixture
-bus-A series resistors for this first plug-in, per `docs/PLAN.md` §15's
-stated mitigation.
+getting this backwards risks driving 5 V into a clock line.
+
+**Every GPIO number in that table, and everywhere else in `HARDWARE.md`, is
+provisional** — reconciled between four independently-written source files,
+never traced against physical copper or continuity-checked
+(`docs/HARDWARE.md`'s own status header). Do not treat a pin number as fact
+just because it appears in a table; if anything about `spi_emu_a.c`,
+`i2c_owner.c`, or `ct_wave_pwm.c` has changed since this document was last
+reviewed, re-derive from source before trusting the table over what you're
+about to wire.
+
+**Fit fixture bus-A series resistors for this first plug-in.** This is
+`docs/PLAN.md` §15's own stated mitigation for exactly this step's risk row
+("J6 pinout traced wrong … Possible damage on first plug-in") — it protects
+against a mis-wired connector back-feeding 5 V into a signal line, **not**
+against the separate MISO-tri-state defect (`docs/SPI_ACCESS_AUDIT.md` D1,
+fixed in code but never bench-proved — see step 3's note). Given this is one
+of the two steps in the whole procedure with real hardware-damage risk
+(section 3), treat the resistors as something to actually fit here, not an
+optional nicety to skip if you're in a hurry.
 
 Boot `KilnFW` (real ESP32-S3 on the main board):
 ```powershell
@@ -377,6 +419,16 @@ in this environment: `thermo_read` / `thermo_get_reports`.
 **Pass:** `KilnFW`'s own telemetry (LCD, or `thermo_read`) shows plausible,
 non-zero, non-fault temperatures on all three main-side channels, tracking
 what `kilnsim state` believes it is reporting.
+**"Plausible temperatures" is necessary here, but it is not proof the SPI
+framing is correct — do not read this step's pass as retiring M-A's risk.**
+The PIO SPI slave has never been clocked by a real master, and the one
+audit finding on this exact failure mode (`docs/SPI_ACCESS_AUDIT.md` D2) is
+a whole response burst shifted one byte late, which reads back as a
+*different, still-plausible* wrong temperature — not an obvious fault. The
+only thing that actually proves the framing is step 3's Saleae capture
+against `spi_test_master`, done *before* this step. If step 3 hasn't been
+run and passed with a capture yet, treat any "plausible" reading here as
+unverified, not confirmed.
 **NO-GO:** see §5's DUT-thermocouple row. **Remember section 2's table**
 before concluding anything is broken — a lack of *heating* here is expected
 this early (K4 has not been asked to energize yet, and relays are not
@@ -426,6 +478,26 @@ request, with no guard tripped, is now a real fixture/DUT problem, not
 expected behavior.
 
 ### Step 9 — E-stop, fault line, DUT power relays — one at a time
+
+**Before the first `power cycle` command: the DUT-power relay's inrush
+margin is unverified.** `docs/BOM.md` §6 estimates ~60 A peak / ~190 µs
+decay from the board's ~940 µF per-domain bulk capacitance, but that figure
+rests on an **assumed** ~0.2 Ω source resistance — nobody has scoped or
+current-probed an actual power-on of either domain. The Omron
+G5LE-14-DC12 relay is rated 10 A/250 VAC *continuous*; its cold-inrush/
+make-current rating has not been checked against the real number. **What to
+check:** if a current probe or scope is on hand, capture the first
+`power cycle` of each domain and compare against the ~60 A/~190 µs estimate
+before treating repeated cycling as routine. **What a pass looks like:** no
+audible/visible arcing or relay chatter at the contact, and (if captured) a
+peak current within the relay's rated make-current. **What happens if you
+skip this:** repeated `power cycle` scenario runs could weld or degrade the
+relay contact on an under-margined part with nobody having measured whether
+the margin exists — a failure that would only surface as a mysterious
+"domain never comes back" fault much later, not at the moment it happens.
+If welding is ever suspected, stop domain-power-cycling scenarios until a
+series NTC limiter or pre-charge bleed resistor is added (`docs/BOM.md`
+§6's own suggested fix).
 
 ```powershell
 kilnsim --port COMx estop open
