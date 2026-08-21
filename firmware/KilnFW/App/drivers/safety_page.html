@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Safety</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --warn: #b00; --tripped-bg: #fdecec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+      --tripped-bg: #3a1f22;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+    --tripped-bg: #3a1f22;
+  }
+  body { font-family: sans-serif; max-width: 640px; margin: 2em auto 5em; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin: 1.4em 0 0.4em; }
+  p.lead { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.2em 0.9em; margin-bottom: 0.6em; }
+  .card.tripped { background: var(--tripped-bg); border-color: var(--warn); }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1em;
+         padding: 0.5em 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .row .value.warn { color: var(--warn); font-weight: bold; }
+  .row .value.ok { color: var(--ok); }
+  .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }
+  button.clear-trip { width: 100%; margin-top: 0.6em; background: var(--warn); color: #fff;
+                       border: none; border-radius: var(--ui-radius); font-size: 1em; cursor: pointer; }
+  button.clear-trip:disabled { opacity: 0.5; cursor: default; }
+  #clearMsg { font-size: 0.85em; margin-top: 0.4em; min-height: 1.2em; }
+  .confirm-row { display: none; margin-top: 0.6em; gap: 0.5em; }
+  .confirm-row.show { display: flex; }
+  .confirm-row button { flex: 1; }
+  .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                  padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
+  .stale-banner.show { display: block; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/">&larr; Dashboard</a>
+<h1>Safety Processor</h1>
+<p class="lead">The web twin of the LCD's Safety page, plus the DIAG/
+TRIP_EVENT detail the panel's ~264px budget had no room for -- everything
+here already rides on GET /api/status (dashboard_http.c); this page adds no
+new endpoint. "Clear trip" posts to the existing POST /api/safety/clear_trip
+(CommonFW/docs/LINK_PROTOCOL.md sec 4) -- the action this data has never had
+on the web before this pass.</p>
+
+<div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
+
+<h2>Link status</h2>
+<div class="card">
+  <div class="row"><span class="label">Safety link</span><span class="value" id="safetyReady">--</span></div>
+  <div class="row"><span class="label">Protocol version</span><span class="value" id="linkVersion">--</span></div>
+</div>
+
+<h2>Temperatures &amp; power</h2>
+<div class="card">
+  <div class="row"><span class="label">Safety-processor thermocouple</span><span class="value" id="safetyTemp">--</span></div>
+  <div class="row"><span class="label">Enclosure temp (MAX31856 cold junction)</span><span class="value" id="enclosureTemp">--</span></div>
+  <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
+</div>
+
+<h2>Diagnostics (Frame B)</h2>
+<div class="card" id="diagCard">
+  <div class="row"><span class="label">Not yet received this boot</span><span class="value">n/a</span></div>
+</div>
+<p class="note">diag_trip_mask / diag_warn_mask are raw per-guard bitmasks
+from the Pico (SaftyFW's safety_guards.h) -- this firmware has no guard-name
+table to decode them against (same reason dashboard_http.c leaves them
+numeric), so they render here as hex, not as named guards.</p>
+
+<h2>Last trip (Frame D)</h2>
+<div class="card" id="tripCard">
+  <div class="row"><span class="label">No trip event received this boot</span><span class="value">n/a</span></div>
+</div>
+<button id="clearTripBtn" class="clear-trip" disabled>Clear latched trip</button>
+<div class="confirm-row" id="confirmRow">
+  <button id="confirmYes">Yes, clear it</button>
+  <button id="confirmNo">Cancel</button>
+</div>
+<div id="clearMsg"></div>
+<p class="note">Clearing only hands the request to the UART link -- it is not
+proof the Pico accepted it. Watch the rows above on the next poll to confirm
+the trip actually cleared. Refused if there is no trip currently latched, or
+if the Pico's diagnostics are too stale to trust.</p>
+
+<script src="/nav.js"></script>
+<script src="/app.js"></script>
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  function set(id, text, cls) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.className = 'value' + (cls ? ' ' + cls : '');
+  }
+  function fmtC(v) { return (v == null) ? 'n/a' : v.toFixed(1) + ' °C'; }
+
+  var lastTripLatched = false;
+
+  function render(st) {
+    set('safetyReady', st.safety_ready ? 'linked' : 'not linked', st.safety_ready ? 'ok' : 'warn');
+
+    if (!st.link_version_known) {
+      set('linkVersion', 'not yet announced');
+    } else if (st.link_version_compatible) {
+      set('linkVersion', 'ESP ' + st.self_protocol_version + ' / Pico ' + st.peer_protocol_version + ' (OK)', 'ok');
+    } else {
+      var older = st.peer_protocol_version < st.self_protocol_version ? 'Pico'
+                : st.peer_protocol_version > st.self_protocol_version ? 'ESP' : 'neither';
+      set('linkVersion', 'ESP ' + st.self_protocol_version + ' / Pico ' + st.peer_protocol_version +
+                         ' -- INCOMPATIBLE, ' + older + ' is older', 'warn');
+    }
+
+    set('safetyTemp', fmtC(st.safety_temp_c));
+    set('enclosureTemp', fmtC(st.enclosure_temp_c));
+    set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a');
+
+    var diagCard = document.getElementById('diagCard');
+    if (st.diag_ever_received) {
+      diagCard.innerHTML =
+        row('State', st.diag_state) +
+        row('Trip reason (raw)', '0x' + hex(st.diag_trip_reason)) +
+        row('Warn mask', '0x' + hex(st.diag_warn_mask)) +
+        row('Trip mask', '0x' + hex(st.diag_trip_mask)) +
+        row('Context age', (st.diag_context_age_100ms * 100) + ' ms') +
+        row('Context frames ok/bad', st.diag_context_frames_ok + ' / ' + st.diag_context_frames_bad) +
+        row('TX frames dropped', st.diag_tx_frames_dropped);
+    } else {
+      diagCard.innerHTML = row('Not yet received this boot', 'n/a');
+    }
+
+    var tripCard = document.getElementById('tripCard');
+    var clearBtn = document.getElementById('clearTripBtn');
+    if (st.trip_event_ever_received) {
+      var ageS = Math.round(st.trip_event_age_ms / 1000);
+      tripCard.className = 'card tripped';
+      tripCard.innerHTML =
+        row('Reason (raw)', '0x' + hex(st.trip_reason)) +
+        row('Age', ageS + 's ago') +
+        row('Safety TC at trip', fmtC(st.trip_safety_tc_c)) +
+        row('Deciding threshold', fmtC(st.trip_deciding_threshold));
+      lastTripLatched = true;
+      clearBtn.disabled = false;
+    } else {
+      tripCard.className = 'card';
+      tripCard.innerHTML = row('No trip event received this boot', 'n/a');
+      lastTripLatched = false;
+      clearBtn.disabled = true;
+    }
+  }
+
+  function row(label, value) {
+    return '<div class="row"><span class="label">' + escHtml(label) + '</span><span class="value">' +
+           escHtml(value) + '</span></div>';
+  }
+  function hex(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(2, '0'); }
+  function escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  /* UI_PLAN.md section 4 item 5: destructive/latched-state actions get an
+     explicit confirm step. Clearing a latched trip is exactly that class. */
+  var clearBtn = document.getElementById('clearTripBtn');
+  var confirmRow = document.getElementById('confirmRow');
+  var confirmYes = document.getElementById('confirmYes');
+  var confirmNo = document.getElementById('confirmNo');
+  var clearMsg = document.getElementById('clearMsg');
+  clearBtn.addEventListener('click', function () {
+    confirmRow.classList.add('show');
+    clearBtn.style.display = 'none';
+  });
+  confirmNo.addEventListener('click', function () {
+    confirmRow.classList.remove('show');
+    clearBtn.style.display = '';
+  });
+  confirmYes.addEventListener('click', function () {
+    confirmRow.classList.remove('show');
+    clearBtn.style.display = '';
+    clearMsg.textContent = 'Sending...';
+    fetch('/api/safety/clear_trip', { method: 'POST' })
+      .then(function (r) { return r.json().catch(function () { return { ok: r.ok }; }); })
+      .then(function (j) {
+        clearMsg.textContent = j.ok ? 'Sent -- watch the row above for it to clear.' :
+                               ('Refused: ' + (j.error || 'unknown reason'));
+      })
+      .catch(function () { clearMsg.textContent = 'Request failed.'; });
+  });
+
+  var lastGoodAt = null;
+  var failCount = 0;
+  function setStale(staleSeconds) {
+    var banner = document.getElementById('staleBanner');
+    if (staleSeconds == null) {
+      banner.classList.remove('show');
+    } else {
+      document.getElementById('staleAge').textContent = staleSeconds;
+      banner.classList.add('show');
+    }
+  }
+  function poll() {
+    fetch('/api/status').then(function (r) { return r.json(); }).then(function (j) {
+      render(j);
+      lastGoodAt = Date.now();
+      failCount = 0;
+      setStale(null);
+    }).catch(function () {
+      failCount++;
+      if (lastGoodAt != null) setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+    });
+  }
+  var timer = null;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    if (document.visibilityState === 'hidden') return;
+    var delay = 1000 * Math.min(1 + failCount, 8);
+    timer = setTimeout(function () { poll(); schedule(); }, delay);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { poll(); schedule(); }
+  });
+  poll();
+  schedule();
+})();
+</script>
+</body>
+</html>

@@ -134,6 +134,23 @@ typedef struct {
     int64_t  last_retry_log_us;
     uint32_t suppressed_retry_logs;
 
+    /* Per-(dst_device,dst_task) "has this peer EVER answered" memory, so the
+     * retry warning above can tell "peer has never existed" (safety_link.c's
+     * RP2040-not-built-yet case: already logged sensibly, once, at a slow
+     * rate, by that module -- this warning adds nothing) apart from "peer WAS
+     * answering and just stopped" (a real fault, must stay loud). Set true on
+     * any reply at all -- ACK or NACK, not just ESP_OK -- since a NACK still
+     * proves a peer is alive and answering frames. Small fixed table, linear
+     * scan: the number of distinct (device,task) destinations any one link
+     * ever sends to is a handful (task_ids in uart_task_ids.h), not a scaling
+     * concern. */
+    struct {
+        bool valid;
+        uart_proto_device_t device;
+        uint8_t task;
+        bool ever_replied;
+    } peer_seen[8];
+
     bool initialized;
 } uart_protocol_t;
 

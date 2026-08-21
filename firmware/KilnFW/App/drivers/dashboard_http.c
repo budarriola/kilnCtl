@@ -1,10 +1,15 @@
 #include "dashboard_http.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 
 #include "autotune_engine.h"
 #include "http_form.h"
@@ -32,6 +37,38 @@ static struct {
     MAX31856BusClass *thermo_bus;
     SafetyLinkClass *safety;
 } s_dash;
+
+/* Forward declaration: json_escape() is defined further down (near the
+ * profile-executor handlers, its original call site) but status_get_handler()
+ * above that point now needs it too for the fw_version/fw_build strings
+ * appended below -- a plain prototype here is simpler than reordering every
+ * function between the two, and this is a static, single-TU helper so a
+ * header declaration would be overkill. */
+static void json_escape(const char *src, char *out, size_t out_cap);
+
+/* esp_reset_reason_t -> short static string, for the diagnostics page's
+ * "why did this boot happen" field (UI_PLAN.md section 5). Verified against
+ * this project's installed esp_system.h (ESP-IDF's own enum, unchanged
+ * across the S3 targets this board uses) -- every named value in
+ * esp_reset_reason_t has a case here, so "unknown" only fires against a
+ * future IDF adding a new reason this file hasn't been updated for. */
+static const char *reset_reason_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_UNKNOWN:   return "unknown";
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software (esp_restart)";
+    case ESP_RST_PANIC:     return "panic/exception";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "unknown";
+    }
+}
 
 /* TODO.md 10.1a: the data-gathering half of GET /api/status, pulled out into
  * a plain function so the LCD home page (ui_page_home.c) reads the exact
@@ -183,14 +220,55 @@ void dashboard_get_status(dashboard_status_t *out)
      * dashboard and pc_tools' Zones panel can say "zone config failed to
      * load" explicitly instead of a kiln that just silently won't fire. */
     out->zones_config_valid = zones_config_is_valid();
+
+    /* UI_PLAN.md section 5's missing field set (see dashboard_http.h's
+     * struct comment above these fields for the full rationale). Every read
+     * here is cheap and side-effect-free -- esp_app_get_description() reads
+     * a const struct baked into the app image, esp_reset_reason()/
+     * esp_timer_get_time() are simple register/RTC reads, and the
+     * heap_caps_get_*() calls are the same O(free-list-length) walk
+     * ui_page_diagnostics.c's own refresh_cb() already performs on the same
+     * 2-second LCD tick, so doing it again here on a browser's poll cadence
+     * is not a new cost profile for this firmware. */
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    out->fw_version_known = (app_desc != NULL);
+    if (app_desc) {
+        /* esp_app_desc_t::version/date/time are themselves fixed-size,
+         * NUL-terminated char arrays (esp_app_desc.h) -- snprintf still used
+         * defensively rather than strcpy, matching this file's json_escape()
+         * callers' general "never trust a fixed-size field to already be
+         * exactly what its type promises" habit. */
+        snprintf(out->fw_version, sizeof(out->fw_version), "%s", app_desc->version);
+        snprintf(out->fw_build, sizeof(out->fw_build), "%s %s", app_desc->date, app_desc->time);
+    } else {
+        out->fw_version[0] = '\0';
+        out->fw_build[0] = '\0';
+    }
+
+    out->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    out->reset_reason = reset_reason_name(esp_reset_reason());
+
+    out->heap_internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    out->heap_internal_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    out->heap_internal_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    /* MALLOC_CAP_SPIRAM reads back as a real 0 (not an error) on a board
+     * built without PSRAM enabled -- see dashboard_http.h's field comment
+     * and ui_page_diagnostics.c's refresh_cb() for the same call and the
+     * same "0 KB is honest, not invented" reasoning. */
+    out->heap_spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    out->heap_spiram_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    out->heap_spiram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    /* Bumped from 896 with the DIAG/TRIP_EVENT fields below (ROADMAP.md
-     * M5) -- comfortably over the worst case (~1150 bytes with 3 zones/
-     * channels and every optional block populated). */
-    char json[1400];
+    /* Bumped from 1400 to make room for the firmware version/build/uptime/
+     * reset-reason/heap block appended below (UI_PLAN.md section 5) --
+     * worst case for that block is under 300 bytes (two ~32-byte escaped
+     * strings plus ~8 numeric fields), so 1400 -> 1700 is comfortably over
+     * the new worst case (~1450 bytes with 3 zones/channels and every
+     * optional block populated) rather than trimmed to the edge. */
+    char json[1700];
     size_t o = 0;
     int n;
 
@@ -327,6 +405,34 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         }
         APPEND("]");
     }
+
+    /* UI_PLAN.md section 5's genuinely-new field set for the web diagnostics
+     * page -- firmware version/build/uptime/reset reason/heap, none of which
+     * were on this endpoint before this pass (see dashboard_http.h's struct
+     * comment for the full "why" and the largest-free-block margin note).
+     * fw_version/fw_build are escaped even though they come from this same
+     * firmware's own embedded esp_app_desc_t (not untrusted network input):
+     * a version string is still operator-supplied at build time (git tag/
+     * describe output can contain arbitrary characters), and json_escape()
+     * is cheap enough that "trust the build" is not a saving worth the risk
+     * of ever emitting invalid JSON from a stray quote in a tag name. */
+    {
+        char fw_version_esc[sizeof(ds.fw_version) * 2 + 1];
+        char fw_build_esc[sizeof(ds.fw_build) * 2 + 1];
+        json_escape(ds.fw_version, fw_version_esc, sizeof(fw_version_esc));
+        json_escape(ds.fw_build, fw_build_esc, sizeof(fw_build_esc));
+        APPEND(",\"fw_version_known\":%s", ds.fw_version_known ? "true" : "false");
+        APPEND(",\"fw_version\":\"%s\"", fw_version_esc);
+        APPEND(",\"fw_build\":\"%s\"", fw_build_esc);
+    }
+    APPEND(",\"uptime_s\":%lu", (unsigned long)ds.uptime_s);
+    APPEND(",\"reset_reason\":\"%s\"", ds.reset_reason);
+    APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu}",
+           (unsigned long)ds.heap_internal_free, (unsigned long)ds.heap_internal_largest_free_block,
+           (unsigned long)ds.heap_internal_min_free);
+    APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu}",
+           (unsigned long)ds.heap_spiram_free, (unsigned long)ds.heap_spiram_largest_free_block,
+           (unsigned long)ds.heap_spiram_min_free);
 
     APPEND("}");
 

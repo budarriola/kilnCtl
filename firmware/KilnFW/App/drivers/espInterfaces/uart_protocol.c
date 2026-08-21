@@ -35,6 +35,45 @@ static const char *TAG = "uart_proto";
 /* One no-reply warning per 5s per protocol instance (see uart_protocol.h). */
 #define RETRY_LOG_INTERVAL_US 5000000
 
+/* peer_seen[] lookup/update -- see uart_protocol.h's field comment. Not
+ * locked: only ever touched from within uart_protocol_send_limited() while
+ * proto->tx_lock is held, same single-writer rule as awaited_* / ack_result. */
+static bool peer_ever_replied(uart_protocol_t *proto, uart_proto_device_t device, uint8_t task)
+{
+    for (size_t i = 0; i < sizeof(proto->peer_seen) / sizeof(proto->peer_seen[0]); ++i) {
+        if (proto->peer_seen[i].valid && proto->peer_seen[i].device == device &&
+            proto->peer_seen[i].task == task) {
+            return proto->peer_seen[i].ever_replied;
+        }
+    }
+    return false;
+}
+
+static void peer_mark_replied(uart_protocol_t *proto, uart_proto_device_t device, uint8_t task)
+{
+    int free_slot = -1;
+    for (size_t i = 0; i < sizeof(proto->peer_seen) / sizeof(proto->peer_seen[0]); ++i) {
+        if (proto->peer_seen[i].valid && proto->peer_seen[i].device == device &&
+            proto->peer_seen[i].task == task) {
+            proto->peer_seen[i].ever_replied = true;
+            return;
+        }
+        if (!proto->peer_seen[i].valid && free_slot < 0) {
+            free_slot = (int)i;
+        }
+    }
+    if (free_slot >= 0) {
+        proto->peer_seen[free_slot].valid = true;
+        proto->peer_seen[free_slot].device = device;
+        proto->peer_seen[free_slot].task = task;
+        proto->peer_seen[free_slot].ever_replied = true;
+    }
+    /* Table full: extremely unlikely (see header comment on its size), and
+     * the worst consequence is just this one destination not getting the
+     * "has replied before" memory -- the retry warning stays as loud as
+     * before for it, which is the safe direction to fail in. */
+}
+
 static uint16_t crc16_ccitt_false(const uint8_t *data, size_t len)
 {
     return kilnlink_crc16_ccitt_false(data, len);
@@ -537,8 +576,25 @@ esp_err_t uart_protocol_send_limited(uart_protocol_t *proto,
             continue; /* tx itself failed; still worth retrying */
         }
         if (xSemaphoreTake(proto->ack_sem, pdMS_TO_TICKS(ack_timeout_ms)) == pdTRUE) {
+            /* Any reply -- ACK or NACK -- proves a peer is alive and
+             * answering frames at (dst_device, dst_task), which is exactly
+             * the distinction the suppression below needs. */
+            peer_mark_replied(proto, dst_device, dst_task);
             result = (proto->ack_result == UART_PROTO_MSG_ACK) ? ESP_OK : ESP_ERR_NOT_FOUND;
             break;
+        }
+        /* Suppressed entirely (not even rate-limited) when this destination
+         * has NEVER once replied: that is the safety link's normal state
+         * until the RP2040 firmware exists, and safety_link.c's
+         * safety_update_health() already logs that condition sensibly, once,
+         * at its own slow rate ("no reply from the safety processor (never
+         * seen one)") -- this per-retry warning under it added nothing but
+         * noise, at exactly the RETRY_LOG_INTERVAL_US/5s cadence that flooded
+         * uart_log_bridge's queue. A destination that WAS replying and then
+         * stopped is a real fault and must stay loud, so the rate-limited
+         * warning below still fires for that case. */
+        if (!peer_ever_replied(proto, dst_device, dst_task)) {
+            continue;
         }
         /* Rate-limited: see uart_protocol.h's last_retry_log_us comment. One
          * line every RETRY_LOG_INTERVAL_US, carrying however many were

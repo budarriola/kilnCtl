@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Settings</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md "web page structure" section, item 2: this page is the web
+     twin of ui_page_config.c, the nav hub the LCD already has. Shared nav
+     (nav.js), sticky Stop + connection-lost banner + kcConfirm (app.js) --
+     same chrome as every other page, same load-order caveat as nav.js's own
+     header comment (only call window.kcConfirm from inside an event-handler
+     callback, never from top-level inline script). -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Page-local palette tokens only -- every real rule this page uses
+     (a.button, button.danger-btn, h1/h2 sizing conventions match the other
+     pages' own inline copies) lives in /theme.css now; see that file's
+     "web page structure" comment block for why. This :root block is not new
+     page-local styling, it is the same --bg/--fg/etc token convention every
+     *_page.html already carries (theme.css's .theme-btn/.kc-topbar/etc read
+     these names without defining them), copied from main_page.html's own
+     block since the Settings + Danger zone content below came from there. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --fault-color: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --fault-color: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --fault-color: var(--ui-accent-5);
+  }
+  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<h1>Settings</h1>
+
+<h2>Board configuration</h2>
+<!-- UI_PLAN.md task instructions, "Deliver" item 1: every existing settings
+     destination, plus the two pages this same pass adds
+     (/settings/manual below, and the diagnostics/safety pages from the
+     2026-08-19/20/21 pass). Order follows roughly how often each is used
+     post-commissioning: readiness/zones/relays/manual are routine, wifi/ota
+     are occasional, diagnostics/safety are troubleshooting. -->
+<a class="button" href="/readiness">Ready to fire? (checklist)</a>
+<a class="button" href="/settings/zones">Thermocouples &amp; zones</a>
+<a class="button" href="/settings/relays">Relays &amp; rules</a>
+<a class="button" href="/settings/manual">Manual relay control</a>
+<a class="button" href="/profiles">Firing profiles</a>
+<a class="button" href="/wifi">Network settings</a>
+<a class="button" href="/ota">Firmware update</a>
+<a class="button" href="/diagnostics">Diagnostics</a>
+<a class="button" href="/safety">Safety processor</a>
+
+<h2 style="border-top-color: var(--fault-color);">Danger zone</h2>
+<!-- Moved verbatim off main_page.html (UI_PLAN.md item 4): same four
+     scopes, same wording, same confirm-then-POST-then-report flow. The
+     board reboots itself as part of every one of these actions, so the
+     fetch's own .catch() path (connection dropped mid-reboot) is expected,
+     not an error to alarm on -- unchanged from the pre-move behaviour. -->
+<p>Each button below erases ONLY what it says and reboots the board
+immediately -- there is no undo. "Wi-Fi" never touches zones/rules/profiles;
+"kiln config" never touches Wi-Fi or profiles; "profiles" never touches
+anything else. "Factory default" erases all three.</p>
+<p>
+<button type="button" class="danger-btn" data-scope="wifi">Reset Wi-Fi only</button>
+<button type="button" class="danger-btn" data-scope="kiln">Reset kiln config only (zones, rules, relay cycles, run state)</button>
+<button type="button" class="danger-btn" data-scope="profiles">Reset fire profiles only</button>
+<button type="button" class="danger-btn" data-scope="all">Factory default (erase everything)</button>
+</p>
+<p id="resetStatus"></p>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+
+// Moved verbatim from main_page.html's own Danger zone script -- same
+// SCOPE_LABELS, same kcConfirm-gated flow (this pass's hard requirement:
+// destructive actions keep their confirm step across the move). kcConfirm
+// comes from app.js, loaded via a deferred <script> in <head>; safe here
+// because this only runs inside a click handler, which cannot fire before
+// app.js has executed.
+var SCOPE_LABELS = {
+  wifi: 'Wi-Fi credentials only',
+  kiln: 'kiln config only (zones, rules, relay cycles, run state)',
+  profiles: 'saved fire profiles only',
+  all: 'EVERYTHING (factory default)',
+};
+document.querySelectorAll('.danger-btn').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var scope = b.getAttribute('data-scope');
+    var label = SCOPE_LABELS[scope] || scope;
+    if (!kcConfirm('This permanently erases ' + label + ' and reboots the board right now. ' +
+                 'There is no undo. Continue?')) {
+      return;
+    }
+    var status = document.getElementById('resetStatus');
+    status.textContent = 'Erasing and rebooting...';
+    fetch('/api/factory_reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'scope=' + encodeURIComponent(scope),
+    }).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (res) {
+      status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
+    }).catch(function () {
+      status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+    });
+  });
+});
+</script>
+</body>
+</html>

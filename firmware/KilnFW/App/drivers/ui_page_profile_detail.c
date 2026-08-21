@@ -15,6 +15,7 @@
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_segments.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 #include "zones_http.h"
 
 static const char *TAG = "ui_page_profile_detail";
@@ -33,21 +34,35 @@ static const char *TAG = "ui_page_profile_detail";
  *       and even a three-way split of ~480px content
  *       width leaves each button comfortably over the
  *       72px touch-width minimum)
- *     gap ......................................... 4px
- *     nav row (Back) .............................. 44px
  *                                                 ------
- *                                                 ~208px  <= 267px  OK
+ *                                                 ~164px  <= 267px  OK
+ *
+ * The nav row's Back button moved into the shared top bar (ui_topbar.c) in
+ * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
+ * cost here.
  *
  * No paging needed -- one profile's summary fits a single screen. */
 
 static uint8_t s_profile_id;
-static const char *s_back_page = "profiles_mine";
+/* Back destination is NOT fixed like every other page in this pass -- this
+ * page is reached from both ui_page_profiles_mine.c and
+ * ui_page_profiles_builtin_list.c, and ui_page_profile_detail_set_id() is how
+ * the caller says which one to return to. ui_topbar_cfg_t::back_page is a
+ * plain `const char *` handed to nav_cb as event user_data and read again at
+ * TAP time, not copied at build time (ui_topbar.h's own comment: "The string
+ * is not copied, so pass a literal") -- so a mutable static buffer works just
+ * as well as a literal as long as the pointer itself never moves and always
+ * holds a valid page name by the time a tap can happen. This buffer is that:
+ * ui_topbar_create() is handed its address once, at build time, and
+ * ui_page_profile_detail_set_id() rewrites its CONTENTS (never reallocates
+ * it) on every navigation here. */
+static char s_back_target[32] = "profiles_mine";
 
-static lv_obj_t *s_title_label;
 static lv_obj_t *s_info_card;
 static lv_obj_t *s_name_label;
 static lv_obj_t *s_segcount_label;
 static lv_obj_t *s_family_label;
+static ui_topbar_t s_tb;
 
 static bool load_current(profile_t *out, const builtin_profile_t **out_builtin)
 {
@@ -68,14 +83,14 @@ static profile_seg_verdict_t current_verdict(const profile_t *prof)
  * calls build() again; the labels must be repainted some other way. */
 static void refresh(void)
 {
-    if (!s_title_label) {
+    if (!s_info_card) {
         return; /* not built yet */
     }
 
     profile_t prof;
     const builtin_profile_t *b = NULL;
     if (!load_current(&prof, &b)) {
-        lv_label_set_text(s_title_label, "Profile Detail");
+        ui_topbar_set_title(&s_tb, "Profile Detail");
         lv_label_set_text(s_name_label, "(not found)");
         lv_label_set_text(s_segcount_label, "");
         lv_label_set_text(s_family_label, "");
@@ -84,7 +99,7 @@ static void refresh(void)
     }
 
     const char *title = b ? b->title : prof.name;
-    lv_label_set_text(s_title_label, title);
+    ui_topbar_set_title(&s_tb, title);
     lv_label_set_text(s_name_label, prof.name);
 
     char segbuf[32];
@@ -116,19 +131,13 @@ static void refresh(void)
 void ui_page_profile_detail_set_id(uint8_t profile_id, const char *back_page)
 {
     s_profile_id = profile_id;
-    s_back_page = back_page ? back_page : "profiles_mine";
+    snprintf(s_back_target, sizeof(s_back_target), "%s", back_page ? back_page : "profiles_mine");
     refresh();
 }
 
 uint8_t ui_page_profile_detail_get_id(void)
 {
     return s_profile_id;
-}
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show(s_back_page);
 }
 
 static void segments_nav_cb(lv_event_t *e)
@@ -253,11 +262,13 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_title_label = lv_label_create(scr);
-    lv_obj_set_width(s_title_label, lv_pct(100));
-    lv_label_set_long_mode(s_title_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(s_title_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(s_title_label, "Profile Detail");
+    /* back_page points at s_back_target, a mutable static buffer, not a
+     * literal -- see that buffer's own comment above for why that's safe. */
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Profile Detail",
+        .back_page = s_back_target,
+        .show_home = true,
+    }, &s_tb);
 
     s_info_card = lv_obj_create(scr);
     lv_obj_set_width(s_info_card, lv_pct(100));
@@ -295,25 +306,7 @@ lv_obj_t *ui_page_profile_detail_build(void)
     build_action_button(action_row, "Edit", UI_THEME_COLOR_CARD, edit_btn_cb);
     build_action_button(action_row, "Start", UI_THEME_ACCENT_4, start_btn_cb);
 
-    lv_obj_t *nav_row = lv_obj_create(scr);
-    lv_obj_set_width(nav_row, lv_pct(100));
-    lv_obj_set_height(nav_row, 44);
-    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nav_row, 0, 0);
-    lv_obj_set_style_pad_all(nav_row, 0, 0);
-    lv_obj_remove_flag(nav_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *back = lv_button_create(nav_row);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    ui_topbar_raise(&s_tb);
 
     refresh();
     return scr;

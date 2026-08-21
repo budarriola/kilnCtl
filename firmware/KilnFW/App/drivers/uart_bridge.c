@@ -18,6 +18,7 @@
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
+#include "kiln_ui.h"
 #include "lvgl_port.h"
 #include "relay_authority.h"
 #include "settings.h"
@@ -68,6 +69,14 @@ static void bridge_put_u16_le(uint8_t *out, uint16_t value)
 {
     out[0] = (uint8_t)(value & 0xFFu);
     out[1] = (uint8_t)((value >> 8) & 0xFFu);
+}
+
+static void bridge_put_u32_le(uint8_t *out, uint32_t value)
+{
+    out[0] = (uint8_t)(value & 0xFFu);
+    out[1] = (uint8_t)((value >> 8) & 0xFFu);
+    out[2] = (uint8_t)((value >> 16) & 0xFFu);
+    out[3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
 static float bridge_f32_le(const uint8_t *bytes)
@@ -1273,6 +1282,12 @@ static void touch_bridge_task(void *arg)
         if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
             continue;
         }
+        /* Whether a TOUCH_CMD_INJECT message reaches this point is now
+         * provable on demand instead of by a per-message push log: a
+         * successful injection increments lvgl_port's
+         * injected_delivered_count (read back via TOUCH_CMD_GET_STATE, see
+         * that case below), which only happens once this task has dequeued
+         * the message, decoded it, and called lvgl_port_inject_touch(). */
         if (msg.length < 1) {
             ESP_LOGW(TAG, "touch: empty payload -- rejected");
             continue;
@@ -1297,6 +1312,55 @@ static void touch_bridge_task(void *arg)
                     reply[4] = (uint8_t)((idle_ms >> 16) & 0xFFu);
                     reply[5] = (uint8_t)((idle_ms >> 24) & 0xFFu);
                     reply_len = 6;
+
+                    /* APPENDED FIELDS ONLY past this point (2026-08-21) --
+                     * pull-based touch/UI diagnostics, added to settle
+                     * whether input is really stuck disabled, whether
+                     * kiln_ui_show() ever reaches its exit, and whether
+                     * touch_read_cb is ever polled, without relying on
+                     * uart_log_bridge's queue (which was proven to drop
+                     * lines during exactly the boot burst under
+                     * investigation -- see lvgl_port.c and kiln_ui.c's
+                     * counter comments). An older PC-side build only reads
+                     * bytes [0..5]; this never reorders or resizes them, only
+                     * grows reply_len, so a short-reply-tolerant reader keeps
+                     * working against a newer board and vice versa.
+                     *
+                     * Layout (little-endian u32s), bytes [6..22]:
+                     *   [6]      input_enabled (1 = LVGL indev enabled)
+                     *   [7..10]  touch_read_cb_count
+                     *   [11..14] injected_delivered_count
+                     *   [15..18] kiln_ui_show entries
+                     *   [19..22] kiln_ui_show completed exits
+                     * 17 bytes appended; 6 + 17 = 23 total reply bytes, well
+                     * under UART_PROTO_MAX_PAYLOAD (253) -- see this file's
+                     * BRIDGE_REPLY_MAX, sized to that same constant. Two more
+                     * fields (indev_exists at [23], timer_handler_calls at
+                     * [24..27]) briefly lived past this point as a one-off
+                     * root-cause probe for the LVGL-task-never-starts bug;
+                     * removed 2026-08-21 once that bug was fixed and the
+                     * Python decoder was confirmed to never read either. */
+                    bool input_enabled = false;
+                    uint32_t read_cb_count = 0, injected_count = 0;
+                    lvgl_port_get_touch_diag(&input_enabled, &read_cb_count, &injected_count);
+                    uint32_t show_entries = 0, show_exits = 0;
+                    kiln_ui_get_show_diag(&show_entries, &show_exits);
+
+                    reply[6] = input_enabled ? 1u : 0u;
+                    bridge_put_u32_le(&reply[7], read_cb_count);
+                    bridge_put_u32_le(&reply[11], injected_count);
+                    bridge_put_u32_le(&reply[15], show_entries);
+                    bridge_put_u32_le(&reply[19], show_exits);
+                    /* indev_exists and timer_handler_calls used to be
+                     * appended here (bytes [23] and [24..27]) as a one-off
+                     * root-cause probe for the LVGL-task-never-starts bug.
+                     * That bug is fixed (static .bss stack, see the fix
+                     * commit) and the Python decoder never read either field
+                     * -- removed 2026-08-21 rather than carried forward as
+                     * permanent wire format. reply_len shrinks from 28 to 23
+                     * to match; the decoder stays tolerant of a shorter reply
+                     * from older firmware regardless. */
+                    reply_len = 23;
                 }
                 break;
             }
@@ -1319,6 +1383,22 @@ static void touch_bridge_task(void *arg)
                  * lvgl_port_task) reads what it wrote. */
                 err = screen_idle_inject_touch(ctx->idle, inj_x, inj_y, inj_pressed);
                 lvgl_port_inject_touch(inj_x, inj_y, inj_pressed);
+                break;
+            }
+            case TOUCH_CMD_SET_TAP_DUMP: {
+                if (!bridge_args_ok("touch", &msg, 2)) { rejected = true; break; }
+                kiln_ui_set_auto_tap_dump(msg.payload[1] != 0);
+                err = ESP_OK;
+                break;
+            }
+            case TOUCH_CMD_LOG_TAP_TARGETS: {
+                /* No arguments -- the subcommand byte alone is the whole
+                 * frame, which msg.length >= 1 above has already
+                 * established. Fire-and-forget, same as INJECT and
+                 * SET_TAP_DUMP: the actual dump goes out as ESP_LOGI lines
+                 * over uart_log_bridge, not as a reply on this task. */
+                kiln_ui_log_tap_targets();
+                err = ESP_OK;
                 break;
             }
             default:

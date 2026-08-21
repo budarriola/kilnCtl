@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kilnCtl - Thermocouples &amp; Zones</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. This
+     page has no <link rel="stylesheet" href="/theme.css"> (it keeps its own
+     full inline copy of the --ui-* palette instead, see the comment on this
+     file's :root block above) -- not changed by this pass since zones_http.c,
+     which owns this page's serving handler, is out of scope here; nav.js's
+     and app.js's CSS classes (theme.css) only need the --bg/--fg/--border/
+     --button-bg/--card-bg/--ui-* names, which this page already defines
+     locally with the same spelling, so they work unmodified either way. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
 <style>
   /* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui_theme.h,
      TODO.md 10.6). Same hex values as the LCD side; duplicated verbatim in each of
@@ -96,7 +107,9 @@
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<a href="/">&larr; Dashboard</a>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar/
+     bottom-nav (UI_PLAN.md Web section 4 item 1) now provides this on every
+     page. -->
 <h1>Thermocouples &amp; Zones</h1>
 <p>Each zone reads one or more MAX31856 thermocouple channels -- pick which
 channels feed a zone below; when more than one is checked, the zone's control

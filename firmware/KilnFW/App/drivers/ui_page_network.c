@@ -11,6 +11,7 @@
 
 #include "kiln_ui.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 #include "wifi_prov.h"
 #include "wifi_status_ui.h"
 
@@ -86,6 +87,18 @@
 // instead of the variable-height `content` column: it's now always on
 // screen regardless of how tall the content below happens to be, and it
 // also gets content's budget back (one less 36-44px row to fit).
+//
+// 2026-08-21 icon-topbar pass: the hand-rolled title `bar` + in-bar Back
+// button above were replaced with the shared ui_topbar.c module (also adds a
+// Home icon, per the "Back/Prev/Next/Home should always be icons at the top"
+// ask). Because Back was already living in the fixed-height bar rather than
+// in `content` (see the 2026-08-19 fix just above), this swap frees no
+// additional content px -- the win here is consistency (one nav-icon
+// implementation for every page) and the Home icon, not new content budget.
+// The full-screen connect modal (build_connect_modal(), built last) still
+// needs to sit ABOVE the icon proxy while shown, so ui_topbar_raise() is
+// called BEFORE that build call rather than at the very end of this
+// function -- see the comment at that call site.
 // (2) "Freezes often": scan_btn_cb() used to call wifi_prov_scan() directly,
 // which calls esp_wifi_scan_start(..., block=true) -- a genuinely blocking
 // full-channel scan that wifi_prov.c's own header comment (see "CAUTION"
@@ -440,11 +453,6 @@ static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LE
  * is enough -- set right before lv_msgbox_create() below. */
 static char s_pending_forget_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
 
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("config");
-}
 
 static void refresh_saved_list(void);
 static void refresh_cb(lv_timer_t *timer);
@@ -991,33 +999,12 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *title = lv_label_create(bar);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Network / Wi-Fi");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
-
-    /* Back, in the fixed-height bar rather than at the bottom of the
-     * variable-height content column below -- see this file's 2026-08-19
-     * header comment. Always on screen regardless of how tall content gets. */
-    lv_obj_t *back = lv_button_create(bar);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_align(back, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Network / Wi-Fi",
+        .back_page = "config",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
@@ -1267,6 +1254,17 @@ lv_obj_t *ui_page_network_build(void)
     lv_obj_t *ap_qr_caption = lv_label_create(s_ap_section);
     lv_obj_set_style_text_color(ap_qr_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(ap_qr_caption, "Scan to join from a phone");
+
+    /* Raise the top bar's icon proxy BEFORE the connect modal is built, not
+     * after -- ui_topbar.h requires raise() to run after the content area
+     * exists, but this page also has a full-screen modal (s_connect_modal)
+     * that must stay ABOVE the icons when it is shown, the same way it used
+     * to sit above the old in-bar Back button (both are ordinary children of
+     * `scr`, and LVGL's hit-test/paint order is z-order-by-child-index, so
+     * whichever is added later wins). Raising first, then building the modal
+     * last, preserves that: the modal still covers the whole screen
+     * including the icons while a connect attempt is in progress. */
+    ui_topbar_raise(&tb);
 
     /* Connect modal -- built last so it's the topmost child in z-order
      * (LVGL's hit-test walks children highest-index-first, ui_theme.h's

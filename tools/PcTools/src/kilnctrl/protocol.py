@@ -231,6 +231,13 @@ DISPLAY_NATIVE_HEIGHT = 320
 # screen" without physical hardware.
 TOUCH_CMD_GET_STATE = 0x01
 TOUCH_CMD_INJECT = 0x02
+#: Turns the AUTOMATIC per-page-switch tap-target dump on/off (off by
+#: default); fire-and-forget, no reply. Payload: enable(u8).
+TOUCH_CMD_SET_TAP_DUMP = 0x03
+#: Requests an immediate tap-target dump for whatever screen is currently
+#: loaded; fire-and-forget, no reply -- the dump itself arrives as ESP_LOGI
+#: lines over the device log, not as a reply on this task.
+TOUCH_CMD_LOG_TAP_TARGETS = 0x04
 
 # --- SAFETY subcommands (opto-isolated link to the RP2040) ------------------
 #

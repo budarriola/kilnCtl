@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Diagnostics</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  /* Page-local palette, same --bg/--fg/etc interface as every other page in
+     this component (theme.css's header comment / readiness_page.html) --
+     only the dark variant points at the shared --ui-* tokens so toggled-dark
+     and default-system-dark match the LCD. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --warn: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+  }
+  body { font-family: sans-serif; max-width: 640px; margin: 2em auto 5em; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin: 1.4em 0 0.4em; }
+  p.lead { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.2em 0.9em; margin-bottom: 0.6em; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1em;
+         padding: 0.5em 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  .row .label { color: var(--fg); }
+  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  /* The one number this page exists to surface -- see the "why this matters"
+     paragraph below it. Same visual weight as a warning row, not because it
+     IS a warning right now, but because it's the number to watch. */
+  .row.headline .value { color: var(--fg); font-weight: bold; font-size: 1.05em; }
+  .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }
+  .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                  padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
+  .stale-banner.show { display: block; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/">&larr; Dashboard</a>
+<h1>Diagnostics</h1>
+<p class="lead">The web twin of the LCD's Diagnostics and Board Health pages
+(UI_PLAN.md's "page structure rework") -- everything below reads GET
+/api/status and GET /api/board_temps, the same live snapshots the panel's own
+refresh timers read, not a second implementation of either.</p>
+
+<div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
+
+<h2>Firmware</h2>
+<div class="card">
+  <div class="row"><span class="label">Version</span><span class="value" id="fwVersion">--</span></div>
+  <div class="row"><span class="label">Build date/time</span><span class="value" id="fwBuild">--</span></div>
+  <div class="row"><span class="label">Uptime</span><span class="value" id="uptime">--</span></div>
+  <div class="row"><span class="label">Last reset reason</span><span class="value" id="resetReason">--</span></div>
+</div>
+
+<h2>Memory</h2>
+<div class="card">
+  <div class="row headline"><span class="label">Internal DRAM &mdash; largest free block</span><span class="value" id="heapIntLargest">--</span></div>
+  <div class="row"><span class="label">Internal DRAM &mdash; free now</span><span class="value" id="heapIntFree">--</span></div>
+  <div class="row"><span class="label">Internal DRAM &mdash; worst-case free</span><span class="value" id="heapIntMin">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; free now</span><span class="value" id="heapSpiFree">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; largest free block</span><span class="value" id="heapSpiLargest">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; worst-case free</span><span class="value" id="heapSpiMin">--</span></div>
+</div>
+<p class="note">"Largest free block" (not "free bytes") is the number that
+matters on this board: internal DRAM is its tight resource, not total heap.
+This firmware has measured a 9216-byte largest free block against LVGL's
+8192-byte task stack allocation -- about 1&nbsp;KB of margin. If the internal
+DRAM row above ever drops close to 8&nbsp;KB, LVGL's stack allocation is the
+thing at risk, not some other subsystem's heap use. PSRAM's numbers exist for
+completeness; this board's 8&nbsp;MB octal PSRAM has an order of magnitude
+more slack and is not the resource to watch.</p>
+
+<h2>Board health</h2>
+<div class="card">
+  <div class="row"><span class="label">ESP32-S3 die temp</span><span class="value" id="esp32Temp">--</span></div>
+  <div id="cjRows"></div>
+</div>
+<p class="note">Cold-junction temperatures are each MAX31856's own local-
+ambient reading (board_temps.c), a different number from the kiln-process
+temperature shown on the dashboard -- this is board/enclosure health, not
+firing progress.</p>
+
+<h2>Subsystems &amp; storage</h2>
+<div class="card">
+  <div class="row"><span class="label">I/O board</span><span class="value" id="ioReady">--</span></div>
+  <div class="row"><span class="label">Thermocouple bus</span><span class="value" id="thermoReady">--</span></div>
+  <div class="row"><span class="label">Safety link</span><span class="value" id="safetyReady">--</span></div>
+  <div class="row"><span class="label">Zone config</span><span class="value" id="zonesValid">--</span></div>
+  <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
+</div>
+<div class="card" id="nvsCard"><div class="row"><span class="label">NVS sections</span><span class="value">loading&hellip;</span></div></div>
+<p class="note">More detail (safety-processor link stats, per-channel
+thermocouple fault registers) lives on their own pages: <a href="/safety">Safety</a> and <a href="/diagnostics/thermo">Thermocouple Faults</a>.</p>
+
+<script src="/nav.js"></script>
+<script src="/app.js"></script>
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  function fmtKB(bytes) {
+    if (bytes == null) return 'n/a';
+    return (bytes / 1024).toFixed(1) + ' KB';
+  }
+  function fmtUptime(s) {
+    if (s == null) return 'n/a';
+    var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return (d > 0 ? d + 'd ' : '') + pad(h) + ':' + pad(m) + ':' + pad(sec);
+  }
+  function set(id, text) { document.getElementById(id).textContent = text; }
+
+  var lastGoodAt = null;
+  var failCount = 0;
+
+  function renderStatus(st) {
+    set('fwVersion', st.fw_version_known ? (st.fw_version || 'n/a') : 'n/a');
+    set('fwBuild', st.fw_version_known ? (st.fw_build || 'n/a') : 'n/a');
+    set('uptime', fmtUptime(st.uptime_s));
+    set('resetReason', st.reset_reason || 'n/a');
+
+    var hi = st.heap_internal || {}, hs = st.heap_spiram || {};
+    set('heapIntFree', fmtKB(hi.free));
+    set('heapIntLargest', fmtKB(hi.largest_free_block));
+    set('heapIntMin', fmtKB(hi.min_free));
+    set('heapSpiFree', fmtKB(hs.free));
+    set('heapSpiLargest', fmtKB(hs.largest_free_block));
+    set('heapSpiMin', fmtKB(hs.min_free));
+
+    set('ioReady', st.io_ready ? 'ready' : 'not attached');
+    set('thermoReady', st.thermo_ready ? 'ready' : 'not attached');
+    set('safetyReady', st.safety_ready ? 'linked' : 'not linked');
+    set('zonesValid', st.zones_config_valid ? 'valid' : 'FAILED TO LOAD');
+    set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a');
+
+    var nvsCard = document.getElementById('nvsCard');
+    if (st.nvs_sections && st.nvs_sections.length) {
+      var html = '';
+      for (var i = 0; i < st.nvs_sections.length; i++) {
+        var s = st.nvs_sections[i];
+        var ok = s.present && s.mounted;
+        html += '<div class="row"><span class="label">' + escHtml(s.name) + '</span>' +
+                '<span class="value" style="color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '">' +
+                (s.present ? 'present' : 'MISSING') + (s.mounted ? ', mounted' : ', NOT MOUNTED') +
+                '</span></div>';
+      }
+      nvsCard.innerHTML = html;
+    } else {
+      nvsCard.innerHTML = '<div class="row"><span class="label">NVS sections</span><span class="value">n/a</span></div>';
+    }
+  }
+
+  function renderBoardTemps(bt) {
+    function fmtC(v) { return (v == null) ? 'n/a' : v.toFixed(1) + ' °C'; }
+    set('esp32Temp', fmtC(bt.esp32_c));
+    var rows = '';
+    var cj = bt.thermo_cj_c || [];
+    for (var i = 0; i < cj.length; i++) {
+      rows += '<div class="row"><span class="label">MAX31856 ch ' + i + ' cold-junction</span>' +
+              '<span class="value">' + fmtC(cj[i]) + '</span></div>';
+    }
+    document.getElementById('cjRows').innerHTML = rows || '<div class="row"><span class="label">MAX31856 channels</span><span class="value">n/a</span></div>';
+  }
+
+  function escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function setStale(staleSeconds) {
+    var banner = document.getElementById('staleBanner');
+    if (staleSeconds == null) {
+      banner.classList.remove('show');
+    } else {
+      document.getElementById('staleAge').textContent = staleSeconds;
+      banner.classList.add('show');
+    }
+  }
+
+  function poll() {
+    Promise.all([
+      fetch('/api/status').then(function (r) { return r.json(); }),
+      fetch('/api/board_temps').then(function (r) { return r.json(); })
+    ]).then(function (results) {
+      renderStatus(results[0]);
+      renderBoardTemps(results[1]);
+      lastGoodAt = Date.now();
+      failCount = 0;
+      setStale(null);
+    }).catch(function () {
+      failCount++;
+      if (lastGoodAt != null) {
+        setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+      }
+    });
+  }
+
+  /* Pauses while the tab is hidden and backs off after consecutive failures
+     -- UI_PLAN.md section 4 item 3's shared-poller behavior; this page has
+     its own small poll loop rather than depending on /app.js's shared one
+     existing yet, since that module is landing in this same session's
+     parallel work. */
+  var timer = null;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    if (document.visibilityState === 'hidden') return;
+    var delay = 2000 * Math.min(1 + failCount, 8);
+    timer = setTimeout(function () { poll(); schedule(); }, delay);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { poll(); schedule(); }
+  });
+  poll();
+  schedule();
+})();
+</script>
+</body>
+</html>

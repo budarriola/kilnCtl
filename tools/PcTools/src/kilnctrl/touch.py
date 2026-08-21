@@ -92,6 +92,24 @@ class TouchClient:
             payload=devices.touch_inject(x, y, pressed),
         )
 
+    def set_tap_dump(self, enable: bool) -> SendResult:
+        """Turn the firmware's automatic per-page-switch tap-target dump
+        on/off, fire-and-forget -- see devices.touch_set_tap_dump."""
+        return self.link.send(
+            dst_task=self.task_id, src_task=self.task_id,
+            payload=devices.touch_set_tap_dump(enable),
+        )
+
+    def log_tap_targets(self) -> SendResult:
+        """Request an on-demand tap-target dump for the current screen,
+        fire-and-forget -- see devices.touch_log_tap_targets. The dump itself
+        arrives as ESP_LOGI lines over the device log (get_device_log /
+        get_device_log_json), not as a reply here."""
+        return self.link.send(
+            dst_task=self.task_id, src_task=self.task_id,
+            payload=devices.touch_log_tap_targets(),
+        )
+
     # -- queries -----------------------------------------------------------
     def get_state(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> TouchState:
         """Whether the screen is on and how long it's been idle."""

@@ -31,6 +31,9 @@
 #ifndef KILN_UI_H
 #define KILN_UI_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "esp_err.h"
 #include "lvgl.h"
 
@@ -80,6 +83,22 @@ const char *kiln_ui_current_page(void);
  * for bench/diagnostic use, not for anything on a hot path -- see the volume
  * note on kiln_ui_show()'s own dump. */
 void kiln_ui_log_tap_targets(void);
+
+/* Turns the AUTOMATIC tap-target dump inside kiln_ui_show() on/off -- off by
+ * default. That automatic dump is a per-page-switch flood risk (see
+ * kiln_ui.c's s_auto_tap_dump comment); kiln_ui_log_tap_targets() above is
+ * unaffected by this flag and always dumps on request. Wired to a TOUCH
+ * bridge subcommand in uart_bridge.c so a PC client can turn the automatic
+ * dump on only while it is actually driving navigation and wants every
+ * switch's targets logged without an explicit call after each one. */
+void kiln_ui_set_auto_tap_dump(bool enable);
+
+/* Pull-based kiln_ui_show() entry/exit counters, wired into
+ * TOUCH_CMD_GET_STATE's reply by uart_bridge.c -- see the s_show_entries /
+ * s_show_exits declaration comment in kiln_ui.c. Safe to call from any task
+ * (single-word reads of counters written only from kiln_ui_show()'s own
+ * task). Either argument may be NULL. */
+void kiln_ui_get_show_diag(uint32_t *show_entries, uint32_t *show_exits);
 
 #ifdef __cplusplus
 }

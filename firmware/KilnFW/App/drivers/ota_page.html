@@ -6,6 +6,10 @@
 <title>kilnCtl - Firmware Update</title>
 <link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
 <style>
   /* Same page-local-palette convention as rules_page.html/readiness_page.html
      -- see theme.css's header comment. Only what's specific to this page
@@ -64,7 +68,9 @@
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<a href="/">&larr; Dashboard</a>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar/
+     bottom-nav (UI_PLAN.md Web section 4 item 1) now provides this on every
+     page. -->
 <h1>Firmware Update</h1>
 <p>Push a new image to the ESP32-S3 main controller or relay one to the RP2040
 safety processor over the isolated UART link. Both require the Wi-Fi AP

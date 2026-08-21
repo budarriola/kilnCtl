@@ -6,6 +6,13 @@
 <title>kilnCtl Wi-Fi Setup</title>
 <link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below.
+     Reachable during AP-only provisioning too (see nav.js/app.js's own
+     comments): both are registered on the same s_server this file's
+     httpd_start() creates, regardless of provisioning state. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
 <style>
   /* Page-local palette (docs/UI_THEME.md / App/drivers/ui_theme.h, TODO.md
      10.6/10.6a). The shared --ui-* palette and .theme-btn now live in

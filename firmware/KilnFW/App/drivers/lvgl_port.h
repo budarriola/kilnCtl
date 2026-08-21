@@ -133,6 +133,24 @@ void lvgl_port_set_input_enabled(bool enabled);
  * touch_read_cb's comment for why this isn't gated). */
 void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed);
 
+/* Pull-based touch/input diagnostics -- see the s_input_enabled /
+ * s_touch_read_cb_count / s_injected_delivered_count declaration comment in
+ * lvgl_port.c for what each counter means and why it replaced push-based
+ * (log-line) evidence. Any argument may be NULL. Safe to call from any task:
+ * each field is a single word, written from exactly one task apiece, so
+ * there is nothing here that needs a lock beyond that single-writer
+ * guarantee. Wired into TOUCH_CMD_GET_STATE's reply by uart_bridge.c. */
+void lvgl_port_get_touch_diag(bool *input_enabled, uint32_t *touch_read_cb_count,
+                               uint32_t *injected_delivered_count);
+
+/* ONE-OFF root-cause probe -- see lvgl_port.c's definition comment. Not part
+ * of the permanent counter set the task asked for; kept only long enough to
+ * settle whether lv_indev_create() itself failed. */
+bool lvgl_port_indev_exists(void);
+
+/* ONE-OFF root-cause probe -- see lvgl_port.c's definition comment. */
+void lvgl_port_get_timer_handler_calls(uint32_t *calls);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Thermocouple Faults</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --warn: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+  }
+  body { font-family: sans-serif; max-width: 640px; margin: 2em auto 5em; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
+               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  p.lead { color: var(--muted); }
+  .chan { background: var(--card-bg); border: 1px solid var(--border); border-left: 4px solid var(--ok);
+          border-radius: var(--ui-radius); padding: 0.6em 0.9em; margin-bottom: 0.6em; }
+  .chan.faulted { border-left-color: var(--warn); }
+  .chan .title { font-weight: bold; margin-bottom: 0.3em; }
+  .chan .faults { margin-bottom: 0.2em; }
+  .chan .faults.faulted { color: var(--warn); }
+  .chan .faults.ok { color: var(--muted); }
+  .chan .subrow { font-size: 0.9em; color: var(--muted); }
+  .chan .subrow .bad { color: var(--warn); }
+  .note { font-size: 0.82em; color: var(--muted); margin: 0.6em 0 0.8em; }
+  .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                  padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
+  .stale-banner.show { display: block; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/diagnostics">&larr; Diagnostics</a> &middot; <a href="/">Dashboard</a>
+<h1>Thermocouple Faults</h1>
+<p class="lead">The web twin of the LCD's Thermocouple Faults page -- every
+MAX31856 channel's fault-register bits, FAULT-pin state, and SPI transport
+health, straight from GET /api/status's "channels" array. Visibility only,
+same scope as the LCD page: no "clear faults" action here either.</p>
+
+<div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
+
+<div id="channels"><p>Loading&hellip;</p></div>
+
+<p class="note">Each channel's "control fault_guard" line, where shown, comes
+from GET /api/profile_exec's per-zone status, matched to this channel by
+index -- this codebase's legacy convention of zone N reading channel N
+(zones_config_apply_cal()'s scope note). It reports the profile executor's
+own guard-trip reason for that zone's control loop, which is a <em>different</em>
+signal from the MAX31856 fault-register bits above it: a zone can show a
+control fault_guard with a perfectly healthy thermocouple (e.g. a cross-zone
+plausibility trip), and a channel can show OPEN/OVUV faults with no zone
+control fault at all (e.g. no profile running). They are shown together here
+because both answer "what's wrong with this channel," not because they are
+the same measurement.</p>
+
+<script src="/nav.js"></script>
+<script src="/app.js"></script>
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  /* Same MAX31856_MASK_*/MAX31856_FAULT_* bit layout as MAX31856.h and
+     ui_page_thermo_faults.c's format_fault_summary() -- SR shares bit
+     positions/names with the register MASK for the low six bits, plus two
+     SR-only bits for the top two (TCRANGE/CJRANGE). */
+  var FAULT_BITS = [
+    [0x01, 'OPEN'], [0x02, 'OVUV'], [0x04, 'TCLOW'], [0x08, 'TCHIGH'],
+    [0x10, 'CJLOW'], [0x20, 'CJHIGH'], [0x40, 'TCRANGE'], [0x80, 'CJRANGE']
+  ];
+  function faultSummary(status) {
+    if (!status) return 'OK';
+    var names = [];
+    for (var i = 0; i < FAULT_BITS.length; i++) {
+      if (status & FAULT_BITS[i][0]) names.push(FAULT_BITS[i][1]);
+    }
+    return names.length ? names.join(', ') : 'OK';
+  }
+
+  function escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function render(st, execSt) {
+    var channels = st.channels || [];
+    var zones = (execSt && execSt.zones) || [];
+    var el = document.getElementById('channels');
+    if (!st.thermo_ready || !channels.length) {
+      el.innerHTML = '<p>No thermocouple channels reporting (bus not attached, or nothing initialized).</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < channels.length; i++) {
+      var c = channels[i];
+      var faulted = (c.fault_status !== 0) || c.spi_failed || !c.valid;
+      var summary = faultSummary(c.fault_status);
+      var zone = null;
+      for (var z = 0; z < zones.length; z++) {
+        if (zones[z].zone === c.channel) { zone = zones[z]; break; }
+      }
+      html += '<div class="chan' + (faulted ? ' faulted' : '') + '">' +
+              '<div class="title">Channel ' + c.channel + '</div>' +
+              '<div class="faults ' + (c.fault_status ? 'faulted' : 'ok') + '">' + escHtml(summary) + '</div>' +
+              '<div class="subrow">FAULT pin: ' + (c.fault_status ? '<span class="bad">yes</span>' : 'no') +
+              '  &middot;  SPI: ' + (c.spi_failed ? '<span class="bad">FAILED</span>' : 'ok') +
+              '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
+              '  &middot;  CJ: ' + (c.cj_c != null ? c.cj_c.toFixed(1) + ' °C' : 'n/a') + '</div>' +
+              (zone ? '<div class="subrow">Control fault_guard: ' +
+                     (zone.faulted ? '<span class="bad">' + escHtml(zone.fault_guard) + '</span>' : 'none') +
+                     '</div>' : '') +
+              '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  var lastGoodAt = null;
+  var failCount = 0;
+  function setStale(staleSeconds) {
+    var banner = document.getElementById('staleBanner');
+    if (staleSeconds == null) {
+      banner.classList.remove('show');
+    } else {
+      document.getElementById('staleAge').textContent = staleSeconds;
+      banner.classList.add('show');
+    }
+  }
+  function poll() {
+    Promise.all([
+      fetch('/api/status').then(function (r) { return r.json(); }),
+      fetch('/api/profile_exec').then(function (r) { return r.json(); }).catch(function () { return null; })
+    ]).then(function (results) {
+      render(results[0], results[1]);
+      lastGoodAt = Date.now();
+      failCount = 0;
+      setStale(null);
+    }).catch(function () {
+      failCount++;
+      if (lastGoodAt != null) setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+    });
+  }
+  var timer = null;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    if (document.visibilityState === 'hidden') return;
+    var delay = 1500 * Math.min(1 + failCount, 8);
+    timer = setTimeout(function () { poll(); schedule(); }, delay);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { poll(); schedule(); }
+  });
+  poll();
+  schedule();
+})();
+</script>
+</body>
+</html>

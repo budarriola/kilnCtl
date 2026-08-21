@@ -54,7 +54,9 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     set(KILNCTL_GZIP_ASSETS
         "wifi_provision_page.html" "main_page.html"
         "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css"
-        "ota_page.html")
+        "ota_page.html" "nav.js" "app.js"
+        "diagnostics_page.html" "safety_page.html" "thermo_faults_page.html"
+        "settings_page.html" "manual_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
@@ -115,6 +117,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "ui_num_pad.c"
                        "touch_cal_store.c"
                        "ui_theme.c"
+                       "ui_topbar.c"
                        "wifi_status_ui.c"
                        "NS2009.c"
                        "screen_idle.c"
@@ -129,6 +132,8 @@ idf_component_register(SRCS "MAX31856.c"
                        "nvs_report.c"
                        "factory_reset.c"
                        "dashboard_http.c"
+                       "diagnostics_http.c"
+                       "settings_http.c"
                        "ota_auth.c"
                        "ota_interlock.c"
                        "ota_record.c"
@@ -166,7 +171,8 @@ idf_component_register(SRCS "MAX31856.c"
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_driver_tsens
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
-                                esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns)
+                                esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
+                       PRIV_REQUIRES spi_flash)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it

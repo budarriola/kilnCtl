@@ -4,9 +4,9 @@
 #include <string.h>
 
 #include "MAX31856.h"
-#include "kiln_ui.h"
 #include "thermo_owner.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 // TODO.md "Diagnostics / System info page" item's thermocouple-IC half,
 // split into its own page per explicit user request ("for the diagnostic
@@ -67,12 +67,6 @@ static const char *TAG __attribute__((unused)) = "ui_page_thermo_faults";
 
 static lv_obj_t *s_fault_label[MAX31856_CHANNEL_COUNT];
 static lv_obj_t *s_status_label[MAX31856_CHANNEL_COUNT];
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("config");
-}
 
 /* Appends every asserted bit's name to buf (comma-separated), or "OK" if
  * fault_status is 0. Reuses MAX31856_MASK_* for the low six bits (SR shares
@@ -217,17 +211,12 @@ lv_obj_t *ui_page_thermo_faults_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *title = lv_label_create(bar);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Thermocouple Faults");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Thermocouple Faults",
+        .back_page = "config",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
@@ -239,8 +228,11 @@ lv_obj_t *ui_page_thermo_faults_build(void)
     lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Grows to fill what content has left after the Back row, and does NOT
-     * scroll. 2026-08-20: this was a fixed UI_PAGE_THERMO_FAULTS_LIST_HEIGHT_PX
+    /* Grows to fill all of content -- the in-content Back button that used
+     * to sit below this list moved into the shared top bar (ui_topbar.c) in
+     * the 2026-08-21 icon-topbar pass, so this list's flex_grow(1) now claims
+     * the full ~264px content column instead of splitting it with a 44px+4px
+     * Back row. Does NOT scroll. 2026-08-20: this was a fixed UI_PAGE_THERMO_FAULTS_LIST_HEIGHT_PX
      * (180px) internally-scrollable box holding three
      * UI_PAGE_THERMO_FAULTS_ROW_HEIGHT_PX (72px) rows -- 3*72 + 2 gaps =
      * 224px of content in a 180px viewport, so the third channel was always
@@ -270,17 +262,7 @@ lv_obj_t *ui_page_thermo_faults_build(void)
         build_channel_row(list, ch, accent_rotation[ch % 3]);
     }
 
-    lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 44);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    ui_topbar_raise(&tb);
 
     /* Pages are never torn down (kiln_ui.h's header comment) -- same
      * "create once, keep refreshing forever" timer lifetime as every other

@@ -9,6 +9,7 @@
 #include "ui_num_pad.h"
 #include "ui_page_profile_builder_segment.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 #include "zones_http.h"
 
 /* Arithmetic (same style as every other page in this pass), against the real
@@ -24,7 +25,7 @@
  *     gap ..........................................  4px
  *     validation caption (reserved even when blank) 18px
  *     gap ..........................................  4px
- *     nav row (Back / Next) ....................... 44px
+ *     nav row (Next) ............................... 44px
  *                                                   ------
  *                                                    208px  <= 267px  OK
  *
@@ -33,7 +34,19 @@
  * already uses (see that file's 2026-08-18 no-scroll-pass comment), applied
  * here via ui_theme_apply_touch_area()'s non-compact path, which extends a
  * sub-72px widget's effective click area up to the real minimum without
- * growing what's drawn. */
+ * growing what's drawn.
+ *
+ * 2026-08-21 icon-topbar pass: Back moved into the shared top bar
+ * (ui_topbar.c) -- freeing its 44px-wide slot inside nav_row, not a whole
+ * row, since nav_row's HEIGHT was already set by Next and stays 44px either
+ * way (no vertical budget freed here). Next stays an in-content button,
+ * deliberately NOT moved to ui_topbar_cfg_t::next_cb: that slot is for a
+ * page that PAGES (clamps at a first/last boundary, N-of-M style, e.g.
+ * ui_page_profiles_mine.c), not for a wizard's "advance to the next step"
+ * action -- this page has no Prev counterpart and Next's enabled state is
+ * validation-gated (has_zone), not a page-boundary clamp. Using the shared
+ * media-skip Next icon for a semantically different action would blur the
+ * one thing this pass is trying to make consistent. */
 
 static profile_t s_draft;
 static lv_obj_t *s_name_btn_label;
@@ -75,12 +88,6 @@ static void refresh_validation(void)
             lv_obj_set_style_bg_opa(s_next_btn, LV_OPA_50, 0);
         }
     }
-}
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("profiles");
 }
 
 static void next_btn_cb(lv_event_t *e)
@@ -172,9 +179,12 @@ lv_obj_t *ui_page_profile_builder_zones_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "New Profile -- Name & Zones");
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "New Profile -- Name & Zones",
+        .back_page = "profiles",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *name_btn = lv_button_create(scr);
     lv_obj_set_width(name_btn, lv_pct(100));
@@ -214,20 +224,8 @@ lv_obj_t *ui_page_profile_builder_zones_build(void)
     lv_obj_set_style_border_width(nav_row, 0, 0);
     lv_obj_set_style_pad_all(nav_row, 0, 0);
     lv_obj_set_flex_flow(nav_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(nav_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(nav_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(nav_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *back = lv_button_create(nav_row);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
 
     s_next_btn = lv_button_create(nav_row);
     lv_obj_set_size(s_next_btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
@@ -240,6 +238,8 @@ lv_obj_t *ui_page_profile_builder_zones_build(void)
     lv_obj_center(next_label);
     lv_obj_update_layout(s_next_btn);
     ui_theme_apply_touch_area(s_next_btn, false);
+
+    ui_topbar_raise(&tb);
 
     lv_label_set_text(s_name_btn_label, s_draft.name[0] ? s_draft.name : "(tap to name)");
     render_zone_chips();

@@ -3,23 +3,20 @@
 #include "kiln_ui.h"
 #include "ui_page_profiles_builtin_list.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 /* Single-page 2x2 grid, same arithmetic as ui_page_profiles.c's hub:
  *
- *     nav row (Back) ............................ 44px
- *     gap ........................................  4px
  *     grid: 2 rows x 72px + 1 gap ............... 148px
  *                                                 ------
- *                                                 196px  <= 267px  OK
+ *                                                 148px  <= 267px  OK
+ *
+ * The nav row's Back button moved into the shared top bar (ui_topbar.c) in
+ * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
+ * cost here.
  *
  * Exactly four families -- one page, no paging needed. */
 #define GRID_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 2 + UI_THEME_PADDING_PX / 2)
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("profiles");
-}
 
 static void family_clicked_cb(lv_event_t *e)
 {
@@ -56,9 +53,12 @@ lv_obj_t *ui_page_profiles_family_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Built-in Schedules");
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Built-in Schedules",
+        .back_page = "profiles",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *grid = lv_obj_create(scr);
     lv_obj_set_width(grid, lv_pct(100));
@@ -79,25 +79,7 @@ lv_obj_t *ui_page_profiles_family_build(void)
     build_cell(grid, "Crystalline");
     build_cell(grid, "General");
 
-    lv_obj_t *nav_row = lv_obj_create(scr);
-    lv_obj_set_width(nav_row, lv_pct(100));
-    lv_obj_set_height(nav_row, 44);
-    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nav_row, 0, 0);
-    lv_obj_set_style_pad_all(nav_row, 0, 0);
-    lv_obj_remove_flag(nav_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *back = lv_button_create(nav_row);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    ui_topbar_raise(&tb);
 
     return scr;
 }

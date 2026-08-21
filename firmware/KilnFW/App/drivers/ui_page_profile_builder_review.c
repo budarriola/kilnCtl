@@ -12,6 +12,7 @@
 #include "ui_confirm.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 #include "zones_http.h"
 
 static const char *TAG = "ui_page_profile_builder_review";
@@ -24,9 +25,14 @@ static const char *TAG = "ui_page_profile_builder_review";
  *     summary card (name/zones/segments/peak, 4      ~80px
  *       lines @ ~20px, feasibility-coloured border)
  *     gap ..........................................  4px
- *     action row (Back / Save @ 72px) ............. 72px
+ *     action row (Save @ 72px) ..................... 72px
  *                                                   ------
  *                                                    180px  <= 267px  OK
+ *
+ * Back moved into the shared top bar (ui_topbar.c) in the 2026-08-21
+ * icon-topbar pass; action_row's height is unchanged (Save still sets it at
+ * 72px) so no vertical budget was freed here, only Back's share of
+ * action_row's horizontal width, which Save now claims alone.
  *
  * The slot picker (8 cells) is NOT part of this budget -- see
  * build_slot_picker() below: it's a full-screen overlay attached to `scr`
@@ -63,12 +69,6 @@ static lv_obj_t *s_slot_grid;
 static profile_t *draft(void)
 {
     return ui_page_profile_builder_draft();
-}
-
-static void back_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("profile_builder_segment");
 }
 
 static void do_save(uint8_t slot)
@@ -305,9 +305,12 @@ lv_obj_t *ui_page_profile_builder_review_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Review & Save");
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Review & Save",
+        .back_page = "profile_builder_segment",
+        .show_home = true,
+    }, &tb);
 
     s_summary_card = lv_obj_create(scr);
     lv_obj_set_width(s_summary_card, lv_pct(100));
@@ -345,19 +348,6 @@ lv_obj_t *ui_page_profile_builder_review_build(void)
     lv_obj_set_style_pad_gap(action_row, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(action_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *back = lv_button_create(action_row);
-    lv_obj_set_height(back, UI_THEME_MIN_TOUCH_TARGET_PX);
-    lv_obj_set_flex_grow(back, 1);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
-
     lv_obj_t *save = lv_button_create(action_row);
     lv_obj_set_height(save, UI_THEME_MIN_TOUCH_TARGET_PX);
     lv_obj_set_flex_grow(save, 1);
@@ -371,6 +361,12 @@ lv_obj_t *ui_page_profile_builder_review_build(void)
     lv_obj_update_layout(save);
     ui_theme_apply_touch_area(save, false);
 
+    /* Raise the icon proxy BEFORE the slot-picker overlay is built, same
+     * reasoning as ui_page_network.c's connect modal: the overlay (hidden by
+     * default, shown by save_btn_cb) must stay ABOVE the icons when shown,
+     * and z-order here is child-add-order, so building it last keeps it on
+     * top regardless of when raise() ran. */
+    ui_topbar_raise(&tb);
     build_slot_picker(scr);
 
     ui_page_profile_builder_review_prepare();

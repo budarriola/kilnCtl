@@ -6,6 +6,10 @@
 <title>kilnCtl - Fire Profiles</title>
 <link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
 <style>
   /* Page-local palette (docs/UI_THEME.md / App/drivers/ui_theme.h, TODO.md
      10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
@@ -114,7 +118,9 @@
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<a href="/">&larr; Dashboard</a>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar/
+     bottom-nav (UI_PLAN.md Web section 4 item 1) now provides this on every
+     page. -->
 <h1>Fire Profiles</h1>
 <p>Create and edit named firing profiles here. Run them from the Dashboard.
 A profile can target more than one zone; when it does, every selected zone
@@ -318,7 +324,15 @@ function loadList() {
       var delBtn = document.createElement('button');
       delBtn.className = 'small';
       delBtn.textContent = 'Delete';
-      delBtn.addEventListener('click', function () { deleteProfile(p.id); });
+      delBtn.addEventListener('click', function () {
+        // UI_PLAN.md Web section 4 item 5: deleting a profile is destructive
+        // and irreversible (no undo endpoint exists), so it gets an explicit
+        // confirm -- this call site had none before this pass. kcConfirm
+        // comes from app.js (deferred <script> in <head>); safe here because
+        // it only runs inside this click handler, not at page-load time.
+        if (!kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.')) return;
+        deleteProfile(p.id);
+      });
       btnGroup.appendChild(editBtn);
       btnGroup.appendChild(delBtn);
       div.appendChild(btnGroup);

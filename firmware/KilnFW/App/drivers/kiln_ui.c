@@ -1,5 +1,6 @@
 #include "kiln_ui.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -27,6 +28,20 @@
 #include "touch_cal_store.h"
 #include "lvgl_port.h"
 
+/* lv_buttonmatrix_t's real fields (button_areas, btn_cnt) are declared in
+ * this private header, not lv_buttonmatrix.h -- the public header only
+ * exposes the opaque lv_buttonmatrix_class/lv_obj_t handle. Confirmed by
+ * reading lv_buttonmatrix_private.h at
+ * components/lvgl/src/widgets/buttonmatrix/lv_buttonmatrix_private.h: it
+ * defines struct _lv_buttonmatrix_t with button_areas/ctrl_bits/btn_cnt. The
+ * path below is relative to components/lvgl/src, which esp.cmake
+ * (components/lvgl/env_support/cmake/esp.cmake) registers as one of this
+ * component's public INCLUDE_DIRS alongside the component root -- the same
+ * reason lv_buttonmatrix.c's own "widgets/buttonmatrix/..." style includes
+ * resolve. This only reads the library's private struct layout; nothing
+ * under components/lvgl/ is modified. */
+#include "widgets/buttonmatrix/lv_buttonmatrix_private.h"
+
 static const char *TAG = "kiln_ui";
 
 /* A handful of pages (home, settings, temperature, config -- see TODO.md
@@ -48,6 +63,42 @@ typedef struct {
 static kiln_ui_page_t s_pages[KILN_UI_MAX_PAGES];
 static size_t s_page_count;
 static const char *s_current_page_name;
+
+/* Pull-based kiln_ui_show() entry/exit counters (2026-08-21) -- see
+ * lvgl_port.c's touch-diag counters for the same rationale: a push-based log
+ * line can be dropped by uart_log_bridge's queue during exactly the boot
+ * burst under investigation, making "the line never printed" indistinguishable
+ * from "the line printed but was dropped". These are read on demand over
+ * TOUCH_CMD_GET_STATE instead, so a drop anywhere in the log pipeline can't
+ * hide the answer to "does kiln_ui_show() ever reach its exit?". Both
+ * single-writer from kiln_ui_show() itself (whichever task calls it -- today
+ * always lvgl_port_task), read from the UART bridge task via the accessor
+ * below. s_show_exits is incremented on the line immediately AFTER
+ * lvgl_port_set_input_enabled(true) at the bottom of kiln_ui_show(), so
+ * entries > exits proves a path out of that function returns (or ends up
+ * stuck) before ever reaching the re-enable call. */
+static volatile uint32_t s_show_entries;
+static volatile uint32_t s_show_exits;
+
+/* Gates the AUTOMATIC tap-target dump inside kiln_ui_show() (every page
+ * switch) -- the explicit kiln_ui_log_tap_targets() call always dumps
+ * regardless of this flag. Off by default: the automatic dump is what
+ * flooded the log during boot/navigation churn, but the previous fix for
+ * that (demoting the dump's ESP_LOGI calls to ESP_LOGD) was wrong -- this
+ * project builds with CONFIG_LOG_MAXIMUM_LEVEL=3, which compiles ESP_LOGD out
+ * of the binary entirely, so it didn't quiet the automatic dump, it deleted
+ * the only way to find a widget's on-screen position (no framebuffer
+ * readback exists on this panel). Gating the call site instead keeps the
+ * capability in the binary at all times; kiln_ui_set_auto_tap_dump() (wired
+ * to a TOUCH bridge subcommand in uart_bridge.c) is what turns it on from the
+ * PC side when someone actually wants the per-navigation dump. */
+static bool s_auto_tap_dump;
+
+void kiln_ui_set_auto_tap_dump(bool enable)
+{
+    s_auto_tap_dump = enable;
+    ESP_LOGI(TAG, "auto tap-target dump %s", enable ? "enabled" : "disabled");
+}
 
 static kiln_ui_page_t *find_page(const char *name)
 {
@@ -237,6 +288,76 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
             continue;
         }
 
+        /* An lv_keyboard (and any other lv_buttonmatrix) is a SINGLE lv_obj
+         * -- its ~30-odd keys are not child objects, they're entries in an
+         * internal button_areas[]/map_p array that lv_buttonmatrix.c draws
+         * itself. Walking children the way the rest of this function does
+         * would report one big rectangle covering the whole keyboard and no
+         * way to aim at an individual key, so a keyboard widget is handled
+         * before (and instead of) the generic CLICKABLE check below. */
+        if (lv_obj_check_type(child, &lv_buttonmatrix_class)) {
+            lv_buttonmatrix_t *bm = (lv_buttonmatrix_t *)child;
+            lv_area_t bm_area;
+            lv_obj_get_coords(child, &bm_area);
+
+            /* Verified in lv_buttonmatrix.c: button_areas[i] is populated in
+             * the widget's OWN coordinate space (relative to its top-left),
+             * not screen space -- lv_buttonmatrix.c's own drawing code adds
+             * the widget's coords before blitting each key. Adding
+             * bm_area.x1/y1 here reproduces that same offset so the numbers
+             * this dump prints are screen coordinates the injected-touch
+             * harness can use directly. This deliberately does NOT reproduce
+             * the library's separate "extra click area" padding math (used
+             * internally to make small keys easier to hit) -- the harness
+             * only needs the plain key rectangle and its centre, not the
+             * enlarged hit-test area. */
+            if (bm->button_areas && bm->btn_cnt > 0) {
+                for (uint32_t k = 0; k < bm->btn_cnt; k++) {
+                    const char *key_text = lv_buttonmatrix_get_button_text(child, k);
+                    if (!key_text || key_text[0] == '\0') {
+                        /* A NULL/empty caption is a map control entry (row
+                         * break, spacer) rather than a real key -- nothing a
+                         * test harness would ever want to tap. */
+                        continue;
+                    }
+
+                    const lv_area_t *ka = &bm->button_areas[k];
+                    int x1 = (int)bm_area.x1 + (int)ka->x1;
+                    int y1 = (int)bm_area.y1 + (int)ka->y1;
+                    int x2 = (int)bm_area.x1 + (int)ka->x2;
+                    int y2 = (int)bm_area.y1 + (int)ka->y2;
+
+                    /* This is a burst of ~30+ lines from one widget, well
+                     * above this function's usual "a dozen or so lines per
+                     * page" volume (see kiln_ui_show()'s call-site comment).
+                     * That's accepted here: it only fires on a page switch
+                     * or an explicit kiln_ui_log_tap_targets() call, i.e. at
+                     * human tap rate, not per poll -- the same volume
+                     * argument that comment already makes for the rest of
+                     * this dump. */
+                    /* Restored to INFO (2026-08-21): CONFIG_LOG_MAXIMUM_LEVEL=3 on
+                     * this project compiles ESP_LOGD out of the binary
+                     * entirely, so the earlier demotion didn't just quiet
+                     * this dump, it deleted the only way to discover a
+                     * widget's on-screen position (no framebuffer readback
+                     * exists). The real flood contributor is the automatic
+                     * call from kiln_ui_show() on every page switch, which is
+                     * now gated by s_auto_tap_dump / kiln_ui_set_auto_tap_dump()
+                     * below instead of by deleting the log level. The
+                     * explicit kiln_ui_log_tap_targets() call (and this
+                     * function under it) always logs at INFO. */
+                    ESP_LOGI(TAG, "  tap target%*s key[%u] (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"",
+                             depth * 2, "", (unsigned)k, x1, y1, x2, y2,
+                             (x1 + x2) / 2, (y1 + y2) / 2, key_text);
+                }
+            }
+
+            /* A buttonmatrix has no real children to recurse into (its keys
+             * aren't lv_obj_t's), so skip straight to the next sibling
+             * rather than falling into the generic path below. */
+            continue;
+        }
+
         if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
             lv_area_t area;
             lv_obj_get_coords(child, &area);
@@ -253,6 +374,9 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
                 }
             }
 
+            /* Restored to INFO alongside the keyboard-key case above -- see
+             * that comment; the flood is now handled by gating the automatic
+             * call site, not by deleting this log level. */
             ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"", depth * 2, "",
                      (int)area.x1, (int)area.y1, (int)area.x2, (int)area.y2,
                      (int)((area.x1 + area.x2) / 2), (int)((area.y1 + area.y2) / 2), text);
@@ -262,8 +386,42 @@ static void log_tap_targets(lv_obj_t *obj, int depth)
     }
 }
 
+/* Modal overlays (ui_num_pad.c's numeric keypad, ui_page_network.c's connect
+ * modal, ui_confirm.c) are deliberately NOT parented under the active
+ * screen -- they're built on lv_layer_top() (or, for lv_msgbox_create(NULL),
+ * end up reparented onto it by LVGL) precisely so they draw above whatever
+ * page is underneath and survive a screen load/unload. That means
+ * log_tap_targets(page->screen, 0) alone never sees them: walking only the
+ * screen's tree is a silent gap, not a rendering bug, so a keypad that is
+ * fully visible on the glass produces zero dump lines and cannot be aimed
+ * at. This helper is the one place both call sites (kiln_ui_show() below and
+ * kiln_ui_log_tap_targets()) go through so neither can regress back to
+ * screen-only walking. lv_layer_sys() is included too even though nothing in
+ * this codebase uses it yet -- it's the same kind of screen-independent
+ * layer lv_layer_top() is, so a future toast/system overlay put there gets
+ * the same treatment for free. */
+static void log_all_tap_targets(lv_obj_t *screen)
+{
+    if (screen) {
+        log_tap_targets(screen, 0);
+    }
+
+    lv_obj_t *top = lv_layer_top();
+    if (top && lv_obj_get_child_count(top) > 0) {
+        ESP_LOGI(TAG, "  -- top-layer --");
+        log_tap_targets(top, 0);
+    }
+
+    lv_obj_t *sys = lv_layer_sys();
+    if (sys && lv_obj_get_child_count(sys) > 0) {
+        ESP_LOGI(TAG, "  -- sys-layer --");
+        log_tap_targets(sys, 0);
+    }
+}
+
 esp_err_t kiln_ui_show(const char *name)
 {
+    s_show_entries++;
     kiln_ui_page_t *page = find_page(name);
     if (!page) {
         ESP_LOGE(TAG, "kiln_ui_show(\"%s\"): no such page", name ? name : "(null)");
@@ -287,6 +445,7 @@ esp_err_t kiln_ui_show(const char *name)
         if (!page->screen) {
             ESP_LOGE(TAG, "page \"%s\" build() returned NULL", page->name);
             lvgl_port_set_input_enabled(true);
+            s_show_exits++;
             return ESP_FAIL;
         }
     }
@@ -346,20 +505,32 @@ esp_err_t kiln_ui_show(const char *name)
      *
      * Volume is bounded and tied to human interaction -- one burst per page
      * switch, a dozen or so lines, not per poll. See this function's
-     * navigation-log comment above for why that distinction matters here. */
-    log_tap_targets(page->screen, 0);
+     * navigation-log comment above for why that distinction matters here.
+     *
+     * Gated by s_auto_tap_dump (off by default, 2026-08-21): even at "human
+     * tap rate" this still stacks with the per-navigation "page: X -> Y" line
+     * and any keyboard's ~30-line key burst, and a normal test session
+     * switches pages a lot. The explicit kiln_ui_log_tap_targets() call below
+     * is unconditional -- ask for the dump when actually aiming a tap. */
+    if (s_auto_tap_dump) {
+        log_all_tap_targets(page->screen);
+    }
 
     lvgl_port_set_input_enabled(true);
+    s_show_exits++;
     return ESP_OK;
+}
+
+void kiln_ui_get_show_diag(uint32_t *show_entries, uint32_t *show_exits)
+{
+    if (show_entries) *show_entries = s_show_entries;
+    if (show_exits) *show_exits = s_show_exits;
 }
 
 void kiln_ui_log_tap_targets(void)
 {
     lv_obj_t *screen = lv_screen_active();
-    if (!screen) {
-        return;
-    }
-    log_tap_targets(screen, 0);
+    log_all_tap_targets(screen);
 }
 
 const char *kiln_ui_current_page(void)

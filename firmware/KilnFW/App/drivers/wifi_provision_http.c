@@ -39,6 +39,14 @@ extern const uint8_t main_page_html_gz_start[] asm("_binary_main_page_html_gz_st
 extern const uint8_t main_page_html_gz_end[] asm("_binary_main_page_html_gz_end");
 extern const uint8_t theme_css_gz_start[] asm("_binary_theme_css_gz_start");
 extern const uint8_t theme_css_gz_end[] asm("_binary_theme_css_gz_end");
+/* UI_PLAN.md Web "page structure rework" section 4 item 1's shared-nav
+ * follow-up to theme.css: /nav.js and /app.js, registered here for exactly
+ * the same reason theme.css is -- this module owns s_server, so both are
+ * reachable during AP-only provisioning as well as once fully provisioned. */
+extern const uint8_t nav_js_gz_start[] asm("_binary_nav_js_gz_start");
+extern const uint8_t nav_js_gz_end[] asm("_binary_nav_js_gz_end");
+extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
+extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
 
 static httpd_handle_t s_server;
 
@@ -67,6 +75,32 @@ static esp_err_t theme_css_get_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     return httpd_resp_send(req, (const char *)theme_css_gz_start,
                            (size_t)(theme_css_gz_end - theme_css_gz_start));
+}
+
+/* text/javascript per RFC 9239 (obsoletes the older application/javascript
+ * recommendation) -- both are gzip-only embedded assets like theme.css, so
+ * this shares web_client_accepts_gzip()'s 406 path rather than reimplementing
+ * the negotiation, same as every other handler in this file. */
+static esp_err_t nav_js_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "nav.js");
+    }
+    httpd_resp_set_type(req, "text/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)nav_js_gz_start,
+                           (size_t)(nav_js_gz_end - nav_js_gz_start));
+}
+
+static esp_err_t app_js_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "app.js");
+    }
+    httpd_resp_set_type(req, "text/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)app_js_gz_start,
+                           (size_t)(app_js_gz_end - app_js_gz_start));
 }
 
 static esp_err_t wifi_page_get_handler(httpd_req_t *req)
@@ -681,7 +715,36 @@ esp_err_t wifi_provision_http_start(void)
      * still-missing-error-check note on this file's own
      * httpd_register_uri_handler() calls just below for the other half of
      * this pass's fix. */
-    config.max_uri_handlers = 56;
+    /* **Recounted 2026-08-21, by hand, `grep -n '\.uri = "'` over every .c
+     * file under App/drivers/ (plus board_temps.c, factory_reset.c,
+     * sim_backend.c, the other files that also register routes on this
+     * s_server): 59 URI registrations exist in the tree today --
+     * 57 in a normal build plus 2 more (`/api/sim` GET+POST, sim_backend.c)
+     * only compiled in under CONFIG_KILNCTL_SIM_PLANT. That is already 3
+     * over the previous 56, meaning the 2026-08-18 comment's own math was
+     * already stale before this pass (it undercounted by not tracking
+     * ip_config_uri, and then diagnostics_http.c's 3 new routes
+     * (/diagnostics, /diagnostics/thermo, /safety) plus this pass's /nav.js
+     * and /app.js pushed it over). Every one of those registrations DOES
+     * check httpd_register_uri_handler()'s return value and ESP_LOGEs the
+     * failing URI (verified across all of board_temps.c, dashboard_http.c,
+     * diagnostics_http.c, factory_reset.c, ota_http.c, profiles_http.c,
+     * readiness_http.c, rules_http.c, sim_backend.c, zones_http.c, and this
+     * file's own REGISTER_OR_LOG macro below) -- so an overflow is at least
+     * logged, never truly silent, but ESP_LOGE only helps if someone is
+     * watching the log at that exact boot; a page 404ing with no visible
+     * cause otherwise is still the actual user-facing symptom, which is why
+     * the cap itself has to stay ahead of the real count rather than relying
+     * on the log line to save anyone.
+     *
+     * Set to 72: rounds the current 59 up with headroom for the next couple
+     * of routes, same reasoning as every bump before this one -- not set to
+     * an arbitrary large number, because each slot in this table costs a
+     * small fixed amount of RAM (esp_http_server allocates the
+     * config.max_uri_handlers array up front at httpd_start()), so doubling
+     * or hard-coding a huge cap "to be safe" is a real, if small, per-slot
+     * cost paid on every boot whether or not those slots are ever used. */
+    config.max_uri_handlers = 72;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever
@@ -733,6 +796,16 @@ esp_err_t wifi_provision_http_start(void)
     static const httpd_uri_t theme_css_uri = {
         .uri = "/theme.css", .method = HTTP_GET, .handler = theme_css_get_handler,
     };
+    /* UI_PLAN.md Web section 4 item 1 -- shared nav/app JS, same reasoning
+     * and same module as theme_css_uri above. This file now registers 11
+     * routes (was 9 before this pass); see config.max_uri_handlers above for
+     * the 2026-08-21 recount across the whole tree (59 total, cap now 72). */
+    static const httpd_uri_t nav_js_uri = {
+        .uri = "/nav.js", .method = HTTP_GET, .handler = nav_js_get_handler,
+    };
+    static const httpd_uri_t app_js_uri = {
+        .uri = "/app.js", .method = HTTP_GET, .handler = app_js_get_handler,
+    };
     /* Unlike every other *_http.c module's registration block, these 8 were
      * firing-and-forgetting httpd_register_uri_handler()'s return value --
      * the one gap in the codebase's own convention (see e.g. ota_http.c's
@@ -765,6 +838,8 @@ esp_err_t wifi_provision_http_start(void)
     REGISTER_OR_LOG(&forget_uri);
     REGISTER_OR_LOG(&ip_config_uri);
     REGISTER_OR_LOG(&theme_css_uri);
+    REGISTER_OR_LOG(&nav_js_uri);
+    REGISTER_OR_LOG(&app_js_uri);
 
 #undef REGISTER_OR_LOG
 

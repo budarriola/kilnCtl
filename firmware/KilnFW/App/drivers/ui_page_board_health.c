@@ -3,9 +3,9 @@
 #include <stdio.h>
 
 #include "board_temps.h"
-#include "kiln_ui.h"
 #include "MAX31856.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 // TODO.md 10.7's LCD-side board-health page -- see this file's header
 // comment for why it's a separate page. Every number here comes from
@@ -49,12 +49,6 @@ static const char *TAG __attribute__((unused)) = "ui_page_board_health";
 static lv_obj_t *s_esp32_label;
 static lv_obj_t *s_cj_label[MAX31856_CHANNEL_COUNT];
 
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("config");
-}
-
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -88,10 +82,12 @@ static void refresh_cb(lv_timer_t *timer)
 
 /* 2026-08-18 no-scroll pass: pad_all trimmed from UI_THEME_PADDING_PX (8px)
  * to UI_THEME_PADDING_PX/2 (4px) so this page's esp32 + MAX31856_CHANNEL_COUNT
- * (3) channel rows plus a Back button fit with a real margin inside its
- * ~264px content budget (480x320 landscape, this codebase's actual runtime
- * canvas -- see ui_page_home.c's header comment for that number's
- * derivation). Row content/behavior is otherwise unchanged. */
+ * (3) channel rows fit with a real margin inside its content budget (480x320
+ * landscape, this codebase's actual runtime canvas -- see ui_page_home.c's
+ * header comment for that number's derivation). The Back button that used to
+ * share this budget moved into the shared top bar (ui_topbar.c) in the
+ * 2026-08-21 icon-topbar pass, freeing 44px + the 4px row gap back to
+ * content. Row content/behavior is otherwise unchanged. */
 static lv_obj_t *build_stat_row(lv_obj_t *parent, const char *name, lv_color_t accent)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -129,17 +125,12 @@ lv_obj_t *ui_page_board_health_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *title = lv_label_create(bar);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Board Health -- onboard IC temperatures");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Board Health -- onboard IC temperatures",
+        .back_page = "config",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
@@ -167,17 +158,7 @@ lv_obj_t *ui_page_board_health_build(void)
         s_cj_label[ch] = build_stat_row(content, name, accent);
     }
 
-    lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, 44);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    ui_topbar_raise(&tb);
 
     /* Pages are never torn down (kiln_ui.h's header comment) -- same
      * "create once, keep refreshing forever" timer lifetime as

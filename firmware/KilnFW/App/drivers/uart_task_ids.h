@@ -396,6 +396,18 @@
  *                    the idle/wake decision. pressed=0 (a release) is
  *                    accepted but changes nothing -- there is no "held"
  *                    state to end.
+ *   0x03 SET_TAP_DUMP enable(u8) -- fire-and-forget, no reply. Turns the
+ *                    AUTOMATIC tap-target dump inside kiln_ui_show() on/off
+ *                    (kiln_ui_set_auto_tap_dump(), off by default). The
+ *                    explicit dump (kiln_ui_log_tap_targets(), fired by
+ *                    0x04 below) is unaffected by this flag and always logs.
+ *   0x04 LOG_TAP_TARGETS (no args) -- fire-and-forget, no reply. Requests an
+ *                    immediate on-demand tap-target dump for whatever screen
+ *                    is currently loaded (kiln_ui_log_tap_targets()), at
+ *                    ESP_LOGI so it survives this project's
+ *                    CONFIG_LOG_MAXIMUM_LEVEL=3 build. This is the only way
+ *                    to discover where a widget actually is on this panel --
+ *                    there is no framebuffer readback.
  *
  * GET_STATE response payload:
  *   byte0 = TOUCH_CMD_GET_STATE (0x01)
@@ -404,8 +416,10 @@
  *               activity (real or injected); saturates at UINT32_MAX rather
  *               than wrapping.
  */
-#define TOUCH_CMD_GET_STATE 0x01u
-#define TOUCH_CMD_INJECT    0x02u
+#define TOUCH_CMD_GET_STATE     0x01u
+#define TOUCH_CMD_INJECT        0x02u
+#define TOUCH_CMD_SET_TAP_DUMP  0x03u
+#define TOUCH_CMD_LOG_TAP_TARGETS 0x04u
 
 /* --- SAFETY (task_id = UART_TASK_ID_SAFETY) ---
  * The RP2040 safety processor (A1) sits in its own ground domain: the only

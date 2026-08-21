@@ -3,8 +3,8 @@
 #include <stdio.h>
 
 #include "dashboard_http.h"
-#include "kiln_ui.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 // See ui_page_safety.h for why this page exists (moved off ui_page_home.c
 // in the 2026-08-18 no-scroll rewrite). Contents/behavior are otherwise
@@ -33,12 +33,6 @@ static lv_obj_t *s_enclosure_temp_label;
 static lv_obj_t *s_safety_power_label;
 static lv_obj_t *s_link_version_label;
 static lv_obj_t *s_trip_label;
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("config");
-}
 
 static void refresh_cb(lv_timer_t *timer)
 {
@@ -107,9 +101,12 @@ static void refresh_cb(lv_timer_t *timer)
 }
 
 /* Compact stat row -- pad_all trimmed to UI_THEME_PADDING_PX/2 (4px) rather
- * than the full 8px so all four rows plus the back button fit comfortably
- * inside this page's ~264px content budget (same 480x320 landscape budget
- * ui_page_home.c's header comment derives). */
+ * than the full 8px so all five rows fit comfortably inside this page's
+ * content budget (same 480x320 landscape budget ui_page_home.c's header
+ * comment derives). The in-content Back button that used to share this
+ * budget moved into the shared top bar (ui_topbar.c) in the 2026-08-21
+ * icon-topbar pass, freeing UI_THEME_MIN_TOUCH_TARGET_PX (72px) + the 4px
+ * row gap back to content. */
 static lv_obj_t *build_stat_label(lv_obj_t *parent, const char *initial_text)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -139,17 +136,12 @@ lv_obj_t *ui_page_safety_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *title = lv_label_create(bar);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Safety Processor");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Safety Processor",
+        .back_page = "config",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
@@ -167,17 +159,7 @@ lv_obj_t *ui_page_safety_build(void)
     s_link_version_label = build_stat_label(content, "Link version: ---");
     s_trip_label = build_stat_label(content, "Last trip: ---");
 
-    lv_obj_t *back = lv_button_create(content);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX * 2, UI_THEME_MIN_TOUCH_TARGET_PX);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    ui_topbar_raise(&tb);
 
     lv_timer_create(refresh_cb, UI_PAGE_SAFETY_REFRESH_MS, NULL);
     refresh_cb(NULL);

@@ -48,3 +48,130 @@ button { min-height: var(--ui-touch); }
    this pass (UI_PLAN.md's audit named it) but has no <table> element at all
    -- nothing to wrap there; noted here rather than silently skipped. */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* UI_PLAN.md Web "page structure rework" section 4, items 1/2/4: shared nav
+   chrome (nav.js), sticky Stop (app.js) and the connection-lost banner
+   (app.js). Folded in here rather than per-page <style> blocks, same rule
+   as everything else in this file -- one copy, not seven. Uses the --bg/
+   --fg/--border/--button-bg/--card-bg names every one of the seven pages
+   already defines locally (verified identical in spelling, if not always
+   identical hex, across all seven <style> blocks) plus this file's own
+   --ui-* palette, so this block works unmodified regardless of which page
+   includes it. */
+
+.kc-topbar { display: flex; align-items: center; justify-content: space-between;
+             padding: 0.5em 1em; margin: 0 -1em 0.8em -1em; border-bottom: 1px solid var(--border);
+             background: var(--card-bg); }
+.kc-brand { font-weight: bold; color: var(--fg); text-decoration: none; font-size: 1em; }
+.kc-menu-btn { min-height: 0; padding: 0.35em 0.8em; font-size: 0.85em; border-radius: var(--ui-radius);
+               border: 1px solid var(--border); background: var(--button-bg); color: var(--fg); cursor: pointer; }
+
+.kc-menu-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 1000;
+                   display: flex; align-items: flex-end; }
+.kc-menu-overlay[hidden] { display: none; }
+.kc-menu-panel { background: var(--bg); color: var(--fg); width: 100%; box-sizing: border-box;
+                 border-top: 1px solid var(--border); border-radius: var(--ui-radius) var(--ui-radius) 0 0;
+                 padding: 0.5em 0; max-height: 70vh; overflow-y: auto; }
+.kc-menu-panel a { display: block; padding: 0.9em 1.2em; color: var(--fg); text-decoration: none;
+                    border-bottom: 1px solid var(--border); min-height: var(--ui-touch);
+                    box-sizing: border-box; display: flex; align-items: center; }
+.kc-menu-panel a:last-child { border-bottom: none; }
+.kc-menu-panel a.kc-menu-active { font-weight: bold; color: var(--ui-accent-3); }
+
+/* Fixed, thumb-reachable per UI_PLAN.md item 2's own framing ("this is a
+   mobile control surface for hitting Stop quickly, not a desktop admin
+   panel"). z-index above ordinary content but below the menu overlay so an
+   open menu always wins. */
+.kc-bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900;
+                 display: flex; background: var(--card-bg); border-top: 1px solid var(--border); }
+.kc-bottom-nav-item { flex: 1; text-align: center; padding: 0.6em 0.2em; min-height: var(--ui-touch);
+                       box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+                       color: var(--fg); text-decoration: none; font-size: 0.85em; background: transparent;
+                       border: none; cursor: pointer; }
+.kc-bottom-nav-item.kc-bottom-nav-active { color: var(--ui-accent-3); font-weight: bold; }
+
+/* Stacks directly above .kc-bottom-nav (higher z-index, bottom offset equal
+   to the nav bar's own height) when a firing is running -- see app.js's
+   setStopBarVisible(). accent-5 matches the LCD/dashboard's existing
+   fault/danger colour (main_page.html's --fault-color already maps to
+   --ui-accent-5 in dark mode) so Stop reads as the same "this is the
+   serious one" colour everywhere. */
+.kc-stop-bar { position: fixed; left: 0; right: 0; bottom: 56px; z-index: 899;
+               padding: 0.4em 0.6em; background: var(--bg); border-top: 1px solid var(--ui-accent-5); }
+.kc-stop-bar[hidden] { display: none; }
+.kc-stop-btn { display: block; width: 100%; box-sizing: border-box; min-height: var(--ui-touch);
+               background: var(--ui-accent-5); color: #fff; border: none; border-radius: var(--ui-radius);
+               font-size: 1em; font-weight: bold; cursor: pointer; }
+.kc-stop-btn:disabled { opacity: 0.6; }
+
+/* Connection-lost banner (UI_PLAN.md item 4). Not fixed -- it sits in-flow
+   right after the topbar, so it pushes content down rather than overlapping
+   it, and disappears cleanly (no leftover gap) the instant the heartbeat
+   in app.js succeeds again. */
+.kc-conn-banner { background: var(--ui-accent-5); color: #fff; padding: 0.6em 1em;
+                  margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center; }
+.kc-conn-banner[hidden] { display: none; }
+/* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
+   item 4's "dim its values" wording. Deliberately opt-in per page: no
+   existing element carries .kc-live-value yet (that is a per-page
+   annotation task left for whichever pass wires each page's specific
+   numeric fields to it), so this rule is inert until a page adopts it --
+   recorded as a known gap in this pass's report rather than silently
+   assumed to already work everywhere. */
+.kc-stale .kc-live-value { opacity: 0.45; }
+
+/* UI_PLAN.md "web page structure" section, items 2-4 (settings hub +
+   manual-relay split, 2026-08-2x pass): settings_page.html and
+   manual_page.html are new pages whose task instructions require NO
+   page-local CSS beyond the per-page --bg/--fg/etc :root token block every
+   page already carries (needed for the shared .theme-btn/.kc-topbar/etc
+   above, which read those names without defining them). Everything else
+   those two pages need is pulled from main_page.html's own <style> block,
+   verbatim, because that is where this markup and behaviour used to live
+   before this pass split it out -- these rules are a MOVE, not a redesign.
+   a.button is also still used by main_page.html itself (the "Manage fire
+   profiles" link), so it stays here rather than duplicated per page now
+   that two pages need it. */
+a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch);
+           box-sizing: border-box; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
+           border: 1px solid var(--border); border-radius: var(--ui-radius); text-decoration: none;
+           color: var(--fg); background: var(--button-bg); }
+.card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+        padding: 0.7em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
+        align-items: center; }
+.empty { color: var(--muted); font-style: italic; }
+
+/* Manual relay toggles (manual_page.html) -- grouped by zone, same
+   zone-group / relay-toggle markup and rules main_page.html used before
+   this pass moved the whole "Relays" section off the dashboard (UI_PLAN.md:
+   "moved off the dashboard ... a phone in a pocket can brush a screen in a
+   way a panel mounted on a kiln cannot"). --on-color/--off-color are each
+   page's own :root tokens, same convention as --bg/--fg above. */
+.zone-group { border: 1px solid var(--border); border-radius: var(--ui-radius); margin-bottom: 0.7em;
+              overflow: hidden; }
+.zone-group h3 { margin: 0; padding: 0.5em 1em; font-size: 0.9em;
+                  background: var(--card-bg); border-bottom: 1px solid var(--border); }
+.zone-group .card { border: none; border-radius: 0; border-bottom: 1px solid var(--border);
+                     margin-bottom: 0; }
+.zone-group .card:last-child { border-bottom: none; }
+.zone-group:nth-of-type(4n+1) h3 { color: var(--ui-accent-1); }
+.zone-group:nth-of-type(4n+2) h3 { color: var(--ui-accent-2); }
+.zone-group:nth-of-type(4n+3) h3 { color: var(--ui-accent-3); }
+.zone-group:nth-of-type(4n+4) h3 { color: var(--ui-accent-4); }
+button.relay-toggle { min-width: var(--ui-touch); padding: 0.4em 1em;
+                       font-size: 0.9em; border-radius: var(--ui-radius);
+                       border: 1px solid var(--border); cursor: pointer; }
+button.relay-on { background: var(--on-color); color: #fff; }
+button.relay-off { background: var(--button-bg); color: var(--fg); }
+
+/* Danger zone (settings_page.html) -- moved verbatim off main_page.html;
+   see that file's git history for the pre-move markup/behaviour this
+   matches exactly (still confirm-gated via kcConfirm, per this pass's hard
+   requirement that no destructive action loses its confirm step in the
+   move). */
+button.danger-btn { display: block; width: 100%; box-sizing: border-box;
+                     text-align: left; padding: 0.6em 1em;
+                     font-size: 0.9em; border-radius: var(--ui-radius); border: 1px solid var(--fault-color);
+                     background: var(--button-bg); color: var(--fault-color); cursor: pointer;
+                     margin-bottom: 0.5em; }
+button.danger-btn:hover { background: var(--fault-color); color: #fff; }

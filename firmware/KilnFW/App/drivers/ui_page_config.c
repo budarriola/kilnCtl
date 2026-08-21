@@ -1,9 +1,12 @@
 #include "ui_page_config.h"
 
+#include <stdio.h>
+
 #include "esp_log.h"
 
 #include "kiln_ui.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 static const char *TAG = "ui_page_config";
 
@@ -75,12 +78,6 @@ static const char *TAG = "ui_page_config";
 //   - Temperature History -- real navigation to the new
 //     ui_page_history.c/.h (TODO.md 10.3's chart, moved off
 //     ui_page_home.c this pass).
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("home");
-}
-
 static void temperature_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -135,47 +132,54 @@ static void profiles_nav_cb(lv_event_t *e)
     kiln_ui_show("profiles");
 }
 
-/* --- Paged hub, 2026-08-20 ------------------------------------------------
+/* --- Paged hub, 2026-08-21 ------------------------------------------------
  * This hub used to be a single fixed-height container that scrolled
- * internally. Measuring the real post-layout geometry on hardware (the
- * per-page tap-target dump kiln_ui_show() now emits) showed how bad that
- * actually was: the scroll viewport ended at y=223, but the ten cells ran
- * to y=419 on a 320px-tall panel. Six of ten items -- including the
- * Diagnostics and Thermocouple Faults pages -- were unreachable without a
- * scroll gesture, and the two newest pages were the two furthest off-screen.
+ * internally, then (2026-08-20) a paged grid with its own bottom nav row
+ * (Back / "< Prev" / "N of M" / "Next >") costing 44px + a 4px gap out of
+ * content's budget. The user's request ("the configuration menu can be more
+ * dense and the back/prev/next buttons should always be icons at the top of
+ * the screen if they are required") moves those three controls into the
+ * shared top bar (ui_topbar.c/.h) instead: Back and Prev/Next are now icons
+ * next to the gear-equivalent row, and the page indicator ("N of M") is the
+ * bar's TITLE (see hub_show_page()'s ui_topbar_set_title() call), so no
+ * on-screen real estate is spent duplicating information the title slot
+ * already had room for.
  *
- * Scrolling is not permitted on this project's LCD pages, so the fix is to
- * page the hub rather than scroll it. Every cell now sits on-screen at full
- * UI_THEME_MIN_TOUCH_TARGET_PX height, with Prev/Next stepping between
- * pages.
+ * Removing the nav row frees its 44px plus the 4px gap that used to separate
+ * it from the grid above -- 48px back to content. Verified cell count in
+ * this file before touching the arithmetic (do not trust a stale comment
+ * here either): eleven destinations total -- page 0 held 4 (Zones &
+ * Thermocouples, Relays & Rules, Temperature, Network/Wi-Fi), page 1 held 4
+ * (Board Health, Safety Processor, Temperature History, Touch Calibration),
+ * page 2 held 3 (Diagnostics, Thermocouple Faults, Profiles).
  *
  * The arithmetic, against content's real ~267px (y=44..311) and a
- * UI_THEME_PADDING_PX/2 inter-child gap:
+ * UI_THEME_PADDING_PX/2 = 4px inter-child gap, now that the nav row is gone:
  *
- *     nav row (Back / Prev / N of M / Next) .... 44px
- *     gap ....................................... 4px
- *     one hub page: 2 rows x 72px + 1 gap ...... 148px
+ *     one hub page: 3 rows x 72px + 2 gaps ..... 224px
  *                                               ------
- *                                                196px  <= 267px  OK
+ *                                                224px  <= 267px  OK
  *
- * Three rows would need 224px and total 272px, which overflows -- hence two
- * rows, i.e. four cells per page, and three pages for the current ten items.
- * If an eleventh item is added it lands on page 3 (which currently holds
- * two); a thirteenth needs a fourth page, and UI_CONFIG_HUB_PAGE_COUNT plus
- * the switch in ui_page_config_build() are the only two places to change.
+ * Three rows of two cells is six cells per page -- up from four -- so the
+ * same eleven destinations now fit on two pages (6 + 5) instead of three.
+ * Page assignments below were re-split accordingly. A twelfth item still
+ * fits page 1 (which now holds 5 of 6); a thirteenth needs a third page, and
+ * UI_CONFIG_HUB_PAGE_COUNT plus the switch in ui_page_config_build() are the
+ * only two places to change.
  *
  * The active page index is deliberately module state that survives leaving
  * this screen: kiln_ui.c never tears a page down, so a user who reaches
- * Diagnostics from hub page 3 and presses Back returns to hub page 3 rather
+ * Diagnostics from hub page 2 and presses Back returns to hub page 2 rather
  * than being dumped back on page 1. That keeps every sub-page's "Back goes
  * back exactly one level" contract intact -- Back lands on the hub view the
  * user actually came from. */
-#define UI_CONFIG_HUB_PAGE_COUNT     3
-#define UI_CONFIG_HUB_ITEMS_PER_PAGE 4
-#define UI_CONFIG_HUB_PAGE_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 2 + UI_THEME_PADDING_PX / 2)
+#define UI_CONFIG_HUB_PAGE_COUNT     2
+#define UI_CONFIG_HUB_ITEMS_PER_PAGE 6
+#define UI_CONFIG_HUB_PAGE_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 3 + (UI_THEME_PADDING_PX / 2) * 2)
+
+static ui_topbar_t s_topbar;
 
 static lv_obj_t *s_hub_pages[UI_CONFIG_HUB_PAGE_COUNT];
-static lv_obj_t *s_hub_indicator;
 static uint8_t s_hub_page;
 
 /* Shows hub page `index` and hides the rest. Safe before the page has been
@@ -199,18 +203,34 @@ static void hub_show_page(uint8_t index)
         }
     }
 
-    if (s_hub_indicator) {
-        lv_label_set_text_fmt(s_hub_indicator, "%u of %u", (unsigned)(index + 1),
-                              (unsigned)UI_CONFIG_HUB_PAGE_COUNT);
-    }
+    /* The page indicator used to be its own label in a nav row; it is now
+     * the top bar's TITLE (ui_topbar_set_title()) -- see this file's "Paged
+     * hub" comment for why folding it into the bar is what pays for the
+     * denser 3-row grid. No-op before the page is built (title is NULL
+     * until ui_topbar_create() runs), same as the old s_hub_indicator NULL
+     * guard this replaces. */
+    char title_buf[32];
+    snprintf(title_buf, sizeof(title_buf), "Configuration  %u of %u", (unsigned)(index + 1),
+             (unsigned)UI_CONFIG_HUB_PAGE_COUNT);
+    ui_topbar_set_title(&s_topbar, title_buf);
+
+    /* Dim (not hide -- see ui_topbar.c's set_icon_enabled() comment) the
+     * paging icon that would do nothing at this end of the hub. Clamp, not
+     * wrap -- same rule this hub always used, now shown via the shared
+     * top-bar visual instead of a page-local one. */
+    ui_topbar_set_prev_enabled(&s_topbar, index > 0);
+    ui_topbar_set_next_enabled(&s_topbar, index + 1 < UI_CONFIG_HUB_PAGE_COUNT);
 
     ESP_LOGI(TAG, "hub page %u of %u", (unsigned)(index + 1), (unsigned)UI_CONFIG_HUB_PAGE_COUNT);
 }
 
 /* Prev/Next clamp rather than wrap. Wrapping would make "Next" on the last
- * page silently jump back to the first, which on a four-cell page reads as
+ * page silently jump back to the first, which on a six-cell page reads as
  * the UI having lost the press -- clamping leaves the screen visibly
- * unchanged, which is the honest response to "there is nothing after this". */
+ * unchanged, which is the honest response to "there is nothing after this".
+ * The visual half of clamping (dimming the dead-end icon) is
+ * ui_topbar_set_prev_enabled()/set_next_enabled(), called from
+ * hub_show_page() above. */
 /* Both callbacks re-emit the tap-target dump after switching. Paging does not
  * go through kiln_ui_show(), so nothing else would: every cell on the screen
  * changes while the last dump on record still describes the previous page,
@@ -238,9 +258,9 @@ static void hub_next_cb(lv_event_t *e)
     }
 }
 
-/* One hub page: a non-scrollable two-row wrap grid sized to exactly the two
- * rows it holds. LV_OBJ_FLAG_SCROLLABLE is cleared explicitly (rather than
- * relied on being off) because a cell that overflowed would otherwise
+/* One hub page: a non-scrollable three-row wrap grid sized to exactly the
+ * three rows it holds. LV_OBJ_FLAG_SCROLLABLE is cleared explicitly (rather
+ * than relied on being off) because a cell that overflowed would otherwise
  * silently reintroduce the scrolling this rework exists to remove. */
 static lv_obj_t *build_hub_page(lv_obj_t *parent)
 {
@@ -254,27 +274,6 @@ static lv_obj_t *build_hub_page(lv_obj_t *parent)
     lv_obj_set_style_pad_gap(page, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
     return page;
-}
-
-/* A small fixed-width button for the nav row (Prev/Next/Back). Kept separate
- * from build_nav_item(): those are lv_pct(48) grid cells, these are a fixed
- * 44px-tall row that must leave space for the page indicator between them. */
-static lv_obj_t *build_hub_nav_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
-{
-    lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_size(btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *label = lv_label_create(btn);
-    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(label, text);
-    lv_obj_center(label);
-
-    lv_obj_update_layout(btn);
-    ui_theme_apply_touch_area(btn, false);
-    return btn;
 }
 
 /* A real, clickable nav cell (cb non-NULL) or an honest "not built yet"
@@ -333,17 +332,22 @@ lv_obj_t *ui_page_config_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *title = lv_label_create(bar);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Configuration");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+    /* Top bar -- ui_topbar.c/.h owns the two LVGL traps (hit-test-escape and
+     * the FLOATING flex trap); see that header. Back already goes to home
+     * from here, so show_home is deliberately false (a second identical
+     * icon to the same destination is noise, not redundancy worth having).
+     * Prev/Next live here too now -- see this file's "Paged hub" comment for
+     * why moving them off a dedicated nav row is what pays for the third
+     * grid row. The title starts as a placeholder; hub_show_page() (called
+     * at the bottom of this function) immediately overwrites it with the
+     * real "Configuration  N of M" text via ui_topbar_set_title(). */
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Configuration",
+        .back_page = "home",
+        .show_home = false,
+        .prev_cb = hub_prev_cb,
+        .next_cb = hub_next_cb,
+    }, &s_topbar);
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
@@ -355,10 +359,10 @@ lv_obj_t *ui_page_config_build(void)
     lv_obj_set_style_pad_gap(content, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Three stacked hub pages, exactly one visible at a time -- see the
+    /* Two stacked hub pages, exactly one visible at a time -- see the
      * "Paged hub" comment block above for the height arithmetic and for why
-     * this replaced the old internally-scrolling grid. All three are built
-     * up front and toggled with LV_OBJ_FLAG_HIDDEN rather than rebuilt on
+     * this replaced the old three-page/nav-row layout. Both are built up
+     * front and toggled with LV_OBJ_FLAG_HIDDEN rather than rebuilt on
      * demand: kiln_ui.c never tears a page down, so building once keeps
      * Prev/Next instant and keeps every cell's coordinates stable for the
      * tap-target dump. */
@@ -366,61 +370,31 @@ lv_obj_t *ui_page_config_build(void)
         s_hub_pages[i] = build_hub_page(content);
     }
 
-    /* Page 1: the two not-yet-built placeholders sit here, with the two most
-     * frequently used real destinations, so the placeholders never push a
-     * working page off the visible area the way they did when all ten cells
-     * shared one scrolling grid. */
+    /* Page 1 (6 cells, full): the two not-yet-built placeholders sit here,
+     * with the most frequently used real destinations, so the placeholders
+     * never push a working page off the visible area. */
     build_nav_item(s_hub_pages[0], "Zones & Thermocouples (not built yet)", NULL);
     build_nav_item(s_hub_pages[0], "Relays & Rules (not built yet)", NULL);
     build_nav_item(s_hub_pages[0], "Temperature", temperature_nav_cb);
     build_nav_item(s_hub_pages[0], "Network / Wi-Fi", network_nav_cb);
+    build_nav_item(s_hub_pages[0], "Board Health", board_health_nav_cb);
+    build_nav_item(s_hub_pages[0], "Safety Processor", safety_nav_cb);
 
-    build_nav_item(s_hub_pages[1], "Board Health", board_health_nav_cb);
-    build_nav_item(s_hub_pages[1], "Safety Processor", safety_nav_cb);
+    /* Page 2 (5 of 6 cells -- one free for a 12th destination before a third
+     * page is needed): the remaining five destinations. */
     build_nav_item(s_hub_pages[1], "Temperature History", history_nav_cb);
     build_nav_item(s_hub_pages[1], "Touch Calibration", touch_cal_nav_cb);
+    build_nav_item(s_hub_pages[1], "Diagnostics", diagnostics_nav_cb);
+    build_nav_item(s_hub_pages[1], "Thermocouple Faults", thermo_faults_nav_cb);
+    build_nav_item(s_hub_pages[1], "Profiles", profiles_nav_cb);
 
-    /* Page 3 holds the two diagnostic pages -- the two that were furthest
-     * off-screen (cell centres at y=383 on a 320px panel) under the old
-     * scrolling grid, i.e. the ones this rework most needed to make
-     * reachable. Room for two more items here before a fourth page is
-     * needed.
-     *
-     * "Profiles" (LCD profile browse/start, this pass) is the 11th item --
-     * verified against this file before relying on the claim: this page
-     * held exactly 2 of its 4 cells before this pass (Diagnostics,
-     * Thermocouple Faults), so the 11th item lands here with NO layout or
-     * UI_CONFIG_HUB_PAGE_COUNT change, leaving exactly one cell free for a
-     * 12th. */
-    build_nav_item(s_hub_pages[2], "Diagnostics", diagnostics_nav_cb);
-    build_nav_item(s_hub_pages[2], "Thermocouple Faults", thermo_faults_nav_cb);
-    build_nav_item(s_hub_pages[2], "Profiles", profiles_nav_cb);
+    /* content is created after the topbar's icon proxy, so without this it
+     * would sit above the proxy in z-order and win taps in the overlap
+     * region -- see ui_topbar.h's usage note: raise MUST happen after the
+     * content area exists. */
+    ui_topbar_raise(&s_topbar);
 
-    /* Nav row: Back on the left, then Prev / "N of M" / Next. Back keeps its
-     * own callback and its one-level-up target (home) unchanged -- paging
-     * within the hub is not navigation between pages in kiln_ui's sense, so
-     * it must not consume the Back press. */
-    lv_obj_t *nav_row = lv_obj_create(content);
-    lv_obj_set_width(nav_row, lv_pct(100));
-    lv_obj_set_height(nav_row, 44);
-    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nav_row, 0, 0);
-    lv_obj_set_style_pad_all(nav_row, 0, 0);
-    lv_obj_set_flex_flow(nav_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(nav_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_remove_flag(nav_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    build_hub_nav_button(nav_row, "Back", back_btn_cb);
-    build_hub_nav_button(nav_row, "< Prev", hub_prev_cb);
-
-    s_hub_indicator = lv_label_create(nav_row);
-    lv_obj_set_style_text_color(s_hub_indicator, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_hub_indicator, "");
-
-    build_hub_nav_button(nav_row, "Next >", hub_next_cb);
-
-    /* Apply the remembered page (0 on the first build) so the indicator text
+    /* Apply the remembered page (0 on the first build) so the title text
      * and hidden flags start consistent with s_hub_page. */
     hub_show_page(s_hub_page);
 

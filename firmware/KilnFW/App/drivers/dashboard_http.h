@@ -161,6 +161,45 @@ typedef struct {
     uint32_t trip_event_age_ms;
     float    trip_safety_tc_c;
     float    trip_deciding_threshold;
+
+    /* UI_PLAN.md section 5's one genuinely-missing field set for the web
+     * diagnostics page (ui_page_diagnostics.c's ESP-only half, section 8's
+     * "Data already on the wire" note): firmware version/build strings,
+     * uptime, reset reason, and per-heap-region free/largest-free-block/
+     * minimum-ever-free. Always known/populated -- unlike the safety-link
+     * fields above, none of this depends on a Pico being attached, so there
+     * is no *_valid companion flag to check; a field here is only "wrong" if
+     * esp_app_get_description() itself returns NULL (never observed on this
+     * target, but see fw_version_known below for the one honest fallback
+     * this code still has to make room for). */
+    bool     fw_version_known;              /* false only if esp_app_get_description() returned NULL */
+    char     fw_version[32];                /* esp_app_desc_t::version, ESP_APP_DESC_VERSION_SIZE-sized */
+    char     fw_build[40];                  /* esp_app_desc_t::date + ' ' + time, e.g. "Aug 20 2026 14:03:11"; sized for
+                                              * gcc's worst-case format-truncation analysis of two 16-byte fixed
+                                              * esp_app_desc_t fields (15 usable chars each) plus separator + NUL */
+    uint32_t uptime_s;                      /* esp_timer_get_time() / 1e6 -- monotonic since this boot */
+    const char *reset_reason;               /* esp_reset_reason() decoded to a short static string */
+
+    /* MALLOC_CAP_INTERNAL (on-chip DRAM) and MALLOC_CAP_SPIRAM (external
+     * PSRAM), each: current free bytes, the single largest contiguous free
+     * block, and the worst-case (lowest-ever) free-bytes low-water mark since
+     * boot. heap_internal_largest_free_block is the number that actually
+     * matters on this board: measured 9216 bytes against LVGL's 8192-byte
+     * task stack allocation (lvgl_port.c) -- about 1 KB of headroom, and the
+     * tightest resource this firmware has. It is the one number worth putting
+     * front-and-center on the diagnostics page rather than burying it in a
+     * table alongside the SPIRAM figures, which have an order of magnitude
+     * more slack (8 MB octal PSRAM, CONFIG_SPIRAM_USE_MALLOC=y). SPIRAM free
+     * reads back as a real 0 (not "n/a") on a board built without
+     * CONFIG_SPIRAM -- same "no separate validity bit, so 0 is shown as a
+     * real 0 KB, not invented as n/a" convention ui_page_diagnostics.c's own
+     * refresh_cb() comment already documents for exactly this call. */
+    size_t   heap_internal_free;
+    size_t   heap_internal_largest_free_block;
+    size_t   heap_internal_min_free;
+    size_t   heap_spiram_free;
+    size_t   heap_spiram_largest_free_block;
+    size_t   heap_spiram_min_free;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);

@@ -7,6 +7,7 @@
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profiles_mine.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 static const char *TAG = "ui_page_profiles";
 
@@ -14,23 +15,21 @@ static const char *TAG = "ui_page_profiles";
  * (same style as ui_page_config.c's paged-hub comment, against the same real
  * ~267px content budget that file's header measured on hardware):
  *
- *     nav row (Back) ............................ 44px
- *     gap ........................................  4px
  *     hub grid: 2 rows x 72px + 1 gap ........... 148px
  *                                                 ------
- *                                                  196px  <= 267px  OK
+ *                                                  148px  <= 267px  OK
+ *
+ * The nav row's Back button moved into the shared top bar (ui_topbar.c) in
+ * the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap it used to
+ * cost here -- this page never needed that margin (148px was already well
+ * under budget), but it's one less hand-rolled Back affordance to keep in
+ * sync with every other page's.
  *
  * Four items exactly fill a single 2x2 grid page -- no paging needed, unlike
  * ui_page_config.c's ten-item hub. "New Profile" (this pass's LCD builder,
  * ui_page_profile_builder_zones.c) is the fourth cell, filling what used to
  * be an empty one -- confirmed there was room before adding it, not assumed. */
 #define UI_PAGE_PROFILES_GRID_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 2 + UI_THEME_PADDING_PX / 2)
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("config");
-}
 
 static void mine_nav_cb(lv_event_t *e)
 {
@@ -90,17 +89,12 @@ lv_obj_t *ui_page_profiles_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, UI_THEME_STATUS_BAR_HEIGHT_PX);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *title = lv_label_create(bar);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Profiles");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Profiles",
+        .back_page = "config",
+        .show_home = true,
+    }, &tb);
 
     lv_obj_t *content = lv_obj_create(scr);
     lv_obj_set_width(content, lv_pct(100));
@@ -127,26 +121,7 @@ lv_obj_t *ui_page_profiles_build(void)
     build_nav_item(grid, "Restore hidden", restore_hidden_cb);
     build_nav_item(grid, "New Profile", new_profile_nav_cb);
 
-    lv_obj_t *nav_row = lv_obj_create(content);
-    lv_obj_set_width(nav_row, lv_pct(100));
-    lv_obj_set_height(nav_row, 44);
-    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nav_row, 0, 0);
-    lv_obj_set_style_pad_all(nav_row, 0, 0);
-    lv_obj_remove_flag(nav_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *back = lv_button_create(nav_row);
-    lv_obj_set_size(back, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(back, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(back, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_t *back_label = lv_label_create(back);
-    lv_obj_set_style_text_color(back_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_center(back_label);
-    lv_obj_update_layout(back);
-    ui_theme_apply_touch_area(back, false);
+    ui_topbar_raise(&tb);
 
     return scr;
 }

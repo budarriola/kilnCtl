@@ -2,21 +2,24 @@
 
 #include <stdio.h>
 
-#include "kiln_ui.h"
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "ui_page_profile_detail.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 /* Arithmetic (same style as every other page in this pass), against the real
  * ~267px content budget:
  *
  *     row list: 4 rows x 48px + 3 gaps (4px each) ... 204px
- *     gap ............................................  4px
- *     nav row (Back / Prev / N of M / Next) .........  44px
  *                                                     ------
- *                                                      252px  <= 267px  OK
+ *                                                      204px  <= 267px  OK
+ *
+ * The nav row's Back/Prev/Next moved into the shared top bar (ui_topbar.c)
+ * in the 2026-08-21 icon-topbar pass, freeing the 44px + 4px gap they used
+ * to cost here -- see ui_page_profiles_mine.c's header comment for the
+ * identical rationale. Only the "N of M" indicator still lives in content.
  *
  * Read-only rows (spec explicitly allows shorter than
  * UI_THEME_MIN_TOUCH_TARGET_PX for a non-tap-target row -- these are not
@@ -34,13 +37,7 @@ static uint8_t s_page;
 
 static lv_obj_t *s_list;
 static lv_obj_t *s_indicator;
-static lv_obj_t *s_title_label;
-
-static void back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("profile_detail");
-}
+static ui_topbar_t s_tb;
 
 static void render_page(void)
 {
@@ -91,6 +88,9 @@ static void render_page(void)
     if (s_indicator) {
         lv_label_set_text_fmt(s_indicator, "%u of %u", (unsigned)(s_page + 1), (unsigned)(s_page_count ? s_page_count : 1));
     }
+
+    ui_topbar_set_prev_enabled(&s_tb, s_page > 0);
+    ui_topbar_set_next_enabled(&s_tb, (uint8_t)(s_page + 1) < s_page_count);
 }
 
 static void prev_cb(lv_event_t *e)
@@ -127,30 +127,14 @@ void ui_page_profile_segments_prepare(void)
         s_page_count = 1;
     }
 
-    if (s_title_label) {
+    {
         const builtin_profile_t *b = (id >= PROFILE_BUILTIN_ID_BASE) ? profiles_builtin_entry(id) : NULL;
         char buf[64];
         snprintf(buf, sizeof(buf), "Segments -- %s", s_prof_valid ? (b ? b->title : s_prof.name) : "?");
-        lv_label_set_text(s_title_label, buf);
+        ui_topbar_set_title(&s_tb, buf);
     }
 
     render_page();
-}
-
-static lv_obj_t *build_nav_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
-{
-    lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_size(btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *label = lv_label_create(btn);
-    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(label, text);
-    lv_obj_center(label);
-    lv_obj_update_layout(btn);
-    ui_theme_apply_touch_area(btn, false);
-    return btn;
 }
 
 lv_obj_t *ui_page_profile_segments_build(void)
@@ -163,11 +147,17 @@ lv_obj_t *ui_page_profile_segments_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_title_label = lv_label_create(scr);
-    lv_obj_set_width(s_title_label, lv_pct(100));
-    lv_label_set_long_mode(s_title_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(s_title_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(s_title_label, "Segments");
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Segments",
+        .back_page = "profile_detail",
+        .show_home = true,
+        .prev_cb = prev_cb,
+        .next_cb = next_cb,
+    }, &s_tb);
+
+    s_indicator = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_indicator, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_indicator, "");
 
     s_list = lv_obj_create(scr);
     lv_obj_set_width(s_list, lv_pct(100));
@@ -179,22 +169,7 @@ lv_obj_t *ui_page_profile_segments_build(void)
     lv_obj_set_style_pad_gap(s_list, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(s_list, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *nav_row = lv_obj_create(scr);
-    lv_obj_set_width(nav_row, lv_pct(100));
-    lv_obj_set_height(nav_row, 44);
-    lv_obj_set_style_bg_opa(nav_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nav_row, 0, 0);
-    lv_obj_set_style_pad_all(nav_row, 0, 0);
-    lv_obj_set_flex_flow(nav_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(nav_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_remove_flag(nav_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    build_nav_button(nav_row, "Back", back_btn_cb);
-    build_nav_button(nav_row, "< Prev", prev_cb);
-    s_indicator = lv_label_create(nav_row);
-    lv_obj_set_style_text_color(s_indicator, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_indicator, "");
-    build_nav_button(nav_row, "Next >", next_cb);
+    ui_topbar_raise(&s_tb);
 
     render_page();
     return scr;

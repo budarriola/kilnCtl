@@ -49,6 +49,39 @@ static lvgl_port_t s_port;
  * other lv_* access in this file. */
 static uint16_t s_last_raw_x, s_last_raw_y, s_last_raw_z1;
 
+/* Pull-based touch/input diagnostics (2026-08-21, replacing the push-based
+ * TEMP DIAGNOSTIC log lines in this file and kiln_ui.c -- those proved
+ * useless on this bench: uart_log_bridge's queue was dropping lines during
+ * exactly the boot burst that mattered, so "the enable log never appeared"
+ * was indistinguishable from "the enable call never ran". These counters are
+ * read on demand over TOUCH_CMD_GET_STATE (uart_bridge.c) instead of pushed
+ * as log lines, so a drop anywhere in the log pipeline can no longer hide
+ * what happened. All four are monotonic and single-writer:
+ *   - s_input_enabled: shadow of the indev's enabled flag. LVGL 9.5 has no
+ *     public getter (lv_indev_enable() is set-only, confirmed by reading
+ *     components/lvgl/src/indev/lv_indev.h -- do not add one there, that
+ *     tree is off limits), so this is kept in lockstep by
+ *     lvgl_port_set_input_enabled(), the only place that ever calls
+ *     lv_indev_enable(). Written only from whichever task calls that
+ *     function (today always lvgl_port_task, via kiln_ui_show()'s
+ *     LV_EVENT-adjacent call path); read from the UART bridge task via the
+ *     accessor below, which is a single bool read/write, not worth a lock.
+ *   - s_touch_read_cb_count: incremented at the top of touch_read_cb(),
+ *     i.e. every time LVGL's indev core actually calls this read callback.
+ *     Written only from lvgl_port_task (the only caller of
+ *     lv_timer_handler(), which is the only thing that can invoke an indev
+ *     read callback).
+ *   - s_injected_delivered_count: incremented every time touch_read_cb()
+ *     hands an injected sample to LVGL (data->point/state set from
+ *     s_inject), i.e. a strict superset in cadence of the old
+ *     transition-only "injected touch delivered to LVGL" log line -- this
+ *     counts every delivery, not just changes, so it also answers "is the
+ *     injection path being polled at all" even when the sample never
+ *     changes between polls. Same single-writer task as the line above. */
+static volatile bool s_input_enabled = true;
+static volatile uint32_t s_touch_read_cb_count;
+static volatile uint32_t s_injected_delivered_count;
+
 /* Loaded once in lvgl_port_start(). {.calibrated = false} until
  * ui_page_touch_cal.c finishes a calibration pass and calls
  * touch_cal_store_save() -- see touch_read_cb() below for the fallback used
@@ -204,8 +237,21 @@ static void touch_inject_unlock(void)
 
 void lvgl_port_inject_touch(uint16_t x, uint16_t y, bool pressed)
 {
-    if (!s_inject.lock) return; /* lvgl_port_start hasn't run yet -- nothing to inject into */
-    if (!touch_inject_lock()) return; /* contention on a 1s timeout: drop rather than block the UART task */
+    /* Both early returns below are silent by design (a NULL lock means
+     * lvgl_port_start() hasn't run yet; a lock timeout means touch_read_cb
+     * is wedged on the same mutex, itself a symptom worth its own
+     * investigation, not this function's). Whether a write here actually
+     * reaches LVGL is now provable from the far side, on demand, via
+     * lvgl_port_get_touch_diag()'s injected_delivered_count -- see that
+     * function's declaration comment -- so this no longer needs its own
+     * per-call log to answer the question the removed TEMP DIAGNOSTIC WARNs
+     * existed for. */
+    if (!s_inject.lock) {
+        return;
+    }
+    if (!touch_inject_lock()) {
+        return;
+    }
 
     s_inject.pending = true;
     s_inject.pressed = pressed;
@@ -232,6 +278,10 @@ static int32_t touch_raw_to_px(uint16_t raw, uint16_t panel_extent, bool invert)
 
 static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
+    /* Pull-based replacement for the old one-shot "first call reached" log
+     * -- see s_touch_read_cb_count's declaration comment above. */
+    s_touch_read_cb_count++;
+
     lvgl_port_t *p = (lvgl_port_t *)lv_indev_get_user_data(indev);
 
     /* An injected touch always takes priority over the physical NS2009 read
@@ -263,6 +313,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         touch_inject_unlock();
 
         if (have_injection) {
+            s_injected_delivered_count++;
             data->point.x = inject_x;
             data->point.y = inject_y;
             data->state = inject_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
@@ -386,10 +437,25 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
  * sleep before the next call is needed -- honoured directly rather than a
  * fixed poll period, same idea as every other "sleep until there's real
  * work" task in this codebase. */
+/* ONE-OFF root-cause probe (2026-08-21): touch_read_cb_count staying at 0
+ * forever with the indev confirmed to exist (lvgl_port_indev_exists()) means
+ * either lv_timer_handler() itself is never being called (this task never
+ * runs, or is stuck before its first iteration) or it runs but skips the
+ * indev's read timer specifically. This counter settles the first half:
+ * incremented on every loop iteration, read back the same way as the other
+ * touch diagnostics. */
+static volatile uint32_t s_timer_handler_calls;
+
+void lvgl_port_get_timer_handler_calls(uint32_t *calls)
+{
+    if (calls) *calls = s_timer_handler_calls;
+}
+
 static void lvgl_port_task(void *arg)
 {
     (void)arg;
     while (true) {
+        s_timer_handler_calls++;
         uint32_t sleep_ms = lv_timer_handler();
         if (sleep_ms == LV_NO_TIMER_READY) sleep_ms = 50;
         if (sleep_ms < 1) sleep_ms = 1;
@@ -515,26 +581,60 @@ esp_err_t lvgl_port_start(ILI9488Class *display, NS2009Class *touch, screen_idle
      * this task. Any UI callback that persists anything does the same, so this
      * was not an obscure corner: it was every settings write in the UI.
      *
-     * Internal SRAM is affordable again now that the fragmentation this
-     * comment's first half describes has been fixed at its source: LVGL's own
-     * allocator moved to PSRAM (lvgl_mem_psram.c) and the Wi-Fi/lwIP pools
-     * with it (CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP), taking the largest
-     * contiguous internal block at this point in boot from ~2.5KB to ~17KB --
-     * comfortably more than the 8KB needed here. main.c's heap_stage() prints
-     * that figure per stage if it ever needs rechecking.
+     * "~17KB, comfortably more than the 8KB needed" turned out not to hold:
+     * confirmed live on the bench 2026-08-21 (this file's new
+     * touch_read_cb_count / lvgl_port_get_timer_handler_calls() counters,
+     * added for the "all touch is dead" investigation, both stayed at
+     * EXACTLY ZERO forever -- proving lvgl_port_task never ran a single
+     * lv_timer_handler() call, not merely that touch itself was
+     * misbehaving). The device log's "heap stage lvgl_start" line at that
+     * exact boot showed largest internal block = 7680 B, just under this
+     * task's 8192 B ask: xTaskCreatePinnedToCore() below failed, logged its
+     * ESP_LOGE, and returned -- silently, because nothing downstream of a
+     * failed lvgl_port_start() reboots or halts the board (main.c logs its
+     * own ESP_LOGE and boots on). The one screen the user ever saw was
+     * painted by kiln_ui_init()'s single kiln_ui_show("home") call, which
+     * runs synchronously (via lv_refr_now()) INSIDE lvgl_port_start(),
+     * before this task is even created -- so the panel looked normal while
+     * every timer this UI depends on, including the touch indev's read
+     * timer, silently never existed.
      *
-     * Do NOT move this back to PSRAM to save internal SRAM. The draw buffers
-     * (allocated above) are the large PSRAM win and they stay there; this
-     * stack must remain somewhere reachable with the cache down. */
-    BaseType_t created = xTaskCreatePinnedToCore(lvgl_port_task, "lvgl", 8192, NULL, 4, NULL,
-                                                 tskNO_AFFINITY);
-    if (created != pdPASS) {
+     * More UART bridge tasks (dashboard_http, log/info/system/thermo/io) run
+     * between the last time this fit and now, each taking its own slice of
+     * internal SRAM before lvgl_port_start() ever gets a turn -- a genuinely
+     * moving target, not something to keep re-measuring and hoping stays
+     * above 8192 forever.
+     *
+     * REAL FIX (2026-08-21): stop asking the runtime heap for this stack at
+     * all. Static allocation (xTaskCreateStaticPinnedToCore(), backed by a
+     * plain .bss array below) has its address decided by the LINKER at
+     * build time, before a single byte of runtime heap fragmentation exists
+     * -- there is no "largest free block" query to lose to whatever else
+     * booted first, because nothing is being carved out of a shared pool at
+     * all. This is strictly better than chasing a bigger number for the
+     * dynamic largest-free-block query: it can't be re-broken by some
+     * future task claiming one more chunk of internal SRAM before this one
+     * gets its turn. Internal SRAM is still the right place (not PSRAM --
+     * see this comment's PSRAM-crash section above, still true, still
+     * unrelated to whether the stack is static or dynamic): a static array
+     * with internal linkage still lands in on-chip DRAM by default on this
+     * target, reachable with the flash cache disabled, same as the dynamic
+     * allocation was. */
+    static StackType_t s_lvgl_task_stack[8192 / sizeof(StackType_t)];
+    static StaticTask_t s_lvgl_task_tcb;
+    TaskHandle_t created_handle = xTaskCreateStaticPinnedToCore(
+        lvgl_port_task, "lvgl", sizeof(s_lvgl_task_stack) / sizeof(StackType_t), NULL, 4,
+        s_lvgl_task_stack, &s_lvgl_task_tcb, tskNO_AFFINITY);
+    if (created_handle == NULL) {
         /* Deliberately NOT falling back to a PSRAM stack: that is the
          * configuration that crashes on the first settings write, and a UI
-         * that reboots the controller is worse than no UI. */
-        ESP_LOGE(TAG, "Failed to start lvgl_port_task: no internal stack available "
-                      "(largest internal block %u B) -- no local display this boot",
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+         * that reboots the controller is worse than no UI. Static
+         * allocation from a fixed-size .bss array can still fail if this
+         * task's own arguments are wrong (they aren't) or FreeRTOS itself
+         * rejects the call -- kept as a safety net, not because internal
+         * SRAM headroom is the failure mode anymore. */
+        ESP_LOGE(TAG, "Failed to start lvgl_port_task (static allocation) -- no local display "
+                      "this boot");
         return ESP_ERR_NO_MEM;
     }
 
@@ -561,4 +661,29 @@ void lvgl_port_set_input_enabled(bool enabled)
     if (s_port.lv_indev) {
         lv_indev_enable(s_port.lv_indev, enabled);
     }
+    /* Kept in lockstep even if s_port.lv_indev is NULL (no touch hardware),
+     * so the shadow always reflects "what this module was last told", not
+     * "what LVGL actually has" -- see the field's declaration comment on why
+     * no public getter exists to cross-check against. */
+    s_input_enabled = enabled;
+}
+
+void lvgl_port_get_touch_diag(bool *input_enabled, uint32_t *touch_read_cb_count,
+                               uint32_t *injected_delivered_count)
+{
+    if (input_enabled) *input_enabled = s_input_enabled;
+    if (touch_read_cb_count) *touch_read_cb_count = s_touch_read_cb_count;
+    if (injected_delivered_count) *injected_delivered_count = s_injected_delivered_count;
+}
+
+/* ONE-OFF root-cause probe (2026-08-21): is s_port.lv_indev even non-NULL?
+ * touch_read_cb_count staying at 0 forever (proven on the bench: it does not
+ * move even across several seconds of idling with no injection at all) is
+ * consistent with either (a) lv_indev_create() itself failing, in which case
+ * touch_read_cb was never registered as anyone's read callback, or (b) the
+ * indev existing but its internal read_timer never firing. This resolves
+ * which. */
+bool lvgl_port_indev_exists(void)
+{
+    return s_port.lv_indev != NULL;
 }

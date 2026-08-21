@@ -5,6 +5,7 @@
 
 #include "kiln_ui.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 // 2026-08-19 no-scroll audit (UI_PLAN.md section 3, LCD item 4): this page
 // was previously unreviewed against the same no-page-scroll rule the other 8
@@ -20,6 +21,20 @@
 // stack here that could grow past what's actually available. The `if
 // (s_canvas_h < 60)` floor only matters for a pathological (near-zero)
 // resolution, never expected on this board's real 480x320 panel.
+//
+// 2026-08-21 icon-topbar pass: this page never had a Back button (only
+// "Done", which goes to "home" -- see done_btn_cb) and its own header
+// comment above never claims one, so back_page is left NULL here (no
+// destination to invent, per this pass's "never change/add a back target
+// a page didn't already have" rule). It DOES get a Home icon -- this is not
+// the main screen, and the user's ask ("add a home button... if we are not
+// on the main screen") applies regardless of whether a page also has a
+// Back icon. The plain title label became ui_topbar_create()'s bar, which
+// draws at exactly UI_THEME_STATUS_BAR_HEIGHT_PX (32px) -- s_canvas_h's
+// budget arithmetic above already assumed that same 32px for the title
+// row, so this is a closer match to the assumed budget than the old plain
+// label (whose real draw height was font-dependent, not exactly 32px),
+// not a new risk to the no-scroll fit.
 static const char *TAG = "ui_page_touch_test";
 
 #define SQUARE_MARGIN_PX 24
@@ -135,9 +150,12 @@ lv_obj_t *ui_page_touch_test_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_color(title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(title, "Trace the square to check calibration");
+    static ui_topbar_t tb;
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Trace the square to check calibration",
+        .back_page = NULL,
+        .show_home = true,
+    }, &tb);
 
     s_canvas_w = lv_display_get_horizontal_resolution(NULL);
     s_canvas_h = lv_display_get_vertical_resolution(NULL) - UI_THEME_STATUS_BAR_HEIGHT_PX -
@@ -192,6 +210,8 @@ lv_obj_t *ui_page_touch_test_build(void)
     lv_obj_set_style_text_color(done_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(done_label, "Done");
     lv_obj_center(done_label);
+
+    ui_topbar_raise(&tb);
 
     return scr;
 }

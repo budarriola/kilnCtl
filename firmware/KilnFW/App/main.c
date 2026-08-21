@@ -18,6 +18,8 @@
 
 #include "board_temps.h"
 #include "dashboard_http.h"
+#include "diagnostics_http.h"
+#include "settings_http.h"
 #include "factory_reset.h"
 #include "ILI9488.h"
 #include "lvgl_port.h"
@@ -930,6 +932,35 @@ void app_main(void)
     if (readiness_err != ESP_OK) {
         ESP_LOGW(TAG, "readiness_http_start failed: %s -- no readiness page this boot",
                  esp_err_to_name(readiness_err));
+    }
+
+    // UI_PLAN.md "page structure rework" section: /diagnostics, /diagnostics/
+    // thermo and /safety -- the four LCD pages (diagnostics + board health
+    // merged into one web page, thermo faults, safety) that had no web
+    // equivalent at all until this pass. Takes no hardware pointers -- these
+    // are static pages that poll the existing GET /api/status and
+    // GET /api/board_temps endpoints client-side, same "pure page, no
+    // server-side data gathering of its own" shape as readiness_http_start()
+    // just above. Registered right after readiness for the same reason: no
+    // ordering dependency on anything below it, so placement only matters for
+    // reading this boot sequence top-to-bottom.
+    esp_err_t diagnostics_err = diagnostics_http_start();
+    if (diagnostics_err != ESP_OK) {
+        ESP_LOGW(TAG, "diagnostics_http_start failed: %s -- no /diagnostics, /diagnostics/thermo "
+                      "or /safety page this boot", esp_err_to_name(diagnostics_err));
+    }
+
+    // UI_PLAN.md "web page structure" section, items 2-4: the settings hub
+    // and the manual-relay page that finally split main_page.html apart --
+    // that file kept its own inline Settings block, Danger zone, and
+    // per-relay toggles even after the diagnostics/safety pages above
+    // shipped. Same "pure page, no server-side data gathering of its own"
+    // shape as diagnostics_http_start() just above, registered right after
+    // it for the same reason (no ordering dependency on anything below).
+    esp_err_t settings_err = settings_http_start();
+    if (settings_err != ESP_OK) {
+        ESP_LOGW(TAG, "settings_http_start failed: %s -- no /settings or /settings/manual page "
+                      "this boot", esp_err_to_name(settings_err));
     }
 
     // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:

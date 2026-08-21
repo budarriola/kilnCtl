@@ -6,6 +6,12 @@
 <title>kilnCtl</title>
 <link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5: shared nav, sticky Stop,
+     connection-lost banner, confirm helper. `defer` -- see nav.js's own
+     header comment for why this page's inline <script> below can only rely
+     on window.kcNav/kcConfirm from inside event-handler callbacks. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
 <style>
   /* Page-local palette (docs/UI_THEME.md / App/drivers/ui_theme.h, TODO.md
      10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
@@ -49,29 +55,7 @@
   .temp { font-size: 1.1em; font-weight: bold; }
   .fault { color: var(--fault-color); font-size: 0.85em; }
   .stale { color: var(--muted); font-size: 0.85em; }
-  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
-     Web item 2) -- min-width isn't part of that shared rule (only
-     relay-toggle needs a square minimum), so it stays here. */
-  button.relay-toggle { min-width: var(--ui-touch); padding: 0.4em 1em;
-                         font-size: 0.9em; border-radius: var(--ui-radius);
-                         border: 1px solid var(--border); cursor: pointer; }
-  button.relay-on { background: var(--on-color); color: #fff; }
-  button.relay-off { background: var(--button-bg); color: var(--fg); }
   .empty { color: var(--muted); font-style: italic; }
-  .zone-group { border: 1px solid var(--border); border-radius: var(--ui-radius); margin-bottom: 0.7em;
-                overflow: hidden; }
-  .zone-group h3 { margin: 0; padding: 0.5em 1em; font-size: 0.9em;
-                    background: var(--card-bg); border-bottom: 1px solid var(--border); }
-  .zone-group .card { border: none; border-radius: 0; border-bottom: 1px solid var(--border);
-                       margin-bottom: 0; }
-  .zone-group .card:last-child { border-bottom: none; }
-  /* Rotating accent per zone group, same idea as the LCD's per-zone/per-metric
-     colouring (docs/UI_THEME.md) -- accent-5 stays reserved for fault/danger use
-     below, not part of this rotation. */
-  .zone-group:nth-of-type(4n+1) h3 { color: var(--ui-accent-1); }
-  .zone-group:nth-of-type(4n+2) h3 { color: var(--ui-accent-2); }
-  .zone-group:nth-of-type(4n+3) h3 { color: var(--ui-accent-3); }
-  .zone-group:nth-of-type(4n+4) h3 { color: var(--ui-accent-4); }
   select { width: 100%; box-sizing: border-box; min-height: var(--ui-touch); padding: 0.5em; font-size: 1em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--border);
            border-radius: var(--ui-radius); margin-bottom: 0.5em; }
@@ -82,12 +66,6 @@
   button.run-btn.primary { background: var(--on-color); color: #fff; border-color: var(--on-color); }
   .exec-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
                padding: 0.7em 1em; margin-top: 0.5em; }
-  button.danger-btn { display: block; width: 100%; box-sizing: border-box;
-                       text-align: left; padding: 0.6em 1em;
-                       font-size: 0.9em; border-radius: var(--ui-radius); border: 1px solid var(--fault-color);
-                       background: var(--button-bg); color: var(--fault-color); cursor: pointer;
-                       margin-bottom: 0.5em; }
-  button.danger-btn:hover { background: var(--fault-color); color: #fff; }
   .exec-card .row { display: flex; justify-content: space-between; margin-bottom: 0.3em; }
   .exec-state { font-weight: bold; text-transform: capitalize; }
   .exec-state.state-faulted { color: var(--fault-color); }
@@ -117,12 +95,6 @@
 <h2>Thermocouples</h2>
 <div id="channels"><p class="empty">Loading…</p></div>
 
-<h2>Relays</h2>
-<p>Grouped by zone (Settings &rarr; Thermocouples &amp; Zones) -- relays in
-the same group are assigned to the same zone and switch together when a
-profile drives that zone.</p>
-<div id="relays"><p class="empty">Loading…</p></div>
-
 <h2>Firing profiles</h2>
 <div id="execCard"></div>
 <div id="runPicker">
@@ -139,25 +111,7 @@ Red marks are thermal-guard trips. <a href="/api/history.csv">Download CSV</a></
 <canvas id="historyChart" width="600" height="220"></canvas>
 <p id="historyEmpty" class="empty">No history yet -- start a firing profile.</p>
 
-<h2>Settings</h2>
-<a class="button" href="/readiness">Ready to fire? (checklist)</a>
-<a class="button" href="/settings/zones">Thermocouples &amp; zones</a>
-<a class="button" href="/settings/relays">Relays &amp; rules</a>
-<a class="button" href="/wifi">Network settings</a>
-<a class="button" href="/ota">Firmware update</a>
-
-<h2 style="border-top-color: var(--fault-color);">Danger zone</h2>
-<p>Each button below erases ONLY what it says and reboots the board
-immediately -- there is no undo. "Wi-Fi" never touches zones/rules/profiles;
-"kiln config" never touches Wi-Fi or profiles; "profiles" never touches
-anything else. "Factory default" erases all three.</p>
-<p>
-<button type="button" class="danger-btn" data-scope="wifi">Reset Wi-Fi only</button>
-<button type="button" class="danger-btn" data-scope="kiln">Reset kiln config only (zones, rules, relay cycles, run state)</button>
-<button type="button" class="danger-btn" data-scope="profiles">Reset fire profiles only</button>
-<button type="button" class="danger-btn" data-scope="all">Factory default (erase everything)</button>
-</p>
-<p id="resetStatus"></p>
+<p><a class="button" href="/settings">Settings</a></p>
 
 <script>
 const FAULT_BITS = [
@@ -201,67 +155,11 @@ function renderChannels(data) {
   });
 }
 
-function setRelay(relay, on) {
-  fetch('/api/relay', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'relay=' + relay + '&on=' + (on ? '1' : '0'),
-  }).then(poll).catch(poll);
-}
-
-function relayRow(r) {
-  const div = document.createElement('div');
-  div.className = 'card';
-  const btn = document.createElement('button');
-  btn.className = 'relay-toggle ' + (r.on ? 'relay-on' : 'relay-off');
-  btn.textContent = r.on ? 'ON' : 'OFF';
-  btn.addEventListener('click', function () { setRelay(r.relay, !r.on); });
-  div.innerHTML = '<span>Relay ' + r.relay + '</span>';
-  div.appendChild(btn);
-  return div;
-}
-
-// Groups relays by the zone that claims them (zones.relay_mask, bit N-1 =
-// Relay N -- same numbering as kiln_io.h). A relay claimed by no zone (or
-// zones aren't configured at all) falls into "Unassigned" so it's never
-// silently hidden.
+// zonesCache/loadZones stay here (unlike setRelay/relayRow/renderRelays,
+// moved to manual_page.html per UI_PLAN.md item 3) because the profile-exec
+// card and the previous-run banner below still name zones by index
+// (zoneName()) -- this page needs zone names, not relay toggle state.
 var zonesCache = { zones: [] };
-function renderRelays(statusData) {
-  const el = document.getElementById('relays');
-  if (!statusData.io_ready) {
-    el.innerHTML = '<p class="empty">No relay board attached.</p>';
-    return;
-  }
-  el.innerHTML = '';
-  const relaysByN = {};
-  statusData.relays.forEach(function (r) { relaysByN[r.relay] = r; });
-  const claimed = {};
-
-  zonesCache.zones.slice(0, zonesCache.thermo_count || 0).forEach(function (z, i) {
-    const relaysHere = [];
-    for (let bit = 0; bit < 4; bit++) {
-      if (z.relay_mask & (1 << bit)) {
-        const n = bit + 1;
-        if (relaysByN[n]) { relaysHere.push(relaysByN[n]); claimed[n] = true; }
-      }
-    }
-    if (relaysHere.length === 0) return;
-    const group = document.createElement('div');
-    group.className = 'zone-group';
-    group.innerHTML = '<h3>' + (z.name || ('Zone ' + i)) + '</h3>';
-    relaysHere.forEach(function (r) { group.appendChild(relayRow(r)); });
-    el.appendChild(group);
-  });
-
-  const unassigned = statusData.relays.filter(function (r) { return !claimed[r.relay]; });
-  if (unassigned.length > 0) {
-    const group = document.createElement('div');
-    group.className = 'zone-group';
-    group.innerHTML = '<h3>Unassigned</h3>';
-    unassigned.forEach(function (r) { group.appendChild(relayRow(r)); });
-    el.appendChild(group);
-  }
-}
-
 function loadZones() {
   return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
     zonesCache = data;
@@ -591,7 +489,6 @@ function pollExec() {
 function poll() {
   fetch('/api/status').then(r => r.json()).then(function (data) {
     renderChannels(data);
-    renderRelays(data);
   }).catch(function () {});
   pollExec();
   setTimeout(poll, 2000);
@@ -617,36 +514,6 @@ window.addEventListener('resize', pollHistory);
     apply(next);
   });
 })();
-
-var SCOPE_LABELS = {
-  wifi: 'Wi-Fi credentials only',
-  kiln: 'kiln config only (zones, rules, relay cycles, run state)',
-  profiles: 'saved fire profiles only',
-  all: 'EVERYTHING (factory default)',
-};
-document.querySelectorAll('.danger-btn').forEach(function (b) {
-  b.addEventListener('click', function () {
-    var scope = b.getAttribute('data-scope');
-    var label = SCOPE_LABELS[scope] || scope;
-    if (!confirm('This permanently erases ' + label + ' and reboots the board right now. ' +
-                 'There is no undo. Continue?')) {
-      return;
-    }
-    var status = document.getElementById('resetStatus');
-    status.textContent = 'Erasing and rebooting...';
-    fetch('/api/factory_reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'scope=' + encodeURIComponent(scope),
-    }).then(function (r) {
-      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
-    }).then(function (res) {
-      status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
-    }).catch(function () {
-      status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
-    });
-  });
-});
 </script>
 </body>
 </html>

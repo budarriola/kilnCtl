@@ -1446,6 +1446,36 @@ def touch_inject(x: int, y: int, pressed: bool = True) -> str:
     return _send(UART_TASK_ID_TOUCH, devices.touch_inject(x, y, pressed))
 
 
+@_tool()
+def touch_set_tap_dump(enable: bool) -> str:
+    """Turn the firmware's AUTOMATIC per-page-switch tap-target dump on/off.
+
+    Off by default: kiln_ui_show() dumps every clickable widget's rectangle,
+    centre point, and label on every page switch only while this is enabled,
+    because doing it unconditionally floods the device log during ordinary
+    navigation. touch_log_tap_targets() below is unaffected by this flag and
+    always dumps on request -- reach for that first; only turn this on when
+    driving a sequence of navigations and wanting every switch's targets
+    logged without a separate call after each one.
+    """
+    return _send(UART_TASK_ID_TOUCH, devices.touch_set_tap_dump(enable))
+
+
+@_tool()
+def touch_log_tap_targets() -> str:
+    """Request an immediate tap-target dump for whatever screen is loaded now.
+
+    This is the only way to discover where a widget actually is on this
+    panel -- there is no framebuffer readback. The dump covers the active
+    screen plus lv_layer_top()/lv_layer_sys() (where modal overlays such as
+    ui_confirm.c's confirmation dialogs and ui_num_pad.c's keypad live), and
+    walks any open lv_keyboard's individual keys. Fire-and-forget: the dump
+    itself arrives as ESP_LOGI "tap target ..." lines over the device log
+    (get_device_log / get_device_log_json), not as a reply to this call.
+    """
+    return _send(UART_TASK_ID_TOUCH, devices.touch_log_tap_targets())
+
+
 # ---------------------------------------------------------------------------
 # SAFETY -- the opto-isolated RP2040 link (task 7)
 #

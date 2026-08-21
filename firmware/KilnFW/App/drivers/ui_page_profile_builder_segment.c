@@ -10,6 +10,7 @@
 #include "ui_page_profile_builder_review.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_theme.h"
+#include "ui_topbar.h"
 
 /* Arithmetic (same style as every other page in this pass), against the real
  * ~267px content budget:
@@ -18,31 +19,41 @@
  *     gap ..........................................  4px
  *     three value cards, side by side, 72px tall .. 72px
  *     gap ..........................................  4px
- *     nav row 1 (Back / Prev / N of M / Next) ..... 44px
- *     gap ..........................................  4px
- *     nav row 2 (Add / Del) ....................... 44px
+ *     nav row (Add / Del) ......................... 44px
  *     gap ..........................................  4px
  *     caption (Add/Del limit, reserved even blank)  18px
  *                                                   ------
- *                                                    214px  <= 267px  OK
+ *                                                    162px  <= 267px  OK
  *
  * Three cards LAID OUT HORIZONTALLY, not stacked -- three 72px rows stacked
  * plus a nav row would be 3*72 + 44 = 260px on their own, no room left for a
  * second nav row or the caption; side by side they cost only one 72px row
- * total, same trick this task's brief calls out explicitly. */
+ * total, same trick this task's brief calls out explicitly.
+ *
+ * 2026-08-21 icon-topbar pass: the old nav row 1 (Back / Prev / N of M /
+ * Next) moved into the shared top bar (ui_topbar.c), freeing 44px + 4px of
+ * gap. Prev/Next are wired through cfg.prev_cb/next_cb -- Next here is a
+ * real page-style control (advances s_cur_seg like ui_page_profiles_mine.c's
+ * Prev/Next), with one twist ui_topbar_set_next_enabled() is deliberately
+ * NOT used for: at the last segment, Next does not clamp/disable, it
+ * advances to Step 3 (profile_builder_review) -- see next_cb()'s own
+ * comment. Prev DOES clamp (set_prev_enabled(s_cur_seg > 0)), same as every
+ * other paged page. The standalone "N of M" indicator label was dropped
+ * entirely rather than moved: s_title already renders "Segment N of M" via
+ * ui_topbar_set_title(), so a second copy of the same count would be pure
+ * duplication. */
 #define CARD_HEIGHT_PX 72
 
 static uint8_t s_cur_seg;
 
-static lv_obj_t *s_title;
 static lv_obj_t *s_target_val_label;
 static lv_obj_t *s_ramp_val_label;
 static lv_obj_t *s_dwell_val_label;
 static lv_obj_t *s_cards_row;
-static lv_obj_t *s_indicator;
 static lv_obj_t *s_caption;
 static lv_obj_t *s_add_btn;
 static lv_obj_t *s_del_btn;
+static ui_topbar_t s_tb;
 
 static profile_t *draft(void)
 {
@@ -68,13 +79,13 @@ static void refresh(void)
     snprintf(buf, sizeof(buf), "%u min", (unsigned)seg->dwell_min);
     lv_label_set_text(s_dwell_val_label, buf);
 
-    if (s_title) {
-        lv_label_set_text_fmt(s_title, "Segment %u of %u", (unsigned)(s_cur_seg + 1),
-                              (unsigned)d->segment_count);
-    }
-    if (s_indicator) {
-        lv_label_set_text_fmt(s_indicator, "%u of %u", (unsigned)(s_cur_seg + 1), (unsigned)d->segment_count);
-    }
+    char title_buf[32];
+    snprintf(title_buf, sizeof(title_buf), "Segment %u of %u", (unsigned)(s_cur_seg + 1),
+             (unsigned)d->segment_count);
+    ui_topbar_set_title(&s_tb, title_buf);
+    ui_topbar_set_prev_enabled(&s_tb, s_cur_seg > 0);
+    /* Next is deliberately always enabled -- see this file's header comment:
+     * at the last segment it advances to Step 3 rather than clamping. */
 
     /* Live feasibility verdict -- profile_feasibility_profile_mask() is pure
      * math over the in-memory model (no NVS touched), safe to call on every
@@ -125,12 +136,6 @@ void ui_page_profile_builder_segment_prepare(void)
     }
     s_cur_seg = 0;
     refresh();
-}
-
-static void back_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("profile_builder_zones");
 }
 
 static void prev_cb(lv_event_t *e)
@@ -315,9 +320,13 @@ lv_obj_t *ui_page_profile_builder_segment_build(void)
     lv_obj_set_style_pad_gap(scr, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_title = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_title, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(s_title, "Segment");
+    ui_topbar_create(scr, &(ui_topbar_cfg_t){
+        .title = "Segment",
+        .back_page = "profile_builder_zones",
+        .show_home = true,
+        .prev_cb = prev_cb,
+        .next_cb = next_cb,
+    }, &s_tb);
 
     s_cards_row = lv_obj_create(scr);
     lv_obj_set_width(s_cards_row, lv_pct(100));
@@ -332,23 +341,6 @@ lv_obj_t *ui_page_profile_builder_segment_build(void)
     build_card(s_cards_row, "Target C", &s_target_val_label, target_card_cb);
     build_card(s_cards_row, "Ramp C/hr", &s_ramp_val_label, ramp_card_cb);
     build_card(s_cards_row, "Dwell min", &s_dwell_val_label, dwell_card_cb);
-
-    lv_obj_t *nav_row1 = lv_obj_create(scr);
-    lv_obj_set_width(nav_row1, lv_pct(100));
-    lv_obj_set_height(nav_row1, 44);
-    lv_obj_set_style_bg_opa(nav_row1, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(nav_row1, 0, 0);
-    lv_obj_set_style_pad_all(nav_row1, 0, 0);
-    lv_obj_set_flex_flow(nav_row1, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(nav_row1, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_remove_flag(nav_row1, LV_OBJ_FLAG_SCROLLABLE);
-
-    build_nav_button(nav_row1, "Back", back_cb);
-    build_nav_button(nav_row1, "< Prev", prev_cb);
-    s_indicator = lv_label_create(nav_row1);
-    lv_obj_set_style_text_color(s_indicator, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_indicator, "");
-    build_nav_button(nav_row1, "Next >", next_cb);
 
     lv_obj_t *nav_row2 = lv_obj_create(scr);
     lv_obj_set_width(nav_row2, lv_pct(100));
@@ -366,6 +358,8 @@ lv_obj_t *ui_page_profile_builder_segment_build(void)
     s_caption = lv_label_create(scr);
     lv_obj_set_style_text_color(s_caption, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(s_caption, "");
+
+    ui_topbar_raise(&s_tb);
 
     refresh();
     return scr;

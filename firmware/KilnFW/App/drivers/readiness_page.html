@@ -6,6 +6,10 @@
 <title>kilnCtl - Ready to fire?</title>
 <link rel="stylesheet" href="/theme.css">
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
 <style>
   /* Page-local palette (docs/UI_THEME.md / App/drivers/ui_theme.h, TODO.md
      10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
@@ -62,7 +66,9 @@
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<a href="/">&larr; Dashboard</a>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar/
+     bottom-nav (UI_PLAN.md Web section 4 item 1) now provides this on every
+     page. -->
 <h1>Ready to fire?</h1>
 <p>A status page, not a forced setup flow (TODO.md 8.3) -- it answers "what
 is missing" on a board someone else configured a while ago, in the order
