@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 54,
   "timescale": 2.0,
-  "start_time": 1787337224.4939554,
+  "start_time": 1787349405.5868678,
   "events": [
     {
       "seq": 0,
@@ -56,7 +56,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 20200000,
+      "sim_time_us": 20800000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S12"
@@ -67,7 +67,7 @@
     },
     {
       "seq": 2000000004,
-      "sim_time_us": 80000000,
+      "sim_time_us": 80600000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S12"
@@ -92,7 +92,7 @@
         0,
         2000000003
       ],
-      "detail": "event:guard_warn observed 0.000s after fault_fired"
+      "detail": "event:guard_warn observed 0.600s after fault_fired"
     },
     {
       "name": "s12_trips_at_85c_sustained",
@@ -101,7 +101,7 @@
         0,
         2000000004
       ],
-      "detail": "event:guard_trip observed 59.800s after fault_fired"
+      "detail": "event:guard_trip observed 60.400s after fault_fired"
     }
   ],
   "verdict": "PASS",
@@ -111,10 +111,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 163,
-    "context_valid": 163,
+    "polls": 171,
+    "context_valid": 171,
     "any_current_present": 0,
-    "link_up": 163,
+    "link_up": 171,
     "max_zone_count": 3,
     "energized": 0
   }

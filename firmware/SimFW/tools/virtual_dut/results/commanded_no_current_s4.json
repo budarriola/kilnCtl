@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 62,
   "timescale": 2.0,
-  "start_time": 1787337282.4766421,
+  "start_time": 1787349463.6891148,
   "events": [
     {
       "seq": 0,
@@ -84,7 +84,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 60200000,
+      "sim_time_us": 60400000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -96,7 +96,7 @@
     },
     {
       "seq": 2000000004,
-      "sim_time_us": 157200000,
+      "sim_time_us": 156400000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S4"
@@ -115,7 +115,7 @@
         1,
         2000000004
       ],
-      "detail": "event:guard_warn observed 151.600s after relay_edge"
+      "detail": "event:guard_warn observed 150.800s after relay_edge"
     },
     {
       "name": "no_current_ever_flows",
@@ -139,11 +139,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 313,
-    "context_valid": 313,
+    "polls": 325,
+    "context_valid": 325,
     "any_current_present": 0,
-    "link_up": 313,
+    "link_up": 325,
     "max_zone_count": 3,
-    "energized": 229
+    "energized": 238
   }
 }

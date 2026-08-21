@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 57,
   "timescale": 10.0,
-  "start_time": 1787337975.961733,
+  "start_time": 1787350183.3368874,
   "events": [
     {
       "seq": 0,
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 63000000,
+      "sim_time_us": 62000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -127,7 +127,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 96000000,
+      "sim_time_us": 95000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -184,7 +184,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 62000000,
+      "sim_time_us": 60000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -196,7 +196,7 @@
     },
     {
       "seq": 2000000004,
-      "sim_time_us": 94000000,
+      "sim_time_us": 91000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "link_up",
@@ -231,7 +231,7 @@
         2,
         1000000001
       ],
-      "detail": "dut:current_absent observed 6.000s after dut_power"
+      "detail": "dut:current_absent observed 5.000s after dut_power"
     },
     {
       "name": "s6b_stays_at_warn_not_trip",
@@ -258,11 +258,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 61,
-    "context_valid": 61,
-    "any_current_present": 38,
-    "link_up": 54,
+    "polls": 63,
+    "context_valid": 63,
+    "any_current_present": 39,
+    "link_up": 55,
     "max_zone_count": 3,
-    "energized": 45
+    "energized": 47
   }
 }

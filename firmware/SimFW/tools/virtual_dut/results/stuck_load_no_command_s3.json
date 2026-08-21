@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 61,
   "timescale": 2.0,
-  "start_time": 1787338231.8048275,
+  "start_time": 1787350441.202961,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 60400000,
+      "sim_time_us": 60200000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -51,7 +51,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 71000000,
+      "sim_time_us": 70800000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -63,7 +63,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 91200000,
+      "sim_time_us": 92000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -108,7 +108,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 60200000,
+      "sim_time_us": 60000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -151,7 +151,7 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 0.800s after fault_fired"
+      "detail": "dut:current_present observed 0.600s after fault_fired"
     },
     {
       "name": "s3_trips_on_uncommanded_load",
@@ -185,7 +185,7 @@
         2000000004,
         1000000001
       ],
-      "detail": "dut:current_absent observed 0.200s after guard_trip"
+      "detail": "dut:current_absent observed 1.000s after guard_trip"
     }
   ],
   "verdict": "PASS",
@@ -197,7 +197,7 @@
   "dut_input_reachability": {
     "polls": 207,
     "context_valid": 207,
-    "any_current_present": 30,
+    "any_current_present": 31,
     "link_up": 207,
     "max_zone_count": 3,
     "energized": 46

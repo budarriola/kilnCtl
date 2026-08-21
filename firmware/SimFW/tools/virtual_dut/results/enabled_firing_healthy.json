@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 60,
   "timescale": 2.0,
-  "start_time": 1787337393.0715923,
+  "start_time": 1787349574.0286155,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 5600000,
+      "sim_time_us": 5400000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -39,7 +39,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 201200000,
+      "sim_time_us": 201000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -53,7 +53,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 60600000,
+      "sim_time_us": 60800000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -130,7 +130,7 @@
         0,
         1
       ],
-      "detail": "dut:K4_closed observed 54.600s after relay_edge"
+      "detail": "dut:K4_closed observed 54.800s after relay_edge"
     },
     {
       "name": "current_flows_once_k4_permits",
@@ -139,7 +139,7 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 0.400s after relay_edge"
+      "detail": "dut:current_present observed 0.600s after relay_edge"
     },
     {
       "name": "s3_never_trips_during_a_commanded_firing",
@@ -160,7 +160,7 @@
         2,
         1000000001
       ],
-      "detail": "dut:current_absent observed 0.400s after relay_edge"
+      "detail": "dut:current_absent observed 0.600s after relay_edge"
     },
     {
       "name": "k4_still_closed_at_end",
@@ -178,11 +178,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 485,
-    "context_valid": 485,
+    "polls": 490,
+    "context_valid": 490,
     "any_current_present": 209,
-    "link_up": 485,
+    "link_up": 490,
     "max_zone_count": 3,
-    "energized": 401
+    "energized": 403
   }
 }

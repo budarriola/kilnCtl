@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 1,
   "timescale": 10.0,
-  "start_time": 1787337090.156739,
+  "start_time": 1787349271.3645613,
   "events": [
     {
       "seq": 0,
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 63000000,
+      "sim_time_us": 61000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -39,7 +39,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 154000000,
+      "sim_time_us": 156000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -53,7 +53,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 65000000,
+      "sim_time_us": 61000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -65,7 +65,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 156000000,
+      "sim_time_us": 157000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -110,7 +110,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 62000000,
+      "sim_time_us": 60000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -158,11 +158,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 66,
-    "context_valid": 66,
-    "any_current_present": 26,
-    "link_up": 66,
+    "polls": 68,
+    "context_valid": 68,
+    "any_current_present": 28,
+    "link_up": 68,
     "max_zone_count": 3,
-    "energized": 50
+    "energized": 52
   }
 }

@@ -2,16 +2,16 @@
   "scenario": {
     "name": "mainfault_tc_disconnect",
     "version": 1,
-    "hash": "36eedb369aea11ea5477ca6b999b81f2f01df3089138ce4405d3b720cbb61528"
+    "hash": "6d9641c3a08d81208f113f96c043cae447bd2ba76b260c566486ec09c418dde6"
   },
   "fw_versions": {},
   "seed": 63,
-  "timescale": 10.0,
-  "start_time": 1787337954.763241,
+  "timescale": 1.0,
+  "start_time": 1787350122.108338,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 6000000,
+      "sim_time_us": 5100000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "oc_main",
@@ -22,8 +22,20 @@
       "f0": 0.0
     },
     {
-      "seq": 2000000000,
+      "seq": 1000000000,
       "sim_time_us": 6000000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "fault_line",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000000,
+      "sim_time_us": 700000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -35,7 +47,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 6000000,
+      "sim_time_us": 700000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "safety_temp_valid",
@@ -47,9 +59,43 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 6000000,
+      "sim_time_us": 700000,
       "event_type": "LINK_UP",
       "payload": {},
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 2000000003,
+      "sim_time_us": 5800000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "S6a"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000000,
+      "sim_time_us": 5500000,
+      "event_type": "SIM_CLOCK_MARK",
+      "payload": {
+        "entity": "main_fault",
+        "state": true
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
+      "seq": 3000000001,
+      "sim_time_us": 5500000,
+      "event_type": "GUARD_TRIP",
+      "payload": {
+        "guard": "KILNFW_S6"
+      },
       "a": 0,
       "b": 0,
       "f0": 0.0
@@ -67,27 +113,21 @@
     },
     {
       "name": "mainfault_trips_s6a",
-      "verdict": "BLOCKED",
+      "verdict": "PASS",
       "evidence": [
-        0
+        0,
+        2000000003
       ],
-      "detail": "event:guard_trip not observed within 3s after fault_fired (seq 0) [BLOCKED: STALE REASON, SUPERSEDED 2026-08-20 -- kept below for history, real current reason follows. safety_core_build_input() now names `.main_fault_asserted = discrete_task_main_fault()` (immediately after `.estop_pressed`), so SaftyFW's own half of this signal is fully wired; that is no longer what blocks this clause. The real blocker is one level deeper, in the FIXTURE, not the firmware: `virtual_simfw.c`'s `fault_line_asserted` field (the Fault-opto sensing this harness's own header comment already says the fixture only 'senses', never drives) is set ONLY by real hardware's `i2c_owner.c`, reading a real I2C GPIO-expander pin (`EXP1_PIN_FAULT_LINE`) wired to the ESP's GPIO6 -> U1 opto. `virtual_simfw.c` has no I2C-expander emulation of that path at all (grepped this pass: `fault_line_asserted` is read in three places in virtual_simfw.c/cmd_task.c/telemetry.c and WRITTEN in none) -- it is zero-initialized and stays false for the entire life of the process, regardless of what TC fault is injected on tc:0. Disconnecting tc:0 has no code path to it at all: this fixture never executes KilnFW's own guard-6 logic (there is no KilnFW anywhere in virtual_simfw or virtual_dut, only the real SaftyFW guard code under test), so the 'ESP decides to assert its own fault output' step this scenario's header comment describes is not something any fault injection here can cause. Separately and independently, run_dut_scenarios.py's poll loop never reads `fault_line_asserted` from telemetry and passes it as dut_core.exe's optional TICK `<main_fault>` field at all (it always calls `dut.tick(...)` with the parameter's default, `main_fault=False`) -- so even a fixture that DID assert the Fault line would still need that wiring added before this scenario could see it. Both gaps are fixture-side; neither is a SaftyFW guard defect or a scenario-authoring gap. See GUARD_TEST_MATRIX.md \u00a76 for the full three-way accounting (SaftyFW input: wired; fixture Fault-line emulation: absent; orchestrator TICK wiring: absent).]",
-      "blocked_on": {
-        "reason": "STALE REASON, SUPERSEDED 2026-08-20 -- kept below for history, real current reason follows. safety_core_build_input() now names `.main_fault_asserted = discrete_task_main_fault()` (immediately after `.estop_pressed`), so SaftyFW's own half of this signal is fully wired; that is no longer what blocks this clause. The real blocker is one level deeper, in the FIXTURE, not the firmware: `virtual_simfw.c`'s `fault_line_asserted` field (the Fault-opto sensing this harness's own header comment already says the fixture only 'senses', never drives) is set ONLY by real hardware's `i2c_owner.c`, reading a real I2C GPIO-expander pin (`EXP1_PIN_FAULT_LINE`) wired to the ESP's GPIO6 -> U1 opto. `virtual_simfw.c` has no I2C-expander emulation of that path at all (grepped this pass: `fault_line_asserted` is read in three places in virtual_simfw.c/cmd_task.c/telemetry.c and WRITTEN in none) -- it is zero-initialized and stays false for the entire life of the process, regardless of what TC fault is injected on tc:0. Disconnecting tc:0 has no code path to it at all: this fixture never executes KilnFW's own guard-6 logic (there is no KilnFW anywhere in virtual_simfw or virtual_dut, only the real SaftyFW guard code under test), so the 'ESP decides to assert its own fault output' step this scenario's header comment describes is not something any fault injection here can cause. Separately and independently, run_dut_scenarios.py's poll loop never reads `fault_line_asserted` from telemetry and passes it as dut_core.exe's optional TICK `<main_fault>` field at all (it always calls `dut.tick(...)` with the parameter's default, `main_fault=False`) -- so even a fixture that DID assert the Fault line would still need that wiring added before this scenario could see it. Both gaps are fixture-side; neither is a SaftyFW guard defect or a scenario-authoring gap. See GUARD_TEST_MATRIX.md \u00a76 for the full three-way accounting (SaftyFW input: wired; fixture Fault-line emulation: absent; orchestrator TICK wiring: absent).",
-        "phase": "No SaftyFW phase applies -- the SaftyFW side is done. The gap is virtual_simfw's own I2C-expander/opto emulation, which is out of this scenario library's ownership (scenarios/*.yaml cannot touch firmware/SimFW/tools/virtual_simfw/src), and even closing it would only be half the fix without also wiring run_dut_scenarios.py's poll loop to read and forward `fault_line_asserted`. S6a is therefore not provokable through this harness at all today, by design of what the harness chooses to emulate -- not a wiring omission this pass can close."
-      }
+      "detail": "event:guard_trip observed 0.700s after fault_fired"
     },
     {
       "name": "fault_line_asserted",
-      "verdict": "BLOCKED",
+      "verdict": "PASS",
       "evidence": [
-        0
+        0,
+        1000000000
       ],
-      "detail": "dut:fault_line_asserted not observed within 3s after fault_fired (seq 0) [BLOCKED: Same fixture-side gap as `mainfault_trips_s6a` immediately above: `virtual_simfw.c` has no producer that ever sets `fault_line_asserted` true (only real hardware's `i2c_owner.c` does), so this clause cannot pass against this fixture regardless of what fault is injected or when. This clause previously reported as a bare FAIL (no blocked_on annotation) -- SCENARIO_RESULTS.md's own honesty rule (report.py's BLOCKED-vs-FAIL distinction) says a clause blocked on known, tracked fixture incompleteness should read as BLOCKED, not FAIL; a bare FAIL here was accurate about the outcome but did not carry the reason, and made the suite look more broken than it is.]",
-      "blocked_on": {
-        "reason": "Same fixture-side gap as `mainfault_trips_s6a` immediately above: `virtual_simfw.c` has no producer that ever sets `fault_line_asserted` true (only real hardware's `i2c_owner.c` does), so this clause cannot pass against this fixture regardless of what fault is injected or when. This clause previously reported as a bare FAIL (no blocked_on annotation) -- SCENARIO_RESULTS.md's own honesty rule (report.py's BLOCKED-vs-FAIL distinction) says a clause blocked on known, tracked fixture incompleteness should read as BLOCKED, not FAIL; a bare FAIL here was accurate about the outcome but did not carry the reason, and made the suite look more broken than it is.",
-        "phase": "Same as `mainfault_trips_s6a` above -- virtual_simfw's Fault- line/opto emulation, out of this scenario library's ownership."
-      }
+      "detail": "dut:fault_line_asserted observed 0.900s after fault_fired"
     },
     {
       "name": "trip_latched",
@@ -98,17 +138,17 @@
       "detail": "dut:K4_open held at end of run (last observed seq 2000000000)"
     }
   ],
-  "verdict": "BLOCKED",
+  "verdict": "PASS",
   "validity": {
     "spi_underrun": false,
     "event_seq_gap": false,
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 27,
-    "context_valid": 27,
+    "polls": 142,
+    "context_valid": 142,
     "any_current_present": 0,
-    "link_up": 27,
+    "link_up": 142,
     "max_zone_count": 3,
     "energized": 0
   }

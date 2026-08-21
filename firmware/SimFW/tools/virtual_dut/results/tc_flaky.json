@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 46,
   "timescale": 0.2,
-  "start_time": 1787338608.639424,
+  "start_time": 1787350818.7094166,
   "events": [
     {
       "seq": 0,
@@ -440,7 +440,7 @@
     },
     {
       "seq": 2000000007,
-      "sim_time_us": 23680000,
+      "sim_time_us": 23620000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "safety_temp_valid",
@@ -452,7 +452,7 @@
     },
     {
       "seq": 2000000008,
-      "sim_time_us": 24520000,
+      "sim_time_us": 24580000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "safety_temp_valid",
@@ -476,7 +476,7 @@
     },
     {
       "seq": 2000000010,
-      "sim_time_us": 26380000,
+      "sim_time_us": 26320000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "safety_temp_valid",
@@ -761,10 +761,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 674,
-    "context_valid": 674,
+    "polls": 669,
+    "context_valid": 669,
     "any_current_present": 0,
-    "link_up": 674,
+    "link_up": 669,
     "max_zone_count": 3,
     "energized": 0
   }

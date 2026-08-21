@@ -233,6 +233,10 @@ from kilnsim.scenario import Scenario, compile_faults, load_scenario  # noqa: E4
 
 VIRTUAL_SIMFW_EXE = REPO_ROOT / "firmware" / "SimFW" / "tools" / "virtual_simfw" / "build" / "virtual_simfw.exe"
 DUT_CORE_EXE = HERE / "dut_core" / "build" / "dut_core.exe"
+# Only required when a scenario's dut.kiln_guard6: opts into the real-guard-6
+# causal chain (see the block comment above KilnCore) -- absent scenarios
+# never touch this path.
+KILN_CORE_EXE = REPO_ROOT / "firmware" / "SimFW" / "tools" / "virtual_kiln" / "kiln_core" / "build" / "kiln_core.exe"
 
 # TC_FAULT_CHANNEL_SAFETY (firmware/SimFW/src/sim/tc_fault_state.h) -- the
 # one safety-side MAX31856 channel behind J7/spi_emu_b, index 3 of 4.
@@ -279,6 +283,194 @@ _TRIP_REASON_TO_GUARD = {
 # _send_raw_relay_command() helper uses for the same reason.
 _RELAY_SET_SENSE_CMD = 0xF0
 _RELAY_SIGNAL_K1, _RELAY_SIGNAL_K2, _RELAY_SIGNAL_K3, _RELAY_SIGNAL_K5, _RELAY_SIGNAL_K4 = range(5)
+
+# --- KilnFW guard-6 causal chain (added 2026-08-21, this pass) ---------------
+# `mainfault_tc_disconnect.yaml`'s own `blocked_on` reasons (superseded by
+# this pass, see that file) correctly identified two fixture-side gaps: (1)
+# `virtual_simfw.c` had no producer for `fault_line_asserted` at all, and (2)
+# this script never forwarded it into `dut_core.exe`'s `<main_fault>` TICK
+# field. Both gaps are closed here, honestly rather than by fabricating a
+# timed assertion: `firmware/SimFW/tools/virtual_kiln/kiln_core.exe` already
+# compiles KilnFW's REAL, unmodified `thermal_guard.c` for the host (see that
+# directory's README.md, "Phase 1 finding: what in KilnFW/App is genuinely
+# host-portable" -- `thermal_guard.c` has no FreeRTOS/ESP-IDF/LVGL
+# dependency, and is already host-tested by `test_thermal_guard.c`). This
+# script can therefore run the SAME real guard-6 code virtual_kiln already
+# runs, driven by the SAME TC channel a scenario's `disconnected_tc` fault
+# targets, and let ITS verdict -- not a timer, not a scenario-authored
+# boolean -- decide when to assert the fault line. This is opt-in per
+# scenario (`dut.kiln_guard6:`, see `_parse_kiln_guard6` below): every
+# scenario that does not set it runs byte-identically to before this pass,
+# including `mainfault_esp_asserted.yaml`/`mainfault_no_nuisance_trip.yaml`,
+# which deliberately keep using `set_main_fault` to stand in for the ESP's
+# DECISION directly (a different, still-valid category of honesty -- see
+# those files' own comments) rather than this causal chain.
+#
+# `SIMFW_VIRTUAL_CMD_FAULT_LINE_SET` (IO group, cmd id 0xF1) is the new
+# virtual-only command this pass added to `virtual_simfw.c` (see that file's
+# own header comment above `dispatch_io()` for the full rationale) so that
+# `fault_line_asserted` -- a real wire-native telemetry/RELAY_GET_STATES/
+# IO_FAULT_LINE_GET field, not anything synthetic -- can be driven by this
+# script the same way K1/K4's sensed contact state already is via
+# `_send_relay_set_sense()`. Same low-level reuse of `TcpSimLink`'s private
+# request/reply primitives, because this command has no entry in
+# `kilnsim.payloads`' per-group encoder tables by design (same reasoning as
+# `_send_relay_set_sense()` above).
+_FAULT_LINE_SET_CMD = 0xF1
+# thermal_guard.h's thermal_guard_trip_t numeric value for
+# THERMAL_GUARD_TRIP_SENSOR_INVALID (guard 6) -- the only reason this pass's
+# composition ever asserts the fault line on. Hand-copied for the same
+# reason virtual_kiln/kiln_core/main.c's own protocol doc comment gives:
+# there is nothing machine-readable to import a C enum's numeric value from
+# on the Python side.
+_THERMAL_GUARD_TRIP_SENSOR_INVALID = 7
+
+
+def _send_fault_line_set(link: TcpSimLink, asserted: bool) -> int:
+    """Sends SIMFW_VIRTUAL_CMD_FAULT_LINE_SET(asserted) and returns the
+    reply's status byte (0 == SIMFW_CMD_STATUS_OK). See the module-level
+    comment above for why this bypasses kilnsim.payloads entirely -- same
+    pattern as _send_relay_set_sense(), IO group instead of RELAY."""
+    from kilnsim import benchproto_codec as bp
+
+    with link._send_lock:  # noqa: SLF001 - intentional low-level reuse, see _send_relay_set_sense()
+        msg_index = link._link.next_msg_index()  # noqa: SLF001
+        link._pending.begin(dst_device=1, dst_task=int(CommandGroup.IO), msg_index=msg_index)  # noqa: SLF001
+        frame = bp.Frame(
+            msg_type=bp.MsgType.DATA, msg_index=msg_index, src_device=0, src_task=0,
+            dst_device=1, dst_task=int(CommandGroup.IO),
+            payload=bytes([_FAULT_LINE_SET_CMD, 1 if asserted else 0]),
+        )
+        try:
+            while True:
+                with link._reply_cv:  # noqa: SLF001
+                    link._reply_frame = None  # noqa: SLF001
+                link._write_frame(frame)  # noqa: SLF001
+                reply = link._wait_for_reply(2.0)  # noqa: SLF001
+                if reply is not None:
+                    break
+                if not link._pending.note_retry():  # noqa: SLF001
+                    raise TimeoutError("no reply to FAULT_LINE_SET")
+                frame.msg_index = link._pending.msg_index  # noqa: SLF001
+        finally:
+            link._pending.clear()  # noqa: SLF001
+    if reply.msg_type != bp.MsgType.ACK or not reply.payload:
+        raise RuntimeError(f"FAULT_LINE_SET: unexpected reply {reply.msg_type}")
+    return reply.payload[0]
+
+
+# thermal_guard.c's own fault-status mask (its own comment: "OPEN | OVUV |
+# TCRANGE"), byte-identical to virtual_kiln/run_kiln_scenarios.py's
+# _TC_INVALIDATING_FAULTS and this file's own _TC_INVALIDATING_FAULT_BITS
+# used for the SaftyFW-side safety_temp_valid reconstruction above -- all
+# three are the same MAX31856 datasheet fact, not three different decisions.
+_KILN_TC_INVALIDATING_FAULTS = 0x01 | 0x02 | 0x40
+
+# profile_executor.c's own #define, PROFILE_EXECUTOR_TICK_MS ("1 Hz per
+# TODO.md 6A.7"), hand-copied here for the same reason virtual_kiln/
+# run_kiln_scenarios.py's KILN_CONTROL_TICK_S is (profile_executor.c is not
+# host-compilable, so there is nothing to import the constant from).
+KILN_CONTROL_TICK_S = 1.0
+
+
+def _decode_kiln_tc_c(regs: bytes) -> tuple:
+    """Byte-for-byte the same MAX31856 LTCBH:LTCBM:LTCBL decode as
+    virtual_kiln/run_kiln_scenarios.py's _decode_tc_c() -- a datasheet fact,
+    not a control/safety decision, duplicated rather than imported because
+    virtual_kiln/ is a standalone script directory, not an importable
+    package (same reasoning kiln_core/main.c's own header gives for why its
+    protocol doc is hand-copied rather than shared)."""
+    raw = (regs[0x0C] << 16) | (regs[0x0D] << 8) | regs[0x0E]
+    raw &= 0x00FFFFE0
+    if raw & 0x00800000:
+        raw -= 0x01000000
+    tc_c = raw * (1.0 / 4096.0)
+    sr = regs[0x0F]
+    sensor_ok = (sr & _KILN_TC_INVALIDATING_FAULTS) == 0
+    return tc_c, sensor_ok
+
+
+class KilnCore:
+    """Thin subprocess wrapper around virtual_kiln/kiln_core.exe's line
+    protocol -- same class virtual_kiln/run_kiln_scenarios.py already
+    defines, duplicated here for the same "not an importable package"
+    reason _decode_kiln_tc_c() gives. Runs KilnFW's REAL, unmodified
+    pid.c/thermal_guard.c/heater_output.c (see kiln_core/main.c's own header
+    comment). Only instantiated when a scenario's `dut.kiln_guard6:` opts
+    into this composition -- see _parse_kiln_guard6() below."""
+
+    def __init__(self, exe_path: Path, setpoint_c: float):
+        self.setpoint_c = setpoint_c
+        self.proc = subprocess.Popen(
+            [str(exe_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        self._readline()  # consume the boot-time RESET's "OK"
+
+    def _send(self, line: str) -> str:
+        assert self.proc.stdin is not None
+        self.proc.stdin.write(line + "\n")
+        self.proc.stdin.flush()
+        return self._readline()
+
+    def _readline(self) -> str:
+        assert self.proc.stdout is not None
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError("kiln_core.exe exited unexpectedly")
+        return line.strip()
+
+    def tick(self, measurement_c: float, sensor_ok: bool, dt_s: float) -> dict:
+        reply = self._send(f"TICK {measurement_c:.6f} {1 if sensor_ok else 0} {self.setpoint_c:.6f} {dt_s:.6f}")
+        parts = reply.split()
+        if len(parts) != 8:
+            raise RuntimeError(f"kiln_core TICK: malformed reply {reply!r}")
+        return {
+            "is_tripped": parts[0] == "1",
+            "reason": int(parts[1]),
+            "relay_on": parts[2] == "1",
+            "duty": float(parts[3]),
+        }
+
+    def close(self) -> None:
+        if self.proc.stdin:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+        self.proc.wait(timeout=5)
+
+
+def _parse_kiln_guard6(scenario: Scenario) -> Optional[dict]:
+    """Reads the scenario's optional `dut.kiln_guard6:` mapping:
+
+        dut:
+          kiln_guard6: { tc_channel: 0, setpoint_c: 1200.0 }
+
+    Opting a scenario into the real-guard-6 causal chain above. Absent by
+    default (returns None) -- every scenario written before this pass has no
+    such key and runs exactly as before. `tc_channel` is the MAIN-side
+    MAX31856 channel (0..2, NOT TC_CHANNEL_SAFETY=3 -- that channel is the
+    Pico's own independent sensor and cannot affect a KilnFW guard at all)
+    whose real TC_GET_REGS reading feeds kiln_core.exe. `setpoint_c` is a
+    fixed setpoint (same "no profile ramp/dwell" limitation
+    virtual_kiln/README.md documents) high enough above ambient that the
+    zone is genuinely regulating (duty > 0) when the scenario wants
+    "actively running a zone" to be true, matching KilnFW's own
+    profile-gated escalation of guard 6 into SAFETY_FAULT_SRC_THERMO."""
+    dut_raw = (scenario.raw or {}).get("dut") or {}
+    raw = dut_raw.get("kiln_guard6")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("dut.kiln_guard6 must be a mapping")
+    if "tc_channel" not in raw or "setpoint_c" not in raw:
+        raise ValueError("dut.kiln_guard6 needs 'tc_channel' and 'setpoint_c'")
+    tc_channel = int(raw["tc_channel"])
+    if not (0 <= tc_channel < 3):
+        raise ValueError(f"dut.kiln_guard6: tc_channel {tc_channel} out of range (0..2, "
+                          f"main-side channels only -- see TC_CHANNEL_SAFETY)")
+    return {"tc_channel": tc_channel, "setpoint_c": float(raw["setpoint_c"])}
 
 
 def _send_relay_set_sense(link: TcpSimLink, signal: int, level: bool) -> int:
@@ -925,6 +1117,10 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                       poll_interval_s: float, trace: bool = False) -> dict:
     sim_proc, port = start_virtual_simfw(seed_override if seed_override is not None else scenario.seed)
     dut = DutCore(DUT_CORE_EXE)
+    kiln_guard6 = _parse_kiln_guard6(scenario)
+    kiln: Optional[KilnCore] = None
+    if kiln_guard6 is not None:
+        kiln = KilnCore(KILN_CORE_EXE, kiln_guard6["setpoint_c"])
     link = TcpSimLink()
     try:
         link.connect(f"127.0.0.1:{port}")
@@ -979,6 +1175,10 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
         # reasoning as both: outside WIRE_EVENT_TYPES, so none of the three
         # synthetic streams can ever collide in seq space.
         next_main_fault_evt_seq = 3_000_000_000
+        # kiln_guard6 composition's own state, unused (stays None/False)
+        # unless the scenario opted in -- see _parse_kiln_guard6().
+        kiln_was_tripped = False
+        last_kiln_sim_time_us: Optional[int] = None
 
         last_sim_time_us = 0
         start_wall = time.time()
@@ -1044,6 +1244,57 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                         next_main_fault_evt_seq += 1
                     else:
                         _send_relay_set_sense(link, act["signal"], act["closed"])
+
+                # --- kiln_guard6 composition (see the block comment above
+                # KilnCore/_send_fault_line_set) -- inert unless the scenario
+                # opted in via dut.kiln_guard6:. Batch-ticks kiln_core.exe
+                # (REAL, unmodified thermal_guard.c) to cover the elapsed sim
+                # time in real PROFILE_EXECUTOR_TICK_MS (1s) steps, replaying
+                # the same TC_GET_REGS-decoded reading across a batch -- the
+                # SAME documented approximation virtual_kiln/
+                # run_kiln_scenarios.py's own poll loop already uses and
+                # ships against a 19-scenario sweep, not a new one introduced
+                # here. On the tick that newly trips guard 6 specifically for
+                # THERMAL_GUARD_TRIP_SENSOR_INVALID, this is "the ESP decided
+                # to assert its fault output": the real fault line is
+                # asserted in virtual_simfw AND dut_core's main_fault input
+                # is raised the same tick, so SaftyFW's own unmodified S6a
+                # block decides for itself whether to trip -- nothing about
+                # that decision is bypassed or asserted directly.
+                if kiln is not None:
+                    kiln_reg_reply = link.send_command(
+                        CommandGroup.TC, TcCmd.GET_REGS, {"channel": kiln_guard6["tc_channel"]})
+                    kiln_regs = bytes(kiln_reg_reply.get("regs", bytes(16)))
+                    kiln_tc_c, kiln_sensor_ok = _decode_kiln_tc_c(kiln_regs)
+                    step_us = int(KILN_CONTROL_TICK_S * 1_000_000)
+                    if last_kiln_sim_time_us is None or sim_time_us <= last_kiln_sim_time_us:
+                        n_steps = 1
+                    else:
+                        n_steps = max(1, (sim_time_us - last_kiln_sim_time_us) // step_us)
+                    n_steps = min(n_steps, 20_000)
+                    kiln_result = None
+                    for _ in range(n_steps):
+                        kiln_result = kiln.tick(kiln_tc_c, kiln_sensor_ok, KILN_CONTROL_TICK_S)
+                    last_kiln_sim_time_us = sim_time_us
+                    if kiln_result is not None:
+                        kiln_newly_tripped = kiln_result["is_tripped"] and not kiln_was_tripped
+                        kiln_was_tripped = kiln_result["is_tripped"]
+                        if kiln_newly_tripped and kiln_result["reason"] == _THERMAL_GUARD_TRIP_SENSOR_INVALID \
+                                and not main_fault_state:
+                            main_fault_state = True
+                            _send_fault_line_set(link, True)
+                            collected.append(Event(
+                                seq=next_main_fault_evt_seq, sim_time_us=sim_time_us,
+                                event_type=EventType.SIM_CLOCK_MARK,
+                                payload={"entity": "main_fault", "state": True},
+                            ))
+                            next_main_fault_evt_seq += 1
+                            collected.append(Event(
+                                seq=next_main_fault_evt_seq, sim_time_us=sim_time_us,
+                                event_type=EventType.GUARD_TRIP,
+                                payload={"guard": "KILNFW_S6"},
+                            ))
+                            next_main_fault_evt_seq += 1
 
                 reg_reply = link.send_command(CommandGroup.TC, TcCmd.GET_REGS, {"channel": TC_CHANNEL_SAFETY})
                 regs = bytes(reg_reply.get("regs", bytes(16)))
@@ -1142,6 +1393,8 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
     finally:
         link.disconnect()
         dut.close()
+        if kiln is not None:
+            kiln.close()
         sim_proc.terminate()
         try:
             sim_proc.wait(timeout=5)

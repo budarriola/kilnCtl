@@ -1312,11 +1312,54 @@ static bool dispatch_relay(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 }
 
 // ===========================================================================
-// IO group (PROTOCOL.md sec 5.5)
+// IO group (PROTOCOL.md sec 5.5) -- PLUS one VIRTUAL-ONLY extension.
+//
+// SIMFW_VIRTUAL_CMD_FAULT_LINE_SET (0xF1) is NOT part of PROTOCOL.md and
+// deliberately NOT added to firmware/SimFW/src/tasks/cmd_ids.h, same
+// discipline as RELAY group's SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE (0xF0,
+// see that command's own header comment above dispatch_relay()) and for
+// the analogous reason: on real hardware `fault_line_asserted` is SENSED,
+// never driven, by i2c_owner.c reading EXP1_PIN_FAULT_LINE off the ESP's
+// GPIO6 -> U1 opto (DESIGN_NOTES.md sec 3.4) -- there is no wire by which a
+// connected client could ever tell the fixture "the ESP asserted its fault
+// output" on real hardware either. RELAY_SET_SENSE's own comment explicitly
+// refused signal 5 (FAULT_LINE) for exactly this reason: "that line is
+// ESP-driven, not a relay, and has no coil for a virtual DUT to represent."
+//
+// This command exists for a narrower, later reason RELAY_SET_SENSE's
+// design predates: firmware/SimFW/tools/virtual_kiln/ compiles KilnFW's
+// REAL, unmodified thermal_guard.c for the host and can now compute guard
+// 6's real verdict (THERMAL_GUARD_TRIP_SENSOR_INVALID) against a real
+// simulated TC channel. When a client composing that real guard-6 decision
+// wants to report ITS OUTCOME -- "the ESP's own guard just decided to
+// assert its fault output" -- there is still no physical coil to represent,
+// same as RELAY_SET_SENSE's K1-K5 case, but now for the ESP's own output
+// pin rather than a relay contact. This command is that narrowly-scoped
+// substitute, standing in for the missing opto/GPIO wire the same way
+// RELAY_SET_SENSE stands in for a missing relay coil -- see
+// firmware/SimFW/tools/virtual_dut/run_dut_scenarios.py's `kiln_guard6`
+// wiring for the one caller that uses it.
+//
+// Request: [u8 level]. level: 0 = not asserted, nonzero = asserted. Reply:
+// [status] only. Setting this does NOT synthesize a RELAY_EDGE or any other
+// wire event -- `fault_line_asserted` is not part of the RELAY_GET_EDGES
+// edge log, only a plain telemetry/RELAY_GET_STATES/IO_FAULT_LINE_GET field
+// (see the three `d->fault_line_asserted` read sites below), so this command
+// simply writes that field, exactly the way real i2c_owner.c's read of
+// EXP1_PIN_FAULT_LINE would update it on real hardware.
 // ===========================================================================
+#define SIMFW_VIRTUAL_CMD_FAULT_LINE_SET 0xF1u
+
 static bool dispatch_io(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
 {
     switch (cmd) {
+    case SIMFW_VIRTUAL_CMD_FAULT_LINE_SET: {
+        uint8_t level = ar_u8(r);
+        if (r->overflow) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+        d->fault_line_asserted = level != 0u;
+        rw_u8(w, SIMFW_CMD_STATUS_OK);
+        return true;
+    }
     case SIMFW_CMD_IO_SET_DIR:
     case SIMFW_CMD_IO_WRITE:
         // Generic expander I/O: no MCP23017 emulated here (nothing in the
