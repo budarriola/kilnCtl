@@ -87,6 +87,8 @@
 #include "hardware/sync.h"
 #include "pico/platform.h"
 
+#include "drivers/simfw_fatal.h"
+
 // --- GPIO / slice assignment (see file header) ------------------------------
 // Named as individual macros, not just array literals, so the compile-time
 // guard block below can _Static_assert each one against the forbidden-pin
@@ -268,9 +270,18 @@ bool ct_wave_pwm_init(void)
         }
         s_pending_valid[ch] = false;
 
+        // required = false, checked explicitly rather than required = true,
+        // so simfw_fatal() can name the exact zone and cite the budget --
+        // see docs/HARDWARE.md section 1b.5 (this used to return false here
+        // and let main.c discard it with (void), which is what let the
+        // fixture boot with silent DC-mid-scale CT outputs on exhaustion).
         int chan = dma_claim_unused_channel(false);
         if (chan < 0) {
-            return false;
+            simfw_fatal("ct_wave_pwm",
+                        "DMA channel exhausted claiming zone %u of %u "
+                        "(docs/HARDWARE.md section 1b: 11/12 channels already "
+                        "budgeted, 1 spare)",
+                        (unsigned)ch, (unsigned)CT_WAVE_PWM_NUM_CHANNELS);
         }
         s_dma_chan[ch] = chan;
 

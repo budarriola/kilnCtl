@@ -34,12 +34,15 @@
 // DMA channel budget -- docs/HARDWARE.md section 1b.
 //
 // The RP2040's 12 DMA channels are one global pool with no per-peripheral
-// partitioning, and every claim in the fixture passes required = false, so
-// exhaustion does NOT panic: it degrades silently (section 1b.5 -- a fixture
-// that boots, enumerates and answers commands while having no CT output or one
-// dead SPI bus). Nothing at run time notices. So the budget is checked here,
-// at compile time, where a 13th channel is a build error instead of a bench
-// mystery.
+// partitioning. Every dma_claim_unused_channel() call site in the fixture
+// now routes a failure through drivers/simfw_fatal.h, which halts loudly
+// (matching the neighbouring pio_claim_unused_sm(pio, true) panics) instead
+// of the silent degrade this budget used to be the only defense against
+// (section 1b.5: a fixture that boots, enumerates and answers commands while
+// having no CT output or one dead SPI bus -- fixed this pass). That does NOT
+// make this compile-time check redundant: catching a 13th channel at build
+// time, before anyone is standing at the bench, is still strictly better
+// than catching it via a bench-time halt on whichever core claims last.
 //
 // This file is the only translation unit that sees every DMA claimant's
 // count constant at once -- the drivers cannot check it themselves (a driver
@@ -65,11 +68,12 @@
 _Static_assert(SIMFW_DMA_CHANNELS_CLAIMED <= NUM_DMA_CHANNELS,
                "SimFW DMA budget exceeded: the CT wave synth and the two PIO "
                "SPI buses together claim more than the RP2040's "
-               "NUM_DMA_CHANNELS channels. Every claim passes required=false, "
-               "so this would not panic at run time -- it would boot with a "
-               "dead CT output or a dead SPI bus. Free a channel (see "
-               "docs/HARDWARE.md section 1b.4, the only slack that exists) or "
-               "reduce a channel-count constant.");
+               "NUM_DMA_CHANNELS channels. Every claim now halts loudly via "
+               "simfw_fatal() on exhaustion (drivers/simfw_fatal.h) rather "
+               "than degrading silently, but that is a bench-time halt -- "
+               "catching the overrun here, at compile time, is still better. "
+               "Free a channel (see docs/HARDWARE.md section 1b.4, the only "
+               "slack that exists) or reduce a channel-count constant.");
 
 // FreeRTOSConfig.h turns on configCHECK_FOR_STACK_OVERFLOW (2) and
 // configUSE_MALLOC_FAILED_HOOK (1) unconditionally, matching SaftyFW's
@@ -109,14 +113,25 @@ int main(void)
     // this file does not set affinity itself, so there is exactly one place
     // per task that can get it wrong, not two.
     //
-    // No return value is checked yet: there is no log sink running before
-    // the scheduler starts to report a failure to (log_task itself is one
-    // of the tasks being started), and every task body is currently just an
-    // idle loop with nothing that can fail beyond xTaskCreate() itself --
-    // same "logged-and-continued, nothing fatal" posture SaftyFW's main()
-    // documents for its own bring-up, minus the logging until log_task is
-    // real. TODO: once log_task/telemetry have real bodies, capture and
-    // report these.
+    // No return value is checked here, but that is no longer "every task
+    // body is just an idle loop with nothing that can fail beyond
+    // xTaskCreate()" -- it stopped being true the moment wave_owner_start()
+    // (ct_wave_pwm_init()) and spi_emu_a/b_start() (max31856_pio_engine_init())
+    // started claiming DMA channels from a shared, exhaustible 12-channel
+    // pool (docs/HARDWARE.md section 1b). What makes the (void) discards
+    // below still defensible is that a DMA claim failure no longer returns
+    // false up this chain at all: every dma_claim_unused_channel() call site
+    // now halts loudly through drivers/simfw_fatal.h on exhaustion (see that
+    // header, and ct_wave_pwm.c/max31856_pio_engine.c's call sites) instead
+    // of degrading silently the way it used to. What a _start() function can
+    // still fail on -- and what these (void)s still discard -- is a plain
+    // FreeRTOS allocation failure (xTaskCreate()/xQueueCreate()/
+    // xSemaphoreCreateMutex() under heap pressure), which remains
+    // "logged-and-continued, nothing fatal" the way SaftyFW's own main()
+    // documents, minus the logging until log_task is real (there is no log
+    // sink running yet to report a failure to -- log_task itself is one of
+    // the tasks being started). TODO: once log_task/telemetry have real
+    // bodies, capture and report these.
     (void)spi_emu_a_start();
     (void)spi_emu_b_start();
     (void)wave_owner_start();

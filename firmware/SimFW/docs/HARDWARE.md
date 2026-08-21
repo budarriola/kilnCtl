@@ -338,44 +338,74 @@ table swap, which is the feature.
 
 ### 1b.5 What happens today if a claim fails
 
-**Every DMA claim in the fixture passes `required = false`. Nothing panics on
-DMA exhaustion; everything degrades, and today nothing reports the
-degradation.**
+**Fixed.** Every `dma_claim_unused_channel()` call site still passes
+`required = false` (so each one can name exactly which subsystem/channel
+failed before halting, rather than relying on the SDK's generic panic
+message), but a failed claim is checked explicitly and routed through
+`drivers/simfw_fatal.h`'s `simfw_fatal(subsystem, reason_fmt, ...)` instead of
+returning `false` up a chain `main.c` used to discard with `(void)`.
+`simfw_fatal()` never returns: it blinks the onboard LED (GPIO25 — its first
+owner, since no heartbeat body has ever claimed it) into a fast burst then
+solid-on, then calls `panic()` with the formatted subsystem+reason message —
+the same halt mechanism the neighbouring `pio_claim_unused_sm(pio, true)`
+calls already use for PIO state-machine exhaustion, closing the asymmetry
+recorded below. Verified by temporarily draining the whole 12-channel pool
+before `ct_wave_pwm_init()`'s per-zone claim and confirming (compiled ARM
+disassembly + `.rodata` inspection) that the forced failure reaches
+`simfw_fatal()` with the correct subsystem name and message, not a silent
+`return false`; reverted after confirming.
 
 | Call site | Arg | On failure |
 |---|---|---|
-| `ct_wave_pwm.c:191` (per CT zone) | `false` | `ct_wave_pwm_init()` returns `false` → `wave_owner_start()` returns `false` → `main.c` discards it with `(void)`. Boot continues. The PWM carriers are already running at fixed mid-scale, so all three CT outputs sit at DC silence forever; the `wave_owner` task is never created, so every `ct_wave_*` command fails at the queue check. Channels claimed for earlier zones are not released. |
-| `max31856_pio_engine.c:628` (`dma_data`) | `false` | `..._init()` returns `false` → the owner task enters a 1 s idle loop forever. That bus answers no SPI traffic. |
-| `max31856_pio_engine.c:629` (`dma_load`) | `false` | Same, but `dma_data` is already claimed and leaked. |
-| `max31856_pio_engine.c:653` (per `dma_sniff[i]`) | `false` | Same, plus a sharper hazard — see below. |
+| `ct_wave_pwm.c` (per CT zone) | `false` | `simfw_fatal("ct_wave_pwm", "DMA channel exhausted claiming zone %u of %u ...")`. Halts before `vTaskStartScheduler()` — this claim runs from `main()`, pre-scheduler, so no core is left running to enumerate USB or answer commands. |
+| `max31856_pio_engine.c` (`dma_data`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_data channel exhausted on pio%u ...")`. |
+| `max31856_pio_engine.c` (`dma_load`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_load channel exhausted on pio%u (dma_data already claimed; ...)")`. |
+| `max31856_pio_engine.c` (per `dma_sniff[i]`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_sniff[%u] channel exhausted on pio%u, channel_count=%u ...")` — halting here (rather than returning `false`) is also what closes the "mid-loop sniff failure is worse than an idle bus" hazard this section used to describe: `simfw_fatal()` never returns, so the half-initialised bus state (`s_bus_for_pio_index[]` published, `dma_load` armed with `DMA_IRQ_0` enabled) is never reachable by the other bus's shared `irq_handler_dma()`. |
 
-Three things about this posture are worth stating plainly:
+Two things about this posture are worth stating plainly:
 
-1. **The failure is silent.** `main.c` explicitly `(void)`s every `_start()`,
-   on the documented grounds that "every task body is currently just an idle
-   loop with nothing that can fail beyond `xTaskCreate()` itself". That is no
-   longer true of `wave_owner_start()`, which now really can fail on DMA
-   exhaustion. A 12th claim gives a fixture that boots, enumerates, and
-   answers commands while quietly having no CT output or one dead SPI bus.
-2. **Nothing is unwound.** Neither init releases already-claimed DMA channels,
-   PIO state machines, or PIO program space on the failure path, so a partial
-   failure permanently strands channels the next subsystem might have used.
-3. **A mid-loop sniff failure on bus A is worse than an idle bus.**
-   `max31856_pio_engine_init()` publishes `s_bus_for_pio_index[]` early and
-   arms `dma_load` (with `DMA_IRQ_0` enabled on it) and `dma_sniff[0..i-1]`
-   before the failing claim. `max31856_pio_engine_start_irq()` is never
-   reached for that bus — but the *other* bus installs the shared `DMA_IRQ_0`
-   handler, which walks both entries and only skips a bus whose `dma_load < 0`.
-   A half-initialised bus therefore still services `handle_load_done()` and
-   unmasks PIO IRQ sources on a bus that was never brought up. Recorded as an
-   audit finding; not fixed here.
+1. **The failure is no longer silent, for the two DMA-exhaustion call sites.**
+   `main.c`'s comment about "nothing that can fail beyond `xTaskCreate()`" has
+   been corrected in place; what a `_start()` function can still fail on
+   (and what its caller's `(void)` still discards) is a plain FreeRTOS
+   allocation failure (`xTaskCreate()`/`xQueueCreate()`/
+   `xSemaphoreCreateMutex()` under heap pressure) — unrelated to DMA, and
+   still "logged-and-continued, nothing fatal" pending a real `log_task` body.
+2. **The unwind gap is moot for DMA-caused partial state, not separately
+   patched.** `simfw_fatal()` is `noreturn` and halts synchronously inside the
+   failing claim, so execution can never continue to a point where a
+   previously-claimed-but-now-stranded DMA channel, PIO SM, or PIO program
+   offset gets reused or serviced by anything else — there is no return path
+   left to unwind *from*. (A non-DMA leak this pass did not touch:
+   `max31856_pio_engine_init()`'s `!publish_base(...)` failure path, mid-loop
+   over already-enabled RX state machines, still returns `false` without
+   releasing them — out of scope for a DMA-claim-failure pass, flagged here so
+   it is not lost.)
 
-**Asymmetry worth knowing:** the PIO claims in the same function use
-`pio_claim_unused_sm(pio, true)` — `required = true`, which **panics**. So SM
-exhaustion halts the fixture while DMA exhaustion limps. The `if (sm < 0)
-return false` guards after those calls, and `spi_emu_a.c`'s comment explaining
-the idle-loop fallback "if the PIO block cannot supply 4 state machines", both
-describe a path that cannot be taken.
+**One caveat `simfw_fatal()` does NOT remove:** `panic()` (like the PIO
+precedent it matches) halts only the CALLING core. `ct_wave_pwm.c`'s claim
+runs pre-scheduler (single core), so it halts boot outright. `spi_emu_a.c`/
+`spi_emu_b.c`'s claims run from tasks pinned to `SIMFW_CORE_RT_PATH` (core 1,
+`task_priorities.h`) *after* the scheduler has started — a claim failure there
+freezes core 1 (and with it, that bus's activity, forever) while core 0
+(`usb_owner`/`telemetry`/`cmd_task`/etc., `SIMFW_CORE_ELASTIC_PATH`) keeps
+running and USB stays enumerated. The affected bus's own state is guaranteed
+to stop changing forever (frozen transaction counters, every read/write to it
+failing), so it cannot be mistaken for a *live, healthy* bus — but a true
+whole-board halt from a single-core panic would need cross-core signalling or
+a watchdog, which this pass did not add. Recorded for `docs/PLAN.md` §0.1 as
+a possible follow-up, not implemented here.
+
+**Formerly an asymmetry, now consistent:** the PIO claims in the same
+functions use `pio_claim_unused_sm(pio, true)` — `required = true`, which
+**panics**. DMA claims now reach the same halt via `simfw_fatal()` on
+exhaustion (`required = false`, checked explicitly, so the message can name
+the exact subsystem/channel rather than relying on the SDK's generic
+"No PIO state machines available"-style text). The `if (sm < 0) return false`
+guards after the PIO claims, and `spi_emu_a.c`'s comment explaining the
+idle-loop fallback "if the PIO block cannot supply 4 state machines", both
+still describe a path that cannot be taken — true before this pass and true
+after it, for the same reason (`required = true` never returns negative).
 
 ### 1b.6 Correction to §0 item 7
 

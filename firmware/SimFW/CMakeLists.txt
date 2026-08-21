@@ -141,6 +141,7 @@ set(SIMFW_APP_SOURCES
     src/sim/fault_engine.c
     src/drivers/mcp23017.c
     src/drivers/ct_wave_pwm.c
+    src/drivers/simfw_fatal.c
     src/sim/sine_synth.c
     src/sim/ct_calibration.c
 )

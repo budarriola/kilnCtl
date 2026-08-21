@@ -13,6 +13,7 @@
 #include "hardware/irq.h"
 
 #include "max31856_spi_slave.pio.h"
+#include "simfw_fatal.h"
 
 // --- Bus-lookup table for the IRQ dispatch functions below ------------------
 // At most one bus struct per PIO index (0 or 1) -- see the .h file's
@@ -625,10 +626,26 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
     pio_sm_set_enabled(pio, bus->sm_tx, true);
 
     // --- DMA: data <- load <- sniff ----------------------------------
+    // required = false, checked individually (rather than required = true,
+    // or the combined check this replaces) so simfw_fatal() can name which
+    // of the two failed and on which PIO bus -- see docs/HARDWARE.md section
+    // 1b.5. Before this change, either failure returned false here with
+    // dma_data possibly already claimed and leaked, and the caller (the
+    // owner task) fell into a 1 s idle loop forever with no report anywhere.
     bus->dma_data = dma_claim_unused_channel(false);
+    if (bus->dma_data < 0) {
+        simfw_fatal("max31856_pio_engine",
+                    "dma_data channel exhausted on pio%u (docs/HARDWARE.md "
+                    "section 1b: 11/12 channels already budgeted, 1 spare)",
+                    (unsigned)pio_get_index(pio));
+    }
     bus->dma_load = dma_claim_unused_channel(false);
-    if (bus->dma_data < 0 || bus->dma_load < 0) {
-        return false;
+    if (bus->dma_load < 0) {
+        simfw_fatal("max31856_pio_engine",
+                    "dma_load channel exhausted on pio%u (dma_data already "
+                    "claimed; docs/HARDWARE.md section 1b: 11/12 channels "
+                    "already budgeted, 1 spare)",
+                    (unsigned)pio_get_index(pio));
     }
     data_arm(bus);
 
@@ -652,7 +669,20 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
     for (uint8_t i = 0; i < cfg->channel_count; i++) {
         bus->dma_sniff[i] = dma_claim_unused_channel(false);
         if (bus->dma_sniff[i] < 0) {
-            return false;
+            // The sharper hazard docs/HARDWARE.md section 1b.5 item 3 flags:
+            // s_bus_for_pio_index[] is already published and dma_load is
+            // already armed with DMA_IRQ_0 enabled at this point, and the
+            // shared irq_handler_dma() only skips a bus whose dma_load < 0
+            // -- so a `return false` here used to leave a half-initialised
+            // bus that the OTHER bus's IRQ install could still service.
+            // simfw_fatal() halts synchronously and never returns, so that
+            // half-initialised state is never reachable by anything else.
+            simfw_fatal("max31856_pio_engine",
+                        "dma_sniff[%u] channel exhausted on pio%u, "
+                        "channel_count=%u (docs/HARDWARE.md section 1b: "
+                        "11/12 channels already budgeted, 1 spare)",
+                        (unsigned)i, (unsigned)pio_get_index(pio),
+                        (unsigned)cfg->channel_count);
         }
         sniff_arm(bus, i);
     }
