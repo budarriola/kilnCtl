@@ -79,17 +79,6 @@ never `[x]`.
       `DESIGN_NOTES.md` §3.2.1 for the full two-deadline analysis (datasheet
       arithmetic, not measured — `docs/SPI_ACCESS_AUDIT.md` §9 has the
       source numbers).
-- [ ] **`panic()` only halts the calling core.** `simfw_fatal()` (below)
-      halts `ct_wave_pwm`'s pre-scheduler claim outright, but the
-      post-scheduler `spi_emu_a`/`spi_emu_b` claims run on core 1 — a
-      failure there freezes core 1 while core 0 (`usb_owner`/telemetry)
-      keeps running with USB enumerated. The affected bus is provably dead
-      (frozen counters, every access fails) so it can't masquerade as
-      healthy, but it's not a whole-board halt. Needs cross-core signalling
-      or a watchdog to close.
-- [ ] **`max31856_pio_engine_init()`'s `!publish_base(...)` path leaks
-      already-enabled RX state machines** — a non-DMA leak `f9cc7b5`
-      deliberately left alone; flagged in `docs/HARDWARE.md`.
 - [ ] **Bridge ACK still precedes dispatch — narrower than it was.** Every
       unimplemented subcommand's silent-ACK case is now fixed (`c91ed50`: all
       11 `default:` branches reply `ok=0` with the echoed subcmd). **Still
@@ -215,6 +204,11 @@ never `[x]`.
       flag since SimFW has no console at that point, and it matches the
       neighbouring PIO SM claims' existing panic; verified by draining all
       12 channels and disassembling the ARM build (`f9cc7b5`)
+- [x] `max31856_pio_engine_init()`'s `!publish_base(...)` failure path now
+      routes to `simfw_fatal()` (proven unreachable, not a normal unwind
+      case), and `simfw_fatal()` now halts the whole board via a cross-core
+      SIO FIFO signal, not just the calling core — `DESIGN_NOTES.md` §4.6.1
+      (`13a90b0`)
 
 ---
 

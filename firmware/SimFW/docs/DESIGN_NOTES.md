@@ -580,6 +580,17 @@ commit:**
 Currently 11 of 12 DMA channels are claimed (`a27d1b1`, `docs/HARDWARE.md`
 §1b), verified from source.
 
+### 4.6.1 Why `simfw_fatal()` halts the whole board, not just the calling core
+
+(`13a90b0`) SimFW has no console when these failures occur — `stdio_uart`/
+`stdio_usb` are both disabled, TinyUSB owns USB — so the solid-on GPIO25 LED
+`simfw_fatal()` drives is the only bench-visible signal an operator without a
+debugger has. A board that keeps answering USB and telemetry after a
+core-1 fatal — even truthfully, naming the dead bus — undermines that signal
+more than it helps. `simfw_fatal()` now pushes a sentinel over the RP2040 SIO
+inter-core FIFO to a `SIO_IRQ_PROC0` handler installed from `main()` before
+the scheduler starts, so a core-1 fatal halts core 0 too.
+
 ---
 
 ## 5. USB control protocol (design background)
