@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "MAX31856.h"
@@ -98,15 +99,47 @@ static const char *TAG = "uart_bridge_ext";
  * touch-calibration data to NVS. Its stack is now internal again; see
  * lvgl_port.c.
  *
- * That makes any NVS/flash write reachable from THESE tasks a latent reboot.
- * The Wi-Fi bridge looks exposed but is not: wifi_prov_add_network() and
- * friends post to the wifi_prov owner task, which has an ordinary internal
- * stack, and the write happens there. `profiles_uart_bridge` is the one to
- * check first -- it calls profiles_http_save() DIRECTLY, on this task. Not
- * reproduced yet only because saving a profile requires a configured zone and
- * this bench board has none (no thermocouple daughterboard). NOT VERIFIED
- * SAFE. Before trusting it, either test it on a board with zones configured
- * or move the write behind an owner task with an internal stack.
+ * REPRODUCED ON THESE BRIDGE TASKS TOO -- 2026-08-20, coredump captured.
+ * An earlier revision of this comment said `profiles_uart_bridge` was "NOT
+ * VERIFIED SAFE" and "not reproduced yet". It is reproduced now. Saving a
+ * profile over the UART bridge aborts with exactly the assert above:
+ *
+ *   assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+ *                  cache_utils.c:126 (esp_task_stack_is_sane_cache_disabled())
+ *
+ * Backtrace (condensed):
+ *   profiles_task (uart_bridge_ext.c:514)
+ *     -> profiles_http_save (profiles_http.c:448)
+ *       -> nvs_save_slot (profiles_http.c:230)
+ *         -> nvs -> esp_flash_write -> cache disable -> assert
+ *
+ * And profiles was NOT the only exposed task. The audit that followed found:
+ *   - profiles_task: profiles_http_save(), profiles_http_delete(), plus the
+ *     run_state writes reachable through profile_executor_run() / _halt() /
+ *     _pause() and run_state_acknowledge().
+ *   - control_task:  zones_config_set_pid() and zones_config_set_model(),
+ *     both of which end in zones_http.c's nvs_save().
+ *   - autotune_task: autotune_engine_accept().
+ *   - wifi_task: NOT exposed -- wifi_prov_* post to the wifi_prov owner task,
+ *     which has an ordinary internal stack, and the write happens there.
+ *
+ * NVS *READS* ARE EQUALLY UNSAFE. The assert is in the cache-disable path,
+ * not in the write path: any partition/NVS read that misses the cache
+ * disables it the same way. So "audit the writes" is not a sufficient fix.
+ *
+ * FIX (implemented below): a single shared flash-safe executor --
+ * bx_run_on_internal_stack(). One worker task created with plain
+ * xTaskCreatePinnedToCore(), i.e. an INTERNAL-SRAM stack, plus a job queue, a
+ * mutex serializing callers and a completion semaphore. control_task,
+ * profiles_task and autotune_task now run their ENTIRE per-message switch
+ * body on that worker rather than wrapping individual flash calls: there are
+ * many flash-reaching call sites, more will be added, and reads count too, so
+ * per-call wrapping is fragile. wifi_task is unchanged.
+ *
+ * Moving these tasks' own stacks back to internal SRAM is NOT the fix -- that
+ * reintroduces the WiFi-driver internal-DRAM race documented at the top of
+ * this comment. The bridge tasks keep their PSRAM stacks; only the worker's
+ * stack is internal, and it is created once, long after the WiFi buffer storm.
  *
  * STACK SIZING FOR TASKS CREATED HERE -- read before shrinking one.
  * Because the stack comes from PSRAM (~8MB free) and not internal SRAM, its
@@ -150,6 +183,129 @@ static BaseType_t retry_task_create_pinned(TaskFunction_t task_fn, const char *n
     ESP_LOGW(TAG, "xTaskCreatePinnedToCoreWithCaps(%s) still failing after 5 attempts (~200ms)", name);
     return pdFAIL;
 }
+
+/* ==========================================================================
+ * FLASH-SAFE EXECUTOR
+ *
+ * See the HAZARD block above for why this exists. The three bridge tasks that
+ * can reach flash (control/profiles/autotune) do not run their message
+ * handlers themselves; they hand the whole handler to this one worker, whose
+ * stack is ordinary internal SRAM, and block until it returns.
+ *
+ * Deliberately whole-message granularity, not per-flash-call: NVS reads trip
+ * the same assert as NVS writes, the reachable call sites are numerous
+ * (profiles_http_*, zones_config_set_*, profile_executor_*, run_state_*,
+ * autotune_engine_accept) and the set will grow. Wrapping individual calls
+ * means re-auditing on every future edit; wrapping the switch body does not.
+ *
+ * Serialized by a mutex, so the queue only ever holds one job and a single
+ * completion semaphore is unambiguous. That also means one bridge task's slow
+ * handler blocks the other two -- acceptable: these are low-rate request/reply
+ * bridges (see the file banner), and NVS access was already serialized inside
+ * NVS itself.
+ *
+ * 8192, internal. Larger than the 4096 the bridge tasks themselves use
+ * because the reply buffers that used to be locals in those switch bodies
+ * (uint8_t reply[BRIDGE_REPLY_MAX], plus PROFILES_CMD_SAVE's second
+ * BRIDGE_REPLY_MAX rep[] and a profile_t candidate) now live on THIS stack,
+ * on top of the NVS/esp_flash call chain underneath them. Do not trim this
+ * from reading the visible locals -- that is precisely the mistake that
+ * overflowed wifi_uart_bridge; size it from a coredump's STACK USED figure.
+ * ======================================================================== */
+
+#define BX_WORKER_STACK 8192
+
+typedef void (*bx_job_fn)(void *arg);
+
+typedef struct {
+    bx_job_fn fn;
+    void     *arg;
+} bx_job_t;
+
+static QueueHandle_t     s_bx_jobs;
+static SemaphoreHandle_t s_bx_done;
+static SemaphoreHandle_t s_bx_lock;
+
+static void bx_worker_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        bx_job_t job;
+        if (xQueueReceive(s_bx_jobs, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (job.fn) {
+            job.fn(job.arg);
+        }
+        xSemaphoreGive(s_bx_done);
+    }
+}
+
+/* Called only from the uart_bridge_start_*_task() functions, which app_main
+ * calls back-to-back on a single thread -- hence a plain static bool guard
+ * with no locking of its own. Returns false if the worker could not be
+ * created; callers MUST fail the start rather than fall through to running
+ * handlers on their PSRAM stack, which is the bug this whole file is about. */
+static bool bx_worker_ensure_started(void)
+{
+    static bool s_started = false;
+    if (s_started) {
+        return true;
+    }
+
+    s_bx_jobs = xQueueCreate(1, sizeof(bx_job_t));
+    s_bx_done = xSemaphoreCreateBinary();
+    s_bx_lock = xSemaphoreCreateMutex();
+    if (!s_bx_jobs || !s_bx_done || !s_bx_lock) {
+        ESP_LOGE(TAG, "flash-safe worker: queue/semaphore allocation failed");
+        goto fail;
+    }
+
+    /* PLAIN xTaskCreatePinnedToCore, NOT the *WithCaps variant used by
+     * retry_task_create_pinned(): the entire point is that this stack lives
+     * in internal SRAM so the flash cache can be disabled underneath it. */
+    if (xTaskCreatePinnedToCore(bx_worker_task, "bx_flash_worker", BX_WORKER_STACK, NULL, 5, NULL,
+                                tskNO_AFFINITY) != pdPASS) {
+        ESP_LOGE(TAG, "flash-safe worker: task creation failed (internal SRAM)");
+        goto fail;
+    }
+
+    s_started = true;
+    return true;
+
+fail:
+    if (s_bx_jobs) { vQueueDelete(s_bx_jobs); s_bx_jobs = NULL; }
+    if (s_bx_done) { vSemaphoreDelete(s_bx_done); s_bx_done = NULL; }
+    if (s_bx_lock) { vSemaphoreDelete(s_bx_lock); s_bx_lock = NULL; }
+    return false;
+}
+
+/* Runs fn(arg) on the internal-stack worker and blocks until it returns.
+ * `arg` may point at the caller's stack -- the caller is blocked for the whole
+ * call, so the storage stays live. */
+static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
+{
+    if (!s_bx_jobs || !s_bx_done || !s_bx_lock) {
+        ESP_LOGE(TAG, "flash-safe worker not started -- job dropped");
+        return false;
+    }
+    xSemaphoreTake(s_bx_lock, portMAX_DELAY);
+    bx_job_t job = { .fn = fn, .arg = arg };
+    bool ok = (xQueueSend(s_bx_jobs, &job, portMAX_DELAY) == pdTRUE);
+    if (ok) {
+        xSemaphoreTake(s_bx_done, portMAX_DELAY);
+    }
+    xSemaphoreGive(s_bx_lock);
+    return ok;
+}
+
+/* Shared shape for the three refactored handlers: the task's ctx plus the
+ * message it just received. Lives on the bridge task's stack across the
+ * blocking bx_run_on_internal_stack() call. */
+typedef struct {
+    void                    *ctx;
+    const uart_proto_message_t *msg;
+} bx_handler_args_t;
 
 /* --------------------------------------------------------------------------
  * Shared little-endian helpers -- same layout uart_bridge.c uses, duplicated
@@ -289,22 +445,20 @@ static size_t control_build_get_zones(uint8_t *out)
     return o;
 }
 
-static void control_task(void *arg)
+/* Runs on the flash-safe worker (bx_run_on_internal_stack), never on
+ * control_task itself: CONTROL_CMD_SET_ZONE_PID/MODEL both end in zones_http.c's
+ * nvs_save(). `reply` is a local here on purpose -- that is what moves the
+ * BRIDGE_REPLY_MAX buffer onto the worker's internal stack. */
+static void control_handle_message(void *vargs)
 {
-    control_ctx_t *ctx = (control_ctx_t *)arg;
-    uart_proto_message_t msg;
+    bx_handler_args_t          *args = (bx_handler_args_t *)vargs;
+    control_ctx_t              *ctx  = (control_ctx_t *)args->ctx;
+    const uart_proto_message_t  msg  = *args->msg;
     uint8_t reply[BRIDGE_REPLY_MAX];
 
-    while (true) {
-        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
-            continue;
-        }
-        if (msg.length < 1) {
-            ESP_LOGW(TAG, "control: empty payload -- rejected");
-            continue;
-        }
-        uint8_t subcmd = msg.payload[0];
+    uint8_t subcmd = msg.payload[0];
 
+    {
         switch (subcmd) {
             case CONTROL_CMD_GET_ZONES: {
                 size_t len = control_build_get_zones(reply);
@@ -338,10 +492,35 @@ static void control_task(void *arg)
     }
 }
 
+static void control_task(void *arg)
+{
+    control_ctx_t *ctx = (control_ctx_t *)arg;
+    uart_proto_message_t msg;
+
+    while (true) {
+        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
+            continue;
+        }
+        if (msg.length < 1) {
+            ESP_LOGW(TAG, "control: empty payload -- rejected");
+            continue;
+        }
+        bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
+        bx_run_on_internal_stack(control_handle_message, &args);
+    }
+}
+
 esp_err_t uart_bridge_start_control_task(uart_protocol_t *proto)
 {
     if (!proto) {
         return ESP_ERR_INVALID_ARG;
+    }
+    /* Must succeed before the bridge task exists: without the worker,
+     * control_handle_message() would never run at all, and silently falling
+     * back to running it on this task's PSRAM stack is the exact bug being
+     * fixed. Fail the start instead. */
+    if (!bx_worker_ensure_started()) {
+        return ESP_ERR_NO_MEM;
     }
     static control_ctx_t ctx;
     ctx.proto = proto;
@@ -473,22 +652,20 @@ static size_t profiles_build_exec_status(uint8_t *out)
     return o;
 }
 
-static void profiles_task(void *arg)
+/* Runs on the flash-safe worker. This is the handler whose old in-task form
+ * produced the captured coredump: SAVE -> profiles_http_save() -> nvs_save_slot()
+ * -> esp_flash_write() -> cache disable -> assert. DELETE, START, STOP, PAUSE
+ * and ACK_LAST_RUN reach flash too (run_state / profiles_http). */
+static void profiles_handle_message(void *vargs)
 {
-    profiles_ctx_t *ctx = (profiles_ctx_t *)arg;
-    uart_proto_message_t msg;
+    bx_handler_args_t          *args = (bx_handler_args_t *)vargs;
+    profiles_ctx_t             *ctx  = (profiles_ctx_t *)args->ctx;
+    const uart_proto_message_t  msg  = *args->msg;
     uint8_t reply[BRIDGE_REPLY_MAX];
 
-    while (true) {
-        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
-            continue;
-        }
-        if (msg.length < 1) {
-            ESP_LOGW(TAG, "profiles: empty payload -- rejected");
-            continue;
-        }
-        uint8_t subcmd = msg.payload[0];
+    uint8_t subcmd = msg.payload[0];
 
+    {
         switch (subcmd) {
             case PROFILES_CMD_LIST: {
                 size_t len = profiles_build_list(reply);
@@ -598,10 +775,31 @@ static void profiles_task(void *arg)
     }
 }
 
+static void profiles_task(void *arg)
+{
+    profiles_ctx_t *ctx = (profiles_ctx_t *)arg;
+    uart_proto_message_t msg;
+
+    while (true) {
+        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
+            continue;
+        }
+        if (msg.length < 1) {
+            ESP_LOGW(TAG, "profiles: empty payload -- rejected");
+            continue;
+        }
+        bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
+        bx_run_on_internal_stack(profiles_handle_message, &args);
+    }
+}
+
 esp_err_t uart_bridge_start_profiles_task(uart_protocol_t *proto)
 {
     if (!proto) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (!bx_worker_ensure_started()) {
+        return ESP_ERR_NO_MEM; /* see uart_bridge_start_control_task() */
     }
     static profiles_ctx_t ctx;
     ctx.proto = proto;
@@ -659,22 +857,18 @@ static size_t autotune_build_status(uint8_t *out)
     return o;
 }
 
-static void autotune_task(void *arg)
+/* Runs on the flash-safe worker: AUTOTUNE_CMD_ACCEPT writes the tuned gains
+ * through to NVS via autotune_engine_accept(). */
+static void autotune_handle_message(void *vargs)
 {
-    autotune_ctx_t *ctx = (autotune_ctx_t *)arg;
-    uart_proto_message_t msg;
+    bx_handler_args_t          *args = (bx_handler_args_t *)vargs;
+    autotune_ctx_t             *ctx  = (autotune_ctx_t *)args->ctx;
+    const uart_proto_message_t  msg  = *args->msg;
     uint8_t reply[BRIDGE_REPLY_MAX];
 
-    while (true) {
-        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
-            continue;
-        }
-        if (msg.length < 1) {
-            ESP_LOGW(TAG, "autotune: empty payload -- rejected");
-            continue;
-        }
-        uint8_t subcmd = msg.payload[0];
+    uint8_t subcmd = msg.payload[0];
 
+    {
         switch (subcmd) {
             case AUTOTUNE_CMD_GET_STATUS: {
                 size_t len = autotune_build_status(reply);
@@ -723,10 +917,31 @@ static void autotune_task(void *arg)
     }
 }
 
+static void autotune_task(void *arg)
+{
+    autotune_ctx_t *ctx = (autotune_ctx_t *)arg;
+    uart_proto_message_t msg;
+
+    while (true) {
+        if (uart_protocol_receive(ctx->inbox, &msg, portMAX_DELAY) != ESP_OK) {
+            continue;
+        }
+        if (msg.length < 1) {
+            ESP_LOGW(TAG, "autotune: empty payload -- rejected");
+            continue;
+        }
+        bx_handler_args_t args = { .ctx = ctx, .msg = &msg };
+        bx_run_on_internal_stack(autotune_handle_message, &args);
+    }
+}
+
 esp_err_t uart_bridge_start_autotune_task(uart_protocol_t *proto)
 {
     if (!proto) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (!bx_worker_ensure_started()) {
+        return ESP_ERR_NO_MEM; /* see uart_bridge_start_control_task() */
     }
     static autotune_ctx_t ctx;
     ctx.proto = proto;

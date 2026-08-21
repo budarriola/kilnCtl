@@ -737,6 +737,44 @@ page. also add support for the temp sensors you currently have access to."
       ?? ()` because no ROM ELF is installed for this chip; frames above it
       resolve normally.
 
+- [x] **PSRAM-stack bridge tasks could not touch flash — reproduced, then
+      fixed (2026-08-20).** The four UART bridge tasks in
+      `App/drivers/uart_bridge_ext.c` get their stacks from PSRAM
+      (`xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`) to keep them
+      out of the Wi-Fi driver's internal-DRAM race. PSRAM is reached *through*
+      the flash cache, so such a task must never be the one running when the
+      cache is disabled. Any flash access from one aborts the board:
+      ```
+      assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+                     cache_utils.c:126 (esp_task_stack_is_sane_cache_disabled())
+      ```
+      This had been recorded as suspected-but-unreproduced, because saving a
+      profile requires a configured zone and the bench board has no
+      thermocouple daughterboard. Configuring one zone over
+      `POST /api/zones` (`thermo_count=1, relay_count=1`) made it reproduce on
+      the first try, and the coredump named it exactly:
+      ```
+      #20 nvs_save_slot          (profiles_http.c:230)
+      #21 profiles_http_save     (profiles_http.c:448)
+      #22 profiles_task          (uart_bridge_ext.c:514)
+      ```
+      Wider than first thought: `control_task` was exposed too
+      (`zones_config_set_pid` / `_set_model` both end in `nvs_save()`), as was
+      `autotune_task` via `autotune_engine_accept()`, and the run-state writes
+      under profile start/stop/ack. NVS **reads** trip the same assert, so
+      wrapping individual write calls would not have been enough.
+      **Fix:** one shared flash-safe executor task with an *internal* 8192-byte
+      stack; the three exposed bridge tasks now hand their whole
+      per-message switch body to it and block until it returns. Their own
+      stacks stay in PSRAM, so the Wi-Fi race stays fixed. `wifi_task` was
+      already safe (it posts to the `wifi_prov` owner task) and is unchanged.
+      **Verified on hardware after the fix:** profile save x3 + delete x3,
+      `control_set_zone_pid`, `control_set_zone_model`, and a profile
+      start/stop/abort cycle (which writes run state) all complete with no
+      panic; `bench_link_health.py --repeat 4` reports all surfaces healthy.
+      The ELF archive added earlier paid for itself here — the dump matched
+      `KilnCtrl-8d74854bdf3e.elf`, an image already overwritten on the board.
+
 ## 2. Web UI — Main / Dashboard page
 
 Live thermocouple/relay status and manual relay control are DONE and
