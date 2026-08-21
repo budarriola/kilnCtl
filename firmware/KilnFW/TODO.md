@@ -649,8 +649,15 @@ page. also add support for the temp sensors you currently have access to."
       - `-p COM3` is the USB-Serial-JTAG port (VID:PID 303A:1001), **not**
         COM9 (the CH340 PC link).
       - **The ELF must be the exact image that crashed.** Rebuilding first
-        breaks symbol resolution. Snapshot `build/KilnCtrl.elf` before
-        touching the tree.
+        breaks symbol resolution, and because `gen_build_info.cmake` stamps a
+        BUILD TIMESTAMP into every build, the matching ELF can never be
+        reconstructed afterwards. This is now handled automatically: every
+        link archives its ELF to `build/elf_archive/KilnCtrl-<hash>.elf`,
+        with `KilnCtrl-latest.elf` pointing at the most recent (see the
+        `elf_archive` block in `CMakeLists.txt` and `archive_elf.cmake`). If
+        a dump will not load against `build/KilnCtrl.elf`, try the archived
+        ones. Note the archive name is a hash of the ELF, NOT the app SHA a
+        dump records — it is an index, not something to match directly.
       - PowerShell reports a nonzero exit for this command because esptool
         writes progress to stderr; redirect with `> out.txt 2>$null` and
         check the file rather than trusting `$LASTEXITCODE`.
