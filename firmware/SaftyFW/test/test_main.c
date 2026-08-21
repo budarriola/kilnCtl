@@ -16,6 +16,7 @@ void run_test_kilnlink_power(void);
 void run_test_tx_watermark(void);
 void run_test_relay_grace(void);
 void run_test_config_store(void);
+void run_test_ct_amps_cal(void);
 void run_test_snapshots(void);
 
 int main(void)
@@ -28,6 +29,7 @@ int main(void)
     run_test_tx_watermark();
     run_test_relay_grace();
     run_test_config_store();
+    run_test_ct_amps_cal();
     run_test_snapshots();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

@@ -154,6 +154,28 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // down, S6b trips exactly as if this frame had never arrived.
 #define LINK_FRAME_ANNOUNCE_REBOOT_CMD 0x18u
 
+// --- ESP -> Pico: SAFETY_CMD_SET_CT_CAL (0x19) -------------------------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
+// KILNLINK_SET_CT_CAL_CMD (kilnlink/kilnlink_set_ct_cal.h) -- redefined here
+// as a local dispatch id, same convention as LINK_FRAME_SET_CONFIG_CMD
+// above. The payload is decoded by kilnlink_set_ct_cal_decode() in
+// src/tasks/link_task.c, not unpacked here -- a fixed 11-byte frame with no
+// variable-length fields, same reasoning as SET_CONFIG. Sets one channel's
+// CT amps calibration (config_store.h's ct_cal) -- firmware/SimFW/tools/
+// ct_calibration/'s bench sweep-and-fit tool's PC-side path to actually
+// pushing constants into SaftyFW's own flash, TODO.md's documented gap.
+#define LINK_FRAME_SET_CT_CAL_CMD 0x19u
+
+// --- ESP -> Pico: SAFETY_CMD_GET_CT_CAL (0x1A), request only ----------------
+// CommonFW/docs/LINK_PROTOCOL.md section 4/6. Same value as
+// KILNLINK_GET_CT_CAL_CMD (kilnlink/kilnlink_get_ct_cal.h) -- redefined here
+// as a local dispatch id. Same shared-id-both-directions convention as
+// LINK_FRAME_FW_VERSION_CMD/SAFETY_CMD_GET_FW_VERSION: this is the 1-byte
+// ESP->Pico request; the Pico's reply (kilnlink_ct_cal.h's SAFETY_CMD_
+// CT_CAL, link_task_send_ct_cal()) reuses the SAME wire id, distinguished by
+// direction and length, not a second constant.
+#define LINK_FRAME_GET_CT_CAL_CMD 0x1Au
+
 // --- Update frames: SAFTYFW Phase 10, CommonFW/docs/UPDATE_PROTOCOL.md
 // section 4's frame table. Plain #define ids, same convention as every other
 // command byte in this file -- these are dispatched in src/tasks/link_task.c's

@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "ct_amps_cal.h"
 #include "snapshots.h"
 
 #ifdef __cplusplus
@@ -76,6 +77,22 @@ typedef struct {
     // very small number) -- an explicit flag is the only unambiguous
     // signal, same reasoning as thermo_snapshot_t.valid.
     bool calibrated;
+
+    // Per-channel end-to-end amps correction (ct_amps_cal.h), config_store.c
+    // 's ct_cal (Phase 9). A SEPARATE, later stage from zero_counts/
+    // k_ct_v_per_a/gain above: those model the physical ADC->volts->amps
+    // conversion from schematic values, this corrects the RESULT of that
+    // conversion against a bench measurement of THIS unit's actual reported
+    // current_a (firmware/SimFW/tools/ct_calibration/'s sweep-and-fit
+    // runner). Applied in cs_counts_to_amps()'s caller, after the physics
+    // conversion, per channel -- see current_sense.c. Deliberately its own
+    // ct_amps_cal_table_t rather than three more raw floats here: current_
+    // sense_set_ct_cal() below updates only THIS field without touching any
+    // other calibration state, which current_sense_set_cal() (replacing the
+    // whole struct) cannot do -- needed because SAFETY_CMD_SET_CT_CAL can
+    // land live, at runtime, long after current_task_start()'s one-time
+    // full current_sense_set_cal() call.
+    ct_amps_cal_table_t ct_cal;
 } current_sense_cal_t;
 
 // Reporting-only power-estimate quantities, docs/CURRENT_SENSE.md section
@@ -109,10 +126,23 @@ typedef struct {
     double   energy_wh;
 } current_sense_power_t;
 
-// Sets calibration state. Not called by anything yet (Phase 9's
-// config_store will call this once it exists); current_task_start() leaves
-// the module on its zero-initialized "not commissioned" defaults.
+// Sets calibration state. Called once by current_task.c's boot sequence
+// (current_task_fn(), right after current_sense_init()) with the values
+// config_store.c's Phase 9 record supplies; current_sense_init() itself
+// leaves the module on its zero-initialized "not commissioned" defaults if
+// nothing ever calls this.
 void current_sense_set_cal(const current_sense_cal_t *cal);
+
+// Updates ONLY the CT amps calibration sub-field of the cached calibration,
+// leaving zero_counts/i_present_a/k_ct_v_per_a/gain/mains_voltage_v/
+// calibrated (the whole-struct fields current_sense_set_cal() would
+// otherwise clobber) untouched. Meant to be called again at runtime,
+// separately from the one-time boot load above, whenever SAFETY_CMD_
+// SET_CT_CAL lands (current_task_reload_ct_cal(), current_task.c) -- unlike
+// tc_type/calibration_missing, a live CT calibration update must take effect
+// without a reboot, since it is exactly the kind of thing a bench
+// calibration session wants to iterate on.
+void current_sense_set_ct_cal(const ct_amps_cal_table_t *ct_cal);
 
 // Must be called once, after adc_init()/adc_gpio_init() for ADC0/1/2 (see
 // current_task.c -- current_task_start() already does both).

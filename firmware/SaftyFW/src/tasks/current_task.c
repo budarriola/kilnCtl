@@ -13,9 +13,18 @@
 #include "hardware/adc.h"
 
 #include "board_pins.h"
+#include "config_store.h"
 #include "current_sense.h"
 #include "task_priorities.h"
 #include "watchdog_task.h"
+
+// Compile-time cross-check: ct_amps_cal.h's CT_AMPS_CAL_NUM_CHANNELS and
+// config_store.h's CONFIG_STORE_CT_CAL_NUM_CHANNELS must agree -- both are
+// meant to be "one per ADC0/1/2", but neither header includes the other
+// (deliberately, see each file's own header comment), so this is the one
+// place that would catch them drifting apart.
+typedef char current_task_ct_cal_channel_counts_match
+    [(CT_AMPS_CAL_NUM_CHANNELS == CONFIG_STORE_CT_CAL_NUM_CHANNELS) ? 1 : -1];
 
 #define CURRENT_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
 
@@ -36,6 +45,16 @@ static void current_task_fn(void *arg)
     (void)arg;
 
     current_sense_init();
+
+    // Phase 9: load CT amps calibration from config_store (this task's own
+    // glue -- current_sense.c itself must not depend on config_store.h, the
+    // same "sampling/conversion here, commissioning storage elsewhere"
+    // split every other current_sense_cal_t field already respects).
+    // config_store_boot_load() has already run by the time main.c calls
+    // current_task_start() (step 4 runs before step 7 -- see main.c), so
+    // this reads a real record (or a safe all-uncalibrated default, never
+    // uninitialised memory) even on the very first pass through this loop.
+    current_task_reload_ct_cal();
 
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -95,4 +114,18 @@ void current_task_get_power(current_sense_power_t *out)
     taskENTER_CRITICAL();
     *out = s_published_power;
     taskEXIT_CRITICAL();
+}
+
+void current_task_reload_ct_cal(void)
+{
+    config_store_ct_channel_cal_t stored[CONFIG_STORE_CT_CAL_NUM_CHANNELS];
+    config_store_get_ct_cal(stored);
+
+    ct_amps_cal_table_t table;
+    for (unsigned n = 0; n < CT_AMPS_CAL_NUM_CHANNELS; n++) {
+        table.channels[n].calibrated = stored[n].calibrated;
+        table.channels[n].gain = stored[n].gain;
+        table.channels[n].offset = stored[n].offset;
+    }
+    current_sense_set_ct_cal(&table);
 }

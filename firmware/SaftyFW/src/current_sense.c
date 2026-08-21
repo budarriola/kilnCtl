@@ -104,6 +104,11 @@ void current_sense_set_cal(const current_sense_cal_t *cal)
     s_cal = *cal;
 }
 
+void current_sense_set_ct_cal(const ct_amps_cal_table_t *ct_cal)
+{
+    s_cal.ct_cal = *ct_cal;
+}
+
 void current_sense_init(void)
 {
     // s_cal, s_snapshot, s_power, s_window, s_filtered_amps are all static
@@ -111,7 +116,9 @@ void current_sense_init(void)
     // current_sense_init() is idempotent and does not depend on being
     // called exactly once at power-on.
     current_sense_cal_t zero_cal = {0};
-    s_cal = zero_cal;
+    s_cal = zero_cal; // ct_cal's zero value == ct_amps_cal_uncalibrated_table()
+                       // (calibrated false on every channel, gain/offset
+                       // irrelevant) -- see current_sense.h's field comment.
 
     current_snapshot_t zero_snap = {0};
     s_snapshot = zero_snap;
@@ -225,6 +232,16 @@ void current_sense_sample(void)
 
         bool clipped = (counts_avg >= CS_CLIP_THRESHOLD_COUNTS);
         float amps = cs_counts_to_amps(n, counts_avg);
+
+        // Phase 9: end-to-end CT amps correction (ct_amps_cal.h), applied
+        // AFTER the physics-based ADC->amps conversion above, on top of it
+        // rather than instead of it -- see current_sense.h's field comment
+        // on current_sense_cal_t.ct_cal for why these are two separate
+        // stages. An uncommissioned channel (the compiled-in default)
+        // returns `amps` completely unchanged -- see ct_amps_cal_apply()'s
+        // own doc comment; this call never introduces a behavior change on
+        // a channel nobody has calibrated.
+        amps = ct_amps_cal_apply(&s_cal.ct_cal, (uint8_t)n, amps);
 
         snap.amps[n] = amps;
         snap.clipped[n] = clipped;

@@ -21,6 +21,11 @@ static void test_pack_unpack_roundtrip(void)
     rec.seq = 42;
     rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
     rec.calibration_missing = false;
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        rec.ct_cal[i].calibrated = (i % 2u) == 0u;
+        rec.ct_cal[i].gain = 1.0f + (float)i * 0.25f;
+        rec.ct_cal[i].offset = -0.5f + (float)i * 0.1f;
+    }
     for (size_t i = 0; i < sizeof(rec.reserved); i++) {
         rec.reserved[i] = (uint8_t)(i + 1);
     }
@@ -36,6 +41,12 @@ static void test_pack_unpack_roundtrip(void)
     TEST_CHECK(back.seq == rec.seq, "seq roundtrips");
     TEST_CHECK(back.tc_type == rec.tc_type, "tc_type roundtrips");
     TEST_CHECK(back.calibration_missing == false, "calibration_missing (false) roundtrips");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(back.ct_cal[i].calibrated == rec.ct_cal[i].calibrated,
+                   "ct_cal[i].calibrated roundtrips");
+        TEST_CHECK(back.ct_cal[i].gain == rec.ct_cal[i].gain, "ct_cal[i].gain roundtrips");
+        TEST_CHECK(back.ct_cal[i].offset == rec.ct_cal[i].offset, "ct_cal[i].offset roundtrips");
+    }
     TEST_CHECK(memcmp(back.reserved, rec.reserved, sizeof(rec.reserved)) == 0,
                "reserved bytes roundtrip byte-for-byte");
 
@@ -107,6 +118,142 @@ static void test_default(void)
     TEST_CHECK(rec.seq == 0, "default seq is 0");
     TEST_CHECK(rec.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE, "default tc_type is K");
     TEST_CHECK(rec.calibration_missing == true, "default calibration_missing is true");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(rec.ct_cal[i].calibrated == false,
+                   "default ct_cal[i].calibrated is false -- uncalibrated, not zero-gain");
+    }
+}
+
+static void test_ct_cal_defaults_on_blank(void)
+{
+    TEST_SECTION("ct_cal -- defaults-on-blank/corrupt sector");
+
+    // A fully erased sector: find_latest() finds nothing, and the caller
+    // (config_store_flash.c's read_latest_or_default(), mirrored here) must
+    // fall back to config_store_default() -- every channel uncalibrated,
+    // never a crash and never a plausible-looking wrong gain/offset.
+    uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector, 0xFF, sizeof(sector));
+
+    config_store_record_t out;
+    size_t slot = config_store_find_latest(sector, &out);
+    TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "erased sector: no valid record found");
+
+    config_store_record_t fallback;
+    config_store_default(&fallback);
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(fallback.ct_cal[i].calibrated == false,
+                   "erased-sector fallback: channel uncalibrated");
+    }
+
+    // A record written before this field existed: config_store_pack() with
+    // rec.ct_cal left zero-initialized (memset 0, exactly what every SET_
+    // CONFIG-authored record before this feature landed would have produced
+    // in the byte range this field now claims). Must unpack as calibrated ==
+    // false, not as a CRC failure and not as a stray "calibrated" reading.
+    config_store_record_t old_rec;
+    memset(&old_rec, 0, sizeof(old_rec));
+    old_rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    old_rec.seq = 3;
+    old_rec.tc_type = 0x03u;
+    old_rec.calibration_missing = true;
+    // old_rec.ct_cal left all-zero -- exactly what a pre-this-pass record's
+    // corresponding bytes held (config_store_default()'s memset).
+    uint8_t packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&old_rec, packed);
+
+    config_store_record_t unpacked;
+    bool ok = config_store_unpack(packed, &unpacked);
+    TEST_CHECK(ok, "pre-ct_cal-shaped record still unpacks (no format_version bump was needed)");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(unpacked.ct_cal[i].calibrated == false,
+                   "pre-ct_cal record: every channel reads back uncalibrated, not corrupted");
+    }
+}
+
+static void test_ct_cal_corrupt_or_unknown_version(void)
+{
+    TEST_SECTION("ct_cal -- corrupt or unknown-version record never surfaces stale calibration");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 11;
+    rec.tc_type = 0x03u;
+    rec.calibration_missing = false;
+    rec.ct_cal[0].calibrated = true;
+    rec.ct_cal[0].gain = 2.5f;
+    rec.ct_cal[0].offset = 0.75f;
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    // Corrupt one payload byte inside the ct_cal region -- the record must
+    // be rejected WHOLESALE (CRC covers everything before it), not partially
+    // trusted with a flipped gain.
+    record[18] ^= 0x01u; // inside channel 0's ct_cal bytes (offset 16..24)
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a corrupted ct_cal byte fails the whole record's CRC check");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "on CRC failure, *out is left completely untouched (caller must fall back to config_store_default())");
+
+    // Unknown format_version -- same wholesale-reject rule.
+    config_store_pack(&rec, record); // re-pack clean
+    record[4] = 0xFF;
+    record[5] = 0xFF; // format_version -> unrecognised
+    memset(&out, 0xAA, sizeof(out));
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "unrecognised format_version rejects the whole record, ct_cal included");
+}
+
+static void test_ct_cal_round_trip_and_independence(void)
+{
+    TEST_SECTION("ct_cal -- round trip through pack/unpack, per-channel independence");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.ct_cal[0].calibrated = true;
+    rec.ct_cal[0].gain = 1.02f;
+    rec.ct_cal[0].offset = -0.01f;
+    // Channel 1 left uncalibrated (config_store_default()'s shape).
+    rec.ct_cal[2].calibrated = true;
+    rec.ct_cal[2].gain = 0.98f;
+    rec.ct_cal[2].offset = 0.05f;
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t back;
+    TEST_CHECK(config_store_unpack(record, &back), "mixed calibrated/uncalibrated record unpacks");
+
+    TEST_CHECK(back.ct_cal[0].calibrated == true, "channel 0: calibrated round-trips true");
+    TEST_CHECK(back.ct_cal[0].gain == 1.02f, "channel 0: gain round-trips exactly");
+    TEST_CHECK(back.ct_cal[0].offset == -0.01f, "channel 0: offset round-trips exactly");
+
+    TEST_CHECK(back.ct_cal[1].calibrated == false,
+               "channel 1: still uncalibrated -- setting channel 0/2 did not leak into it");
+
+    TEST_CHECK(back.ct_cal[2].calibrated == true, "channel 2: calibrated round-trips true");
+    TEST_CHECK(back.ct_cal[2].gain == 0.98f, "channel 2: its own gain, not channel 0's");
+    TEST_CHECK(back.ct_cal[2].offset == 0.05f, "channel 2: its own offset, not channel 0's");
+
+    // Now flip channel 1 on and channel 0 off, proving independence holds in
+    // both directions, not just "channel 0 happened to be first."
+    rec.ct_cal[0].calibrated = false;
+    rec.ct_cal[1].calibrated = true;
+    rec.ct_cal[1].gain = 3.0f;
+    rec.ct_cal[1].offset = 1.0f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back), "re-packed record unpacks");
+    TEST_CHECK(back.ct_cal[0].calibrated == false, "channel 0 now uncalibrated as set");
+    TEST_CHECK(back.ct_cal[1].calibrated == true, "channel 1 now calibrated as set");
+    TEST_CHECK(back.ct_cal[1].gain == 3.0f, "channel 1's own new gain");
+    TEST_CHECK(back.ct_cal[2].calibrated == true,
+               "channel 2 UNCHANGED by channel 0/1's flip -- true per-channel independence");
+    TEST_CHECK(back.ct_cal[2].gain == 0.98f, "channel 2's gain still its own original value");
 }
 
 static void test_find_latest(void)
@@ -232,4 +379,7 @@ void run_test_config_store(void)
     test_next_write_slot();
     test_decide_write();
     test_record_crc();
+    test_ct_cal_defaults_on_blank();
+    test_ct_cal_corrupt_or_unknown_version();
+    test_ct_cal_round_trip_and_independence();
 }

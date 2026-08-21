@@ -46,6 +46,9 @@ add_library(kilnlink STATIC
     src/kilnlink_get_fw_version.c
     src/kilnlink_set_clock.c
     src/kilnlink_announce_reboot.c
+    src/kilnlink_set_ct_cal.c
+    src/kilnlink_get_ct_cal.c
+    src/kilnlink_ct_cal.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -219,6 +222,33 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_announce_reboot PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_announce_reboot COMMAND test_announce_reboot)
+
+    add_executable(test_set_ct_cal test/test_set_ct_cal.c)
+    target_link_libraries(test_set_ct_cal PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_ct_cal PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_ct_cal PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_ct_cal COMMAND test_set_ct_cal)
+
+    add_executable(test_get_ct_cal test/test_get_ct_cal.c)
+    target_link_libraries(test_get_ct_cal PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_ct_cal PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_ct_cal PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_ct_cal COMMAND test_get_ct_cal)
+
+    add_executable(test_ct_cal test/test_ct_cal.c)
+    target_link_libraries(test_ct_cal PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_ct_cal PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_ct_cal PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_ct_cal COMMAND test_ct_cal)
 
     # -- benchproto host tests (independent of everything above) --------------
     add_executable(test_benchproto_frame test/test_benchproto_frame.c)

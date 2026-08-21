@@ -54,11 +54,28 @@ MSVC+CMake+Ninja, all passing as of 2026-08-19 -- 13 host test binaries
 total including `test_frame`/`test_fuzz`/`test_uart_protocol_delegate`) with
 byte-exact vectors in `test/vectors/`, and as of 2026-08-19 every one of
 those vector manifests is also consumed by `tools/PcTools/selfcheck.py`
-(`commonfw_payload_vector_checks()`, against the new pure-Python
-`kilnctrl/kilnlink_codec.py`) -- not just `frame_vectors.json` as before.
+(`commonfw_payload_vector_checks()`, against the new pure-Python encoder/decoder pair that lives there
+(`kilnctrl/kilnlink_codec.py`) -- not just `frame_vectors.json` as before.
 `kilnlink_codec.py` is encode-only: nothing in `pc_tools` decodes these
 frames yet, so there is no real caller to justify a decode side (see that
-module's own docstring). **Wiring status, same day (2026-08-19):** most of
+module's own docstring).
+
+**2026-08-20: three more codecs close the CT-calibration gap** `firmware/
+SimFW/tools/ct_calibration/README.md` documented: `kilnlink_set_ct_cal.{c,h}`
+(`SAFETY_CMD_SET_CT_CAL` 0x19, ESP→Pico, sets one channel's CT amps
+gain/offset), `kilnlink_get_ct_cal.{c,h}` (`SAFETY_CMD_GET_CT_CAL` 0x1A,
+ESP→Pico, one byte, no fields) and `kilnlink_ct_cal.{c,h}` (`SAFETY_CMD_
+CT_CAL`, same 0x1A id as the request, Pico→ESP reply, 28 bytes, all three
+channels). Host-tested (`test_set_ct_cal.c`/`test_get_ct_cal.c`/
+`test_ct_cal.c`, hand-computed byte-exact vectors inline rather than in
+`test/vectors/` -- no `tools/PcTools/selfcheck.py` cross-check exists yet
+for these three; that PC-side integration, and the PC-side sender for
+`SET_CT_CAL` itself, are still open. The consumer is `firmware/SaftyFW/src/
+tasks/link_task.c` (`link_task_handle_set_ct_cal()`/`_get_ct_cal()`/
+`send_ct_cal()`) against `firmware/SaftyFW/src/config_store.{c,h}`'s `ct_cal`
+record and `firmware/SaftyFW/src/ct_amps_cal.{c,h}`'s pure apply logic.
+
+**Wiring status, same day (2026-08-19):** most of
 these codecs are still codec-only, not called from either firmware's real
 send/receive dispatch -- see Migration below -- but two are now genuine
 exceptions. `ANNOUNCE_VERSION` (0x0F) is wired on both ends:

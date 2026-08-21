@@ -31,6 +31,17 @@ void current_task_get_snapshot(current_snapshot_t *out);
 // see current_sense.h's header comment for why this is a separate struct.
 void current_task_get_power(current_sense_power_t *out);
 
+// Re-reads config_store's CT calibration (config_store_get_ct_cal()) and
+// pushes it into current_sense.c via current_sense_set_ct_cal(), without
+// disturbing any other calibration field. Called once from current_task_fn()
+// 's own boot sequence, and again by link_task.c's SAFETY_CMD_SET_CT_CAL
+// handler every time a new value is written -- a live commissioning session
+// must take effect immediately, not after a reboot. Safe to call from any
+// task: current_sense_set_ct_cal() only ever replaces the whole ct_cal
+// sub-struct atomically from current_task's own perspective (no torn read),
+// same reasoning as every other current_sense.c setter.
+void current_task_reload_ct_cal(void);
+
 #ifdef __cplusplus
 }
 #endif

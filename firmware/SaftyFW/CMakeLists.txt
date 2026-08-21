@@ -58,6 +58,10 @@ set(SAFTYFW_APP_SOURCES
     src/spi_owner.c
     src/max31856.c
     src/current_sense.c
+    # ct_amps_cal.c -- pure, host-tested (test/test_ct_amps_cal.c) per-channel
+    # CT amps correction current_sense.c applies on top of its own physics-
+    # based conversion; see that file's header comment.
+    src/ct_amps_cal.c
     # Phase 9 -- src/config_store.c is the pure, host-tested record format
     # (test/test_config_store.c, mirrors bootloader/metadata.c); config_store_flash.c
     # is the real XIP-read / flash_safe_execute()-write / ARMED-check glue, NOT

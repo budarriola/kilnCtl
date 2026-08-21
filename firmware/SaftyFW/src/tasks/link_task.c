@@ -73,11 +73,14 @@
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_announce_reboot.h" // SAFETY_CMD_ANNOUNCE_REBOOT, see link_task_handle_announce_reboot()
 #include "kilnlink/kilnlink_clear_trip.h"
+#include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL, see link_task_handle_get_ct_cal()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
 #include "kilnlink/kilnlink_set_config.h"
+#include "kilnlink/kilnlink_set_ct_cal.h" // SAFETY_CMD_SET_CT_CAL, see link_task_handle_set_ct_cal()
 #include "kilnlink/kilnlink_trip.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -358,6 +361,35 @@ static void link_task_send_fw_version(void)
         return;
     }
 
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+// SAFETY_CMD_CT_CAL (0x1A) reply -- sent in answer to SAFETY_CMD_GET_CT_CAL
+// (link_task_handle_get_ct_cal() below), same shared-id/reply-on-request
+// shape as link_task_send_fw_version() above. Reports config_store's cached
+// ct_cal exactly, three channels' calibrated/gain/offset -- see kilnlink_
+// ct_cal.h's header comment for why this exists (the GUI's way to show what
+// SaftyFW is actually correcting current with right now, not what a bench
+// tool last claimed to upload).
+static void link_task_send_ct_cal(void)
+{
+    config_store_ct_channel_cal_t stored[CONFIG_STORE_CT_CAL_NUM_CHANNELS];
+    config_store_get_ct_cal(stored);
+
+    kilnlink_ct_cal_t cal;
+    for (unsigned ch = 0; ch < KILNLINK_CT_CAL_NUM_CHANNELS && ch < CONFIG_STORE_CT_CAL_NUM_CHANNELS;
+         ch++) {
+        cal.channels[ch].calibrated = stored[ch].calibrated ? 1u : 0u;
+        cal.channels[ch].gain = stored[ch].gain;
+        cal.channels[ch].offset = stored[ch].offset;
+    }
+
+    uint8_t payload[KILNLINK_CT_CAL_LEN];
+    kilnlink_ct_cal_status_t status;
+    size_t len = kilnlink_ct_cal_encode(&cal, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return;
+    }
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
@@ -836,6 +868,82 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
     }
 }
 
+// SAFETY_CMD_SET_CT_CAL (0x19), CommonFW/docs/LINK_PROTOCOL.md section 4 --
+// firmware/SimFW/tools/ct_calibration/README.md's documented gap: "no MCP
+// tool exists to push calibration constants ... to the RP2040's own flash."
+// Same fire-and-forget shape as link_task_handle_set_config() immediately
+// above: decode, validate, log accept/refuse, never ACK on the wire.
+//
+// Read-modify-write: config_store_write() replaces the ENTIRE record, so
+// this fetches every field first (tc_type/calibration_missing/all three
+// ct_cal channels via config_store_get_ct_cal()) and overwrites only the
+// ONE channel this frame named -- setting channel 1 must never disturb
+// channel 0 or 2's stored constants, and must never re-arm calibration_
+// missing or change tc_type, both of which are a SEPARATE commissioning
+// concern (thermocouple, not CT current) that SET_CT_CAL has no business
+// touching.
+//
+// Two refusal paths, same split as link_task_handle_set_config():
+//   1. `channel` is out of range -- checked here, since kilnlink_set_ct_cal.c
+//      only serializes bytes and has no opinion on the channel count.
+//   2. The relay is currently ARMED -- config_store_write()'s own
+//      unconditional refusal, delegated to config_store_flash.c exactly as
+//      SET_CONFIG's does.
+static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
+{
+    kilnlink_set_ct_cal_t msg;
+    kilnlink_set_ct_cal_status_t dstatus =
+        kilnlink_set_ct_cal_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_SET_CT_CAL_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+
+    if (msg.channel >= CONFIG_STORE_CT_CAL_NUM_CHANNELS) {
+        log_task_log(LOG_LEVEL_WARN, "set_ct_cal", "refused, channel out of range");
+        return;
+    }
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = config_store_get_tc_type();
+    rec.calibration_missing = config_store_is_calibration_missing();
+    config_store_get_ct_cal(rec.ct_cal);
+    rec.ct_cal[msg.channel].calibrated = (msg.calibrated != 0u);
+    rec.ct_cal[msg.channel].gain = msg.gain;
+    rec.ct_cal[msg.channel].offset = msg.offset;
+
+    const char *reason = NULL;
+    bool written = config_store_write(&rec, &reason);
+    if (written) {
+        log_task_log(LOG_LEVEL_INFO, "set_ct_cal", "accepted");
+        // Take effect immediately, not after a reboot -- current_task.c's
+        // own comment on current_task_reload_ct_cal() explains why a live
+        // commissioning session needs this, unlike tc_type (which only ever
+        // takes effect via max31856_configure() at boot today).
+        current_task_reload_ct_cal();
+    } else {
+        log_task_log(LOG_LEVEL_WARN, "set_ct_cal", reason ? reason : "refused");
+    }
+}
+
+// SAFETY_CMD_GET_CT_CAL (0x1A), request only -- CommonFW/docs/LINK_PROTOCOL.md
+// section 4. Same shape as SAFETY_CMD_GET_FW_VERSION above: answer every
+// copy seen (the ESP is the side allowed to retry), reply via link_task_
+// send_ct_cal() under the same wire id, distinguished by direction/length.
+static void link_task_handle_get_ct_cal(const kilnlink_frame_t *frame)
+{
+    kilnlink_get_ct_cal_t msg;
+    kilnlink_get_ct_cal_status_t dstatus =
+        kilnlink_get_ct_cal_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_GET_CT_CAL_OK) {
+        return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
+    }
+    (void)msg; // no fields
+    link_task_send_ct_cal();
+}
+
 // SAFETY_CMD_ROLLBACK (0x17), CommonFW/docs/LINK_PROTOCOL.md section 4 --
 // tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
 // half, POST /api/ota/esp/rollback, already exists). Same shape as
@@ -963,6 +1071,17 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case LINK_FRAME_ANNOUNCE_REBOOT_CMD:
         link_task_handle_announce_reboot(&frame);
+        break;
+    case LINK_FRAME_SET_CT_CAL_CMD:
+        link_task_handle_set_ct_cal(&frame);
+        break;
+    case LINK_FRAME_GET_CT_CAL_CMD:
+        // Same id as the reply (SAFETY_CMD_CT_CAL), distinguished by
+        // direction and length: the ESP's request is exactly 1 byte, no
+        // arguments -- same convention as LINK_FRAME_FW_VERSION_CMD above.
+        if (frame.length == 1) {
+            link_task_handle_get_ct_cal(&frame);
+        }
         break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
     // call above, except the handler lives in update_task.c rather than

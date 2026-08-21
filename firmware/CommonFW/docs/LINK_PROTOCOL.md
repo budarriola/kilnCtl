@@ -412,6 +412,48 @@ This codec (`kilnlink_set_config.{c,h}`) only serializes the byte — like
 validation, and the write itself, are `SaftyFW`'s (`link_task.c` calling
 `config_store_write()`).
 
+### `SAFETY_CMD_SET_CT_CAL` = `0x19` (ESP → Pico)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x19` |
+| 1 | u8 | `channel` (0..2) |
+| 2 | u8 | `calibrated` (0/1) |
+| 3..6 | f32 LE | `gain` |
+| 7..10 | f32 LE | `offset` |
+
+The bench-tool's path to actually pushing CT amps calibration constants into
+`SaftyFW`'s own flash — closes the gap `firmware/SimFW/tools/ct_calibration/`
+'s README documented: a calibration run could compute per-channel
+constants but had no wire command to write them anywhere. One channel per
+frame (a bench run sweeps and fits one CT channel at a time); setting one
+channel must never disturb another's stored constants — `link_task.c`
+read-modify-writes the other two channels' current values back unchanged.
+
+Fire-and-forget, same as `SET_CONFIG`: never ACKed on the wire, refused (with
+the reason logged on the Pico side) if the relay is currently `ARMED`, or if
+`channel` is out of range. Unlike `SET_CONFIG`, does **not** touch
+`calibration_missing` — thermocouple commissioning and CT calibration are
+separate concerns.
+
+`gain`/`offset` must already be inverted the way
+`firmware/SimFW/tools/gen_ct_cal_table.py` inverts its fit before writing a
+compiled table: `firmware/SimFW/tools/ct_calibration/calibrate_ct.py` fits
+`measured_a = fit_gain * commanded + fit_offset` (`commanded` = the
+fixture's known true amps, `measured_a` = `SaftyFW`'s own reported
+`current_a`, read back via `SAFETY_CMD_GET_STATUS` over the existing
+kilnctrl link). The sender must invert before transmitting: `gain = 1 /
+fit_gain`, `offset = -fit_offset / fit_gain`, so that the Pico's
+`corrected = gain * raw + offset` undoes the measured error. This codec has
+no way to enforce that inversion; see `firmware/SaftyFW/src/config_store.h`'s
+header comment on `config_store_ct_channel_cal_t`.
+
+### `SAFETY_CMD_GET_CT_CAL` = `0x1A` (ESP → Pico), request only
+
+One byte, no arguments — same shape as `SAFETY_CMD_GET_FW_VERSION`. The
+Pico answers every copy it sees, under the **same** command byte
+(`SAFETY_CMD_CT_CAL`, §6 Frame G), distinguished by direction and length.
+
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
 One byte, no arguments. Sent by the ESP at boot and whenever the Pico's
@@ -765,6 +807,35 @@ The PC distinguishes the two streams by the frame's source device, and should
 mark the transport on each line: a log line relayed through the ESP and one read
 over RTT mean very different things when the link is what is under
 investigation. See `tools/PcTools/TODO.md`, "Logging and consoles".
+
+### Frame G: `SAFETY_CMD_CT_CAL` = `0x1A` — CT amps calibration, in reply to `SAFETY_CMD_GET_CT_CAL`
+
+Sent in reply to `SAFETY_CMD_GET_CT_CAL` (§4 below), same shared-id,
+distinguished-by-direction-and-length convention as Frame C/
+`SAFETY_CMD_GET_FW_VERSION`: the request is always 1 byte, this reply is
+always 28 bytes. Reports the three current-sense channels' stored CT amps
+calibration exactly as `config_store.c` holds it — the GUI's way to show
+what the safety processor is actually correcting current with right now,
+same motivation as Frame C's `config_crc` field.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x1A` |
+| 1 | u8 | channel 0 `calibrated` (0/1) |
+| 2..5 | f32 LE | channel 0 `gain` |
+| 6..9 | f32 LE | channel 0 `offset` |
+| 10..18 | — | channel 1: same 9-byte layout |
+| 19..27 | — | channel 2: same 9-byte layout |
+
+`calibrated` is carried explicitly per channel, never inferred from
+gain/offset — an uncalibrated channel's gain/offset are meaningless (the
+Pico's own `ct_amps_cal.c` never reads them for that channel) and must not
+be displayed or trusted as if they were a real correction. See
+`firmware/SaftyFW/src/config_store.h`'s header comment on
+`config_store_ct_channel_cal_t` for the full "uncalibrated is explicit, not
+zero" reasoning, and `firmware/SimFW/src/sim/ct_calibration.h`'s header
+comment for why the same discipline holds on the SimFW side of this exact
+problem.
 
 ---
 

@@ -21,16 +21,22 @@
 // NOT host-tested for the same reason update_task.c and bootloader/main.c
 // are not: it needs a real RP2040 (XIP-mapped reads, flash_safe_execute()).
 //
-// What this pass builds: the record format, the pure pack/unpack/find-latest/
-// next-write-slot logic, the pure ARMED-refusal decision, and tc_type wired
-// as the first real consumer (replacing max31856.h's
-// MAX31856_TC_TYPE_PLACEHOLDER call site in main.c). What it does NOT build:
-// any wire command to actually SET these values (SAFTY_CMD_SET_CONFIG or
-// similar) -- that is a LINK_PROTOCOL.md addition and its own
-// commissioning-flow UI work, TODO.md Phase 9's later bullets, deliberately
-// out of scope here. Nor does it implement S8's threshold or current-sense
-// calibration constants -- config_store_record_t reserves room for them
-// (`reserved` below) but nothing reads or writes that room yet.
+// What the original pass built: the record format, the pure pack/unpack/
+// find-latest/next-write-slot logic, the pure ARMED-refusal decision, and
+// tc_type wired as the first real consumer (replacing max31856.h's
+// MAX31856_TC_TYPE_PLACEHOLDER call site in main.c), plus SAFETY_CMD_
+// SET_CONFIG (0x16) as the wire command that actually sets tc_type.
+//
+// A later pass (this one) adds `ct_cal`: three channels' worth of CT amps
+// calibration constants (config_store_ct_channel_cal_t above), the wire
+// commands SAFETY_CMD_SET_CT_CAL (0x19) and SAFETY_CMD_GET_CT_CAL/CT_CAL
+// (0x1A) that set/read them (src/tasks/link_task.c), and current_sense.c's
+// ct_amps_cal.h consumer -- closing the gap firmware/SimFW/tools/
+// ct_calibration/README.md's "Readback path" section documented: a bench
+// calibration run could compute per-channel constants but had no way to push
+// them into SaftyFW's own flash. Still NOT implemented: S8's implausible-
+// rate-of-rise threshold -- config_store_record_t's `reserved` bytes still
+// hold room for it, but nothing reads or writes that room yet.
 #ifndef SAFTYFW_CONFIG_STORE_H
 #define SAFTYFW_CONFIG_STORE_H
 
@@ -76,6 +82,54 @@ extern "C" {
                                             // DOES know about max31856.h)
                                             // asserts the two agree.
 
+// Number of current-sense channels a config record carries calibration for --
+// must equal current_task.c's channel count (3, one per ADC0/1/2). Not
+// #included from anywhere hardware-specific: this module stays as
+// dependency-free as the rest of it.
+#define CONFIG_STORE_CT_CAL_NUM_CHANNELS 3u
+
+// One channel's CT amps calibration -- a linear correction applied on top of
+// current_sense.c's own physics-based conversion (zero_counts/k_ct_v_per_a/
+// gain), fit by firmware/SimFW/tools/ct_calibration/'s bench sweep-and-fit
+// runner against THIS firmware's own reported current_a (SAFETY_CMD_
+// GET_STATUS's current field, read back over the existing kilnctrl UART
+// link -- see that tool's README, "Readback path").
+//
+// `calibrated == false` means "no bench run has ever set this channel" and
+// `gain`/`offset` are then IGNORED ENTIRELY -- ct_amps_cal.c falls back to
+// the compiled-in IDENTITY (the raw reading, unmodified), never to any
+// number stored here. This must be an explicit flag, not a gain==1/
+// offset==0 convention, for exactly the reason firmware/SimFW/src/sim/
+// ct_calibration.h's header comment gives for its own `calibrated` bool: a
+// zero-initialized struct (gain 0, offset 0) would otherwise silently
+// force every reading on that channel to 0 A, and "nobody calibrated this"
+// would be indistinguishable from "this channel was measured to need
+// gain=0" -- the single worst way an uncommissioned channel could fail,
+// since S3/S4/S9 read current_a to decide whether current is flowing where
+// it should not be. A blank/corrupt/unreadable config record (see
+// config_store_default()) and any record written before this field existed
+// (config_store_default()'s memset leaves it exactly this way) both decode
+// as calibrated == false on every channel -- see config_store_unpack()'s
+// handling of the wire bytes for exactly why 0x00 AND 0xFF both mean "not
+// calibrated", not just one of them.
+//
+// `gain`/`offset` are meant to be stored ALREADY INVERTED, the same way
+// firmware/SimFW/tools/gen_ct_cal_table.py inverts its fit before writing a
+// compiled table: firmware/SimFW/tools/ct_calibration/calibrate_ct.py fits
+// `measured_a = fit_gain * commanded + fit_offset` (commanded = the
+// fixture's known true amps, measured_a = this firmware's own reported
+// current_a). To correct a RAW reading back to true amps, the PC-side
+// sender of SAFETY_CMD_SET_CT_CAL must invert that fit before transmitting:
+// `gain = 1 / fit_gain`, `offset = -fit_offset / fit_gain` -- so that
+// ct_amps_cal_apply()'s `corrected = gain * raw + offset` undoes the
+// measured error exactly. This module has no way to enforce that inversion
+// happened; it only stores and applies whatever two floats arrive.
+typedef struct {
+    bool  calibrated;
+    float gain;
+    float offset;
+} config_store_ct_channel_cal_t;
+
 typedef struct {
     uint16_t format_version;
     uint32_t seq; // log sequence number; config_store_find_latest() keeps the highest
@@ -91,15 +145,22 @@ typedef struct {
                                    // cleared semantics is all this pass
                                    // builds. A blank/corrupt/unreadable store
                                    // must also read back as true here: see
-                                   // config_store_default().
+                                   // config_store_default(). Untouched by
+                                   // SAFETY_CMD_SET_CT_CAL -- CT calibration
+                                   // and thermocouple commissioning are
+                                   // separate concerns, see
+                                   // link_task_handle_set_ct_cal()'s comment.
+    config_store_ct_channel_cal_t ct_cal[CONFIG_STORE_CT_CAL_NUM_CHANNELS];
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
     // same convention as metadata.h's per-slot reserved bytes). Room for
-    // S8's implausible-rate-of-rise threshold and current-sense calibration
-    // constants (TODO.md Phase 9's later bullets) without moving anything
-    // else or changing the record size -- adding those fields later is a
-    // struct/pack/unpack/host-test change, not a layout change, same as
-    // metadata.h's own signature/sig_required reservation.
-    uint8_t  reserved[64];
+    // S8's implausible-rate-of-rise threshold (TODO.md Phase 9's later
+    // bullets) without moving anything else or changing the record size --
+    // adding that field later is a struct/pack/unpack/host-test change, not
+    // a layout change, same as metadata.h's own signature/sig_required
+    // reservation. (ct_cal above used to live in this same reserved room;
+    // this is the remainder after claiming CONFIG_STORE_CT_CAL_NUM_CHANNELS
+    // * 9 = 27 of the original 64 bytes.)
+    uint8_t  reserved[37];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's
@@ -201,6 +262,17 @@ uint8_t config_store_get_tc_type(void);
 // The cached calibration_missing flag. Returns true (the safe default) if
 // called before config_store_boot_load().
 bool config_store_is_calibration_missing(void);
+
+// Copies the cached record's CT calibration into `out[0..CONFIG_STORE_CT_
+// CAL_NUM_CHANNELS-1]`. Same "safe default before boot_load()" contract as
+// every other getter here: if called before config_store_boot_load(), every
+// channel comes back calibrated == false (config_store_default()'s shape),
+// never uninitialised memory. Used by current_task.c (boot-time load) and
+// link_task_handle_set_ct_cal() (read-modify-write: fetch every channel's
+// current constants before overwriting just the one SAFETY_CMD_SET_CT_CAL
+// named, so setting channel 1 can never disturb channel 0 or 2's stored
+// values).
+void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_CAL_NUM_CHANNELS]);
 
 // Writes `rec` as the new current config record, refusing while ARMED (see
 // config_store_decide_write()). Returns false and fills `*out_reason` (if

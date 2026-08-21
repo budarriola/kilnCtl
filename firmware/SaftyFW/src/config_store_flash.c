@@ -81,6 +81,22 @@ bool config_store_is_calibration_missing(void)
     return s_cached_record.calibration_missing;
 }
 
+void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_CAL_NUM_CHANNELS])
+{
+    if (!s_loaded) {
+        // Defensive, same reasoning as config_store_get_tc_type() above: a
+        // caller that runs before config_store_boot_load() gets
+        // config_store_default()'s shape (every channel calibrated ==
+        // false) rather than uninitialised/zeroed memory that happens to
+        // look the same today but is not guaranteed to.
+        config_store_record_t def;
+        config_store_default(&def);
+        memcpy(out, def.ct_cal, sizeof(def.ct_cal));
+        return;
+    }
+    memcpy(out, s_cached_record.ct_cal, sizeof(s_cached_record.ct_cal));
+}
+
 // SAFETY_CMD_FW_VERSION's config_version/config_crc fields (LINK_PROTOCOL.md
 // sec 4), wired to the real cache now that config_store exists -- see
 // link_task.c's link_task_send_fw_version(), which used to hard-code both to

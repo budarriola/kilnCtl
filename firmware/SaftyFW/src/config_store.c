@@ -15,29 +15,38 @@
 //     12     1  tc_type
 //     13     1  calibration_missing (0/1)
 //     14     2  reserved1 (0)
-//     16    64  reserved (0xFF -- room for S8 threshold, CT calibration)
+//     16    27  ct_cal: 3 channels x 9 B each (calibrated u8 + gain f32 LE +
+//               offset f32 LE) -- see config_store.h's header comment on
+//               config_store_ct_channel_cal_t for what these mean and why
+//               `calibrated` must be its own explicit byte.
+//     43    37  reserved (0xFF -- room for S8's threshold; the rest of what
+//               used to be one 64-byte reserved block, before ct_cal above
+//               claimed the first 27 bytes of it)
 //     80   168  reserved, 0xFF-filled (further headroom)
 //    248     4  record_crc32, over bytes [0, 248)
 //    252     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    256  total = CONFIG_STORE_RECORD_LEN
 //
-// (CRC placed at 248 rather than 252 so the whole 64-byte `reserved` field
-// plus extra pad both stay contiguous and untouched by anything the CRC
-// covers being relocated later -- see the budget check below.)
+// (CRC placed at 248 rather than 252 so the whole reserved region plus extra
+// pad both stay contiguous and untouched by anything the CRC covers being
+// relocated later -- see the budget check below.)
 #define REC_OFF_MAGIC               0u
 #define REC_OFF_FORMAT_VERSION      4u
 #define REC_OFF_SEQ                 8u
 #define REC_OFF_TC_TYPE             12u
 #define REC_OFF_CALIBRATION_MISSING 13u
-#define REC_OFF_RESERVED            16u
-#define REC_RESERVED_LEN            64u
+#define REC_OFF_CT_CAL              16u
+#define REC_CT_CAL_CHANNEL_LEN      9u /* calibrated u8(1) + gain f32(4) + offset f32(4) */
+#define REC_OFF_RESERVED \
+    (REC_OFF_CT_CAL + CONFIG_STORE_CT_CAL_NUM_CHANNELS * REC_CT_CAL_CHANNEL_LEN) /* 43 */
+#define REC_RESERVED_LEN            37u
 #define REC_OFF_CRC                 248u
 
 // Compile-time budget check, mirroring
-// bootloader_metadata_record_budget_check: the fixed header plus reserved
-// room must fit inside the record before the CRC field -- if a future field
-// addition breaks this, it must fail the build, not silently overrun into
-// the CRC.
+// bootloader_metadata_record_budget_check: the fixed header plus ct_cal plus
+// reserved room must fit inside the record before the CRC field -- if a
+// future field addition breaks this, it must fail the build, not silently
+// overrun into the CRC.
 typedef char config_store_record_budget_check
     [(REC_OFF_RESERVED + REC_RESERVED_LEN <= REC_OFF_CRC) ? 1 : -1];
 
@@ -66,6 +75,30 @@ static uint32_t get_u32_le(const uint8_t *in)
            ((uint32_t)in[3] << 24);
 }
 
+// Float <-> 4-byte-LE via a union, same type-punning convention CommonFW's
+// kilnlink_bytes.h uses for its f32 helpers -- this module does not depend
+// on kilnlink, so it carries its own copy rather than reaching across a
+// layer boundary for two small functions.
+static void put_f32_le(uint8_t *out, float v)
+{
+    union {
+        float    f;
+        uint32_t u;
+    } conv;
+    conv.f = v;
+    put_u32_le(out, conv.u);
+}
+
+static float get_f32_le(const uint8_t *in)
+{
+    union {
+        float    f;
+        uint32_t u;
+    } conv;
+    conv.u = get_u32_le(in);
+    return conv.f;
+}
+
 void config_store_pack(const config_store_record_t *rec,
                         uint8_t out[CONFIG_STORE_RECORD_LEN])
 {
@@ -77,6 +110,12 @@ void config_store_pack(const config_store_record_t *rec,
     out[REC_OFF_TC_TYPE] = rec->tc_type;
     out[REC_OFF_CALIBRATION_MISSING] = rec->calibration_missing ? 1u : 0u;
     put_u16_le(&out[14], 0); // reserved1
+    for (unsigned ch = 0; ch < CONFIG_STORE_CT_CAL_NUM_CHANNELS; ch++) {
+        size_t off = REC_OFF_CT_CAL + (size_t)ch * REC_CT_CAL_CHANNEL_LEN;
+        out[off] = rec->ct_cal[ch].calibrated ? 1u : 0u;
+        put_f32_le(&out[off + 1u], rec->ct_cal[ch].gain);
+        put_f32_le(&out[off + 5u], rec->ct_cal[ch].offset);
+    }
     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved));
     // bytes [REC_OFF_RESERVED + REC_RESERVED_LEN, REC_OFF_CRC) already 0xFF
     // from the initial memset -- further headroom.
@@ -110,6 +149,21 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
     out->seq = get_u32_le(&in[REC_OFF_SEQ]);
     out->tc_type = in[REC_OFF_TC_TYPE];
     out->calibration_missing = in[REC_OFF_CALIBRATION_MISSING] != 0u;
+    for (unsigned ch = 0; ch < CONFIG_STORE_CT_CAL_NUM_CHANNELS; ch++) {
+        size_t off = REC_OFF_CT_CAL + (size_t)ch * REC_CT_CAL_CHANNEL_LEN;
+        // Explicit: only wire byte value 1 means calibrated. Any other byte
+        // -- 0 (config_store_default()'s zero-init, and every record ever
+        // written before this field existed) or 0xFF (erased flash) --
+        // decodes as NOT calibrated. gain/offset are still copied through
+        // even when calibrated is false; ct_amps_cal_apply() ignores them
+        // in that case, but there is no reason to hide them from a caller
+        // that wants to inspect a stale value. See config_store.h's header
+        // comment on config_store_ct_channel_cal_t for why this must be an
+        // explicit byte, never inferred from the numbers.
+        out->ct_cal[ch].calibrated = (in[off] == 1u);
+        out->ct_cal[ch].gain = get_f32_le(&in[off + 1u]);
+        out->ct_cal[ch].offset = get_f32_le(&in[off + 5u]);
+    }
     memcpy(out->reserved, &in[REC_OFF_RESERVED], sizeof(out->reserved));
     return true;
 }
@@ -122,6 +176,11 @@ void config_store_default(config_store_record_t *out)
     out->tc_type = CONFIG_STORE_DEFAULT_TC_TYPE;
     out->calibration_missing = true; // always true until a real commissioning
                                       // pass clears it -- see config_store.h
+    // ct_cal: left at the memset(0) above -- calibrated == false on every
+    // channel, gain/offset == 0 but IGNORED (never read) as a consequence.
+    // This is the "uncalibrated is explicit" default: ct_amps_cal_apply()
+    // treats calibrated == false as pass-the-raw-reading-through, not as
+    // "gain 0, offset 0" -- see config_store.h's header comment.
 }
 
 size_t config_store_find_latest(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE],

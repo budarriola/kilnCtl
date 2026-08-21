@@ -1023,6 +1023,57 @@ See `../CommonFW/docs/LINK_PROTOCOL.md` §7 for the full panel spec and presenta
       environment; build- and host-test-verified only (`cmake --build` for
       `SaftyFW`/`SaftyFW_slotA`/`SaftyFW_slotB` clean, 501/501 host checks
       including the new `config_store_record_crc` test).
+- [x] CT amps calibration constants: storage + wire commands. **2026-08-20**:
+      closes the gap `firmware/SimFW/tools/ct_calibration/README.md`'s
+      "Readback path" section documented — that PC-side bench tool could
+      compute a per-channel gain/offset fit against a real `SaftyFW`'s own
+      reported `current_a`, but "no MCP tool exists to push calibration
+      constants ... to the RP2040's own flash." `config_store_record_t`
+      gains `ct_cal[3]` (`config_store_ct_channel_cal_t`: `calibrated` bool +
+      `gain`/`offset` floats per channel), carved out of the 64-byte
+      `reserved` room this struct already set aside for exactly this —
+      `format_version` was NOT bumped, following this file's own documented
+      convention that claiming reserved room is "a struct/pack/unpack/
+      host-test change, not a layout change." A record written before this
+      field existed (reserved bytes all zero, from `config_store_default()`)
+      decodes every channel as `calibrated == false`, same as a
+      never-commissioned board — see `config_store.h`'s header comment on
+      why only the wire byte value `1` means calibrated (0 AND 0xFF both
+      mean "not calibrated," not just one).
+      New pure module `src/ct_amps_cal.{c,h}` (mirrors
+      `firmware/SimFW/src/sim/ct_calibration.h`'s discipline exactly, same
+      reason: `calibrated` is an explicit flag, never inferred from
+      gain==1/offset==0) applies `corrected = gain*raw + offset` on top of
+      `current_sense.c`'s own physics-based ADC→amps conversion, clamped to
+      >= 0; an uncalibrated channel returns the raw reading byte-for-byte
+      unchanged. Two new wire commands (`CommonFW/docs/LINK_PROTOCOL.md`
+      sec 4/6): `SAFETY_CMD_SET_CT_CAL` (0x19, ESP→Pico, one channel per
+      frame, fire-and-forget like `SET_CONFIG`, read-modify-writes the other
+      two channels' stored constants back unchanged) and
+      `SAFETY_CMD_GET_CT_CAL`/`SAFETY_CMD_CT_CAL` (0x1A, same shared-id/
+      reply-on-request shape as `GET_FW_VERSION`/Frame C). New kilnlink
+      codecs `kilnlink_set_ct_cal.{c,h}`, `kilnlink_get_ct_cal.{c,h}`,
+      `kilnlink_ct_cal.{c,h}` (CommonFW), each host-tested with hand-computed
+      byte-exact vectors (not yet added to `test/vectors/` or
+      `tools/PcTools/selfcheck.py`'s cross-check — see CommonFW/README.md).
+      `link_task.c`'s handlers refuse (logged) on an out-of-range channel or
+      while ARMED (`config_store_write()`'s existing refusal, unchanged);
+      unlike `SET_CONFIG`, never touches `calibration_missing` — CT
+      calibration and thermocouple commissioning are separate concerns.
+      A live `SET_CT_CAL` takes effect immediately (`current_task_reload_
+      ct_cal()`), not after a reboot, since a bench calibration session needs
+      to iterate. **Not done**: no PC-side sender exists yet (`tools/PcTools`
+      is out of scope for this pass) — `firmware/SimFW/tools/ct_calibration/`
+      's tool still only writes a JSON file; wiring it (or a new script) to
+      actually call `SAFETY_CMD_SET_CT_CAL` over the kilnctrl link, with the
+      gain/offset inversion `config_store.h`'s header comment documents, is
+      the follow-up. Build/test-verified only, same hardware caveat as every
+      other Phase 9 item above: `cmake --build` clean for `SaftyFW`/
+      `SaftyFW_slotA`/`SaftyFW_slotB` under `-Wall -Wextra -Werror`,
+      `tools/check_isolation.ps1` passes, 653/653 host checks (up from the
+      576/576 baseline, including 32 new checks across
+      `test_config_store.c`'s `ct_cal` additions and the new
+      `test_ct_amps_cal.c`).
 - [x] `SAFETY_CMD_ROLLBACK` (0x17) — explicit "revert to the previously-running
       bootloader slot, right now" command, the Pico half of
       `tools/PcTools/TODO.md`'s `ota_rollback(processor)` line (the ESP half,
