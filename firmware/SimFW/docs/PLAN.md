@@ -61,10 +61,9 @@ guards are blocked by specific inputs `safety_core_build_input()`
 
 > **SUPERSEDED 2026-08-20 (later the same day) — read this before the list
 > below.** The nine-blocked-guards finding was acted on. Commits `f304392`
-> (context/`link_up`/`REQUEST_ENABLE` wiring) and `5375bca` (S6a) closed most
-> of these gaps in `SaftyFW` itself. **Current state: only S9
-> (`relay_deenergized`) and S11 (`heat_commanded`) still have inputs that are
-> never produced.** S1 and S13 remain deliberately dormant as *commissioning*
+> (context/`link_up`/`REQUEST_ENABLE` wiring), `5375bca` (S6a), `5f90325` (S9)
+> and `6e98ae3` (S11) closed **all** of these gaps in `SaftyFW` itself.
+> **Current state: every guard input is produced.** S1 and S13 remain deliberately dormant as *commissioning*
 > gaps (uncommissioned `abs_max_temp_c`; no `borrowed_zone_index` field
 > exists), which is a different category from a missing producer. The list
 > below is kept as written because it is the evidence trail that motivated
@@ -85,9 +84,11 @@ guards are blocked by specific inputs `safety_core_build_input()`
   callers anywhere in the tree (confirmed by grep, not just the one obvious
   call site) — `relay_owner_task()` starts in GRACE and, once GRACE expires,
   nothing ever asks for an energize. K4 reads open from t=0 on every boot.
-- **S11 cannot trip.** `safety_core_build_input()` hardcodes
-  `heat_commanded = false` ("no current sense yet, Phase 6" per its own
-  comment), and S11's trip condition requires `heat_commanded` true.
+- ~~**S11 cannot trip.** `safety_core_build_input()` hardcodes
+  `heat_commanded = false`.~~ **Wired in `6e98ae3`** to
+  `any_current_present`. Note the "no current sense yet, Phase 6" comment
+  quoted here was already stale when this was written — Phase 6 was built;
+  S11's wiring was simply out of scope for the pass that landed the others.
 - **S2, S3, S4, S10, S13 cannot fire or warn.** All five are gated on
   `context_valid`, which `safety_core_build_input()` never sets true (same
   Phase 7 link-context gap as S6b, one level up).
@@ -207,14 +208,6 @@ never `[x]`.
       `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
       halts while DMA exhaustion limps, and the code's own idle-loop-fallback
       comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
-- [ ] **S11 guard input — and it is NOT blocked on Phase 6, contrary to what
-      earlier notes here said.** S11 is `SAFETY_TRIP_FROZEN_SENSOR` (the
-      frozen-safety-reading guard), not a current guard; `heat_commanded` is
-      only its "and heat is happening" qualifier.
-      `safety_core.c:162-168` states it directly: Phase 6 **is** built and
-      `any_current_present` already reads it — `heat_commanded` stays false
-      because S11's wiring was out of scope for that pass. This is a small,
-      available wiring job, not a blocked one.
 - [ ] **PC-side sender for `SAFETY_CMD_SET_CT_CAL`.** SaftyFW can now store and
       apply CT calibration (`1bd5d9d`), but `tools/ct_calibration/` still only
       writes JSON. Needs a `tools/PcTools/src/kilnctrl` sender that inverts the
@@ -279,6 +272,13 @@ never `[x]`.
       18, so its anti-nuisance claim is proven by its own default run. Swept
       all 22 scenarios; no other has a repeat cycle shorter than the telemetry
       cadence
+- [x] **Every guard input in `SaftyFW` is now produced** (`6e98ae3` wired S11's
+      `heat_commanded = any_current_present`). Only S1 and S13 remain dormant,
+      and both are deliberate *commissioning* gaps — uncommissioned
+      `abs_max_temp_c`, and a `borrowed_zone_index` that exists in docs but as
+      no struct field. S11 deliberately uses the ADC-derived current fact
+      rather than the link-derived relay facts, so it keeps working, and keeps
+      authority over K4, with the ESP link down
 - [x] S9 `relay_deenergized` wired (`5f90325`), and S9's decision logic has
       now **fired end to end** (`3c6763a`): S3 trips, K4 opens, the welded
       contactor holds 20 A, `TRIP_INEFFECTIVE_LATCHED` lands 9.8 s later
