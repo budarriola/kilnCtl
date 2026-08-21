@@ -85,14 +85,23 @@ RP2040 safety processor that is a separate, not-yet-started firmware project.
   slot) — see ROADMAP.md M8 for the still-open two-app-slot OTA partition
   table work; `../../CommonFW/docs/UPDATE_PROTOCOL.md` §3 is the design doc
   for that.
-- **PSRAM: deliberately off**, and staying off (decision 2026-08-16,
-  `TODO.md` 9.1a). `# CONFIG_SPIRAM is not set`. Nothing on this board needs it:
-  the only candidate workload is a display framebuffer, and `docs/ILI9488.md`
-  streams straight to the panel's own GRAM instead. Against that, PSRAM adds
-  cache-miss stalls to a firmware with real-time heater and link deadlines, a
-  new boot failure mode, and a DMA-capability audit of every existing driver
-  buffer. The named trigger to revisit is a locally-rendered UI on the panel.
-  **This is a decision, not an oversight** — do not "fix" it by enabling PSRAM.
+- **PSRAM: ON since 2026-08-17** (`TODO.md` 9.1a). `CONFIG_SPIRAM=y`,
+  `CONFIG_SPIRAM_MODE_OCT=y` at 40 MHz on the N16R8 module's 8 MB,
+  `CONFIG_SPIRAM_USE_MALLOC=y`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`,
+  `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768`. In use by: LVGL's two draw
+  buffers (`lvgl_port.c`), the LVGL heap (`lvgl_mem_psram.c`),
+  `ui_page_touch_test.c`'s canvas, and several task stacks allocated with
+  `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)` in
+  `uart_bridge.c`, `uart_bridge_ext.c`, `gpio_probe.c` and `uart_protocol.c`.
+  **This paragraph said "deliberately off, and staying off" until 2026-08-20
+  — it was stale by three days and is corrected here.** It was off by
+  decision on 2026-08-16 for four reasons (no framebuffer needed, cache-miss
+  stalls against real-time deadlines, a new boot failure mode, a DMA audit);
+  section 10's LVGL GUI was the named trigger that reversed it, and
+  `TODO.md` 9.1a re-examines all four objections against the actual use.
+  Note the DMA one specifically: `ILI9488_blit_data()` stages into the
+  driver's own internal DMA-capable scratch buffer, so the PSRAM LVGL buffer
+  is never a DMA target.
 - **Python**: `python -c "import kilnctrl"` succeeds. `selfcheck.py` **fails 16
   of its checks** as of 2026-08-16; they fail identically on the
   pre-reorganisation source, so they are pre-existing and unrelated to the move.

@@ -657,24 +657,38 @@ extractable from the binary — worse than self-signed.
   deliberate exception; every STA-mode route is TLS. Worth stating in the UI
   so it is not mistaken for an oversight.
 
-**Cost, and the constraint that decides it: PSRAM is off** (section 9.1a,
-"decided: stays off"). Each concurrent TLS session costs mbedTLS handshake
-and record buffers out of internal SRAM, and this firmware has already hit
-internal-SRAM exhaustion once (ROADMAP.md's 2026-08-19 crash-loop entry).
-That makes the following non-optional rather than tuning:
+**Cost. PSRAM is ON** — `CONFIG_SPIRAM=y`, octal mode, 8 MB on the N16R8
+module, with `CONFIG_SPIRAM_USE_MALLOC=y`,
+`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` and
+`CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768`, in use since 2026-08-17 for
+LVGL's draw buffers and heap and for several task stacks. (An earlier
+revision of this section claimed PSRAM was off, quoting TODO.md 9.1a's
+heading, which was stale — the section body records the reversal. Corrected
+2026-08-20; 9.1a's heading, `PROJECT_STATUS.md` and `ROADMAP.md`'s decision
+table were fixed in the same pass.)
 
-- Cap concurrent TLS sessions well below the plain-HTTP connection count,
-  and lean on `lru_purge_enable` — which is already set for exactly this
-  "a stuck client must not lock a phone out" reason.
+That changes the shape of the TLS cost question but does not erase it —
+mbedTLS's session and record buffers are `malloc`'d, so with
+`CONFIG_SPIRAM_USE_MALLOC=y` they can land in PSRAM, but the handshake still
+burns **internal** SRAM for stack, and this firmware has hit internal-SRAM
+exhaustion once already (ROADMAP.md's 2026-08-19 crash-loop entry, and
+`uart_bridge_ext.c`'s task stacks were moved to PSRAM for exactly that
+reason). So:
+
+- The HTTPS server task's own stack is the number to watch, not the heap.
+  It handshakes on that stack; size it deliberately rather than taking the
+  default, the same way `stack_size = 8192` was already forced on the
+  plain-HTTP server by `zones_post_handler`'s 3.2 KB body buffer.
 - Reduce `MBEDTLS_SSL_IN_CONTENT_LEN`/`OUT_CONTENT_LEN` from the 16 KB
-  default; this UI's largest body is `zones_post_handler`'s ~3.2 KB, so
-  4 KB is generous. This is the single biggest RAM lever available.
+  default anyway; this UI's largest body is that same ~3.2 KB, so 4 KB is
+  generous, and it shrinks per-session cost wherever the buffers land.
 - Enable TLS session resumption/tickets — §4.3's shared poller reconnects
   regularly, and a full ECDHE handshake every 2 s per client is the one
-  workload that would actually hurt.
-- Measure `esp_get_minimum_free_heap_size()` before and after with two or
-  three phones connected. `ui_page_diagnostics.c` already displays exactly
-  that worst-case-ever number — the instrument for this is built.
+  workload that would actually hurt. With PSRAM available the ticket cache
+  is cheap.
+- Measure both numbers, before and after, with two or three phones
+  connected: `esp_get_minimum_free_heap_size()` **and** PSRAM free.
+  `ui_page_diagnostics.c` already displays both — the instrument is built.
 
 **OTA over TLS.** `ota_http.c`'s routes ride the same server, so they inherit
 TLS with no per-route change; the challenge/HMAC scheme stays exactly as it

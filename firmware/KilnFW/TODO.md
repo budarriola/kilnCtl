@@ -3589,9 +3589,23 @@ more room after it on a 16 MB part.
 - [ ] **Reflash the bootloader on the physical board** — the flash size is in
       its header, so a new table alone does nothing. This is still a one-time
       USB/serial step against real hardware that this pass could not perform
-### 9.1a PSRAM — decided: stays off
+### 9.1a PSRAM — ENABLED (2026-08-17). Originally decided off; the named trigger fired
 
-**Decision (2026-08-16): leave `CONFIG_SPIRAM` unset. Do not enable PSRAM.**
+> **Read the reversal at the bottom of this section before quoting anything
+> above it.** PSRAM is **on** and in use today — LVGL draw buffers, the LVGL
+> heap (`lvgl_mem_psram.c`), and several task stacks
+> (`uart_bridge.c`/`uart_bridge_ext.c`/`gpio_probe.c`/`uart_protocol.c` via
+> `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`). `sdkconfig`
+> carries `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_MODE_OCT=y`,
+> `CONFIG_SPIRAM_USE_MALLOC=y`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`,
+> `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768`. The heading of this section
+> said "stays off" until 2026-08-20 and misled a later reader into
+> propagating that into other docs — hence this banner. The original
+> reasoning is kept below because the four objections are still useful
+> context for *how* PSRAM is used, not whether.
+
+**Original decision (2026-08-16), since reversed: leave `CONFIG_SPIRAM`
+unset. Do not enable PSRAM.**
 
 The module carries 2 MB or 8 MB of it depending on which variant is actually
 fitted, and none of it is used. That is the right answer today, for four
@@ -3664,9 +3678,13 @@ sdkconfig/driver changes.
       are consumed by the PSRAM inside the module whether or not the software
       enables it. The board currently uses 0-21, 38, 43, 44, 47 and 48, so there
       is no conflict — this is to keep it that way
-- [ ] Note for sourcing: the **flash** is what earns the module's keep, since OTA
-      needs it. The PSRAM on an R8 part is being paid for and not used. That is an
-      acceptable trade for a one-off, not a reason to specify R8 on a reorder
+- [ ] Note for sourcing: the flash is what earns the module's keep, since OTA
+      needs it. ~~The PSRAM on an R8 part is being paid for and not used. That
+      is an acceptable trade for a one-off, not a reason to specify R8 on a
+      reorder~~ — **stale, corrected 2026-08-20: the R8's PSRAM is in use**
+      (LVGL draw buffers + LVGL heap + several task stacks, §9.1a). **R8 is
+      now a requirement on a reorder, not an incidental**: dropping to an R2
+      or a no-PSRAM part would break the LCD GUI's memory plan.
 - [x] `otadata` at `0x200000`, `ota_0`/`ota_1` 2 MB each above it, `pico_img`
       staging partition (896K, corrected up from the originally-proposed 512K
       — too small for SaftyFW's 832K app slot). Full layout in
@@ -3760,7 +3778,9 @@ sdkconfig/driver changes.
       `httpd_ssl_start()` gives OTA TLS with no per-route change in this
       section. See UI_PLAN §6 for the cert design (on-device ECDSA P-256
       self-signed, fingerprint shown on the LCD), the AP-mode plain-HTTP
-      exception, and the internal-SRAM cost with PSRAM off (§9.1a).
+      exception, and the RAM cost — which is an internal-SRAM *stack*
+      question, not a heap one, since PSRAM is enabled and `malloc`-backed
+      (§9.1a).
 
 ### 9.4 Interlocks
 
