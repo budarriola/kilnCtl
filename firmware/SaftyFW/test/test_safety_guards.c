@@ -1302,6 +1302,128 @@ static void test_s9(void)
         TEST_CHECK(safety_guards_tick(&s, &cfg, &verify) == false, "further ticks do not re-report a new escalation");
         TEST_CHECK(s.trip_ineffective, "trip_ineffective remains latched true");
     }
+
+    /* --- The wiring itself: safety_core_build_input() now names this field
+     * as `!relay_owner_is_energized()`. The blocks above prove the guard's
+     * ARITHMETIC given the field; these four prove the field's SENSE, by
+     * only ever setting it through the same single negation the call site
+     * applies, never by writing the bool literal directly. If the `!` were
+     * ever dropped (or doubled) in safety_core.c, the first two of these are
+     * the ones that would start disagreeing with reality. */
+
+    /* Polarity, the dangerous direction: K4 ENERGIZED with current flowing
+     * is a perfectly normal firing kiln, and after any trip it means the
+     * de-energize has not landed yet -- but S9's window must NOT start,
+     * because "K4 still closed and conducting" is not evidence of a welded
+     * contactor, it is evidence of a command still in flight. An inverted
+     * wiring would read this exact situation as "de-energized + current" and
+     * escalate to SAFETY_TRIP_INEFFECTIVE within trip_verify_s, which is why
+     * this runs well past the 10s bar before believing it. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop); /* trip via S7 */
+        TEST_CHECK(s.is_tripped, "sanity: tripped via S7");
+
+        const bool relay_owner_energized = true; /* relay_owner_is_energized() */
+        safety_guard_input_t in = base_input();
+        in.relay_deenergized = !relay_owner_energized; /* the call site's own expression */
+        in.any_current_present = true;
+        in.dt_s = 1.0f;
+        bool escalated = false;
+        for (int i = 0; i < 60 && !escalated; i++) { /* 60s, 6x trip_verify_s */
+            escalated = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!escalated, "energized K4 with current present never escalates S9 (inverted wiring would)");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false while K4 is energized");
+        TEST_CHECK(s.reason == SAFETY_TRIP_ESTOP, "reason stays the original S7 trip, not SAFETY_TRIP_INEFFECTIVE");
+        TEST_CHECK(s.s9_verify_elapsed_s == 0.0f, "S9's verify clock never started while K4 was energized");
+    }
+
+    /* Polarity, the other direction: the same single negation over a
+     * de-energized relay DOES arm the window, and with current still flowing
+     * escalates. Together with the block above this pins the sense in both
+     * directions -- one expression, two truth values, two opposite verdicts. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        const bool relay_owner_energized = false; /* GPIO6 driven low -- K4 open */
+        safety_guard_input_t in = base_input();
+        in.relay_deenergized = !relay_owner_energized;
+        in.any_current_present = true; /* contacts welded shut */
+        in.dt_s = 1.0f;
+        bool escalated = false;
+        for (int i = 0; i < 60 && !escalated; i++) {
+            escalated = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(escalated, "de-energized K4 with current present escalates S9 through the wired expression");
+        TEST_CHECK(s.trip_ineffective, "trip_ineffective latches");
+        TEST_CHECK(s.reason == SAFETY_TRIP_INEFFECTIVE, "reason escalates to SAFETY_TRIP_INEFFECTIVE");
+        TEST_CHECK(s.s9_verify_elapsed_s >= 10.0f, "escalation happened at or after trip_verify_s, not before");
+    }
+
+    /* GRACE: relay_owner starts in GRACE and REFUSES to drive GPIO6 high for
+     * the whole 60s startup window, so relay_owner_is_energized() is false
+     * and this field reads TRUE from the very first tick of every boot. That
+     * is exactly the shape that made S6b trip ~120s into every boot before
+     * f304392, so it is worth proving it cannot happen here: with no trip
+     * latched, safety_guards_tick() never enters the S9 branch at all, and
+     * the verify clock is actively re-zeroed at the bottom of every
+     * untripped tick. 20 minutes of boot-shaped ticks, nothing else wrong. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        const bool relay_owner_energized = false; /* GRACE never energizes */
+        safety_guard_input_t in = base_input();
+        in.relay_deenergized = !relay_owner_energized;
+        in.link_up = true;
+        in.tc_c = 22.0f;
+        bool tripped = false;
+        for (int i = 0; i < 12000 && !tripped; i++) { /* 12000*0.1s = 20 minutes */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "a de-energized K4 through GRACE never trips anything on its own");
+        TEST_CHECK(!s.trip_ineffective, "no S9 escalation without a latched trip");
+        TEST_CHECK(!s.s9_verify_active, "S9's verify window stays inactive while untripped");
+        TEST_CHECK(s.s9_verify_elapsed_s == 0.0f, "S9's verify clock accumulates nothing while untripped");
+    }
+
+    /* GRACE, the honest half: a trip that DOES land during startup, with K4
+     * correctly open and no current anywhere, still must not escalate --
+     * this is the real per-boot situation (K4 open the whole time), and the
+     * only thing separating it from the welded case is any_current_present.
+     * Run it far past trip_verify_s to prove the separation is the current
+     * fact and not the timer. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+
+        const bool relay_owner_energized = false;
+        safety_guard_input_t in = base_input();
+        in.relay_deenergized = !relay_owner_energized;
+        in.any_current_present = false; /* K4 open AND nothing conducting */
+        in.dt_s = 0.1f;
+        bool escalated = false;
+        for (int i = 0; i < 6000 && !escalated; i++) { /* 10 minutes */
+            escalated = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!escalated, "K4 open with no current never escalates, however long the window runs");
+        TEST_CHECK(!s.trip_ineffective, "trip_ineffective stays false");
+        TEST_CHECK(s.reason == SAFETY_TRIP_ESTOP, "the original trip reason survives un-escalated");
+    }
 }
 
 static void test_s10(void)

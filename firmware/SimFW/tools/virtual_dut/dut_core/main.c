@@ -67,6 +67,21 @@
 //                            current scenario asserts it -- but the input is
 //                            now reachable from the wire, exactly like
 //                            <estop>, instead of being unreachable in C.
+//   relay_deenergized    <- this file's own s_energized, inverted:
+//                            safety_core_build_input() now names the field as
+//                            `!relay_owner_is_energized()`, and s_energized
+//                            here already IS relay_owner.c's s_energized,
+//                            modelled by apply_energize_request() /
+//                            relay_trip_transition() below. So this needs no
+//                            new TICK field and no protocol change -- the
+//                            producer was already mirrored, only its inverse
+//                            was never consumed. Note the consequence: with
+//                            no scenario issuing ENABLE, s_energized is false
+//                            for every run, so this now reads TRUE
+//                            throughout, which is truthful (K4 really is open
+//                            in these runs) and still cannot escalate S9 on
+//                            its own -- S9 also needs a latched trip AND
+//                            any_current_present past trip_verify_s.
 //   link_up              <- the fixture telemetry stream's own liveness,
 //                            standing in for link_task_link_up()'s
 //                            "CRC-valid frame within LINK_UP_RECENCY_MS".
@@ -85,7 +100,6 @@
 //                                      exist anywhere in the codebase, and
 //                                      cfg->tc_source's OWN_J7 default keeps
 //                                      S13 dormant regardless)
-//   relay_deenergized        = false (safety_core.c never names it)
 //   reboot_grace_active      = false (no SAFETY_CMD_ANNOUNCE_REBOOT source in
 //                                      this fixture -- there is no ESP here)
 //   energized                = only ever set by an explicit ENABLE command
@@ -380,9 +394,10 @@ static void do_tick(tokens_t *t)
     // sets valid=true and lets the SR fault bits speak for themselves
     // (already applied by max31856_decode_regs() above).
     safety_guard_input_t in;
-    memset(&in, 0, sizeof(in)); // relay_deenergized stays false:
-                                  // safety_core_build_input()'s own C99 struct
-                                  // literal still does not name that one.
+    memset(&in, 0, sizeof(in)); // every field safety_core_build_input()'s own
+                                  // C99 struct literal names is assigned
+                                  // explicitly below; this only covers the
+                                  // ones it deliberately leaves at zero.
     in.tc_valid = true;
     in.tc_c = decoded.tc_c;
     in.cj_c = decoded.cj_c;
@@ -443,6 +458,14 @@ static void do_tick(tokens_t *t)
     in.sample_counter_advancing = false;
 
     in.link_up = (link_up != 0);
+
+    // S9, mirroring safety_core_build_input()'s `.relay_deenergized =
+    // !relay_owner_is_energized()`. Read HERE, before safety_guards_tick(),
+    // from the value left by the previous tick's apply_energize_request() --
+    // the real safety_core reads relay_owner's published level at the top of
+    // its own tick the same way. Same single negation, same reason: this
+    // file's s_energized is the affirmative, the guard field is the negative.
+    in.relay_deenergized = !s_energized;
 
     bool newly_tripped = safety_guards_tick(&s_state, &s_cfg, &in);
 

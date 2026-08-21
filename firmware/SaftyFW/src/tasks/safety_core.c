@@ -308,6 +308,29 @@ static safety_guard_input_t safety_core_build_input(void)
         .sample_counter_advancing = sample_counter_advancing,
         .link_up = link_task_link_up(),
         .reboot_grace_active = reboot_grace_active,
+        // S9's "did the hardware actually respond". The INVERSE of
+        // relay_owner_is_energized(), and the inversion belongs here rather
+        // than in the producer: relay_owner.h publishes the affirmative
+        // ("true only while GPIO6 is actually being driven high right now"),
+        // safety_guards.h asks for the negative ("set by the caller once
+        // relay_owner has actually de-energized K4"). safety_core_get_output_
+        // status() below reads the SAME getter with NO `!` for its
+        // out_relay_energized field, which is the cross-check that this `!`
+        // is the right way round: the two call sites disagree by exactly one
+        // negation because the two field names are exact opposites.
+        //
+        // Not gated on relay_owner's state, and deliberately so. K4 does read
+        // de-energized for the whole 60s GRACE window at every boot (GRACE
+        // refuses to drive GPIO6 high at all), but S9 cannot nuisance-trip on
+        // that: safety_guards_tick() only evaluates S9 inside its
+        // `if (state->is_tripped)` branch, so with no trip latched this field
+        // is never even read -- it is not the S6b class of unconditional
+        // free-running timer that f304392 had to undo. And if a trip DOES
+        // land during GRACE, "K4 open yet current still flowing for
+        // trip_verify_s" is a genuine welded contactor whether or not GRACE
+        // is still running; suppressing it there would blind the one guard
+        // whose entire job is to distrust the trip that just happened.
+        .relay_deenergized = !relay_owner_is_energized(),
         .dt_s = (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f,
     };
 }
