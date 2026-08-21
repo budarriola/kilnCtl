@@ -12,6 +12,7 @@
 #include "MAX31856.h"
 #include "http_form.h"
 #include "kiln_io.h"
+#include "thermo_owner.h"
 #include "wifi_provision_http.h"
 
 static const char *TAG = "zones_http";
@@ -35,8 +36,37 @@ static const char *TAG = "zones_http";
  * so thermo_mask already reads as 0 with no explicit copy needed, and only
  * the version bump plus migrate_zones_cfg_v1_to_current()'s new
  * legacy-mapping fill-in (see there) are required to make the growth safe
- * for an operator's existing saved zones. */
-#define ZONES_CFG_VERSION 4
+ * for an operator's existing saved zones.
+ *
+ * 4 -> 5 (2026-08-21): added zone_cfg_t::tc_type (per-channel MAX31856 CR1
+ * TC[3:0] thermocouple type -- the owner's actual complaint: the settings
+ * page had no way to select B/E/J/K/N/R/S/T, and MAX31856.c hardcoded
+ * THERMO_TC_K at boot with no persistence at all) and
+ * zones_cfg_t::safety_tc_type (the RP2040 safety processor's OWN,
+ * independent thermocouple type -- see safety_link.c's mirroring comment for
+ * why this is a separate field rather than reusing any one zone's tc_type).
+ * Both are a real hazard to leave at their zeroed default (0 decodes as Type
+ * B, not "unconfigured" -- unlike thermo_mask's 0, there is no safe implicit
+ * meaning for a zeroed tc_type), so THIS growth needs the same explicit
+ * migration treatment thermo_mask got at 3->4, not the "0 already means the
+ * right thing" case continue_on_zone_trip got at 1->2. See
+ * migrate_zones_cfg_v1_to_current() below for the fill-in. */
+#define ZONES_CFG_VERSION 5
+
+/* MAX31856 CR1.TC[3:0] nibble values 0x00-0x07 name a real thermocouple type
+ * (B/E/J/K/N/R/S/T, uart_task_ids.h's THERMO_TC_* -- THERMO_TC_B is 0, the
+ * lowest, THERMO_TC_T is 7, the highest of the eight); 0x08-0x0F are the
+ * part's voltage-input modes (THERMO_TC_VMODE_G8/G32 and reserved codes in
+ * between), not thermocouples at all. uart_bridge.c's raw CONFIG_CHANNEL
+ * subcommand and MAX31856_configure() itself both accept the full 0-0x0F
+ * range deliberately (a debug/raw path has legitimate reasons to want the
+ * voltage-input modes) -- this page's operator-facing selector does not, and
+ * TODO.md's owner-report task item 4 asks explicitly for the tighter check:
+ * an operator picking "thermocouple type" off a labelled dropdown can never
+ * mean a voltage-input mode, so this endpoint rejects anything past
+ * THERMO_TC_T with a specific reason rather than silently accepting a
+ * register code that isn't a thermocouple. */
+#define ZONE_TC_TYPE_MAX_REAL THERMO_TC_T
 
 #define ZONE_NAME_MAX_LEN 15
 
@@ -117,6 +147,26 @@ typedef struct {
      * either nuisance-trip a kiln that genuinely stratifies or be so wide it
      * catches nothing. Left blank until the operator has a measurement. */
     float cross_zone_max_delta_c;
+    /* 2026-08-21: the actual gap the owner reported -- "in the thermocouples
+     * settings page i dont see anywhere i can select my thermocouple type."
+     * MAX31856.c's tc_type field (CR1.TC[3:0]) was always THERMO_TC_K at
+     * boot, hardcoded, never persisted, and never exposed here. This is
+     * per-CHANNEL, not per-zone, even though it lives in the same
+     * MAX31856_CHANNEL_COUNT-sized zones[] array indexed by i: slot i is
+     * "channel i" for this field regardless of which zone(s) thermo_mask
+     * says actually read that channel (a zone can combine several channels;
+     * each physical channel still has exactly one real thermocouple wired to
+     * it with exactly one type). Bounded to ZONE_TC_TYPE_MAX_REAL (0-7, the
+     * eight real types) by both parse_zone_fields() and
+     * migrate_zones_cfg_v1_to_current() -- the remaining CR1 nibble codes
+     * are voltage-input modes, not thermocouples, and have no business being
+     * reachable from this operator-facing page (see ZONE_TC_TYPE_MAX_REAL's
+     * comment). Applied to hardware at boot by zones_http_start() below,
+     * which is the fix for the other half of the bug: setting this over
+     * UART today (thermo_owner_command_config_channel(), already wired) was
+     * live only until the next reboot, because nothing read it back out of
+     * NVS at bring-up. */
+    uint8_t tc_type;
     /* The FOPDT plant model autotune (TODO.md 6A.4) fitted for this zone,
      * kept so 6A.2's feedforward term can be computed from it:
      * u_ff = (T_sp - T_ambient)/K + (dT_sp/dt)*tau/K. Until now the fit was
@@ -169,6 +219,26 @@ typedef struct {
      * whole-board decision, not a per-zone one. Enforced by
      * profile_executor.c's escalate_guard_trip(). */
     uint8_t continue_on_zone_trip;
+    /* 2026-08-21, TODO.md owner-report task item 3: the RP2040 safety
+     * processor has its OWN, physically independent MAX31856 thermocouple --
+     * not one of the main board's MAX31856_CHANNEL_COUNT channels above, a
+     * fourth (well, first) part on entirely separate hardware -- and its
+     * type is set over the link by SAFETY_CMD_SET_CONFIG
+     * (safety_link_send_set_config()). This is a SEPARATE setting from any
+     * zone's tc_type above, deliberately: the safety processor's sensor is
+     * wired to whatever thermocouple the operator physically attached to
+     * ITS input, which has no reason to match any particular main-board
+     * zone's channel (that is the whole point of it being an *independent*
+     * cross-check -- see docs/HARDWARE.md and SaftyFW's own thermocouple
+     * wiring). Defaults to THERMO_TC_K, matching what MAX31856.c has always
+     * hardcoded for the main board's own channels, so a board that has never
+     * touched this setting keeps behaving exactly as it does today. Mirrored
+     * to the Pico by safety_link.c's poll task, not sent directly from this
+     * file -- see that file's safety_sync_tc_type() for why (this module has
+     * no reference to the SafetyLinkClass instance; main.c, which does, is
+     * off-limits this pass) and for the "link was down when this changed"
+     * re-apply-on-reconnect handling. */
+    uint8_t safety_tc_type;
     zone_cfg_t zones[MAX31856_CHANNEL_COUNT];
 } zones_cfg_t;
 
@@ -186,7 +256,9 @@ typedef struct {
  * parse_float_field()'s 23-char value each, ~250 bytes a zone, ~750 across
  * three. z%u_thermo_mask (TODO.md 10.8) is a single 0-255 u8 field, well
  * under 20 bytes a zone even with its key name -- left inside the existing
- * 4096 without another bump; the three-zone worst case is nowhere near it. */
+ * 4096 without another bump; the three-zone worst case is nowhere near it.
+ * z%u_tctype (2026-08-21) and the top-level safety_tc_type are each a
+ * single 0-7 u8 field, smaller still -- also left inside the existing 4096. */
 #define ZONES_BODY_MAX 4096
 
 static struct {
@@ -397,6 +469,26 @@ static void migrate_zones_cfg_v1_to_current(zones_cfg_t *cfg)
             cfg->zones[i].thermo_mask = (uint8_t)(1u << i);
         }
     }
+    /* 4 -> 5 (2026-08-21, TODO.md owner-report item 1): every blob older than
+     * version 5 predates zone_cfg_t::tc_type / zones_cfg_t::safety_tc_type
+     * entirely, so both fields arrived here zeroed by nvs_get_blob() reading
+     * into a zeroed out_cfg (see nvs_load_from()). Unlike thermo_mask above,
+     * 0 is NOT a safe "not configured" reading for either field -- 0 decodes
+     * as THERMO_TC_B, a real and different thermocouple type, not an
+     * "unset" sentinel. Every board that has ever saved a zones config was
+     * running with THERMO_TC_K in the actual hardware register the whole
+     * time (MAX31856.c's now-fixed hardcoded default), so filling in
+     * THERMO_TC_K here for every channel -- and for the safety processor's
+     * own setting -- is what keeps a migrated board's thermocouples reading
+     * the same temperatures after this upgrade as they did before it, rather
+     * than silently relinearizing every reading against the wrong type the
+     * moment this firmware boots. An operator who deliberately wants
+     * something else still has to say so explicitly on the page, same as
+     * any first-time use of a brand-new field. */
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        cfg->zones[i].tc_type = THERMO_TC_K;
+    }
+    cfg->safety_tc_type = THERMO_TC_K;
 }
 
 /* One-time move of the persisted zones config out of the default partition's
@@ -494,6 +586,34 @@ uint8_t zones_config_get_max_simultaneous_relays(void)
 bool zones_config_get_continue_on_zone_trip(void)
 {
     return s_zones.cfg.continue_on_zone_trip != 0;
+}
+
+/* 2026-08-21, TODO.md owner-report item 3 -- safety_link.c's consumer (see
+ * its safety_sync_tc_type()): the RP2040 safety processor's own,
+ * independent thermocouple type, as last saved on this page. Always
+ * answerable, unlike the per-zone getters below -- this is a global setting
+ * with a real value from the moment NVS first loads (defaulting to
+ * THERMO_TC_K either via a fresh zero-init struct reading 0/THERMO_TC_B...
+ * no: see below) -- so, unlike zones_config_get_max_ramp() and friends,
+ * there is no "cannot answer" case to report via a bool return; the return
+ * value exists only so this getter's shape matches every other one in this
+ * file and a future caller doesn't have to special-case it.
+ *
+ * IMPORTANT: on a board that has never loaded a valid zones config at all
+ * (s_zones_config_valid false -- first boot, corrupt NVS, a refused
+ * newer-than-firmware blob), s_zones.cfg is the zeroed default, and 0 here
+ * decodes as THERMO_TC_B, NOT THERMO_TC_K -- unlike MAX31856.c's own
+ * hardcoded boot default. safety_link.c's caller MUST check
+ * zones_config_is_valid() itself before trusting this value for anything
+ * other than "what would get sent if asked to sync right now" -- see that
+ * file's safety_sync_tc_type() for how it actually guards this. */
+bool zones_config_get_safety_tc_type(uint8_t *out_tc_type)
+{
+    if (!out_tc_type) {
+        return false;
+    }
+    *out_tc_type = s_zones.cfg.safety_tc_type;
+    return true;
 }
 
 bool zones_config_get_relay_mask(uint8_t zone_index, uint8_t *out_mask)
@@ -714,11 +834,13 @@ static void json_escape(const char *src, char *out, size_t out_cap)
 
 static esp_err_t zones_get_handler(httpd_req_t *req)
 {
-    char json[2560]; /* 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
+    char json[2688]; /* 1024 -> 1536 with heater_window_ms/min_on_ms/min_off_ms,
                       * 1536 -> 1792 with cross_zone_max_delta_c,
                       * 1792 -> 2048 with the three plant-model fields (their
                       * key names alone are ~50 bytes a zone before values),
-                      * 2048 -> 2560 with the 8 guard-threshold overrides.
+                      * 2048 -> 2560 with the 8 guard-threshold overrides,
+                      * 2560 -> 2688 with tc_type/safety_tc_type (2026-08-21):
+                      * one small integer per zone plus one top-level field.
                       * thermo_mask (TODO.md 10.8) added ~20 bytes/zone --
                       * left inside the existing 2560 headroom rather than
                       * bumped again, MAX31856_CHANNEL_COUNT zones' worth of
@@ -736,9 +858,9 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
     } while (0)
 
     APPEND("{\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
-           "\"continue_on_zone_trip\":%s,\"zones\":[",
+           "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,\"zones\":[",
            s_zones.cfg.thermo_count, s_zones.cfg.relay_count, s_zones.cfg.max_simultaneous_relays,
-           s_zones.cfg.continue_on_zone_trip ? "true" : "false");
+           s_zones.cfg.continue_on_zone_trip ? "true" : "false", s_zones.cfg.safety_tc_type);
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         const zone_cfg_t *z = &s_zones.cfg.zones[i];
         char name_escaped[ZONE_NAME_MAX_LEN * 2 + 1];
@@ -761,7 +883,11 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
              * happen to have been autotuned. %.4f on K because a small-gain
              * zone's fit can land in the fractional range and the
              * feedforward divides by it. */
-            "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f}",
+            "\"model_k_dc\":%.4f,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f,"
+            /* tc_type is CONFIG, not a live reading, so it deliberately does
+             * NOT go anywhere near kc-live-value on the page -- see
+             * zones_page.html's rendering of this field. */
+            "\"tc_type\":%u}",
             i == 0 ? "" : ",", i, name_escaped, z->relay_mask, z->thermo_mask, (double)z->cal_offset_c,
             (double)z->pid_kp, (double)z->pid_ki, (double)z->pid_kd, (double)z->max_ramp_c_per_hr,
             (double)z->sanity_rate_c_per_min, z->control_mode, (double)z->max_temp_c,
@@ -772,7 +898,7 @@ static esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->guard_runaway_margin_c, (double)z->guard_drift_period_s,
             (double)z->guard_sensor_fault_debounce_ticks, (double)z->guard_frozen_window_s,
             (double)z->cross_zone_max_delta_c, (double)z->model_k_dc,
-            (double)z->model_tau_s, (double)z->model_dead_time_s);
+            (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type);
     }
     APPEND("]}");
 
@@ -828,7 +954,7 @@ static bool parse_float_field(const char *body, const char *key, float min, floa
  * relay_count, since a shrunk relay_count would otherwise reject fields the
  * page never showed for a zone the submission isn't even claiming to use. */
 static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count, uint8_t relay_count,
-                              zone_cfg_t *z, const char **err_reason)
+                              const zone_cfg_t *current_z, zone_cfg_t *z, const char **err_reason)
 {
     char key[24]; /* 16 -> 24 when the 8 guard-threshold override keys were
                    * added -- "z0_wrongdirwindow" is the longest at 18 chars
@@ -846,6 +972,50 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     }
     strncpy(z->name, name, ZONE_NAME_MAX_LEN);
     z->name[ZONE_NAME_MAX_LEN] = '\0';
+
+    /* 2026-08-21, TODO.md owner-report item 1/4: this channel's MAX31856
+     * thermocouple type. Parsed BEFORE the `i >= thermo_count` early return
+     * below, deliberately unlike relay_mask/thermo_mask/every other zone
+     * field -- this is per-CHANNEL hardware state (see zone_cfg_t::tc_type's
+     * comment), not per-zone, so a channel physically present but not
+     * currently claimed by any configured zone (thermo_count set lower than
+     * the physical channel count) must still keep its own real type across
+     * an ordinary page save rather than being silently zeroed to THERMO_TC_B
+     * the moment it falls outside thermo_count's range -- which is exactly
+     * what would happen if this fell after the early return, since tmp is
+     * zero-initialized by the caller and 0 is a real, different, wrong type
+     * here (see ZONES_CFG_VERSION's migration comment for the identical
+     * reasoning).
+     *
+     * OPTIONAL, falling back to current_z->tc_type (the live value) rather
+     * than to a fixed default when omitted -- there is no default
+     * thermocouple type that could possibly be correct for a channel this
+     * submission never mentioned, unlike thermo_mask's "zone i reads channel
+     * i" legacy mapping just below. zones_page.html always sends this field
+     * (see its JS), so the fallback matters only for a client that predates
+     * thermocouple-type selection entirely (pc_tools/MCP, the test
+     * harnesses).
+     *
+     * Present-but-out-of-range is still an error -- "in range" is
+     * ZONE_TC_TYPE_MAX_REAL (0-7, the eight real thermocouple types), not
+     * MAX31856_configure()'s wider 0-0x0F: see that macro's comment for why
+     * this operator-facing endpoint is deliberately stricter than the raw
+     * UART debug path. */
+    snprintf(key, sizeof(key), "z%u_tctype", i);
+    {
+        char probe[8];
+        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+            uint8_t tc_type_raw;
+            if (!parse_u8_field(body, key, 0, ZONE_TC_TYPE_MAX_REAL, &tc_type_raw)) {
+                *err_reason = "zone thermocouple type must be a real thermocouple type (0-7: "
+                              "B/E/J/K/N/R/S/T), not a voltage-input mode";
+                return false;
+            }
+            z->tc_type = tc_type_raw;
+        } else {
+            z->tc_type = current_z->tc_type;
+        }
+    }
 
     if (i >= thermo_count) {
         return true;
@@ -1211,9 +1381,43 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
 
     for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
         const char *err_reason = "invalid zone field";
-        if (!parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, &tmp.zones[i], &err_reason)) {
+        /* &s_zones.cfg.zones[i]: the LIVE value, for z%u_tctype's
+         * omit-means-preserve fallback (see parse_zone_fields()'s comment) --
+         * tmp itself is zeroed, so tmp.zones[i] can't supply "what this
+         * channel is already set to." */
+        if (!parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, &s_zones.cfg.zones[i],
+                               &tmp.zones[i], &err_reason)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
             return ESP_OK;
+        }
+    }
+
+    /* 2026-08-21, TODO.md owner-report item 3: the safety processor's own
+     * thermocouple type (see zones_cfg_t::safety_tc_type's comment for why
+     * this is a separate global setting rather than any zone's tc_type).
+     * OPTIONAL, falling back to the current live value on omit -- same
+     * "cannot silently relinearize a channel against the wrong type"
+     * reasoning as z%u_tctype above, and for the identical reason: an older
+     * client that predates this field must not zero a real, physically
+     * meaningful setting just by doing an otherwise-ordinary whole-page
+     * save. Bounds match ZONE_TC_TYPE_MAX_REAL -- the safety processor's own
+     * MAX31856 is the same part with the same eight real thermocouple types;
+     * see that macro's comment. */
+    {
+        char val[8];
+        int len = http_form_find_field(body, "safety_tc_type", val, sizeof(val));
+        if (len > 0) {
+            char *end = NULL;
+            long v = strtol(val, &end, 10);
+            if (end == val || v < 0 || v > ZONE_TC_TYPE_MAX_REAL) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "safety_tc_type must be a real thermocouple type (0-7: "
+                                    "B/E/J/K/N/R/S/T), not a voltage-input mode");
+                return ESP_OK;
+            }
+            tmp.safety_tc_type = (uint8_t)v;
+        } else {
+            tmp.safety_tc_type = s_zones.cfg.safety_tc_type;
         }
     }
 
@@ -1288,6 +1492,64 @@ esp_err_t zones_http_start(void)
      * replaced") holds unconditionally rather than only for the paths a
      * consumer happens to be watching today. */
     s_config_generation++;
+
+    /* 2026-08-21, TODO.md owner-report item 1 -- the actual fix for the
+     * gap: apply the persisted per-channel thermocouple type to the real
+     * hardware now, at bring-up, instead of leaving MAX31856.c's hardcoded
+     * THERMO_TC_K in the register forever. This runs after
+     * thermo_owner_start() unconditionally (main.c calls it well before
+     * zones_http_start() -- see thermo_owner.h's doc comment on ordering),
+     * so thermo_owner_command_config_channel() is reachable here whether or
+     * not any channel actually came up; a channel that never came up simply
+     * answers ESP_ERR_NOT_FOUND, exactly as it does for every other
+     * thermo_owner producer.
+     *
+     * Gated on s_zones_config_valid, not merely "a blob was read": a zeroed
+     * s_zones.cfg (first boot, corrupt NVS, refused newer-than-firmware
+     * blob) has every zones[i].tc_type reading 0 (THERMO_TC_B), which is
+     * NOT this kiln's THERMO_TC_K default -- applying it here would
+     * relinearize a perfectly fine, never-configured board's temperature
+     * readings against the wrong thermocouple type the moment this firmware
+     * boots. Leaving the hardcoded default MAX31856_start_all() already
+     * wrote in place (Type K) is exactly the "preserve today's behaviour
+     * for anyone who never touches this setting" outcome the migration
+     * above exists to guarantee for a config that WAS successfully loaded;
+     * this is the mirror-image guarantee for a config that was not. */
+    if (s_zones_config_valid) {
+        MAX31856Config default_cfg;
+        MAX31856_config_default(&default_cfg); /* avg_mode/filter_50hz/auto_convert only --
+                                                 * tc_type below is overridden per channel. */
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            uint8_t tc_type = s_zones.cfg.zones[i].tc_type;
+            if (tc_type > ZONE_TC_TYPE_MAX_REAL) {
+                /* Defensive only: parse_zone_fields()/the migration above both
+                 * bound this to 0-7 before it can ever reach flash, so this
+                 * should be unreachable outside a corrupted blob that still
+                 * happened to pass the version/size checks. Fail safe by
+                 * leaving this channel at whatever MAX31856_start_all()
+                 * already configured (Type K) rather than writing a
+                 * voltage-input mode into a thermocouple channel's register. */
+                ESP_LOGE(TAG, "ch%u: stored tc_type=%u is not a real thermocouple type -- leaving "
+                              "this channel's hardware config unchanged",
+                         i, (unsigned)tc_type);
+                continue;
+            }
+            esp_err_t tc_err = thermo_owner_command_config_channel(
+                i, tc_type, default_cfg.avg_mode, default_cfg.filter_50hz, default_cfg.auto_convert);
+            if (tc_err != ESP_OK) {
+                /* ESP_ERR_NOT_FOUND is the expected, unremarkable case for a
+                 * channel that isn't physically populated (this bench has 3
+                 * of MAX31856_CHANNEL_COUNT fitted) -- logged at the same
+                 * WARN level as MAX31856_start_all()'s own per-channel
+                 * bring-up failures, not ERROR, for the same reason. */
+                ESP_LOGW(TAG, "ch%u: could not apply persisted tc_type=%u at boot: %s", i,
+                         (unsigned)tc_type, esp_err_to_name(tc_err));
+            } else {
+                ESP_LOGI(TAG, "ch%u: applied persisted thermocouple type %u from NVS", i,
+                         (unsigned)tc_type);
+            }
+        }
+    }
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {

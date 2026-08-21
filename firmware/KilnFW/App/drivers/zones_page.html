@@ -146,6 +146,24 @@ firing, since the remaining zones would keep dumping heat into a chamber whose
 temperature is now partly unmeasured. Turn this on only if you deliberately want
 independent per-zone firings that don't take each other down.</p>
 
+<!-- 2026-08-21, TODO.md owner-report item 3: the RP2040 safety processor has
+     its OWN, physically separate MAX31856 thermocouple -- not one of the
+     channels listed under each zone below -- and needs its type set
+     independently so it agrees with what the main board is measuring (an
+     independent cross-check that disagrees about thermocouple type
+     disagrees about temperature too, which defeats the whole point of it).
+     zones_http.c mirrors this to the Pico automatically (safety_link.c's
+     safety_sync_tc_type()) whenever the link is up; if it's down when you
+     save, the setting still persists here and gets pushed the moment the
+     link reconnects -- it is never silently dropped. -->
+<label for="safetyTcType">Safety processor's thermocouple type</label>
+<select id="safetyTcType"></select>
+<p class="hint">The RP2040 safety processor reads its own, independent thermocouple --
+a different physical sensor from any of the channels below. Set this to whatever type
+is actually wired into IT, not to match a zone; if the two ever disagree, the safety
+processor's temperature cross-check will disagree with the main board for no reason
+other than a wrong setting here.</p>
+
 <div id="zones"><p class="empty">Loading&hellip;</p></div>
 
 <button id="saveBtn" type="button">Save</button>
@@ -258,6 +276,41 @@ where they are not.</p>
 var RELAY_NAMES = ['Relay1', 'Relay2', 'Relay3', 'Relay4'];
 var current = { thermo_count: 0, relay_count: 0, zones: [] };
 
+/* MAX31856 CR1.TC[3:0] 0-7, matching uart_task_ids.h's THERMO_TC_* and
+ * zones_http.c's ZONE_TC_TYPE_MAX_REAL -- the eight real thermocouple types
+ * the part supports; codes 8-0xF are voltage-input modes, deliberately not
+ * offered here (zones_http.c's POST validation rejects them with a specific
+ * reason if somehow submitted anyway). Ranges are the standard ITS-90
+ * practical limits for each type's wire pair, included per TODO.md's task
+ * description ("an operator picking Type S vs Type K is choosing a
+ * different usable temperature range, and a kiln person will care") -- not
+ * an accuracy spec, just enough for an operator to tell at a glance whether
+ * a type can even reach cone temperature. */
+var TC_TYPES = [
+  { code: 0, name: 'Type B', range: '0 to 1820°C', note: 'highest range; no CJ compensation below ~50°C' },
+  { code: 1, name: 'Type E', range: '-200 to 900°C', note: 'highest output signal of any type' },
+  { code: 2, name: 'Type J', range: '-40 to 750°C', note: 'iron leg corrodes above ~500°C in open air' },
+  { code: 3, name: 'Type K', range: '-200 to 1350°C', note: 'general purpose -- what this kiln ships with' },
+  { code: 4, name: 'Type N', range: '-200 to 1300°C', note: 'more stable than K at high temp, less common' },
+  { code: 5, name: 'Type R', range: '-50 to 1760°C', note: 'platinum/rhodium, for high-fire kilns' },
+  { code: 6, name: 'Type S', range: '-50 to 1760°C', note: 'platinum/rhodium, for high-fire kilns' },
+  { code: 7, name: 'Type T', range: '-200 to 350°C', note: 'lowest range -- not for a kiln\'s hot side' },
+];
+
+function tcTypeOptionsHtml(selected) {
+  var sel = (typeof selected === 'number') ? selected : 3; /* Type K, matching the firmware/NVS default */
+  var html = '';
+  TC_TYPES.forEach(function (t) {
+    html += '<option value="' + t.code + '"' + (t.code === sel ? ' selected' : '') + '>' +
+            t.name + ' (' + t.range + ') -- ' + t.note + '</option>';
+  });
+  return html;
+}
+
+function tcTypeSelectHtml(className, selected) {
+  return '<select class="' + className + '">' + tcTypeOptionsHtml(selected) + '</select>';
+}
+
 function zoneBlock(z, i, relayCount, thermoCount) {
   var div = document.createElement('div');
   div.className = 'zone';
@@ -313,6 +366,18 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<p class="hint">Checking more than one channel averages their valid readings into this ' +
     'zone\'s control temperature. Leaving all unchecked disables control for this zone, the ' +
     'same as an unplugged/faulted thermocouple.</p>' +
+    /* 2026-08-21, TODO.md owner-report item 1/2 -- the owner's actual
+       complaint: "in the thermocouples settings page i dont see anywhere i
+       can select my thermocouple type." This is CONFIG, not a live sensor
+       reading, so it deliberately carries no kc-live-value class -- it must
+       not dim/grey out when the connection heartbeat fails, unlike an
+       actual temperature. tc_type here means "channel ' + i + '", not "zone
+       ' + i + '" -- see zone_cfg_t::tc_type's comment in zones_http.c: a
+       zone can combine several channels via the checkboxes above, but each
+       physical channel still has exactly one real thermocouple wired to it
+       with exactly one type. */
+    '<label>Thermocouple type wired to channel ' + i + '</label>' +
+    tcTypeSelectHtml('tctype', z.tc_type) +
     '<label>Control mode</label>' + modeHtml +
     '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
     '<div class="row2">' +
@@ -391,7 +456,7 @@ function renderZones() {
      * a zone that has never been explicitly configured -- "zone i reads
      * channel i" -- so a freshly grown thermoCount starts a new zone off
      * reading a real channel instead of nothing. */
-    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0 };
+    var z = current.zones[i] || { name: '', relay_mask: 0, thermo_mask: (1 << i), cal_offset_c: 0, pid_kp: 0, pid_ki: 0, pid_kd: 0, max_ramp_c_per_hr: 0, sanity_rate_c_per_min: 0, control_mode: 0, max_temp_c: 0, min_temp_c: -20, heater_window_ms: 0, heater_min_on_ms: 0, heater_min_off_ms: 0, cross_zone_max_delta_c: 0, model_k_dc: 0, model_tau_s: 0, model_dead_time_s: 0, guard_wrong_dir_window_s: 0, guard_wrong_dir_rate_c_per_min: 0, guard_off_settle_s: 0, guard_runaway_rate_c_per_min: 0, guard_runaway_margin_c: 0, guard_drift_period_s: 0, guard_sensor_fault_debounce_ticks: 0, guard_frozen_window_s: 0, tc_type: 3 /* Type K, matching MAX31856.c's/the NVS migration's default */ };
     el.appendChild(zoneBlock(z, i, relayCount, thermoCount));
   }
 }
@@ -403,6 +468,7 @@ function loadCurrent() {
     document.getElementById('relayCount').value = data.relay_count;
     document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
     document.getElementById('continueOnZoneTrip').checked = !!data.continue_on_zone_trip;
+    document.getElementById('safetyTcType').innerHTML = tcTypeOptionsHtml(data.safety_tc_type);
     renderZones();
     populateAutotuneZones();
   }).catch(function () {
@@ -421,7 +487,8 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var continueOnZoneTrip = document.getElementById('continueOnZoneTrip').checked ? 1 : 0;
   var params = ['thermo_count=' + thermoCount, 'relay_count=' + relayCount,
                  'max_simultaneous_relays=' + maxSimultaneous,
-                 'continue_on_zone_trip=' + continueOnZoneTrip];
+                 'continue_on_zone_trip=' + continueOnZoneTrip,
+                 'safety_tc_type=' + document.getElementById('safetyTcType').value];
   var blocks = document.getElementById('zones').querySelectorAll('.zone');
   blocks.forEach(function (div) {
     var i = div.dataset.index;
@@ -436,6 +503,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_name=' + encodeURIComponent(div.querySelector('.name').value));
     params.push('z' + i + '_relay_mask=' + mask);
     params.push('z' + i + '_thermo_mask=' + thermoMask);
+    params.push('z' + i + '_tctype=' + div.querySelector('.tctype').value);
     params.push('z' + i + '_cal=' + div.querySelector('.cal').value);
     params.push('z' + i + '_kp=' + div.querySelector('.kp').value);
     params.push('z' + i + '_ki=' + div.querySelector('.ki').value);

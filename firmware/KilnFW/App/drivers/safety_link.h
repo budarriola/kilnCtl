@@ -572,6 +572,17 @@ typedef struct {
     bool       down_logged;      /* rate limiting for the "link is down" warning */
     TickType_t down_log_tick;
 
+    /* TODO.md owner-report item 3 (2026-08-21): poll-task-only state, same
+     * no-lock reasoning as down_logged above -- see safety_sync_tc_type()
+     * (safety_link.c) for the full design. 0xFF is never a real tc_type
+     * (the wire range is 0-0x0F and this driver only ever sends 0-7, the
+     * real thermocouple types), so it doubles as "never successfully sent /
+     * must (re)send at the next opportunity" -- set at safety_link_start()
+     * and again on every down->up transition, which is what makes a
+     * reconnect re-apply the setting rather than silently trusting a Pico
+     * that may have rebooted and lost it. */
+    uint8_t    tc_type_last_sent;
+
     /* ROADMAP.md M5 / LINK_PROTOCOL.md sec 4 -- SAFETY_CMD_PUSH_CONTEXT
      * source pointers, set once by safety_link_set_context_sources() (called
      * from app_main after both boards have come up, same pattern as

@@ -75,6 +75,23 @@ uint8_t zones_config_get_max_simultaneous_relays(void);
  * zones_cfg_t::continue_on_zone_trip's comment. */
 bool zones_config_get_continue_on_zone_trip(void);
 
+/* TODO.md owner-report item 3 (2026-08-21): the RP2040 safety processor's
+ * OWN, physically independent thermocouple type, as last saved on the
+ * Thermocouples & Zones page. Consumed by safety_link.c to mirror this
+ * setting to the Pico over SAFETY_CMD_SET_CONFIG and to re-apply it if the
+ * link was down when it changed -- see safety_link.c's safety_sync_tc_type()
+ * for the full mirroring design and why this is a SEPARATE setting from any
+ * main-board zone's own tc_type.
+ *
+ * Returns false only for a NULL out pointer -- this is a global setting with
+ * a real value from the moment NVS loads, so there is no "cannot answer,
+ * zone not configured" case the way there is for the per-zone getters below.
+ * Callers that care whether the returned value came from a genuinely loaded
+ * config (vs. the zeroed default of a board that has never saved one) must
+ * check zones_config_is_valid() themselves -- see this getter's own comment
+ * in zones_http.c for why 0 is not a safe "unconfigured" reading here. */
+bool zones_config_get_safety_tc_type(uint8_t *out_tc_type);
+
 /* TODO.md 8.2 "Tie it to the guards, not only the UI". true only after a
  * real, trustworthy zones config is live -- a successful load (current
  * version, or an older version successfully migrated) or a fresh validated
