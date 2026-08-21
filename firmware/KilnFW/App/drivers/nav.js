@@ -134,10 +134,23 @@
     var actions = document.createElement('div');
     actions.className = 'kc-topbar-actions';
 
-    var homeBtn = document.createElement('a');
-    homeBtn.href = '/';
-    homeBtn.className = 'kc-home-btn';
-    homeBtn.textContent = 'Home';
+    // Owner's report (2026-08-21, same day as the rework above): on the
+    // dashboard itself the Home button is a no-op -- it navigates to `/`,
+    // which is already the page you're looking at -- so it's suppressed
+    // there. Reusing pageTitle()'s own "am I the dashboard" signal rather
+    // than inventing a second one: pageTitle() already special-cases
+    // main_page.html's bare "kilnCtl" <title> (no second word to strip) to
+    // the literal string 'Dashboard', specifically so this button and the
+    // old bottom-nav's "Dashboard" label would agree (see that function's
+    // comment). A URL-path check was considered instead (e.g.
+    // window.location.pathname === '/') but pageTitle() is the ONE place
+    // that already decides "which page is this" for the topbar -- a path
+    // check would be a second, parallel notion of the same fact, and would
+    // still have to cover both '/' and any '/index.html'-style alias this
+    // server might answer to (not verified either way here) plus guard
+    // against matching a sub-path like '/settings/zones'. Comparing
+    // against the title string sidesteps all of that.
+    var isDashboard = title.textContent === 'Dashboard';
 
     var menuBtn = document.createElement('button');
     menuBtn.type = 'button';
@@ -147,7 +160,13 @@
       menuOverlay.removeAttribute('hidden');
     });
 
-    actions.appendChild(homeBtn);
+    if (!isDashboard) {
+      var homeBtn = document.createElement('a');
+      homeBtn.href = '/';
+      homeBtn.className = 'kc-home-btn';
+      homeBtn.textContent = 'Home';
+      actions.appendChild(homeBtn);
+    }
     actions.appendChild(menuBtn);
     bar.appendChild(title);
     bar.appendChild(actions);
