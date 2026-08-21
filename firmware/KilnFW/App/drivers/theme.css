@@ -62,15 +62,39 @@ button { min-height: var(--ui-touch); }
 .kc-topbar { display: flex; align-items: center; justify-content: space-between;
              padding: 0.5em 1em; margin: 0 -1em 0.8em -1em; border-bottom: 1px solid var(--border);
              background: var(--card-bg); }
-.kc-brand { font-weight: bold; color: var(--fg); text-decoration: none; font-size: 1em; }
-.kc-menu-btn { min-height: 0; padding: 0.35em 0.8em; font-size: 0.85em; border-radius: var(--ui-radius);
-               border: 1px solid var(--border); background: var(--button-bg); color: var(--fg); cursor: pointer; }
+/* 2026-08-21 rework: the "kilnCtl" brand link that used to sit here is
+   gone -- item 5 of the spec replaces it with the page's own name (see
+   nav.js's pageTitle()/buildTopbar()), on the theory that "kilnCtl" told
+   the operator which product they were using but not which of twelve
+   pages they were on, and the <h1> underneath that used to answer that is
+   also being deleted (duplicate text, same information twice on one
+   screen). Plain text, not a link -- the topbar's "go home" job now
+   belongs solely to .kc-home-btn below, so this doesn't need to double as
+   one. */
+.kc-page-title { font-weight: bold; color: var(--fg); font-size: 1em;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kc-topbar-actions { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
+.kc-home-btn, .kc-menu-btn { min-height: 0; padding: 0.35em 0.8em; font-size: 0.85em;
+               border-radius: var(--ui-radius); border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); cursor: pointer;
+               text-decoration: none; }
 
+/* Drop-down FROM THE TOP (2026-08-21 rework item 2 -- it used to slide up
+   from the bottom, `align-items: flex-end`, matching the old bottom-nav
+   convention below; now `flex-start` so the panel hangs from the topbar
+   instead). Scrollable via `max-height: 70vh; overflow-y: auto` on the
+   panel -- that pair was already present before this rework (the menu
+   already held enough links to risk overflowing a short landscape phone
+   screen) and needed no change to keep working now that the list has grown
+   to ten entries plus Reset; verified by eye at a 375x667-rotated
+   (landscape, ~375px tall) viewport with all eleven NAV_LINKS entries --
+   the panel caps at 70% of that height and scrolls internally rather than
+   pushing the backdrop or clipping off-screen. */
 .kc-menu-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 1000;
-                   display: flex; align-items: flex-end; }
+                   display: flex; align-items: flex-start; }
 .kc-menu-overlay[hidden] { display: none; }
 .kc-menu-panel { background: var(--bg); color: var(--fg); width: 100%; box-sizing: border-box;
-                 border-top: 1px solid var(--border); border-radius: var(--ui-radius) var(--ui-radius) 0 0;
+                 border-bottom: 1px solid var(--border); border-radius: 0 0 var(--ui-radius) var(--ui-radius);
                  padding: 0.5em 0; max-height: 70vh; overflow-y: auto; }
 .kc-menu-panel a { display: block; padding: 0.9em 1.2em; color: var(--fg); text-decoration: none;
                     border-bottom: 1px solid var(--border); min-height: var(--ui-touch);
@@ -78,25 +102,26 @@ button { min-height: var(--ui-touch); }
 .kc-menu-panel a:last-child { border-bottom: none; }
 .kc-menu-panel a.kc-menu-active { font-weight: bold; color: var(--ui-accent-3); }
 
-/* Fixed, thumb-reachable per UI_PLAN.md item 2's own framing ("this is a
-   mobile control surface for hitting Stop quickly, not a desktop admin
-   panel"). z-index above ordinary content but below the menu overlay so an
-   open menu always wins. */
-.kc-bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900;
-                 display: flex; background: var(--card-bg); border-top: 1px solid var(--border); }
-.kc-bottom-nav-item { flex: 1; text-align: center; padding: 0.6em 0.2em; min-height: var(--ui-touch);
-                       box-sizing: border-box; display: flex; align-items: center; justify-content: center;
-                       color: var(--fg); text-decoration: none; font-size: 0.85em; background: transparent;
-                       border: none; cursor: pointer; }
-.kc-bottom-nav-item.kc-bottom-nav-active { color: var(--ui-accent-3); font-weight: bold; }
+/* .kc-bottom-nav / .kc-bottom-nav-item deleted outright (2026-08-21 rework
+   item 1) along with nav.js's buildBottomNav() -- the Dashboard/Profiles/
+   Menu links it held are now the topbar's Home button, the drop-down's own
+   "Firing profiles" entry, and the topbar's Menu button, respectively.
+   Nothing in this file references .kc-bottom-nav* any more; verified with
+   `grep -rn "kc-bottom-nav" *.css *.js *.html` over this directory after
+   this edit -- zero matches outside this comment. */
 
-/* Stacks directly above .kc-bottom-nav (higher z-index, bottom offset equal
-   to the nav bar's own height) when a firing is running -- see app.js's
-   setStopBarVisible(). accent-5 matches the LCD/dashboard's existing
+/* Sticky Stop (app.js's setStopBarVisible()). Previously stacked above the
+   now-deleted bottom nav (`bottom: 56px`, matching that bar's own height,
+   so Stop sat just above it rather than under it); with the bottom nav
+   gone this is simply the bottom of the viewport, `bottom: 0`, same as the
+   bottom nav's own old position. Confirmed the ONLY other reference to
+   that 56px figure was this rule -- theme.css and app.js were grepped for
+   "56px" and "kc-bottom-nav" after the removal and found nothing else
+   depending on it. accent-5 matches the LCD/dashboard's existing
    fault/danger colour (main_page.html's --fault-color already maps to
    --ui-accent-5 in dark mode) so Stop reads as the same "this is the
    serious one" colour everywhere. */
-.kc-stop-bar { position: fixed; left: 0; right: 0; bottom: 56px; z-index: 899;
+.kc-stop-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 899;
                padding: 0.4em 0.6em; background: var(--bg); border-top: 1px solid var(--ui-accent-5); }
 .kc-stop-bar[hidden] { display: none; }
 .kc-stop-btn { display: block; width: 100%; box-sizing: border-box; min-height: var(--ui-touch);

@@ -21,25 +21,39 @@
 // see that file's comment on theme_css_uri for the original reasoning this
 // reuses verbatim).
 //
-// UI_PLAN.md's route map (section 1) named a `/settings` hub page that did
-// not exist when this file was first written -- the menu below listed
-// every settings-ish route individually as a stand-in (zones, relays,
-// wifi, ota, readiness) with a comment to collapse them once /settings
-// landed. It has now landed (settings_page.html, this same "web page
-// structure" pass): that page already collects zones/relays/manual/wifi/
-// ota/profiles/readiness/diagnostics/safety in one place, so this menu
-// links there once instead of repeating the same list in a second spot --
-// exactly the "update NAV_LINKS in one place, not two" the old comment
-// asked for. Dashboard/profiles/readiness stay direct links since they are
-// this app's other most-visited destinations, not settings.
+// 2026-08-21 rework (owner's "web-GUI rework" spec): the bottom nav bar is
+// gone (see buildBottomNav's removal note below) and the menu no longer
+// merely points at the /settings hub -- it now carries the hub's own
+// "board configuration" link list directly, sourced by hand from
+// settings_page.html's <h2>Board configuration</h2> section as it read on
+// 2026-08-21 (readiness/zones/relays/manual/profiles/wifi/ota/diagnostics/
+// safety, same hrefs and same order that page used), because that section
+// is being deleted from settings_page.html in this same pass -- its links
+// have to live somewhere, and the drop-down is that somewhere now. Two
+// entries were added on top of that list: /diagnostics/thermo (the
+// thermo-faults page has its own route, registered in diagnostics_http.c,
+// but was never linked from the settings hub at all -- an existing gap,
+// not something this pass broke) and a "Reset" item pointing at
+// /settings#danger, since /settings itself now shows nothing BUT the
+// danger zone (see settings_page.html) and needs a way in from here.
+// /settings has no entry of its own anymore for the same reason: the plain
+// hub page it used to point at doesn't exist any more, only the danger
+// zone does, and that's what "Reset" already reaches.
 (function () {
   'use strict';
 
   var NAV_LINKS = [
-    { href: '/', label: 'Dashboard' },
+    { href: '/readiness', label: 'Ready to fire? (checklist)' },
+    { href: '/settings/zones', label: 'Thermocouples & zones' },
+    { href: '/settings/relays', label: 'Relays & rules' },
+    { href: '/settings/manual', label: 'Manual relay control' },
     { href: '/profiles', label: 'Firing profiles' },
-    { href: '/readiness', label: 'Ready to fire?' },
-    { href: '/settings', label: 'Settings' },
+    { href: '/wifi', label: 'Network settings' },
+    { href: '/ota', label: 'Firmware update' },
+    { href: '/diagnostics', label: 'Diagnostics' },
+    { href: '/diagnostics/thermo', label: 'Thermocouple faults' },
+    { href: '/safety', label: 'Safety processor' },
+    { href: '/settings#danger', label: 'Reset' },
   ];
 
   function currentPath() {
@@ -81,14 +95,49 @@
     return overlay;
   }
 
+  // Page name for the topbar (item 5 of the rework spec: the brand
+  // "kilnCtl" that used to sit in the topbar, with the page name repeated
+  // as an <h1> underneath, is replaced by the page name ALONE in the
+  // topbar -- the <h1> is deleted from every page). Every *_page.html's
+  // <title> is "kilnCtl - X" (verified 2026-08-21 via `grep -n "<title>"
+  // *.html` over all twelve pages) with two hand-written exceptions:
+  // main_page.html's is bare "kilnCtl" (no page name at all -- there was
+  // never a second word to reuse, so this maps it to "Dashboard", matching
+  // the Home button below and the old bottom-nav's own "Dashboard" label)
+  // and wifi_provision_page.html's is "kilnCtl Wi-Fi Setup" (a space, not
+  // "kilnCtl - ", predating the "kilnCtl - X" convention -- this page is
+  // also reachable stand-alone during AP-only first-boot provisioning, a
+  // different code path than the rest, which likely explains the drift).
+  // One regex strips "kilnCtl" and an optional leading " - " / " " in
+  // either order, covering both forms without needing a per-page marker
+  // element added to twelve files just to name a five-word bar.
+  function pageTitle() {
+    var t = document.title.replace(/^kilnCtl\s*-?\s*/, '').trim();
+    return t || 'Dashboard';
+  }
+
   function buildTopbar(menuOverlay) {
     var bar = document.createElement('div');
     bar.className = 'kc-topbar';
 
-    var brand = document.createElement('a');
-    brand.className = 'kc-brand';
-    brand.href = '/';
-    brand.textContent = 'kilnCtl';
+    var title = document.createElement('span');
+    title.className = 'kc-page-title';
+    title.textContent = pageTitle();
+
+    // Item 4: a Home button next to Menu, both grouped on the right so a
+    // thumb reaching for either lands in the same corner regardless of
+    // which one it meant to hit -- the topbar no longer has a brand link
+    // to double as "go home" (that was the ONLY way home before the bottom
+    // nav's own Dashboard button existed; that button was arguably
+    // redundant with the brand, and now the brand is gone, this replaces
+    // both former "go home" paths with one explicit control).
+    var actions = document.createElement('div');
+    actions.className = 'kc-topbar-actions';
+
+    var homeBtn = document.createElement('a');
+    homeBtn.href = '/';
+    homeBtn.className = 'kc-home-btn';
+    homeBtn.textContent = 'Home';
 
     var menuBtn = document.createElement('button');
     menuBtn.type = 'button';
@@ -98,63 +147,47 @@
       menuOverlay.removeAttribute('hidden');
     });
 
-    bar.appendChild(brand);
-    bar.appendChild(menuBtn);
+    actions.appendChild(homeBtn);
+    actions.appendChild(menuBtn);
+    bar.appendChild(title);
+    bar.appendChild(actions);
     // Inserted as the very first child of <body> -- ahead of each page's own
-    // theme-toggle button and <h1> -- so it reads as the same top-of-page
-    // chrome everywhere, matching UI_PLAN.md's "consistent header" wording.
+    // theme-toggle button and (on pages that still have one; main_page.html
+    // etc no longer do, see this pass's page-by-page edits) <h1> -- so it
+    // reads as the same top-of-page chrome everywhere, matching UI_PLAN.md's
+    // "consistent header" wording.
     document.body.insertBefore(bar, document.body.firstChild);
     return bar;
   }
 
-  function buildBottomNav(menuOverlay) {
-    var bar = document.createElement('div');
-    bar.className = 'kc-bottom-nav';
+  // Bottom nav bar deleted outright (2026-08-21 rework spec item 1): its two
+  // links (Dashboard, Profiles) are now covered by the topbar's Home button
+  // and the drop-down's own "Firing profiles" entry, and "Menu" duplicated
+  // the topbar's menu button one-for-one. Nothing replaces this function --
+  // it simply no longer exists, and neither does .kc-bottom-nav* in
+  // theme.css (see that file's own edit).
 
-    var here = currentPath();
-    function navBtn(href, label, isMenu) {
-      var el = document.createElement(isMenu ? 'button' : 'a');
-      if (isMenu) {
-        el.type = 'button';
-      } else {
-        el.href = href;
-      }
-      el.className = 'kc-bottom-nav-item';
-      if (!isMenu && href === here) {
-        el.className += ' kc-bottom-nav-active';
-      }
-      el.textContent = label;
-      if (isMenu) {
-        el.addEventListener('click', function () {
-          menuOverlay.removeAttribute('hidden');
-        });
-      }
-      return el;
-    }
-
-    bar.appendChild(navBtn('/', 'Dashboard', false));
-    bar.appendChild(navBtn('/profiles', 'Profiles', false));
-    bar.appendChild(navBtn(null, 'Menu', true));
-
-    document.body.appendChild(bar);
-    return bar;
-  }
-
-  // The fixed bottom nav (and, when a firing is running, app.js's sticky
-  // Stop bar stacked above it -- see app.js's KC_BOTTOM_STACK contract)
-  // would otherwise cover the last inch of every page's real content. Body
-  // padding has to track the *current* stack height, not a guessed
-  // constant, because the Stop bar attaches/detaches at runtime as a firing
-  // starts/stops. app.js calls kcNav.updateBodyPadding() itself whenever it
-  // changes the Stop bar's presence; nav.js also calls it once here so a
-  // page with no app.js involvement yet (there is none today, but nothing
-  // stops a future page skipping app.js) still gets correct padding for the
-  // nav bar alone.
+  // The fixed Stop bar (app.js, shown only while a firing is running) would
+  // otherwise cover the last inch of every page's real content, same as the
+  // deleted bottom nav used to. Body padding has to track the Stop bar's
+  // *current* height, not a guessed constant, because it attaches/detaches
+  // at runtime as a firing starts/stops. app.js calls
+  // kcNav.updateBodyPadding() itself whenever it changes the Stop bar's
+  // presence; nav.js also calls it once here so a page with no app.js
+  // involvement yet (there is none today, but nothing stops a future page
+  // skipping app.js) still gets correct padding.
+  //
+  // Previously this also added the bottom nav's own offsetHeight -- removed
+  // along with the bottom nav itself. The Stop bar's CSS `bottom` offset
+  // used to be a hardcoded 56px so it would stack visually just above the
+  // bottom nav (see theme.css's old .kc-stop-bar comment); with the bottom
+  // nav gone, that offset is now 0 (theme.css), and this function's job is
+  // unchanged -- it only ever measured the Stop bar's own height for body
+  // padding, never the 56px stacking offset, so removing the bottom nav
+  // term here is the only change this function needed.
   function updateBodyPadding() {
     var total = 0;
-    var bottomNav = document.querySelector('.kc-bottom-nav');
     var stopBar = document.querySelector('.kc-stop-bar');
-    if (bottomNav) total += bottomNav.offsetHeight;
     if (stopBar && !stopBar.hasAttribute('hidden')) total += stopBar.offsetHeight;
     document.body.style.paddingBottom = total + 'px';
   }
@@ -162,7 +195,6 @@
   function init() {
     var menuOverlay = buildMenuOverlay();
     buildTopbar(menuOverlay);
-    buildBottomNav(menuOverlay);
     updateBodyPadding();
     window.addEventListener('resize', updateBodyPadding);
   }

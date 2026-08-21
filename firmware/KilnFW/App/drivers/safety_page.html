@@ -59,7 +59,9 @@
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 <a href="/">&larr; Dashboard</a>
-<h1>Safety Processor</h1>
+<!-- <h1>Safety Processor</h1> removed 2026-08-21 (rework item 5): nav.js's
+     topbar now shows this page's name ("Safety", from <title> above) in the
+     brand's old spot, so the heading duplicated it. -->
 <p class="lead">The web twin of the LCD's Safety page, plus the DIAG/
 TRIP_EVENT detail the panel's ~264px budget had no room for -- everything
 here already rides on GET /api/status (dashboard_http.c); this page adds no

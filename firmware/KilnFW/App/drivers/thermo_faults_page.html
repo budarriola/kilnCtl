@@ -49,7 +49,9 @@
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 <a href="/diagnostics">&larr; Diagnostics</a> &middot; <a href="/">Dashboard</a>
-<h1>Thermocouple Faults</h1>
+<!-- <h1>Thermocouple Faults</h1> removed 2026-08-21 (rework item 5): nav.js's
+     topbar now shows this page's name in the brand's old spot, so the
+     heading duplicated it. -->
 <p class="lead">The web twin of the LCD's Thermocouple Faults page -- every
 MAX31856 channel's fault-register bits, FAULT-pin state, and SPI transport
 health, straight from GET /api/status's "channels" array. Visibility only,

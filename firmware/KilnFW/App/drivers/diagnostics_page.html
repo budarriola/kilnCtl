@@ -56,7 +56,11 @@
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 <a href="/">&larr; Dashboard</a>
-<h1>Diagnostics</h1>
+<!-- <h1>Diagnostics</h1> removed 2026-08-21 (rework item 5): nav.js's
+     topbar now shows this page's name in the brand's old spot (see that
+     file's pageTitle()), so the heading duplicated it. The "&larr;
+     Dashboard" link above predates the topbar's own Home button and is
+     left as-is -- not asked for in this pass, and harmless alongside it. -->
 <p class="lead">The web twin of the LCD's Diagnostics and Board Health pages
 (UI_PLAN.md's "page structure rework") -- everything below reads GET
 /api/status and GET /api/board_temps, the same live snapshots the panel's own

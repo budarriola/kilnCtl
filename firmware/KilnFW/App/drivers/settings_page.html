@@ -48,26 +48,18 @@
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<h1>Settings</h1>
 
-<h2>Board configuration</h2>
-<!-- UI_PLAN.md task instructions, "Deliver" item 1: every existing settings
-     destination, plus the two pages this same pass adds
-     (/settings/manual below, and the diagnostics/safety pages from the
-     2026-08-19/20/21 pass). Order follows roughly how often each is used
-     post-commissioning: readiness/zones/relays/manual are routine, wifi/ota
-     are occasional, diagnostics/safety are troubleshooting. -->
-<a class="button" href="/readiness">Ready to fire? (checklist)</a>
-<a class="button" href="/settings/zones">Thermocouples &amp; zones</a>
-<a class="button" href="/settings/relays">Relays &amp; rules</a>
-<a class="button" href="/settings/manual">Manual relay control</a>
-<a class="button" href="/profiles">Firing profiles</a>
-<a class="button" href="/wifi">Network settings</a>
-<a class="button" href="/ota">Firmware update</a>
-<a class="button" href="/diagnostics">Diagnostics</a>
-<a class="button" href="/safety">Safety processor</a>
-
-<h2 style="border-top-color: var(--fault-color);">Danger zone</h2>
+<!-- 2026-08-21 rework: the "Board configuration" hub links that used to sit
+     here (readiness/zones/relays/manual/profiles/wifi/ota/diagnostics/
+     safety) moved to the shared drop-down menu (nav.js's NAV_LINKS) -- see
+     that file's header comment for the exact list and where each entry came
+     from. This page now shows ONLY the danger zone; the <h1>"Settings"</h1>
+     that used to sit above the hub links is also gone (nav.js's topbar now
+     shows "Settings" in its place, item 5 of the rework spec), and the
+     danger-zone heading below carries an id so the menu's "Reset" item
+     (href="/settings#danger") lands directly on it instead of at the top of
+     an otherwise-empty page. -->
+<h2 id="danger" style="border-top-color: var(--fault-color);">Danger zone</h2>
 <!-- Moved verbatim off main_page.html (UI_PLAN.md item 4): same four
      scopes, same wording, same confirm-then-POST-then-report flow. The
      board reboots itself as part of every one of these actions, so the

@@ -85,17 +85,48 @@
   .banner .row { display: flex; justify-content: space-between; margin-bottom: 0.2em;
                  color: var(--muted); }
   .banner .note { color: var(--muted); font-style: italic; margin-top: 0.5em; }
+  /* 2026-08-21 rework item 11: relay status shown next to each channel's
+     temperature, sourced by joining zonesCache (thermo_mask/relay_mask,
+     already loaded once by loadZones() -- see script below) against
+     /api/status's "relays" array. Small pill per relay rather than plain
+     text so several relays on one channel (item 11's "if several relays
+     map to one channel, show them all, identifiably") read as distinct
+     tokens instead of running together. relay-unknown (grey, no
+     kc-live-value) is deliberately the least visually loud of the three --
+     it is not a reading of any kind, live or stale, just an absence, and
+     must not compete with relay-on/relay-off for attention the way a real
+     status would. */
+  .relay-status { margin-left: 0.4em; }
+  .relay-tag { display: inline-block; font-size: 0.75em; font-weight: normal; border-radius: var(--ui-radius);
+               padding: 0.1em 0.45em; margin-left: 0.25em; border: 1px solid var(--border); }
+  .relay-tag.relay-on { color: #fff; background: var(--on-color); border-color: var(--on-color); }
+  .relay-tag.relay-off { color: var(--muted); background: transparent; }
+  .relay-tag.relay-unknown { color: var(--muted); background: transparent; font-style: italic; }
 </style>
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<h1>kilnCtl</h1>
+<!-- <h1>kilnCtl</h1> removed 2026-08-21 (rework item 5): nav.js's topbar
+     now shows "Dashboard" in the brand's old spot (see nav.js's
+     pageTitle() -- this page's bare <title>kilnCtl</title> has no page name
+     of its own to reuse, so that function maps it to "Dashboard" specially),
+     so the heading duplicated it. -->
 <div id="lastRunBanner"></div>
 
-<h2>Thermocouples</h2>
-<div id="channels"><p class="empty">Loading…</p></div>
-
-<h2>Firing profiles</h2>
+<!-- 2026-08-21 rework items 9/10: reordered so firing-profile status/picker
+     comes first and per-channel temperatures come last, matching
+     ui_page_home.c's own ordering (profile summary before zone rows -- see
+     that file's header comment on what stayed on the LCD's home page and in
+     what order). The history graph in between has no LCD equivalent to
+     match: ui_page_home.c's own header comment says the desired-vs-actual
+     chart was moved OFF the LCD's home page entirely, to ui_page_history.c,
+     because it didn't fit that screen's 264px no-scroll budget -- the web
+     dashboard has no such budget, so item 9 places it here explicitly
+     rather than leaving it off. The "Thermocouples"/"Firing profiles" <h2>
+     headings are removed outright (item 10), not just reordered: with the
+     graph and channel cards sitting directly under their own picker/history
+     intro text, the extra section labels no longer added information, only
+     vertical space. -->
 <div id="execCard"></div>
 <div id="runPicker">
   <label for="profileSelect">Profile</label>
@@ -111,7 +142,13 @@ Red marks are thermal-guard trips. <a href="/api/history.csv">Download CSV</a></
 <canvas id="historyChart" width="600" height="220"></canvas>
 <p id="historyEmpty" class="empty">No history yet -- start a firing profile.</p>
 
-<p><a class="button" href="/settings">Settings</a></p>
+<!-- Item 8: the "Settings" button that used to follow the history section
+     is gone -- /settings is reachable from the shared drop-down menu now
+     (nav.js), and that hub page itself no longer has anything on it BUT
+     the danger zone (settings_page.html), so a second, redundant link to
+     it from here would be pointing at a page with nothing left for the
+     operator to do except something destructive. -->
+<div id="channels"><p class="empty">Loading…</p></div>
 
 <script>
 const FAULT_BITS = [
@@ -121,6 +158,67 @@ const FAULT_BITS = [
 ];
 function faultText(bits) {
   return FAULT_BITS.filter(([b]) => bits & b).map(([, t]) => t).join(', ');
+}
+
+// Item 11: which relay(s) a thermocouple channel drives is NOT in
+// /api/status -- it's derived from zonesCache (loaded once by loadZones(),
+// below), specifically each zone's thermo_mask (which channels feed it) and
+// relay_mask (which relays it drives). Both fields use the same "bit b =
+// channel/relay number b" convention the migration code and the /api/status
+// relay loop already rely on: zones_http.c's v3->v4 migration seeds a
+// zone's thermo_mask as `1u << i` for zone index i (zones_http.c, comment
+// on migrate_zones_cfg_v1_to_current), the exact same i this page's own
+// `channel` field carries (MAX31856.h: "channel; /* 0..2, as used on the
+// wire */", copied into dashboard_channel_status_t verbatim in
+// dashboard_http.c); and dashboard_http.c's status_get_handler emits
+// "relays" as `{"relay": relay, ...}` for `relay` running 1..KILN_IO_RELAY_COUNT
+// with `on = ds.relay_on[relay - 1]`, i.e. relay_mask bit (relay-1) is relay
+// number `relay` -- so testing bit (relay-1) here against the same mask the
+// firmware itself reads with (`zones_config_get_relay_mask`) is the correct
+// join, not a guess. A channel with no zone whose thermo_mask includes it
+// maps to zero relay numbers below and renders NOTHING (not "off") --
+// per this codebase's missing-data-is-absent convention (see e.g. this
+// page's own age_ms===null handling above) an unmapped channel's relay
+// state is unknown, not off, and inventing "off" here would be exactly the
+// fabrication that convention exists to prevent.
+function relayNumbersForChannel(channel) {
+  var nums = [];
+  (zonesCache.zones || []).forEach(function (z) {
+    if (!(z.thermo_mask & (1 << channel))) return;
+    for (var b = 0; b < 8; b++) {
+      if (z.relay_mask & (1 << b)) {
+        var relayNum = b + 1;
+        if (nums.indexOf(relayNum) === -1) nums.push(relayNum);
+      }
+    }
+  });
+  return nums;
+}
+
+// relaysData is /api/status's "relays" array ({relay, on}), present only
+// when ds.io_ready (dashboard_http.c) -- absent entirely on a board with no
+// IO expander, same as today. Relay ON/OFF IS a live device reading (unlike
+// the zone/relay MAPPING itself, which is config from zonesCache, fetched
+// once -- see loadZones()'s own comment on why it's not in the fast poll),
+// so each pill gets kc-live-value only when an actual on/off value was
+// found; a relay whose number is in this channel's list but not in
+// relaysData (io not ready) shows "n/a" undimmed, same "absent, not
+// fabricated" rule as the channel-with-no-zone case above, just one level
+// more specific (mapping known, current value not).
+function relayStatusHtml(channel, relaysData) {
+  var nums = relayNumbersForChannel(channel);
+  if (!nums.length) return '';
+  var onByRelay = {};
+  (relaysData || []).forEach(function (r) { onByRelay[r.relay] = r.on; });
+  var tags = nums.map(function (n) {
+    if (!onByRelay.hasOwnProperty(n)) {
+      return '<span class="relay-tag relay-unknown">R' + n + ': n/a</span>';
+    }
+    var on = onByRelay[n];
+    return '<span class="relay-tag kc-live-value ' + (on ? 'relay-on' : 'relay-off') + '">R' + n +
+           ': ' + (on ? 'ON' : 'off') + '</span>';
+  });
+  return '<span class="relay-status">' + tags.join('') + '</span>';
 }
 
 // Cached so the °C/°F toggle (app.js's kcUnit) can re-render immediately on
@@ -157,12 +255,13 @@ function renderChannels(data) {
       } else if (ch.stale) {
         staleTag = ' <span class="stale">(stale, ' + (ch.age_ms / 1000).toFixed(0) + 's old)</span>';
       }
-      // Process temp and cold-junction temp are both live device readings --
-      // kc-live-value on each independently (not the whole <span class=temp>)
-      // so the staleTag text itself, which already says "stale"/"no reading
-      // yet" in words, isn't ALSO dimmed on top of its own wording.
-      detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' +
-               ' (CJ <span class="kc-live-value">' + window.kcUnit.fmt(ch.cj_c) + '</span>)' + staleTag;
+      // Item 7: cold-junction temperature dropped from this line -- the
+      // dashboard now shows the thermocouple (process) reading only. The
+      // raw ch.cj_c value is still served by /api/status (diagnostics_page.html
+      // still surfaces it); dropping it HERE is a display choice, not a data
+      // removal, and needed no API change.
+      detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag +
+               relayStatusHtml(ch.channel, data.relays);
     }
     div.innerHTML = '<span>Channel ' + ch.channel + '</span><span class="temp">' + detail + '</span>';
     el.appendChild(div);
@@ -172,7 +271,14 @@ function renderChannels(data) {
 // zonesCache/loadZones stay here (unlike setRelay/relayRow/renderRelays,
 // moved to manual_page.html per UI_PLAN.md item 3) because the profile-exec
 // card and the previous-run banner below still name zones by index
-// (zoneName()) -- this page needs zone names, not relay toggle state.
+// (zoneName()), and (2026-08-21 rework item 11) renderChannels()'s own
+// relayStatusHtml() above now also reads zonesCache directly for the
+// thermo_mask/relay_mask join -- this page needs zone/relay MAPPING, not
+// relay toggle controls (those stayed on manual_page.html). Fetched once on
+// load, NOT added to poll()'s fast loop below: zone config changes rarely
+// (an operator visiting /settings/zones), unlike the live relay ON/OFF bits
+// this join combines it with, which do belong in the fast loop and already
+// arrive via /api/status's "relays" field on every poll() tick.
 var zonesCache = { zones: [] };
 function loadZones() {
   return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
