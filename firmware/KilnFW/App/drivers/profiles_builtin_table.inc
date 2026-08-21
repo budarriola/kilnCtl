@@ -23,11 +23,13 @@
  * already reads ramp_c_per_hr <= 0 exactly that way (it jumps the setpoint
  * straight to the segment target), so 0 is imported unchanged.
  */
+
 const builtin_profile_t g_builtin_profiles[] = {
     {
         .code = "03DSFF",
         .title = "Cone 03 Fast Fire",
         .slug = "03dsff",
+        .family = "General",
         .segment_count = 4,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 194.0f, .dwell_min = 30 },
@@ -40,6 +42,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "04DSDH",
         .title = "Low Temperature Drop-and-Hold",
         .slug = "04dsdh",
+        .family = "General",
         .segment_count = 5,
         .segments = {
             { .target_c = 115.0f, .ramp_c_per_hr = 60.0f, .dwell_min = 60 },
@@ -53,6 +56,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BQ1000",
         .title = "Plainsman Electric Bisque",
         .slug = "bq1000",
+        .family = "Plainsman",
         .segment_count = 4,
         .segments = {
             { .target_c = 120.0f, .ramp_c_per_hr = 170.0f, .dwell_min = 60 },
@@ -65,6 +69,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BRTF05",
         .title = "Bartlett Fast Glaze Cone 05",
         .slug = "brtf05",
+        .family = "Bartlett",
         .segment_count = 2,
         .segments = {
             { .target_c = 913.0f, .ramp_c_per_hr = 316.0f, .dwell_min = 0 },
@@ -75,6 +80,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BRTF6",
         .title = "Bartlett Fast Glaze Cone 6",
         .slug = "brtf6",
+        .family = "Bartlett",
         .segment_count = 2,
         .segments = {
             { .target_c = 1083.0f, .ramp_c_per_hr = 316.0f, .dwell_min = 0 },
@@ -85,6 +91,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BRTS6",
         .title = "Bartlett Slow Glaze Cone 6",
         .slug = "brts6",
+        .family = "Bartlett",
         .segment_count = 3,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 83.0f, .dwell_min = 0 },
@@ -96,6 +103,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BTFB04",
         .title = "Bartlett Fast Bisque Cone 04",
         .slug = "btfb04",
+        .family = "Bartlett",
         .segment_count = 5,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 66.0f, .dwell_min = 0 },
@@ -109,6 +117,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BTSB04",
         .title = "Bartlett Slow Bisque Cone 04",
         .slug = "btsb04",
+        .family = "Bartlett",
         .segment_count = 5,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 44.0f, .dwell_min = 0 },
@@ -122,6 +131,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "BTSG05",
         .title = "Bartlett Slow Glaze Cone 05",
         .slug = "btsg05",
+        .family = "Bartlett",
         .segment_count = 3,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 66.0f, .dwell_min = 0 },
@@ -133,6 +143,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C04PLTP",
         .title = "Plainsman Low Temperature Drop-and-hold",
         .slug = "c04pltp",
+        .family = "Plainsman",
         .segment_count = 5,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 55.0f, .dwell_min = 60 },
@@ -146,6 +157,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C10RPL",
         .title = "Plainsman Cone 10R Firing",
         .slug = "c10rpl",
+        .family = "Plainsman",
         .segment_count = 6,
         .segments = {
             { .target_c = 120.0f, .ramp_c_per_hr = 10.0f, .dwell_min = 0 },
@@ -160,6 +172,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C5DHSC",
         .title = "Plainsman Cone 5 Drop-and-Hold Slow-Cool",
         .slug = "c5dhsc",
+        .family = "Plainsman",
         .segment_count = 5,
         .segments = {
             { .target_c = 104.0f, .ramp_c_per_hr = 60.0f, .dwell_min = 60 },
@@ -173,6 +186,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C6DHSC",
         .title = "Plainsman Cone 6 Drop-and-hold, Slow Cool",
         .slug = "c6dhsc",
+        .family = "Plainsman",
         .segment_count = 5,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 60.0f, .dwell_min = 60 },
@@ -186,6 +200,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C6IRED",
         .title = "Cone 6 Iron Reds",
         .slug = "c6ired",
+        .family = "General",
         .segment_count = 5,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 138.0f, .dwell_min = 60 },
@@ -199,6 +214,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C6MSGL1",
         .title = "Mastering Glazes Cone 6",
         .slug = "c6msgl1",
+        .family = "General",
         .segment_count = 5,
         .segments = {
             { .target_c = 105.0f, .ramp_c_per_hr = 55.0f, .dwell_min = 0 },
@@ -212,6 +228,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "C6PLST",
         .title = "Plainsman Cone 6 Electric Standard",
         .slug = "c6plst",
+        .family = "Plainsman",
         .segment_count = 3,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 55.0f, .dwell_min = 60 },
@@ -223,6 +240,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSCG1",
         .title = "Shimbo Crystal Schedule 1",
         .slug = "fscg1",
+        .family = "Crystalline",
         .segment_count = 5,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -236,6 +254,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSCGB1",
         .title = "Shimbo Crystal Holding Pattern 2",
         .slug = "fscgb1",
+        .family = "Crystalline",
         .segment_count = 8,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -252,6 +271,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSCGCL",
         .title = "Shimbo Crystal Celestite Schedule",
         .slug = "fscgcl",
+        .family = "Crystalline",
         .segment_count = 5,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -265,6 +285,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSCGWM",
         .title = "Wollast-O-Matte Fara Shimbo Crystalline Glaze",
         .slug = "fscgwm",
+        .family = "Crystalline",
         .segment_count = 5,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -278,6 +299,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSCRGL",
         .title = "GC106 Base for Crystalline Glazes",
         .slug = "fscrgl",
+        .family = "Crystalline",
         .segment_count = 5,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -291,6 +313,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSHP1",
         .title = "Shimbo Crystal Holding Pattern 1",
         .slug = "fshp1",
+        .family = "Crystalline",
         .segment_count = 8,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -307,6 +330,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSHP3",
         .title = "Shimbo Crystal Holding Pattern 3",
         .slug = "fshp3",
+        .family = "Crystalline",
         .segment_count = 8,
         .segments = {
             { .target_c = 250.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -323,6 +347,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "FSNM5",
         .title = "Fa's Number Five",
         .slug = "fsnm5",
+        .family = "Crystalline",
         .segment_count = 4,
         .segments = {
             { .target_c = 200.0f, .ramp_c_per_hr = 100.0f, .dwell_min = 0 },
@@ -335,6 +360,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "MDDCL",
         .title = "Medalta Decal Firing",
         .slug = "mddcl",
+        .family = "General",
         .segment_count = 4,
         .segments = {
             { .target_c = 43.0f, .ramp_c_per_hr = 111.0f, .dwell_min = 30 },
@@ -347,6 +373,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "PLC6CR",
         .title = "Cone 6 Crystal Glaze Plainsman",
         .slug = "plc6cr",
+        .family = "Plainsman",
         .segment_count = 5,
         .segments = {
             { .target_c = 372.0f, .ramp_c_per_hr = 176.0f, .dwell_min = 0 },
@@ -360,6 +387,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "PLC6DS",
         .title = "Cone 6 Drop-and-Soak",
         .slug = "plc6ds",
+        .family = "Plainsman",
         .segment_count = 4,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 60.0f, .dwell_min = 60 },
@@ -372,6 +400,7 @@ const builtin_profile_t g_builtin_profiles[] = {
         .code = "QICA",
         .title = "Quartz Inversion Cracking Avoider",
         .slug = "qica",
+        .family = "General",
         .segment_count = 8,
         .segments = {
             { .target_c = 121.0f, .ramp_c_per_hr = 138.0f, .dwell_min = 60 },

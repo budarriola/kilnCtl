@@ -430,7 +430,10 @@ function renderExec(st) {
   const resumeBtn = document.getElementById('resumeBtn');
   if (resumeBtn) resumeBtn.addEventListener('click', function () { execAction('resume'); });
   const stopBtn = document.getElementById('stopBtn');
-  if (stopBtn) stopBtn.addEventListener('click', function () { execAction('stop'); });
+  if (stopBtn) stopBtn.addEventListener('click', function () {
+    if (!confirm('Stop this firing now? This aborts the run in progress and cannot be resumed.')) return;
+    execAction('stop');
+  });
 }
 
 function execAction(action) {
@@ -462,6 +465,8 @@ function redirectToReadinessIfBlocked(errMsg) {
 document.getElementById('runBtn').addEventListener('click', function () {
   const id = document.getElementById('profileSelect').value;
   if (id === undefined || id === '') return;
+  const startName = profileTitleById[id] || ('profile ' + id);
+  if (!confirm('Start firing "' + startName + '" now? This energises the heaters and will run for hours.')) return;
   fetch('/api/profile_exec/start', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'id=' + id,

@@ -10,6 +10,12 @@
 #include "ui_page_history.h"
 #include "ui_page_home.h"
 #include "ui_page_network.h"
+#include "ui_page_profile_detail.h"
+#include "ui_page_profile_segments.h"
+#include "ui_page_profiles.h"
+#include "ui_page_profiles_builtin_list.h"
+#include "ui_page_profiles_family.h"
+#include "ui_page_profiles_mine.h"
 #include "ui_page_safety.h"
 #include "ui_page_temperature.h"
 #include "ui_page_thermo_faults.h"
@@ -23,8 +29,12 @@ static const char *TAG = "kiln_ui";
 /* A handful of pages (home, settings, temperature, config -- see TODO.md
  * 10.3's page list), not a dynamic set: a fixed array avoids pulling in
  * dynamic allocation for something this small and bounded. Raise this if
- * 10.3 ends up wanting more top-level pages than that. */
-#define KILN_UI_MAX_PAGES 16
+ * 10.3 ends up wanting more top-level pages than that.
+ *
+ * Raised 16 -> 24 this pass: the LCD Profiles tree (ui_page_profiles.c and
+ * its five siblings, see this file's registrations below) added 6 pages to
+ * the 11 that existed before it, which would have overflowed the old 16. */
+#define KILN_UI_MAX_PAGES 24
 
 typedef struct {
     const char *name;          /* borrowed, see kiln_ui_register_page */
@@ -115,6 +125,27 @@ esp_err_t kiln_ui_init(void)
     /* NS2009 touch calibration -- see ui_page_touch_cal.c/.h. Linked from
      * ui_page_config.c's nav hub like every other diagnostic/settings page. */
     err = kiln_ui_register_page("touch_cal", ui_page_touch_cal_build);
+    if (err != ESP_OK) return err;
+
+    /* LCD profile browse/start (this pass): "Profiles" hub off
+     * ui_page_config.c's nav hub, then My Profiles / Built-ins (family
+     * picker -> per-family list) / Restore hidden, then a per-profile detail
+     * screen (title, segment count, feasibility colour, START) and a
+     * paginated segment list. Closes the gap the user reported: the home
+     * page's Start button previously had no way to pick a DIFFERENT profile
+     * than whatever the fallback chain resolved to. See
+     * ui_page_profiles.c's header comment for the full tree. */
+    err = kiln_ui_register_page("profiles", ui_page_profiles_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profiles_mine", ui_page_profiles_mine_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profiles_family", ui_page_profiles_family_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profiles_builtin_list", ui_page_profiles_builtin_list_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profile_detail", ui_page_profile_detail_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("profile_segments", ui_page_profile_segments_build);
     if (err != ESP_OK) return err;
 
     /* ui_page_touch_cal.c's finish_calibration() navigates here right after

@@ -1,6 +1,7 @@
 #include "ui_page_home.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
 
@@ -8,8 +9,10 @@
 #include "dashboard_http.h"
 #include "kiln_io.h"
 #include "kiln_ui.h"
+#include "ui_confirm.h"
 #include "ui_page_config.h"
 #include "profile_executor.h"
+#include "profiles_http.h"
 #include "run_state.h"
 #include "ui_theme.h"
 #include "wifi_status_ui.h"
@@ -153,6 +156,27 @@ static const char *exec_state_label(profile_exec_state_t s)
     }
 }
 
+/* Shared by do_start() and the confirmation dialog builder below -- both need
+ * the exact same fallback chain (whatever's currently known this boot
+ * (non-idle profile_id), else the last boot record), and the dialog has to
+ * name the SAME profile the button is actually about to start, not a second
+ * guess at it. Returns false (out_id untouched) if neither source has one. */
+static bool resolve_start_profile_id(uint8_t *out_id)
+{
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    if (st.state != PROFILE_EXEC_IDLE) {
+        *out_id = st.profile_id;
+        return true;
+    }
+    run_state_record_t rec;
+    if (run_state_get_boot_record(&rec)) {
+        *out_id = rec.profile_id;
+        return true;
+    }
+    return false;
+}
+
 static void do_start(void)
 {
     /* Same action function dashboard_http.c's POST /api/profile_exec/start
@@ -163,23 +187,8 @@ static void do_start(void)
      * boot (non-idle profile_id), else the last boot record. An operator
      * who wants a *different* profile than either of those has to use the
      * web dashboard's picker. */
-    bool have_id = false;
     uint8_t id = 0;
-
-    profile_exec_status_t st;
-    profile_executor_get_status(&st);
-    if (st.state != PROFILE_EXEC_IDLE) {
-        id = st.profile_id;
-        have_id = true;
-    }
-    if (!have_id) {
-        run_state_record_t rec;
-        if (run_state_get_boot_record(&rec)) {
-            id = rec.profile_id;
-            have_id = true;
-        }
-    }
-    if (!have_id) {
+    if (!resolve_start_profile_id(&id)) {
         ESP_LOGW(TAG, "Start pressed with no known profile id -- nothing has run this boot "
                       "and no picker on this page (TODO.md 10.3's no-scroll rewrite)");
         return;
@@ -201,21 +210,126 @@ static void do_stop(void)
     profile_executor_halt();
 }
 
+/* ---- Start/Stop confirmation overlay --------------------------------
+ *
+ * Both actions were firing immediately with no confirmation anywhere in this
+ * call path (do_start()/do_stop()'s own header comments used to flag this
+ * back to the requester rather than silently adding one). Starting energises
+ * heaters for hours; stopping mid-firing aborts a load. Both now go through
+ * a modal confirm/cancel step first, via the shared ui_confirm.c helper
+ * (factored out of what used to be a hand-rolled lv_msgbox pair here, so the
+ * new Profiles-hub detail page's START action -- see ui_page_profile_detail.c
+ * -- reuses the exact same dialog instead of a second copy-pasted
+ * implementation). See ui_confirm.h for the FLEX TRAP / cancel-safe-by-
+ * default rationale that used to live in this comment. */
+
+static void confirm_start_yes_cb(void *user_data)
+{
+    (void)user_data;
+    do_start();
+}
+
+static void confirm_stop_yes_cb(void *user_data)
+{
+    (void)user_data;
+    do_stop();
+}
+
+static void show_start_confirm(void)
+{
+    uint8_t id = 0;
+    bool have_id = resolve_start_profile_id(&id);
+
+    profile_t prof;
+    bool have_prof = have_id && profiles_http_get(id, &prof);
+
+    char body[256];
+    if (have_prof) {
+        /* Zones this profile drives -- cheap here (profiles_http_get() is a
+         * plain NVS-backed struct copy, same call profile_executor.c itself
+         * uses to run the profile, not a second read path), unlike trying to
+         * derive it from profile_exec_status_t, which only carries a
+         * meaningful zone_mask once the run has actually started. */
+        char zones_buf[96];
+        size_t zlen = 0;
+        zones_buf[0] = '\0';
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT && zlen < sizeof(zones_buf) - 1; zi++) {
+            if (!(prof.zone_mask & (1u << zi))) {
+                continue;
+            }
+            char name[16];
+            const char *zname = (zones_config_get_name(zi, name, sizeof(name)) && name[0]) ? name : NULL;
+            char piece[24];
+            if (zname) {
+                snprintf(piece, sizeof(piece), "%s%s", zlen ? ", " : "", zname);
+            } else {
+                snprintf(piece, sizeof(piece), "%sZone %u", zlen ? ", " : "", (unsigned)zi);
+            }
+            size_t piece_len = strlen(piece);
+            if (zlen + piece_len < sizeof(zones_buf)) {
+                memcpy(zones_buf + zlen, piece, piece_len + 1);
+                zlen += piece_len;
+            }
+        }
+        snprintf(body, sizeof(body), "Start \"%s\" now? This will energise %s for the duration of the "
+                                      "firing, which can be hours.",
+                 prof.name, zones_buf[0] ? zones_buf : "no zones");
+    } else if (have_id) {
+        /* Have an id but profiles_http_get() failed (slot no longer stored,
+         * e.g. deleted between boot and now) -- name what we can rather than
+         * a blank, and say plainly the rest could not be read. */
+        snprintf(body, sizeof(body), "Start profile id %u now? Its saved details could not be read, "
+                                      "but starting will energise heaters for the duration of the "
+                                      "firing, which can be hours.",
+                 (unsigned)id);
+    } else {
+        /* No non-idle profile this boot and no boot record either -- the
+         * honest answer is "nothing to name," not a blank dialog. */
+        snprintf(body, sizeof(body), "No profile can be identified to start (nothing has run yet this "
+                                      "boot). Use the web dashboard's profile picker to choose one.");
+    }
+
+    ui_confirm_params_t params = {
+        .title = "Confirm Start",
+        .body = body,
+        .confirm_label = "Start",
+        .confirm_color = UI_THEME_ACCENT_4, /* start-green, matches the fire button */
+        .on_confirm = confirm_start_yes_cb,
+        .user_data = NULL,
+    };
+    ui_confirm_show(&params);
+}
+
+static void show_stop_confirm(void)
+{
+    ui_confirm_params_t params = {
+        .title = "Confirm Stop",
+        .body = "Stop this firing now? This aborts the run in progress -- it cannot "
+                "be resumed, and the load will not finish firing.",
+        .confirm_label = "Stop",
+        .confirm_color = UI_THEME_ACCENT_5, /* stop-red, matches the fire button */
+        .on_confirm = confirm_stop_yes_cb,
+        .user_data = NULL,
+    };
+    ui_confirm_show(&params);
+}
+
 /* Merged Start/Stop button (single user-visible request: "the start stop
  * button should be one button on the lcd"). Idle/Done/Faulted -> "Start" +
- * do_start(); Running/Paused -> "Stop" + do_stop(). One callback reads
- * current state at click time rather than two callbacks each assuming a
- * fixed action, so a state change between refresh_cb() ticks and the actual
- * tap can never fire the stale action. */
+ * confirm -> do_start(); Running/Paused -> "Stop" + confirm -> do_stop().
+ * One callback reads current state at click time rather than two callbacks
+ * each assuming a fixed action, so a state change between refresh_cb() ticks
+ * and the actual tap can never fire the stale action -- the same reasoning
+ * now also decides which of the two confirmation dialogs to show. */
 static void fire_btn_cb(lv_event_t *e)
 {
     (void)e;
     profile_exec_status_t st;
     profile_executor_get_status(&st);
     if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
-        do_stop();
+        show_stop_confirm();
     } else {
-        do_start();
+        show_start_confirm();
     }
 }
 

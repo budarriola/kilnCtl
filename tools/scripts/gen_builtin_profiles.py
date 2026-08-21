@@ -60,6 +60,43 @@ TITLES = {
     "qica": "Quartz Inversion Cracking Avoider",
 }
 
+# Which of the four browse families (LCD Profiles hub -- see ui_page_profiles*.c)
+# each catalogue entry falls into. Keyed by slug, same as TITLES above. The LCD
+# builtin family picker is only usable if every entry has one, so this dict
+# must cover every slug in TITLES -- an unmapped slug fails loudly below rather
+# than silently leaving a profile un-browsable (same discipline as TITLES's
+# existing KeyError-on-lookup behavior).
+FAMILIES = {
+    "brtf05": "Bartlett",
+    "brtf6": "Bartlett",
+    "brts6": "Bartlett",
+    "btfb04": "Bartlett",
+    "btsb04": "Bartlett",
+    "btsg05": "Bartlett",
+    "bq1000": "Plainsman",
+    "c04pltp": "Plainsman",
+    "c10rpl": "Plainsman",
+    "c5dhsc": "Plainsman",
+    "c6dhsc": "Plainsman",
+    "c6plst": "Plainsman",
+    "plc6cr": "Plainsman",
+    "plc6ds": "Plainsman",
+    "fscg1": "Crystalline",
+    "fscgb1": "Crystalline",
+    "fscgcl": "Crystalline",
+    "fscgwm": "Crystalline",
+    "fscrgl": "Crystalline",
+    "fshp1": "Crystalline",
+    "fshp3": "Crystalline",
+    "fsnm5": "Crystalline",
+    "03dsff": "General",
+    "04dsdh": "General",
+    "c6ired": "General",
+    "c6msgl1": "General",
+    "mddcl": "General",
+    "qica": "General",
+}
+
 rows = []
 for entry in data:
     slug = entry["slug"]
@@ -69,7 +106,10 @@ for entry in data:
     code = re.match(r"([A-Za-z0-9]+)", entry["title"]).group(1).upper()
     if len(code) > 15:
         raise SystemExit("code too long for profile name field: %s" % code)
-    rows.append((code, slug, TITLES[slug], steps))
+    if slug not in FAMILIES:
+        raise SystemExit("no FAMILIES entry for slug %r -- add one (LCD Profiles hub needs "
+                          "every builtin to have a browse family)" % slug)
+    rows.append((code, slug, TITLES[slug], FAMILIES[slug], steps))
 
 with open(out_c, "w", encoding="utf8", newline="\n") as f:
     f.write("""/* GENERATED FILE -- do not hand-edit.
@@ -99,13 +139,14 @@ with open(out_c, "w", encoding="utf8", newline="\n") as f:
  */
 
 const builtin_profile_t g_builtin_profiles[] = {
-""" % (sum(len(r[3]) for r in rows), sum(len(r[3]) for r in rows)))
+""" % (sum(len(r[4]) for r in rows), sum(len(r[4]) for r in rows)))
 
-    for code, slug, title, steps in rows:
+    for code, slug, title, family, steps in rows:
         f.write("    {\n")
         f.write('        .code = "%s",\n' % code)
         f.write('        .title = "%s",\n' % title.replace('"', '\\"'))
         f.write('        .slug = "%s",\n' % slug)
+        f.write('        .family = "%s",\n' % family)
         f.write("        .segment_count = %d,\n" % len(steps))
         f.write("        .segments = {\n")
         for s in steps:
@@ -119,4 +160,4 @@ const builtin_profile_t g_builtin_profiles[] = {
             "    sizeof(g_builtin_profiles) / sizeof(g_builtin_profiles[0]);\n")
 
 print("wrote %s: %d profiles, %d segments"
-      % (out_c, len(rows), sum(len(r[3]) for r in rows)))
+      % (out_c, len(rows), sum(len(r[4]) for r in rows)))

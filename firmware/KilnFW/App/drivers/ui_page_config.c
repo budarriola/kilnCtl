@@ -129,6 +129,12 @@ static void thermo_faults_nav_cb(lv_event_t *e)
     kiln_ui_show("thermo_faults");
 }
 
+static void profiles_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("profiles");
+}
+
 /* --- Paged hub, 2026-08-20 ------------------------------------------------
  * This hub used to be a single fixed-height container that scrolled
  * internally. Measuring the real post-layout geometry on hardware (the
@@ -378,9 +384,17 @@ lv_obj_t *ui_page_config_build(void)
      * off-screen (cell centres at y=383 on a 320px panel) under the old
      * scrolling grid, i.e. the ones this rework most needed to make
      * reachable. Room for two more items here before a fourth page is
-     * needed. */
+     * needed.
+     *
+     * "Profiles" (LCD profile browse/start, this pass) is the 11th item --
+     * verified against this file before relying on the claim: this page
+     * held exactly 2 of its 4 cells before this pass (Diagnostics,
+     * Thermocouple Faults), so the 11th item lands here with NO layout or
+     * UI_CONFIG_HUB_PAGE_COUNT change, leaving exactly one cell free for a
+     * 12th. */
     build_nav_item(s_hub_pages[2], "Diagnostics", diagnostics_nav_cb);
     build_nav_item(s_hub_pages[2], "Thermocouple Faults", thermo_faults_nav_cb);
+    build_nav_item(s_hub_pages[2], "Profiles", profiles_nav_cb);
 
     /* Nav row: Back on the left, then Prev / "N of M" / Next. Back keeps its
      * own callback and its one-level-up target (home) unchanged -- paging

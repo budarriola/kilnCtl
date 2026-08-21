@@ -44,6 +44,14 @@ typedef struct {
     const char       code[PROFILE_NAME_MAX_LEN + 1]; /* e.g. "C6DHSC" */
     const char      *title;                          /* e.g. "Plainsman Cone 6 Drop-and-hold, Slow Cool" */
     const char      *slug;                           /* digitalfire.com/schedule/<slug> -- the attribution link */
+    /* Browse family for the LCD Profiles hub's builtin family picker
+     * (ui_page_profiles_builtin_family.c) -- one of "Bartlett", "Plainsman",
+     * "Crystalline", "General". Not used anywhere off-LCD (the web page still
+     * lists all 28 flat); exists purely so a 480x320 no-scroll screen can
+     * browse 28 entries at 2 pages per family instead of 7 flat pages. See
+     * tools/scripts/gen_builtin_profiles.py's FAMILIES dict, the single
+     * source of truth this field is generated from. */
+    const char      *family;
     uint8_t          segment_count;
     profile_segment_t segments[PROFILE_MAX_SEGMENTS];
 } builtin_profile_t;
