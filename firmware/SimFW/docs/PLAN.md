@@ -196,11 +196,31 @@ never `[x]`.
       sample point) at that clock. Running the fixture at 200 MHz sysclk would
       buy the ~125 ns *design* deadline as well — margin, not correctness.
       Datasheet arithmetic, not measured; see `docs/SPI_ACCESS_AUDIT.md` §9.
-- [ ] **`check_single_owner.ps1` needs re-thinking before a third DMA
-      claimant.** `hardware/dma.h` now has two owners (`ct_wave_pwm`,
-      `max31856_pio_engine`) — justified, disjoint IRQ vectors, both claim via
-      `dma_claim_unused_channel`. **11 of 12 DMA channels are now claimed.** A
-      third claimant needs the rule redesigned, not another allowlist entry.
+- [ ] **`~DRDY` pin assignments contradict `HARDWARE.md` §1.** The SPI engines
+      claim GPIO 21/22/26 (main) and 27 (safety), but §1 assigns those to
+      `FAULT_MAIN_1/2`, `DRDY_SAFETY`, and `FAULT_SAFETY`. §1's own preamble
+      says a pin claimant must cite the table. **This would be wired wrong at
+      bring-up.** Found by the DMA budget audit (`a27d1b1`).
+- [ ] **DMA claim failures degrade silently — arguably the wrong default for
+      this fixture.** All four claim sites use `required = false`, and
+      `main.c` discards `wave_owner_start()`'s return with `(void)`, so a 12th
+      claim would let SimFW **boot looking healthy with no CT output or a dead
+      SPI bus**. Related: `main.c`'s comment justifying that discard is stale;
+      no failure path unwinds its claimed DMA channels / PIO SMs / program
+      space; a mid-loop sniff failure on bus A leaves a half-initialised bus
+      running `handle_load_done()`; and the PIO claims beside them use
+      `pio_claim_unused_sm(pio, true)`, which *panics* — so SM exhaustion
+      halts while DMA exhaustion limps, and the code's own idle-loop-fallback
+      comment describes an unreachable path. See `docs/HARDWARE.md` §1b.
+- [ ] **`check_single_owner.ps1`'s `hardware/dma.h` rule encodes the wrong
+      invariant.** It checks *who includes the header*; the real invariant is
+      *how a channel is acquired* (`dma_claim_unused_channel`, never
+      `dma_channel_claim(n)` or raw `dma_hw->ch[n]`) plus disjoint IRQ
+      vectors. Today a third owner is a one-line allowlist edit that passes CI
+      while silently exhausting the pool. **11 of 12 claimed, 1 spare**
+      (`3 + Σ_buses (chips_on_bus + 2)`); one is recoverable by packing two CT
+      zones into one PWM slice's `CC`, none on the SPI side without
+      reintroducing CPU work into the first-byte path.
 - [ ] **Expose the second DUT-power relay in `kilnsim`.** The firmware and
       wire protocol are done (`f5cb4c3`), but the CLI, GUI, MCP tool, and
       `MockSimLink` still surface only the main-domain relay, so no operator
@@ -260,6 +280,8 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] DMA channel budget audited and documented (`a27d1b1`,
+      `docs/HARDWARE.md` §1b) — 11/12 claimed, verified from source
 - [x] `virtual_simfw` timescale² bug fixed (`ca62e8b`), with a regression test
       asserting the *shape* (≈5×, not ≈25×) so a slow CI box cannot explain a
       reintroduction away. Exposed two vacuous PASSes: `no_early_trip` in
