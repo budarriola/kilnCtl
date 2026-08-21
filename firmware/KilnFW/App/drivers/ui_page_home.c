@@ -5,6 +5,8 @@
 
 #include "esp_log.h"
 
+#include <math.h>
+
 #include "MAX31856.h"
 #include "dashboard_http.h"
 #include "kiln_io.h"
@@ -71,7 +73,37 @@
 //     "Safety Processor" nav item.
 //   - Desired-vs-actual temperature chart (TODO.md 10.3) -- moved to the new
 //     ui_page_history.c/.h, reachable from ui_page_config.c's "Temperature
-//     History" nav item.
+//     History" nav item. SUPERSEDED 2026-08-21 (see below): a compact,
+//     actual-only chart came back to THIS page per an explicit user request
+//     ("i always want to see the graph above the start/profile selection
+//     even when not running"); the full actual+desired trend view with
+//     legend stays on ui_page_history.c for detail.
+//
+// 2026-08-21, CHART RETURNS (partial reversal of the no-scroll rewrite above):
+// the operator wants the temperature trend visible on the home page at all
+// times, not just via a Menu -> Temperature History detour, but a second,
+// explicit follow-up narrowed the idle behaviour: "the current temps should
+// just show as dots and should stay on the left side of the graph until the
+// profile is started." So:
+//   - IDLE with no history yet: a single dot (the representative zone's
+//     current reading, same "first configured zone" convention
+//     profile_executor.h's history ring already uses) pinned at chart index
+//     0 -- LV_CHART_POINT_NONE fills every other index, so LVGL draws one
+//     point marker and no connecting line, and it never marches across the
+//     plot as time passes (no accumulation, no scrolling window) because it
+//     is rewritten to the same index 0 every refresh tick, not appended.
+//   - Once a profile is running (or has left history behind, same
+//     `state==IDLE && history_count==0` gate ui_page_history.c already used):
+//     normal trend rendering from profile_executor's history ring, windowed
+//     into this page's own UI_PAGE_HOME_CHART_POINTS-point buffer exactly
+//     the way ui_page_history.c windows into its own (separate, non-aliased)
+//     buffer -- see s_chart_pts's own comment for why these arrays cannot be
+//     shared between the two pages.
+//   - Actual-only, not actual+desired: half the series of ui_page_history.c's
+//     chart, a deliberate simplification to fit this page's height budget
+//     (see the action-row/state_card arithmetic below for the fixed-height
+//     accounting this trades against) -- the desired-vs-actual comparison
+//     with its legend remains ui_page_history.c's job.
 //   - Profile picker dropdown -- REMOVED outright, not moved. Start now
 //     always uses the same fallback chain start_btn_cb() already had for
 //     "picker untouched": current non-idle profile, else the last boot
@@ -95,6 +127,17 @@ static const char *TAG = "ui_page_home";
  * faster than the control loop that produces the numbers changes them. */
 #define UI_PAGE_HOME_REFRESH_MS 1000
 
+/* Home page's own compact chart -- 2026-08-21, see this file's header
+ * comment ("CHART RETURNS"). Deliberately smaller than
+ * ui_page_history.c's UI_PAGE_HISTORY_CHART_POINTS (60): this page's plot
+ * is UI_PAGE_HOME_CHART_HEIGHT_PX (70px) tall vs. history's 110px, so fewer
+ * points buys back DRAM (see s_chart_pts's own comment) without visibly
+ * changing anything -- 30 points at 1 sample/tick still spans the same
+ * wall-clock window history's ring-buffer sampling period implies, just at
+ * lower horizontal resolution on a physically smaller plot. */
+#define UI_PAGE_HOME_CHART_POINTS 30
+#define UI_PAGE_HOME_CHART_HEIGHT_PX 70
+
 typedef struct {
     lv_obj_t *row;
     lv_obj_t *name_label;
@@ -104,6 +147,22 @@ typedef struct {
 
 static zone_widgets_t s_zone[MAX31856_CHANNEL_COUNT];
 static uint8_t s_zone_count; /* zones_config_get_thermo_count() at build time */
+
+static lv_obj_t *s_chart;                     /* home page's compact actual-only chart */
+static lv_chart_series_t *s_chart_series;
+/* This array IS the chart's backing store (lv_chart_set_series_ext_y_array()),
+ * not a scratch copy, so it must outlive the chart -- static, matching every
+ * other widget on this page's "built once, page never torn down" lifetime
+ * (kiln_ui.h's header comment). This is a SEPARATE array from
+ * ui_page_history.c's s_chart_actual_pts/s_chart_desired_pts -- both pages
+ * exist for the app's whole lifetime (never torn down), so aliasing one
+ * static array between two live charts would have one page's
+ * lv_chart_set_series_ext_y_array() call silently stomp the other's chart
+ * data every refresh. Size: UI_PAGE_HOME_CHART_POINTS (30) * 4 bytes = 120
+ * bytes, comfortably small next to the ~4167-byte internal-DRAM headroom
+ * this codebase runs under -- not moved to PSRAM. */
+static int32_t s_chart_pts[UI_PAGE_HOME_CHART_POINTS];
+static size_t s_chart_last_count;
 
 static lv_obj_t *s_state_label;   /* "<profile> -- <state>" single line */
 static lv_obj_t *s_time_label;
@@ -462,6 +521,77 @@ static void refresh_cb(lv_timer_t *timer)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
+    /* Compact home chart -- see this file's header comment ("CHART
+     * RETURNS") for the idle-dot vs. running-trend split. Same
+     * state==IDLE && history_count==0 gate ui_page_history.c uses, so both
+     * pages flip from dot to trend at the exact same instant. */
+    if (st.state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
+        for (uint32_t i = 1; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+            s_chart_pts[i] = LV_CHART_POINT_NONE;
+        }
+        /* Representative zone -- same "first configured zone" convention
+         * build_zone_row()'s loop and ui_page_history.c's idle-fallback
+         * both use; zone_mask is meaningless before a profile has ever
+         * started this boot, so there is no mask to read yet. */
+        float val = NAN;
+        if (s_zone_count > 0) {
+            for (size_t i = 0; i < ds.channel_count; i++) {
+                if (ds.channels[i].channel == 0) {
+                    if (ds.channels[i].valid && !ds.channels[i].stale) {
+                        val = unit_pref_convert(ds.channels[i].temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE);
+                    }
+                    break;
+                }
+            }
+        }
+        if (!isnan(val)) {
+            int32_t v = (int32_t)lroundf(val);
+            s_chart_pts[0] = v;
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, v - 10, v + 10);
+        } else {
+            s_chart_pts[0] = LV_CHART_POINT_NONE;
+        }
+        s_chart_last_count = 0; /* next real sample (count==1) must still trigger the trend branch */
+        lv_chart_refresh(s_chart);
+    } else {
+        size_t count = profile_executor_get_history_count();
+        if (count != s_chart_last_count) {
+            s_chart_last_count = count;
+            if (count == 0) {
+                for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+                    s_chart_pts[i] = LV_CHART_POINT_NONE;
+                }
+            } else {
+                size_t n = count < UI_PAGE_HOME_CHART_POINTS ? count : UI_PAGE_HOME_CHART_POINTS;
+                size_t start = count - n;
+                profile_history_entry_t batch[UI_PAGE_HOME_CHART_POINTS];
+                size_t got = profile_executor_get_history(batch, start, n);
+                size_t pad = UI_PAGE_HOME_CHART_POINTS - got;
+                for (size_t i = 0; i < pad; i++) {
+                    s_chart_pts[i] = LV_CHART_POINT_NONE;
+                }
+                unit_pref_t unit = unit_pref_get();
+                bool have_range = false;
+                float lo = 0.0f, hi = 0.0f;
+                for (size_t i = 0; i < got; i++) {
+                    float a = unit_pref_convert(batch[i].actual_c, unit, UNIT_PREF_KIND_ABSOLUTE);
+                    s_chart_pts[pad + i] = isnan(a) ? LV_CHART_POINT_NONE : (int32_t)lroundf(a);
+                    if (!isnan(a)) {
+                        if (!have_range) { lo = hi = a; have_range = true; } else { if (a < lo) lo = a; if (a > hi) hi = a; }
+                    }
+                }
+                if (have_range) {
+                    float range = hi - lo;
+                    if (range < 1.0f) range = 1.0f;
+                    float pad_c = range * 0.1f;
+                    lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (int32_t)lroundf(lo - pad_c),
+                                            (int32_t)lroundf(hi + pad_c));
+                }
+            }
+            lv_chart_refresh(s_chart);
+        }
+    }
+
     for (uint8_t zi = 0; zi < s_zone_count; zi++) {
         char buf[24];
         const dashboard_channel_status_t *ch = NULL;
@@ -692,6 +822,33 @@ lv_obj_t *ui_page_home_build(void)
      * this must run AFTER content exists. */
     ui_topbar_raise(&s_topbar);
 
+    /* Compact actual-only chart -- see this file's header comment ("CHART
+     * RETURNS", 2026-08-21) and the action-row comment below for the height
+     * budget this trades against. Built directly into `content` (no card
+     * wrapper, unlike ui_page_history.c's chart) specifically to skip a
+     * card's own pad_all/pad_gap overhead -- every pixel of vertical budget
+     * here is accounted for in the action-row comment's arithmetic, and a
+     * wrapper card was not in that budget. */
+    s_chart = lv_chart_create(content);
+    lv_obj_set_width(s_chart, lv_pct(100));
+    lv_obj_set_height(s_chart, UI_PAGE_HOME_CHART_HEIGHT_PX);
+    lv_obj_set_style_bg_color(s_chart, UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_bg_opa(s_chart, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chart, 0, 0);
+    lv_obj_set_style_radius(s_chart, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_chart, 2, 0);
+    lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_div_line_count(s_chart, 2, 4);
+    lv_chart_set_point_count(s_chart, UI_PAGE_HOME_CHART_POINTS);
+    s_chart_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_1, LV_CHART_AXIS_PRIMARY_Y);
+    for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+        s_chart_pts[i] = LV_CHART_POINT_NONE;
+    }
+    lv_chart_set_series_ext_y_array(s_chart, s_chart_series, s_chart_pts);
+    lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    s_chart_last_count = (size_t)-1;
+    lv_obj_remove_flag(s_chart, LV_OBJ_FLAG_SCROLLABLE);
+
     /* Zones (TODO.md 10.3: "each configured zone, its current temperature,
      * and its heater on/off status"). Widgets built for however many zones
      * are configured right now; a config change mid-session (no live editor
@@ -793,27 +950,36 @@ lv_obj_t *ui_page_home_build(void)
      * absorbs both the space this button gives up and the ~110px of content
      * space that was already going unused below the old 71px button.
      *
+     *     chart (actual-only, home-compact) ..... UI_PAGE_HOME_CHART_HEIGHT_PX = 70px
+     *     gap ..................................... UI_THEME_PADDING_PX/2 = 4px
      *     zone rows (up to 3, compact) ......... variable, unchanged
-     *     gap x (zone rows + 1) ................. UI_THEME_PADDING_PX/2 = 4px each
+     *     gap x (zone rows) ...................... UI_THEME_PADDING_PX/2 = 4px each
      *     state card (2 lines + progress bar) ... flex_grow(1): whatever's left
      *     gap .................................... UI_THEME_PADDING_PX/2 = 4px
      *     action row: 1 button, drawn ........... 36px (was 71px measured / 72px coded)
      *
-     * Because state_card is the one flex-growing child, this "adds up" by
-     * construction (flex-grow, not a hand-summed total, absorbs exactly
-     * whatever main-axis space is left in `content` -- it cannot overflow
-     * the 267px budget any more than any other flex-grow child could). The
-     * only thing worth checking is that the FIXED children alone (everything
-     * except state_card) never exceed 267px outright, which would starve
-     * state_card to a negative/zero height: worst case is 3 zone rows at
-     * ~19px each (measured on hardware for the single-zone case; per-row
-     * height is otherwise LV_SIZE_CONTENT and grows a little with more
-     * label text, but nowhere near double) plus 4 gaps (3 zone-row gaps + 1
-     * before the action row) at 4px plus the 36px button:
-     *     3*19 + 4*4 + 36 = 57 + 16 + 36 = 109px fixed, leaving
-     *     267 - 109 = 158px for state_card in the worst (3-zone) case --
-     * comfortably positive, so state_card never collapses to zero even at
-     * MAX31856_CHANNEL_COUNT (3) zones.
+     * UPDATED 2026-08-21 (chart re-added to this page, see the header
+     * comment's "CHART RETURNS" section): because state_card is still the
+     * one flex-growing child, this "adds up" by construction (flex-grow
+     * absorbs exactly whatever main-axis space is left in `content` -- it
+     * cannot overflow the 267px measured budget any more than any other
+     * flex-grow child could). The only thing worth checking is that the
+     * FIXED children alone (everything except state_card) never exceed
+     * 267px outright, which would starve state_card to a negative/zero
+     * height. `content` now has 6 children (chart, up to 3 zone rows,
+     * state_card, action_row) instead of 5, so there are 5 gaps, not 4.
+     * Worst case (3 zones, ~19px each, same hardware-measured figure as
+     * before) plus the new 70px chart plus 5 gaps at 4px plus the 36px
+     * button:
+     *     70 + 3*19 + 5*4 + 36 = 70 + 57 + 20 + 36 = 183px fixed, leaving
+     *     267 - 183 = 84px for state_card in the worst (3-zone) case --
+     * still comfortably positive (2 short labels + a 10px-tall progress bar
+     * fit well inside 84px, same widgets this card already held when it had
+     * 158px to itself -- they just get less slack now), so state_card never
+     * collapses to zero even at MAX31856_CHANNEL_COUNT (3) zones. If a
+     * future zone gains enough label text to push a row past ~19px, or a
+     * 4th zone is ever added, re-derive this number rather than assume it
+     * still holds.
      *
      * Drawn vs effective button height: build_button()'s
      * ui_theme_apply_touch_area(btn, false) call reads back the button's

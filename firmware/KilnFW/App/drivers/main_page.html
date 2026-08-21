@@ -100,6 +100,13 @@
   .exec-state.state-running { color: var(--on-color); }
   #historyChart { width: 100%; height: 220px; background: var(--card-bg);
                   border: 1px solid var(--border); border-radius: var(--ui-radius); display: block; }
+  /* 2026-08-21 idle-dot swatch: ties a channel's dot colour on the (now
+     always-visible) chart back to that same channel's row in the list
+     below it, so "which dot is which channel" doesn't require a legend.
+     CH_COLORS in the script is the single source of truth for the actual
+     colour values; this is just the inline circle that displays them. */
+  .ch-swatch { display: inline-block; width: 0.7em; height: 0.7em; border-radius: 50%;
+               margin-right: 0.4em; vertical-align: middle; }
   /* Previous-run breadcrumb (TODO.md 6A.3). Uses the existing card colours
      rather than a new palette; only the left rule is coloured, so an
      interrupted firing reads as urgent without the page shouting on every
@@ -202,6 +209,17 @@ const FAULT_BITS = [
 function faultText(bits) {
   return FAULT_BITS.filter(([b]) => bits & b).map(([, t]) => t).join(', ');
 }
+
+// Single source of truth for "which colour is channel N", shared by the
+// channel-list swatch (renderChannels below) and the idle dots drawn on
+// historyChart (drawIdleDots) -- see that function's comment for why the
+// idle case needs a per-channel colour at all (the running-chart trend
+// lines only ever track one representative zone, so they never needed
+// this). Cycles if there are ever more channels than colours; five
+// MAX31856 channels is the current board (CLAUDE.md), so this covers it
+// with room to spare.
+const CH_COLORS = ['#e63', '#3a9', '#37f', '#c8a', '#fa3', '#0bb'];
+function chColor(channel) { return CH_COLORS[channel % CH_COLORS.length]; }
 
 // Item 11: which relay(s) a thermocouple channel drives is NOT in
 // /api/status -- it's derived from zonesCache (loaded once by loadZones(),
@@ -306,7 +324,8 @@ function renderChannels(data) {
       detail = '<span class="kc-live-value">' + window.kcUnit.fmt(ch.temp_c) + '</span>' + staleTag +
                relayStatusHtml(ch.channel, data.relays);
     }
-    div.innerHTML = '<span>Channel ' + ch.channel + '</span><span class="temp">' + detail + '</span>';
+    div.innerHTML = '<span><span class="ch-swatch" style="background:' + chColor(ch.channel) + '"></span>Channel ' +
+      ch.channel + '</span><span class="temp">' + detail + '</span>';
     el.appendChild(div);
   });
 }
@@ -580,21 +599,13 @@ function parseHistoryCsv(text) {
 // own staleness lags the banner's anyway). The axis/legend TEXT this
 // function draws is still unit-converted below for UI_PLAN.md item 7 parity,
 // same as every other on-screen °C figure.
-function drawHistoryChart(rows) {
-  // 2026-08-21: #historyEmpty (the "No history yet" <p>) was removed from the
-  // markup above along with the History heading/intro paragraph -- this used
-  // to toggle canvas/empty visibility as a pair. There is no replacement text
-  // element now, by the same "no longer earns its space" call as the
-  // paragraph removal, so the empty case collapses to just hiding the
-  // canvas; getElementById('historyEmpty') is gone from this function
-  // entirely rather than left as a null a later line would dereference.
+// Shared canvas/axis setup for both the running-trend chart (drawHistoryChart)
+// and the idle-dots chart (drawIdleDots). Returns null if the canvas isn't
+// laid out yet (clientWidth 0), same "nothing sensible to draw" case either
+// caller already had to handle.
+function setupChart() {
   var canvas = document.getElementById('historyChart');
-  if (!rows.length) {
-    canvas.style.display = 'none';
-    return;
-  }
   canvas.style.display = '';
-
   var dpr = window.devicePixelRatio || 1;
   var cssW = canvas.clientWidth || 600, cssH = 220;
   canvas.width = cssW * dpr;
@@ -610,6 +621,79 @@ function drawHistoryChart(rows) {
 
   var padL = 42, padR = 36, padT = 10, padB = 20;
   var plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+  ctx.strokeStyle = border; ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, plotW, plotH);
+  return { canvas: canvas, ctx: ctx, cssW: cssW, cssH: cssH, fg: fg, muted: muted, border: border,
+           padL: padL, padR: padR, padT: padT, padB: padB, plotW: plotW, plotH: plotH };
+}
+
+// Idle case (no profile running): there is no time axis to plot against --
+// the history ring isn't being fed (profile_executor.c only samples while a
+// zone is active/running) -- so this draws one static dot per thermocouple
+// channel, pinned to the left edge of the plot area, using this tick's
+// /api/status reading. It does NOT accumulate points or move rightward over
+// time; each call fully replaces the previous frame (setupChart() clears the
+// canvas), so a channel's dot just relocates vertically as its live temp
+// changes. Colour matches that channel's swatch in the list below (CH_COLORS/
+// chColor(), shared source of truth) so the two views read as the same data.
+function drawIdleDots(data) {
+  var g = setupChart();
+  if (!g) return;
+  var channels = (data && data.thermo_ready) ? (data.channels || []) : [];
+  var vals = channels.filter(function (c) { return c.valid && !c.spi_failed; })
+                     .map(function (c) { return c.temp_c; });
+
+  // Y-axis rule: with no history to derive a range from, scale to the
+  // live readings themselves (min/max +/- 10% pad, same shape as the
+  // running chart's 5% pad but a bit more generous since a single frozen
+  // reading has no future samples to eventually widen the range). With no
+  // valid reading at all, fall back to a fixed 0-100 degC range converted
+  // through kcUnit -- arbitrary, but keeps the axis legible instead of a
+  // divide-by-zero 0..1 span, and matches the kiln's low end.
+  var minV = vals.length ? Math.min.apply(null, vals) : 0;
+  var maxV = vals.length ? Math.max.apply(null, vals) : 100;
+  if (maxV === minV) { minV -= 5; maxV += 5; }
+  var padV = (maxV - minV) * 0.1;
+  minV -= padV; maxV += padV;
+
+  function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }
+  var dotX = g.padL + 10; // pinned to the left edge, never marches across the plot
+
+  g.ctx.fillStyle = g.muted; g.ctx.font = '10px sans-serif';
+  g.ctx.fillText(window.kcUnit.toDisplay(maxV).toFixed(0) + window.kcUnit.label(), 2, g.padT + 8);
+  g.ctx.fillText(window.kcUnit.toDisplay(minV).toFixed(0) + window.kcUnit.label(), 2, g.padT + g.plotH);
+
+  channels.forEach(function (c) {
+    if (!c.valid || c.spi_failed) return;
+    var py = yTemp(c.temp_c);
+    g.ctx.beginPath();
+    g.ctx.arc(dotX, py, 4, 0, Math.PI * 2);
+    g.ctx.fillStyle = chColor(c.channel);
+    g.ctx.fill();
+  });
+
+  g.ctx.fillStyle = g.fg; g.ctx.font = '11px sans-serif';
+  g.ctx.fillText('no firing running — current channel readings', g.padL + 4, g.cssH - 4);
+}
+
+function drawHistoryChart(rows) {
+  // 2026-08-21: #historyEmpty (the "No history yet" <p>) was removed from the
+  // markup above along with the History heading/intro paragraph -- this used
+  // to toggle canvas/empty visibility as a pair. There is no replacement text
+  // element now, by the same "no longer earns its space" call as the
+  // paragraph removal. The chart itself is now ALWAYS shown though (see
+  // updateChart()'s idle/running split below): an empty `rows` here only
+  // happens transiently (e.g. history.csv fetch racing a just-started
+  // profile), so rather than hiding the canvas this just leaves whatever
+  // was drawn last tick on screen -- never a blank state.
+  if (!rows.length) {
+    return;
+  }
+
+  var g = setupChart();
+  if (!g) return;
+  var ctx = g.ctx, cssW = g.cssW, cssH = g.cssH, fg = g.fg, muted = g.muted;
+  var padL = g.padL, padR = g.padR, padT = g.padT, padB = g.padB, plotW = g.plotW, plotH = g.plotH;
 
   var tMin = rows[0].t, tMax = rows[rows.length - 1].t;
   if (tMax === tMin) tMax = tMin + 1;
@@ -626,9 +710,6 @@ function drawHistoryChart(rows) {
   function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
   function yTemp(v) { return padT + plotH - (v - tMinV) / (tMaxV - tMinV) * plotH; }
   function yDuty(d) { return padT + plotH - d * plotH; }
-
-  ctx.strokeStyle = border; ctx.lineWidth = 1;
-  ctx.strokeRect(padL, padT, plotW, plotH);
 
   ctx.fillStyle = muted; ctx.font = '10px sans-serif';
   ctx.fillText(window.kcUnit.toDisplay(tMaxV).toFixed(0) + window.kcUnit.label(), 2, padT + 8);
@@ -672,10 +753,33 @@ function pollHistory() {
   }).catch(function () {});
 }
 
+// Chart mode switch: the user's actual request ("the current temps should
+// just show as dots ... until the profile is started") means the chart is
+// two different visuals sharing one canvas, not one dataset with an empty
+// state. /api/profile_exec's st.state is the same idle/running/paused/
+// faulted/done value renderExec() already switches on to show/hide the
+// picker vs. the exec card -- reusing it here (rather than e.g. inferring
+// "running" from history.csv row count) keeps both switches on the same
+// source of truth, so they can never disagree about whether a firing is
+// live. wasIdle tracks the previous call so a fresh idle->running
+// transition repaints the trend chart immediately instead of waiting up to
+// 15s for pollHistory's own interval.
+var wasIdle = true;
+function updateChartMode(st) {
+  var idleNow = !st || st.state === 'idle';
+  if (idleNow) {
+    drawIdleDots(lastChannelsData);
+  } else if (wasIdle) {
+    pollHistory();
+  }
+  wasIdle = idleNow;
+}
+
 function pollExec() {
   fetch('/api/profile_exec').then(function (r) { return r.json(); }).then(function (st) {
     renderExec(st);
     renderLastRun(st);
+    updateChartMode(st);
   }).catch(function () {});
 }
 
@@ -687,15 +791,21 @@ function poll() {
     // one-time-fetch fallback for pages that never poll /api/status at all).
     window.kcUnit.updateFromStatus(data);
     renderChannels(data);
+    // Idle dots are a LIVE temperature display (same data as the channel
+    // cards above), so they refresh on this 2s status poll, not history.csv's
+    // slower 15s one -- a firing that's still idle should show the dots
+    // tracking the kiln cooling/heating ambient in real time, not appear
+    // frozen between 15s history polls that (while idle) fetch nothing new
+    // anyway (history.csv only starts moving once a profile is running).
+    if (wasIdle) { drawIdleDots(data); }
   }).catch(function () {});
   pollExec();
   setTimeout(poll, 2000);
 }
 
 loadZones().then(function () { loadProfileList(); poll(); });
-pollHistory();
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
-window.addEventListener('resize', pollHistory);
+window.addEventListener('resize', function () { if (wasIdle) { drawIdleDots(lastChannelsData); } else { pollHistory(); } });
 
 // UI_PLAN.md item 7: re-render immediately on a °C/°F toggle instead of
 // waiting out poll()'s own 2s interval -- re-uses the last payload each

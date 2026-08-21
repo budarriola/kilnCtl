@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "MAX31856.h"
+#include "dashboard_http.h"
 #include "profile_executor.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
@@ -24,6 +25,19 @@
 // budget moved into the shared top bar (ui_topbar.c) in the 2026-08-21
 // icon-topbar pass, freeing UI_THEME_MIN_TOUCH_TARGET_PX (72px) + the 4px
 // row gap back to content.
+//
+// 2026-08-21: this page used to show a dead-end "Temperature history -- no
+// run yet" label with an empty chart while idle. Per the same user request
+// that put a compact chart back on ui_page_home.c ("i always want to see
+// the graph... current temps should just show as dots and should stay on
+// the left side of the graph until the profile is started"), idle now shows
+// the SAME single-dot-pinned-at-index-0 behaviour ui_page_home.c uses
+// (rewritten every refresh tick, not appended, so it never marches or
+// accumulates), on this page's existing actual series -- s_chart_desired_pts
+// stays LV_CHART_POINT_NONE throughout idle since there is no desired value
+// without a running profile. The label text changes from the old dead-end
+// message to "Current -- <zone>" so it still says something true instead of
+// announcing a lack of history.
 
 static const char *TAG __attribute__((unused)) = "ui_page_history";
 
@@ -73,23 +87,64 @@ static void refresh_cb(lv_timer_t *timer)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
-    if (st.state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
-        lv_label_set_text(s_chart_zone_label, "Temperature history -- no run yet");
-    } else {
-        uint8_t zi = 0;
+    bool idle_no_history = (st.state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0);
+
+    /* Representative zone -- st.zone_mask is only meaningful once a run has
+     * actually started (profile_exec_status_t's own scope note), so while
+     * idle there is no mask to read yet; fall back to zone 0, the same
+     * "first configured zone" convention ui_page_home.c's idle dot uses. */
+    uint8_t zi = 0;
+    if (!idle_no_history) {
         for (; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (st.zone_mask & (1u << zi)) break;
         }
-        char cfg_name[16];
-        char zone_buf[24];
-        if (zones_config_get_name(zi, cfg_name, sizeof(cfg_name)) && cfg_name[0] != '\0') {
-            snprintf(zone_buf, sizeof(zone_buf), "%s", cfg_name);
-        } else {
-            snprintf(zone_buf, sizeof(zone_buf), "Zone %u", (unsigned)zi);
-        }
-        char buf[48];
+    }
+    char cfg_name[16];
+    char zone_buf[24];
+    if (zones_config_get_name(zi, cfg_name, sizeof(cfg_name)) && cfg_name[0] != '\0') {
+        snprintf(zone_buf, sizeof(zone_buf), "%s", cfg_name);
+    } else {
+        snprintf(zone_buf, sizeof(zone_buf), "Zone %u", (unsigned)zi);
+    }
+    char buf[48];
+    if (idle_no_history) {
+        snprintf(buf, sizeof(buf), "Current -- %s", zone_buf);
+    } else {
         snprintf(buf, sizeof(buf), "Actual vs Desired -- %s", zone_buf);
-        lv_label_set_text(s_chart_zone_label, buf);
+    }
+    lv_label_set_text(s_chart_zone_label, buf);
+
+    if (idle_no_history) {
+        /* Single dot pinned at index 0 -- see this file's header comment
+         * ("2026-08-21") and ui_page_home.c's matching idle-dot block.
+         * Rewritten every tick, not appended, so it never marches across
+         * the plot or accumulates a trail. */
+        for (uint32_t i = 1; i < UI_PAGE_HISTORY_CHART_POINTS; i++) {
+            s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
+            s_chart_desired_pts[i] = LV_CHART_POINT_NONE;
+        }
+        dashboard_status_t ds;
+        dashboard_get_status(&ds);
+        float val = NAN;
+        for (size_t i = 0; i < ds.channel_count; i++) {
+            if (ds.channels[i].channel == zi) {
+                if (ds.channels[i].valid && !ds.channels[i].stale) {
+                    val = unit_pref_convert(ds.channels[i].temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE);
+                }
+                break;
+            }
+        }
+        s_chart_desired_pts[0] = LV_CHART_POINT_NONE; /* no desired value without a running profile */
+        if (!isnan(val)) {
+            int32_t v = (int32_t)lroundf(val);
+            s_chart_actual_pts[0] = v;
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, v - 10, v + 10);
+        } else {
+            s_chart_actual_pts[0] = LV_CHART_POINT_NONE;
+        }
+        s_chart_last_count = 0; /* next real sample (count==1) must still trigger the trend branch below */
+        lv_chart_refresh(s_chart);
+        return;
     }
 
     size_t count = profile_executor_get_history_count();
@@ -187,7 +242,7 @@ lv_obj_t *ui_page_history_build(void)
 
     s_chart_zone_label = lv_label_create(card);
     lv_obj_set_style_text_color(s_chart_zone_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_chart_zone_label, "Temperature history -- no run yet");
+    lv_label_set_text(s_chart_zone_label, "Current -- Zone 0");
 
     s_chart = lv_chart_create(card);
     lv_obj_set_width(s_chart, lv_pct(100));
