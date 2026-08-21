@@ -564,6 +564,30 @@ page. also add support for the temp sensors you currently have access to."
       which is a separate `uart_protocol` instance with its OWN `tx_lock`.
       They cannot congest the PC link on UART0, however alarming the volume
       looks.
+- [x] **Wi-Fi/web regression check after the Wi-Fi/lwIP buffers moved to
+      PSRAM (2026-08-20).** That change (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`)
+      touches the memory of the exact subsystem that had the AP-join failure
+      earlier the same day, so it was worth proving rather than assuming.
+      - **AP mode**: switched home -> ap, and the AP is genuinely on the air
+        -- confirmed from the dev PC with `netsh wlan show networks
+        mode=bssid`: `kilnCtl`, WPA2-Personal, CCMP, BSSID
+        `1c:db:d4:92:f4:7d`. DHCP server came up on 192.168.4.1. No
+        `ESP_ERR_NO_MEM`, no crash.
+      - **Mode cycle**: ap -> home rejoined the station at 192.168.1.156,
+        RSSI -46. (The `httpd_sock_err: recv 113` lines during the switch are
+        the station-side sockets tearing down as that interface drops --
+        expected, not a fault.)
+      - **Web server over HTTP**, 17 GETs, 0 failures: all six pages
+        (`/`, `/profiles`, `/settings/zones`, `/settings/relays`, `/wifi`,
+        `/ota`), five JSON APIs (`/api/status|profiles|rules|zones|readiness`),
+        and the four OS captive-portal probe URLs (`/generate_204`,
+        `/hotspot-detect.html`, `/connecttest.txt`, `/ncsi.txt`). Gzip bodies
+        decompressed correctly on every page that serves one.
+      **NOT covered, still open**: the captive portal as a *user* experiences
+      it. The probe handlers respond and serve a page, which is the mechanism
+      working, but nothing here joins the AP as a client, so the
+      DNS-hijack -> portal-appears path is still unverified end to end. That
+      needs a device actually associated to `kilnCtl`.
 - [x] **Internal-DRAM fragmentation — MEASURED and largely RESOLVED
       (2026-08-20), verified live on the bench.** The entry above fixed the
       *symptom* (task stacks that couldn't be allocated) by moving those
@@ -5022,6 +5046,14 @@ ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
       fall back to serving the uncompressed blob for a client that doesn't
       support it, or keep both blobs embedded and pick one at request time --
       decide which based on how much flash headroom this actually costs)
+      **CONFIRMED STILL OPEN, measured 2026-08-20.** A GET with no
+      `Accept-Encoding` header still comes back `Content-Encoding: gzip`:
+      `/` returned 8244 gzip bytes and `/wifi` 11760, with the firmware
+      logging "client did not advertise Accept-Encoding: gzip; serving gzip
+      body anyway". So a client that cannot decompress receives bytes it
+      cannot read. Every real browser sends the header, which is why this has
+      never been noticed in normal use -- but `curl` without `--compressed`,
+      and any minimal HTTP client, gets garbage.
 - [ ] Re-verify byte-for-byte that nothing about the *content* changes --
       this is a transport-encoding change only, same risk shape as 10.1a's
       `dashboard_get_status()` extraction (behavior-preserving refactor,
