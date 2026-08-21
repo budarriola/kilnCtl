@@ -586,6 +586,31 @@ static const char *esc(const char *src, char *buf, size_t cap)
     return buf;
 }
 
+/* Sends one snprintf'd chunk, honouring the one thing snprintf's return value
+ * is easy to get wrong: on truncation it reports the length it WOULD have
+ * written, which is larger than the buffer. Passing that straight to
+ * httpd_resp_send_chunk() reads past the end of the buffer. The worst-case
+ * field widths in the builtin JSON below (fixed text + escaped code + a
+ * 127-char title + two copies of the slug) add up to more than the 384-byte
+ * chunk buffer, so this is reachable the day someone adds a longer title --
+ * and the table those titles live in is generated, so that is a plausible
+ * edit rather than a theoretical one.
+ *
+ * Truncation also means the JSON is malformed, which a clamp alone would hide,
+ * so it is logged rather than silently shortened. */
+static esp_err_t send_chunk_checked(httpd_req_t *req, const char *buf, int n, size_t cap, const char *what)
+{
+    if (n < 0) {
+        return ESP_OK; /* encoding error -- skip this fragment, keep the response alive */
+    }
+    if ((size_t)n >= cap) {
+        ESP_LOGW(TAG, "%s JSON truncated at %u bytes -- response will be malformed", what,
+                 (unsigned)cap);
+        n = (int)(cap - 1);
+    }
+    return httpd_resp_send_chunk(req, buf, (size_t)n);
+}
+
 /* Appends one builtin entry's summary (no segments) to a chunked response. */
 static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builtin_profile_t *b, bool first)
 {
@@ -608,10 +633,7 @@ static esp_err_t send_builtin_summary(httpd_req_t *req, uint8_t id, const builti
                      esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
                      profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
                      profile_feasibility_verdict_str(rollup));
-    if (n < 0) {
-        return ESP_OK;
-    }
-    return httpd_resp_send_chunk(req, chunk, (size_t)((size_t)n < sizeof(chunk) ? (size_t)n : sizeof(chunk) - 1));
+    return send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin summary");
 }
 
 /* Full builtin entry: summary fields + every segment with its own verdict. */
@@ -641,11 +663,9 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
                      esc(b->slug, slug_e, sizeof(slug_e)), b->slug,
                      profiles_builtin_is_hidden(id) ? "true" : "false", b->segment_count,
                      profile_feasibility_verdict_str(rollup));
-    if (n > 0) {
-        esp_err_t err = httpd_resp_send_chunk(req, chunk, (size_t)n);
-        if (err != ESP_OK) {
-            return err;
-        }
+    esp_err_t err = send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin header");
+    if (err != ESP_OK) {
+        return err;
     }
 
     for (uint8_t i = 0; i < b->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
@@ -654,11 +674,9 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
                      i == 0 ? "" : ",", (double)b->segments[i].target_c,
                      (double)b->segments[i].ramp_c_per_hr, (unsigned long)b->segments[i].dwell_min,
                      profile_feasibility_verdict_str(per_seg[i]));
-        if (n > 0) {
-            esp_err_t err = httpd_resp_send_chunk(req, chunk, (size_t)n);
-            if (err != ESP_OK) {
-                return err;
-            }
+        err = send_chunk_checked(req, chunk, n, sizeof(chunk), "builtin segment");
+        if (err != ESP_OK) {
+            return err;
         }
     }
     return httpd_resp_send_chunk(req, "]}", 2);

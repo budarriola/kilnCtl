@@ -16,6 +16,7 @@ void run_test_sim_kiln(void);
 void run_test_ota_auth(void);
 void run_test_ota_interlock(void);
 void run_test_thermo_combine(void);
+void run_test_profile_feasibility(void);
 
 int main(void)
 {
@@ -28,6 +29,7 @@ int main(void)
     run_test_ota_auth();
     run_test_ota_interlock();
     run_test_thermo_combine();
+    run_test_profile_feasibility();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
