@@ -2,6 +2,9 @@
 
 > **Status:** software complete, hardware-gated · **Last reviewed:** 2026-08-20
 >
+> **See [section 0](#0-whats-left--index) for the short checklist of what
+> remains.** Sections 10, 11, 12, 13 and 14 carry per-item checkboxes.
+>
 > **What is actually true right now.** Every task and every `src/sim/` module
 > in this plan's architecture is implemented — no stubs remain anywhere in
 > `firmware/SimFW/src/` — and the standard 17-scenario test library
@@ -55,6 +58,18 @@ established, empirically and reproducibly, that **in today's shipping
 `SaftyFW`, only S5, S6b, S7, and S12 can structurally fire.** The other nine
 guards are blocked by specific inputs `safety_core_build_input()`
 (`firmware/SaftyFW/src/tasks/safety_core.c`) never populates:
+
+> **SUPERSEDED 2026-08-20 (later the same day) — read this before the list
+> below.** The nine-blocked-guards finding was acted on. Commits `f304392`
+> (context/`link_up`/`REQUEST_ENABLE` wiring) and `5375bca` (S6a) closed most
+> of these gaps in `SaftyFW` itself. **Current state: only S9
+> (`relay_deenergized`) and S11 (`heat_commanded`) still have inputs that are
+> never produced.** S1 and S13 remain deliberately dormant as *commissioning*
+> gaps (uncommissioned `abs_max_temp_c`; no `borrowed_zone_index` field
+> exists), which is a different category from a missing producer. The list
+> below is kept as written because it is the evidence trail that motivated
+> those fixes — treat it as history, not as current state. The live table is
+> `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §6.
 
 - **S6b trips unconditionally ~120 s into every boot.** `link_up` is never
   set true anywhere — `safety_core_build_input()`'s struct literal doesn't
@@ -157,6 +172,77 @@ A real SPI-mode bug was found and fixed in this pass: the PIO slave engine
 > connectors and pretends, convincingly, to be the rest of the kiln — the
 > thermocouple ICs, the current transformers, the heater load, and the thermal
 > mass — while a PC drives it over USB from a CLI, a GUI, or an MCP server.
+
+---
+
+## 0. What's left — index
+
+Checkbox legend used throughout this document: `[x]` done and verified,
+`[~]` partially done (the text says which half), `[ ]` not started or not
+met. **Done means verified at the level the item itself demands** — for a
+milestone whose exit criterion names hardware, host tests passing is `[~]`,
+never `[x]`.
+
+### 0.1 Doable now, in software (no hardware required)
+
+- [ ] **Master driver access-pattern audit** — does either master use
+      write-then-read inside one CS assertion? Pure code-reading task, but it
+      is part of M-A's exit criterion, so M-A cannot close without it.
+      (§11 item 4)
+- [ ] **`wave_owner.c` amplitude mapping is still an IDENTITY placeholder.**
+      The calibration *tooling* now exists (`tools/ct_calibration/`); the
+      firmware side must become per-channel
+      `clamp(gain[ch]*amps + offset[ch], 0, 1)` fed from its JSON table.
+      (§3.3, M-D)
+- [ ] **Second DUT-power relay output bit.** The two-relay decision is made
+      (§11 item 5) but `i2c_owner.c` still exposes only one
+      `EXP1_PIN_DUT_POWER`. Spare expander capacity exists. (M-E)
+- [ ] **Claim a real USB VID:PID.** `kilnsim/link.py`'s
+      `SIMFW_VID_PID = "2E8A:000A"` is Raspberry Pi's generic example ID; with
+      three RP2040s on the bench, auto-detect can latch the wrong device.
+      (§11 item 11 — a bench hazard, not cosmetic)
+- [ ] **S9 / S11 guard inputs** — the last two never-produced inputs in
+      `safety_core_build_input()`. S11 waits on Phase 6 current sense.
+- [ ] **`no_warn_storm` scenario FAIL** — pre-existing, survives a fine poll
+      interval, still unexplained. Deliberately not loosened.
+- [ ] **MCP tool to push calibration constants into `SaftyFW` flash** — no
+      such path exists today.
+
+### 0.2 Hardware-gated (nothing here can progress without the fixture)
+
+- [ ] **M-A SPI slave timing proof** — Saleae capture, ≥10k transactions,
+      zero underruns. *The single biggest unretired risk in the plan.*
+- [ ] **CT calibration against `SaftyFW`'s real ADC readback** (M-D)
+- [ ] **J7 pin 1 continuity check** — the two main-board docs contradict each
+      other; getting it wrong back-feeds a rail or leaves the isolator side
+      unpowered. (§11 item 9)
+- [ ] **DUT-power inrush measurement** — the ~60 A / ~190 µs figure rests on
+      an *assumed* source resistance. (§11 item 5)
+- [ ] **Verify every provisional GPIO assignment** in `HARDWARE.md`
+- [ ] **`UnitTestFw` decommission** — gated on proving the replacement link on
+      real hardware. (§12)
+- [ ] **Fixture hardware form factor** — breadboard vs a real
+      `hardware/SimFixture/` board. Not answerable until M-E. (§11 item 6)
+
+### 0.3 Done
+
+- [x] All `src/sim/` modules and all FreeRTOS owner tasks implemented — no
+      stubs remain in `firmware/SimFW/src/`
+- [x] `benchproto` extracted into `CommonFW`, host-tested, spoken by both
+      SimFW's CDC link and `kilnsim`
+- [x] `kilnsim` PC toolset — CLI, Tk GUI, MCP server, scenario loader, report
+      generator
+- [x] 19-scenario standard library (over-delivered vs the planned 16)
+- [x] PIO SPI mode-1 clocking bug found and fixed (was sampling as mode 0)
+- [x] `virtual_simfw` / `virtual_dut` / `virtual_kiln` — the fourth,
+      software-only verification layer (§13.4)
+- [x] SaftyFW guard-input wiring: context/`link_up`/`REQUEST_ENABLE`
+      (`f304392`) and S6a (`5375bca`)
+- [x] CT calibration tooling (`tools/ct_calibration/`) — fit, crosstalk gate,
+      versioned table
+- [x] `docs/BOM.md`, `docs/BENCH_RUNBOOK.md`, `docs/HARDWARE.md`,
+      `docs/PROTOCOL.md`
+- [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 
 ---
 
@@ -1058,7 +1144,7 @@ it is a new, fourth thing. Where it matters (M-G/M-H, which talk about
 scenarios "running"), that distinction is called out explicitly below rather
 than left to be inferred.
 
-- **M-A — SPI slave proof of concept.** PIO MAX31856 emulation, one channel,
+- [ ] **M-A — SPI slave proof of concept.** PIO MAX31856 emulation, one channel,
   against a real master (the bench ESP32 running unmodified `KilnFW` driver
   code, or a third Pico as a scripted test master first). *This is the risk
   item; it goes first, before any framework code.*
@@ -1076,7 +1162,7 @@ than left to be inferred.
   needing the real ESP32/`KilnFW` driver as the first thing ever thrown at
   the emulator — but even that tool has not yet been run against real SimFW
   hardware, because none exists.
-- **M-B — Protocol lift + skeleton + USB.** Protocol core extracted from
+- [~] **M-B — Protocol lift + skeleton + USB.** Protocol core extracted from
   `UnitTestFw` into `CommonFW` (pure, host-tested, spec doc moved); FreeRTOS
   task skeleton; CDC link speaking the extracted protocol; PING/VERSION/
   GET_CAPS; fresh `kilnsim` CLI talking to it.
@@ -1091,7 +1177,7 @@ than left to be inferred.
   executed — section 12 step 2 ("prove the replacement on real hardware")
   is exactly the hardware gate above, so `firmware/UnitTestFw/` and
   `hardware/UnitTestFixture/` are both still in the tree, untouched.
-- **M-C — Thermal model + TC emulation wired.** 3+1 channels, model-driven
+- [~] **M-C — Thermal model + TC emulation wired.** 3+1 channels, model-driven
   temps, presets, time-scale, MODEL/MANUAL modes.
   **Exit:** host-test suite green incl. golden traces; on the bench, real
   `KilnFW` displays a plausible warming curve driven entirely by the model;
@@ -1100,7 +1186,7 @@ than left to be inferred.
   `max31856_regs.c` are implemented and host-tested with golden traces. The
   bench half — a real `KilnFW` board displaying a plausible curve — has not
   happened; no board has ever been connected to this fixture.
-- **M-D — CT synthesis.** 3x 60 Hz with amplitude tracking, transformer
+- [ ] **M-D — CT synthesis.** 3x 60 Hz with amplitude tracking, transformer
   coupling network built.
   **Exit:** calibration table fitted per 3.3 against `SaftyFW`'s own ADC
   readback; commanded 0→N A sweep reads back within ±5 % over the usable
@@ -1113,7 +1199,7 @@ than left to be inferred.
   exit criterion requires has not been written, separately from it never
   having been run against real hardware. No transformer coupling network has
   been built.
-- **M-E — Relay sense + discrete I/O.** Expanders, E-stop, fault line, DUT
+- [ ] **M-E — Relay sense + discrete I/O.** Expanders, E-stop, fault line, DUT
   power switch.
   **Exit:** heat loop closes end-to-end — DUT PID actually regulates a
   simulated zone through relay cycling with no fixture intervention;
@@ -1124,7 +1210,7 @@ than left to be inferred.
   found. The closed-loop, DUT-power-cycle, and E-stop exit behaviors are all
   bench-only demonstrations that have not been attempted — no fixture
   hardware exists to close the loop with.
-- **M-F — Fault engine + scheduler.** Full catalog, trigger spec, slots,
+- [~] **M-F — Fault engine + scheduler.** Full catalog, trigger spec, slots,
   composition rules.
   **Exit:** same scenario + seed twice ⇒ byte-identical event logs;
   every fault type demonstrated at least once with an event trace.
@@ -1133,7 +1219,7 @@ than left to be inferred.
   simulated snapshot and are host-tested for deterministic replay from a
   seed. Nothing here has produced an event trace against a real DUT, which
   is what "every fault type demonstrated" originally meant.
-- **M-G — MCP server + GUI + scenario runner.** Scenario YAML schema frozen;
+- [~] **M-G — MCP server + GUI + scenario runner.** Scenario YAML schema frozen;
   reports with assertions and validity flags.
   **Exit:** `baseline_firing`, `welded_ssr_midfire`, `tc_disconnect_ramp`
   green against real `KilnFW`+`SaftyFW` with reports archived; GUI drives
@@ -1156,7 +1242,7 @@ than left to be inferred.
   SCENARIO_RESULTS.md` for that run's actual pass/fail pattern — mostly FAIL,
   for reasons that are themselves the headline finding of this pass (see the
   status header above), not a scenario-writing or fixture defect.
-- **M-H — Standard library complete.** All 16 scenarios written and run.
+- [~] **M-H — Standard library complete.** All 16 scenarios written and run.
   **Exit:** each maps to its `GUARD_TEST_MATRIX.md` rows and that file is
   updated in the same change; `kilnsim run --all` is a one-command
   regression gate.
@@ -1180,7 +1266,7 @@ than left to be inferred.
 
 ## 11. Open questions (resolve before the matching milestone)
 
-1. **Exact J6/J7 mating pinout and voltage levels** — **substantially
+1. [~] **Exact J6/J7 mating pinout and voltage levels** — **substantially
    resolved 2026-08-20** by `docs/HARDWARE.md` §3.1/3.2, which traces the
    full mating table for both connectors (including J6's reverse-pin-order
    trap) against `firmware/KilnFW/docs/HARDWARE.md` and
@@ -1190,7 +1276,7 @@ than left to be inferred.
    item 9 below. Nothing here has been continuity-checked against physical
    silicon; `HARDWARE.md` itself is explicit that it reconciles source
    *documents*, not hardware. (M-A)
-2. **CT input stage transfer function** — read the AD8542 `CurrentSense`
+2. [~] **CT input stage transfer function** — read the AD8542 `CurrentSense`
    sheets to size the transformer/attenuator so "N amps simulated" maps to
    the right burden voltage; then calibrate against `CURRENT_SENSE.md` §5's
    commissioning procedure. **Further resolved 2026-08-20 (`docs/BOM.md`
@@ -1204,16 +1290,16 @@ than left to be inferred.
    ratio is unconfirmed against its datasheet; and `wave_owner.c`'s
    amplitude mapping is still an IDENTITY placeholder pending the real
    calibration procedure — see M-D's status in section 10. (M-D)
-3. ~~DRDY/`~FAULT` over I2C latency~~ — **resolved 2026-08-20:** direct Pico
+3. [x] ~~DRDY/`~FAULT` over I2C latency~~ — **resolved 2026-08-20:** direct Pico
    GPIO (3.4/3.6); no I2C latency question remains.
-4. **Does the ESP's driver ever use write-then-read within one CS assertion**
+4. [ ] **Does the ESP's driver ever use write-then-read within one CS assertion**
    in a pattern the PIO responder must special-case? Audit both masters'
    drivers before freezing the PIO program. **Still open** — no audit
    document exists yet; the PIO program has been corrected for clock
    polarity (see the status header) but this access-pattern question is
    distinct and unanswered. This is explicitly named as part of M-A's exit
    criterion, so M-A cannot close without it either way. (M-A)
-5. ~~DUT power control~~ — **resolved 2026-08-20:** yes, a fixture relay in
+5. [~] ~~DUT power control~~ — **resolved 2026-08-20:** yes, a fixture relay in
    the 12 V feed, MCP23017 #1-driven (3.4); `power_blip` is in scope.
    **One-vs-two-relay question further resolved 2026-08-20
    (`docs/BOM.md` §6): two relays, not one.** The main board has *two*
@@ -1237,18 +1323,18 @@ than left to be inferred.
    measured, so treat the 60 A/190 µs numbers as a planning estimate only,
    pending a scope/current-probe capture at first power-on. See
    `docs/HARDWARE.md` §0 item 6 and §3.7. (M-E)
-6. **Fixture hardware form** — how long does the breadboard harness survive
+6. [ ] **Fixture hardware form** — how long does the breadboard harness survive
    before a real `hardware/SimFixture/` KiCad board is worth it? Revisit
    after M-E. Unchanged — no fixture hardware, breadboard or otherwise, has
    been built yet, so this has not become answerable.
-7. ~~Naming~~ — **resolved 2026-08-20:** stays `SimFW`; README already
+7. [x] ~~Naming~~ — **resolved 2026-08-20:** stays `SimFW`; README already
    disambiguates vs `UnitTestFw`/`UnitTestFixture`.
-8. ~~UnitTestFw protocol reuse mechanics~~ — **resolved 2026-08-20:** the
+8. [~] ~~UnitTestFw protocol reuse mechanics~~ — **resolved 2026-08-20:** the
    protocol core is lifted into `CommonFW` before `UnitTestFw` is deleted;
    PC side is written fresh, nothing imported from its `pc_tools`. The
    extraction itself is now done (`benchproto`); the deletion is still
    pending on the hardware proof section 12 step 2 requires. See section 12.
-9. **NEW — J7 pin 1 contradiction between the two main-board hardware
+9. [ ] **NEW — J7 pin 1 contradiction between the two main-board hardware
    docs.** `firmware/KilnFW/docs/HARDWARE.md` ("Safety thermocouple board
    (J7 -> J1)") says J7 pin 1 is "(no connect)".
    `firmware/SaftyFW/docs/HARDWARE.md` §8 says J7 pin 1 is `3.3v_Safty` (via
@@ -1261,7 +1347,7 @@ than left to be inferred.
    isolator side unpowered. Resolve at bring-up step 5–6 (section 14),
    alongside the ground-domain check that already lives there. (M-A/pre-M-A
    bring-up)
-10. ~~kilnsim's own CLI is missing subcommands `docs/HARDWARE.md`'s bring-up
+10. [x] ~~kilnsim's own CLI is missing subcommands `docs/HARDWARE.md`'s bring-up
     checklist (§6) needs~~ — **resolved 2026-08-20:** `tools/PcTools/src/
     kilnsim/cli.py` now has `io`, `ct`, `relay`, `selftest`, `fault-list`,
     `fault-cancel`, and `fault-fire` subcommand groups; `docs/HARDWARE.md`
@@ -1272,7 +1358,7 @@ than left to be inferred.
     faked — still worth re-checking its exact behavior against its own
     source before leaning on it, since it was landing concurrently with this
     pass. (pre-M-A bring-up convenience)
-11. **NEW — `kilnsim`'s USB auto-detect matches a placeholder VID:PID, not
+11. [ ] **NEW — `kilnsim`'s USB auto-detect matches a placeholder VID:PID, not
     one `SimFW` actually claims.** `tools/PcTools/src/kilnsim/link.py`
     defines `SIMFW_VID_PID = "2E8A:000A"` — Raspberry Pi's generic
     example-board CDC identifier, explicitly commented as a placeholder "until
@@ -1297,7 +1383,7 @@ than left to be inferred.
 thrown away (decided 2026-08-20). Order matters — the protocol lives only
 there today:
 
-1. **Extract first (M-B):** lift the protocol core — framing, CRC,
+1. [x] **Extract first (M-B):** lift the protocol core — framing, CRC,
    reliability/retry/dedup, task registration — out of
    `UnitTestFw/UnitTest/App/drivers/` into `CommonFW` as a pure, host-tested
    library alongside kilnlink (they stay separate protocols; nothing touches
@@ -1306,16 +1392,16 @@ there today:
    Note: `UnitTestFw`'s `uart_protocol.c` is a known stale fork of `KilnFW`'s
    (ROADMAP M2 allowlist) — extract from the best of both, don't blindly copy
    the stale one.
-2. **Prove the replacement:** SimFW's CDC link and the fresh `kilnsim` PC
+2. [ ] **Prove the replacement:** SimFW's CDC link and the fresh `kilnsim` PC
    link layer both speak the `CommonFW`-hosted protocol, PING/VERSION green
    on real hardware. The independent Python implementation doubles as the
    extraction's cross-check.
-3. **Delete, one commit, no stragglers:**
+3. [ ] **Delete, one commit, no stragglers:**
    - `firmware/UnitTestFw/` entirely — App, pc_tools, docs, build trees, and
      the embedded `UnitTestFixture.kicad_*` files plus
      `UnitTestFixture-backups/`.
    - `hardware/UnitTestFixture/` entirely.
-4. **Sweep the references in the same commit** (grep hit list as of
+4. [ ] **Sweep the references in the same commit** (grep hit list as of
    2026-08-20): `CLAUDE.md`, `README.md`, `ROADMAP.md`, `docs/SETUP.md`,
    `docs/REPO_LAYOUT.md`, `kilnCtl.code-workspace` (folder/tasks entries),
    `tools/setup.ps1`, `.gitignore`, and
@@ -1323,7 +1409,7 @@ there today:
    `UnitTestFw`'s `uart_protocol.c` dies with the file (per that script's own
    rule: deleting an allowlist entry is part of finishing a migration).
    Re-grep for `UnitTestFw|UnitTestFixture` before committing.
-5. **No tag needed** — git history is the archive; the deletion commit
+5. [x] **No tag needed** — git history is the archive; the deletion commit
    message names this plan section as the rationale.
 
 ---
@@ -1333,7 +1419,7 @@ there today:
 Originally three layers, cheapest first. A fourth, unplanned layer has since
 appeared between 1 and 2 — see 13.4.
 
-1. **Host tests** (MSVC/CMake, `SaftyFW/test` pattern, `test/`): everything
+1. [x] **Host tests** (MSVC/CMake, `SaftyFW/test` pattern, `test/`): everything
    in `src/sim/` is pure and runs on the PC — thermal model golden traces,
    MAX31856 register machine (feed byte sequences, assert register/SR/DRDY
    behavior against datasheet-derived vectors), fault trigger evaluation
@@ -1341,7 +1427,7 @@ appeared between 1 and 2 — see 13.4.
    ordering), sine-table generation. The register-machine vectors double as
    documentation of what the emulator claims to implement. **Real, done**:
    this is the layer the status header's 4873/4873-class numbers come from.
-2. **Loopback tests** (fixture alone, no DUT): a `kilnsim selftest` mode —
+2. [~] **Loopback tests** (fixture alone, no DUT): a `kilnsim selftest` mode —
    PIO engines clocked by a scripted on-fixture master (spare PIO SM) to
    verify the SPI path end-to-end; CT outputs looped to a spare ADC input
    for amplitude sanity; expander read-after-write. Runs in CI-on-a-bench
@@ -1350,7 +1436,7 @@ appeared between 1 and 2 — see 13.4.
    not trust a specific implementation shape here until that work lands and
    this section is updated again. It remains hardware-adjacent (needs real
    fixture GPIO/SPI/I2C, just not the main board), unlike layer 4 below.
-3. **DUT integration** (the point of the project): the scenario library
+3. [ ] **DUT integration** (the point of the project): the scenario library
    (section 8) against real `KilnFW`+`SaftyFW`. `kilnsim run` exit codes
    make it a scriptable gate; reports are the archived evidence. **Status:
    unchanged, fully hardware-gated** — see section 10's milestone table.
@@ -1413,20 +1499,20 @@ already carries elsewhere in this tree).
 The wiring order is chosen so each step is verifiable before the next adds
 risk, and the DUT is not connected until the fixture alone is proven:
 
-1. Pico alone: USB CDC + protocol + heartbeat; `kilnsim state` works.
-2. Expanders on I2C: read/write, interrupt lines if used.
-3. SPI A loopback (scripted master on spare pins): register machine correct.
-4. CT synthesis into a scope/DMM through the transformer: waveform + levels.
-5. **Ground-domain check before first DUT contact:** with the bring-up
+1. [ ] Pico alone: USB CDC + protocol + heartbeat; `kilnsim state` works.
+2. [ ] Expanders on I2C: read/write, interrupt lines if used.
+3. [ ] SPI A loopback (scripted master on spare pins): register machine correct.
+4. [ ] CT synthesis into a scope/DMM through the transformer: waveform + levels.
+5. [ ] **Ground-domain check before first DUT contact:** with the bring-up
    jumper OUT, verify no continuity fixture-GND ↔ GND_Safty; verify isolator
    and transformer orientation.
-6. DUT thermocouple path: J6 unplugged from the real daughterboard, fixture
+6. [ ] DUT thermocouple path: J6 unplugged from the real daughterboard, fixture
    in its place, `KilnFW` booted — temperatures appear.
-7. Safety path: J7 via isolator, `SaftyFW`'s single channel reads.
-8. Relay sense: command relays via existing kilnctrl tools, fixture sees
+7. [ ] Safety path: J7 via isolator, `SaftyFW`'s single channel reads.
+8. [ ] Relay sense: command relays via existing kilnctrl tools, fixture sees
    edges.
-9. E-stop + fault line + DUT power relay, one at a time.
-10. First closed-loop firing on `fast_test` preset.
+9. [ ] E-stop + fault line + DUT power relay, one at a time.
+10. [ ] First closed-loop firing on `fast_test` preset.
 
 Each step gets a row in `docs/HARDWARE.md`'s checklist when that doc is
 written, same keep-it-current rule as `SaftyFW/docs/HARDWARE.md`.
