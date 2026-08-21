@@ -14,6 +14,7 @@
 #include "ui_confirm.h"
 #include "ui_page_config.h"
 #include "profile_executor.h"
+#include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "run_state.h"
 #include "ui_theme.h"
@@ -113,6 +114,68 @@
 //     picker this page briefly had, traded for the hard no-scroll
 //     requirement. See TODO.md 10.3's status note for this trade-off.
 //
+// 2026-08-21, DESIRED SERIES + PROGRESS BAR RETURN, part 1 (superseded by
+// part 2 below the same day once the backend landed -- kept for history):
+// two more user requests against this same compact chart -- "does the graph
+// draw lines with the temps as the profile progresses, and also show the
+// desired profile on the graph... it should also show a progress bar under
+// the graph with the time elapsed and time left," followed by "i want both
+// the web and the lcd to work this way". Landed first as a stopgap using
+// only data that already existed (profile_executor_get_history()'s recorded
+// desired_c for the chart, per-SEGMENT elapsed/remaining for the bar) because
+// the whole-profile duration accessor a parallel pass was adding to
+// profile_executor.c/profile_feasibility.c/dashboard_http.c was not yet
+// present anywhere under firmware/ when this was first written.
+//
+// 2026-08-21, part 2 (the backend landed later the same day -- this is the
+// CURRENT behaviour): profile_exec_status_t gained segments[]/run_start_c/
+// total_elapsed_s, and profile_feasibility.h gained
+// profile_feasibility_plan_curve() (the straight-line planned-setpoint
+// polyline + total duration, or -1 if any segment's ramp duration is
+// unknowable -- see that header's own HONESTY RULE comment). Both are called
+// directly here (pure math, no zones_http/HTTP dependency, safe from an LVGL
+// refresh timer) -- this file still does not own profile_executor.*/
+// profile_feasibility.*/dashboard_http.* and did not have to.
+//   - Chart: the SECOND series is now the PLANNED curve (ahead of the run),
+//     not the trailing recorded desired_c ui_page_history.c still shows --
+//     s_chart_planned_series/s_chart_planned_pts (still ACCENT_3, same color
+//     the "desired" concept has always used on both pages). Per this page's
+//     own effort note ("if both a planned and a recorded-desired line is too
+//     noisy at this size, planned-ahead is the one that was asked for"), the
+//     70px-tall home chart keeps ONLY actual + planned, not a third trailing-
+//     desired line -- ui_page_history.c (110px, more room) keeps all three.
+//     Both series are now plotted against a SHARED time axis spanning the
+//     WHOLE run (0..the planned curve's own last point time, "horizon_s"),
+//     not the old "last N ring-buffer samples" trailing window: planned is
+//     evaluated at each of this page's UI_PAGE_HOME_CHART_POINTS bucket
+//     times via piecewise-linear interpolation over the curve's own points
+//     (plan_lookup()); actual is looked up per-bucket from the history ring
+//     by approximating the sample index from bucket time / HISTORY_SAMPLE_PERIOD_S
+//     (samples are recorded at that fixed period, so index and elapsed time
+//     are proportional) and left as LV_CHART_POINT_NONE for any bucket whose
+//     time hasn't happened yet (real time > st.total_elapsed_s) -- this is
+//     deliberate: the actual line stops at "now" and the planned line keeps
+//     going, which is the whole point of drawing the schedule ahead of the
+//     run. Recomputed EVERY refresh tick now (not gated on "did the ring
+//     buffer gain a new sample"), since which buckets have already occurred
+//     changes every second even between 30s samples; the per-tick cost is a
+//     handful of single-entry profile_executor_get_history() reads (at most
+//     UI_PAGE_HOME_CHART_POINTS of them), not a bulk copy of the ring buffer
+//     (which can hold up to HISTORY_MAX_SAMPLES=2880 entries -- far too big
+//     to stage as a local array on this board's DRAM budget).
+//   - Progress bar: now shows the WHOLE-FIRING elapsed/remaining
+//     (st.total_elapsed_s / profile_feasibility_plan_curve()'s total), not
+//     the per-segment numbers part 1 above used as a stopgap. Same honesty
+//     rules as before: an unknown total (-1) hides the bar and shows elapsed
+//     only; a known total always labels the remaining figure "(estimate)"
+//     because ramp-lock overrun is never corrected for (this run's total is
+//     an estimate the instant it's known, not just when things go wrong).
+//     The per-segment line part 1 added was DROPPED from the bar itself (no
+//     room to show both a whole-firing line and a segment line in this
+//     page's ~30px progress_row without re-growing the budget) -- segment
+//     detail is still visible via s_state_label's summary line and the
+//     per-zone rows above it.
+//
 // Content-container scrolling is explicitly disabled
 // (LV_OBJ_FLAG_SCROLLABLE cleared on both `scr` and `content` in
 // ui_page_home_build()) now that the content is sized to fit -- if a future
@@ -148,21 +211,25 @@ typedef struct {
 static zone_widgets_t s_zone[MAX31856_CHANNEL_COUNT];
 static uint8_t s_zone_count; /* zones_config_get_thermo_count() at build time */
 
-static lv_obj_t *s_chart;                     /* home page's compact actual-only chart */
-static lv_chart_series_t *s_chart_series;
-/* This array IS the chart's backing store (lv_chart_set_series_ext_y_array()),
- * not a scratch copy, so it must outlive the chart -- static, matching every
+static lv_obj_t *s_chart;                     /* home page's compact chart -- actual + planned-ahead */
+static lv_chart_series_t *s_chart_actual_series;
+static lv_chart_series_t *s_chart_planned_series;
+/* These arrays ARE the chart's backing store (lv_chart_set_series_ext_y_array()),
+ * not a scratch copy, so they must outlive the chart -- static, matching every
  * other widget on this page's "built once, page never torn down" lifetime
- * (kiln_ui.h's header comment). This is a SEPARATE array from
- * ui_page_history.c's s_chart_actual_pts/s_chart_desired_pts -- both pages
- * exist for the app's whole lifetime (never torn down), so aliasing one
- * static array between two live charts would have one page's
- * lv_chart_set_series_ext_y_array() call silently stomp the other's chart
- * data every refresh. Size: UI_PAGE_HOME_CHART_POINTS (30) * 4 bytes = 120
- * bytes, comfortably small next to the ~4167-byte internal-DRAM headroom
- * this codebase runs under -- not moved to PSRAM. */
-static int32_t s_chart_pts[UI_PAGE_HOME_CHART_POINTS];
-static size_t s_chart_last_count;
+ * (kiln_ui.h's header comment). SEPARATE arrays from
+ * ui_page_history.c's own chart arrays -- both pages exist for the app's
+ * whole lifetime (never torn down), so aliasing one static array between two
+ * live charts would have one page's lv_chart_set_series_ext_y_array() call
+ * silently stomp the other's chart data every refresh. Size: 2 *
+ * UI_PAGE_HOME_CHART_POINTS (30) * 4 bytes = 240 bytes total -- comfortably
+ * small next to the ~4167-byte internal-DRAM headroom this codebase runs
+ * under, not moved to PSRAM. 2026-08-21 part 2 (see this file's header
+ * comment): this is now the PLANNED-ahead curve, not a trailing recorded
+ * desired_c -- see refresh_cb()'s plan_lookup()/plan_pts usage. No size
+ * change from part 1 (still one int32 per bucket). */
+static int32_t s_chart_actual_pts[UI_PAGE_HOME_CHART_POINTS];
+static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
 
 static lv_obj_t *s_state_label;   /* "<profile> -- <state>" single line */
 static lv_obj_t *s_time_label;
@@ -501,6 +568,38 @@ static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
     s_zone[zone_index].heat_label = heat;
 }
 
+/* Piecewise-linear sample of a profile_feasibility_plan_curve() point list at
+ * time t (seconds from run start). pts[] is ordered by increasing t (the
+ * order profile_feasibility_plan_curve() writes them in) -- t before the
+ * first point holds the first point's value (there is no "before start"),
+ * and t past the last point holds the LAST point's value (the chart's
+ * horizon is derived from the last point's own time, so this only matters
+ * for a t that lands exactly on it due to float rounding). A zero-width
+ * step (t1<=t0, an unknown-duration ramp segment -- see
+ * profile_feasibility.h's HONESTY RULE) holds the step's arrival value
+ * rather than dividing by zero. Returns NAN if pts is empty. */
+static float plan_lookup(const profile_plan_point_t *pts, size_t n, float t)
+{
+    if (n == 0) {
+        return NAN;
+    }
+    if (t <= pts[0].t) {
+        return pts[0].c;
+    }
+    for (size_t i = 1; i < n; i++) {
+        if (t <= pts[i].t) {
+            float t0 = pts[i - 1].t, t1 = pts[i].t;
+            float c0 = pts[i - 1].c, c1 = pts[i].c;
+            if (t1 <= t0) {
+                return c1;
+            }
+            float f = (t - t0) / (t1 - t0);
+            return c0 + f * (c1 - c0);
+        }
+    }
+    return pts[n - 1].c;
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -521,13 +620,20 @@ static void refresh_cb(lv_timer_t *timer)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
-    /* Compact home chart -- see this file's header comment ("CHART
-     * RETURNS") for the idle-dot vs. running-trend split. Same
-     * state==IDLE && history_count==0 gate ui_page_history.c uses, so both
-     * pages flip from dot to trend at the exact same instant. */
+    /* Compact home chart -- see this file's header comment ("DESIRED SERIES
+     * + PROGRESS BAR RETURN, part 2") for the idle-dot vs. whole-run-timeline
+     * split. Same state==IDLE && history_count==0 gate ui_page_history.c
+     * uses, so both pages flip from dot to timeline at the exact same
+     * instant. profile_feasibility_plan_curve() is also used by the
+     * progress-bar block further down -- computed once here and passed down
+     * rather than called twice per tick. */
+    int64_t total_planned_s = -1;
+    profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
+    size_t plan_n = 0;
     if (st.state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
         for (uint32_t i = 1; i < UI_PAGE_HOME_CHART_POINTS; i++) {
-            s_chart_pts[i] = LV_CHART_POINT_NONE;
+            s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
+            s_chart_planned_pts[i] = LV_CHART_POINT_NONE;
         }
         /* Representative zone -- same "first configured zone" convention
          * build_zone_row()'s loop and ui_page_history.c's idle-fallback
@@ -544,52 +650,93 @@ static void refresh_cb(lv_timer_t *timer)
                 }
             }
         }
+        /* No planned curve without a running profile -- same rule
+         * ui_page_history.c's idle branch documents. */
+        s_chart_planned_pts[0] = LV_CHART_POINT_NONE;
         if (!isnan(val)) {
             int32_t v = (int32_t)lroundf(val);
-            s_chart_pts[0] = v;
+            s_chart_actual_pts[0] = v;
             lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, v - 10, v + 10);
         } else {
-            s_chart_pts[0] = LV_CHART_POINT_NONE;
+            s_chart_actual_pts[0] = LV_CHART_POINT_NONE;
         }
-        s_chart_last_count = 0; /* next real sample (count==1) must still trigger the trend branch */
         lv_chart_refresh(s_chart);
     } else {
+        /* Running/paused/done/faulted: segments[]/run_start_c/total_elapsed_s
+         * are all meaningful once state != IDLE (profile_executor.h's own
+         * field comments) -- profile_feasibility_plan_curve() is pure math
+         * over that copy, safe to call from this refresh timer every tick. */
+        total_planned_s = profile_feasibility_plan_curve(st.segments, st.segment_count, st.run_start_c,
+                                                          plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
+                                                          &plan_n);
+        float horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
+        if (horizon_s < 1.0f) {
+            horizon_s = 1.0f; /* guard div-by-zero below; a real profile always has segments */
+        }
+
         size_t count = profile_executor_get_history_count();
-        if (count != s_chart_last_count) {
-            s_chart_last_count = count;
-            if (count == 0) {
-                for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
-                    s_chart_pts[i] = LV_CHART_POINT_NONE;
-                }
-            } else {
-                size_t n = count < UI_PAGE_HOME_CHART_POINTS ? count : UI_PAGE_HOME_CHART_POINTS;
-                size_t start = count - n;
-                profile_history_entry_t batch[UI_PAGE_HOME_CHART_POINTS];
-                size_t got = profile_executor_get_history(batch, start, n);
-                size_t pad = UI_PAGE_HOME_CHART_POINTS - got;
-                for (size_t i = 0; i < pad; i++) {
-                    s_chart_pts[i] = LV_CHART_POINT_NONE;
-                }
-                unit_pref_t unit = unit_pref_get();
-                bool have_range = false;
-                float lo = 0.0f, hi = 0.0f;
-                for (size_t i = 0; i < got; i++) {
-                    float a = unit_pref_convert(batch[i].actual_c, unit, UNIT_PREF_KIND_ABSOLUTE);
-                    s_chart_pts[pad + i] = isnan(a) ? LV_CHART_POINT_NONE : (int32_t)lroundf(a);
-                    if (!isnan(a)) {
-                        if (!have_range) { lo = hi = a; have_range = true; } else { if (a < lo) lo = a; if (a > hi) hi = a; }
+        unit_pref_t unit = unit_pref_get();
+        bool have_range = false;
+        float lo = 0.0f, hi = 0.0f;
+        for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+            float t_i = (UI_PAGE_HOME_CHART_POINTS > 1)
+                            ? (float)i * horizon_s / (float)(UI_PAGE_HOME_CHART_POINTS - 1)
+                            : 0.0f;
+
+            float planned_c = plan_lookup(plan_pts, plan_n, t_i);
+            float planned_disp = unit_pref_convert(planned_c, unit, UNIT_PREF_KIND_ABSOLUTE);
+            s_chart_planned_pts[i] = isnan(planned_disp) ? LV_CHART_POINT_NONE : (int32_t)lroundf(planned_disp);
+            if (!isnan(planned_disp)) {
+                if (!have_range) { lo = hi = planned_disp; have_range = true; }
+                else { if (planned_disp < lo) lo = planned_disp; if (planned_disp > hi) hi = planned_disp; }
+            }
+
+            /* Actual stops at "now" -- a bucket time in the future (past
+             * st.total_elapsed_s) has no recorded sample yet, and showing
+             * one would fabricate data that hasn't happened. */
+            bool have_actual = false;
+            float actual_c = NAN;
+            if (t_i <= (float)st.total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
+                if (count > 0) {
+                    /* Samples are recorded every HISTORY_SAMPLE_PERIOD_S
+                     * seconds of real time, so ring index and elapsed time
+                     * are proportional -- this avoids paging the whole ring
+                     * (up to HISTORY_MAX_SAMPLES=2880 entries, far too big
+                     * for a local buffer here) for a single-entry lookup. */
+                    size_t idx = (size_t)lroundf(t_i / (float)HISTORY_SAMPLE_PERIOD_S);
+                    if (idx >= count) idx = count - 1;
+                    profile_history_entry_t entry;
+                    if (profile_executor_get_history(&entry, idx, 1) == 1) {
+                        actual_c = entry.actual_c;
+                        have_actual = true;
                     }
-                }
-                if (have_range) {
-                    float range = hi - lo;
-                    if (range < 1.0f) range = 1.0f;
-                    float pad_c = range * 0.1f;
-                    lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (int32_t)lroundf(lo - pad_c),
-                                            (int32_t)lroundf(hi + pad_c));
+                } else if (i == 0) {
+                    /* No samples recorded yet this tick, but the run's real
+                     * starting temperature is known -- anchor bucket 0 to it
+                     * rather than leaving even the start blank. */
+                    actual_c = st.run_start_c;
+                    have_actual = true;
                 }
             }
-            lv_chart_refresh(s_chart);
+            if (have_actual) {
+                float disp = unit_pref_convert(actual_c, unit, UNIT_PREF_KIND_ABSOLUTE);
+                s_chart_actual_pts[i] = isnan(disp) ? LV_CHART_POINT_NONE : (int32_t)lroundf(disp);
+                if (!isnan(disp)) {
+                    if (!have_range) { lo = hi = disp; have_range = true; }
+                    else { if (disp < lo) lo = disp; if (disp > hi) hi = disp; }
+                }
+            } else {
+                s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
+            }
         }
+        if (have_range) {
+            float range = hi - lo;
+            if (range < 1.0f) range = 1.0f;
+            float pad_c = range * 0.1f;
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (int32_t)lroundf(lo - pad_c),
+                                    (int32_t)lroundf(hi + pad_c));
+        }
+        lv_chart_refresh(s_chart);
     }
 
     for (uint8_t zi = 0; zi < s_zone_count; zi++) {
@@ -668,37 +815,65 @@ static void refresh_cb(lv_timer_t *timer)
         lv_obj_set_style_bg_color(s_fire_btn, UI_THEME_ACCENT_4, 0);
     }
 
-    /* Elapsed/remaining are per-SEGMENT, not whole-profile totals -- that is
-     * all profile_executor_get_status() computes (see profile_executor.h),
-     * and it is exactly what main_page.html already shows for GET
-     * /api/profile_exec ("Into the segment" / "Dwell remaining"), so this
-     * matches section 2's web dashboard rather than inventing a
-     * whole-profile total the backend doesn't track. */
+    /* Progress bar under the chart -- WHOLE-FIRING elapsed/remaining
+     * (2026-08-21 part 2; see this file's header comment). total_planned_s
+     * was already computed above (in the chart block) from the SAME
+     * profile_feasibility_plan_curve() call this bar needs -- reused here
+     * rather than calling it twice per tick. st.total_elapsed_s is real
+     * wall-clock seconds since profile_executor_run() (frozen across PAUSE
+     * by the executor itself, per that field's own comment), NOT the
+     * per-segment segment_elapsed_s this block used as a stopgap before the
+     * backend landed.
+     *
+     * HONESTY RULES (unchanged from the stopgap, now applied to the
+     * whole-firing numbers instead of per-segment ones):
+     *   - total_planned_s < 0 (any segment's ramp duration is unknowable,
+     *     per profile_feasibility.h's HONESTY RULE): no denominator -- show
+     *     elapsed only, HIDE the bar outright (not a 0%/100% fill, which
+     *     would misread as empty/full).
+     *   - total_planned_s >= 0: remaining = total - elapsed is always an
+     *     ESTIMATE the instant it's known, not just when it goes wrong --
+     *     ramp-lock overrun (profile_executor.h's ramp_lock_held) is never
+     *     corrected for in this number, so it is labeled "(estimate)"
+     *     unconditionally, same as main_page.html's remaining_is_estimate
+     *     (which the web page's backend sets unconditionally for the same
+     *     reason). Clamped to 0 rather than going negative if the firing
+     *     has already overrun its plan.
+     * The per-segment line the stopgap version showed here (e.g. "Segment:
+     * elapsed X / remaining Y") did not fit alongside a whole-firing line in
+     * this page's ~30px progress_row without re-growing the budget, so it
+     * was DROPPED from this bar -- segment context is still visible via
+     * s_state_label's summary line above. */
     char elapsed_buf[16];
-    format_duration(st.segment_elapsed_s, elapsed_buf, sizeof(elapsed_buf));
-    if (st.dwelling) {
-        char remaining_buf[16];
-        format_duration(st.dwell_remaining_s, remaining_buf, sizeof(remaining_buf));
-        /* 64, not 48: "Elapsed " + up to 15 bytes of elapsed_buf + " / Remaining "
-         * + up to 15 bytes of remaining_buf can reach 51 bytes plus the NUL --
-         * -Werror=format-truncation caught this statically. */
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Elapsed %s / Remaining %s", elapsed_buf, remaining_buf);
-        lv_label_set_text(s_time_label, buf);
-        uint32_t total = st.segment_elapsed_s + st.dwell_remaining_s;
-        int32_t pct = total > 0 ? (int32_t)((uint64_t)st.segment_elapsed_s * 100u / total) : 0;
-        lv_bar_set_value(s_progress_bar, pct, LV_ANIM_OFF);
-    } else if (st.state == PROFILE_EXEC_RUNNING || st.state == PROFILE_EXEC_PAUSED) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "Elapsed %s (ramping)", elapsed_buf);
-        lv_label_set_text(s_time_label, buf);
-        /* No total ramp duration is tracked anywhere in the backend --
-         * see the header comment above. 0 rather than a fabricated
-         * percentage. */
-        lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
-    } else {
+    format_duration(st.total_elapsed_s, elapsed_buf, sizeof(elapsed_buf));
+    if (st.state == PROFILE_EXEC_IDLE) {
         lv_label_set_text(s_time_label, "--");
-        lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+        lv_obj_add_flag(s_progress_bar, LV_OBJ_FLAG_HIDDEN);
+    } else if (total_planned_s < 0) {
+        /* 48: "Elapsed " (8) + up to 15 bytes of elapsed_buf + " (total
+         * unknown)" (16) + NUL = 40 max -- fits with margin. */
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Elapsed %s (total unknown)", elapsed_buf);
+        lv_label_set_text(s_time_label, buf);
+        lv_obj_add_flag(s_progress_bar, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        uint32_t total = (uint32_t)total_planned_s;
+        uint32_t elapsed = st.total_elapsed_s;
+        uint32_t remaining = (elapsed < total) ? (total - elapsed) : 0;
+        char remaining_buf[16];
+        format_duration(remaining, remaining_buf, sizeof(remaining_buf));
+        /* 80, not 64: "Elapsed " (8) + 15 + " / Remaining " (13) + 15 +
+         * " (estimate)" (11) + NUL can reach 63 bytes -- rounded up with
+         * margin rather than computed to the exact byte, same discipline
+         * -Werror=format-truncation already enforced on the other buffers
+         * in this file. */
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Elapsed %s / Remaining %s (estimate)", elapsed_buf, remaining_buf);
+        lv_label_set_text(s_time_label, buf);
+        int32_t pct = total > 0 ? (int32_t)((uint64_t)elapsed * 100u / total) : 100;
+        if (pct > 100) pct = 100;
+        lv_obj_remove_flag(s_progress_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_bar_set_value(s_progress_bar, pct, LV_ANIM_OFF);
     }
 }
 
@@ -840,14 +1015,51 @@ lv_obj_t *ui_page_home_build(void)
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_div_line_count(s_chart, 2, 4);
     lv_chart_set_point_count(s_chart, UI_PAGE_HOME_CHART_POINTS);
-    s_chart_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_1, LV_CHART_AXIS_PRIMARY_Y);
+    /* Same "desired" accent color ui_page_history.c uses (ACCENT_3), now
+     * carrying the PLANNED-ahead curve instead of a trailing recorded
+     * setpoint -- see this file's header comment, part 2. No legend on this
+     * compact chart (no room in the 70px-tall budget); the full chart with a
+     * legend remains ui_page_history.c's job. */
+    s_chart_actual_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_1, LV_CHART_AXIS_PRIMARY_Y);
+    s_chart_planned_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_3, LV_CHART_AXIS_PRIMARY_Y);
     for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
-        s_chart_pts[i] = LV_CHART_POINT_NONE;
+        s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
+        s_chart_planned_pts[i] = LV_CHART_POINT_NONE;
     }
-    lv_chart_set_series_ext_y_array(s_chart, s_chart_series, s_chart_pts);
+    lv_chart_set_series_ext_y_array(s_chart, s_chart_actual_series, s_chart_actual_pts);
+    lv_chart_set_series_ext_y_array(s_chart, s_chart_planned_series, s_chart_planned_pts);
     lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-    s_chart_last_count = (size_t)-1;
     lv_obj_remove_flag(s_chart, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Progress row -- UNDER the chart, per the 2026-08-21 request ("show a
+     * progress bar under the graph with the time elapsed and time left").
+     * MOVED here (not duplicated) from inside state_card, where s_time_label/
+     * s_progress_bar used to live -- see this file's header comment
+     * ("DESIRED SERIES + PROGRESS BAR RETURN") for why one bar in one place
+     * beats two progress indicators on the same screen. A plain (non-
+     * floating) child of `content`'s flex column, so it consumes real
+     * main-axis height like every other fixed row here -- see the action-row
+     * comment below for the updated budget arithmetic this adds a line to. */
+    lv_obj_t *progress_row = lv_obj_create(content);
+    lv_obj_set_width(progress_row, lv_pct(100));
+    lv_obj_set_height(progress_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(progress_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(progress_row, 0, 0);
+    lv_obj_set_style_pad_all(progress_row, 0, 0);
+    lv_obj_set_flex_flow(progress_row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(progress_row, 2, 0);
+    lv_obj_remove_flag(progress_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_time_label = lv_label_create(progress_row);
+    lv_obj_set_style_text_color(s_time_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_time_label, "--");
+
+    s_progress_bar = lv_bar_create(progress_row);
+    lv_obj_set_width(s_progress_bar, lv_pct(100));
+    lv_obj_set_height(s_progress_bar, 8);
+    lv_bar_set_range(s_progress_bar, 0, 100);
+    lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_progress_bar, UI_THEME_ACCENT_3, LV_PART_INDICATOR);
 
     /* Zones (TODO.md 10.3: "each configured zone, its current temperature,
      * and its heater on/off status"). Widgets built for however many zones
@@ -867,37 +1079,20 @@ lv_obj_t *ui_page_home_build(void)
         }
     }
 
-    /* Compact run-state card -- one summary line, one time/progress line, a
-     * slim progress bar. Trimmed from the previous 4-widget card (separate
-     * profile-name and state labels, a full-height picker) specifically to
-     * fit this page's budget -- see this file's header comment.
-     *
-     * 2026-08-21: flex_grow(1) added (height is no longer LV_SIZE_CONTENT-
-     * only -- grow overrides the main-axis size regardless of the explicit
-     * LV_SIZE_CONTENT set below, same as build_button()'s flex_grow(1)
-     * already overrides its own explicit width within action_row). This is
-     * the "give the reclaimed space to the content above" half of the
-     * bottom-button change below: before this, `content`'s children (zone
-     * rows, this card, the action row) each sized to their own natural
-     * content height and simply stacked at the TOP of `content`, leaving
-     * whatever `content` had left over as dead, unrendered space below the
-     * action row -- confirmed against the live hardware tap-target dump
-     * this change was requested against (content ran y=44..311, but the
-     * button's own tap target ended at y=201, leaving y=201..311, 110px,
-     * doing nothing). Making the run-state card the one flex-growing child
-     * means it now consumes exactly that leftover main-axis space -- neither
-     * more nor less, by construction of how CSS-style flex-grow distributes
-     * remaining space -- which both reclaims the dead 110px and pushes the
-     * action row down to sit flush against `content`'s bottom edge, with no
-     * lv_obj_align()/floating trick needed (see the action-row comment below
-     * for why that would have been the wrong tool here). No chart lives in
-     * this card or anywhere else on this page -- see this file's header
-     * comment for why (TODO.md 10.3's chart was deliberately moved to
-     * ui_page_history.c, not merely omitted by oversight); the space is
-     * reserved for exactly what already lives here (the state/time labels
-     * and the progress bar), which simply get more headroom and a taller
-     * progress bar's surrounding card now that they are not squeezed against
-     * a 71px-tall button directly below them. */
+    /* Compact run-state card -- 2026-08-21: now ONE summary line only
+     * ("<profile> -- <state>"); s_time_label/s_progress_bar MOVED out of
+     * this card into progress_row (built above, directly under the chart) --
+     * see this file's header comment ("DESIRED SERIES + PROGRESS BAR
+     * RETURN") for why. flex_grow(1) is kept even though this card now holds
+     * less content: `content`'s children don't otherwise sum to exactly its
+     * height at every zone count, and giving the leftover main-axis space to
+     * this one-line card (rather than to a gap or the button) is still the
+     * simplest way to pin the action row to `content`'s bottom edge without
+     * an lv_obj_align()/floating trick -- same reasoning as before this
+     * card's contents were trimmed, just with a smaller worst-case leftover
+     * now that progress_row is its own fixed-height sibling instead of living
+     * inside this card. See the action-row comment below for the updated
+     * arithmetic including progress_row's line. */
     lv_obj_t *state_card = lv_obj_create(content);
     lv_obj_set_width(state_card, lv_pct(100));
     lv_obj_set_height(state_card, LV_SIZE_CONTENT);
@@ -912,17 +1107,6 @@ lv_obj_t *ui_page_home_build(void)
     s_state_label = lv_label_create(state_card);
     lv_obj_set_style_text_color(s_state_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(s_state_label, "No profile running");
-
-    s_time_label = lv_label_create(state_card);
-    lv_obj_set_style_text_color(s_time_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_time_label, "--");
-
-    s_progress_bar = lv_bar_create(state_card);
-    lv_obj_set_width(s_progress_bar, lv_pct(100));
-    lv_obj_set_height(s_progress_bar, 10);
-    lv_bar_set_range(s_progress_bar, 0, 100);
-    lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_progress_bar, UI_THEME_ACCENT_3, LV_PART_INDICATOR);
 
     /* Single merged Start/Stop button -- one user-visible request ("the
      * start stop button should be one button on the lcd"). Menu moved off
@@ -950,36 +1134,42 @@ lv_obj_t *ui_page_home_build(void)
      * absorbs both the space this button gives up and the ~110px of content
      * space that was already going unused below the old 71px button.
      *
-     *     chart (actual-only, home-compact) ..... UI_PAGE_HOME_CHART_HEIGHT_PX = 70px
+     *     chart (actual+desired, home-compact) .. UI_PAGE_HOME_CHART_HEIGHT_PX = 70px
+     *     gap ..................................... UI_THEME_PADDING_PX/2 = 4px
+     *     progress row (time label + slim bar) .. ~30px (20px label line + 2px gap + 8px bar)
      *     gap ..................................... UI_THEME_PADDING_PX/2 = 4px
      *     zone rows (up to 3, compact) ......... variable, unchanged
      *     gap x (zone rows) ...................... UI_THEME_PADDING_PX/2 = 4px each
-     *     state card (2 lines + progress bar) ... flex_grow(1): whatever's left
+     *     state card (1 summary line) ........... flex_grow(1): whatever's left
      *     gap .................................... UI_THEME_PADDING_PX/2 = 4px
      *     action row: 1 button, drawn ........... 36px (was 71px measured / 72px coded)
      *
-     * UPDATED 2026-08-21 (chart re-added to this page, see the header
-     * comment's "CHART RETURNS" section): because state_card is still the
-     * one flex-growing child, this "adds up" by construction (flex-grow
-     * absorbs exactly whatever main-axis space is left in `content` -- it
-     * cannot overflow the 267px measured budget any more than any other
-     * flex-grow child could). The only thing worth checking is that the
-     * FIXED children alone (everything except state_card) never exceed
-     * 267px outright, which would starve state_card to a negative/zero
-     * height. `content` now has 6 children (chart, up to 3 zone rows,
-     * state_card, action_row) instead of 5, so there are 5 gaps, not 4.
+     * UPDATED 2026-08-21 (progress row added under the chart, moved out of
+     * state_card -- see this file's header comment, "DESIRED SERIES +
+     * PROGRESS BAR RETURN"): because state_card is still the one
+     * flex-growing child, this "adds up" by construction (flex-grow absorbs
+     * exactly whatever main-axis space is left in `content` -- it cannot
+     * overflow the 267px measured budget any more than any other flex-grow
+     * child could). The only thing worth checking is that the FIXED
+     * children alone (everything except state_card) never exceed 267px
+     * outright, which would starve state_card to a negative/zero height.
+     * `content` now has 7 children (chart, progress_row, up to 3 zone rows,
+     * state_card, action_row) instead of 6, so there are 6 gaps, not 5.
      * Worst case (3 zones, ~19px each, same hardware-measured figure as
-     * before) plus the new 70px chart plus 5 gaps at 4px plus the 36px
-     * button:
-     *     70 + 3*19 + 5*4 + 36 = 70 + 57 + 20 + 36 = 183px fixed, leaving
-     *     267 - 183 = 84px for state_card in the worst (3-zone) case --
-     * still comfortably positive (2 short labels + a 10px-tall progress bar
-     * fit well inside 84px, same widgets this card already held when it had
-     * 158px to itself -- they just get less slack now), so state_card never
-     * collapses to zero even at MAX31856_CHANNEL_COUNT (3) zones. If a
-     * future zone gains enough label text to push a row past ~19px, or a
-     * 4th zone is ever added, re-derive this number rather than assume it
-     * still holds.
+     * before) plus the 70px chart plus the ~30px progress row plus 6 gaps
+     * at 4px plus the 36px button:
+     *     70 + 30 + 3*19 + 6*4 + 36 = 70 + 30 + 57 + 24 + 36 = 217px fixed,
+     *     leaving 267 - 217 = 50px for state_card in the worst (3-zone) case
+     * -- comfortably positive for the one short summary line state_card now
+     * holds (it needs roughly UI_THEME_PADDING_PX/2 * 2 pad + a ~20px text
+     * line =~ 28px), so state_card never collapses to zero even at
+     * MAX31856_CHANNEL_COUNT (3) zones. If a future zone gains enough label
+     * text to push a row past ~19px, or a 4th zone is ever added, re-derive
+     * this number rather than assume it still holds. NOT re-measured on
+     * hardware since this pass (no bench access when this was written) --
+     * treat "50px leftover" as computed against the same real, hardware-
+     * measured 267px content height and 19px-per-zone-row figure as before,
+     * not as pixel-verified for this specific new layout.
      *
      * Drawn vs effective button height: build_button()'s
      * ui_theme_apply_touch_area(btn, false) call reads back the button's
@@ -1002,15 +1192,17 @@ lv_obj_t *ui_page_home_build(void)
      *
      * Hit-test conflict check (the user's explicit ask: does the
      * upward-extended click area steal taps from state_card above it?):
-     * state_card and everything inside it (s_state_label, s_time_label,
-     * s_progress_bar -- all lv_label_create()/lv_bar_create() calls above,
-     * none followed by lv_obj_add_flag(..., LV_OBJ_FLAG_CLICKABLE)) are NOT
+     * state_card and everything inside it (now just s_state_label) -- and,
+     * further up the page, progress_row and everything inside IT
+     * (s_time_label, s_progress_bar, moved here 2026-08-21) -- are all
+     * lv_obj_create()/lv_label_create()/lv_bar_create() calls, none followed
+     * by lv_obj_add_flag(..., LV_OBJ_FLAG_CLICKABLE)), so none of them are
      * clickable. lv_obj_create() and lv_label_create() do not add
      * LV_OBJ_FLAG_CLICKABLE by default in LVGL 9.5, and nothing in this file
-     * adds it to state_card or its children -- confirmed by reading every
-     * lv_obj_create/lv_label_create/lv_bar_create call above this comment;
-     * only lv_button_create() (used solely by build_button() for
-     * s_fire_btn) is clickable by default. Since LVGL's hit-test
+     * adds it to state_card, progress_row, or their children -- confirmed by
+     * reading every lv_obj_create/lv_label_create/lv_bar_create call above
+     * this comment; only lv_button_create() (used solely by build_button()
+     * for s_fire_btn) is clickable by default. Since LVGL's hit-test
      * (lv_indev_search_obj(), see ui_theme.h's block comment) only considers
      * CLICKABLE objects at all, the button's 24px upward halo landing on
      * non-clickable state_card content is a no-op: there is nothing above

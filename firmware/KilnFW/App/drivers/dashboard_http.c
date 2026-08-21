@@ -19,6 +19,8 @@
 #include "nvs_report.h"
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see the ERR_UPDATING case below */
 #include "profile_executor.h"
+#include "profile_feasibility.h" /* profile_feasibility_plan_curve() -- the duration model, see below */
+#include "profiles_http.h" /* profiles_http_get() -- /api/profile_plan, see that handler below */
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
@@ -866,6 +868,76 @@ static size_t append_last_run_json(char *json, size_t cap, size_t o)
     return (n < 0 || (size_t)n >= cap - o) ? o : o + (size_t)n;
 }
 
+/* ---- Planned-curve duration model -----------------------------------------
+ *
+ * Backs /api/profile_exec's total_planned_s/elapsed_s/remaining_s/
+ * remaining_is_estimate and GET /api/profile_plan's polyline -- the actual
+ * math and its one honesty rule (a zero/negative ramp_c_per_hr segment has
+ * an UNKNOWN duration, not a zero one) live in
+ * profile_feasibility_plan_curve() (profile_feasibility.h/.c), where they
+ * are host-tested; this file only decides WHICH start_c to hand it and
+ * shapes the JSON. */
+#define PLAN_MAX_POINTS (PROFILE_MAX_SEGMENTS * 2 + 1)
+
+/* start_c fallback for an idle/preview /api/profile_plan call (the profile
+ * named isn't the one actually running, so there is no real starting
+ * temperature to know yet) -- matches profile_feasibility.c's
+ * FEASIBILITY_AMBIENT_C and profile_executor.c's FALLBACK_AMBIENT_C. Kept as
+ * its own constant here (not a shared #include) for the same reason those
+ * two don't share one: each caller asks a different question, at a
+ * different time, and 20 C is coincidentally the right idle-room answer to
+ * all of them, not a value one owns and the others borrow. */
+#define PROFILE_PLAN_PREVIEW_AMBIENT_C 20.0f
+
+/* Fills in the four exec-status timing fields from a status snapshot. IDLE
+ * reports elapsed 0 and everything else unknown/absent -- there is no run to
+ * time. DONE reports remaining 0 exactly (a real, not estimated, answer: the
+ * run finished). FAULTED reports remaining unknown -- the run stopped short
+ * of the plan with no path back to RUNNING except halt() then a fresh
+ * run(), and "time left on a schedule nothing is following anymore" has no
+ * honest number. RUNNING/PAUSED report remaining_is_estimate true
+ * unconditionally whenever the total is known at all: ramp-lock can always
+ * overrun the plan if a zone lags, and this module does not attempt to
+ * correct for observed lag (see the report this task asked for) -- it is a
+ * plan-only estimate, every time, not just when a lag is currently visible. */
+static void plan_exec_fields(const profile_exec_status_t *st, int64_t *out_total_planned_s,
+                             uint32_t *out_elapsed_s, int64_t *out_remaining_s, bool *out_remaining_is_estimate)
+{
+    *out_elapsed_s = 0;
+    *out_total_planned_s = -1;
+    *out_remaining_s = -1;
+    *out_remaining_is_estimate = false;
+
+    if (st->state == PROFILE_EXEC_IDLE) {
+        return;
+    }
+
+    *out_elapsed_s = st->total_elapsed_s;
+    int64_t total = profile_feasibility_plan_curve(st->segments, st->segment_count, st->run_start_c,
+                                                   NULL, 0, NULL);
+    *out_total_planned_s = total;
+
+    switch (st->state) {
+    case PROFILE_EXEC_DONE:
+        *out_remaining_s = 0;
+        *out_remaining_is_estimate = false;
+        break;
+    case PROFILE_EXEC_FAULTED:
+        *out_remaining_s = -1;
+        *out_remaining_is_estimate = false;
+        break;
+    case PROFILE_EXEC_RUNNING:
+    case PROFILE_EXEC_PAUSED:
+    default:
+        if (total >= 0) {
+            int64_t rem = total - (int64_t)st->total_elapsed_s;
+            *out_remaining_s = rem > 0 ? rem : 0;
+            *out_remaining_is_estimate = true;
+        }
+        break;
+    }
+}
+
 static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
 {
     profile_exec_status_t st;
@@ -876,25 +948,44 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
     char reason_escaped[sizeof(st.fault_reason) * 2 + 1];
     json_escape(st.fault_reason, reason_escaped, sizeof(reason_escaped));
 
+    int64_t total_planned_s, remaining_s;
+    uint32_t elapsed_s;
+    bool remaining_is_estimate;
+    plan_exec_fields(&st, &total_planned_s, &elapsed_s, &remaining_s, &remaining_is_estimate);
+    char total_planned_buf[24], remaining_buf[24];
+    if (total_planned_s < 0) {
+        snprintf(total_planned_buf, sizeof(total_planned_buf), "null");
+    } else {
+        snprintf(total_planned_buf, sizeof(total_planned_buf), "%lld", (long long)total_planned_s);
+    }
+    if (remaining_s < 0) {
+        snprintf(remaining_buf, sizeof(remaining_buf), "null");
+    } else {
+        snprintf(remaining_buf, sizeof(remaining_buf), "%lld", (long long)remaining_s);
+    }
+
     /* Sized against the real worst case rather than the previous estimate.
      * Per zone the exec shape can emit a fully backslash-escaped 95-char
      * fault_reason (190 bytes) on top of ~130 bytes of fixed keys, so 320,
      * not 224 -- 224 was already optimistic before this change and would
      * have truncated mid-object into invalid JSON in a multi-zone fault. The
-     * 896-byte fixed part covers the run-level line (its own escaped reason)
-     * plus the "last_run" object at ITS worst case. The httpd task runs on
-     * an 8192-byte stack (wifi_provision_http.c), so ~2.5 KB here is
-     * comfortable. */
-    char json[896 + MAX31856_CHANNEL_COUNT * 320];
+     * 960-byte fixed part covers the run-level line (its own escaped reason,
+     * plus the four duration-model fields added for the profile-plan
+     * contract -- at most ~48 bytes more) plus the "last_run" object at ITS
+     * worst case. The httpd task runs on an 8192-byte stack
+     * (wifi_provision_http.c), so ~2.5 KB here is comfortable. */
+    char json[960 + MAX31856_CHANNEL_COUNT * 320];
     int n = snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"profile_id\":%u,\"profile_name\":\"%s\",\"zone_mask\":%u,"
         "\"segment_index\":%u,\"segment_count\":%u,\"dwelling\":%s,\"target_c\":%.2f,"
         "\"segment_elapsed_s\":%lu,\"dwell_remaining_s\":%lu,\"ramp_lock_held\":%s,"
-        "\"ramp_lock_lagging_mask\":%u,\"fault_reason\":\"%s\",\"fault_guard\":%u,",
+        "\"ramp_lock_lagging_mask\":%u,\"fault_reason\":\"%s\",\"fault_guard\":%u,"
+        "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
         exec_state_name(st.state), st.profile_id, name_escaped, st.zone_mask, st.segment_index,
         st.segment_count, st.dwelling ? "true" : "false", (double)st.target_c,
         (unsigned long)st.segment_elapsed_s, (unsigned long)st.dwell_remaining_s,
-        st.ramp_lock_held ? "true" : "false", st.ramp_lock_lagging_mask, reason_escaped, st.fault_guard);
+        st.ramp_lock_held ? "true" : "false", st.ramp_lock_lagging_mask, reason_escaped, st.fault_guard,
+        total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");
     size_t o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
     /* last_run BEFORE the zones array on purpose: both appenders stop rather
      * than overflow, and the zones array is the unbounded-ish one (up to
@@ -904,6 +995,94 @@ static esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
     o = append_last_run_json(json, sizeof(json), o);
     o = append_zone_status_json(json, sizeof(json), o, &st, false);
     if (o + 1 < sizeof(json)) json[o++] = '}';
+    json[o < sizeof(json) ? o : sizeof(json) - 1] = '\0';
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, o);
+}
+
+/* GET /api/profile_plan?id=<profile_id> -- the PLANNED curve as a polyline
+ * ready to draw: one {"t","c"} point per ramp start/end and dwell
+ * start/end (see plan_curve() above), CELSIUS always -- the web/LCD front
+ * ends already own converting for unit_pref, this endpoint has no display
+ * concerns.
+ *
+ * Starting temperature: if `id` names the profile the executor is actually
+ * RUNNING/PAUSED/DONE/FAULTED on right now, this uses that run's captured
+ * run_start_c -- the real reading segment 0's ramp started from -- so the
+ * curve lines up with the live /api/profile_exec numbers for that firing.
+ * Otherwise (idle preview, or a different profile than whatever is
+ * running) there is no real starting temperature to know yet, so this
+ * falls back to PROFILE_PLAN_PREVIEW_AMBIENT_C, same as
+ * profile_feasibility.c's edit-time check -- see that module's doc comment
+ * for why a constant beats a live cold-junction read here (a colour/curve
+ * that shifts under a user who made no edit is worse than one a few degrees
+ * stale). */
+static esp_err_t profile_plan_get_handler(httpd_req_t *req)
+{
+    char query[32];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
+        return ESP_OK;
+    }
+    char id_str[8];
+    if (httpd_query_key_value(query, "id", id_str, sizeof(id_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
+        return ESP_OK;
+    }
+    char *end = NULL;
+    long id = strtol(id_str, &end, 10);
+    if (end == id_str || id < 0 || id > 255) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
+        return ESP_OK;
+    }
+
+    profile_t p;
+    if (!profiles_http_get((uint8_t)id, &p)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
+        return ESP_OK;
+    }
+
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    float start_c = PROFILE_PLAN_PREVIEW_AMBIENT_C;
+    if (st.state != PROFILE_EXEC_IDLE && st.profile_id == (uint8_t)id) {
+        start_c = st.run_start_c;
+    }
+
+    profile_plan_point_t points[PLAN_MAX_POINTS];
+    size_t point_count = 0;
+    int64_t total_s = profile_feasibility_plan_curve(p.segments, p.segment_count, start_c, points,
+                                                     PLAN_MAX_POINTS, &point_count);
+
+    char name_escaped[sizeof(p.name) * 2 + 1];
+    json_escape(p.name, name_escaped, sizeof(name_escaped));
+
+    /* Fixed part plus up to PLAN_MAX_POINTS (25 for PROFILE_MAX_SEGMENTS ==
+     * 12) points at ~40 bytes each worst case ("{"t":123456.00,"c":-999.99},")
+     * -- comfortably inside the httpd task's 8192-byte stack alongside the
+     * other buffers this file already keeps there. */
+    char json[192 + PLAN_MAX_POINTS * 48];
+    size_t o = 0;
+    int n = snprintf(json, sizeof(json), "{\"profile_id\":%ld,\"name\":\"%s\",\"total_planned_s\":", id,
+                     name_escaped);
+    o = (n < 0 || (size_t)n >= sizeof(json)) ? sizeof(json) - 1 : (size_t)n;
+    if (total_s < 0) {
+        n = snprintf(json + o, sizeof(json) - o, "null,\"points\":[");
+    } else {
+        n = snprintf(json + o, sizeof(json) - o, "%lld,\"points\":[", (long long)total_s);
+    }
+    if (n > 0 && (size_t)n < sizeof(json) - o) o += (size_t)n;
+    for (size_t i = 0; i < point_count; i++) {
+        n = snprintf(json + o, sizeof(json) - o, "%s{\"t\":%.0f,\"c\":%.2f}", i == 0 ? "" : ",",
+                    (double)points[i].t, (double)points[i].c);
+        if (n < 0 || (size_t)n >= sizeof(json) - o) break;
+        o += (size_t)n;
+    }
+    if (o + 2 < sizeof(json)) {
+        json[o++] = ']';
+        json[o++] = '}';
+    }
     json[o < sizeof(json) ? o : sizeof(json) - 1] = '\0';
 
     httpd_resp_set_type(req, "application/json");
@@ -1441,6 +1620,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t exec_status_uri = {
         .uri = "/api/profile_exec", .method = HTTP_GET, .handler = profile_exec_status_get_handler,
     };
+    static const httpd_uri_t profile_plan_uri = {
+        .uri = "/api/profile_plan", .method = HTTP_GET, .handler = profile_plan_get_handler,
+    };
     static const httpd_uri_t exec_start_uri = {
         .uri = "/api/profile_exec/start", .method = HTTP_POST, .handler = profile_exec_start_post_handler,
     };
@@ -1500,6 +1682,11 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = httpd_register_uri_handler(server, &exec_status_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/profile_exec) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &profile_plan_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/profile_plan) failed: %s", esp_err_to_name(err));
         return err;
     }
     err = httpd_register_uri_handler(server, &exec_start_uri);

@@ -256,6 +256,14 @@ typedef struct {
     float ambient_c;
     bool  ambient_from_cj; /* false = FALLBACK_AMBIENT_C was substituted, see run() */
 
+    /* profile_exec_status_t.run_start_c/total_elapsed_s -- see that header
+     * for what these feed. run_start_c is baseline_target_c from run(),
+     * captured once and never touched again by the control loop.
+     * total_elapsed_s is incremented alongside dt_s below, every RUNNING
+     * tick regardless of ramp-lock, and simply not touched while PAUSED. */
+    float run_start_c;
+    uint32_t total_elapsed_s;
+
     bool ramp_lock_held;
     uint8_t ramp_lock_lagging_mask;
 
@@ -1097,6 +1105,12 @@ static void executor_task_entry(void *arg)
         }
         s_exec.prev_control_tick = now;
         float dt_s = (float)dt_ms / 1000.0f;
+        /* Real elapsed time for this run -- counts through a ramp-lock
+         * stall (that's genuine wall-clock time passing while the plan's
+         * remaining_s estimate quietly falls behind), only excluded while
+         * PAUSED, since this whole block is skipped then. See
+         * profile_exec_status_t.total_elapsed_s. */
+        s_exec.total_elapsed_s += (uint32_t)(dt_s + 0.5f);
 
         /* --- Read every physical channel (raw), then combine per zone
          * (TODO.md 10.8) into that zone's control temperature ------------
@@ -1958,6 +1972,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     }
 
     s_exec.target_c = baseline_target_c;
+    s_exec.run_start_c = baseline_target_c;
+    s_exec.total_elapsed_s = 0;
     s_exec.history_zone = (first_active >= 0) ? (uint8_t)first_active : 0;
 
     /* One line per firing recording what feedforward will run on, because it
@@ -2155,6 +2171,11 @@ void profile_executor_get_status(profile_exec_status_t *out)
         out->segment_elapsed_s = s_exec.segment_elapsed_s;
         out->ramp_lock_held = s_exec.ramp_lock_held;
         out->ramp_lock_lagging_mask = s_exec.ramp_lock_lagging_mask;
+        out->run_start_c = s_exec.run_start_c;
+        out->total_elapsed_s = s_exec.total_elapsed_s;
+        size_t seg_n = s_exec.profile.segment_count;
+        if (seg_n > PROFILE_MAX_SEGMENTS) seg_n = PROFILE_MAX_SEGMENTS;
+        memcpy(out->segments, s_exec.profile.segments, seg_n * sizeof(out->segments[0]));
 
         if (s_exec.dwelling) {
             const profile_segment_t *seg = &s_exec.profile.segments[s_exec.segment_index < s_exec.profile.segment_count

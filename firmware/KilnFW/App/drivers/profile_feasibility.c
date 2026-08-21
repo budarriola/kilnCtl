@@ -173,6 +173,62 @@ profile_seg_verdict_t profile_feasibility_segment(uint8_t zone_index, float star
     return PROFILE_SEG_OK;
 }
 
+int64_t profile_feasibility_plan_curve(const profile_segment_t *segments, uint8_t segment_count,
+                                       float start_c, profile_plan_point_t *out_points,
+                                       size_t out_cap, size_t *out_point_count)
+{
+    if (out_point_count) {
+        *out_point_count = 0;
+    }
+    if (!segments || segment_count == 0) {
+        return -1;
+    }
+
+    float t = 0.0f;
+    float cur_c = start_c;
+    bool unknown = false;
+    size_t n = 0;
+
+#define ADD_POINT(tt, cc)                       \
+    do {                                          \
+        if (out_points && n < out_cap) {           \
+            out_points[n].t = (tt);                 \
+            out_points[n].c = (cc);                 \
+        }                                            \
+        n++;                                          \
+    } while (0)
+
+    ADD_POINT(t, cur_c);
+    for (uint8_t i = 0; i < segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+        const profile_segment_t *seg = &segments[i];
+        float target = seg->target_c;
+
+        if (seg->ramp_c_per_hr > 0.0f) {
+            float dist = fabsf(target - cur_c);
+            t += dist / seg->ramp_c_per_hr * 3600.0f;
+        } else {
+            /* No rate constraint -- the setpoint jumps, but the kiln's
+             * actual arrival time is unknowable here. Plotted as a
+             * zero-width step; the true verdict is the -1 returned below. */
+            unknown = true;
+        }
+        cur_c = target;
+        ADD_POINT(t, cur_c);
+
+        uint32_t dwell_s = seg->dwell_min * 60u;
+        if (dwell_s > 0) {
+            t += (float)dwell_s;
+            ADD_POINT(t, cur_c);
+        }
+    }
+#undef ADD_POINT
+
+    if (out_point_count) {
+        *out_point_count = n;
+    }
+    return unknown ? -1 : (int64_t)(t + 0.5f);
+}
+
 profile_seg_verdict_t profile_feasibility_profile(uint8_t zone_index, const profile_t *p,
                                                   profile_seg_verdict_t *out_segments,
                                                   size_t out_cap)

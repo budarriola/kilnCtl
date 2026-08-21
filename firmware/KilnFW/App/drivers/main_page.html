@@ -100,6 +100,33 @@
   .exec-state.state-running { color: var(--on-color); }
   #historyChart { width: 100%; height: 220px; background: var(--card-bg);
                   border: 1px solid var(--border); border-radius: var(--ui-radius); display: block; }
+  /* 2026-08-21: progress bar sits directly under the chart (owner's explicit
+     placement -- NOT at the page bottom, and the bottom nav bar stays gone).
+     Hidden entirely (#progressWrap display:none) when there's nothing to
+     show: idle with no run, or older firmware that doesn't send the new
+     /api/profile_exec fields at all -- see renderProgress()'s own comment
+     for the degrade-on-missing-fields rule. The indeterminate state (total
+     known, remaining_s null -- e.g. a zero ramp-rate segment with no
+     predictable duration) uses a moving stripe animation instead of any
+     fixed fill fraction, so it can never be mistaken for "0% done" or
+     "100% done"; the no-total state skips the track/fill entirely and shows
+     elapsed-only text, since a bar with no denominator has nothing honest
+     to show as its fill amount. */
+  #progressWrap { margin-top: 0.6em; }
+  .progress-track { height: 10px; border: 1px solid var(--border); border-radius: 999px;
+                     background: var(--card-bg); overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--on-color); width: 0%; }
+  .progress-fill.indeterminate {
+    width: 100% !important;
+    background-image: repeating-linear-gradient(45deg, var(--on-color) 0, var(--on-color) 10px,
+                       transparent 10px, transparent 20px);
+    background-size: 28px 28px;
+    animation: kc-progress-stripe 1s linear infinite;
+  }
+  @keyframes kc-progress-stripe { from { background-position: 0 0; } to { background-position: 28px 0; } }
+  .progress-label { display: flex; justify-content: space-between; font-size: 0.8em;
+                      color: var(--muted); margin-top: 0.3em; }
+  .progress-label .estimate-tag { font-style: italic; }
   /* 2026-08-21 idle-dot swatch: ties a channel's dot colour on the (now
      always-visible) chart back to that same channel's row in the list
      below it, so "which dot is which channel" doesn't require a legend.
@@ -182,6 +209,10 @@
      dangling getElementById('historyEmpty') is left for the poll loop to
      dereference into a TypeError. -->
 <canvas id="historyChart" width="600" height="220"></canvas>
+<div id="progressWrap" style="display:none">
+  <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+  <div class="progress-label"><span id="progressElapsed"></span><span id="progressRemaining"></span></div>
+</div>
 <div id="runPicker">
   <label for="profileSelect">Profile</label>
   <select id="profileSelect"></select>
@@ -403,6 +434,114 @@ function fmtDuration(s) {
 // bit position, zones.relay_mask-style, per zones_http.h).
 function zoneName(zi) {
   return (zonesCache.zones[zi] && zonesCache.zones[zi].name) || ('Zone ' + zi);
+}
+
+// -- Planned-profile curve (the third chart series) ----------------------
+//
+// /api/profile_plan?id=N returns the profile's STRAIGHT-LINE plan
+// (total_planned_s + points[{t,c}], celsius, t = seconds from a
+// hypothetical run start at 0) -- distinct from the "desired" series
+// drawHistoryChart already draws from history.csv, which is the RECORDED
+// setpoint sample-by-sample and only ever traces behind the run. This is
+// the planned curve, drawn ahead of and through the run so the operator can
+// see where the profile is headed, not just where it has been.
+//
+// Cached per profile id (a profile's plan does not change while the page is
+// open -- editing one happens on /profiles, a full page navigation away)
+// so switching the picker back and forth, or a running/paused state's
+// repeated pollExec ticks, don't re-fetch every 2s. A 404 (route not wired
+// yet -- the backend for this is landing concurrently with this change) or
+// any fetch failure caches `null`, same "degrade like older firmware"
+// treatment as every other optional endpoint on this page.
+var planCache = {};
+function fetchPlan(id) {
+  if (id === undefined || id === null || id === '') return Promise.resolve(null);
+  if (Object.prototype.hasOwnProperty.call(planCache, id)) return Promise.resolve(planCache[id]);
+  return fetch('/api/profile_plan?id=' + id).then(function (r) {
+    if (!r.ok) throw 0;
+    return r.json();
+  }).then(function (data) {
+    planCache[id] = data;
+    return data;
+  }).catch(function () {
+    planCache[id] = null;
+    return null;
+  });
+}
+
+// The plan currently drawn on the chart, if any -- set by pollExec (running/
+// paused/faulted/done, keyed off st.profile_id) or by the profile <select>'s
+// change handler (idle preview of whatever's picked but not yet started).
+// null means "nothing to draw", either because no id is selected/running or
+// because the plan fetch failed/404'd (old firmware, or id not found).
+var activePlan = null;
+function setActivePlanFor(id) {
+  if (id === undefined || id === null || id === '') { activePlan = null; return; }
+  fetchPlan(id).then(function (data) {
+    activePlan = data;
+    // Redraw whichever chart mode is current so a plan that arrives after
+    // the frame was already drawn (fetch is async) doesn't sit un-rendered
+    // until the next poll tick.
+    if (wasIdle) { drawIdleDots(lastChannelsData); } else { pollHistory(); }
+  });
+}
+
+// -- Progress bar (under the chart) ---------------------------------------
+//
+// Reads /api/profile_exec's total_planned_s/elapsed_s/remaining_s/
+// remaining_is_estimate. All four are treated as a group: if the response
+// doesn't carry them at all (older firmware -- this is a brand-new API
+// surface landing alongside this change) the whole bar hides, same
+// degrade-gracefully rule as the rest of this page's optional fields. Once
+// the fields ARE present:
+//   - state idle: hidden (nothing running, elapsed_s is meaningless before
+//     a run exists).
+//   - total_planned_s null: no denominator to show a fraction of, so no
+//     track/fill at all -- elapsed time only, as text.
+//   - total_planned_s known, remaining_s null: a ramp_c_per_hr==0 segment
+//     has no predictable duration -- rendered as an animated indeterminate
+//     stripe (full-width, moving), never 0% or 100%, and the remaining-time
+//     text says "unknown" rather than "0:00".
+//   - remaining_is_estimate true: the run has overrun (or could overrun)
+//     its plan -- the label says "estimate" explicitly rather than
+//     presenting a countdown the operator could mistake for exact.
+function renderProgress(st) {
+  const wrap = document.getElementById('progressWrap');
+  const fill = document.getElementById('progressFill');
+  const elapsedEl = document.getElementById('progressElapsed');
+  const remainingEl = document.getElementById('progressRemaining');
+
+  var have = st && typeof st.elapsed_s === 'number' &&
+             st.hasOwnProperty('total_planned_s') && st.hasOwnProperty('remaining_s') &&
+             st.hasOwnProperty('remaining_is_estimate');
+  var running = st && (st.state === 'running' || st.state === 'paused' ||
+                        st.state === 'faulted' || st.state === 'done');
+  if (!have || !running) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+
+  elapsedEl.textContent = 'Elapsed ' + fmtDuration(st.elapsed_s);
+
+  if (st.total_planned_s === null || st.total_planned_s === undefined) {
+    // No meaningful denominator -- elapsed only, no bar fraction at all.
+    fill.classList.remove('indeterminate');
+    fill.style.width = '0%';
+    remainingEl.textContent = '';
+    return;
+  }
+
+  if (st.remaining_s === null || st.remaining_s === undefined) {
+    fill.classList.add('indeterminate');
+    remainingEl.innerHTML = '<span class="estimate-tag">time remaining unknown</span>';
+    return;
+  }
+
+  fill.classList.remove('indeterminate');
+  var pct = st.total_planned_s > 0 ? Math.max(0, Math.min(100, 100 * st.elapsed_s / st.total_planned_s)) : 100;
+  fill.style.width = pct.toFixed(1) + '%';
+  var remText = fmtDuration(st.remaining_s) + ' left';
+  remainingEl.innerHTML = st.remaining_is_estimate
+    ? remText + ' <span class="estimate-tag">(estimate)</span>'
+    : remText;
 }
 
 // -- Previous-run breadcrumb (TODO.md 6A.3, "No auto-resume across reboot") --
@@ -643,6 +782,13 @@ function drawIdleDots(data) {
   var vals = channels.filter(function (c) { return c.valid && !c.spi_failed; })
                      .map(function (c) { return c.temp_c; });
 
+  // Planned-curve preview (idle only): activePlan is set by the profileSelect
+  // change handler / initial load when a profile is picked but not started.
+  // Its points feed into the same min/max pad below so the preview curve is
+  // never clipped off the top/bottom of a range sized only for the dots.
+  var planPts = (activePlan && activePlan.points) || [];
+  planPts.forEach(function (p) { vals.push(p.c); });
+
   // Y-axis rule: with no history to derive a range from, scale to the
   // live readings themselves (min/max +/- 10% pad, same shape as the
   // running chart's 5% pad but a bit more generous since a single frozen
@@ -663,6 +809,31 @@ function drawIdleDots(data) {
   g.ctx.fillText(window.kcUnit.toDisplay(maxV).toFixed(0) + window.kcUnit.label(), 2, g.padT + 8);
   g.ctx.fillText(window.kcUnit.toDisplay(minV).toFixed(0) + window.kcUnit.label(), 2, g.padT + g.plotH);
 
+  // Planned-curve preview drawn BEFORE the dots so the dots (this instant's
+  // real readings) stay on top and are never occluded by the dashed line.
+  // Spans the full plot width against the plan's own time axis (0..last
+  // point's t, or total_planned_s if larger) -- deliberately NOT pinned to
+  // the left edge like the dots, and dashed + a distinct colour (#96c) so
+  // it reads as "the plan", not as a moving trend the way the running
+  // chart's solid lines do. Explicit label makes the "not started" state
+  // impossible to mistake for a live run.
+  if (planPts.length >= 2) {
+    var pMaxT = planPts[planPts.length - 1].t;
+    if (activePlan.total_planned_s && activePlan.total_planned_s > pMaxT) pMaxT = activePlan.total_planned_s;
+    if (pMaxT <= 0) pMaxT = 1;
+    function px(t) { return g.padL + (t / pMaxT) * g.plotW; }
+    g.ctx.save();
+    g.ctx.setLineDash([6, 4]);
+    g.ctx.strokeStyle = '#96c'; g.ctx.lineWidth = 1.5;
+    g.ctx.beginPath();
+    planPts.forEach(function (p, i) {
+      var ppx = px(p.t), ppy = yTemp(p.c);
+      if (i === 0) g.ctx.moveTo(ppx, ppy); else g.ctx.lineTo(ppx, ppy);
+    });
+    g.ctx.stroke();
+    g.ctx.restore();
+  }
+
   channels.forEach(function (c) {
     if (!c.valid || c.spi_failed) return;
     var py = yTemp(c.temp_c);
@@ -673,7 +844,14 @@ function drawIdleDots(data) {
   });
 
   g.ctx.fillStyle = g.fg; g.ctx.font = '11px sans-serif';
-  g.ctx.fillText('no firing running — current channel readings', g.padL + 4, g.cssH - 4);
+  if (planPts.length >= 2) {
+    g.ctx.fillText('no firing running — current channel readings', g.padL + 4, g.cssH - 4);
+    g.ctx.fillStyle = '#96c';
+    g.ctx.fillText('- - previewing plan (not started)', g.padL + 4, g.cssH - 16);
+    g.ctx.fillStyle = g.fg;
+  } else {
+    g.ctx.fillText('no firing running — current channel readings', g.padL + 4, g.cssH - 4);
+  }
 }
 
 function drawHistoryChart(rows) {
@@ -696,12 +874,27 @@ function drawHistoryChart(rows) {
   var padL = g.padL, padR = g.padR, padT = g.padT, padB = g.padB, plotW = g.plotW, plotH = g.plotH;
 
   var tMin = rows[0].t, tMax = rows[rows.length - 1].t;
+  // Planned curve (activePlan, set by pollExec's lastExecPlanId switch keyed
+  // off st.profile_id): extend tMax to cover the plan's own future points so
+  // the dashed line draws AHEAD of the run, not just clipped to however far
+  // history.csv has recorded so far -- that's the whole point of showing it
+  // separately from the recorded-desired trace, which only ever traces
+  // behind. planPts is empty if there's no active plan, or the fetch
+  // 404'd/failed (older firmware) -- both collapse to "just draw the usual
+  // two series" further down.
+  var planPts = (activePlan && activePlan.points) || [];
+  if (planPts.length) {
+    var planMaxT = planPts[planPts.length - 1].t;
+    if (activePlan.total_planned_s && activePlan.total_planned_s > planMaxT) planMaxT = activePlan.total_planned_s;
+    if (planMaxT > tMax) tMax = planMaxT;
+  }
   if (tMax === tMin) tMax = tMin + 1;
   var tempVals = [];
   rows.forEach(function (r) {
     if (!isNaN(r.actual)) tempVals.push(r.actual);
     if (!isNaN(r.desired)) tempVals.push(r.desired);
   });
+  planPts.forEach(function (p) { tempVals.push(p.c); });
   var tMinV = tempVals.length ? Math.min.apply(null, tempVals) : 0;
   var tMaxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
   if (tMaxV === tMinV) tMaxV = tMinV + 1;
@@ -732,6 +925,25 @@ function drawHistoryChart(rows) {
   drawLine('duty', yDuty, '#3a9');
   drawLine('actual', yTemp, '#e63');
 
+  // Planned curve: dashed + a colour (#96c) shared with no other series (and
+  // with the idle preview above, so it reads as "the same kind of thing" in
+  // both chart modes), drawn last so it sits on top of the solid duty line
+  // it may cross. Straight lines between consecutive points, per the API's
+  // own contract ("Straight lines between consecutive points is the correct
+  // rendering").
+  if (planPts.length >= 2) {
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#96c'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    planPts.forEach(function (p, i) {
+      var ppx = x(p.t), ppy = yTemp(p.c);
+      if (i === 0) ctx.moveTo(ppx, ppy); else ctx.lineTo(ppx, ppy);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
   rows.forEach(function (r) {
     if (r.guard && r.guard !== 0) {
       var px = x(r.t);
@@ -744,6 +956,9 @@ function drawHistoryChart(rows) {
   ctx.fillText('— actual', padL + 4, cssH - 4);
   ctx.fillStyle = '#888'; ctx.fillText('— desired', padL + 70, cssH - 4);
   ctx.fillStyle = '#3a9'; ctx.fillText('— duty', padL + 145, cssH - 4);
+  if (planPts.length >= 2) {
+    ctx.fillStyle = '#96c'; ctx.fillText('- - planned', padL + 205, cssH - 4);
+  }
   ctx.fillStyle = fg;
 }
 
@@ -775,10 +990,30 @@ function updateChartMode(st) {
   wasIdle = idleNow;
 }
 
+// Tracks the profile id the running/paused/etc. plan curve was last fetched
+// for, so a poll tick that reports the SAME run doesn't refetch/redraw every
+// 2s -- only an actual change (new run started, or exec state going idle)
+// re-triggers setActivePlanFor.
+var lastExecPlanId = undefined;
 function pollExec() {
   fetch('/api/profile_exec').then(function (r) { return r.json(); }).then(function (st) {
     renderExec(st);
     renderLastRun(st);
+    renderProgress(st);
+    var idleNow = !st || st.state === 'idle';
+    var planId = idleNow ? undefined : st.profile_id;
+    if (planId !== lastExecPlanId) {
+      lastExecPlanId = planId;
+      if (idleNow) {
+        // A run just ended -- don't leave its plan curve on screen under the
+        // idle dots. Fall back to previewing whatever's currently picked (or
+        // nothing, if the list hasn't loaded / nothing's selected yet).
+        var sel = document.getElementById('profileSelect');
+        setActivePlanFor(sel ? sel.value : undefined);
+      } else {
+        setActivePlanFor(planId);
+      }
+    }
     updateChartMode(st);
   }).catch(function () {});
 }
@@ -803,7 +1038,23 @@ function poll() {
   setTimeout(poll, 2000);
 }
 
-loadZones().then(function () { loadProfileList(); poll(); });
+// Idle-preview: previewing the plan for whatever's picked (but not started)
+// is a natural fit here since the picker sits right below the chart -- but
+// it must never look like a run in progress. drawIdleDots() below labels it
+// explicitly ("previewing plan — not started") and it only ever draws while
+// wasIdle is true; the moment a run actually starts, pollExec's own
+// lastExecPlanId switch takes over and the preview label goes away with it.
+document.getElementById('profileSelect').addEventListener('change', function (e) {
+  if (wasIdle) setActivePlanFor(e.target.value);
+});
+
+loadZones().then(function () {
+  loadProfileList().then(function () {
+    var sel = document.getElementById('profileSelect');
+    if (wasIdle && sel) setActivePlanFor(sel.value);
+  });
+  poll();
+});
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
 window.addEventListener('resize', function () { if (wasIdle) { drawIdleDots(lastChannelsData); } else { pollHistory(); } });
 

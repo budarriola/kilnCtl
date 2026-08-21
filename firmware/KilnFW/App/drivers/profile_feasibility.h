@@ -67,6 +67,55 @@ profile_seg_verdict_t profile_feasibility_profile_mask(uint8_t zone_mask, const 
  * "unreachable". Never NULL. */
 const char *profile_feasibility_verdict_str(profile_seg_verdict_t v);
 
+/* ---- Planned-curve duration model ------------------------------------------
+ *
+ * Backs dashboard_http.c's GET /api/profile_exec (total_planned_s/elapsed_s/
+ * remaining_s/remaining_is_estimate) and GET /api/profile_plan (the drawable
+ * polyline) -- lives here, not in dashboard_http.c, so the one honesty rule
+ * below is written and host-tested exactly once, same reasoning as this
+ * module already applying to profile_feasibility_segment().
+ *
+ * HONESTY RULE: profile_segment_t.ramp_c_per_hr <= 0 means "no rate
+ * constraint" (profiles_http.h) -- profile_executor.c's segment-stepping
+ * jumps the shared setpoint straight to that segment's target in a single
+ * control tick when this is true. The ACTUAL kiln does not arrive there in
+ * zero seconds: ramp-lock (profile_executor.h's top comment) holds the
+ * schedule right there until every active zone catches up, and how long
+ * that takes depends on the plant, not on anything this function can
+ * compute. So such a segment's ramp portion is UNKNOWN, not 0 -- it makes
+ * the whole profile's return value -1 ("cannot know"), and in the point
+ * list it is plotted as a zero-width vertical step at its start time,
+ * matching what the setpoint literally does. A caller learns the timeline
+ * past that point isn't reliable from the -1 return, not from the segment
+ * looking any particular way in the point list -- it must never silently
+ * read as "0 seconds, nothing happening here".
+ *
+ * The dwell portion of every segment is always known (dwell_min*60),
+ * rate-limited ramp or not.
+ *
+ * start_c is the temperature segment 0's ramp is assumed to start from --
+ * ambient for an idle/preview call, or the run's actual captured starting
+ * reading when the profile in question is the one really executing; the
+ * caller decides which (see dashboard_http.c's PROFILE_PLAN_PREVIEW_AMBIENT_C
+ * and profile_exec_status_t.run_start_c), this function just walks segments
+ * from whatever start_c it's given. */
+typedef struct {
+    float t; /* seconds from profile start */
+    float c; /* setpoint, Celsius */
+} profile_plan_point_t;
+
+/* Walks segments[0..segment_count) from start_c. Writes up to out_cap
+ * points to out_points (one per ramp start/end and dwell start/end -- a
+ * straight line between consecutive points is the correct rendering) and
+ * the count actually written to *out_point_count. out_points/out_cap/
+ * out_point_count may all be 0/NULL to skip point generation and just get
+ * the total. Returns the total planned duration in seconds, or -1 if any
+ * segment's ramp duration could not be determined -- see the honesty rule
+ * above. */
+int64_t profile_feasibility_plan_curve(const profile_segment_t *segments, uint8_t segment_count,
+                                       float start_c, profile_plan_point_t *out_points,
+                                       size_t out_cap, size_t *out_point_count);
+
 #ifdef __cplusplus
 }
 #endif

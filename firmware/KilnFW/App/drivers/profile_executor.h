@@ -154,6 +154,42 @@ typedef struct {
     uint8_t  ramp_lock_lagging_mask; /* which zone(s) are the reason, if ramp_lock_held */
     profile_exec_zone_status_t zones[MAX31856_CHANNEL_COUNT];
 
+    /* Duration-model inputs for /api/profile_exec's total_planned_s/
+     * elapsed_s/remaining_s and for /api/profile_plan's polyline against
+     * the profile that is actually running (dashboard_http.c does the
+     * arithmetic; this struct just hands out the two things it cannot get
+     * any other way -- the segment data as run, and the temperature
+     * segment 0's ramp actually started from).
+     *
+     * segments/segment_count: a COPY of the profile this run is executing
+     * (s_exec.profile can differ from whatever profiles_http.c holds for
+     * this id right now -- profile_executor_run() takes its own copy at
+     * start, same reasoning as s_exec_state_t.profile in the .c file), so a
+     * caller computing this run's planned duration is guaranteed to match
+     * the schedule actually driving relays, not a schedule since edited
+     * under it. */
+    profile_segment_t segments[PROFILE_MAX_SEGMENTS];
+
+    /* The temperature segment 0's ramp treated as its starting point --
+     * profile_executor_run()'s baseline_target_c, captured once from the
+     * first active zone's actual reading at firing start (or that segment's
+     * own target if no reading was available yet). Fixed for the life of
+     * the run so a caller's total-planned-seconds answer does not drift
+     * tick to tick as target_c itself moves through the ramp -- only
+     * meaningful when state != PROFILE_EXEC_IDLE. */
+    float    run_start_c;
+
+    /* Real seconds since this run started (profile_executor_run()), NOT
+     * reset at a segment boundary -- unlike segment_elapsed_s above, this
+     * only freezes across a PAUSE (the control task simply doesn't tick it
+     * while PROFILE_EXEC_PAUSED, same discipline as segment_elapsed_s) and
+     * otherwise keeps counting even while ramp-lock holds the shared
+     * setpoint, because wall-clock time is genuinely passing then -- ramp-
+     * lock is exactly the situation /api/profile_exec's
+     * remaining_is_estimate exists to flag, not a reason to stop the clock.
+     * This is "elapsed_s" in the API contract. */
+    uint32_t total_elapsed_s;
+
     char     fault_reason[96];   /* only meaningful when state == PROFILE_EXEC_FAULTED (a GLOBAL trip) */
     uint8_t  fault_guard;        /* thermal_guard_trip_t, only meaningful when state == PROFILE_EXEC_FAULTED */
 } profile_exec_status_t;

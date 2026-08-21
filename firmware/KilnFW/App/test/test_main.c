@@ -18,6 +18,7 @@ void run_test_ota_interlock(void);
 void run_test_heat_interlock(void);
 void run_test_thermo_combine(void);
 void run_test_profile_feasibility(void);
+void run_test_profile_plan_curve(void);
 void run_test_wifi_prov(void);
 void run_test_backup_import(void);
 
@@ -34,6 +35,7 @@ int main(void)
     run_test_heat_interlock();
     run_test_thermo_combine();
     run_test_profile_feasibility();
+    run_test_profile_plan_curve();
     run_test_wifi_prov();
     run_test_backup_import();
 

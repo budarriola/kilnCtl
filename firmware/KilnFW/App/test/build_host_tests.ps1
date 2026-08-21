@@ -37,6 +37,7 @@ $sources = @(
     (Join-Path $testDir "test_heat_interlock.c"),
     (Join-Path $testDir "test_thermo_combine.c"),
     (Join-Path $testDir "test_profile_feasibility.c"),
+    (Join-Path $testDir "test_profile_plan_curve.c"),
     (Join-Path $testDir "test_wifi_prov.c"),
     (Join-Path $testDir "test_backup_import.c"),
     (Join-Path $testDir "sim_plant.c"),
