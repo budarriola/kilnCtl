@@ -154,6 +154,27 @@ invents DUT behavior:
     refused here on purpose: it is owned by the ``energized`` feedback loop
     below and must never be forced by a scenario.
 
+``set_main_fault`` (added 2026-08-21, S6a provocation pass)
+    Sets this script's own ``main_fault`` state, threaded straight into
+    ``dut.tick(..., main_fault=...)`` -- ``dut_core.exe``'s TICK line's
+    optional trailing ``<main_fault>`` field, documented there as "already-
+    debounced ... standing in for discrete_task_main_fault()", exactly the
+    same category of "reachable from the wire, like <estop>" the module
+    docstring above already claims for it. ``mainfault_tc_disconnect.yaml``
+    tries to provoke S6a *indirectly*, through a causal chain this fixture
+    cannot complete (TC fault -> KilnFW's own guard-6 logic -> Fault-line
+    opto -> virtual_simfw's `fault_line_asserted` -- and there is no KilnFW
+    process anywhere in this fixture to run that logic, nor an I2C-expander/
+    opto emulation of the Fault line in `virtual_simfw.c`). This action does
+    not try to complete that chain; it stands in for its OUTCOME directly --
+    "the ESP decided to assert its fault output" -- exactly the same way
+    ``request_enable`` stands in for an operator's decision instead of this
+    fixture running a whole UI/button-press model to arrive at one. Nothing
+    about the real guard is bypassed: `safety_guards.c`'s S6a block still
+    runs unmodified, still sees a plain boolean, and still decides for
+    itself whether to trip. See ``firmware/SimFW/scenarios/
+    mainfault_esp_asserted.yaml`` and ``mainfault_no_nuisance_trip.yaml``.
+
 Together these are what make S3 and S4 provokable at all: both need
 ``any_current_present`` (S3 positively, S4 by its absence), current flows
 only when a zone relay is closed *and* K4 permits, and K4 closes only after
@@ -351,10 +372,14 @@ def _parse_operator_actions(scenario: Scenario) -> list:
                 raise ValueError(f"dut.operator_actions: relay state must be closed/open, got {state!r}")
             out.append({"t": t, "kind": kind, "signal": _RELAY_SIGNAL_BY_NAME[name],
                         "name": name, "closed": state == "closed"})
+        elif kind == "set_main_fault":
+            if "asserted" not in entry:
+                raise ValueError(f"dut.operator_actions: set_main_fault needs 'asserted': {entry!r}")
+            out.append({"t": t, "kind": kind, "asserted": bool(entry["asserted"])})
         else:
             raise ValueError(
                 f"dut.operator_actions: unknown action {kind!r} "
-                f"(valid: request_enable, command_relay)"
+                f"(valid: request_enable, command_relay, set_main_fault)"
             )
     out.sort(key=lambda a: a["t"])
     return out
@@ -705,6 +730,19 @@ class _FixtureContext:
         # scenario written before this pass: every zone's setpoint_c stays
         # NaN unless a scenario explicitly opts in.
         self.zone_setpoints: dict = dict(zone_setpoints or {})
+        # Tracks EventType.DUT_POWER edges (see note_dut_power() below).
+        # Starts True: virtual_simfw.c's own device_t default is powered
+        # (dut_power_on = true at init, "board powered" -- virtual_simfw.c's
+        # own comment on that field), and no scenario begins mid-outage.
+        self.dut_power_on = True
+
+    def note_dut_power(self, on: bool) -> None:
+        """Called from the main poll loop for every raw EventType.DUT_POWER
+        edge (virtual_simfw.c's apply_edge_effects() -> ring_push(...,
+        SIM_EVENT_DUT_POWER, ..., on)). This is an exact signal -- unlike
+        telemetry staleness, which is a proxy for it -- so link_up below is
+        forced off it directly rather than inferred."""
+        self.dut_power_on = on
 
     def observe(self, telemetry: dict) -> dict:
         sim_us = int(telemetry.get("sim_time_us", 0))
@@ -769,7 +807,15 @@ class _FixtureContext:
             amps[i] = float(z.get("i_amps", 0.0))
 
         return {
-            "link_up": age_ms < self.LINK_UP_RECENCY_MS and self.last_advance_wall is not None,
+            # A powered-down ESP cannot be transmitting kilnlink frames, full
+            # stop -- forced off directly on the exact dut_power_on signal
+            # (note_dut_power()) rather than left to the staleness heuristic
+            # below, which is only a proxy for "a real frame arrived" and
+            # (correctly, see send_telemetry()'s own comment in
+            # virtual_simfw.c) does not itself starve during a DUT-power
+            # outage, since the fixture's own USB report channel to the PC
+            # keeps running on its own, separate supply throughout.
+            "link_up": self.dut_power_on and age_ms < self.LINK_UP_RECENCY_MS and self.last_advance_wall is not None,
             "ctx_present": self.last_advance_wall is not None,
             "ctx_degraded": False,  # no version-mismatch path exists in this fixture
             "ctx_age_ms": age_ms,
@@ -920,6 +966,19 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                  "link_up": 0, "max_zone_count": 0, "energized": 0}
         samples = 0
         pending_actions = list(actions)  # sorted by sim-time, consumed below
+        # dut_core.exe's TICK <main_fault> field: this script's own state,
+        # standing in for discrete_task_main_fault()'s already-debounced
+        # GPIO10 level (see the module docstring's `set_main_fault` section).
+        # Starts false -- no scenario begins mid-fault -- and is flipped only
+        # by a scheduled `set_main_fault` operator action, never inferred
+        # from anything else the fixture reports.
+        main_fault_state = False
+        # Synthetic seq base for the `main_fault` entity-state marks emitted
+        # below -- disjoint from kilnsim.runner's own _SYNTHETIC_SEQ_BASE
+        # (1_000_000_000) and _GuardEdgeTracker's (2_000_000_000), same
+        # reasoning as both: outside WIRE_EVENT_TYPES, so none of the three
+        # synthetic streams can ever collide in seq space.
+        next_main_fault_evt_seq = 3_000_000_000
 
         last_sim_time_us = 0
         start_wall = time.time()
@@ -928,6 +987,8 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
 
         while time.time() - start_wall < wall_budget:
             for e in link.read_events(timeout=poll_interval_s):
+                if e.event_type == EventType.DUT_POWER:
+                    fixture_ctx.note_dut_power(e.b != 0)
                 collected.append(kr._translate_wire_event(e, slot_to_fault_id))
 
             telemetry = link.get_last_telemetry()
@@ -963,6 +1024,24 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                     act = pending_actions.pop(0)
                     if act["kind"] == "request_enable":
                         dut.enable(act["enable"])
+                    elif act["kind"] == "set_main_fault":
+                        main_fault_state = act["asserted"]
+                        # Referenceable cause/effect anchor for a scenario's
+                        # own `event: {type: sim_clock_mark, entity:
+                        # main_fault}` / `dut: main_fault_asserted` clauses --
+                        # same synthetic entity-state-mark pattern
+                        # _GuardEdgeTracker already uses for K4/link_up/
+                        # safety_temp_valid, stamped at this poll's own
+                        # (telemetry-derived) sim time, the same precision
+                        # every other operator action already gets applied
+                        # at (see the "Scheduled operator actions" comment
+                        # above).
+                        collected.append(Event(
+                            seq=next_main_fault_evt_seq, sim_time_us=sim_time_us,
+                            event_type=EventType.SIM_CLOCK_MARK,
+                            payload={"entity": "main_fault", "state": main_fault_state},
+                        ))
+                        next_main_fault_evt_seq += 1
                     else:
                         _send_relay_set_sense(link, act["signal"], act["closed"])
 
@@ -1004,7 +1083,7 @@ def run_one_scenario(scenario: Scenario, seed_override: Optional[int], timescale
                 dt_ms = plan_tick_dt_ms(tick_sim_time_us, last_sim_time_us)
                 result = None
                 if dt_ms is not None:
-                    result = dut.tick(regs, estop, ctx_facts, dt_ms=dt_ms)
+                    result = dut.tick(regs, estop, ctx_facts, dt_ms=dt_ms, main_fault=main_fault_state)
                     samples += 1
                 last_sim_time_us = max(tick_sim_time_us, last_sim_time_us)
                 if result is not None:

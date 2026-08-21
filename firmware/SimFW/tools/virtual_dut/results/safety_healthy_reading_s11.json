@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 68,
   "timescale": 10.0,
-  "start_time": 1787327024.5497053,
+  "start_time": 1787338063.2606797,
   "events": [
     {
       "seq": 0,
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 63000000,
+      "sim_time_us": 61000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -84,7 +84,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 62000000,
+      "sim_time_us": 60000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -104,7 +104,7 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 2.000s after relay_edge"
+      "detail": "dut:current_present observed 4.000s after relay_edge"
     },
     {
       "name": "s11_never_trips_on_a_live_reading",
@@ -137,11 +137,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 210,
-    "context_valid": 210,
-    "any_current_present": 192,
-    "link_up": 210,
+    "polls": 218,
+    "context_valid": 218,
+    "any_current_present": 200,
+    "link_up": 218,
     "max_zone_count": 3,
-    "energized": 194
+    "energized": 202
   }
 }

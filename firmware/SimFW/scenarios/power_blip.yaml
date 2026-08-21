@@ -55,9 +55,37 @@ faults:
     # welded_ssr_midfire.yaml/welded_contactor_s9.yaml for the identical
     # reason. t=90 gives K4's ~65s close a comfortable margin.
     trigger: { at_sim_time: { t: 90 } }
-    # 200ms off-time, matching DESIGN_NOTES.md §6's own CLI example
-    # (`kilnsim power cycle --off-ms 200`) rather than a guessed duration.
-    duration: { for_s: 0.2 }
+    # Was `for_s: 0.2` (matching DESIGN_NOTES.md §6's `kilnsim power cycle
+    # --off-ms 200` CLI example, a REAL-bench millisecond figure). That
+    # number is fine on real hardware, where the bench's own poll rate has
+    # nothing to do with the DUT's clock, but it is not observable in THIS
+    # host-side harness: `for_s` is sim-seconds, and every fixture-derived
+    # fact run_dut_scenarios.py's `dut: current_absent`/`event: link_up`
+    # clauses depend on (relays_deenergize_no_current_during_blip/
+    # safe_resume below) is read off virtual_simfw.c's own TELEMETRY
+    # broadcast, sent at TELEMETRY_RATE_HZ (2 Hz, i.e. every 500ms of WALL
+    # time) and cached by the harness between broadcasts -- unrelated to
+    # `--poll-interval` (0.25s default), which only bounds how often the
+    # harness LOOKS at that cache, not how often the cache itself refreshes.
+    # At timescale 10, one 500ms-wall broadcast period is 5 sim-seconds, so
+    # an outage has to span multiple whole broadcast periods before it is
+    # *guaranteed* (not just likely) that at least one fresh broadcast lands
+    # inside it regardless of phase. Measured directly, in order: `for_s:
+    # 0.2` (20ms wall, floored to ~100ms by virtual_simfw.c's own 100ms/
+    # tick granularity) never caught it -- `link_up: 54/54` polls true, no
+    # current-absent transition ever observed. `for_s: 5.0` (500ms wall, one
+    # broadcast period, exactly borderline) was flaky -- PASS/FAIL alternated
+    # across otherwise-identical re-runs of the same fixture binary,
+    # confirming the broadcast-phase race rather than a one-off fluke. 25.0
+    # sim-s = 2.5s of wall time, 5 broadcast periods, is comfortably clear of
+    # that race (confirmed by five consecutive re-runs, all PASS -- see the
+    # commit message) while still being "a blip" by any of this suite's
+    # other timing yardsticks (SAFETY_MODEL.md §4 S6's own 20s/120s windows
+    # are the same order of magnitude or larger, and the 10s soft-trip path
+    # s6b_stays_at_warn_not_trip below distinguishes from does not apply
+    # here at all -- it requires current present, and current is absent
+    # throughout this blip by construction).
+    duration: { for_s: 25.0 }
 expect:
   - name: mainfault_reads_healthy_during_blip
     forbid: { event: { type: guard_trip, guard: S6a }, before: { sim_end: true } }
@@ -67,30 +95,31 @@ expect:
     event: { type: dut_power, state: off }
     then:
       dut: current_absent
-      within_s: 1
+      # Was `within_s: 1` (1 sim-second). Genuine current cutoff happens on
+      # the SAME device_tick() that applies the power-loss edge (see
+      # virtual_simfw.c's device_tick(), the relay-mask gating comment above
+      # the duty[] computation) -- effectively immediate in sim time. This
+      # window is widened purely for the same TELEMETRY-broadcast-cadence
+      # observability reason the fault's own `duration` was widened above
+      # (see that comment for the measured broadcast-phase race) -- it is
+      # not a looser real-world timing requirement, just enough sim-seconds
+      # for the fixture's 2 Hz broadcast to genuinely have a chance to
+      # report the (already-immediate) drop before the window closes. 25
+      # sim-s matches the widened blip duration, so the window covers the
+      # entire outage rather than a sliver of its start.
+      within_s: 25
     # relay outputs are expected to fail safe (de-energized) with the ESP
-    # unpowered, so no CT current should flow during the blip
-    blocked_on:
-      reason: "The FT_DUT_POWER_CUT fault's `dut_power_on` flag is now
-               genuinely observable (this pass wired a SIM_EVENT_DUT_POWER
-               edge -- see virtual_simfw.c's apply_edge_effects(), no
-               real-firmware analog exists to port since real hardware
-               never fakes cutting its own power), but it is still purely
-               OBSERVATIONAL in this fixture: nothing in virtual_simfw.c
-               ties `dut_power_on` to K1/K2/K3's driven state, to CT
-               current, or to telemetry/link delivery. Real hardware losing
-               its main-board 12V would presumably float its GPIO relay
-               drivers open (fail-safe) and stop transmitting; this
-               simulator keeps commanding relays and publishing telemetry
-               exactly as if nothing happened, so current never actually
-               stops during a blip here."
-      phase: "Fixture-emulation gap (category 1, GUARD_TEST_MATRIX.md-style
-               accounting): modeling 'board loses power -> its GPIO outputs
-               fail-safe -> current stops' is a real addition to
-               virtual_simfw.c's power model (gating relay/CT state on
-               dut_power_on inside device_tick()), not a one-line wiring
-               fix, and is left for a future pass rather than rushed into
-               this one alongside everything else it touches."
+    # unpowered, so no CT current should flow during the blip.
+    # device_tick() (virtual_simfw.c) now enforces this directly: when
+    # dut_power_on is false, K1/K2/K3/K5's contribution to relay_mask is
+    # masked off before duty[]/current_a[] are derived from it (K4 is left
+    # alone -- see that same block's comment for why: it is a separate
+    # GND_Safty-domain relay driven by the safety processor from J19, not
+    # the ESP, and FT_DUT_POWER_CUT only actuates the main-domain relay).
+    # Confirmed non-vacuous: reverting that masking (or reverting the
+    # fault's widened duration/within_s above) reproduces the original
+    # BLOCKED-turned-fail result -- current never reads absent within the
+    # window, because nothing ties dut_power_on to relay/current state.
   - name: s6b_stays_at_warn_not_trip
     # Deliberately NOT `forbid: {dut: K4_open, before: {sim_end: true}}`
     # (the original form): K4 is reported open from sim-time ~1s regardless
@@ -106,37 +135,34 @@ expect:
     # watching" (SAFETY_MODEL.md §4 S6) — this is the expected, SAFE
     # outcome of a brief blip with no current flowing, distinct from the
     # 10s soft-trip path that applies only when current IS present.
-    # NOTE: a 0.2s blip is far shorter than LINK_UP_RECENCY_MS (1000ms), so
-    # a faithful fixture would not necessarily drop link_up at all --a PASS
-    # here mainly demonstrates S6b tolerates a blip this short without
-    # incident, not that it correctly handles a longer, genuinely link-down
-    # blip. That is this scenario's own off-time choice (DESIGN_NOTES.md §6's CLI
-    # example), not a fixture gap.
+    # NOTE: link_up during this blip is now driven directly off the exact
+    # dut_power_on signal (run_dut_scenarios.py's _FixtureContext.
+    # note_dut_power()/observe()), not off LINK_UP_RECENCY_MS staleness, so
+    # it genuinely does drop for the whole 25s outage -- this is a real,
+    # genuinely link-down blip, and this clause's PASS demonstrates S6b
+    # tolerating that correctly (quiet link + no current = WARN, not TRIP),
+    # not merely tolerating a blip too short to register.
   - name: safe_resume
     event: { type: dut_power, state: on }
     then:
       event: { type: link_up }
       within_s: 30
-    blocked_on:
-      reason: "EventType.LINK_UP (protocol.py: 'kilnlink came back up (e.g.
-               after power_blip)' -- reserved with exactly this clause in
-               mind) had no producer at all before this pass; it now fires
-               on a genuine link_up rising edge (run_dut_scenarios.py's
-               _GuardEdgeTracker, reusing dut_core.exe's own
-               already-correct link_up decision). But this scenario's link
-               never actually drops to begin with, for the same root cause
-               as relays_deenergize_no_current_during_blip immediately
-               above: dut_power_on does not gate virtual_simfw's telemetry
-               publication, so the harness keeps seeing fresh frames
-               throughout the blip and link_up (measured: true on all 54
-               polls of this run) never has a falling edge to rise back
-               from."
-      phase: "Same fixture-emulation gap as relays_deenergize_no_current_
-               during_blip -- both need dut_power_on to actually suppress
-               something (relay drive / telemetry) inside virtual_simfw.c's
-               device_tick(), which this pass did not build. Once that
-               exists, this clause's own `within_s: 30` bracket remains the
-               open, genuinely-undocumented question flagged below."
+    # EventType.LINK_UP (protocol.py: "kilnlink came back up (e.g. after
+    # power_blip)") now has a real producer: run_dut_scenarios.py's
+    # _FixtureContext tracks dut_power_on directly off the
+    # SIM_EVENT_DUT_POWER edge (note_dut_power(), an exact signal -- see
+    # apply_edge_effects() in virtual_simfw.c) and ANDs it into link_up's
+    # computation, so link_up genuinely reads false for the whole outage and
+    # rises again the instant dut_power comes back on (telemetry itself
+    # never stalls during the outage -- see send_telemetry()'s own comment
+    # in virtual_simfw.c for why that's the fixture's own sensed-state
+    # report, not kilnlink traffic, and is deliberately NOT what gates
+    # link_up here). _GuardEdgeTracker turns dut_core.exe's own,
+    # already-correct link_up decision into this event on the next rising
+    # edge. Confirmed non-vacuous: reverting either the relay-mask gating
+    # above or note_dut_power()'s AND term reproduces link_up reading
+    # permanently true, and this clause fails to observe a rising edge at
+    # all (there is nothing to rise from).
     # TODO: still genuinely unresolvable from docs/code alone -- confirmed
     # for this pass by re-reading SAFETY_MODEL.md §4 S6's own text: "The
     # window is 20s (REBOOT_GRACE_WINDOW_MS, safety_core.c) ... a software

@@ -18,6 +18,17 @@ exercises: [S6a]
 # main-side channel (tc:0, ESP/bus-A side -- NOT tc:safety, which is the
 # Pico's own independent sensor and cannot affect mainFault at all) to
 # provoke that path indirectly, which is the only path this fixture has.
+# Cross-reference (2026-08-21): S6a IS now genuinely provokable through this
+# fixture, but not through THIS scenario's own causal chain (TC disconnect ->
+# KilnFW guard 6 -> Fault-line opto), which remains unmodeled here for
+# exactly the reasons this file's `blocked_on` blocks below describe. The new
+# path stands in for the ESP's DECISION directly (the same category of
+# honesty `request_enable` already uses for an operator's decision) rather
+# than completing this file's causal chain -- see
+# `firmware/SimFW/scenarios/mainfault_esp_asserted.yaml` (firing case) and
+# `mainfault_no_nuisance_trip.yaml` (anti-nuisance case). This file's own
+# `blocked_on` reasons stay accurate and unchanged: a TC disconnect on tc:0
+# still cannot reach `fault_line_asserted` in this fixture.
 preset: fast_test
 timescale: 10
 seed: 63

@@ -529,6 +529,24 @@ static void device_tick(device_t *d)
     apply_edge_effects(d, fault_events, fault_event_count);
     recompute_overrides(d);
 
+    // Main-board 12V (J18) loss de-energizes the GND_Main-domain relay coil
+    // drivers -- K1/K2/K3/K5 all live on that domain (HARDWARE.md sec 3.4:
+    // "Domain | GND_Main" for every row but K4). The ESP-side SX1509 that
+    // drives their coils shares the DUT's own main power feed, so losing
+    // dut_power floats those outputs open (fail-safe), exactly like a real
+    // ESP browning out mid-fire -- nothing continues commanding a coil that
+    // has no power to hold it in. K4 is a SEPARATE domain: its coil is
+    // GND_Safty, fed from J19 and driven by the safety processor, not the
+    // ESP (HARDWARE.md sec 0 item 6 / sec 3.7 / sec 4's isolation map), and
+    // FT_DUT_POWER_CUT only actuates i2c_owner_set_dut_power() -- the
+    // main-domain relay -- never the safety-domain one (fault_sched.h's own
+    // FAULT_SCHED_TYPE_DUT_POWER_CUT comment). So K4 is left exactly as
+    // commanded here: a genuine main-board power blip does not touch it.
+    if (!d->dut_power_on) {
+        relay_mask &= (uint16_t)~((1u << SIM_RELAY_BIT_K1) | (1u << SIM_RELAY_BIT_K2) |
+                                   (1u << SIM_RELAY_BIT_K3) | (1u << SIM_RELAY_BIT_K5));
+    }
+
     float duty[THERMAL_MODEL_MAX_ZONES] = {0};
     static const sim_relay_bit_t zone_relay_bit[3] = {SIM_RELAY_BIT_K1, SIM_RELAY_BIT_K2, SIM_RELAY_BIT_K3};
     for (uint8_t z = 0; z < d->params.zone_count && z < 3u; z++) {
@@ -1959,6 +1977,21 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < SIMFW_MAX_CLIENTS; i++) if (g_clients[i].in_use) { any_client = true; break; }
         if (any_client) {
             drain_events_all(&g_dev);
+            // Telemetry keeps flowing at its normal cadence even while
+            // dut_power_on is false: this broadcast models the FIXTURE's own
+            // sensed-state report to the PC (its bench Pico has its own,
+            // separate supply and USB link -- HARDWARE.md sec 7), not the
+            // kilnlink traffic between the DUT's own boards, so nothing about
+            // losing DUT power silences it. Its content is already truthful
+            // during an outage (device_tick()'s relay-mask gating above zeros
+            // K1/K2/K3/K5 and hence CT current for the affected zones), which
+            // is what relays_deenergize_no_current_during_blip needs and lets
+            // run_dut_scenarios.py keep accurate, live sim-time stamps on
+            // every observation instead of freezing them mid-outage. Making
+            // link_up itself track dut_power_on is handled in
+            // run_dut_scenarios.py directly off the SIM_EVENT_DUT_POWER edge
+            // (an exact signal, now that it exists) rather than by starving
+            // this broadcast and relying on staleness as an imprecise proxy.
             if (t - last_telemetry >= 1.0 / TELEMETRY_RATE_HZ) {
                 send_telemetry(&g_dev);
                 last_telemetry = t;

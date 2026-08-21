@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 50,
   "timescale": 2.0,
-  "start_time": 1787326556.1739423,
+  "start_time": 1787337113.9430406,
   "events": [
     {
       "seq": 0,
@@ -96,7 +96,7 @@
     },
     {
       "seq": 2000000004,
-      "sim_time_us": 156600000,
+      "sim_time_us": 157200000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S4"
@@ -115,7 +115,7 @@
         0,
         2000000004
       ],
-      "detail": "event:guard_warn observed 151.000s after relay_edge"
+      "detail": "event:guard_warn observed 151.600s after relay_edge"
     },
     {
       "name": "s4_never_trips",

@@ -2,12 +2,12 @@
   "scenario": {
     "name": "spi_flaky_tc_ic",
     "version": 1,
-    "hash": "5aad16a2d459129527b00945b20a8a6d82292459d7b62f368ed47c6803a89b7e"
+    "hash": "833d1f7c67867d12a35c7377e551df838533b2efe825f07aad1cf436e1659ad5"
   },
   "fw_versions": {},
   "seed": 55,
   "timescale": 10.0,
-  "start_time": 1787327093.8324847,
+  "start_time": 1787338216.0817325,
   "events": [
     {
       "seq": 0,
@@ -68,7 +68,7 @@
     },
     {
       "seq": 2000000004,
-      "sim_time_us": 55000000,
+      "sim_time_us": 54000000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S5"
@@ -79,7 +79,7 @@
     },
     {
       "seq": 2000000005,
-      "sim_time_us": 83000000,
+      "sim_time_us": 81000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S5"
@@ -104,7 +104,7 @@
         0,
         2000000005
       ],
-      "detail": "event:guard_trip observed 62.000s after fault_fired"
+      "detail": "event:guard_trip observed 60.000s after fault_fired"
     }
   ],
   "verdict": "PASS",
@@ -114,10 +114,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 44,
-    "context_valid": 44,
+    "polls": 45,
+    "context_valid": 45,
     "any_current_present": 0,
-    "link_up": 44,
+    "link_up": 45,
     "max_zone_count": 3,
     "energized": 0
   }

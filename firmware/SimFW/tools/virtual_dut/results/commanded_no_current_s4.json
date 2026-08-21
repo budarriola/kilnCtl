@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 62,
   "timescale": 2.0,
-  "start_time": 1787326724.5478303,
+  "start_time": 1787337282.4766421,
   "events": [
     {
       "seq": 0,
@@ -37,7 +37,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 60400000,
+      "sim_time_us": 60600000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
