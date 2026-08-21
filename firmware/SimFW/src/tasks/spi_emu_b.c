@@ -36,9 +36,15 @@
 #define SPI_EMU_B_MISO_GPIO 14u
 #define SPI_EMU_B_CS0_GPIO  15u
 // Safety-side ~DRDY (PLAN.md 3.6's "DRDY + ~FAULT (safety side) | 2 | direct
-// GPIO, via isolator"). See spi_emu_a.c's DRDY block for the whole free-pin
-// derivation this number comes out of.
-#define SPI_EMU_B_DRDY_GPIO 27
+// GPIO, via isolator"). GPIO26 = `DRDY_SAFETY` per docs/HARDWARE.md section
+// 1, wired to J7 pin 4 (`thermoDrdy`) through the fixture->board ISO7740DWR
+// (section 3.2). Its partner `FAULT_SAFETY` is GPIO27, adjacent on purpose:
+// these are the only two isolator-crossing direct-GPIO lines, and section 1
+// keeps them together (and next to the GPIO28 spare) so the safety domain's
+// pins do not interleave with GND_Main ones on the header. An earlier
+// revision claimed GPIO27 here, which took FAULT_SAFETY's pin and split the
+// pair across the isolation boundary -- see spi_emu_a.c's DRDY block.
+#define SPI_EMU_B_DRDY_GPIO 26
 
 static TaskHandle_t s_task_handle = NULL;
 static max31856_channel_t s_channel;

@@ -38,6 +38,11 @@ Read this section first.
    whoever writes that driver has a number to build against instead of
    picking a sixth independent guess. Whoever writes it must use exactly
    these numbers or update this table in the same commit.
+   **Partially closed 2026-08-20 (§0 item 8):** the 4 `~DRDY` lines
+   (`DRDY_MAIN_0/1/2`, `DRDY_SAFETY`) now have owner files —
+   `spi_emu_a.c`/`spi_emu_b.c` — and use exactly §1's numbers. Still
+   unclaimed: the 4 `~FAULT` lines (GPIO19/21/22 main, GPIO27 safety) and
+   the 2 debug-UART pins (GPIO0/1). The warning above stands for those 6.
 
 3. **The remaining budget fits with exactly the margin PLAN.md predicted.**
    15 pins already claimed + 10 pins newly assigned here = 25 of the Pico's
@@ -96,6 +101,74 @@ Read this section first.
      B's PIO1 allocation (1 RX + 1 TX = 2) leaves 2 SMs free on PIO1. Neither
      overruns.
 
+8. **Resolved 2026-08-20: the `~DRDY` pin contradiction between the SPI
+   engines and §1 is settled in favor of §1. The code moved.** Commit
+   `4221f70` claimed GPIO21/22/26 for main-side `~DRDY` and GPIO27 for the
+   safety side; §1 had already assigned those four to `FAULT_MAIN_1`,
+   `FAULT_MAIN_2`, `DRDY_SAFETY` and `FAULT_SAFETY`. `spi_emu_a.c` now uses
+   **GPIO2/3/17** and `spi_emu_b.c` uses **GPIO26**, matching §1 exactly; no
+   number in this document changed. Three things decided it, in order of
+   weight:
+
+   - **Provenance.** §1 (commit `f7230a5`) pre-dates the `~DRDY` code
+     (`4221f70`) and pre-assigned all eight lines with an explicit rule —
+     "whoever writes that driver must use exactly these numbers or update
+     this table in the same commit" (§0 item 2). `4221f70` did neither: it
+     never cites this document, and the pin block it edited still carried the
+     header "no traced HARDWARE.md exists yet". So it is a later *commit* but
+     not a later *decision* — it is precisely the "sixth independent guess"
+     §0 item 2 was written to prevent, not a reconsideration of §1.
+   - **Domain grouping.** §1 puts the only two isolator-crossing direct-GPIO
+     lines (`DRDY_SAFETY` = 26, `FAULT_SAFETY` = 27) adjacent to each other
+     and next to the GPIO28 spare, so the six signals crossing the two
+     ISO7740DWRs (§3.2) occupy GPIO12–15 + 26/27 and nothing else. The code's
+     map made GPIO26 a GND_Main line and GPIO27 a GND_Safty one, interleaving
+     domains on the header and pushing `FAULT_SAFETY` down among GPIO2/3/17/19
+     with the main-side pins. For a fixture whose reason to exist includes
+     keeping `GND_Main` and `GND_Safty` apart (§4, bring-up step 5), §1's
+     grouping has a real layout benefit and the code's has none.
+   - **Blast radius.** §1's numbers are already cited by the J6 and J7 mating
+     tables (§3.1, §3.2), §4's isolation map, and `docs/BOM.md` §2's isolator
+     channel split. The code's numbers appear nowhere outside the two `.c`
+     files. Moving the code touched two `#define` blocks; moving the document
+     would have touched five tables across two files.
+
+   **Hard constraints did NOT settle it** — recorded so nobody assumes they
+   did. `~DRDY` is a plain SIO pin toggled between output-low and input-Hi-Z
+   (the open-drain emulation, `max31856_pio_engine.c`'s
+   `init_input_pin`/`drdy_sync`); §2's PIO adjacency rules and
+   `config_is_sane()`'s checks cover `SCLK`/`MOSI`/`CS` only and say nothing
+   about `drdy_gpio[]`. **Both assignments were electrically legal.** The
+   choice was made on provenance and layout, and — like everything else here
+   — remains **provisional and unverified against hardware**.
+
+9. **Full pin-map re-check done in the same pass (2026-08-20): no further
+   two-owner GPIO collisions.** Every claim in `src/` was enumerated against
+   §1 — `i2c_owner.c` 4/5, `spi_emu_a.c` 6–11 + 2/3/17, `spi_emu_b.c` 12–15 +
+   26, `ct_wave_pwm.c` 16/18/20 — 18 distinct GPIOs, no overlap, and the
+   7 pins §1 assigns with no owner file yet (0, 1, 19, 21, 22, 27, plus the
+   GPIO25 LED) are claimed by nothing in code. Three *near*-misses were
+   checked and are not collisions, recorded so they are not re-litigated:
+
+   - **PWM pacer slice 3 shadows GPIO6/7/22/23.** `ct_wave_pwm.c`'s pacer
+     slice is unbound to any pin, but slice 3's own candidate outputs are
+     GPIO6/GPIO22 (channel A) and GPIO7/GPIO23 (channel B). GPIO6/7 are SPI
+     bus A `SCLK`/`MOSI` (PIO function), GPIO22 is `FAULT_MAIN_2` (SIO),
+     GPIO23 is not a header pin — none is muxed to `GPIO_FUNC_PWM`, so the
+     free-running pacer reaches no pin. **Latent trap:** any future
+     `gpio_set_function(6|7|22, GPIO_FUNC_PWM)` would silently put the pacer
+     carrier on a claimed line. No slice is free of claimed pins at 25-of-26
+     occupancy, so this is inherent, not fixable by moving the pacer.
+   - **CT channel-B pins.** The three CT carriers are on even GPIOs
+     (16/18/20 = channel A of slices 0/1/2); the matching channel-B pins are
+     GPIO17/19/21 = `DRDY_MAIN_2`/`FAULT_MAIN_0`/`FAULT_MAIN_1`. `arm_dma()`
+     writes only the `CC` register's low halfword and never sets those pins
+     to PWM function, so channel B is inert on all three. This is the same
+     adjacency §1b.4's slice-packing optimization would exploit — which is
+     exactly why that optimization needs GPIO17 to move first.
+   - **MCP23017 #1 bit allocation** (§3.7): pins 0–10 all distinct, 11–15
+     spare, matching `i2c_owner.c`. No two-owner bit.
+
 ---
 
 ## 1. Authoritative Pico pin map
@@ -108,8 +181,8 @@ that claims that pin must cite this table.
 |---|---|---|---|---|
 | 0 | Debug UART0 TX → Debug Probe RX | *(none yet — assign here)* | GND_Main (bench-local, not board-referenced) | n/a (bench probe only) |
 | 1 | Debug UART0 RX ← Debug Probe TX | *(none yet)* | GND_Main | n/a |
-| 2 | `DRDY_MAIN_0` (open-drain) | *(none yet)* | GND_Main | J6 pin 17 (`thermoDrdy_0`) |
-| 3 | `DRDY_MAIN_1` (open-drain) | *(none yet)* | GND_Main | J6 pin 15 (`thermoDrdy_1`) |
+| 2 | `DRDY_MAIN_0` (open-drain) | `spi_emu_a.c` (cites this table, §0 item 8) | GND_Main | J6 pin 17 (`thermoDrdy_0`) |
+| 3 | `DRDY_MAIN_1` (open-drain) | `spi_emu_a.c` | GND_Main | J6 pin 15 (`thermoDrdy_1`) |
 | 4 | I2C0 SDA | `i2c_owner.c` (provisional, own header comment) | GND_Main | n/a (internal: MCP23017 #1/#2) |
 | 5 | I2C0 SCL | `i2c_owner.c` | GND_Main | n/a (internal) |
 | 6 | SPI bus A SCLK | `spi_emu_a.c` | GND_Main | J6 pin 9 (`CLK`) |
@@ -123,7 +196,7 @@ that claims that pin must cite this table.
 | 14 | SPI bus B MISO (fixture output) | `spi_emu_b.c` | crosses isolator → GND_Safty | J7 pin 7 (`MISO`) |
 | 15 | SPI bus B CS0 | `spi_emu_b.c` | crosses isolator → GND_Safty | J7 pin 11 (`CS0`) |
 | 16 | CT PWM ch0 (zone 0 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J13 (via RC + isolation xfmr) |
-| 17 | `DRDY_MAIN_2` (open-drain) | *(none yet)* | GND_Main | J6 pin 13 (`thermoDrdy_2`) |
+| 17 | `DRDY_MAIN_2` (open-drain) | `spi_emu_a.c` | GND_Main | J6 pin 13 (`thermoDrdy_2`) |
 | 18 | CT PWM ch1 (zone 1 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J15 (via RC + isolation xfmr) |
 | 19 | `FAULT_MAIN_0` (open-drain) | *(none yet)* | GND_Main | J6 pin 18 (`thermoFault_0`) |
 | 20 | CT PWM ch2 (zone 2 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J17 (via RC + isolation xfmr) |
@@ -132,7 +205,7 @@ that claims that pin must cite this table.
 | — | PWM pacer slice 3 (no GPIO bound) | `ct_wave_pwm.c` | n/a | n/a |
 | — | DMA_IRQ_1 (not a pin) | `ct_wave_pwm.c` | n/a | n/a |
 | 25 | Heartbeat LED (on-board, not a header pin) | *(none yet, PLAN.md 3.6)* | n/a | n/a |
-| 26 | `DRDY_SAFETY` (open-drain) | *(none yet)* | crosses isolator → GND_Safty | J7 pin 4 (`thermoDrdy`) |
+| 26 | `DRDY_SAFETY` (open-drain) | `spi_emu_b.c` (cites this table, §0 item 8) | crosses isolator → GND_Safty | J7 pin 4 (`thermoDrdy`) |
 | 27 | `FAULT_SAFETY` (open-drain) | *(none yet)* | crosses isolator → GND_Safty | J7 pin 3 (`thermoFault`) |
 | **28** | **SPARE — the one pin PLAN.md 3.6 leaves free** | — | — | — |
 
@@ -247,8 +320,10 @@ DREQ is unchanged, and the CPU stays entirely out of the loop.
 
 Costs, stated so the trade is visible: the two paired zones share one
 completion IRQ and therefore one zero-crossing table-swap event (harmless —
-they are already phase-locked to the same pacer slice); GPIO17 is currently
-assigned to `DRDY_MAIN_2` in §1 and would have to move; and the clean
+they are already phase-locked to the same pacer slice); GPIO17 is assigned to
+`DRDY_MAIN_2` in §1 and — as of §0 item 8 — is now *driven* by `spi_emu_a.c`
+rather than merely reserved, so moving it is a code change plus a §1/§3.1
+edit, not a paper one; and the clean
 one-zone-one-slice symmetry `ct_wave_pwm.c`'s header argues for is lost.
 
 **All three zones cannot collapse onto one channel.** A slice has only two

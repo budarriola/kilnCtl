@@ -32,8 +32,10 @@
 // observed contention.
 #define SPI_EMU_A_REG_IMAGE_MAX_RETRIES 4u
 
-// --- Bus A pin configuration (PROVISIONAL -- no traced HARDWARE.md exists
-// yet, docs/PLAN.md section 3.6/11.1). i2c_owner.c already claims GPIO4/5
+// --- Bus A pin configuration (PROVISIONAL -- no fixture hardware has ever
+// been wired; docs/HARDWARE.md section 1 is the authoritative pin map and is
+// itself labelled provisional, docs/PLAN.md section 3.6/11.1).
+// i2c_owner.c already claims GPIO4/5
 // for I2C0 (its own header comment marks that pair provisional too); this
 // module picks a DIFFERENT, disjoint block: GPIO6-11, six consecutive pins
 // matching PLAN.md 3.6's pin-budget table order (SCLK, MOSI, MISO, CS0, CS1,
@@ -52,15 +54,24 @@
 #define SPI_EMU_A_CS2_GPIO  11u
 
 // ~DRDY outputs (PLAN.md 3.6's "DRDY x3 ... direct GPIO, open-drain
-// emulation"). Also PROVISIONAL. Picked from what the other three provisional
-// claims leave free -- i2c_owner.c has 4/5, this file 6-11, spi_emu_b.c
-// 12-15, ct_wave_pwm.c 16/18/20 -- which leaves 2, 3, 17, 19, 21, 22 and
-// 26-28. 21/22/26 are taken here for main-side DRDY; 27 goes to bus B; the
-// remaining 2/3/17/19 are the natural home for the four ~FAULT lines PLAN.md
-// 3.6 also budgets but which nothing drives yet.
-#define SPI_EMU_A_DRDY0_GPIO 21
-#define SPI_EMU_A_DRDY1_GPIO 22
-#define SPI_EMU_A_DRDY2_GPIO 26
+// emulation"). Also PROVISIONAL. These numbers come from docs/HARDWARE.md
+// section 1's pin table -- DRDY_MAIN_0/1/2 = GPIO2/3/17, wired to J6 pins
+// 17/15/13 (`thermoDrdy_0..2`) per that document's section 3.1 -- NOT from a
+// fresh derivation here. An earlier revision of this file picked 21/22/26 by
+// re-deriving "what is still free" from PLAN.md 3.6 alone, unaware section 1
+// had already assigned all eight DRDY/~FAULT lines; that collided head-on
+// with FAULT_MAIN_1 (21), FAULT_MAIN_2 (22) and DRDY_SAFETY (26). Section 1
+// wins and this file follows it, per section 1's own rule that a driver
+// claiming a pin must cite that table or amend it in the same commit.
+//
+// The remaining main-side pins section 1 reserves are GPIO19/21/22 for
+// FAULT_MAIN_0/1/2, which nothing drives yet. There is no PIO adjacency
+// constraint on ~DRDY: max31856_pio_engine_init()'s config_is_sane() checks
+// SCLK/MOSI/CS relationships only, and drdy_gpio[] is a plain SIO pin
+// toggled between output-low and input-Hi-Z (the open-drain emulation).
+#define SPI_EMU_A_DRDY0_GPIO 2
+#define SPI_EMU_A_DRDY1_GPIO 3
+#define SPI_EMU_A_DRDY2_GPIO 17
 
 static TaskHandle_t s_task_handle = NULL;
 static max31856_channel_t s_channels[SPI_EMU_A_CHANNEL_COUNT];
