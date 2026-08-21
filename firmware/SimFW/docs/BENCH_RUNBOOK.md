@@ -125,33 +125,45 @@ See section 5's troubleshooting table.
 
 **This section exists so you don't spend hours debugging the fixture for
 problems that are actually already-known gaps in today's shipping
-`SaftyFW`.** A software cross-check (`firmware/SimFW/tools/virtual_dut/`,
-compiling `SaftyFW`'s real, unmodified `safety_guards.c`/`relay_grace.c` and
-ticking them against simulated fixture data) established, and this session
-independently re-verified by reading `firmware/SaftyFW/src/tasks/
-safety_core.c` and `link_task.c` directly, that **only guards S5, S6b, S7,
-and S12 can structurally fire in today's `SaftyFW`.** The other nine are
-blocked because `safety_core_build_input()` never populates the inputs they
-need — not because anything is broken on the bench.
+`SaftyFW`.** An earlier revision of this section reported that only guards
+S5, S6b, S7, and S12 could structurally fire, that K4 could never be
+energized, and that S6b nuisance-tripped ~120 s into every boot regardless
+of link health. **That has since been substantially closed** by a guard-
+wiring pass (`safety_core_build_input()` now populates `link_up`,
+`context_valid`, `heat_commanded`, `relay_deenergized`, and
+`main_fault_asserted`) and by `link_task.c` gaining a real
+`SAFETY_CMD_REQUEST_ENABLE` handler that forwards to
+`safety_core_request_enable()` → `relay_owner_command_energize()` — verified
+directly against `firmware/SaftyFW/src/tasks/safety_core.c` and
+`link_task.c` this pass, not carried over from the stale claim.
 
-Two consequences will hit you almost immediately once real hardware is
-involved (steps 6–10 below):
+**Current state: every guard's input is produced. Only S1 and S13 stay
+dormant, and both are commissioning gaps, not missing producers:**
 
-| Symptom you will see | This is expected, because |
+| Symptom you may still see | This is expected, because |
 |---|---|
-| **K4 (the safety pilot relay) reads open/de-energized from the moment `SaftyFW` boots, and never closes, no matter what the fixture or `KilnFW` does.** The kiln will never appear to heat under DUT control. | `relay_owner_command_energize()` (`firmware/SaftyFW/src/tasks/relay_owner.c`) is fully implemented but has **zero callers anywhere in the tree** — confirmed by grep, not just at the one obvious call site. `relay_owner_task()` starts in GRACE and, once GRACE expires, nothing ever asks for an energize. This would also be the eventual caller of a `SAFETY_CMD_REQUEST_ENABLE` decode — but `link_task.c`'s own command switch (`firmware/SaftyFW/src/tasks/link_task.c`, verified this session) has cases for `ANNOUNCE_VERSION`, `FW_VERSION`, `PUSH_CONTEXT`, `CLEAR_TRIP`, `SET_CONFIG`, `ROLLBACK`, `ANNOUNCE_REBOOT`, and the four `UPDATE_*` frames — **no case for `SAFETY_CMD_REQUEST_ENABLE`** exists, even though `KilnFW`'s side of that frame (`safety_link.c`/`safety_link.h`) already sends it. K4 cannot be energized by any path in the current source tree. |
-| **Roughly 120 seconds into every `SaftyFW` boot, S6b (LINK_DEAD) trips — even with a perfectly healthy link, even with nothing else happening.** | `safety_core_build_input()` never sets `link_up` true (no field for it in its struct literal — verified directly, line ~146–156 of `safety_core.c`). `safety_core.c` itself carries a standing `// TODO (Phase 7): context_snapshot_t is read here too, once link_task publishes one`. `link_task.c` is substantially built (context frames, DIAG, STATUS, TRIP_EVENT all exist) — the gap is narrower than "no link task": `safety_core` simply never asks it whether the link is alive. The elapsed-silence timer therefore accumulates from t=0 of every boot and trips the 120 s hard backstop (`link_dead_hard_s` default) unconditionally. |
-| Most other guards (S1–S4, S9, S10, S11, S13) never trip or warn no matter what fault you inject through the fixture. | S2/S3/S4/S10/S13 are gated on `in->context_valid`, also never set true (same Phase 7 gap). S9 needs `in->relay_deenergized`, never computed. S11 needs `in->heat_commanded`, hardcoded `false` ("no current sense yet, Phase 6" — `safety_core.c`'s own comment). S1 needs `cfg->abs_max_temp_c` commissioned; it defaults to 0, and 0 means "not commissioned, never trip" by deliberate convention (`safety_guards.h`), not a bug — this one's a config gap, not a missing producer. S6a needs `in->main_fault_asserted`; the debounced reading already exists (`discrete_task_main_fault()`) and is simply never called from `safety_core_build_input()` — a one-line wiring omission, not a missing phase. |
-| S5, S6b (once past 120 s), S7, and S12 *do* react correctly to fixture-injected faults. | These are the four guards whose inputs `safety_core_build_input()` actually populates today: `tc_c`/`cj_c`/`fault_bits`/`spi_failed` (unconditional, from `thermo_task`) and `estop_pressed` (unconditional, from `discrete_task_estop_pressed()`). Use these four to validate that the fixture→DUT signal path itself works, since they are the only guards that can currently confirm it. |
+| **S1 (absolute temperature ceiling) never trips no matter how hot the fixture reports.** | `cfg->abs_max_temp_c` has no commissioned value yet (defaults to 0, and 0 means "not commissioned, never trip" by deliberate convention, `safety_guards.h`) — a config gap, not a missing producer. Guard logic itself is fully wired to real `tc_c`. |
+| **S13 (borrowed-zone sample-staleness) never trips or warns.** | Needs a commissioned `borrowed_zone_index` to say which context zone is "the" borrowed channel — that config field does not exist anywhere in the codebase yet (Phase 9, same category as S1). `safety_core_build_input()` deliberately leaves `sample_counter_advancing` false rather than guess a zone index; `safety_guards.c`'s own S13 block is additionally gated on `cfg->tc_source`, which also has no default, so S13 stays correctly dormant either way. |
+| K4 (the safety pilot relay) energizes only when `SAFETY_CMD_REQUEST_ENABLE` is sent AND `relay_owner`'s own interlocks (state machine, GRACE window, any latched trip) allow it — **not automatically at boot.** | This is the real, current behavior, not a gap: `relay_owner_command_energize()` refuses outright while any guard is tripped, and always accepts a disable. Send the enable request (`KilnFW`'s `safety_link_request_enable()` or the equivalent `mcp__kilnctrl__safety_request_enable` tool) and confirm it during step 8/9 rather than assuming K4 stays open forever. |
+| Every other guard (S2, S3, S4, S5, S6a, S6b, S7, S9, S10, S11, S12) reacts to fixture-injected faults once its trigger condition is met. | All of their inputs are now populated unconditionally or gated only on `context_valid`/`link_up`, both of which the fixture can actually drive true via a healthy USB link and `PUSH_CONTEXT` traffic — there is no longer a producer-side blocker for these guards. |
 
-**None of the above is a fixture bug, a wiring mistake, or something this
-session can fix by re-checking connections.** It is `SaftyFW`'s own Phase
-6/7 incompleteness (current-sense and link-context wiring), already flagged
-in `SaftyFW/TODO.md` and `SAFETY_MODEL.md`, now quantified per-guard by
-`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §6. Full detail and the
-guard-by-guard reachability table live there and in `docs/PLAN.md`'s status
-header — read those if a specific guard's non-behavior needs explaining to
-someone else.
+**S6b specifically no longer nuisance-trips on a healthy link.** `link_up`
+resets S6b's elapsed-silence timer every tick it is true
+(`safety_guards.c`), so the 120 s hard backstop only fires on a genuinely
+silent link, not unconditionally from t=0 of every boot as the earlier
+revision of this document reported.
+
+**If a guard still behaves unexpectedly on the bench, do not assume it's
+this same already-known gap** — that assumption has been wrong before in
+this project's own docs (an earlier pass separately, and incorrectly,
+claimed "S9 is blocked by SaftyFW wiring" and "S11 waits on Phase 6" when
+neither was true by the time it was written). Check
+`firmware/SaftyFW/src/tasks/safety_core.c`'s `safety_core_build_input()`
+directly for what a guard's inputs actually are before writing off a
+surprising result as expected incompleteness. Full detail lives in
+`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §6 and `docs/PLAN.md`'s status
+header — read those if a specific guard's behavior needs explaining to
+someone else, but verify against the source before repeating either.
 
 **Practical upshot for scenario runs (step 10):** `kilnsim run` has a
 dedicated exit code (`2`, "BLOCKED") specifically for expectations blocked
@@ -253,12 +265,20 @@ pip install pyserial   # not vendored anywhere in this repo
 python firmware\SimFW\tools\spi_test_master\run_soak.py --port COM<master-port>
 ```
 Default sweep: 100 kHz → 5 MHz, 10,000 transactions per rate point.
+**Correction: the M-A target rate is now 4 MHz, not 5 MHz.** `docs/PLAN.md`
+§3.2.1 decided 2026-08-20 that the thermocouple SPI clock is capped at 4 MHz
+on both real masters (`KILNCTL_THERMO_SPI_CLOCK_HZ`'s Kconfig `range` on the
+ESP32-S3 plus a matching `_Static_assert` on `SPI_OWNER_BAUDRATE_HZ` in
+`SaftyFW/src/spi_owner.c`) — the 5 MHz figures below were superseded by that
+decision and are kept in the sweep tool as extra headroom characterization,
+not as the pass bar. Treat any rate point above 4 MHz in the tool's own
+sweep table as informational only.
 
 **Pass (table-only, not yet M-A's full exit criterion):** every rate point
-in the sweep table reports PASS, zero mismatches, zero suspected
-first-byte-late events, up through 5 MHz.
+up through 4 MHz reports PASS, zero mismatches, zero suspected
+first-byte-late events.
 **Pass (M-A's actual, literal exit criterion):** the above, *plus* a Saleae
-capture of the 5 MHz run showing clean mode-1 framing and no MISO-tri-state
+capture of the 4 MHz run showing clean mode-1 framing and no MISO-tri-state
 violations — see `tools/spi_test_master/README.md`'s "Where the Saleae
 fits" section for the exact capture procedure (start the capture just before
 issuing `SOAK`, stop it just after `SOAK DONE`). **The sweep table alone
@@ -288,11 +308,13 @@ kilnsim --port COMx ct state 0
 bench test point before the transformer, if the transformer/CT jacks aren't
 wired yet — likely true this session, see §1.1's BOM note) within a
 plausible voltage range for the commanded amplitude. **CT amplitude
-calibration is an explicit `TODO(M-D calibration)` IDENTITY placeholder in
-`wave_owner.c` today** — "5.0 A commanded" does not yet mean 5 A as any real
-ADC would measure it; judge this step on waveform cleanliness (frequency,
-shape, no carrier ripple bleeding through), not on absolute calibrated
-amplitude.
+calibration's mechanism now exists (`src/sim/ct_calibration.{c,h}`), but the
+compiled-in default table is deliberately all-uncalibrated** — "5.0 A
+commanded" still does not yet mean 5 A as any real ADC would measure it,
+because no bench calibration run has ever populated real per-channel
+constants; behavior today is identity, same as the old placeholder. Judge
+this step on waveform cleanliness (frequency, shape, no carrier ripple
+bleeding through), not on absolute calibrated amplitude.
 **NO-GO:** see §5's CT row.
 
 ### Step 5 — GROUND-DOMAIN CHECK BEFORE FIRST DUT CONTACT
@@ -357,9 +379,9 @@ non-zero, non-fault temperatures on all three main-side channels, tracking
 what `kilnsim state` believes it is reporting.
 **NO-GO:** see §5's DUT-thermocouple row. **Remember section 2's table**
 before concluding anything is broken — a lack of *heating* here is expected
-(K4 never energizes, relays are never commanded by a PID with nothing to
-regulate toward yet); a lack of *temperature readings at all* is not
-expected and is a real fixture-path problem.
+this early (K4 has not been asked to energize yet, and relays are not
+commanded by a PID with nothing to regulate toward); a lack of *temperature
+readings at all* is not expected and is a real fixture-path problem.
 
 ### Step 7 — Safety path (J7, isolated)
 
@@ -378,9 +400,10 @@ zone-0 (or configured blend) temperature. **Note:** this is also the first
 point where you can confirm S5/S12 are alive per section 2's table — inject
 a TC fault (step-ahead preview of step 10's fault tooling:
 `kilnsim fault tc:safety open_circuit`) and confirm `safety_get_status`
-shows the expected fault reaction; S6b will also be counting down in the
-background from the moment `SaftyFW` booted, regardless of anything you do
-here (section 2).
+shows the expected fault reaction. S6b will only trip from here if the USB
+link actually goes silent for the backstop window — with a healthy link
+`link_up` keeps resetting its timer, so it should stay quiet in the
+background rather than counting down unconditionally (section 2).
 
 ### Step 8 — Relay sense
 
@@ -392,12 +415,15 @@ Command relays via the existing DUT-side MCP tool
 ```powershell
 kilnsim --port COMx relay edges --since-seq 0
 ```
-**Pass:** commanding K1/K2/K3/K5/K4 produces a matching edge in the
-fixture's relay-edge log within one debounce window (~24 ms worst case, per
-`mcp23017.h`). **K4 specifically will never show a commanded-closed edge**
-regardless of what you do here — section 2's table, `relay_owner_command_
-energize()` has no caller. Confirm K1/K2/K3/K5 edges track real commands;
-treat K4 staying open as expected, not a fixture defect.
+**Pass:** commanding K1/K2/K3/K5 produces a matching edge in the fixture's
+relay-edge log within one debounce window (~24 ms worst case, per
+`mcp23017.h`). **K4 needs an explicit enable request first** (section 2) —
+`mcp__kilnctrl__io_set_relay` alone does not energize K4; send
+`mcp__kilnctrl__safety_request_enable` (or `KilnFW`'s equivalent
+`SAFETY_CMD_REQUEST_ENABLE`) and confirm no guard is currently tripped
+before expecting K4's edge to appear. K4 staying open after a real enable
+request, with no guard tripped, is now a real fixture/DUT problem, not
+expected behavior.
 
 ### Step 9 — E-stop, fault line, DUT power relays — one at a time
 
@@ -432,13 +458,23 @@ exercised.
 kilnsim --port COMx run firmware\SimFW\scenarios\baseline_firing.yaml --report out.json
 ```
 Exit code: 0 = PASS, 1 = FAIL, 2 = BLOCKED (per `cli.py`'s documented
-convention — a BLOCKED-only result, expected here, is not a fixture
-failure; see section 2). **Given section 2's findings, expect this run to
-report BLOCKED or FAIL, not PASS** — K4 never energizes and most guards
-never see their inputs, so a genuine closed-loop firing with a real PID
-regulating through relay cycling almost certainly cannot happen against
-today's shipping `SaftyFW`, independent of anything about the fixture. A
-BLOCKED/FAIL result that traces cleanly back to section 2's table (inspect
+convention — a BLOCKED-only result, if it happens, is not automatically a
+fixture failure; see section 2). **Do not assume this run must report
+BLOCKED/FAIL** the way an earlier revision of this document did — most guard
+inputs are now populated and K4 *can* energize once a
+`SAFETY_CMD_REQUEST_ENABLE` is actually sent and no guard is tripped. What
+is still genuinely open: `kilnsim`'s own CLI/scenario runner does not
+appear to send that enable request on its own (checked this pass — grep
+found no `request_enable` call in `tools/PcTools/src/kilnsim/`), so unless
+something else in the loop sends it, K4 can still stay open through a
+`kilnsim run` and gate a closed-loop firing exactly the old way, just for a
+different, narrower reason (a missing enable call, not a missing wiring
+path). Confirm whether an enable request needs to be issued separately
+(e.g. `mcp__kilnctrl__safety_request_enable`) before or during the run, and
+record which is actually true on this bench session — this is exactly the
+kind of claim this document has gotten wrong before and needs verifying
+against real behavior, not re-asserted from an old note. A BLOCKED/FAIL
+result that traces cleanly back to section 2's table (inspect
 `out.json`'s `expectations[].reason` and raw `events` list — the `virtual_dut/
 README.md`'s "Finding 2" explains exactly this failure signature: a `forbid`
 clause reporting satisfied "for the wrong reason" because K4 was already
@@ -480,7 +516,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 | Symptom | Likely cause |
 |---|---|
 | No waveform at all | PWM GPIO not wired, RC filter component missing/wrong values, or `wave_owner` mode is still MODEL (not MANUAL) and the thermal model has no simulated current on that zone yet — set `ct mode <ch> manual` first |
-| Waveform present but wildly wrong amplitude | Expected — calibration is an identity placeholder (`TODO(M-D calibration)`), not a fixture fault; do not chase this as a bug this session |
+| Waveform present but wildly wrong amplitude | Expected — the shipped calibration table is deliberately all-uncalibrated (identity behavior), not a fixture fault; do not chase this as a bug this session |
 | Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built (ratio decided as ~3:1 step-up, `docs/PLAN.md` §3.3/§11 item 2, but the physical coupling network has not been built — still open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
 
 ### Isolator / K4 / relay-sense-wetting-circuit symptoms
@@ -488,7 +524,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 | Symptom | Likely cause |
 |---|---|
 | Safety-side SPI (bus B) dead but bus A works fine | Digital isolator not powered from J7's safety-side rail, or the 3-board→fixture/3-fixture→board channel-direction split doesn't match the specific isolator part purchased (`docs/HARDWARE.md` §3.2 flags this as unconfirmed against any specific part) |
-| K4 relay sense never shows closed even when you believe you've closed it externally for a bench test | Expected per section 2 — nothing in current `SaftyFW` ever asks for an energize. This is not a wetting-circuit fault; confirm by checking whether K1/K2/K3/K5 sense correctly (they should) while only K4 stays stuck |
+| K4 relay sense never shows closed even after a `SAFETY_CMD_REQUEST_ENABLE` with no guard tripped | Now a real fixture/DUT problem, not expected (section 2 — the enable path exists and is wired end to end). First confirm the request was actually sent and no guard is latched tripped; if both check out, treat this as a real wetting-circuit or relay_owner fault, and confirm K1/K2/K3/K5 sense correctly (they should) as a baseline |
 | K1/K2/K3/K5 relay sense never shows closed either | Now a real fixture problem — check the wetting-circuit voltage source + resistor per contact (`docs/HARDWARE.md` §5, "not sized" — verify it was actually built to a sane value) |
 
 ### I/O-expander-driven E-stop / DUT-power symptoms
@@ -517,10 +553,10 @@ evidence, not just "tried it":
    milestone (M-A through M-H) currently reads "Status: NOT MET" or
    "PARTIALLY MET" for its hardware half. Update the specific milestone(s)
    this session actually touched — e.g. if M-A's Saleae capture passed at
-   5 MHz with zero underruns over ≥10k transactions, M-A's status changes
-   from NOT MET to MET, with the capture as cited evidence. Do not mark a
-   milestone met on the strength of the sweep table alone — the exit
-   criterion is the capture.
+   4 MHz (the current cap, PLAN.md §3.2.1) with zero underruns over ≥10k
+   transactions, M-A's status changes from NOT MET to MET, with the capture
+   as cited evidence. Do not mark a milestone met on the strength of the
+   sweep table alone — the exit criterion is the capture.
 3. **`firmware/SimFW/docs/HARDWARE.md` §0 and its bring-up checklist §6.**
    Check off whichever bring-up steps passed. If step 5's J7 pin-1
    continuity check resolved the KilnFW-vs-SaftyFW contradiction, update §0
@@ -548,21 +584,22 @@ evidence, not just "tried it":
 
 ## 7. Realistic session plan
 
-**M-A alone (the sweep to 5 MHz plus a Saleae capture) is real, non-trivial
-bench time** — flashing two boards, wiring a 6-wire+GND harness correctly,
-running a 10,000-transaction sweep across 7 rate points, then re-running at
-5 MHz specifically while a Saleae capture is armed, then reviewing that
+**M-A alone (the sweep plus a Saleae capture at the capped 4 MHz rate) is
+real, non-trivial bench time** — flashing two boards, wiring a 6-wire+GND
+harness correctly, running a 10,000-transaction sweep across the tool's rate
+points, then re-running at 4 MHz specifically (the real masters' hard cap,
+`docs/PLAN.md` §3.2.1) while a Saleae capture is armed, then reviewing that
 capture. Budget most of a first session for this alone if it's attempted at
 all.
 
 **Achievable in a first sitting**, roughly in priority order:
 1. Steps 1–2 (Pico alone, expanders) — quick, low-risk, get the fixture
    Pico's basic health confirmed.
-2. Step 3 (M-A) at least through the sweep table at all 7 rate points — the
+2. Step 3 (M-A) at least through the sweep table up to the 4 MHz cap — the
    single highest-value thing this session can produce, since it retires
    (or characterizes) the project's single biggest named risk
    (`docs/PLAN.md` §15's top row).
-3. The Saleae capture at 5 MHz, if the sweep passes and there's time left.
+3. The Saleae capture at 4 MHz, if the sweep passes and there's time left.
 4. Step 5's ground-domain and J7 pin-1 checks, **even if no fixture harness
    exists yet to build on** — these can be done directly against the real
    main board with just a multimeter, and resolving the J7 pin-1
@@ -576,10 +613,13 @@ all.
   built — §1.1). Attempting them before M-A is proven and the ground-domain
   check has passed risks the real board for no proportionate benefit.
 - CT calibration (M-D) — explicitly gated on hardware existing to calibrate
-  against.
+  against; the calibration *mechanism* is already in firmware, only the
+  bench measurement and table generation remain.
 - Any scenario run expecting a genuine PASS rather than a documented
-  BLOCKED/FAIL (step 10) — not reachable until `SaftyFW` Phase 6/7 lands,
-  independent of anything this bench session can do.
+  BLOCKED/FAIL (step 10) — Phase 6/7 guard wiring has since landed, so this
+  is no longer gated on `SaftyFW` guard reachability the way it used to be;
+  see step 10's own note on the one thing (an explicit
+  `SAFETY_CMD_REQUEST_ENABLE`) that may still be needed and unverified.
 
 **If only one thing gets done this session, make it M-A's Saleae capture.**
 Every later step in this runbook, and every hardware-trip row in

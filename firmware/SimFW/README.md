@@ -25,15 +25,21 @@ against `benchproto` — a new hardened protocol library extracted into
 **What that status does *not* mean: nothing here has been hardware-verified.**
 No fixture hardware has ever been built or connected to a bench ESP32/Pico.
 The single biggest unproven risk is still the PIO SPI slave's real-world
-timing — no Saleae capture exists proving 5 MHz mode-1 transactions against a
-real master (`docs/PLAN.md` section 10, milestone M-A). A real SPI-mode bug
-*was* found and fixed during implementation: the PIO engine originally
+timing — no Saleae capture exists proving mode-1 transactions against a real
+master at 4 MHz, the thermocouple SPI clock's decided ceiling on both real
+masters (`docs/PLAN.md` section 10 / section 3.2.1, milestone M-A; enforced
+by a Kconfig `range` on KilnFW plus a matching `_Static_assert` on SaftyFW —
+the separate display SPI symbol stays at 20 MHz, unaffected). A real SPI-mode
+bug *was* found and fixed during implementation: the PIO engine originally
 sampled MOSI on the wrong clock edge (mode 0 behavior under a mode-1 label);
 it is now corrected to match the MAX31856 datasheet and both real masters'
 drivers — see `docs/HARDWARE.md` and the PLAN.md status header for detail.
-CT amplitude calibration is also still an identity placeholder pending real
-hardware to calibrate against. None of the 19 scenarios (grown from 17) has
-ever run against a real `KilnFW`+`SaftyFW` pair.
+CT amplitude calibration's mechanism now exists in firmware
+(`src/sim/ct_calibration.{c,h}`, a real per-channel gain/offset fit), but the
+compiled-in default table is deliberately all-uncalibrated, so behavior is
+still identity pending a real bench calibration run. None of the 19
+scenarios (grown from 17) has ever run against a real `KilnFW`+`SaftyFW`
+pair.
 
 **A fourth, software-only capability exists now and it already found a real
 bug — in `SaftyFW`, not in `SimFW`.** `tools/virtual_simfw/` compiles this
@@ -44,12 +50,17 @@ further, compiling `SaftyFW`'s real `safety_guards.c`/`relay_grace.c`
 unmodified and ticking them against `virtual_simfw`'s live data, so guard
 verdicts genuinely PASS/FAIL instead of skipping (see
 `tools/virtual_dut/README.md`). **Neither is hardware verification** — see
-each tool's own README — but running real guard code against a simulated
-kiln established that in today's shipping `SaftyFW`, only 4 of 13 guards
-(S5, S6b, S7, S12) can structurally fire; the rest are blocked on inputs
-`safety_core.c` never populates yet (Phase 6/7 work). See `docs/PLAN.md`'s
-status header and `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s new
-reachability section for the full detail.
+each tool's own README — and running real guard code against a simulated
+kiln originally established that only 4 of 13 guards (S5, S6b, S7, S12)
+could structurally fire, with the rest blocked on inputs `safety_core.c`
+never populated (Phase 6/7 work). **That gap has since been closed**: a
+guard-wiring pass now populates every guard's input in
+`safety_core_build_input()`, and only S1 and S13 remain dormant today, both
+by deliberate commissioning gaps (an uncommissioned `abs_max_temp_c`, and a
+`borrowed_zone_index` with no config field yet), not by missing producers.
+See `docs/PLAN.md`'s status header and
+`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s reachability section for the
+current, guard-by-guard detail.
 
 Single-image, no A/B bootloader slots — unlike `SaftyFW`, this is a bench
 tool, flashed over BOOTSEL or SWD.

@@ -13,8 +13,11 @@ concept") as the project's risk-first milestone: prove the PIO MAX31856
 *slave* emulator (`../../src/drivers/max31856_spi_slave.pio` +
 `max31856_pio_engine.c`) can survive real SPI timing before any framework
 code is built on top of it. Its exit criterion is a Saleae capture of
-correct mode-1 multi-byte reads at 5 MHz with **zero TX underruns over
->=10k transactions**.
+correct mode-1 multi-byte reads at **4 MHz** (the thermocouple SPI clock's
+decided ceiling on both real masters, `docs/PLAN.md` section 3.2.1 —
+originally targeted at 5 MHz before that cap was decided; this tool's own
+sweep still exercises rates above 4 MHz for headroom characterization, see
+below) with **zero TX underruns over >=10k transactions**.
 
 PLAN.md explicitly allows proving this against "a third Pico as a scripted
 test master first" instead of going straight to the real bench ESP32. That
@@ -198,9 +201,14 @@ python run_soak.py --port COM5
 
 Default sweep: 100 kHz, 500 kHz, 1, 2, 3, 4, 5 MHz, 10,000 transactions
 (iterations, each contributing 2 SPI transactions -- the write and the
-read) per rate point -- the M-A exit criterion's floor. Override with
-`--rates` and `--count`; `--mode 0` reruns the whole sweep with CPHA=0 for
-diagnosing the ambiguity below without reflashing.
+read) per rate point. **The M-A exit criterion's actual rate is 4 MHz** (the
+thermocouple SPI clock's decided cap on both real masters, `docs/PLAN.md`
+section 3.2.1) -- the 5 MHz point in this default sweep is kept as headroom
+characterization above the real ceiling, not as the pass bar; a slave that
+also passes at 5 MHz says something useful about margin, but only the
+4 MHz result is required. Override with `--rates` and `--count`; `--mode 0`
+reruns the whole sweep with CPHA=0 for diagnosing the ambiguity below
+without reflashing.
 
 Output is a plain table, one row per rate point (requested Hz, actual Hz
 achieved, PASS/FAIL, failed iteration count, mismatch count, suspected
@@ -284,8 +292,10 @@ intended to send.
 **Recommended capture procedure:**
 1. Wire per the table above, flash both boards, connect the Saleae probes
    to the slave-side SCLK/MOSI/MISO/CS lines.
-2. Run `run_soak.py` at your target rate (5 MHz for the literal M-A
-   criterion) with `--count 10000` or more, starting the Saleae capture
+2. Run `run_soak.py` at your target rate (**4 MHz** for the literal M-A
+   criterion -- the real masters' decided cap, `docs/PLAN.md` section
+   3.2.1; a 5 MHz capture is optional extra headroom evidence, not a
+   substitute) with `--count 10000` or more, starting the Saleae capture
    just before issuing the `SOAK` command and stopping it just after
    `SOAK DONE` prints.
 3. Confirm in the capture software: SCLK period matches the requested rate

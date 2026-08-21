@@ -35,34 +35,27 @@ refuses a non-invertible (zero/NaN) ``fit_gain`` and a table whose
 refusals for free instead of re-deriving them and risking the two copies
 drifting apart.
 
-**A genuine, currently-unresolved blocker, found while building this, not
-manufactured for this docstring.** ``firmware/KilnFW/App/drivers/uart_bridge.c``'s
-``safety_bridge_task()`` switches on the SAFETY subcommand byte and has no
-``case`` for ``SAFETY_CMD_SET_CT_CAL`` (0x19) or
-``SAFETY_CMD_GET_CT_CAL``/``CT_CAL`` (0x1A) -- both fall through to
-``default: rejected = true`` and are silently dropped on the ESP (a warning
-is logged to the ESP's own console; nothing is returned over the PC UART
-link). ``firmware/KilnFW/App/drivers/safety_link.h``/``.c`` (the ESP's
-send/receive glue to the isolated RP2040 link) likewise has no
-``safety_link_send_set_ct_cal()`` or GET_CT_CAL forwarder -- grepped for at
-the time this was written, zero hits in either file. So even though
-CommonFW's codecs and SaftyFW's ``config_store.c`` both support these
-commands end to end on the Pico side, and this module builds the wire bytes
-for them correctly (verified against a fake transport -- see this package's
-tests), **a real ESP32 running the KilnFW currently checked into this repo
-will ACK a SET_CT_CAL send** (task 7 exists on the ESP and ACKs at the
-transport layer regardless of whether the subcommand byte is recognised --
-see ``kilnctrl.serial_link``'s own docstring on exactly this "delivered,
-acknowledged, silently discarded" shape) **and then silently discard it,
-and a GET_CT_CAL query will time out waiting for a reply that is never
-sent.** This is a different kind of gap than "no CT hardware exists yet":
-it is firmware KilnFW does not have yet, on the ESP side of the link.
-Fixing it means adding cases to ``uart_bridge.c``'s ``safety_bridge_task()``
-switch and a forwarder in ``safety_link.c`` -- both squarely inside
-``firmware/KilnFW/**``, which is out of scope for this task (see this
-package's README for the fuller account and what should happen next).
+**Closed.** An earlier revision of this docstring described a genuine,
+then-unresolved blocker: ``firmware/KilnFW/App/drivers/uart_bridge.c``'s
+``safety_bridge_task()`` had no ``case`` for ``SAFETY_CMD_SET_CT_CAL``
+(0x19) or ``SAFETY_CMD_GET_CT_CAL``/``CT_CAL`` (0x1A), and
+``firmware/KilnFW/App/drivers/safety_link.h``/``.c`` had no
+``safety_link_send_set_ct_cal()`` or GET_CT_CAL forwarder, so a real ESP32
+would ACK a SET_CT_CAL send at the transport layer and then silently
+discard it, and a GET_CT_CAL query would time out waiting for a reply that
+was never sent. **That gap has since been closed on the KilnFW side**
+(commit ``5fb6928``): ``uart_bridge.c``'s ``safety_bridge_task()`` now has
+real ``case SAFETY_CMD_SET_CT_CAL`` / ``case SAFETY_CMD_GET_CT_CAL``
+handlers that call ``safety_link_send_set_ct_cal()`` /
+``safety_link_get_ct_cal()``, and ``safety_link.c`` implements both as real
+send/receive glue to the isolated RP2040 link (verified directly against
+those two files, not carried over from the old note). So this module's wire
+bytes, CommonFW's codecs, SaftyFW's ``config_store.c``, and KilnFW's bridge
+now form a complete, real path end to end on the software side; what
+remains is the hardware-gated part this package's README already covers
+(no CT hardware exists yet to calibrate against).
 
-Usage (bench day, once the KilnFW gap above is closed)::
+Usage (bench day)::
 
     python push_ct_cal.py --json ct_calibration_table.json \\
         --dut-serial-port COM7

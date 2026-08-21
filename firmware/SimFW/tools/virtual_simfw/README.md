@@ -72,9 +72,15 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   by most of `firmware/SimFW/scenarios/*.yaml`'s `expect` clauses) can never
   appear. See "Which scenarios are DUT-gated" below.
 * No PWM/DMA/PIO hardware -- CT channel state (amps/phase/distortion) is
-  tracked as plain numbers, same `wave_owner.h` TODO(M-D calibration)
-  placeholder real firmware uses today (amps == a 0..1 PWM-scale fraction,
-  not yet a real calibrated current unit).
+  tracked as plain numbers. **Correction:** real firmware no longer carries a
+  bare `TODO(M-D calibration)` identity placeholder for this -- it now calls
+  through `src/sim/ct_calibration.{c,h}`'s real per-channel `gain`/`offset`
+  fit (`ct_cal_apply()`). The compiled-in default table is still deliberately
+  all-uncalibrated, so the *observed* amps == a 0..1 PWM-scale fraction
+  behavior this bullet describes is still accurate today, but the mechanism
+  producing it is a real (currently-neutral) calibration table, not a
+  hardcoded placeholder -- worth knowing if this harness is ever extended to
+  exercise a real calibration table.
 * No I2C expander hardware -- `IO_SET_DIR`/`IO_WRITE`/`IO_READ` ack but do
   nothing (no scenario in the standard library needs J20/spare-pin coverage
   today).

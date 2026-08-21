@@ -388,6 +388,22 @@ the datasheet, not a measurement** — see §8. The recommendation for the
 coordinator is: run the fixture at 200 MHz, or hold the masters to 4 MHz, and
 treat the Saleae capture as the arbiter.
 
+**Decided 2026-08-20 (`docs/PLAN.md` §3.2.1), superseding the "run at
+200 MHz or hold to 4 MHz" recommendation above with the second option:** the
+thermocouple SPI clock is now capped at 4 MHz on both real masters, not left
+open. `KILNCTL_THERMO_SPI_CLOCK_HZ`'s Kconfig `range 100000 4000000` (KilnFW)
+plus a `_Static_assert(SPI_OWNER_BAUDRATE_HZ <= 4000000u, ...)` on
+`SaftyFW/src/spi_owner.c`'s `SPI_OWNER_BAUDRATE_HZ` enforce this at build
+time on both sides, so the sysclk-bump path is no longer under
+consideration. This document's own 5 MHz figures above are therefore
+historical margin analysis, not a live target — they explain *why* 4 MHz was
+chosen (comfortable hard-deadline margin) and *why* 5 MHz was rejected
+(little to no margin), not an open question. M-A's exit criterion (§7, §8)
+is a Saleae capture at 4 MHz, the masters' actual ceiling — not 5 MHz. Note
+this is the **thermocouple** SPI clock only; the separate display SPI symbol
+(`KILNCTL_DISPLAY_SPI_CLOCK_HZ`, 20 MHz) is unrelated and unaffected by this
+cap.
+
 Design notes on the three constraints that had to survive:
 
 * **MISO tri-state (D1).** Unchanged and preserved: the TX programs and D1's

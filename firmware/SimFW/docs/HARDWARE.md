@@ -626,7 +626,7 @@ exists specifically to verify this before the DUT is ever touched.
 | Part | Qty | Role | Sizing status |
 |---|---|---|---|
 | Digital isolator, quad unidirectional, TI ISO7740DWR (revised 2026-08-20; was "6-channel ISO7741-class, qty 1") | 2 | One for the 3 board→fixture channels (`CLK`/`MOSI`/`CS0`), one for the 3 fixture→board channels (`MISO`/`DRDY_SAFETY`/`FAULT_SAFETY`), 1 spare channel each | **Resolved (§3.2, `docs/BOM.md` §2):** no 6-channel part ships with a fixed 3/3 split, so two single-direction quad parts are used instead. In stock, Mouser 595-ISO7740DWR |
-| CT isolation transformer, **~3:1 step-up** audio/isolation (revised 2026-08-20; was 1:1) | 3 | One per CT channel, between the RC-filtered PWM output and the J13/J15/J17 jack | **Partially resolved (PLAN.md §11 item 2):** target transfer function sized — `SaftyFW/docs/CURRENT_SENSE.md` §2 (gain 0.715, full-scale ≈98 A rms for a 1 V/30 A CT or ≈326 A rms for a 1 V/100 A CT) against an estimated ~1.5 Vpk usable Pico drive gives ~3:1 (medium confidence — see `docs/BOM.md` §3). **Still open:** the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its datasheet, and `ct_wave_pwm.c`'s amplitude mapping is still an `IDENTITY` placeholder (M-D) |
+| CT isolation transformer, **~3:1 step-up** audio/isolation (revised 2026-08-20; was 1:1) | 3 | One per CT channel, between the RC-filtered PWM output and the J13/J15/J17 jack | **Partially resolved (PLAN.md §11 item 2):** target transfer function sized — `SaftyFW/docs/CURRENT_SENSE.md` §2 (gain 0.715, full-scale ≈98 A rms for a 1 V/30 A CT or ≈326 A rms for a 1 V/100 A CT) against an estimated ~1.5 Vpk usable Pico drive gives ~3:1 (medium confidence — see `docs/BOM.md` §3). **Still open:** the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its datasheet, and the compiled-in CT calibration table remains all-uncalibrated (identity behavior) — the calibration *mechanism* itself now exists, see §6 step 4's correction (M-D) |
 | Relay-sense wetting circuit | 5 | One per relay (K1/K2/K3/K5 direct, K4 through an opto stage) into MCP23017 #1 inputs | **Resolved (`docs/BOM.md` §4):** no dedicated wetting supply needed — MCP23017's internal 100 kΩ pull-ups (`GPPU`) plus a 1 kΩ series resistor per contact (K1/K2/K3/K5 direct to `GND_Main`; K4 through the 4N35 opto stage's phototransistor, LED side wetted from J7's safety rail). Vishay 4N35 for K4's opto, per `docs/BOM.md` §5 |
 | E-stop optoMOS | 1 | In series with J1's E-stop loop, driven by `EXP1_PIN_ESTOP_DRIVE` | **Resolved (`docs/BOM.md` §5):** Littelfuse/IXYS CPC1017N — loop current ≈3.3 mA (3.3 V / 1 kΩ pull-up) against a part rated for 100+ mA continuous in this family, comfortable margin |
 | DUT 12 V power relay | **2** (resolved 2026-08-20, §0 item 6 — one per domain, not one shared) | Fixture's own 12 V feed to J18 (relay #1) and J19 (relay #2) independently | Part: Omron G5LE-14-DC12 (10 A/250 VAC continuous, already used elsewhere on the main board), per `docs/BOM.md` §6. **Still open (PLAN.md §11 item 5):** inrush rating vs the board's actual inrush not measured — `docs/BOM.md` §6 estimates ~60 A / ~190 µs from ~940 µF per-domain bulk capacitance and an assumed ~0.2 Ω source resistance; this is an estimate, not a measurement, and needs a scope/current-probe capture at first power-on |
@@ -681,8 +681,17 @@ expands this same ten-step order in full.
   calibration.
   Command: `kilnsim ct amps <channel> <amps>` then `kilnsim ct state
   <channel>` — the CLI's `ct` group now exists; judge on waveform
-  cleanliness, not absolute amplitude (`ct_wave_pwm.c`'s amplitude mapping is
-  still an `IDENTITY` placeholder pending M-D calibration).
+  cleanliness, not absolute amplitude. **Correction:** the amplitude
+  calibration *mechanism* now exists (`src/sim/ct_calibration.{c,h}`,
+  `pwm_scale = clamp(gain[ch] * amps + offset[ch], 0, 1)`) — this is no
+  longer a bare `IDENTITY` placeholder in the code sense. What ships today is
+  the compiled-in *default table*, and that table is deliberately
+  all-uncalibrated (`ct_calibration_defaults.h`, every channel's `calibrated`
+  flag false), which makes the observed behavior identical to the old
+  IDENTITY placeholder (`pwm_scale = clamp(amps, 0, 1)`) until a real bench
+  calibration run (`tools/ct_calibration/`) produces per-channel constants
+  and `tools/gen_ct_cal_table.py` regenerates the default header. Still
+  pending M-D hardware; the plumbing to consume a real table is not.
 
 - [ ] **Step 5 — GROUND-DOMAIN CHECK BEFORE FIRST DUT CONTACT. Do not skip,
   do not reorder.**
@@ -726,14 +735,20 @@ expands this same ten-step order in full.
   the expected STOP/healthy transition on the DUT's safety status.
   Pass (fault line): a fault forced on the DUT's `Fault` GPIO is visible in
   the fixture's sense state.
-  Pass (DUT power): `kilnsim power cycle --off-ms 500` reboots the DUT and
-  its telemetry shows the gap. **§0 item 6 (J18/J19, one relay vs two) is
-  design-resolved (two relays) but not yet implemented** — `i2c_owner.c`
-  today drives only one relay/one MCP23017 bit, so until the second relay's
-  control bit is added, this step only proves the wired domain browns out;
-  note which domain in the bench log (§6 of `docs/BENCH_RUNBOOK.md`).
-  Commands: `kilnsim estop open|closed`, `kilnsim power on|off|cycle
-  [--off-ms N]`.
+  Pass (DUT power): each `--domain` cycle reboots only that domain's
+  downstream load and its telemetry shows the gap. **Correction: §0 item 6
+  (J18/J19, one relay vs two) is now fully implemented, not just
+  design-resolved** — `i2c_owner.c` drives two independent MCP23017 output
+  bits (`EXP1_PIN_DUT_POWER_MAIN`/`EXP1_PIN_DUT_POWER_SAFETY`, §3.7), with
+  matching wire commands (`DUT_POWER_SET`/`GET` main-domain-only,
+  `DUT_POWER_SAFETY_SET`/`GET` for the safety domain, `docs/PROTOCOL.md`
+  §5.5). Run the two domains' power cycles **separately**, not as one
+  combined action — there is deliberately no "power both" command, so a
+  scenario that wants both domains power-cycled issues both commands; note
+  which domain(s) you actually exercised in the bench log (§6 of
+  `docs/BENCH_RUNBOOK.md`).
+  Commands: `kilnsim estop open|closed`, `kilnsim power cycle --off-ms N
+  --domain main`, `kilnsim power cycle --off-ms N --domain safety`.
 
 - [ ] **Step 10 — First closed-loop firing on `fast_test` preset.**
   Pass: `kilnsim run scenarios/baseline_firing.yaml` (once that scenario file

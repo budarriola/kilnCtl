@@ -109,10 +109,14 @@ rail), with a theoretical maximum swing of ±1.65 V at a 100 % modulation
 index. Real duty-cycle firmware always derates below the rails to avoid
 distortion near 0 %/100 % duty — **this document assumes a practical usable
 amplitude of 1.5 V peak** (≈91 % of the theoretical max), which is an
-estimate, not a measured or firmware-confirmed number (`ct_wave_pwm.c`'s
-amplitude-to-duty mapping is explicitly an unfinished `IDENTITY` placeholder
-per `docs/PLAN.md`'s own status header — the real ceiling depends on
-whatever modulation-index cap that code ends up using).
+estimate, not a measured or firmware-confirmed number. **Correction:** the
+amplitude-to-duty *mapping mechanism* (`src/sim/ct_calibration.{c,h}`) is no
+longer an unfinished placeholder — it applies a real per-channel
+`gain`/`offset` linear fit. What remains unfinished is the *table*: the
+compiled-in default is all-uncalibrated, so today's observed behavior is
+still identity (`pwm_scale = clamp(amps, 0, 1)`) until a bench calibration
+run populates real constants — the real ceiling still depends on whatever
+modulation-index cap the uncalibrated path ends up using.
 
 A series DC-blocking capacitor (sized for a corner well below 60 Hz — e.g.
 1 µF into a primary of a few kΩ gives a corner around 20–30 Hz, more than a
