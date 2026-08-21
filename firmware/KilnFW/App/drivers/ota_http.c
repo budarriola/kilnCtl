@@ -34,6 +34,7 @@
 #include "ota_record.h"
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
+#include "web_encoding.h"
 #include "sim_backend.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
@@ -226,24 +227,14 @@ static void get_client_ip(httpd_req_t *req, char *out, size_t out_len)
     }
 }
 
-// Same per-file duplicated helper every other page's *_http.c carries
-// (rules_http.c's client_accepts_gzip(), wifi_provision_http.c's own copy)
-// rather than a shared one -- matches this codebase's existing convention
-// per TODO.md 10.6a's own note on that duplication being deliberate.
-static bool ota_page_client_accepts_gzip(httpd_req_t *req)
-{
-    char enc[32];
-    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
-        return false;
-    }
-    return strstr(enc, "gzip") != NULL;
-}
-
+// TODO.md 10.6a: content negotiation lives in web_encoding.h's shared
+// web_client_accepts_gzip() (the per-file duplicated helpers were folded
+// into it) -- absent Accept-Encoding is legal and served gzip per RFC 9110
+// s12.5.3; a header that explicitly excludes gzip gets an uncompressed 406.
 static esp_err_t ota_page_get_handler(httpd_req_t *req)
 {
-    if (!ota_page_client_accepts_gzip(req)) {
-        ESP_LOGW(TAG, "ota_page.html: client did not advertise Accept-Encoding: gzip; serving gzip "
-                      "body anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "ota_page.html");
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");

@@ -11,6 +11,7 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
+#include "web_encoding.h"
 #include "wifi_provision_http.h"
 #include "zones_http.h"
 
@@ -476,28 +477,14 @@ bool profiles_http_delete(uint8_t id)
 
 /* ---- HTML page ------------------------------------------------------------ */
 
-/* TODO.md 10.6a: defensive Accept-Encoding check before relying on a client
- * to have asked for gzip -- see wifi_provision_http.c's
- * client_accepts_gzip() for the fuller rationale (this file duplicates the
- * small helper rather than sharing it, matching this codebase's existing
- * per-file-duplication convention, e.g. json_escape() elsewhere). No
- * uncompressed fallback is embedded this pass (named gap, TODO.md 10.6a) --
- * a client that doesn't advertise support still gets served the gzip body,
- * just with a warning logged instead of silently mis-serving it. */
-static bool client_accepts_gzip(httpd_req_t *req)
-{
-    char enc[32];
-    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
-        return false;
-    }
-    return strstr(enc, "gzip") != NULL;
-}
-
+/* TODO.md 10.6a: content negotiation lives in web_encoding.h's shared
+ * web_client_accepts_gzip() -- absent Accept-Encoding is legal and served
+ * gzip (RFC 9110 s12.5.3); a header that explicitly excludes gzip gets an
+ * uncompressed 406 rather than a body it cannot decode. */
 static esp_err_t page_get_handler(httpd_req_t *req)
 {
-    if (!client_accepts_gzip(req)) {
-        ESP_LOGW(TAG, "profiles_page.html: client did not advertise Accept-Encoding: gzip; serving "
-                      "gzip body anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "profiles_page.html");
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");

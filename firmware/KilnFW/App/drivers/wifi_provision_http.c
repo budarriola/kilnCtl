@@ -7,6 +7,7 @@
 #include "esp_http_server.h"
 
 #include "http_form.h"
+#include "web_encoding.h"
 #include "wifi_prov.h"
 
 static const char *TAG = "wifi_prov_http";
@@ -41,29 +42,16 @@ extern const uint8_t theme_css_gz_end[] asm("_binary_theme_css_gz_end");
 
 static httpd_handle_t s_server;
 
-/* TODO.md 10.6a: defensive check before relying on a client to have asked
- * for gzip -- every real browser sends Accept-Encoding: gzip, but this
- * codebase's convention is to never trust a client to be well-behaved
- * (see e.g. every POST handler's Content-Length bound in this file) rather
- * than assume. There is no uncompressed fallback blob embedded alongside
- * the gzip one (named gap, see TODO.md 10.6a's status note) -- a client
- * that doesn't advertise support still gets the gzip body, just with a
- * warning logged rather than silently mis-served. */
-static bool client_accepts_gzip(httpd_req_t *req)
-{
-    char enc[32];
-    if (httpd_req_get_hdr_value_str(req, "Accept-Encoding", enc, sizeof(enc)) != ESP_OK) {
-        return false; /* header absent, or longer than this buffer -- treat as "no" either way */
-    }
-    return strstr(enc, "gzip") != NULL;
-}
-
+/* TODO.md 10.6a: content negotiation now lives in web_encoding.h's shared
+ * web_client_accepts_gzip() -- absent Accept-Encoding means "anything is
+ * acceptable" (RFC 9110 s12.5.3) and is served gzip without a warning; a
+ * header that explicitly excludes gzip gets an uncompressed 406 instead of
+ * a body it cannot decode. */
 static esp_err_t send_embedded_gzip_html(httpd_req_t *req, const char *page_name,
                                           const uint8_t *start, const uint8_t *end)
 {
-    if (!client_accepts_gzip(req)) {
-        ESP_LOGW(TAG, "%s: client did not advertise Accept-Encoding: gzip; serving gzip body anyway "
-                      "(TODO.md 10.6a: no uncompressed fallback embedded this pass)", page_name);
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, page_name);
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
@@ -72,9 +60,8 @@ static esp_err_t send_embedded_gzip_html(httpd_req_t *req, const char *page_name
 
 static esp_err_t theme_css_get_handler(httpd_req_t *req)
 {
-    if (!client_accepts_gzip(req)) {
-        ESP_LOGW(TAG, "theme.css: client did not advertise Accept-Encoding: gzip; serving gzip body "
-                      "anyway (TODO.md 10.6a: no uncompressed fallback embedded this pass)");
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "theme.css");
     }
     httpd_resp_set_type(req, "text/css");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");

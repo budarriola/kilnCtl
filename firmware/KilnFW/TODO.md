@@ -5068,7 +5068,7 @@ already built and reviewed (`kiln_ui.c`, `ui_theme.c`, `lvgl_port.c`, every
 concrete problem it solves. Recorded here as a decision, not silently
 ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
 
-- [ ] CMake step (likely in `App/drivers/CMakeLists.txt`, alongside the
+- [x] CMake step (likely in `App/drivers/CMakeLists.txt`, alongside the
       existing `EMBED_TXTFILES` list) that gzips each of the six HTML pages
       at build time before embedding, OR embeds them raw and gzips is
       pre-generated and checked in -- decide which based on whether this
@@ -5076,7 +5076,23 @@ ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
       environment (Windows dev machines are the wrinkle here -- CMake's
       `find_program(GZIP)` or a Python-based `gzip` module call avoids
       depending on a Unix tool being installed)
-- [ ] Each HTTP handler that currently does
+      **DONE (verified 2026-08-20).** `App/drivers/CMakeLists.txt` already
+      implements exactly this: a `find_package(Python3)` +
+      `python -c "import gzip, shutil, sys; ..."` `execute_process()` block
+      (guarded by `if(NOT CMAKE_BUILD_EARLY_EXPANSION)`) gzips
+      `wifi_provision_page.html`, `main_page.html`, `rules_page.html`,
+      `profiles_page.html`, `readiness_page.html`, `ota_page.html` and
+      `theme.css` at configure time into `CMAKE_CURRENT_BINARY_DIR`, and
+      `idf_component_register(... EMBED_TXTFILES ...)` embeds the `.gz`
+      outputs. The Windows wrinkle was resolved the Python way, not with a
+      Unix `gzip` binary. `set_property(... CMAKE_CONFIGURE_DEPENDS ...)`
+      on each source keeps the embedded blob from going stale. Remaining
+      named gap (unchanged): `zones_page.html` is deliberately excluded and
+      still embedded raw. Re-checked 2026-08-20 and this is *safe*, not a
+      latent bug: `zones_http.c`'s `page_get_handler()` sets only
+      `httpd_resp_set_type(req, "text/html")` and sends the raw blob with
+      no `Content-Encoding` header, so raw page and raw framing agree.
+- [x] Each HTTP handler that currently does
       `httpd_resp_set_type(req, "text/html"); httpd_resp_send(req, page, len)`
       needs `httpd_resp_set_hdr(req, "Content-Encoding", "gzip")` added, and
       must not be sent to a client that didn't advertise
@@ -5092,6 +5108,58 @@ ignored: LVGL stays the LCD rendering backend (10.1's own decision, unchanged).
       cannot read. Every real browser sends the header, which is why this has
       never been noticed in normal use -- but `curl` without `--compressed`,
       and any minimal HTTP client, gets garbage.
+
+      **DONE 2026-08-20 -- but the bug description above is partly wrong,
+      and the fix is narrower than "fall back to the uncompressed blob".**
+
+      (a) *The dual-embed option is dead on measurement.* Keeping both a
+      gzip and a raw blob embedded, or falling back to serving the raw one,
+      needs the raw pages in flash: they total **162,728 bytes** against
+      **74,720 bytes (5%)** free in the app partition. It does not fit, not
+      close. A runtime inflater was rejected for the same budget reason
+      (plus it would mean shipping a decompressor to undo a compression we
+      chose). So gzip is, and stays, the *only* representation this server
+      can produce for these routes.
+
+      (b) *Serving gzip to a client that sent no `Accept-Encoding` header
+      is CORRECT, per RFC 9110 s12.5.3: "if no Accept-Encoding field is in
+      the request, any content coding is considered acceptable."* The
+      measurement above -- a header-less GET coming back gzipped -- is
+      therefore not a defect, and the old
+      "client did not advertise Accept-Encoding: gzip; serving gzip body
+      anyway" warning was misleading noise on a legal, normal request. The
+      real defect is narrower: a client that sends an `Accept-Encoding`
+      header which *excludes* gzip (`identity`, `deflate`, `gzip;q=0`,
+      `*;q=0`) was still sent a gzip body it had explicitly told us it
+      could not decode.
+
+      (c) *The fix is content negotiation plus a 406 for the
+      explicit-exclusion case.* New shared header
+      `App/drivers/web_encoding.h` + `web_encoding.c` (a real `.c`/`.o`
+      pair with a `SRCS` entry, deliberately NOT `http_form.h`-style
+      header-only `static inline`: inlined into all five `*_http.c`
+      translation units the parser cost ~2.8 KB of flash, unaffordable at
+      5% free -- out-of-line it costs nothing) exposes
+      `web_client_accepts_gzip(httpd_req_t *)`: header
+      absent -> true; otherwise a small, heap-free, whitespace-tolerant,
+      case-insensitive parse of the comma-separated coding list into a
+      fixed `char[128]`, returning true for `gzip`/`x-gzip`/`*` with a
+      non-zero qvalue, false for `q=0` forms, false when the header names
+      neither. Its companion `web_send_gzip_not_acceptable()` sends
+      **HTTP 406 Not Acceptable** with a short *uncompressed* `text/plain`
+      body (no `Content-Encoding` header) and logs a single `ESP_LOGW`
+      naming the offending header value -- the only case that warns now.
+      The five per-file duplicated `client_accepts_gzip()` copies in
+      `wifi_provision_http.c`, `rules_http.c`, `profiles_http.c`,
+      `readiness_http.c` and `ota_http.c` were deleted in favor of it, and
+      every gzipped-page/`theme.css` handler now negotiates. JSON/API
+      handlers are untouched -- they are served uncompressed and stay that
+      way. Build-verified clean at **0x123f0 bytes (5%) free** = 74,736
+      bytes, i.e. 16 bytes *more* free than the 74,720-byte baseline: the
+      five deleted duplicate helpers pay for the one shared copy and the
+      406 string. (A first cut with the parser `static inline` in the
+      header measured 0x11900 / 71,936 free -- ~2.8 KB worse -- which is
+      why the out-of-line `.c` is the shipped form.)
 - [ ] Re-verify byte-for-byte that nothing about the *content* changes --
       this is a transport-encoding change only, same risk shape as 10.1a's
       `dashboard_get_status()` extraction (behavior-preserving refactor,
