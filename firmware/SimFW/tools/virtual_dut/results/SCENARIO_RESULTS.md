@@ -7,7 +7,82 @@ findings behind the PASS/FAIL/BLOCKED pattern below.
 
 ---
 
-## This revision: S3 and S4 actually fire
+## This revision: the sim clock is right, and the two welded scenarios are alive
+
+Two fixture-side defects found while writing the K4 scenarios, both fixed
+here, both re-measured across the whole suite.
+
+### 1. `virtual_simfw` was advancing sim by timescale-squared per wall second
+
+Its host main loop scaled the tick **accumulator** by `timescale` and then let
+each 100 ms tick advance sim by `100 ms x timescale`, applying the factor
+twice. Real `sim_engine_task()` applies it exactly once (a
+`vTaskDelayUntil(SIMFW_PERIOD_SIM_ENGINE_MS)` loop -- a REAL-time cadence --
+whose body advances sim by `period x timescale`), and `device_tick()` already
+ported that body verbatim. `timescale` now means what
+`kilnsim.runner.run_scenario()`'s docstring always claimed: **N sim-seconds
+per wall second**. Guarded by
+`tools/PcTools/tests/test_kilnsim_virtual_simfw.py::test_timescale_advances_sim_linearly_not_quadratically`,
+which asserts the *shape* (5x between timescale 1 and 5, not 25x) so no single
+slow-machine measurement can explain a reintroduction away.
+
+Wall-clock run times are unchanged. What changed is that every scenario's
+sim-time span shrank by its own `timescale` -- to what its `run_duration`
+estimate always intended. A `timescale: 10` scenario that used to overshoot to
+~2 450 sim-seconds now ends at ~245.
+
+**Exactly two pre-existing verdicts moved, both from a vacuous PASS to an
+honest non-PASS:**
+
+| Scenario | Clause | Before | After | Why |
+|---|---|---|---|---|
+| `mainfault_tc_disconnect` | `no_early_trip` | PASS | BLOCKED | At timescale 10 the FIRST telemetry frame did not land until sim-time ~45 s -- *after* the fault -- so K4's from-boot "open" edge was recorded after this `forbid`'s boundary instead of before it. The frame now lands at ~1 s and the clause sees what was always true (README Finding 2's corollary). Annotated `blocked_on:`. |
+| `safety_tc_frozen` | `no_early_trip` | PASS | BLOCKED | Identical cause, identical annotation. |
+
+`tc_flaky` looked like it had moved and had not: `no_warn_storm` still FAILs,
+with S5 warns at t~51 s / t~92 s instead of t~146 s / t~196 s. Its run no
+longer overshoots (96 s, not 953) and its per-poll tick batch dropped from
+~500 ticks to ~50, but 2 Hz telemetry at timescale 10 still cannot resolve its
+900 ms bad / 900 ms good alternation, so the batch still manufactures streaks
+out of one TC sample. **It was deliberately not re-tuned**, so a clock fix and
+a scenario change could not be conflated -- see README Finding 9.
+
+### 2. `welded_ssr_midfire` / `welded_contactor_s9` were dead tests
+
+Both were blocked twice over: no `dut.operator_actions:` (so K4 never closed,
+so `sim_engine.c` gated all duty to zero) *and* an `at_zone_temp: 400` trigger
+the run could never reach. Fixed differently in each, per what each proves:
+
+| Scenario | What it now does | Measured |
+|---|---|---|
+| `welded_ssr_midfire` | Keeps a temperature trigger, at a temperature the run reaches (150 C). Enable at t=5 -> K4 closes at t=56.2 -> K1 commanded on at t=66.0 -> weld at **t=126.4** (`at_zone_temp` fired for real) -> K1 commanded **off** at t=135.6. That last step is what makes this file distinct from `stuck_load_no_command_s3`: it exercises S3's 150 s `correlation_window_s` as a *timing* property. | **`GUARD_TRIP {S3}` at t=303.8 s** -- 168 s after the last K1 command (150 s window + ~18 of the 20 s `stuck_on_time_s`, the shortfall being Finding 8's batching bias). K4 opens at 304.4, current gone at 304.8. 414 of 661 polls carry real CT current. Four clauses PASS. |
+| `welded_contactor_s9` | Converts to `at_sim_time: 70` and reuses the uncommanded-weld recipe. Nothing about S9 depends on kiln temperature, and S3 is only the *initiating* trip here. | **`GUARD_TRIP {S3}` 18.6 s after the weld**, K4 opens, and the `welded_contactor` fault genuinely fires on that K4-open edge. `initial_trip` and `uncommanded_current_appears_with_the_weld` both PASS (they were BLOCKED / absent). |
+
+**New finding, from doing this:** `contactor_weld_engages_on_k4_open` still
+cannot pass, and it is neither a scenario bug nor a guard gap.
+`WELDED_K4_CURRENT_PERSIST` deliberately bypasses `duty[]`/`current_a[]` and
+drives the CT channel's wave synth directly (real `sim_engine.c` says so at
+that call site; `virtual_simfw.c` ports it verbatim), while telemetry's
+per-zone `i_amps` is `snap.zones[].current_a` -- the MODEL value, which K4
+gates to zero the instant it opens. Real hardware reads the persisted current
+off the synthesized waveform through the DUT's own CT ADC; this fixture has no
+waveform and no ADC, so **the persisted half of S9's signature has no
+observable here at all.**
+
+That is now S9's *only* blocker in this fixture: `relay_deenergized` is
+genuinely produced today (`safety_core.c`'s
+`.relay_deenergized = !relay_owner_is_energized()`, mirrored by
+`dut_core/main.c`), so the "still dormant" table further down this file is
+stale on S9's row.
+
+### What did NOT change
+
+Not one scenario-level verdict moved. The suite is 5 PASS, 10 BLOCKED, 7 FAIL,
+same as before, and every FAIL is a pre-existing one this pass did not touch.
+
+---
+
+## Previous revision: S3 and S4 actually fire
 
 The previous revision closed the context/current/link wiring and reported
 S3/S4 as "reachable but not provokable": `any_current_present` was measured
@@ -42,8 +117,10 @@ an 8x margin, not a number tuned to just clear a bar. Both faults used
 (`welded_ssr`, `broken_heater_coil`) take no `params[]` at all, so the
 "fault with no `params:` silently injects magnitude 0" trap cannot apply.
 
-The contrast is instructive: `welded_ssr_midfire`/`welded_contactor_s9`
-trigger their weld at `at_zone_temp 400 C`, which the `fast_test` preset
+The contrast is instructive (**superseded**: both files were fixed in the
+revision above, and neither uses a 400 C trigger any more):
+`welded_ssr_midfire`/`welded_contactor_s9`
+triggered their weld at `at_zone_temp 400 C`, which the `fast_test` preset
 **cannot reach** in those scenarios' time budget even with K4 closed --
 it asymptotes at ~505 C with a ~200 s time constant, so 400 C needs ~304
 sim-seconds of full duty against an estimated run duration of ~195 s. That
@@ -58,7 +135,10 @@ Two harness facts, both measured, both now in `../README.md` as Finding 8:
    second, so `timescale: 10` is 100x real time and its 2 Hz telemetry
    broadcast lands one frame every ~50 sim-seconds -- coarser than S3's own
    20 s window. The new scenarios use `timescale: 2` (~2 sim-seconds per
-   frame).
+   frame). (**Superseded**: the squaring was a defect and is fixed in the
+   revision above. `timescale: 2` is still the right choice for these files --
+   one frame per sim-second -- but the number to reason from is now
+   `0.5 / timescale` sim-seconds per frame, not `0.5 / timescale^2`.)
 2. `run_dut_scenarios.py` converts elapsed sim time to 100 ms guard ticks
    with `max(1, delta // 100ms)`. Below 100 ms of sim per poll that floor
    **over**-ticks the DUT and every guard timer fires early. Measured on

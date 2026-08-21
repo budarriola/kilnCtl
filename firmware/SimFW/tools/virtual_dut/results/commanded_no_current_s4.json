@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 62,
   "timescale": 2.0,
-  "start_time": 1787273814.9986682,
+  "start_time": 1787277515.7966192,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 6800000,
+      "sim_time_us": 5200000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -37,7 +37,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 59200000,
+      "sim_time_us": 57000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -51,7 +51,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 1800000,
+      "sim_time_us": 1000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -63,7 +63,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 58600000,
+      "sim_time_us": 56400000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -75,7 +75,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 158000000,
+      "sim_time_us": 156200000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S4"
@@ -94,7 +94,7 @@
         1,
         2000000002
       ],
-      "detail": "event:guard_warn observed 151.200s after relay_edge"
+      "detail": "event:guard_warn observed 151.000s after relay_edge"
     },
     {
       "name": "no_current_ever_flows",
@@ -118,11 +118,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 373,
-    "context_valid": 373,
+    "polls": 364,
+    "context_valid": 364,
     "any_current_present": 0,
-    "link_up": 373,
+    "link_up": 364,
     "max_zone_count": 3,
-    "energized": 323
+    "energized": 267
   }
 }

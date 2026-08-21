@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 54,
   "timescale": 10.0,
-  "start_time": 1787273798.9229498,
+  "start_time": 1787277499.9560091,
   "events": [
     {
       "seq": 0,
@@ -23,18 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 47000000,
-      "event_type": "GUARD_WARN",
-      "payload": {
-        "guard": "S12"
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 2000000001,
-      "sim_time_us": 47000000,
+      "sim_time_us": 5000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -45,8 +34,19 @@
       "f0": 0.0
     },
     {
+      "seq": 2000000001,
+      "sim_time_us": 20000000,
+      "event_type": "GUARD_WARN",
+      "payload": {
+        "guard": "S12"
+      },
+      "a": 0,
+      "b": 0,
+      "f0": 0.0
+    },
+    {
       "seq": 2000000002,
-      "sim_time_us": 97000000,
+      "sim_time_us": 80000000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S12"

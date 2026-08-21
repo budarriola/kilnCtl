@@ -148,6 +148,79 @@ def test_tc_stuck_fault_fires_without_a_dut():
     assert report.verdict == "BLOCKED"  # no genuine FAIL, but not an unqualified PASS either
 
 
+def _measure_sim_rate(timescale: float, window_s: float = 4.0) -> float:
+    """Sim-seconds advanced per WALL second, measured against a freshly
+    started ``virtual_simfw.exe`` at the given timescale. Sampled from the
+    telemetry stream's own ``sim_time_us``, which is the same clock every
+    scenario deadline and every fault trigger is evaluated against."""
+    from kilnsim.protocol import CommandGroup, ModelCmd, SysCmd
+
+    with _VirtualSimFW() as device:
+        link = TcpSimLink()
+        link.connect(f"127.0.0.1:{device.port}")
+        try:
+            link.send_command(CommandGroup.SYS, SysCmd.SET_TIMESCALE, {"value": timescale})
+            link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": "fast_test"})
+            deadline = time.time() + 5.0
+            while link.get_last_telemetry() is None and time.time() < deadline:
+                time.sleep(0.05)
+            first = link.get_last_telemetry()
+            assert first is not None, "virtual_simfw published no telemetry"
+            sim0, wall0 = int(first["sim_time_us"]), time.time()
+            time.sleep(window_s)
+            last = link.get_last_telemetry()
+            sim1, wall1 = int(last["sim_time_us"]), time.time()
+        finally:
+            link.disconnect()
+    return ((sim1 - sim0) / 1e6) / (wall1 - wall0)
+
+
+def test_timescale_advances_sim_linearly_not_quadratically():
+    """`timescale` must mean N sim-seconds per wall second -- the contract
+    every consumer already assumes (``kilnsim.runner.run_scenario``'s own
+    docstring: "Real time actually elapsed is `duration_s / timescale`") and
+    the one real firmware implements (``sim_engine_task()`` is a
+    ``vTaskDelayUntil(SIMFW_PERIOD_SIM_ENGINE_MS)`` loop -- a REAL-time
+    cadence -- whose body advances the sim clock by
+    ``SIMFW_PERIOD_SIM_ENGINE_MS * timescale``; the factor appears exactly
+    once).
+
+    ``virtual_simfw.c``'s host main loop reproduces that body verbatim, so
+    scaling its tick ACCUMULATOR by timescale as well applied the factor a
+    second time and advanced the sim clock by **timescale squared** per wall
+    second. That is not a harmless speed-up: at ``timescale: 10`` the 2 Hz
+    telemetry broadcast landed one frame every ~50 sim-seconds -- coarser
+    than S3's 20 s ``stuck_on_time_s`` and several other guard windows under
+    test -- so scenarios silently could not resolve the events they assert
+    on, while still reporting confident verdicts. Two shipped scenarios were
+    additionally dead because their ``at_zone_temp`` triggers were sized
+    against the wrong clock.
+
+    Measuring the ratio at ONE timescale would not catch the reintroduction
+    (any single value could be explained by a slow machine), so this asserts
+    the SHAPE: the ratio must track `timescale` itself, not its square. At
+    timescale 5 the two hypotheses are 5x apart (5 vs 25), far outside the
+    tolerance a loaded CI box needs.
+    """
+    slow = _measure_sim_rate(1.0)
+    fast = _measure_sim_rate(5.0)
+
+    # Generous absolute bounds: the measurement is quantized by the 2 Hz
+    # telemetry broadcast at both ends (up to ~0.5 wall-seconds of staleness
+    # each), which biases it a few percent LOW, never high.
+    assert 0.7 <= slow <= 1.3, f"timescale 1 should advance ~1 sim-second per wall second, got {slow:.2f}"
+    assert 3.0 <= fast <= 7.5, (
+        f"timescale 5 should advance ~5 sim-seconds per wall second, got {fast:.2f} "
+        f"-- ~25 would mean virtual_simfw.c's main loop is scaling its tick accumulator "
+        f"by timescale again on top of device_tick()'s own scaling (the timescale-squared bug)"
+    )
+    # The shape check: 5x, not 25x.
+    assert 3.0 <= fast / slow <= 8.0, (
+        f"sim rate must scale LINEARLY with timescale; measured {fast / slow:.1f}x between "
+        f"timescale 1 and timescale 5 (linear => ~5x, squared => ~25x)"
+    )
+
+
 def test_until_trigger_fault_two_frame_sequence():
     """FAULT_SCHEDULE(duration_kind=UNTIL_TRIGGER) + FAULT_SET_UNTIL_TRIGGER
     (PROTOCOL.md sec 5.6's two-frame design) against the real virtual

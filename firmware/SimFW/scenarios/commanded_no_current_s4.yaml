@@ -19,14 +19,19 @@ exercises: [S4]
 # S4 warns -- and, being WARN-only by design, must not touch K4.
 preset: fast_test
 # timescale 2, not the library's usual 10, and deliberately so. virtual_simfw
-# advances its sim clock by timescale**2 per wall second (its main loop scales
-# the tick ACCUMULATOR by timescale and then each 100ms tick advances sim by
-# 100ms * timescale), so at timescale 10 its 2Hz telemetry broadcast lands one
-# frame every ~50 sim-seconds -- coarser than the shortest guard window this
-# library tests (S3's 20s stuck_on_time_s), which would make a guard verdict an
-# artifact of the sampling rather than a measurement of the guard. At timescale 2 the same broadcast is
-# one frame every ~2 sim-seconds, comfortably finer than every window under
-# test. See virtual_dut/README.md's batch-ticking note.
+# advances its sim clock by exactly `timescale` sim-seconds per wall second
+# (it used to advance by timescale**2 -- its main loop scaled the tick
+# ACCUMULATOR by timescale and then each 100ms tick advanced sim by
+# 100ms * timescale, applying the factor twice; that is fixed, and
+# tools/PcTools/tests/test_kilnsim_virtual_simfw.py::
+# test_timescale_advances_sim_linearly_not_quadratically now guards it).
+# Its 2Hz telemetry broadcast therefore lands one frame every
+# `0.5 / timescale` sim-seconds: 5 sim-seconds at timescale 10 -- only ~4
+# samples across the shortest guard window this library tests (S3's 20s
+# stuck_on_time_s), which would make a guard verdict as much a measurement of
+# the sampling as of the guard. At timescale 2 the same broadcast is one frame
+# per sim-second, comfortably finer than every window under test. See
+# virtual_dut/README.md's batch-ticking note and its Finding 8.
 timescale: 2
 seed: 62
 overrides: {}

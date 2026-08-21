@@ -2,12 +2,12 @@
   "scenario": {
     "name": "mainfault_tc_disconnect",
     "version": 1,
-    "hash": "6741e9f5f597edbb0feeb2797b2c9485ae0988a4dbb42fc9f328b9971d9145e0"
+    "hash": "9b5fbe95953f97d4f491f92bb3cc4e174872e43f58699404bd9f6a059823a502"
   },
   "fw_versions": {},
   "seed": 63,
   "timescale": 10.0,
-  "start_time": 1787274127.0589902,
+  "start_time": 1787277827.8683999,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 47000000,
+      "sim_time_us": 5000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -38,11 +38,15 @@
   "expectations": [
     {
       "name": "no_early_trip",
-      "verdict": "PASS",
+      "verdict": "BLOCKED",
       "evidence": [
-        0
+        2000000000
       ],
-      "detail": "dut:K4_open never observed before the boundary"
+      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: K4 is reported open from this harness's very first observation, because nothing in current SaftyFW energizes it until an operator enable survives the 60 s startup grace, and this scenario schedules no `dut.operator_actions:` at all -- so a `forbid: {dut: K4_open}` clause always sees an 'open' edge at sim-time ~1 s, long before the oc_main fault fires, whatever any guard decides (virtual_dut/README.md Finding 2 and its corollary). This clause reported PASS until 2026-08-20 purely by accident of timing: virtual_simfw was advancing its sim clock by timescale**2 per wall second, so at timescale 10 the FIRST telemetry frame did not land until sim-time ~45 s -- after the fault -- and the K4-open edge was therefore recorded after the boundary rather than before it. Fixing the clock (one sim-second per wall second per unit of timescale) moved the first frame to ~1 s and exposed the clause's real state. Nothing about the DUT changed; a vacuous PASS became an honest non-PASS.]",
+      "blocked_on": {
+        "reason": "K4 is reported open from this harness's very first observation, because nothing in current SaftyFW energizes it until an operator enable survives the 60 s startup grace, and this scenario schedules no `dut.operator_actions:` at all -- so a `forbid: {dut: K4_open}` clause always sees an 'open' edge at sim-time ~1 s, long before the oc_main fault fires, whatever any guard decides (virtual_dut/README.md Finding 2 and its corollary). This clause reported PASS until 2026-08-20 purely by accident of timing: virtual_simfw was advancing its sim clock by timescale**2 per wall second, so at timescale 10 the FIRST telemetry frame did not land until sim-time ~45 s -- after the fault -- and the K4-open edge was therefore recorded after the boundary rather than before it. Fixing the clock (one sim-second per wall second per unit of timescale) moved the first frame to ~1 s and exposed the clause's real state. Nothing about the DUT changed; a vacuous PASS became an honest non-PASS.",
+        "phase": "No phase: nothing upstream is missing. This clause FORM (`forbid: {dut: K4_open}`) cannot be meaningful while K4's boot state is open and report.py matches edges rather than levels. Either give the scenario an `operator_actions:` enable so K4 genuinely closes first (see welded_ssr_midfire.yaml / stuck_load_no_command_s3.yaml), or express the early-trip property with a `forbid: {event: {type: guard_trip, ...}}` clause instead."
+      }
     },
     {
       "name": "mainfault_trips_s6a",
@@ -80,10 +84,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 32,
-    "context_valid": 32,
+    "polls": 33,
+    "context_valid": 33,
     "any_current_present": 0,
-    "link_up": 32,
+    "link_up": 33,
     "max_zone_count": 3,
     "energized": 0
   }

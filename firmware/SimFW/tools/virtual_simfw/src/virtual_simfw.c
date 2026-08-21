@@ -1892,7 +1892,24 @@ int main(int argc, char **argv)
         double wall_dt = t - last_tick;
         last_tick = t;
         if (wall_dt > 0.25) wall_dt = 0.25; // clamp a stall (debugger pause, etc.)
-        tick_accum_s += wall_dt * ((double)g_dev.timescale_x100 / 100.0);
+        // Accumulate WALL time, NOT wall time scaled by timescale. On the real
+        // target, sim_engine_task() is a vTaskDelayUntil() loop that runs once
+        // every SIMFW_PERIOD_SIM_ENGINE_MS of REAL time and advances the sim
+        // clock by `SIMFW_PERIOD_SIM_ENGINE_MS * timescale` per run
+        // (sim_engine.c's own dt_s / s_sim_time_us += lines) -- the timescale
+        // appears exactly once, inside the tick, and the tick cadence itself is
+        // real-time-fixed. device_tick() below already reproduces that half
+        // verbatim, so scaling the accumulator here as well applied timescale a
+        // SECOND time and advanced the sim clock by timescale^2 sim-seconds per
+        // wall second (at timescale 10: 100x real time, and a 2 Hz telemetry
+        // broadcast landing one frame every ~50 sim-seconds -- coarser than
+        // several guard windows under test, which silently made scenarios
+        // unable to resolve the events they assert on). timescale now means
+        // what every consumer already assumed it meant, and what
+        // kilnsim.runner.run_scenario()'s own docstring states: N sim-seconds
+        // per wall second, i.e. "real time actually elapsed is
+        // duration_s / timescale".
+        tick_accum_s += wall_dt;
         while (tick_accum_s >= TICK_PERIOD_MS / 1000.0) {
             device_tick(&g_dev);
             tick_accum_s -= TICK_PERIOD_MS / 1000.0;

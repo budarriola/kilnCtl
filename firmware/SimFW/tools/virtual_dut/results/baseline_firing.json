@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 1,
   "timescale": 10.0,
-  "start_time": 1787274669.9535906,
+  "start_time": 1787277465.7576382,
   "events": [
     {
       "seq": 2000000000,
-      "sim_time_us": 45000000,
+      "sim_time_us": 4000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",

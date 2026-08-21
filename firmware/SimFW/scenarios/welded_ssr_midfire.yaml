@@ -97,88 +97,180 @@
 name: welded_ssr_midfire
 version: 1
 exercises: [S3, S4]
-# S3 is the guard this scenario is built to provoke (welded/shorted SSR:
-# current flows with the relay sensed open — SAFETY_MODEL.md §4 S3).
-# S4 is cited because the healthy portion of the run *before* the weld fires
+# S3 is the guard this scenario is built to provoke, in its MID-FIRE form:
+# zone 0's SSR welds shut while the zone is legitimately commanded on, the
+# controller later commands the zone off, and current keeps flowing with the
+# relay sensed open (SAFETY_MODEL.md §4 S3).
+#
+# That mid-fire framing is what distinguishes this file from
+# stuck_load_no_command_s3.yaml, which welds into a kiln that was NEVER
+# commanded. S3 has two halves -- current present AND nothing commanded within
+# correlation_window_s (150 s) -- and only this scenario exercises the second
+# half as a *timing* property: from the weld until 150 s after the last K1
+# command, S3 must stay silent even though current is flowing, and only then
+# may it accumulate its 20 s stuck_on_time_s and trip. A guard that tripped as
+# soon as it saw uncommanded current would pass stuck_load_no_command_s3.yaml
+# and fail here.
+#
+# S4 is cited because the commanded, current-carrying stretch before the weld
 # is itself S4's nuisance check: relay commanded on, current present, for the
 # whole pre-fault period — must never produce a WARN (SAFETY_MODEL.md §4 S4,
 # GUARD_TEST_MATRIX.md §1).
+#
+# --- What this file used to be, and why it changed -------------------------
+# Until this pass this scenario was a DEAD TEST, blocked twice over, and both
+# blockers were recorded in its own (now-removed) `blocked_on:` annotations:
+#   1. it scheduled no `dut.operator_actions:`, so K4 never closed, so
+#      sim_engine.c gated every zone's duty to zero and no current ever
+#      existed for S3 to see (measured: any_current_present true on 0 of 82
+#      polls);
+#   2. independently, its `at_zone_temp: 400` trigger was unreachable in the
+#      run's own time budget even with K4 closed.
+# Both are fixed below. The trigger temperature is now 150 °C, which this
+# preset genuinely reaches: with K4 closed and K1 commanded, zone 0 leaves
+# ambient at sim-time ~65 s and T_zone crosses 150 °C ~60 s later (measured
+# against virtual_simfw with this file's own R_element override: 100 °C at
+# ~35 s of heating, 150 °C at ~60 s, 200 °C at ~92 s). 400 °C would have
+# needed ~300 s of full duty on top of the 65 s of startup, which is what made
+# the old trigger unreachable — not the run length alone.
 preset: fast_test
-timescale: 10
+# timescale 2, not the library's usual 10. virtual_simfw now advances the sim
+# clock by exactly `timescale` sim-seconds per wall second (the timescale²
+# defect its main loop used to have is fixed), so its 2 Hz telemetry broadcast
+# lands one frame per `0.5 / timescale` sim-seconds: 0.5 s at timescale 1, 1 s
+# at timescale 2, 5 s at timescale 10. S3's stuck_on_time_s is 20 s, so
+# timescale 10 would resolve that window with only ~4 telemetry samples and
+# any verdict would be as much a measurement of the sampling as of the guard;
+# timescale 2 gives ~20. See virtual_dut/README.md's batch-ticking note and
+# its Finding 8.
+timescale: 2
 seed: 42
 overrides:
   zones[0].R_element: 12.0
 dut:
   profile: cone6_fast
+  # See run_dut_scenarios.py's module docstring for why these are scenario-
+  # authored steps rather than harness behavior (KilnFW does not auto-enable
+  # on profile start, and there is no PID here to decide when a zone is on).
+  # The sequence IS this file's test:
+  #   t=5    operator requests enable; relay_owner holds it through the real
+  #          60 s SAFTYFW_STARTUP_GRACE_MS and closes K4 at t≈60.
+  #   t=65   zone 0 is commanded on — a normal firing. Current flows (K4
+  #          permits, K1 is sensed closed) and the zone starts heating.
+  #   t≈125  T_zone crosses 150 °C and the SSR welds (fault `weld` below).
+  #          Nothing observable changes yet: duty was already 1 because K1 is
+  #          legitimately closed. That is what makes it a *hidden* weld.
+  #   t=135  the controller commands zone 0 OFF. THIS is the moment the weld
+  #          becomes visible: K1 is sensed open, nothing is commanded, and
+  #          20 A keeps flowing. S3's correlation window starts here.
+  #   t≈285  the 150 s correlation_window_s expires — only now may S3 count.
+  #   t≈305  S3 trips after its 20 s stuck_on_time_s; K4 opens; current dies.
+  operator_actions:
+    - { at_sim_time: 5, action: request_enable }
+    - { at_sim_time: 65, action: command_relay, relay: K1, state: closed }
+    - { at_sim_time: 135, action: command_relay, relay: K1, state: open }
 faults:
   - id: weld
+    # FAULT_SCHED_TYPE_WELDED_RELAY: duty forced to 1 for the target zone
+    # regardless of the relay sense (fault_sched.h) — a shorted/welded SSR.
+    # Takes no params[], so there is no magnitude to get wrong here (contrast
+    # welded_k4_current_persist in welded_contactor_s9.yaml, which silently
+    # forces 0.0 A without one); the current comes from the preset's own
+    # physics: V_mains 240 / this file's zones[0].R_element override 12.0 ×
+    # element_health 1.0 = 20.0 A.
     type: welded_ssr
     target: relay:K1
-    # trigger point approximates "40% of soak" (PLAN.md §8 item 2); no exact
-    # sim-clock boundary for "40% of soak" is defined anywhere, so a zone-temp
-    # trigger mid-ramp is used as a reasonable, repeatable proxy instead of a
-    # guessed sim-time offset.
-    trigger: { at_zone_temp: { zone: 0, temp_c: 400, edge: rising } }
+    # A zone-temperature trigger, kept rather than converted to at_sim_time
+    # because "the SSR welds part-way up the ramp" is the physical story this
+    # scenario tells — PLAN.md §8 item 2's "40% of soak" has no exact sim-clock
+    # definition, and a temperature is the repeatable proxy for it. The number
+    # is now one this run actually reaches; see the header note above for the
+    # measured heating curve.
+    trigger: { at_zone_temp: { zone: 0, temp_c: 150, edge: rising } }
     duration: permanent
 expect:
-  - name: safety_trips
+  - name: current_flows_during_the_commanded_firing
+    # The precondition for everything below, and S4's nuisance premise: K4
+    # closed and K1 commanded means real current on CT0. If this fails, every
+    # other clause here is vacuous — which is exactly how this file went dead
+    # before.
+    # Anchored on the K1 command edge, not the K4 close edge: K4 closes at
+    # t~60 but zone 0 is not commanded until t=65, so current legitimately does
+    # not exist for ~5 s after K4 permits. (Both halves are still asserted --
+    # this clause needs K4 closed too, because sim_engine.c gates every zone's
+    # duty on it, so current on CT0 is itself the proof that K4 is closed.)
+    event: { type: relay_edge, relay: K1, edge: close }
+    then:
+      dut: current_present
+      within_s: 10       # one telemetry frame's quantization (~1 sim-second at
+                         # timescale 2) plus margin; duty follows the sensed
+                         # contacts on the very next device_tick()
+  - name: s4_never_warns_while_commanded_and_conducting
+    # S4 = commanded continuously AND no current. K1 is commanded on from 65 s
+    # to 135 s with 20 A flowing the whole time, so S4's magnitude half is
+    # genuinely false here rather than untested.
+    forbid: { event: { type: guard_warn, guard: S4 }, before: { fault: weld } }
+  - name: s3_waits_out_the_correlation_window
+    # The lower bar of the two-bar doctrine (SAFETY_MODEL.md §2), and the one
+    # property only this scenario tests: uncommanded current alone is not
+    # enough while K1 was commanded within correlation_window_s. K1 is
+    # commanded off at t=135, so S3 may not trip before t≈285 (135 + 150) at
+    # the very earliest. Anchored on the weld (t≈125) because report.py's
+    # `before:` boundary takes an event, not a sim time.
+    forbid: { event: { type: guard_trip, guard: S3 }, before: { fault: weld } }
+  - name: s3_trips_after_the_window_expires
     event: { type: fault_fired, slot: weld }
     then:
-      dut: K4_open
-      within_s: 25       # stuck_on_time_s = 20s (SAFETY_MODEL.md §4 S3) + ~5s
-                         # margin for the guard's own 10Hz evaluation tick and
-                         # relay coil release time (no separate numeric bound
-                         # is given for the latter beyond "de-energizes K4
-                         # first, before anything else, before logging",
-                         # SAFETY_MODEL.md §6)
-      not_before_s: 18  # must not trip meaningfully before the 20s
-                         # stuck_on_time_s bar is cleared (lower bar of the
-                         # two-bar doctrine, SAFETY_MODEL.md §2)
-    blocked_on:
-      reason: "S3 itself is no longer blocked ANYWHERE -- it trips for real
-               now. stuck_load_no_command_s3.yaml issues the operator enable
-               via `dut.operator_actions:`, K4 closes at sim-time ~58s, a
-               welded SSR puts 16A on CT0 with nothing commanded, and S3
-               trips 18.2s later. What still blocks THIS clause is two things
-               local to this file, neither of them a SaftyFW gap:
-               (1) it schedules no operator actions, so K4 never closes here
-               and sim_engine.c gates duty/current to zero (measured
-               any_current_present true on 0 of 82 polls);
-               (2) independently, its own `at_zone_temp 400C` trigger is
-               unreachable in this run's time budget even with K4 closed --
-               the fast_test preset asymptotes at ~505C with a ~200s time
-               constant, so 400C needs ~304 sim-seconds of full duty, against
-               an estimated run duration of ~195s. The fault never fires,
-               which is why the clause reports 'triggering event never
-               occurred'."
-      phase: "No phase: nothing upstream is missing. Fixing this file means
-              adding `dut.operator_actions:` AND replacing the 400C trigger
-              with one the run can actually reach (a sim-time trigger after
-              the 60s startup grace is what stuck_load_no_command_s3.yaml
-              uses). Until then, treat stuck_load_no_command_s3.yaml as the
-              library's live S3 test."
+      event: { type: guard_trip, guard: S3 }
+      within_s: 200      # the weld fires at t≈125; the trip is due at t≈305,
+                         # i.e. ~180 s later (150 s correlation_window_s
+                         # measured from the t=135 command-off, + 20 s
+                         # stuck_on_time_s, + the fixture's telemetry
+                         # quantization at each end). 200 s leaves ~20 s of
+                         # headroom on that.
+      not_before_s: 150  # must not trip before the correlation window can
+                         # possibly have expired: 135 − 125 = 10 s from the
+                         # weld to the last command, + 150 s of window = 160 s.
+                         # Set below that rather than at it, for the same
+                         # reason stuck_load_no_command_s3's own not_before_s
+                         # sits below its nominal bar: the harness replays one
+                         # telemetry sample across a whole batch of 100 ms
+                         # guard ticks, so the guard's clock runs a few percent
+                         # fast (virtual_dut/README.md Finding 8). Asserting
+                         # the nominal number would be asserting the fixture's
+                         # sampling, not the guard's threshold.
   - name: no_early_trip
     forbid: { dut: K4_open, before: { fault: weld } }
+    blocked_on:
+      reason: "Not about S3 at all: K4 is reported open from this harness's
+               very first observation, because nothing in current SaftyFW
+               energizes it until the operator enable survives the 60 s startup
+               grace -- and the first telemetry frame lands well before that.
+               So a `forbid: {dut: K4_open}` clause sees an 'open' edge at
+               sim-time ~1 s, long before the weld, no matter what any guard
+               decides. See firmware/SimFW/tools/virtual_dut/README.md Finding
+               2 and its corollary. `s3_waits_out_the_correlation_window` above
+               is the clause that genuinely tests early-trip behavior here, and
+               it keys off the guard_trip event rather than the K4 level for
+               exactly this reason."
+      phase: "No phase: nothing upstream is missing. This clause FORM
+              (`forbid: {dut: K4_open}`) cannot be meaningful while K4's boot
+              state is open and report.py matches edges rather than levels; a
+              scenario author should prefer the guard_trip form."
   - name: trip_latched
     at_end: { dut: K4_open }
   - name: current_decays_after_k4_opens
     event: { type: relay_edge, relay: K4, edge: open }
     then:
       dut: current_absent
-      within_s: 4        # <5% within ~4s, τ≈1s peak-hold decay
-                         # (GUARD_TEST_MATRIX.md §3.3 "Decay")
-    blocked_on:
-      reason: "Downstream of `safety_trips` above: this clause's own trigger
-               is the relay_edge{K4, open} event, which only occurs if S3
-               actually trips K4 -- since S3 cannot fire (see `safety_trips`
-               blocked_on), the triggering edge never occurs either."
-      phase: "Same as the clause it depends on. No longer a fixture gap
-              either: run_dut_scenarios.py can close K4 and present real CT
-              current now (see stuck_load_no_command_s3.yaml, where S3 trips
-              and K4 opens for real); this file simply does not ask it to.
-              Any additional SaftyFW-side gap this clause names in its own
-              `reason` -- e.g. relay_deenergized for S9 -- is unaffected by
-              that and is still real."
+      within_s: 10       # K4 is in series with every zone's power path
+                         # (sim_engine.c's own k4_closed block), so the trip
+                         # must actually kill the current even though the SSR
+                         # is still welded. Widened from the old 4 s, which was
+                         # the <5% peak-hold decay time constant
+                         # (GUARD_TEST_MATRIX.md §3.3) — finer than this
+                         # fixture's ~1 sim-second sampling can resolve, so
+                         # asserting it would be asserting the sampling.
 manual_checks:
   - "Confirm KilnFW's LCD/web UI surfaces the S3 trip reason distinctly (not a generic fault) — fixture cannot read display/web content"
 report_keep: [telemetry, events]

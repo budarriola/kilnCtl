@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 50,
   "timescale": 10.0,
-  "start_time": 1787274680.0491333,
+  "start_time": 1787277475.8114593,
   "events": [
     {
       "seq": 0,
@@ -23,7 +23,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 47000000,
+      "sim_time_us": 5000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -66,10 +66,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 79,
-    "context_valid": 79,
+    "polls": 81,
+    "context_valid": 81,
     "any_current_present": 0,
-    "link_up": 79,
+    "link_up": 81,
     "max_zone_count": 3,
     "energized": 0
   }
