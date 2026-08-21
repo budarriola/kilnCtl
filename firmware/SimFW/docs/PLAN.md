@@ -185,10 +185,15 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [ ] **Master driver access-pattern audit** — does either master use
-      write-then-read inside one CS assertion? Pure code-reading task, but it
-      is part of M-A's exit criterion, so M-A cannot close without it.
-      (§11 item 4)
+- [ ] **`~DRDY` is not implemented at all** in `firmware/SimFW/src/`, and the
+      "reading CJTH/LTCB releases `~DRDY`" side effect **both** real masters
+      depend on has no hook in the register machine. Found by the SPI access
+      audit; this is a functional gap, not a timing one.
+- [ ] **Re-plan the first-byte path.** The audit found PLAN §3.2.1's 1.6 µs
+      budget is wrong by ~8× (real budget ~125 ns at 4 MHz), which likely
+      rules out Plan A entirely. See `docs/SPI_ACCESS_AUDIT.md` §6 for the
+      DMA-fed Plan B sketch. This is the biggest open *design* risk in the
+      fixture.
 - [ ] **`wave_owner.c` amplitude mapping is still an IDENTITY placeholder.**
       The calibration *tooling* now exists (`tools/ct_calibration/`); the
       firmware side must become per-channel
@@ -241,6 +246,12 @@ never `[x]`.
       `docs/PROTOCOL.md`
 - [x] Transformer ratio corrected 1:1 → ~3:1 (1:1 could not reach ADC clip)
 - [x] S9 `relay_deenergized` wired (`5f90325`)
+- [x] SPI access-pattern audit — `docs/SPI_ACCESS_AUDIT.md` (`46fa310`),
+      which also found and fixed four responder defects: MISO permanently
+      driven instead of tri-stated (three emulated chips share one physical
+      MISO), TX FIFO surplus leading the next transaction, a vacuous
+      `first_byte_late` counter, and a 4-bit register address space where the
+      part has 7
 - [x] USB identity claimed — `2E8A:F00A` fixture / `2E8A:F00B`
       `spi_test_master` (`55d81e5`). This also fixed a live bug: `link.py`
       was matching `2E8A:000A` while the firmware actually shipped TinyUSB's
@@ -468,9 +479,9 @@ SCLK/MOSI/MISO; bus B has one CS. Design per engine:
   settled bit; MISO pin is tri-stated (pindir flip in the PIO program)
   whenever no CS is low, since three emulated chips share one physical
   MISO on bus A.
-- **First-byte path (the 1.6 µs problem):** at 5 MHz a byte takes 1.6 µs and
-  the master's first clock for the *response* byte comes one byte-time after
-  the address byte. A FreeRTOS task cannot bounce a queue in that window
+- **First-byte path (the 1.6 µs problem — SEE CORRECTION BELOW):** at 5 MHz a
+  byte takes 1.6 µs and the master's first clock for the *response* byte comes
+  one byte-time after the address byte. A FreeRTOS task cannot bounce a queue in that window
   reliably; a core-1 ISR can (RP2040 interrupt latency ~1 µs is too tight to
   bet on alone). Two-stage plan, POC decides (M-A):
   1. **Plan A — ISR staging:** address byte triggers a PIO RX IRQ on core 1
@@ -478,6 +489,18 @@ SCLK/MOSI/MISO; bus B has one CS. Design per engine:
      indexes the channel's 16-byte register image and feeds the TX FIFO with
      the auto-increment stream. Handler budget: <1 µs of straight-line code,
      register image always coherent (see below).
+> **CORRECTION 2026-08-20 (`docs/SPI_ACCESS_AUDIT.md` §6) — the budget above
+> is wrong by roughly 8×, and it changes which plan is viable.** The response
+> is not due one byte-time after the address byte. The address *value* is only
+> known after clock 8's falling edge, and the first response bit must already
+> be on MISO at clock 9's rising edge — so the real budget is about **half an
+> SCLK period (~125 ns at 4 MHz)**, not 1.6 µs. Plan A (ISR staging) almost
+> certainly cannot meet that on an RP2040, and its failure mode is not one
+> late byte but **an entire burst shifted by one position**, returning
+> plausible-looking wrong temperatures rather than an obvious fault. A
+> DMA-fed Plan B variant is sketched in `SPI_ACCESS_AUDIT.md` §6. Treat M-A's
+> POC as deciding between Plan B variants, not between A and B.
+
   2. **Plan B — precomputed full-image streaming:** if Plan A misses timing
      at 5 MHz, exploit MAX31856 read behavior — the TX FIFO is pre-loaded at
      every CS-fall with the register image starting at address 0, and a
@@ -1294,13 +1317,23 @@ than left to be inferred.
    calibration procedure — see M-D's status in section 10. (M-D)
 3. [x] ~~DRDY/`~FAULT` over I2C latency~~ — **resolved 2026-08-20:** direct Pico
    GPIO (3.4/3.6); no I2C latency question remains.
-4. [ ] **Does the ESP's driver ever use write-then-read within one CS assertion**
-   in a pattern the PIO responder must special-case? Audit both masters'
-   drivers before freezing the PIO program. **Still open** — no audit
-   document exists yet; the PIO program has been corrected for clock
-   polarity (see the status header) but this access-pattern question is
-   distinct and unanswered. This is explicitly named as part of M-A's exit
-   criterion, so M-A cannot close without it either way. (M-A)
+4. [x] ~~**Does the ESP's driver ever use write-then-read within one CS assertion**
+   in a pattern the PIO responder must special-case?~~ **RESOLVED 2026-08-20
+   — `docs/SPI_ACCESS_AUDIT.md` (`46fa310`). Answer: no.** Neither master
+   ever emits a write-then-read, a repeated start, or any multi-phase
+   transaction inside one CS assertion. Every transaction from either master
+   is exactly one CS-low window holding one address byte then 1–6 data bytes,
+   with direction fixed for the whole window by bit 7 of the address byte.
+   This is structural, not incidental — both transports are
+   one-CS-per-transfer by construction (`esp_spi_owner.c:26-34`,
+   `SaftyFW/src/spi_owner.c:62-65`). Six distinct shapes total (3 write, 3
+   read); neither master's read burst ever crosses `0Fh`. **The responder
+   needs no special case and the PIO program can be frozen on this point.**
+   The audit also found and fixed four real responder defects (two critical)
+   and corrected §3.2.1's timing budget — see §0.1 and the correction block
+   in §3.2.1. Note this satisfies only the *audit* half of M-A's exit
+   criterion; the Saleae capture half remains, and now has three specific
+   claims to confirm (`SPI_ACCESS_AUDIT.md` §8). (M-A)
 5. [~] ~~DUT power control~~ — **resolved 2026-08-20:** yes, a fixture relay in
    the 12 V feed, MCP23017 #1-driven (3.4); `power_blip` is in scope.
    **One-vs-two-relay question further resolved 2026-08-20
