@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 53,
   "timescale": 10.0,
-  "start_time": 1787290698.794545,
+  "start_time": 1787292630.5135074,
   "events": [
     {
       "seq": 2000000000,
@@ -38,7 +38,7 @@
       "name": "s8_produces_no_trip_of_its_own_today",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_trip never observed before the boundary"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     }
   ],
   "verdict": "BLOCKED",

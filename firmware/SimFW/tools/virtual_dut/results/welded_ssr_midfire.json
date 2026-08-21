@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 42,
   "timescale": 2.0,
-  "start_time": 1787291061.4934576,
+  "start_time": 1787293213.4280791,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 61400000,
+      "sim_time_us": 60800000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 65200000,
+      "sim_time_us": 66200000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -39,7 +39,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 125600000,
+      "sim_time_us": 126600000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "weld",
@@ -51,7 +51,7 @@
     },
     {
       "seq": 3,
-      "sim_time_us": 136200000,
+      "sim_time_us": 136800000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -65,7 +65,7 @@
     },
     {
       "seq": 4,
-      "sim_time_us": 306200000,
+      "sim_time_us": 306000000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -79,7 +79,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 66000000,
+      "sim_time_us": 66400000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -91,7 +91,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 306200000,
+      "sim_time_us": 306600000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -115,7 +115,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 60800000,
+      "sim_time_us": 60200000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -127,7 +127,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 305200000,
+      "sim_time_us": 305600000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S3"
@@ -138,7 +138,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 305200000,
+      "sim_time_us": 305600000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -158,7 +158,7 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 0.800s after relay_edge"
+      "detail": "dut:current_present observed 0.200s after relay_edge"
     },
     {
       "name": "s4_never_warns_while_commanded_and_conducting",
@@ -166,7 +166,7 @@
       "evidence": [
         2
       ],
-      "detail": "event:guard_warn never observed before the boundary"
+      "detail": "event:guard_warn never observed inside the forbidden window"
     },
     {
       "name": "s3_waits_out_the_correlation_window",
@@ -174,7 +174,7 @@
       "evidence": [
         2
       ],
-      "detail": "event:guard_trip never observed before the boundary"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
       "name": "s3_trips_after_the_window_expires",
@@ -183,7 +183,7 @@
         2,
         2000000002
       ],
-      "detail": "event:guard_trip observed 179.600s after fault_fired"
+      "detail": "event:guard_trip observed 179.000s after fault_fired"
     },
     {
       "name": "no_early_trip",
@@ -191,7 +191,7 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: Not about S3 at all: K4 is reported open from this harness's very first observation, because nothing in current SaftyFW energizes it until the operator enable survives the 60 s startup grace -- and the first telemetry frame lands well before that. So a `forbid: {dut: K4_open}` clause sees an 'open' edge at sim-time ~1 s, long before the weld, no matter what any guard decides. See firmware/SimFW/tools/virtual_dut/README.md Finding 2 and its corollary. `s3_waits_out_the_correlation_window` above is the clause that genuinely tests early-trip behavior here, and it keys off the guard_trip event rather than the K4 level for exactly this reason.]",
+      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: Not about S3 at all: K4 is reported open from this harness's very first observation, because nothing in current SaftyFW energizes it until the operator enable survives the 60 s startup grace -- and the first telemetry frame lands well before that. So a `forbid: {dut: K4_open}` clause sees an 'open' edge at sim-time ~1 s, long before the weld, no matter what any guard decides. See firmware/SimFW/tools/virtual_dut/README.md Finding 2 and its corollary. `s3_waits_out_the_correlation_window` above is the clause that genuinely tests early-trip behavior here, and it keys off the guard_trip event rather than the K4 level for exactly this reason.]",
       "blocked_on": {
         "reason": "Not about S3 at all: K4 is reported open from this harness's very first observation, because nothing in current SaftyFW energizes it until the operator enable survives the 60 s startup grace -- and the first telemetry frame lands well before that. So a `forbid: {dut: K4_open}` clause sees an 'open' edge at sim-time ~1 s, long before the weld, no matter what any guard decides. See firmware/SimFW/tools/virtual_dut/README.md Finding 2 and its corollary. `s3_waits_out_the_correlation_window` above is the clause that genuinely tests early-trip behavior here, and it keys off the guard_trip event rather than the K4 level for exactly this reason.",
         "phase": "No phase: nothing upstream is missing. This clause FORM (`forbid: {dut: K4_open}`) cannot be meaningful while K4's boot state is open and report.py matches edges rather than levels; a scenario author should prefer the guard_trip form."
@@ -212,7 +212,7 @@
         4,
         1000000001
       ],
-      "detail": "dut:current_absent observed 0.000s after relay_edge"
+      "detail": "dut:current_absent observed 0.600s after relay_edge"
     }
   ],
   "verdict": "BLOCKED",
@@ -222,11 +222,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 374,
-    "context_valid": 374,
-    "any_current_present": 237,
-    "link_up": 374,
+    "polls": 372,
+    "context_valid": 372,
+    "any_current_present": 235,
+    "link_up": 372,
     "max_zone_count": 3,
-    "energized": 241
+    "energized": 240
   }
 }

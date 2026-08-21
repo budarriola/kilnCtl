@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 56,
   "timescale": 10.0,
-  "start_time": 1787290609.3309913,
+  "start_time": 1787292541.0184057,
   "events": [
     {
       "seq": 2000000000,
@@ -28,7 +28,7 @@
       "name": "relay_never_energizes",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "dut:K4_closed never observed before the boundary"
+      "detail": "dut:K4_closed never observed inside the forbidden window"
     },
     {
       "name": "still_open_at_end",

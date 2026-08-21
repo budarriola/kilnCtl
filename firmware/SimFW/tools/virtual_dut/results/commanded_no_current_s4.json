@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 62,
   "timescale": 2.0,
-  "start_time": 1787290343.4469442,
+  "start_time": 1787292275.475639,
   "events": [
     {
       "seq": 0,
@@ -37,7 +37,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 61000000,
+      "sim_time_us": 61800000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -63,7 +63,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 60800000,
+      "sim_time_us": 61000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -75,7 +75,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 156000000,
+      "sim_time_us": 156400000,
       "event_type": "GUARD_WARN",
       "payload": {
         "guard": "S4"
@@ -94,13 +94,13 @@
         1,
         2000000002
       ],
-      "detail": "event:guard_warn observed 150.600s after relay_edge"
+      "detail": "event:guard_warn observed 151.000s after relay_edge"
     },
     {
       "name": "no_current_ever_flows",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "dut:current_present never observed before the boundary"
+      "detail": "dut:current_present never observed inside the forbidden window"
     },
     {
       "name": "s4_never_opens_k4",
@@ -118,11 +118,11 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 207,
-    "context_valid": 207,
+    "polls": 206,
+    "context_valid": 206,
     "any_current_present": 0,
-    "link_up": 207,
+    "link_up": 206,
     "max_zone_count": 3,
-    "energized": 148
+    "energized": 147
   }
 }

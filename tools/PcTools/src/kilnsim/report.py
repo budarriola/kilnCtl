@@ -352,28 +352,82 @@ def _eval_event_then(clause: EventThenExpect, events: list) -> ExpectationResult
     )
 
 
-def _forbid_boundary(before: dict, events: list) -> tuple:
+def _generic_boundary(spec: dict, events: list) -> tuple:
     """Returns ``(boundary_us, boundary_seq, skip_detail)``. ``skip_detail``
     is set (and the other two ``None``) when the boundary event never
-    occurred, meaning the clause can't be evaluated."""
-    if before.get("sim_end"):
+    occurred, meaning the clause can't be evaluated. Shared by
+    ``forbid.before`` and ``forbid.after`` (see :func:`_eval_forbid`) -- both
+    are "a point in sim time," just anchoring the forbidden interval from
+    opposite ends, so they accept the same spec vocabulary.
+
+    ``"event"`` (added alongside ``after:`` -- see ``_eval_forbid``'s
+    docstring) takes the same ``{type: ..., ...filters}``/bare-string shape
+    :func:`_resolve_event_clause` already parses for ``event:``/``then:``
+    clauses, e.g. ``{"event": {"type": "relay_edge", "relay": "K4", "edge":
+    "open"}}`` -- anything in the event stream, not just ``fault_fired``
+    (which ``"fault"`` below remains a convenience alias for)."""
+    if spec.get("sim_end"):
         return float("inf"), None, None
-    if "sim_time_s" in before:
-        return float(before["sim_time_s"]) * 1_000_000, None, None
-    if "sim_time" in before:
-        return float(before["sim_time"]) * 1_000_000, None, None
-    if "fault" in before:
-        fired = _find_events(events, "fault_fired", {"slot": before["fault"]})
+    if "sim_time_s" in spec:
+        return float(spec["sim_time_s"]) * 1_000_000, None, None
+    if "sim_time" in spec:
+        return float(spec["sim_time"]) * 1_000_000, None, None
+    if "fault" in spec:
+        fired = _find_events(events, "fault_fired", {"slot": spec["fault"]})
         if not fired:
-            return None, None, f"boundary fault {before['fault']!r} never fired"
+            return None, None, f"boundary fault {spec['fault']!r} never fired"
         return fired[0].sim_time_us, fired[0].seq, None
-    raise ReportError(f"forbid.before needs 'fault', 'sim_time_s', or 'sim_end': {before!r}")
+    if "event" in spec:
+        type_name, filters = _resolve_event_clause(spec["event"])
+        matches = _find_events(events, type_name, filters)
+        if not matches:
+            return None, None, (
+                f"boundary event ({type_name}{f' {filters}' if filters else ''}) never occurred"
+            )
+        return matches[0].sim_time_us, matches[0].seq, None
+    raise ReportError(f"boundary needs 'fault', 'event', 'sim_time_s', or 'sim_end': {spec!r}")
 
 
 def _eval_forbid(clause: ForbidExpect, events: list) -> ExpectationResult:
+    """``forbid:`` checks that its target (a ``dut:`` entity/polarity or an
+    ``event:``) is never observed inside ``[after, before)`` of sim time.
+
+    ``before:`` alone (the original, still the common case -- "never before
+    this boundary") defaults ``after`` to sim-time 0, unchanged from before
+    this function grew an ``after:`` side.
+
+    ``after:`` (new) anchors the *other* end: "never forbidden from this
+    boundary onward" -- defaults ``before`` to sim_end. This is what lets a
+    scenario assert a *persisting* level rather than only a bounded-before
+    one: a condition that is already true at some cause and must not stop
+    produces no new "it started" edge for a ``then:`` clause to match (see
+    the module docstring's target-kind block and
+    ``virtual_dut/README.md``'s Finding 2 corollary), but its *negation*
+    stopping is exactly an edge, and "that edge must never occur after the
+    cause" is a plain ``forbid`` once ``after:`` exists. E.g. "current must
+    not stop after K4 opens" is ``forbid: {dut: current_absent, after:
+    {event: {type: relay_edge, relay: K4, edge: open}}}`` -- no ``before:``
+    needed, so the forbidden interval runs to sim_end.
+
+    At least one of ``after:``/``before:`` must be given.
+    """
     forbid = clause.forbid
-    before = forbid.get("before") or {}
-    boundary_us, boundary_seq, skip_detail = _forbid_boundary(before, events)
+    after_spec = forbid.get("after")
+    before_spec = forbid.get("before")
+    if after_spec is None and before_spec is None:
+        raise ReportError(f"forbid clause {clause.name!r} needs 'after' and/or 'before'")
+
+    if after_spec is None:
+        after_us, after_seq, skip_detail = 0.0, None, None
+    else:
+        after_us, after_seq, skip_detail = _generic_boundary(after_spec, events)
+    if skip_detail:
+        return ExpectationResult(name=clause.name, verdict=SKIPPED, detail=skip_detail)
+
+    if before_spec is None:
+        before_us, before_seq, skip_detail = float("inf"), None, None
+    else:
+        before_us, before_seq, skip_detail = _generic_boundary(before_spec, events)
     if skip_detail:
         return ExpectationResult(name=clause.name, verdict=SKIPPED, detail=skip_detail)
 
@@ -390,17 +444,18 @@ def _eval_forbid(clause: ForbidExpect, events: list) -> ExpectationResult:
         target_desc = f"event:{type_name}"
         candidates = _find_events(events, type_name, filters)
 
-    violations = [e for e in candidates if e.sim_time_us < boundary_us]
+    violations = [e for e in candidates if after_us <= e.sim_time_us < before_us]
+    boundary_evidence = [s for s in (after_seq, before_seq) if s is not None]
     if violations:
         return ExpectationResult(
             name=clause.name, verdict=FAIL,
             evidence=[e.seq for e in violations],
-            detail=f"{target_desc} observed before the boundary (first at seq {violations[0].seq})",
+            detail=f"{target_desc} observed inside the forbidden window (first at seq {violations[0].seq})",
         )
     return ExpectationResult(
         name=clause.name, verdict=PASS,
-        evidence=[] if boundary_seq is None else [boundary_seq],
-        detail=f"{target_desc} never observed before the boundary",
+        evidence=boundary_evidence,
+        detail=f"{target_desc} never observed inside the forbidden window",
     )
 
 

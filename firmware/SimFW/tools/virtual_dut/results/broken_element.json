@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 50,
   "timescale": 10.0,
-  "start_time": 1787290303.7970421,
+  "start_time": 1787292235.5014281,
   "events": [
     {
       "seq": 0,
@@ -52,7 +52,7 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes IN THIS FILE, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated again, after the operator-actions pass): 'no scenario models the operator enable' is no longer true -- commanded_no_current_s4.yaml issues it, watches K4 close at ~58s, watches S4 warn, and then asserts the real design property this clause is reaching for (K4 STILL CLOSED at end of run, because S4 is WARN-only). That is the assertion this clause cannot make while K4 never closes.]",
+      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes IN THIS FILE, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated again, after the operator-actions pass): 'no scenario models the operator enable' is no longer true -- commanded_no_current_s4.yaml issues it, watches K4 close at ~58s, watches S4 warn, and then asserts the real design property this clause is reaching for (K4 STILL CLOSED at end of run, because S4 is WARN-only). That is the assertion this clause cannot make while K4 never closes.]",
       "blocked_on": {
         "reason": "This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes IN THIS FILE, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated again, after the operator-actions pass): 'no scenario models the operator enable' is no longer true -- commanded_no_current_s4.yaml issues it, watches K4 close at ~58s, watches S4 warn, and then asserts the real design property this clause is reaching for (K4 STILL CLOSED at end of run, because S4 is WARN-only). That is the assertion this clause cannot make while K4 never closes.",
         "phase": "No phase: nothing upstream is missing. Superseded in practice by commanded_no_current_s4.yaml's `s4_never_opens_k4` clause; retire this one, or give this file the operator actions that would make it meaningful."

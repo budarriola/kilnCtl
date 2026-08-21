@@ -2,16 +2,16 @@
   "scenario": {
     "name": "tc_flaky",
     "version": 1,
-    "hash": "d06c8dd5d3aa863f8e5566011626c05025dc761dd99c7c6e7780aaaa025245fa"
+    "hash": "0fa8c9c333998078342273cecc9e807e54756481fae6eb7e7dc7dd8a91d79eb7"
   },
   "fw_versions": {},
   "seed": 46,
-  "timescale": 10.0,
-  "start_time": 1787290915.7941253,
+  "timescale": 0.2,
+  "start_time": 1787292846.9820635,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 21000000,
+      "sim_time_us": 20020000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -23,7 +23,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 22000000,
+      "sim_time_us": 20920000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -35,7 +35,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 23000000,
+      "sim_time_us": 21820000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -47,7 +47,7 @@
     },
     {
       "seq": 3,
-      "sim_time_us": 24000000,
+      "sim_time_us": 22720000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -59,7 +59,7 @@
     },
     {
       "seq": 4,
-      "sim_time_us": 25000000,
+      "sim_time_us": 23620000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -71,7 +71,7 @@
     },
     {
       "seq": 5,
-      "sim_time_us": 26000000,
+      "sim_time_us": 24520000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -83,7 +83,7 @@
     },
     {
       "seq": 6,
-      "sim_time_us": 27000000,
+      "sim_time_us": 25420000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -95,7 +95,7 @@
     },
     {
       "seq": 7,
-      "sim_time_us": 28000000,
+      "sim_time_us": 26320000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -107,7 +107,7 @@
     },
     {
       "seq": 8,
-      "sim_time_us": 29000000,
+      "sim_time_us": 27220000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -119,7 +119,7 @@
     },
     {
       "seq": 9,
-      "sim_time_us": 30000000,
+      "sim_time_us": 28120000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -131,7 +131,7 @@
     },
     {
       "seq": 10,
-      "sim_time_us": 31000000,
+      "sim_time_us": 29020000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -143,7 +143,7 @@
     },
     {
       "seq": 11,
-      "sim_time_us": 32000000,
+      "sim_time_us": 29920000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -155,7 +155,7 @@
     },
     {
       "seq": 12,
-      "sim_time_us": 33000000,
+      "sim_time_us": 30820000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -167,7 +167,7 @@
     },
     {
       "seq": 13,
-      "sim_time_us": 34000000,
+      "sim_time_us": 31720000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -179,7 +179,7 @@
     },
     {
       "seq": 14,
-      "sim_time_us": 35000000,
+      "sim_time_us": 32620000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -191,7 +191,7 @@
     },
     {
       "seq": 15,
-      "sim_time_us": 36000000,
+      "sim_time_us": 33520000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -203,7 +203,7 @@
     },
     {
       "seq": 16,
-      "sim_time_us": 37000000,
+      "sim_time_us": 34420000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -215,7 +215,7 @@
     },
     {
       "seq": 17,
-      "sim_time_us": 38000000,
+      "sim_time_us": 35320000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -227,7 +227,7 @@
     },
     {
       "seq": 18,
-      "sim_time_us": 39000000,
+      "sim_time_us": 36220000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -239,7 +239,7 @@
     },
     {
       "seq": 19,
-      "sim_time_us": 40000000,
+      "sim_time_us": 37120000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -251,7 +251,7 @@
     },
     {
       "seq": 20,
-      "sim_time_us": 41000000,
+      "sim_time_us": 38020000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -263,7 +263,7 @@
     },
     {
       "seq": 21,
-      "sim_time_us": 42000000,
+      "sim_time_us": 38920000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -275,7 +275,7 @@
     },
     {
       "seq": 22,
-      "sim_time_us": 43000000,
+      "sim_time_us": 39820000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -287,7 +287,7 @@
     },
     {
       "seq": 23,
-      "sim_time_us": 44000000,
+      "sim_time_us": 40720000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -299,7 +299,7 @@
     },
     {
       "seq": 24,
-      "sim_time_us": 45000000,
+      "sim_time_us": 41620000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -311,7 +311,7 @@
     },
     {
       "seq": 25,
-      "sim_time_us": 46000000,
+      "sim_time_us": 42520000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -323,7 +323,7 @@
     },
     {
       "seq": 26,
-      "sim_time_us": 47000000,
+      "sim_time_us": 43420000,
       "event_type": "FAULT_FIRED",
       "payload": {
         "fault_id": "flaky",
@@ -335,7 +335,7 @@
     },
     {
       "seq": 27,
-      "sim_time_us": 48000000,
+      "sim_time_us": 44320000,
       "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
@@ -347,572 +347,8 @@
     },
     {
       "seq": 28,
-      "sim_time_us": 49000000,
+      "sim_time_us": 45220000,
       "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 29,
-      "sim_time_us": 50000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 30,
-      "sim_time_us": 51000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 31,
-      "sim_time_us": 52000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 32,
-      "sim_time_us": 53000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 33,
-      "sim_time_us": 54000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 34,
-      "sim_time_us": 55000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 35,
-      "sim_time_us": 56000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 36,
-      "sim_time_us": 57000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 37,
-      "sim_time_us": 58000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 38,
-      "sim_time_us": 59000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 39,
-      "sim_time_us": 60000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 40,
-      "sim_time_us": 61000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 41,
-      "sim_time_us": 62000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 42,
-      "sim_time_us": 63000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 43,
-      "sim_time_us": 64000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 44,
-      "sim_time_us": 65000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 45,
-      "sim_time_us": 66000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 46,
-      "sim_time_us": 67000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 47,
-      "sim_time_us": 68000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 48,
-      "sim_time_us": 69000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 49,
-      "sim_time_us": 70000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 50,
-      "sim_time_us": 71000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 51,
-      "sim_time_us": 72000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 52,
-      "sim_time_us": 73000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 53,
-      "sim_time_us": 74000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 54,
-      "sim_time_us": 75000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 55,
-      "sim_time_us": 76000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 56,
-      "sim_time_us": 77000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 57,
-      "sim_time_us": 78000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 58,
-      "sim_time_us": 79000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 59,
-      "sim_time_us": 80000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 60,
-      "sim_time_us": 81000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 61,
-      "sim_time_us": 82000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 62,
-      "sim_time_us": 83000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 63,
-      "sim_time_us": 84000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 64,
-      "sim_time_us": 85000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 65,
-      "sim_time_us": 86000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 66,
-      "sim_time_us": 87000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 67,
-      "sim_time_us": 88000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 68,
-      "sim_time_us": 89000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 69,
-      "sim_time_us": 90000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 70,
-      "sim_time_us": 91000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 71,
-      "sim_time_us": 92000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 72,
-      "sim_time_us": 93000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 73,
-      "sim_time_us": 94000000,
-      "event_type": "FAULT_CLEARED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 74,
-      "sim_time_us": 95000000,
-      "event_type": "FAULT_FIRED",
-      "payload": {
-        "fault_id": "flaky",
-        "slot": 0
-      },
-      "a": 0,
-      "b": 0,
-      "f0": 0.0
-    },
-    {
-      "seq": 75,
-      "sim_time_us": 96000000,
-      "event_type": "FAULT_CLEARED",
       "payload": {
         "fault_id": "flaky",
         "slot": 0
@@ -923,7 +359,7 @@
     },
     {
       "seq": 2000000000,
-      "sim_time_us": 5000000,
+      "sim_time_us": 100000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -942,7 +378,7 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.]",
+      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.]",
       "blocked_on": {
         "reason": "This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.",
         "phase": "No longer a missing-decoder gap on the SaftyFW side -- link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) today and relay_owner_command_energize() has its first caller. The remaining gap is on this side of the fence: no scenario issues the operator enable. firmware/SimFW/tools/virtual_dut/dut_core/main.c already accepts an ENABLE command mirroring relay_owner's TRIPPED-refuses / GRACE-defers / ARMED-honours behavior; run_dut_scenarios.py never sends one, because deciding WHEN a scenario would issue it is a scenario-library design question, not something a harness should invent. Owned by SimFW's scenario library, not by SaftyFW."
@@ -952,7 +388,7 @@
       "name": "no_warn_storm",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_warn never observed before the boundary"
+      "detail": "event:guard_warn never observed inside the forbidden window"
     }
   ],
   "verdict": "BLOCKED",
@@ -962,10 +398,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 18,
-    "context_valid": 18,
+    "polls": 449,
+    "context_valid": 449,
     "any_current_present": 0,
-    "link_up": 18,
+    "link_up": 449,
     "max_zone_count": 3,
     "energized": 0
   }

@@ -40,6 +40,27 @@ expect:
     at_end: { dut: K4_open }
 """
 
+# A persisting-level claim ("current does not stop once K4 opens") --
+# `forbid: {..., after: {...}}` -- see report.py's `_eval_forbid` docstring
+# and virtual_dut/README.md's Finding 2 corollary for why `then:` cannot
+# express this (a level that was already true produces no new edge).
+FORBID_AFTER_YAML = """
+name: forbid_after_probe
+version: 1
+seed: 1
+timescale: 1
+expect:
+  - name: current_persists_after_k4_opens
+    forbid:
+      dut: current_absent
+      after: { event: { type: relay_edge, relay: K4, edge: open } }
+  - name: current_persists_before_sim_end
+    forbid:
+      dut: current_absent
+      after: { event: { type: relay_edge, relay: K4, edge: open } }
+      before: { sim_end: true }
+"""
+
 
 def _fault_fired(seq, sim_time_us, fault_id="weld"):
     return Event(seq=seq, sim_time_us=sim_time_us, event_type=EventType.FAULT_FIRED,
@@ -48,7 +69,13 @@ def _fault_fired(seq, sim_time_us, fault_id="weld"):
 
 def _k4(seq, sim_time_us, open_: bool):
     return Event(seq=seq, sim_time_us=sim_time_us, event_type=EventType.RELAY_EDGE,
-                 payload={"entity": "K4", "state": open_})
+                 payload={"entity": "K4", "state": open_, "relay": "K4",
+                          "edge": "open" if open_ else "close"})
+
+
+def _current(seq, sim_time_us, present: bool):
+    return Event(seq=seq, sim_time_us=sim_time_us, event_type=EventType.RELAY_EDGE,
+                 payload={"entity": "current", "state": present})
 
 
 class EventThenWithinDeadlineTests(unittest.TestCase):
@@ -136,6 +163,81 @@ class ForbidBeforeTests(unittest.TestCase):
         report = evaluate_expectations(self.scenario, events)
         result = {r.name: r for r in report.expectations}["no_early_trip"]
         self.assertEqual(result.verdict, SKIPPED)
+
+
+class ForbidAfterTests(unittest.TestCase):
+    """`forbid: {..., after: {...}}` -- the persisting-level clause form
+    (report.py's `_eval_forbid`/`_generic_boundary`), added for exactly the
+    K4_open/current_present corollary virtual_dut/README.md's Finding 2
+    records: a level already true at a cause produces no new edge for
+    `then:` to match, but the *stopping* of that level is an edge, and
+    forbidding that edge from the cause onward expresses the real claim."""
+
+    def setUp(self):
+        self.scenario = load_scenario_text(FORBID_AFTER_YAML)
+
+    def test_passes_when_current_never_stops_after_k4_opens(self):
+        events = [
+            _current(1, 10_000_000, present=True),   # current already flowing
+            _k4(2, 70_000_000, open_=True),           # K4 opens (the weld)
+            # no current_absent edge ever -- current persists to sim_end
+        ]
+        report = evaluate_expectations(self.scenario, events)
+        result = {r.name: r for r in report.expectations}["current_persists_after_k4_opens"]
+        self.assertEqual(result.verdict, PASS)
+        self.assertEqual(result.evidence, [2])  # the after-boundary's own seq
+
+    def test_fails_when_current_stops_after_k4_opens(self):
+        events = [
+            _current(1, 10_000_000, present=True),
+            _k4(2, 70_000_000, open_=True),
+            _current(3, 90_000_000, present=False),  # current genuinely stops
+        ]
+        report = evaluate_expectations(self.scenario, events)
+        result = {r.name: r for r in report.expectations}["current_persists_after_k4_opens"]
+        self.assertEqual(result.verdict, FAIL)
+        self.assertEqual(result.evidence, [3])
+
+    def test_a_stop_edge_before_the_after_boundary_does_not_count(self):
+        # current dipped BEFORE K4 opened (e.g. a brief real fluctuation) --
+        # that is not the claim under test and must not fail the clause.
+        events = [
+            _current(1, 5_000_000, present=True),
+            _current(2, 6_000_000, present=False),   # stop, but before K4 opens
+            _current(3, 8_000_000, present=True),
+            _k4(4, 70_000_000, open_=True),
+        ]
+        report = evaluate_expectations(self.scenario, events)
+        result = {r.name: r for r in report.expectations}["current_persists_after_k4_opens"]
+        self.assertEqual(result.verdict, PASS)
+
+    def test_skipped_when_the_after_boundary_event_never_occurs(self):
+        events = [_current(1, 10_000_000, present=True)]  # K4 never opens
+        report = evaluate_expectations(self.scenario, events)
+        result = {r.name: r for r in report.expectations}["current_persists_after_k4_opens"]
+        self.assertEqual(result.verdict, SKIPPED)
+
+    def test_after_and_before_together_bound_both_ends(self):
+        events = [
+            _current(1, 10_000_000, present=True),
+            _k4(2, 70_000_000, open_=True),
+        ]
+        report = evaluate_expectations(self.scenario, events)
+        result = {r.name: r for r in report.expectations}["current_persists_before_sim_end"]
+        self.assertEqual(result.verdict, PASS)
+
+    def test_forbid_clause_needs_after_or_before(self):
+        from kilnsim.report import ReportError
+
+        scenario = load_scenario_text("""
+name: bad_forbid
+version: 1
+expect:
+  - name: neither_bound
+    forbid: { dut: current_absent }
+""")
+        with self.assertRaises(ReportError):
+            evaluate_expectations(scenario, [])
 
 
 class AtEndTests(unittest.TestCase):

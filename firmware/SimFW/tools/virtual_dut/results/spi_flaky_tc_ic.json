@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 55,
   "timescale": 10.0,
-  "start_time": 1787290789.21064,
+  "start_time": 1787292720.9467647,
   "events": [
     {
       "seq": 0,
@@ -40,7 +40,7 @@
       "name": "not_an_instant_trip",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "dut:K4_open never observed before the boundary"
+      "detail": "dut:K4_open never observed inside the forbidden window"
     },
     {
       "name": "warns_then_trips_like_disconnect",
@@ -58,10 +58,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 31,
-    "context_valid": 31,
+    "polls": 30,
+    "context_valid": 30,
     "any_current_present": 0,
-    "link_up": 31,
+    "link_up": 30,
     "max_zone_count": 3,
     "energized": 0
   }

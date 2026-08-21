@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 61,
   "timescale": 2.0,
-  "start_time": 1787290805.26255,
+  "start_time": 1787292736.6722963,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 60800000,
+      "sim_time_us": 61200000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -37,7 +37,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 90000000,
+      "sim_time_us": 90600000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -51,7 +51,7 @@
     },
     {
       "seq": 1000000000,
-      "sim_time_us": 70200000,
+      "sim_time_us": 70800000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -63,7 +63,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 90400000,
+      "sim_time_us": 91200000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -87,7 +87,7 @@
     },
     {
       "seq": 2000000001,
-      "sim_time_us": 60000000,
+      "sim_time_us": 60800000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -99,7 +99,7 @@
     },
     {
       "seq": 2000000002,
-      "sim_time_us": 89400000,
+      "sim_time_us": 90200000,
       "event_type": "GUARD_TRIP",
       "payload": {
         "guard": "S3"
@@ -110,7 +110,7 @@
     },
     {
       "seq": 2000000003,
-      "sim_time_us": 89400000,
+      "sim_time_us": 90200000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "K4",
@@ -130,7 +130,7 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 0.000s after fault_fired"
+      "detail": "dut:current_present observed 0.600s after fault_fired"
     },
     {
       "name": "s3_trips_on_uncommanded_load",
@@ -139,7 +139,7 @@
         1,
         2000000002
       ],
-      "detail": "event:guard_trip observed 19.200s after fault_fired"
+      "detail": "event:guard_trip observed 20.000s after fault_fired"
     },
     {
       "name": "s3_does_not_trip_before_there_is_any_current",
@@ -147,7 +147,7 @@
       "evidence": [
         1
       ],
-      "detail": "event:guard_trip never observed before the boundary"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
       "name": "k4_opens_and_stays_open",

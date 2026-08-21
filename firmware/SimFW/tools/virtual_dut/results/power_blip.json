@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 57,
   "timescale": 10.0,
-  "start_time": 1787290673.4110525,
+  "start_time": 1787292605.1488402,
   "events": [
     {
       "seq": 2000000000,
@@ -28,7 +28,7 @@
       "name": "mainfault_reads_healthy_during_blip",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_trip never observed before the boundary"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
       "name": "relays_deenergize_no_current_during_blip",
@@ -42,7 +42,7 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: One of the two original reasons here is now resolved, the other is not. RESOLVED: link_up is no longer permanently false -- commit f304392 wired it to link_task_link_up() (a CRC-valid frame within LINK_UP_RECENCY_MS), and S6b's unconditional ~120s hard-backstop trip, which previously fired in 16 of 19 virtual_dut scenarios, now fires in none of them. This clause's 'stays at warn, not trip' claim is finally testable in principle. NOT RESOLVED: K4 is still open from sim-time 0 (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so the forbid clause is still satisfied before the blip has had a chance to prove anything.]",
+      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: One of the two original reasons here is now resolved, the other is not. RESOLVED: link_up is no longer permanently false -- commit f304392 wired it to link_task_link_up() (a CRC-valid frame within LINK_UP_RECENCY_MS), and S6b's unconditional ~120s hard-backstop trip, which previously fired in 16 of 19 virtual_dut scenarios, now fires in none of them. This clause's 'stays at warn, not trip' claim is finally testable in principle. NOT RESOLVED: K4 is still open from sim-time 0 (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so the forbid clause is still satisfied before the blip has had a chance to prove anything.]",
       "blocked_on": {
         "reason": "One of the two original reasons here is now resolved, the other is not. RESOLVED: link_up is no longer permanently false -- commit f304392 wired it to link_task_link_up() (a CRC-valid frame within LINK_UP_RECENCY_MS), and S6b's unconditional ~120s hard-backstop trip, which previously fired in 16 of 19 virtual_dut scenarios, now fires in none of them. This clause's 'stays at warn, not trip' claim is finally testable in principle. NOT RESOLVED: K4 is still open from sim-time 0 (no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE -- see the K4 blocked_on entries elsewhere in this library), so the forbid clause is still satisfied before the blip has had a chance to prove anything.",
         "phase": "link_up: done (f304392, link_task_link_up() + safety_core_build_input() reading it). K4 energize: no longer a missing decoder either -- link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) and relay_owner_command_energize() has its first caller. The residual gap is scenario-side: nothing here performs the operator enable step. Also note that a 0.2s blip is far shorter than LINK_UP_RECENCY_MS (1000ms), so even a faithful fixture would not necessarily drop link_up at all -- revisit this clause's off-time against that constant before treating a PASS here as evidence about S6b."

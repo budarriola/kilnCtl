@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 51,
   "timescale": 20.0,
-  "start_time": 1787290665.778045,
+  "start_time": 1787292597.547655,
   "events": [
     {
       "seq": 0,
@@ -42,7 +42,7 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.]",
+      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.]",
       "blocked_on": {
         "reason": "This forbid clause is still satisfied for the wrong reason: K4 is open at sim-time 0 and never closes, so it is already true before anything under test has had a chance to say otherwise. NOTE (updated after SaftyFW commit f304392): the previous wording here -- 'relay_owner_command_energize() is called by nothing in the current source tree' -- is no longer true. It now has a caller, safety_core_request_enable(), reached from link_task.c's SAFETY_CMD_REQUEST_ENABLE (0x02) decoder. That path is driven only by an explicit operator/PC command (KilnFW's uart_bridge.c -> safety_link_request_enable(), i.e. PcTools' safety_request_enable MCP tool); KilnFW does NOT request enable automatically when a profile runs, and no scenario in this library models that operator step.",
         "phase": "No longer a missing-decoder gap on the SaftyFW side -- link_task.c decodes LINK_FRAME_REQUEST_ENABLE_CMD (0x02) today and relay_owner_command_energize() has its first caller. The remaining gap is on this side of the fence: no scenario issues the operator enable. firmware/SimFW/tools/virtual_dut/dut_core/main.c already accepts an ENABLE command mirroring relay_owner's TRIPPED-refuses / GRACE-defers / ARMED-honours behavior; run_dut_scenarios.py never sends one, because deciding WHEN a scenario would issue it is a scenario-library design question, not something a harness should invent. Owned by SimFW's scenario library, not by SaftyFW."

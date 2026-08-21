@@ -649,15 +649,15 @@ expectation verdicts moved, all of them upward, none downward:
 | `welded_contactor_s9` | `escalation_latched_at_end` | BLOCKED | **PASS** | Follows the clause above; also flagged STALE. |
 | `enabled_firing_healthy` | (none) | PASS | PASS | Listed because it moved *during* development and moved back: see the MANUAL-only note above. Its K4 now closes at a true **60.8 s** rather than 58.6 s, which is the `max(1, ...)` bias leaving. |
 
-**`tc_flaky`'s PASS at its own `timescale: 10` is honest but under-resolved —
-so it was separately checked at full resolution, and it holds there too.** The
-suite run took **18 samples** across ~96 sim-seconds (one frame per 5
-sim-seconds), so the guards saw isolated single bad reads, never the *9*
-consecutive the scenario's own comment derives from a 900 ms bad phase at the
-MAX31856's ~100 ms cadence. That run only proves a coarse sampler no longer
-fabricates a streak. Re-running the same file with `--timescale 0.2`
+**`tc_flaky`'s PASS at its own `timescale: 10` was honest but under-resolved —
+so it was separately checked at full resolution, and it held there too.** The
+suite run at `timescale: 10` took **18 samples** across ~96 sim-seconds (one
+frame per 5 sim-seconds), so the guards saw isolated single bad reads, never
+the *9* consecutive the scenario's own comment derives from a 900 ms bad phase
+at the MAX31856's ~100 ms cadence. That run only proved a coarse sampler no
+longer fabricates a streak. Re-running the same file with `--timescale 0.2`
 (0.5 / timescale = **0.1 sim-seconds per frame**, i.e. the real conversion
-cadence, ~8 min of wall time) presents the scenario's actual stimulus:
+cadence) presented the scenario's actual stimulus:
 
     453 guard ticks over 45.2 sim-seconds — **zero** S5 warns, zero trips.
 
@@ -665,21 +665,78 @@ That is the claim the scenario was written to make, measured: a 900 ms bad run
 is ~9 consecutive bad reads, one short of `BAD_READ_COUNT_DEFAULT` = 10, and
 the good phase resets the streak (`safety_guards.c`: `s5_bad_streak = 0`).
 **The clause was not re-tuned in either direction** — the FAIL was removed by
-removing the fabrication, not by changing what is asserted. A scenario-library
-follow-up worth considering (not made here): drop `tc_flaky`'s `timescale` to
-0.2 so its own default run is the meaningful one.
+removing the fabrication, not by changing what is asserted.
 
-**What did NOT move**, and is worth stating: `welded_contactor_s9`'s
-`contactor_weld_engages_on_k4_open` is still BLOCKED, and the persisted
-current is now genuinely observable — so its `blocked_on:` reason ("no
-observable at all") is stale and has been rewritten in the scenario file. The
-real reason is Finding 2's corollary applied to current: `report.py` matches
+> **Superseded in this pass**: `tc_flaky.yaml`'s own `timescale:` is now `0.2`,
+> so the 453-tick/45.2-sim-second run described above IS the scenario's
+> default run (449 polls measured on the committed re-run — the ~1% delta from
+> 453 is ordinary telemetry-cadence jitter, not a regression). The "was
+> honest but under-resolved" framing above is now history: there is no
+> longer a separate, under-resolved default run to distinguish it from.
+
+**What did NOT move here** (moved in Finding 12 below): `welded_contactor_s9`'s
+`contactor_weld_engages_on_k4_open` was still BLOCKED as of this finding, and
+the persisted current was now genuinely observable — so its `blocked_on:`
+reason ("no observable at all") was stale even then. The real reason was
+Finding 2's corollary applied to current: `report.py` matched
 `then: {dut: current_present}` against an **edge**, and a correctly persisting
 current produces none — it was already present before K4 opened (the weld) and
 simply never stops. `virtual_simfw` fires the `welded_contactor` fault in the
 same `device_tick()` that opens K4, so the CT never even dips. Expressing
-"current did not stop" needs a `forbid:`-shaped clause, not a `then:` — a
-scenario-grammar question, not a fixture gap.
+"current did not stop" needed a `forbid:`-shaped clause, not a `then:` — a
+scenario-grammar question, not a fixture gap. That grammar change is Finding
+12.
+
+### 12. `forbid:` grew an `after:` boundary, so a persisting level can finally
+   be asserted — `contactor_weld_engages_on_k4_open` genuinely PASSes now
+
+Finding 2's corollary (above) and Finding 11's "what did NOT move" both
+pointed at the same missing piece of grammar: `report.py`'s `then:` and
+`forbid:` clauses only ever matched **edges** (entity/state transitions), so
+a condition that was already true at some cause and simply never stops —
+exactly S9's "current does not stop when K4 opens" — could never be
+evidenced. `forbid:` already existed for "X must never happen **before**
+some boundary"; the missing half was "X must never happen **from** some
+boundary **onward**". `_eval_forbid`/`_generic_boundary`
+(`tools/PcTools/src/kilnsim/report.py`) now accept a `forbid.after:` key that
+is the mirror image of `forbid.before:` — same boundary vocabulary
+(`sim_time_s`/`sim_time`/`fault`/`sim_end`), plus a new `event:` boundary
+form (`{"event": {"type": "relay_edge", "relay": "K4", "edge": "open"}}`) so
+the anchor need not be a `fault_fired`. At least one of `after:`/`before:`
+must be given; omitting one defaults it to the run's own start/end, so every
+existing `forbid: {..., before: {...}}` clause in the library is unchanged in
+meaning and byte-identical in verdict.
+
+The trick that makes this expressible at all: **the persistence of a level is
+provable by forbidding the edge that would end it.** "Current does not stop
+after K4 opens" is not statable as "current is present" (a level, unobservable
+as declared above) but *is* statable as "a `current_absent` edge is never
+observed from the K4-open edge onward" — and that is a plain edge-match once
+`forbid` can anchor its window from a cause instead of only ending at one.
+`welded_contactor_s9.yaml`'s `contactor_weld_engages_on_k4_open` now reads:
+
+```yaml
+- name: contactor_weld_engages_on_k4_open
+  forbid:
+    dut: current_absent
+    after: { event: { type: relay_edge, relay: K4, edge: open } }
+```
+
+No `before:` — the forbidden window runs to `sim_end`. Its `blocked_on:` is
+removed, not softened: this clause genuinely PASSes now, for the reason it
+was written to prove. Measured on the committed re-run: `dut:current_absent`
+is never observed from the K4-open edge (t≈89.6 s) to `sim_end` — the welded
+contactor's 20 A holds on CT0 the whole time, exactly the "trip did not work"
+signature SAFETY_MODEL.md §4 S9 describes. `welded_contactor_s9`'s overall
+verdict moves from BLOCKED to PASS (all six of its clauses now PASS) — the
+one scenario-level verdict this pass changed. Regression-covered by
+`tools/PcTools/tests/test_kilnsim_report.py`'s `ForbidAfterTests`.
+
+Whether the honest form of a claim can pass is still evaluated case by case,
+not assumed: this grammar extension makes the claim *expressible*, it does
+not make every persisting-level claim in the library true. In this scenario
+it is true (the fixture and the fault both cooperate to keep current on the
+CT after K4 opens), so the clause passes for a real reason, not a vacuous one.
 
 ## Known, documented limitations
 

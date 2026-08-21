@@ -7,11 +7,11 @@
   "fw_versions": {},
   "seed": 60,
   "timescale": 2.0,
-  "start_time": 1787290448.9858084,
+  "start_time": 1787292380.6492386,
   "events": [
     {
       "seq": 0,
-      "sim_time_us": 5600000,
+      "sim_time_us": 5800000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -25,7 +25,7 @@
     },
     {
       "seq": 1,
-      "sim_time_us": 61600000,
+      "sim_time_us": 61200000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K4",
@@ -39,7 +39,7 @@
     },
     {
       "seq": 2,
-      "sim_time_us": 201400000,
+      "sim_time_us": 200600000,
       "event_type": "RELAY_EDGE",
       "payload": {
         "entity": "K1",
@@ -65,7 +65,7 @@
     },
     {
       "seq": 1000000001,
-      "sim_time_us": 201800000,
+      "sim_time_us": 201000000,
       "event_type": "SIM_CLOCK_MARK",
       "payload": {
         "entity": "current",
@@ -109,7 +109,7 @@
         0,
         1
       ],
-      "detail": "dut:K4_closed observed 56.000s after relay_edge"
+      "detail": "dut:K4_closed observed 55.400s after relay_edge"
     },
     {
       "name": "current_flows_once_k4_permits",
@@ -118,19 +118,19 @@
         1,
         1000000000
       ],
-      "detail": "dut:current_present observed 0.200s after relay_edge"
+      "detail": "dut:current_present observed 0.600s after relay_edge"
     },
     {
       "name": "s3_never_trips_during_a_commanded_firing",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_trip never observed before the boundary"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
       "name": "s4_never_warns_during_a_commanded_firing",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_warn never observed before the boundary"
+      "detail": "event:guard_warn never observed inside the forbidden window"
     },
     {
       "name": "current_stops_when_the_zone_is_commanded_off",
@@ -159,7 +159,7 @@
   "dut_input_reachability": {
     "polls": 315,
     "context_valid": 315,
-    "any_current_present": 138,
+    "any_current_present": 137,
     "link_up": 315,
     "max_zone_count": 3,
     "energized": 256

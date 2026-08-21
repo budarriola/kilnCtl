@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 48,
   "timescale": 10.0,
-  "start_time": 1787290925.5753322,
+  "start_time": 1787293077.1722405,
   "events": [
     {
       "seq": 0,
@@ -42,7 +42,7 @@
       "evidence": [
         2000000000
       ],
-      "detail": "dut:K4_open observed before the boundary (first at seq 2000000000) [BLOCKED: Partially resolved. S10 is no longer blocked: commit f304392 populates context_valid/zone_count/nearest_zone_measured_c, and S10 is now genuinely evaluated against this scenario's noise (virtual_dut measures context_valid true on every poll). S1 remains blocked on uncommissioned abs_max_temp_c (Phase 9). The forbid clause itself is still satisfied for the wrong reason, though: K4 is open from sim-time 0 because no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE, so 'no trip ever' still is not proving the anti-nuisance behavior it names.]",
+      "detail": "dut:K4_open observed inside the forbidden window (first at seq 2000000000) [BLOCKED: Partially resolved. S10 is no longer blocked: commit f304392 populates context_valid/zone_count/nearest_zone_measured_c, and S10 is now genuinely evaluated against this scenario's noise (virtual_dut measures context_valid true on every poll). S1 remains blocked on uncommissioned abs_max_temp_c (Phase 9). The forbid clause itself is still satisfied for the wrong reason, though: K4 is open from sim-time 0 because no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE, so 'no trip ever' still is not proving the anti-nuisance behavior it names.]",
       "blocked_on": {
         "reason": "Partially resolved. S10 is no longer blocked: commit f304392 populates context_valid/zone_count/nearest_zone_measured_c, and S10 is now genuinely evaluated against this scenario's noise (virtual_dut measures context_valid true on every poll). S1 remains blocked on uncommissioned abs_max_temp_c (Phase 9). The forbid clause itself is still satisfied for the wrong reason, though: K4 is open from sim-time 0 because no scenario issues the operator SAFETY_CMD_REQUEST_ENABLE, so 'no trip ever' still is not proving the anti-nuisance behavior it names.",
         "phase": "For S10: done (f304392). For S1's abs_max_temp_c: Phase 9 -- config_store exists but has no abs_max_temp_c field, and safety_core.c never reads config_store for guard thresholds at all (s_guard_cfg is a zero-initialized static). For K4 energize: no longer a missing decoder; the gap is that no scenario performs the operator enable step."
@@ -52,7 +52,7 @@
       "name": "no_fault_line_latch",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "dut:fault_line_asserted never observed before the boundary"
+      "detail": "dut:fault_line_asserted never observed inside the forbidden window"
     }
   ],
   "verdict": "BLOCKED",

@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 49,
   "timescale": 20.0,
-  "start_time": 1787290642.5099142,
+  "start_time": 1787292574.1652503,
   "events": [
     {
       "seq": 0,
@@ -52,7 +52,7 @@
       "name": "s10_stays_quiet",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_warn never observed before the boundary"
+      "detail": "event:guard_warn never observed inside the forbidden window"
     }
   ],
   "verdict": "BLOCKED",

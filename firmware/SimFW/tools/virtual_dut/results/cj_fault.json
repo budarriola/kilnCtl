@@ -7,7 +7,7 @@
   "fw_versions": {},
   "seed": 54,
   "timescale": 10.0,
-  "start_time": 1787290327.6459405,
+  "start_time": 1787292259.4173026,
   "events": [
     {
       "seq": 0,
@@ -62,7 +62,7 @@
       "name": "s5_never_trips_on_cj_alone",
       "verdict": "PASS",
       "evidence": [],
-      "detail": "event:guard_trip never observed before the boundary"
+      "detail": "event:guard_trip never observed inside the forbidden window"
     },
     {
       "name": "s12_warns_at_60c",
@@ -88,10 +88,10 @@
     "valid": true
   },
   "dut_input_reachability": {
-    "polls": 30,
-    "context_valid": 30,
+    "polls": 31,
+    "context_valid": 31,
     "any_current_present": 0,
-    "link_up": 30,
+    "link_up": 31,
     "max_zone_count": 3,
     "energized": 0
   }
