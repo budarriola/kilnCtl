@@ -1107,3 +1107,22 @@ section above predates all of them (last entry 2026-08-16). None reaches
 migration are **built** only (compiles clean, not exercised on real
 silicon), and Phase 4 is the sole exception that gets a genuine **partial**
 hardware data point (boots and stays running) short of full verification.
+
+## 2026-08-20 update — the three MAX31856 thermocouple ICs are fitted
+
+**Supersedes the 2026-08-19 entry above and every other place in this repo
+that says "the MAX31856 thermocouple ICs are physically not connected" for
+the `KilnFW`/ESP32-S3 side.** Three MAX31856 ICs and their thermocouples are
+now populated on this bench board (via the daughterboard on J6). Verified
+live: channels 0/1/2 read ~31-32 °C, cold junctions tracking ~0.3 °C below,
+no faults; `CR1` reads back `0x03` (averaging 1 sample, TC type K) where it
+previously read `0x00` before the parts were fitted. `thermo_owner.c`'s
+bench verification is unblocked by this. **Unchanged**: the safety
+processor (RP2040) still has none fitted — see `ROADMAP.md` M3 and
+`../SaftyFW/docs/THERMOCOUPLE.md`.
+
+Also this session: the mDNS host was renamed `kiln.local` -> `kilnctl.local`
+(see the correction just above, this file's own earlier `kiln.local`
+reference already updated) and a CMSIS-DAP probe was confirmed wired to the
+safety processor's SWD, giving an agent-usable debug/program path there too
+— see `../SaftyFW/README.md`.

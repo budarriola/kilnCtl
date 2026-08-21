@@ -24,14 +24,16 @@ and the code disagree, the code wins — fix whichever one is wrong.
 
 **HARDWARE STATUS**: per `docs/PROJECT_STATUS.md`, all five page routes and
 the zones/rules/profiles JSON APIs were verified live against a real board on
-2026-08-11, and `GET /api/status` / `POST /api/relay` on 2026-08-10 — but in
-every case against a bench unit with **no thermocouple daughterboard, relay
-expander, display or safety peer physically attached**. What is verified is
-that the routes answer, that they report hardware-absent honestly, and that a
-malformed request gets a clean 400 without taking the server down. No
-endpoint on this page has ever served a real thermocouple reading or switched
-a real relay. `/api/sim`'s handlers have never run at all — that build
-configuration compiles but has never been flashed.
+2026-08-11, and `GET /api/status` / `POST /api/relay` on 2026-08-10 — in every
+case at first against a bench unit with **no thermocouple daughterboard,
+relay expander, display or safety peer physically attached**. That changed
+2026-08-20: three MAX31856 ICs and their thermocouples are now fitted on this
+board (the ESP32-S3/`KilnFW` side — the safety processor still has none), and
+`GET /api/status` has served real readings since (channels 0/1/2 around
+31-32 °C, cold junctions tracking ~0.3 °C below, no faults). The relay
+expander, display and safety peer are unaffected by that change and remain
+unverified against real hardware. `/api/sim`'s handlers have never run at all
+— that build configuration compiles but has never been flashed.
 
 ## The server itself
 
@@ -203,7 +205,9 @@ render.
  "relay_cycles":[0,0,0,0],                       // lifetime contact cycles, always present
  "thermo_ready":true,
  "channels":[{"channel":0,"temp_c":21.50,"cj_c":22.00,"valid":true,
-              "fault_status":0,"spi_failed":false,"stale":false}, ...],
+              "fault_status":0,"spi_failed":false,"stale":false,
+              "age_ms":1500}, ...],   // age_ms: integer ms since the last
+                                       // conversion, null if never converted
  "safety_ready":false}
 ```
 
@@ -229,6 +233,15 @@ render.
   alongside `valid: false` rather than emitting something a naive
   `parseFloat()` breaks on. `valid` is the field to trust; the number next to
   it when `valid` is false is meaningless, not a reading of zero.
+- **`stale` vs `age_ms` (2026-08-20).** The driver's `stale` flag means "no
+  new conversion since the previous read" — true whenever the poll outruns
+  the conversion, which can happen seconds into a normal boot and does not
+  mean the reading is old. It is unchanged and still what `safety_link.c`
+  relies on. What changed is what the UI calls "stale": `age_ms` (ms since
+  the channel's last conversion, `null` if it has never converted) plus a
+  single shared 10 s threshold now decide whether the web dashboard, the
+  LCD, and the UART status path each show a temperature as stale — applied
+  identically on all three so they cannot disagree with each other.
 - In a `CONFIG_KILNCTL_SIM_PLANT` build the channels come from
   `sim_backend_read_all()` instead, so the dashboard shows the same
   fabricated kiln the executor is controlling.
@@ -643,11 +656,17 @@ evaluated** are in [`docs/PROFILES.md`](PROFILES.md).
 | `GET /api/profile?id=<n>` | `{"id":0,"name":"bisque","zone_mask":5,"segment_count":3,"segments":[{"target_c":100.00,"ramp_c_per_hr":60.00,"dwell_min":30}, ...]}` |
 | `POST /api/profile` | create/overwrite; `{"ok":true,"id":<n>,"warnings":[...]}` or 400 `{"ok":false,"error":"..."}` |
 | `POST /api/profile/delete` | body `id=<n>`; 200 `ok`, 400 `id missing or out of range`, 404 `no such profile` |
+| `GET /api/profiles/builtin` | visible built-ins only, same shape as `GET /api/profiles`; `?all=1` also includes hidden ones |
+| `POST /api/profile/builtin/hide` | body `id=<n>&hidden=0\|1` (id 128+); sets one built-in's bit in the NVS hidden mask (either direction) — a `const` table in flash can't be deleted, so "removable" is a hide, not an erase |
+| `POST /api/profile/builtin/restore` | no body; clears the hidden mask, bringing every built-in back |
 
 `GET /api/profile` is the only endpoint on this server that takes a **URL
 query parameter** rather than a form body; it answers 400 `id missing` or 404
-`no such profile`. Field names, bounds, slot allocation and the feasibility
-check that produces `warnings[]` are in [`docs/PROFILES.md`](PROFILES.md).
+`no such profile`. `id` may be a user slot (0-7) or a built-in (128+n) — same
+endpoint, same shape, either id space. Field names, bounds, slot allocation
+and the feasibility check that produces `warnings[]` are in
+[`docs/PROFILES.md`](PROFILES.md), which also covers the built-in catalogue
+(2026-08-20) in full — this table only adds its wire shape.
 
 ## `/api/sim` — development builds only
 

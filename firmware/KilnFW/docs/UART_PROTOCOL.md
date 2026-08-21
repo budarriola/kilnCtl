@@ -684,8 +684,8 @@ Fire profile storage (mirrors `profiles_http.c`) and execution control
 
 | Subcmd | Name | Args |
 |---|---|---|
-| `0x01` | `LIST` | none — **query** |
-| `0x02` | `GET` | byte1=id(0-7) — **query** |
+| `0x01` | `LIST` | byte1=`start_id` (optional) — **query, paged** |
+| `0x02` | `GET` | byte1=id(0-7, or 128+n for a built-in) — **query** |
 | `0x03` | `SAVE` | byte1=id(0-7, or `0xFF`=first free slot), byte2=name_len, name, zone_mask, segment_count, then 12 bytes/segment (target_c f32, ramp_c_per_hr f32, dwell_min u32) — **reply: ok/fail** |
 | `0x04` | `DELETE` | byte1=id — **reply: ok/fail** |
 | `0x05` | `GET_EXEC_STATUS` | none — **query** |
@@ -707,6 +707,19 @@ an operator-relevant reason the GUI needs immediately.
 
 `0xFF` (`PROFILES_SAVE_ID_NEW`) as `SAVE`'s id byte requests "first free
 slot", mirroring `POST /api/profile`'s empty/`-1`/out-of-range `id` field.
+
+**`LIST` is paged (2026-08-20).** A summary record is up to 19 bytes (id,
+name_len, <=15-byte name, zone_mask, segment_count); 8 user slots plus the 28
+shipped built-ins is ~532 bytes against the 253-byte `UART_PROTO_MAX_PAYLOAD`
+— it no longer fits one frame. `LIST` takes an optional `start_id` byte and
+enumerates every existing profile with `id >= start_id` in ascending order
+(user slots 0–7, then the built-in catalogue at 128+), stopping when the
+frame fills; the client re-asks with `last id + 1` until a reply comes back
+with `count == 0`. Hidden built-ins are skipped, matching `GET /api/profiles`
+— they stay reachable by a direct `GET`. The reply layout is unchanged, so an
+old client sending no `start_id` byte still parses fine, it just sees the
+first page. A single profile `GET` was never at risk: worst case (15-char
+name, 12 segments) is 165 of 253 bytes.
 
 ### AUTOTUNE (task 10) — `uart_bridge_ext.c: autotune_task`
 

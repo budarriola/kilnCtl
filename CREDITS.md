@@ -18,10 +18,16 @@ design into the repo, add an entry here in the same pull request.
   Reference hardware design (schematics, 3D models, user manual) for the TFT35 SPI
   display, vendored as a git submodule at `mainBoard/parts/TFT35-SPI`; used as a hardware
   reference for the display interface.
+- **[Digital Fire firing schedules](https://digitalfire.com/schedule)** — Digital Fire
+  Corporation — 28 published cone-fire schedules, reproduced for convenience as the
+  built-in (read-only) firing profiles shipped in `KilnFW` flash
+  (`profiles_builtin.c` + the generated `profiles_builtin_table.inc`); credited on the
+  web Profiles page and per entry via a source link. Third-party published data, not
+  vendored source code, but listed here for the same traceability reason.
 
 ---
 
-*Last updated: 2026-08-11. If you copy or vendor a new third-party file, library, or
+*Last updated: 2026-08-20. If you copy or vendor a new third-party file, library, or
 reference design into this repo, add an entry here in the same pull request. Plain
 package-manager dependencies (pip packages, ESP-IDF managed components, etc.) don't need
 an entry — only things actually copied into the tree.*

@@ -74,6 +74,27 @@ blobs.
 reads through `profiles_http_get()` and never touches NVS — the same
 one-owner discipline `zones_http.c` established for zone config.
 
+### Built-in schedules (2026-08-20)
+
+28 published [Digital Fire](https://digitalfire.com/schedule) firing
+schedules ship read-only in flash, addressed at `PROFILE_BUILTIN_ID_BASE`
+(128) + index — a separate id space from the 8 user slots above, so they can
+neither fill them nor be evicted by them. Full design (why a separate id
+space, why "removable" is a hide recorded in an NVS mask rather than a
+delete, how the table is generated, and the feasibility formulas that badge
+an unusable schedule) is `TODO.md` section 5A — this file doesn't repeat it.
+Credited on `profiles_page.html`.
+
+A handful of defects specific to the built-ins were found and fixed
+2026-08-20 (`TODO.md`, full list in the commit message):
+`profiles_http_get()` used to fail a built-in with no zones configured,
+which surfaced as "no such profile" instead of the real "configure a zone
+first"; readiness now counts visible built-ins toward "at least one fire
+profile available"; a reset restores the shipped defaults explicitly
+(`profiles_builtin_restore_all()`) instead of relying on a partition-erase
+side effect; and the dashboard now shows a built-in's readable title where
+it used to show its short code (e.g. "BQ1000").
+
 ### Creation and validation (`POST /api/profile`)
 
 Form-encoded fields: `id` (optional), `name`, `zone_mask`, `seg_count`, then

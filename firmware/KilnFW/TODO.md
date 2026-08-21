@@ -826,6 +826,40 @@ page. also add support for the temp sensors you currently have access to."
       complaint would be silently unreadable, which is the sort of thing that
       costs a day later.
 
+- [x] **Bench pass after the three MAX31856 ICs were fitted (2026-08-20),
+      two regressions found and fixed.**
+      1. The shared flash-safe executor task (see `766` above) was still
+         created lazily, from whichever of the control/profiles/autotune
+         bridge starts ran first — which app_main calls right after
+         `lvgl_port_start()` takes its own 8192-byte internal stack, the
+         tightest moment of the whole boot. With the thermocouple ICs now
+         initialising as an extra internal-DRAM consumer, the largest free
+         internal block there fell to 7680 against the 8192 wanted:
+         ```
+         heap stage uart_bridges_1  largest=15360
+         heap stage lvgl_start      largest= 7680
+         E uart_bridge_ext: flash-safe worker: task creation failed (internal SRAM)
+         ```
+         All three start functions then returned `ESP_ERR_NO_MEM` and tasks
+         8/9/10 never registered — `control_get_zones`/`profiles_list`/
+         `autotune_get_status` all failed "destination task not registered."
+         Fixed by a new explicit entry point, `uart_bridge_ext_start_flash_worker()`,
+         called from `app_main` right after `autotune_engine_start()` —
+         before display/LVGL bring-up, where the largest free internal block
+         is 31744. The lazy path stays as an idempotent fallback. Verified on
+         hardware: all three bridges register and answer, all three
+         thermocouple channels read (31.2 / 31.1 / 31.5 °C, CJ tracking, no
+         faults).
+      2. The LCD network page's raw-IP QR is gone; only the `kilnctl.local`
+         QR remains (confirmed resolving from an Android phone on the
+         bench). The IP is still shown as text.
+      3. Menu now always opens the first config-hub page. The hub is built
+         once and kept, so its paging position previously persisted for the
+         life of the boot — pressing Menu from home could drop you on
+         whichever hub page you'd last viewed. `ui_page_config_reset_to_first_page()`
+         is called from the home page's Menu callback only; Back from a
+         sub-page still returns to the page you left from, unchanged.
+
 ## 2. Web UI — Main / Dashboard page
 
 Live thermocouple/relay status and manual relay control are DONE and
@@ -1140,6 +1174,26 @@ the kiln as `dT/dt = (K*u - (T - T_amb)) / tau`:
       that logs per-surface latency percentiles rather than pass/fail, so
       the next occurrence carries evidence instead of a single FAIL line.
 
+- [x] **Out-of-bounds chunk send fixed, and `profile_feasibility.c` host-tested
+      (2026-08-20, found by reading the new code, not by a failure).**
+      `send_builtin_full()` passed `snprintf`'s return value straight to
+      `httpd_resp_send_chunk()`; on truncation `snprintf` reports the length
+      it *would* have written, so that sent more bytes than the 384-byte
+      buffer held -- an out-of-bounds read. Worst-case field widths (fixed
+      text, escaped code, a 127-char title, two copies of the slug) exceed
+      the buffer, so only today's short titles prevented it, and the table
+      those titles live in is generated. All three sends now go through
+      `send_chunk_checked()`, which clamps and logs (truncation also means
+      malformed JSON, which a silent clamp would hide). Separately,
+      `profile_feasibility.c` had no coverage beyond one ad-hoc hardware
+      poke despite deciding whether a schedule is shown as red; it now has
+      66 host-test checks covering the no-model/`UNKNOWN` honesty property,
+      the steady-state ceiling and its margin, heating/cooling rate limits,
+      the policy ceiling (including `ceiling==0`, verified on hardware), the
+      0.90 margin boundary, start-temperature carry between segments,
+      roll-up ordering, and the multi-zone worst-wins rule. Host tests:
+      354/354 (was 288).
+
 ### 5A.2 Still open
 
 - [ ] **No LCD access to profiles at all** — pre-existing, but 28 shipped
@@ -1166,6 +1220,19 @@ the kiln as `dT/dt = (K*u - (T - T_amb)) / tau`:
       partition table revisited first, not squeezed in. Note the coredump
       partition is 1 MB (section 1's notes explain why 512 K was not enough),
       so there is room to reorganise if it comes to that.
+
+      The constraint is on the `factory` app partition specifically —
+      `partitions.csv` — which at 1500K is the **smallest** app partition on
+      the board (the one the build's own size warning is against); `ota_0`/
+      `ota_1` are 2048K each, and roughly 8.1 MB of the 16 MB chip
+      (`0x7F0000..0x1000000`) is still unallocated. The planned rework is to
+      relocate `factory` into that spare region and grow the app slots, not
+      to shrink anything currently stored — but any repartition has two hard
+      constraints: app partitions must stay 64K-aligned, and the first three
+      partitions (`nvs`/`phy_init`/`factory`) are kept byte-identical to
+      ESP-IDF's stock `partitions_singleapp_large.csv` on purpose, because
+      live NVS data already sits at `0x9000` on the physical board and
+      resizing or moving any of those three would silently invalidate it.
 
 ## 5. Web UI — Fire profile creation page
 

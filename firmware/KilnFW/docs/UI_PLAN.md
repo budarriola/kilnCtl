@@ -207,6 +207,34 @@ are build+inspection-verified only until that's fixed, noted per item.
    Build-clean (`idf.py -C firmware/KilnFW build` / ninja on the existing
    configured build dir) — not flashed/visually confirmed, no ILI9488
    panel attached in this environment this pass.
+7. **DONE (2026-08-20).** Merging home's Start/Stop into a single button and
+   moving Menu to a gear icon (`ui_page_home.c`) surfaced two hit-testing
+   facts worth keeping in mind for any future overlay/icon widget on this
+   panel, found by measuring on hardware rather than trusting the layout:
+   - **`ui_theme_apply_touch_area()` cannot rescue a child whose parent
+     clips it.** LVGL hit-testing descends the widget tree, so a child's
+     extended click area can never reach outside a parent that does not
+     itself contain the point. The gear glyph is 21x23px inside the 32px
+     status bar; the extended-area helper does nothing once the parent's own
+     bounds cut the touch off first. Verified by injected touch: a point
+     15px left of the gear hit, 30px below (inside the glyph's nominal extra
+     reach, outside the 32px bar) did not. Fix: a floating proxy button
+     (80x36, halo reaching y=61 — 3px short of the first interactive row)
+     parented to the page **root**, not to the status bar, so nothing clips
+     its extended area.
+   - **A plain child of a flex-column page root joins the layout flow.**
+     `LV_OBJ_FLAG_FLOATING` is required for a true overlay; without it the
+     proxy above got positioned by the flex layout (ignoring the intended
+     alignment) and consumed real content height. Measured consequence when
+     this was first got wrong: the proxy landed bottom-left and the content
+     region shrank from 267px to 227px. The trap is now commented at the
+     call site.
+   - Separately: `lv_obj_align_to()` sets position, not width — a
+     flex-stretched label keeps its full-width box regardless of where it's
+     aligned, so the status label was underlapping the new gear proxy.
+     Fixed by deriving the label's width from the same constant that sizes
+     the gear proxy, plus `LV_LABEL_LONG_DOT` and a clamp; measured on
+     hardware as "width 380 of bar 464" (4px gap).
 
 ### Web
 
@@ -633,7 +661,8 @@ extractable from the binary — worse than self-signed.
   alongside the existing `wifi_cfg`/`kiln_nvs` sections — see section 8.1's
   one-partition-per-concern rule and 8.2's boot-time compatibility check,
   which the cert section needs to participate in like every other section).
-- CN/SAN covering the mDNS name (`kiln.local`) **and** the current IP. IP
+- CN/SAN covering the mDNS name (`kilnctl.local`, renamed 2026-08-20 from
+  `kiln.local`) **and** the current IP. IP
   SANs go stale on a DHCP lease change — plan for regeneration on IP change,
   or accept name-only access and make mDNS the supported path. Decide during
   implementation; it is the one genuinely fiddly part.
@@ -648,7 +677,7 @@ extractable from the binary — worse than self-signed.
 **Port and redirect layout.**
 
 - HTTPS on 443. A plain-HTTP listener stays on 80 that does nothing but
-  `301` to the HTTPS URL, so a bookmarked/typed `http://kiln.local` still
+  `301` to the HTTPS URL, so a bookmarked/typed `http://kilnctl.local` still
   lands.
 - **AP-mode provisioning stays plain HTTP.** Phone captive-portal detection
   breaks on TLS, and a fresh board's AP has no name and no trusted cert

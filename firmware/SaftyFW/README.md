@@ -111,11 +111,16 @@ energizes the load-switching stage, wired so that de-energized K4 = elements
 dead. Loss of Pico power, a crash, a watchdog reset, and an unprogrammed Pico
 must all land in that state ([`docs/HARDWARE.md`](docs/HARDWARE.md) §3).
 
-**Flash and debug over SWD, and log over the link.** There is no MCP for the
-Pico and nothing exposes halt/step/memory access to an agent; the plan wraps
-OpenOCD (already installed, already this project's ESP flashing path) to cover
-both processors uniformly. The Pico's console reaches the GUI as `kilnlink` LOG
-frames relayed by the ESP — no extra cable ([`../../tools/PcTools/TODO.md`](../../tools/PcTools/TODO.md)).
+**Flash and debug over SWD, and log over the link.** A CMSIS-DAP probe is wired
+to the safety processor's SWD header, and `tools/PcTools/src/kilnctrl/debug_probe.py`
+(`mcp__kilnctrl__debug_program`, `target/rp2040.cfg`, 5000 kHz) programs and
+debugs it through the same OpenOCD substrate used for ESP flashing — reset,
+halt, step and memory read/write are all exposed to an agent this way. The
+Pico's console reaches the GUI as `kilnlink` LOG frames relayed by the ESP —
+no extra cable ([`../../tools/PcTools/TODO.md`](../../tools/PcTools/TODO.md)).
+The safety link itself has still never run against the ESP; `ota_update_pico`
+cannot be used for bring-up because its interlock requires an already-healthy
+safety link — a chicken-and-egg that SWD flashing sidesteps.
 
 **Do not connect USB to the Pico while `12v_Safty` is applied.** A1's 3V3 pin is
 back-fed from the board's regulator with VSYS and VBUS unconnected; USB would

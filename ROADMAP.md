@@ -172,6 +172,11 @@ soldering session.
 **Bench state (2026-08-19):**
 - Working: ILI9488 LCD attached, boots, verified live (KilnFW flashed via OpenOCD/JTAG this same day); ESP32-S3 JTAG (OpenOCD) — program/halt/reset verified; Pico SWD via Debug Probe — program + GPIO probe verified (GPIO6 deny-list bench-confirmed 2026-08-19); Saleae logic analyzer available (used 2026-08-18 per bench notes)
 - Broken/absent, blocking work: Pi↔ESP isolated UART link — bench-confirmed dead (M0, still the top blocker); PC↔ESP command UART (USB-serial, COM9) — found dead 2026-08-19 (JTAG proves chip alive; every UART command times out; separate fault from isolated link; blocks console, wifi status, mcp tools); MAX31856 thermocouple ICs — physically not connected (blocks real-reading thermo work and thermo_owner bench verification)
+- **2026-08-20: superseded for the `KilnFW` side.** Three MAX31856 ICs and
+  their thermocouples are now fitted on the ESP32-S3 board — channels 0/1/2
+  read ~31-32 °C with cold junctions tracking ~0.3 °C below, no faults, and
+  `thermo_owner.c` bench verification is unblocked. The safety processor
+  (RP2040, M3 below) still has none fitted — that caveat is unchanged.
 - **2026-08-19, later same day — real boot-loop found and fixed live on this
   bench**: with COM9 dead, `get_device_log`/`get_fw_version` gave no
   visibility into a crash-reboot loop the board was actually stuck in.
@@ -696,6 +701,53 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       exercise the three split scenarios end-to-end, 378/378 host checks pass)
 
 ## M6 — Throw the liveness switch
+
+**2026-08-20, later pass — nine user-reported defects fixed in the profiles,
+readiness and home UI**, all reproduced on hardware before fixing and
+re-verified after: a profile with no zones configured reported "no such
+profile" instead of the real cause; readiness ignored the 28 shipped
+schedules; readiness's "Calibration entered" check demanded an action that
+may not exist and is now honestly worded; temperatures were shown stale
+seconds after a read (new shared `age_ms` + a single 10 s threshold applied
+identically on web/LCD/UART); resetting profiles now explicitly restores the
+shipped defaults; built-ins showed their short code instead of their title;
+the profile picker's "zone undefined" bug (a field `/api/profiles` never
+had); the per-profile "untuned" badge was noise on every schedule; and Start
+now routes to readiness only when readiness is the real blocker. The LCD's
+Start/Stop buttons are now one button following run state, with Menu moved
+to a gear icon — see `docs/UI_PLAN.md`'s LCD section for the two hit-testing
+lessons that fell out of building it (LVGL hit-testing can't escape a
+clipping parent; a flex-column page root requires `LV_OBJ_FLAG_FLOATING` for
+a true overlay). Full list in the commit message and `TODO.md`.
+
+**2026-08-20: mDNS host renamed `kiln.local` -> `kilnctl.local`.** The board
+answered at `kiln.local` while calling itself kilnCtl everywhere a user reads
+a name (AP SSID, mDNS instance name). No alias for the old name — tried and
+confirmed silent on the bench; doing it properly needs the station address
+mirrored on every `GOT_IP`, so the in-repo references were renamed instead.
+
+**2026-08-20: Wi-Fi state now reconciled against the radio, not trusted from
+event ordering.** A real bug found on hardware: after an AP -> home switch
+the station rejoined and served HTTP normally while `wifi_prov` stayed stuck
+reporting `RECONNECTING` with no IP, indefinitely. Fixed by reconciling
+against `esp_wifi_sta_get_ap_info()` + `esp_netif_get_ip_info()` instead of
+trusting the event sequence — `TODO.md`, commit `5b4d464`.
+
+**2026-08-20: gzip content negotiation, not gzip-always.** A client whose
+`Accept-Encoding` explicitly excludes gzip (`identity`, `deflate`,
+`gzip;q=0`) now gets 406 plain text instead of bytes it cannot read; an
+absent header still legally gets gzip per RFC 9110 §12.5.3 — the old bug
+report's framing of that case was wrong. `TODO.md` section 10.6a, commit
+`8c80777`.
+
+**2026-08-20: the flash-safe executor now starts early in `app_main`.**
+Bridge-task message handlers that touch NVS/flash run on a shared internal
+(not PSRAM) stack to stay out of the Wi-Fi driver's cache-disable race
+(commit `ff8b807`); with the thermocouple ICs now initialising as an extra
+internal-DRAM consumer at boot, the worker's lazy creation point (right
+after `lvgl_port_start()`'s own 8192-byte internal stack) no longer had room,
+silently killing three UART bridge surfaces. Fixed by an explicit early
+start call before display/LVGL bring-up — `TODO.md`, commit `11d3de6`.
 
 **2026-08-20: the Digital Fire firing schedules ship in flash.** All 28
 published schedules from https://digitalfire.com/schedule are now read-only
