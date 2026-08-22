@@ -69,16 +69,6 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [ ] **DECIDE: fixture sysclk — but the pressure is lower than it looked.**
-      **Both masters already run at 4 MHz today**, and deliberately
-      (`CONFIG_KILNCTL_THERMO_SPI_CLOCK_HZ=4000000` in KilnFW,
-      `SPI_OWNER_BAUDRATE_HZ 4000000u` in SaftyFW). The DMA-fed response path
-      already meets the ~250 ns hard deadline at the stock 125 MHz sysclk;
-      running the fixture at 200 MHz sysclk would buy the tighter ~125 ns
-      *design* deadline too — margin, not correctness. See
-      `DESIGN_NOTES.md` §3.2.1 for the full two-deadline analysis (datasheet
-      arithmetic, not measured — `docs/SPI_ACCESS_AUDIT.md` §9 has the
-      source numbers).
 - [ ] **Bridge ACK still precedes dispatch — narrower than it was.** Every
       unimplemented subcommand's silent-ACK case is now fixed (`c91ed50`: all
       11 `default:` branches reply `ok=0` with the echoed subcmd). **Still
@@ -86,19 +76,6 @@ never `[x]`.
       failure paths (truncated args, range refusals, ownership refusals) stay
       silent by documented design; `tools/PcTools/src/kilnctrl` still only
       checks the transport ACK and would need updating to benefit.
-- [ ] **`kilnsim`'s wire protocol has no SAFETY command group at all**
-      (`protocol.py`: SYS/MODEL/TC/CT/RELAY/IO/FAULT/EVT) — it addresses only
-      the plant simulator (`virtual_simfw`, or the bench fixture Pico on real
-      hardware); the safety processor is a physically separate device
-      reachable only through `kilnctrl`. So `run_dut_scenarios.py`'s
-      `operator_actions:`/`request_enable` pattern **cannot** simply be
-      mirrored into `kilnsim`; it works there only because `dut_core.exe` is
-      SaftyFW's safety core running in-process. `eac3905` added a stderr
-      diagnostic hint when a non-passing run never saw a K4-close relay edge,
-      pointing at `safety_request_enable` and `BENCH_RUNBOOK.md` step 10 — the
-      hint never affects the verdict or exit code. **Still open:** deciding
-      how a bench closed-loop firing actually issues the enable — an operator
-      step via `kilnctrl`, or `kilnsim` gaining a `kilnctrl` dependency.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -130,6 +107,12 @@ contents) rather than kept here — this plan only tracks what's left.
       drives `fault_line_asserted` in `virtual_dut`, non-vacuously
       (`94f2fc3`); every fixture-emulation and harness gap in the 27-scenario
       suite is closed — `DESIGN_NOTES.md` §10
+- [x] **Fixture sysclk decided: stays at stock 125 MHz.** No overclock to
+      200 MHz — `DESIGN_NOTES.md` §3.2.1 and §13.
+- [x] **`kilnsim` will never gain a SAFETY command group; `REQUEST_ENABLE`
+      stays an operator action.** Resolved by the SimFW scope boundary
+      (physical-only: thermocouples, board I/O, relays, E-stop — never the
+      UI, never a safety command) recorded in `DESIGN_NOTES.md` §1/§13.
 
 ---
 

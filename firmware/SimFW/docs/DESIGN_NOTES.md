@@ -30,6 +30,18 @@ guard, fault path, and control loop in `KilnFW` (ESP32-S3) and `SaftyFW`
 failure modes nobody wants to provoke on a real kiln (welded contactors,
 runaway zones, broken elements).
 
+**Scope boundary (settled, 2026-08-21): SimFW's interface to the DUT is
+physical only.** It acts on the thermocouples, board discrete I/O, relays,
+and the E-stop input — nothing else. It **never** injects data into the
+DUT's logic, issues a safety-link command, or interacts with the UI: it is
+the *kiln*, not the operator and not the PC. Anything a human operator would
+do — enabling the safety relay, starting a firing — stays with the operator,
+via `kilnctrl` or the panel; SimFW's job is to make the kiln heat and go
+wrong, convincingly, so that operator action has something real to act on.
+This is why `kilnsim`'s wire protocol has no SAFETY command group and never
+will (§13 below has the provenance of that specific question) — SimFW must
+never gain one.
+
 **In scope**
 
 - Emulate every MAX31856 thermocouple IC the main board talks to: the three
@@ -262,6 +274,16 @@ implemented DMA path meets the hard deadline at stock 125 MHz sysclk, so no
 fixture overclock is required for correctness; 200 MHz would only buy the
 tighter design deadline as margin. **The display/LCD SPI bus is explicitly
 out of scope of this cap.**
+
+**Decided: fixture sysclk stays at the RP2040's stock 125 MHz (2026-08-21,
+see §13's resolved-questions entry for the short version).** 200 MHz would
+buy margin against the ~125 ns design deadline, but the ~250 ns hard deadline
+— the one that actually determines correctness — is already met with margin
+at stock sysclk given the 4 MHz cap above. 200 MHz is also above the
+RP2040's 133 MHz spec, and first bring-up already has enough unproven
+variables (PIO engine, DMA path, fixture wiring) without adding an overclock
+to the list. This is datasheet arithmetic, not measurement; M-A's Saleae
+capture is the thing that actually settles whether either deadline holds.
 
 A driver access-pattern audit (`docs/SPI_ACCESS_AUDIT.md`, `46fa310`) also
 confirmed structurally that neither master ever issues a write-then-read, a
@@ -910,6 +932,48 @@ claims otherwise — no real SPI bus, no real relay coil, no real ESP, no
 FreeRTOS scheduling jitter. A PASS here means "the code's decision logic did
 the right thing given this input," never "the board is safe."
 
+**Boundary audit (2026-08-21): several harness conveniences deliberately sit
+outside §1's physical-only scope boundary, and that is correct — for the
+harness, not for real SimFW firmware.** §1 says the real fixture only acts on
+thermocouples, board I/O, relays, and E-stop, and never injects data,
+issues safety commands, or plays operator. This PC-only harness has no real
+ESP and no real human operator at all, so it must stand in for both to
+produce a non-trivial test; the following all fall in that "stands in for an
+absent actor" category, are legitimate exactly because this harness has no
+other way to get the input, and **must never be ported into
+`firmware/SimFW/src/` or the real `benchproto`/`PROTOCOL.md` wire protocol**:
+
+- `run_dut_scenarios.py`'s `operator_actions: request_enable` — stands in
+  for the operator issuing `SAFETY_CMD_REQUEST_ENABLE` via `kilnctrl`, needed
+  only because `dut_core.exe` *is* SaftyFW's logic running in-process with no
+  operator present. Real SimFW must never send this command (§1, §13).
+- `set_main_fault` (`63acef8`) — stands in for the ESP's own decision to
+  assert its fault output, needed only because no real ESP32 exists in this
+  harness. A real fixture only *senses* the fault line; it never asserts it
+  on the DUT's behalf.
+- `dut.kiln_guard6:` (`94f2fc3`) — runs KilnFW's real `thermal_guard.c` via
+  `virtual_kiln`'s `kiln_core.exe` to drive the fault line non-vacuously,
+  standing in for a physical ESP32 that isn't there. It makes the harness's
+  verdict less vacuous, but a real fixture has no business running KilnFW's
+  guard logic itself — the real ESP does that.
+- `dut.zone_setpoints:` — supplies a setpoint nothing physical would
+  provide, standing in for a full profile execution the harness doesn't run.
+- `SIMFW_VIRTUAL_CMD_RELAY_SET_SENSE` (0xF0) / `SIMFW_VIRTUAL_CMD_FAULT_LINE_SET`
+  (0xF1) — virtual-only commands in `virtual_simfw.c` letting a DUT with no
+  physical relay coil or sense wire report a sensed state directly. Already
+  disciplined correctly: deliberately excluded from
+  `firmware/SimFW/src/tasks/cmd_ids.h` and `PROTOCOL.md`, with header
+  comments saying so. Keep it that way — on real hardware these signals are
+  *sensed* off physical wiring, never set by fiat.
+
+None of this is a defect in the harness; it is the harness doing its job of
+approximating absent hardware and an absent human in software. The risk is
+purely one of migration — a future change that lifts one of these patterns
+into real `SimFW` firmware or the real protocol would cross §1's boundary
+(the fixture acting as the operator or injecting data instead of sensing/
+driving physical signals). No such migration exists today; this entry
+exists so the next reader recognizes the pattern before repeating it.
+
 **What it is:** the first time this project's guard-provocation logic ran
 against `SaftyFW`'s real, unmodified source rather than a synthetic host-test
 harness or a description of intended behavior. It surfaced a genuine,
@@ -1048,6 +1112,28 @@ open.
   including J6's reverse-pin-order trap). The one still-open piece (the J6/
   J7 voltage-pin contradiction between two main-board docs) remains tracked
   in `PLAN.md` §11 as it is unresolved and safety-relevant.
+- **Should `kilnsim` send `SAFETY_CMD_REQUEST_ENABLE`, or otherwise gain a
+  SAFETY command group?** Resolved no (2026-08-21), by the scope boundary in
+  §1: SimFW is the kiln, not the operator or the PC. Enabling the safety
+  relay is an operator action taken via `kilnctrl`/the panel, never something
+  the fixture does to itself. `kilnsim` already does the right thing here —
+  it prints a diagnostic hint when a run never sees K4 close (`eac3905`),
+  pointing at `safety_request_enable` and `BENCH_RUNBOOK.md` step 10, without
+  ever issuing the command itself. The `virtual_dut` harness's own
+  `operator_actions: request_enable` (§10 below) is a *different* thing: a
+  PC-only test-harness stand-in for the operator, needed only because
+  `dut_core.exe` runs SaftyFW's logic in-process with no operator present at
+  all — it does not reopen this question for real SimFW.
+- **Fixture sysclk: stock 125 MHz or an overclock to 200 MHz?** Resolved:
+  **stay at the RP2040's stock 125 MHz** (2026-08-21). See §3.2.1 for the
+  full timing analysis; in short, at the 4 MHz both masters already enforce,
+  the DMA-fed path's measured-on-paper ~150–215 ns meets the ~250 ns hard
+  deadline with margin at stock sysclk. 200 MHz would only buy margin against
+  the tighter ~125 ns *design* deadline, which is not required for
+  correctness — and it is above the RP2040's 133 MHz spec, adding an
+  overclock as a variable during first bring-up, when everything else in the
+  fixture is already unproven. The M-A Saleae capture, not this arithmetic,
+  is the real arbiter of whether either deadline actually holds on silicon.
 
 ---
 
