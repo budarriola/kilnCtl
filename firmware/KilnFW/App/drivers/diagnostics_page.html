@@ -77,6 +77,19 @@ refresh timers read, not a second implementation of either.</p>
   <div class="row"><span class="label">Last reset reason</span><span class="value" id="resetReason">--</span></div>
 </div>
 
+<h2>Safety-processor build</h2>
+<div class="card" id="safetyBuildCard">
+  <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
+</div>
+<p class="note">CommonFW/docs/LINK_PROTOCOL.md sec 7: "Show the safety
+processor's own build identity, not just the ESP's" -- two processors means
+two firmwares that can be out of sync. Same /api/status fields safety_page.html
+already renders, mirrored here since this is the page for "is this board
+healthy," not only the Wi-Fi-link-specific one. Today (2026-08-21) SaftyFW's
+link_task.c does not yet generate a real build identity -- it announces
+dirty=1 with an empty commit/datetime -- so "unknown"/blank fields here are
+this firmware honestly reporting what arrived, not a bug in this page.</p>
+
 <h2>Memory</h2>
 <div class="card">
   <div class="row headline"><span class="label">Internal DRAM &mdash; largest free block</span><span class="value" id="heapIntLargest">--</span></div>
@@ -151,6 +164,15 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
     el.textContent = text;
     el.classList.toggle('kc-live-value', !!live);
   }
+  // safety-processor build card only -- escaped through kcEscapeHtml since
+  // the commit string and build datetime are server-supplied text, not this
+  // firmware's own compile-time constant (the stored-XSS fix from two days
+  // ago applies here too).
+  function buildRow(label, value) {
+    return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) + '</span><span class="value kc-live-value">' +
+           window.kcEscapeHtml(String(value)) + '</span></div>';
+  }
+  function hex16(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(4, '0'); }
 
   var lastGoodAt = null;
   var failCount = 0;
@@ -184,6 +206,22 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
     set('safetyReady', st.safety_ready ? 'linked' : 'not linked', true);
     set('zonesValid', st.zones_config_valid ? 'valid' : 'FAILED TO LOAD', true);
     set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a', true);
+
+    // Same rendering as safety_page.html's buildCard -- kept as an inline
+    // row()/hex16() pair rather than a shared helper module because these
+    // two pages don't otherwise share a JS file (each is a standalone,
+    // gzipped-at-build page, per this project's convention).
+    var safetyBuildCard = document.getElementById('safetyBuildCard');
+    if (st.safety_build_known) {
+      safetyBuildCard.innerHTML =
+        buildRow('Commit', (st.safety_build_commit || 'unknown') + (st.safety_build_dirty ? ' (dirty)' : '')) +
+        buildRow('Built', st.safety_build_datetime || 'unknown') +
+        buildRow('Config version', st.safety_config_version) +
+        buildRow('Config CRC', '0x' + hex16(st.safety_config_crc) +
+            (st.safety_config_crc === 0 ? ' -- UNCOMMISSIONED (compiled-in defaults)' : ''));
+    } else {
+      safetyBuildCard.innerHTML = buildRow('Not yet announced this boot', 'n/a');
+    }
 
     var nvsCard = document.getElementById('nvsCard');
     if (st.nvs_sections && st.nvs_sections.length) {

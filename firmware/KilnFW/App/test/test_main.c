@@ -24,6 +24,7 @@ void run_test_backup_import(void);
 void run_test_ota_record(void);
 void run_test_uart_log_bridge(void);
 void run_test_safety_watchdog(void);
+void run_test_safety_link(void);
 void run_test_kiln_cfg_store(void);
 
 int main(void)
@@ -45,6 +46,7 @@ int main(void)
     run_test_ota_record();
     run_test_uart_log_bridge();
     run_test_safety_watchdog();
+    run_test_safety_link();
     run_test_kiln_cfg_store();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

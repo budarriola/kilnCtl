@@ -306,6 +306,88 @@ uint16_t config_store_get_config_crc(void);
 // like the rest of this file's pure logic.
 uint32_t config_store_record_crc(const config_store_record_t *rec);
 
+// --- update_task's PENDING_VERIFY -> VALID gate (TODO.md Phase 10.8) -------
+
+// Pure decision for src/update/confirm.h's `config_crc_ok` checklist bit.
+// `config_version` is whatever config_store_get_config_version() just
+// returned. That getter returns 0 in exactly two situations, and this
+// codebase must not tell them apart in the unsafe direction:
+//   1. config_store_boot_load() has never run (s_loaded == false in
+//      config_store_flash.c) -- the cache is not even populated yet.
+//   2. It HAS run, but config_store_find_latest() found no slot in flash
+//      whose magic/format_version/CRC all validated (blank sector, torn
+//      write, bit rot), so the cache fell back to config_store_default(),
+//      whose seq is 0.
+// A genuinely written, CRC-verified record can never read back as version 0:
+// config_store_write() always assigns `s_cached_record.seq + 1u`, and the
+// cached seq starts at 0 (the default's), so the first real write already
+// produces version 1, and every subsequent one is strictly higher. So
+// version == 0 is an unambiguous, permanent signal that no CRC-verified
+// config record has ever been loaded -- config_crc_ok MUST be false in that
+// case, and version != 0 is the only condition under which it may be true.
+//
+// This is the deliberate safe-direction choice for TODO.md Phase 10.8: the
+// two failure inputs above (never loaded; loaded-but-nothing-valid-found)
+// both resolve to `false`, which keeps update_confirm_missing() non-zero and
+// the slot stuck at BOOTLOADER_SLOT_PENDING_VERIFY rather than letting it
+// reach BOOTLOADER_SLOT_VALID. Getting this backwards -- treating "I don't
+// know" as "confirmed good" -- would let a freshly-flashed image be marked
+// VALID on a board whose config store was never actually re-validated,
+// which is exactly the "sails through any check that just proves main()
+// ran" failure docs/BOOTLOADER.md section 5 warns against. A slot stuck at
+// PENDING_VERIFY is recoverable (it can still be confirmed once config_store
+// loads a real record, or rolled back); a slot wrongly marked VALID cannot be
+// un-confirmed except by pushing yet another update.
+//
+// Pure/host-testable: this is only the version==0 test, not the flash read
+// itself (config_store_flash.c, NOT host-tested, is the only caller).
+bool config_store_confirm_crc_ok(uint8_t config_version);
+
+// --- flash_safe_execute() failure surfacing (TODO.md Phase 2) --------------
+//
+// config_store.c is pure and must stay dependency-free of pico-sdk (this
+// file's own header comment), so it cannot #include pico/error.h and use
+// PICO_OK/PICO_ERROR_* directly. These duplicate pico/error.h's
+// `enum pico_error_codes` values as plain integer literals -- the exact same
+// "duplicate the literal, assert numeric agreement at the call site"
+// convention CONFIG_STORE_DEFAULT_TC_TYPE's header comment documents for
+// MAX31856_TC_TYPE_K. config_store_flash.c (which DOES include pico/error.h)
+// carries a compile-time assert that each of these still matches the SDK's
+// own enum value, so a future pico-sdk upgrade that renumbers them fails the
+// build instead of silently mismatching every reason string below.
+#define CONFIG_STORE_FLASH_RC_OK                      0
+#define CONFIG_STORE_FLASH_RC_TIMEOUT                (-2)
+#define CONFIG_STORE_FLASH_RC_NOT_PERMITTED          (-4)
+#define CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES (-9)
+
+// Turns the int flash_safe_execute() (pico/flash.h) returned into a human,
+// honest reason string for config_store_write()'s `*out_reason`. Pure --
+// this is only the string mapping, not the flash call itself.
+//
+// pico/flash.h's own doc comment on flash_safe_execute() names three
+// distinct non-OK outcomes, and collapsing all of them into one opaque
+// "flash write failed" would hide exactly the distinction a bench log or a
+// retry policy needs:
+//   - PICO_ERROR_TIMEOUT: the other core never answered the lockout
+//     handshake within the timeout passed to flash_safe_execute() -- e.g. it
+//     is spinning with interrupts disabled somewhere else, or is stuck. The
+//     callback was NOT invoked (pico/flash.h: "the function may have been
+//     called" is TIMEOUT's only caveat, but in this specific lockout path it
+//     means the other core did not even reach the rendezvous). Worth a
+//     retry and worth asking what the other core was doing.
+//   - PICO_ERROR_NOT_PERMITTED: safe execution is not possible at all --
+//     e.g. flash_safe_execute_core_init() was never called on the other
+//     core, or this is being invoked before the scheduler starts or from an
+//     unsafe context. This is a bug in THIS firmware's own init order, not a
+//     transient condition, and must not be reported the same way as a
+//     timeout.
+//   - PICO_ERROR_INSUFFICIENT_RESOURCES: the lockout handshake's own dynamic
+//     allocation failed.
+// Any other/unrecognised negative value still returns a non-NULL, honest
+// "unrecognised error code" string rather than silently reusing one of the
+// three named reasons above for a code that does not actually mean that.
+const char *config_store_flash_rc_reason(int rc);
+
 #ifdef __cplusplus
 }
 #endif

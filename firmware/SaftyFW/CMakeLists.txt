@@ -107,6 +107,7 @@ target_include_directories(SaftyFW PRIVATE
     src
     src/update
     bootloader
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_compile_options(SaftyFW PRIVATE -Wall -Wextra -Werror)
@@ -142,6 +143,75 @@ target_link_libraries(SaftyFW PRIVATE
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
     kilnlink
+)
+
+# SaftyFW's own build-identity header (TODO.md Phase 8: "build_info.h-
+# equivalent identity for SaftyFW itself... is not generated on every build
+# yet"). Copies KilnFW's App/drivers/CMakeLists.txt + gen_build_info.cmake
+# model exactly, including the add_custom_target-not-add_custom_command
+# reasoning: add_custom_target has no dependency tracking, so Ninja/Make
+# reruns it on *every* build invocation rather than only when CMake
+# reconfigures or a tracked file changes -- necessary here because the git
+# commit/dirty state and the build timestamp can both change between two
+# builds that touch none of this target's sources.
+#
+# Header lands in the build directory (${CMAKE_CURRENT_BINARY_DIR}/
+# saftyfw_build_info.h) and is include-able as "saftyfw_build_info.h" from
+# any SaftyFW source, since that directory is on this target's (and the two
+# slot targets' -- see saftyfw_add_slot_executable() below)
+# target_include_directories(). Macros: SAFTYFW_GIT_COMMIT (string),
+# SAFTYFW_GIT_DIRTY (0/1), SAFTYFW_BUILD_DATE (string, UTC), SAFTYFW_BUILD_TIME
+# (string, UTC). NOT wired into link_task_send_fw_version() by this change --
+# that file is owned by other work in progress; this only makes the header
+# exist, build, and be include-able. See gen_build_info.cmake's own comment
+# for the full per-field rationale (identical to KilnFW's copy).
+find_package(Git QUIET)
+if(GIT_EXECUTABLE)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --show-toplevel
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE SAFTYFW_GIT_TOPLEVEL
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
+if(NOT SAFTYFW_GIT_TOPLEVEL)
+    set(SAFTYFW_GIT_TOPLEVEL ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
+set(SAFTYFW_BUILD_INFO_HEADER "${CMAKE_CURRENT_BINARY_DIR}/saftyfw_build_info.h")
+add_custom_target(saftyfw_build_info ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DOUT=${SAFTYFW_BUILD_INFO_HEADER}
+        -DPROJECT_ROOT=${SAFTYFW_GIT_TOPLEVEL}
+        -DTHIS_PROJECT_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_LIST_DIR}/tools/gen_build_info.cmake
+    BYPRODUCTS ${SAFTYFW_BUILD_INFO_HEADER}
+    COMMENT "Regenerating saftyfw_build_info.h (git commit/dirty/build time)"
+    VERBATIM
+)
+add_dependencies(SaftyFW saftyfw_build_info)
+
+# TODO.md Phase 10 "*** MANUAL SYNC HAZARD ***": bootloader/flash_layout.h's
+# slot offsets/size are hand-copied into app_slot.ld.in's FLASH LENGTH and
+# the two saftyfw_add_slot_executable() origin literals just below. This
+# target parses the header and asserts all three agree, failing loudly with
+# the specific mismatched numbers if not -- see
+# tools/check_flash_layout_sync.cmake for the full parsing/comparison logic.
+# Wired into the build (add_custom_target ALL, same "reruns every build"
+# reasoning as saftyfw_build_info above) rather than left as a standalone
+# script, so a hand-edit to any of the three files is caught on the very
+# next build without anyone having to remember to run a separate command.
+add_custom_target(saftyfw_check_flash_layout_sync ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DFLASH_LAYOUT_HEADER=${CMAKE_CURRENT_LIST_DIR}/bootloader/flash_layout.h
+        -DLD_TEMPLATE=${CMAKE_CURRENT_LIST_DIR}/bootloader/app_slot.ld.in
+        -DSLOT_A_ORIGIN=0x10011000
+        -DSLOT_B_ORIGIN=0x100E1000
+        -DXIP_BASE=0x10000000
+        -P ${CMAKE_CURRENT_LIST_DIR}/tools/check_flash_layout_sync.cmake
+    COMMENT "Checking bootloader/flash_layout.h agrees with app_slot.ld.in and CMakeLists.txt slot literals"
+    VERBATIM
 )
 
 # SWD/probe flashing only (docs/ARCHITECTURE.md section 1: "Not USB" -- A1's
@@ -201,9 +271,17 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
         src
         src/update
         bootloader
+        ${CMAKE_CURRENT_BINARY_DIR}
     )
 
     target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Werror)
+
+    # Same generated build-identity header as the default SaftyFW target
+    # above -- these slot executables are the SAME application sources, so
+    # they get the SAME saftyfw_build_info.h (one generation, shared by all
+    # three targets via ${CMAKE_CURRENT_BINARY_DIR} on each target's include
+    # path).
+    add_dependencies(${TARGET_NAME} saftyfw_build_info)
 
     # Same SAFTYFW_ENABLE_USB_STDIO gating as the default SaftyFW target
     # above -- keeps all three executables' compiled behavior consistent for

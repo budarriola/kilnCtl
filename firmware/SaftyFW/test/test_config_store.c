@@ -370,6 +370,71 @@ static void test_record_crc(void)
                "a changed field changes the computed CRC");
 }
 
+static void test_confirm_crc_ok(void)
+{
+    TEST_SECTION("config_store_confirm_crc_ok -- update_task's config_crc_ok gate");
+
+    // "config store never loaded": config_store_get_config_version() returns
+    // 0 both before config_store_boot_load() has run and after it runs but
+    // finds nothing valid (blank/corrupt sector) -- config_store_flash.c's
+    // getter contract. Either way, version 0 must gate CLOSED.
+    TEST_CHECK(!config_store_confirm_crc_ok(0u),
+               "version 0 (never loaded / nothing valid found): gate stays closed");
+
+    // "CRC mismatched" in practice can never surface as a version -- a
+    // record whose CRC does not validate is rejected wholesale by
+    // config_store_unpack() (test_unpack_hostile() above) and never becomes
+    // the cached record at all, so config_store_get_config_version() falls
+    // back to the default's seq (0), the same "never loaded" signal above.
+    // That fallback IS the mismatch case reads as "stay closed" -- covered
+    // by the version==0 check; there is no separate non-zero "mismatched"
+    // version to test, by construction of config_store_unpack()'s own
+    // wholesale-reject rule.
+
+    // "config CRC matches": any genuinely written, CRC-verified record's
+    // version is >= 1 (config_store_write() always assigns current+1,
+    // starting from the default's 0) -- must gate OPEN.
+    TEST_CHECK(config_store_confirm_crc_ok(1u),
+               "version 1 (first real write, CRC-verified): gate can open");
+    TEST_CHECK(config_store_confirm_crc_ok(255u),
+               "any other non-zero version: gate can open");
+}
+
+static void test_flash_rc_reason(void)
+{
+    TEST_SECTION("config_store_flash_rc_reason -- flash_safe_execute() failure surfacing");
+
+    const char *ok = config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_OK);
+    const char *timeout = config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_TIMEOUT);
+    const char *not_permitted =
+        config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_NOT_PERMITTED);
+    const char *insufficient_resources =
+        config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES);
+    const char *unrecognised = config_store_flash_rc_reason(-999);
+
+    TEST_CHECK(ok != NULL && strcmp(ok, "ok") == 0, "PICO_OK reason is exactly \"ok\"");
+    TEST_CHECK(timeout != NULL && strlen(timeout) > 0, "TIMEOUT reason is non-empty");
+    TEST_CHECK(not_permitted != NULL && strlen(not_permitted) > 0,
+               "NOT_PERMITTED reason is non-empty");
+    TEST_CHECK(insufficient_resources != NULL && strlen(insufficient_resources) > 0,
+               "INSUFFICIENT_RESOURCES reason is non-empty");
+    TEST_CHECK(unrecognised != NULL && strlen(unrecognised) > 0,
+               "unrecognised rc still returns a non-NULL, non-empty reason");
+
+    // Every failure reason must be distinguishable from every other one --
+    // this is the entire point of config_store_flash_rc_reason() existing
+    // instead of one generic "flash write failed" string: a caller (or a
+    // bench log) must be able to tell a transient timeout apart from a
+    // firmware init-order bug (NOT_PERMITTED) apart from resource exhaustion.
+    TEST_CHECK(strcmp(timeout, not_permitted) != 0, "TIMEOUT reason differs from NOT_PERMITTED");
+    TEST_CHECK(strcmp(timeout, insufficient_resources) != 0,
+               "TIMEOUT reason differs from INSUFFICIENT_RESOURCES");
+    TEST_CHECK(strcmp(not_permitted, insufficient_resources) != 0,
+               "NOT_PERMITTED reason differs from INSUFFICIENT_RESOURCES");
+    TEST_CHECK(strcmp(timeout, unrecognised) != 0, "TIMEOUT reason differs from unrecognised-rc reason");
+    TEST_CHECK(strcmp(ok, timeout) != 0, "ok reason differs from a failure reason");
+}
+
 void run_test_config_store(void)
 {
     test_pack_unpack_roundtrip();
@@ -382,4 +447,6 @@ void run_test_config_store(void)
     test_ct_cal_defaults_on_blank();
     test_ct_cal_corrupt_or_unknown_version();
     test_ct_cal_round_trip_and_independence();
+    test_confirm_crc_ok();
+    test_flash_rc_reason();
 }

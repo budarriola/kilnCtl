@@ -15,6 +15,7 @@
 
 #include <string.h>
 
+#include "pico/error.h"
 #include "pico/flash.h"
 
 #include "hardware/flash.h"
@@ -30,6 +31,24 @@
 // apart instead of silently defaulting to the wrong type.
 typedef char config_store_default_tc_type_matches_max31856
     [(CONFIG_STORE_DEFAULT_TC_TYPE == MAX31856_TC_TYPE_K) ? 1 : -1];
+
+// Compile-time cross-check, same pattern as the one above: config_store.h's
+// CONFIG_STORE_FLASH_RC_* literals are a dependency-free duplicate of
+// pico/error.h's `enum pico_error_codes` (config_store.h's own comment on
+// config_store_flash_rc_reason() explains why config_store.c can't just
+// #include pico/error.h directly). If a future pico-sdk upgrade ever
+// renumbers PICO_ERROR_TIMEOUT/_NOT_PERMITTED/_INSUFFICIENT_RESOURCES, this
+// fails the build instead of silently making config_store_flash_rc_reason()
+// return the wrong string for a real failure.
+typedef char config_store_flash_rc_ok_matches_pico_error
+    [(CONFIG_STORE_FLASH_RC_OK == PICO_OK) ? 1 : -1];
+typedef char config_store_flash_rc_timeout_matches_pico_error
+    [(CONFIG_STORE_FLASH_RC_TIMEOUT == PICO_ERROR_TIMEOUT) ? 1 : -1];
+typedef char config_store_flash_rc_not_permitted_matches_pico_error
+    [(CONFIG_STORE_FLASH_RC_NOT_PERMITTED == PICO_ERROR_NOT_PERMITTED) ? 1 : -1];
+typedef char config_store_flash_rc_insufficient_resources_matches_pico_error
+    [(CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES == PICO_ERROR_INSUFFICIENT_RESOURCES) ? 1
+                                                                                          : -1];
 
 static config_store_record_t s_cached_record;
 static size_t s_cached_slot = CONFIG_STORE_NO_SLOT;
@@ -169,8 +188,14 @@ bool config_store_write(const config_store_record_t *rec, const char **out_reaso
 
     int rc = flash_safe_execute(config_store_write_cb, &args, 1000u);
     if (rc != PICO_OK) {
+        // Surface WHICH failure mode this was, not a single opaque string --
+        // see config_store_flash_rc_reason()'s header comment (config_store.h)
+        // for why "the other core never answered the lockout" (TIMEOUT) and
+        // "safe execution isn't possible at all" (NOT_PERMITTED) must not be
+        // reported identically: one is a transient/bench condition, the
+        // other is a firmware init-order bug.
         if (out_reason != NULL) {
-            *out_reason = "flash write failed";
+            *out_reason = config_store_flash_rc_reason(rc);
         }
         return false;
     }

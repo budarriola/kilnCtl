@@ -1,6 +1,6 @@
 # TODO — Safety Processor Firmware
 
-> **Status:** planning · **Last reviewed:** 2026-08-21
+> **Status:** planning · **Last reviewed:** 2026-08-22
 > **Keep this file current.** Tick items as they land, and keep "built" and
 > "verified on hardware" distinct — `firmware/KilnFW/docs/PROJECT_STATUS.md` is the model
 > for that discipline. Finished items are removed from this file (moved into
@@ -43,19 +43,6 @@ complete the code and host tests are, and is marked accordingly.
 - [ ] **0.5b Consider a RUN (pin 30) reset wire** to the probe or a button while
       the board is still open. RUN is currently unconnected; OpenOCD's SWD reset
       is sufficient without it.
-- [ ] **0.6 Redefine `SAFETY_FAULT_SRC_SAFETY_LINK`** as "no telemetry frame
-      within 1.5 s", feeding `relay_authority_on_blocked()`, plus a 30 s
-      firing-abort. This is what makes *the safety processor must be alive to
-      heat* true. `../CommonFW/docs/LINK_PROTOCOL.md` §8. The ESP side today
-      still reuses the older link-staleness check (`safety_link_up_locked()`),
-      not this redefinition. ⚠️ It also stops a main board with no Pico fitted
-      from heating at all — bench work will need
-      `safety_link_fault_on_link_loss(link, false)`.
-- [ ] **0.6b Add the ESP-side `GET_FW_VERSION` request, with retry**, and the
-      dashboard/GUI surface for build identity + config CRC. (Receiving an
-      unsolicited `FW_VERSION` push is already handled — see Phase 7b — this
-      item is the explicit request-with-retry half plus the GUI surface,
-      still both open.)
 - [ ] **0.7 Confirm the K4 → line-contactor interlock topology** and which J10
       pin is NO vs NC. `docs/HARDWARE.md` §3. **This is a system-wiring decision,
       not a firmware one, and it must be settled before any bench trip test.**
@@ -74,13 +61,21 @@ gating items are:
       `0x1A` (`SET_CT_CAL`/`GET_CT_CAL`/`CT_CAL`) now has a codec in
       `firmware/CommonFW/src/`, including `kilnlink_ceiling.c` (SET_FIRING_CEILING)
       and `kilnlink_set_clock.c` (SET_CLOCK) — **this file previously claimed
-      those two were "not yet coded"; that was stale.** What is genuinely still
-      open is the SaftyFW-side *consumer* wiring for both (Phase 7, below) —
-      the codecs exist and are host-tested, but `link_task.c` does not call
-      them yet.
+      those two were "not yet coded"; that was stale.** The SaftyFW-side
+      *consumer* wiring this entry used to list as still-open is also done
+      and was likewise stale: `link_task_handle_set_firing_ceiling()` and
+      `link_task_handle_set_clock()` both exist and are dispatched, with the
+      `min()` ceiling clamp living in `safety_guards.c` and covered by
+      property tests sweeping `1e30`/`NaN`/`±Inf` (verified 2026-08-22).
 - [ ] `KilnFW`'s `uart_protocol.c` delegating framing/CRC, proven byte-identical
       to the pre-refactor output **before** the old code is deleted
-- [ ] CI grep: no CRC or byte-stuffing implementation outside `CommonFW`
+- [x] CI grep: no CRC or byte-stuffing implementation outside `CommonFW` —
+      2026-08-22, `tools/check_link_impl_isolation.ps1`. Standalone (matching
+      `check_isolation.ps1`'s convention), not build-wired. **It currently
+      reports 4 real hits**, all of them the un-done delegation item above:
+      `KilnFW`'s `uart_protocol.c` (`crc16_ccitt_false()`/`stuff_and_send()`)
+      and its `UnitTestFw` host-test twin. That is the check working, not a
+      false positive — it goes green when the item above lands.
 
 ## Phase 2 — Skeleton
 
@@ -88,15 +83,18 @@ Built and build-verified under the real toolchain (arm-none-eabi-gcc 14.2.1 /
 pico-sdk 2.1.1 / FreeRTOS-Kernel RP2040 SMP, Ninja). **Never flashed or run on
 real hardware** — no RP2040 attached to any machine this has been built on.
 
-- [ ] `flash_safe_execute()` for every config write — still not started for
-      `config_store`'s writes specifically (Phase 9's store exists now but
-      this item is about the write path's flash-safety wrapper).
 - [ ] Blink-equivalent proof of life over SWD/RTT, and the physical heartbeat
       LED's toggle logic — **neither verified**; no RP2040/debug probe attached
       to any build machine.
-- [ ] Runtime log-level command over the link — `log_task_set_level()`/
-      `_get_level()` exist and are used internally, but `link_task.c` has no
-      RX handler wiring a wire command to them yet.
+- [ ] Runtime log-level command over the link. ⚠️ **Blocked on a decision, not
+      on code**: `log_task_set_level()`/`_get_level()` exist and work
+      internally, but `CommonFW` allocates **no wire command id** for this —
+      grepped end to end 2026-08-22 for `log_level`/`LOG_LEVEL`/`SET_LOG`,
+      nothing. Minting one is a wire-contract change (`LINK_PROTOCOL.md` plus
+      both firmwares plus `pc_tools`), so it is the owner's call rather than
+      something `link_task.c` can decide unilaterally. Low risk when it
+      happens — additive, and an older peer ignores an unknown id — with
+      `0x1B` the next free id.
 - [ ] RTT as `SaftyFW`'s secondary log transport — needs the debug probe wiring
       on the bench.
 
@@ -178,11 +176,6 @@ handling are built, host-tested, and audited clean against
 real wire** — the pi↔ESP UART link is currently dead on the bench
 (`link_status`: `frames_received: 0`).
 
-- [ ] Handle `SET_FIRING_CEILING` (0x09) → S1's `effective_ceiling`.
-      **Clamp with `min()`** — the ESP may only ever tighten it. The codec
-      exists in `CommonFW` (Phase 1); `link_task.c` does not call it yet.
-- [ ] Handle `SET_CLOCK` (0x0C), diagnostic only. **No guard may read it.**
-      Same status — codec exists, not consumed.
 - [~] `boot_id` change resets every correlation window — the change is
       *detected* (`link_task.c` tracks `s_last_context_boot_id`), but there is
       no correlation guard yet for it to reset (see S2/S6/S10 below), so the
@@ -235,8 +228,14 @@ and the `0x00`–`0x0F` compatibility floor are all built and host/build-verifie
       redefinition (dead-link fault, not just version mismatch) is still
       unbuilt on the ESP side — this phase reused the pre-existing
       link-staleness check instead.
-- [ ] 7b.8 Host test: every combination of older/newer/equal on both sides,
-      including a peer that announces a `min_compatible` above its own version.
+- [x] 7b.8 Host test — 2026-08-22, `test/test_link_frame_wire.c`. A 14-case
+      named matrix (older/newer/equal on both the protocol and the
+      `min_compatible` axis, both directions, inclusive/exclusive boundaries,
+      plus the pathological peer announcing `min_compatible` above its own
+      version) and a 6561-combination exhaustive sweep against an
+      independently-written reference formula. Also asserts telemetry keeps
+      flowing during a mismatch. `link_frame_versions_compatible()` had **no**
+      test coverage at all before this.
 
 ## Phase 8 — Telemetry (required)
 
@@ -247,15 +246,20 @@ all built, host-tested, and build-verified against the real toolchain. **None
 has ever carried a real reading or a real trip across actual wire** — no
 RP2040/CT hardware attached to any build machine, and the link is bench-dead.
 
-- [ ] `build_info.h`-equivalent identity for `SaftyFW` itself (git commit,
-      dirty, timestamp) is not generated on every build yet.
-      `link_task_send_fw_version()` currently hardcodes `dirty = 1` and empty
-      commit/datetime fields — honest (unknown maps to dirty), but not the
-      real build identity.
-- [ ] `config_version`/`config_crc` in `FW_VERSION` and DIAG's
-      `calibration_missing` bit are not yet wired to the real `config_store`
-      record (Phase 9) — `link_task.c`'s send paths still use 0/0 or a
-      hard-coded 1 rather than reading the store.
+- [x] `build_info.h`-equivalent identity — 2026-08-22.
+      `tools/gen_build_info.cmake` generates `saftyfw_build_info.h` into the
+      build dir on **every** build (an `add_custom_target`, not a
+      dependency-tracked custom command, for the same reason KilnFW's copy
+      is), and `link_task_send_fw_version()` now sends the real commit/dirty/
+      datetime instead of hard-coded `dirty = 1` with empty strings. Verified
+      by grepping the commit hash and build timestamp out of `SaftyFW.elf`
+      itself, not just the generated header.
+- [x] `config_version`/`config_crc` in `FW_VERSION` — wired to
+      `config_store_get_config_version()`/`_get_config_crc()`. Still reports
+      0/0 on a never-commissioned board, which is the documented meaning of
+      "running on compiled-in defaults", not a stub.
+- [ ] DIAG's `calibration_missing` bit is still not wired to the real
+      `config_store` record.
 
 ## Phase 8b — ESP web GUI surface (`KilnFW` work)
 
@@ -269,16 +273,37 @@ missing, confirmed by reading that file:
 
 - [ ] **Label the safety temperature with its placement mode.** In
       `EXTERNAL_OVERHEAT` it will not track the zone temperatures and should not.
-- [ ] Colour the enclosure temperature against S12's 60 °C / 85 °C thresholds.
-- [ ] Mark power as an estimate; show `—` when `mains_voltage_v` is unconfigured
-      rather than assuming a default.
-- [ ] **`TRIP_INEFFECTIVE` gets its own visual treatment** — it means "go to the
-      breaker", not "investigate the kiln".
-- [ ] Safety processor build identity + config CRC on the diagnostics page.
-- [ ] Mirror the same data on the PC-link `SAFETY` task so `pc_tools` and MCP
-      see it without Wi-Fi — not confirmed present in `tools/PcTools/src/kilnctrl/safety.py`.
-- [ ] **Assert in the host tests that guard verdicts are bit-identical with the
-      TX path stubbed out.** No verdict may depend on anyone listening.
+All of the following landed 2026-08-22 and are listed here only because the
+section above still names open work:
+
+- [x] Enclosure temperature coloured against S12's real 60 °C / 85 °C
+      (instantaneous, so it can flag slightly before S12's `cj_time_s = 60 s`
+      debounce actually trips — an early warning, not a false one).
+- [x] Power marked an estimate, rendering `—` when `mains_voltage_v` is
+      unconfigured. No default mains voltage is assumed anywhere.
+- [x] `TRIP_INEFFECTIVE` visual treatment — was already implemented (full
+      red card plus a black "go to the breaker" banner), found on inspection,
+      left alone.
+- [x] Safety processor build identity + config CRC on the diagnostics page,
+      rendering "not yet announced this boot" rather than a placeholder.
+- [x] Mirrored on the PC-link `SAFETY` task. DIAG/TRIP_EVENT were already
+      there; `FW_VERSION` needed both halves — `SafetyFwVersion` +
+      `SafetyClient.get_fw_version()` on the PC side, and the missing
+      `SAFETY_CMD_FW_VERSION` dispatch case plus
+      `safety_link_build_fw_version_payload()` on the ESP side, without which
+      the query fell through to `bridge_reply_unsupported()`. Verified live
+      against the board.
+- [x] Guard verdicts bit-identical with TX stubbed — asserted structurally,
+      which is the honest form of this test. The real TX path is
+      pico-sdk-only and cannot link into the host binary, and
+      `safety_guards.c` has no TX field, pointer or include (enforced by
+      `tools/check_isolation.ps1`), so there is no second code path to diff.
+      `test_safety_guards.c` instead `memcmp`s the whole verdict struct
+      across two instances every tick of a long mixed sequence.
+
+(The placement-mode label bullet above stays open: it is blocked on the
+`tc_placement_mode` commissioning field of Phase 7 existing to label it
+*with*.)
 
 ## Phase 9 — Commissioning and the honest gaps
 
@@ -315,10 +340,13 @@ been exercised against real RP2040 hardware.**
   - [ ] Populate or explicitly remove `R72` and document the required CT type on
         the silkscreen — a current-output CT fitted here reads garbage and
         nothing detects it.
-- [ ] `update_task.c`'s `PENDING_VERIFY`-clear gate (Phase 10.8) still cannot
-      compute `config_crc_ok` for real — it's permanently `false` since nothing
-      reads the now-existing `config_store`'s CRC yet, so no slot can be
-      marked `VALID` in any build today. See Phase 10 below.
+- [x] `update_task.c`'s `PENDING_VERIFY`-clear gate now reads a real config
+      CRC (2026-08-22, `config_store_confirm_crc_ok()`). ⚠️ **Practical
+      consequence, not a bug**: `config_store_get_config_version()` returns 0
+      until a record has actually been *written*, and nothing has ever written
+      a non-default record on any board — so no slot reaches `VALID` until
+      commissioning writes one. That direction is deliberate: a slot stuck at
+      `PENDING_VERIFY` is recoverable, one wrongly marked `VALID` is not.
 
 ## Phase 10 — Field updates over the isolated link
 
@@ -345,16 +373,14 @@ run from either slot, and no update has ever crossed real wire.
       (768 B pubkey slot, `slot[2].signature[64]`, `sig_required`) but not yet
       in code — `flash_layout.h`/`metadata.h` have neither field. Signature
       algorithm and key-rotation support are both still undecided.
-- [ ] **`*** MANUAL SYNC HAZARD ***`**: `app_slot.ld.in`'s `FLASH` `LENGTH` and
-      the two `saftyfw_add_slot_executable()` origin literals in
-      `CMakeLists.txt` are hand-copied from `bootloader/flash_layout.h` and
-      nothing enforces they stay in sync. A CI check parsing the header and
-      asserting agreement would close this; not built.
-- [ ] 10.8, remaining half: `update_task_confirm_tick()`'s `PENDING_VERIFY`→
-      `VALID` gate cannot compute `config_crc_ok` — nothing reads the now-existing
-      `config_store`'s CRC yet, so `update_confirm_missing()` can never reach 0
-      and no slot can be marked `VALID` in this build. Wiring it to a real
-      `config_store` read is the next step.
+- [x] **`*** MANUAL SYNC HAZARD ***`** closed 2026-08-22:
+      `tools/check_flash_layout_sync.cmake` parses `flash_layout.h` and
+      asserts `app_slot.ld.in`'s `FLASH LENGTH` and `CMakeLists.txt`'s two
+      slot-origin literals agree. Build-wired (not standalone), so a hand-edit
+      to any of the three is caught on the very next build. Proven to fail by
+      skewing the linker script's `LENGTH` — build stopped with both
+      mismatched numbers named.
+- [x] 10.8's remaining half — see Phase 9's `config_crc_ok` entry above.
 - [ ] 10.8c, remaining caveat: the retransmit-round cap (10 rounds) is a real
       backstop, but one "round" can take far longer in practice than
       `UPDATE_PROTOCOL.md`'s throughput section seems to assume — not measured

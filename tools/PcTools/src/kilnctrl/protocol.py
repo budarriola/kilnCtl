@@ -270,6 +270,15 @@ SAFETY_CMD_ROLLBACK = 0x17
 #: SAFETY_CMD_GET_DIAG doc comment for both response payload layouts.
 SAFETY_CMD_GET_DIAG = 0x0C
 SAFETY_CMD_GET_TRIP_EVENT = 0x15
+#: PC -> ESP query, same shared-id/reply-on-request convention as
+#: SAFETY_CMD_GET_DIAG/GET_TRIP_EVENT above -- mirrors the Pico's own
+#: FW_VERSION (Frame C) push, answered from the ESP's cache only. Same value
+#: as the Pico-side SAFETY_CMD_GET_FW_VERSION/SAFETY_CMD_FW_VERSION
+#: (CommonFW/docs/LINK_PROTOCOL.md sec 4/6), reused here rather than given a
+#: separate id -- the request is 1 byte (no args), the reply is the full
+#: build-identity/config-CRC payload (protocol_version/min_compatible first,
+#: then commit/datetime/boot_id/config_version/config_crc).
+SAFETY_CMD_GET_FW_VERSION = 0x0B
 
 #: Age field in GET_STATUS: "no valid status has ever been received".
 SAFETY_AGE_NEVER = 0xFFFF

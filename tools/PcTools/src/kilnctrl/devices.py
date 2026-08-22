@@ -122,6 +122,7 @@ from .protocol import (
     IO_RELAY_COUNT,
     SAFETY_AGE_NEVER,
     SAFETY_CMD_GET_DIAG,
+    SAFETY_CMD_GET_FW_VERSION,
     SAFETY_CMD_GET_LINK_STATS,
     SAFETY_CMD_GET_STATUS,
     SAFETY_CMD_GET_TRIP_EVENT,
@@ -1796,6 +1797,18 @@ def safety_get_trip_event() -> bytes:
     return struct.pack("<B", SAFETY_CMD_GET_TRIP_EVENT)
 
 
+def safety_get_fw_version() -> bytes:
+    """0x0B GET_FW_VERSION request (query): no args.
+
+    Same cache-only mirror as :func:`safety_get_diag`/:func:`safety_get_trip_event`,
+    for the Pico's own FW_VERSION (Frame C) push -- build identity and config
+    CRC, not telemetry. Shares its command id with the Pico-side request/reply
+    pair (CommonFW/docs/LINK_PROTOCOL.md sec 4/6); the ESP answers from its own
+    cache of the last FW_VERSION frame the Pico sent, never a live round trip.
+    """
+    return struct.pack("<B", SAFETY_CMD_GET_FW_VERSION)
+
+
 def safety_set_poll_period(period_ms: int) -> bytes:
     """0x05 SET_POLL_PERIOD: u16 LE ms, 0 = stop polling."""
     return struct.pack(
@@ -2010,9 +2023,48 @@ class SafetyTripEvent:
         return self.ever_received and self.trip_reason == SAFETY_TRIP_INEFFECTIVE
 
 
+@dataclass(frozen=True)
+class SafetyFwVersion:
+    """Decoded GET_FW_VERSION (0x0B) reply -- the ESP's cache of the Pico's
+    own FW_VERSION (Frame C) push: build identity and active config CRC, the
+    other half of the "mirror it on the PC-link SAFETY task" ask alongside
+    :class:`SafetyDiag`/:class:`SafetyTripEvent` (CommonFW/docs/LINK_PROTOCOL.md
+    sec 7).
+
+    ``protocol_version``/``min_compatible`` are parsed *first*, deliberately --
+    LINK_PROTOCOL.md sec 6: "read bytes 1-4 first and decide compatibility
+    before parsing anything after them," so a version-incompatible peer's
+    frame can still be read far enough to learn why it is incompatible.
+
+    ``commit``/``built`` are empty strings when the Pico's build has no known
+    identity (``commit_len``/``datetime_len`` == 0 on the wire) -- never a
+    placeholder standing in for "unknown". ``dirty`` is the wire's own
+    dirty-or-unknown bit: LINK_PROTOCOL.md sec 6 requires "unknown" and
+    "dirty" to map to the same value, so this field alone cannot distinguish
+    them; an empty ``commit`` is the signal that the identity itself is
+    unknown, not just that the tree was dirty.
+    """
+
+    protocol_version: int
+    min_compatible: int
+    dirty: bool
+    commit: str
+    built: str
+    boot_id: int
+    config_version: int
+    config_crc: int
+
+    @property
+    def commissioned(self) -> bool:
+        """False when config_crc == 0 -- LINK_PROTOCOL.md sec 6: "a config CRC
+        of zero means running on compiled-in defaults that were never
+        commissioned."""
+        return self.config_crc != 0
+
+
 def parse_safety_response(
     payload: bytes,
-) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent]":
+) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion]":
     """Decode a SAFETY query reply into ``(subcommand, value)``.
 
     Layouts (uart_task_ids.h)::
@@ -2032,6 +2084,11 @@ def parse_safety_response(
                          safety_tc_c f32 LE, deciding_threshold f32 LE,
                          current1..3 f32 LE, relay_recent_mask u8,
                          context_age_100ms u8, age_ms u32 LE         (34 bytes)
+        GET_FW_VERSION:  byte0=0x0B, protocol_version u16 LE, min_compatible
+                         u16 LE, dirty u8, commit_len u8, commit (N1 ASCII),
+                         datetime_len u8, datetime (N2 ASCII), boot_id u8,
+                         config_version u8, config_crc u16 LE  (variable, see
+                         CommonFW/docs/LINK_PROTOCOL.md sec 6 Frame C)
     """
     if len(payload) < 1:
         raise SafetyResponseError("SAFETY response is empty")
@@ -2155,6 +2212,66 @@ def parse_safety_response(
             relay_recent_mask=relay_recent_mask,
             context_age_100ms=context_age_100ms,
             age_ms=age_ms,
+        )
+
+    if subcommand == SAFETY_CMD_GET_FW_VERSION:
+        # Variable-length: LINK_PROTOCOL.md sec 6 Frame C. Parse strictly in
+        # wire order and bounds-check before every read -- this is untrusted
+        # input from another processor relayed through the ESP (CommonFW/
+        # README.md rule 6), and a byte-offset mistake here would produce
+        # confident garbage on a safety diagnostics surface.
+        #
+        #   offset 1..2  protocol_version u16 LE   <- read + gate first
+        #   offset 3..4  min_compatible   u16 LE   <- (sec 6: "read bytes
+        #                                              1-4 first")
+        #   offset 5     dirty            u8
+        #   offset 6     commit_len (N1)  u8
+        #   offset 7..            N1 * u8  commit, ASCII, not null-terminated
+        #   next 1                u8       datetime_len (N2)
+        #   next N2                N2 * u8  datetime, ASCII
+        #   next 1                u8       boot_id
+        #   next 1                u8       config_version
+        #   next 2                u16 LE   config_crc
+        if len(payload) < 7:
+            raise SafetyResponseError(
+                f"GET_FW_VERSION response too short: {len(payload)} bytes "
+                "(need >= 7 to reach commit_len)"
+            )
+        protocol_version, min_compatible, dirty, commit_len = struct.unpack_from(
+            "<HHBB", payload, 1
+        )
+        commit_start = 7
+        commit_end = commit_start + commit_len
+        if len(payload) < commit_end + 1:
+            raise SafetyResponseError(
+                f"GET_FW_VERSION response too short: {len(payload)} bytes, "
+                f"commit_len={commit_len} implies at least {commit_end + 1} "
+                "bytes (need 1 more for datetime_len)"
+            )
+        commit = payload[commit_start:commit_end].decode("ascii", errors="replace")
+        datetime_len = payload[commit_end]
+        datetime_start = commit_end + 1
+        datetime_end = datetime_start + datetime_len
+        suffix_end = datetime_end + 4  # boot_id(1) + config_version(1) + config_crc(2)
+        if len(payload) != suffix_end:
+            raise SafetyResponseError(
+                f"GET_FW_VERSION response length mismatch: commit_len={commit_len}, "
+                f"datetime_len={datetime_len} imply exactly {suffix_end} bytes, "
+                f"got {len(payload)}"
+            )
+        built = payload[datetime_start:datetime_end].decode("ascii", errors="replace")
+        boot_id, config_version, config_crc = struct.unpack_from(
+            "<BBH", payload, datetime_end
+        )
+        return subcommand, SafetyFwVersion(
+            protocol_version=protocol_version,
+            min_compatible=min_compatible,
+            dirty=bool(dirty),
+            commit=commit,
+            built=built,
+            boot_id=boot_id,
+            config_version=config_version,
+            config_crc=config_crc,
         )
 
     raise SafetyResponseError(f"unknown SAFETY response subcommand 0x{subcommand:02X}")

@@ -1546,6 +1546,31 @@ static void safety_bridge_task(void *arg)
                 err = (reply_len > 0) ? ESP_OK : ESP_FAIL;
                 break;
             }
+            case SAFETY_CMD_FW_VERSION: {
+                /* LINK_PROTOCOL.md sec 7's last unmirrored frame: the Pico's
+                 * own build identity + config CRC, answered from the cache
+                 * exactly like GET_DIAG/GET_TRIP_EVENT above -- never by
+                 * asking the Pico here (safety_poll_task() already requests
+                 * 0x0B on its own cadence until the answer is known).
+                 * Without this case the PC-side reader in pc_tools fell
+                 * through to bridge_reply_unsupported(), so "which RP2040
+                 * firmware is running" was visible over Wi-Fi but not over
+                 * the wired link -- the one that still works when Wi-Fi
+                 * does not, which is exactly when you are most likely to be
+                 * asking. Variable-length reply, unlike the fixed-size two
+                 * above.
+                 *
+                 * Id note: 0x0B is SAFETY_CMD_FW_VERSION, already enumerated
+                 * in uart_task_ids.h as the Pico->ESP frame id. It doubles
+                 * here as the PC->ESP query on UART_TASK_ID_SAFETY -- the
+                 * same request-and-reply-share-one-id convention
+                 * SAFETY_CMD_GET_CT_CAL/SAFETY_CMD_CT_CAL already use, and
+                 * the value pc_tools' protocol.py sends. Directions are
+                 * distinguished by who is talking, not by a second id. */
+                reply_len = safety_link_build_fw_version_payload(ctx->link, reply);
+                err = (reply_len > 0) ? ESP_OK : ESP_FAIL;
+                break;
+            }
             case SAFETY_CMD_SET_POLL_PERIOD: {
                 if (!bridge_args_ok("safety", &msg, 3)) { rejected = true; break; }
                 err = safety_link_set_poll_period(ctx->link, bridge_u16_le(&msg.payload[1]));

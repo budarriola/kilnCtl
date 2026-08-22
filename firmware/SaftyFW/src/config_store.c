@@ -259,3 +259,34 @@ const char *config_store_write_decision_reason(config_store_write_decision_t dec
             return "unknown";
     }
 }
+
+bool config_store_confirm_crc_ok(uint8_t config_version)
+{
+    // See config_store.h's header comment on this function for the full
+    // reasoning -- version 0 is the one value a genuinely written, CRC-
+    // verified record can never produce, so it is the only safe "not
+    // confirmed" signal, covering both "never loaded" and "loaded but
+    // nothing valid found" without needing to tell those two apart.
+    return config_version != 0u;
+}
+
+const char *config_store_flash_rc_reason(int rc)
+{
+    switch (rc) {
+        case CONFIG_STORE_FLASH_RC_OK:
+            return "ok";
+        case CONFIG_STORE_FLASH_RC_TIMEOUT:
+            return "flash write failed: flash_safe_execute() timed out waiting for the "
+                   "other core to answer the lockout request";
+        case CONFIG_STORE_FLASH_RC_NOT_PERMITTED:
+            return "flash write failed: flash_safe_execute() reports safe execution is "
+                   "not possible (other core not initialised for lockout, or called from "
+                   "an unsafe context)";
+        case CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES:
+            return "flash write failed: flash_safe_execute()'s lockout handshake could "
+                   "not allocate the resources it needed";
+        default:
+            return "flash write failed: flash_safe_execute() returned an unrecognised "
+                   "error code";
+    }
+}

@@ -102,8 +102,13 @@ on the web before this pass.</p>
   see CommonFW/docs/LINK_PROTOCOL.md sec 7's "Label the safety temperature with its placement"
   rule.</p>
   <div class="row"><span class="label">Enclosure temp (MAX31856 cold junction)</span><span class="value" id="enclosureTemp">--</span></div>
-  <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
+  <div class="row"><span class="label">Power draw (estimate)</span><span class="value" id="powerW">--</span></div>
 </div>
+<p class="note">Power draw is an <strong>estimate</strong> -- SAFETY_CMD_POWER
+(Frame E) derives it from measured current times a configured mains voltage,
+not a direct wattage measurement. This firmware never invents a default mains
+voltage: an em-dash here means the Pico has no configured mains voltage (or no
+POWER frame has arrived at all), not zero watts.</p>
 
 <h2>Safety-processor build</h2>
 <div class="card" id="buildCard">
@@ -206,8 +211,30 @@ if the Pico's diagnostics are too stale to trust.</p>
       else if (st.diag_state === 3) tempCls = 'near';  // WARN
     }
     set('safetyTemp', fmtC(st.safety_temp_c), tempCls);
-    set('enclosureTemp', fmtC(st.enclosure_temp_c), tempCls);
-    set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a');
+
+    // S12 (firmware/SaftyFW/docs/SAFETY_MODEL.md sec on "Cold junction /
+    // enclosure over-temperature"): cj_warn_c = 60 C, cj_max_c = 85 C,
+    // cj_time_s = 60 s. Unlike safetyTemp above, this is a real per-field
+    // numeric threshold this page can compare directly against -- S12's own
+    // documented defaults, not a guess -- so colour it against those numbers
+    // rather than only the coarse diag_state signal. (The cj_time_s
+    // debounce lives on the Pico; this page has no way to know how long the
+    // reading has been over cj_max_c, so it colours on the instantaneous
+    // value, which can flag "near"/"past" slightly before S12 actually
+    // trips -- an early warning, not a false one.)
+    var enclosureCls = null;
+    if (st.enclosure_temp_c != null && !isNaN(st.enclosure_temp_c)) {
+      if (st.enclosure_temp_c >= 85) enclosureCls = 'past';
+      else if (st.enclosure_temp_c >= 60) enclosureCls = 'near';
+    }
+    set('enclosureTemp', fmtC(st.enclosure_temp_c), enclosureCls);
+
+    // power_valid is already false whenever p_total_w came back NaN --
+    // including the "mains_voltage_v not configured" case (dashboard_http.h's
+    // field comment on power_valid) -- so an em-dash here, rather than a
+    // fabricated 0 W or a default mains voltage, is the honest rendering of
+    // "no trustworthy estimate exists yet".
+    set('powerW', (st.power_w != null && !isNaN(st.power_w)) ? st.power_w.toFixed(0) + ' W' : '—');
 
     var buildCard = document.getElementById('buildCard');
     if (st.safety_build_known) {

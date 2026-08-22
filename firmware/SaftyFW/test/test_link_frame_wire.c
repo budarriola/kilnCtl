@@ -388,6 +388,216 @@ static void test_fw_version_negative(void)
     }
 }
 
+// --- TODO.md Phase 7b.8: exhaustive mutual-compatibility matrix ------------
+// link_frame_versions_compatible() (src/tasks/link_frame.c) implements
+// LINK_PROTOCOL.md section 4's formula exactly:
+//   compatible == peer.protocol >= self.min_compatible
+//              && self.protocol >= peer.min_compatible
+// This is the ONE function that decides whether the Pico trusts anything the
+// ESP's ANNOUNCE_VERSION says, so it is tested two ways below: (1) an
+// explicit, named table covering every older/newer/equal relationship on
+// both sides plus the pathological peer, and (2) a brute-force sweep over a
+// small integer range against an INDEPENDENT reference formula written here
+// (not copy-pasted from link_frame.c), so a bug in the real implementation
+// has something other than itself to disagree with.
+
+// Independent reimplementation of LINK_PROTOCOL.md section 4's formula --
+// deliberately not calling into link_frame_versions_compatible() or sharing
+// any code with it, so this is a real second opinion, not an echo.
+static bool reference_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
+                                           uint16_t peer_protocol, uint16_t peer_min_compatible)
+{
+    bool peer_can_read_self = (peer_protocol >= self_min_compatible);
+    bool self_can_read_peer = (self_protocol >= peer_min_compatible);
+    return peer_can_read_self && self_can_read_peer;
+}
+
+typedef struct {
+    const char *label;
+    uint16_t self_protocol;
+    uint16_t self_min_compatible;
+    uint16_t peer_protocol;
+    uint16_t peer_min_compatible;
+    bool expect_compatible;
+} version_case_t;
+
+static void test_version_compatibility_named_matrix(void)
+{
+    TEST_SECTION("ANNOUNCE_VERSION -- named older/newer/equal matrix (TODO.md 7b.8)");
+
+    // Self is fixed at a well-formed "current build": protocol 5, willing to
+    // talk down to protocol 4 (min_compatible 4). Peer is varied across every
+    // older/newer/equal relationship, on both the protocol axis and the
+    // min_compatible axis, including peer combinations no honest build could
+    // ever produce.
+    const version_case_t cases[] = {
+        // -- peer.protocol vs self: older / equal / newer, peer well-formed --
+        {"peer older protocol (4), peer well-formed (min=4): compatible (self talks down to 4)",
+         5, 4, 4, 4, true},
+        {"peer equal protocol (5), peer well-formed (min=5): compatible",
+         5, 4, 5, 5, true},
+        {"peer newer protocol (6), peer well-formed (min=5): compatible (self.protocol(5)>=peer.min(5))",
+         5, 4, 6, 5, true},
+        {"peer newer protocol (6), peer requires min=6: incompatible (self.protocol(5) < peer.min(6))",
+         5, 4, 6, 6, false},
+
+        // -- peer.protocol older than self.min_compatible: self can't read peer's era --
+        {"peer protocol (3) older than self.min_compatible (4): incompatible (self dropped support)",
+         5, 4, 3, 3, false},
+        {"peer protocol exactly at self.min_compatible (4): compatible (boundary, inclusive)",
+         5, 4, 4, 3, true},
+        {"peer protocol one below self.min_compatible (3 vs min 4): incompatible (boundary, exclusive)",
+         5, 4, 3, 4, false},
+
+        // -- self.protocol vs peer.min_compatible: peer dropped support for self --
+        {"peer.min_compatible exactly equals self.protocol (5): compatible (boundary, inclusive)",
+         5, 4, 5, 5, true},
+        {"peer.min_compatible one above self.protocol (6 vs 5): incompatible (boundary, exclusive)",
+         5, 4, 5, 6, false},
+
+        // -- both sides identical (the common case) --
+        {"both sides identical build (5,5) vs (5,5): compatible",
+         5, 5, 5, 5, true},
+
+        // -- self older than peer, mirrored relationship --
+        {"self older (protocol=4,min=4) than a newer peer requiring min=5: incompatible",
+         4, 4, 6, 5, false},
+        {"self older (protocol=4,min=4) than a newer peer requiring min=4: compatible",
+         4, 4, 6, 4, true},
+
+        // -- THE pathological case: peer announces min_compatible ABOVE ITS
+        // OWN protocol version. This is a malformed/hostile announcement --
+        // no honest build ever sets min_compatible > its own protocol_version
+        // (kilnlink_version.h's own invariant) -- and the local side must not
+        // be talked into anything by it. Even though peer.protocol (5) alone
+        // would satisfy self.min_compatible (4), and self.protocol (5) is
+        // not old enough for what the peer hostilely claims to require (9),
+        // the formula must still refuse: self.protocol(5) >= peer.min(9) is
+        // false, so this correctly evaluates to incompatible regardless of
+        // the peer's own internal nonsense.
+        {"PATHOLOGICAL: peer.min_compatible (9) > peer.protocol (5) itself: incompatible, not trusted",
+         5, 4, 5, 9, false},
+        // A second pathological shape: pathological peer whose own claimed
+        // protocol is otherwise perfectly compatible on every other axis --
+        // proves the hostile min_compatible field alone is what defeats it,
+        // not some other mismatched field.
+        {"PATHOLOGICAL: peer.protocol==self.protocol==5 but peer.min_compatible=100: incompatible",
+         5, 5, 5, 100, false},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const version_case_t *c = &cases[i];
+        bool actual = link_frame_versions_compatible(c->self_protocol, c->self_min_compatible,
+                                                       c->peer_protocol, c->peer_min_compatible);
+        TEST_CHECK(actual == c->expect_compatible, c->label);
+    }
+}
+
+static void test_version_compatibility_exhaustive_sweep(void)
+{
+    TEST_SECTION("ANNOUNCE_VERSION -- exhaustive brute-force sweep vs independent reference formula "
+                 "(TODO.md 7b.8: every combination of older/newer/equal on both sides)");
+
+    // Every combination of protocol/min_compatible for both self and peer
+    // over a small integer range that comfortably covers older (<), equal
+    // (==), and newer (>) on all four pairwise relationships the formula
+    // cares about (peer.protocol vs self.min_compatible, self.protocol vs
+    // peer.min_compatible), plus values above/below the "sensible" 3..7
+     // window on both ends. Includes every pathological shape where
+    // min_compatible > protocol on either side, not just the peer.
+    const uint16_t values[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    const size_t n = sizeof(values) / sizeof(values[0]);
+
+    int compared = 0;
+    bool all_agree = true;
+    for (size_t a = 0; a < n; a++) {
+        for (size_t b = 0; b < n; b++) {
+            for (size_t c = 0; c < n; c++) {
+                for (size_t d = 0; d < n; d++) {
+                    uint16_t self_protocol = values[a];
+                    uint16_t self_min = values[b];
+                    uint16_t peer_protocol = values[c];
+                    uint16_t peer_min = values[d];
+
+                    bool actual = link_frame_versions_compatible(self_protocol, self_min,
+                                                                   peer_protocol, peer_min);
+                    bool expected = reference_versions_compatible(self_protocol, self_min,
+                                                                    peer_protocol, peer_min);
+                    compared++;
+                    if (actual != expected) {
+                        all_agree = false;
+                    }
+                }
+            }
+        }
+    }
+
+    TEST_CHECK(compared == (int)(n * n * n * n),
+               "exhaustive sweep actually covered every (self_protocol, self_min, peer_protocol, "
+               "peer_min) combination in the grid");
+    TEST_CHECK(all_agree,
+               "link_frame_versions_compatible() agrees with an independently-written reference "
+               "formula across all 9^4 combinations, including every pathological "
+               "min_compatible > protocol_version shape on either side");
+}
+
+// --- TODO.md Phase 7b.8 (continued): telemetry keeps flowing on a mismatch --
+// LINK_PROTOCOL.md section 4: "keeps sending telemetry, including its own
+// version, so the ESP can display the mismatch and so an update can be
+// pushed to fix it." link_frame_pack_status()/link_frame_pack_fw_version()
+// (the actual telemetry packers, exercised above) take no compatibility/
+// degraded-mode argument at all and have no notion of link_task's
+// s_degraded_no_context flag -- there is structurally nothing in their
+// signature for a mismatch to gate. This test proves that emptily-true
+// structural fact is also true operationally: telemetry packs and survives
+// the real wire round trip identically regardless of what the compatibility
+// verdict for the current peer would be.
+static void test_telemetry_keeps_flowing_on_version_mismatch(void)
+{
+    TEST_SECTION("telemetry keeps flowing on a version mismatch (LINK_PROTOCOL.md sec 4)");
+
+    // A peer announcement that is definitely incompatible (self is protocol
+    // 5/min 5; this peer's own protocol is 3, below self's floor).
+    bool mismatch_compatible =
+        link_frame_versions_compatible(/*self_protocol=*/5, /*self_min_compatible=*/5,
+                                        /*peer_protocol=*/3, /*peer_min_compatible=*/3);
+    TEST_CHECK(!mismatch_compatible, "sanity: the scenario below is a real version mismatch");
+
+    // Build and wire-round-trip a status telemetry frame exactly as
+    // test_status_frame_round_trip() does above -- nothing here consults
+    // mismatch_compatible, by construction, because link_frame_pack_status()
+    // has no parameter through which it could.
+    uint8_t payload[LINK_FRAME_STATUS_LEN];
+    link_frame_pack_status(payload, /*estop=*/false, /*relay_energized=*/false,
+                            /*heating_enabled=*/false, /*temp_valid=*/true, 500.0f, 22.0f, 0, 0.1f,
+                            0.2f, 0.3f);
+    uint8_t wire_payload[LINK_FRAME_STATUS_LEN];
+    uint8_t wire_length = 0;
+    TEST_CHECK(wire_round_trip(payload, LINK_FRAME_STATUS_LEN, wire_payload, &wire_length),
+               "status telemetry (Frame A) still packs and survives the wire round trip "
+               "during a version mismatch -- no guard exists to silence it");
+    mirror_status_t parsed = mirror_apply_status(wire_payload, wire_length);
+    TEST_CHECK(parsed.ok, "status telemetry still parses correctly during a version mismatch");
+    TEST_CHECK_NEAR(parsed.tc_temp_c, 500.0f, 0.0001,
+                     "status telemetry content is unaffected by the mismatch (no silent degradation "
+                     "of the frame itself, only of the context-consuming guards elsewhere)");
+
+    // Same for the FW_VERSION frame itself -- LINK_PROTOCOL.md is explicit
+    // that the version frame is part of the compatibility FLOOR and must be
+    // emitted "regardless of whether the two sides agree on anything else".
+    const char *commit = "deadbee";
+    uint8_t fwv[64];
+    size_t fwv_len = link_frame_pack_fw_version(fwv, sizeof(fwv), /*protocol=*/5, /*min_compat=*/5,
+                                                  /*dirty=*/0, commit, (uint8_t)strlen(commit), "",
+                                                  0, /*boot_id=*/3, /*config_version=*/1,
+                                                  /*config_crc=*/0x1234u);
+    TEST_CHECK(fwv_len > 0, "FW_VERSION (compatibility-floor frame) still packs during a mismatch");
+    uint8_t fwv_wire[64];
+    uint8_t fwv_wire_len = 0;
+    TEST_CHECK(wire_round_trip(fwv, (uint8_t)fwv_len, fwv_wire, &fwv_wire_len),
+               "FW_VERSION frame still survives the wire round trip during a mismatch");
+}
+
 void run_test_link_frame_wire(void)
 {
     test_status_frame_round_trip();
@@ -395,4 +605,7 @@ void run_test_link_frame_wire(void)
     test_status_frame_negative();
     test_fw_version_round_trip();
     test_fw_version_negative();
+    test_version_compatibility_named_matrix();
+    test_version_compatibility_exhaustive_sweep();
+    test_telemetry_keeps_flowing_on_version_mismatch();
 }

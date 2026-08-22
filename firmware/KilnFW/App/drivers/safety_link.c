@@ -2314,3 +2314,123 @@ size_t safety_link_build_trip_event_payload(SafetyLinkClass *link, uint8_t *out)
     safety_put_u32_le(&out[30], status.trip_event_age_ms);
     return SAFETY_LINK_TRIP_EVENT_PAYLOAD_LEN;
 }
+
+/* Same cache-only contract as the two builders above: answered entirely from
+ * what the last FW_VERSION (Frame C) frame from the Pico left in this struct,
+ * never by sending anything. LINK_PROTOCOL.md sec 7's "mirror it onto the PC
+ * link so pc_tools/MCP see it without Wi-Fi" — the web dashboard already
+ * shows this data, and this is the same data over the wired link.
+ *
+ * Wire layout deliberately mirrors the Pico's own Frame C byte for byte
+ * (link_frame_pack_fw_version() in SaftyFW/src/tasks/link_frame.c), because
+ * pc_tools parses one layout for both paths:
+ *
+ *   [0]      cmd (SAFETY_CMD_FW_VERSION, 0x0B -- shared id, see uart_bridge.c)
+ *   [1..2]   peer protocol_version   u16 LE   <- version fields FIRST, so a
+ *   [3..4]   peer min_compatible     u16 LE      version-incompatible peer's
+ *                                                frame still parses far
+ *                                                enough to say WHY
+ *   [5]      dirty                   u8
+ *   [6]      commit_len N1           u8
+ *   [7..]    commit                  N1 bytes ASCII, NOT null-terminated
+ *   [+1]     datetime_len N2         u8
+ *   [+N2]    datetime                N2 bytes ASCII, NOT null-terminated
+ *   [+1]     boot_id                 u8
+ *   [+1]     config_version          u8
+ *   [+2]     config_crc              u16 LE
+ *
+ * "Not known yet" is reported as a real state, never as a plausible-looking
+ * zero: until the Pico has pushed (or answered with) one FW_VERSION frame
+ * that parsed all the way through config_crc, peer_build_known is false and
+ * this returns a frame with both string lengths 0 and every numeric field 0.
+ * A PC-side reader distinguishes that from a commissioned board by
+ * config_crc != 0, exactly as safety_page.html does. Fabricating a
+ * placeholder commit here would put a confident wrong build identity on a
+ * safety diagnostics surface, which is worse than an explicit "unknown".
+ *
+ * Worst-case length is 9 + 64 + 32 = 105 bytes, inside
+ * UART_PROTO_MAX_PAYLOAD (253); the caller's buffer is BRIDGE_REPLY_MAX,
+ * which is that same constant. */
+size_t safety_link_build_fw_version_payload(SafetyLinkClass *link, uint8_t *out)
+{
+    if (!out) {
+        return 0;
+    }
+
+    bool     known = false;
+    bool     compatible = false;
+    uint16_t peer_protocol = 0;
+    uint16_t peer_min_compatible = 0;
+    if (safety_link_get_peer_version_status(link, &known, &compatible, &peer_protocol,
+                                            &peer_min_compatible) != ESP_OK) {
+        return 0;
+    }
+
+    bool     build_known = false;
+    bool     dirty = false;
+    uint8_t  commit[64];
+    uint8_t  commit_len = 0;
+    uint8_t  datetime[32];
+    uint8_t  datetime_len = 0;
+    uint8_t  config_version = 0;
+    uint16_t config_crc = 0;
+    if (safety_link_get_peer_build_status(link, &build_known, &dirty, commit, &commit_len,
+                                          datetime, &datetime_len, &config_version,
+                                          &config_crc) != ESP_OK) {
+        return 0;
+    }
+
+    /* Nothing parsed through config_crc yet -- emit the well-formed
+     * "unknown" shape rather than half-populated fields off an older or
+     * truncated frame. peer_build_known is precisely the flag that gates
+     * "every other peer_build_* field is meaningless" (see its declaration
+     * in safety_link.h), so honouring it here is what keeps this from
+     * reporting a stale commit as current. */
+    if (!build_known) {
+        commit_len = 0;
+        datetime_len = 0;
+        dirty = false;
+        config_version = 0;
+        config_crc = 0;
+    }
+    /* Defensive clamp: the accessor documents these as capped at the wire
+     * limits it copied into our buffers, but this function indexes `out`
+     * off them, so a bad length here would be a buffer overrun rather than
+     * a wrong number. Cheap to re-assert, and the failure it prevents is
+     * not a cosmetic one. */
+    if (commit_len > sizeof(commit)) {
+        commit_len = (uint8_t)sizeof(commit);
+    }
+    if (datetime_len > sizeof(datetime)) {
+        datetime_len = (uint8_t)sizeof(datetime);
+    }
+
+    uint8_t peer_boot_id = 0;
+    if (safety_lock(link)) {
+        peer_boot_id = link->pico_boot_id_known ? link->pico_boot_id : 0u;
+        safety_unlock(link);
+    }
+
+    size_t i = 0;
+    out[i++] = SAFETY_CMD_FW_VERSION;
+    safety_put_u16_le(&out[i], known ? peer_protocol : 0u);
+    i += 2;
+    safety_put_u16_le(&out[i], known ? peer_min_compatible : 0u);
+    i += 2;
+    out[i++] = dirty ? 1u : 0u;
+    out[i++] = commit_len;
+    if (commit_len > 0) {
+        memcpy(&out[i], commit, commit_len);
+        i += commit_len;
+    }
+    out[i++] = datetime_len;
+    if (datetime_len > 0) {
+        memcpy(&out[i], datetime, datetime_len);
+        i += datetime_len;
+    }
+    out[i++] = peer_boot_id;
+    out[i++] = config_version;
+    safety_put_u16_le(&out[i], config_crc);
+    i += 2;
+    return i;
+}

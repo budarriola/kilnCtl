@@ -76,6 +76,13 @@
 
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_announce_reboot.h" // SAFETY_CMD_ANNOUNCE_REBOOT, see link_task_handle_announce_reboot()
+// Generated into the build dir by CMakeLists.txt's saftyfw_build_info target,
+// regenerated on every build (see link_task_send_fw_version() below, the only
+// consumer). Firmware-only: the host test binary does not compile this file
+// (test/build_host_tests.ps1 pulls in link_frame.c, not link_task.c), so no
+// host-side shim is needed for it.
+#include "saftyfw_build_info.h"
+
 #include "kilnlink/kilnlink_ceiling.h" // SAFETY_CMD_SET_FIRING_CEILING, see link_task_handle_set_firing_ceiling()
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
@@ -366,20 +373,40 @@ static void link_task_send_status(void)
 
 static void link_task_send_fw_version(void)
 {
-    // build_info.h (git commit, dirty flag, build timestamp) is not
-    // generated yet -- TODO.md Phase 8 item, not this pass. "Unknown must map
-    // to dirty = 1" (LINK_PROTOCOL.md section 4) is honoured trivially: an
-    // unknown commit is reported dirty, never falsely clean. config_version/
-    // config_crc now come from config_store's real cache (Phase 9's store
-    // landed, and SAFETY_CMD_SET_CONFIG's link_task_handle_set_config() above
-    // is its first writer) -- still 0/0 on a never-commissioned board, since
-    // that is exactly config_store_default()'s seq=0 record, which the spec
-    // documents as meaning "running on compiled-in defaults that were never
-    // commissioned."
-    uint8_t payload[16];
+    // Build identity now comes from saftyfw_build_info.h, regenerated on
+    // EVERY build by CMakeLists.txt's saftyfw_build_info target (not merely
+    // on reconfigure -- see that target's comment, and KilnFW's equivalent
+    // gen_build_info.cmake, which this mirrors). Before that generator
+    // existed this function hard-coded dirty = 1 with empty commit/datetime
+    // fields: honest, because LINK_PROTOCOL.md section 4's rule is "unknown
+    // must map to dirty", but useless for telling two builds apart.
+    //
+    // SAFTYFW_GIT_DIRTY is already 0/1 from the generator and is passed
+    // straight through, so a clean tree now reports clean -- the one
+    // direction the old hard-coded 1 could never express. The commit and
+    // datetime strings go on the wire as ASCII, NOT null-terminated, exactly
+    // strlen() bytes each (see link_frame_pack_fw_version()'s contract).
+    //
+    // config_version/config_crc come from config_store's real cache (Phase
+    // 9's store landed, and SAFETY_CMD_SET_CONFIG's
+    // link_task_handle_set_config() above is its first writer) -- still 0/0
+    // on a never-commissioned board, since that is exactly
+    // config_store_default()'s seq=0 record, which the spec documents as
+    // meaning "running on compiled-in defaults that were never commissioned."
+    //
+    // Payload capacity: the old buffer was 16 bytes, sized for the
+    // fixed-width fields alone when both strings were empty. It has to hold
+    // the strings now; pack_fw_version() returns 0 (writing nothing) rather
+    // than overflowing if this is ever too small, so a short buffer would
+    // silently stop the frame being sent at all -- hence sizing it from the
+    // generated strings themselves rather than a guessed constant.
+    static const char commit_str[] = SAFTYFW_GIT_COMMIT;
+    static const char datetime_str[] = SAFTYFW_BUILD_DATE " " SAFTYFW_BUILD_TIME;
+    uint8_t payload[16 + sizeof(commit_str) + sizeof(datetime_str)];
     size_t len = link_frame_pack_fw_version(
         payload, sizeof(payload), KILNLINK_PROTOCOL_VERSION, KILNLINK_MIN_COMPATIBLE,
-        /* dirty = */ 1, NULL, 0, NULL, 0, s_boot_id, config_store_get_config_version(),
+        SAFTYFW_GIT_DIRTY ? 1u : 0u, commit_str, sizeof(commit_str) - 1u, datetime_str,
+        sizeof(datetime_str) - 1u, s_boot_id, config_store_get_config_version(),
         config_store_get_config_crc());
     if (len == 0) {
         return;

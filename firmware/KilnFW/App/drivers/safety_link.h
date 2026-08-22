@@ -1018,6 +1018,14 @@ size_t safety_link_build_status_payload(SafetyLinkClass *link, uint8_t *out);
 size_t safety_link_build_stats_payload(SafetyLinkClass *link, uint8_t *out);
 size_t safety_link_build_diag_payload(SafetyLinkClass *link, uint8_t *out);
 size_t safety_link_build_trip_event_payload(SafetyLinkClass *link, uint8_t *out);
+/* Frame C (the Pico's build identity + config commissioning state) mirrored
+ * onto the PC link, same cache-only contract as the two above. Returns the
+ * byte count written, 0 on failure. Variable length (the commit/datetime
+ * strings are wire-sized), worst case 105 bytes; `out` must have room for
+ * UART_PROTO_MAX_PAYLOAD. Full layout and the "unknown is a real state,
+ * never a fabricated placeholder" rule are documented on the definition in
+ * safety_link.c. */
+size_t safety_link_build_fw_version_payload(SafetyLinkClass *link, uint8_t *out);
 
 #ifdef __cplusplus
 }

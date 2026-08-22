@@ -82,6 +82,7 @@
 #include "snapshots.h"
 #include "thermo_task.h"
 
+#include "config_store.h" // config_store_get_config_version()/config_store_confirm_crc_ok()
 #include "crc32.h"       // bootloader/ -- see CMakeLists.txt include path
 #include "flash_layout.h" // bootloader/
 #include "metadata.h"     // bootloader/
@@ -819,14 +820,24 @@ static void update_task_startup_confirm_check(void)
 
 // Gathers real evidence (src/update/confirm.h's update_confirm_checklist_t)
 // and, once update_confirm_missing() returns 0, marks this slot VALID
-// exactly once. NOTE, stated here and in TODO.md: config_crc_ok is
-// permanently false in this build (no config_store, Phase 9 -- confirm.h's
-// own doc comment: "a caller with nothing to check should pass false, never
-// true") so update_confirm_missing() can never actually reach 0 here. This
-// is an honest consequence of building the confirmation gate against a
-// config_store that does not exist yet, not a bug -- the gate is fully
-// wired and will start working the moment Phase 9 lands a real config CRC
-// check, with no further change needed in this file.
+// exactly once.
+//
+// config_crc_ok is now wired to config_store's real cache (TODO.md Phase
+// 10.8's "remaining half", closed by this pass): config_store_get_config_
+// version() reads the cached record's seq (truncated to u8), and
+// config_store_confirm_crc_ok() (config_store.c, pure/host-tested) applies
+// the safe-direction rule documented on its own declaration in
+// config_store.h -- version 0 means "no CRC-verified record has ever been
+// loaded" (either config_store_boot_load() has not run, or it ran and found
+// nothing valid in flash), and that must gate CLOSED, never open. Getting
+// this backwards -- letting an unreadable/uninitialised config store read as
+// "confirmed good" -- would let a freshly-flashed image reach
+// BOOTLOADER_SLOT_VALID without its config ever actually having been
+// verified, which is exactly the "sails through any check that just proves
+// main() ran" failure docs/BOOTLOADER.md section 5 warns against. A slot
+// stuck at PENDING_VERIFY is recoverable; a slot wrongly marked VALID is not
+// (short of another update), so "stuck closed" is the only defensible
+// default here.
 static void update_task_confirm_tick(void)
 {
     if (!s_confirm_pending) {
@@ -834,7 +845,7 @@ static void update_task_confirm_tick(void)
     }
 
     update_confirm_checklist_t c;
-    c.config_crc_ok = false; // see this function's header comment -- never fake this
+    c.config_crc_ok = config_store_confirm_crc_ok(config_store_get_config_version());
 
     thermo_snapshot_t th;
     bool th_present = thermo_task_get_snapshot(&th);

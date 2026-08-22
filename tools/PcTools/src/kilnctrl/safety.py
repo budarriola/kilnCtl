@@ -40,9 +40,17 @@ import threading
 from typing import Optional
 
 from . import devices
-from .devices import SafetyDiag, SafetyLinkStats, SafetyResponseError, SafetyStatus, SafetyTripEvent
+from .devices import (
+    SafetyDiag,
+    SafetyFwVersion,
+    SafetyLinkStats,
+    SafetyResponseError,
+    SafetyStatus,
+    SafetyTripEvent,
+)
 from .protocol import (
     SAFETY_CMD_GET_DIAG,
+    SAFETY_CMD_GET_FW_VERSION,
     SAFETY_CMD_GET_LINK_STATS,
     SAFETY_CMD_GET_STATUS,
     SAFETY_CMD_GET_TRIP_EVENT,
@@ -170,6 +178,20 @@ class SafetyClient:
         """
         value = self._query(
             SAFETY_CMD_GET_TRIP_EVENT, devices.safety_get_trip_event(), timeout
+        )
+        return value  # type: ignore[return-value]
+
+    def get_fw_version(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> SafetyFwVersion:
+        """Read the cached FW_VERSION (Frame C) telemetry -- the Pico's own
+        build identity and active config CRC, the other half of DIAG/
+        TRIP_EVENT's "mirror it on the PC-link SAFETY task" ask
+        (CommonFW/docs/LINK_PROTOCOL.md sec 7). Same cache-only shape as
+        :meth:`get_diag`/:meth:`get_trip_event`: this never talks to the Pico
+        live. ``commit``/``built`` are empty strings, not placeholders, when
+        the Pico hasn't reported a known build identity yet.
+        """
+        value = self._query(
+            SAFETY_CMD_GET_FW_VERSION, devices.safety_get_fw_version(), timeout
         )
         return value  # type: ignore[return-value]
 

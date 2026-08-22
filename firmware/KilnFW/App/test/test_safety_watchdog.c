@@ -147,6 +147,30 @@ static void test_silent_link_30s_still_faults_running(void)
     TEST_CHECK(strstr(out.fault_reason, "silent") != NULL, "fault_reason still describes link silence");
 }
 
+static void test_silent_link_brief_does_not_fault(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- a BRIEF safety-link silence (not yet 30s) does NOT abort");
+
+    // The nuisance-abort case this task's brief calls out explicitly: a
+    // single dropped telemetry frame recovers well inside the 30s window,
+    // and the caller's own safety_link_is_stale(age, SAFETY_LINK_FIRING_
+    // ABORT_SILENCE_MS) check is what keeps safety_link_silent_30s false
+    // until the outage is actually sustained -- this function must treat
+    // that false exactly like "nothing wrong", same as the PC-link analog
+    // (test_pc_link_brief_loss_does_not_fault) below. A twelve-hour firing
+    // must survive one missed frame.
+    profile_executor_wd_input_t in = base_input();
+    in.safety_link_silent_30s = false; // caller's own timer hasn't crossed 30s
+    in.state_running_or_paused = true;
+
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_NONE,
+               "a safety-link blip that hasn't reached SAFETY_LINK_FIRING_ABORT_SILENCE_MS must not "
+               "abort a firing -- a brief drop-and-recover is survivable");
+    TEST_CHECK(out.fault_reason[0] == '\0', "no fault_reason is produced when nothing crossed the threshold");
+}
+
 static void test_silent_link_30s_still_retries_when_already_faulted(void)
 {
     TEST_SECTION("profile_executor_wd_decide -- REGRESSION: 30s silence retry-while-faulted still works");
@@ -315,6 +339,7 @@ void run_test_safety_watchdog(void)
     test_idle_trip_does_not_fabricate_run();
     test_no_trip_no_silence_idle_is_a_true_no_op();
     test_silent_link_30s_still_faults_running();
+    test_silent_link_brief_does_not_fault();
     test_silent_link_30s_still_retries_when_already_faulted();
     test_pc_link_sustained_loss_faults_running();
     test_pc_link_brief_loss_does_not_fault();
