@@ -150,32 +150,38 @@
     };
   })();
 
-  // Small toggle button, inserted next to each page's own #themeBtn (every
-  // *_page.html has one) rather than requiring a markup change in twelve
-  // files -- same "app.js injects its own chrome" pattern already used for
-  // the banner and stop bar below.
+  // The °C/°F toggle. Injected rather than written into twelve *_page.html
+  // files -- same "app.js injects its own chrome" pattern used for the
+  // banner and stop bar below.
   //
-  // 2026-08-21: this button and #themeBtn both used to be `position: fixed`
-  // to the viewport's top-right corner (theme.css's .theme-btn, which this
-  // reuses via the class list below), which put them on top of nav.js's
-  // topbar Home/Menu buttons on a phone-width screen -- reported bug. The
-  // fix lives on nav.js's side: buildTopbar() there moves the real
-  // #themeBtn element into .kc-topbar-actions before this function ever
-  // runs (nav.js's <script> tag loads before app.js's on every page, and
-  // `defer` scripts run in that document order), so by the time this code
-  // executes, `themeBtn.parentNode` below is already the topbar's actions
-  // group -- inserting immediately before it lands this button in the
-  // topbar too, with no extra wiring needed here for the common case.
-  // Two fallbacks handle anything unexpected: if #themeBtn is missing but
-  // the topbar exists, drop into .kc-topbar-actions directly; if neither
-  // exists (nav.js didn't run for some reason), fall back to the old
-  // prepend-to-body behaviour rather than losing the control entirely.
+  // 2026-08-21, second pass (owner request "move the Fahrenheit/Celsius and
+  // theme selection to the settings pages"): this button used to be built on
+  // every page and inserted into the topbar next to #themeBtn. It is a
+  // display preference, not per-page chrome, so it is now built ONLY on a
+  // page that offers a #kcDisplayPrefs container -- settings_page.html.
+  // Returning null elsewhere is not a loss of function: kcUnit itself still
+  // loads on every page and every page still RENDERS in the selected unit;
+  // only the control that changes it has moved to one place.
+  //
+  // The unit's source of truth is the device (unit_pref.c/NVS), so unlike
+  // the theme -- which is per-browser localStorage -- a change made here is
+  // visible on the LCD and in every other browser too.
   function buildUnitBtn() {
+    var host = document.getElementById('kcDisplayPrefs');
+    if (!host) return null;
     var el = document.createElement('button');
     el.type = 'button';
-    el.className = 'kc-unit-btn theme-btn';
+    el.className = 'kc-unit-btn kc-pref-btn';
     el.title = 'Toggle Celsius/Fahrenheit display -- persisted on the device, same setting the LCD shows (see app.js)';
-    function refresh() { el.textContent = window.kcUnit.label(); }
+    // Spelled out, not the bare "°C"/"°F" this showed as a topbar button:
+    // with room for words, the settings row says both what the setting IS
+    // and what tapping does, matching the LCD hub cell's own wording
+    // (ui_page_config.c's units_cell_set_label()).
+    function refresh() {
+      el.textContent = window.kcUnit.get() === 'f'
+        ? 'Units: Fahrenheit (switch to °C)'
+        : 'Units: Celsius (switch to °F)';
+    }
     refresh();
     // Listens rather than refreshing only on click: updateFromStatus() (from
     // this page's own poll, or from another browser tab's POST landing on
@@ -185,14 +191,16 @@
     el.addEventListener('click', function () {
       window.kcUnit.set(window.kcUnit.get() === 'f' ? 'c' : 'f');
     });
+    // nav.js has already moved #themeBtn into this same container by the
+    // time this runs (deferred scripts execute in document order and nav.js
+    // is listed first on every page), so inserting before it puts Units
+    // above Theme; if nav.js somehow did not run, appending still lands the
+    // control inside the container.
     var themeBtn = document.getElementById('themeBtn');
-    var topbarActions = document.querySelector('.kc-topbar-actions');
-    if (themeBtn && themeBtn.parentNode) {
-      themeBtn.parentNode.insertBefore(el, themeBtn);
-    } else if (topbarActions) {
-      topbarActions.insertBefore(el, topbarActions.firstChild);
+    if (themeBtn && themeBtn.parentNode === host) {
+      host.insertBefore(el, themeBtn);
     } else {
-      document.body.insertBefore(el, document.body.firstChild);
+      host.appendChild(el);
     }
     return el;
   }

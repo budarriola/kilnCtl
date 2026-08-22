@@ -49,6 +49,25 @@
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 
+<!-- Display preferences, 2026-08-21 (owner request: "move the Fahrenheit/
+     Celsius and theme selection to the settings pages"). Both controls used
+     to sit in every page's topbar. This <div id="kcDisplayPrefs"> is the
+     container both of them look for: nav.js moves the real #themeBtn element
+     above into it (it stays in <body> markup so every OTHER page's inline
+     theme script still finds it by id), and app.js's buildUnitBtn() builds
+     the °C/°F control only when this container exists. Neither control is
+     hard-coded here, so this page never has to be edited again if either
+     one's behaviour changes.
+
+     The two are NOT the same kind of setting, which the note below says out
+     loud: the theme is per-browser (localStorage, this device only) while
+     the unit is stored on the board and shared with the LCD. -->
+<h2 id="display" style="border-top: none; margin-top: 0; padding-top: 0;">Display</h2>
+<div id="kcDisplayPrefs"></div>
+<p>Temperature units are stored on the board, so this also changes what the
+LCD and every other browser shows. The dark/light theme is remembered by this
+browser only.</p>
+
 <!-- 2026-08-21 rework: the "Board configuration" hub links that used to sit
      here (readiness/zones/relays/manual/profiles/wifi/ota/diagnostics/
      safety) moved to the shared drop-down menu (nav.js's NAV_LINKS) -- see
@@ -84,7 +103,13 @@ anything else. "Factory default" erases all three.</p>
   function apply(t) {
     if (t) document.documentElement.setAttribute('data-theme', t);
     else document.documentElement.removeAttribute('data-theme');
-    btn.textContent = isDark(t) ? '☀' : '🌙';
+    // Every other page's copy of this script sets a bare '☀'/'🌙' glyph,
+    // sized for a corner button. Here the control is a labelled settings row
+    // (see the #kcDisplayPrefs block above), so it says which theme is on and
+    // what clicking does -- same wording shape as the Units row app.js builds
+    // right beside it.
+    btn.textContent = isDark(t) ? '☀ Theme: Dark (switch to light)'
+                                : '🌙 Theme: Light (switch to dark)';
   }
   apply(localStorage.getItem('kilnctl-theme'));
   btn.addEventListener('click', function () {

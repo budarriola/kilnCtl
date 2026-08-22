@@ -54,6 +54,12 @@
     { href: '/diagnostics/thermo', label: 'Thermocouple faults' },
     { href: '/safety', label: 'Safety processor' },
     { href: '/settings/backup', label: 'Backup & restore' },
+    // 2026-08-21: /settings gained a Display section (theme + °C/°F, moved
+    // off the topbar at the owner's request), so it needs a way in that is
+    // not the Reset entry below -- an operator looking for the units toggle
+    // should not have to guess it lives behind a link labelled "Reset".
+    // Both entries point at the same page, each at its own anchor.
+    { href: '/settings#display', label: 'Display (theme & units)' },
     { href: '/settings#danger', label: 'Reset' },
   ];
 
@@ -161,32 +167,46 @@
       menuOverlay.removeAttribute('hidden');
     });
 
-    // 2026-08-21 fix: every page's <button id="themeBtn"> markup (real HTML,
-    // not script-created) used to stay wherever the page put it in <body>
-    // and rely on `.theme-btn { position: fixed; top/right }` to visually
-    // land in the same corner as this topbar's Home/Menu group -- on a
-    // phone-width viewport there wasn't room for both, so the fixed button
-    // landed ON TOP of Home/Menu (reported bug). Moving the actual element
-    // into .kc-topbar-actions makes it a normal flex child instead, so it
-    // can never overlap anything at any width. Moved (not cloned) so its
-    // existing id/listeners (attached by each page's own inline <script>,
-    // see e.g. main_page.html's bottom-of-body script) keep working
-    // untouched -- only its position in the DOM tree changes.
+    // Theme toggle placement, 2026-08-21 (second pass, owner request "move
+    // the Fahrenheit/Celsius and theme selection to the settings pages").
     //
-    // Ordering race: this runs from nav.js, which is guaranteed to execute
-    // before app.js on every page (`defer` scripts run in document order;
-    // nav.js's <script> tag is listed first on every *_page.html). app.js's
-    // buildUnitBtn() creates the °C/°F toggle and inserts it as a sibling
-    // immediately before whatever #themeBtn's parentNode is AT THE TIME
-    // app.js runs -- by then this line has already reparented themeBtn into
-    // `actions`, so the unit button lands in the topbar too, with no change
-    // needed on the app.js side for the common case. #themeBtn itself is
-    // real markup parsed before any deferred script runs, so it already
-    // exists in the DOM by the time this function is called -- no race on
-    // that side either.
+    // History, because the two passes look contradictory otherwise: every
+    // page's <button id="themeBtn"> markup (real HTML, not script-created)
+    // originally stayed wherever the page put it in <body> and relied on
+    // `.theme-btn { position: fixed; top/right }` to land in the same corner
+    // as this topbar's Home/Menu group -- on a phone-width viewport there
+    // wasn't room for both, so the fixed button landed ON TOP of Home/Menu.
+    // The first fix reparented it into .kc-topbar-actions so it became a
+    // normal flex child that could not overlap anything. This pass goes
+    // further: the theme and °C/°F controls are display preferences, not
+    // per-page chrome, so they now live on the Settings page only and the
+    // topbar carries just Home/Menu.
+    //
+    // Kept as a MOVE (or a hide), never a removal: each page's own inline
+    // <script> looks up #themeBtn by id and attaches the theme listener to
+    // it, and would throw on null. So on the one page that offers the
+    // control (settings_page.html, which provides the #kcDisplayPrefs
+    // container) the real element is moved into that container; everywhere
+    // else it stays in the DOM, functional but hidden, and the page script
+    // is none the wiser.
+    //
+    // Ordering: this runs from nav.js, guaranteed to execute before app.js
+    // on every page (`defer` scripts run in document order; nav.js's
+    // <script> tag is listed first on every *_page.html). app.js's
+    // buildUnitBtn() then inserts the °C/°F toggle next to #themeBtn, so it
+    // follows wherever this put it. #themeBtn itself is real markup parsed
+    // before any deferred script runs, so it already exists here -- no race
+    // on that side either.
     var themeBtn = document.getElementById('themeBtn');
+    var displayPrefs = document.getElementById('kcDisplayPrefs');
     if (themeBtn) {
-      actions.appendChild(themeBtn);
+      if (displayPrefs) {
+        themeBtn.classList.remove('theme-btn');
+        themeBtn.classList.add('kc-pref-btn');
+        displayPrefs.appendChild(themeBtn);
+      } else {
+        themeBtn.hidden = true;
+      }
     }
 
     if (!isDashboard) {

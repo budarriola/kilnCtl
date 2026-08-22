@@ -29,11 +29,13 @@
    which inherits this class) directly on top of nav.js's topbar actions
    (Home/Menu) -- fine on a wide desktop viewport where there was slack, but
    on a phone-width topbar the two fixed buttons landed squarely on the real
-   controls underneath. nav.js now moves the real #themeBtn element (already
-   present in each page's markup, not created by script) into
-   .kc-topbar-actions itself, so this is just a normal flex child now --
-   see nav.js's buildTopbar() for the move and its comment for why that
-   ordering is safe regardless of whether nav.js or app.js runs first.
+   controls underneath. The fix dropped `position: fixed` entirely.
+   2026-08-21 (second pass): the theme control then moved off the topbar
+   altogether onto settings_page.html, where it is styled by .kc-pref-btn
+   below instead. This rule now applies only to the #themeBtn copies that
+   remain (hidden) in every other page's markup, kept solely because each
+   page's inline theme script looks the element up by id -- see nav.js's
+   buildTopbar().
    Deliberately keeps relying on the generic `button { min-height: ... }`
    rule below (no min-height override here) rather than shrinking to match
    .kc-home-btn/.kc-menu-btn's smaller `min-height: 0` -- the owner's
@@ -41,6 +43,20 @@
 .theme-btn { border: 1px solid var(--border);
              background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
              padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+/* Display preferences (theme, °C/°F) as full-width settings rows.
+   2026-08-21: both controls moved off the topbar onto settings_page.html, per
+   the owner's request; #kcDisplayPrefs is the container that page provides
+   and that nav.js/app.js look for (see nav.js's buildTopbar() and app.js's
+   buildUnitBtn()). On every other page #themeBtn keeps its .theme-btn class
+   and is simply hidden, so the rule above still describes it there.
+   Full width and left-aligned because these now read as labelled rows
+   ("Units: Celsius (switch to °F)"), not corner glyph buttons. */
+#kcDisplayPrefs { display: flex; flex-direction: column; gap: 0.5em; }
+.kc-pref-btn { display: block; width: 100%; text-align: left;
+               border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg);
+               border-radius: var(--ui-radius);
+               padding: 0.6em 0.8em; font-size: 1em; cursor: pointer; }
 /* UI_PLAN.md section 3, Web item 2: every real <button> across all six pages
    independently redeclared `min-height: var(--ui-touch)` (profiles_page.html/
    rules_page.html/zones_page.html/wifi_provision_page.html's plain `button {}`
@@ -173,16 +189,16 @@ button { min-height: var(--ui-touch); }
    like firmware version). */
 .kc-stale .kc-live-value { opacity: 0.45; }
 
-/* UI_PLAN.md item 7 ("Unit parity"): client-only °C/°F display toggle,
-   injected by app.js's buildUnitBtn() next to each page's own #themeBtn.
-   Reuses .theme-btn's exact box (border/radius/padding) so it reads as a
-   matching pair of small icon toggles, not a new control style. 2026-08-21:
-   the fixed-position offset that used to live here (`right: 3.4em`, needed
-   only because both buttons were pinned to the same viewport corner) is
-   gone along with .theme-btn's own `position: fixed` -- both buttons are
-   now ordinary flex children of .kc-topbar-actions, so the flex row's own
-   `gap` (see .kc-topbar-actions above) keeps them apart instead of a
-   hand-tuned em offset that had to be re-guessed at every screen size. */
+/* UI_PLAN.md item 7 ("Unit parity"): the °C/°F toggle app.js's
+   buildUnitBtn() injects. It has no rules of its own -- .kc-unit-btn is kept
+   purely as a hook for anything that needs to find it; its box comes from
+   .kc-pref-btn above, shared with the theme control it now sits beside on
+   settings_page.html.
+   Two dead offsets used to live here and are recorded only so neither gets
+   reintroduced: `right: 3.4em` (from when both buttons were pinned to the
+   same viewport corner by .theme-btn's `position: fixed`), then the topbar
+   flex placement that replaced it. Both controls are now settings rows, so
+   neither positioning scheme applies. */
 
 /* UI_PLAN.md "web page structure" section, items 2-4 (settings hub +
    manual-relay split, 2026-08-2x pass): settings_page.html and
