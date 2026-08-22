@@ -1,13 +1,12 @@
 // The "config" page -- TODO.md 10.3's "Configuration" nav item destination:
-// a navigation hub to the deeper config/settings menus (section 3's Settings
-// pages: Thermocouples & Zones, Relays & Rules, Network), not a settings
+// a navigation hub to the deeper config/settings menus, not a settings
 // editor in itself. Replaces the pre-this-pass title+Back stub (see git
-// history). See ui_page_config.c's header comment for exactly which items
-// are real navigation and which are honest "not built yet" placeholders --
-// this pass built one real destination (Board Health, see
-// ui_page_board_health.c/.h) and left the other three as labeled
-// placeholders rather than half-building a settings editor. One page one
-// file, see kiln_ui.h's header comment.
+// history). See ui_page_config.c's header comment for the current list of
+// destinations -- it has changed several times since this file was written
+// (most recently 2026-08-22: Zones & Thermocouples, Relays & Rules, and
+// Temperature History were removed outright, per owner request, as the LCD
+// shed config duties now covered by the web GUI). One page one file, see
+// kiln_ui.h's header comment.
 #ifndef UI_PAGE_CONFIG_H
 #define UI_PAGE_CONFIG_H
 

@@ -8,7 +8,6 @@
 #include "ui_page_board_health.h"
 #include "ui_page_config.h"
 #include "ui_page_diagnostics.h"
-#include "ui_page_history.h"
 #include "ui_page_home.h"
 #include "ui_page_kiln_cfg_setup.h"
 #include "ui_page_kiln_setup.h"
@@ -28,7 +27,6 @@
 #include "ui_page_thermo_faults.h"
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
-#include "ui_page_zones.h"
 #include "touch_cal_store.h"
 #include "lvgl_port.h"
 
@@ -59,7 +57,13 @@ static const char *TAG = "kiln_ui";
  *
  * Raised 24 -> 26: the new Kiln Setup hub ("kiln_setup") and Kiln Config
  * management screen ("kiln_cfg_setup") added 2 more pages, exactly filling
- * the old 24-page cap otherwise. */
+ * the old 24-page cap otherwise.
+ *
+ * 2026-08-22: "zones", "zones_detail", and "history" were removed (owner
+ * request -- see this file's registration comments), freeing 3 slots. Left
+ * at 26 rather than lowered to 23: the array is tiny (a few dozen bytes per
+ * slot) and a future page addition should not have to re-derive this
+ * arithmetic from scratch the next time the count changes. */
 #define KILN_UI_MAX_PAGES 26
 
 typedef struct {
@@ -155,13 +159,17 @@ esp_err_t kiln_ui_init(void)
     if (err != ESP_OK) return err;
 
     /* 2026-08-18 no-scroll rewrite -- ui_page_home.c's Safety Processor card
-     * and temperature-history chart moved to their own pages (no room left
-     * in home's ~264px content budget once zones/run-state/action row were
-     * sized to fit), reachable from ui_page_config.c's nav hub. See
-     * ui_page_safety.c/ui_page_history.c's header comments. */
+     * moved to its own page (no room left in home's ~264px content budget
+     * once zones/run-state/action row were sized to fit), reachable from
+     * ui_page_config.c's nav hub. See ui_page_safety.c's header comment.
+     * The temperature-history chart moved off THIS page the same pass, to
+     * "history"/ui_page_history.c -- that page (and its "Temperature
+     * History" nav item) was REMOVED outright 2026-08-22 per owner request
+     * ("tempiture history page can go away on the lcd too"); the compact
+     * chart that later came back to ui_page_home.c is now the LCD's only
+     * trend chart, so there is no separate destination to register here any
+     * more. */
     err = kiln_ui_register_page("safety", ui_page_safety_build);
-    if (err != ESP_OK) return err;
-    err = kiln_ui_register_page("history", ui_page_history_build);
     if (err != ESP_OK) return err;
 
     /* TODO.md's "Diagnostics / System info page" item, ESP-only half
@@ -206,19 +214,17 @@ esp_err_t kiln_ui_init(void)
     err = kiln_ui_register_page("kiln_cfg_setup", ui_page_kiln_cfg_setup_build);
     if (err != ESP_OK) return err;
 
-    /* TODO.md 406/section 3, 10.8: LCD equivalent of the web zones page's
-     * per-zone thermo_mask/relay_mask/cal_offset_c/temp_limits editor -- see
-     * ui_page_zones.c's header comment for the two-page (list; paged detail)
-     * layout and what stayed deliberately out of scope. Linked from
-     * ui_page_config.c's "Zones & Thermocouples" hub cell, which was a
-     * non-clickable "not built yet" placeholder until now. "zones_detail" is
-     * a second registered page, only ever reached via
-     * ui_page_zones_detail_prepare() + kiln_ui_show("zones_detail"), never
-     * linked to directly. */
-    err = kiln_ui_register_page("zones", ui_page_zones_build);
-    if (err != ESP_OK) return err;
-    err = kiln_ui_register_page("zones_detail", ui_page_zones_detail_build);
-    if (err != ESP_OK) return err;
+    /* "zones"/"zones_detail" (ui_page_zones.c, the LCD equivalent of the web
+     * zones page's per-zone thermo_mask/relay_mask/cal_offset_c/temp_limits
+     * editor, TODO.md section 3/10.8) were REMOVED outright 2026-08-22 per
+     * owner request ("zones and thermocouples page on the lcd can go away").
+     * The owner's own framing: settings belong on the web GUI now; the only
+     * LCD-side zone information worth keeping is LIVE current temperature
+     * and relay status, which ui_page_temperature.c already shows (per-zone
+     * temp + per-relay ON/OFF toggle) -- that page stays and needed no
+     * change. Nothing replaces "zones"/"zones_detail" here; there is nothing
+     * left in their scope that isn't either settings (now web-only) or
+     * already covered by ui_page_temperature.c. */
 
     /* NS2009 touch calibration -- see ui_page_touch_cal.c/.h. Linked from
      * ui_page_config.c's nav hub like every other diagnostic/settings page. */

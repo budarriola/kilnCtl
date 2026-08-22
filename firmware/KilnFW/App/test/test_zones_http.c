@@ -85,6 +85,12 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
     (void)value;
     return ESP_OK;
 }
+
+/* web_encoding.c is not part of the host build (it pulls in the real httpd),
+   but zones_http.c/safety_cfg_http.c now call this from their page handlers.
+   Same local-stub convention as httpd_resp_set_hdr() just above. */
+void web_set_asset_cache_headers(httpd_req_t *r);
+void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;

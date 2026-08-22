@@ -9,16 +9,15 @@
 
 #include "MAX31856.h"
 #include "dashboard_http.h"
-#include "kiln_cfg_store.h"
 #include "kiln_io.h"
 #include "kiln_ui.h"
 #include "ui_confirm.h"
 #include "ui_page_config.h"
+#include "safety_trip_words.h"
 #include "profile_executor.h"
 #include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "run_state.h"
-#include "safety_trip_words.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "wifi_status_ui.h"
@@ -80,7 +79,12 @@
 //     actual-only chart came back to THIS page per an explicit user request
 //     ("i always want to see the graph above the start/profile selection
 //     even when not running"); the full actual+desired trend view with
-//     legend stays on ui_page_history.c for detail.
+//     legend stayed on ui_page_history.c for detail. SUPERSEDED AGAIN
+//     2026-08-22: ui_page_history.c/"Temperature History" is REMOVED
+//     outright (owner request, "tempiture history page can go away on the
+//     lcd too") -- this page's chart is now the only trend chart on the LCD,
+//     not a compact stand-in for a fuller one elsewhere. See "CHART FILLS
+//     THE PAGE" below for what replaced it.
 //
 // 2026-08-21, CHART RETURNS (partial reversal of the no-scroll rewrite above):
 // the operator wants the temperature trend visible on the home page at all
@@ -178,6 +182,23 @@
 //     detail is still visible via s_state_label's summary line and the
 //     per-zone rows above it.
 //
+// 2026-08-22, CHART FILLS THE PAGE (owner requests, same pass as
+// ui_page_history.c's removal): "remove whatever it is between the graph and
+// the start button" and "the graph ... should expand down to the start
+// button". The run-state summary card (profile/state text, live safety-trip
+// banner, active kiln-config name) and the progress bar (elapsed/remaining
+// time) that used to occupy that space -- plus the bottom_spacer that used to
+// keep the Start/Stop button pinned to the page's bottom edge while either of
+// those could be hidden -- are all GONE, not hidden. The chart itself now
+// carries flex_grow(1) (see ui_page_home_build()'s chart-build comment)
+// instead of a fixed pixel height, so it does bottom_spacer's old job:
+// whatever vertical space the fixed-height Start/Stop button below it does
+// not need, the chart claims. The button is still the LAST child of
+// `content` and still the lowest thing on the page -- that requirement is
+// unchanged, only what sits above it changed. See refresh_cb()'s tail comment
+// for the safety-trip-visibility trade-off this removal carries (still
+// visible on ui_page_safety.c, just no longer pre-empting this page).
+//
 // Content-container scrolling is explicitly disabled
 // (LV_OBJ_FLAG_SCROLLABLE cleared on both `scr` and `content` in
 // ui_page_home_build()) now that the content is sized to fit -- if a future
@@ -192,26 +213,15 @@ static const char *TAG = "ui_page_home";
  * faster than the control loop that produces the numbers changes them. */
 #define UI_PAGE_HOME_REFRESH_MS 1000
 
-/* Home page's own compact chart -- 2026-08-21, see this file's header
- * comment ("CHART RETURNS"). Deliberately smaller than
- * ui_page_history.c's UI_PAGE_HISTORY_CHART_POINTS (60): this page's plot
- * is UI_PAGE_HOME_CHART_HEIGHT_PX (70px) tall vs. history's 110px, so fewer
- * points buys back DRAM (see s_chart_pts's own comment) without visibly
- * changing anything -- 30 points at 1 sample/tick still spans the same
- * wall-clock window history's ring-buffer sampling period implies, just at
- * lower horizontal resolution on a physically smaller plot. */
+/* Home page's own chart -- 2026-08-21, see this file's header comment
+ * ("CHART RETURNS"); ui_page_history.c (the separate, larger "Temperature
+ * History" page this was once windowed smaller than) was removed 2026-08-22
+ * per owner request, so this is now the ONLY trend chart on the LCD. Point
+ * count stays modest (DRAM cost -- see s_chart_actual_pts/s_chart_planned_pts'
+ * own comment) even though the chart's on-screen HEIGHT is no longer fixed:
+ * see ui_page_home_build()'s chart-build comment for why height is now
+ * flex_grow(1) instead of a compile-time pixel constant. */
 #define UI_PAGE_HOME_CHART_POINTS 30
-/* 150, was 70 -- 2026-08-21 owner request ("remove the zone [] section and
- * make it so that i can see a temp and time scale on the graph"). Removing
- * the zone rows (~24px/row, up to MAX31856_CHANNEL_COUNT of them) and hiding
- * the idle state_card (~28-50px depending on zone count, now HIDDEN rather
- * than always-present -- see refresh_cb()'s show_state_card logic) frees
- * real main-axis height in `content`; per the task's own instructions, that
- * freed room is spent on a taller chart plus the two scale overlays (which
- * cost no extra height at all -- they're children of the chart, not new flex
- * rows, see s_chart_y_hi_label's comment). See the action-row comment below
- * for the full updated arithmetic that this number is checked against. */
-#define UI_PAGE_HOME_CHART_HEIGHT_PX 150
 
 /* 2026-08-21 owner request: "remove the zone a temp section ... also remove
  * the box that says no profile running". The per-zone ROW WIDGETS are gone
@@ -225,6 +235,9 @@ static const char *TAG = "ui_page_home";
  * built) without reintroducing the removed UI. */
 static uint8_t s_zone_count; /* zones_config_get_thermo_count() at build time */
 
+/* Trip strip -- hidden unless a live trip is present; see its creation in
+ * ui_page_home_build() for why it is hidden rather than absent. */
+static lv_obj_t *s_trip_strip;
 static lv_obj_t *s_chart;                     /* home page's compact chart -- actual + planned-ahead */
 static lv_chart_series_t *s_chart_actual_series;
 static lv_chart_series_t *s_chart_planned_series;
@@ -274,10 +287,6 @@ static lv_obj_t *s_chart_y_hi_label; /* top-left: current Y-axis max, in the use
 static lv_obj_t *s_chart_y_lo_label; /* bottom-left: current Y-axis min, in the user's unit_pref */
 static lv_obj_t *s_chart_x_label;    /* top-right: the plotted window's time span, "0:00-MM:SS" */
 
-static lv_obj_t *s_state_label;   /* "<profile> -- <state>" single line */
-static lv_obj_t *s_state_card;    /* parent of s_state_label -- recoloured whole when a safety trip is live */
-static lv_obj_t *s_time_label;
-static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_fire_btn;      /* merged Start/Stop button */
 static lv_obj_t *s_fire_btn_label;
 static ui_topbar_t s_topbar;       /* Menu gear icon, shared chrome -- see ui_topbar.h */
@@ -304,11 +313,6 @@ static void format_duration(uint32_t seconds, char *out, size_t out_cap)
     }
 }
 
-/* safety_trip_words_short() now lives in safety_trip_words.h, shared with
- * ui_page_safety.c (see that header's comment for the full reasoning: this
- * is the one shared copy for LCD single-line surfaces; profile_executor.h's
- * full-sentence table and main_page.html's JS table remain separate). */
-
 /* 2026-08-21 owner request: "the charts should never show below freezing
  * temp." The clamp belongs on the AXIS, never on the DATA: a thermocouple
  * fault/disconnect/cold-workshop reading below freezing must still be
@@ -327,18 +331,6 @@ static void format_duration(uint32_t seconds, char *out, size_t out_cap)
 static float freezing_point_disp(unit_pref_t unit)
 {
     return (unit == UNIT_PREF_FAHRENHEIT) ? 32.0f : 0.0f;
-}
-
-static const char *exec_state_label(profile_exec_state_t s)
-{
-    switch (s) {
-    case PROFILE_EXEC_IDLE: return "Idle";
-    case PROFILE_EXEC_RUNNING: return "Running";
-    case PROFILE_EXEC_PAUSED: return "Paused";
-    case PROFILE_EXEC_DONE: return "Done";
-    case PROFILE_EXEC_FAULTED: return "Faulted";
-    default: return "Unknown";
-    }
 }
 
 /* Shared by do_start() and the confirmation dialog builder below -- both need
@@ -628,14 +620,40 @@ static void refresh_cb(lv_timer_t *timer)
     profile_exec_status_t st;
     profile_executor_get_status(&st);
 
+    /* Safety-trip strip. Same gate the removed state-card banner used, kept
+     * verbatim on purpose: diag_age_ms < SAFETY_LINK_STALE_MS, because a
+     * STALE diag_state == TRIPPED is a silent link, not a live trip, and
+     * painting the two identically is exactly the "guard firing vs. dead
+     * peer" confusion this codebase has been careful to avoid elsewhere.
+     *
+     * Hidden (not blanked) when clear: LVGL skips hidden children in flex
+     * layout, so this costs zero height whenever nothing is wrong, which is
+     * what lets the chart still reach all the way down to the Start button. */
+    if (s_trip_strip != NULL) {
+        bool safety_tripped = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                              ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+        if (safety_tripped) {
+            char trip_buf[96];
+            snprintf(trip_buf, sizeof(trip_buf), "SAFETY TRIP -- %s",
+                     safety_trip_words_short(ds.diag_trip_reason));
+            lv_label_set_text(s_trip_strip, trip_buf);
+            lv_obj_remove_flag(s_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     /* Compact home chart -- see this file's header comment ("DESIRED SERIES
      * + PROGRESS BAR RETURN, part 2") for the idle-dot vs. whole-run-timeline
      * split. Same state==IDLE && history_count==0 gate ui_page_history.c
      * uses, so both pages flip from dot to timeline at the exact same
      * instant. profile_feasibility_plan_curve() is also used by the
      * progress-bar block further down -- computed once here and passed down
-     * rather than called twice per tick. */
-    int64_t total_planned_s = -1;
+     * rather than called twice per tick. 2026-08-22: the progress bar itself
+     * is gone (see this function's tail comment), but plan_pts/plan_n are
+     * still needed for the chart's planned-ahead series and time-axis label,
+     * so the call stays -- only its total-seconds return value is now
+     * discarded. */
     profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
     size_t plan_n = 0;
     if (st.state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
@@ -721,9 +739,9 @@ static void refresh_cb(lv_timer_t *timer)
              * state != IDLE (profile_executor.h's own field comments) --
              * profile_feasibility_plan_curve() is pure math over that copy,
              * safe to call from this refresh timer every tick. */
-            total_planned_s = profile_feasibility_plan_curve(st.segments, st.segment_count, st.run_start_c,
-                                                              plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
-                                                              &plan_n);
+            (void)profile_feasibility_plan_curve(st.segments, st.segment_count, st.run_start_c,
+                                                  plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
+                                                  &plan_n);
             horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
             if (horizon_s < 1.0f) {
                 horizon_s = 1.0f; /* guard div-by-zero below; a real profile always has segments */
@@ -889,88 +907,23 @@ static void refresh_cb(lv_timer_t *timer)
         lv_chart_refresh(s_chart);
     }
 
-    /* Single-line "<profile> -- <state>" summary -- replaces the previous
-     * two separate labels (profile name, state) to save a text line's worth
-     * of height (see this file's header comment on the budget).
+    /* 2026-08-22 owner request: "remove whatever it is between the graph and
+     * the start button" -- the run-state summary card (profile/state text,
+     * live safety-trip banner, active kiln-config name) and the progress bar
+     * (elapsed/remaining time) that used to live in this space are both
+     * GONE, not just hidden -- see this function's/ui_page_home_build()'s
+     * removed state_card/progress_row for what used to be here.
      *
-     * ROADMAP.md "safety processor faults should stop firing and the GUI
-     * should reflect that, on both the LCD and web page": a live safety
-     * trip is the most serious thing this card can show, so it PREEMPTS the
-     * normal profile/state text entirely rather than adding a second line --
-     * this page has no spare height to add one (header comment budget), and
-     * profile_executor.c's watchdog already faults/latches any RUNNING run
-     * independently of this display. Gated on diag_age_ms < SAFETY_LINK_
-     * STALE_MS for the same reason profile_executor.c's watchdog gates its
-     * own FAULTED transition on it: a stale diag_state == TRIPPED is the
-     * silent-link case, not a live trip, and conflating the two here is
-     * exactly the "guard firing vs. dead peer" confusion the task calls out.
-     * Solid red fill (not just text colour) matches safety_page.html's own
-     * TRIP_INEFFECTIVE/S9 escalation -- every live trip gets it here, since
-     * "the run kept going while the kiln cooled" is the one failure mode this
-     * whole feature exists to make impossible to miss. */
-    bool safety_tripped = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
-                           ds.diag_age_ms < SAFETY_LINK_STALE_MS;
-    char state_buf[96];
-    if (safety_tripped) {
-        snprintf(state_buf, sizeof(state_buf), "SAFETY TRIP -- %s",
-                 safety_trip_words_short(ds.diag_trip_reason));
-    } else if (st.state == PROFILE_EXEC_IDLE) {
-        snprintf(state_buf, sizeof(state_buf), "No profile running");
-    } else {
-        snprintf(state_buf, sizeof(state_buf), "%s -- %s", st.profile_name[0] ? st.profile_name : "(unnamed)",
-                 exec_state_label(st.state));
-    }
-
-    /* 2026-08-21 owner request: show the active KILN CONFIG (a saved
-     * relay/thermocouple/PID/guard snapshot, see kiln_cfg_store.h's header
-     * comment -- NOT the firing profile named just above, a different
-     * concept entirely) as ONE line on this existing card. Per the task's
-     * own instruction ("ONE line ... No new element, no height change"),
-     * this is appended onto s_state_label's SAME single line rather than a
-     * second lv_label -- a second element would grow state_card past this
-     * page's zero-margin worst-case budget (see this file's action-row
-     * comment: the worst 3-zone case leaves state_card only ~50px, already
-     * exactly what one line needs). s_state_label's long_mode is
-     * LV_LABEL_LONG_DOT (set at build time below) specifically so appending
-     * this can NEVER wrap the card into a second line/taller box regardless
-     * of how long either half gets -- an overlong combined string ellipsises
-     * instead, which is the honest degrade this hard no-scroll page needs.
-     * Skipped entirely during a live safety trip: that text already
-     * preempts everything else on this line (see the branch above), and
-     * appending more to an already-urgent message would only dilute it. */
-    if (!safety_tripped) {
-        int32_t cfg_id = kiln_cfg_store_get_active_id();
-        char cfg_name[KILN_CFG_NAME_MAX_LEN + 1];
-        size_t len = strlen(state_buf);
-        if (cfg_id != KILN_CFG_NO_ACTIVE_ID && kiln_cfg_store_get_name(cfg_id, cfg_name, sizeof(cfg_name))) {
-            snprintf(state_buf + len, sizeof(state_buf) - len, "  |  Cfg: %s", cfg_name);
-        } else {
-            snprintf(state_buf + len, sizeof(state_buf) - len, "  |  Cfg: none");
-        }
-    }
-    lv_label_set_text(s_state_label, state_buf);
-    lv_obj_set_style_bg_color(s_state_card, safety_tripped ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_text_color(s_state_label,
-                                 safety_tripped ? lv_color_hex(0xFFFFFF) : UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    /* 2026-08-21 owner request: "remove the box that says no profile
-     * running". This card is ALSO the live safety-trip banner (see the block
-     * above), so the fix is not deleting the card -- it's HIDING it exactly
-     * when it would have nothing to say: idle AND no live trip. HIDDEN (not
-     * deleted/rebuilt) so flex reclaims its main-axis space immediately
-     * (content's flex_grow(1) on this card means the freed height goes to...
-     * nothing, since a HIDDEN flex child is skipped by the layout entirely --
-     * the row above (progress_row) and below (action_row) simply end up with
-     * more slack between them and the content edges, which is fine on a page
-     * that never scrolls either way). Un-hidden the instant either condition
-     * that would have shown real text becomes true: a trip lands, or a
-     * profile moves off IDLE (running/paused/faulted/done all have something
-     * honest to say per exec_state_label()/the trip branch above). */
-    bool show_state_card = safety_tripped || st.state != PROFILE_EXEC_IDLE;
-    if (show_state_card) {
-        lv_obj_remove_flag(s_state_card, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s_state_card, LV_OBJ_FLAG_HIDDEN);
-    }
+     * KNOWN TRADE-OFF, flagged rather than silently dropped: the safety-trip
+     * banner this replaces was the one place a live safety trip pre-empted
+     * this page's display (ROADMAP.md "safety processor faults should stop
+     * firing and the GUI should reflect that, on both the LCD and web page").
+     * profile_executor.c's watchdog still independently faults/latches any
+     * RUNNING run on a trip -- the firing itself still stops -- but the LCD
+     * home page no longer calls that out visually; ui_page_safety.c (Menu ->
+     * Safety Processor) is now the only LCD surface that shows it. Confirm
+     * this trade-off is intended before relying on the home page alone to
+     * notice a trip. */
 
     /* Merged fire button -- label and color follow the same st.state this
      * function already polled above. Running/Paused reads "Stop" in the
@@ -982,67 +935,6 @@ static void refresh_cb(lv_timer_t *timer)
     } else {
         lv_label_set_text(s_fire_btn_label, "Start");
         lv_obj_set_style_bg_color(s_fire_btn, UI_THEME_ACCENT_4, 0);
-    }
-
-    /* Progress bar under the chart -- WHOLE-FIRING elapsed/remaining
-     * (2026-08-21 part 2; see this file's header comment). total_planned_s
-     * was already computed above (in the chart block) from the SAME
-     * profile_feasibility_plan_curve() call this bar needs -- reused here
-     * rather than calling it twice per tick. st.total_elapsed_s is real
-     * wall-clock seconds since profile_executor_run() (frozen across PAUSE
-     * by the executor itself, per that field's own comment), NOT the
-     * per-segment segment_elapsed_s this block used as a stopgap before the
-     * backend landed.
-     *
-     * HONESTY RULES (unchanged from the stopgap, now applied to the
-     * whole-firing numbers instead of per-segment ones):
-     *   - total_planned_s < 0 (any segment's ramp duration is unknowable,
-     *     per profile_feasibility.h's HONESTY RULE): no denominator -- show
-     *     elapsed only, HIDE the bar outright (not a 0%/100% fill, which
-     *     would misread as empty/full).
-     *   - total_planned_s >= 0: remaining = total - elapsed is always an
-     *     ESTIMATE the instant it's known, not just when it goes wrong --
-     *     ramp-lock overrun (profile_executor.h's ramp_lock_held) is never
-     *     corrected for in this number, so it is labeled "(estimate)"
-     *     unconditionally, same as main_page.html's remaining_is_estimate
-     *     (which the web page's backend sets unconditionally for the same
-     *     reason). Clamped to 0 rather than going negative if the firing
-     *     has already overrun its plan.
-     * The per-segment line the stopgap version showed here (e.g. "Segment:
-     * elapsed X / remaining Y") did not fit alongside a whole-firing line in
-     * this page's ~30px progress_row without re-growing the budget, so it
-     * was DROPPED from this bar -- segment context is still visible via
-     * s_state_label's summary line above. */
-    char elapsed_buf[16];
-    format_duration(st.total_elapsed_s, elapsed_buf, sizeof(elapsed_buf));
-    if (st.state == PROFILE_EXEC_IDLE) {
-        lv_label_set_text(s_time_label, "--");
-        lv_obj_add_flag(s_progress_bar, LV_OBJ_FLAG_HIDDEN);
-    } else if (total_planned_s < 0) {
-        /* 48: "Elapsed " (8) + up to 15 bytes of elapsed_buf + " (total
-         * unknown)" (16) + NUL = 40 max -- fits with margin. */
-        char buf[48];
-        snprintf(buf, sizeof(buf), "Elapsed %s (total unknown)", elapsed_buf);
-        lv_label_set_text(s_time_label, buf);
-        lv_obj_add_flag(s_progress_bar, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        uint32_t total = (uint32_t)total_planned_s;
-        uint32_t elapsed = st.total_elapsed_s;
-        uint32_t remaining = (elapsed < total) ? (total - elapsed) : 0;
-        char remaining_buf[16];
-        format_duration(remaining, remaining_buf, sizeof(remaining_buf));
-        /* 80, not 64: "Elapsed " (8) + 15 + " / Remaining " (13) + 15 +
-         * " (estimate)" (11) + NUL can reach 63 bytes -- rounded up with
-         * margin rather than computed to the exact byte, same discipline
-         * -Werror=format-truncation already enforced on the other buffers
-         * in this file. */
-        char buf[80];
-        snprintf(buf, sizeof(buf), "Elapsed %s / Remaining %s (estimate)", elapsed_buf, remaining_buf);
-        lv_label_set_text(s_time_label, buf);
-        int32_t pct = total > 0 ? (int32_t)((uint64_t)elapsed * 100u / total) : 100;
-        if (pct > 100) pct = 100;
-        lv_obj_remove_flag(s_progress_bar, LV_OBJ_FLAG_HIDDEN);
-        lv_bar_set_value(s_progress_bar, pct, LV_ANIM_OFF);
     }
 }
 
@@ -1166,16 +1058,51 @@ lv_obj_t *ui_page_home_build(void)
      * this must run AFTER content exists. */
     ui_topbar_raise(&s_topbar);
 
-    /* Compact actual-only chart -- see this file's header comment ("CHART
-     * RETURNS", 2026-08-21) and the action-row comment below for the height
-     * budget this trades against. Built directly into `content` (no card
-     * wrapper, unlike ui_page_history.c's chart) specifically to skip a
-     * card's own pad_all/pad_gap overhead -- every pixel of vertical budget
-     * here is accounted for in the action-row comment's arithmetic, and a
-     * wrapper card was not in that budget. */
+    /* Actual+planned chart -- see this file's header comment ("CHART
+     * RETURNS", 2026-08-21). Built directly into `content` (no card wrapper,
+     * unlike ui_page_history.c's chart, which no longer exists -- see this
+     * file's header comment on ui_page_history.c's removal) specifically to
+     * skip a card's own pad_all/pad_gap overhead.
+     *
+     * 2026-08-22 owner request ("remove whatever it is between the graph and
+     * the start button" / "the graph ... should expand down to the start
+     * button"): the run-state card, progress bar, and bottom spacer that used
+     * to fill this page's leftover vertical space are gone (see
+     * refresh_cb()'s tail comment and this function's own removed
+     * state_card/progress_row/bottom_spacer). The chart itself now carries
+     * flex_grow(1) instead of a fixed UI_PAGE_HOME_CHART_HEIGHT_PX, so it
+     * claims however much of `content`'s main-axis space action_row (the
+     * Start/Stop button, still the last child, still pinned to the bottom)
+     * does not need -- the same job bottom_spacer used to do, but performed
+     * by the chart growing into the space rather than an invisible filler
+     * next to a fixed-height chart. No explicit height is set here; flex_grow
+     * alone determines it. */
+    /* Safety-trip strip. The run-state card that used to carry the trip
+     * banner was removed on 2026-08-22 per the owner's "remove whatever it is
+     * between the graph and the start button" -- but losing the trip callout
+     * from the page an operator actually watches is not an acceptable side
+     * effect of a layout request. This strip is the compromise: it is created
+     * hidden and only ever shown while a trip is live, and LVGL SKIPS hidden
+     * children when laying out a flex container, so while everything is
+     * normal it occupies exactly zero pixels and the chart still grows all
+     * the way down to the Start button, which is what was asked for.
+     *
+     * First child, above the chart, so a trip reads at the top of the screen
+     * rather than displacing the button at the bottom. */
+    s_trip_strip = lv_label_create(content);
+    lv_obj_add_flag(s_trip_strip, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(s_trip_strip, lv_pct(100));
+    lv_label_set_long_mode(s_trip_strip, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_bg_color(s_trip_strip, UI_THEME_ACCENT_5, 0);
+    lv_obj_set_style_bg_opa(s_trip_strip, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_trip_strip, lv_color_white(), 0);
+    lv_obj_set_style_radius(s_trip_strip, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_set_style_pad_all(s_trip_strip, 3, 0);
+    lv_label_set_text(s_trip_strip, "");
+
     s_chart = lv_chart_create(content);
     lv_obj_set_width(s_chart, lv_pct(100));
-    lv_obj_set_height(s_chart, UI_PAGE_HOME_CHART_HEIGHT_PX);
+    lv_obj_set_flex_grow(s_chart, 1);
     lv_obj_set_style_bg_color(s_chart, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_bg_opa(s_chart, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_chart, 0, 0);
@@ -1200,11 +1127,14 @@ lv_obj_t *ui_page_home_build(void)
      * other one was the problem".) */
     lv_chart_set_div_line_count(s_chart, 0, 0);
     lv_chart_set_point_count(s_chart, UI_PAGE_HOME_CHART_POINTS);
-    /* Same "desired" accent color ui_page_history.c uses (ACCENT_3), now
-     * carrying the PLANNED-ahead curve instead of a trailing recorded
-     * setpoint -- see this file's header comment, part 2. No legend on this
-     * compact chart (no room in the 70px-tall budget); the full chart with a
-     * legend remains ui_page_history.c's job. */
+    /* Same "desired" accent color the now-removed ui_page_history.c used
+     * (ACCENT_3), carrying the PLANNED-ahead curve instead of a trailing
+     * recorded setpoint -- see this file's header comment, part 2. Still no
+     * on-chart legend text (the two corner overlay labels below cover Y/X
+     * scale; a colour-to-series legend was ui_page_history.c's job and was
+     * never rebuilt here after that page's removal -- actual is
+     * UI_THEME_ACCENT_1, planned is UI_THEME_ACCENT_3, same colours this
+     * codebase has used for those two concepts everywhere else). */
     s_chart_actual_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_1, LV_CHART_AXIS_PRIMARY_Y);
     s_chart_planned_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_3, LV_CHART_AXIS_PRIMARY_Y);
     for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
@@ -1250,36 +1180,6 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_align(s_chart_x_label, LV_ALIGN_TOP_RIGHT, -2, 2);
     lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
 
-    /* Progress row -- UNDER the chart, per the 2026-08-21 request ("show a
-     * progress bar under the graph with the time elapsed and time left").
-     * MOVED here (not duplicated) from inside state_card, where s_time_label/
-     * s_progress_bar used to live -- see this file's header comment
-     * ("DESIRED SERIES + PROGRESS BAR RETURN") for why one bar in one place
-     * beats two progress indicators on the same screen. A plain (non-
-     * floating) child of `content`'s flex column, so it consumes real
-     * main-axis height like every other fixed row here -- see the action-row
-     * comment below for the updated budget arithmetic this adds a line to. */
-    lv_obj_t *progress_row = lv_obj_create(content);
-    lv_obj_set_width(progress_row, lv_pct(100));
-    lv_obj_set_height(progress_row, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(progress_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(progress_row, 0, 0);
-    lv_obj_set_style_pad_all(progress_row, 0, 0);
-    lv_obj_set_flex_flow(progress_row, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(progress_row, 2, 0);
-    lv_obj_remove_flag(progress_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    s_time_label = lv_label_create(progress_row);
-    lv_obj_set_style_text_color(s_time_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(s_time_label, "--");
-
-    s_progress_bar = lv_bar_create(progress_row);
-    lv_obj_set_width(s_progress_bar, lv_pct(100));
-    lv_obj_set_height(s_progress_bar, 8);
-    lv_bar_set_range(s_progress_bar, 0, 100);
-    lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_progress_bar, UI_THEME_ACCENT_3, LV_PART_INDICATOR);
-
     /* 2026-08-21 owner request: "remove the zone [] section" -- no zone row
      * widgets are built on this page any more (see s_zone_count's own comment
      * near its declaration for what's KEPT: the count itself, still used by
@@ -1296,87 +1196,6 @@ lv_obj_t *ui_page_home_build(void)
         s_zone_count = MAX31856_CHANNEL_COUNT; /* defensive; should never trip */
     }
 
-    /* Compact run-state card -- 2026-08-21: now ONE summary line only
-     * ("<profile> -- <state>"); s_time_label/s_progress_bar MOVED out of
-     * this card into progress_row (built above, directly under the chart) --
-     * see this file's header comment ("DESIRED SERIES + PROGRESS BAR
-     * RETURN") for why.
-     *
-     * 2026-08-21 owner request ("the start button should be at the bottom of
-     * the LCD main page"): state_card used to carry flex_grow(1) here so its
-     * leftover main-axis space kept the action row pinned to `content`'s
-     * bottom edge -- that worked ONLY while state_card was always present.
-     * Once refresh_cb()'s show_state_card logic started HIDING this card
-     * while idle (a HIDDEN flex child is skipped by LVGL's layout outright,
-     * per that logic's own comment), the growing child disappeared from the
-     * layout entirely in exactly that state, so the leftover space it used to
-     * absorb went unclaimed above the button instead -- the button floated up
-     * to sit directly under progress_row rather than at the bottom, which is
-     * the bug this pass fixes. flex_grow(1) is REMOVED from state_card here;
-     * a dedicated spacer object (built right after this card, see its own
-     * comment below) now owns that job instead, because it is never hidden --
-     * present in idle, running, AND safety-tripped alike -- so the action row
-     * sits at the bottom of `content` in every one of those states, not just
-     * the ones where state_card happens to be visible. */
-    lv_obj_t *state_card = lv_obj_create(content);
-    lv_obj_set_width(state_card, lv_pct(100));
-    lv_obj_set_height(state_card, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(state_card, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(state_card, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_set_style_pad_all(state_card, UI_THEME_PADDING_PX / 2, 0);
-    lv_obj_set_flex_flow(state_card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(state_card, UI_THEME_PADDING_PX / 4, 0);
-    lv_obj_remove_flag(state_card, LV_OBJ_FLAG_SCROLLABLE);
-    s_state_card = state_card; /* refresh() recolours this whole card during a live safety trip */
-
-    s_state_label = lv_label_create(state_card);
-    lv_obj_set_style_text_color(s_state_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    /* LONG_DOT (not the label default WRAP) -- see refresh_cb()'s "active
-     * kiln config" comment: this line now carries the profile/state text
-     * PLUS the active kiln config's name, and this card has zero height
-     * margin to spare in the worst (3-zone) case. DOT guarantees this stays
-     * a single line (ellipsised if too long) no matter how long either half
-     * gets, rather than silently wrapping and growing state_card/breaking
-     * the no-scroll budget. */
-    lv_label_set_long_mode(s_state_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_state_label, lv_pct(100));
-    lv_label_set_text(s_state_label, "No profile running");
-    /* Built hidden -- boot state is always IDLE with no trip yet, i.e.
-     * exactly the "nothing to say" case refresh_cb()'s show_state_card logic
-     * hides for. refresh_cb(NULL) at the bottom of this function re-derives
-     * the real state (including un-hiding this, if e.g. a trip is already
-     * latched at boot) before the page is ever shown, so this starting value
-     * is never actually seen -- it just avoids a one-tick flash of the old
-     * "No profile running" box between page-build and the first refresh. */
-    lv_obj_add_flag(state_card, LV_OBJ_FLAG_HIDDEN);
-
-    /* Bottom spacer -- 2026-08-21 owner request ("the start button should be
-     * at the bottom of the LCD main page"), see state_card's comment above
-     * for the mechanism this replaces. A plain, always-visible, zero-content
-     * flex child with flex_grow(1) and a 0 minimum height: LVGL's flex layout
-     * gives a growing child ALL of `content`'s leftover main-axis space after
-     * every fixed-height sibling is laid out, so whatever this page's actual
-     * total height turns out to be at runtime (267px measured, see the
-     * action-row comment below), this spacer -- not state_card -- absorbs the
-     * slack. Unlike state_card it is NEVER hidden, so the action row stays
-     * pinned to `content`'s bottom edge in all three states the owner asked
-     * about: idle (state_card hidden, spacer alone fills the gap),
-     * running/paused/done/faulted (state_card shown at its natural content
-     * height, spacer fills whatever's left over that), and a live safety trip
-     * (state_card shown and recoloured, same as the running case). No visual
-     * footprint of its own -- transparent, no border, no padding -- so it
-     * cannot be mistaken for a real element if it is ever accidentally made
-     * visible. */
-    lv_obj_t *bottom_spacer = lv_obj_create(content);
-    lv_obj_set_width(bottom_spacer, lv_pct(100));
-    lv_obj_set_height(bottom_spacer, 0);
-    lv_obj_set_flex_grow(bottom_spacer, 1);
-    lv_obj_set_style_bg_opa(bottom_spacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bottom_spacer, 0, 0);
-    lv_obj_set_style_pad_all(bottom_spacer, 0, 0);
-    lv_obj_remove_flag(bottom_spacer, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(bottom_spacer, LV_OBJ_FLAG_CLICKABLE);
-
     /* Single merged Start/Stop button -- one user-visible request ("the
      * start stop button should be one button on the lcd"). Menu moved off
      * this row entirely into the status bar as a gear (see the status-bar
@@ -1384,56 +1203,13 @@ lv_obj_t *ui_page_home_build(void)
      * now just the one button. build_button() still grows it across the
      * row's width via flex_grow(1).
      *
-     * Action-row height arithmetic, UPDATED 2026-08-21 (this pass: "the start
-     * button should be at the bottom of the LCD main page", plus the
-     * freezing-clamp and time-scale changes elsewhere in this file that do
-     * not touch main-axis height). Same 267px real, hardware-measured content
-     * height this comment has used since the zone-removal pass (live
-     * tap-target dump, y=44..311).
-     *
-     * What changed THIS pass: state_card's flex_grow(1) moved to a new,
-     * always-present bottom_spacer child (built just above, see its own
-     * comment) instead of living on state_card itself. Previously, "leftover
-     * space goes to whichever child has flex_grow(1)" broke down exactly when
-     * that child (state_card) was HIDDEN: a hidden flex child is skipped by
-     * LVGL's layout outright, so its flex_grow was skipped too, and the
-     * leftover space went unclaimed ABOVE the action row instead of pinning
-     * it to the bottom -- the button floated up mid-page while idle, which is
-     * the bug this pass fixes. bottom_spacer is never hidden, so it now
-     * absorbs the leftover space in every state, not just the ones where
-     * state_card happens to be visible.
-     *
-     *     chart (actual+planned, with the temp/time scale overlay) ...... UI_PAGE_HOME_CHART_HEIGHT_PX = 150px
-     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
-     *     progress row (time label + slim bar) .......................... ~30px (20px label line + 2px gap + 8px bar)
-     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
-     *     state card (1 summary line, HIDDEN when idle+not tripped) ..... LV_SIZE_CONTENT: ~28px when shown, 0px when hidden
-     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px (skipped by LVGL when state_card is hidden)
-     *     bottom spacer (NEVER hidden) .................................. flex_grow(1): whatever's left, always >= 0
-     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
-     *     action row: 1 button, drawn ................................... 36px
-     *
-     * `content` now has 5 children always (chart, progress_row, state_card,
-     * bottom_spacer, action_row) -- 4 gaps, always, regardless of whether
-     * state_card is shown (an LVGL flex column only skips the gap adjacent to
-     * a HIDDEN child, so hiding state_card drops exactly one of those 4 gaps,
-     * same as before). The only thing worth checking is that the FIXED
-     * children (everything except bottom_spacer, and state_card when shown)
-     * never exceed 267px outright, which would starve bottom_spacer to 0px
-     * (harmless: it can legally be 0px, unlike the old state_card-grows
-     * scheme, this can never "break" the pin -- action_row is still the last
-     * child and still sits wherever bottom_spacer's bottom edge ends up, 0px
-     * tall or not) -- worst case, state_card shown:
-     *     150 (chart) + 30 (progress row) + 28 (state card) + 36 (button) + 4*4 (gaps) = 260px fixed,
-     *     leaving 267 - 260 = 7px for bottom_spacer
-     * -- still non-negative, so the button still sits exactly at the bottom
-     * edge rather than being clipped or pushed past it; idle (state_card
-     * hidden, one gap skipped) leaves 267 - (260 - 28 - 4) = 39px for
-     * bottom_spacer instead, comfortably positive either way. NOT re-measured
-     * on hardware since the zone-removal pass (no bench access when either
-     * pass was written) -- treat these figures as computed against the same
-     * real, hardware-measured 267px content height as before, not as
-     * pixel-verified for this specific spacer-based layout.
+     * 2026-08-22: the run-state card, progress bar, and bottom spacer that
+     * used to sit between the chart and this row are gone (see the chart's
+     * own build comment above and refresh_cb()'s tail comment) -- action_row
+     * is now the chart's very next sibling. It still stays pinned to
+     * `content`'s bottom edge: the chart above it carries flex_grow(1), so it
+     * (not a dedicated spacer) claims whatever vertical space this button
+     * does not need.
      *
      * Drawn vs effective button height: build_button()'s
      * ui_theme_apply_touch_area(btn, false) call reads back the button's
@@ -1444,33 +1220,13 @@ lv_obj_t *ui_page_home_build(void)
      * generous=UI_THEME_PADDING_PX*3=24, and ext_click_area is set to
      * max(18,24)=24px on every side (verified against ui_theme.c's actual
      * arithmetic, not assumed). Effective clickable height is therefore
-     * 36 + 2*24 = 84px -- 12px TALLER than the old 72px-drawn button's own
-     * effective area (72 already >= 72, so the old button got ext=24
-     * (generous) too, i.e. 72+48=120px effective; the new button's 84px
-     * effective area is smaller than the old one's 120px in absolute terms,
-     * but still comfortably clears the 72px minimum this whole mechanism
-     * exists to guarantee). The drawn box is what the operator sees and
-     * taps confidently within; the extra 24px halo on every side (48px on
-     * top, reaching upward into state_card's bottom padding/gap) is there so
-     * a slightly-off tap near the visual edge still registers.
-     *
-     * Hit-test conflict check (the user's explicit ask: does the
-     * upward-extended click area steal taps from state_card above it?):
-     * state_card and everything inside it (now just s_state_label) -- and,
-     * further up the page, progress_row and everything inside IT
-     * (s_time_label, s_progress_bar, moved here 2026-08-21) -- are all
-     * lv_obj_create()/lv_label_create()/lv_bar_create() calls, none followed
-     * by lv_obj_add_flag(..., LV_OBJ_FLAG_CLICKABLE)), so none of them are
-     * clickable. lv_obj_create() and lv_label_create() do not add
-     * LV_OBJ_FLAG_CLICKABLE by default in LVGL 9.5, and nothing in this file
-     * adds it to state_card, progress_row, or their children -- confirmed by
-     * reading every lv_obj_create/lv_label_create/lv_bar_create call above
-     * this comment; only lv_button_create() (used solely by build_button()
-     * for s_fire_btn) is clickable by default. Since LVGL's hit-test
-     * (lv_indev_search_obj(), see ui_theme.h's block comment) only considers
-     * CLICKABLE objects at all, the button's 24px upward halo landing on
-     * non-clickable state_card content is a no-op: there is nothing above
-     * this button on the page that could ever win a stolen tap. */
+     * 36 + 2*24 = 84px, comfortably clearing the 72px minimum this whole
+     * mechanism exists to guarantee. The drawn box is what the operator sees
+     * and taps confidently within; the extra 24px halo on every side (48px on
+     * top, now reaching upward into the chart's own bottom padding) is there
+     * so a slightly-off tap near the visual edge still registers -- the chart
+     * is a plain lv_chart (not CLICKABLE by default in LVGL 9.5), so that
+     * halo cannot steal a tap meant for anything inside it. */
     lv_obj_t *action_row = lv_obj_create(content);
     lv_obj_set_width(action_row, lv_pct(100));
     lv_obj_set_height(action_row, LV_SIZE_CONTENT);

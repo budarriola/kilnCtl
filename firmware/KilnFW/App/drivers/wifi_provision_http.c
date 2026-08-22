@@ -63,6 +63,7 @@ static esp_err_t send_embedded_gzip_html(httpd_req_t *req, const char *page_name
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
     return httpd_resp_send(req, (const char *)start, (size_t)(end - start));
 }
 
@@ -73,6 +74,7 @@ static esp_err_t theme_css_get_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "text/css");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
     return httpd_resp_send(req, (const char *)theme_css_gz_start,
                            (size_t)(theme_css_gz_end - theme_css_gz_start));
 }
@@ -88,6 +90,7 @@ static esp_err_t nav_js_get_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "text/javascript");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
     return httpd_resp_send(req, (const char *)nav_js_gz_start,
                            (size_t)(nav_js_gz_end - nav_js_gz_start));
 }
@@ -99,6 +102,7 @@ static esp_err_t app_js_get_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "text/javascript");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
     return httpd_resp_send(req, (const char *)app_js_gz_start,
                            (size_t)(app_js_gz_end - app_js_gz_start));
 }

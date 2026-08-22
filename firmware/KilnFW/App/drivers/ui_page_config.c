@@ -6,7 +6,6 @@
 
 #include "kiln_ui.h"
 #include "ui_theme.h"
-#include "ui_page_zones.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
 
@@ -82,6 +81,25 @@ static const char *TAG = "ui_page_config";
 //   - Temperature History -- real navigation to the new
 //     ui_page_history.c/.h (TODO.md 10.3's chart, moved off
 //     ui_page_home.c this pass).
+//
+// 2026-08-22 REMOVALS (owner request -- LCD sheds config duties now covered
+// by the web GUI): three of the above are GONE from this hub, not just
+// re-labelled:
+//   - "Zones & Thermocouples" cell/zones_nav_cb -- ui_page_zones.c/.h deleted
+//     outright ("zones and thermocouples page on the lcd can go away").
+//     Live zone temperature + relay status, the one part of that page's
+//     scope worth keeping on the LCD, was never that page's job anyway --
+//     ui_page_temperature.c already shows both and needed no change.
+//   - "Relays & Rules" cell -- was only ever a non-clickable "not built yet"
+//     placeholder (no nav_cb, nothing to delete behind it); the cell itself
+//     is removed ("relays and rules can go away on the lcd too").
+//   - "Temperature History" cell/history_nav_cb -- ui_page_history.c/.h
+//     deleted outright ("tempiture history page can go away on the lcd
+//     too"). The trend chart that page showed is superseded by
+//     ui_page_home.c's own chart, which now fills that page's freed vertical
+//     space (see ui_page_home.c's "CHART FILLS THE PAGE" header comment).
+// The hub therefore repacked from 3 pages (6+6+2 cells) to 2 (6+5 cells) --
+// see UI_CONFIG_HUB_PAGE_COUNT's own comment below for the new arithmetic.
 static void temperature_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -104,12 +122,6 @@ static void safety_nav_cb(lv_event_t *e)
 {
     (void)e;
     kiln_ui_show("safety");
-}
-
-static void history_nav_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("history");
 }
 
 static void touch_cal_nav_cb(lv_event_t *e)
@@ -152,12 +164,6 @@ static void kiln_setup_nav_cb(lv_event_t *e)
 {
     (void)e;
     kiln_ui_show("kiln_setup");
-}
-
-static void zones_nav_cb(lv_event_t *e)
-{
-    (void)e;
-    kiln_ui_show("zones");
 }
 
 /* ROADMAP.md 2026-08-21 "a real shared temperature-unit setting": the hub's
@@ -272,8 +278,24 @@ static void units_toggle_cb(lv_event_t *e)
  * Diagnostics from hub page 2 and presses Back returns to hub page 2 rather
  * than being dumped back on page 1. That keeps every sub-page's "Back goes
  * back exactly one level" contract intact -- Back lands on the hub view the
- * user actually came from. */
-#define UI_CONFIG_HUB_PAGE_COUNT     3
+ * user actually came from.
+ *
+ * 2026-08-22 REMOVALS (owner request -- see this file's top header comment):
+ * "Zones & Thermocouples", "Relays & Rules", and "Temperature History" are
+ * gone, dropping the total from thirteen destinations to ten: Temperature,
+ * Network/Wi-Fi, Board Health, Safety Processor, Touch Calibration,
+ * Diagnostics, Thermocouple Faults, Profiles, the unit toggle, Thermocouple
+ * Types, Kiln Setup -- eleven, not ten (the unit toggle and Kiln Setup were
+ * easy to undercount against the stale destination list above; verified by
+ * reading every build_nav_item()/build_unit_toggle_item() call in
+ * ui_page_config_build() below before touching this constant, not assumed).
+ * Eleven fits the same "6 + 5 across two pages" arithmetic this comment
+ * already worked out above for the same count, before Thermocouple Types and
+ * Kiln Setup pushed it to thirteen and needed a third page. UI_CONFIG_HUB_
+ * PAGE_COUNT goes back to 2; the third page's two cells (Thermocouple Types,
+ * Kiln Setup) move onto page 2's five free slots -- see the cell-placement
+ * calls below. */
+#define UI_CONFIG_HUB_PAGE_COUNT     2
 #define UI_CONFIG_HUB_ITEMS_PER_PAGE 6
 #define UI_CONFIG_HUB_PAGE_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 3 + (UI_THEME_PADDING_PX / 2) * 2)
 
@@ -500,36 +522,32 @@ lv_obj_t *ui_page_config_build(void)
         s_hub_pages[i] = build_hub_page(content);
     }
 
-    /* Page 1 (6 cells, full): the two not-yet-built placeholders sit here,
-     * with the most frequently used real destinations, so the placeholders
-     * never push a working page off the visible area. */
-    build_nav_item(s_hub_pages[0], "Zones & Thermocouples", zones_nav_cb);
-    build_nav_item(s_hub_pages[0], "Relays & Rules (not built yet)", NULL);
+    /* Page 1 (6 cells, full). 2026-08-22: "Zones & Thermocouples" and
+     * "Relays & Rules" (the latter never more than a "not built yet"
+     * placeholder) are gone from this page -- see this file's top header
+     * comment. Their two slots are filled by Touch Calibration and
+     * Diagnostics, pulled forward from the old page 2, rather than left
+     * empty. */
     build_nav_item(s_hub_pages[0], "Temperature", temperature_nav_cb);
     build_nav_item(s_hub_pages[0], "Network / Wi-Fi", network_nav_cb);
     build_nav_item(s_hub_pages[0], "Board Health", board_health_nav_cb);
     build_nav_item(s_hub_pages[0], "Safety Processor", safety_nav_cb);
+    build_nav_item(s_hub_pages[0], "Touch Calibration", touch_cal_nav_cb);
+    build_nav_item(s_hub_pages[0], "Diagnostics", diagnostics_nav_cb);
 
-    /* Page 2 (5 of 6 cells -- one free for a 12th destination before a third
-     * page is needed): the remaining five destinations. */
-    build_nav_item(s_hub_pages[1], "Temperature History", history_nav_cb);
-    build_nav_item(s_hub_pages[1], "Touch Calibration", touch_cal_nav_cb);
-    build_nav_item(s_hub_pages[1], "Diagnostics", diagnostics_nav_cb);
+    /* Page 2 (5 of 6 cells -- one free for an eleventh destination before a
+     * third page is needed again). 2026-08-22: "Temperature History" is gone
+     * from this page (ui_page_history.c/.h deleted -- see this file's top
+     * header comment); Thermocouple Types and Kiln Setup, which used to need
+     * their own third page, moved here into two of its now-free slots. */
     build_nav_item(s_hub_pages[1], "Thermocouple Faults", thermo_faults_nav_cb);
     build_nav_item(s_hub_pages[1], "Profiles", profiles_nav_cb);
-    /* 12th destination, in the one cell page 2 had free (5 of 6 -- confirmed
-     * against this file's own "Paged hub" comment before adding this, not
-     * assumed). See build_unit_toggle_item()'s comment for why this is an
-     * in-place toggle rather than a new kiln_ui_show() route. */
+    /* See build_unit_toggle_item()'s comment for why this is an in-place
+     * toggle rather than a new kiln_ui_show() route. */
     build_unit_toggle_item(s_hub_pages[1]);
-
-    /* Page 3 (1 of 6 cells, 2026-08-21): "Thermocouple Types" -- see this
-     * file's "Paged hub" comment for why this got a third page instead of
-     * being squeezed onto an already-full page 1/2 or bolted onto an
-     * existing thermocouple-related page. */
-    build_nav_item(s_hub_pages[2], "Thermocouple Types", tc_types_nav_cb);
-    /* 2nd of 6 cells on page 3, see kiln_setup_nav_cb()'s comment above. */
-    build_nav_item(s_hub_pages[2], "Kiln Setup", kiln_setup_nav_cb);
+    build_nav_item(s_hub_pages[1], "Thermocouple Types", tc_types_nav_cb);
+    /* See kiln_setup_nav_cb()'s comment above. */
+    build_nav_item(s_hub_pages[1], "Kiln Setup", kiln_setup_nav_cb);
 
     /* content is created after the topbar's icon proxy, so without this it
      * would sit above the proxy in z-order and win taps in the overlap

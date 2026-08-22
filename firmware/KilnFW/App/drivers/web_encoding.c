@@ -142,3 +142,11 @@ esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const 
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, WEB_ENCODING_406_BODY, HTTPD_RESP_USE_STRLEN);
 }
+
+void web_set_asset_cache_headers(httpd_req_t *req)
+{
+    /* See web_encoding.h for why this exists and why it is no-cache rather
+     * than no-store. httpd_resp_set_hdr() does not copy the value, so the
+     * string must outlive the response -- a string literal does. */
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+}

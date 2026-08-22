@@ -71,6 +71,7 @@ static esp_err_t backup_page_get_handler(httpd_req_t *req)
     }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
     return httpd_resp_send(req, (const char *)backup_page_html_gz_start,
                            (size_t)(backup_page_html_gz_end - backup_page_html_gz_start));
 }
