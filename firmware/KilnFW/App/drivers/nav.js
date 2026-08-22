@@ -51,6 +51,15 @@
     { href: '/wifi', label: 'Network settings' },
     { href: '/ota', label: 'Firmware update' },
     { href: '/diagnostics', label: 'Diagnostics' },
+    // 2026-08-22: board_temps.c has served /board_temps since it was written,
+    // but nothing ever linked to it -- the page was reachable only by typing
+    // the URL. Found while sweeping every route in a headless browser: the
+    // sweep list said "/board", which is not a route, and unknown paths 302
+    // to "/" (the captive-portal catch-all every route on this server
+    // inherits), so the sweep was silently testing the dashboard twice and
+    // reporting it as the board page. That redirect is why a missing page is
+    // invisible from a browser -- it looks like a working link, not a 404.
+    { href: '/board_temps', label: 'Board health (ESP + cold junctions)' },
     { href: '/diagnostics/thermo', label: 'Thermocouple faults' },
     { href: '/safety', label: 'Safety processor' },
     { href: '/safety/commissioning', label: 'Safety commissioning' },

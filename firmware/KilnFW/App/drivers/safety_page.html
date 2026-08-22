@@ -85,7 +85,11 @@
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<a href="/">&larr; Dashboard</a>
+<!-- Ad-hoc back-link retired 2026-08-22: nav.js's shared topbar already
+     supplies Home and Menu on every page, and these hand-rolled links were
+     both redundant and undersized (measured 99x17 / 78x17 / 103x17 in a
+     headless browser, against the 32px minimum a fingertip needs). Same
+     removal readiness_page.html and diagnostics_page.html already record. -->
 <!-- <h1>Safety Processor</h1> removed 2026-08-21 (rework item 5): nav.js's
      topbar now shows this page's name ("Safety", from <title> above) in the
      brand's old spot, so the heading duplicated it. -->

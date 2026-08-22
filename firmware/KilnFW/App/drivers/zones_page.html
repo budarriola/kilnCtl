@@ -6,14 +6,26 @@
 <title>kilnCtl - Thermocouples &amp; Zones</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
 <!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
-     for why `defer` matters to this page's own inline <script> below. This
-     page has no <link rel="stylesheet" href="/theme.css"> (it keeps its own
-     full inline copy of the --ui-* palette instead, see the comment on this
-     file's :root block above) -- not changed by this pass since zones_http.c,
-     which owns this page's serving handler, is out of scope here; nav.js's
-     and app.js's CSS classes (theme.css) only need the --bg/--fg/--border/
-     --button-bg/--card-bg/--ui-* names, which this page already defines
-     locally with the same spelling, so they work unmodified either way. -->
+     for why `defer` matters to this page's own inline <script> below.
+
+     2026-08-22: this page was the ONLY one of the fifteen with no theme.css
+     link. The old note here argued that was harmless, on the grounds that
+     nav.js's and app.js's classes only need the --bg/--fg/--border/--ui-*
+     NAMES, which this page defines locally with the same spelling. That
+     reasoning covered the custom properties and missed the rest of the file:
+     theme.css also carries the RULES for the shared chrome those two scripts
+     inject -- .kc-topbar, .kc-home-btn/.kc-menu-btn, .kc-menu-overlay, .card,
+     [hidden]. Without them this page rendered nav.js's topbar markup with
+     none of the topbar's styling, which is exactly the owner's report that
+     the header was not consistent with the other pages'. Measured in a
+     headless browser before the fix: the Home button computed to
+     `display: inline; min-height: 0` and rendered 57x17px, against 40px tall
+     everywhere else.
+
+     The page keeps its own inline palette block below -- that duplication is
+     pre-existing and harmless (identical names and values), and removing it
+     is a separate cleanup, not something to fold into a bug fix. -->
+<link rel="stylesheet" href="/theme.css">
 <script defer src="/nav.js"></script>
 <script defer src="/app.js"></script>
 <style>
@@ -64,6 +76,30 @@
     background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
     border-radius: var(--ui-radius);
   }
+  /* 2026-08-22: a headless-Chromium sweep at 320/390px found this page's
+     document scrollWidth running to 474px inside a 320px viewport -- a real
+     horizontal-overflow bug, not a cosmetic one, since it means the whole
+     page (not just this control) gets sideways-scrollable on a phone. Root
+     cause: a bare <select> was never in the width-constraining rule above
+     (only input[type=text]/input[type=number] were), so #safetyTcType and
+     #atRule below defaulted to CSS's normal shrink-to-fit-content sizing for
+     a <select> -- i.e. wide enough for their single WIDEST <option> string
+     (safetyTcType's longest is 'Type B (0 to 1820°C) -- highest range; no CJ
+     compensation below ~50°C', atRule's is the Tyreus-Luyben option), which
+     drags the select, and with it the whole document, past the viewport.
+     The option text itself is left completely unshortened (thermocouple
+     ranges/notes are real information the task this page serves cares
+     about) -- only the CLOSED control's box is constrained to the viewport,
+     same as every text/number input already is; overflow/ellipsis below
+     clips just the on-screen display of whichever option is currently
+     selected, never the option list itself (a native <select> always shows
+     its options at their own full width when opened, regardless of the
+     closed control's width). */
+  select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .zone { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.7em 1em; margin-bottom: 0.7em; }
   .relaybits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
@@ -104,6 +140,32 @@
   p.verdict-ok { color: var(--ok); }
   p.verdict-warn { color: var(--warn); }
   p.verdict-bad { color: var(--bad); }
+  /* 2026-08-22: root cause of the "input.offsettle overlaps button#saveBtn"
+     bug a headless-Chromium sweep found at 1280px (measured: 69x35px of
+     overlap between the two). Each zone's "Advanced guard thresholds" is a
+     CLOSED <details class="advguards"> by default (zoneBlock() below). A
+     closed <details> is not simply `display: none` on its non-<summary>
+     children in current Chromium -- it skip-paints them but still runs a
+     real layout pass for their descendants (an internal content-visibility
+     optimization), so an input like .offsettle deep inside gets a real,
+     non-zero position computed as if the details were open. That phantom
+     position is anchored to its own local subtree, not clipped to the
+     zone .card's actual (small, collapsed) rendered height, so with several
+     zones stacked above real page content of its own, the phantom position
+     computed for a LATER zone's closed .offsettle can land past the real,
+     visible Save button that comes after every zone card -- exactly the
+     reported overlap. Nothing is actually painted there (a screenshot shows
+     nothing), but the geometry is real enough that any code doing
+     hit-testing/overlap checks without first confirming visibility (this
+     project's own browser sweep included) sees a genuine collision.
+     Reproduced locally with this page's own zoneBlock() output at 3 zones/
+     1280px: offsettle[2] landed at y=3678 h=38 (bottom 3716) while saveBtn
+     sat at y=3670 h=42 (bottom 3712) -- a 34x69px overlap, matching the
+     report almost exactly. Fix: force the closed state to a real, explicit
+     zero-size box via an author rule the browser can't optimize around
+     (same fix and same reasoning as profiles_page.html's catalogue-row
+     overlap bug -- see that file's `.ci:not([open])` rule). */
+  details.advguards:not([open]) > *:not(summary) { display: none; }
 </style>
 </head>
 <body>

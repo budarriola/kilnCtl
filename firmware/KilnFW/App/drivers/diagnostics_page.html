@@ -67,16 +67,32 @@
   .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
                   padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
   .stale-banner.show { display: block; }
+  /* Bug fix 2026-08-22 (headless-Chromium 320px sweep): the "Safety" and
+     "Thermocouple Faults" links used to sit inline inside the closing <p>,
+     which measured 37x15 and 123x15 -- both under the ~32px fingertip
+     minimum, and at 320px the wrap point landed them on top of each other
+     (measured 37x15 overlapping 37x15). Pulling them out of the running
+     text into their own block list fixes both problems at once: each is
+     now a full-width row with real padding (comfortably over 32px tall
+     regardless of viewport, so 320/360/390/768/1280 all just get a wider
+     or narrower version of the same stacked list, never a wrap collision),
+     and stacking them removes the wrap point that caused the overlap in
+     the first place. */
+  .linklist { display: flex; flex-direction: column; gap: 0.5em; margin: 0.6em 0 1em; }
+  .linklist a { display: block; padding: 0.6em 0.9em; min-height: 32px; box-sizing: border-box;
+                background: var(--button-bg); border: 1px solid var(--border);
+                border-radius: var(--ui-radius); text-decoration: none; }
 </style>
 </head>
 <body>
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
-<a href="/">&larr; Dashboard</a>
 <!-- <h1>Diagnostics</h1> removed 2026-08-21 (rework item 5): nav.js's
      topbar now shows this page's name in the brand's old spot (see that
-     file's pageTitle()), so the heading duplicated it. The "&larr;
-     Dashboard" link above predates the topbar's own Home button and is
-     left as-is -- not asked for in this pass, and harmless alongside it. -->
+     file's pageTitle()). The ad-hoc "&larr; Dashboard" link that used to
+     sit here (predating the topbar's Home button) is removed as of
+     2026-08-22, matching readiness_page.html's own retirement of the same
+     kind of stray back-link once nav.js's shared topbar covers it --
+     measured 99x17 in the headless-Chromium sweep that flagged it. -->
 <p class="lead">The web twin of the LCD's Diagnostics and Board Health pages
 (UI_PLAN.md's "page structure rework") -- everything below reads GET
 /api/status and GET /api/board_temps, the same live snapshots the panel's own
@@ -143,7 +159,11 @@ firing progress.</p>
 </div>
 <div class="card" id="nvsCard"><div class="row"><span class="label">NVS sections</span><span class="value">loading&hellip;</span></div></div>
 <p class="note">More detail (safety-processor link stats, per-channel
-thermocouple fault registers) lives on their own pages: <a href="/safety">Safety</a> and <a href="/diagnostics/thermo">Thermocouple Faults</a>.</p>
+thermocouple fault registers) lives on their own pages:</p>
+<div class="linklist">
+  <a href="/safety">Safety</a>
+  <a href="/diagnostics/thermo">Thermocouple Faults</a>
+</div>
 
 <script src="/nav.js"></script>
 <script src="/app.js"></script>

@@ -117,7 +117,28 @@ button { min-height: var(--ui-touch); }
 .kc-page-title { font-weight: bold; color: var(--fg); font-size: 1em; min-width: 0;
                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kc-topbar-actions { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
-.kc-home-btn, .kc-menu-btn { min-height: 0; padding: 0.35em 0.8em; font-size: 0.85em;
+/* min-height 0 -> 40px, 2026-08-22. A browser sweep at 320/390px measured
+   these at 27-30px tall, under the 32px floor a fingertip needs and well
+   under the 44px both platform guidelines suggest; they are the two controls
+   on every single page, so they are the worst two to have undersized. 40px is
+   the compromise the topbar can actually afford at 320px without the page
+   title losing its room (the title ellipsises rather than pushing them off --
+   see .kc-page-title's min-width: 0 note). Deliberately NOT var(--ui-touch)
+   (72px): that is sized for the LCD's gloved-hand panel case and would eat a
+   fifth of a phone's visible height on every page. inline-flex + center keeps
+   the glyph and word optically centred now that there is spare height. */
+/* box-sizing is declared HERE rather than left to each page. Measured
+   2026-08-22: the same button rendered 40px tall on pages that happen to
+   carry a `*{box-sizing:border-box}` reset (readiness, diagnostics, backup)
+   and 52px on pages that do not (profiles, zones) -- min-height 40 plus
+   padding plus border, under content-box. That is the owner's "make the
+   header consistent" report in its most literal form: identical markup and
+   identical rules, two different heights, decided by whether an unrelated
+   page-local reset existed. Shared chrome must not inherit its geometry from
+   whatever the host page happens to declare. */
+.kc-home-btn, .kc-menu-btn { box-sizing: border-box;
+               min-height: 40px; display: inline-flex; align-items: center;
+               justify-content: center; padding: 0.35em 0.8em; font-size: 0.85em;
                border-radius: var(--ui-radius); border: 1px solid var(--border);
                background: var(--button-bg); color: var(--fg); cursor: pointer;
                text-decoration: none; }

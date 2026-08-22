@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kilnCtl - Safety Commissioning</title>
 <script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- 2026-08-22: this page used zones_page.html as its model and inherited
+     that file's one real defect -- no theme.css link. theme.css carries the
+     RULES for the chrome nav.js and app.js inject (.kc-topbar, .kc-home-btn/
+     .kc-menu-btn, .kc-menu-overlay, .card, [hidden]), not just the --ui-*
+     custom properties, so without it this page rendered the shared topbar
+     markup unstyled: measured in a headless browser, its Home link computed
+     to `display: inline; min-height: 0` at 17px tall against 40px everywhere
+     else. The local --fault-color note further down still stands; a local
+     token definition is harmless alongside the stylesheet. -->
+<link rel="stylesheet" href="/theme.css">
 <!-- SaftyFW/docs/COMMISSIONING.md section 4 is this page's spec; section 3.1
      is the exact HTTP contract this page's JS is written against (GET/POST
      /api/safety/commissioning, POST /api/safety/commissioning/bench_preset);
@@ -135,6 +145,22 @@
   .crc-mismatch { color: var(--fault-color); font-weight: bold; }
 
   details.section-details summary { cursor: pointer; font-weight: bold; }
+
+  /* Bug fix 2026-08-22 (headless-Chromium 390px sweep): a bool-type field's
+     checkbox measured 13x13px -- far under the ~32px fingertip minimum, and
+     on a page that WRITES safety-commissioning parameters a mis-tap here is
+     not cosmetic, it is a wrong guard value silently staged. The fix is the
+     usual one: the label wraps the checkbox (see .bool-label / fieldBlock's
+     bool branch below) so the whole row -- name, unit, whitespace included
+     -- is the hit target, not just the 13px box, and the box itself is
+     enlarged and given explicit min dimensions so it still reads as a
+     checkbox even at a glance. Verified in both themes: --fg/--border only,
+     no new colors introduced. */
+  label.bool-label { display: flex; align-items: center; gap: 0.6em; cursor: pointer;
+    min-height: 32px; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  label.bool-label input[type=checkbox] { width: 1.5em; height: 1.5em; min-width: 32px;
+    min-height: 32px; flex: 0 0 auto; accent-color: var(--link); }
+  label.bool-label .hint { font-weight: normal; }
 
   /* Phone-width pass: cards already stack (flex-wrap on field-head, no
      fixed-width side-by-side rows anywhere on this page) so nothing extra
@@ -416,8 +442,12 @@ function fieldInputHtml(f, paramsById) {
     return html;
   }
   if (f.type === 'bool') {
+    // Rendered by fieldBlock's bool branch instead (label-wraps-checkbox,
+    // see the .bool-label comment above) -- this function still owns the
+    // <input> markup itself so there is exactly one place that builds a
+    // bool field's checked/data-id/data-type attributes.
     var checked = (isSet && val) ? ' checked' : '';
-    return '<input type="checkbox" data-id="' + f.id + '" data-type="bool" style="width:auto;display:inline-block"' + checked + '>';
+    return '<input type="checkbox" data-id="' + f.id + '" data-type="bool"' + checked + '>';
   }
   // f32 / u16 / u8: a plain number input. isSet false -> leave the value
   // attribute OFF entirely (no "0", no placeholder-as-value) so an unset
@@ -438,11 +468,27 @@ function fieldBlock(f, paramsById) {
   div.className = 'field' + (unsetHere ? ' unset' : '');
   div.dataset.id = f.id;
 
-  var headHtml = '<label for="f' + f.id + '">' + window.kcEscapeHtml(f.name) +
-    (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') + '</label>' +
-    '<span class="risk-badge risk-' + f.risk + '">' + RISK_BADGE[f.risk] + '</span>';
-
-  var bodyHtml = fieldInputHtml(f, paramsById);
+  // bool fields: the label WRAPS the checkbox (fieldInputHtml still builds
+  // the <input> itself) so the entire name+unit row is the hit target, not
+  // the checkbox alone -- see the .bool-label comment above the field-head
+  // style. Every other type keeps the plain label + separate input/select
+  // it already had, since those widgets are full-width and don't have this
+  // page's small-target problem.
+  var headHtml;
+  var bodyHtml;
+  if (f.type === 'bool') {
+    headHtml = '<label class="bool-label">' + fieldInputHtml(f, paramsById) +
+      '<span>' + window.kcEscapeHtml(f.name) +
+      (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') +
+      '</span></label>' +
+      '<span class="risk-badge risk-' + f.risk + '">' + RISK_BADGE[f.risk] + '</span>';
+    bodyHtml = '';
+  } else {
+    headHtml = '<label for="f' + f.id + '">' + window.kcEscapeHtml(f.name) +
+      (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') + '</label>' +
+      '<span class="risk-badge risk-' + f.risk + '">' + RISK_BADGE[f.risk] + '</span>';
+    bodyHtml = fieldInputHtml(f, paramsById);
+  }
 
   var noteHtml = f.note ? '<p class="note">' + window.kcEscapeHtml(f.note) + '</p>' : '';
   if (f.def !== undefined && isSet) {

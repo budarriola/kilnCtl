@@ -65,7 +65,42 @@
   button { padding: 0.6em 1.2em; font-size: 0.95em;
            background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
            border-radius: var(--ui-radius); cursor: pointer; }
-  button.small { min-height: 0; padding: 0.3em 0.7em; font-size: 0.85em; }
+  /* 2026-08-22: min-height raised 0 -> 32px. A headless-Chromium sweep at
+     390/1280px found EVERY pair of adjacent catalogue rows' "Use / Save a
+     copy"/"Remove" buttons reporting overlapping bounding boxes (e.g. one
+     row's buttons at y=690 h=25, the next row's at y=707 h=25 -- an 8px
+     overlap, with rows only ~17px apart). Reproduced locally: the real cause
+     turned out to be Chromium's closed-<details> rendering (see the
+     `.ci:not([open])` rule below for the actual fix for THAT), but while
+     chasing it down this file's own 25px .small height was also confirmed
+     under the 32px floor a fingertip needs -- and Remove/Delete/hide are the
+     only actions this class is ever used for on real content rows (the
+     catalogue's Use/Remove, the saved-profile list's Edit/Delete), so it
+     gets bumped here rather than left as the one destructive control on this
+     page smaller than the sitewide --ui-touch/40px floor everything else
+     converged on. */
+  button.small { min-height: 32px; padding: 0.3em 0.7em; font-size: 0.85em; }
+  /* 2026-08-22: the actual root cause of the "overlapping catalogue row
+     buttons" bug above. A CLOSED <details> (the normal/default state of
+     every "Shipped schedules" entry below) is not simply `display: none` on
+     its non-<summary> children in current Chromium -- it renders them via an
+     internal content-visibility optimization that skips PAINTING them but
+     still computes and retains a real, non-zero layout box for each
+     descendant (confirmed locally: a headless screenshot of several closed
+     entries shows only the summary lines, nothing else, yet
+     getBoundingClientRect() on the Use/Remove buttons inside them still
+     returns their full real size and position, sitting at roughly the
+     summary's own line-height spacing apart -- which is exactly the ~17px
+     gap against a 25px button that a rect-based sweep (or any other code
+     that queries the DOM without checking visibility, e.g. automated a11y
+     tooling) sees as physically overlapping). Nothing is actually visible on
+     screen because of this, but relying on an unspecified internal browser
+     optimization to also zero out descendant geometry is not safe to leave
+     alone -- an author rule that forces it explicitly removes the ambiguity
+     outright rather than hoping today's rendering quirk never changes.
+     Verified: adding this rule collapses every closed-row control's rect to
+     0x0/0,0 in the same local repro. */
+  details.ci:not([open]) > *:not(summary) { display: none; }
   #msg { margin-top: 1em; }
   #msg .err { color: var(--err); font-weight: bold; }
   #msg .warn { color: var(--warn); }
