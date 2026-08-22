@@ -1772,16 +1772,24 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * 4096: MAX31856_read_all/pid_update_terms/thermal_guard_tick/
      * kiln_io_set_relay_mask/safety_link_set_fault_source all run on this
      * stack, now looped up to MAX31856_CHANNEL_COUNT times per tick. */
-    /* 2026-08-22: PSRAM stack, audited against uart_bridge_ext.c's
-     * cache-disable hazard. executor_task_entry() reads thermo/relay state
-     * and runs PID/guard math on this stack, but the calls that reach flash
-     * (profiles_http_save/_delete, zones_http config writers, run_state
-     * persistence) are made by profile_executor_run()/_halt()/_pause() from
-     * WHICHEVER task calls them (an HTTP handler or uart_bridge_ext.c's
-     * flash-safe worker) -- never from this task's own loop. */
-    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(executor_task_entry, "profile_executor", 4096, NULL, 5,
-                                                    &s_exec.task, tskNO_AFFINITY,
-                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* INTERNAL stack, deliberately. A 2026-08-22 pass moved this to PSRAM on
+     * the reasoning that every flash-touching call was made by
+     * profile_executor_run()/_halt()/_pause() from whichever task called
+     * them, never from this loop. That reasoning was WRONG and the board
+     * crashed on the bench the first time a real firing was started:
+     * the tick path itself calls run_state_note() (RUNNING/FAULTED/DONE
+     * breadcrumbs, ~line 1516) and relay_cycles_maybe_persist() (~line 1481),
+     * both of which write NVS. A task whose stack lives in PSRAM cannot be
+     * running when the flash cache is disabled -- ESP-IDF asserts
+     * esp_task_stack_is_sane_cache_disabled() in
+     * spi_flash_disable_interrupts_caches_and_other_cpu() and panics.
+     *
+     * Do not move this back without first removing every flash write from
+     * the tick path, which is not a stack-placement question but a design
+     * one: the run-state breadcrumb exists precisely so a power loss mid-tick
+     * is recoverable. */
+    BaseType_t ok = xTaskCreatePinnedToCore(executor_task_entry, "profile_executor", 4096, NULL, 5,
+                                            &s_exec.task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_executor) failed");
         vSemaphoreDelete(s_exec.lock);
@@ -1790,13 +1798,16 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
     }
     /* Small and independent on purpose -- guard 9 exists precisely because
      * the control task cannot be trusted to notice its own death. Same
-     * priority as the control task it's watching. Same PSRAM-safety audit as
-     * executor_task_entry() above -- watchdog_task_entry() only reads status
-     * (safety_link_get_status(), run_state) and forces relays off; it never
-     * touches flash. */
-    ok = xTaskCreatePinnedToCoreWithCaps(watchdog_task_entry, "profile_exec_wdt", 2560, NULL, 5,
-                                         &s_exec.watchdog_task, tskNO_AFFINITY,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+     * priority as the control task it's watching.
+     *
+     * INTERNAL stack, for the same reason as executor_task_entry() above and
+     * with the same bench crash behind it. The claim that this task "only
+     * reads status and forces relays off" missed run_state_note() on its own
+     * abort path (~line 1728): when the safety link goes silent it aborts the
+     * firing AND persists why. That is exactly the moment this task must not
+     * fail, so its stack must be reachable with the flash cache disabled. */
+    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 2560, NULL, 5,
+                                 &s_exec.watchdog_task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
     }
