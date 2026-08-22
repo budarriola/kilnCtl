@@ -25,7 +25,12 @@
     --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
     --tripped-bg: #3a1f22;
   }
-  body { font-family: sans-serif; max-width: 640px; margin: 2em auto 5em; padding: 0 1em;
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint -- fills a 320px phone, caps at 640px on anything wider so
+     the trip/diagnostics rows below don't stretch to a 1920px monitor's
+     full width. Reasoned about 320/360/390, 768/820, 1280/1920. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto 5em;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
@@ -41,7 +46,14 @@
   .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1em;
          padding: 0.5em 0; border-bottom: 1px solid var(--border); }
   .row:last-child { border-bottom: none; }
-  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  /* min-width: 0 -- the flex-shrink trap flagged in theme.css's
+     .kc-page-title comment: without it, a long unbreakable token (a build
+     commit hash, a hex trip-reason code) floors this item at its
+     min-content width and can push its sibling off a narrow phone screen
+     instead of wrapping. overflow-wrap lets those tokens actually break. */
+  .row .label { min-width: 0; overflow-wrap: anywhere; }
+  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
+                min-width: 0; overflow-wrap: anywhere; }
   .row .value.warn { color: var(--warn); font-weight: bold; }
   .row .value.ok { color: var(--ok); }
   .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }
@@ -51,7 +63,7 @@
   #clearMsg { font-size: 0.85em; margin-top: 0.4em; min-height: 1.2em; }
   .confirm-row { display: none; margin-top: 0.6em; gap: 0.5em; }
   .confirm-row.show { display: flex; }
-  .confirm-row button { flex: 1; }
+  .confirm-row button { flex: 1; min-width: 0; }
   .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
                   padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
   .stale-banner.show { display: block; }

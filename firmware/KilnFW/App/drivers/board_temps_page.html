@@ -27,7 +27,12 @@
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
   }
-  body { font-family: sans-serif; max-width: 640px; margin: 2em auto 5em; padding: 0 1em;
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint, same reasoning as diagnostics_page.html/safety_page.html:
+     fills a 320px phone, caps at 640px so rows don't stretch across a
+     1920px monitor. Reasoned about 320/360/390, 768/820, 1280/1920. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto 5em;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
@@ -41,8 +46,15 @@
   .row { display: flex; justify-content: space-between; align-items: baseline; gap: 1em;
          padding: 0.5em 0; border-bottom: 1px solid var(--border); }
   .row:last-child { border-bottom: none; }
-  .row .label { color: var(--fg); }
-  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  /* min-width: 0 on both flex children -- the flex-shrink trap flagged in
+     theme.css's .kc-page-title comment (a flex item defaults to
+     min-width: auto, which can push a sibling off a narrow phone instead of
+     wrapping). Not expected to bite here (labels/values are short), but
+     kept consistent with diagnostics_page.html/safety_page.html's identical
+     .row markup so a future longer label doesn't reopen the bug. */
+  .row .label { color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
+  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
+                min-width: 0; overflow-wrap: anywhere; }
   .row.headline .value { color: var(--fg); font-weight: bold; font-size: 1.05em; }
   .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }
   .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);

@@ -50,6 +50,20 @@
 the same group are assigned to the same zone and switch together when a
 profile drives that zone. Forcing a relay while a profile is running fights
 that profile's own control -- prefer Stop first.</p>
+<!-- 2026-08-21 owner report: "manual relays does not let me activate them...
+     i think it is because safety link is down but it should show an error
+     message". The refusal itself was already correct (dashboard_http.c's
+     relay_post_handler refuses a manual relay-ON with 403 and a reason
+     string whenever relay_authority_on_blocked() finds any SAFETY_FAULT_SRC_*
+     bit set) -- the bug was entirely here: setRelay() below fed the fetch's
+     result into poll() on BOTH success and failure, so a 403 body containing
+     the exact reason was fetched off the wire and then thrown away, and the
+     button just silently stayed OFF. This div surfaces that reason text
+     verbatim (via window.kcEscapeHtml, same as every other server-supplied
+     string on this page) instead of the page guessing from a bare status
+     code, per the same rule ui_page_temperature.c's LCD-side message
+     already follows. -->
+<div id="relayError" class="empty" style="display:none;color:var(--fault-color);"></div>
 <div id="relays"><p class="empty">Loading…</p></div>
 
 <script>
@@ -62,11 +76,43 @@ that profile's own control -- prefer Stop first.</p>
 // independent static document with no shared JS runtime across pages, same
 // as every other page pair in this codebase (e.g. rules_page.html and
 // zones_page.html each fetch /api/zones themselves too).
+// 2026-08-21 (owner report -- see the <div id="relayError"> comment above):
+// this used to be `.then(poll).catch(poll)`, which read the fetch's result
+// only far enough to know "something happened" and then discarded it either
+// way -- a refused relay-ON (403, with a specific reason in the body: safety
+// link down, owned by a running profile, firmware update in progress, ...)
+// looked identical to a network error looked identical to success, all three
+// just silently re-polling. Now: 2xx clears any previous error and repaints
+// via poll() same as before; anything else reads the body text (the server's
+// actual reason -- see dashboard_http.c's relay_post_handler /
+// relay_safety_reason()) and shows it verbatim, escaped, until the next
+// attempt succeeds or the page is reloaded.
+function showRelayError(text) {
+  const el = document.getElementById('relayError');
+  if (!text) {
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+  el.style.display = '';
+  el.innerHTML = window.kcEscapeHtml(text);
+}
+
 function setRelay(relay, on) {
   fetch('/api/relay', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'relay=' + relay + '&on=' + (on ? '1' : '0'),
-  }).then(poll).catch(poll);
+  }).then(function (resp) {
+    return resp.text().then(function (text) {
+      if (resp.ok) {
+        showRelayError(null);
+      } else {
+        showRelayError('Relay ' + relay + ' ' + (on ? 'ON' : 'OFF') + ' refused: ' + (text || ('HTTP ' + resp.status)));
+      }
+    });
+  }).catch(function () {
+    showRelayError('Relay ' + relay + ' ' + (on ? 'ON' : 'OFF') + ' failed: could not reach the board.');
+  }).then(poll);
 }
 
 // The button's ON/OFF text and its relay-on/relay-off styling are both a

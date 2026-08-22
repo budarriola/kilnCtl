@@ -614,6 +614,58 @@ dashboard_relay_result_t dashboard_set_relay(uint8_t relay_index, bool on, uint3
     }
 }
 
+/* Turns a DASHBOARD_RELAY_ERR_SAFETY refusal's raw SAFETY_FAULT_SRC_* bitmask
+ * (safety_link.h) into the specific, actionable sentence relay_post_handler()
+ * below hands back in the HTTP body -- the owner's report (TODO.md/ROADMAP.md
+ * 2026-08-21 "manual relays refuse silently") was that "blocked by safety
+ * fault" alone reads as a dead button, not a safety refusal, and that this
+ * board's actual bench condition (safety link never comes up -- the
+ * optocouplers are non-functional, so safety_link.c's link_up latches 0
+ * forever and SAFETY_FAULT_SRC_SAFETY_LINK is asserted permanently) needs to
+ * be named, not left as a bit an operator has no way to decode. Checked in
+ * the same priority relay_authority_on_blocked()'s bit values imply (any bit
+ * set blocks -- see that function) but SAFETY_LINK is called out first and by
+ * name because it is the chronic, expected-on-this-bench condition every
+ * other bit is a rarer, acute one; a caller with more than one bit set still
+ * gets a truthful single sentence rather than every bit spelled out, matching
+ * this file's other one-reason-at-a-time refusal messages (ERR_UPDATING
+ * above).
+ *
+ * Deliberately does NOT suggest disabling CONFIG_KILNCTL_SX1509_RELAYS_OFF_
+ * ON_LINK_LOSS -- that Kconfig default (Kconfig: "Drop all relays when the
+ * PC link goes away") exists specifically so a crashed/unplugged controller
+ * can never leave a kiln element energised, and turning it off is a
+ * deliberate bench-only escape hatch the owner has not asked for here. This
+ * message names it only so the operator understands WHY relays keep bouncing
+ * back off if they were ever momentarily forced on some other way, not as an
+ * invitation to flip it. */
+static void relay_safety_reason(uint32_t sources, char *buf, size_t buf_len)
+{
+    if (sources & SAFETY_FAULT_SRC_SAFETY_LINK) {
+        snprintf(buf, buf_len,
+                 "safety link is down (no safety processor has ever answered on this board) -- "
+                 "manual relay-ON is refused while the link is down, and "
+                 "CONFIG_KILNCTL_SX1509_RELAYS_OFF_ON_LINK_LOSS additionally forces every relay "
+                 "off on this same condition so a crashed controller can never leave an element on");
+    } else if (sources & SAFETY_FAULT_SRC_PC_LINK) {
+        snprintf(buf, buf_len, "PC control link is down");
+    } else if (sources & SAFETY_FAULT_SRC_THERMO) {
+        snprintf(buf, buf_len, "a thermocouple has faulted");
+    } else if (sources & SAFETY_FAULT_SRC_THERMAL_SANITY) {
+        snprintf(buf, buf_len, "a zone failed its thermal sanity check");
+    } else if (sources & SAFETY_FAULT_SRC_MANUAL) {
+        snprintf(buf, buf_len, "a fault was manually asserted (SAFETY_CMD_SET_FAULT_OUT)");
+    } else if (sources & SAFETY_FAULT_SRC_APP) {
+        snprintf(buf, buf_len, "the application asserted a safety fault");
+    } else {
+        /* Should not happen -- ERR_SAFETY is only returned when
+         * relay_authority_on_blocked() found at least one bit set -- but
+         * still an honest, non-empty sentence rather than a blank body if it
+         * somehow does. */
+        snprintf(buf, buf_len, "blocked by an unspecified safety fault (sources=0x%02X)", (unsigned)sources);
+    }
+}
+
 static esp_err_t relay_post_handler(httpd_req_t *req)
 {
     if (!s_dash.io) {
@@ -657,8 +709,14 @@ static esp_err_t relay_post_handler(httpd_req_t *req)
     /* dashboard_set_relay() -- see this file's definition above and
      * dashboard_http.h's doc comment -- is now the one place the
      * ownership/safety gate and the kiln_io write happen; this handler only
-     * translates its result to an HTTP status. */
-    switch (dashboard_set_relay((uint8_t)relay, want_on, NULL)) {
+     * translates its result to an HTTP status. out_safety_sources is a real
+     * pointer (not NULL, as this used to pass) so a DASHBOARD_RELAY_ERR_SAFETY
+     * result below can be decoded into the specific reason relay_safety_reason()
+     * builds, instead of the flat "blocked by safety fault" text that read as
+     * a dead button to an operator who has no way to tell a refusal from a
+     * silently-ignored click (2026-08-21 owner report). */
+    uint32_t safety_sources = 0;
+    switch (dashboard_set_relay((uint8_t)relay, want_on, &safety_sources)) {
     case DASHBOARD_RELAY_OK:
         return httpd_resp_sendstr(req, "ok");
     case DASHBOARD_RELAY_ERR_NO_BOARD:
@@ -671,7 +729,11 @@ static esp_err_t relay_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "relay owned by a running profile");
         return ESP_OK;
     case DASHBOARD_RELAY_ERR_SAFETY:
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "blocked by safety fault");
+        {
+            char reason[320];
+            relay_safety_reason(safety_sources, reason, sizeof(reason));
+            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, reason);
+        }
         return ESP_OK;
     case DASHBOARD_RELAY_ERR_UPDATING:
         /* 2026-08-21: distinct wording from ERR_SAFETY above -- see

@@ -216,10 +216,32 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
            box-sizing: border-box; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
            border: 1px solid var(--border); border-radius: var(--ui-radius); text-decoration: none;
            color: var(--fg); background: var(--button-bg); }
+/* 2026-08-22: `display: flex; justify-content: space-between; align-items:
+   center` USED to live on this bare `.card` rule. It was written for the
+   manual-relay card, which is genuinely one row (label on the left, toggle on
+   the right) -- but `.card` is also the container class every other page uses
+   to wrap a STACK of `.row` children (diagnostics_page.html's Firmware/Memory
+   cards, safety_page.html, board_temps_page.html, backup_page.html). Making
+   the container a flex row laid those stacked rows out side by side instead
+   of one per line, which is what the owner reported as "the diagnostics pages
+   look cramped" / "the restore section is formatted in an unreadable block":
+   four separate bug reports, one shared rule.
+   The flex now lives on .zone-group .card below -- the relay card that
+   actually wanted it -- so a card is a plain block by default and only opts
+   in where a single row is the real intent. */
 .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
-        padding: 0.7em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
-        align-items: center; }
+        padding: 0.7em 1em; margin-bottom: 0.5em; }
 .empty { color: var(--muted); font-style: italic; }
+
+/* The `hidden` attribute only hides via the UA stylesheet's
+   `[hidden] { display: none }`, which ANY author `display` rule outranks --
+   including several pages' own `button { display: inline-block }`. That is
+   why the theme toggle, hidden by nav.js on every page that is not Settings,
+   still showed up in the corner of backup_page.html (owner report,
+   2026-08-22, with a photo). Making it !important means "hidden" means
+   hidden, everywhere, regardless of what a page-local rule says about the
+   element's display -- which is what every caller of it already assumes. */
+[hidden] { display: none !important; }
 
 /* Manual relay toggles (manual_page.html) -- grouped by zone, same
    zone-group / relay-toggle markup and rules main_page.html used before
@@ -232,7 +254,11 @@ a.button { display: inline-flex; align-items: center; min-height: var(--ui-touch
 .zone-group h3 { margin: 0; padding: 0.5em 1em; font-size: 0.9em;
                   background: var(--card-bg); border-bottom: 1px solid var(--border); }
 .zone-group .card { border: none; border-radius: 0; border-bottom: 1px solid var(--border);
-                     margin-bottom: 0; }
+                     margin-bottom: 0;
+                     /* The one-row layout that used to sit on bare .card --
+                        see that rule's comment. This IS a single row (relay
+                        name left, toggle right), so it opts in explicitly. */
+                     display: flex; justify-content: space-between; align-items: center; }
 .zone-group .card:last-child { border-bottom: none; }
 .zone-group:nth-of-type(4n+1) h3 { color: var(--ui-accent-1); }
 .zone-group:nth-of-type(4n+2) h3 { color: var(--ui-accent-2); }

@@ -94,6 +94,23 @@
     // Tapping the dimmed backdrop (not the panel itself) closes the menu --
     // standard bottom-sheet convention, and cheap: only the overlay element
     // itself needs the listener, not each link.
+    //
+    // 2026-08-22: the panel's own click handler below is NOT redundant with
+    // this. Owner report: "clicking the reset menu button leaves the menu
+    // open and does not allow the page to be seen." Every other entry
+    // navigates to a different document, which tears the overlay down as a
+    // side effect of the page unloading -- so nothing ever had to close it
+    // explicitly. "Reset" points at /settings#danger, and from /settings
+    // that is a SAME-PAGE fragment jump: no navigation, no unload, so the
+    // overlay just sat there covering the anchor it had scrolled to.
+    // Closing on any link click fixes it for that entry and for the
+    // "Display (theme & units)" entry, which has the same shape, without
+    // depending on which page you happen to be standing on.
+    panel.addEventListener('click', function (ev) {
+      if (ev.target && ev.target.tagName === 'A') {
+        overlay.setAttribute('hidden', '');
+      }
+    });
     overlay.addEventListener('click', function (ev) {
       if (ev.target === overlay) {
         overlay.setAttribute('hidden', '');
@@ -160,10 +177,21 @@
     // against the title string sidesteps all of that.
     var isDashboard = title.textContent === 'Dashboard';
 
+    /* 2026-08-22 owner request: "use a gear for menu and a home icon for
+       home". Unicode glyphs, not an icon font or SVG sprite: these pages are
+       served from flash on an ESP32 and every byte of asset is a byte of
+       flash budget (see web_encoding.h), so a two-character label beats a
+       new asset for two icons. The text label stays alongside the glyph
+       rather than being replaced by it -- an unlabelled gear is guessable,
+       but the label costs nothing here and the topbar has room at phone
+       width (the title ellipsises first; see .kc-page-title's min-width: 0
+       note in theme.css). aria-label carries the same word for a screen
+       reader, which a bare glyph would not. */
     var menuBtn = document.createElement('button');
     menuBtn.type = 'button';
     menuBtn.className = 'kc-menu-btn';
-    menuBtn.textContent = 'Menu';
+    menuBtn.setAttribute('aria-label', 'Menu');
+    menuBtn.textContent = '⚙ Menu';
     menuBtn.addEventListener('click', function () {
       menuOverlay.removeAttribute('hidden');
     });
@@ -214,7 +242,8 @@
       var homeBtn = document.createElement('a');
       homeBtn.href = '/';
       homeBtn.className = 'kc-home-btn';
-      homeBtn.textContent = 'Home';
+      homeBtn.setAttribute('aria-label', 'Home');
+      homeBtn.textContent = '⌂ Home';
       actions.appendChild(homeBtn);
     }
     actions.appendChild(menuBtn);

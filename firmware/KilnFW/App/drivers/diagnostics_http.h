@@ -8,20 +8,30 @@
 // apply") while keeping thermo-faults separate, so this module registers
 // three routes, not four:
 //
-//   GET /diagnostics         -- ui_page_diagnostics.c + ui_page_board_health.c
-//   GET /diagnostics/thermo  -- ui_page_thermo_faults.c
-//   GET /safety              -- ui_page_safety.c, plus the DIAG/TRIP_EVENT
-//                                detail the LCD's ~264px budget had no room
-//                                for (already on GET /api/status, per
-//                                UI_PLAN.md section 5)
+//   GET /diagnostics          -- ui_page_diagnostics.c + ui_page_board_health.c
+//   GET /diagnostics/thermo   -- ui_page_thermo_faults.c
+//   GET /safety               -- ui_page_safety.c, plus the DIAG/TRIP_EVENT
+//                                 detail the LCD's ~264px budget had no room
+//                                 for (already on GET /api/status, per
+//                                 UI_PLAN.md section 5)
+//   GET /api/thermo/faults    -- per-channel MAX31856 fault/CJ/timeout data
+//                                 for /diagnostics/thermo, added 2026-08-21
+//                                 (see diagnostics_http.c's
+//                                 thermo_faults_get_handler() doc comment for
+//                                 the full root-cause writeup)
 //
-// This module owns no live hardware state of its own and reads none directly
-// -- every number these three pages show already comes from GET /api/status
-// (dashboard_http.c, now carrying the fw_version/build/uptime/reset_reason/
-// heap fields this same pass added) and GET /api/board_temps (board_temps.c).
-// The pages are plain static HTML+JS that poll those two existing endpoints,
-// same "one reader, existing owner" shape as readiness_page.html reading
-// GET /api/readiness. No new JSON endpoint is added here.
+// /diagnostics and /safety are pure static pages with no server-side data
+// gathering of their own -- every number they show comes from GET /api/status
+// (dashboard_http.c) and GET /api/board_temps (board_temps.c), same
+// "one reader, existing owner" shape as readiness_page.html reading GET
+// /api/readiness. /diagnostics/thermo is the one exception: it used to lean
+// on GET /api/status too, but that endpoint answers every field (relays,
+// safety link, heap, thermocouples, everything) in one HTTP response built
+// from one MAX31856_read_all() call, so a single wedged channel could leave
+// the whole response -- and the thermo-faults page's "Loading..." -- stuck
+// forever. GET /api/thermo/faults exists so this page can query each channel
+// independently through thermo_owner, which bounds every channel's answer to
+// THERMO_OWNER_WAIT_MS regardless of what any other channel is doing.
 #ifndef DIAGNOSTICS_HTTP_H
 #define DIAGNOSTICS_HTTP_H
 

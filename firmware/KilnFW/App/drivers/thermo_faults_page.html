@@ -35,10 +35,20 @@
   .chan { background: var(--card-bg); border: 1px solid var(--border); border-left: 4px solid var(--ok);
           border-radius: var(--ui-radius); padding: 0.6em 0.9em; margin-bottom: 0.6em; }
   .chan.faulted { border-left-color: var(--warn); }
+  /* Timed-out and absent channels get their own left-border color rather
+     than reusing --warn/--ok: a channel that never answered is a different
+     kind of "not fine" than one that answered with a real fault, and must
+     never be visually confusable with the healthy (green) state -- that
+     confusion is exactly the dangerous failure mode the owner flagged
+     ("a silent channel reported as healthy"). --muted is used rather than a
+     fourth custom property since it is already theme-aware and reads as
+     "unknown," not "ok" or "bad," at a glance. */
+  .chan.timeout, .chan.absent { border-left-color: var(--muted); }
   .chan .title { font-weight: bold; margin-bottom: 0.3em; }
   .chan .faults { margin-bottom: 0.2em; }
   .chan .faults.faulted { color: var(--warn); }
   .chan .faults.ok { color: var(--muted); }
+  .chan .faults.timeout { color: var(--muted); font-style: italic; }
   .chan .subrow { font-size: 0.9em; color: var(--muted); }
   .chan .subrow .bad { color: var(--warn); }
   .note { font-size: 0.82em; color: var(--muted); margin: 0.6em 0 0.8em; }
@@ -55,8 +65,12 @@
      heading duplicated it. -->
 <p class="lead">The web twin of the LCD's Thermocouple Faults page -- every
 MAX31856 channel's fault-register bits, FAULT-pin state, and SPI transport
-health, straight from GET /api/status's "channels" array. Visibility only,
-same scope as the LCD page: no "clear faults" action here either.</p>
+health, from GET /api/thermo/faults, which queries each channel
+independently so one channel that never answers cannot hide the others.
+Visibility only, same scope as the LCD page: no "clear faults" action here
+either.</p>
+
+<p class="note" id="scopeNote"></p>
 
 <div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
 
@@ -109,40 +123,99 @@ the same measurement.</p>
     return names.length ? names.join(', ') : 'OK';
   }
 
-  // Every field this page shows -- fault bits, FAULT pin, SPI transport
-  // health, staleness, cold-junction temperature, and the matched zone's
+  // fetch() alone has NO timeout -- a stalled TCP connection (Wi-Fi hiccup,
+  // a wedged handler on the board) leaves the returned promise pending
+  // forever, which is exactly how this page used to get stuck on
+  // "Loading..." with nothing ever rendered. AbortController bounds every
+  // request client-side too, on top of GET /api/thermo/faults's own
+  // server-side per-channel bound (diagnostics_http.c's
+  // thermo_faults_get_handler() doc comment) -- belt and suspenders: the
+  // client timeout is what protects against the request never reaching the
+  // board, or the board itself being wedged deeply enough that not even the
+  // TCP-level response goes out.
+  function fetchJsonTimeout(url, timeoutMs) {
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, timeoutMs);
+    return fetch(url, { signal: ctl.signal }).then(function (r) {
+      clearTimeout(timer);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }, function (err) {
+      clearTimeout(timer);
+      throw err;
+    });
+  }
+
+  // Every field this page shows -- fault bits, FAULT pin/timeout/absent
+  // state, staleness, cold-junction temperature, and the matched zone's
   // control fault_guard -- is a live per-channel reading straight off this
-  // poll's /api/status and /api/profile_exec, so the whole per-channel card
-  // is marked kc-live-value (title excepted: "Channel N" is just the fixed
-  // channel index, not a reading). CJ temp also runs through kcUnit.fmt for
-  // unit parity (UI_PLAN.md item 7).
-  var lastStatus = null, lastExecSt = null;
-  function render(st, execSt) {
-    lastStatus = st; lastExecSt = execSt;
-    var channels = st.channels || [];
+  // poll's /api/thermo/faults and /api/profile_exec, so the whole
+  // per-channel card is marked kc-live-value (title excepted: "Channel N" is
+  // just the fixed channel index, not a reading). CJ temp also runs through
+  // kcUnit.fmt for unit parity (UI_PLAN.md item 7).
+  //
+  // Each channel is rendered from whatever state the server reported for
+  // THAT channel alone -- "timeout"/"absent" on one channel never blocks the
+  // others from showing their own state, because GET /api/thermo/faults
+  // already queried them independently (see the handler's doc comment).
+  var lastFaults = null, lastExecSt = null;
+  function render(faultsResp, execSt) {
+    lastFaults = faultsResp; lastExecSt = execSt;
+    var channels = (faultsResp && faultsResp.channels) || [];
     var zones = (execSt && execSt.zones) || [];
     var el = document.getElementById('channels');
-    if (!st.thermo_ready || !channels.length) {
+    var scopeNote = document.getElementById('scopeNote');
+    if (scopeNote) {
+      scopeNote.textContent = faultsResp && faultsResp.shown === 'wired_channels'
+        ? 'Showing all ' + channels.length + ' wired MAX31856 channel(s) this board ' +
+          'initializes at boot, not the zones-config thermocouple count (which can ' +
+          'under-report real hardware -- a channel with no zone assigned still shows ' +
+          'here if it is wired).'
+        : '';
+    }
+    if (!channels.length) {
       el.innerHTML = '<p>No thermocouple channels reporting (bus not attached, or nothing initialized).</p>';
       return;
     }
     var html = '';
     for (var i = 0; i < channels.length; i++) {
       var c = channels[i];
-      var faulted = (c.fault_status !== 0) || c.spi_failed || !c.valid;
-      var summary = faultSummary(c.fault_status);
+      var state = c.state || 'ok'; // 'ok' | 'timeout' | 'absent' | 'spi_failed'
+      var faulted = state === 'ok' && (c.fault_status !== 0);
+      var cardClass = 'chan kc-live-value';
+      var faultsClass = 'faults';
+      var summary;
+      if (state === 'timeout') {
+        cardClass += ' timeout';
+        faultsClass += ' timeout';
+        summary = 'TIMED OUT -- channel did not answer';
+      } else if (state === 'absent') {
+        cardClass += ' absent';
+        faultsClass += ' timeout';
+        summary = 'Not wired / never initialized';
+      } else if (state === 'spi_failed') {
+        cardClass += ' faulted';
+        faultsClass += ' faulted';
+        summary = 'SPI transport failed';
+      } else {
+        cardClass += faulted ? ' faulted' : '';
+        faultsClass += faulted ? ' faulted' : ' ok';
+        summary = faultSummary(c.fault_status);
+      }
       var zone = null;
       for (var z = 0; z < zones.length; z++) {
         if (zones[z].zone === c.channel) { zone = zones[z]; break; }
       }
-      html += '<div class="chan kc-live-value' + (faulted ? ' faulted' : '') + '">' +
+      html += '<div class="' + cardClass + '">' +
               '<div class="title">Channel ' + c.channel + '</div>' +
-              '<div class="faults ' + (c.fault_status ? 'faulted' : 'ok') + '">' + window.kcEscapeHtml(summary) + '</div>' +
-              '<div class="subrow">FAULT pin: ' + (c.fault_status ? '<span class="bad">yes</span>' : 'no') +
-              '  &middot;  SPI: ' + (c.spi_failed ? '<span class="bad">FAILED</span>' : 'ok') +
-              '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
-              '  &middot;  CJ: ' + window.kcUnit.fmt(c.cj_c) + '</div>' +
-              (zone ? '<div class="subrow">Control fault_guard: ' +
+              '<div class="' + faultsClass + '">' + window.kcEscapeHtml(summary) + '</div>';
+      if (state === 'ok' || state === 'spi_failed') {
+        html += '<div class="subrow">FAULT pin: ' + (c.fault_pin ? '<span class="bad">yes</span>' : 'no') +
+                '  &middot;  SPI: ' + (state === 'spi_failed' ? '<span class="bad">FAILED</span>' : 'ok') +
+                '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
+                '  &middot;  CJ: ' + window.kcUnit.fmt(c.cj_c) + '</div>';
+      }
+      html += (zone ? '<div class="subrow">Control fault_guard: ' +
                      (zone.faulted ? '<span class="bad">' + window.kcEscapeHtml(zone.fault_guard) + '</span>' : 'none') +
                      '</div>' : '') +
               '</div>';
@@ -161,18 +234,35 @@ the same measurement.</p>
       banner.classList.add('show');
     }
   }
+  // The /api/thermo/faults fetch and the /api/profile_exec fetch are two
+  // INDEPENDENT failures, same principle as the per-channel independence
+  // above applied one level up: profile_exec is supplementary (just the
+  // "control fault_guard" subrow), so its failure/timeout must never stop
+  // the channel fault data -- the thing this page exists for -- from
+  // rendering. Only the faults fetch failing is treated as a poll failure
+  // for the stale banner.
   function poll() {
-    Promise.all([
-      fetch('/api/status').then(function (r) { return r.json(); }),
-      fetch('/api/profile_exec').then(function (r) { return r.json(); }).catch(function () { return null; })
-    ]).then(function (results) {
+    var faultsPromise = fetchJsonTimeout('/api/thermo/faults', 4000);
+    var execPromise = fetchJsonTimeout('/api/profile_exec', 4000).catch(function () { return null; });
+    Promise.all([faultsPromise, execPromise]).then(function (results) {
       render(results[0], results[1]);
       lastGoodAt = Date.now();
       failCount = 0;
       setStale(null);
     }).catch(function () {
       failCount++;
-      if (lastGoodAt != null) setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+      // Requirement: the page must never sit on "Loading" forever. If this
+      // is the very first poll (no prior successful render at all), fall
+      // through to an explicit terminal state instead of leaving the
+      // "Loading..." placeholder from the initial HTML in place -- a
+      // transport failure is exactly as real a terminal result as a
+      // channel-level timeout is, just at a different layer.
+      if (lastGoodAt != null) {
+        setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+      } else {
+        document.getElementById('channels').innerHTML =
+          '<p>Could not reach the board (request failed or timed out). Retrying&hellip;</p>';
+      }
     });
   }
   var timer = null;
@@ -191,7 +281,7 @@ the same measurement.</p>
   // UI_PLAN.md item 7: re-render CJ temperatures in the new unit immediately
   // on toggle, from the cached last-good payload.
   window.addEventListener('kcunitchange', function () {
-    if (lastStatus) render(lastStatus, lastExecSt);
+    if (lastFaults) render(lastFaults, lastExecSt);
   });
 })();
 </script>

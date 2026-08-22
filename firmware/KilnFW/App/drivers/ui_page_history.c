@@ -151,6 +151,19 @@ static void build_chart_legend_item(lv_obj_t *parent, const char *text, lv_color
     lv_label_set_text(label, text);
 }
 
+/* 2026-08-21 owner request: "the charts should never show below freezing
+ * temp." Mirrors ui_page_home.c's identical freezing_point_disp() (not
+ * shared between the two files, same "mirrored not shared" reasoning as this
+ * file's format_duration()/plan_lookup()) -- the clamp is on the AXIS, never
+ * on the DATA: a genuine sub-zero/fault/disconnected-probe reading must still
+ * be plotted and visible as an out-of-range excursion, so both call sites
+ * below only raise their axis_lo to this floor when the real plotted minimum
+ * is itself still at-or-above it (see each call site's own comment). */
+static float freezing_point_disp(unit_pref_t unit)
+{
+    return (unit == UNIT_PREF_FAHRENHEIT) ? 32.0f : 0.0f;
+}
+
 static void refresh_progress(void);
 
 /* Piecewise-linear sample of a profile_feasibility_plan_curve() point list --
@@ -245,7 +258,18 @@ static void refresh_cb(lv_timer_t *timer)
         if (!isnan(val)) {
             int32_t v = (int32_t)lroundf(val);
             s_chart_actual_pts[0] = v;
-            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, v - 10, v + 10);
+            /* Freezing floor -- only raise axis_lo when the real point (v)
+             * is itself at or above freezing; if v itself is below freezing
+             * (a genuine sub-zero/fault reading), axis_lo is left at v-10
+             * unclamped so the excursion stays visible instead of being
+             * clamped off the bottom of the plot. */
+            int32_t floor_i = (int32_t)lroundf(freezing_point_disp(ds.temp_unit));
+            int32_t axis_lo = v - 10;
+            int32_t axis_hi = v + 10;
+            if (axis_lo < floor_i && v >= floor_i) {
+                axis_lo = floor_i;
+            }
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
         } else {
             s_chart_actual_pts[0] = LV_CHART_POINT_NONE;
         }
@@ -328,8 +352,19 @@ static void refresh_cb(lv_timer_t *timer)
         float range = hi - lo;
         if (range < 1.0f) range = 1.0f;
         float pad_c = range * 0.1f;
-        lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (int32_t)lroundf(lo - pad_c),
-                                (int32_t)lroundf(hi + pad_c));
+        int32_t axis_lo = (int32_t)lroundf(lo - pad_c);
+        int32_t axis_hi = (int32_t)lroundf(hi + pad_c);
+        /* Freezing floor -- same guard as the idle-dot branch above: only
+         * raise axis_lo when the real data minimum (lo, pre-padding) is
+         * itself at or above freezing. If `lo` itself is below freezing (a
+         * genuine sub-zero actual/desired/planned point), axis_lo is left
+         * unclamped so that point stays plotted and visible rather than
+         * being clipped off the bottom. */
+        int32_t floor_i = (int32_t)lroundf(freezing_point_disp(unit));
+        if (axis_lo < floor_i && lo >= floor_i) {
+            axis_lo = floor_i;
+        }
+        lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
     }
     lv_chart_refresh(s_chart);
 }

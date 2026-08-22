@@ -39,7 +39,15 @@
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --fault-color: var(--ui-accent-5);
   }
-  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint: fills a 320px phone, caps at 640px on tablet/desktop so the
+     Danger-zone prose doesn't run the full width of a 27" monitor. Widened
+     from the old fixed 480px to 640px to match the other *_page.html pages'
+     cap (diagnostics/safety/board_temps/backup) now that this page also
+     scales fluidly instead of just centering a fixed box. Reasoned about
+     320/360/390, 768/820, 1280/1920. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto;
          background: var(--bg); color: var(--fg); }
   h1 { font-size: 1.2em; }
   h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }

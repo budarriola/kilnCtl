@@ -32,16 +32,51 @@
     --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
     --fault-color: var(--ui-accent-5);
   }
-  body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
+  /* box-sizing reset -- page-local only (not touching theme.css). Without
+     this, a.button's own padding (below) is added ON TOP OF whatever width
+     the flex/grid layout gives it, which is exactly how "Download backup"
+     ran past the right edge on a phone but not a PC: a PC's wide viewport
+     had enough slack for the overflow to land inside the scrollbar gutter
+     unnoticed, a phone's didn't. border-box makes padding count INSIDE the
+     box a flex/grid track hands an element, so it can never do that again. */
+  *, *::before, *::after { box-sizing: border-box; }
+  /* Fluid width, capped so a line of the Restore prose below doesn't run
+     the full width of a 27" monitor -- `min()` rather than a breakpoint:
+     shrinks to fit 320px phones automatically, holds at 640px on anything
+     wider. Reasoned about 320/360/390 (phones), 768/820 (tablets) and
+     1280/1920 (desktop): all of them just resolve to whichever side of the
+     min() is smaller, no breakpoint needed. */
+  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto;
          background: var(--bg); color: var(--fg); }
   h1 { font-size: 1.2em; }
   h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
   p { color: var(--muted); }
   .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
           padding: 1em; margin: 1em 0; }
-  a.button, button { display: inline-block; padding: 0.5em 1em; border-radius: 4px;
+  /* Export/Restore controls each sit in their own row so they can go full-
+     width on a phone (a big, unmissable tap target) without needing a fixed
+     pixel width that would either overflow a 320px screen or look tiny on a
+     1920px one. `flex-wrap: wrap` plus `min-width: 0` on the children is the
+     fix for the trap this codebase keeps getting bitten by: a flex item
+     defaults to `min-width: auto`, which floors it at its own min-content
+     width and can shove a sibling off-screen -- see theme.css's
+     .kc-page-title comment for the earlier instance of this exact bug. */
+  .action-row { display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; }
+  .action-row > * { min-width: 0; }
+  a.button, button { display: inline-flex; align-items: center; justify-content: center;
+         max-width: 100%; padding: 0.6em 1.2em; border-radius: 4px; min-height: 44px;
          border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
-         text-decoration: none; cursor: pointer; font-size: 1em; }
+         text-decoration: none; cursor: pointer; font-size: 1em; white-space: normal; }
+  /* Restore's file-picker + button: on a narrow phone these stack (one per
+     line, each full width so both stay comfortably tap-sized); at any width
+     wide enough for both to sit side by side without squeezing either one
+     under its min-content size, they do. auto-fit/minmax rather than a
+     breakpoint -- same reasoning as .action-row above, but grid instead of
+     flex because these two controls should size independently, not share
+     leftover space. */
+  .restore-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+         gap: 0.6em; margin: 0.8em 0; }
+  .restore-controls input[type="file"] { max-width: 100%; }
 </style>
 </head>
 <body>
@@ -58,7 +93,9 @@
   and the guard-threshold overrides.</p>
   <p><strong>This file does NOT include Wi-Fi credentials</strong> (see
   Restore below for why).</p>
-  <p><a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a></p>
+  <div class="action-row">
+    <a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a>
+  </div>
 </div>
 
 <div class="card">
@@ -77,10 +114,10 @@
   progress -- the same check this board's own OTA update uses before writing
   anything. The whole file is validated before any single field is written;
   a malformed or truncated upload changes nothing and reports why.</p>
-  <p>
+  <div class="restore-controls">
     <input type="file" id="restoreFile" accept="application/json,.json">
     <button type="button" id="restoreBtn">Restore from file</button>
-  </p>
+  </div>
   <p id="restoreStatus"></p>
 </div>
 

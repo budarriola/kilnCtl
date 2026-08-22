@@ -336,6 +336,26 @@ static const char *safety_trip_words_short(uint8_t reason)
     }
 }
 
+/* 2026-08-21 owner request: "the charts should never show below freezing
+ * temp." The clamp belongs on the AXIS, never on the DATA: a thermocouple
+ * fault/disconnect/cold-workshop reading below freezing must still be
+ * PLOTTED and still be visible as an out-of-range excursion -- silently
+ * floor-clamping the value itself would hide exactly the fault this display
+ * exists to surface. So every call site below computes its natural axis
+ * bound from the real data first (unchanged), then raises axis_lo to this
+ * floor ONLY when the real plotted minimum is itself still at-or-above the
+ * floor (i.e. only the cosmetic padding dipped below freezing, not a real
+ * reading) -- see the two call sites' comments for the exact guard. Freezing
+ * is 0 in Celsius but 32 in Fahrenheit (unit_pref.h's own ABSOLUTE-vs-RATE
+ * distinction: this is a fixed point on the Celsius scale, not a magnitude,
+ * so it must be re-expressed per display unit, never just reused as "0"),
+ * so this reads the same `unit_pref_t` every value on this page is already
+ * converted through -- never a second, independent guess at the unit. */
+static float freezing_point_disp(unit_pref_t unit)
+{
+    return (unit == UNIT_PREF_FAHRENHEIT) ? 32.0f : 0.0f;
+}
+
 static const char *exec_state_label(profile_exec_state_t s)
 {
     switch (s) {
@@ -677,10 +697,23 @@ static void refresh_cb(lv_timer_t *timer)
         if (!isnan(val)) {
             int32_t v = (int32_t)lroundf(val);
             s_chart_actual_pts[0] = v;
-            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, v - 10, v + 10);
+            /* Freezing floor (see freezing_point_disp()'s comment): only
+             * raise the lower bound when the real point (v) is itself at or
+             * above freezing -- i.e. only the fixed +/-10 padding dipped
+             * below the floor, not a genuine sub-zero/fault reading. If v
+             * itself is below freezing, axis_lo is left at v-10 unclamped so
+             * the excursion stays visible instead of being clamped off the
+             * bottom of the plot. */
+            int32_t floor_i = (int32_t)lroundf(freezing_point_disp(ds.temp_unit));
+            int32_t axis_lo = v - 10;
+            int32_t axis_hi = v + 10;
+            if (axis_lo < floor_i && v >= floor_i) {
+                axis_lo = floor_i;
+            }
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
             char hi_buf[16], lo_buf[16];
-            snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)(v + 10), unit_pref_suffix(ds.temp_unit));
-            snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)(v - 10), unit_pref_suffix(ds.temp_unit));
+            snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)axis_hi, unit_pref_suffix(ds.temp_unit));
+            snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)axis_lo, unit_pref_suffix(ds.temp_unit));
             lv_label_set_text(s_chart_y_hi_label, hi_buf);
             lv_label_set_text(s_chart_y_lo_label, lo_buf);
             lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
@@ -696,19 +729,46 @@ static void refresh_cb(lv_timer_t *timer)
         }
         lv_chart_refresh(s_chart);
     } else {
-        /* Running/paused/done/faulted: segments[]/run_start_c/total_elapsed_s
-         * are all meaningful once state != IDLE (profile_executor.h's own
-         * field comments) -- profile_feasibility_plan_curve() is pure math
-         * over that copy, safe to call from this refresh timer every tick. */
-        total_planned_s = profile_feasibility_plan_curve(st.segments, st.segment_count, st.run_start_c,
-                                                          plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
-                                                          &plan_n);
-        float horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
-        if (horizon_s < 1.0f) {
-            horizon_s = 1.0f; /* guard div-by-zero below; a real profile always has segments */
+        /* This branch is entered whenever NOT (idle && history_count==0) --
+         * that includes RUNNING/PAUSED/DONE/FAULTED, but ALSO plain IDLE with
+         * leftover history from a run that already ended (nothing currently
+         * active). state_active distinguishes the two: only the former has a
+         * real schedule to show ahead of "now", so only it calls
+         * profile_feasibility_plan_curve() -- calling it while IDLE would read
+         * st.segments/run_start_c left over from whatever last ran and label
+         * them as a live plan, which is exactly the "confident wrong number"
+         * this task's owner warned against (2026-08-21: "the chart's time
+         * scale must say the truth in both idle and running states -- idle
+         * has no planned horizon, it's showing recent history"). */
+        bool state_active = (st.state != PROFILE_EXEC_IDLE);
+        size_t count = profile_executor_get_history_count();
+        float horizon_s;
+        if (state_active) {
+            /* segments[]/run_start_c/total_elapsed_s are all meaningful once
+             * state != IDLE (profile_executor.h's own field comments) --
+             * profile_feasibility_plan_curve() is pure math over that copy,
+             * safe to call from this refresh timer every tick. */
+            total_planned_s = profile_feasibility_plan_curve(st.segments, st.segment_count, st.run_start_c,
+                                                              plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
+                                                              &plan_n);
+            horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
+            if (horizon_s < 1.0f) {
+                horizon_s = 1.0f; /* guard div-by-zero below; a real profile always has segments */
+            }
+        } else {
+            /* IDLE with leftover history (count>0 is guaranteed here -- the
+             * outer gate that chose this else-branch already ruled out
+             * idle-with-zero-history). plan_n stays 0, so plan_lookup() below
+             * returns NaN for every bucket and the planned series is simply
+             * never drawn -- there is nothing planned right now, and drawing
+             * one would be a lie. horizon_s instead spans the RECENT HISTORY
+             * actually retained (oldest retained sample to the newest), so
+             * the x-axis label below can honestly say "recent history", not
+             * a run duration that does not exist. */
+            plan_n = 0;
+            horizon_s = (count > 1) ? (float)(count - 1) * (float)HISTORY_SAMPLE_PERIOD_S : 1.0f;
         }
 
-        size_t count = profile_executor_get_history_count();
         unit_pref_t unit = unit_pref_get();
         bool have_range = false;
         float lo = 0.0f, hi = 0.0f;
@@ -727,10 +787,15 @@ static void refresh_cb(lv_timer_t *timer)
 
             /* Actual stops at "now" -- a bucket time in the future (past
              * st.total_elapsed_s) has no recorded sample yet, and showing
-             * one would fabricate data that hasn't happened. */
+             * one would fabricate data that hasn't happened. This gate only
+             * makes sense while state_active (t_i is "seconds since run
+             * start" there); the idle-with-history branch's t_i is "seconds
+             * since the oldest RETAINED sample" instead (see horizon_s's
+             * comment above) -- every bucket in that window already
+             * happened, by construction, so there is nothing to gate. */
             bool have_actual = false;
             float actual_c = NAN;
-            if (t_i <= (float)st.total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
+            if (!state_active || t_i <= (float)st.total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
                 if (count > 0) {
                     /* Samples are recorded every HISTORY_SAMPLE_PERIOD_S
                      * seconds of real time, so ring index and elapsed time
@@ -769,6 +834,16 @@ static void refresh_cb(lv_timer_t *timer)
             float pad_c = range * 0.1f;
             int32_t axis_lo = (int32_t)lroundf(lo - pad_c);
             int32_t axis_hi = (int32_t)lroundf(hi + pad_c);
+            /* Freezing floor -- same guard as the idle-dot branch above: only
+             * raise axis_lo when the real data minimum (lo, pre-padding) is
+             * itself at or above freezing. If `lo` itself is below freezing
+             * (a genuine sub-zero actual/planned point), axis_lo is left
+             * unclamped so that point stays plotted and visible rather than
+             * being clipped off the bottom. */
+            int32_t floor_i = (int32_t)lroundf(freezing_point_disp(unit));
+            if (axis_lo < floor_i && lo >= floor_i) {
+                axis_lo = floor_i;
+            }
             lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
             /* Y labels written from the SAME axis_lo/axis_hi just handed to
              * lv_chart_set_axis_range(), not read back from the chart --
@@ -793,22 +868,46 @@ static void refresh_cb(lv_timer_t *timer)
             lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
         }
-        /* X (time) label -- the chart's horizontal axis is the WHOLE-RUN
-         * planned horizon (0..horizon_s), computed above from
-         * profile_feasibility_plan_curve(), NOT a trailing "last N samples"
-         * window (see this file's header comment, part 2) -- so labelling it
-         * "0:00" to "<horizon>" is the honest span, not a guess at one.
-         * Gated on plan_n > 0: horizon_s falls back to a hardcoded 1.0f guard
-         * a few lines up specifically to avoid a div-by-zero when the plan
-         * curve came back empty (e.g. a malformed/zero-segment profile) --
-         * that fallback value is a guard, not a real duration, so showing
-         * "0:00-0:01" from it would be exactly the "confident wrong number"
-         * this task's own instructions warn against. */
-        if (plan_n > 0) {
-            char span_buf[24];
-            char end_buf[16];
+        /* X (time) label -- a real scale, not just a single span string
+         * (2026-08-21 owner request: "I want a time scale on the LCD
+         * chart"). Three points -- start, an intermediate tick at the
+         * midpoint, and the end -- honest per branch:
+         *   - state_active: the chart's horizontal axis is the WHOLE-RUN
+         *     PLANNED horizon (0..horizon_s) from profile_feasibility_
+         *     plan_curve(), NOT a trailing "last N samples" window (this
+         *     file's header comment, part 2) -- "0:00 | <mid> | <end>" is the
+         *     actual planned duration being plotted, not a guess. Gated on
+         *     plan_n > 0: horizon_s falls back to a hardcoded 1.0f guard a
+         *     few lines up specifically to avoid a div-by-zero when the plan
+         *     curve came back empty (e.g. a malformed/zero-segment profile)
+         *     -- that fallback is a guard, not a real duration, so labelling
+         *     it would be exactly the "confident wrong number" this task's
+         *     own instructions warn against.
+         *   - !state_active (idle, leftover history): there is no planned
+         *     run to span -- horizon_s here is the RECENT-HISTORY window
+         *     actually being plotted (oldest retained sample to now, see
+         *     its own comment above), so the label says exactly that instead
+         *     of implying a schedule that does not exist. Gated on count > 1
+         *     (need at least two samples for a non-zero span to be honest
+         *     about); a single leftover sample has no span to show a scale
+         *     for. */
+        /* 48: worst case "hist -" (6) + up to 15 bytes of one duration + "|-"
+         * (2) + up to 15 bytes of a second duration + "|now" (4) + NUL = 43
+         * max -- rounded up with margin, same discipline the other
+         * snprintf-into-fixed-buffer call sites in this file already use. */
+        char span_buf[48];
+        if (state_active && plan_n > 0) {
+            char mid_buf[16], end_buf[16];
+            format_duration((uint32_t)lroundf(horizon_s / 2.0f), mid_buf, sizeof(mid_buf));
             format_duration((uint32_t)lroundf(horizon_s), end_buf, sizeof(end_buf));
-            snprintf(span_buf, sizeof(span_buf), "0:00-%s", end_buf);
+            snprintf(span_buf, sizeof(span_buf), "0:00|%s|%s", mid_buf, end_buf);
+            lv_label_set_text(s_chart_x_label, span_buf);
+            lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+        } else if (!state_active && count > 1) {
+            char mid_buf[16], end_buf[16];
+            format_duration((uint32_t)lroundf(horizon_s / 2.0f), mid_buf, sizeof(mid_buf));
+            format_duration((uint32_t)lroundf(horizon_s), end_buf, sizeof(end_buf));
+            snprintf(span_buf, sizeof(span_buf), "hist -%s|-%s|now", end_buf, mid_buf);
             lv_label_set_text(s_chart_x_label, span_buf);
             lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -1228,20 +1327,27 @@ lv_obj_t *ui_page_home_build(void)
      * ("<profile> -- <state>"); s_time_label/s_progress_bar MOVED out of
      * this card into progress_row (built above, directly under the chart) --
      * see this file's header comment ("DESIRED SERIES + PROGRESS BAR
-     * RETURN") for why. flex_grow(1) is kept even though this card now holds
-     * less content: `content`'s children don't otherwise sum to exactly its
-     * height at every zone count, and giving the leftover main-axis space to
-     * this one-line card (rather than to a gap or the button) is still the
-     * simplest way to pin the action row to `content`'s bottom edge without
-     * an lv_obj_align()/floating trick -- same reasoning as before this
-     * card's contents were trimmed, just with a smaller worst-case leftover
-     * now that progress_row is its own fixed-height sibling instead of living
-     * inside this card. See the action-row comment below for the updated
-     * arithmetic including progress_row's line. */
+     * RETURN") for why.
+     *
+     * 2026-08-21 owner request ("the start button should be at the bottom of
+     * the LCD main page"): state_card used to carry flex_grow(1) here so its
+     * leftover main-axis space kept the action row pinned to `content`'s
+     * bottom edge -- that worked ONLY while state_card was always present.
+     * Once refresh_cb()'s show_state_card logic started HIDING this card
+     * while idle (a HIDDEN flex child is skipped by LVGL's layout outright,
+     * per that logic's own comment), the growing child disappeared from the
+     * layout entirely in exactly that state, so the leftover space it used to
+     * absorb went unclaimed above the button instead -- the button floated up
+     * to sit directly under progress_row rather than at the bottom, which is
+     * the bug this pass fixes. flex_grow(1) is REMOVED from state_card here;
+     * a dedicated spacer object (built right after this card, see its own
+     * comment below) now owns that job instead, because it is never hidden --
+     * present in idle, running, AND safety-tripped alike -- so the action row
+     * sits at the bottom of `content` in every one of those states, not just
+     * the ones where state_card happens to be visible. */
     lv_obj_t *state_card = lv_obj_create(content);
     lv_obj_set_width(state_card, lv_pct(100));
     lv_obj_set_height(state_card, LV_SIZE_CONTENT);
-    lv_obj_set_flex_grow(state_card, 1);
     lv_obj_set_style_bg_color(state_card, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(state_card, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(state_card, UI_THEME_PADDING_PX / 2, 0);
@@ -1271,6 +1377,33 @@ lv_obj_t *ui_page_home_build(void)
      * "No profile running" box between page-build and the first refresh. */
     lv_obj_add_flag(state_card, LV_OBJ_FLAG_HIDDEN);
 
+    /* Bottom spacer -- 2026-08-21 owner request ("the start button should be
+     * at the bottom of the LCD main page"), see state_card's comment above
+     * for the mechanism this replaces. A plain, always-visible, zero-content
+     * flex child with flex_grow(1) and a 0 minimum height: LVGL's flex layout
+     * gives a growing child ALL of `content`'s leftover main-axis space after
+     * every fixed-height sibling is laid out, so whatever this page's actual
+     * total height turns out to be at runtime (267px measured, see the
+     * action-row comment below), this spacer -- not state_card -- absorbs the
+     * slack. Unlike state_card it is NEVER hidden, so the action row stays
+     * pinned to `content`'s bottom edge in all three states the owner asked
+     * about: idle (state_card hidden, spacer alone fills the gap),
+     * running/paused/done/faulted (state_card shown at its natural content
+     * height, spacer fills whatever's left over that), and a live safety trip
+     * (state_card shown and recoloured, same as the running case). No visual
+     * footprint of its own -- transparent, no border, no padding -- so it
+     * cannot be mistaken for a real element if it is ever accidentally made
+     * visible. */
+    lv_obj_t *bottom_spacer = lv_obj_create(content);
+    lv_obj_set_width(bottom_spacer, lv_pct(100));
+    lv_obj_set_height(bottom_spacer, 0);
+    lv_obj_set_flex_grow(bottom_spacer, 1);
+    lv_obj_set_style_bg_opa(bottom_spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bottom_spacer, 0, 0);
+    lv_obj_set_style_pad_all(bottom_spacer, 0, 0);
+    lv_obj_remove_flag(bottom_spacer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(bottom_spacer, LV_OBJ_FLAG_CLICKABLE);
+
     /* Single merged Start/Stop button -- one user-visible request ("the
      * start stop button should be one button on the lcd"). Menu moved off
      * this row entirely into the status bar as a gear (see the status-bar
@@ -1278,59 +1411,56 @@ lv_obj_t *ui_page_home_build(void)
      * now just the one button. build_button() still grows it across the
      * row's width via flex_grow(1).
      *
-     * Action-row height arithmetic, UPDATED 2026-08-21 (owner request: "remove
-     * the zone [] section and make it so that i can see a temp and time
-     * scale on the graph. also remove the box that says no profile
-     * running"). Same 267px real, hardware-measured content height this
-     * comment has used since the previous pass (live tap-target dump, y=44..311).
+     * Action-row height arithmetic, UPDATED 2026-08-21 (this pass: "the start
+     * button should be at the bottom of the LCD main page", plus the
+     * freezing-clamp and time-scale changes elsewhere in this file that do
+     * not touch main-axis height). Same 267px real, hardware-measured content
+     * height this comment has used since the zone-removal pass (live
+     * tap-target dump, y=44..311).
      *
-     * What changed this pass, and why the arithmetic below is now SIMPLER,
-     * not just re-numbered:
-     *   - Zone rows are GONE (no widgets built at all -- see s_zone_count's
-     *     own comment). The old worst-case "3 zones x ~19px + 3 gaps" term
-     *     drops out of this sum entirely, not just shrinks.
-     *   - state_card can now be HIDDEN (refresh_cb()'s show_state_card logic)
-     *     whenever idle and not tripped. A HIDDEN flex child is skipped by
-     *     LVGL's layout outright, so the worst case for the FIXED items below
-     *     is now simply "state_card present" (running/paused/faulted/done, or
-     *     a live trip) -- the same flex_grow(1) reasoning as before still
-     *     applies when it IS shown: it absorbs whatever main-axis space is
-     *     left, so it can only ever ADD slack, never cause an overflow.
-     *   - The two scale-overlay labels (s_chart_y_hi/lo_label, s_chart_x_label)
-     *     cost ZERO extra main-axis height: they are children of s_chart
-     *     positioned via lv_obj_align(), not siblings in `content`'s flex
-     *     column. All the freed height goes into UI_PAGE_HOME_CHART_HEIGHT_PX
-     *     itself (70 -> 150), per the task's own instruction to spend it on
-     *     "a taller chart plus the two scales."
+     * What changed THIS pass: state_card's flex_grow(1) moved to a new,
+     * always-present bottom_spacer child (built just above, see its own
+     * comment) instead of living on state_card itself. Previously, "leftover
+     * space goes to whichever child has flex_grow(1)" broke down exactly when
+     * that child (state_card) was HIDDEN: a hidden flex child is skipped by
+     * LVGL's layout outright, so its flex_grow was skipped too, and the
+     * leftover space went unclaimed ABOVE the action row instead of pinning
+     * it to the bottom -- the button floated up mid-page while idle, which is
+     * the bug this pass fixes. bottom_spacer is never hidden, so it now
+     * absorbs the leftover space in every state, not just the ones where
+     * state_card happens to be visible.
      *
-     *     chart (actual+planned, now WITH the temp/time scale overlay) .. UI_PAGE_HOME_CHART_HEIGHT_PX = 150px
+     *     chart (actual+planned, with the temp/time scale overlay) ...... UI_PAGE_HOME_CHART_HEIGHT_PX = 150px
      *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
      *     progress row (time label + slim bar) .......................... ~30px (20px label line + 2px gap + 8px bar)
      *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
-     *     state card (1 summary line, HIDDEN when idle+not tripped) ..... flex_grow(1) when shown: whatever's left; 0px when hidden
+     *     state card (1 summary line, HIDDEN when idle+not tripped) ..... LV_SIZE_CONTENT: ~28px when shown, 0px when hidden
      *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px (skipped by LVGL when state_card is hidden)
+     *     bottom spacer (NEVER hidden) .................................. flex_grow(1): whatever's left, always >= 0
+     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
      *     action row: 1 button, drawn ................................... 36px
      *
-     * `content` now has 4 children when state_card is shown (chart,
-     * progress_row, state_card, action_row) -- 3 gaps, not 6. The only thing
-     * worth checking is that the FIXED children (everything except state_card)
-     * never exceed 267px outright, which would starve state_card to a
-     * negative/zero height in the case where it IS shown:
-     *     150 (chart) + 30 (progress row) + 36 (button) + 3*4 (gaps) = 228px fixed,
-     *     leaving 267 - 228 = 39px for state_card when it is shown
-     * -- comfortably positive for the one short summary line state_card holds
-     * (needs roughly UI_THEME_PADDING_PX/2 * 2 pad + a ~20px text line =~
-     * 28px), with 11px of margin, and there is no zone-row-count variable
-     * left to worsen this case (the old "up to 3 zones" term is gone). When
-     * state_card is hidden (idle, not tripped -- the exact case the owner
-     * asked to remove), the fixed sum is even smaller (228px minus the one
-     * gap LVGL skips = 224px) and the leftover 43px of `content` simply goes
-     * unused rather than being redistributed -- acceptable on a page that
-     * never scrolls either way; nothing needs that space when idle. NOT
-     * re-measured on hardware since this pass (no bench access when this was
-     * written) -- treat "39px leftover" as computed against the same real,
-     * hardware-measured 267px content height as before, not as
-     * pixel-verified for this specific new layout.
+     * `content` now has 5 children always (chart, progress_row, state_card,
+     * bottom_spacer, action_row) -- 4 gaps, always, regardless of whether
+     * state_card is shown (an LVGL flex column only skips the gap adjacent to
+     * a HIDDEN child, so hiding state_card drops exactly one of those 4 gaps,
+     * same as before). The only thing worth checking is that the FIXED
+     * children (everything except bottom_spacer, and state_card when shown)
+     * never exceed 267px outright, which would starve bottom_spacer to 0px
+     * (harmless: it can legally be 0px, unlike the old state_card-grows
+     * scheme, this can never "break" the pin -- action_row is still the last
+     * child and still sits wherever bottom_spacer's bottom edge ends up, 0px
+     * tall or not) -- worst case, state_card shown:
+     *     150 (chart) + 30 (progress row) + 28 (state card) + 36 (button) + 4*4 (gaps) = 260px fixed,
+     *     leaving 267 - 260 = 7px for bottom_spacer
+     * -- still non-negative, so the button still sits exactly at the bottom
+     * edge rather than being clipped or pushed past it; idle (state_card
+     * hidden, one gap skipped) leaves 267 - (260 - 28 - 4) = 39px for
+     * bottom_spacer instead, comfortably positive either way. NOT re-measured
+     * on hardware since the zone-removal pass (no bench access when either
+     * pass was written) -- treat these figures as computed against the same
+     * real, hardware-measured 267px content height as before, not as
+     * pixel-verified for this specific spacer-based layout.
      *
      * Drawn vs effective button height: build_button()'s
      * ui_theme_apply_touch_area(btn, false) call reads back the button's

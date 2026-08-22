@@ -38,7 +38,13 @@
     --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --not-done: var(--ui-accent-5);
     --cannot-yet: var(--ui-text-secondary); --off: var(--ui-accent-1);
   }
-  body { font-family: sans-serif; max-width: 560px; margin: 2em auto; padding: 0 1em;
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint: fills a 320px phone, caps at 640px on tablet/desktop
+     (matches the other *_page.html pages' cap) so a checklist item's detail
+     text doesn't run the full width of a 27" monitor. Reasoned about
+     320/360/390, 768/820, 1280/1920. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: sans-serif; width: min(100% - 2rem, 640px); margin: 2em auto;
          background: var(--bg); color: var(--fg); }
   /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
      rule in /theme.css (which loads first), and being `position: fixed`
@@ -51,7 +57,12 @@
           border: 1px solid var(--border); border-radius: var(--ui-radius); padding: 0.6em 0.9em;
           margin-bottom: 0.5em; }
   .item .mark { font-size: 1.1em; line-height: 1.3em; width: 1.2em; text-align: center; flex-shrink: 0; }
-  .item .body { flex: 1; }
+  /* min-width: 0 -- the flex-shrink trap flagged in theme.css's
+     .kc-page-title comment: without it a flex item floors at its own
+     min-content width, which for a long unbroken detail string (a raw
+     error message, a hostname) could push .mark off a narrow phone instead
+     of wrapping the text as intended. */
+  .item .body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .item .label { font-weight: bold; }
   .item .detail { color: var(--muted); font-size: 0.85em; margin-top: 0.15em; }
   .item .fix { font-size: 0.85em; margin-top: 0.2em; display: inline-block; }

@@ -130,6 +130,27 @@
   .exec-state.state-running { color: var(--on-color); }
   #historyChart { width: 100%; height: 220px; background: var(--card-bg);
                   border: 1px solid var(--border); border-radius: var(--ui-radius); display: block; }
+  /* 2026-08-21 owner request: chart legend/caption moved OUT of the canvas
+     bitmap entirely, into real DOM text sitting below it. Three reasons, all
+     from the same root cause -- baked-in canvas text uses fixed pixel offsets
+     (padL+70, padL+145, ...) sized for the 600px design width, not this
+     page's actual phone-width canvas.clientWidth; on a real ~360px viewport
+     those offsets could crowd together or clip at the canvas edge, which is
+     exactly the overlap-on-phone class of bug the owner has already reported
+     twice. A flex-wrap DOM row instead wraps naturally at any width, is
+     covered by the same --ui-*/--fg/--muted theme variables as everything
+     else on this page (canvas fillStyle strings were already doing this, but
+     via getComputedStyle() plumbing that's easy to get wrong), and, per the
+     owner's literal wording ("the legend ... should be below the plot
+     area"), a DOM element after the <canvas> in source order is
+     unambiguously below it -- unlike text drawn inside the canvas's own
+     padding band, which reads as part of the chart image itself. */
+  #chartMeta { margin-top: 0.4em; }
+  .chart-axis-note { font-size: 0.75em; color: var(--muted); font-style: italic; margin-bottom: 0.3em; }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 0.5em 0.9em; font-size: 0.75em; color: var(--fg); }
+  .chart-legend-item { display: inline-flex; align-items: center; gap: 0.3em; white-space: nowrap; }
+  .chart-legend-swatch { display: inline-block; width: 1.1em; height: 0; border-top: 2px solid; }
+  .chart-legend-swatch.dashed { border-top-style: dashed; }
   /* 2026-08-21: progress bar sits directly under the chart (owner's explicit
      placement -- NOT at the page bottom, and the bottom nav bar stays gone).
      Hidden entirely (#progressWrap display:none) when there's nothing to
@@ -259,6 +280,15 @@
      dangling getElementById('historyEmpty') is left for the poll loop to
      dereference into a TypeError. -->
 <canvas id="historyChart" width="600" height="220"></canvas>
+<!-- Legend/span caption for historyChart -- see #chartMeta's own <style>
+     comment for why this is real DOM text rather than canvas fillText.
+     Populated by renderChartMeta() (below, in-script), never hand-authored
+     here; empty by default so there's nothing to show before the first
+     draw call. -->
+<div id="chartMeta">
+  <div id="chartAxisNote" class="chart-axis-note"></div>
+  <div id="chartLegend" class="chart-legend"></div>
+</div>
 <div id="progressWrap" style="display:none">
   <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
   <div class="progress-label"><span id="progressElapsed"></span><span id="progressRemaining"></span></div>
@@ -702,6 +732,115 @@ function fmtDuration(s) {
   return m + 'm ' + sec + 's';
 }
 
+// Compact m:ss form for chart tick labels -- fmtDuration's "12m 34s" is fine
+// for the progress bar's prose but is wider than a tick label has room for
+// once several of them share the plot width on a phone-width canvas.
+function fmtTick(s) {
+  s = Math.max(0, Math.round(s));
+  var m = Math.floor(s / 60), sec = s % 60;
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+// Freezing point, always in the raw Celsius the firmware stores and this
+// script computes with -- app.js's kcUnit only converts for DISPLAY (see its
+// own header comment), so every temperature comparison in this file, this
+// constant included, stays in Celsius; only the text drawn on screen runs
+// through kcUnit.toDisplay()/label().
+var CHART_FREEZING_C = 0;
+
+// One legend row's markup: a short coloured line sample (dashed for the
+// planned-curve series, solid otherwise) plus its label. Labels here are
+// always this script's own literal strings, never server-supplied, so
+// kcEscapeHtml is not needed -- unlike the fault/name text spliced in
+// elsewhere on this page, which always is.
+function chartLegendItem(color, label, dashed) {
+  return '<span class="chart-legend-item"><span class="chart-legend-swatch' +
+    (dashed ? ' dashed' : '') + '" style="border-color:' + color + '"></span>' + label + '</span>';
+}
+
+// Single place that fills in #chartAxisNote/#chartLegend for BOTH chart
+// modes -- see drawIdleDots/drawHistoryChart for what each mode passes in.
+// The axis-note text is the "be honest about the span" requirement: it is
+// built entirely from values the caller is actually about to plot (or, for
+// the idle no-plan case, an explicit statement that nothing here is a time
+// series at all), never a guess at wall-clock time this board doesn't have
+// (see renderLastRun's own comment on why -- no RTC, no guaranteed SNTP).
+function renderChartMeta(mode, opts) {
+  opts = opts || {};
+  var note = '';
+  var items = [];
+  if (mode === 'running') {
+    items.push(chartLegendItem('#e63', 'actual'));
+    items.push(chartLegendItem('#888', 'desired'));
+    items.push(chartLegendItem('#3a9', 'duty'));
+    if (opts.planShown) items.push(chartLegendItem('#96c', 'planned', true));
+    if (opts.guardShown) items.push(chartLegendItem('#c22', 'guard trip'));
+    if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
+    // tMin/actualMaxT are exactly the domain x() maps rows over below --
+    // never the plan's own (possibly longer) horizon, so this can't overstate
+    // how much real history is on screen.
+    note = 'Showing ' + fmtTick(opts.tMin) + '–' + fmtTick(opts.actualMaxT) + ' elapsed';
+    if (opts.totalPlannedS !== null && opts.totalPlannedS !== undefined) {
+      note += ' of ' + fmtTick(opts.totalPlannedS) + ' planned';
+    }
+  } else {
+    // Idle: the dots are this instant's live readings, not a time series --
+    // see drawIdleDots's own header comment for why there is nothing to put a
+    // real elapsed span on. Only the planned-curve preview (if any) has a
+    // genuine time axis, so only it gets one, and it's labelled "preview,
+    // not started" so it can never be mistaken for a run in progress.
+    note = 'Live channel readings (not a time series)';
+    if (opts.planShown) {
+      items.push(chartLegendItem('#96c', 'planned profile (preview)', true));
+      note += ' — dashed line previews the selected profile, 0–' +
+        fmtTick(opts.planMaxT) + ', not started';
+    }
+    if (opts.freezingShown) items.push(chartLegendItem(opts.faultColor || '#b00', 'freezing (0°C)', true));
+  }
+  document.getElementById('chartAxisNote').textContent = note;
+  document.getElementById('chartLegend').innerHTML = items.join('');
+}
+
+// Draws the x-axis tick row (evenly spaced fmtTick() labels across [tMin,
+// tMax], mapped through the caller's own x() so ticks always land exactly
+// where the data they label actually is) plus, when the axis had to stretch
+// below freezing to fit a genuine sub-zero reading, a dashed reference line
+// at 0degC so that region reads as "below the normal range", not as an
+// ordinary continuation of the plot. g/x/yTemp/minV/maxV are the same
+// values the caller just used to draw its own series.
+function drawChartAxis(g, x, yTemp, tMin, tMax) {
+  var ctx = g.ctx;
+  var tickCount = 3;
+  ctx.font = '9px sans-serif';
+  for (var ti = 0; ti <= tickCount; ti++) {
+    var tt = tMin + (tMax - tMin) * ti / tickCount;
+    var tx = x(tt);
+    ctx.strokeStyle = g.border;
+    ctx.beginPath(); ctx.moveTo(tx, g.padT + g.plotH); ctx.lineTo(tx, g.padT + g.plotH + 3); ctx.stroke();
+    var label = fmtTick(tt);
+    var tw = ctx.measureText(label).width;
+    var lx = Math.max(0, Math.min(g.cssW - tw, tx - tw / 2));
+    ctx.fillStyle = g.muted;
+    ctx.fillText(label, lx, g.cssH - 4);
+  }
+}
+
+// The freezing-clamp's visible "this is out of range" marker -- drawn
+// whenever the axis had to stretch below CHART_FREEZING_C to fit a genuine
+// sub-zero reading (see drawIdleDots/drawHistoryChart's own comments on that
+// clamp). Separate from drawChartAxis (time ticks) because it fires
+// independently of whether there's any time axis to draw at all -- the idle
+// dots have no time series but can still need this line.
+function drawFreezingRef(g, yTemp, minV, maxV) {
+  if (!(CHART_FREEZING_C > minV && CHART_FREEZING_C < maxV)) return;
+  var ctx = g.ctx, fy = yTemp(CHART_FREEZING_C);
+  ctx.save();
+  ctx.setLineDash([4, 3]);
+  ctx.strokeStyle = g.fault; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(g.padL, fy); ctx.lineTo(g.padL + g.plotW, fy); ctx.stroke();
+  ctx.restore();
+}
+
 // Shared by the exec card and the previous-run banner (both name zones by
 // bit position, zones.relay_mask-style, per zones_http.h).
 function zoneName(zi) {
@@ -1084,12 +1223,18 @@ function setupChart() {
   var fg = style.getPropertyValue('--fg').trim() || '#111';
   var muted = style.getPropertyValue('--muted').trim() || '#444';
   var border = style.getPropertyValue('--border').trim() || '#888';
+  // Theme-aware colour for the freezing reference line/legend swatch --
+  // never a hard-coded hex, same rule the rest of this page's palette
+  // already follows (see the :root/--fault-color chain at the top of this
+  // file). Falls back to the light-theme default only if the variable is
+  // somehow unset.
+  var fault = style.getPropertyValue('--fault-color').trim() || '#b00';
 
   var padL = 42, padR = 36, padT = 10, padB = 20;
   var plotW = cssW - padL - padR, plotH = cssH - padT - padB;
   ctx.strokeStyle = border; ctx.lineWidth = 1;
   ctx.strokeRect(padL, padT, plotW, plotH);
-  return { canvas: canvas, ctx: ctx, cssW: cssW, cssH: cssH, fg: fg, muted: muted, border: border,
+  return { canvas: canvas, ctx: ctx, cssW: cssW, cssH: cssH, fg: fg, muted: muted, border: border, fault: fault,
            padL: padL, padR: padR, padT: padT, padB: padB, plotW: plotW, plotH: plotH };
 }
 
@@ -1113,6 +1258,12 @@ function drawIdleDots(data) {
   // change handler / initial load when a profile is picked but not started.
   // Its points feed into the same min/max pad below so the preview curve is
   // never clipped off the top/bottom of a range sized only for the dots.
+  // Genuine-reading check for the freezing clamp below: only ACTUAL
+  // thermocouple readings count as "a real sub-zero temperature" -- the plan
+  // preview (pushed into `vals` further down, for ranging purposes only) is a
+  // synthetic curve that has no business setting the axis floor.
+  var sensorVals = vals.slice();
+
   var planPts = (activePlan && activePlan.points) || [];
   planPts.forEach(function (p) { vals.push(p.c); });
 
@@ -1129,6 +1280,20 @@ function drawIdleDots(data) {
   var padV = (maxV - minV) * 0.1;
   minV -= padV; maxV += padV;
 
+  // Owner request: "the charts should never show below freezing temp" -- but
+  // ONLY as an axis floor, not a data clamp. A disconnected/faulty probe or a
+  // genuinely cold workshop can and does read below 0degC, and that reading
+  // must still be plotted, visibly out of range, not silently pinned to 0 --
+  // hiding a real sub-zero reading on a safety-relevant display would hide
+  // exactly the kind of fault this dashboard exists to surface. So: if
+  // nothing actually read below freezing, don't let the +/-10% pad push the
+  // axis floor below 0 for no reason (snap it back up to CHART_FREEZING_C).
+  // If something genuinely did read below freezing, leave the axis exactly
+  // where the data put it (below zero) and let drawChartAxis's dashed
+  // reference line mark 0degC as the abnormal boundary.
+  var belowFreezing = sensorVals.length > 0 && Math.min.apply(null, sensorVals) < CHART_FREEZING_C;
+  if (!belowFreezing) { minV = Math.max(minV, CHART_FREEZING_C); if (maxV <= minV) maxV = minV + 10; }
+
   function yTemp(v) { return g.padT + g.plotH - (v - minV) / (maxV - minV) * g.plotH; }
   var dotX = g.padL + 10; // pinned to the left edge, never marches across the plot
 
@@ -1144,8 +1309,9 @@ function drawIdleDots(data) {
   // it reads as "the plan", not as a moving trend the way the running
   // chart's solid lines do. Explicit label makes the "not started" state
   // impossible to mistake for a live run.
+  var pMaxT = 0;
   if (planPts.length >= 2) {
-    var pMaxT = planPts[planPts.length - 1].t;
+    pMaxT = planPts[planPts.length - 1].t;
     if (activePlan.total_planned_s && activePlan.total_planned_s > pMaxT) pMaxT = activePlan.total_planned_s;
     if (pMaxT <= 0) pMaxT = 1;
     function px(t) { return g.padL + (t / pMaxT) * g.plotW; }
@@ -1159,7 +1325,13 @@ function drawIdleDots(data) {
     });
     g.ctx.stroke();
     g.ctx.restore();
+    // The plan preview is the ONLY thing in this idle frame with a genuine
+    // time axis (the dots below are a single instant, not a series) -- so
+    // ticks are drawn spanning just its own 0..pMaxT domain, via the same px()
+    // used to place the curve itself, not the dots' fixed left-edge x.
+    drawChartAxis(g, px, yTemp, 0, pMaxT);
   }
+  if (belowFreezing) drawFreezingRef(g, yTemp, minV, maxV);
 
   channels.forEach(function (c) {
     if (!c.valid || c.spi_failed) return;
@@ -1170,15 +1342,10 @@ function drawIdleDots(data) {
     g.ctx.fill();
   });
 
-  g.ctx.fillStyle = g.fg; g.ctx.font = '11px sans-serif';
-  if (planPts.length >= 2) {
-    g.ctx.fillText('no firing running — current channel readings', g.padL + 4, g.cssH - 4);
-    g.ctx.fillStyle = '#96c';
-    g.ctx.fillText('- - previewing plan (not started)', g.padL + 4, g.cssH - 16);
-    g.ctx.fillStyle = g.fg;
-  } else {
-    g.ctx.fillText('no firing running — current channel readings', g.padL + 4, g.cssH - 4);
-  }
+  renderChartMeta('idle', {
+    planShown: planPts.length >= 2, planMaxT: pMaxT,
+    freezingShown: belowFreezing, faultColor: g.fault,
+  });
 }
 
 function drawHistoryChart(rows) {
@@ -1217,8 +1384,9 @@ function drawHistoryChart(rows) {
   }
   if (tMax === tMin) tMax = tMin + 1;
   var tempVals = [];
+  var actualVals = []; // genuine sensor readings only -- see freezing-clamp comment below
   rows.forEach(function (r) {
-    if (!isNaN(r.actual)) tempVals.push(r.actual);
+    if (!isNaN(r.actual)) { tempVals.push(r.actual); actualVals.push(r.actual); }
     if (!isNaN(r.desired)) tempVals.push(r.desired);
   });
   planPts.forEach(function (p) { tempVals.push(p.c); });
@@ -1226,6 +1394,15 @@ function drawHistoryChart(rows) {
   var tMaxV = tempVals.length ? Math.max.apply(null, tempVals) : 1;
   if (tMaxV === tMinV) tMaxV = tMinV + 1;
   tMinV -= (tMaxV - tMinV) * 0.05; tMaxV += (tMaxV - tMinV) * 0.05;
+
+  // Same freezing-axis-floor clamp as drawIdleDots (see that function's
+  // comment for the full reasoning): only the recorded ACTUAL trace counts as
+  // "a real reading" for deciding whether the axis is allowed to dip below
+  // 0degC -- the desired/duty/planned series are config/plan, not sensor
+  // data, and must never be what forces (or excuses clamping away) a
+  // below-freezing axis.
+  var belowFreezing = actualVals.length > 0 && Math.min.apply(null, actualVals) < CHART_FREEZING_C;
+  if (!belowFreezing) { tMinV = Math.max(tMinV, CHART_FREEZING_C); if (tMaxV <= tMinV) tMaxV = tMinV + 1; }
 
   function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
   function yTemp(v) { return padT + plotH - (v - tMinV) / (tMaxV - tMinV) * plotH; }
@@ -1279,14 +1456,17 @@ function drawHistoryChart(rows) {
     }
   });
 
-  ctx.fillStyle = fg; ctx.font = '11px sans-serif';
-  ctx.fillText('— actual', padL + 4, cssH - 4);
-  ctx.fillStyle = '#888'; ctx.fillText('— desired', padL + 70, cssH - 4);
-  ctx.fillStyle = '#3a9'; ctx.fillText('— duty', padL + 145, cssH - 4);
-  if (planPts.length >= 2) {
-    ctx.fillStyle = '#96c'; ctx.fillText('- - planned', padL + 205, cssH - 4);
-  }
-  ctx.fillStyle = fg;
+  var guardShown = rows.some(function (r) { return r.guard && r.guard !== 0; });
+  drawChartAxis(g, x, yTemp, tMin, tMax);
+  if (belowFreezing) drawFreezingRef(g, yTemp, tMinV, tMaxV);
+
+  var actualMaxT = rows[rows.length - 1].t;
+  renderChartMeta('running', {
+    tMin: tMin, actualMaxT: actualMaxT,
+    totalPlannedS: (activePlan && activePlan.total_planned_s !== undefined) ? activePlan.total_planned_s : null,
+    planShown: planPts.length >= 2, guardShown: guardShown,
+    freezingShown: belowFreezing, faultColor: g.fault,
+  });
 }
 
 function pollHistory() {
