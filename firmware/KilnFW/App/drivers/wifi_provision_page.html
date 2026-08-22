@@ -23,7 +23,14 @@
      its own hex, so toggled-dark and default (no preference) match the LCD,
      while explicit light mode is untouched. */
   :root {
-    --bg: #fff; --fg: #111; --border: #ccc; --input-bg: #fff; --input-border: #999;
+    /* --border is #888, matching every other page's light palette. It was
+       #ccc here, which is why the owner reported "wifi setup top banner is
+       diffrent stile from others": nav.js injects the same topbar everywhere
+       and it draws its bottom edge with var(--border), so this page alone
+       rendered that edge in a paler grey. Measured before the fix:
+       rgb(204,204,204) here against rgb(136,136,136) on /settings/zones,
+       with identical geometry otherwise. */
+    --bg: #fff; --fg: #111; --border: #888; --input-bg: #fff; --input-border: #999;
     --button-bg: #f2f2f2; --hover-bg: #eee; --link: #06c;
   }
   @media (prefers-color-scheme: dark) {
@@ -82,7 +89,12 @@
   ul#networks .net-right { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
   .badge-saved { font-size: 0.75em; padding: 0.1em 0.4em; border-radius: 3px;
                  background: var(--link); color: #fff; flex-shrink: 0; }
-  .forget-btn { min-height: 0; margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
+  /* min-height 32px, not 0. The 0 was deliberately opting out of theme.css's
+   shared button floor to keep this button compact inside a network row, but
+   it measured 58x25 -- under the size a fingertip reliably hits, on a control
+   that DROPS a saved network. The row still fits: 32px is the touch floor,
+   not the 40px the topbar buttons use. */
+.forget-btn { min-height: 32px; margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
   #connectSection { margin-top: 0.5em; padding: 0.5em; border: 1px solid var(--border);
                      border-radius: var(--ui-radius); display: none; }
   #connectSection label { margin-top: 0.5em; }

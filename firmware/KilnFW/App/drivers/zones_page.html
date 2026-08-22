@@ -102,8 +102,14 @@
   }
   .zone { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
           padding: 0.7em 1em; margin-bottom: 0.7em; }
-  .relaybits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
-  .thermobits label { display: inline-block; font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
+  /* inline-FLEX with a 32px floor, not inline-block. These labels are the hit
+     area for the relay/thermocouple checkboxes they wrap, and at inline-block
+     they measured 69x19 and 90x19 -- well under the 32px a fingertip needs,
+     on the controls that decide which relays and thermocouples belong to a
+     zone. Found by the UI sweep at 320/390/768. */
+  .relaybits label, .thermobits label {
+    display: inline-flex; align-items: center; gap: 0.35em; min-height: 32px;
+    font-weight: normal; margin-right: 1em; margin-top: 0.4em; }
   .row2 { display: flex; gap: 0.7em; }
   .row2 > div { flex: 1; }
   /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
@@ -203,7 +209,12 @@ skipped a tick keeps its lost on-time and makes it up on its own next window rat
 just losing it (PID mode only -- bang-bang mode has no window to make it up in)</label>
 <input type="number" id="maxSimultaneous" min="0" max="4" value="0">
 
-<label><input type="checkbox" id="continueOnZoneTrip" style="width:auto;display:inline-block;margin-right:0.4em;">
+<!-- inline-flex with a 32px floor: the label is the hit area for the
+     checkbox inside it. As an inline label it measured 480x19 on a tablet
+     (only 35 on a phone because the text happened to wrap to two lines),
+     i.e. it passed or failed the tap-target floor depending on viewport
+     width alone. -->
+<label style="display:inline-flex;align-items:center;min-height:32px;gap:0.4em;"><input type="checkbox" id="continueOnZoneTrip" style="width:auto;margin:0;">
 Continue firing other zones when one zone's guard trips</label>
 <p class="hint">Off by default (recommended): a guard trip on ANY zone aborts the whole
 firing, since the remaining zones would keep dumping heat into a chamber whose

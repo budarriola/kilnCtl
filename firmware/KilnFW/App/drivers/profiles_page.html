@@ -220,8 +220,17 @@ function loadZones() {
     var container = document.getElementById('pzone');
     container.innerHTML = '';
     zones.forEach(function (name, i) {
+      /* inline-FLEX with a 32px minimum, not inline-block: the label IS the
+         hit area for the checkbox inside it, and at inline-block it measured
+         81x19 on a 390px phone -- half the 32px minimum a finger needs, and
+         the only genuinely small tap target the UI sweep still reported.
+         (The similar-looking checkbox on the zones page was already fine at
+         358x35; this one was not, so they are not the same case.) */
       var label = document.createElement('label');
-      label.style.display = 'inline-block';
+      label.style.display = 'inline-flex';
+      label.style.alignItems = 'center';
+      label.style.minHeight = '32px';
+      label.style.gap = '0.35em';
       label.style.fontWeight = 'normal';
       label.style.marginRight = '1em';
       var cb = document.createElement('input');
@@ -230,7 +239,9 @@ function loadZones() {
       cb.value = i;
       cb.addEventListener('change', updateZoneCeiling);
       label.appendChild(cb);
-      label.appendChild(document.createTextNode(' ' + i + ': ' + name));
+      /* No leading space in the text node now that the label is a flex row with
+         a gap -- the gap does that job, and a stray space would double it. */
+      label.appendChild(document.createTextNode(i + ': ' + name));
       container.appendChild(label);
     });
     if (zones.length === 0) {

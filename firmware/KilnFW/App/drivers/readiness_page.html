@@ -65,7 +65,13 @@
   .item .body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .item .label { font-weight: bold; }
   .item .detail { color: var(--muted); font-size: 0.85em; margin-top: 0.15em; }
-  .item .fix { font-size: 0.85em; margin-top: 0.2em; display: inline-block; }
+  /* 2026-08-22: given a real tap target. At 60x15 this was the smallest
+     control left on the site, and it is the whole point of the page -- the
+     one affordance that takes an operator from "this is not ready" to the
+     screen that fixes it. It sits on its own line (not mid-sentence), so
+     padding it out costs nothing typographically. */
+  .item .fix { font-size: 0.85em; margin-top: 0.2em; display: inline-flex;
+               align-items: center; min-height: 32px; padding: 0 0.4em 0 0; }
   .item.status-ok .mark { color: var(--ok); }
   .item.status-not_done .mark { color: var(--not-done); }
   .item.status-cannot_yet .mark { color: var(--cannot-yet); }

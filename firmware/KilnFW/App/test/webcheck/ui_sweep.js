@@ -80,6 +80,19 @@ async function auditLayout(page, vp) {
       if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
       const r = el.getBoundingClientRect();
       if (r.width === 0 && r.height === 0) continue;
+      /* Skip anything inside a horizontal scroll container. A wide table in a
+       * .table-scroll wrapper is the CORRECT design here, not a bug: the
+       * wrapper scrolls, the page does not. Without this, /settings/relays
+       * reported its 394px table as an overflow on a 390px phone while
+       * document.scrollWidth was exactly the viewport width -- a false alarm
+       * that costs real time to re-diagnose every time it appears. */
+      let inScroller = false;
+      for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+        const ox = getComputedStyle(a).overflowX;
+        if (ox === 'auto' || ox === 'scroll') { inScroller = true; break; }
+      }
+      if (inScroller) continue;
+
       if (r.right > vpWidth + 1 && cs.position !== 'fixed') {
         // Only report the innermost offenders: skip if a child also overflows.
         const childOverflows = Array.from(el.children).some((c) => {
@@ -183,14 +196,28 @@ async function auditTapTargets(page, vpWidth) {
       let problems = [];
       let small = [];
       let loadErr = null;
+      /* Progress goes to stderr as each page finishes, NOT to stdout with the
+       * report at the end. An earlier version printed nothing until the whole
+       * run completed, so when it hung there was no way to see WHICH page it
+       * hung on -- it just produced an empty file after a 15-minute timeout.
+       * A check you cannot watch stall is a check you stop trusting. */
+      process.stderr.write(`  ${vp.name} ${path} ... `);
+      const started = Date.now();
       try {
         await page.goto(BASE + path, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await page.waitForTimeout(700); // let pollers paint
+        /* 1800ms, not 700: several pages build their real content from a
+           fetch (zones' checkbox labels, the readiness list, the faults
+           table), and measuring too early judges a half-built page. That
+           produced a standing false positive -- zones' checkbox label reads
+           358x35 once loaded, comfortably above the tap-target floor, but
+           was reported as a 13x13 target when measured mid-load. */
+        await page.waitForTimeout(1800); // let fetches land and pollers paint
         problems = await auditLayout(page, vp);
         small = await auditTapTargets(page, vp.width);
       } catch (e) {
         loadErr = String(e).split('\n')[0].slice(0, 160);
       }
+      process.stderr.write(`${Date.now() - started}ms${loadErr ? ' LOAD ERROR' : ''}\n`);
       results.push({
         viewport: vp.name, page: name, path,
         loadErr, problems, small,
@@ -202,7 +229,15 @@ async function auditTapTargets(page, vpWidth) {
     await ctx.close();
   }
 
-  await browser.close();
+  /* Bounded teardown. browser.close() has been observed to hang here after
+   * the last page -- the pages poll on timers, and a stuck close meant the
+   * whole run produced NO report despite every page having been audited
+   * successfully. The results are already in hand at this point, so a
+   * teardown that will not finish must never cost us the report. */
+  await Promise.race([
+    browser.close(),
+    new Promise((res) => setTimeout(res, 5000)),
+  ]);
 
   // ---- report ----
   const byKind = {};
@@ -249,4 +284,9 @@ async function auditTapTargets(page, vpWidth) {
   if (!tks.length) console.log('  none');
   for (const k of tks.slice(0, 40)) console.log(`  ${k}\n      @ ${tt[k].join(', ')}`);
   if (tks.length > 40) console.log(`  ... and ${tks.length - 40} more`);
+
+  /* Explicit exit for the same reason: if a browser process is still winding
+   * down, node would otherwise sit on a live handle after the report is
+   * printed and look like a hang to whoever ran this. */
+  process.exit(0);
 })();

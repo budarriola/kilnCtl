@@ -138,7 +138,12 @@
      those offsets could crowd together or clip at the canvas edge, which is
      exactly the overlap-on-phone class of bug the owner has already reported
      twice. A flex-wrap DOM row instead wraps naturally at any width, is
-     covered by the same --ui-*/--fg/--muted theme variables as everything
+     covered by the same --ui-xxx / --fg / --muted theme variables as everything
+     (NEVER write that as "--ui-" followed by a star and a slash: the star-slash
+     closes THIS comment early, the prose after it parses as CSS, and every
+     rule below is silently discarded. That is not hypothetical -- it is what
+     hid .relay-status/.relay-tag and produced the owner's "86.6 °FR1: off"
+     report; the CSS parser stopped after 35 of this block's rules.)
      else on this page (canvas fillStyle strings were already doing this, but
      via getComputedStyle() plumbing that's easy to get wrong), and, per the
      owner's literal wording ("the legend ... should be below the plot
