@@ -1100,7 +1100,23 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_radius(s_chart, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(s_chart, 2, 0);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_div_line_count(s_chart, 2, 4);
+    /* Owner report 2026-08-22: "the LCD has 3 sections in the graph, it
+     * should only be one", confirmed against a photo of the screen.
+     *
+     * Both counts are 0. The culprit was the VERTICAL count, which was 4:
+     * LVGL draws vertical division lines INCLUDING one at each edge of the
+     * plot area, so 4 lines are drawn at 0, 1/3, 2/3 and 1 of the width --
+     * two of them land in the middle and cut the plot into exactly the three
+     * columns the report describes. It reads as three separate panels, not
+     * as gridlines, because the line color has as much contrast against the
+     * card background as the trace itself does.
+     *
+     * (A first attempt zeroed only the HORIZONTAL count, on the assumption
+     * that 2 horizontal lines making 3 stacked bands was the "3 sections".
+     * It was not -- the photo shows the divisions running vertically. Noted
+     * so the next person does not re-add either count reasoning that "the
+     * other one was the problem".) */
+    lv_chart_set_div_line_count(s_chart, 0, 0);
     lv_chart_set_point_count(s_chart, UI_PAGE_HOME_CHART_POINTS);
     /* Same "desired" accent color ui_page_history.c uses (ACCENT_3), now
      * carrying the PLANNED-ahead curve instead of a trailing recorded
