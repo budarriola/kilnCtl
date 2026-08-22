@@ -123,6 +123,41 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 bool config_params_validate(const config_store_record_t *rec, const char **out_field,
                              const char **out_rule);
 
+// COMMISSIONING.md sec 2/3.1, kilnlink_commit_config_rejected.h -- the coarse
+// classification a rejected COMMIT_CONFIG needs to put on the wire.
+// config_params_validate()'s out_rule is a free-text C string, fine for
+// SaftyFW's own log but too unbounded for a fixed 4-byte wire frame; this
+// enum is the wire-sized version of "which kind of rule broke." Every
+// RANGE_FAIL site in config_params_validate_ranges() reports RANGE; the
+// tc_placement_mode/tc_source cross-field check reports CONTRADICTION.
+// link_task.c's COMMIT_CONFIG handler adds ARMED/STORAGE itself, from
+// config_store_write()'s own refusal, since validate() never sees that
+// failure (it happens after validate() already passed).
+typedef enum {
+    CONFIG_PARAMS_REJECT_NONE = 0,     // validate() passed; unused on the wire
+    CONFIG_PARAMS_REJECT_RANGE,        // one field's value fails its own range/finite check
+    CONFIG_PARAMS_REJECT_CONTRADICTION, // two staged fields contradict each other
+} config_params_reject_reason_t;
+
+// Same contract as config_params_validate() above, plus `out_reason`
+// (optional, NULL-safe) carrying the wire-sized classification of *why*.
+// config_params_validate() is now a thin wrapper over this with
+// out_reason == NULL, so every existing caller (including test_config_
+// store.c's) is unaffected.
+bool config_params_validate_ex(const config_store_record_t *rec, const char **out_field,
+                                const char **out_rule, config_params_reject_reason_t *out_reason);
+
+// Maps a config_params_validate()/config_params_validate_ex() out_field
+// string to its COMMISSIONING.md sec 2.1 wire param_id, for building a
+// SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20) reply (link_task.c). Returns
+// CONFIG_PARAMS_NO_PARAM_ID (matching kilnlink_commit_config_rejected.h's
+// KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID sentinel byte-for-byte -- see
+// this file's own static assertion) for any name this table does not cover,
+// including NULL and "rec" (config_params_validate()'s own NULL-rec guard,
+// which is not a real staged field).
+#define CONFIG_PARAMS_NO_PARAM_ID 0xFFFFu
+uint16_t config_params_id_for_field_name(const char *name);
+
 // Derives the ct_channel_map "confirmed as a whole" bit (config_store.h's
 // CONFIG_STORE_SET_CT_CHANNEL_MAP) from the three per-channel bookkeeping
 // bits SET_PARAM populates (CONFIG_STORE_SET_CT_CHANNEL_MAP_0/_1/_2) --

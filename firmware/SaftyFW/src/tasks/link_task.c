@@ -87,6 +87,7 @@
 #include "kilnlink/kilnlink_ceiling.h" // SAFETY_CMD_SET_FIRING_CEILING, see link_task_handle_set_firing_ceiling()
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h" // SAFETY_CMD_COMMIT_CONFIG (0x1D), see link_task_handle_commit_config()
+#include "kilnlink/kilnlink_commit_config_rejected.h" // SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20), see link_task_send_commit_config_rejected()
 #include "kilnlink/kilnlink_config_page.h" // SAFETY_CMD_CONFIG_PAGE reply, see link_task_send_config_page()
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
 #include "kilnlink/kilnlink_diag.h"
@@ -1274,6 +1275,30 @@ static void link_task_handle_set_param(const kilnlink_frame_t *frame)
 // cannot forget it. On refusal (ARMED, or a flash failure), s_staged_config
 // is left completely UNCHANGED, so a retry (or another SET_PARAM first)
 // starts from exactly what was staged, never from a half-written record.
+// SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20), docs/COMMISSIONING.md sec 2/3.1
+// -- ROADMAP.md "no wire codec carries a per-field COMMIT_CONFIG rejection
+// reason back to the ESP" loose end. Sent ONLY from link_task_handle_
+// commit_config() below, ONLY on a refusal (never on acceptance -- an
+// accepted commit is already visible via FW_VERSION's bumped config_crc).
+// Same fire-and-forget broadcast shape as every other reply this file sends
+// off its own initiative (STATUS/DIAG/TRIP_EVENT), not a protocol-level ACK
+// payload: kilnlink_commit_config.h's own codec carries no fields for this,
+// by design (COMMISSIONING.md sec 2: validation happens after the frame is
+// already accepted at the wire layer), so the rejection has to be its own
+// frame.
+static void link_task_send_commit_config_rejected(uint16_t param_id,
+                                                    kilnlink_commit_config_reject_reason_t reason)
+{
+    kilnlink_commit_config_rejected_t msg = { .param_id = param_id, .reason = (uint8_t)reason };
+    uint8_t payload[KILNLINK_COMMIT_CONFIG_REJECTED_LEN];
+    kilnlink_commit_config_rejected_status_t status;
+    size_t len = kilnlink_commit_config_rejected_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // can't happen for a fixed sizeof(payload) == KILNLINK_COMMIT_CONFIG_REJECTED_LEN buffer
+    }
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
 static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 {
     kilnlink_commit_config_t msg;
@@ -1290,9 +1315,22 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 
     const char *field = NULL;
     const char *rule = NULL;
-    if (!config_params_validate(&s_staged_config, &field, &rule)) {
+    config_params_reject_reason_t validate_reason = CONFIG_PARAMS_REJECT_NONE;
+    if (!config_params_validate_ex(&s_staged_config, &field, &rule, &validate_reason)) {
         log_task_log(LOG_LEVEL_WARN, "commit_config", rule ? rule : "refused, validation failed");
-        return; // writes NOTHING -- s_staged_config is untouched by validate()
+        // COMMISSIONING.md sec 3.1's "names the offending field and the rule
+        // it broke" -- validate_reason maps directly onto the wire enum
+        // (both are "range" vs "contradiction", nothing else can come out
+        // of config_params_validate_ex() here); CONFIG_PARAMS_REJECT_NONE
+        // (the NULL-rec case, which link_task.c never actually triggers,
+        // since s_staged_config is always a real object) falls through to
+        // UNKNOWN rather than silently mislabelling as RANGE.
+        kilnlink_commit_config_reject_reason_t wire_reason =
+            (validate_reason == CONFIG_PARAMS_REJECT_CONTRADICTION) ? KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION
+            : (validate_reason == CONFIG_PARAMS_REJECT_RANGE)       ? KILNLINK_COMMIT_CONFIG_REJECT_RANGE
+                                                                     : KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
+        link_task_send_commit_config_rejected(config_params_id_for_field_name(field), wire_reason);
+        return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
     }
 
     config_store_record_t to_write = s_staged_config;
@@ -1306,6 +1344,18 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
         log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
     } else {
         log_task_log(LOG_LEVEL_WARN, "commit_config", reason ? reason : "refused");
+        // Not field-specific -- config_store_write()'s own refusal is either
+        // "relay is ARMED" (config_store_decide_write()) or a flash failure
+        // (config_store_flash_rc_reason()), never a single staged field's
+        // fault, so this always carries the NO_PARAM_ID sentinel. Match on
+        // the ARMED string specifically (config_store_write_decision_
+        // reason()'s own literal for CONFIG_STORE_WRITE_REFUSED_ARMED) --
+        // anything else here is a storage-layer failure.
+        kilnlink_commit_config_reject_reason_t wire_reason =
+            (reason && strcmp(reason, "refused: relay is ARMED, config writes are refused while ARMED") == 0)
+                ? KILNLINK_COMMIT_CONFIG_REJECT_ARMED
+                : KILNLINK_COMMIT_CONFIG_REJECT_STORAGE;
+        link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, wire_reason);
     }
 }
 

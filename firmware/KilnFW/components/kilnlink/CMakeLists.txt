@@ -49,5 +49,13 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_commit_config.c"
          "${KILNLINK_DIR}/src/kilnlink_get_config_page.c"
          "${KILNLINK_DIR}/src/kilnlink_config_page.c"
+         # SET_LOG_LEVEL now has a real ESP caller (safety_link.c's
+         # safety_link_send_set_log_level(), ROADMAP.md "no ESP caller" loose
+         # end) so it moves out of this comment's "hand-parsed, not linked"
+         # list above and into the actually-linked set below. COMMIT_CONFIG_REJECTED
+         # is the new Pico -> ESP reply safety_link.c decodes for the
+         # per-field commissioning rejection reason (COMMISSIONING.md sec 3.1).
+         "${KILNLINK_DIR}/src/kilnlink_set_log_level.c"
+         "${KILNLINK_DIR}/src/kilnlink_commit_config_rejected.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

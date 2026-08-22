@@ -9,6 +9,7 @@
 #include "esp_log.h"
 
 #include "http_form.h"
+#include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "safety_cfg_store.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -368,28 +369,44 @@ static bool parse_value_for_type(const char *text, uint8_t type, kilnlink_param_
     }
 }
 
+/* kilnlink_commit_config_reject_reason_t -> a short human phrase, for
+ * apply_pairs()'s rejection message below. Matches the wording
+ * config_params.h's config_params_reject_reason_t doc comment and
+ * kilnlink_commit_config_rejected.h's own reason enum use to describe each
+ * case -- kept here, not in a shared header, for the same "ESP web surface
+ * owns its own wording" split safety_trip_words.h's own comment documents
+ * for the LCD/web trip-reason tables (this one just has one caller instead
+ * of two). */
+static const char *commit_reject_reason_words(uint8_t reason)
+{
+    switch (reason) {
+    case KILNLINK_COMMIT_CONFIG_REJECT_RANGE: return "value out of range";
+    case KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION: return "contradicts another staged field";
+    case KILNLINK_COMMIT_CONFIG_REJECT_ARMED: return "relay is ARMED -- config writes are refused while ARMED";
+    case KILNLINK_COMMIT_CONFIG_REJECT_STORAGE: return "the safety processor's flash write failed";
+    default: return "refused (unrecognised reason)";
+    }
+}
+
 /* Stages every pair via safety_link_send_set_param(), then (if `commit`)
  * sends COMMIT_CONFIG. Writes a human-readable outcome into reason_out
  * (always NUL-terminated if reason_cap > 0) and returns true only if every
- * stage succeeded AND (if requested) the commit was ACKed.
+ * stage succeeded AND (if requested) the commit was ACKed and ACCEPTED.
  *
- * KNOWN LIMITATION (see safety_link_send_commit_config()'s own doc comment):
- * a REJECTED commit -- the Pico's cross-field validation refusing the staged
- * set, or its ARMED-write refusal -- is indistinguishable, at this protocol
- * layer, from an ACCEPTED one: both simply ACK the frame. COMMISSIONING.md
- * sec 3.1 asks this endpoint to "name the offending field and the rule it
- * broke" on rejection; no wire codec carries that text today (CommonFW's
- * kilnlink_commit_config.h explicitly defers it to "the existing diagnostic
- * frame", which has no room for free text -- see this function's own
- * comment for the full trail). This handler does the honest thing instead
- * of inventing a plausible-sounding reason: it reports the commit as
- * "sent, awaiting confirmation" and tells the caller to re-check GET's
- * `stale`/`commissioned`/per-field values after the next refetch (which
- * happens automatically, on the Pico's own bumped config_crc, the next time
- * safety_link.c's poll task sees a fresh FW_VERSION frame -- no action
- * needed here to trigger it). Deliberately NOT implemented this pass: a new
- * commit-verdict wire codec, which would require touching CommonFW/SaftyFW,
- * both outside this pass's file ownership. */
+ * COMMISSIONING.md sec 3.1 asks this endpoint to "name the offending field
+ * and the rule it broke" on rejection -- SAFETY_CMD_COMMIT_CONFIG_REJECTED
+ * (0x20) now carries exactly that (ROADMAP.md loose end, closed): a REJECTED
+ * commit is no longer indistinguishable from an ACCEPTED one at this layer.
+ * safety_link_send_commit_config()'s out_rejected/out_param_id/out_reason
+ * report it; this function turns the param_id back into a field NAME via
+ * safety_cfg_store_lookup() (the same table safety_cfg_store.c's ESP-side
+ * cache uses) and the reason code into words via commit_reject_reason_words()
+ * above, then reports both -- never "sent, awaiting confirmation" for a
+ * rejection this build can now actually see. A param_id this build's own
+ * table does not recognise (KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID, or
+ * a real id from a newer Pico this ESP predates) falls back to reporting the
+ * numeric id, same "refused individually... reported by numeric id" fallback
+ * the unknown-id case just below already uses. */
 static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
                         bool commit, char *reason_out, size_t reason_cap)
 {
@@ -423,11 +440,32 @@ static bool apply_pairs(SafetyLinkClass *link, const safety_cfg_post_pair_t *pai
         }
     }
     if (commit) {
-        esp_err_t err = safety_link_send_commit_config(link);
+        uint16_t reject_param_id = 0;
+        uint8_t reject_reason = 0;
+        bool rejected = false;
+        esp_err_t err = safety_link_send_commit_config(link, &reject_param_id, &reject_reason, &rejected);
         if (err != ESP_OK) {
             snprintf(reason_out, reason_cap, "the safety processor did not acknowledge the commit "
                                               "(%s) -- values were staged but NOT written",
                      esp_err_to_name(err));
+            return false;
+        }
+        if (rejected) {
+            uint8_t reject_type = 0;
+            const char *reject_name = NULL;
+            if (reject_param_id != KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID &&
+                safety_cfg_store_lookup(reject_param_id, &reject_type, &reject_name)) {
+                snprintf(reason_out, reason_cap,
+                         "commit rejected: %s (id %u) -- %s -- values were staged but NOT written",
+                         reject_name, (unsigned)reject_param_id, commit_reject_reason_words(reject_reason));
+            } else if (reject_param_id != KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID) {
+                snprintf(reason_out, reason_cap,
+                         "commit rejected: parameter id %u -- %s -- values were staged but NOT written",
+                         (unsigned)reject_param_id, commit_reject_reason_words(reject_reason));
+            } else {
+                snprintf(reason_out, reason_cap, "commit rejected: %s -- values were staged but NOT written",
+                         commit_reject_reason_words(reject_reason));
+            }
             return false;
         }
     }
@@ -555,12 +593,27 @@ static esp_err_t bench_preset_post_handler(httpd_req_t *req)
             return ESP_OK;
         }
     }
-    esp_err_t commit_err = safety_link_send_commit_config(s_link);
+    uint16_t reject_param_id = 0;
+    uint8_t reject_reason = 0;
+    bool rejected = false;
+    esp_err_t commit_err = safety_link_send_commit_config(s_link, &reject_param_id, &reject_reason, &rejected);
     if (commit_err != ESP_OK) {
         ESP_LOGW(TAG, "bench_preset: commit failed: %s", esp_err_to_name(commit_err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                              "bench preset staged but the safety processor did not acknowledge the commit");
         return ESP_OK;
+    }
+    if (rejected) {
+        /* Not expected in practice (the preset's own values are chosen to
+         * pass CONFIG_REFERENCE.md's range/contradiction rules -- see this
+         * function's own header comment), but report it honestly rather than
+         * claiming {"ok":true} for a commit the Pico actually refused. */
+        ESP_LOGW(TAG, "bench_preset: commit REJECTED (param_id=0x%04X, reason=%u)", (unsigned)reject_param_id,
+                 (unsigned)reject_reason);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"bench preset staged but the safety "
+                                        "processor rejected the commit\"}");
     }
     ESP_LOGI(TAG, "bench_preset: applied (%u fields) -- calibration_missing remains set, "
                   "the sec-1 commissioning fields were deliberately not sent",

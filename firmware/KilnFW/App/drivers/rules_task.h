@@ -28,10 +28,18 @@
 // there first (RELAY_OWNER_PROFILE) or autotune_engine.c did
 // (RELAY_OWNER_AUTOTUNE), the claim is refused, logged once, and this task
 // does not drive that relay at all until the other owner releases it.
-// Operators should keep a relay's zones_cfg_t relay_mask and its
-// rule_driven flag disjoint -- nothing currently validates that they are,
-// so a relay assigned to both loses to whichever of PROFILE/RULE claims it
-// first.
+//
+// A relay belonging to ANY zone (zones_config_get_relay_mask(), any zone,
+// unioned) is a PID/heater relay by the owner's design rule and this task
+// never even ATTEMPTS to claim RELAY_OWNER_RULE for it in the first place
+// -- see compute_heater_relay_mask() and rules_eval_decide()'s
+// is_heater_relay gate in rules_task.c. That closes the
+// "operators should keep relay_mask and rule_driven disjoint, nothing
+// validates it" gap this comment used to describe for the zone-relay case:
+// it is now enforced every tick regardless of what the saved rules_cfg_t
+// still holds. rules_http.c's POST /api/rules handler additionally refuses
+// to let an operator SET rule_driven on a zone-assigned relay in the first
+// place (see that file), so this is defense in depth, not the only gate.
 //
 // Net precedence, relay by relay: PROFILE/AUTOTUNE ownership (if claimed
 // first) > RULE ownership > MANUAL. Two callers in the same MANUAL family
@@ -63,19 +71,21 @@
 //   - kiln_io_owner's queue/task is down (never started, or wedged): every
 //     kiln_io_owner_command_*() call fails closed on its own (documented in
 //     kiln_io_owner.h) -- this task does not need to detect that itself.
-//   - This task's own tick stalls or the task dies: it holds no ownership
-//     claim that defaults to ON -- relay_authority_manual_blocked_by_owner()
-//     merely refuses OTHERS from writing a RULE-owned relay; it does not
-//     drive the relay itself. A wedged rules_task simply stops refreshing
-//     the commanded state (last write stands, whatever it was) rather than
-//     forcing anything on. profile_executor.c's own guard-9 watchdog
-//     pattern (a second, independent task) was considered and rejected here
-//     specifically because there is no continuously-running "run" for a
-//     watchdog to detect the absence of ticking on the way profile_executor
-//     has one -- a future improvement could add a stale-tick timeout that
-//     force-releases RULE ownership (falling back to manual control) if
-//     this task hasn't ticked in N seconds; not built here (see rules_task.c
-///    top comment for the exact gap this leaves).
+//   - This task's own tick stalls or the task dies: a second, independent
+//     watchdog task (rules_watchdog_entry(), rules_task.c) polls how long
+//     it has been since the main tick last completed
+//     (s_rules_task.last_tick_us). Past RULES_WATCHDOG_STALE_MS (5x the
+//     tick period), it force-commands every relay this task holds
+//     RELAY_OWNER_RULE for OFF via the same AUTHORIZED kiln_io_owner entry
+//     point the main tick uses, then releases that ownership -- so a wedged
+//     tick no longer "simply stops refreshing the commanded state (last
+//     write stands, whatever it was)"; it now actively drives its relays to
+//     the safe state instead, same as every other fail-safe path in this
+//     file. profile_executor.c's own guard-9 watchdog pattern (a second,
+//     independent task) is the direct precedent this borrows -- see
+//     rules_task.c for the implementation and the accepted small race
+//     window if the main task resumes ticking in the same instant the
+//     watchdog trips.
 //   - rules_http.c's config is mid-write when this task reads it: no lock
 //     (documented in rules_http.h) -- worst case is one tick evaluated
 //     against a torn config, self-corrects next tick, never a crash.
@@ -105,14 +115,30 @@ esp_err_t rules_task_start(SafetyLinkClass *safety);
  * (relay N is index N-1). rules_http.c's GET /api/rules/status serves this
  * as JSON. */
 typedef struct {
-    bool rule_driven;     /* rules_cfg_t.relays[i].rule_driven as of the last tick */
+    bool rule_driven;     /* rules_cfg_t.relays[i].rule_driven as of the last tick --
+                           * the RAW saved flag, even when heater_owned below forces
+                           * it to have no effect (so the page can tell the operator
+                           * "this is set but being ignored" instead of silently
+                           * clearing the checkbox out from under them) */
     bool rule_wants_on;   /* rules_eval_relay_wants_on()'s answer, BEFORE the safety/
-                           * interlock gate -- "would fire if nothing were blocking it" */
+                           * interlock/heater-relay gates -- "would fire if nothing
+                           * were blocking it" */
     bool commanded_on;    /* the actual state this task commanded this relay to,
-                           * AFTER the gate -- what the relay is really doing */
+                           * AFTER every gate -- what the relay is really doing */
     bool owned_by_rules;  /* true if this task currently holds RELAY_OWNER_RULE for
-                           * this relay (false if some other owner got there first --
-                           * see this header's top comment) */
+                           * this relay (false if some other owner got there first,
+                           * or if heater_owned below is true -- see this header's
+                           * top comment) */
+    bool heater_owned;    /* true if this relay currently belongs to ANY zone
+                           * (zones_config_get_relay_mask() union, recomputed every
+                           * tick) and is therefore a PID/heater relay the rule
+                           * engine is forbidden from ever commanding or claiming --
+                           * see rules_task.c's compute_heater_relay_mask() and
+                           * rules_eval_decide()'s is_heater_relay parameter. A
+                           * relay with this true but rule_driven also true is the
+                           * "assigned to a zone after being marked rule_driven"
+                           * ordering hazard: the saved flag is left alone on disk,
+                           * but never acted on while heater_owned stays true. */
 } rules_task_relay_status_t;
 
 typedef struct {
@@ -120,6 +146,14 @@ typedef struct {
                               * the last tick */
     bool heat_interlock_ok;  /* ota_http_heat_blocked_by_update() was NOT blocking,
                               * as of the last tick */
+    bool watchdog_forced_off; /* true if the stale-tick watchdog (see rules_task.c's
+                               * RULES_WATCHDOG_STALE_MS) has force-released this
+                               * task's relays because the main tick stopped
+                               * running; cleared automatically once ticking
+                               * resumes. Latched here (not just logged) so the
+                               * Relay & Rules page can surface "the rule engine
+                               * stalled and its relays were forced off" instead of
+                               * silently showing stale-but-plausible numbers. */
     rules_task_relay_status_t relays[RULES_EVAL_RELAY_COUNT];
 } rules_task_status_t;
 

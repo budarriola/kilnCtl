@@ -16,6 +16,7 @@
 #include "rules_types.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
+#include "zones_http.h"
 
 /* rules_types.h mirrors these two constants without including MAX31856.h/
  * kiln_io.h (host-testability -- see that header's top comment). Caught here,
@@ -325,6 +326,45 @@ send:
  * a worse failure mode than a rejected one (per TODO.md's own framing for
  * this page). */
 
+/* Owner's design rule: "the relays that are controlled by pid/thermocouples
+ * should not be controlable through rules ... they may be used as rule data
+ * though". A relay belonging to ANY zone (zones_config_get_relay_mask(),
+ * checked across every configured zone) is such a relay -- refuse a
+ * RELAY <n> DRIVEN 1 submission for it outright, naming both the relay and
+ * the owning zone, rather than silently accepting and dropping the bit (the
+ * enforcement rules_task.c applies every tick would make a silently-accepted
+ * bit a no-op anyway, but a save that claims success while quietly doing
+ * nothing is a worse UX than a rejected save with a clear reason).
+ * DRIVEN 0 is always allowed regardless of zone ownership -- turning rule
+ * control OFF for a relay is never something this needs to block.
+ *
+ * Returns NULL if relay_n (1-based) is not zone-owned. Otherwise returns a
+ * pointer to a static, file-scope buffer holding the formatted reason --
+ * not thread-safe, but this codebase's httpd handlers already assume
+ * effectively-serialized request handling (see rules_get_handler's/
+ * rules_post_handler's own single in-RAM s_rules.cfg with no lock), so one
+ * more non-reentrant static buffer used strictly within a single request's
+ * handling is consistent with the rest of this file. */
+static const char *check_relay_not_zone_owned(int relay_n)
+{
+    static char s_reason[96];
+    uint8_t bit = (uint8_t)(1u << (relay_n - 1));
+    uint8_t zone_count = zones_config_get_thermo_count();
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        uint8_t zone_mask = 0;
+        if (!zones_config_get_relay_mask(zi, &zone_mask)) {
+            continue;
+        }
+        if ((zone_mask & bit) != 0) {
+            snprintf(s_reason, sizeof(s_reason),
+                     "relay %d is assigned to zone %u and is controlled by PID -- it cannot be rule_driven",
+                     relay_n, (unsigned)(zi + 1));
+            return s_reason;
+        }
+    }
+    return NULL;
+}
+
 static bool parse_cmp(const char *s, cmp_t *out)
 {
     if (strcmp(s, "GE") == 0) {
@@ -365,6 +405,12 @@ static const char *parse_line(char *line, rules_cfg_t *cfg, int *current_relay)
         }
         if (driven != 0 && driven != 1) {
             return "DRIVEN must be 0 or 1";
+        }
+        if (driven == 1) {
+            const char *zone_reason = check_relay_not_zone_owned(relay_n);
+            if (zone_reason != NULL) {
+                return zone_reason;
+            }
         }
         int idx = relay_n - 1;
         if (cfg->relays[idx].rule_driven || cfg->relays[idx].rules[0].condition_count ||
@@ -499,7 +545,14 @@ static esp_err_t rules_post_handler(httpd_req_t *req)
     memset(&tmp, 0, sizeof(tmp));
     int current_relay = -1;
 
-    char err_msg[96];
+    /* 160, not 96: the zone-owned-relay refusal names both the relay and the
+     * zone that owns it ("relay N is assigned to zone M and is controlled by
+     * PID -- it cannot be rule_driven"), which is 95 bytes before the
+     * "line %d: " prefix is added. At 96 the compiler rejected the build
+     * outright (-Werror=format-truncation), which is the right outcome: a
+     * silently truncated error would have cut off the very part that tells
+     * the operator which relay to fix. */
+    char err_msg[160];
     int line_no = 0;
     char *save = NULL;
     /* strtok_r over the caller's own buffer -- body is already a private
@@ -549,15 +602,16 @@ static esp_err_t rules_status_get_handler(httpd_req_t *req)
         o += (size_t)n;                                                                            \
     } while (0)
 
-    APPEND("{\"safety_link_ok\":%s,\"heat_interlock_ok\":%s,\"relays\":[",
-           st.safety_link_ok ? "true" : "false", st.heat_interlock_ok ? "true" : "false");
+    APPEND("{\"safety_link_ok\":%s,\"heat_interlock_ok\":%s,\"watchdog_forced_off\":%s,\"relays\":[",
+           st.safety_link_ok ? "true" : "false", st.heat_interlock_ok ? "true" : "false",
+           st.watchdog_forced_off ? "true" : "false");
     for (uint8_t r = 0; r < RULES_EVAL_RELAY_COUNT; r++) {
         const rules_task_relay_status_t *rs = &st.relays[r];
         APPEND("%s{\"relay\":%u,\"rule_driven\":%s,\"rule_wants_on\":%s,\"owned_by_rules\":%s,"
-               "\"commanded_on\":%s}",
+               "\"commanded_on\":%s,\"heater_owned\":%s}",
                r == 0 ? "" : ",", (unsigned)(r + 1), rs->rule_driven ? "true" : "false",
                rs->rule_wants_on ? "true" : "false", rs->owned_by_rules ? "true" : "false",
-               rs->commanded_on ? "true" : "false");
+               rs->commanded_on ? "true" : "false", rs->heater_owned ? "true" : "false");
     }
     APPEND("]}");
 

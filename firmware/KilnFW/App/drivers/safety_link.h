@@ -905,6 +905,30 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link);
  * Safe to call from any task, same as safety_link_send_clear_trip(). */
 esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type);
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_LOG_LEVEL (0x1B) --
+ * docs/COMMISSIONING.md sec 2's table. Runtime log verbosity on the safety
+ * processor, not a staged config field -- unrelated to SET_CONFIG/SET_PARAM
+ * despite the neighboring id, so this takes effect immediately on the Pico
+ * side (log_task_set_level(), never persisted) and is never ARMED-gated.
+ * Nothing on the ESP ever called this before (ROADMAP.md "SET_LOG_LEVEL has
+ * a codec and a Pico consumer but no ESP caller" loose end) -- this is that
+ * caller, following safety_link_send_set_config()'s exact shape: a local
+ * wire-range check the codec itself does not perform, then encode/send.
+ *
+ * `level` is the same UART_LOG_LEVEL_* scale as safety_link.c's own
+ * log-forwarding code (uart_task_ids.h) and SaftyFW's LOG_LEVEL_* (link_task.c
+ * link_task_handle_set_log_level() range-checks it again on the Pico side;
+ * this is a second, independent check on the wire value, same
+ * defense-in-depth as SET_CONFIG's tc_type range check).
+ *
+ * Returns ESP_ERR_INVALID_ARG if level is out of the wire-level range,
+ * ESP_ERR_INVALID_STATE if the driver isn't initialized, ESP_OK once the
+ * broadcast has been handed to the UART (not proof of Pico acceptance --
+ * link_task_handle_set_log_level() never replies on the wire, same
+ * fire-and-forget shape as safety_link_send_set_config()). Safe to call from
+ * any task. */
+esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level);
+
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --
  * tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (the ESP
  * half is ota_http.c's POST /api/ota/esp/rollback). Explicit "revert to the
@@ -1015,11 +1039,28 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
  * (0x1D) / GET_CONFIG_PAGE (0x1F). App/drivers/safety_cfg_store.c (the
  * NVS-backed ESP-side cache) and safety_cfg_http.c (the /api/safety/
  * commissioning handlers) are the only intended callers -- see safety_link.c's
- * definitions for the full contract, including the known limitation that
- * safety_link_send_commit_config()'s return value is a PROTOCOL-level ACK/
- * NACK only: no wire codec exists yet to carry a textual "offending field and
- * rule" back from a rejected commit (kilnlink_commit_config.h's own doc
- * comment; that reason is entirely SaftyFW's, out of this pass's reach).
+ * definitions for the full contract.
+ *
+ * safety_link_send_commit_config()'s return value is still a PROTOCOL-level
+ * ACK/NACK only, but a rejected commit is no longer indistinguishable from an
+ * accepted one: SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20,
+ * kilnlink_commit_config_rejected.h) is a real reply now (ROADMAP.md "no wire
+ * codec carries a per-field COMMIT_CONFIG rejection reason back to the ESP"
+ * loose end, closed). `out_param_id`/`out_reason`/`out_rejected` are all
+ * optional (pass NULL for any/all to ignore); when the Pico's own commit
+ * handler refuses, *out_rejected is set true, and *out_param_id together
+ * with *out_reason carry the offending field's wire id (or
+ * KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID) and a
+ * kilnlink_commit_config_reject_reason_t value. (Write that pair as
+ * "*out_param_id together with *out_reason", never as "id/" directly
+ * followed by "*out_reason": the resulting slash-star opens a nested
+ * comment, and -Werror=comment fails the build on it. That is the same
+ * class of typo that silently broke the thermocouple faults page's inline
+ * script, where it cost far more to find.) safety_cfg_http.c's
+ * commissioning_post_handler() is the intended consumer, surfacing this in
+ * the HTTP response's error text; bench_preset's own call site passes
+ * NULL/NULL/NULL, since COMMISSIONING.md sec 4.1's bench values are not
+ * expected to be rejected by real commissioning rules.
  * safety_link_send_set_param() ACK'd-unicast-stages one field;
  * safety_link_send_commit_config() ACK'd-unicast-validates-and-writes the
  * whole staged set; safety_link_get_config_page() is a live, blocking round
@@ -1029,7 +1070,8 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
  * bridge/app task, never anything latency-critical. */
 esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
                                       kilnlink_param_value_t value);
-esp_err_t safety_link_send_commit_config(SafetyLinkClass *link);
+esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id,
+                                          uint8_t *out_reason, bool *out_rejected);
 esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
                                        kilnlink_config_page_t *out);
 

@@ -17,6 +17,7 @@
 #include "kilnlink/kilnlink_announce_reboot.h"
 #include "kilnlink/kilnlink_clear_trip.h"
 #include "kilnlink/kilnlink_commit_config.h"
+#include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_ct_cal.h"
@@ -25,6 +26,7 @@
 #include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
+#include "kilnlink/kilnlink_set_log_level.h"
 #include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -981,10 +983,18 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
  * for a SAFETY_CMD_CONFIG_PAGE (0x1F) reply -- COMMISSIONING.md sec 3's bulk
  * config read is likewise never cached inside this driver (safety_cfg_store.c
  * owns that cache, one layer up), so every GET_CONFIG_PAGE is a live round
- * trip and this is, again, the only way the caller gets the raw frame back. */
+ * trip and this is, again, the only way the caller gets the raw frame back.
+ *
+ * `out_commit_rejected`/`out_got_commit_rejected` (both optional, NULL
+ * together for every call site except safety_link_send_commit_config()) do
+ * the same job for a SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20) reply --
+ * ROADMAP.md "no wire codec carries a per-field COMMIT_CONFIG rejection
+ * reason back to the ESP" loose end. Never cached: it is meaningful only to
+ * the one commit that provoked it, exactly like CT_CAL/CONFIG_PAGE above. */
 static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
                                    uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal,
-                                   uart_proto_message_t *out_config_page, bool *out_got_config_page)
+                                   uart_proto_message_t *out_config_page, bool *out_got_config_page,
+                                   uart_proto_message_t *out_commit_rejected, bool *out_got_commit_rejected)
 {
     uart_proto_message_t msg;
     bool got_status = false;
@@ -1032,6 +1042,13 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
                     *out_got_config_page = true;
                 }
                 break;
+            case KILNLINK_COMMIT_CONFIG_REJECTED_CMD:
+                if (out_commit_rejected && out_got_commit_rejected &&
+                    msg.length == KILNLINK_COMMIT_CONFIG_REJECTED_LEN) {
+                    *out_commit_rejected = msg;
+                    *out_got_commit_rejected = true;
+                }
+                break;
             default:
                 break;
             }
@@ -1043,7 +1060,7 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
 
 static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
 {
-    return safety_drain_inbox_ex(link, wait_ms, NULL, NULL, NULL, NULL);
+    return safety_drain_inbox_ex(link, wait_ms, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 
 /* One complete request/reply exchange, serialized against every other one on
@@ -1921,6 +1938,48 @@ esp_err_t safety_link_send_set_config(SafetyLinkClass *link, uint8_t tc_type)
                                          UART_TASK_ID_SAFETY, payload, len);
 }
 
+/* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_SET_LOG_LEVEL (0x1B) --
+ * see safety_link.h's doc comment for the full design rationale. Same
+ * wire-range-check-then-encode-then-broadcast shape as
+ * safety_link_send_set_config() above; the only difference is the field
+ * (log verbosity, not tc_type) and the range it is checked against
+ * (UART_LOG_LEVEL_* rather than the MAX31856 CR1 nibble). */
+esp_err_t safety_link_send_set_log_level(SafetyLinkClass *link, uint8_t level)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (level > UART_LOG_LEVEL_VERBOSE) {
+        /* Same "refuse locally rather than let a bogus value hit the wire"
+         * discipline as safety_link_send_set_config()'s tc_type check --
+         * SaftyFW's link_task_handle_set_log_level() checks its own copy of
+         * this range again on receipt, but there is no reason to ship a
+         * value this driver already knows is illegal. */
+        ESP_LOGW(TAG, "set_log_level: refused locally, level=%u out of the 0-%u wire range",
+                 (unsigned)level, (unsigned)UART_LOG_LEVEL_VERBOSE);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_set_log_level_t msg = { .level = level };
+    uint8_t payload[KILNLINK_SET_LOG_LEVEL_LEN];
+    kilnlink_set_log_level_status_t status = KILNLINK_SET_LOG_LEVEL_OK;
+    size_t len = kilnlink_set_log_level_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "set_log_level: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "set_log_level: sending, level=%u", (unsigned)level);
+    /* Same (dst_device, dst_task, src_task) triple as SET_CONFIG's own
+     * broadcast call site above -- fire-and-forget, no ACK expected
+     * (link_task_handle_set_log_level() never replies on the wire). */
+    return uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                         UART_TASK_ID_SAFETY, payload, len);
+}
+
 /* CommonFW/docs/LINK_PROTOCOL.md sec 4, SAFETY_CMD_ROLLBACK (0x17) --
  * tools/PcTools/TODO.md's `ota_rollback(processor)` line, Pico half (this
  * driver's own ota_http.c owns the ESP half, POST /api/ota/esp/rollback).
@@ -2105,7 +2164,8 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
 
     uart_proto_message_t ct_cal_msg;
     bool got_ct_cal = false;
-    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, &ct_cal_msg, &got_ct_cal, NULL, NULL);
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, &ct_cal_msg, &got_ct_cal, NULL, NULL, NULL,
+                                 NULL);
 
     if (!got_ct_cal) {
         /* ACKed but no CT_CAL reply: same "protocol layer alive, application
@@ -2189,26 +2249,36 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
  * writes one config_store record on the Pico and bumps config_crc. ACK'd
  * unicast, same reasoning as SET_PARAM above.
  *
- * KNOWN LIMITATION, deliberate for this pass: kilnlink_commit_config.h's own
- * doc comment says refusal is "reported back on the existing diagnostic
- * frame, not by this codec" -- but SAFETY_CMD_DIAG (Frame B) carries only
- * numeric trip/warn masks and a state byte, nothing that can name "the
- * offending field and the rule it broke" as free text. No wire codec for a
- * textual commit-rejection reason exists yet in CommonFW or SaftyFW (both
- * out of this pass's file ownership -- see App/drivers/safety_cfg_http.c's
- * header comment for how its caller surfaces this gap to the operator
- * instead of inventing a reason locally). This function can therefore only
- * report the PROTOCOL-level outcome: ESP_OK means the Pico's link layer
- * ACKed the COMMIT_CONFIG frame (it received and processed the request,
- * cross-field validation included), ESP_ERR_TIMEOUT means no ACK arrived
- * (dead link, or the Pico's own ARMED-write refusal never gets an ACK either
- * -- CommonFW/docs/LINK_PROTOCOL.md sec 2's ACK-per-frame contract does not
- * distinguish "processed and rejected" from "processed and accepted" at this
- * layer). The caller must re-fetch the config page afterward
- * (safety_cfg_store_refetch()) and compare config_crc to learn whether the
- * commit actually changed anything on the Pico. */
-esp_err_t safety_link_send_commit_config(SafetyLinkClass *link)
+ * ROADMAP.md "no wire codec carries a per-field COMMIT_CONFIG rejection
+ * reason back to the ESP" loose end -- this used to be exactly the limitation
+ * kilnlink_commit_config.h's own doc comment describes (refusal "reported
+ * back on the existing diagnostic frame," which had no room for it). It no
+ * longer is: SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20,
+ * kilnlink_commit_config_rejected.h) is a real reply now, and this function
+ * captures it the same way safety_link_get_ct_cal()/safety_link_get_config_
+ * page() capture their own shared-id replies (safety_drain_inbox_ex()'s
+ * out_commit_rejected/out_got_commit_rejected params).
+ *
+ * `out_param_id`/`out_reason`/`out_rejected` are all optional (pass NULL for
+ * any/all when the caller only cares about the protocol-level outcome, e.g.
+ * safety_cfg_http.c's bench_preset path). When *out_rejected comes back
+ * true, `out_param_id` is either a real COMMISSIONING.md sec 2.1 id or
+ * KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID, and `out_reason` is a
+ * kilnlink_commit_config_reject_reason_t value -- both only meaningful in
+ * that case.
+ *
+ * Return value is still the PROTOCOL-level outcome, unchanged: ESP_OK means
+ * the Pico's link layer ACKed the COMMIT_CONFIG frame (it received and
+ * processed the request, cross-field validation included, WHETHER OR NOT
+ * that validation then rejected it -- rejection is now visible via
+ * *out_rejected, not via this return value), ESP_ERR_TIMEOUT means no ACK
+ * arrived at all (dead link). */
+esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id,
+                                          uint8_t *out_reason, bool *out_rejected)
 {
+    if (out_rejected) {
+        *out_rejected = false;
+    }
     if (!link) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -2240,6 +2310,34 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link)
         link->stats.timeouts++;
         safety_unlock(link);
     }
+
+    if (err == ESP_OK) {
+        /* Give the Pico's own frame handler a brief window to push
+         * COMMIT_CONFIG_REJECTED before this exchange's lock is released --
+         * link_task_handle_commit_config() runs to completion synchronously
+         * within its own frame dispatch, so any rejection it decides on is
+         * already queued (or in flight) by the time the protocol-level ACK
+         * above lands. SAFETY_LINK_REPLY_TIMEOUT_MS is the same budget
+         * get_ct_cal()/get_config_page() give their own reply; absence of a
+         * REJECTED frame in that window is treated as acceptance, same as
+         * every accepted commit today (an accepted commit sends nothing). */
+        uart_proto_message_t rejected_msg;
+        bool got_rejected = false;
+        (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, NULL, NULL, NULL, NULL, &rejected_msg,
+                                     &got_rejected);
+        if (got_rejected) {
+            kilnlink_commit_config_rejected_t rejected;
+            if (kilnlink_commit_config_rejected_decode(rejected_msg.payload, rejected_msg.length, &rejected) ==
+                KILNLINK_COMMIT_CONFIG_REJECTED_OK) {
+                if (out_rejected) *out_rejected = true;
+                if (out_param_id) *out_param_id = rejected.param_id;
+                if (out_reason) *out_reason = rejected.reason;
+                ESP_LOGW(TAG, "commit_config: REJECTED by the safety processor (param_id=0x%04X, reason=%u)",
+                         (unsigned)rejected.param_id, (unsigned)rejected.reason);
+            }
+        }
+    }
+
     xSemaphoreGive(link->xact_lock);
     ESP_LOGI(TAG, "commit_config: %s", err == ESP_OK ? "ACKed by the safety processor" : esp_err_to_name(err));
     return err;
@@ -2297,7 +2395,8 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
 
     uart_proto_message_t page_msg;
     bool got_page = false;
-    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, NULL, NULL, &page_msg, &got_page);
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, NULL, NULL, &page_msg, &got_page, NULL,
+                                 NULL);
 
     if (!got_page) {
         if (safety_lock(link)) {

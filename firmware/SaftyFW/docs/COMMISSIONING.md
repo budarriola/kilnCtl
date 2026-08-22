@@ -91,6 +91,7 @@ Staged in RAM, then committed as one record:
 | `0x1D` | `COMMIT_CONFIG` | ESP → Pico | Validate the staged set as a whole, write one record, bump `config_crc` |
 | `0x1E` | `GET_PARAM` / `PARAM` | both | Request one parameter / the reply, sharing an id per the `GET_CT_CAL`/`CT_CAL` convention |
 | `0x1F` | `GET_CONFIG_PAGE` / `CONFIG_PAGE` | both | Bulk read: packed `(id, value)` pairs, one page per frame, so the ESP can fetch the whole set in a few frames |
+| `0x20` | `COMMIT_CONFIG_REJECTED` | Pico → ESP | Sent only when a `COMMIT_CONFIG` is refused: names the offending `param_id` (or a "not field-specific" sentinel) and a coarse reason code (range / contradiction / ARMED / storage). Closes the gap section 3.1 used to describe as a known limitation |
 
 ### 2.1 Parameter ids
 
@@ -266,6 +267,7 @@ board is the same failure as a guessed default, arrived at more slowly.
 - [ ] `0x1B` `SET_LOG_LEVEL` codec + consumer
 - [ ] `0x1C`/`0x1D` stage-and-commit, validation at commit, ARMED refusal in the store
 - [ ] `0x1E`/`0x1F` read-back, single and paged
+- [x] `0x20` `COMMIT_CONFIG_REJECTED` -- per-field rejection reason back to the ESP, surfaced in the commissioning page's error text
 - [ ] ESP cache keyed on `config_crc`, refetch only on change
 - [ ] GUI: risk badges, unset states, disabled-guard display, live CRC, contradiction refusal
 - [ ] Bench preset leaves `calibration_missing` set and is labelled as such

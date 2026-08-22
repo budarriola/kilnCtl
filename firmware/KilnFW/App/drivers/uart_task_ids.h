@@ -795,7 +795,15 @@
  *   completeness and for any future single-parameter caller.
  * 0x1F GET_CONFIG_PAGE / CONFIG_PAGE: shared id, same request/reply-by-length
  *   convention. safety_link_get_config_page() -- the bulk read
- *   safety_cfg_store.c pages through to fetch/refresh its whole cache. */
+ *   safety_cfg_store.c pages through to fetch/refresh its whole cache.
+ * 0x20 COMMIT_CONFIG_REJECTED (Pico -> ESP only): sent by link_task.c ONLY
+ *   when a COMMIT_CONFIG (0x1D) is refused, naming the offending param_id
+ *   (or KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID if the refusal isn't
+ *   about one field) and a coarse reason code. ROADMAP.md "no wire codec
+ *   carries a per-field COMMIT_CONFIG rejection reason back to the ESP"
+ *   loose end. safety_link_send_commit_config() captures this the same way
+ *   safety_link_get_ct_cal()/safety_link_get_config_page() capture their own
+ *   shared-id replies -- see safety_drain_inbox_ex()'s doc comment. */
 #define SAFETY_CMD_SET_LOG_LEVEL    0x1Bu
 #define SAFETY_CMD_SET_PARAM        0x1Cu
 #define SAFETY_CMD_COMMIT_CONFIG    0x1Du
@@ -803,6 +811,7 @@
 #define SAFETY_CMD_PARAM            0x1Eu
 #define SAFETY_CMD_GET_CONFIG_PAGE  0x1Fu
 #define SAFETY_CMD_CONFIG_PAGE      0x1Fu
+#define SAFETY_CMD_COMMIT_CONFIG_REJECTED 0x20u
 
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u

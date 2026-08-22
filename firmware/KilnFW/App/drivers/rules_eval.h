@@ -70,12 +70,27 @@ bool rules_eval_relay_wants_on(const relay_rules_cfg_t *cfg, const rules_eval_in
  * rule) -- if the rules don't want the relay on, this returns false
  * unconditionally, gates or not.
  *
+ * is_heater_relay is the third, independent gate for the owner's design rule
+ * ("the relays that are controlled by pid/thermocouples should not be
+ * controlable through rules ... they may be used as rule data though"): true
+ * when the relay this decision is for belongs to ANY zone (the caller
+ * computes this from zones_config_get_relay_mask() across every configured
+ * zone -- see rules_task.c's per-tick recomputation for why that cannot be
+ * cached once). A heater relay's answer is forced to false unconditionally,
+ * exactly like the two gates above and for the identical reason: this is the
+ * one place that can never be bypassed by a stale/illegal rule_driven flag a
+ * config saved before the relay was assigned to a zone (or before this gate
+ * existed at all). Note this only blocks COMMANDING the relay -- reading
+ * another relay's commanded state via a COND_RELAY condition is untouched by
+ * this parameter, which is deliberate: a heater relay may still be used as
+ * rule DATA, just never as a rule TARGET.
+ *
  * This is the one function rules_task.c should trust for the actual relay
  * decision; rules_eval_relay_wants_on() alone is NOT safe to drive a relay
- * from directly, since it knows nothing about the safety link or an
- * in-progress OTA update. */
+ * from directly, since it knows nothing about the safety link, an
+ * in-progress OTA update, or heater-relay ownership. */
 bool rules_eval_decide(const relay_rules_cfg_t *cfg, const rules_eval_inputs_t *in,
-                        bool safety_link_ok, bool heat_interlock_ok);
+                        bool safety_link_ok, bool heat_interlock_ok, bool is_heater_relay);
 
 #ifdef __cplusplus
 }

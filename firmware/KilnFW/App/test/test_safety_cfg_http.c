@@ -22,6 +22,8 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+#include "kilnlink/kilnlink_commit_config_rejected.h"
+
 // safety_cfg_http.c gained the /safety/commissioning PAGE handler after this
 // test was first written, and that handler declares the embedded gzip blob
 // with GCC's `asm("_binary_...")` label syntax -- which MSVC cannot parse at
@@ -131,6 +133,9 @@ static esp_err_t s_stub_set_param_result = ESP_OK;
 static esp_err_t s_stub_commit_result = ESP_OK;
 static int s_stub_set_param_calls = 0;
 static int s_stub_commit_calls = 0;
+static bool s_stub_commit_rejected = false;
+static uint16_t s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
+static uint8_t s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
 
 esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
                                       kilnlink_param_value_t value)
@@ -140,10 +145,14 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
     return s_stub_set_param_result;
 }
 
-esp_err_t safety_link_send_commit_config(SafetyLinkClass *link)
+esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id, uint8_t *out_reason,
+                                          bool *out_rejected)
 {
     (void)link;
     s_stub_commit_calls++;
+    if (out_rejected) *out_rejected = s_stub_commit_rejected;
+    if (out_param_id) *out_param_id = s_stub_commit_reject_param_id;
+    if (out_reason) *out_reason = s_stub_commit_reject_reason;
     return s_stub_commit_result;
 }
 
@@ -180,6 +189,9 @@ static void reset_all(void)
     s_stub_commit_result = ESP_OK;
     s_stub_set_param_calls = 0;
     s_stub_commit_calls = 0;
+    s_stub_commit_rejected = false;
+    s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
+    s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
 }
 
 static void test_parse_single_pair_no_commit(void)
@@ -354,6 +366,46 @@ static void test_apply_pairs_refused_commit_surfaces_reason(void)
     TEST_CHECK(s_stub_set_param_calls == 1, "the field WAS staged before the commit was attempted");
 }
 
+static void test_apply_pairs_rejected_commit_names_field_and_reason(void)
+{
+    TEST_SECTION("apply_pairs -- a REJECTED commit (0x20) names the offending field and reason, "
+                 "not \"awaiting confirmation\"");
+    reset_all();
+    s_stub_commit_rejected = true;
+    s_stub_commit_reject_param_id = 0x0104u; // abs_max_temp_c
+    s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
+    s_stub_lookup_name = "abs_max_temp_c"; // safety_cfg_store_lookup() stub returns this for any id
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    // value_text just has to parse for the stub's default wire type
+    // (KILNLINK_PARAM_TYPE_U16) -- the actual rejection this test exercises
+    // comes from the stubbed safety_link_send_commit_config() outcome, not
+    // from parse_value_for_type(), so this must be an in-range U16.
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0104u, .value_text = "500" } };
+    char reason[160];
+    bool ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "a rejected commit is reported as a failure, not success");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL,
+               "the offending field is named (COMMISSIONING.md sec 3.1: \"name the offending field\")");
+    TEST_CHECK(strstr(reason, "range") != NULL, "the reason (\"value out of range\") is named");
+    TEST_CHECK(strstr(reason, "awaiting confirmation") == NULL,
+               "this is no longer the old ambiguous \"sent, awaiting confirmation\" wording");
+    TEST_CHECK(s_stub_commit_calls == 1, "commit was sent exactly once");
+
+    // Same rejection, but a not-field-specific one (ARMED) -- the
+    // NO_PARAM_ID sentinel must not be looked up as if it were a real id.
+    reset_all();
+    s_stub_commit_rejected = true;
+    s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
+    s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_ARMED;
+    reason[0] = '\0';
+    ok = apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason));
+    TEST_CHECK(ok == false, "an ARMED rejection is reported as a failure");
+    TEST_CHECK(strstr(reason, "ARMED") != NULL, "the ARMED reason is named");
+    TEST_CHECK(strstr(reason, "0x0104") == NULL && strstr(reason, "abs_max_temp_c") == NULL,
+               "a not-field-specific rejection does not fabricate a field name");
+}
+
 int main(void)
 {
     test_parse_single_pair_no_commit();
@@ -367,6 +419,7 @@ int main(void)
     test_apply_pairs_all_succeed_with_commit();
     test_apply_pairs_unknown_id_is_refused_and_named();
     test_apply_pairs_refused_commit_surfaces_reason();
+    test_apply_pairs_rejected_commit_names_field_and_reason();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

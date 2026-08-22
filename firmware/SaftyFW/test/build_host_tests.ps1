@@ -62,7 +62,8 @@ $sources = @(
     (Join-Path $commonSrcDir "kilnlink_param.c"),
     (Join-Path $commonSrcDir "kilnlink_get_config_page.c"),
     (Join-Path $commonSrcDir "kilnlink_config_page.c"),
-    (Join-Path $commonSrcDir "kilnlink_set_log_level.c")
+    (Join-Path $commonSrcDir "kilnlink_set_log_level.c"),
+    (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

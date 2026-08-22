@@ -10,6 +10,15 @@
 #include <math.h>
 #include <string.h>
 
+#include "kilnlink/kilnlink_commit_config_rejected.h"
+
+// config_params_id_for_field_name()'s CONFIG_PARAMS_NO_PARAM_ID sentinel
+// must be byte-identical to the wire sentinel it stands in for -- a mismatch
+// would make link_task.c's "no specific field" case silently name a real
+// (and wrong) param_id on the wire.
+typedef char config_params_no_param_id_matches_wire_sentinel
+    [(CONFIG_PARAMS_NO_PARAM_ID == KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID) ? 1 : -1];
+
 // u16-wire <-> u32-record clamp: every wire-U16 field in config_store.h is
 // stored as uint32_t (seconds/ms counters use the wider type internally so
 // arithmetic on them never has to think about u16 wraparound), but the wire
@@ -348,11 +357,13 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // which CONFIG_REFERENCE.md line justifies each one; this function does not
 // repeat that justification, only the check.
 static bool config_params_validate_ranges(const config_store_record_t *rec,
-                                           const char **out_field, const char **out_rule)
+                                           const char **out_field, const char **out_rule,
+                                           config_params_reject_reason_t *out_reason)
 {
 #define RANGE_FAIL(field_name, rule_text) do { \
         if (out_field) *out_field = (field_name); \
         if (out_rule) *out_rule = (rule_text); \
+        if (out_reason) *out_reason = CONFIG_PARAMS_REJECT_RANGE; \
         return false; \
     } while (0)
 #define RANGE_U8_MAX(field, maxval, field_name) do { \
@@ -409,16 +420,25 @@ static bool config_params_validate_ranges(const config_store_record_t *rec,
 #undef RANGE_F32_NONNEG
 }
 
-bool config_params_validate(const config_store_record_t *rec, const char **out_field,
-                             const char **out_rule)
+bool config_params_validate_ex(const config_store_record_t *rec, const char **out_field,
+                                const char **out_rule, config_params_reject_reason_t *out_reason)
 {
+    if (out_reason) {
+        *out_reason = CONFIG_PARAMS_REJECT_NONE;
+    }
     if (!rec) {
         if (out_field) *out_field = "rec";
         if (out_rule) *out_rule = "NULL record";
+        // No CONFIG_PARAMS_REJECT_* value fits "not even a record" --
+        // link_task.c never calls this with a NULL rec (s_staged_config is
+        // always a real object), so *out_reason is deliberately left at
+        // CONFIG_PARAMS_REJECT_NONE here; the wire mapping in link_task.c
+        // treats that as KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN, its own
+        // documented fallback for exactly this "should not occur" case.
         return false;
     }
 
-    if (!config_params_validate_ranges(rec, out_field, out_rule)) {
+    if (!config_params_validate_ranges(rec, out_field, out_rule, out_reason)) {
         return false;
     }
 
@@ -444,10 +464,75 @@ bool config_params_validate(const config_store_record_t *rec, const char **out_f
                         "EXTERNAL_OVERHEAT with BORROWED_ZONE is a contradiction, "
                         "rejected rather than silently reconciled";
         }
+        if (out_reason) {
+            *out_reason = CONFIG_PARAMS_REJECT_CONTRADICTION;
+        }
         return false;
     }
 
     return true;
+}
+
+bool config_params_validate(const config_store_record_t *rec, const char **out_field,
+                             const char **out_rule)
+{
+    return config_params_validate_ex(rec, out_field, out_rule, NULL);
+}
+
+// Name -> param_id lookup for config_params_validate()/_ex()'s out_field
+// strings -- COMMISSIONING.md sec 2.1's table, restricted to the fields that
+// can actually appear as an out_field here (every RANGE_FAIL site above,
+// plus the tc_placement_mode contradiction). "rec" (the NULL-record guard)
+// is deliberately absent -- CONFIG_PARAMS_NO_PARAM_ID is exactly the right
+// answer for it, same as for any other name this table does not recognise.
+typedef struct {
+    const char *name;
+    uint16_t id;
+} config_param_name_id_t;
+
+static const config_param_name_id_t CONFIG_PARAM_NAME_TABLE[] = {
+    { "tc_source", 0x0101u },
+    { "borrowed_zone_index", 0x0102u },
+    { "tc_placement_mode", 0x0103u },
+    { "abs_max_temp_c", 0x0104u },
+    { "tc_type", 0x0105u },
+    { "borrowed_type_expected", 0x0210u },
+    { "i_present_a", 0x0301u },
+    { "firing_margin_c", 0x0201u },
+    { "overshoot_margin_c", 0x0202u },
+    { "max_rate_c_per_min", 0x0204u },
+    { "tc_disagreement_c", 0x0208u },
+    { "tc_expected_offset_c", 0x020Au },
+    { "cj_warn_c", 0x020Bu },
+    { "cj_max_c", 0x020Cu },
+    { "k_ct_v_per_a[0]", 0x0308u },
+    { "k_ct_v_per_a[1]", 0x0309u },
+    { "k_ct_v_per_a[2]", 0x030Au },
+    { "gain[0]", 0x030Bu },
+    { "gain[1]", 0x030Cu },
+    { "gain[2]", 0x030Du },
+    { "mains_voltage_v", 0x030Eu },
+    { "ct_cal[0].gain", 0x0310u },
+    { "ct_cal[1].gain", 0x0311u },
+    { "ct_cal[2].gain", 0x0312u },
+    { "ct_cal[0].offset", 0x0313u },
+    { "ct_cal[1].offset", 0x0314u },
+    { "ct_cal[2].offset", 0x0315u },
+};
+#define CONFIG_PARAM_NAME_TABLE_COUNT \
+    (sizeof(CONFIG_PARAM_NAME_TABLE) / sizeof(CONFIG_PARAM_NAME_TABLE[0]))
+
+uint16_t config_params_id_for_field_name(const char *name)
+{
+    if (!name) {
+        return CONFIG_PARAMS_NO_PARAM_ID;
+    }
+    for (size_t i = 0; i < CONFIG_PARAM_NAME_TABLE_COUNT; i++) {
+        if (strcmp(CONFIG_PARAM_NAME_TABLE[i].name, name) == 0) {
+            return CONFIG_PARAM_NAME_TABLE[i].id;
+        }
+    }
+    return CONFIG_PARAMS_NO_PARAM_ID;
 }
 
 void config_params_finalize_ct_channel_map(config_store_record_t *rec)

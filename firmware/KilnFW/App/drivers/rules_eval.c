@@ -79,10 +79,14 @@ bool rules_eval_relay_wants_on(const relay_rules_cfg_t *cfg, const rules_eval_in
 }
 
 bool rules_eval_decide(const relay_rules_cfg_t *cfg, const rules_eval_inputs_t *in,
-                        bool safety_link_ok, bool heat_interlock_ok)
+                        bool safety_link_ok, bool heat_interlock_ok, bool is_heater_relay)
 {
     if (!rules_eval_relay_wants_on(cfg, in)) {
         return false; /* OFF is never gated -- if rules don't want it on, done */
+    }
+    if (is_heater_relay) {
+        return false; /* a PID/heater relay is never commanded by the rule engine,
+                        * no matter what the saved config says -- see header comment */
     }
     return safety_link_ok && heat_interlock_ok;
 }

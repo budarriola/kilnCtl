@@ -18,6 +18,7 @@
 #include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "run_state.h"
+#include "safety_trip_words.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "wifi_status_ui.h"
@@ -303,38 +304,10 @@ static void format_duration(uint32_t seconds, char *out, size_t out_cap)
     }
 }
 
-/* Mirrors SaftyFW's safety_guards.h SAFETY_TRIP_* enum, in words -- same
- * mirrored-not-shared reasoning as profile_executor.c's own
- * safety_trip_reason_words() and main_page.html's SAFETY_TRIP_WORDS (KilnFW
- * cannot #include SaftyFW's header; three independent copies rather than one
- * shared one because each surface owns its own file per this task's ownership
- * split). Kept SHORT (unlike the other two copies) -- this string replaces
- * the LCD's single-line "<profile> -- <state>" summary in place, and that
- * label's line must not wrap: this page has zero spare height (see this
- * file's header comment), so a run-on sentence here would grow the state
- * card and push the page into a scroll, which is the one thing this page's
- * "no scroll" rule cannot tolerate. Keep in sync with the other two tables
- * if safety_guards.h's enum changes. */
-static const char *safety_trip_words_short(uint8_t reason)
-{
-    switch (reason) {
-    case 1:  return "S1 overtemp";
-    case 2:  return "S2 over setpoint";
-    case 3:  return "S3 relay stuck on";
-    case 5:  return "S5 sensor invalid";
-    case 6:  return "S6a main fault";
-    case 7:  return "S6b link dead";
-    case 8:  return "S7 E-stop";
-    case 9:  return "S8 rate of rise";
-    case 10: return "S9 INEFFECTIVE";
-    case 12: return "S11 frozen sensor";
-    case 13: return "S12 enclosure temp";
-    case 14: return "S13 stale data";
-    case 15: return "config corrupt";
-    case 16: return "self-test fail";
-    default: return "unknown guard";
-    }
-}
+/* safety_trip_words_short() now lives in safety_trip_words.h, shared with
+ * ui_page_safety.c (see that header's comment for the full reasoning: this
+ * is the one shared copy for LCD single-line surfaces; profile_executor.h's
+ * full-sentence table and main_page.html's JS table remain separate). */
 
 /* 2026-08-21 owner request: "the charts should never show below freezing
  * temp." The clamp belongs on the AXIS, never on the DATA: a thermocouple

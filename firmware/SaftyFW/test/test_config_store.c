@@ -1080,6 +1080,64 @@ static void test_config_params_validate_range_validation(void)
                "an untouched, compiled-default record still validates");
 }
 
+static void test_config_params_validate_ex_reason_and_id_lookup(void)
+{
+    TEST_SECTION("config_params_validate_ex / config_params_id_for_field_name -- "
+                 "COMMIT_CONFIG_REJECTED's (0x20) wire-sized reason and param_id");
+
+    // A range failure reports CONFIG_PARAMS_REJECT_RANGE, and the offending
+    // field's name maps to its real COMMISSIONING.md sec 2.1 param_id.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = NAN;
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t reason = CONFIG_PARAMS_REJECT_CONTRADICTION; // poison, must be overwritten
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "NaN abs_max_temp_c still fails validate_ex()");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_RANGE, "a range failure reports CONFIG_PARAMS_REJECT_RANGE");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0104u,
+               "abs_max_temp_c's name maps to its real param_id 0x0104");
+
+    // A contradiction reports CONFIG_PARAMS_REJECT_CONTRADICTION, not RANGE
+    // -- this is the check that actually distinguishes the two wire reasons;
+    // without it, every rejection would look identical to the ESP.
+    config_store_default(&rec);
+    rec.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    rec.tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT;
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_TC_PLACEMENT_MODE);
+    field = NULL;
+    rule = NULL;
+    reason = CONFIG_PARAMS_REJECT_RANGE; // poison, must be overwritten
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "the tc_placement_mode/tc_source contradiction still fails validate_ex()");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_CONTRADICTION,
+               "a cross-field contradiction reports CONFIG_PARAMS_REJECT_CONTRADICTION, not RANGE");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0103u,
+               "tc_placement_mode's name maps to its real param_id 0x0103");
+
+    // A passing record leaves *out_reason untouched at NONE and old
+    // callers (out_reason == NULL, i.e. config_params_validate() itself)
+    // still work unchanged.
+    config_store_default(&rec);
+    field = NULL;
+    rule = NULL;
+    reason = CONFIG_PARAMS_REJECT_RANGE; // poison
+    TEST_CHECK(config_params_validate_ex(&rec, &field, &rule, &reason), "a clean record passes validate_ex()");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_NONE, "a passing validate_ex() reports CONFIG_PARAMS_REJECT_NONE");
+    TEST_CHECK(config_params_validate(&rec, &field, &rule), "config_params_validate() wrapper still works");
+
+    // An unknown/NULL name is the NO_PARAM_ID sentinel, never a 0 or a
+    // garbage id that could collide with a real one.
+    TEST_CHECK(config_params_id_for_field_name("not_a_real_field") == CONFIG_PARAMS_NO_PARAM_ID,
+               "an unrecognised field name maps to the NO_PARAM_ID sentinel");
+    TEST_CHECK(config_params_id_for_field_name(NULL) == CONFIG_PARAMS_NO_PARAM_ID,
+               "a NULL field name maps to the NO_PARAM_ID sentinel");
+    TEST_CHECK(config_params_id_for_field_name("rec") == CONFIG_PARAMS_NO_PARAM_ID,
+               "\"rec\" (the NULL-record guard's own out_field) is not a real param and maps to the sentinel");
+}
+
 static void test_config_params_id_table_self_consistent(void)
 {
     TEST_SECTION("config_params -- every id in the enumeration table is get()/set()-able");
@@ -1370,6 +1428,7 @@ void run_test_config_store(void)
     test_config_params_validate_range_validation();
     test_config_params_id_table_self_consistent();
     test_config_params_validate_contradiction_rejected();
+    test_config_params_validate_ex_reason_and_id_lookup();
     test_config_params_ct_channel_map_two_of_three();
     test_config_params_all_required_set();
     test_config_params_get_config_page_roundtrip();

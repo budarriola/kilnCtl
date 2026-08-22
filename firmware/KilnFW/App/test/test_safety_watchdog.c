@@ -19,6 +19,7 @@
 
 #include "test_common.h"
 #include "../drivers/profile_executor.h"
+#include "../drivers/safety_trip_words.h"
 
 static profile_executor_wd_input_t base_input(void)
 {
@@ -330,6 +331,29 @@ static void test_reason_words_are_never_a_bare_number(void)
                "an out-of-range code renders as words, not garbage or a crash");
 }
 
+// ROADMAP.md "LCD shows a raw bitmask where the web shows a sentence" --
+// ui_page_safety.c's "Last trip" row used to print a bare "0x%02X" for
+// trip_reason; it now decodes through safety_trip_words_short() (shared with
+// ui_page_home.c) the same way this file's own
+// test_reason_words_are_never_a_bare_number() already holds
+// profile_executor_safety_trip_words() to. Same spot-check shape, on the
+// short/single-line table this time.
+static void test_lcd_short_words_are_never_a_bare_number(void)
+{
+    TEST_SECTION("safety_trip_words_short -- every known reason renders in words, none as a bare hex byte");
+
+    TEST_CHECK(strcmp(safety_trip_words_short(1), "S1 overtemp") == 0, "S1 named");
+    TEST_CHECK(strstr(safety_trip_words_short(10), "INEFFECTIVE") != NULL,
+               "S9/TRIP_INEFFECTIVE is called out by name on the LCD's short table too");
+    TEST_CHECK(strcmp(safety_trip_words_short(255), "unknown guard") == 0,
+               "an out-of-range code renders as words, not garbage or a crash");
+    // The actual regression this closes: the old LCD row's format string was
+    // "reason 0x%02X" -- verify the decoded word for a real reason contains
+    // no "0x", which a raw-hex render always would.
+    TEST_CHECK(strstr(safety_trip_words_short(7), "0x") == NULL,
+               "a real reason decodes to words, not a hex escape sequence");
+}
+
 void run_test_safety_watchdog(void)
 {
     test_safety_trip_faults_running();
@@ -348,4 +372,5 @@ void run_test_safety_watchdog(void)
     test_pc_link_wording_distinct_from_safety_link_and_trip();
     test_tick_stale_still_faults_running_and_takes_priority();
     test_reason_words_are_never_a_bare_number();
+    test_lcd_short_words_are_never_a_bare_number();
 }

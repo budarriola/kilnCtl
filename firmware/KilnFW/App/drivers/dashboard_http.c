@@ -837,6 +837,67 @@ static esp_err_t unit_pref_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
+/* "level=N" plus headroom, same "generous over the actual worst case,
+ * checked against Content-Length before a single byte is read" reasoning as
+ * UNIT_PREF_BODY_MAX above. */
+#define SAFETY_LOG_LEVEL_BODY_MAX 16
+
+/* POST /api/safety/log_level -- ROADMAP.md "SET_LOG_LEVEL (0x1B) has a codec
+ * and a Pico consumer but no ESP caller" loose end. Deliberately API-only,
+ * no LCD or web page control: this is a developer/bench knob (how chatty
+ * the safety processor's own log_task is), not an operator-facing setting
+ * -- there is no kiln-operation reason to ever change it during a firing,
+ * unlike safety_get_status()'s clear_trip or the commissioning page's
+ * config fields, which the operator or installer routinely needs. A
+ * developer with `curl` or tools/PcTools has this endpoint; that is judged
+ * sufficient exposure. Body is "level=N" (0-4, UART_LOG_LEVEL_* --
+ * ERROR/WARN/INFO/DEBUG/VERBOSE), same query-string-in-POST-body shape as
+ * unit_pref_post_handler() above. */
+static esp_err_t safety_log_level_post_handler(httpd_req_t *req)
+{
+    if (!s_dash.safety) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "safety link not wired up");
+        return ESP_OK;
+    }
+    if (req->content_len <= 0 || req->content_len > SAFETY_LOG_LEVEL_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[SAFETY_LOG_LEVEL_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char level_val[8];
+    int level_len = http_form_find_field(body, "level", level_val, sizeof(level_val));
+    if (level_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"level\" field");
+        return ESP_OK;
+    }
+    char *endptr = NULL;
+    long level = strtol(level_val, &endptr, 10);
+    if (endptr == level_val || *endptr != '\0' || level < 0 || level > UART_LOG_LEVEL_VERBOSE) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "level must be 0-4 (ERROR..VERBOSE)");
+        return ESP_OK;
+    }
+
+    esp_err_t err = safety_link_send_set_log_level(s_dash.safety, (uint8_t)level);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"send failed\"}");
+    }
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 /* ---- Profile executor (TODO.md section 6) --------------------------------- */
 
 static const char *exec_state_name(profile_exec_state_t s)
@@ -1732,6 +1793,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t safety_clear_trip_uri = {
         .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
     };
+    static const httpd_uri_t safety_log_level_uri = {
+        .uri = "/api/safety/log_level", .method = HTTP_POST, .handler = safety_log_level_post_handler,
+    };
     static const httpd_uri_t history_csv_uri = {
         .uri = "/api/history.csv", .method = HTTP_GET, .handler = history_csv_get_handler,
     };
@@ -1805,6 +1869,10 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = httpd_register_uri_handler(server, &safety_clear_trip_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/safety/clear_trip) failed: %s", esp_err_to_name(err));
+    }
+    err = httpd_register_uri_handler(server, &safety_log_level_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/safety/log_level) failed: %s", esp_err_to_name(err));
     }
     err = httpd_register_uri_handler(server, &control_status_uri);
     if (err != ESP_OK) {

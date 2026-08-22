@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "dashboard_http.h"
+#include "safety_trip_words.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 
@@ -92,17 +93,20 @@ static void refresh_cb(lv_timer_t *timer)
      * did the kiln stop'" (LINK_PROTOCOL.md sec 6), so it earns the one new
      * row this page's ~264px budget has room for (see this file's header
      * comment and build_stat_label()'s doc comment for that budget).
-     * trip_reason is a raw SAFETY_TRIP_* value -- this firmware has no
-     * guard-name table to decode it against, same reasoning
-     * dashboard_http.c's JSON leaves it numeric. Age is reported in whole
-     * seconds; sub-second precision isn't useful once a trip is more than a
-     * moment old. */
+     * trip_reason is a raw SAFETY_TRIP_* value -- dashboard_http.c's JSON
+     * still leaves it numeric for the web page's own JS to decode
+     * (main_page.html's SAFETY_TRIP_WORDS), but this row now decodes it the
+     * same way ui_page_home.c's state card does, via the shared
+     * safety_trip_words_short() table in safety_trip_words.h, instead of
+     * printing the bare 0x%02X value an operator has no table for. Age is
+     * reported in whole seconds; sub-second precision isn't useful once a
+     * trip is more than a moment old. */
     if (!ds.trip_event_ever_received) {
         lv_label_set_text(s_trip_label, "Last trip: ---");
     } else {
-        char buf[56];
-        snprintf(buf, sizeof(buf), "Last trip: reason 0x%02X, %lus ago",
-                 (unsigned)ds.trip_reason, (unsigned long)(ds.trip_event_age_ms / 1000u));
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Last trip: %s, %lus ago",
+                 safety_trip_words_short(ds.trip_reason), (unsigned long)(ds.trip_event_age_ms / 1000u));
         lv_label_set_text(s_trip_label, buf);
     }
 }

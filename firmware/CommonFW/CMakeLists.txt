@@ -53,6 +53,7 @@ add_library(kilnlink STATIC
     src/kilnlink_param_value.c
     src/kilnlink_set_param.c
     src/kilnlink_commit_config.c
+    src/kilnlink_commit_config_rejected.c
     src/kilnlink_get_param.c
     src/kilnlink_param.c
     src/kilnlink_get_config_page.c
@@ -293,6 +294,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_commit_config PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_commit_config COMMAND test_commit_config)
+
+    add_executable(test_commit_config_rejected test/test_commit_config_rejected.c)
+    target_link_libraries(test_commit_config_rejected PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_commit_config_rejected PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_commit_config_rejected PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_commit_config_rejected COMMAND test_commit_config_rejected)
 
     add_executable(test_get_param test/test_get_param.c)
     target_link_libraries(test_get_param PRIVATE kilnlink)
