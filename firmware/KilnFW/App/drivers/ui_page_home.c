@@ -200,16 +200,28 @@ static const char *TAG = "ui_page_home";
  * wall-clock window history's ring-buffer sampling period implies, just at
  * lower horizontal resolution on a physically smaller plot. */
 #define UI_PAGE_HOME_CHART_POINTS 30
-#define UI_PAGE_HOME_CHART_HEIGHT_PX 70
+/* 150, was 70 -- 2026-08-21 owner request ("remove the zone [] section and
+ * make it so that i can see a temp and time scale on the graph"). Removing
+ * the zone rows (~24px/row, up to MAX31856_CHANNEL_COUNT of them) and hiding
+ * the idle state_card (~28-50px depending on zone count, now HIDDEN rather
+ * than always-present -- see refresh_cb()'s show_state_card logic) frees
+ * real main-axis height in `content`; per the task's own instructions, that
+ * freed room is spent on a taller chart plus the two scale overlays (which
+ * cost no extra height at all -- they're children of the chart, not new flex
+ * rows, see s_chart_y_hi_label's comment). See the action-row comment below
+ * for the full updated arithmetic that this number is checked against. */
+#define UI_PAGE_HOME_CHART_HEIGHT_PX 150
 
-typedef struct {
-    lv_obj_t *row;
-    lv_obj_t *name_label;
-    lv_obj_t *temp_label;
-    lv_obj_t *heat_label;
-} zone_widgets_t;
-
-static zone_widgets_t s_zone[MAX31856_CHANNEL_COUNT];
+/* 2026-08-21 owner request: "remove the zone a temp section ... also remove
+ * the box that says no profile running". The per-zone ROW WIDGETS are gone
+ * (no more build_zone_row()/zone_accent(), no more s_zone[] widget array) --
+ * but s_zone_count is NOT gone: refresh_cb()'s idle branch still uses it to
+ * gate the "representative zone" lookup that feeds the chart's single idle
+ * dot (the "first configured zone" convention this file's header comment
+ * documents, shared with ui_page_history.c's own idle fallback). Keeping the
+ * count without the widgets means that gate still reads honestly (0
+ * configured zones -> no dot, not a NULL-deref on a widget that was never
+ * built) without reintroducing the removed UI. */
 static uint8_t s_zone_count; /* zones_config_get_thermo_count() at build time */
 
 static lv_obj_t *s_chart;                     /* home page's compact chart -- actual + planned-ahead */
@@ -232,6 +244,35 @@ static lv_chart_series_t *s_chart_planned_series;
 static int32_t s_chart_actual_pts[UI_PAGE_HOME_CHART_POINTS];
 static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
 
+/* Temp/time scale overlay -- 2026-08-21 owner request ("make it so that i can
+ * see a temp and time scale on the graph"). LVGL 9.5 removed
+ * lv_chart_set_axis_tick() (no built-in chart axis widget any more -- grepped
+ * this tree's own lv_chart.h to confirm before writing any of this). The two
+ * remaining options were lv_scale (a full separate widget, src/widgets/scale/
+ * lv_scale.h) or plain lv_label children positioned over the chart's own
+ * corners. Chose plain labels: lv_scale's tick/label rendering is built
+ * around a FIXED set of major ticks (lv_scale_set_total_tick_count() /
+ * _set_major_tick_every()) and a static text_src[] array
+ * (lv_scale_set_text_src()) -- reasonable for an axis that ticks at fixed
+ * intervals, but this page's Y range is fully dynamic (refresh_cb() rewrites
+ * it from live data every tick, both branches below) and re-deriving a tick
+ * spacing + a fresh text_src array every second just to show two numbers is
+ * more moving parts than the two labels below, with more ways for the tick
+ * labels to silently drift out of sync with the range that drives them. Two
+ * labels directly overwritten with lv_label_set_text() every refresh_cb()
+ * call are trivially kept in sync BY CONSTRUCTION: they are written from the
+ * exact same lo/hi (or v-10/v+10) values passed to
+ * lv_chart_set_axis_range() in the same code path, not read back from the
+ * chart afterward. Built as CHILDREN of s_chart (not `content` siblings), so
+ * they overlay the plot rather than consuming their own row height -- this
+ * page has no spare height budget for a fourth chart-adjacent row (see the
+ * action-row comment's arithmetic). Small semi-opaque background chips (not
+ * fully transparent) so the digits stay legible against whichever part of
+ * the actual/planned traces happens to be under that corner. */
+static lv_obj_t *s_chart_y_hi_label; /* top-left: current Y-axis max, in the user's unit_pref */
+static lv_obj_t *s_chart_y_lo_label; /* bottom-left: current Y-axis min, in the user's unit_pref */
+static lv_obj_t *s_chart_x_label;    /* top-right: the plotted window's time span, "0:00-MM:SS" */
+
 static lv_obj_t *s_state_label;   /* "<profile> -- <state>" single line */
 static lv_obj_t *s_state_card;    /* parent of s_state_label -- recoloured whole when a safety trip is live */
 static lv_obj_t *s_time_label;
@@ -245,17 +286,6 @@ static ui_topbar_t s_topbar;       /* Menu gear icon, shared chrome -- see ui_to
  * comment for the underlying getters and the TODO.md 10.1a shared-backend
  * rule. */
 static lv_obj_t *s_status_label;
-
-static lv_color_t zone_accent(uint8_t zone_index)
-{
-    switch (zone_index % 5) {
-    case 0: return UI_THEME_ACCENT_1;
-    case 1: return UI_THEME_ACCENT_2;
-    case 2: return UI_THEME_ACCENT_3;
-    case 3: return UI_THEME_ACCENT_4;
-    default: return UI_THEME_ACCENT_5;
-    }
-}
 
 /* mm:ss for anything under an hour (this page's numbers are segment-scale,
  * not multi-day), hh:mm:ss beyond that -- matches main_page.html's
@@ -553,56 +583,6 @@ static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_color_t bg,
     return btn;
 }
 
-/* Compact zone row -- pad_all trimmed to UI_THEME_PADDING_PX/4 (2px, vs. the
- * standard 8px) specifically to fit up to MAX31856_CHANNEL_COUNT (3) of
- * these plus the status card and action row inside this page's ~264px
- * content budget (see this file's header comment for that number's
- * derivation). Everything else about the row (accent border, name/temp/heat
- * labels) is unchanged from the pre-rewrite version. */
-static void build_zone_row(lv_obj_t *parent, uint8_t zone_index)
-{
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_width(row, lv_pct(100));
-    lv_obj_set_height(row, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 4, 0);
-    lv_obj_set_style_pad_left(row, UI_THEME_PADDING_PX, 0); /* room for the accent border */
-    lv_obj_set_style_border_width(row, 3, 0);
-    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
-    lv_obj_set_style_border_color(row, zone_accent(zone_index), 0);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *name = lv_label_create(row);
-    lv_obj_set_style_text_color(name, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    char name_buf[24];
-    /* zones_config_get_name() -- "Zone N" is only the fallback for a zone
-     * that returns false (out of range, should never trip here) or a real
-     * but empty name (a configured zone the operator has never named). */
-    char cfg_name[16];
-    if (zones_config_get_name(zone_index, cfg_name, sizeof(cfg_name)) && cfg_name[0] != '\0') {
-        snprintf(name_buf, sizeof(name_buf), "%s", cfg_name);
-    } else {
-        snprintf(name_buf, sizeof(name_buf), "Zone %u", (unsigned)zone_index);
-    }
-    lv_label_set_text(name, name_buf);
-
-    lv_obj_t *temp = lv_label_create(row);
-    lv_obj_set_style_text_color(temp, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(temp, "-- C");
-
-    lv_obj_t *heat = lv_label_create(row);
-    lv_obj_set_style_text_color(heat, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(heat, "unknown");
-
-    s_zone[zone_index].row = row;
-    s_zone[zone_index].name_label = name;
-    s_zone[zone_index].temp_label = temp;
-    s_zone[zone_index].heat_label = heat;
-}
-
 /* Piecewise-linear sample of a profile_feasibility_plan_curve() point list at
  * time t (seconds from run start). pts[] is ordered by increasing t (the
  * order profile_feasibility_plan_curve() writes them in) -- t before the
@@ -688,12 +668,31 @@ static void refresh_cb(lv_timer_t *timer)
         /* No planned curve without a running profile -- same rule
          * ui_page_history.c's idle branch documents. */
         s_chart_planned_pts[0] = LV_CHART_POINT_NONE;
+        /* No time axis in the idle single-dot case -- there is nothing to
+         * span yet (the dot never moves, see this file's header comment), so
+         * a "0:00-0:00" label would be a confident lie rather than a scale.
+         * Hidden here unconditionally; the running branch below is the only
+         * place that ever un-hides it. */
+        lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
         if (!isnan(val)) {
             int32_t v = (int32_t)lroundf(val);
             s_chart_actual_pts[0] = v;
             lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, v - 10, v + 10);
+            char hi_buf[16], lo_buf[16];
+            snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)(v + 10), unit_pref_suffix(ds.temp_unit));
+            snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)(v - 10), unit_pref_suffix(ds.temp_unit));
+            lv_label_set_text(s_chart_y_hi_label, hi_buf);
+            lv_label_set_text(s_chart_y_lo_label, lo_buf);
+            lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             s_chart_actual_pts[0] = LV_CHART_POINT_NONE;
+            /* No reading at all -- the axis range above is untouched (stays
+             * whatever it last was), so a Y label here would describe a
+             * range that's no longer being drawn. Hide rather than show a
+             * stale number. */
+            lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
         }
         lv_chart_refresh(s_chart);
     } else {
@@ -768,62 +767,54 @@ static void refresh_cb(lv_timer_t *timer)
             float range = hi - lo;
             if (range < 1.0f) range = 1.0f;
             float pad_c = range * 0.1f;
-            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, (int32_t)lroundf(lo - pad_c),
-                                    (int32_t)lroundf(hi + pad_c));
+            int32_t axis_lo = (int32_t)lroundf(lo - pad_c);
+            int32_t axis_hi = (int32_t)lroundf(hi + pad_c);
+            lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
+            /* Y labels written from the SAME axis_lo/axis_hi just handed to
+             * lv_chart_set_axis_range(), not read back from the chart --
+             * that is what keeps them from ever drifting out of sync with a
+             * range that changes every tick (see this file's header comment
+             * on why lv_scale was rejected in favour of this). `unit` here is
+             * the same unit_pref_get() result planned_disp/actual disp were
+             * already converted through above, so the suffix can never
+             * disagree with the plotted numbers. */
+            char hi_buf[16], lo_buf[16];
+            snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)axis_hi, unit_pref_suffix(unit));
+            snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)axis_lo, unit_pref_suffix(unit));
+            lv_label_set_text(s_chart_y_hi_label, hi_buf);
+            lv_label_set_text(s_chart_y_lo_label, lo_buf);
+            lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            /* No actual and no planned point converted this tick -- nothing
+             * to show a range for; leave the previous axis range alone (same
+             * as before this change) but don't label it, same honesty rule
+             * as the idle branch's "no reading" case above. */
+            lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        /* X (time) label -- the chart's horizontal axis is the WHOLE-RUN
+         * planned horizon (0..horizon_s), computed above from
+         * profile_feasibility_plan_curve(), NOT a trailing "last N samples"
+         * window (see this file's header comment, part 2) -- so labelling it
+         * "0:00" to "<horizon>" is the honest span, not a guess at one.
+         * Gated on plan_n > 0: horizon_s falls back to a hardcoded 1.0f guard
+         * a few lines up specifically to avoid a div-by-zero when the plan
+         * curve came back empty (e.g. a malformed/zero-segment profile) --
+         * that fallback value is a guard, not a real duration, so showing
+         * "0:00-0:01" from it would be exactly the "confident wrong number"
+         * this task's own instructions warn against. */
+        if (plan_n > 0) {
+            char span_buf[24];
+            char end_buf[16];
+            format_duration((uint32_t)lroundf(horizon_s), end_buf, sizeof(end_buf));
+            snprintf(span_buf, sizeof(span_buf), "0:00-%s", end_buf);
+            lv_label_set_text(s_chart_x_label, span_buf);
+            lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
         }
         lv_chart_refresh(s_chart);
-    }
-
-    for (uint8_t zi = 0; zi < s_zone_count; zi++) {
-        char buf[24];
-        const dashboard_channel_status_t *ch = NULL;
-        for (size_t i = 0; i < ds.channel_count; i++) {
-            /* Legacy zone_index == MAX31856 channel mapping, same as
-             * dashboard_http.c (zones_config_apply_cal()'s scope note). */
-            if (ds.channels[i].channel == zi) {
-                ch = &ds.channels[i];
-                break;
-            }
-        }
-        /* ch->stale is the shared user-facing rule (older than
-         * KILN_TEMP_STALE_AGE_MS), not the driver's per-poll flag -- see
-         * dashboard_http.h. Showing a number that has not been refreshed in
-         * over ten seconds as if it were live is how a kiln gets watched
-         * against a temperature that stopped moving; "--" is the honest
-         * answer, and it matches what the web page and the PC tools show for
-         * the same reading. */
-        /* ROADMAP.md 2026-08-21 shared unit preference: ds.temp_unit comes
-         * from the same dashboard_get_status() snapshot as everything else
-         * on this page (dashboard_http.h's shared-backend rule), so this can
-         * never disagree with GET /api/status's "temp_unit" field. ABSOLUTE
-         * conversion -- this is a live sensor reading, not a rate. */
-        if (ch && ch->valid && !ch->stale) {
-            snprintf(buf, sizeof(buf), "%.1f %s",
-                     (double)unit_pref_convert(ch->temp_c, ds.temp_unit, UNIT_PREF_KIND_ABSOLUTE),
-                     unit_pref_suffix(ds.temp_unit));
-        } else {
-            snprintf(buf, sizeof(buf), "-- %s", unit_pref_suffix(ds.temp_unit));
-        }
-        lv_label_set_text(s_zone[zi].temp_label, buf);
-
-        uint8_t relay_mask = 0;
-        bool heat_on = false;
-        bool have_mask = zones_config_get_relay_mask(zi, &relay_mask);
-        if (have_mask && ds.io_ready) {
-            for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
-                if ((relay_mask & (1u << r)) && ds.relay_on[r]) {
-                    heat_on = true;
-                    break;
-                }
-            }
-        }
-        if (!ds.io_ready) {
-            lv_label_set_text(s_zone[zi].heat_label, "no relay board");
-        } else {
-            lv_label_set_text(s_zone[zi].heat_label, heat_on ? "HEATING" : "off");
-        }
-        lv_obj_set_style_text_color(s_zone[zi].heat_label,
-                                     heat_on ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
     }
 
     /* Single-line "<profile> -- <state>" summary -- replaces the previous
@@ -889,6 +880,25 @@ static void refresh_cb(lv_timer_t *timer)
     lv_obj_set_style_bg_color(s_state_card, safety_tripped ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_text_color(s_state_label,
                                  safety_tripped ? lv_color_hex(0xFFFFFF) : UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    /* 2026-08-21 owner request: "remove the box that says no profile
+     * running". This card is ALSO the live safety-trip banner (see the block
+     * above), so the fix is not deleting the card -- it's HIDING it exactly
+     * when it would have nothing to say: idle AND no live trip. HIDDEN (not
+     * deleted/rebuilt) so flex reclaims its main-axis space immediately
+     * (content's flex_grow(1) on this card means the freed height goes to...
+     * nothing, since a HIDDEN flex child is skipped by the layout entirely --
+     * the row above (progress_row) and below (action_row) simply end up with
+     * more slack between them and the content edges, which is fine on a page
+     * that never scrolls either way). Un-hidden the instant either condition
+     * that would have shown real text becomes true: a trip lands, or a
+     * profile moves off IDLE (running/paused/faulted/done all have something
+     * honest to say per exec_state_label()/the trip branch above). */
+    bool show_state_card = safety_tripped || st.state != PROFILE_EXEC_IDLE;
+    if (show_state_card) {
+        lv_obj_remove_flag(s_state_card, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_state_card, LV_OBJ_FLAG_HIDDEN);
+    }
 
     /* Merged fire button -- label and color follow the same st.state this
      * function already polled above. Running/Paused reads "Stop" in the
@@ -1134,6 +1144,40 @@ lv_obj_t *ui_page_home_build(void)
     lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_obj_remove_flag(s_chart, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* Temp/time scale overlay widgets -- see s_chart_y_hi_label's own comment
+     * (near the static declarations above) for why these are plain labels
+     * overlaid on the chart's own corners rather than an lv_scale widget.
+     * Small semi-opaque chips so digits stay legible over the plotted lines;
+     * built HIDDEN, refresh_cb() (called once at the bottom of this function)
+     * un-hides whichever ones have real data before the page is ever shown,
+     * so there is no visible flash of an unset "0" label on first paint. */
+    s_chart_y_hi_label = lv_label_create(s_chart);
+    lv_obj_set_style_text_color(s_chart_y_hi_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_set_style_bg_color(s_chart_y_hi_label, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_chart_y_hi_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(s_chart_y_hi_label, 3, 0);
+    lv_obj_set_style_radius(s_chart_y_hi_label, 4, 0);
+    lv_obj_align(s_chart_y_hi_label, LV_ALIGN_TOP_LEFT, 2, 2);
+    lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+
+    s_chart_y_lo_label = lv_label_create(s_chart);
+    lv_obj_set_style_text_color(s_chart_y_lo_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_set_style_bg_color(s_chart_y_lo_label, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_chart_y_lo_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(s_chart_y_lo_label, 3, 0);
+    lv_obj_set_style_radius(s_chart_y_lo_label, 4, 0);
+    lv_obj_align(s_chart_y_lo_label, LV_ALIGN_BOTTOM_LEFT, 2, -2);
+    lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+
+    s_chart_x_label = lv_label_create(s_chart);
+    lv_obj_set_style_text_color(s_chart_x_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_obj_set_style_bg_color(s_chart_x_label, UI_THEME_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_chart_x_label, LV_OPA_70, 0);
+    lv_obj_set_style_pad_hor(s_chart_x_label, 3, 0);
+    lv_obj_set_style_radius(s_chart_x_label, 4, 0);
+    lv_obj_align(s_chart_x_label, LV_ALIGN_TOP_RIGHT, -2, 2);
+    lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+
     /* Progress row -- UNDER the chart, per the 2026-08-21 request ("show a
      * progress bar under the graph with the time elapsed and time left").
      * MOVED here (not duplicated) from inside state_card, where s_time_label/
@@ -1164,22 +1208,20 @@ lv_obj_t *ui_page_home_build(void)
     lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(s_progress_bar, UI_THEME_ACCENT_3, LV_PART_INDICATOR);
 
-    /* Zones (TODO.md 10.3: "each configured zone, its current temperature,
-     * and its heater on/off status"). Widgets built for however many zones
-     * are configured right now; a config change mid-session (no live editor
-     * on this page yet anyway) is not re-observed until the next boot. */
+    /* 2026-08-21 owner request: "remove the zone [] section" -- no zone row
+     * widgets are built on this page any more (see s_zone_count's own comment
+     * near its declaration for what's KEPT: the count itself, still used by
+     * refresh_cb()'s idle branch to gate the chart's representative-zone
+     * dot). s_zone_count == 0 is handled sensibly by simply having nothing to
+     * gate -- refresh_cb() skips the representative-temp lookup and the
+     * chart shows no idle dot, which is the honest "nothing configured"
+     * state; there is no separate "No zones configured" label to build here
+     * any more; each configured zone's live temperature/heater status is
+     * still visible via the web dashboard (main_page.html), which was never
+     * subject to this page's height budget. */
     s_zone_count = zones_config_get_thermo_count();
     if (s_zone_count > MAX31856_CHANNEL_COUNT) {
         s_zone_count = MAX31856_CHANNEL_COUNT; /* defensive; should never trip */
-    }
-    if (s_zone_count == 0) {
-        lv_obj_t *none = lv_label_create(content);
-        lv_obj_set_style_text_color(none, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-        lv_label_set_text(none, "No zones configured");
-    } else {
-        for (uint8_t zi = 0; zi < s_zone_count; zi++) {
-            build_zone_row(content, zi);
-        }
     }
 
     /* Compact run-state card -- 2026-08-21: now ONE summary line only
@@ -1220,6 +1262,14 @@ lv_obj_t *ui_page_home_build(void)
     lv_label_set_long_mode(s_state_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_state_label, lv_pct(100));
     lv_label_set_text(s_state_label, "No profile running");
+    /* Built hidden -- boot state is always IDLE with no trip yet, i.e.
+     * exactly the "nothing to say" case refresh_cb()'s show_state_card logic
+     * hides for. refresh_cb(NULL) at the bottom of this function re-derives
+     * the real state (including un-hiding this, if e.g. a trip is already
+     * latched at boot) before the page is ever shown, so this starting value
+     * is never actually seen -- it just avoids a one-tick flash of the old
+     * "No profile running" box between page-build and the first refresh. */
+    lv_obj_add_flag(state_card, LV_OBJ_FLAG_HIDDEN);
 
     /* Single merged Start/Stop button -- one user-visible request ("the
      * start stop button should be one button on the lcd"). Menu moved off
@@ -1228,61 +1278,59 @@ lv_obj_t *ui_page_home_build(void)
      * now just the one button. build_button() still grows it across the
      * row's width via flex_grow(1).
      *
-     * Action-row height arithmetic, UPDATED 2026-08-21 (was: "same style as
-     * ui_page_config.c's hub-page comment", 72px fixed). Live hardware
-     * tap-target dump (the same dump that motivated this change) measured
-     * this page's real content area at y=44..311 -- 267px, not the ~264px
-     * this file's header comment estimates; 267px is the real, measured
-     * number and is what the arithmetic below uses.
+     * Action-row height arithmetic, UPDATED 2026-08-21 (owner request: "remove
+     * the zone [] section and make it so that i can see a temp and time
+     * scale on the graph. also remove the box that says no profile
+     * running"). Same 267px real, hardware-measured content height this
+     * comment has used since the previous pass (live tap-target dump, y=44..311).
      *
-     * Request: "the start button should sit at the bottom and be about half
-     * as tall so the graph can be larger." Resolved against reading (a), not
-     * (b) -- see this file's header comment: TODO.md 10.3's chart was
-     * deliberately MOVED to ui_page_history.c, not left off by oversight,
-     * and nothing in this file gives a concrete reason to reverse that
-     * decision as a side effect of a button-geometry request. Reading (a)
-     * ("let the existing content -- the run-state card just above this
-     * button -- take the freed room") is what's implemented: state_card
-     * above now has flex_grow(1) (see its own comment) so it, not a chart,
-     * absorbs both the space this button gives up and the ~110px of content
-     * space that was already going unused below the old 71px button.
+     * What changed this pass, and why the arithmetic below is now SIMPLER,
+     * not just re-numbered:
+     *   - Zone rows are GONE (no widgets built at all -- see s_zone_count's
+     *     own comment). The old worst-case "3 zones x ~19px + 3 gaps" term
+     *     drops out of this sum entirely, not just shrinks.
+     *   - state_card can now be HIDDEN (refresh_cb()'s show_state_card logic)
+     *     whenever idle and not tripped. A HIDDEN flex child is skipped by
+     *     LVGL's layout outright, so the worst case for the FIXED items below
+     *     is now simply "state_card present" (running/paused/faulted/done, or
+     *     a live trip) -- the same flex_grow(1) reasoning as before still
+     *     applies when it IS shown: it absorbs whatever main-axis space is
+     *     left, so it can only ever ADD slack, never cause an overflow.
+     *   - The two scale-overlay labels (s_chart_y_hi/lo_label, s_chart_x_label)
+     *     cost ZERO extra main-axis height: they are children of s_chart
+     *     positioned via lv_obj_align(), not siblings in `content`'s flex
+     *     column. All the freed height goes into UI_PAGE_HOME_CHART_HEIGHT_PX
+     *     itself (70 -> 150), per the task's own instruction to spend it on
+     *     "a taller chart plus the two scales."
      *
-     *     chart (actual+desired, home-compact) .. UI_PAGE_HOME_CHART_HEIGHT_PX = 70px
-     *     gap ..................................... UI_THEME_PADDING_PX/2 = 4px
-     *     progress row (time label + slim bar) .. ~30px (20px label line + 2px gap + 8px bar)
-     *     gap ..................................... UI_THEME_PADDING_PX/2 = 4px
-     *     zone rows (up to 3, compact) ......... variable, unchanged
-     *     gap x (zone rows) ...................... UI_THEME_PADDING_PX/2 = 4px each
-     *     state card (1 summary line) ........... flex_grow(1): whatever's left
-     *     gap .................................... UI_THEME_PADDING_PX/2 = 4px
-     *     action row: 1 button, drawn ........... 36px (was 71px measured / 72px coded)
+     *     chart (actual+planned, now WITH the temp/time scale overlay) .. UI_PAGE_HOME_CHART_HEIGHT_PX = 150px
+     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
+     *     progress row (time label + slim bar) .......................... ~30px (20px label line + 2px gap + 8px bar)
+     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px
+     *     state card (1 summary line, HIDDEN when idle+not tripped) ..... flex_grow(1) when shown: whatever's left; 0px when hidden
+     *     gap ............................................................ UI_THEME_PADDING_PX/2 = 4px (skipped by LVGL when state_card is hidden)
+     *     action row: 1 button, drawn ................................... 36px
      *
-     * UPDATED 2026-08-21 (progress row added under the chart, moved out of
-     * state_card -- see this file's header comment, "DESIRED SERIES +
-     * PROGRESS BAR RETURN"): because state_card is still the one
-     * flex-growing child, this "adds up" by construction (flex-grow absorbs
-     * exactly whatever main-axis space is left in `content` -- it cannot
-     * overflow the 267px measured budget any more than any other flex-grow
-     * child could). The only thing worth checking is that the FIXED
-     * children alone (everything except state_card) never exceed 267px
-     * outright, which would starve state_card to a negative/zero height.
-     * `content` now has 7 children (chart, progress_row, up to 3 zone rows,
-     * state_card, action_row) instead of 6, so there are 6 gaps, not 5.
-     * Worst case (3 zones, ~19px each, same hardware-measured figure as
-     * before) plus the 70px chart plus the ~30px progress row plus 6 gaps
-     * at 4px plus the 36px button:
-     *     70 + 30 + 3*19 + 6*4 + 36 = 70 + 30 + 57 + 24 + 36 = 217px fixed,
-     *     leaving 267 - 217 = 50px for state_card in the worst (3-zone) case
-     * -- comfortably positive for the one short summary line state_card now
-     * holds (it needs roughly UI_THEME_PADDING_PX/2 * 2 pad + a ~20px text
-     * line =~ 28px), so state_card never collapses to zero even at
-     * MAX31856_CHANNEL_COUNT (3) zones. If a future zone gains enough label
-     * text to push a row past ~19px, or a 4th zone is ever added, re-derive
-     * this number rather than assume it still holds. NOT re-measured on
-     * hardware since this pass (no bench access when this was written) --
-     * treat "50px leftover" as computed against the same real, hardware-
-     * measured 267px content height and 19px-per-zone-row figure as before,
-     * not as pixel-verified for this specific new layout.
+     * `content` now has 4 children when state_card is shown (chart,
+     * progress_row, state_card, action_row) -- 3 gaps, not 6. The only thing
+     * worth checking is that the FIXED children (everything except state_card)
+     * never exceed 267px outright, which would starve state_card to a
+     * negative/zero height in the case where it IS shown:
+     *     150 (chart) + 30 (progress row) + 36 (button) + 3*4 (gaps) = 228px fixed,
+     *     leaving 267 - 228 = 39px for state_card when it is shown
+     * -- comfortably positive for the one short summary line state_card holds
+     * (needs roughly UI_THEME_PADDING_PX/2 * 2 pad + a ~20px text line =~
+     * 28px), with 11px of margin, and there is no zone-row-count variable
+     * left to worsen this case (the old "up to 3 zones" term is gone). When
+     * state_card is hidden (idle, not tripped -- the exact case the owner
+     * asked to remove), the fixed sum is even smaller (228px minus the one
+     * gap LVGL skips = 224px) and the leftover 43px of `content` simply goes
+     * unused rather than being redistributed -- acceptable on a page that
+     * never scrolls either way; nothing needs that space when idle. NOT
+     * re-measured on hardware since this pass (no bench access when this was
+     * written) -- treat "39px leftover" as computed against the same real,
+     * hardware-measured 267px content height as before, not as
+     * pixel-verified for this specific new layout.
      *
      * Drawn vs effective button height: build_button()'s
      * ui_theme_apply_touch_area(btn, false) call reads back the button's

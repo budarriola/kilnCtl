@@ -22,6 +22,35 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+// safety_cfg_http.c gained the /safety/commissioning PAGE handler after this
+// test was first written, and that handler declares the embedded gzip blob
+// with GCC's `asm("_binary_...")` label syntax -- which MSVC cannot parse at
+// all (error C2061: syntax error: identifier 'asm'). #define it away to
+// nothing, exactly as test_zones_http.c already does for the identical
+// reason; see that file's own note. The symbols themselves are then supplied
+// as ordinary arrays below, since nothing on the host links the real
+// EMBED_TXTFILES blobs.
+#define asm(x)
+
+const uint8_t safety_commissioning_page_html_gz_start[] = { 0x1f, 0x8b, 0x00 };
+const uint8_t safety_commissioning_page_html_gz_end[] = { 0x00 };
+
+// web_encoding.h -- reached only from the page handler, which these tests do
+// not exercise (they cover the JSON builder, the tokenizer and apply_pairs).
+// Same stub bodies test_zones_http.c uses for the identical reason.
+esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const char *page_name)
+{
+    (void)req;
+    (void)tag;
+    (void)page_name;
+    return ESP_OK;
+}
+bool web_client_accepts_gzip(httpd_req_t *req)
+{
+    (void)req;
+    return true;
+}
+
 #include "../drivers/safety_cfg_http.c"
 
 // ---------------------------------------------------------------------------
