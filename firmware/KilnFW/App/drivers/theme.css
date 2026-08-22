@@ -136,7 +136,36 @@ button { min-height: var(--ui-touch); }
    identical rules, two different heights, decided by whether an unrelated
    page-local reset existed. Shared chrome must not inherit its geometry from
    whatever the host page happens to declare. */
+/* nav.js injects this topbar into EVERY page, so these two controls have to
+   be immune to whatever the host page happens to say about bare elements.
+   Nine of the pages carry their own `button { ... }` rule, and the Menu
+   button is a <button> while Home is an <a> -- so any property a page sets
+   on `button` lands on one of the pair and not the other, and the two drift
+   apart. That is exactly what the owner reported as "an odd offset on the
+   buttons": zones_page.html's `button { margin-top: 1em; }` was pushing Menu
+   13.6px below Home and stretching the whole topbar from 57px to 70.6px.
+
+   Hence the explicit resets below. They are not redundancy for its own sake:
+   each one closes a property a page-local `button` rule would otherwise win.
+     - margin: 0        -- the reported bug (margin-top: 1em)
+     - font-family      -- a <button> does NOT inherit the page font by
+                           default (UA stylesheet), so Menu was computing
+                           Arial while Home computed sans-serif. Different
+                           metrics put Menu's label 3px off-centre inside its
+                           own border on EVERY page, not just the two named.
+     - font-size/line-height/padding -- pages set these on `button` too, and
+                           any of them changes the button's height, which
+                           breaks the 40px tap target the sweep checks for.
+
+   line-height is `1`, not `normal`, and that is load-bearing rather than
+   stylistic. With `normal`, a <button>'s line box resolves taller than an
+   <a>'s from the same font, so the Menu label sat 3px below the Home label's
+   optical centre (measured: 14px above / 11px below the text, against Home's
+   even 12.5/12.5) on every page. Pinning line-height makes both elements
+   produce the same line box, and flex centring then lands them identically
+   (12.2/12.8 on both, i.e. within one device pixel). */
 .kc-home-btn, .kc-menu-btn { box-sizing: border-box;
+               margin: 0; font-family: inherit; line-height: 1;
                min-height: 40px; display: inline-flex; align-items: center;
                justify-content: center; padding: 0.35em 0.8em; font-size: 0.85em;
                border-radius: var(--ui-radius); border: 1px solid var(--border);
