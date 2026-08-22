@@ -152,11 +152,23 @@ esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const 
 
 // ota_http.h's interlock check -- only reached from backup_import_post_handler(),
 // which these tests never call (they call backup_import_apply() directly).
+// Controllable via the two globals below (default OK/"", unchanged from this
+// function's original hardcoded body) rather than a second, colliding
+// definition, because test_kiln_cfg_store.c (linked into the same host-test
+// executable, 2026-08-21) needs this same symbol to be able to report
+// OTA_INTERLOCK_REFUSED for its own interlock-backstop regression test --
+// exactly one definition of ota_http_check_interlocks() may exist across the
+// whole link, so it lives here and is driven by state, not duplicated.
+ota_interlock_result_t g_stub_ota_interlock_result = OTA_INTERLOCK_OK;
+char g_stub_ota_interlock_reason[OTA_INTERLOCK_REASON_MAX] = "";
+
 ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap)
 {
-    (void)reason_out;
-    (void)reason_cap;
-    return OTA_INTERLOCK_OK;
+    if (reason_out && reason_cap) {
+        strncpy(reason_out, g_stub_ota_interlock_reason, reason_cap - 1);
+        reason_out[reason_cap - 1] = '\0';
+    }
+    return g_stub_ota_interlock_result;
 }
 
 // ---------------------------------------------------------------------------

@@ -142,6 +142,18 @@ static void tc_types_nav_cb(lv_event_t *e)
     kiln_ui_show("tc_types");
 }
 
+/* 2026-08-21 (owner request): "save kiln configs with different relay,
+ * thermocouple, and PID configs" -- see ui_page_kiln_setup.c/.h's header
+ * comment for the hub this leads to (Firing Profile / Kiln Config, kept
+ * verbally and visually distinct from each other). Page 3 was 1 of 6 cells
+ * (Thermocouple Types only) before this -- verified against the "Paged hub"
+ * comment above before adding a second cell here, not assumed. */
+static void kiln_setup_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("kiln_setup");
+}
+
 static void zones_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -516,6 +528,8 @@ lv_obj_t *ui_page_config_build(void)
      * being squeezed onto an already-full page 1/2 or bolted onto an
      * existing thermocouple-related page. */
     build_nav_item(s_hub_pages[2], "Thermocouple Types", tc_types_nav_cb);
+    /* 2nd of 6 cells on page 3, see kiln_setup_nav_cb()'s comment above. */
+    build_nav_item(s_hub_pages[2], "Kiln Setup", kiln_setup_nav_cb);
 
     /* content is created after the topbar's icon proxy, so without this it
      * would sit above the proxy in z-order and win taps in the overlap

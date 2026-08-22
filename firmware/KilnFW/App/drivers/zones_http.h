@@ -507,6 +507,72 @@ uint32_t zones_config_generation(void);
  * of going through here. */
 float zones_config_apply_cal(uint8_t zone_index, float raw_c);
 
+/* ---- Whole-config export/import for kiln_cfg_store.c ---------------------
+ *
+ * TODO.md owner-report (2026-08-21 follow-up): "save kiln profiles with
+ * different relay/thermocouple/PID configs ... survive a programming cycle,
+ * allow creating a config from an existing one." Named KILN CONFIG
+ * everywhere (never "profile" -- that word already means a firing schedule
+ * in this codebase, profiles_http.c/profile_executor.c). A kiln config is a
+ * named, saved copy of the WHOLE zones_cfg_t blob below -- every field this
+ * module owns for every channel, plus safety_tc_type -- so kiln_cfg_store.c
+ * never needs to know this struct's layout, only that it is an opaque blob
+ * of at most ZONES_CONFIG_BLOB_MAX_SIZE bytes that this module alone knows
+ * how to interpret, version, migrate, and validate.
+ *
+ * ZONES_CONFIG_BLOB_MAX_SIZE is a fixed compile-time ceiling kiln_cfg_store.c
+ * sizes its own fixed-size storage array against; zones_config_blob_size()
+ * (below) is the actual, possibly-smaller runtime size of THIS firmware's
+ * zones_cfg_t, used for the export/save path. A future field added to
+ * zone_cfg_t/zones_cfg_t that pushes sizeof(zones_cfg_t) past this ceiling
+ * fails the _Static_assert in zones_http.c at compile time -- widen this
+ * macro then, which also means every kiln_cfg_store entry already on a
+ * board's flash keeps its old (smaller) blob size until re-saved, exactly
+ * like ZONES_CFG_VERSION's own "grows, never shrinks" migration discipline. */
+#define ZONES_CONFIG_BLOB_MAX_SIZE 512
+
+/* Runtime size of the internal zones_cfg_t struct THIS firmware build
+ * stores -- what zones_config_export_blob() below actually writes, and the
+ * unit kiln_cfg_store.c uses to know how many of a stored blob's bytes are
+ * meaningful. Always <= ZONES_CONFIG_BLOB_MAX_SIZE (enforced at compile time
+ * in zones_http.c). */
+size_t zones_config_blob_size(void);
+
+/* Copies the CURRENT live zones config (s_zones.cfg, exactly what nvs_save()
+ * would blob out right now, version byte included) into *out.
+ * kiln_cfg_store.c's "save current config under a name" path calls this.
+ * Returns false (nothing copied) if out is NULL or out_cap is smaller than
+ * zones_config_blob_size(). */
+bool zones_config_export_blob(void *out, size_t out_cap);
+
+/* Validates and, only if the WHOLE blob is valid, applies `blob` (len bytes)
+ * as the new live zones config -- kiln_cfg_store.c's "apply this saved kiln
+ * config" path calls this, AFTER its own caller (kiln_cfg_http.c) has
+ * already refused the request via ota_http_check_interlocks() if a firing is
+ * running or the heaters are on. This function does NOT check that
+ * interlock itself -- it only owns "is this blob internally valid," the same
+ * separation of concerns ota_http.h's own header comment describes between
+ * ota_http_check_interlocks() and the transfer handlers that call it.
+ *
+ * Runs the EXACT three-outcome version handling nvs_load_from() uses for a
+ * blob read from flash (current version / older version migrated via
+ * migrate_zones_cfg_v1_to_current() / newer version REFUSED, since this
+ * build does not know that layout and must not guess at it), THEN
+ * re-validates every field of the resulting current-version struct against
+ * the exact bounds parse_zone_fields()/zones_config_set_*() enforce on a
+ * live POST -- a config saved by older firmware, or years ago under looser
+ * bounds, must not be trusted just because it was valid once.
+ *
+ * All-or-nothing: nothing is written to the live config or NVS unless the
+ * WHOLE blob -- version handling AND every field's bounds -- passes; a
+ * single bad field refuses the entire apply, leaving the running config
+ * completely untouched (same discipline as zones_post_handler()'s single
+ * commit point). Returns true only on a successful apply (the live config
+ * and, best-effort, NVS were updated); on false, reason_out (if non-NULL/
+ * non-zero-length) is filled with a specific, human-readable refusal reason,
+ * and nothing was changed. */
+bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap);
+
 #ifdef __cplusplus
 }
 #endif

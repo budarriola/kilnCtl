@@ -43,6 +43,7 @@ $sources = @(
     (Join-Path $testDir "test_ota_record.c"),
     (Join-Path $testDir "test_uart_log_bridge.c"),
     (Join-Path $testDir "test_safety_watchdog.c"),
+    (Join-Path $testDir "test_kiln_cfg_store.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),

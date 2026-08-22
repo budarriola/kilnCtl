@@ -9,6 +9,7 @@
 
 #include "MAX31856.h"
 #include "dashboard_http.h"
+#include "kiln_cfg_store.h"
 #include "kiln_io.h"
 #include "kiln_ui.h"
 #include "ui_confirm.h"
@@ -856,6 +857,34 @@ static void refresh_cb(lv_timer_t *timer)
         snprintf(state_buf, sizeof(state_buf), "%s -- %s", st.profile_name[0] ? st.profile_name : "(unnamed)",
                  exec_state_label(st.state));
     }
+
+    /* 2026-08-21 owner request: show the active KILN CONFIG (a saved
+     * relay/thermocouple/PID/guard snapshot, see kiln_cfg_store.h's header
+     * comment -- NOT the firing profile named just above, a different
+     * concept entirely) as ONE line on this existing card. Per the task's
+     * own instruction ("ONE line ... No new element, no height change"),
+     * this is appended onto s_state_label's SAME single line rather than a
+     * second lv_label -- a second element would grow state_card past this
+     * page's zero-margin worst-case budget (see this file's action-row
+     * comment: the worst 3-zone case leaves state_card only ~50px, already
+     * exactly what one line needs). s_state_label's long_mode is
+     * LV_LABEL_LONG_DOT (set at build time below) specifically so appending
+     * this can NEVER wrap the card into a second line/taller box regardless
+     * of how long either half gets -- an overlong combined string ellipsises
+     * instead, which is the honest degrade this hard no-scroll page needs.
+     * Skipped entirely during a live safety trip: that text already
+     * preempts everything else on this line (see the branch above), and
+     * appending more to an already-urgent message would only dilute it. */
+    if (!safety_tripped) {
+        int32_t cfg_id = kiln_cfg_store_get_active_id();
+        char cfg_name[KILN_CFG_NAME_MAX_LEN + 1];
+        size_t len = strlen(state_buf);
+        if (cfg_id != KILN_CFG_NO_ACTIVE_ID && kiln_cfg_store_get_name(cfg_id, cfg_name, sizeof(cfg_name))) {
+            snprintf(state_buf + len, sizeof(state_buf) - len, "  |  Cfg: %s", cfg_name);
+        } else {
+            snprintf(state_buf + len, sizeof(state_buf) - len, "  |  Cfg: none");
+        }
+    }
     lv_label_set_text(s_state_label, state_buf);
     lv_obj_set_style_bg_color(s_state_card, safety_tripped ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_text_color(s_state_label,
@@ -1165,6 +1194,15 @@ lv_obj_t *ui_page_home_build(void)
 
     s_state_label = lv_label_create(state_card);
     lv_obj_set_style_text_color(s_state_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    /* LONG_DOT (not the label default WRAP) -- see refresh_cb()'s "active
+     * kiln config" comment: this line now carries the profile/state text
+     * PLUS the active kiln config's name, and this card has zero height
+     * margin to spare in the worst (3-zone) case. DOT guarantees this stays
+     * a single line (ellipsised if too long) no matter how long either half
+     * gets, rather than silently wrapping and growing state_card/breaking
+     * the no-scroll budget. */
+    lv_label_set_long_mode(s_state_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_state_label, lv_pct(100));
     lv_label_set_text(s_state_label, "No profile running");
 
     /* Single merged Start/Stop button -- one user-visible request ("the

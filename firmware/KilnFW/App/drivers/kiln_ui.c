@@ -10,6 +10,8 @@
 #include "ui_page_diagnostics.h"
 #include "ui_page_history.h"
 #include "ui_page_home.h"
+#include "ui_page_kiln_cfg_setup.h"
+#include "ui_page_kiln_setup.h"
 #include "ui_page_network.h"
 #include "ui_page_profile_builder_review.h"
 #include "ui_page_profile_builder_segment.h"
@@ -53,8 +55,12 @@ static const char *TAG = "kiln_ui";
  *
  * Raised 16 -> 24 this pass: the LCD Profiles tree (ui_page_profiles.c and
  * its five siblings, see this file's registrations below) added 6 pages to
- * the 11 that existed before it, which would have overflowed the old 16. */
-#define KILN_UI_MAX_PAGES 24
+ * the 11 that existed before it, which would have overflowed the old 16.
+ *
+ * Raised 24 -> 26: the new Kiln Setup hub ("kiln_setup") and Kiln Config
+ * management screen ("kiln_cfg_setup") added 2 more pages, exactly filling
+ * the old 24-page cap otherwise. */
+#define KILN_UI_MAX_PAGES 26
 
 typedef struct {
     const char *name;          /* borrowed, see kiln_ui_register_page */
@@ -185,6 +191,19 @@ esp_err_t kiln_ui_init(void)
      * third page (that file's UI_CONFIG_HUB_PAGE_COUNT went 2 -> 3 because
      * both existing pages were already full -- see its own header comment). */
     err = kiln_ui_register_page("tc_types", ui_page_tc_types_build);
+    if (err != ESP_OK) return err;
+
+    /* 2026-08-21 owner request: "save kiln profiles with different relay,
+     * thermocouple, and PID configs" -- named a KILN CONFIG in code/on
+     * screen (never "profile", which already means a firing SCHEDULE here),
+     * per kiln_cfg_store.h's header comment. "kiln_setup" is the two-cell
+     * hub (Firing Profile -> the existing "profiles" tree; Kiln Config ->
+     * the new management screen below), linked from ui_page_config.c's nav
+     * hub's page 3. See ui_page_kiln_setup.c/ui_page_kiln_cfg_setup.c's own
+     * header comments for the full tree and safety UX. */
+    err = kiln_ui_register_page("kiln_setup", ui_page_kiln_setup_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("kiln_cfg_setup", ui_page_kiln_cfg_setup_build);
     if (err != ESP_OK) return err;
 
     /* TODO.md 406/section 3, 10.8: LCD equivalent of the web zones page's

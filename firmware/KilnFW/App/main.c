@@ -53,6 +53,8 @@
 #include "uart_owner.h"
 #include "uart_protocol.h"
 #include "wifi_prov.h"
+#include "kiln_cfg_http.h"
+#include "kiln_cfg_store.h"
 #include "zones_http.h"
 
 static const char *TAG = "app_main";
@@ -1000,6 +1002,29 @@ void app_main(void)
     if (ota_http_err != ESP_OK) {
         ESP_LOGW(TAG, "ota_http_start failed: %s -- no /api/ota/challenge this boot",
                  esp_err_to_name(ota_http_err));
+    }
+
+    // Owner-report (2026-08-21 follow-up): saved "kiln config" slots --
+    // whole-zones-config snapshots, named, cloneable, switchable -- that
+    // must survive a programming cycle like every other user-set parameter
+    // here. kiln_cfg_store_init() must run AFTER zones_http_start() (already
+    // called above): its boot-time active-config restore falls back to
+    // whatever zones_http_start() already loaded on its own if nothing (or
+    // an invalid something) is marked active, and that fallback is only
+    // correct if a real zones config load already happened. kiln_cfg_http_start()
+    // must run AFTER ota_http_start() just above: its apply handler calls
+    // ota_http_check_interlocks(), which needs the io/thermo_bus/safety
+    // pointers ota_http_start() just stashed -- same ordering reasoning
+    // backup_http_start()'s own comment below gives for the identical call.
+    esp_err_t kiln_cfg_store_err = kiln_cfg_store_init();
+    if (kiln_cfg_store_err != ESP_OK) {
+        ESP_LOGW(TAG, "kiln_cfg_store_init failed: %s -- saved kiln configs unavailable this boot",
+                 esp_err_to_name(kiln_cfg_store_err));
+    }
+    esp_err_t kiln_cfg_http_err = kiln_cfg_http_start();
+    if (kiln_cfg_http_err != ESP_OK) {
+        ESP_LOGW(TAG, "kiln_cfg_http_start failed: %s -- no /api/kiln_configs this boot",
+                 esp_err_to_name(kiln_cfg_http_err));
     }
 
     // TODO.md 0.5 / UI_PLAN.md's settings+profile import/export, unified into

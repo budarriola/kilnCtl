@@ -761,7 +761,16 @@ esp_err_t wifi_provision_http_start(void)
      * config.max_uri_handlers array up front at httpd_start()), so doubling
      * or hard-coding a huge cap "to be safe" is a real, if small, per-slot
      * cost paid on every boot whether or not those slots are ever used. */
-    config.max_uri_handlers = 72;
+    /* 2026-08-21: raised 72 -> 80. The kiln-config store added 6 routes,
+     * taking the real count to 71 of 72 -- one spare. That is too thin to
+     * be safe here, because over-cap registration is NOT fatal: the failure
+     * shows up only as a 404 on whichever page lost the race, which is
+     * exactly the kind of defect that gets diagnosed as "the web UI is
+     * broken" rather than "the table was full". Worse, enabling
+     * CONFIG_KILNCTL_SIM_PLANT adds 2 more and would have put the build 1
+     * over immediately. 80 restores real headroom while keeping the
+     * per-slot RAM reasoning below intact. */
+    config.max_uri_handlers = 80;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

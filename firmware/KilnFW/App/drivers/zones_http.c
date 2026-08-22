@@ -1114,6 +1114,252 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c)
     return raw_c + s_zones.cfg.zones[zone_index].cal_offset_c;
 }
 
+/* ---- Whole-config export/import for kiln_cfg_store.c (see zones_http.h's
+ * doc comment on this pair for the full rationale) -------------------------- */
+
+_Static_assert(sizeof(zones_cfg_t) <= ZONES_CONFIG_BLOB_MAX_SIZE,
+               "zones_cfg_t grew past ZONES_CONFIG_BLOB_MAX_SIZE -- widen the macro in "
+               "zones_http.h (existing kiln_cfg_store entries keep their old, smaller blob "
+               "size until re-saved, same discipline as ZONES_CFG_VERSION migrations)");
+
+size_t zones_config_blob_size(void)
+{
+    return sizeof(zones_cfg_t);
+}
+
+bool zones_config_export_blob(void *out, size_t out_cap)
+{
+    if (!out || out_cap < sizeof(s_zones.cfg)) {
+        return false;
+    }
+    memcpy(out, &s_zones.cfg, sizeof(s_zones.cfg));
+    return true;
+}
+
+/* Validates every field of `cand` -- a fully migrated, CURRENT-version
+ * zones_cfg_t -- against the exact bounds parse_zone_fields()/
+ * zones_config_set_*() enforce on a live POST. Used only by
+ * zones_config_import_blob() below; a config stored by kiln_cfg_store.c may
+ * have been saved years ago, under looser bounds, or by firmware this build
+ * has since tightened, so it is re-checked here rather than trusted because
+ * it was valid once. */
+static bool validate_zones_cfg(const zones_cfg_t *cand, const char **err_reason)
+{
+    if (cand->thermo_count > MAX31856_CHANNEL_COUNT) {
+        *err_reason = "thermo_count out of range";
+        return false;
+    }
+    if (cand->relay_count > KILN_IO_RELAY_COUNT) {
+        *err_reason = "relay_count out of range";
+        return false;
+    }
+    if (cand->max_simultaneous_relays > KILN_IO_RELAY_COUNT) {
+        *err_reason = "max_simultaneous_relays out of range";
+        return false;
+    }
+    if (cand->safety_tc_type > ZONE_TC_TYPE_MAX_REAL) {
+        *err_reason = "safety_tc_type out of range";
+        return false;
+    }
+    uint8_t relay_valid_bits =
+        cand->relay_count >= 8 ? 0xFF : (uint8_t)((1u << cand->relay_count) - 1u);
+    uint8_t thermo_valid_bits =
+        cand->thermo_count >= 8 ? 0xFF : (uint8_t)((1u << cand->thermo_count) - 1u);
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        const zone_cfg_t *z = &cand->zones[i];
+        /* tc_type is per-CHANNEL, meaningful past thermo_count too -- same
+         * reasoning parse_zone_fields() applies (see its own comment). */
+        if (z->tc_type > ZONE_TC_TYPE_MAX_REAL) {
+            *err_reason = "zone tc_type out of range";
+            return false;
+        }
+        if (i >= cand->thermo_count) {
+            continue; /* unused trailing slot -- matches parse_zone_fields()'s early return */
+        }
+        if ((z->relay_mask & ~relay_valid_bits) != 0) {
+            *err_reason = "zone relay_mask references an unconfigured relay";
+            return false;
+        }
+        if ((z->thermo_mask & ~thermo_valid_bits) != 0) {
+            *err_reason = "zone thermo_mask references an unconfigured thermocouple channel";
+            return false;
+        }
+        if (!isfinite(z->cal_offset_c) || z->cal_offset_c < ZONE_CAL_OFFSET_MIN_C ||
+            z->cal_offset_c > ZONE_CAL_OFFSET_MAX_C) {
+            *err_reason = "zone cal_offset_c out of range";
+            return false;
+        }
+        if (!isfinite(z->pid_kp) || z->pid_kp < 0.0f || z->pid_kp > 1000.0f) {
+            *err_reason = "zone pid_kp out of range";
+            return false;
+        }
+        if (!isfinite(z->pid_ki) || z->pid_ki < 0.0f || z->pid_ki > 1000.0f) {
+            *err_reason = "zone pid_ki out of range";
+            return false;
+        }
+        if (!isfinite(z->pid_kd) || z->pid_kd < 0.0f || z->pid_kd > 1000.0f) {
+            *err_reason = "zone pid_kd out of range";
+            return false;
+        }
+        if (!isfinite(z->max_ramp_c_per_hr) || z->max_ramp_c_per_hr < 0.0f ||
+            z->max_ramp_c_per_hr > ZONE_MAX_RAMP_C_PER_HR_MAX) {
+            *err_reason = "zone max_ramp_c_per_hr out of range";
+            return false;
+        }
+        if (!isfinite(z->sanity_rate_c_per_min) || z->sanity_rate_c_per_min < 0.0f ||
+            z->sanity_rate_c_per_min > ZONE_SANITY_RATE_MAX_C_PER_MIN) {
+            *err_reason = "zone sanity_rate_c_per_min out of range";
+            return false;
+        }
+        if (z->control_mode > (uint8_t)ZONE_CONTROL_MODE_PID) {
+            *err_reason = "zone control_mode out of range";
+            return false;
+        }
+        if (!isfinite(z->max_temp_c) || z->max_temp_c < 0.0f || z->max_temp_c > ZONE_MAX_TEMP_C_MAX) {
+            *err_reason = "zone max_temp_c out of range";
+            return false;
+        }
+        if (!isfinite(z->min_temp_c) || z->min_temp_c < ZONE_MIN_TEMP_C_MIN ||
+            z->min_temp_c > ZONE_MIN_TEMP_C_MAX) {
+            *err_reason = "zone min_temp_c out of range";
+            return false;
+        }
+        if (!isfinite(z->heater_window_ms) || z->heater_window_ms < 0.0f ||
+            z->heater_window_ms > ZONE_HEATER_WINDOW_MS_MAX) {
+            *err_reason = "zone heater_window_ms out of range";
+            return false;
+        }
+        if (!isfinite(z->heater_min_on_ms) || z->heater_min_on_ms < 0.0f ||
+            z->heater_min_on_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
+            *err_reason = "zone heater_min_on_ms out of range";
+            return false;
+        }
+        if (!isfinite(z->heater_min_off_ms) || z->heater_min_off_ms < 0.0f ||
+            z->heater_min_off_ms > ZONE_HEATER_MIN_ON_OFF_MS_MAX) {
+            *err_reason = "zone heater_min_off_ms out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_wrong_dir_window_s) || z->guard_wrong_dir_window_s < 0.0f ||
+            z->guard_wrong_dir_window_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone guard_wrong_dir_window_s out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_wrong_dir_rate_c_per_min) || z->guard_wrong_dir_rate_c_per_min < 0.0f ||
+            z->guard_wrong_dir_rate_c_per_min > ZONE_GUARD_RATE_C_PER_MIN_MAX) {
+            *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_off_settle_s) || z->guard_off_settle_s < 0.0f ||
+            z->guard_off_settle_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone guard_off_settle_s out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_runaway_rate_c_per_min) || z->guard_runaway_rate_c_per_min < 0.0f ||
+            z->guard_runaway_rate_c_per_min > ZONE_GUARD_RATE_C_PER_MIN_MAX) {
+            *err_reason = "zone guard_runaway_rate_c_per_min out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_runaway_margin_c) || z->guard_runaway_margin_c < 0.0f ||
+            z->guard_runaway_margin_c > ZONE_GUARD_MARGIN_C_MAX) {
+            *err_reason = "zone guard_runaway_margin_c out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_drift_period_s) || z->guard_drift_period_s < 0.0f ||
+            z->guard_drift_period_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone guard_drift_period_s out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_sensor_fault_debounce_ticks) || z->guard_sensor_fault_debounce_ticks < 0.0f ||
+            z->guard_sensor_fault_debounce_ticks > ZONE_GUARD_DEBOUNCE_TICKS_MAX) {
+            *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
+            return false;
+        }
+        if (!isfinite(z->guard_frozen_window_s) || z->guard_frozen_window_s < 0.0f ||
+            z->guard_frozen_window_s > ZONE_GUARD_TIME_S_MAX) {
+            *err_reason = "zone guard_frozen_window_s out of range";
+            return false;
+        }
+        if (!isfinite(z->cross_zone_max_delta_c) || z->cross_zone_max_delta_c < 0.0f ||
+            z->cross_zone_max_delta_c > ZONE_CROSS_ZONE_DELTA_C_MAX) {
+            *err_reason = "zone cross_zone_max_delta_c out of range";
+            return false;
+        }
+        if (!isfinite(z->model_k_dc) || !isfinite(z->model_tau_s) || !isfinite(z->model_dead_time_s) ||
+            z->model_k_dc < 0.0f || z->model_tau_s < 0.0f || z->model_dead_time_s < 0.0f ||
+            z->model_k_dc > ZONE_MODEL_K_MAX || z->model_tau_s > ZONE_MODEL_TIME_MAX_S ||
+            z->model_dead_time_s > ZONE_MODEL_TIME_MAX_S) {
+            *err_reason = "zone plant model out of range";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, size_t reason_cap)
+{
+    if (reason_out && reason_cap) {
+        reason_out[0] = '\0';
+    }
+    if (!blob || len < sizeof(((zones_cfg_t *)0)->version)) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "blob missing or too short to contain a version");
+        }
+        return false;
+    }
+
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    memcpy(&cand, blob, len < sizeof(cand) ? len : sizeof(cand));
+
+    /* Same three-outcome version handling as nvs_load_from() -- see that
+     * function's comment. current / older-migrated / newer-REFUSED, no
+     * guessing at a layout this build doesn't know. */
+    if (cand.version == ZONES_CFG_VERSION) {
+        if (len != sizeof(cand)) {
+            if (reason_out && reason_cap) {
+                snprintf(reason_out, reason_cap,
+                         "current-version config is the wrong size -- treating as corrupt");
+            }
+            return false;
+        }
+    } else if (cand.version < ZONES_CFG_VERSION) {
+        migrate_zones_cfg_v1_to_current(&cand);
+    } else {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap,
+                     "this config was saved by newer firmware (zones layout v%u, this build "
+                     "knows v%u) -- refusing rather than guessing",
+                     (unsigned)cand.version, (unsigned)ZONES_CFG_VERSION);
+        }
+        return false;
+    }
+
+    const char *err_reason = "invalid stored config";
+    if (!validate_zones_cfg(&cand, &err_reason)) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "%s", err_reason);
+        }
+        return false;
+    }
+
+    /* Commit point -- everything above only touched `cand`, a local scratch
+     * copy; nothing has been written to s_zones or NVS until this line, so
+     * any rejection above (bad version, bad size, any one field out of
+     * range) leaves the live config completely untouched. Same
+     * all-or-nothing discipline as zones_post_handler()'s own commit
+     * point. */
+    s_zones.cfg = cand;
+    s_zones_config_valid = true;
+    s_config_generation++;
+    esp_err_t err = nvs_save();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save after kiln-config apply failed: %s -- config applied live but "
+                      "will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    return true;
+}
+
 /* ---- HTTP handlers --------------------------------------------------------- */
 
 /* Same content-negotiation shape as diagnostics_http.c's send_gz_page():

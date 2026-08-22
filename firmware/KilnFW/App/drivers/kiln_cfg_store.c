@@ -1,0 +1,556 @@
+#include "kiln_cfg_store.h"
+
+#include <ctype.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+#include "ota_http.h"
+#include "zones_http.h"
+
+static const char *TAG = "kiln_cfg_store";
+
+/* kiln_nvs (0x18D000, 64KB) already holds zones/rules/relay_cycles/run_state
+ * (see partitions.csv, TODO.md 8.1's 2026-08-13 split) -- a saved kiln config
+ * belongs alongside them for the identical reason: reprogramming this board
+ * only ever rewrites bootloader/partition-table/app (verified against this
+ * project's actual OTA/JTAG flash args), so every `data` partition, kiln_nvs
+ * included, survives a reflash untouched. Do not move this to a new
+ * partition or the default `nvs` one -- see kiln_cfg_store.h's header
+ * comment for the fuller version of this note. */
+#define KILN_NVS_PARTITION "kiln_nvs"
+
+/* Shared namespace name with zones_http.c/rules_http.c/relay_cycles.c/
+ * run_state.c/ota_record.c/profiles_builtin.c/profiles_http.c/unit_pref.c --
+ * each of those files independently #defines the identical "kiln_cfg"
+ * string, same convention this file follows, distinguished by KEY not
+ * namespace. */
+#define NVS_NAMESPACE "kiln_cfg"
+#define NVS_KEY_STORE "kilncfgs"
+
+/* Bump whenever kiln_cfg_store_blob_t's on-flash layout changes -- mirrors
+ * ZONES_CFG_VERSION's role in zones_http.c. Only version 1 exists today, so
+ * nvs_load_store() below has no migration chain yet; a future bump needs one
+ * (see that function's comment), the same discipline
+ * migrate_zones_cfg_v1_to_current() established for zones_cfg_t. */
+#define KILN_CFG_STORE_VERSION 1
+
+/* One saved kiln config slot. blob/blob_len hold whatever
+ * zones_config_export_blob() produced at save time -- an opaque byte string
+ * to this module, sized against zones_http.h's ZONES_CONFIG_BLOB_MAX_SIZE
+ * ceiling so this struct's layout never has to change just because
+ * zone_cfg_t grew a field (that only ever changes zones_config_blob_size()'s
+ * RUNTIME return value, not this fixed-size array). */
+typedef struct {
+    uint8_t in_use;
+    int32_t id;
+    char name[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t blob_len;
+    uint8_t blob[ZONES_CONFIG_BLOB_MAX_SIZE];
+} kiln_cfg_entry_t;
+
+typedef struct {
+    uint8_t version;
+    /* KILN_CFG_NO_ACTIVE_ID (-1) if nothing is currently applied-and-tracked
+     * as the "starting point" config -- see kiln_cfg_store_init()'s doc
+     * comment (kiln_cfg_store.h) for the three boot-fallback outcomes this
+     * drives. */
+    int32_t active_id;
+    /* Monotonic; never reused, even across a delete -- so a stale id a
+     * client cached from before a delete can never silently resolve to a
+     * DIFFERENT config that later reused the same number. Starts at 1 (0 is
+     * never assigned) purely so "id == 0" reads as obviously-uninitialized
+     * in a debug dump; nothing tests against 0 specially otherwise. */
+    int32_t next_id;
+    kiln_cfg_entry_t entries[KILN_CFG_MAX_COUNT];
+} kiln_cfg_store_blob_t;
+
+static kiln_cfg_store_blob_t s_store;
+
+/* ---- NVS ------------------------------------------------------------------ */
+
+/* Copied from zones_http.c's nvs_partition_init() (see that file for the
+ * full rationale) -- each module using kiln_nvs brings the partition up
+ * independently rather than assuming another module already has;
+ * nvs_flash_init_partition() on an already-initialized partition is a
+ * harmless no-op. */
+static esp_err_t nvs_partition_init(const char *partition)
+{
+    esp_err_t err = nvs_flash_init_partition(partition);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition '%s' needs erase (%s) -- erasing THAT PARTITION ONLY and retrying",
+                 partition, esp_err_to_name(err));
+        err = nvs_flash_erase_partition(partition);
+        if (err == ESP_OK) {
+            err = nvs_flash_init_partition(partition);
+        }
+    }
+    return err;
+}
+
+static void reset_to_defaults(void)
+{
+    memset(&s_store, 0, sizeof(s_store));
+    s_store.version = KILN_CFG_STORE_VERSION;
+    s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
+    s_store.next_id = 1;
+}
+
+/* Loads the persisted store blob, or defaults to an empty store if nothing
+ * was ever saved. No migration chain exists yet (KILN_CFG_STORE_VERSION==1
+ * is the only version this build has ever written) -- a future version bump
+ * needs one here, mirroring zones_http.c's nvs_load_from()/
+ * migrate_zones_cfg_v1_to_current(); until then, any blob that doesn't match
+ * both the current version AND the current size is treated as unusable and
+ * reset, same fail-safe-not-fail-guessing choice zones_http.c makes for a
+ * newer-than-firmware blob. */
+static void nvs_load_store(void)
+{
+    reset_to_defaults();
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return; /* ESP_ERR_NVS_NOT_FOUND (never saved) or partition trouble -- defaults stand */
+    }
+
+    kiln_cfg_store_blob_t loaded;
+    size_t len = sizeof(loaded);
+    err = nvs_get_blob(h, NVS_KEY_STORE, &loaded, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return; /* nothing stored, or unreadable -- defaults stand */
+    }
+    if (len != sizeof(loaded) || loaded.version != KILN_CFG_STORE_VERSION) {
+        ESP_LOGW(TAG, "kiln_cfg_store blob is the wrong size or an unknown version -- resetting to "
+                      "an empty store rather than risking a half-understood layout");
+        return; /* defaults stand */
+    }
+    s_store = loaded;
+}
+
+static esp_err_t nvs_save_store(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    s_store.version = KILN_CFG_STORE_VERSION;
+    err = nvs_set_blob(h, NVS_KEY_STORE, &s_store, sizeof(s_store));
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+/* ---- Internal helpers ------------------------------------------------------ */
+
+static int find_index_by_id(int32_t id)
+{
+    if (id < 0) {
+        return -1;
+    }
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (s_store.entries[i].in_use && s_store.entries[i].id == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_slot(void)
+{
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (!s_store.entries[i].in_use) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool set_reason(char *reason_out, size_t reason_cap, const char *msg)
+{
+    if (reason_out && reason_cap) {
+        strncpy(reason_out, msg, reason_cap - 1);
+        reason_out[reason_cap - 1] = '\0';
+    }
+    return false;
+}
+
+/* Trims leading/trailing whitespace from `raw` and writes the result to
+ * `out` (out_cap must be >= KILN_CFG_NAME_MAX_LEN + 1). Returns false --
+ * `out` untouched -- if `raw` is NULL, or if the TRIMMED result is empty
+ * (covers both "" and a whitespace-only name -- an unnamed entry is exactly
+ * as unusable in the operator's picker as a duplicated one) or longer than
+ * KILN_CFG_NAME_MAX_LEN. Trimming happens before both the too-long check and
+ * before storing/comparing -- " spare" and "spare" are the same name to the
+ * duplicate check below AND the same bytes end up on flash, so a stray space
+ * typed at either end never produces a name that reads as a duplicate in the
+ * picker but somehow isn't (or vice versa). */
+static bool normalize_name(const char *raw, char *out, size_t out_cap)
+{
+    if (!raw || out_cap == 0) {
+        return false;
+    }
+    size_t len = strlen(raw);
+    size_t start = 0;
+    while (start < len && isspace((unsigned char)raw[start])) {
+        start++;
+    }
+    size_t end = len;
+    while (end > start && isspace((unsigned char)raw[end - 1])) {
+        end--;
+    }
+    size_t trimmed_len = end - start;
+    if (trimmed_len == 0 || trimmed_len > KILN_CFG_NAME_MAX_LEN || trimmed_len >= out_cap) {
+        return false;
+    }
+    memcpy(out, raw + start, trimmed_len);
+    out[trimmed_len] = '\0';
+    return true;
+}
+
+/* Case-insensitive compare of two already-normalized (trimmed) names --
+ * "Spare" and "spare" are indistinguishable to an operator reading a name
+ * picker, so they are treated as the SAME name for collision purposes, even
+ * though the exact case the operator originally typed is still what gets
+ * stored/displayed (this function only decides collision-or-not, it never
+ * changes what's stored). */
+static bool names_equal_ci(const char *a, const char *b)
+{
+    /* Hand-rolled rather than strcasecmp()/_stricmp() -- this file is built
+     * both by ESP-IDF's toolchain (on-target) and, unmodified, by MSVC's cl
+     * for the host test harness (build_host_tests.ps1); the two disagree on
+     * which non-standard name (or header) exposes a case-insensitive
+     * compare, so a tolower()-based loop (plain C89, no extra header) avoids
+     * the whole portability question. */
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/* True if some OTHER entry (not `exclude_id`) already has `normalized_name`,
+ * case-insensitively. `exclude_id` lets a caller allow "rename/save this
+ * entry back to the name it already has" (a no-op, not a collision) by
+ * passing that entry's own id; pass KILN_CFG_NO_ACTIVE_ID (or any id that
+ * cannot exist, e.g. a save-as-new's not-yet-assigned id) when there is no
+ * entry to exclude. */
+static bool name_collides(const char *normalized_name, int32_t exclude_id)
+{
+    for (int i = 0; i < KILN_CFG_MAX_COUNT; i++) {
+        if (!s_store.entries[i].in_use || s_store.entries[i].id == exclude_id) {
+            continue;
+        }
+        if (names_equal_ci(s_store.entries[i].name, normalized_name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ---- Public API ------------------------------------------------------------ */
+
+esp_err_t kiln_cfg_store_init(void)
+{
+    esp_err_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- kiln configs will not persist",
+                 KILN_NVS_PARTITION, esp_err_to_name(part_err));
+        reset_to_defaults();
+        return part_err;
+    }
+    nvs_load_store();
+
+    /* Boot-time active-config restore -- see kiln_cfg_store_init()'s doc
+     * comment (kiln_cfg_store.h) for the exact three-outcome fallback this
+     * implements. Called AFTER zones_http_start() (main.c's call order), so
+     * "apply nothing" always means "keep whatever zones_http_start() already
+     * loaded on its own", never a half-state. */
+    if (s_store.active_id != KILN_CFG_NO_ACTIVE_ID) {
+        int idx = find_index_by_id(s_store.active_id);
+        if (idx < 0) {
+            ESP_LOGW(TAG, "active kiln config id=%ld no longer exists -- clearing it, keeping "
+                          "whatever zones config already loaded",
+                     (long)s_store.active_id);
+            s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
+            (void)nvs_save_store();
+        } else {
+            char reason[96];
+            reason[0] = '\0';
+            if (!zones_config_import_blob(s_store.entries[idx].blob, s_store.entries[idx].blob_len,
+                                          reason, sizeof(reason))) {
+                ESP_LOGW(TAG, "active kiln config id=%ld failed validation at boot (%s) -- clearing "
+                              "it, keeping whatever zones config already loaded",
+                         (long)s_store.active_id, reason);
+                s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
+                (void)nvs_save_store();
+            } else {
+                ESP_LOGI(TAG, "restored active kiln config id=%ld ('%s') at boot", (long)s_store.active_id,
+                         s_store.entries[idx].name);
+            }
+        }
+    }
+    return ESP_OK;
+}
+
+uint8_t kiln_cfg_store_max_count(void)
+{
+    return KILN_CFG_MAX_COUNT;
+}
+
+uint8_t kiln_cfg_store_list(kiln_cfg_summary_t *out, uint8_t out_cap)
+{
+    if (!out || out_cap == 0) {
+        return 0;
+    }
+    uint8_t n = 0;
+    for (int i = 0; i < KILN_CFG_MAX_COUNT && n < out_cap; i++) {
+        if (!s_store.entries[i].in_use) {
+            continue;
+        }
+        out[n].id = s_store.entries[i].id;
+        strncpy(out[n].name, s_store.entries[i].name, KILN_CFG_NAME_MAX_LEN);
+        out[n].name[KILN_CFG_NAME_MAX_LEN] = '\0';
+        out[n].is_active = (s_store.entries[i].id == s_store.active_id);
+        n++;
+    }
+    return n;
+}
+
+int32_t kiln_cfg_store_get_active_id(void)
+{
+    return s_store.active_id;
+}
+
+bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0) {
+        return false;
+    }
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return false;
+    }
+    strncpy(out, s_store.entries[idx].name, out_cap - 1);
+    out[out_cap - 1] = '\0';
+    return true;
+}
+
+bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32_t *out_id,
+                                  char *reason_out, size_t reason_cap)
+{
+    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!normalize_name(name, normalized, sizeof(normalized))) {
+        return set_reason(reason_out, reason_cap, "name missing or too long");
+    }
+    /* Excluding id_or_negative itself (when >= 0, i.e. an overwrite-by-id)
+     * means "re-save this config under the name it already has" is allowed
+     * -- that's a legitimate re-save-from-live action, not a collision. A
+     * save-as-new (id_or_negative < 0) has no existing id to exclude, so -1
+     * (KILN_CFG_NO_ACTIVE_ID) is passed, which can never match a real
+     * entry's id. */
+    if (name_collides(normalized, id_or_negative)) {
+        return set_reason(reason_out, reason_cap, "a saved kiln config already has that name");
+    }
+
+    uint8_t scratch[ZONES_CONFIG_BLOB_MAX_SIZE];
+    size_t blob_size = zones_config_blob_size();
+    if (blob_size == 0 || blob_size > sizeof(scratch)) {
+        return set_reason(reason_out, reason_cap, "current zones config could not be exported");
+    }
+    if (!zones_config_export_blob(scratch, sizeof(scratch))) {
+        return set_reason(reason_out, reason_cap, "current zones config could not be exported");
+    }
+
+    int idx;
+    int32_t id;
+    if (id_or_negative >= 0) {
+        idx = find_index_by_id(id_or_negative);
+        if (idx < 0) {
+            return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
+        }
+        id = id_or_negative;
+    } else {
+        idx = find_free_slot();
+        if (idx < 0) {
+            return set_reason(reason_out, reason_cap, "kiln config store is full");
+        }
+        id = s_store.next_id++;
+    }
+
+    kiln_cfg_entry_t *e = &s_store.entries[idx];
+    e->in_use = 1;
+    e->id = id;
+    strncpy(e->name, normalized, KILN_CFG_NAME_MAX_LEN);
+    e->name[KILN_CFG_NAME_MAX_LEN] = '\0';
+    memset(e->blob, 0, sizeof(e->blob));
+    memcpy(e->blob, scratch, blob_size);
+    e->blob_len = (uint16_t)blob_size;
+
+    if (id_or_negative < 0) {
+        /* A config just saved FROM the running kiln is, by construction,
+         * exactly what's live right now -- marking it active is recording a
+         * fact, not applying anything. Overwriting an existing entry
+         * (id_or_negative >= 0) does NOT do this -- see this function's own
+         * header comment. */
+        s_store.active_id = id;
+    }
+
+    esp_err_t err = nvs_save_store();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after save failed: %s -- saved live but will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    if (out_id) {
+        *out_id = id;
+    }
+    return true;
+}
+
+bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, char *reason_out,
+                          size_t reason_cap)
+{
+    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!normalize_name(name, normalized, sizeof(normalized))) {
+        return set_reason(reason_out, reason_cap, "name missing or too long");
+    }
+    /* A clone always creates a brand-new entry/id, so there is no existing
+     * entry to exempt from the collision check -- KILN_CFG_NO_ACTIVE_ID (-1)
+     * can never match a real id. */
+    if (name_collides(normalized, KILN_CFG_NO_ACTIVE_ID)) {
+        return set_reason(reason_out, reason_cap, "a saved kiln config already has that name");
+    }
+    int src_idx = find_index_by_id(src_id);
+    if (src_idx < 0) {
+        return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
+    }
+    int dst_idx = find_free_slot();
+    if (dst_idx < 0) {
+        return set_reason(reason_out, reason_cap, "kiln config store is full");
+    }
+
+    int32_t new_id = s_store.next_id++;
+    kiln_cfg_entry_t *dst = &s_store.entries[dst_idx];
+    const kiln_cfg_entry_t *src = &s_store.entries[src_idx]; /* read before any write to dst,
+                                                              * safe even if src_idx==dst_idx
+                                                              * could somehow coincide (it can't --
+                                                              * dst_idx is always a FREE slot,
+                                                              * src_idx always an in_use one). */
+    *dst = *src;
+    dst->id = new_id;
+    strncpy(dst->name, normalized, KILN_CFG_NAME_MAX_LEN);
+    dst->name[KILN_CFG_NAME_MAX_LEN] = '\0';
+
+    /* Deliberately does NOT touch active_id -- a clone is a new saved slot,
+     * not a change to what's live or what boots next. See this function's
+     * header comment. */
+    esp_err_t err = nvs_save_store();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after clone failed: %s -- cloned live but will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    if (out_id) {
+        *out_id = new_id;
+    }
+    return true;
+}
+
+bool kiln_cfg_store_apply(int32_t id, char *reason_out, size_t reason_cap)
+{
+    /* Backstop interlock -- see this function's SAFETY note
+     * (kiln_cfg_store.h). Checked FIRST, before find_index_by_id() or
+     * anything else touches the store, so a caller that forgets to
+     * pre-check (kiln_cfg_http.c's apply handler and the LCD's confirm
+     * callback both do, for a better-worded message, but that is now
+     * redundant belt-and-suspenders, not load-bearing) still cannot apply a
+     * config out from under a running kiln. Same predicate
+     * POST /api/ota/esp and /api/ota/pico gate on -- "is a profile running /
+     * are the heaters on" -- deliberately NOT heat_interlock.c, which
+     * answers the opposite question (may heat run during an update). */
+    if (ota_http_check_interlocks(reason_out, reason_cap) != OTA_INTERLOCK_OK) {
+        return false;
+    }
+
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return set_reason(reason_out, reason_cap, "no saved kiln config with that id");
+    }
+    /* zones_config_import_blob() does the actual all-or-nothing
+     * version-check/re-validate/commit work; see its own doc comment
+     * (zones_http.h). */
+    if (!zones_config_import_blob(s_store.entries[idx].blob, s_store.entries[idx].blob_len, reason_out,
+                                  reason_cap)) {
+        return false;
+    }
+    s_store.active_id = id;
+    esp_err_t err = nvs_save_store();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after apply failed: %s -- active id applied live but will not "
+                      "survive a reboot",
+                 esp_err_to_name(err));
+    }
+    return true;
+}
+
+bool kiln_cfg_store_delete(int32_t id)
+{
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return false;
+    }
+    memset(&s_store.entries[idx], 0, sizeof(s_store.entries[idx]));
+    if (s_store.active_id == id) {
+        s_store.active_id = KILN_CFG_NO_ACTIVE_ID;
+    }
+    esp_err_t err = nvs_save_store();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after delete failed: %s -- deleted live but will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    return true;
+}
+
+bool kiln_cfg_store_rename(int32_t id, const char *name)
+{
+    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!normalize_name(name, normalized, sizeof(normalized))) {
+        return false;
+    }
+    int idx = find_index_by_id(id);
+    if (idx < 0) {
+        return false;
+    }
+    /* Excluding `id` itself allows a no-op rename (or a rename that only
+     * changes case/whitespace of the SAME name) -- that is not a collision
+     * with another entry, it is the entry keeping (an equivalent form of)
+     * its own name. */
+    if (name_collides(normalized, id)) {
+        return false;
+    }
+    strncpy(s_store.entries[idx].name, normalized, KILN_CFG_NAME_MAX_LEN);
+    s_store.entries[idx].name[KILN_CFG_NAME_MAX_LEN] = '\0';
+    esp_err_t err = nvs_save_store();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_save_store after rename failed: %s -- renamed live but will not survive a reboot",
+                 esp_err_to_name(err));
+    }
+    return true;
+}
+
+bool kiln_cfg_store_name_would_collide(const char *name, int32_t exclude_id)
+{
+    char normalized[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!normalize_name(name, normalized, sizeof(normalized))) {
+        return false; /* an invalid name is reported separately -- not this predicate's job */
+    }
+    return name_collides(normalized, exclude_id);
+}
