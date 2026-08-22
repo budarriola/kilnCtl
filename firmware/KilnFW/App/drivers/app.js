@@ -123,9 +123,25 @@
   })();
 
   // Small toggle button, inserted next to each page's own #themeBtn (every
-  // *_page.html has one, same fixed-position top-right convention) rather
-  // than requiring a markup change in twelve files -- same "app.js injects
-  // its own chrome" pattern already used for the banner and stop bar below.
+  // *_page.html has one) rather than requiring a markup change in twelve
+  // files -- same "app.js injects its own chrome" pattern already used for
+  // the banner and stop bar below.
+  //
+  // 2026-08-21: this button and #themeBtn both used to be `position: fixed`
+  // to the viewport's top-right corner (theme.css's .theme-btn, which this
+  // reuses via the class list below), which put them on top of nav.js's
+  // topbar Home/Menu buttons on a phone-width screen -- reported bug. The
+  // fix lives on nav.js's side: buildTopbar() there moves the real
+  // #themeBtn element into .kc-topbar-actions before this function ever
+  // runs (nav.js's <script> tag loads before app.js's on every page, and
+  // `defer` scripts run in that document order), so by the time this code
+  // executes, `themeBtn.parentNode` below is already the topbar's actions
+  // group -- inserting immediately before it lands this button in the
+  // topbar too, with no extra wiring needed here for the common case.
+  // Two fallbacks handle anything unexpected: if #themeBtn is missing but
+  // the topbar exists, drop into .kc-topbar-actions directly; if neither
+  // exists (nav.js didn't run for some reason), fall back to the old
+  // prepend-to-body behaviour rather than losing the control entirely.
   function buildUnitBtn() {
     var el = document.createElement('button');
     el.type = 'button';
@@ -142,8 +158,11 @@
       window.kcUnit.set(window.kcUnit.get() === 'f' ? 'c' : 'f');
     });
     var themeBtn = document.getElementById('themeBtn');
+    var topbarActions = document.querySelector('.kc-topbar-actions');
     if (themeBtn && themeBtn.parentNode) {
       themeBtn.parentNode.insertBefore(el, themeBtn);
+    } else if (topbarActions) {
+      topbarActions.insertBefore(el, topbarActions.firstChild);
     } else {
       document.body.insertBefore(el, document.body.firstChild);
     }

@@ -49,9 +49,10 @@
   }
   body { font-family: sans-serif; max-width: 480px; margin: 2em auto; padding: 0 1em;
          background: var(--bg); color: var(--fg); }
-  .theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
-               background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
-               padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+  /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
+     rule in /theme.css (which loads first), and being `position: fixed`
+     made it overlap nav.js's topbar on a phone-width viewport -- see
+     theme.css's own comment on .theme-btn for the fix. */
   a { color: var(--link); }
   .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
   h1 { font-size: 1.2em; }

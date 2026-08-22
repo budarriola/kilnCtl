@@ -13,14 +13,32 @@
    subset of those named variables onto this palette, e.g. --ok/--warn/--bad
    on some pages vs --on-color/--off-color/--fault-color on others), only the
    --ui-* palette itself and .theme-btn (verified identical byte-for-byte via
-   md5sum across all six files) were truly shared. */
+   md5sum across all six files) were truly shared. 2026-08-21: every page's
+   own local re-declaration of .theme-btn (a byte-for-byte copy of this
+   file's rule, added back independently on ten pages after this file was
+   first written) has been removed -- this is again the single definition,
+   see .theme-btn's own comment below for why that duplication mattered. */
 :root {
   --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
   --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
   --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
   --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
 }
-.theme-btn { position: fixed; top: 0.8em; right: 0.8em; border: 1px solid var(--border);
+/* 2026-08-21: no longer `position: fixed`. It used to pin itself to the
+   viewport's top-right corner, which put it (and the unit toggle below,
+   which inherits this class) directly on top of nav.js's topbar actions
+   (Home/Menu) -- fine on a wide desktop viewport where there was slack, but
+   on a phone-width topbar the two fixed buttons landed squarely on the real
+   controls underneath. nav.js now moves the real #themeBtn element (already
+   present in each page's markup, not created by script) into
+   .kc-topbar-actions itself, so this is just a normal flex child now --
+   see nav.js's buildTopbar() for the move and its comment for why that
+   ordering is safe regardless of whether nav.js or app.js runs first.
+   Deliberately keeps relying on the generic `button { min-height: ... }`
+   rule below (no min-height override here) rather than shrinking to match
+   .kc-home-btn/.kc-menu-btn's smaller `min-height: 0` -- the owner's
+   instruction was "keep tap targets finger-sized, don't shrink them to fit". */
+.theme-btn { border: 1px solid var(--border);
              background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
              padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
 /* UI_PLAN.md section 3, Web item 2: every real <button> across all six pages
@@ -71,7 +89,16 @@ button { min-height: var(--ui-touch); }
    screen). Plain text, not a link -- the topbar's "go home" job now
    belongs solely to .kc-home-btn below, so this doesn't need to double as
    one. */
-.kc-page-title { font-weight: bold; color: var(--fg); font-size: 1em;
+/* min-width: 0 is load-bearing, not decoration. This is a flex item of
+   .kc-topbar, and a flex item defaults to min-width: auto -- which floors it
+   at its min-content width. With white-space: nowrap that min-content width
+   is the ENTIRE untruncated title, so the ellipsis rules below never get a
+   chance to fire: instead of truncating, the title refuses to shrink and
+   shoves .kc-topbar-actions off the right edge on a narrow phone. Setting
+   min-width: 0 lets it actually shrink, which is what makes the ellipsis
+   work. Found 2026-08-21 while fixing the toggles that used to overlay this
+   bar; the ellipsis properties had been present and inert the whole time. */
+.kc-page-title { font-weight: bold; color: var(--fg); font-size: 1em; min-width: 0;
                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kc-topbar-actions { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
 .kc-home-btn, .kc-menu-btn { min-height: 0; padding: 0.35em 0.8em; font-size: 0.85em;
@@ -148,17 +175,14 @@ button { min-height: var(--ui-touch); }
 
 /* UI_PLAN.md item 7 ("Unit parity"): client-only °C/°F display toggle,
    injected by app.js's buildUnitBtn() next to each page's own #themeBtn.
-   Reuses .theme-btn's exact box (same fixed top/right corner, same border/
-   radius/padding) so it reads as a matching pair of small icon toggles, not
-   a new control style; the offset below just shifts it one button-width to
-   the left so the two don't overlap. */
-/* button.kc-unit-btn (not just .kc-unit-btn) deliberately: every page's own
-   <style> block also redeclares a plain `.theme-btn { right: 0.8em; ... }`
-   rule (same specificity, and it loads AFTER this shared theme.css file in
-   the cascade), which would otherwise win the `right` property and overlap
-   the two buttons. The extra type-selector bumps specificity so this offset
-   always wins regardless of per-page load order. */
-button.kc-unit-btn { right: 3.4em; }
+   Reuses .theme-btn's exact box (border/radius/padding) so it reads as a
+   matching pair of small icon toggles, not a new control style. 2026-08-21:
+   the fixed-position offset that used to live here (`right: 3.4em`, needed
+   only because both buttons were pinned to the same viewport corner) is
+   gone along with .theme-btn's own `position: fixed` -- both buttons are
+   now ordinary flex children of .kc-topbar-actions, so the flex row's own
+   `gap` (see .kc-topbar-actions above) keeps them apart instead of a
+   hand-tuned em offset that had to be re-guessed at every screen size. */
 
 /* UI_PLAN.md "web page structure" section, items 2-4 (settings hub +
    manual-relay split, 2026-08-2x pass): settings_page.html and

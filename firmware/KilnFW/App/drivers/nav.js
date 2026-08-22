@@ -161,6 +161,34 @@
       menuOverlay.removeAttribute('hidden');
     });
 
+    // 2026-08-21 fix: every page's <button id="themeBtn"> markup (real HTML,
+    // not script-created) used to stay wherever the page put it in <body>
+    // and rely on `.theme-btn { position: fixed; top/right }` to visually
+    // land in the same corner as this topbar's Home/Menu group -- on a
+    // phone-width viewport there wasn't room for both, so the fixed button
+    // landed ON TOP of Home/Menu (reported bug). Moving the actual element
+    // into .kc-topbar-actions makes it a normal flex child instead, so it
+    // can never overlap anything at any width. Moved (not cloned) so its
+    // existing id/listeners (attached by each page's own inline <script>,
+    // see e.g. main_page.html's bottom-of-body script) keep working
+    // untouched -- only its position in the DOM tree changes.
+    //
+    // Ordering race: this runs from nav.js, which is guaranteed to execute
+    // before app.js on every page (`defer` scripts run in document order;
+    // nav.js's <script> tag is listed first on every *_page.html). app.js's
+    // buildUnitBtn() creates the °C/°F toggle and inserts it as a sibling
+    // immediately before whatever #themeBtn's parentNode is AT THE TIME
+    // app.js runs -- by then this line has already reparented themeBtn into
+    // `actions`, so the unit button lands in the topbar too, with no change
+    // needed on the app.js side for the common case. #themeBtn itself is
+    // real markup parsed before any deferred script runs, so it already
+    // exists in the DOM by the time this function is called -- no race on
+    // that side either.
+    var themeBtn = document.getElementById('themeBtn');
+    if (themeBtn) {
+      actions.appendChild(themeBtn);
+    }
+
     if (!isDashboard) {
       var homeBtn = document.createElement('a');
       homeBtn.href = '/';
@@ -171,11 +199,12 @@
     actions.appendChild(menuBtn);
     bar.appendChild(title);
     bar.appendChild(actions);
-    // Inserted as the very first child of <body> -- ahead of each page's own
-    // theme-toggle button and (on pages that still have one; main_page.html
-    // etc no longer do, see this pass's page-by-page edits) <h1> -- so it
-    // reads as the same top-of-page chrome everywhere, matching UI_PLAN.md's
-    // "consistent header" wording.
+    // Inserted as the very first child of <body> -- ahead of anything left
+    // in <body> (on pages that still have a stray <h1> etc; see this pass's
+    // page-by-page edits) -- so it reads as the same top-of-page chrome
+    // everywhere, matching UI_PLAN.md's "consistent header" wording. The
+    // theme/unit toggles are no longer among the things left behind in
+    // <body> -- they were just moved into `bar` above.
     document.body.insertBefore(bar, document.body.firstChild);
     return bar;
   }
