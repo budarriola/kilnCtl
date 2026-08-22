@@ -3,11 +3,13 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -1678,10 +1680,15 @@ static void dns_hijack_task(void *arg)
 
 static void start_dns_hijack_task(void)
 {
-    BaseType_t created = xTaskCreatePinnedToCore(dns_hijack_task, "dns_hijack", 3072, NULL, 4, NULL,
-                                                 tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack. dns_hijack_task only does a UDP
+     * recvfrom/sendto loop answering captive-portal DNS queries -- no
+     * NVS/flash access, no direct SPI/I2C/UART hardware ownership. Unlike
+     * wifi_prov's own owner_task (below), this one never calls
+     * esp_wifi_set_config()/nvs_save_*(). */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(dns_hijack_task, "dns_hijack", 3072, NULL, 4, NULL,
+                                                         tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
-        ESP_LOGW(TAG, "xTaskCreatePinnedToCore(dns_hijack) failed -- no captive-portal DNS redirect");
+        ESP_LOGW(TAG, "xTaskCreatePinnedToCoreWithCaps(dns_hijack) failed -- no captive-portal DNS redirect");
     }
 }
 

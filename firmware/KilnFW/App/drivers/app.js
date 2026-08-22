@@ -158,8 +158,11 @@
   // theme selection to the settings pages"): this button used to be built on
   // every page and inserted into the topbar next to #themeBtn. It is a
   // display preference, not per-page chrome, so it is now built ONLY on a
-  // page that offers a #kcDisplayPrefs container -- settings_page.html.
-  // Returning null elsewhere is not a loss of function: kcUnit itself still
+  // page that offers a #kcDisplayPrefs container -- settings_display_page.html
+  // (moved there off settings_page.html 2026-08-22, see that page's header
+  // comment: the two nav-menu entries "Display" and "Reset" used to be two
+  // anchors on one settings page, which made them look like the same
+  // destination). Returning null elsewhere is not a loss of function: kcUnit itself still
   // loads on every page and every page still RENDERS in the selected unit;
   // only the control that changes it has moved to one place.
   //

@@ -12,8 +12,19 @@
 
 #include "MAX31856.h"
 #include "kiln_io.h"
+#include "rules_task.h"
+#include "rules_types.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
+
+/* rules_types.h mirrors these two constants without including MAX31856.h/
+ * kiln_io.h (host-testability -- see that header's top comment). Caught here,
+ * at compile time, in the one translation unit that has both the mirror and
+ * the real headers in scope. */
+_Static_assert(RULES_EVAL_RELAY_COUNT == KILN_IO_RELAY_COUNT,
+               "rules_types.h's RULES_EVAL_RELAY_COUNT drifted from kiln_io.h's KILN_IO_RELAY_COUNT");
+_Static_assert(RULES_EVAL_ZONE_COUNT == MAX31856_CHANNEL_COUNT,
+               "rules_types.h's RULES_EVAL_ZONE_COUNT drifted from MAX31856.h's MAX31856_CHANNEL_COUNT");
 
 static const char *TAG = "rules_http";
 
@@ -32,8 +43,8 @@ static const char *TAG = "rules_http";
 /* Bump whenever rules_cfg_t's on-flash layout changes; see nvs_load(). */
 #define RULES_CFG_VERSION 1
 
-#define RULES_MAX_RULES_PER_RELAY 3
-#define RULES_MAX_CONDITIONS_PER_RULE 3
+/* RULES_MAX_RULES_PER_RELAY / RULES_MAX_CONDITIONS_PER_RULE now come from
+ * rules_types.h. */
 
 /* Embedded via EMBED_TXTFILES in CMakeLists.txt. TODO.md 10.6a: embedded
  * pre-gzipped (gzip'd at configure time before idf_component_register
@@ -48,45 +59,9 @@ extern const uint8_t rules_page_html_gz_end[] asm("_binary_rules_page_html_gz_en
  * against Content-Length before a single byte is read. */
 #define RULES_BODY_MAX 2048
 
-typedef enum {
-    COND_NONE = 0,
-    COND_TEMP,
-    COND_TIME,
-    COND_RELAY,
-} cond_type_t;
-
-typedef enum {
-    CMP_GE = 0,
-    CMP_LE,
-} cmp_t;
-
-/* One condition. Which fields are meaningful depends on type -- a tagged
- * union would save a few bytes but this whole config is tiny (well under
- * 1KB), so a flat struct keeps the parser/serializer simpler. */
-typedef struct {
-    cond_type_t type;
-    uint8_t zone_index;      /* TEMP */
-    cmp_t cmp;                /* TEMP, TIME */
-    float threshold_c;        /* TEMP */
-    uint32_t seconds;         /* TIME */
-    uint8_t other_relay;      /* RELAY, 1-based (KILN_IO_RELAY_COUNT numbering) */
-    bool other_relay_state;   /* RELAY */
-} rule_condition_t;
-
-typedef struct {
-    uint8_t condition_count; /* 0 = this rule slot is unused */
-    rule_condition_t conditions[RULES_MAX_CONDITIONS_PER_RULE];
-} rule_t;
-
-typedef struct {
-    bool rule_driven; /* mirrors the RULE owner tag -- recorded intent only, see header */
-    rule_t rules[RULES_MAX_RULES_PER_RELAY];
-} relay_rules_cfg_t;
-
-typedef struct {
-    uint8_t version; /* RULES_CFG_VERSION at save time -- see nvs_load() */
-    relay_rules_cfg_t relays[KILN_IO_RELAY_COUNT];
-} rules_cfg_t;
+/* cond_type_t/cmp_t/rule_condition_t/rule_t/relay_rules_cfg_t/rules_cfg_t now
+ * live in rules_types.h, shared with rules_eval.c/.h and rules_task.c -- see
+ * that header's top comment for why this moved out of here. */
 
 static struct {
     rules_cfg_t cfg;
@@ -551,6 +526,56 @@ static esp_err_t rules_post_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "ok");
 }
 
+/* ---- GET /api/rules/status: live per-relay firing/ownership state --------
+ * Backed by rules_task.c's rules_task_get_status() -- see rules_task.h for
+ * what each field means. Plain hand-rolled JSON (no cJSON dependency in
+ * this codebase), same APPEND-macro-over-a-stack-buffer style as
+ * rules_get_handler() above. */
+static esp_err_t rules_status_get_handler(httpd_req_t *req)
+{
+    rules_task_status_t st;
+    rules_task_get_status(&st);
+
+    char text[768];
+    size_t o = 0;
+    int n;
+
+#define APPEND(...)                                                                              \
+    do {                                                                                          \
+        n = snprintf(text + o, sizeof(text) - o, __VA_ARGS__);                                   \
+        if (n < 0 || (size_t)n >= sizeof(text) - o) {                                             \
+            goto send;                                                                            \
+        }                                                                                          \
+        o += (size_t)n;                                                                            \
+    } while (0)
+
+    APPEND("{\"safety_link_ok\":%s,\"heat_interlock_ok\":%s,\"relays\":[",
+           st.safety_link_ok ? "true" : "false", st.heat_interlock_ok ? "true" : "false");
+    for (uint8_t r = 0; r < RULES_EVAL_RELAY_COUNT; r++) {
+        const rules_task_relay_status_t *rs = &st.relays[r];
+        APPEND("%s{\"relay\":%u,\"rule_driven\":%s,\"rule_wants_on\":%s,\"owned_by_rules\":%s,"
+               "\"commanded_on\":%s}",
+               r == 0 ? "" : ",", (unsigned)(r + 1), rs->rule_driven ? "true" : "false",
+               rs->rule_wants_on ? "true" : "false", rs->owned_by_rules ? "true" : "false",
+               rs->commanded_on ? "true" : "false");
+    }
+    APPEND("]}");
+
+#undef APPEND
+
+send:
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, text, o);
+}
+
+void rules_http_get_cfg(rules_cfg_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    *out = s_rules.cfg;
+}
+
 esp_err_t rules_http_start(void)
 {
     /* kiln_nvs is shared by zones/rules/relay_cycles/run_state, and each
@@ -593,6 +618,9 @@ esp_err_t rules_http_start(void)
     static const httpd_uri_t post_uri = {
         .uri = "/api/rules", .method = HTTP_POST, .handler = rules_post_handler,
     };
+    static const httpd_uri_t status_uri = {
+        .uri = "/api/rules/status", .method = HTTP_GET, .handler = rules_status_get_handler,
+    };
     err = httpd_register_uri_handler(server, &page_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/relays) failed: %s", esp_err_to_name(err));
@@ -608,7 +636,12 @@ esp_err_t rules_http_start(void)
         ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/rules) failed: %s", esp_err_to_name(err));
         return err;
     }
+    err = httpd_register_uri_handler(server, &status_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/rules/status) failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    ESP_LOGI(TAG, "rules API up (config storage only -- no rule evaluator exists yet)");
+    ESP_LOGI(TAG, "rules API up -- rules_task_start() (main.c) drives the actual evaluator off this config");
     return ESP_OK;
 }

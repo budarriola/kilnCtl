@@ -11,6 +11,7 @@
 #include "nvs_report.h"
 #include "profiles_builtin.h"
 #include "profiles_http.h"
+#include "safety_cfg_store.h"
 #include "web_encoding.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
@@ -25,17 +26,13 @@ static const char *TAG = "readiness_http";
 extern const uint8_t readiness_page_html_gz_start[] asm("_binary_readiness_page_html_gz_start");
 extern const uint8_t readiness_page_html_gz_end[] asm("_binary_readiness_page_html_gz_end");
 
-/* TODO.md 8.3's four required distinctions, as an explicit enum rather than
- * a bool + comment: "not_done" (nothing stops it, nobody has done it yet),
- * "cannot_yet" (an earlier, unmet prerequisite makes this item meaningless
- * right now -- bullet 2), "deliberately_off" (a recordable, legitimate
- * choice to leave a guard/field at its off value -- bullet 3), and "ok". */
-typedef enum {
-    READY_OK = 0,
-    READY_NOT_DONE,
-    READY_CANNOT_YET,
-    READY_DELIBERATELY_OFF,
-} readiness_status_t;
+/* readiness_status_t (TODO.md 8.3's four required distinctions: "not_done",
+ * "cannot_yet" per bullet 2, "deliberately_off" per bullet 3, and "ok") now
+ * lives in readiness_http.h so readiness_commissioning_status() below can be
+ * host-tested without esp_http_server. readiness_commissioning_status()
+ * likewise lives there as a static inline, so the commissioning item's
+ * decision can be tested (test_readiness_commissioning.c) without compiling
+ * this file, which pulls in httpd and the whole NVS stack. */
 
 static const char *status_name(readiness_status_t s)
 {
@@ -361,7 +358,16 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             for (uint8_t i = 0; i < thermo_count; i++) {
                 float kp = 0, ki = 0, kd = 0;
                 float k_dc = 0, tau_s = 0, dead_time_s = 0;
-                bool has_gains = zones_config_get_pid(i, &kp, &ki, &kd) && (kp > 0.0f || ki > 0.0f || kd > 0.0f);
+                /* kp > 0 specifically, NOT "any of kp/ki/kd nonzero". A PID
+                 * loop with kp == 0 has no proportional term at all: ki alone
+                 * integrates its way to setpoint eventually and kd alone does
+                 * nothing but fight noise, so neither is a usable set of
+                 * gains for a kiln. The looser any-of test previously here
+                 * reported a zone as tuned when only kd had been typed in,
+                 * which is exactly the "green light on an untuned zone" this
+                 * whole page exists to prevent. ki/kd are still allowed to be
+                 * zero -- a pure-P zone is crude but genuinely functional. */
+                bool has_gains = zones_config_get_pid(i, &kp, &ki, &kd) && kp > 0.0f;
                 bool has_model =
                     zones_config_get_model(i, &k_dc, &tau_s, &dead_time_s) && k_dc > 0.0f && tau_s > 0.0f;
                 if (has_gains || has_model) {
@@ -386,8 +392,71 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         char detail[96];
         snprintf(detail, sizeof(detail), "io=%s thermo=%s safety=%s", io_ready ? "up" : "down",
                  thermo_ready ? "up" : "down", safety_ready ? "up" : "down");
+        /* fix_url used to be "/" -- owner report: "the ready to fire hardware
+         * connected item just takes me to the main page." "/" is a real,
+         * registered route (wifi_provision_http.c's index_get_handler(), the
+         * dashboard), so this never 404'd or looked broken; it just landed
+         * somewhere that cannot help diagnose which of io/thermo/safety is
+         * down. "/diagnostics" is the actual system-health hub for exactly
+         * this (diagnostics_http.c: ESP + board-health info, plus links to
+         * /diagnostics/thermo and /safety for the per-subsystem detail this
+         * item's own `detail` string already breaks io/thermo/safety out
+         * into). */
         o = append_item(json, sizeof(json), o, first, "hardware", "Hardware present and answering", st, detail,
-                        "/");
+                        "/diagnostics");
+        first = false;
+    }
+
+    /* 10a. Safety processor commissioned. Added 2026-08-22: the whole
+     * commissioning parameter set (trip thresholds, TC type, guard limits --
+     * COMMISSIONING.md sec 2.1) could be entirely unset and this page still
+     * showed every light green, because nothing here ever asked. That is the
+     * worst possible omission on a readiness page: the safety processor is
+     * the thing that stops a runaway, and an uncommissioned one has no
+     * thresholds to trip on.
+     *
+     * cached_crc == 0 means "never fetched a config from the Pico" -- 0 is
+     * never a real CRC, so it doubles as "never commissioned"
+     * (safety_cfg_store.h's own note on the sentinel). A param reading
+     * set == false is one the Pico has no value for; the sec-1 fields with
+     * no compiled-in default read exactly this way until an operator sets
+     * them, so any unset param means commissioning is genuinely incomplete
+     * rather than merely un-refetched.
+     *
+     * Reported cannot_yet (not not_done) when the safety link is down: with
+     * no link the ESP cannot tell an uncommissioned Pico from one it simply
+     * has not talked to yet, and nagging about a task the operator cannot
+     * perform right now is what READY_CANNOT_YET exists for. */
+    {
+        bool io_ready = false, thermo_ready = false, safety_ready = false;
+        dashboard_http_get_hw_ready(&io_ready, &thermo_ready, &safety_ready);
+
+        char detail[112];
+        uint16_t cached_crc = safety_cfg_store_cached_crc();
+        size_t count = safety_cfg_store_param_count();
+        size_t unset = 0;
+        for (size_t i = 0; i < count; i++) {
+            safety_cfg_param_t p;
+            if (safety_cfg_store_get_by_index(i, &p) && !p.set) {
+                unset++;
+            }
+        }
+
+        readiness_status_t st = readiness_commissioning_status(safety_ready, cached_crc, unset, count);
+
+        if (cached_crc == 0) {
+            snprintf(detail, sizeof(detail), "%s",
+                     safety_ready ? "no commissioning values have ever been read from the safety processor"
+                                  : "safety link is down -- cannot tell uncommissioned from unread");
+        } else if (unset == 0) {
+            snprintf(detail, sizeof(detail), "all %u safety parameters have values (config_crc 0x%04X)",
+                     (unsigned)count, (unsigned)cached_crc);
+        } else {
+            snprintf(detail, sizeof(detail), "%u of %u safety parameters still have no value", (unsigned)unset,
+                     (unsigned)count);
+        }
+        o = append_item(json, sizeof(json), o, first, "safety_commissioned", "Safety processor commissioned", st,
+                        detail, "/safety/commissioning");
         first = false;
     }
 

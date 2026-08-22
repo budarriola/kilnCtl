@@ -68,10 +68,15 @@
      here is also gone (2026-08-21 rework item 5) -- nav.js's topbar now
      shows this page's name ("Relays &amp; Rules", from <title> above) in
      the brand's old spot, so the heading was pure duplication. -->
-<p class="notice">Saved rules are NOT evaluated by the firmware yet -- there is no
-rule-evaluator task. Nothing here turns a relay on or off automatically until
-that's built (TODO.md section 6). Manual relay control on the Dashboard is
-unaffected by anything saved here.</p>
+<p>A relay marked <code>DRIVEN 1</code> is evaluated and driven automatically
+by the firmware's rule-evaluator task, once per second, through the same
+ownership arbitration a running profile uses -- it cannot fight a manual
+relay command or a profile that already owns that relay (whichever claims a
+relay first keeps it; see the live table below for which relays are
+currently rule-owned). A relay a running profile or autotune test already
+owns is left alone by the rule engine even if marked <code>DRIVEN 1</code>,
+and never left on if the safety link drops or an ESP/Pico update is in
+progress -- both force every rule-driven relay off.</p>
 
 <p>Hand-typed format, one line each. A relay's rules are OR'd together;
 a rule's conditions are AND'd together.</p>
@@ -90,6 +95,17 @@ Example: vent relay 2 opens once zone 0 passes 500C
   <button id="saveBtn" type="button">Save</button>
 </div>
 <p id="msg"></p>
+
+<h2>Live rule state</h2>
+<p>Refreshed every 2s. "Firing" is what the rules alone want (before the
+safety/interlock gate); "Commanded" is what the relay is actually being
+driven to right now.</p>
+<div class="table-scroll">
+<table id="liveTable"><thead><tr><th>Relay</th><th>Driven</th><th>Owned by rules</th>
+<th>Firing</th><th>Commanded</th></tr></thead>
+<tbody id="liveBody"><tr><td colspan="5">Loading…</td></tr></tbody></table>
+</div>
+<p id="liveGates"></p>
 
 <h2>Relay contact wear</h2>
 <p>Lifetime on/off transitions per relay, counted by the control loop and
@@ -153,9 +169,41 @@ function loadCycles() {
   });
 }
 
+function loadLiveState() {
+  fetch('/api/rules/status').then(function (r) { return r.json(); }).then(function (s) {
+    var body = document.getElementById('liveBody');
+    var relays = s.relays || [];
+    if (!relays.length) {
+      body.innerHTML = '<tr><td colspan="5">No status reported.</td></tr>';
+    } else {
+      var html = '';
+      for (var i = 0; i < relays.length; i++) {
+        var r = relays[i];
+        html += '<tr><td>' + r.relay + '</td>' +
+          '<td>' + (r.rule_driven ? 'yes' : 'no') + '</td>' +
+          '<td>' + (r.owned_by_rules ? 'yes' : 'no') + '</td>' +
+          '<td>' + (r.rule_wants_on ? 'yes' : 'no') + '</td>' +
+          '<td class="kc-live-value">' + (r.commanded_on ? 'ON' : 'off') + '</td></tr>';
+      }
+      body.innerHTML = html;
+    }
+    var gates = document.getElementById('liveGates');
+    var notes = [];
+    if (!s.safety_link_ok) notes.push('safety link/fault gate is BLOCKING all rule-driven relays');
+    if (!s.heat_interlock_ok) notes.push('an OTA update is in progress -- BLOCKING all rule-driven relays');
+    gates.textContent = notes.length ? notes.join('; ') : '';
+    gates.style.color = notes.length ? 'var(--warn)' : '';
+  }).catch(function () {
+    document.getElementById('liveBody').innerHTML =
+      '<tr><td colspan="5">Could not read live rule state.</td></tr>';
+  });
+}
+
 load();
 loadCycles();
+loadLiveState();
 setInterval(loadCycles, 30000);
+setInterval(loadLiveState, 2000);
 
 (function () {
   var btn = document.getElementById('themeBtn');

@@ -437,6 +437,25 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx)
     bool in_progress = false;
     ota_update_claim_t claim = OTA_UPDATE_NONE;
 
+    // s_ota_lock does not exist until ota_http_start() runs. Any caller that
+    // asks before then must get a fail-safe answer rather than a crash:
+    // xSemaphoreTake() on a NULL handle asserts inside FreeRTOS and panics
+    // the whole system. This is not hypothetical -- rules_task called this
+    // from its 1 Hz fail-safe gate while ota_http_start() was still ~120
+    // lines away in app_main(), and the board boot-looped with
+    // "assert_func ... xQueueSemaphoreTake" on every single boot.
+    //
+    // "In progress" is the safe answer here, not "idle": every caller uses
+    // this to decide whether it is safe to start heating or start another
+    // update, and before the OTA subsystem is even up, refusing both is
+    // correct. The start-order fix in main.c is the real remedy; this guard
+    // exists so a future caller that runs early degrades to "refuse" instead
+    // of taking the board down.
+    if (s_ota_lock == NULL) {
+        ESP_LOGW(TAG, "OTA update claim query before ota_http_start() -- reporting in-progress (fail-safe)");
+        return true;
+    }
+
     if (xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
         claim = s_update_claim;
         xSemaphoreGive(s_ota_lock);

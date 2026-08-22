@@ -4,8 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -1770,21 +1772,33 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * 4096: MAX31856_read_all/pid_update_terms/thermal_guard_tick/
      * kiln_io_set_relay_mask/safety_link_set_fault_source all run on this
      * stack, now looped up to MAX31856_CHANNEL_COUNT times per tick. */
-    BaseType_t ok = xTaskCreatePinnedToCore(executor_task_entry, "profile_executor", 4096, NULL, 5,
-                                            &s_exec.task, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack, audited against uart_bridge_ext.c's
+     * cache-disable hazard. executor_task_entry() reads thermo/relay state
+     * and runs PID/guard math on this stack, but the calls that reach flash
+     * (profiles_http_save/_delete, zones_http config writers, run_state
+     * persistence) are made by profile_executor_run()/_halt()/_pause() from
+     * WHICHEVER task calls them (an HTTP handler or uart_bridge_ext.c's
+     * flash-safe worker) -- never from this task's own loop. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(executor_task_entry, "profile_executor", 4096, NULL, 5,
+                                                    &s_exec.task, tskNO_AFFINITY,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreatePinnedToCore(profile_executor) failed");
+        ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_executor) failed");
         vSemaphoreDelete(s_exec.lock);
         s_exec.lock = NULL;
         return ESP_ERR_NO_MEM;
     }
     /* Small and independent on purpose -- guard 9 exists precisely because
      * the control task cannot be trusted to notice its own death. Same
-     * priority as the control task it's watching. */
-    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 2560, NULL, 5,
-                                 &s_exec.watchdog_task, tskNO_AFFINITY);
+     * priority as the control task it's watching. Same PSRAM-safety audit as
+     * executor_task_entry() above -- watchdog_task_entry() only reads status
+     * (safety_link_get_status(), run_state) and forces relays off; it never
+     * touches flash. */
+    ok = xTaskCreatePinnedToCoreWithCaps(watchdog_task_entry, "profile_exec_wdt", 2560, NULL, 5,
+                                         &s_exec.watchdog_task, tskNO_AFFINITY,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreatePinnedToCore(profile_exec_wdt) failed -- guard 9 unavailable this boot");
+        ESP_LOGE(TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
     }
 
     ESP_LOGI(TAG, "profile executor up (io_ready=%d, thermo_ready=%d, safety_ready=%d) -- "

@@ -2,6 +2,8 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 
 static const char *TAG = "monitor_task";
 
@@ -100,12 +102,25 @@ BaseType_t monitor_task_start(monitor_task_t *monitor)
     /* 3072, not 2048: every heartbeat line goes through ESP_LOGx, whose
      * vsnprintf and the log bridge's own formatting both run on this stack.
      * 2048 left very little headroom above that for a task whose entire job is
-     * to prove the scheduler is still healthy. */
-    return xTaskCreatePinnedToCore(monitor_task_entry,
-                                   "monitor_task",
-                                   3072,
-                                   monitor,
-                                   4,
-                                   NULL,
-                                   tskNO_AFFINITY);
+     * to prove the scheduler is still healthy.
+     *
+     * 2026-08-22: moved off internal SRAM. This task never touches flash/NVS
+     * (no profile/zones/wifi_prov calls anywhere in monitor_task_entry() above)
+     * and only ever does gpio_set_level()/vTaskDelay()/ESP_LOGI -- none of
+     * which are ISR context or DMA-dependent -- so it has none of the hazards
+     * documented in uart_bridge_ext.c (PSRAM-stack-during-cache-disable) that
+     * keep the flash-touching bridge tasks' own stacks internal. It is one of
+     * ~20 remaining plain-internal-stack tasks contending with the WiFi
+     * driver's own internal-SRAM buffer storm during the same boot window
+     * uart_bridge_ext.c's retry_task_create_pinned() comment documents; moving
+     * it (and heartbeat_LED indicator work is not latency-critical) frees its
+     * 3072 B for that window without touching anything hardware-DMA-facing. */
+    return xTaskCreatePinnedToCoreWithCaps(monitor_task_entry,
+                                            "monitor_task",
+                                            3072,
+                                            monitor,
+                                            4,
+                                            NULL,
+                                            tskNO_AFFINITY,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }

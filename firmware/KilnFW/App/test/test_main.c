@@ -25,8 +25,11 @@ void run_test_ota_record(void);
 void run_test_uart_log_bridge(void);
 void run_test_safety_watchdog(void);
 void run_test_safety_link(void);
+void run_test_dashboard_safety_ready(void);
+void run_test_readiness_commissioning(void);
 void run_test_kiln_cfg_store(void);
 void run_test_safety_cfg_store(void);
+void run_test_rules_eval(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
 // its own separate executable (build_host_tests.ps1's third build+run step),
 // same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
@@ -57,8 +60,11 @@ int main(void)
     run_test_uart_log_bridge();
     run_test_safety_watchdog();
     run_test_safety_link();
+    run_test_dashboard_safety_ready();
+    run_test_readiness_commissioning();
     run_test_kiln_cfg_store();
     run_test_safety_cfg_store();
+    run_test_rules_eval();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

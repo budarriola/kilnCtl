@@ -2,9 +2,11 @@
 
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
@@ -130,7 +132,12 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
         }
     }
 
-    xTaskCreate(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
+    /* 2026-08-22: PSRAM stack. reboot_task() only vTaskDelay()s and calls
+     * esp_restart() -- the NVS erase this function name suggests already
+     * happened above, in the CALLER's context, before this task is even
+     * created, so nothing on this task's own stack touches flash. */
+    xTaskCreatePinnedToCoreWithCaps(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL,
+                                    tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     return first_err;
 }
 

@@ -18,6 +18,14 @@
 //                              main_page.html per UI_PLAN.md's "a phone in
 //                              a pocket can brush a screen in a way a panel
 //                              mounted on a kiln cannot" reasoning.
+//   GET /settings/display  -- theme + °C/°F preferences, split out of
+//                              /settings 2026-08-22 (owner report: "both
+//                              display theme and reset menu items take me to
+//                              the same page" -- the two nav.js menu entries
+//                              used to be /settings#display and
+//                              /settings#danger, two anchors on this one
+//                              page, so either menu choice landed on the same
+//                              document). See settings_display_page.html.
 #ifndef SETTINGS_HTTP_H
 #define SETTINGS_HTTP_H
 

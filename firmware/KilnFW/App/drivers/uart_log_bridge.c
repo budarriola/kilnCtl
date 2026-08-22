@@ -4,8 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "uart_task_ids.h"
@@ -285,9 +287,12 @@ esp_err_t uart_log_bridge_start(uart_protocol_t *proto)
      * wedged (an I2C lockup, a burst of bridge traffic); at the old
      * priority 4 it was *below* the very tasks it reports on, so it could be
      * starved right when its output mattered most. */
-    BaseType_t created = xTaskCreatePinnedToCore(uart_log_bridge_task, "uart_log_bridge", 4096,
-                                                  &s_bridge, 7, &s_bridge.sender_task,
-                                                  tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack. This task only formats and forwards log
+     * lines over the existing uart_protocol inbox/queue plumbing -- no
+     * flash/NVS access, no direct hardware ownership. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(uart_log_bridge_task, "uart_log_bridge", 4096,
+                                                         &s_bridge, 7, &s_bridge.sender_task, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         s_bridge.proto = NULL;
         return ESP_ERR_NO_MEM;

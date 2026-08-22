@@ -44,6 +44,7 @@
 #include "readiness_http.h"
 #include "relay_cycles.h"
 #include "rules_http.h"
+#include "rules_task.h"
 #include "safety_link.h"
 #include "settings.h"
 #include "sim_backend.h"
@@ -880,6 +881,18 @@ void app_main(void)
         ESP_LOGW(TAG, "rules_http_start failed: %s -- no Relays & Rules page this boot",
                  esp_err_to_name(rules_err));
     }
+    // TODO.md section 6's rule evaluator (previously just a config store with
+    // a disclaimer on the page saying so). Started after rules_http_start()
+    // (reads its config every tick via rules_http_get_cfg()), and relies on
+    // kiln_io_owner_start()/profile_executor_start() already having run above
+    // -- it is only ever a PRODUCER into kiln_io_owner's queue, and it must
+    // see whatever ownership profile_executor has already claimed before its
+    // own first tick tries to claim RELAY_OWNER_RULE. `safety` may be NULL
+    // (safety_link_start() failed this boot) -- same fail-closed convention
+    // as kiln_io_owner_start() above: every rule-driven relay-ON decision is
+    // refused until a live link exists.
+    // MOVED below ota_http_start() (2026-08-22): see the rules_task_start()
+    // call there for why. Starting it here boot-looped the board.
     // The shipped Digital Fire schedule catalogue's persisted hidden-mask.
     // Must load before profiles_http_start() registers the read paths that
     // consult it, or the first listing after boot would show hidden entries.
@@ -980,8 +993,8 @@ void app_main(void)
     // it for the same reason (no ordering dependency on anything below).
     esp_err_t settings_err = settings_http_start();
     if (settings_err != ESP_OK) {
-        ESP_LOGW(TAG, "settings_http_start failed: %s -- no /settings or /settings/manual page "
-                      "this boot", esp_err_to_name(settings_err));
+        ESP_LOGW(TAG, "settings_http_start failed: %s -- no /settings, /settings/manual, or "
+                      "/settings/display page this boot", esp_err_to_name(settings_err));
     }
 
     // CommonFW/docs/UPDATE_PROTOCOL.md section 2 + section 1 / TODO.md 9.4:
@@ -1004,6 +1017,29 @@ void app_main(void)
     if (ota_http_err != ESP_OK) {
         ESP_LOGW(TAG, "ota_http_start failed: %s -- no /api/ota/challenge this boot",
                  esp_err_to_name(ota_http_err));
+    }
+
+    // Rule evaluator. Deliberately started AFTER ota_http_start() above: its
+    // 1 Hz fail-safe gate calls ota_http_heat_blocked_by_update(), which
+    // takes a mutex that ota_http_start() creates. Started before it, that
+    // call asserts inside FreeRTOS on the NULL handle and panics -- this
+    // exact ordering mistake boot-looped the board on every boot until it
+    // was found in the backtrace (rules_task_entry -> ota_http_heat_blocked_
+    // by_update -> xQueueSemaphoreTake -> __assert_func). ota_http.c now also
+    // guards the NULL handle defensively, but the correct fix is this order.
+    //
+    // Everything else it needs is already up by here: rules_http_start()
+    // (config it reads every tick), kiln_io_owner_start() (the queue it is
+    // only ever a PRODUCER into) and profile_executor_start() (whose relay
+    // ownership its first tick must see before claiming RELAY_OWNER_RULE).
+    // `safety` may be NULL if safety_link_start() failed this boot -- same
+    // fail-closed convention as kiln_io_owner_start(): every rule-driven
+    // relay-ON decision is refused until a live link exists.
+    esp_err_t rules_task_err = rules_task_start(safety_err == ESP_OK ? &safety : NULL);
+    if (rules_task_err != ESP_OK) {
+        ESP_LOGE(TAG, "rules_task_start failed: %s -- saved rules will NOT be evaluated this boot "
+                      "(config storage/editing is unaffected)",
+                 esp_err_to_name(rules_task_err));
     }
 
     // Owner-report (2026-08-21 follow-up): saved "kiln config" slots --

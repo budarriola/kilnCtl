@@ -33,6 +33,27 @@
 extern "C" {
 #endif
 
+/* Pure decision for the "safety_ready" bit reported on /api/status and by
+ * dashboard_http_get_hw_ready() (readiness_http.c's "hardware present and
+ * answering" check reads it too). Owner-reported bench bug: with the UART
+ * between the ESP and the RP2040 safety processor physically unplugged, the
+ * web UI and LCD both kept reporting the safety link as up. Root cause was
+ * that both call sites computed this bit as "does the SafetyLinkClass driver
+ * object exist" (a non-NULL pointer, true from the moment safety_link_start()
+ * is called and forever after) instead of "is it actually receiving frames" --
+ * exactly the "bus exists vs. something answered on it" trap this file's own
+ * thermo_ready comment already warns about, just not applied here.
+ * safety_link_get_status()'s link_up field IS the real, staleness-gated
+ * answer (safety_link.c's safety_link_up_locked(), gated at
+ * SAFETY_LINK_STALE_MS = 1500 ms) -- this function is only the null/error
+ * handling around calling it, pulled out to a pure, host-testable predicate
+ * so the "must equal link_up, never merely non-NULL" contract can't quietly
+ * regress at either call site again. */
+static inline bool dashboard_safety_ready(bool have_safety_link, esp_err_t status_err, bool link_up)
+{
+    return have_safety_link && status_err == ESP_OK && link_up;
+}
+
 /* One MAX31856 channel's reading, as reported on /api/status's "channels"
  * array -- see dashboard_get_status() below. channel is 0-based (MAX31856.h:
  * "0..2, as used on the wire") and, per this codebase's legacy zone<->channel

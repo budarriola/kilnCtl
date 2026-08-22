@@ -17,6 +17,8 @@ extern const uint8_t settings_page_html_gz_start[] asm("_binary_settings_page_ht
 extern const uint8_t settings_page_html_gz_end[] asm("_binary_settings_page_html_gz_end");
 extern const uint8_t manual_page_html_gz_start[] asm("_binary_manual_page_html_gz_start");
 extern const uint8_t manual_page_html_gz_end[] asm("_binary_manual_page_html_gz_end");
+extern const uint8_t settings_display_page_html_gz_start[] asm("_binary_settings_display_page_html_gz_start");
+extern const uint8_t settings_display_page_html_gz_end[] asm("_binary_settings_display_page_html_gz_end");
 
 /* Same content-negotiation shape as diagnostics_http.c's send_gz_page():
  * web_client_accepts_gzip() covers the "no Accept-Encoding header" (legal,
@@ -45,6 +47,19 @@ static esp_err_t manual_page_get_handler(httpd_req_t *req)
     return send_gz_page(req, "manual_page.html", manual_page_html_gz_start, manual_page_html_gz_end);
 }
 
+/* GET /settings/display -- the theme + °C/°F preferences, split out of
+ * /settings 2026-08-22. Owner report: "both display theme and reset menu
+ * items take me to the same page" -- nav.js's menu always had two separate
+ * entries for these, but both used to point at /settings (one at #display,
+ * one at #danger), so either menu choice landed on the same document. This
+ * route gives Display its own destination; /settings keeps the Danger zone
+ * and its own #danger entry still resolves there. */
+static esp_err_t settings_display_page_get_handler(httpd_req_t *req)
+{
+    return send_gz_page(req, "settings_display_page.html", settings_display_page_html_gz_start,
+                        settings_display_page_html_gz_end);
+}
+
 esp_err_t settings_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -59,6 +74,9 @@ esp_err_t settings_http_start(void)
     static const httpd_uri_t manual_uri = {
         .uri = "/settings/manual", .method = HTTP_GET, .handler = manual_page_get_handler,
     };
+    static const httpd_uri_t display_uri = {
+        .uri = "/settings/display", .method = HTTP_GET, .handler = settings_display_page_get_handler,
+    };
 
     esp_err_t err = httpd_register_uri_handler(server, &settings_uri);
     if (err != ESP_OK) {
@@ -70,7 +88,12 @@ esp_err_t settings_http_start(void)
         ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/manual) failed: %s", esp_err_to_name(err));
         return err;
     }
+    err = httpd_register_uri_handler(server, &display_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/settings/display) failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    ESP_LOGI(TAG, "settings/manual pages up");
+    ESP_LOGI(TAG, "settings/manual/display pages up");
     return ESP_OK;
 }

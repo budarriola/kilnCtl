@@ -110,10 +110,18 @@ the same measurement.</p>
     apply(next);
   });
 
-  /* Same MAX31856_MASK_*/MAX31856_FAULT_* bit layout as MAX31856.h and
+  /* Same MAX31856_MASK_xxx / MAX31856_FAULT_xxx bit layout as MAX31856.h and
      ui_page_thermo_faults.c's format_fault_summary() -- SR shares bit
      positions/names with the register MASK for the low six bits, plus two
-     SR-only bits for the top two (TCRANGE/CJRANGE). */
+     SR-only bits for the top two (TCRANGE/CJRANGE).
+
+     NOTE: write those constant names with "xxx", never with a "*" wildcard.
+     "MAX31856_MASK_*" followed by "/" closes this very comment early, and
+     everything after it parses as code -- that is not hypothetical, it is
+     the bug that made this page sit on "Loading..." forever: the syntax
+     error killed the whole inline script, so render() never ran and the
+     placeholder below was never replaced. The endpoint was fine the entire
+     time, which is why curl-based testing never saw it. */
   var FAULT_BITS = [
     [0x01, 'OPEN'], [0x02, 'OVUV'], [0x04, 'TCLOW'], [0x08, 'TCHIGH'],
     [0x10, 'CJLOW'], [0x20, 'CJHIGH'], [0x40, 'TCRANGE'], [0x80, 'CJRANGE']

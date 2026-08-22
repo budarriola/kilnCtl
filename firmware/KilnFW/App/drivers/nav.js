@@ -68,8 +68,15 @@
     // off the topbar at the owner's request), so it needs a way in that is
     // not the Reset entry below -- an operator looking for the units toggle
     // should not have to guess it lives behind a link labelled "Reset".
-    // Both entries point at the same page, each at its own anchor.
-    { href: '/settings#display', label: 'Display (theme & units)' },
+    //
+    // 2026-08-22: that Display section moved again, this time to its own
+    // page (/settings/display, settings_display_page.html) -- owner report:
+    // "both display theme and reset menu items take me to the same page."
+    // The two entries used to be /settings#display and /settings#danger, two
+    // anchors on the ONE settings page, so picking either menu item visibly
+    // landed on the same document. They now point at genuinely different
+    // routes.
+    { href: '/settings/display', label: 'Display (theme & units)' },
     { href: '/settings#danger', label: 'Reset' },
   ];
 
@@ -223,10 +230,11 @@
     // Kept as a MOVE (or a hide), never a removal: each page's own inline
     // <script> looks up #themeBtn by id and attaches the theme listener to
     // it, and would throw on null. So on the one page that offers the
-    // control (settings_page.html, which provides the #kcDisplayPrefs
-    // container) the real element is moved into that container; everywhere
-    // else it stays in the DOM, functional but hidden, and the page script
-    // is none the wiser.
+    // control (settings_display_page.html, which provides the
+    // #kcDisplayPrefs container -- moved there from settings_page.html
+    // 2026-08-22, see that file's own header comment) the real element is
+    // moved into that container; everywhere else it stays in the DOM,
+    // functional but hidden, and the page script is none the wiser.
     //
     // Ordering: this runs from nav.js, guaranteed to execute before app.js
     // on every page (`defer` scripts run in document order; nav.js's

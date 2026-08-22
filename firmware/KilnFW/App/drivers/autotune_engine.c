@@ -4,8 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -721,7 +723,18 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
      * autotune_engine_run()/profile_executor_run()), so there's no
      * starvation concern between them; both still sit below the link-loss
      * watchdog (6). */
-    BaseType_t ok = xTaskCreatePinnedToCore(task_entry, "autotune_engine", 4096, NULL, 5, &s_at.task, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack -- audited against uart_bridge_ext.c's
+     * cache-disable hazard (see that file's boot-time comment). task_entry()
+     * never touches flash/NVS itself (autotune_engine_accept()'s zones_http
+     * writes run on whichever task calls it, not this one) and reaches
+     * hardware only through thermo_owner_task/kiln_io_owner_task's queues
+     * (owner tasks keep their own internal stacks; the caller-owned result
+     * struct they write into being in PSRAM is a plain memory store, not a
+     * DMA target). Safe to move off internal SRAM, which several other
+     * tasks are contending for during the WiFi-driver boot-time buffer
+     * storm that same comment documents. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(task_entry, "autotune_engine", 4096, NULL, 5, &s_at.task,
+                                                    tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         vSemaphoreDelete(s_at.lock);
         s_at.lock = NULL;

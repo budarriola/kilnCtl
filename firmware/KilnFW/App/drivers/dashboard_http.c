@@ -149,7 +149,15 @@ void dashboard_get_status(dashboard_status_t *out)
         out->channels[i].stale = (r->age_ms >= KILN_TEMP_STALE_AGE_MS);
     }
 
-    out->safety_ready = s_dash.safety != NULL;
+    /* safety_ready must equal dashboard_safety_ready() -- see that function's
+     * doc comment (dashboard_http.h) for the owner-reported bench bug this
+     * fixes: s_dash.safety != NULL only means the driver object was
+     * constructed, not that the Pico is actually answering, and the old code
+     * reported the former. Defaults to false/ESP_FAIL here so a never-
+     * initialized or currently-failing link reads not-ready, never a stale
+     * "true" left over from init. */
+    esp_err_t safety_status_err = ESP_FAIL;
+    bool safety_link_up = false;
 
     /* ROADMAP.md M6: safety/enclosure temperature straight from the safety
      * link's cache -- see dashboard_http.h's field comment for the wire
@@ -160,7 +168,9 @@ void dashboard_get_status(dashboard_status_t *out)
      * read as a real, very cold reading). */
     if (s_dash.safety) {
         safety_link_status_t sl;
-        if (safety_link_get_status(s_dash.safety, &sl) == ESP_OK) {
+        safety_status_err = safety_link_get_status(s_dash.safety, &sl);
+        if (safety_status_err == ESP_OK) {
+            safety_link_up = sl.link_up;
             out->safety_temp_c = sl.tc_temp_c;
             out->safety_temp_valid = !isnan(sl.tc_temp_c);
             out->enclosure_temp_c = sl.cj_temp_c;
@@ -199,6 +209,7 @@ void dashboard_get_status(dashboard_status_t *out)
             out->trip_safety_tc_c = sl.trip_safety_tc_c;
             out->trip_deciding_threshold = sl.trip_deciding_threshold;
         }
+        out->safety_ready = dashboard_safety_ready(true, safety_status_err, safety_link_up);
 
         /* TODO.md 9.0's deferred "GUI names both versions" item -- this
          * firmware's own protocol number is always known regardless of link
@@ -532,7 +543,19 @@ void dashboard_http_get_hw_ready(bool *out_io_ready, bool *out_thermo_ready, boo
         *out_io_ready = s_dash.io != NULL;
     }
     if (out_safety_ready) {
-        *out_safety_ready = s_dash.safety != NULL;
+        /* Same dashboard_safety_ready() contract as dashboard_get_status()
+         * above -- see that function's call site, or dashboard_http.h's doc
+         * comment, for the owner-reported false-positive this fixes. */
+        esp_err_t safety_status_err = ESP_FAIL;
+        bool safety_link_up = false;
+        if (s_dash.safety) {
+            safety_link_status_t sl;
+            safety_status_err = safety_link_get_status(s_dash.safety, &sl);
+            if (safety_status_err == ESP_OK) {
+                safety_link_up = sl.link_up;
+            }
+        }
+        *out_safety_ready = dashboard_safety_ready(s_dash.safety != NULL, safety_status_err, safety_link_up);
     }
     if (out_thermo_ready) {
         MAX31856Reading readings[MAX31856_CHANNEL_COUNT];

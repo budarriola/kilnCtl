@@ -58,6 +58,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "ota_page.html" "nav.js" "app.js"
         "diagnostics_page.html" "safety_page.html" "thermo_faults_page.html"
         "settings_page.html" "manual_page.html" "board_temps_page.html" "backup_page.html"
+        "settings_display_page.html"
         "safety_commissioning_page.html"
         "zones_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
@@ -158,6 +159,8 @@ idf_component_register(SRCS "MAX31856.c"
                        "safety_cfg_store.c"
                        "safety_cfg_http.c"
                        "rules_http.c"
+                       "rules_eval.c"
+                       "rules_task.c"
                        "profiles_http.c"
                        # profiles_builtin.c is hand-written and #includes the
                        # machine-generated profiles_builtin_table.inc, which is

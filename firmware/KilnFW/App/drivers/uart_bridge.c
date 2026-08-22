@@ -603,8 +603,14 @@ esp_err_t uart_bridge_start_thermo_task(uart_protocol_t *proto, MAX31856BusClass
         return err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(thermo_bridge_task, "thermo_uart_bridge", 4096,
-                                                 &ctx, 5, NULL, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack, same audit as safety_bridge_task/
+     * link_watchdog_task above -- thermo_bridge_task reaches the MAX31856
+     * bus only through thermo_owner_command_*() (thermo_owner_task keeps its
+     * own internal stack for the actual SPI transactions), and never touches
+     * flash/NVS. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(thermo_bridge_task, "thermo_uart_bridge", 4096,
+                                                         &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_THERMO);
         return ESP_ERR_NO_MEM;
@@ -1072,8 +1078,13 @@ esp_err_t uart_bridge_start_io_task(uart_protocol_t *proto, kiln_io_t *io)
         }
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(io_bridge_task, "io_uart_bridge", 4096, &ctx, 5,
-                                                 NULL, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack -- io_bridge_task reaches the SX1509 expander
+     * only through kiln_io_owner_command_*() (kiln_io_owner_task keeps its
+     * own internal stack for the actual I2C transactions), and never touches
+     * flash/NVS. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(io_bridge_task, "io_uart_bridge", 4096, &ctx, 5,
+                                                         NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_IO);
         return ESP_ERR_NO_MEM;
@@ -1472,8 +1483,12 @@ esp_err_t uart_bridge_start_touch_task(uart_protocol_t *proto, screen_idle_t *id
         return err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(touch_bridge_task, "touch_uart_bridge", 3072,
-                                                 &ctx, 5, NULL, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack -- touch_bridge_task only calls
+     * screen_idle_get_state()/lvgl_port_inject_touch(), neither of which
+     * touches hardware directly or reaches flash/NVS. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(touch_bridge_task, "touch_uart_bridge", 3072,
+                                                         &ctx, 5, NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_TOUCH);
         return ESP_ERR_NO_MEM;
@@ -1997,7 +2012,11 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
         return err;
     }
 
-    BaseType_t created = xTaskCreatePinnedToCore(info_bridge_task, "info_uart_bridge", 3072, &ctx, 5, NULL, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack -- info_bridge_task only reports version/
+     * uptime/reset-reason state, no flash/NVS access, no hardware ownership. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(info_bridge_task, "info_uart_bridge", 3072, &ctx, 5,
+                                                         NULL, tskNO_AFFINITY,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         uart_protocol_unregister_task(proto, UART_TASK_ID_INFO);
         return ESP_ERR_NO_MEM;
@@ -2011,8 +2030,11 @@ esp_err_t uart_bridge_start_info_task(uart_protocol_t *proto)
      * connects later independently pulls the version via
      * INFO_CMD_GET_FW_VERSION. Runs in its own one-shot task so app_main
      * isn't blocked for the ~seconds this can take to give up. */
-    BaseType_t boot_push_created = xTaskCreatePinnedToCore(info_boot_push_task, "info_boot_push", 3072,
-                                                            &ctx, 5, NULL, tskNO_AFFINITY);
+    /* 2026-08-22: PSRAM stack, same reasoning as info_bridge_task above --
+     * one-shot version push, no flash/NVS, no hardware ownership. */
+    BaseType_t boot_push_created = xTaskCreatePinnedToCoreWithCaps(info_boot_push_task, "info_boot_push", 3072,
+                                                                   &ctx, 5, NULL, tskNO_AFFINITY,
+                                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (boot_push_created != pdPASS) {
         ESP_LOGW(TAG, "failed to start boot version-push task (non-fatal)");
     }

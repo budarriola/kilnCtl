@@ -55,26 +55,25 @@
 </style>
 </head>
 <body>
+<!-- This page no longer offers #kcDisplayPrefs (moved to settings_display_
+     page.html, see the comment below), so nav.js's topbar code hides this
+     button rather than reparenting it (its "themeBtn.hidden = true" branch,
+     see nav.js's own comment on the move) -- kept in markup, not deleted,
+     because this page's own inline script below still looks it up by id and
+     would throw on null otherwise. Same bare-glyph script every OTHER
+     *_page.html carries now that this is no longer the one page with the
+     labelled settings row. -->
 <button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
 
-<!-- Display preferences, 2026-08-21 (owner request: "move the Fahrenheit/
-     Celsius and theme selection to the settings pages"). Both controls used
-     to sit in every page's topbar. This <div id="kcDisplayPrefs"> is the
-     container both of them look for: nav.js moves the real #themeBtn element
-     above into it (it stays in <body> markup so every OTHER page's inline
-     theme script still finds it by id), and app.js's buildUnitBtn() builds
-     the °C/°F control only when this container exists. Neither control is
-     hard-coded here, so this page never has to be edited again if either
-     one's behaviour changes.
-
-     The two are NOT the same kind of setting, which the note below says out
-     loud: the theme is per-browser (localStorage, this device only) while
-     the unit is stored on the board and shared with the LCD. -->
-<h2 id="display" style="border-top: none; margin-top: 0; padding-top: 0;">Display</h2>
-<div id="kcDisplayPrefs"></div>
-<p>Temperature units are stored on the board, so this also changes what the
-LCD and every other browser shows. The dark/light theme is remembered by this
-browser only.</p>
+<!-- Display preferences (theme + °C/°F) moved to their own page, /settings/
+     display, 2026-08-22 -- owner report: "both display theme and reset menu
+     items take me to the same page." Before this, both nav.js menu entries
+     pointed at this one document (/settings#display and /settings#danger,
+     two anchors on one page), so either menu choice landed on the same URL.
+     See settings_display_page.html for the moved content and nav.js's
+     NAV_LINKS for the corrected href. This page now shows ONLY the danger
+     zone, so the <h2 id="display"> anchor that used to disambiguate the two
+     sections is gone too -- there is only one section left here. -->
 
 <!-- 2026-08-21 rework: the "Board configuration" hub links that used to sit
      here (readiness/zones/relays/manual/profiles/wifi/ota/diagnostics/
@@ -111,13 +110,11 @@ anything else. "Factory default" erases all three.</p>
   function apply(t) {
     if (t) document.documentElement.setAttribute('data-theme', t);
     else document.documentElement.removeAttribute('data-theme');
-    // Every other page's copy of this script sets a bare '☀'/'🌙' glyph,
-    // sized for a corner button. Here the control is a labelled settings row
-    // (see the #kcDisplayPrefs block above), so it says which theme is on and
-    // what clicking does -- same wording shape as the Units row app.js builds
-    // right beside it.
-    btn.textContent = isDark(t) ? '☀ Theme: Dark (switch to light)'
-                                : '🌙 Theme: Light (switch to dark)';
+    // Bare glyph, same as every other page's copy of this script -- this
+    // button is hidden on this page now (see the comment above #themeBtn),
+    // so its label never renders; the labelled-row wording lives in
+    // settings_display_page.html's copy instead.
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
   }
   apply(localStorage.getItem('kilnctl-theme'));
   btn.addEventListener('click', function () {

@@ -6,8 +6,10 @@
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "freertos/idf_additions.h"
 #include "settings.h"
 #include "uart_task_ids.h"
 
@@ -1575,9 +1577,15 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * uninitialized link -- so the flag has to be true by the time it runs its
      * first iteration, not merely by the time start() returns. */
     link->initialized = true;
-    if (xTaskCreatePinnedToCore(safety_poll_task, "safety_poll", SAFETY_POLL_TASK_STACK, link,
-                                 SAFETY_POLL_TASK_PRIORITY, &link->poll_task,
-                                 tskNO_AFFINITY) != pdPASS) {
+    /* 2026-08-22: PSRAM stack. safety_poll_task talks to the RP2040 only
+     * through uart_owner_transfer() (uart_owner.c owns the actual UART
+     * driver call and keeps its own internal stack for it); this task itself
+     * never calls into flash/NVS -- per this file's own top-of-file comment,
+     * "nothing reaches its flash until safety_link_send_commit_config()",
+     * which is called by an HTTP handler, not from this poll loop. */
+    if (xTaskCreatePinnedToCoreWithCaps(safety_poll_task, "safety_poll", SAFETY_POLL_TASK_STACK, link,
+                                        SAFETY_POLL_TASK_PRIORITY, &link->poll_task, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "failed to create safety poll task");
         link->initialized = false;
         err = ESP_ERR_NO_MEM;
