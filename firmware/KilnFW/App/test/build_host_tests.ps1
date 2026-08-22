@@ -45,6 +45,7 @@ $sources = @(
     (Join-Path $testDir "test_safety_watchdog.c"),
     (Join-Path $testDir "test_safety_link.c"),
     (Join-Path $testDir "test_kiln_cfg_store.c"),
+    (Join-Path $testDir "test_safety_cfg_store.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
@@ -95,4 +96,26 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $exe2
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+# ---- test_safety_cfg_http.c: its own THIRD, separate executable -----------
+# Same reason as test_zones_http.c above: it #includes safety_cfg_http.c
+# directly to reach its static parse_set_param_body()/build_commissioning_
+# json()/apply_pairs() helpers, and defines its own fake bodies for
+# safety_cfg_store_get_by_index() and friends -- the main executable already
+# links the REAL ones via test_safety_cfg_store.c's #include of safety_cfg_
+# store.c, so linking both into one binary would multiply-define every
+# safety_cfg_store_* symbol.
+$exe3 = Join-Path $outDir "kilnctl_host_tests_safety_cfg_http.exe"
+$cmd3 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$outDir\\safety_cfg_http_`" /Fe:`"$exe3`" `"$(Join-Path $testDir 'test_safety_cfg_http.c')`""
+
+cmd.exe /c $cmd3
+if ($LASTEXITCODE -ne 0) {
+    throw "safety_cfg_http build failed"
+}
+
+& $exe3
 exit $LASTEXITCODE

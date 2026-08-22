@@ -75,6 +75,41 @@ tasks/link_task.c` (`link_task_handle_set_ct_cal()`/`_get_ct_cal()`/
 `send_ct_cal()`) against `firmware/SaftyFW/src/config_store.{c,h}`'s `ct_cal`
 record and `firmware/SaftyFW/src/ct_amps_cal.{c,h}`'s pure apply logic.
 
+**2026-08-21: five codecs for `docs/COMMISSIONING.md` sec 2's commissioning
+family (ids 0x1B-0x1F).** Codecs and host tests only -- no consumer wiring in
+either firmware yet, same as `SET_CT_CAL` when it landed.
+`kilnlink_set_log_level.{c,h}` (`SAFETY_CMD_SET_LOG_LEVEL` 0x1B, ESP→Pico, 2
+bytes, opaque `LOG_LEVEL_*` byte). `kilnlink_set_param.{c,h}`
+(`SAFETY_CMD_SET_PARAM` 0x1C, ESP→Pico, `param_id` u16 + type tag + a
+variable-length value -- stages only, nothing reaches flash from this frame
+alone). `kilnlink_commit_config.{c,h}` (`SAFETY_CMD_COMMIT_CONFIG` 0x1D,
+ESP→Pico, one byte, no fields -- validates the staged set as a whole and
+writes it; that validation is `SaftyFW`'s, not this codec's).
+`kilnlink_get_param.{c,h}` / `kilnlink_param.{c,h}` (`SAFETY_CMD_GET_PARAM`/
+`PARAM`, both 0x1E, request/reply sharing an id per the `GET_CT_CAL`/`CT_CAL`
+convention; the reply carries an explicit `found` byte so an id one side
+doesn't recognise is named in the reply rather than failing the whole
+exchange). `kilnlink_get_config_page.{c,h}` / `kilnlink_config_page.{c,h}`
+(`SAFETY_CMD_GET_CONFIG_PAGE`/`CONFIG_PAGE`, both 0x1F, bulk read of packed
+`(id, type, value)` triples, one page per frame).
+
+All five share a new type-tag helper, `kilnlink_param_value.{c,h}`
+(`KILNLINK_PARAM_TYPE_BOOL/U8/U16/F32`, 1/1/2/4 bytes) -- a small closed tag
+set rather than a length-prefixed blob, so a value whose declared type this
+build doesn't recognise is a decode `ERR_BAD_TYPE`, never a guess at how many
+bytes follow. `kilnlink_config_page_pack()` greedily packs `(id, value)`
+pairs into a page until the next one would not fit in the 253-byte payload
+cap, then reports `more = 1` if entries remain -- the caller re-invokes with
+the leftover slice and the next page index. Host-tested (`test_set_log_
+level.c`, `test_param_value.c`, `test_set_param.c`, `test_commit_config.c`,
+`test_get_param.c`, `test_param.c`, `test_get_config_page.c`,
+`test_config_page.c`): round trips for every type tag, byte-exact vectors,
+and the hostile-input set (short/over-long/truncated-mid-value/bad-type-tag
+frames, plus `CONFIG_PAGE`'s entry_count-too-large and trailing-garbage
+cases and length sweeps that assert no other length ever decodes OK). No
+`tools/PcTools/selfcheck.py` cross-check exists yet for these five, same gap
+`SET_CT_CAL`'s entry above notes.
+
 **Wiring status, same day (2026-08-19):** most of
 these codecs are still codec-only, not called from either firmware's real
 send/receive dispatch -- see Migration below -- but two are now genuine
@@ -132,19 +167,38 @@ firmware/CommonFW/
 │  ├─ kilnlink_status.h            ← Pico → ESP, Frame A, SAFETY_CMD_GET_STATUS (0x01)
 │  ├─ kilnlink_diag.h              ← Pico → ESP, Frame B, SAFETY_CMD_DIAG (0x08)
 │  ├─ kilnlink_trip.h              ← Pico → ESP, Frame D, SAFETY_CMD_TRIP_EVENT (0x0D)
-│  └─ kilnlink_power.h             ← Pico → ESP, Frame E, SAFETY_CMD_POWER (0x0E)
+│  ├─ kilnlink_power.h             ← Pico → ESP, Frame E, SAFETY_CMD_POWER (0x0E)
+│  ├─ kilnlink_set_config.h        ← ESP → Pico, SAFETY_CMD_SET_CONFIG (0x16)
+│  ├─ kilnlink_set_ct_cal.h        ← ESP → Pico, SAFETY_CMD_SET_CT_CAL (0x19)
+│  ├─ kilnlink_get_ct_cal.h        ← ESP → Pico, SAFETY_CMD_GET_CT_CAL (0x1A)
+│  ├─ kilnlink_ct_cal.h            ← Pico → ESP, SAFETY_CMD_CT_CAL (0x1A, reply)
+│  ├─ kilnlink_set_log_level.h     ← ESP → Pico, SAFETY_CMD_SET_LOG_LEVEL (0x1B)
+│  ├─ kilnlink_param_value.h       ← shared type-tag + value codec (BOOL/U8/U16/F32)
+│  ├─ kilnlink_set_param.h         ← ESP → Pico, SAFETY_CMD_SET_PARAM (0x1C)
+│  ├─ kilnlink_commit_config.h     ← ESP → Pico, SAFETY_CMD_COMMIT_CONFIG (0x1D)
+│  ├─ kilnlink_get_param.h         ← ESP → Pico, SAFETY_CMD_GET_PARAM (0x1E)
+│  ├─ kilnlink_param.h             ← Pico → ESP, SAFETY_CMD_PARAM (0x1E, reply)
+│  ├─ kilnlink_get_config_page.h   ← ESP → Pico, SAFETY_CMD_GET_CONFIG_PAGE (0x1F)
+│  └─ kilnlink_config_page.h       ← Pico → ESP, SAFETY_CMD_CONFIG_PAGE (0x1F, reply)
 │  (no `kilnlink_ids.h` or `kilnlink_port.h` yet — see the Completion checklist)
 ├─ src/
 │  ├─ kilnlink_crc.c    kilnlink_frame.c     kilnlink_context.c
 │  ├─ kilnlink_announce.c  kilnlink_ceiling.c  kilnlink_clear_trip.c
 │  ├─ kilnlink_get_fw_version.c  kilnlink_set_clock.c
-│  └─ kilnlink_status.c  kilnlink_diag.c  kilnlink_trip.c  kilnlink_power.c
+│  ├─ kilnlink_status.c  kilnlink_diag.c  kilnlink_trip.c  kilnlink_power.c
+│  ├─ kilnlink_set_config.c  kilnlink_set_ct_cal.c  kilnlink_get_ct_cal.c  kilnlink_ct_cal.c
+│  └─ kilnlink_set_log_level.c  kilnlink_param_value.c  kilnlink_set_param.c
+│     kilnlink_commit_config.c  kilnlink_get_param.c  kilnlink_param.c
+│     kilnlink_get_config_page.c  kilnlink_config_page.c
 ├─ src/benchproto_crc.c  src/benchproto_frame.c  src/benchproto_link.c
 ├─ test/
 │  ├─ test_frame.c  test_fuzz.c  test_uart_protocol_delegate.c
 │  ├─ test_context.c  test_announce.c  test_ceiling.c  test_clear_trip.c
 │  ├─ test_get_fw_version.c  test_set_clock.c
 │  ├─ test_status.c  test_diag.c  test_trip.c  test_power.c
+│  ├─ test_set_config.c  test_set_ct_cal.c  test_get_ct_cal.c  test_ct_cal.c
+│  ├─ test_set_log_level.c  test_param_value.c  test_set_param.c  test_commit_config.c
+│  ├─ test_get_param.c  test_param.c  test_get_config_page.c  test_config_page.c
 │  ├─ test_benchproto_frame.c  test_benchproto_link.c
 │  └─ vectors/                     ← shared byte-exact test vectors, see below
 │     (kilnlink's `*_vectors.json` plus benchproto_frame_vectors.json)

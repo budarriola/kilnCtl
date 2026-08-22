@@ -47,4 +47,23 @@ static inline esp_err_t esp_timer_stop(esp_timer_handle_t timer)
     return ESP_OK;
 }
 
+/* Added for safety_cfg_store.c's host test (test_safety_cfg_store.c):
+ * that file calls the real esp_timer_get_time() (a monotonic microsecond
+ * clock) to compute "how long ago was this fetched" -- deterministic here,
+ * a plain settable counter rather than a real clock, so a test can assert an
+ * exact elapsed value instead of racing a wall clock. `static` (not extern):
+ * each translation unit that includes this header gets its own independent
+ * copy, same as every other file-scope stub state in this directory. */
+static int64_t s_stub_esp_timer_now_us = 0;
+
+static inline int64_t esp_timer_get_time(void)
+{
+    return s_stub_esp_timer_now_us;
+}
+
+static inline void esp_timer_test_set_now_us(int64_t us)
+{
+    s_stub_esp_timer_now_us = us;
+}
+
 #endif // TEST_STUB_ESP_TIMER_H

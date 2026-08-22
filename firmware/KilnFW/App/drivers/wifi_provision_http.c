@@ -770,7 +770,16 @@ esp_err_t wifi_provision_http_start(void)
      * CONFIG_KILNCTL_SIM_PLANT adds 2 more and would have put the build 1
      * over immediately. 80 restores real headroom while keeping the
      * per-slot RAM reasoning below intact. */
-    config.max_uri_handlers = 80;
+    /* 2026-08-21 follow-up: raised 80 -> 84. safety_cfg_http.c (this pass's
+     * ESP-side commissioning surface, docs/COMMISSIONING.md sec 3.1) adds 3
+     * routes (GET/POST /api/safety/commissioning, POST .../bench_preset),
+     * which would have left only ~4-6 spare slots against the prior cap
+     * (71 real routes + 2 more under CONFIG_KILNCTL_SIM_PLANT, per the
+     * comment above) -- thin enough that the NEXT small addition anywhere in
+     * the tree silently 404s a page again, exactly the failure mode the
+     * 72->80 bump above was already fixing. 84 restores the same few-routes
+     * headroom this cap has been kept at every time before. */
+    config.max_uri_handlers = 84;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

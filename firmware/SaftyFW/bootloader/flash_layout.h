@@ -82,11 +82,11 @@ extern "C" {
 // application-layer concern (like BOOTLOADER_CONFIG_FLASH_SIZE's own comment
 // says, this bootloader never writes here), so it gets a named sub-region
 // rather than a new top-level offset. Sized like BOOTLOADER_METADATA_FLASH_
-// SIZE (one sector, 16 slots of CONFIG_STORE_RECORD_LEN=256B each) --
-// conservative for what Phase 9's first pass needs (tc_type,
-// calibration_missing, and reserved room for S8's threshold / CT calibration
-// constants), with 60K of the config region still unclaimed after this for
-// whatever Phase 9 adds next.
+// SIZE (one sector, 8 slots of CONFIG_STORE_RECORD_LEN=512B each as of
+// format version 2 -- was 16 slots of 256B under format version 1; see
+// config_store.h's header comment) -- still ample, since a record is
+// written only at commissioning, not at runtime, with 60K of the config
+// region still unclaimed after this for whatever comes next.
 #define SAFTYFW_CONFIG_STORE_FLASH_OFFSET BOOTLOADER_CONFIG_FLASH_OFFSET
 #define SAFTYFW_CONFIG_STORE_FLASH_SIZE   0x00001000u // 4K, one erase sector
 

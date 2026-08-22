@@ -13,6 +13,12 @@ Stored in the last flash sector, versioned and CRC'd, with compiled-in fallbacks
 See `ARCHITECTURE.md` §7 for the store and §8 for the RP2040 flash-write
 constraints.
 
+**How these values actually get set is [`COMMISSIONING.md`](COMMISSIONING.md)** —
+the ESP web GUI writes them once, they live on the safety processor outside
+both OTA slots, and the ESP refetches only when the reported `config_crc`
+changes. This file stays the authority on *what* each field is and what
+happens if it is wrong; that one owns the mechanism.
+
 **Legend for *Risk if wrong*:**
 
 - 🔴 **Dangerous** — a wrong value can leave a real fault undetected.

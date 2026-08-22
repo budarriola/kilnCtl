@@ -69,6 +69,11 @@ set(SAFTYFW_APP_SOURCES
     # comment for why).
     src/config_store.c
     src/config_store_flash.c
+    # docs/COMMISSIONING.md section 2's SET_PARAM/COMMIT_CONFIG/GET_PARAM/
+    # GET_CONFIG_PAGE wire family: the param_id <-> config_store_record_t
+    # field table plus cross-field COMMIT_CONFIG validation. Pure, host-tested
+    # (test/test_config_store.c) same as config_store.c itself.
+    src/config_params.c
     src/tasks/relay_owner.c
     src/tasks/relay_grace.c
     src/tasks/watchdog_task.c

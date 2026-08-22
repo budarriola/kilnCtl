@@ -54,6 +54,8 @@
 #include "uart_protocol.h"
 #include "wifi_prov.h"
 #include "kiln_cfg_http.h"
+#include "safety_cfg_http.h"
+#include "safety_cfg_store.h"
 #include "kiln_cfg_store.h"
 #include "zones_http.h"
 
@@ -1037,6 +1039,34 @@ void app_main(void)
     if (backup_err != ESP_OK) {
         ESP_LOGW(TAG, "backup_http_start failed: %s -- no /settings/backup page this boot",
                  esp_err_to_name(backup_err));
+    }
+
+    /* Safety-processor commissioning (SaftyFW/docs/COMMISSIONING.md). The
+     * store is the ESP's CACHE of parameters that live on the Pico; the Pico's
+     * own config_store is the source of truth, and the config_crc carried on
+     * every FW_VERSION frame is what decides whether this cache is current.
+     * Init before the HTTP half so a request arriving immediately after
+     * registration finds a loaded (or honestly-empty) cache rather than
+     * uninitialised state.
+     *
+     * `safety` may be NULL here -- safety_link_start() is allowed to fail this
+     * boot (see its own error path above, which logs that the isolated fault
+     * line is unavailable and carries on). safety_cfg_http_start() takes it as
+     * link_or_null precisely so the page still serves in that case, showing
+     * link_up=false and its cached values marked stale, instead of the route
+     * silently not existing. A missing page and a dead link look identical
+     * from a browser, and only one of them is the truth. */
+    esp_err_t safety_cfg_store_err = safety_cfg_store_init();
+    if (safety_cfg_store_err != ESP_OK) {
+        ESP_LOGW(TAG, "safety_cfg_store_init failed: %s -- safety commissioning cache "
+                      "unavailable this boot (values will refetch from the Pico)",
+                 esp_err_to_name(safety_cfg_store_err));
+    }
+    esp_err_t safety_cfg_http_err =
+        safety_cfg_http_start(safety_err == ESP_OK ? &safety : NULL);
+    if (safety_cfg_http_err != ESP_OK) {
+        ESP_LOGW(TAG, "safety_cfg_http_start failed: %s -- no /safety/commissioning this boot",
+                 esp_err_to_name(safety_cfg_http_err));
     }
 
     // Development-only /api/sim (fault injection into the simulated plant).

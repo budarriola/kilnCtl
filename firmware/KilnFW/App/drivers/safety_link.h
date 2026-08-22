@@ -138,6 +138,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "kilnlink/kilnlink_config_page.h"
+#include "kilnlink/kilnlink_param_value.h"
 #include "uart_owner.h"
 #include "uart_protocol.h"
 
@@ -1008,6 +1010,28 @@ esp_err_t safety_link_send_set_ct_cal(SafetyLinkClass *link, uint8_t channel, bo
  * on success. */
 esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out_cap,
                                   size_t *out_len);
+
+/* docs/COMMISSIONING.md sec 2/3 -- SAFETY_CMD_SET_PARAM (0x1C) / COMMIT_CONFIG
+ * (0x1D) / GET_CONFIG_PAGE (0x1F). App/drivers/safety_cfg_store.c (the
+ * NVS-backed ESP-side cache) and safety_cfg_http.c (the /api/safety/
+ * commissioning handlers) are the only intended callers -- see safety_link.c's
+ * definitions for the full contract, including the known limitation that
+ * safety_link_send_commit_config()'s return value is a PROTOCOL-level ACK/
+ * NACK only: no wire codec exists yet to carry a textual "offending field and
+ * rule" back from a rejected commit (kilnlink_commit_config.h's own doc
+ * comment; that reason is entirely SaftyFW's, out of this pass's reach).
+ * safety_link_send_set_param() ACK'd-unicast-stages one field;
+ * safety_link_send_commit_config() ACK'd-unicast-validates-and-writes the
+ * whole staged set; safety_link_get_config_page() is a live, blocking round
+ * trip for one page of the bulk readback (never cached inside this driver,
+ * same split as safety_link_get_ct_cal() above). All three block for the
+ * exchange (same worst-case caveat as safety_link_ping()) -- call from a
+ * bridge/app task, never anything latency-critical. */
+esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
+                                      kilnlink_param_value_t value);
+esp_err_t safety_link_send_commit_config(SafetyLinkClass *link);
+esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
+                                       kilnlink_config_page_t *out);
 
 /* Serializers for the two PC-facing query payloads, so the exact byte layout
  * specified in uart_task_ids.h lives in one place instead of being open-coded

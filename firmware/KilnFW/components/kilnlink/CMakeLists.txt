@@ -31,5 +31,23 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_set_ct_cal.c"
          "${KILNLINK_DIR}/src/kilnlink_get_ct_cal.c"
          "${KILNLINK_DIR}/src/kilnlink_ct_cal.c"
+         # docs/COMMISSIONING.md sec 2/3 (2026-08-21 follow-up): the ESP-side
+         # commissioning cache/HTTP surface (App/drivers/safety_cfg_store.c,
+         # safety_cfg_http.c) and safety_link.c's SET_PARAM/COMMIT_CONFIG/
+         # GET_CONFIG_PAGE wire calls need these five -- added here for the
+         # identical reason every entry above this line was added: this
+         # wrapper's SRCS list does not track CommonFW/CMakeLists.txt's own
+         # add_library(kilnlink ...) automatically, so a new codec is invisible
+         # to the ESP-IDF build until it is also listed here. (Several older
+         # kilnlink_*.c files -- status/power/diag/trip/ceiling/set_clock/
+         # get_fw_version/set_log_level -- are ALSO missing from this list,
+         # pre-existing gaps this pass did not touch since safety_link.c
+         # hand-parses those frames rather than linking their codecs; see that
+         # file's own comments, e.g. safety_apply_diag()'s header, for why.)
+         "${KILNLINK_DIR}/src/kilnlink_param_value.c"
+         "${KILNLINK_DIR}/src/kilnlink_set_param.c"
+         "${KILNLINK_DIR}/src/kilnlink_commit_config.c"
+         "${KILNLINK_DIR}/src/kilnlink_get_config_page.c"
+         "${KILNLINK_DIR}/src/kilnlink_config_page.c"
     INCLUDE_DIRS "${KILNLINK_DIR}/include"
 )

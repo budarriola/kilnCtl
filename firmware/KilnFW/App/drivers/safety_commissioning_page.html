@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Safety Commissioning</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- SaftyFW/docs/COMMISSIONING.md section 4 is this page's spec; section 3.1
+     is the exact HTTP contract this page's JS is written against (GET/POST
+     /api/safety/commissioning, POST /api/safety/commissioning/bench_preset);
+     CONFIG_REFERENCE.md sections 1-5 supply the field grouping, units,
+     defaults and risk ratings this page renders. Both files are read-only
+     inputs here -- this page does not implement any of the mechanism they
+     describe (config_store, SET_PARAM/COMMIT_CONFIG framing, the three-
+     outcome load) -- it only speaks the HTTP surface those docs fix.
+     Not yet wired: the route/handler that serves this page and the two
+     endpoints above are being built in parallel against the same contract;
+     see the file-level comment at the bottom of the inline <script> for the
+     precise list of what the coordinator still has to connect. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Shared KlipperScreen-derived palette, duplicated verbatim per page --
+     see zones_page.html's identical comment for why (EMBED_TXTFILES'd
+     independently, no shared static-asset route today). */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #c0392b;
+    /* --fault-color already exists on theme.css / the LCD side for a hard
+       fault state; defined locally here too since this page (like
+       zones_page.html) carries no <link rel="stylesheet" href="/theme.css">
+       of its own. Deliberately distinct from --bad: --bad is "this reading
+       is a warning/error", --fault-color is reserved for "the data on
+       screen cannot be trusted at all" (stale telemetry, link down) so the
+       two states are never visually confusable with each other. */
+    --fault-color: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+      --fault-color: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+    --fault-color: var(--ui-accent-5);
+  }
+  body { font-family: sans-serif; max-width: 620px; margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  a { color: var(--link); }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1.05em; margin-top: 1.6em; border-top: 1px solid var(--border); padding-top: 0.8em; }
+  p { color: var(--muted); }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type=text], input[type=number], select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  button { margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+           border-radius: var(--ui-radius); cursor: pointer; }
+  #msg { margin-top: 1em; font-weight: bold; }
+  .empty { color: var(--muted); font-style: italic; }
+
+  /* ---- field cards, grouped exactly as CONFIG_REFERENCE.md sections 1-5,
+     one .field per row so risk badge / unset state / guard-disabled note
+     all attach to the same visual block instead of scattering across a
+     bare table (COMMISSIONING.md section 4 item 1: "not forty-five
+     identical-looking number boxes"). ---- */
+  .field { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+           padding: 0.6em 0.9em; margin-bottom: 0.6em; }
+  .field-head { display: flex; align-items: baseline; gap: 0.5em; flex-wrap: wrap; }
+  .field-head label { margin: 0; flex: 1 1 auto; min-width: 0; }
+  .risk-badge { display: inline-block; border-radius: 999px; padding: 0.1em 0.55em; font-size: 0.75em;
+                font-weight: bold; white-space: nowrap; flex: 0 0 auto; }
+  .risk-dangerous { background: var(--fault-color); color: #fff; }
+  .risk-nuisance  { background: var(--warn); color: #fff; }
+  .risk-cosmetic  { background: var(--border); color: var(--fg); }
+  .field .note { font-size: 0.8em; color: var(--muted); margin: 0.3em 0 0; }
+  .field .guardnames { font-size: 0.78em; color: var(--muted); margin: 0.2em 0 0; }
+
+  /* ---- UNSET rendering (COMMISSIONING.md section 4 / CONFIG_REFERENCE.md
+     section 7: "an unset field renders as unset, never as a plausible
+     zero"). The whole card gets a visibly different treatment, not just the
+     input box, since the guard-disabled statement below the input is just
+     as important as the blank value itself. ---- */
+  .field.unset { border-color: var(--warn); border-width: 2px; }
+  .field.unset .field-head::after { content: 'NOT SET'; font-size: 0.72em; font-weight: bold;
+    color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 0.05em 0.4em; }
+  .field.unset input, .field.unset select { border-color: var(--warn); }
+  .field.unset .guard-disabled { color: var(--warn); font-weight: bold; }
+
+  /* ---- disabled-guard rendering, distinct from "unset": a guard can be
+     explicitly zero/off (e.g. max_rate_c_per_min ships 0=off) with the
+     field itself fully SET -- CONFIG_REFERENCE.md section 7: "a disabled
+     guard that looks enabled is worse than no guard, because someone is
+     relying on it." A visible banner on the field, not a color change to
+     the number alone, so it survives a quick glance. ---- */
+  .field .guard-off-banner { display: none; margin-top: 0.35em; padding: 0.3em 0.5em;
+    border-radius: 6px; background: var(--warn); color: #fff; font-size: 0.78em; font-weight: bold; }
+  .field.guard-off .guard-off-banner { display: block; }
+
+  /* ---- stale / link-down: page-wide, unmissable, never rendered as
+     ordinary data (COMMISSIONING.md section 3.1 / section 4). A banner
+     plus a persistent tint on every value field, not a small icon that can
+     be missed on a phone screen. ---- */
+  #staleBanner, #linkDownBanner { display: none; margin: 0.8em 0; padding: 0.7em 0.9em;
+    border-radius: var(--ui-radius); background: var(--fault-color); color: #fff; font-weight: bold; }
+  body.kc-cfg-stale #staleBanner, body.kc-cfg-linkdown #linkDownBanner { display: block; }
+  /* Every value input dims/tints red while stale so a half-read screen
+     can't be mistaken for a trustworthy one even if the banner scrolls
+     out of view. */
+  body.kc-cfg-stale .field input,
+  body.kc-cfg-stale .field select,
+  body.kc-cfg-linkdown .field input,
+  body.kc-cfg-linkdown .field select { border-color: var(--fault-color); opacity: 0.65; }
+
+  .crcline { font-family: monospace; font-size: 0.85em; padding: 0.5em 0.8em;
+             background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius); }
+  .crc-mismatch { color: var(--fault-color); font-weight: bold; }
+
+  details.section-details summary { cursor: pointer; font-weight: bold; }
+
+  /* Phone-width pass: cards already stack (flex-wrap on field-head, no
+     fixed-width side-by-side rows anywhere on this page) so nothing extra
+     is needed there, but the risk badge would otherwise crowd a long field
+     label on a ~360px viewport -- forcing it to wrap onto its own line
+     below the label fixes exactly the "controls overlapping on a narrow
+     viewport" class of bug this repo hit before. */
+  @media (max-width: 420px) {
+    .field-head { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+
+<p>Commissions the RP2040 safety processor's own thresholds -- the values here
+are stored on the Pico, outside both OTA slots, and enforced there regardless
+of what this page or the ESP thinks they are (<code>SaftyFW/docs/COMMISSIONING.md</code>).
+This page is a front end onto that store, not the store itself: it reads and
+stages values, but every write is validated and committed by the Pico, which
+independently refuses anything this page fails to catch.</p>
+
+<div id="linkDownBanner">Safety-processor link is DOWN. Values below are the
+ESP's last cached copy from before the link dropped -- they may no longer
+match what the Pico is enforcing, or the Pico may be enforcing nothing
+correctly commissioned at all. Do not treat anything on this page as current
+until the link banner clears.</div>
+
+<div id="staleBanner">STALE: the ESP's cached values do not match the safety
+processor's live <code>config_crc</code>. The Pico is enforcing something
+different from what is shown below. This is refetching now; if it does not
+clear shortly, treat every value on this page as unknown until it does.</div>
+
+<p class="crcline">Live config_crc (from telemetry): <b id="crcLive">&mdash;</b>
+&nbsp;|&nbsp; Cached at: <b id="crcCached">&mdash;</b>
+&nbsp;|&nbsp; <span id="crcMatch"></span></p>
+<p class="hint">"Which thresholds is the safety processor actually enforcing?"
+is answered by the <b>live</b> value only -- the cached value is what these
+form fields were last fetched at, shown purely so a mismatch is visible.</p>
+
+<p id="commissionedLine" class="hint"></p>
+
+<div id="fields"><p class="empty">Loading&hellip;</p></div>
+
+<button id="saveBtn" type="button">Stage &amp; commit changes</button>
+<button id="benchBtn" type="button">Apply bench preset (test values, dev only)</button>
+<p id="msg"></p>
+
+<script>
+/* ---- CONFIG_REFERENCE.md sections 1-5, restated here as data so the DOM
+ * build below is one loop instead of forty-five hand-written blocks. Every
+ * field carries:
+ *   id       - wire param_id, COMMISSIONING.md section 2.1 (hex in comments
+ *              there, decimal here since that's what the JSON `id` uses)
+ *   name     - matches CONFIG_REFERENCE.md's field name and the JSON `name`
+ *   type     - 'f32' | 'u16' | 'u8' | 'enum' | 'bool' -- drives the input
+ *              widget and value coercion on save. u8 with an `enum` list
+ *              renders as a <select>; a bare 'u8'/'u16'/'f32' is a number
+ *              box. Every temperature field stays in raw Celsius input per
+ *              this repo's kcUnit convention (see app.js's comment on
+ *              window.kcUnit) -- kcUnit is used for DISPLAY of the live
+ *              telemetry-derived text only, never for what gets typed into
+ *              or posted from a form field.
+ *   unit     - display suffix only, never affects the posted value
+ *   risk     - 'dangerous' | 'nuisance' | 'cosmetic', CONFIG_REFERENCE.md's
+ *              legend (🔴/🟠/⚪ badges)
+ *   guards   - array of guard names this field affects, for the
+ *              "which guards are disabled" line on an unset commissioning
+ *              field
+ *   noDefault- true for the section-1 fields that ship with no compiled-in
+ *              default (CONFIG_REFERENCE.md section 1 / section 7): the
+ *              guards named in `guards` stay disabled until this is set.
+ *              NOTE ON THE "four" VS six section-1 rows: COMMISSIONING.md's
+ *              checklist says "the four section 1 commissioning fields have
+ *              no compiled-in default", but section 1's table lists six
+ *              rows. Read literally against section 1's own prose
+ *              ("borrowed_zone_index... only meaningful when tc_source !=
+ *              OWN_J7" and tc_placement_mode's forced-default relationship
+ *              to tc_source), the four with no sensible default at all are
+ *              tc_source, abs_max_temp_c, tc_type and ct_channel_map[0..2]
+ *              (grouped as one commissioning item); borrowed_zone_index and
+ *              tc_placement_mode are treated here as defaultable (0 /
+ *              CHAMBER_AGREED) since a value always exists for them even
+ *              before tc_source picks BORROWED_ZONE. This is this page's
+ *              best reading of an internally inconsistent doc, not a
+ *              verified firmware fact -- flagged for the coordinator/
+ *              firmware author to confirm against config_store.c's actual
+ *              defaults, and the two are visually distinguished below
+ *              (noDefault:true vs a plain `default` value) so a correction
+ *              is a one-line data change, not a rewrite.
+ *   offColor - value that means "guard shipped/left disabled", e.g. 0 for
+ *              max_rate_c_per_min. Only sensible for numeric off-switches;
+ *              renders the guard-off-banner when the current value equals
+ *              it.
+ *   note     - short "what/why" shown under the field, condensed from
+ *              CONFIG_REFERENCE.md's Notes column.
+ */
+var GROUPS = [
+  { title: '1. Commissioning -- required, no safe default',
+    hint: 'These fields have no defensible compiled-in default. Until each ' +
+      'is set, the guards named under it stay disabled and the Pico reports ' +
+      'calibration_missing.',
+    fields: [
+      { id: 257, name: 'tc_source', type: 'enum', risk: 'dangerous', noDefault: true,
+        guards: ['S1', 'S2', 'S5', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13'],
+        enumOpts: [ [0, 'OWN_J7'], [1, 'BORROWED_ZONE'], [2, 'BOTH'] ],
+        note: 'Where the safety processor gets its temperature. BORROWED_ZONE trades ' +
+          'away sensor independence -- see SAFETY_MODEL.md section 3 before choosing it. ' +
+          '(Numeric codes here follow the one worked example in COMMISSIONING.md section ' +
+          '3.1 -- OWN_J7=0/BORROWED_ZONE=1/BOTH=2 is this page\'s assumption, not confirmed ' +
+          'against config_store.c; the Pico\'s own reply is the tie-breaker if these ever ' +
+          'disagree.)' },
+      { id: 258, name: 'borrowed_zone_index', type: 'u8', risk: 'dangerous', unit: '0-2',
+        guards: ['S13'],
+        note: 'Only meaningful when tc_source is not OWN_J7. Must name a zone the ESP ' +
+          'actually reports.' },
+      { id: 259, name: 'tc_placement_mode', type: 'enum', risk: 'dangerous',
+        guards: ['S1 (ceiling mode)', 'S2', 'S10'],
+        enumOpts: [ [0, 'CHAMBER_AGREED'], [1, 'EXTERNAL_OVERHEAT'] ],
+        note: 'A statement about where the sensor physically is, not a preference. Wrong ' +
+          'in one direction silences the only cross-check; wrong the other way makes S10 ' +
+          'fire constantly on correct readings. Forced to CHAMBER_AGREED when tc_source is ' +
+          'BORROWED_ZONE (enforced client-side below AND independently by the Pico at ' +
+          'commit -- see the contradiction-check comment near the bottom of this script).' },
+      { id: 260, name: 'abs_max_temp_c', type: 'f32', risk: 'dangerous', unit: '°C', noDefault: true,
+        guards: ['S1'],
+        note: 'In CHAMBER_AGREED: what the furniture/elements survive (~1300 for cone 10). ' +
+          'In EXTERNAL_OVERHEAT: what that location must never exceed -- unrelated to any ' +
+          'firing temperature.' },
+      { id: 261, name: 'tc_type', type: 'enum', risk: 'dangerous', noDefault: true,
+        guards: ['every guard that reads the safety processor\'s own thermocouple'],
+        enumOpts: [ [0,'Type B'], [1,'Type E'], [2,'Type J'], [3,'Type K'], [4,'Type N'],
+                    [5,'Type R'], [6,'Type S'], [7,'Type T'] ],
+        note: 'Must match the thermocouple physically fitted to J7 on the safety board -- ' +
+          'a different, physically separate sensor from any zone thermocouple on the main ' +
+          'board. A mismatch reads plausible and wrong, usually low.' },
+      { id: 262, name: 'ct_channel_map[0]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
+        guards: ['S3', 'S4'],
+        note: 'Which relay CT0 actually watches. Confirmed by the one-relay-at-a-time ' +
+          'check in CURRENT_SENSE.md section 5 step 2.' },
+      { id: 263, name: 'ct_channel_map[1]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
+        guards: ['S3', 'S4'], note: 'Same as ct_channel_map[0], for CT1.' },
+      { id: 264, name: 'ct_channel_map[2]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
+        guards: ['S3', 'S4'], note: 'Same as ct_channel_map[0], for CT2.' },
+    ] },
+
+  { title: '2. Temperature guards', fields: [
+      { id: 513, name: 'firing_margin_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 100,
+        guards: ['S1'], note: 'Added to the profile\'s peak. CHAMBER_AGREED only.' },
+      { id: 514, name: 'overshoot_margin_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 75,
+        guards: ['S2'], note: 'Generous on purpose -- ramp-end overshoot and TC placement spread ' +
+          'both live inside this.' },
+      { id: 515, name: 'overshoot_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 120,
+        guards: ['S2'], note: 'Two minutes of sustained excess, not a transient.' },
+      { id: 516, name: 'max_rate_c_per_min', type: 'f32', risk: 'nuisance', unit: '°C/min', def: 0,
+        guards: ['S8'], offColor: 0,
+        note: 'Ships disabled (0). Enable only after logging a real full-power ramp; set at ' +
+          '~2x the measured maximum.' },
+      { id: 517, name: 'rate_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 60, guards: ['S8'] },
+      { id: 518, name: 'blind_grace_s', type: 'u16', risk: 'dangerous', unit: 's', def: 60,
+        guards: ['S5'], note: 'WARN immediately, TRIP after this. Long enough for a connector ' +
+          'wiggle, short enough that a whole firing cannot run blind.' },
+      { id: 519, name: 'frozen_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 600,
+        guards: ['S11'], note: 'Only armed while heat is happening.' },
+      { id: 520, name: 'tc_disagreement_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 200,
+        guards: ['S10'], note: 'Vs the nearest valid zone, not the mean. CHAMBER_AGREED only.' },
+      { id: 521, name: 'tc_disagreement_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 300, guards: ['S10'] },
+      { id: 522, name: 'tc_expected_offset_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 0,
+        guards: ['S10'], note: 'Optional captured steady-state offset; compares the change, not ' +
+          'the raw difference.' },
+      { id: 523, name: 'cj_warn_c', type: 'f32', risk: 'cosmetic', unit: '°C', def: 60,
+        guards: ['S12'], note: 'Enclosure warning.' },
+      { id: 524, name: 'cj_max_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 85,
+        guards: ['S12'], note: 'Well inside the MAX31856\'s +-125 °C limit.' },
+      { id: 525, name: 'cj_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 60, guards: ['S12'] },
+      { id: 526, name: 'borrowed_stale_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
+        guards: ['S13'], note: 'sample_counter not advancing => reading treated as invalid. ' +
+          'BORROWED_ZONE/BOTH only.' },
+      { id: 527, name: 'borrowed_stale_trip_s', type: 'u16', risk: 'dangerous', unit: 's', def: 60,
+        guards: ['S13'], note: '...and then trip.' },
+      { id: 528, name: 'borrowed_type_expected', type: 'enum', risk: 'nuisance', guards: ['S13'],
+        enumOpts: [ [0,'Type B'], [1,'Type E'], [2,'Type J'], [3,'Type K'], [4,'Type N'],
+                    [5,'Type R'], [6,'Type S'], [7,'Type T'] ],
+        note: 'The tc_type the borrowed channel is expected to report. A change means ' +
+          'someone reconfigured the main board\'s channel underneath us.' },
+    ] },
+
+  { title: '3. Current channels',
+    hint: 'Scope limit: load-active detection and a power estimate only. There is no ' +
+      'over-current guard (SAFETY_MODEL.md section 3).',
+    fields: [
+      { id: 769, name: 'i_present_a', type: 'f32', risk: 'nuisance', unit: 'A', def: 2.0,
+        guards: ['S3', 'S4', 'S9'], note: 'A load-active threshold -- only has to separate noise ' +
+          'from a conducting element.' },
+      { id: 770, name: 'zero_counts[0]', type: 'u16', risk: 'nuisance', unit: 'ADC counts',
+        guards: ['S3', 'S4', 'S9'], note: 'Re-measured at runtime after >=5 min idle. Not zero -- ' +
+          'single-supply offset.' },
+      { id: 771, name: 'zero_counts[1]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', guards: ['S3', 'S4', 'S9'] },
+      { id: 772, name: 'zero_counts[2]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', guards: ['S3', 'S4', 'S9'] },
+      { id: 773, name: 'correlation_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 150,
+        guards: ['S3', 'S4'], note: '>= 2x the ESP\'s 60s heater window + decay. Shortening this ' +
+          'is the fastest way to make S4 fire on every healthy low-duty firing.' },
+      { id: 774, name: 'stuck_on_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 20, guards: ['S3'] },
+      { id: 775, name: 'trip_verify_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
+        guards: ['S9'], note: 'Past the 1s peak-hold decay and the contactor\'s drop-out. Too ' +
+          'short -> false "trip ineffective"; too long -> delayed alarm on a genuinely live kiln.' },
+      { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'cosmetic', unit: 'V/A', guards: ['(power estimate only)'] },
+      { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'cosmetic', unit: 'V/A', guards: ['(power estimate only)'] },
+      { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'cosmetic', unit: 'V/A', guards: ['(power estimate only)'] },
+      { id: 779, name: 'gain[0]', type: 'f32', risk: 'cosmetic', def: 0.715, guards: ['(power estimate only)'],
+        note: 'R46/R43; refine only if the resistors are not 1%.' },
+      { id: 780, name: 'gain[1]', type: 'f32', risk: 'cosmetic', def: 0.715, guards: ['(power estimate only)'] },
+      { id: 781, name: 'gain[2]', type: 'f32', risk: 'cosmetic', def: 0.715, guards: ['(power estimate only)'] },
+      { id: 782, name: 'mains_voltage_v', type: 'f32', risk: 'cosmetic', unit: 'V', guards: ['(power estimate only)'],
+        note: 'Nominal. Power goes as V^2, so a 5% sag is a 10% error. Unset means report ' +
+          '"--", never assume.' },
+      { id: 783, name: 'power_window_s', type: 'u16', risk: 'cosmetic', unit: 's', def: 120,
+        guards: ['(power estimate only)'], note: 'Conduction-fraction averaging window.' },
+      { id: 784, name: 'ct_cal[0].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 785, name: 'ct_cal[1].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 786, name: 'ct_cal[2].gain', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 787, name: 'ct_cal[0].offset', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 788, name: 'ct_cal[1].offset', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 789, name: 'ct_cal[2].offset', type: 'f32', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 790, name: 'ct_cal[0].calibrated', type: 'bool', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 791, name: 'ct_cal[1].calibrated', type: 'bool', risk: 'cosmetic', guards: ['(power estimate only)'] },
+      { id: 792, name: 'ct_cal[2].calibrated', type: 'bool', risk: 'cosmetic', guards: ['(power estimate only)'] },
+    ] },
+
+  { title: '4. Link and liveness', fields: [
+      { id: 1025, name: 'context_max_age_s', type: 'u16', risk: 'nuisance', unit: 's', def: 5,
+        guards: ['S2', 'S3', 'S4'], note: 'Stale context makes those guards go inactive, never ' +
+          'pessimistic.' },
+      { id: 1026, name: 'link_timeout_s', type: 'u16', risk: 'nuisance', unit: 's', def: 10,
+        guards: ['S6b'], note: 'Trips only if current is also flowing.' },
+      { id: 1027, name: 'link_dead_hard_s', type: 'u16', risk: 'dangerous', unit: 's', def: 120,
+        guards: ['S6b'], note: 'Unconditional backstop.' },
+      { id: 1028, name: 'mainfault_debounce_ms', type: 'u16', risk: 'nuisance', unit: 'ms', def: 200, guards: ['S6a'] },
+      { id: 1029, name: 'telemetry_period_ms', type: 'u16', risk: 'dangerous', unit: 'ms', def: 500,
+        guards: ['ESP liveness detector'], note: 'The ESP\'s liveness detector keys on this. ' +
+          'Changing it means changing the ESP\'s 1.5s window too (LINK_PROTOCOL.md section 8).' },
+    ] },
+
+  { title: '5. Timing and system', fields: [
+      { id: 1281, name: 'startup_grace_s', type: 'u16', risk: 'nuisance', unit: 's', def: 60,
+        guards: ['all thermal/correlation guards (arming delay)'], note: 'No thermal or ' +
+          'correlation guard arms before this.' },
+      { id: 1282, name: 'estop_debounce_ms', type: 'u16', risk: 'nuisance', unit: 'ms', def: 50,
+        guards: ['E-stop'], note: 'Contact bounce only.' },
+      { id: 1283, name: 'watchdog_timeout_ms', type: 'u16', risk: 'dangerous', unit: 'ms', def: 1000,
+        guards: ['hardware watchdog'] },
+      { id: 1284, name: 'config_check_period_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
+        guards: ['in-RAM config re-CRC'] },
+    ] },
+];
+
+var RISK_BADGE = { dangerous: '🔴 dangerous', nuisance: '🟠 nuisance', cosmetic: '⚪ cosmetic' };
+
+/* Flat lookup by id, built once, used by both the render pass and the save
+ * pass so the two never iterate the GROUPS tree independently and risk
+ * disagreeing about a field's shape. */
+var FIELD_BY_ID = {};
+GROUPS.forEach(function (g) { g.fields.forEach(function (f) { FIELD_BY_ID[f.id] = f; }); });
+
+var latest = null; // last /api/safety/commissioning response, kept for the save pass
+
+function fieldInputHtml(f, paramsById) {
+  var p = paramsById[f.id];
+  var isSet = !!(p && p.set);
+  var val = isSet ? p.value : undefined;
+  if (f.type === 'enum') {
+    var html = '<select data-id="' + f.id + '" data-type="' + f.type + '">';
+    if (!isSet) html += '<option value="" selected disabled>-- not set --</option>';
+    f.enumOpts.forEach(function (opt) {
+      var sel = (isSet && Number(val) === opt[0]) ? ' selected' : '';
+      html += '<option value="' + opt[0] + '"' + sel + '>' + window.kcEscapeHtml(opt[1]) + '</option>';
+    });
+    html += '</select>';
+    return html;
+  }
+  if (f.type === 'bool') {
+    var checked = (isSet && val) ? ' checked' : '';
+    return '<input type="checkbox" data-id="' + f.id + '" data-type="bool" style="width:auto;display:inline-block"' + checked + '>';
+  }
+  // f32 / u16 / u8: a plain number input. isSet false -> leave the value
+  // attribute OFF entirely (no "0", no placeholder-as-value) so an unset
+  // field cannot be mistaken for, or accidentally saved as, a real zero --
+  // COMMISSIONING.md section 3.1 / CONFIG_REFERENCE.md section 7.
+  var step = (f.type === 'f32') ? 'any' : '1';
+  var valueAttr = isSet ? (' value="' + window.kcEscapeHtml(val) + '"') : '';
+  var placeholder = isSet ? '' : (' placeholder="not set' + (f.def !== undefined ? ' -- firmware default ' + f.def : '') + '"');
+  return '<input type="number" step="' + step + '" data-id="' + f.id + '" data-type="' + f.type + '"' + valueAttr + placeholder + '>';
+}
+
+function fieldBlock(f, paramsById) {
+  var p = paramsById[f.id];
+  var isSet = !!(p && p.set);
+  var unsetHere = f.noDefault && !isSet;
+
+  var div = document.createElement('div');
+  div.className = 'field' + (unsetHere ? ' unset' : '');
+  div.dataset.id = f.id;
+
+  var headHtml = '<label for="f' + f.id + '">' + window.kcEscapeHtml(f.name) +
+    (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') + '</label>' +
+    '<span class="risk-badge risk-' + f.risk + '">' + RISK_BADGE[f.risk] + '</span>';
+
+  var bodyHtml = fieldInputHtml(f, paramsById);
+
+  var noteHtml = f.note ? '<p class="note">' + window.kcEscapeHtml(f.note) + '</p>' : '';
+  if (f.def !== undefined && isSet) {
+    noteHtml += '<p class="note">Firmware default: ' + window.kcEscapeHtml(f.def) + '</p>';
+  }
+
+  var guardHtml = '';
+  if (unsetHere && f.guards && f.guards.length) {
+    guardHtml = '<p class="note guard-disabled">Disabled while unset: ' +
+      window.kcEscapeHtml(f.guards.join(', ')) + '.</p>';
+  }
+
+  div.innerHTML = '<div class="field-head">' + headHtml + '</div>' + bodyHtml + noteHtml + guardHtml +
+    '<p class="guard-off-banner">GUARD DISABLED: this value leaves ' +
+    window.kcEscapeHtml((f.guards || []).join(', ')) + ' turned off. A disabled guard that ' +
+    'looks enabled is worse than no guard, because someone is relying on it.</p>';
+
+  // "Disabled guard shown as disabled" -- CONFIG_REFERENCE.md section 7,
+  // for the SET-but-off case (offColor), independent of the unset/noDefault
+  // styling above which covers the "never commissioned" case.
+  if (f.offColor !== undefined && isSet && Number(val_of(p)) === f.offColor) {
+    div.classList.add('guard-off');
+  }
+  return div;
+}
+function val_of(p) { return p ? p.value : undefined; }
+
+function renderGroups(data) {
+  var paramsById = {};
+  (data.params || []).forEach(function (p) { paramsById[p.id] = p; });
+  var el = document.getElementById('fields');
+  el.innerHTML = '';
+  GROUPS.forEach(function (g) {
+    var h2 = document.createElement('h2');
+    h2.textContent = g.title;
+    el.appendChild(h2);
+    if (g.hint) {
+      var hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = g.hint;
+      el.appendChild(hint);
+    }
+    g.fields.forEach(function (f) {
+      el.appendChild(fieldBlock(f, paramsById));
+    });
+  });
+  applyContradictionRule();
+}
+
+function setBodyFlags(data) {
+  document.body.classList.toggle('kc-cfg-stale', !!data.stale);
+  document.body.classList.toggle('kc-cfg-linkdown', !data.link_up);
+}
+
+function renderCrcLine(data) {
+  document.getElementById('crcLive').textContent = (data.link_up ? data.live_config_crc : '— (link down)');
+  document.getElementById('crcCached').textContent = data.cached_config_crc;
+  var m = document.getElementById('crcMatch');
+  if (!data.link_up) {
+    m.textContent = 'cannot verify -- no live telemetry';
+    m.className = 'crc-mismatch';
+  } else if (data.stale) {
+    m.textContent = 'MISMATCH -- Pico is enforcing a different config than shown';
+    m.className = 'crc-mismatch';
+  } else {
+    m.textContent = 'matches live telemetry';
+    m.className = '';
+  }
+  var commissioned = document.getElementById('commissionedLine');
+  commissioned.textContent = data.commissioned
+    ? 'Board reports commissioned (calibration_missing is clear).'
+    : 'Board reports NOT COMMISSIONED (calibration_missing is set) -- at least one required ' +
+      'section-1 field above is unset, or only a bench preset has been applied.';
+  commissioned.className = data.commissioned ? 'hint' : 'hint guard-disabled';
+}
+
+function loadCurrent() {
+  fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (data) {
+    latest = data;
+    setBodyFlags(data);
+    renderCrcLine(data);
+    renderGroups(data);
+  }).catch(function () {
+    document.getElementById('fields').innerHTML = '<p class="empty">Could not load commissioning data.</p>';
+  });
+}
+
+/* ---- Client-side contradiction check (COMMISSIONING.md section 4 / 3.1):
+ * tc_placement_mode is forced to CHAMBER_AGREED when tc_source is
+ * BORROWED_ZONE. This is advisory-and-enforced on THIS side only for
+ * immediacy -- disabling the control and showing why -- but it is NOT the
+ * safety boundary. The Pico validates the whole staged set again at
+ * COMMIT_CONFIG independently of whatever this page did or failed to do,
+ * and a browser bug, a hand-crafted POST, or a stale page here must not be
+ * able to commission a contradictory pair -- see COMMISSIONING.md section 2.1's
+ * "validation happens at COMMIT_CONFIG, not at SET_PARAM" and CONFIG_REFERENCE.md
+ * section 1's "rejected, not silently reconciled". */
+function applyContradictionRule() {
+  var srcSel = document.querySelector('select[data-id="257"]'); // tc_source
+  var modeSel = document.querySelector('select[data-id="259"]'); // tc_placement_mode
+  if (!srcSel || !modeSel) return;
+  function sync() {
+    var forced = srcSel.value === '1'; // BORROWED_ZONE, per this page's enum-code note above
+    if (forced) {
+      modeSel.value = '0'; // CHAMBER_AGREED
+      modeSel.disabled = true;
+      modeSel.title = 'Forced to CHAMBER_AGREED because tc_source is BORROWED_ZONE -- ' +
+        'CONFIG_REFERENCE.md section 1.';
+    } else {
+      modeSel.disabled = false;
+      modeSel.title = '';
+    }
+  }
+  srcSel.addEventListener('change', sync);
+  sync();
+}
+
+document.getElementById('saveBtn').addEventListener('click', function () {
+  var msg = document.getElementById('msg');
+  // id=<n>&value=<v> pairs per COMMISSIONING.md section 3.1 -- one SET_PARAM
+  // worth of form fields per param, `commit=1` triggers COMMIT_CONFIG after
+  // every SET_PARAM has staged. The exact wire shape (id=<n>&value=<v> pairs,
+  // not id/value arrays) is spelled out in that section; this just builds it.
+  var body = [];
+  document.querySelectorAll('#fields [data-id]').forEach(function (el) {
+    var id = el.dataset.id, type = el.dataset.type, v;
+    if (type === 'bool') { v = el.checked ? 1 : 0; }
+    else if (el.value === '') { return; }
+    else { v = el.value; }
+    body.push('id=' + encodeURIComponent(id) + '&value=' + encodeURIComponent(v));
+  });
+  body.push('commit=1');
+  msg.textContent = 'Staging and committing…';
+  fetch('/api/safety/commissioning', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.join('&'),
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+  }).then(function (res) {
+    if (!res.ok) {
+      // "Names the offending field and the rule it broke" -- COMMISSIONING.md
+      // section 2.1/3.1. Rendered verbatim, not paraphrased, so this page
+      // never becomes a second place that rule-text can drift from the Pico's.
+      msg.textContent = 'Rejected: ' + (res.j.field ? res.j.field + ' -- ' : '') + (res.j.reason || res.j.error || 'commit failed');
+    } else {
+      msg.textContent = 'Committed.';
+      loadCurrent();
+    }
+  }).catch(function (e) {
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+});
+
+document.getElementById('benchBtn').addEventListener('click', function () {
+  // COMMISSIONING.md section 4.1: a bench preset must be visibly a bench
+  // preset. kcConfirm's message says so explicitly, and the request itself
+  // leaves calibration_missing set (the Pico's own behaviour, per that
+  // section) rather than this page pretending the board is now commissioned.
+  if (!window.kcConfirm(
+    'Apply the bench preset?\n\n' +
+    'This loads test values for exercising the link and the commissioning ' +
+    'flow on a bench with no kiln attached. It is NOT a commissioning: the ' +
+    'board stays marked calibration_missing (not commissioned) afterward, ' +
+    'and every real guard threshold above still needs to be set for an ' +
+    'actual kiln before it is fired.')) {
+    return;
+  }
+  var msg = document.getElementById('msg');
+  msg.textContent = 'Applying bench preset…';
+  fetch('/api/safety/commissioning/bench_preset', { method: 'POST' }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    msg.textContent = 'Bench preset applied -- board remains NOT commissioned (test values only).';
+    loadCurrent();
+  }).catch(function (e) {
+    msg.textContent = 'Bench preset failed: ' + e.message;
+  });
+});
+
+loadCurrent();
+// Refetch periodically so a `stale` flag that clears on its own (the ESP's
+// own cache refetch, COMMISSIONING.md section 3) is reflected here without
+// a manual reload -- same cadence class as zones_page.html's autotune poll.
+setInterval(loadCurrent, 5000);
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+
+<!-- ============================================================
+     STILL UNWIRED -- for the coordinator, not touched by this file:
+     1. This page is not in any gzip/EMBED_TXTFILES list yet, so it is not
+        built into the firmware image at all.
+     2. No httpd route registers it (compare zones_http.c's registration of
+        zones_page.html) -- needs a GET handler for whatever path nav.js's
+        new entry below points at (this page assumes /safety/commissioning).
+     3. GET /api/safety/commissioning and POST /api/safety/commissioning and
+        POST /api/safety/commissioning/bench_preset (the three endpoints this
+        script calls) have no server-side implementation in this codebase yet
+        -- they are being built in parallel against COMMISSIONING.md section
+        3.1's contract, which is the exact shape this file's fetch/render/
+        POST code was written against.
+     4. The tc_source / tc_placement_mode integer-to-enum mapping used above
+        is this page's best reading of COMMISSIONING.md's one worked example,
+        not a confirmed firmware fact -- see the long comment on the GROUPS
+        array's tc_source entry. Whoever wires the handler should confirm (or
+        correct) those codes against config_store.c.
+     ============================================================ -->
+</body>
+</html>

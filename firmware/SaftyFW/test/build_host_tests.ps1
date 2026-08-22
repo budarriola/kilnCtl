@@ -36,6 +36,7 @@ $sources = @(
     (Join-Path $testDir "test_boot_checkin_coverage.c"),
     (Join-Path $srcDir "safety_guards.c"),
     (Join-Path $srcDir "config_store.c"),
+    (Join-Path $srcDir "config_params.c"),
     (Join-Path $srcDir "ct_amps_cal.c"),
     (Join-Path $srcDir "tasks\link_frame.c"),
     (Join-Path $srcDir "tasks\tx_watermark.c"),
@@ -48,7 +49,20 @@ $sources = @(
     (Join-Path $updateDir "confirm.c"),
     (Join-Path $commonSrcDir "kilnlink_power.c"),
     (Join-Path $commonSrcDir "kilnlink_frame.c"),
-    (Join-Path $commonSrcDir "kilnlink_crc.c")
+    (Join-Path $commonSrcDir "kilnlink_crc.c"),
+    # docs/COMMISSIONING.md section 2 wire family -- config_params.c calls
+    # into kilnlink_param_value.c's shared type-tag codec; the frame codecs
+    # themselves (set_param/commit_config/get_param/param/get_config_page/
+    # config_page/set_log_level) are exercised directly by config_params.c's
+    # host tests and by test_link_frame.c's dispatch-id checks.
+    (Join-Path $commonSrcDir "kilnlink_param_value.c"),
+    (Join-Path $commonSrcDir "kilnlink_set_param.c"),
+    (Join-Path $commonSrcDir "kilnlink_commit_config.c"),
+    (Join-Path $commonSrcDir "kilnlink_get_param.c"),
+    (Join-Path $commonSrcDir "kilnlink_param.c"),
+    (Join-Path $commonSrcDir "kilnlink_get_config_page.c"),
+    (Join-Path $commonSrcDir "kilnlink_config_page.c"),
+    (Join-Path $commonSrcDir "kilnlink_set_log_level.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

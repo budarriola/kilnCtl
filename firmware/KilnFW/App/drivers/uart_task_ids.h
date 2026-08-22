@@ -770,6 +770,40 @@
 #define SAFETY_CMD_GET_CT_CAL 0x1Au
 #define SAFETY_CMD_CT_CAL     0x1Au
 
+/* docs/COMMISSIONING.md sec 2/3 -- field-addressed config staging/commit/
+ * readback. Ids 0x1B-0x1F, mirrored here byte-for-byte from that doc's table
+ * (and from CommonFW/include/kilnlink/kilnlink_{set_param,commit_config,
+ * get_param,param,get_config_page,config_page}.h's own CMD constants, which
+ * are the actual authority -- these #defines exist only so this file stays
+ * the one place every SAFETY_CMD_* subcommand on this wire is enumerated,
+ * same reason SAFETY_CMD_PUSH_CONTEXT's #define does).
+ *
+ * 0x1B SET_LOG_LEVEL: ESP -> Pico, unrelated to commissioning (it was the
+ *   last unallocated id blocking log_task_set_level() from being reachable
+ *   over the wire) -- not used by App/drivers/safety_cfg_http.c /
+ *   safety_cfg_store.c; listed here only to keep the id space contiguous and
+ *   documented for whichever caller eventually wants it.
+ * 0x1C SET_PARAM: ESP -> Pico. Stages one CONFIG_REFERENCE.md field --
+ *   nothing reaches flash until 0x1D. safety_link_send_set_param().
+ * 0x1D COMMIT_CONFIG: ESP -> Pico, no payload. Validates the staged set as a
+ *   whole and, if it passes, writes one config_store record and bumps
+ *   config_crc. safety_link_send_commit_config().
+ * 0x1E GET_PARAM / PARAM: shared id, request/reply distinguished by direction
+ *   and length (request always 3 bytes, reply always >= 5) -- same
+ *   convention as GET_CT_CAL/CT_CAL just above. Not used by this pass
+ *   (safety_cfg_store.c fetches in bulk via 0x1F instead); listed for
+ *   completeness and for any future single-parameter caller.
+ * 0x1F GET_CONFIG_PAGE / CONFIG_PAGE: shared id, same request/reply-by-length
+ *   convention. safety_link_get_config_page() -- the bulk read
+ *   safety_cfg_store.c pages through to fetch/refresh its whole cache. */
+#define SAFETY_CMD_SET_LOG_LEVEL    0x1Bu
+#define SAFETY_CMD_SET_PARAM        0x1Cu
+#define SAFETY_CMD_COMMIT_CONFIG    0x1Du
+#define SAFETY_CMD_GET_PARAM        0x1Eu
+#define SAFETY_CMD_PARAM            0x1Eu
+#define SAFETY_CMD_GET_CONFIG_PAGE  0x1Fu
+#define SAFETY_CMD_CONFIG_PAGE      0x1Fu
+
 #define SAFETY_FLAG_LINK_UP      0x01u
 #define SAFETY_FLAG_FAULT        0x02u
 #define SAFETY_FLAG_ESTOP        0x04u

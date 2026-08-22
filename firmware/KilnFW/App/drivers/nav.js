@@ -53,6 +53,7 @@
     { href: '/diagnostics', label: 'Diagnostics' },
     { href: '/diagnostics/thermo', label: 'Thermocouple faults' },
     { href: '/safety', label: 'Safety processor' },
+    { href: '/safety/commissioning', label: 'Safety commissioning' },
     { href: '/settings/backup', label: 'Backup & restore' },
     // 2026-08-21: /settings gained a Display section (theme + °C/°F, moved
     // off the topbar at the owner's request), so it needs a way in that is

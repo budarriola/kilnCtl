@@ -103,11 +103,12 @@ real hardware** — no RP2040 attached to any machine this has been built on.
 - [~] **Choose `tc_type` deliberately, per sensor** — type K is marginal above
       ~1150 °C and green-rots *low* in reduction; type S/R suits a
       chamber-mounted sensor on a cone-10 kiln (`docs/THERMOCOUPLE.md` §2).
-      `tc_type` is a runtime parameter sourced from `config_store`, with a wire
-      command (`SAFETY_CMD_SET_CONFIG`) able to set it — but nothing has ever
-      written a non-default record, so every board still resolves to type K
-      via the safe-default path. **Still not decided**; not a claim that K is
-      correct for this kiln.
+      Owner decision 2026-08-22: **this is not a compile-time choice at all.**
+      It is commissioned from the ESP web GUI along with the rest of the
+      safety parameter surface, and persists on the safety processor —
+      see [`docs/COMMISSIONING.md`](docs/COMMISSIONING.md) for the mechanism.
+      Until a real record is written every board still resolves to type K via
+      the safe-default path, which is not a claim that K is correct here.
 - [ ] **Per-type plausibility ranges**, driven from the configured type — a
       range hard-coded to type K misfires on every other type. Needs a
       commissioned `tc_type` first.

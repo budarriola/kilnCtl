@@ -120,6 +120,18 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
 // sec 4), wired to the real cache now that config_store exists -- see
 // link_task.c's link_task_send_fw_version(), which used to hard-code both to
 // 0 with a "no config_store yet" comment.
+void config_store_get_full_record(config_store_record_t *out)
+{
+    if (!out) {
+        return;
+    }
+    if (!s_loaded) {
+        config_store_default(out);
+        return;
+    }
+    *out = s_cached_record;
+}
+
 uint8_t config_store_get_config_version(void)
 {
     if (!s_loaded) {

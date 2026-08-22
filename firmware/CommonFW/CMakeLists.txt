@@ -49,6 +49,14 @@ add_library(kilnlink STATIC
     src/kilnlink_set_ct_cal.c
     src/kilnlink_get_ct_cal.c
     src/kilnlink_ct_cal.c
+    src/kilnlink_set_log_level.c
+    src/kilnlink_param_value.c
+    src/kilnlink_set_param.c
+    src/kilnlink_commit_config.c
+    src/kilnlink_get_param.c
+    src/kilnlink_param.c
+    src/kilnlink_get_config_page.c
+    src/kilnlink_config_page.c
 )
 target_include_directories(kilnlink PUBLIC include)
 set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -249,6 +257,78 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_ct_cal PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_ct_cal COMMAND test_ct_cal)
+
+    add_executable(test_set_log_level test/test_set_log_level.c)
+    target_link_libraries(test_set_log_level PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_log_level PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_log_level PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_log_level COMMAND test_set_log_level)
+
+    add_executable(test_param_value test/test_param_value.c)
+    target_link_libraries(test_param_value PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_param_value PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_param_value PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_param_value COMMAND test_param_value)
+
+    add_executable(test_set_param test/test_set_param.c)
+    target_link_libraries(test_set_param PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_param PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_param PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_param COMMAND test_set_param)
+
+    add_executable(test_commit_config test/test_commit_config.c)
+    target_link_libraries(test_commit_config PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_commit_config PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_commit_config PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_commit_config COMMAND test_commit_config)
+
+    add_executable(test_get_param test/test_get_param.c)
+    target_link_libraries(test_get_param PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_param PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_param PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_param COMMAND test_get_param)
+
+    add_executable(test_param test/test_param.c)
+    target_link_libraries(test_param PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_param PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_param PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_param COMMAND test_param)
+
+    add_executable(test_get_config_page test/test_get_config_page.c)
+    target_link_libraries(test_get_config_page PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_config_page PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_config_page PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_config_page COMMAND test_get_config_page)
+
+    add_executable(test_config_page test/test_config_page.c)
+    target_link_libraries(test_config_page PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_config_page PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_config_page PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_config_page COMMAND test_config_page)
 
     # -- benchproto host tests (independent of everything above) --------------
     add_executable(test_benchproto_frame test/test_benchproto_frame.c)

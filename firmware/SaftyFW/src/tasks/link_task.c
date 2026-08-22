@@ -63,6 +63,7 @@
 #include "link_frame.h"
 
 #include "boot_reason.h"
+#include "config_params.h" // param_id <-> config_store_record_t field mapping, see SET_PARAM/GET_PARAM/COMMIT_CONFIG/GET_CONFIG_PAGE handlers below
 #include "config_store.h" // SAFETY_CMD_SET_CONFIG, see link_task_handle_set_config()
 #include "current_task.h"
 #include "discrete_task.h"
@@ -85,15 +86,22 @@
 
 #include "kilnlink/kilnlink_ceiling.h" // SAFETY_CMD_SET_FIRING_CEILING, see link_task_handle_set_firing_ceiling()
 #include "kilnlink/kilnlink_clear_trip.h"
+#include "kilnlink/kilnlink_commit_config.h" // SAFETY_CMD_COMMIT_CONFIG (0x1D), see link_task_handle_commit_config()
+#include "kilnlink/kilnlink_config_page.h" // SAFETY_CMD_CONFIG_PAGE reply, see link_task_send_config_page()
 #include "kilnlink/kilnlink_ct_cal.h" // SAFETY_CMD_CT_CAL reply, see link_task_send_ct_cal()
 #include "kilnlink/kilnlink_diag.h"
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_get_config_page.h" // SAFETY_CMD_GET_CONFIG_PAGE (0x1F), see link_task_handle_get_config_page()
 #include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL, see link_task_handle_get_ct_cal()
+#include "kilnlink/kilnlink_get_param.h" // SAFETY_CMD_GET_PARAM (0x1E request), see link_task_handle_get_param()
+#include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
 #include "kilnlink/kilnlink_set_clock.h" // SAFETY_CMD_SET_CLOCK, see link_task_handle_set_clock()
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h" // SAFETY_CMD_SET_CT_CAL, see link_task_handle_set_ct_cal()
+#include "kilnlink/kilnlink_set_log_level.h" // SAFETY_CMD_SET_LOG_LEVEL (0x1B), see link_task_handle_set_log_level()
+#include "kilnlink/kilnlink_set_param.h" // SAFETY_CMD_SET_PARAM (0x1C), see link_task_handle_set_param()
 #include "kilnlink/kilnlink_trip.h"
 #include "kilnlink/kilnlink_version.h"
 
@@ -288,6 +296,29 @@ static float s_firing_ceiling_c = 0.0f;
 // comment.
 static bool s_wall_clock_have = false;
 static uint64_t s_wall_clock_epoch_ms = 0;
+
+// Commissioning staging (docs/COMMISSIONING.md section 2: "Staged in RAM,
+// then committed as one record"). Single-writer, same reasoning as every
+// other plain static above: only SET_PARAM/COMMIT_CONFIG's handlers below
+// ever touch this, both on link_task's own thread. Lazily seeded from
+// config_store_get_full_record() (the currently COMMITTED record) the first
+// time either handler runs, so a board that has never had a single
+// SET_PARAM this boot starts staging from what is actually enforced, not
+// from a blank record that would silently discard every field a PRIOR boot
+// already committed. After a successful COMMIT_CONFIG, this becomes the new
+// baseline for whatever SET_PARAM comes next -- exactly "staged, then
+// committed as one record, then staged again from there."
+static config_store_record_t s_staged_config;
+static bool s_staged_config_init = false;
+
+static void link_task_ensure_staged_config(void)
+{
+    if (s_staged_config_init) {
+        return;
+    }
+    config_store_get_full_record(&s_staged_config);
+    s_staged_config_init = true;
+}
 
 // --- TX ----------------------------------------------------------------
 
@@ -1164,6 +1195,237 @@ static void link_task_handle_set_clock(const kilnlink_frame_t *frame)
     s_wall_clock_epoch_ms = msg.epoch_ms;
 }
 
+// SAFETY_CMD_SET_LOG_LEVEL (0x1B), CommonFW/docs/LINK_PROTOCOL.md section 4 /
+// docs/COMMISSIONING.md section 2's table -- "minted in the same pass
+// because it was the last unallocated id blocking log_task_set_level() from
+// being reachable over the wire." Unrelated to commissioning: this is
+// runtime log verbosity, not a staged config field, so unlike SET_PARAM it
+// takes effect immediately and is never persisted to flash at all.
+static void link_task_handle_set_log_level(const kilnlink_frame_t *frame)
+{
+    kilnlink_set_log_level_t msg;
+    kilnlink_set_log_level_status_t dstatus =
+        kilnlink_set_log_level_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_SET_LOG_LEVEL_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+
+    if (msg.level > LOG_LEVEL_VERBOSE) {
+        log_task_log(LOG_LEVEL_WARN, "set_log_level", "refused, level out of range");
+        return;
+    }
+
+    log_task_set_level(msg.level);
+    log_task_log(LOG_LEVEL_INFO, "set_log_level", "accepted");
+}
+
+// SAFETY_CMD_SET_PARAM (0x1C), docs/COMMISSIONING.md section 2 -- stages one
+// (param_id, value) pair into the in-RAM record, per config_params.c's id
+// table. Nothing here reaches flash: config_params_set() only mutates
+// s_staged_config, and config_store_write() is called ONLY from
+// COMMIT_CONFIG's handler below, after that whole staged record passes
+// cross-field validation. An unknown id or a type that does not match the
+// field's own wire type is refused individually (config_params_set()
+// returns false, s_staged_config left untouched) -- COMMISSIONING.md section
+// 2: "unknown ids are refused individually... rather than the whole
+// transfer failing," and the same treatment extends to a wrong type tag for
+// a real id, which is exactly as untrustworthy.
+static void link_task_handle_set_param(const kilnlink_frame_t *frame)
+{
+    kilnlink_set_param_t msg;
+    kilnlink_set_param_status_t dstatus = kilnlink_set_param_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_SET_PARAM_OK) {
+        // Malformed/wrong-length/bad-type -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+
+    link_task_ensure_staged_config();
+
+    if (!config_params_set(&s_staged_config, msg.param_id, msg.type, msg.value)) {
+        log_task_log(LOG_LEVEL_WARN, "set_param", "refused, unknown param_id or type mismatch");
+        return;
+    }
+    log_task_log(LOG_LEVEL_INFO, "set_param", "staged");
+}
+
+// SAFETY_CMD_COMMIT_CONFIG (0x1D), docs/COMMISSIONING.md section 2 -- the
+// one wire command that can actually reach flash for the commissioning
+// surface. Three things happen, IN THIS ORDER, and a failure at any step
+// writes NOTHING:
+//   1. config_params_validate() checks the staged record's cross-field
+//      rules (tc_placement_mode vs tc_source, CONFIG_REFERENCE.md section
+//      1) as a whole -- refusal here names the offending field/rule and
+//      never touches config_store_write() at all.
+//   2. config_params_finalize_ct_channel_map() derives the ct_channel_map
+//      group bit from whichever of the three per-channel bits are actually
+//      present -- see config_store.h's own comment on why this is derived,
+//      not asserted by an individual SET_PARAM.
+//   3. calibration_missing is recomputed from config_params_all_required_set():
+//      cleared ONLY if every no-safe-default field is now set; left/forced
+//      true otherwise (docs/COMMISSIONING.md section 4.1: "a bench preset
+//      must not look commissioned" -- a partial commit is exactly that
+//      case, and must not silently clear the flag).
+// The ARMED refusal is NOT checked here -- it lives inside
+// config_store_write() itself (config_store_decide_write(), config_store.h's
+// own header comment), so a future second call site into config_store_write()
+// cannot forget it. On refusal (ARMED, or a flash failure), s_staged_config
+// is left completely UNCHANGED, so a retry (or another SET_PARAM first)
+// starts from exactly what was staged, never from a half-written record.
+static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
+{
+    kilnlink_commit_config_t msg;
+    kilnlink_commit_config_status_t dstatus =
+        kilnlink_commit_config_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_COMMIT_CONFIG_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+    (void)msg; // no fields
+
+    link_task_ensure_staged_config();
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    if (!config_params_validate(&s_staged_config, &field, &rule)) {
+        log_task_log(LOG_LEVEL_WARN, "commit_config", rule ? rule : "refused, validation failed");
+        return; // writes NOTHING -- s_staged_config is untouched by validate()
+    }
+
+    config_store_record_t to_write = s_staged_config;
+    config_params_finalize_ct_channel_map(&to_write);
+    to_write.calibration_missing = !config_params_all_required_set(&to_write);
+
+    const char *reason = NULL;
+    bool written = config_store_write(&to_write, &reason);
+    if (written) {
+        s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
+        log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
+    } else {
+        log_task_log(LOG_LEVEL_WARN, "commit_config", reason ? reason : "refused");
+    }
+}
+
+// SAFETY_CMD_PARAM (0x1E) reply -- sent in answer to SAFETY_CMD_GET_PARAM
+// (link_task_handle_get_param() below), same shared-id/reply-on-request
+// shape as link_task_send_fw_version()/link_task_send_ct_cal(). Reports the
+// currently COMMITTED record (config_store_get_full_record()), never the
+// in-progress staged one -- CONFIG_REFERENCE.md section 7's "which
+// thresholds is the safety processor actually enforcing" must be answerable
+// from what is enforced, not from an uncommitted edit in flight.
+static void link_task_send_param(uint16_t param_id)
+{
+    config_store_record_t rec;
+    config_store_get_full_record(&rec);
+
+    kilnlink_param_t reply;
+    reply.param_id = param_id;
+    uint8_t type = 0;
+    kilnlink_param_value_t value;
+    memset(&value, 0, sizeof(value));
+    bool found = config_params_get(&rec, param_id, &type, &value);
+    reply.found = found ? 1u : 0u;
+    reply.type = found ? type : 0u; // ignored by the reader when found == 0 (kilnlink_param.h)
+    reply.value = value;
+
+    uint8_t payload[KILNLINK_PARAM_MAX_LEN];
+    kilnlink_param_status_t status;
+    size_t len = kilnlink_param_encode(&reply, payload, sizeof(payload), &status);
+    if (len == 0) {
+        return; // can't happen for a fixed sizeof(payload) == KILNLINK_PARAM_MAX_LEN buffer
+    }
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+static void link_task_handle_get_param(const kilnlink_frame_t *frame)
+{
+    kilnlink_get_param_t msg;
+    kilnlink_get_param_status_t dstatus = kilnlink_get_param_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_GET_PARAM_OK) {
+        return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
+    }
+    link_task_send_param(msg.param_id);
+}
+
+// SAFETY_CMD_CONFIG_PAGE (0x1F) reply -- sent in answer to SAFETY_CMD_
+// GET_CONFIG_PAGE (link_task_handle_get_config_page() below). Reports the
+// currently COMMITTED record, same reasoning as link_task_send_param()
+// above. kilnlink_config_page_pack() is stateless/greedy per call
+// (kilnlink_config_page.h's own header comment: no server-side cursor to go
+// stale across a lost/repeated request, LINK_PROTOCOL.md section 2), so this
+// re-derives where `page_index` must resume EVERY call by replaying pack()
+// over pages [0, page_index) against the full id list and discarding the
+// bytes, keeping only how many entries each replayed page consumed.
+static void link_task_send_config_page(uint8_t page_index)
+{
+    config_store_record_t rec;
+    config_store_get_full_record(&rec);
+
+    // 64 is config_params.c's own compile-time upper bound on its id table
+    // (config_params_table_fits_64) -- comfortably above its real size
+    // today, checked there so this array can never silently truncate.
+    kilnlink_config_page_entry_t all[64];
+    size_t all_cap = sizeof(all) / sizeof(all[0]);
+    size_t total = config_params_count();
+    if (total > all_cap) {
+        total = all_cap; // defensive only -- see config_params.c's own bound check
+    }
+    for (size_t i = 0; i < total; i++) {
+        uint16_t id = 0;
+        uint8_t type = 0;
+        config_params_id_at(i, &id, &type);
+        uint8_t got_type = 0;
+        kilnlink_param_value_t value;
+        memset(&value, 0, sizeof(value));
+        config_params_get(&rec, id, &got_type, &value); // always succeeds -- id came from this module's own table
+        all[i].param_id = id;
+        all[i].type = got_type;
+        all[i].value = value;
+    }
+
+    uint8_t scratch[KILNLINK_FRAME_MAX_PAYLOAD];
+    size_t offset = 0;
+    for (uint8_t p = 0; p < page_index && offset < total; p++) {
+        size_t packed = 0;
+        kilnlink_config_page_status_t st;
+        size_t n = kilnlink_config_page_pack(p, &all[offset], total - offset, scratch, sizeof(scratch),
+                                              &packed, &st);
+        if (n == 0 || packed == 0) {
+            // Replay ran out of entries before reaching page_index -- the
+            // ESP asked for a page past the end. Fall through to pack an
+            // empty (entry_count 0, more 0) final page below, rather than
+            // looping or guessing at a nonexistent page's contents.
+            offset = total;
+            break;
+        }
+        offset += packed;
+    }
+
+    kilnlink_config_page_status_t status;
+    size_t packed_now = 0;
+    uint8_t payload[KILNLINK_FRAME_MAX_PAYLOAD];
+    size_t len = kilnlink_config_page_pack(page_index, &all[offset], total - offset, payload,
+                                            sizeof(payload), &packed_now, &status);
+    if (len == 0) {
+        return; // can't happen -- payload is sized to the wire's own payload cap
+    }
+    link_task_send_broadcast(payload, (uint8_t)len);
+}
+
+static void link_task_handle_get_config_page(const kilnlink_frame_t *frame)
+{
+    kilnlink_get_config_page_t msg;
+    kilnlink_get_config_page_status_t dstatus =
+        kilnlink_get_config_page_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_GET_CONFIG_PAGE_OK) {
+        return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
+    }
+    link_task_send_config_page(msg.page_index);
+}
+
 static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_len)
 {
     uint8_t unstuffed[LINK_RX_ASSEMBLY_MAX];
@@ -1236,6 +1498,31 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         // arguments -- same convention as LINK_FRAME_FW_VERSION_CMD above.
         if (frame.length == 1) {
             link_task_handle_get_ct_cal(&frame);
+        }
+        break;
+    case KILNLINK_SET_LOG_LEVEL_CMD:
+        link_task_handle_set_log_level(&frame);
+        break;
+    case KILNLINK_SET_PARAM_CMD:
+        link_task_handle_set_param(&frame);
+        break;
+    case KILNLINK_COMMIT_CONFIG_CMD:
+        link_task_handle_commit_config(&frame);
+        break;
+    case KILNLINK_GET_PARAM_CMD:
+        // Same id as the reply (SAFETY_CMD_PARAM, KILNLINK_PARAM_CMD --
+        // both 0x1E), distinguished by direction and length, same
+        // convention as LINK_FRAME_GET_CT_CAL_CMD/GET_FW_VERSION above: the
+        // ESP's request is exactly KILNLINK_GET_PARAM_LEN (3) bytes.
+        if (frame.length == KILNLINK_GET_PARAM_LEN) {
+            link_task_handle_get_param(&frame);
+        }
+        break;
+    case KILNLINK_GET_CONFIG_PAGE_CMD:
+        // Same id as the reply (SAFETY_CMD_CONFIG_PAGE, KILNLINK_CONFIG_PAGE_CMD
+        // -- both 0x1F), same shared-id convention as GET_PARAM/PARAM above.
+        if (frame.length == KILNLINK_GET_CONFIG_PAGE_LEN) {
+            link_task_handle_get_config_page(&frame);
         }
         break;
     // Phase 10 -- thin dispatch only, matching PUSH_CONTEXT's own one-line
@@ -1456,6 +1743,8 @@ bool link_task_start(void)
     s_firing_ceiling_c = 0.0f;
     s_wall_clock_have = false;
     s_wall_clock_epoch_ms = 0;
+
+    s_staged_config_init = false;
 
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.

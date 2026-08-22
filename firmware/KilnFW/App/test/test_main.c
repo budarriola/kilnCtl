@@ -26,6 +26,16 @@ void run_test_uart_log_bridge(void);
 void run_test_safety_watchdog(void);
 void run_test_safety_link(void);
 void run_test_kiln_cfg_store(void);
+void run_test_safety_cfg_store(void);
+// run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
+// its own separate executable (build_host_tests.ps1's third build+run step),
+// same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
+// to reach its static parse_set_param_body()/build_commissioning_json()/
+// apply_pairs() helpers, which means it must define its own fake bodies for
+// safety_cfg_store_get_by_index() and friends -- and this executable already
+// links the REAL ones via test_safety_cfg_store.c's #include of safety_cfg_
+// store.c above. Linking both into one binary would multiply-define every
+// safety_cfg_store_* symbol.
 
 int main(void)
 {
@@ -48,6 +58,7 @@ int main(void)
     run_test_safety_watchdog();
     run_test_safety_link();
     run_test_kiln_cfg_store();
+    run_test_safety_cfg_store();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -14,12 +14,16 @@
 #include "kilnlink/kilnlink_announce.h"
 #include "kilnlink/kilnlink_announce_reboot.h"
 #include "kilnlink/kilnlink_clear_trip.h"
+#include "kilnlink/kilnlink_commit_config.h"
+#include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_context.h"
 #include "kilnlink/kilnlink_ct_cal.h"
+#include "kilnlink/kilnlink_get_config_page.h"
 #include "kilnlink/kilnlink_get_ct_cal.h"
 #include "kilnlink/kilnlink_rollback.h"
 #include "kilnlink/kilnlink_set_config.h"
 #include "kilnlink/kilnlink_set_ct_cal.h"
+#include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
 
 /* TODO.md owner-report item 3 (2026-08-21): zones_config_get_safety_tc_type()/
@@ -32,6 +36,15 @@
  * the poll task that already runs here and already knows link_up/down
  * transitions is the natural place to pull the desired setting from instead. */
 #include "zones_http.h"
+
+/* TODO owner-report (2026-08-21 follow-up), docs/COMMISSIONING.md sec 3: the
+ * ESP-side commissioning cache. Same real, deliberate cross-module dependency
+ * as zones_http.h just above (this driver otherwise knows nothing about NVS
+ * caching or the commissioning HTTP surface) -- the poll task is where every
+ * fresh FW_VERSION frame's config_crc is learned, so it is the natural place
+ * to trigger safety_cfg_store_maybe_refetch()'s fetch-on-change check; see
+ * safety_sync_cfg_cache() below. */
+#include "safety_cfg_store.h"
 
 /* ROADMAP.md M5 -- SAFETY_CMD_PUSH_CONTEXT's live-state sources. safety_link.h
  * only forward-declares these as void* (kiln_io_t is an anonymous-struct
@@ -959,9 +972,17 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
  * anywhere on this side (safety_link_get_ct_cal()'s own doc comment: every
  * GET_CT_CAL is a live round trip, never answered from a cache), so capturing
  * the raw frame here, rather than adding a case to the switch below, is the
- * only way a caller gets the bytes back at all. */
+ * only way a caller gets the bytes back at all.
+ *
+ * `out_config_page`/`out_got_config_page` (both optional, NULL together for
+ * every call site except safety_link_get_config_page()) do the identical job
+ * for a SAFETY_CMD_CONFIG_PAGE (0x1F) reply -- COMMISSIONING.md sec 3's bulk
+ * config read is likewise never cached inside this driver (safety_cfg_store.c
+ * owns that cache, one layer up), so every GET_CONFIG_PAGE is a live round
+ * trip and this is, again, the only way the caller gets the raw frame back. */
 static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
-                                   uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal)
+                                   uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal,
+                                   uart_proto_message_t *out_config_page, bool *out_got_config_page)
 {
     uart_proto_message_t msg;
     bool got_status = false;
@@ -996,6 +1017,19 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
                     *out_got_ct_cal = true;
                 }
                 break;
+            case KILNLINK_CONFIG_PAGE_CMD: /* == SAFETY_CMD_GET_CONFIG_PAGE, shared id */
+                /* Length is NOT fixed (KILNLINK_CONFIG_PAGE_HDR_LEN or more,
+                 * per page's entry_count) -- unlike CT_CAL's exact-length
+                 * check above, any frame carrying this shared id long enough
+                 * to plausibly be a reply is captured; kilnlink_config_page_
+                 * decode() (called by safety_link_get_config_page()) is what
+                 * actually validates it byte-for-byte. */
+                if (out_config_page && out_got_config_page &&
+                    msg.length >= KILNLINK_CONFIG_PAGE_HDR_LEN) {
+                    *out_config_page = msg;
+                    *out_got_config_page = true;
+                }
+                break;
             default:
                 break;
             }
@@ -1007,7 +1041,7 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
 
 static bool safety_drain_inbox(SafetyLinkClass *link, uint32_t wait_ms)
 {
-    return safety_drain_inbox_ex(link, wait_ms, NULL, NULL);
+    return safety_drain_inbox_ex(link, wait_ms, NULL, NULL, NULL, NULL);
 }
 
 /* One complete request/reply exchange, serialized against every other one on
@@ -1178,6 +1212,35 @@ static void safety_sync_tc_type(SafetyLinkClass *link)
      * why this failed. */
 }
 
+/* docs/COMMISSIONING.md sec 3's fetch-on-change trigger: "every FW_VERSION
+ * frame carries the Pico's config_crc... the ESP refetches only when that
+ * CRC differs from its cache." peer_build_known gates this the same way it
+ * gates every other peer_build_* consumer (safety_link.h's own field
+ * comment) -- no opinion until a FW_VERSION frame has actually reached
+ * config_crc, so a Pico that predates this frame's tail (or hasn't answered
+ * yet) never triggers a fetch attempt that could only time out. Called only
+ * when the link is up (safety_update_health()'s own gate), same
+ * "don't even try while nothing is listening" discipline safety_sync_tc_
+ * type() follows for SET_CONFIG. safety_cfg_store_maybe_refetch() itself is
+ * the actual no-UART-traffic-unless-changed check -- this function only
+ * supplies the live CRC to compare against. */
+static void safety_sync_cfg_cache(SafetyLinkClass *link)
+{
+    bool known = false;
+    uint16_t live_crc = 0;
+    if (!safety_lock(link)) {
+        return;
+    }
+    known = link->peer_build_known;
+    live_crc = link->peer_config_crc;
+    safety_unlock(link);
+
+    if (!known) {
+        return;
+    }
+    (void)safety_cfg_store_maybe_refetch(link, live_crc);
+}
+
 static void safety_update_health(SafetyLinkClass *link)
 {
     bool up = false;
@@ -1216,6 +1279,7 @@ static void safety_update_health(SafetyLinkClass *link)
             link->tc_type_last_sent = 0xFFu;
         }
         safety_sync_tc_type(link);
+        safety_sync_cfg_cache(link);
     } else if (!link->down_logged ||
                safety_elapsed_ms(link->down_log_tick) >= SAFETY_LINK_DOWN_LOG_PERIOD_MS) {
         /* TODO.md 9.6: text only -- the fault bit below still asserts
@@ -2033,7 +2097,7 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
 
     uart_proto_message_t ct_cal_msg;
     bool got_ct_cal = false;
-    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, &ct_cal_msg, &got_ct_cal);
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, &ct_cal_msg, &got_ct_cal, NULL, NULL);
 
     if (!got_ct_cal) {
         /* ACKed but no CT_CAL reply: same "protocol layer alive, application
@@ -2052,6 +2116,204 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
         *out_len = KILNLINK_CT_CAL_LEN;
     }
     xSemaphoreGive(link->xact_lock);
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------------ */
+/* docs/COMMISSIONING.md sec 2/3 -- commissioning param staging/commit/     */
+/* bulk readback (0x1C/0x1D/0x1F). App/drivers/safety_cfg_store.c and       */
+/* safety_cfg_http.c are the only callers.                                  */
+/* ------------------------------------------------------------------------ */
+
+/* SAFETY_CMD_SET_PARAM (0x1C) -- stages one CONFIG_REFERENCE.md field on the
+ * Pico; nothing reaches its flash until safety_link_send_commit_config()
+ * follows. ACK'd unicast (uart_protocol_send, same primitive
+ * safety_link_request_enable() uses), NOT a broadcast: COMMISSIONING.md sec 2
+ * calls SET_PARAM "retry-safe... a lost frame costs one retry, not the whole
+ * commissioning pass" -- that guarantee is uart_protocol's own ACK/retry
+ * machinery, which only a unicast send gets. Returns ESP_ERR_TIMEOUT if the
+ * Pico never ACKed (no reply frame is expected or waited for beyond the
+ * protocol-level ACK -- SET_PARAM has no application-level reply on the wire,
+ * per kilnlink_set_param.h's own doc comment). A caller that wants to know
+ * whether the id/value was actually ACCEPTED (as opposed to merely
+ * delivered) must follow up with safety_link_send_commit_config(). */
+esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
+                                      kilnlink_param_value_t value)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_set_param_t msg = { .param_id = param_id, .type = type, .value = value };
+    uint8_t payload[KILNLINK_SET_PARAM_MAX_LEN];
+    kilnlink_set_param_status_t status = KILNLINK_SET_PARAM_OK;
+    size_t len = kilnlink_set_param_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "set_param: encode failed for id 0x%04X (status=%d)", (unsigned)param_id,
+                 (int)status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "set_param: timed out waiting for the safety link transaction lock");
+        return ESP_ERR_TIMEOUT;
+    }
+    (void)safety_drain_inbox(link, 0);
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                        UART_TASK_ID_SAFETY, payload, len, SAFETY_LINK_ACK_TIMEOUT_MS);
+    if (err != ESP_OK && safety_lock(link)) {
+        link->stats.timeouts++;
+        safety_unlock(link);
+    }
+    xSemaphoreGive(link->xact_lock);
+    return err;
+}
+
+/* SAFETY_CMD_COMMIT_CONFIG (0x1D) -- validates everything staged by
+ * safety_link_send_set_param() since the last commit and, if it passes,
+ * writes one config_store record on the Pico and bumps config_crc. ACK'd
+ * unicast, same reasoning as SET_PARAM above.
+ *
+ * KNOWN LIMITATION, deliberate for this pass: kilnlink_commit_config.h's own
+ * doc comment says refusal is "reported back on the existing diagnostic
+ * frame, not by this codec" -- but SAFETY_CMD_DIAG (Frame B) carries only
+ * numeric trip/warn masks and a state byte, nothing that can name "the
+ * offending field and the rule it broke" as free text. No wire codec for a
+ * textual commit-rejection reason exists yet in CommonFW or SaftyFW (both
+ * out of this pass's file ownership -- see App/drivers/safety_cfg_http.c's
+ * header comment for how its caller surfaces this gap to the operator
+ * instead of inventing a reason locally). This function can therefore only
+ * report the PROTOCOL-level outcome: ESP_OK means the Pico's link layer
+ * ACKed the COMMIT_CONFIG frame (it received and processed the request,
+ * cross-field validation included), ESP_ERR_TIMEOUT means no ACK arrived
+ * (dead link, or the Pico's own ARMED-write refusal never gets an ACK either
+ * -- CommonFW/docs/LINK_PROTOCOL.md sec 2's ACK-per-frame contract does not
+ * distinguish "processed and rejected" from "processed and accepted" at this
+ * layer). The caller must re-fetch the config page afterward
+ * (safety_cfg_store_refetch()) and compare config_crc to learn whether the
+ * commit actually changed anything on the Pico. */
+esp_err_t safety_link_send_commit_config(SafetyLinkClass *link)
+{
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_commit_config_t msg = {0};
+    uint8_t payload[KILNLINK_COMMIT_CONFIG_LEN];
+    kilnlink_commit_config_status_t status = KILNLINK_COMMIT_CONFIG_OK;
+    size_t len = kilnlink_commit_config_encode(&msg, payload, sizeof(payload), &status);
+    if (len == 0) {
+        ESP_LOGE(TAG, "commit_config: encode failed (status=%d)", (int)status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "commit_config: timed out waiting for the safety link transaction lock");
+        return ESP_ERR_TIMEOUT;
+    }
+    (void)safety_drain_inbox(link, 0);
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                        UART_TASK_ID_SAFETY, payload, len, SAFETY_LINK_ACK_TIMEOUT_MS);
+    if (err != ESP_OK && safety_lock(link)) {
+        link->stats.timeouts++;
+        safety_unlock(link);
+    }
+    xSemaphoreGive(link->xact_lock);
+    ESP_LOGI(TAG, "commit_config: %s", err == ESP_OK ? "ACKed by the safety processor" : esp_err_to_name(err));
+    return err;
+}
+
+/* SAFETY_CMD_GET_CONFIG_PAGE / CONFIG_PAGE (shared id 0x1F) -- one page of
+ * the bulk config readback COMMISSIONING.md sec 2 describes. Structured
+ * exactly like safety_link_get_ct_cal() above (own xact_lock hold, own
+ * drain-then-send-then-drain-for-the-reply shape) rather than routed through
+ * safety_exchange(), for the identical reason: that function's
+ * `expect_status` parameter only ever watches for SAFETY_CMD_GET_STATUS.
+ * Never cached inside this driver -- safety_cfg_store.c is the one place a
+ * fetched page's entries get kept, same "this driver caches no ct_cal state"
+ * split GET_CT_CAL uses. */
+esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
+                                       kilnlink_config_page_t *out)
+{
+    if (!link || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    kilnlink_get_config_page_t req = { .page_index = page_index };
+    uint8_t request[KILNLINK_GET_CONFIG_PAGE_LEN];
+    kilnlink_get_config_page_status_t req_status = KILNLINK_GET_CONFIG_PAGE_OK;
+    size_t req_len = kilnlink_get_config_page_encode(&req, request, sizeof(request), &req_status);
+    if (req_len == 0) {
+        ESP_LOGE(TAG, "get_config_page: encode failed for page %u (status=%d)", (unsigned)page_index,
+                 (int)req_status);
+        return ESP_FAIL;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "get_config_page: timed out waiting for the safety link transaction lock");
+        return ESP_ERR_TIMEOUT;
+    }
+    (void)safety_drain_inbox(link, 0);
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+
+    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                        UART_TASK_ID_SAFETY, request, req_len, SAFETY_LINK_ACK_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return err;
+    }
+
+    uart_proto_message_t page_msg;
+    bool got_page = false;
+    (void)safety_drain_inbox_ex(link, SAFETY_LINK_REPLY_TIMEOUT_MS, NULL, NULL, &page_msg, &got_page);
+
+    if (!got_page) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    kilnlink_config_page_status_t decode_status = KILNLINK_CONFIG_PAGE_OK;
+    kilnlink_config_page_status_t decode_result =
+        kilnlink_config_page_decode(page_msg.payload, page_msg.length, out);
+    xSemaphoreGive(link->xact_lock);
+    if (decode_result != KILNLINK_CONFIG_PAGE_OK) {
+        decode_status = decode_result;
+        ESP_LOGW(TAG, "get_config_page: reply for page %u failed to decode (status=%d)",
+                 (unsigned)page_index, (int)decode_status);
+        if (safety_lock(link)) {
+            link->stats.frame_errors++;
+            safety_unlock(link);
+        }
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     return ESP_OK;
 }
 
