@@ -26,9 +26,24 @@ PC/MCP link — not a parallel path that bypasses it.
 
 **All settled and built.** Full writeup moved to
 [`docs/ARCHITECTURE_DECISIONS.md`](docs/ARCHITECTURE_DECISIONS.md): web
-server on-device, relay ownership tags, the rule-engine composition rules
-(engine itself still unbuilt — evaluator has no caller), the history ring
-buffer design, and storage (NVS, no LittleFS).
+server on-device, relay ownership tags, the rule-engine composition rules,
+the history ring buffer design, and storage (NVS, no LittleFS).
+
+**Rule engine — BUILT 2026-08-22.** `rules_eval.{c,h}` (pure decision logic)
+plus `rules_task.{c,h}` (1 Hz FreeRTOS task) close the "evaluator has no
+caller" gap this line used to record. Precedence is
+PROFILE/AUTOTUNE > RULE > MANUAL through the existing `relay_authority`
+tags; a safety fault, a down safety link, or an OTA in progress forces every
+rule-driven relay off, and turning off is never gated. A stale-tick watchdog
+forces the same off-state if the evaluator stops ticking for 5 s.
+
+Scope limit set by the owner the same day, and enforced in three places
+(`rules_eval_decide`'s `is_heater_relay` gate, `rules_task`'s per-tick
+recomputation of the zone-relay union, and the POST handler's refusal):
+**rules may never command a relay assigned to a zone.** Those are PID/
+thermocouple-controlled heaters. Rules exist for the non-PID hardware —
+reduction flame, vents, blowers — and may still READ heater relays as rule
+conditions.
 
 ## 0.5 Page organization
 
@@ -794,6 +809,35 @@ comes from the same plain-C getters the web HTTP handlers use (10.1a).
 The four pages this section added to the plan 2026-08-18 (Safety/Alarm,
 Diagnostics, Thermocouple Faults, Backup/restore) are tracked in section 0.5,
 not duplicated here.
+
+**LCD scope narrowed 2026-08-22 — the LCD sheds configuration to the web
+GUI.** Owner: the LCD should show live state; settings belong on the web
+pages. Removed outright (files, hub cells, routes and CMake entries):
+`ui_page_zones.c` (Zones & Thermocouples — a settings editor), the
+"Relays & Rules" hub cell (only ever a non-clickable "not built yet"
+placeholder), and `ui_page_history.c` (Temperature History — duplicated the
+home chart). The config hub repacked 3 pages → 2 with no empty slots.
+
+Live zone temperatures and relay status were never on the deleted zones page
+— they are on `ui_page_temperature.c`, which is now the LCD's zones/relay
+view and stays.
+
+Home page: the run-state card, progress bar and bottom spacer between the
+chart and the Start button are gone; the chart takes `flex_grow(1)` and
+expands into that space, with Start still the last child pinned to the
+bottom. The live safety-trip callout the removed card carried is back as a
+strip that is HIDDEN unless a trip is live (LVGL skips hidden flex children,
+so it costs zero height when clear) — a layout request must not make a trip
+invisible on the page the operator watches.
+
+- [ ] **LCD home layout not verified on hardware.** Chart filling to the
+      Start button, the hidden trip strip, and no-scroll at 480x320 were all
+      built after the board was disconnected. Needs a look on the bench.
+- [ ] **Owner reports some LCD back buttons don't work; not reproduced.**
+      Every `back_page`/`prev_cb`/`next_cb` target was checked against
+      `kiln_ui.c`'s registry and all resolve, and every topbar is raised
+      after its content exists. If still seen on hardware, suspect touch
+      calibration/hit-test drift rather than page-registry wiring.
 
 - [ ] **`UART_TASK_ID_WIFI` (11) sometimes doesn''t register at boot** — PC-tool
       `wifi_get_status`/`wifi_scan` NACK "destination task not registered"

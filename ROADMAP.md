@@ -175,6 +175,18 @@ physically stop a kiln, and the first that can nuisance-trip one.
       is implemented and host-tested but has zero callers — that caller is
       Phase 7's link_task/GUI integration, not yet built. Not a regression;
       just means K4 reads open from every boot today regardless of guards
+- [x] Rule engine drives relays through the existing owner arbitration —
+      `rules_task.c` claims `RELAY_OWNER_RULE` and never writes the SX1509
+      directly, so precedence is PROFILE/AUTOTUNE > RULE > MANUAL. Fails safe
+      on safety fault, down link, OTA in progress, and on its own stale-tick
+      watchdog. **Rules may never command a zone-assigned (PID/thermocouple)
+      relay** — owner's scope rule, enforced in the evaluator, the task and
+      the POST handler; heater relays stay readable as rule conditions.
+      2026-08-22, verified on hardware before the bench was disassembled
+- [x] Dashboard/readiness no longer report the safety link as up merely
+      because the driver object exists — both call sites now consult the real
+      staleness-gated `link_up`. This was a live false positive: the board
+      reported "safety=up" with the UART unplugged. 2026-08-22
 - [ ] S9 trip-ineffective escalation proven with a deliberately welded contactor
       (hardware-gated)
 - [ ] Every guard exercised per
@@ -213,6 +225,19 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       watermark and the drops counted
 - [x] Borrowed-thermocouple staleness split correctly across S11/S13/S6 —
       audit-confirmed 2026-08-18, no code fix needed
+- [x] `SAFETY_CMD_COMMIT_CONFIG_REJECTED` (0x20) — a refused commissioning
+      commit used to be indistinguishable from an accepted one. The Pico now
+      names the offending `param_id` and a reason code (RANGE /
+      CONTRADICTION), and `safety_cfg_http.c` surfaces it in the page's error
+      text instead of "sent, awaiting confirmation". 2026-08-22, host-tested
+      both ends; not hardware-verified (M0)
+- [x] `SET_LOG_LEVEL` (0x1B) reachable from the ESP — the codec and the Pico
+      consumer existed with no caller, so the feature was dead. Now
+      `POST /api/safety/log_level`, deliberately API-only (a bench knob, not
+      an operator control). 2026-08-22
+- [x] LCD stopped showing a raw `reason 0x%02X` where the web showed decoded
+      words — the two same-language copies are one shared table
+      (`safety_trip_words.h`). 2026-08-22
 
 ## M6 — Throw the liveness switch
 
