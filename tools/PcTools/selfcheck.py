@@ -527,6 +527,10 @@ def thermo_checks() -> None:
         if payload[0] == 0x06:
             return faults_reply
         if payload[0] == 0x09:
+            if payload[1] == 2:
+                # Zero-length body: firmware's "this channel's SPI read
+                # failed" marker (echoes channel/reg, len=0, no data bytes).
+                return bytes([0x09, payload[1], payload[2], 0])
             return reg_reply
         return None
 
@@ -541,6 +545,30 @@ def thermo_checks() -> None:
         check("last_readings cached", len(client.last_readings), 3)
         check("live read_faults query", len(client.read_faults(timeout=3.0)), 2)
         check("live read_reg query", client.read_reg(1, 0x02, 3, timeout=3.0).data, b"\xaa\xbb\xcc")
+
+        # 2026-08-20: a 0-length READ_REG reply is the firmware's documented
+        # marker for "this channel's SPI read failed" (uart_bridge.c). Channel
+        # 2 is wired in `answer()` below to send that zero-length reply so we
+        # can prove read_reg() actually raises on it -- not just that the
+        # parse layer accepts the wire shape (that's covered separately by
+        # "classify READ_REG reply" above). We also re-check the success path
+        # through the same client/mechanism right after, so this proves the
+        # *difference*, not merely that something threw.
+        try:
+            client.read_reg(2, 0x02, 3, timeout=3.0)
+            check("read_reg raises on 0-length firmware reply", False, True)
+        except ThermoQueryError as exc:
+            check("read_reg raises on 0-length firmware reply", True, True)
+            check(
+                "0-length read_reg error names the channel",
+                "ch2" in str(exc),
+                True,
+            )
+        check(
+            "read_reg still succeeds after a 0-length reply on another channel",
+            client.read_reg(1, 0x02, 3, timeout=3.0).data,
+            b"\xaa\xbb\xcc",
+        )
 
         from kilnctrl.serial_link import SendResult
 
