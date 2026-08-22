@@ -261,8 +261,8 @@ if the Pico's diagnostics are too stale to trust.</p>
   }
 
   function row(label, value) {
-    return '<div class="row"><span class="label">' + escHtml(label) + '</span><span class="value kc-live-value">' +
-           escHtml(value) + '</span></div>';
+    return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) + '</span><span class="value kc-live-value">' +
+           window.kcEscapeHtml(value) + '</span></div>';
   }
   function hex(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(2, '0'); }
   function hex16(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(4, '0'); }
@@ -272,12 +272,6 @@ if the Pico's diagnostics are too stale to trust.</p>
   // "investigate the kiln"; this one means "the relay did not actually cut
   // power -- go to the breaker."
   var SAFETY_TRIP_INEFFECTIVE = 10;
-  function escHtml(s) {
-    var d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
-  }
-
   /* UI_PLAN.md section 4 item 5: destructive/latched-state actions get an
      explicit confirm step. Clearing a latched trip is exactly that class. */
   var clearBtn = document.getElementById('clearTripBtn');

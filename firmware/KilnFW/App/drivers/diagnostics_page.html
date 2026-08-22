@@ -191,7 +191,7 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
       for (var i = 0; i < st.nvs_sections.length; i++) {
         var s = st.nvs_sections[i];
         var ok = s.present && s.mounted;
-        html += '<div class="row"><span class="label">' + escHtml(s.name) + '</span>' +
+        html += '<div class="row"><span class="label">' + window.kcEscapeHtml(s.name) + '</span>' +
                 '<span class="value kc-live-value" style="color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '">' +
                 (s.present ? 'present' : 'MISSING') + (s.mounted ? ', mounted' : ', NOT MOUNTED') +
                 '</span></div>';
@@ -214,12 +214,6 @@ thermocouple fault registers) lives on their own pages: <a href="/safety">Safety
               '<span class="value kc-live-value">' + window.kcUnit.fmt(cj[i]) + '</span></div>';
     }
     document.getElementById('cjRows').innerHTML = rows || '<div class="row"><span class="label">MAX31856 channels</span><span class="value">n/a</span></div>';
-  }
-
-  function escHtml(s) {
-    var d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
   }
 
   function setStale(staleSeconds) {

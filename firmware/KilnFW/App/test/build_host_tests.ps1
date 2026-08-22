@@ -71,4 +71,27 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $exe
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+# ---- test_zones_http.c: its own SEPARATE executable ------------------------
+# See test_zones_http.c's header comment for why: it #includes zones_http.c
+# directly (to reach parse_zone_fields(), a `static` function with no other
+# seam), which DEFINES the real zones_config_get_*()/set_*() functions --
+# and test_backup_import.c above already defines its OWN fake bodies for
+# those same names to stub backup_import_apply()'s dependency on
+# zones_http.h. Linking both into one executable would be a multiple-
+# definition error, so this one is built and run as a second, independent
+# binary instead of being added to $sources above.
+$exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
+$cmd2 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$outDir\\zones_`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`""
+
+cmd.exe /c $cmd2
+if ($LASTEXITCODE -ne 0) {
+    throw "zones_http build failed"
+}
+
+& $exe2
 exit $LASTEXITCODE

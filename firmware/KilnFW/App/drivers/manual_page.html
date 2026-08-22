@@ -121,7 +121,7 @@ function renderRelays(statusData) {
     if (relaysHere.length === 0) return;
     const group = document.createElement('div');
     group.className = 'zone-group';
-    group.innerHTML = '<h3>' + (z.name || ('Zone ' + i)) + '</h3>';
+    group.innerHTML = '<h3>' + window.kcEscapeHtml(z.name || ('Zone ' + i)) + '</h3>';
     relaysHere.forEach(function (r) { group.appendChild(relayRow(r)); });
     el.appendChild(group);
   });

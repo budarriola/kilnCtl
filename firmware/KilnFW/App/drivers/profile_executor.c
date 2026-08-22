@@ -1536,6 +1536,17 @@ static void watchdog_task_entry(void *arg)
      * that land on a different action entirely (see the reset just after the
      * switch). */
     bool s_idle_trip_logged = false;
+    /* PC-link fault-source tracking (see profile_executor.h's
+     * PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS doc comment): unlike the
+     * safety link, SAFETY_FAULT_SRC_PC_LINK is a level read back off
+     * safety_link_get_fault_sources(), not something with its own "age since
+     * last change" -- uart_bridge.c's link_watchdog_task re-asserts it every
+     * UART_BRIDGE_LINK_CHECK_MS while down and clears it the moment the link
+     * is back (see that task), so this task has to time the level itself:
+     * the tick this bit was FIRST seen asserted, persisted across loop
+     * iterations same as s_idle_trip_logged above. */
+    bool pc_link_was_down = false;
+    TickType_t pc_link_down_since_tick = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_PERIOD_MS));
 
@@ -1585,6 +1596,25 @@ static void watchdog_task_entry(void *arg)
         bool safety_processor_tripped = safety_diag_valid &&
                                          safety_diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
 
+        /* PC link loss (profile_executor.h's PROFILE_EXECUTOR_PC_LINK_ABORT_
+         * SILENCE_MS): uart_bridge.c's link_watchdog_task asserts
+         * SAFETY_FAULT_SRC_PC_LINK the whole time the PC/UART control link
+         * is down and clears it the instant a frame or ACK is seen again --
+         * read back here the same way safety_link_get_status() is read
+         * above, outside s_exec.lock (safety_link_get_fault_sources() takes
+         * its own lock and never blocks on the peer). This task has no
+         * "age" for a level bit, so it times the level itself: latch the
+         * tick on the rising edge, clear it the instant the bit drops. */
+        bool pc_link_now_down = s_exec.safety != NULL &&
+                                 (safety_link_get_fault_sources(s_exec.safety) & SAFETY_FAULT_SRC_PC_LINK) != 0;
+        TickType_t pc_link_check_now = xTaskGetTickCount();
+        if (pc_link_now_down && !pc_link_was_down) {
+            pc_link_down_since_tick = pc_link_check_now;
+        }
+        pc_link_was_down = pc_link_now_down;
+        bool pc_link_down_sustained = pc_link_now_down &&
+            ticks_to_ms(pc_link_check_now - pc_link_down_since_tick) >= PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS;
+
         bool wdt_faulted = false;
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
@@ -1622,6 +1652,7 @@ static void watchdog_task_entry(void *arg)
         wd_in.safety_processor_tripped = safety_processor_tripped;
         wd_in.safety_trip_reason = safety_diag_trip_reason;
         wd_in.safety_link_silent_30s = safety_link_silent_30s;
+        wd_in.pc_link_down_sustained = pc_link_down_sustained;
         wd_in.state_running_or_paused = (s_exec.state == PROFILE_EXEC_RUNNING ||
                                           s_exec.state == PROFILE_EXEC_PAUSED);
         wd_in.state_faulted = (s_exec.state == PROFILE_EXEC_FAULTED);

@@ -362,7 +362,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '</p>';
   div.innerHTML =
     '<h2>Zone ' + i + '</h2>' +
-    '<label>Name</label><input type="text" class="name" maxlength="15" value="' + (z.name || '') + '">' +
+    '<label>Name</label><input type="text" class="name" maxlength="15" value="' + window.kcEscapeHtml(z.name || '') + '">' +
     '<label>Relays in this zone</label><div class="relaybits">' + relayHtml + '</div>' +
     '<label>Thermocouples feeding this zone</label><div class="thermobits">' + thermoHtml + '</div>' +
     '<p class="hint">Checking more than one channel averages their valid readings into this ' +

@@ -18,6 +18,34 @@
 (function () {
   'use strict';
 
+  // ---- kcEscapeHtml ----------------------------------------------------
+  //
+  // Shared escape helper for every page that builds markup via innerHTML
+  // string concatenation. Any operator- or server-supplied text (zone
+  // names, profile names, Wi-Fi SSIDs, fault reason strings, ...) MUST be
+  // run through this before being spliced into an HTML string -- a name
+  // containing a double quote or "<"/">" can otherwise break out of an
+  // attribute or inject an element/event handler that runs in the next
+  // person who opens the page's browser. There is no auth on these APIs,
+  // so anyone who can reach the board on the network can plant such a
+  // payload via a plain POST.
+  //
+  // Prefer textContent / setAttribute / createElement at the call site
+  // when practical -- they can't have this class of bug at all -- but for
+  // the many existing places that build a whole innerHTML string in one
+  // shot, wrap every dynamic value with this instead of duplicating an
+  // escape function per page (this codebase has been bitten by exactly
+  // that duplication before).
+  window.kcEscapeHtml = function (s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+
   // ---- kcConfirm -----------------------------------------------------
   //
   // A single named seam for "ask before doing something destructive"

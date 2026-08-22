@@ -58,5 +58,11 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg);
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status);
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len);
+/* Added 2026-08-21 for zones_http.c's host test (test_zones_http.c) -- that
+ * file's zones_post_handler() calls this on success. Declared here only;
+ * definition lives in whichever test .c file first needs it to link (same
+ * "declared once, defined per-executable" split as the rest of this header --
+ * see this header's own comment). */
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s);
 
 #endif // TEST_STUB_ESP_HTTP_SERVER_H

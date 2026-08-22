@@ -705,7 +705,8 @@ function fmtDuration(s) {
 // Shared by the exec card and the previous-run banner (both name zones by
 // bit position, zones.relay_mask-style, per zones_http.h).
 function zoneName(zi) {
-  return (zonesCache.zones[zi] && zonesCache.zones[zi].name) || ('Zone ' + zi);
+  var raw = (zonesCache.zones[zi] && zonesCache.zones[zi].name) || ('Zone ' + zi);
+  return window.kcEscapeHtml(raw);
 }
 
 // -- Planned-profile curve (the third chart series) ----------------------
@@ -890,7 +891,7 @@ function renderLastRun(st) {
       ? 'Previous firing was interrupted &mdash; it never ended cleanly'
       : 'Previous firing ended (' + lr.phase + ')') + '</h3>' +
     '<div class="row"><span>Profile</span><span>' +
-      (profileTitleById[lr.profile_id] || lr.profile_name || ('id ' + lr.profile_id)) +
+      window.kcEscapeHtml(profileTitleById[lr.profile_id] || lr.profile_name || ('id ' + lr.profile_id)) +
       ' &mdash; ' + (names.join(', ') || 'no zones') + '</span></div>' +
     '<div class="row"><span>Segment</span><span>' + (lr.segment_index + 1) + ' / ' + lr.segment_count +
       ' (' + (lr.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
@@ -901,8 +902,8 @@ function renderLastRun(st) {
     '<div class="row"><span>Recorded at</span><span>' + fmtDuration(lr.uptime_at_write_s) +
       ' into that boot</span></div>';
   if (lr.fault_reason) {
-    html += '<div class="row fault"><span>Fault ' + lr.fault_guard + '</span><span>' +
-            lr.fault_reason + '</span></div>';
+    html += '<div class="row fault"><span>Fault ' + window.kcEscapeHtml(lr.fault_guard) + '</span><span>' +
+            window.kcEscapeHtml(lr.fault_reason) + '</span></div>';
   }
   html += '<p class="note">' + (lr.interrupted
     ? 'Nothing was restarted. Relays came up off and stay off until you start a firing.'
@@ -947,7 +948,7 @@ function renderExec(st) {
   for (var zb = 0; zb < 8; zb++) { if (st.zone_mask & (1 << zb)) zoneNames.push(zoneName(zb)); }
 
   let html = '<div class="exec-card">' +
-    '<div class="row"><span>' + (profileTitleById[st.profile_id] || st.profile_name) +
+    '<div class="row"><span>' + window.kcEscapeHtml(profileTitleById[st.profile_id] || st.profile_name) +
     ' &mdash; ' + zoneNames.join(', ') + '</span>' +
     '<span class="exec-state state-' + st.state + ' kc-live-value">' + st.state + '</span></div>' +
     '<div class="row"><span>Segment</span><span class="kc-live-value">' + (st.segment_index + 1) + ' / ' + st.segment_count +
@@ -964,14 +965,14 @@ function renderExec(st) {
       (z.actual_valid ? window.kcUnit.fmt(z.actual_c) : 'no reading') +
       (z.faulted ? ' &mdash; FAULTED' : (z.relay_on ? ' &mdash; ON' : ' &mdash; off')) + '</span></div>';
     if (z.faulted) {
-      html += '<div class="row fault kc-live-value">' + zoneName(z.zone) + ': ' + z.fault_reason + '</div>';
+      html += '<div class="row fault kc-live-value">' + zoneName(z.zone) + ': ' + window.kcEscapeHtml(z.fault_reason) + '</div>';
     }
   });
   if (st.dwelling && st.state === 'running') {
     html += '<div class="row"><span>Dwell remaining</span><span class="kc-live-value">' + fmtDuration(st.dwell_remaining_s) + '</span></div>';
   }
   if (st.state === 'faulted' && st.fault_reason) {
-    html += '<div class="row fault kc-live-value">' + st.fault_reason + '</div>';
+    html += '<div class="row fault kc-live-value">' + window.kcEscapeHtml(st.fault_reason) + '</div>';
   }
   html += '</div>';
 

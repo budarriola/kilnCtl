@@ -112,6 +112,36 @@ typedef enum {
  * s_exec.lock, same as the code it replaces; it does no locking or I/O of
  * its own so that's still the caller's discipline to keep, not this
  * function's job to enforce. */
+/* How long SAFETY_FAULT_SRC_PC_LINK must read continuously asserted before a
+ * RUNNING/PAUSED firing is aborted (profile_executor_wd_decide()'s
+ * pc_link_down_sustained). Deliberately its OWN threshold, not a reuse of
+ * either neighboring constant:
+ *
+ *   - NOT UART_BRIDGE_LINK_TIMEOUT_MS (5000ms, uart_bridge.h): that is when
+ *     relays get force-dropped, and a brief drop-and-recover there (a USB
+ *     re-enumeration, a driver hiccup, a cable wiggle) is exactly the kind
+ *     of blip a firing must survive without aborting -- "relays came back
+ *     off for 5 seconds" is not "the operator's link is gone." Aborting a
+ *     multi-hour firing on a 5-second hiccup would be worse than the bug
+ *     this constant exists to fix.
+ *   - Matches SAFETY_LINK_FIRING_ABORT_SILENCE_MS (30000ms, safety_link.h)
+ *     instead, and for the identical reason that constant's own doc comment
+ *     gives (LINK_PROTOCOL.md sec 8 / ROADMAP.md M6): "a single dropped
+ *     frame must not abort a twelve-hour firing," but by 30s of continuous
+ *     outage the relays have been sitting force-off the whole time (5s to
+ *     drop them, then 25s more with them held off) and the run is no longer
+ *     doing anything the display claims it is. Giving the two independent
+ *     link failures -- safety-link silence and PC-link loss -- the same
+ *     abort horizon means an operator learns one number for "how long can a
+ *     comms outage run before the firing itself is declared over," instead
+ *     of two link-specific ones to remember.
+ *
+ * The relay-drop and the run-abort intentionally do NOT share a timeout: a
+ * brief drop that recovers inside this window is survivable (relays resume
+ * normal control the moment the PC link watchdog clears the fault source);
+ * a sustained one past it is not, and must stop pretending. */
+#define PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS 30000u
+
 typedef enum {
     PROFILE_EXECUTOR_WD_ACTION_NONE = 0,            /* nothing to do this tick */
     PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF,    /* already FAULTED; keep retrying the relay-off write, no new fault */
@@ -130,6 +160,14 @@ typedef struct {
     uint8_t  safety_trip_reason;       /* SAFETY_TRIP_* (SaftyFW's safety_guards.h); meaningful only if
                                          * safety_processor_tripped */
     bool     safety_link_silent_30s;   /* link silent >= SAFETY_LINK_FIRING_ABORT_SILENCE_MS */
+    bool     pc_link_down_sustained;   /* SAFETY_FAULT_SRC_PC_LINK has read asserted continuously
+                                         * for >= PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS -- the
+                                         * caller owns timing this (the source is a level, not an
+                                         * event, so there is no single "age" to compare like the
+                                         * safety-link case above); see that constant's doc comment
+                                         * for why this is a separate threshold from both
+                                         * SAFETY_LINK_FIRING_ABORT_SILENCE_MS and
+                                         * UART_BRIDGE_LINK_TIMEOUT_MS. */
     bool     state_running_or_paused;  /* s_exec.state == PROFILE_EXEC_RUNNING || PROFILE_EXEC_PAUSED */
     bool     state_faulted;            /* s_exec.state == PROFILE_EXEC_FAULTED */
 } profile_executor_wd_input_t;
@@ -220,6 +258,30 @@ static inline profile_executor_wd_result_t profile_executor_wd_decide(const prof
     }
 
     if (in->safety_link_silent_30s && in->state_faulted) {
+        out.action = PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF;
+        return out;
+    }
+
+    if (in->pc_link_down_sustained && in->state_running_or_paused) {
+        /* uart_bridge.c's link_watchdog_task already force-dropped every
+         * relay 5s (UART_BRIDGE_LINK_TIMEOUT_MS) into this outage, and has
+         * been re-dropping them every 250ms since -- but it has no notion of
+         * "a firing is running" and never touches this module's state. Left
+         * alone, a firing stays RUNNING and keeps advancing its ramp/dwell
+         * schedule while the elements are actually forced off and the kiln
+         * cools, and both GUIs keep showing progress on a firing that ISN'T
+         * one any more. Worded distinctly from the safety-link-silent case
+         * above (a dead PC and a dead safety processor are different
+         * failures an operator needs to tell apart) and from the
+         * safety-trip wording further above. */
+        out.action = PROFILE_EXECUTOR_WD_ACTION_FAULT;
+        snprintf(out.fault_reason, sizeof(out.fault_reason),
+                 "PC control link silent for >=%lums, firing aborted",
+                 (unsigned long)PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS);
+        return out;
+    }
+
+    if (in->pc_link_down_sustained && in->state_faulted) {
         out.action = PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF;
         return out;
     }
@@ -351,6 +413,7 @@ typedef struct {
 #define PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN 0.5f
 
 #define PROFILE_EXECUTOR_TICK_MS 1000u /* 1 Hz per TODO.md 6A.7 */
+
 
 /* TODO.md 6A.5(d): "ramp_lock_band_c (default 25 C)". Not yet per-profile/
  * per-zone configurable -- a single firmware-wide default, same status as

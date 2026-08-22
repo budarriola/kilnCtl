@@ -120,18 +120,12 @@ firing; it is a checklist, not a gate.</p>
       html += '<div class="item status-' + it.status + '">' +
               '<div class="mark kc-live-value">' + mark + '</div>' +
               '<div class="body">' +
-              '<div class="label">' + esc(it.label) + '</div>' +
-              '<div class="detail kc-live-value">' + esc(it.detail) + '</div>' +
-              (it.fix_url ? '<a class="fix" href="' + esc(it.fix_url) + '">Fix this &rarr;</a>' : '') +
+              '<div class="label">' + window.kcEscapeHtml(it.label) + '</div>' +
+              '<div class="detail kc-live-value">' + window.kcEscapeHtml(it.detail) + '</div>' +
+              (it.fix_url ? '<a class="fix" href="' + window.kcEscapeHtml(it.fix_url) + '">Fix this &rarr;</a>' : '') +
               '</div></div>';
     }
     el.innerHTML = html;
-  }
-
-  function esc(s) {
-    var d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
   }
 
   function poll() {

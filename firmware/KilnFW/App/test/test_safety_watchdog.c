@@ -161,6 +161,113 @@ static void test_silent_link_30s_still_retries_when_already_faulted(void)
                "still-silent link on an already-faulted run keeps retrying relay-off, same as before");
 }
 
+// ---- New: PC/UART control link loss (profile_executor.h's
+// PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS). uart_bridge.c's link_watchdog_
+// task already force-drops relays and asserts SAFETY_FAULT_SRC_PC_LINK 5s
+// into an outage (UART_BRIDGE_LINK_TIMEOUT_MS) -- but until now nothing told
+// THIS module, so a firing stayed RUNNING, kept advancing its ramp/dwell
+// schedule, and both GUIs kept showing progress while the elements were
+// actually being forced off every 250ms and the kiln cooled. The caller
+// (watchdog_task_entry()) is the one that times the sustained-outage window
+// against PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS -- pc_link_down_sustained
+// arrives here already thresholded, same convention as safety_link_silent_30s
+// above, so a "brief outage" is simply pc_link_down_sustained == false.
+static void test_pc_link_sustained_loss_faults_running(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- sustained PC link loss while RUNNING faults the run");
+
+    profile_executor_wd_input_t in = base_input();
+    in.pc_link_down_sustained = true;
+    in.state_running_or_paused = true;
+
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_FAULT,
+               "a sustained PC-link outage aborts a RUNNING/PAUSED firing");
+    TEST_CHECK(strstr(out.fault_reason, "PC control link") != NULL,
+               "fault_reason names the PC link specifically");
+    TEST_CHECK(strstr(out.fault_reason, "silent") != NULL, "fault_reason describes it as silence");
+}
+
+static void test_pc_link_brief_loss_does_not_fault(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- a brief PC link loss (not yet sustained) does NOT fault");
+
+    profile_executor_wd_input_t in = base_input();
+    in.pc_link_down_sustained = false; // caller's own timer hasn't crossed the threshold yet
+    in.state_running_or_paused = true;
+
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_NONE,
+               "a PC-link blip that hasn't reached PROFILE_EXECUTOR_PC_LINK_ABORT_SILENCE_MS must not "
+               "abort a firing -- a brief drop-and-recover is survivable");
+}
+
+static void test_pc_link_loss_while_idle_does_not_fabricate_run(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- sustained PC link loss while IDLE does not fabricate a run");
+
+    profile_executor_wd_input_t in = base_input();
+    in.pc_link_down_sustained = true;
+    // state_running_or_paused and state_faulted both false -> IDLE/DONE
+
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_NONE,
+               "PC link loss with nothing running/paused/faulted must not manufacture a FAULTED run");
+    TEST_CHECK(out.fault_reason[0] == '\0', "no fault_reason is produced for the idle case");
+}
+
+static void test_pc_link_already_faulted_retries_relay_off(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- PC link still down while already FAULTED retries relay-off only");
+
+    profile_executor_wd_input_t in = base_input();
+    in.pc_link_down_sustained = true;
+    in.state_faulted = true;
+
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF,
+               "an already-FAULTED run with the PC link still down keeps retrying relay-off, does not "
+               "re-fault or touch fault_reason");
+    TEST_CHECK(out.fault_reason[0] == '\0', "fault_reason is left untouched (empty) on a retry action");
+}
+
+static void test_pc_link_wording_distinct_from_safety_link_and_trip(void)
+{
+    TEST_SECTION("profile_executor_wd_decide -- PC-link wording differs from safety-link-silence and "
+                 "safety-trip wording");
+
+    profile_executor_wd_input_t pc_in = base_input();
+    pc_in.pc_link_down_sustained = true;
+    pc_in.state_running_or_paused = true;
+    profile_executor_wd_result_t pc_out = profile_executor_wd_decide(&pc_in);
+
+    profile_executor_wd_input_t silent_in = base_input();
+    silent_in.safety_link_silent_30s = true;
+    silent_in.state_running_or_paused = true;
+    profile_executor_wd_result_t silent_out = profile_executor_wd_decide(&silent_in);
+
+    profile_executor_wd_input_t trip_in = base_input();
+    trip_in.safety_processor_tripped = true;
+    trip_in.safety_trip_reason = 1;
+    trip_in.state_running_or_paused = true;
+    profile_executor_wd_result_t trip_out = profile_executor_wd_decide(&trip_in);
+
+    TEST_CHECK(strcmp(pc_out.fault_reason, silent_out.fault_reason) != 0,
+               "PC-link loss and safety-link silence produce different fault_reason text");
+    TEST_CHECK(strcmp(pc_out.fault_reason, trip_out.fault_reason) != 0,
+               "PC-link loss and a safety-processor trip produce different fault_reason text");
+    TEST_CHECK(strstr(pc_out.fault_reason, "PC control link") != NULL,
+               "only the PC-link case names the PC link");
+    TEST_CHECK(strstr(silent_out.fault_reason, "PC control link") == NULL,
+               "the safety-link-silence case does not say 'PC control link'");
+    TEST_CHECK(strstr(trip_out.fault_reason, "PC control link") == NULL,
+               "the safety-trip case does not say 'PC control link'");
+}
+
 static void test_tick_stale_still_faults_running_and_takes_priority(void)
 {
     TEST_SECTION("profile_executor_wd_decide -- REGRESSION: control-task tick-stale still faults, "
@@ -209,6 +316,11 @@ void run_test_safety_watchdog(void)
     test_no_trip_no_silence_idle_is_a_true_no_op();
     test_silent_link_30s_still_faults_running();
     test_silent_link_30s_still_retries_when_already_faulted();
+    test_pc_link_sustained_loss_faults_running();
+    test_pc_link_brief_loss_does_not_fault();
+    test_pc_link_loss_while_idle_does_not_fabricate_run();
+    test_pc_link_already_faulted_retries_relay_off();
+    test_pc_link_wording_distinct_from_safety_link_and_trip();
     test_tick_stale_still_faults_running_and_takes_priority();
     test_reason_words_are_never_a_bare_number();
 }

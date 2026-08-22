@@ -109,12 +109,6 @@ the same measurement.</p>
     return names.length ? names.join(', ') : 'OK';
   }
 
-  function escHtml(s) {
-    var d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
-  }
-
   // Every field this page shows -- fault bits, FAULT pin, SPI transport
   // health, staleness, cold-junction temperature, and the matched zone's
   // control fault_guard -- is a live per-channel reading straight off this
@@ -143,13 +137,13 @@ the same measurement.</p>
       }
       html += '<div class="chan kc-live-value' + (faulted ? ' faulted' : '') + '">' +
               '<div class="title">Channel ' + c.channel + '</div>' +
-              '<div class="faults ' + (c.fault_status ? 'faulted' : 'ok') + '">' + escHtml(summary) + '</div>' +
+              '<div class="faults ' + (c.fault_status ? 'faulted' : 'ok') + '">' + window.kcEscapeHtml(summary) + '</div>' +
               '<div class="subrow">FAULT pin: ' + (c.fault_status ? '<span class="bad">yes</span>' : 'no') +
               '  &middot;  SPI: ' + (c.spi_failed ? '<span class="bad">FAILED</span>' : 'ok') +
               '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
               '  &middot;  CJ: ' + window.kcUnit.fmt(c.cj_c) + '</div>' +
               (zone ? '<div class="subrow">Control fault_guard: ' +
-                     (zone.faulted ? '<span class="bad">' + escHtml(zone.fault_guard) + '</span>' : 'none') +
+                     (zone.faulted ? '<span class="bad">' + window.kcEscapeHtml(zone.fault_guard) + '</span>' : 'none') +
                      '</div>' : '') +
               '</div>';
     }

@@ -1531,10 +1531,17 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
         return false;
     }
     if (name_len < 0) {
-        name[0] = '\0';
+        /* Omitted: preserve the currently-stored name rather than blanking
+         * it. In practice zones_page.html always sends z%u_name for every
+         * zone it renders (i < thermo_count), so this only matters for a
+         * slot the page never showed -- see the i >= thermo_count preserve
+         * block below, which this keeps consistent with. */
+        strncpy(z->name, current_z->name, ZONE_NAME_MAX_LEN);
+        z->name[ZONE_NAME_MAX_LEN] = '\0';
+    } else {
+        strncpy(z->name, name, ZONE_NAME_MAX_LEN);
+        z->name[ZONE_NAME_MAX_LEN] = '\0';
     }
-    strncpy(z->name, name, ZONE_NAME_MAX_LEN);
-    z->name[ZONE_NAME_MAX_LEN] = '\0';
 
     /* 2026-08-21, TODO.md owner-report item 1/4: this channel's MAX31856
      * thermocouple type. Parsed BEFORE the `i >= thermo_count` early return
@@ -1581,6 +1588,36 @@ static bool parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count,
     }
 
     if (i >= thermo_count) {
+        /* DEFECT FIX (found by black-box testing against the live board):
+         * this slot is past the just-submitted thermo_count, so
+         * zones_page.html's whole-page submit never rendered UI for it and
+         * carries no data for relay_mask/thermo_mask/cal/PID/ramp/guard
+         * thresholds/model/etc. The caller's `z` starts zero-initialized
+         * (zones_post_handler()'s memset(&tmp, 0, ...)), so returning here
+         * unconditionally used to leave every one of those fields at 0 --
+         * an accepted 200 OK POST that silently zeroed state the operator
+         * never asked to change (reproduced live: thermo_count=1 zeroed
+         * zone 1 and zone 2's thermo_mask on an ordinary re-save that only
+         * replayed what GET had just reported).
+         *
+         * Fix: preserve the currently-stored zone_cfg_t for this slot
+         * instead of leaving it zeroed. z->name and z->tc_type are already
+         * set above (name/tc_type each have their own omit-means-preserve
+         * handling), so save and restore just those two fields around a
+         * bulk copy of everything else from current_z -- the live value,
+         * same object z%u_tctype's fallback already reads from just above.
+         * A future submission that raises thermo_count back up (or a
+         * client that explicitly names this slot's fields once one exists)
+         * still goes through the normal validated path below, unaffected --
+         * this branch only runs for a slot outside today's thermo_count. */
+        char preserved_name[ZONE_NAME_MAX_LEN + 1];
+        strncpy(preserved_name, z->name, sizeof(preserved_name));
+        preserved_name[ZONE_NAME_MAX_LEN] = '\0';
+        uint8_t preserved_tc_type = z->tc_type;
+        *z = *current_z;
+        strncpy(z->name, preserved_name, ZONE_NAME_MAX_LEN);
+        z->name[ZONE_NAME_MAX_LEN] = '\0';
+        z->tc_type = preserved_tc_type;
         return true;
     }
 

@@ -324,7 +324,7 @@ function loadList() {
       div.className = 'card';
       var zoneList = [];
       for (var zb = 0; zb < 8; zb++) { if (p.zone_mask & (1 << zb)) zoneList.push(zb); }
-      div.innerHTML = '<span>' + p.name + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
+      div.innerHTML = '<span>' + window.kcEscapeHtml(p.name) + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
                        ', ' + p.segment_count + ' segments)</span>';
       var btnGroup = document.createElement('span');
       var editBtn = document.createElement('button');
