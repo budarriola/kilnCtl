@@ -6,6 +6,7 @@
 
 #include "kiln_ui.h"
 #include "ui_theme.h"
+#include "ui_page_zones.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
 
@@ -64,9 +65,11 @@ static const char *TAG = "ui_page_config";
 // ui_page_thermo_faults.c/.h -- all land on the same fixed-height,
 // internally scrollable grid LCD work-queue item 5 switched this to, so
 // growing the item count costs nothing beyond more scrolling inside `grid`):
-//   - Zones & Thermocouples, Relays & Rules -- still "not built yet"
-//     placeholders (non-clickable, dimmed text), unchanged from before this
-//     pass.
+//   - Zones & Thermocouples -- real navigation to ui_page_zones.c/.h
+//     (2026-08-21: thermo_mask/relay_mask/cal_offset_c/temp_limits editor,
+//     TODO.md section 3 / 10.8), no longer a "not built yet" placeholder.
+//   - Relays & Rules -- still a "not built yet" placeholder (non-clickable,
+//     dimmed text), unchanged from before this pass.
 //   - Temperature -- real navigation to ui_page_temperature.c/.h (manual
 //     relay control), moved here from ui_page_home.c's old dedicated nav
 //     button (see ui_page_home.c's header comment).
@@ -137,6 +140,12 @@ static void tc_types_nav_cb(lv_event_t *e)
 {
     (void)e;
     kiln_ui_show("tc_types");
+}
+
+static void zones_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("zones");
 }
 
 /* ROADMAP.md 2026-08-21 "a real shared temperature-unit setting": the hub's
@@ -482,7 +491,7 @@ lv_obj_t *ui_page_config_build(void)
     /* Page 1 (6 cells, full): the two not-yet-built placeholders sit here,
      * with the most frequently used real destinations, so the placeholders
      * never push a working page off the visible area. */
-    build_nav_item(s_hub_pages[0], "Zones & Thermocouples (not built yet)", NULL);
+    build_nav_item(s_hub_pages[0], "Zones & Thermocouples", zones_nav_cb);
     build_nav_item(s_hub_pages[0], "Relays & Rules (not built yet)", NULL);
     build_nav_item(s_hub_pages[0], "Temperature", temperature_nav_cb);
     build_nav_item(s_hub_pages[0], "Network / Wi-Fi", network_nav_cb);

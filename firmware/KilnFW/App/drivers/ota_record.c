@@ -23,9 +23,17 @@ static const char *TAG = "ota_record";
  * anything that later tries to load this record, rather than fail the
  * build. There is no loader in this first pass (see ota_record.h -- only
  * the most recent record is kept and nothing currently reads it back), but
- * pinning the size now costs nothing and pays off the day something does. */
-_Static_assert(sizeof(ota_record_t) == 148,
-               "ota_record_t layout changed -- bump OTA_RECORD_VERSION");
+ * pinning the size now costs nothing and pays off the day something does.
+ *
+ * A plain _Static_assert() here builds fine under ESP-IDF's GCC, but this
+ * file is ALSO compiled into App/test/build_host_tests.ps1's MSVC host-test
+ * binary (added 2026-08-21 alongside the image_sha256_hex field, so
+ * ota_record_fill() could get a real host test) -- and the cl.exe invocation
+ * that script uses compiles .c files in a C mode old enough that
+ * _Static_assert is a hard syntax error, not just unavailable. The classic
+ * negative-array-size trick below is portable C89/C99/C11 alike and checks
+ * exactly the same thing. */
+typedef char ota_record_t_size_check[(sizeof(ota_record_t) == 216) ? 1 : -1];
 
 /* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
  * are unusable -- identical to run_state.c's/relay_cycles.c's own
@@ -60,7 +68,7 @@ static void copy_str(char *dst, size_t cap, const char *src)
 
 void ota_record_fill(ota_record_t *out, uint32_t uptime_s, const char *processor,
                       const char *version_before, const char *version_after, bool success,
-                      const char *reason)
+                      const char *reason, const char *image_sha256_hex_or_null)
 {
     memset(out, 0, sizeof(*out));
     out->version = OTA_RECORD_VERSION;
@@ -70,6 +78,7 @@ void ota_record_fill(ota_record_t *out, uint32_t uptime_s, const char *processor
     copy_str(out->version_after, sizeof(out->version_after), version_after);
     out->success = success ? 1u : 0u;
     copy_str(out->reason, sizeof(out->reason), reason);
+    copy_str(out->image_sha256_hex, sizeof(out->image_sha256_hex), image_sha256_hex_or_null);
 }
 
 esp_err_t ota_record_append(const ota_record_t *rec)
@@ -108,9 +117,9 @@ esp_err_t ota_record_append(const ota_record_t *rec)
                  esp_err_to_name(err));
     } else {
         ESP_LOGI(TAG, "OTA update record saved: processor=%s success=%d reason=\"%s\" "
-                      "version %s -> %s",
+                      "version %s -> %s sha256=%s",
                  rec->processor, (int)rec->success, rec->reason, rec->version_before,
-                 rec->version_after);
+                 rec->version_after, rec->image_sha256_hex[0] ? rec->image_sha256_hex : "(none)");
     }
     return err;
 }

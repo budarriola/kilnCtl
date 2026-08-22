@@ -232,6 +232,7 @@ static int32_t s_chart_actual_pts[UI_PAGE_HOME_CHART_POINTS];
 static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
 
 static lv_obj_t *s_state_label;   /* "<profile> -- <state>" single line */
+static lv_obj_t *s_state_card;    /* parent of s_state_label -- recoloured whole when a safety trip is live */
 static lv_obj_t *s_time_label;
 static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_fire_btn;      /* merged Start/Stop button */
@@ -268,6 +269,39 @@ static void format_duration(uint32_t seconds, char *out, size_t out_cap)
         snprintf(out, out_cap, "%lu:%02lu:%02lu", (unsigned long)h, (unsigned long)m, (unsigned long)s);
     } else {
         snprintf(out, out_cap, "%lu:%02lu", (unsigned long)m, (unsigned long)s);
+    }
+}
+
+/* Mirrors SaftyFW's safety_guards.h SAFETY_TRIP_* enum, in words -- same
+ * mirrored-not-shared reasoning as profile_executor.c's own
+ * safety_trip_reason_words() and main_page.html's SAFETY_TRIP_WORDS (KilnFW
+ * cannot #include SaftyFW's header; three independent copies rather than one
+ * shared one because each surface owns its own file per this task's ownership
+ * split). Kept SHORT (unlike the other two copies) -- this string replaces
+ * the LCD's single-line "<profile> -- <state>" summary in place, and that
+ * label's line must not wrap: this page has zero spare height (see this
+ * file's header comment), so a run-on sentence here would grow the state
+ * card and push the page into a scroll, which is the one thing this page's
+ * "no scroll" rule cannot tolerate. Keep in sync with the other two tables
+ * if safety_guards.h's enum changes. */
+static const char *safety_trip_words_short(uint8_t reason)
+{
+    switch (reason) {
+    case 1:  return "S1 overtemp";
+    case 2:  return "S2 over setpoint";
+    case 3:  return "S3 relay stuck on";
+    case 5:  return "S5 sensor invalid";
+    case 6:  return "S6a main fault";
+    case 7:  return "S6b link dead";
+    case 8:  return "S7 E-stop";
+    case 9:  return "S8 rate of rise";
+    case 10: return "S9 INEFFECTIVE";
+    case 12: return "S11 frozen sensor";
+    case 13: return "S12 enclosure temp";
+    case 14: return "S13 stale data";
+    case 15: return "config corrupt";
+    case 16: return "self-test fail";
+    default: return "unknown guard";
     }
 }
 
@@ -793,15 +827,39 @@ static void refresh_cb(lv_timer_t *timer)
 
     /* Single-line "<profile> -- <state>" summary -- replaces the previous
      * two separate labels (profile name, state) to save a text line's worth
-     * of height (see this file's header comment on the budget). */
-    char state_buf[64];
-    if (st.state == PROFILE_EXEC_IDLE) {
+     * of height (see this file's header comment on the budget).
+     *
+     * ROADMAP.md "safety processor faults should stop firing and the GUI
+     * should reflect that, on both the LCD and web page": a live safety
+     * trip is the most serious thing this card can show, so it PREEMPTS the
+     * normal profile/state text entirely rather than adding a second line --
+     * this page has no spare height to add one (header comment budget), and
+     * profile_executor.c's watchdog already faults/latches any RUNNING run
+     * independently of this display. Gated on diag_age_ms < SAFETY_LINK_
+     * STALE_MS for the same reason profile_executor.c's watchdog gates its
+     * own FAULTED transition on it: a stale diag_state == TRIPPED is the
+     * silent-link case, not a live trip, and conflating the two here is
+     * exactly the "guard firing vs. dead peer" confusion the task calls out.
+     * Solid red fill (not just text colour) matches safety_page.html's own
+     * TRIP_INEFFECTIVE/S9 escalation -- every live trip gets it here, since
+     * "the run kept going while the kiln cooled" is the one failure mode this
+     * whole feature exists to make impossible to miss. */
+    bool safety_tripped = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                           ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+    char state_buf[96];
+    if (safety_tripped) {
+        snprintf(state_buf, sizeof(state_buf), "SAFETY TRIP -- %s",
+                 safety_trip_words_short(ds.diag_trip_reason));
+    } else if (st.state == PROFILE_EXEC_IDLE) {
         snprintf(state_buf, sizeof(state_buf), "No profile running");
     } else {
         snprintf(state_buf, sizeof(state_buf), "%s -- %s", st.profile_name[0] ? st.profile_name : "(unnamed)",
                  exec_state_label(st.state));
     }
     lv_label_set_text(s_state_label, state_buf);
+    lv_obj_set_style_bg_color(s_state_card, safety_tripped ? UI_THEME_ACCENT_5 : UI_THEME_COLOR_CARD, 0);
+    lv_obj_set_style_text_color(s_state_label,
+                                 safety_tripped ? lv_color_hex(0xFFFFFF) : UI_THEME_COLOR_TEXT_PRIMARY, 0);
 
     /* Merged fire button -- label and color follow the same st.state this
      * function already polled above. Running/Paused reads "Stop" in the
@@ -1103,6 +1161,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_flex_flow(state_card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_gap(state_card, UI_THEME_PADDING_PX / 4, 0);
     lv_obj_remove_flag(state_card, LV_OBJ_FLAG_SCROLLABLE);
+    s_state_card = state_card; /* refresh() recolours this whole card during a live safety trip */
 
     s_state_label = lv_label_create(state_card);
     lv_obj_set_style_text_color(s_state_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);

@@ -661,6 +661,16 @@ static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
     bool ota_began = false;
     const esp_partition_t *target = NULL;
 
+    // Image SHA-256, computed over exactly the bytes esp_ota_write() is
+    // given (the 24-byte header first, then every streamed chunk) -- a
+    // record of what was actually written, not a gate (see ota_record.h's
+    // header comment: nothing compares this against an expected value).
+    // Best-effort: a PSA failure here logs and leaves the record's hash
+    // field empty rather than failing an otherwise-good transfer over it.
+    psa_hash_operation_t sha_op = psa_hash_operation_init();
+    bool sha_op_active = false;
+    char sha_hex[OTA_RECORD_SHA256_HEX_MAX] = "";
+
     const esp_app_desc_t *running_desc = esp_app_get_description();
     const char *version_before = (running_desc && running_desc->version[0]) ? running_desc->version : "";
 
@@ -753,12 +763,23 @@ static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
         }
         ota_began = true;
 
+        psa_status_t hs = psa_hash_setup(&sha_op, PSA_ALG_SHA_256);
+        sha_op_active = (hs == PSA_SUCCESS);
+        if (!sha_op_active) {
+            ESP_LOGW(TAG, "OTA esp update from %s: psa_hash_setup failed (%d) -- record will have no "
+                          "image hash, transfer continues",
+                     ip, (int)hs);
+        }
+
         rc = esp_ota_write(handle, &hdr, sizeof(hdr));
         if (rc != ESP_OK) {
             set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_write (header) failed: %s", esp_err_to_name(rc));
             ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
             goto cleanup;
+        }
+        if (sha_op_active) {
+            (void)psa_hash_update(&sha_op, (const uint8_t *)&hdr, sizeof(hdr));
         }
     }
 
@@ -792,6 +813,9 @@ static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
                 ESP_LOGE(TAG, "OTA esp update from %s: %s", ip, fail_reason);
                 httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
                 goto cleanup;
+            }
+            if (sha_op_active) {
+                (void)psa_hash_update(&sha_op, s_ota_esp_chunk, (size_t)ret);
             }
             written += (size_t)ret;
 
@@ -864,13 +888,36 @@ cleanup:
         esp_ota_abort(handle);
     }
 
+    // Finish (on success -- the hash covers exactly the bytes that made it
+    // into the flash write path) or abort (on failure -- PSA requires every
+    // started operation to be finished or aborted, and a failed transfer's
+    // partial hash is not meaningful anyway) whatever hash operation was
+    // started above. sha_hex stays "" if no operation was ever started, or
+    // if psa_hash_finish() itself failed.
+    if (sha_op_active) {
+        if (ok) {
+            uint8_t digest[32];
+            size_t digest_len = 0;
+            psa_status_t hs = psa_hash_finish(&sha_op, digest, sizeof(digest), &digest_len);
+            if (hs == PSA_SUCCESS && digest_len == sizeof(digest)) {
+                hex_encode(digest, sizeof(digest), sha_hex);
+            } else {
+                ESP_LOGW(TAG, "OTA esp update from %s: psa_hash_finish failed (%d) -- record will "
+                              "have no image hash",
+                         ip, (int)hs);
+            }
+        } else {
+            (void)psa_hash_abort(&sha_op);
+        }
+    }
+
     esp_progress_set(ok ? OTA_HTTP_ESP_PHASE_DONE : OTA_HTTP_ESP_PHASE_FAILED,
                       ok ? 100 : s_esp_progress_pct);
 
     {
         ota_record_t rec;
         ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
-                         version_after, ok, fail_reason);
+                         version_after, ok, fail_reason, sha_hex);
         ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
     }
 
@@ -997,6 +1044,18 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     uint32_t crc = 0xFFFFFFFFu; // esp_rom_crc.h's own chaining recipe -- see this function's doc comment
     size_t written = 0;
 
+    // Image SHA-256 over every byte staged into pico_img -- same
+    // best-effort, record-not-gate reasoning as ota_esp_do_transfer()'s own
+    // copy of this pattern (see ota_record.h's header comment). The 32-byte
+    // digest (not the hex string) is handed to ota_pico_relay_start(),
+    // which owns turning it into the eventual ota_record_t for the Pico
+    // path -- this function's own job ends at "staged successfully, relay
+    // started."
+    psa_hash_operation_t sha_op = psa_hash_operation_init();
+    bool sha_op_active = false;
+    uint8_t sha_digest[32];
+    bool have_sha_digest = false;
+
     if (!s_safety) {
         snprintf(fail_reason, sizeof(fail_reason), "no safety link configured this boot -- nothing to relay to");
         ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
@@ -1055,6 +1114,16 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
         }
     }
 
+    {
+        psa_status_t hs = psa_hash_setup(&sha_op, PSA_ALG_SHA_256);
+        sha_op_active = (hs == PSA_SUCCESS);
+        if (!sha_op_active) {
+            ESP_LOGW(TAG, "OTA pico update from %s: psa_hash_setup failed (%d) -- record will have no "
+                          "image hash, staging continues",
+                     ip, (int)hs);
+        }
+    }
+
     // Stream the body into pico_img, one httpd_req_recv() per
     // esp_partition_write(), same "never read ahead of what has been
     // consumed" discipline as ota_esp_do_transfer() -- and the same reason
@@ -1087,6 +1156,9 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
             goto cleanup;
         }
         crc = esp_rom_crc32_le(crc, s_ota_pico_chunk, (uint32_t)ret);
+        if (sha_op_active) {
+            (void)psa_hash_update(&sha_op, s_ota_pico_chunk, (size_t)ret);
+        }
         written += (size_t)ret;
 
         int decile = (int)((written * 10u) / content_len);
@@ -1098,10 +1170,23 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     }
     crc ^= 0xFFFFFFFFu; // final XOR -- see this function's doc comment
 
+    if (sha_op_active) {
+        size_t digest_len = 0;
+        psa_status_t hs = psa_hash_finish(&sha_op, sha_digest, sizeof(sha_digest), &digest_len);
+        if (hs == PSA_SUCCESS && digest_len == sizeof(sha_digest)) {
+            have_sha_digest = true;
+        } else {
+            ESP_LOGW(TAG, "OTA pico update from %s: psa_hash_finish failed (%d) -- record will have no "
+                          "image hash",
+                     ip, (int)hs);
+        }
+        sha_op_active = false; // finished (or failed to finish) -- nothing left to abort in cleanup
+    }
+
     ESP_LOGI(TAG, "OTA pico update from %s: staged %u bytes to pico_img, crc32=0x%08X -- starting relay",
              ip, (unsigned)written, (unsigned)crc);
 
-    if (!ota_pico_relay_start(s_safety, (uint32_t)written, crc, NULL)) {
+    if (!ota_pico_relay_start(s_safety, (uint32_t)written, crc, NULL, have_sha_digest ? sha_digest : NULL)) {
         snprintf(fail_reason, sizeof(fail_reason), "image staged, but the relay task could not be started");
         ESP_LOGE(TAG, "OTA pico update from %s: %s", ip, fail_reason);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
@@ -1120,6 +1205,19 @@ static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
     }
 
 cleanup:
+    // Any goto above that fired while sha_op_active was still true left a
+    // PSA hash operation started-but-not-finished (a read/write failure
+    // mid-stream, staging failing before ota_pico_relay_start() -- the
+    // finish-or-fail-fast block above already turned sha_op_active back to
+    // false on every path that actually reached it). PSA requires every
+    // started operation to be finished or aborted; abort here rather than
+    // leak it, same "always release the resource this function borrowed"
+    // discipline as the ota_began/esp_ota_abort() cleanup in
+    // ota_esp_do_transfer().
+    if (sha_op_active) {
+        (void)psa_hash_abort(&sha_op);
+    }
+
     // Ownership handoff: if the relay task was successfully started, IT now
     // owns calling ota_http_update_end() (see ota_http.h's header comment
     // and ota_pico_relay.h's own for the full reasoning) -- calling it here
@@ -1266,7 +1364,7 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     // the partition table (esp_partition_t::label), and inactive_version
     // comes from the SAME struct field on a partition this build itself
     // wrote (or its factory-default) -- none of these are attacker-supplied.
-    char body[640];
+    char body[720];
     int n;
     if (have_record) {
         n = snprintf(body, sizeof(body),
@@ -1275,13 +1373,13 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
                       "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
                       "\"last_update\":"
                       "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
-                      "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u}}",
+                      "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u,\"image_sha256\":\"%s\"}}",
                       esp_phase_str(phase), (unsigned)percent,
                       running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
                       FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
                       rec.processor, rec.version_before,
                       rec.version_after, rec.success ? "true" : "false", rec.reason,
-                      (unsigned)rec.uptime_s);
+                      (unsigned)rec.uptime_s, rec.image_sha256_hex);
     } else {
         n = snprintf(body, sizeof(body),
                       "{\"phase\":\"%s\",\"percent\":%u,"
@@ -1412,8 +1510,12 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 
     {
         ota_record_t rec;
+        // No image hash for a rollback record -- this action reverts to the
+        // PREVIOUS image (already written and hashed, if at all, by whatever
+        // update put it there), it does not write new bytes for this record
+        // to hash.
         ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "esp", version_before,
-                         "", true, "rollback requested");
+                         "", true, "rollback requested", NULL);
         ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
     }
 

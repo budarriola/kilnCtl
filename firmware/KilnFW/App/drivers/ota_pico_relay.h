@@ -138,6 +138,14 @@ const char *ota_pico_relay_phase_str(ota_pico_relay_phase_t phase);
 // this pass (the raw uploaded body carries no filename or embedded version
 // string this code parses).
 //
+// `image_sha256_or_null`: 32 raw bytes (the caller, ota_http.c's
+// ota_pico_do_stage(), already hashed the staged image with PSA while
+// writing it into pico_img), or NULL if hashing failed/was skipped. This
+// module hex-encodes it (or leaves the field "" if NULL) into the
+// ota_record_t it appends once the relay reaches a terminal state -- see
+// relay_task_fn()'s `done:` label. Copied (not retained by pointer): the
+// caller's buffer does not need to outlive this call.
+//
 // Returns true if the task was started -- from that point on, THIS
 // function's caller must NOT call ota_http_update_end() itself; the relay
 // task now owns that (see this header's own top comment on the mutex
@@ -146,7 +154,7 @@ const char *ota_pico_relay_phase_str(ota_pico_relay_phase_t phase);
 // it) if a relay is already running, `link`/`image_length` are invalid, or
 // the FreeRTOS task could not be created.
 bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t image_crc32,
-                           const char *version16_or_null);
+                           const char *version16_or_null, const uint8_t image_sha256_or_null[32]);
 
 // Reads back the current/last relay status. Always writes *out (a zeroed,
 // PHASE_IDLE, empty-last_error struct before the first ever call). Safe

@@ -14,12 +14,13 @@ endif()
 # real browser does; the corresponding *_http.c handlers check the header
 # defensively before relying on that -- see TODO.md 10.6a's status note).
 #
-# zones_page.html is deliberately EXCLUDED from this list and stays embedded
-# raw: its handler lives in zones_http.c, which is owned by parallel work
-# this same session and is off-limits here. Gzipping it would rename its
-# embedded symbol (_binary_zones_page_html_start -> ..._html_gz_start) and
-# require editing zones_http.c's page_get_handler to match, which this pass
-# does not do. Named gap, recorded in TODO.md 10.6a.
+# zones_page.html is included here too (2026-08-21): it was the one holdout,
+# left raw because its handler lives in zones_http.c, owned by parallel work
+# at the time this list was first built. That work is done; zones_http.c's
+# page_get_handler now serves the gzip body via web_client_accepts_gzip()/
+# web_send_gzip_not_acceptable(), same as every other *_http.c handler in
+# this file's list, off the renamed _binary_zones_page_html_gz_start/_end
+# symbols.
 #
 # execute_process (configure-time), not add_custom_command (build-time):
 # idf_component_register's EMBED_TXTFILES list below is evaluated as soon as
@@ -56,7 +57,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         "rules_page.html" "profiles_page.html" "readiness_page.html" "theme.css"
         "ota_page.html" "nav.js" "app.js"
         "diagnostics_page.html" "safety_page.html" "thermo_faults_page.html"
-        "settings_page.html" "manual_page.html" "board_temps_page.html" "backup_page.html")
+        "settings_page.html" "manual_page.html" "board_temps_page.html" "backup_page.html"
+        "zones_page.html")
     set(KILNCTL_GZIP_ASSET_FILES "")
     foreach(asset ${KILNCTL_GZIP_ASSETS})
         set(kilnctl_gz_src "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
@@ -103,6 +105,7 @@ idf_component_register(SRCS "MAX31856.c"
                        "ui_page_diagnostics.c"
                        "ui_page_thermo_faults.c"
                        "ui_page_tc_types.c"
+                       "ui_page_zones.c"
                        "ui_page_touch_cal.c"
                        "ui_page_touch_test.c"
                        "ui_page_profiles.c"
@@ -171,7 +174,7 @@ idf_component_register(SRCS "MAX31856.c"
                        ${SIM_SRCS}
                        INCLUDE_DIRS "." "espInterfaces"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
-                       EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES} "zones_page.html"
+                       EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES}
                        REQUIRES esp_driver_i2c esp_driver_spi esp_driver_uart esp_driver_gpio
                                 esp_driver_tsens
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer

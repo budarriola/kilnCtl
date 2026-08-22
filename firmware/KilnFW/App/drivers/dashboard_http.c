@@ -187,6 +187,7 @@ void dashboard_get_status(dashboard_status_t *out)
             out->diag_warn_mask = sl.diag_warn_mask;
             out->diag_trip_mask = sl.diag_trip_mask;
             out->diag_state = sl.diag_state;
+            out->diag_age_ms = sl.age_ms;
             out->diag_context_age_100ms = sl.diag_context_age_100ms;
             out->diag_context_frames_ok = sl.diag_context_frames_ok;
             out->diag_context_frames_bad = sl.diag_context_frames_bad;
@@ -414,6 +415,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         APPEND(",\"diag_warn_mask\":%u", (unsigned)ds.diag_warn_mask);
         APPEND(",\"diag_trip_mask\":%u", (unsigned)ds.diag_trip_mask);
         APPEND(",\"diag_state\":%u", (unsigned)ds.diag_state);
+        APPEND(",\"diag_age_ms\":%u", (unsigned)ds.diag_age_ms);
         APPEND(",\"diag_context_age_100ms\":%u", (unsigned)ds.diag_context_age_100ms);
         APPEND(",\"diag_context_frames_ok\":%lu", (unsigned long)ds.diag_context_frames_ok);
         APPEND(",\"diag_context_frames_bad\":%lu", (unsigned long)ds.diag_context_frames_bad);

@@ -141,6 +141,19 @@ static void force_relays_off(void)
     heater_output_force_off(&s_at.heater_state);
     apply_relay(false);
     s_at.duty = 0.0f;
+    /* TODO.md 6A.6: release the RELAY_OWNER_AUTOTUNE claim begin_run_locked()
+     * took on this zone's mask. force_relays_off() is the one function every
+     * terminal path (finalize_fit(), finalize_relay_fit(),
+     * escalate_and_abort(), abort_locked()) calls before leaving the running
+     * states, so it's the single place the claim can be released without
+     * duplicating this at each call site. A relay no longer in the zone's
+     * mask (reconfigured mid-test) is simply not released here -- harmless,
+     * since relay_authority_claim_mask() only ever wrote owners for the bits
+     * that were in the mask it was given. */
+    uint8_t owned_mask = 0;
+    if (zones_config_get_relay_mask(s_at.zone_index, &owned_mask) && owned_mask != 0) {
+        relay_authority_release_mask(owned_mask);
+    }
 }
 
 /* Same escalation split as profile_executor.c's escalate_guard_trip() --
@@ -789,6 +802,14 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
     s_at.trace_count = 0;
     s_at.abort_reason[0] = '\0';
     s_at.per_zone_blocked = false;
+
+    /* TODO.md 6A.6: claim this zone's relays for the duration of the run, same
+     * shape as profile_executor.c's RELAY_OWNER_PROFILE claim -- see
+     * force_relays_off()'s matching release and relay_authority.h's
+     * RELAY_OWNER_AUTOTUNE doc comment for why this exists. `mask` was already
+     * validated non-zero above (before this function took the lock), so this
+     * cannot silently claim nothing. */
+    relay_authority_claim_mask(mask, RELAY_OWNER_AUTOTUNE);
     /* Both results are invalidated at the start of every run, whichever method
      * follows: exactly one of them will be filled in, and a stale `valid` from
      * the previous run would let autotune_engine_accept() write gains this run

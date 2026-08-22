@@ -69,6 +69,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "esp_err.h"
 
@@ -93,6 +95,147 @@ typedef enum {
                               * stays here until profile_executor_halt() explicitly acknowledges it
                               * (latching, TODO.md 6A.3) */
 } profile_exec_state_t;
+
+/* ---- Guard 9's pure decision core (ROADMAP.md "safety processor faults
+ * should stop firing" pass) -------------------------------------------------
+ * Pulled out of profile_executor.c's watchdog_task_entry() into a pure,
+ * dependency-free `static inline` function so it can be host-tested without
+ * pulling in FreeRTOS/kiln_io/relay_authority/etc -- the same "pure logic
+ * lives in its own file so it can be tested without this one" split this
+ * header's own top comment already describes for pid.h/thermal_guard.h,
+ * applied to the one piece of watchdog_task_entry() that is itself pure
+ * (everything else in that task is I/O: the safety_link_get_status() call,
+ * s_exec.lock, kiln_io_all_relays_off(), run_state_note()). All of that I/O
+ * stays exactly where it was, entirely inside watchdog_task_entry() -- this
+ * function only classifies "given what the caller already learned this
+ * tick, what should happen," and touches nothing itself. Called from inside
+ * s_exec.lock, same as the code it replaces; it does no locking or I/O of
+ * its own so that's still the caller's discipline to keep, not this
+ * function's job to enforce. */
+typedef enum {
+    PROFILE_EXECUTOR_WD_ACTION_NONE = 0,            /* nothing to do this tick */
+    PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF,    /* already FAULTED; keep retrying the relay-off write, no new fault */
+    PROFILE_EXECUTOR_WD_ACTION_FAULT,               /* RUNNING/PAUSED -> FAULTED: relays off once, latch fault_reason */
+    PROFILE_EXECUTOR_WD_ACTION_LOG_IDLE_TRIP,       /* trip reported with no run to abort -- log only, no state change */
+} profile_executor_wd_action_t;
+
+typedef struct {
+    bool     tick_stale;               /* control task's own liveness tick is too old (guard 9 proper) */
+    uint32_t tick_stale_ms;            /* how long, for the fault_reason text; meaningful only if tick_stale */
+    bool     safety_processor_tripped; /* diag_state == TRIPPED off a FRESH (non-stale) DIAG frame --
+                                         * the caller is responsible for the staleness gate (against
+                                         * SAFETY_LINK_STALE_MS) before setting this, same as the
+                                         * caller already gates safety_link_silent_30s below against
+                                         * its own, much larger threshold. */
+    uint8_t  safety_trip_reason;       /* SAFETY_TRIP_* (SaftyFW's safety_guards.h); meaningful only if
+                                         * safety_processor_tripped */
+    bool     safety_link_silent_30s;   /* link silent >= SAFETY_LINK_FIRING_ABORT_SILENCE_MS */
+    bool     state_running_or_paused;  /* s_exec.state == PROFILE_EXEC_RUNNING || PROFILE_EXEC_PAUSED */
+    bool     state_faulted;            /* s_exec.state == PROFILE_EXEC_FAULTED */
+} profile_executor_wd_input_t;
+
+typedef struct {
+    profile_executor_wd_action_t action;
+    char fault_reason[96];  /* only meaningful when action == PROFILE_EXECUTOR_WD_ACTION_FAULT --
+                              * same size as profile_exec_status_t.fault_reason below */
+} profile_executor_wd_result_t;
+
+/* Mirrors SaftyFW's safety_guards.h SAFETY_TRIP_* enum, in words -- KilnFW
+ * cannot #include that header (a separate build/repository). This is the
+ * one shared copy; main_page.html's SAFETY_TRIP_WORDS and ui_page_home.c's
+ * safety_trip_words_short() are independent, differently-sized copies for
+ * their own surfaces (a 96-byte fault_reason has room for the full sentence
+ * this table returns; the LCD's single, unwrappable summary line does not).
+ * Keep all three in sync if safety_guards.h's enum changes. */
+static inline const char *profile_executor_safety_trip_words(uint8_t reason)
+{
+    switch (reason) {
+    case 0:  return "none";
+    case 1:  return "overtemp (S1)";
+    case 2:  return "over setpoint (S2)";
+    case 3:  return "load stuck on (S3)";
+    case 5:  return "sensor invalid (S5)";
+    case 6:  return "main processor fault (S6a)";
+    case 7:  return "safety link dead (S6b)";
+    case 8:  return "E-stop (S7)";
+    case 9:  return "rate of rise (S8)";
+    case 10: return "TRIP_INEFFECTIVE -- heater still energised (S9)";
+    case 12: return "frozen sensor (S11)";
+    case 13: return "enclosure overtemp (S12)";
+    case 14: return "borrowed data stale (S13)";
+    case 15: return "config corrupt";
+    case 16: return "self-test failure";
+    default: return "unknown guard";
+    }
+}
+
+static inline profile_executor_wd_result_t profile_executor_wd_decide(const profile_executor_wd_input_t *in)
+{
+    profile_executor_wd_result_t out;
+    memset(&out, 0, sizeof(out));
+    out.action = PROFILE_EXECUTOR_WD_ACTION_NONE;
+
+    if (in->tick_stale) {
+        /* Guard 9 proper: the caller forces relays off unconditionally for
+         * this case regardless of what this function returns (see this
+         * header's comment above) -- this only decides whether a RUNNING/
+         * PAUSED run also latches FAULTED over it. */
+        if (in->state_running_or_paused) {
+            out.action = PROFILE_EXECUTOR_WD_ACTION_FAULT;
+            snprintf(out.fault_reason, sizeof(out.fault_reason),
+                     "control task tick stale for %lums", (unsigned long)in->tick_stale_ms);
+        }
+        return out;
+    }
+
+    if (in->safety_processor_tripped && in->state_running_or_paused) {
+        /* The gap this whole pass closes: a live safety-processor trip is a
+         * GLOBAL abort, same as any other global guard here -- fail closed,
+         * and name the actual guard in words, distinct from the silent-link
+         * wording below on purpose (a guard firing and a dead peer are
+         * different failures an operator needs to tell apart). */
+        out.action = PROFILE_EXECUTOR_WD_ACTION_FAULT;
+        snprintf(out.fault_reason, sizeof(out.fault_reason),
+                 "safety processor tripped: %s, firing aborted",
+                 profile_executor_safety_trip_words(in->safety_trip_reason));
+        return out;
+    }
+
+    if (in->safety_processor_tripped && in->state_faulted) {
+        /* Already faulted (this cause or another) but the Pico still
+         * reports the trip latched -- keep retrying the relay-off write,
+         * "dropped and retried until the write succeeds" (LINK_PROTOCOL.md
+         * sec 8), without touching fault_reason so whichever cause faulted
+         * the run first keeps its own wording. */
+        out.action = PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF;
+        return out;
+    }
+
+    if (in->safety_link_silent_30s && in->state_running_or_paused) {
+        out.action = PROFILE_EXECUTOR_WD_ACTION_FAULT;
+        snprintf(out.fault_reason, sizeof(out.fault_reason),
+                 "safety processor link silent for >=%lums, firing aborted",
+                 (unsigned long)SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+        return out;
+    }
+
+    if (in->safety_link_silent_30s && in->state_faulted) {
+        out.action = PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF;
+        return out;
+    }
+
+    if (in->safety_processor_tripped) {
+        /* Tripped with nothing RUNNING/PAUSED/FAULTED (IDLE or DONE) -- must
+         * NOT fabricate a FAULTED run out of nothing: there is no schedule
+         * to stop advancing and no run-specific relay state to drop
+         * (kiln_io_init() already brings relays up off, and relay_authority
+         * independently refuses new relay-on while the Pico reports a trip,
+         * same as it already does for the unhealthy-link case). Log only. */
+        out.action = PROFILE_EXECUTOR_WD_ACTION_LOG_IDLE_TRIP;
+    }
+
+    return out;
+}
 
 /* Per-zone status within the current (or last) run. Only zones[i] with
  * .active == true participated in this run -- the rest are zeroed. */

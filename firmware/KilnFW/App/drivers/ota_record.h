@@ -18,12 +18,35 @@
 // build deliberately -- not something to half-build here by adding a
 // sequence counter nobody reads.
 //
-// Also not real yet, and said so plainly rather than left to look finished:
-// UPDATE_PROTOCOL.md asks for "image SHA-256". Computing that would mean
-// hashing the whole image as it streams past in ota_http.c's transfer loop
-// (mbedtls/PSA is already linked, see ota_http.c's hmac_sha256() for the
-// precedent) -- straightforward, but not built this pass; ota_record_t has
-// no hash field. version_before/version_after ARE real: version_before is
+// UPDATE.2026-08-21: "image SHA-256" is now real, not flagged. `image_sha256_hex`
+// below is populated by hashing the image as it streams past -- ota_http.c's
+// ota_esp_do_transfer() feeds every byte written via esp_ota_write() (the
+// 24-byte header included) through a psa_hash_operation_t
+// (PSA_ALG_SHA_256), and ota_pico_do_stage() does the same for every byte
+// written into pico_img, finishing the hash once the whole body has
+// streamed through and handing the raw 32 bytes to
+// ota_pico_relay_start(), which is the one that actually calls
+// ota_record_append() for the Pico path (see ota_pico_relay.c's `done:`
+// label -- this file's own header comment used to note that NO record was
+// ever written for a Pico update at all; that gap closes in the same change
+// that adds the hash field, since a hash with nowhere to land would be
+// exactly the "computed but not recorded" half-measure this file already
+// warns against for the plain fields).
+//
+// What this hash is FOR, stated plainly: **a record, not a gate.** Nothing
+// in this codebase compares it against an expected value and refuses a
+// flash on mismatch -- there is no "expected SHA-256" to compare against
+// (the operator did not supply one, and neither protocol carries one in
+// today's wire format). It exists so that "which exact bytes were written
+// during update N" is answerable after the fact from NVS, matching
+// CommonFW/docs/UPDATE_PROTOCOL.md's "For a device that can start a fire,
+// 'which firmware was running when that happened' should not depend on
+// someone remembering." A future pass could turn this into a real gate
+// (operator-supplied expected hash, refuse on mismatch) -- that is a
+// different, larger feature (a source of truth for "expected" has to come
+// from somewhere) and is not what this pass builds.
+//
+// version_before/version_after ARE real: version_before is
 // esp_app_get_description()->version for the running image, version_after
 // is esp_ota_get_partition_description() read back from the partition that
 // was just written, both filled by ota_http.c's transfer handler, not
@@ -53,11 +76,13 @@
 extern "C" {
 #endif
 
-#define OTA_RECORD_VERSION 1u
+#define OTA_RECORD_VERSION 2u  // bumped 2026-08-21: image_sha256_hex added below
 
 #define OTA_RECORD_PROCESSOR_MAX     8  // "esp" or "pico" + NUL, with room to spare
 #define OTA_RECORD_VERSION_STR_MAX  32  // matches esp_app_desc_t::version's own size
 #define OTA_RECORD_REASON_MAX       64  // same precedent as ota_interlock.h's OTA_INTERLOCK_REASON_MAX
+#define OTA_RECORD_SHA256_HEX_MAX   65  // 64 hex chars + NUL, "" if hashing was never attempted
+                                         // (e.g. staging failed before any bytes streamed)
 
 // The record persisted to NVS. Explicit reserved padding for alignment, same
 // discipline run_state.c's header comment insists on for its own record --
@@ -78,15 +103,30 @@ typedef struct {
     char     reason[OTA_RECORD_REASON_MAX];               // "ok", or the specific failure -- never a
                                                             // generic string, same convention as
                                                             // ota_interlock.h's refusal reasons
+    char     image_sha256_hex[OTA_RECORD_SHA256_HEX_MAX]; // lowercase hex, SHA-256 over every byte
+                                                            // written (ESP: esp_ota_write() calls,
+                                                            // header included; Pico: esp_partition_write()
+                                                            // calls into pico_img) -- "" if hashing was
+                                                            // never attempted for this record. A RECORD,
+                                                            // not a gate -- see this file's header comment.
+    uint8_t  reserved2[3];                                 // pads to a 4-byte-aligned total, same
+                                                            // explicit-padding discipline as reserved0/1
+                                                            // above rather than relying on invisible
+                                                            // compiler tail padding
 } ota_record_t;
 
 // Fills `out` from the given fields, NUL-terminating and truncating any
 // string that doesn't fit rather than overflowing. Pure -- no ESP-IDF call,
 // no I/O -- see this file's header comment for why it isn't split out and
 // host-tested separately.
+// `image_sha256_hex_or_null`: lowercase hex string (any length; truncated to
+// fit OTA_RECORD_SHA256_HEX_MAX-1 like every other string field here), or
+// NULL/"" if no hash was computed for this record (e.g. staging failed
+// before any bytes were hashed) -- stored as "" in that case, never a
+// placeholder that could be mistaken for a real hash.
 void ota_record_fill(ota_record_t *out, uint32_t uptime_s, const char *processor,
                       const char *version_before, const char *version_after, bool success,
-                      const char *reason);
+                      const char *reason, const char *image_sha256_hex_or_null);
 
 // Overwrites the single stored record in KILN_NVS_PARTITION (same partition
 // run_state.c/relay_cycles.c/zones_http.c already share, each managing its

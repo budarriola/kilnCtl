@@ -147,6 +147,18 @@
   .banner .row { display: flex; justify-content: space-between; margin-bottom: 0.2em;
                  color: var(--muted); }
   .banner .note { color: var(--muted); font-style: italic; margin-top: 0.5em; }
+  /* Safety-processor trip: the most serious state this page can report, so it
+     gets a SOLID fill rather than lastRunBanner's border-only treatment --
+     same escalation safety_page.html already applies to an ordinary trip
+     (border) vs. TRIP_INEFFECTIVE/S9 (solid fill) -- here every live trip
+     gets the solid treatment because "the run kept going while the kiln
+     cooled" is exactly the failure this banner exists to make impossible to
+     miss. ineffective (S9) gets stronger wording still, matching that same
+     precedent's extra emphasis, without a second element/colour. */
+  .banner.safety-trip { background: var(--fault-color); border-color: var(--fault-color);
+                        border-left-color: var(--fault-color); }
+  .banner.safety-trip h3, .banner.safety-trip .row, .banner.safety-trip .row span,
+  .banner.safety-trip .note { color: #fff; }
   /* 2026-08-21 rework item 11: relay status shown next to each channel's
      temperature, sourced by joining zonesCache (thermo_mask/relay_mask,
      already loaded once by loadZones() -- see script below) against
@@ -173,6 +185,14 @@
      pageTitle() -- this page's bare <title>kilnCtl</title> has no page name
      of its own to reuse, so that function maps it to "Dashboard" specially),
      so the heading duplicated it. -->
+<!-- The safety-processor trip banner sits ABOVE lastRunBanner: a live trip is
+     more urgent than a record of how the previous firing ended, and per the
+     "must not look like an ordinary stop" requirement it needs to out-rank
+     that banner visually as well as in reading order. Empty by default
+     (renderSafetyTrip() below only ever fills it in, matching lastRunBanner's
+     own hide-when-nothing-to-report pattern) -- never rendered as a green/
+     blank "all clear" card, just absent when there is nothing to report. -->
+<div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
 <!-- 2026-08-21 rework items 9/10: reordered so firing-profile status/picker
@@ -561,6 +581,50 @@ function renderProgress(st) {
 // reading whose truth depends on the device answering right now; they
 // aren't. The °C figure below still runs through kcUnit.fmt() for unit
 // parity, just without the live-value class.
+// Mirrors SaftyFW's safety_guards.h SAFETY_TRIP_* enum, in words -- same
+// mirrored-not-shared reasoning as profile_executor.c's
+// safety_trip_reason_words() (KilnFW/SaftyFW are separate build targets;
+// this firmware genuinely has no header to #include here). Keep in sync
+// with that C table and with safety_guards.h's own enum if it changes.
+var SAFETY_TRIP_WORDS = {
+  0: 'none', 1: 'overtemp (S1)', 2: 'over setpoint (S2)', 3: 'load stuck on (S3)',
+  5: 'sensor invalid (S5)', 6: 'main processor fault (S6a)', 7: 'safety link dead (S6b)',
+  8: 'E-stop (S7)', 9: 'rate of rise (S8)', 10: 'TRIP_INEFFECTIVE (S9)',
+  12: 'frozen sensor (S11)', 13: 'enclosure overtemp (S12)', 14: 'borrowed data stale (S13)',
+  15: 'config corrupt', 16: 'self-test failure'
+};
+function safetyTripWords(reason) { return SAFETY_TRIP_WORDS[reason] || 'unknown guard'; }
+
+// The gap this closes: relay_authority already blocks new relay-on while the
+// safety processor reports a trip, but until this pass nothing on this page
+// ever looked at diag_state, so a live trip looked exactly like an ordinary
+// firing in progress while the kiln quietly cooled. SAFETY_LINK_STALE_MS
+// (1500, safety_link.h) gates this the same way profile_executor.c's
+// watchdog gates its own FAULTED transition: a diag_state == TRIPPED read off
+// a frame that old is the "link went silent" case, not a live trip, and
+// showing it here as a fresh trip would blur exactly the distinction the
+// task calls out (guard firing vs. dead peer). Absent/stale diag data never
+// renders as safe -- it renders as nothing (banner hidden), never a green
+// "all clear," matching the rest of this page's stale-data convention.
+var SAFETY_LINK_DIAG_STATE_TRIPPED = 4;
+var SAFETY_LINK_STALE_MS = 1500;
+function renderSafetyTrip(data) {
+  var el = document.getElementById('safetyTripBanner');
+  var tripped = data.diag_ever_received && data.diag_state === SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                typeof data.diag_age_ms === 'number' && data.diag_age_ms < SAFETY_LINK_STALE_MS;
+  if (!tripped) { el.innerHTML = ''; return; }
+  var reason = data.diag_trip_reason;
+  var ineffective = reason === 10;
+  var words = safetyTripWords(reason);
+  el.innerHTML = '<div class="banner safety-trip">' +
+    '<h3>' + (ineffective ? '!! SAFETY TRIP -- TRIP_INEFFECTIVE !!' : 'SAFETY PROCESSOR TRIPPED') + '</h3>' +
+    '<div class="row"><span>Reason</span><span>' + words + '</span></div>' +
+    '<div class="row"><span>Heat</span><span>relays blocked off by the safety processor</span></div>' +
+    (ineffective ? '<p class="note">Power may still be flowing to the load. Go to the breaker, not the kiln.</p>' : '') +
+    '<p class="note">Any firing in progress has been aborted and will not resume. ' +
+    'Clear the trip on the safety processor before starting a new firing.</p></div>';
+}
+
 function renderLastRun(st) {
   const el = document.getElementById('lastRunBanner');
   const lr = st.last_run;
@@ -1026,6 +1090,7 @@ function poll() {
     // one-time-fetch fallback for pages that never poll /api/status at all).
     window.kcUnit.updateFromStatus(data);
     renderChannels(data);
+    renderSafetyTrip(data);
     // Idle dots are a LIVE temperature display (same data as the channel
     // cards above), so they refresh on this 2s status poll, not history.csv's
     // slower 15s one -- a firing that's still idle should show the dots

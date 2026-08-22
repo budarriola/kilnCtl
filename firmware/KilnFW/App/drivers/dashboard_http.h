@@ -152,6 +152,17 @@ typedef struct {
     uint16_t diag_warn_mask;
     uint16_t diag_trip_mask;
     uint8_t  diag_state;
+    /* How old the DIAG frame this diag_state/diag_trip_reason came from is --
+     * shares safety_link_status_t's single cached_tick with the overall link
+     * age (safety_link.c), so this is that same age, exposed under the diag_
+     * name for callers reasoning about diag_state specifically. The GUI's
+     * "safety processor tripped" banner (main_page.html/ui_page_home.c) must
+     * not act on a stale diag_state == TRIPPED left over from before the
+     * link went silent -- that case is already the distinct "link is dead"
+     * message, not a live trip -- so it gates on this being fresher than
+     * SAFETY_LINK_STALE_MS (safety_link.h), same threshold
+     * safety_link_send_clear_trip() already uses to judge the same data. */
+    uint16_t diag_age_ms;
     uint8_t  diag_context_age_100ms;
     uint32_t diag_context_frames_ok;
     uint32_t diag_context_frames_bad;

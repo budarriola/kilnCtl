@@ -26,6 +26,7 @@
 #include "ui_page_thermo_faults.h"
 #include "ui_page_touch_cal.h"
 #include "ui_page_touch_test.h"
+#include "ui_page_zones.h"
 #include "touch_cal_store.h"
 #include "lvgl_port.h"
 
@@ -184,6 +185,20 @@ esp_err_t kiln_ui_init(void)
      * third page (that file's UI_CONFIG_HUB_PAGE_COUNT went 2 -> 3 because
      * both existing pages were already full -- see its own header comment). */
     err = kiln_ui_register_page("tc_types", ui_page_tc_types_build);
+    if (err != ESP_OK) return err;
+
+    /* TODO.md 406/section 3, 10.8: LCD equivalent of the web zones page's
+     * per-zone thermo_mask/relay_mask/cal_offset_c/temp_limits editor -- see
+     * ui_page_zones.c's header comment for the two-page (list; paged detail)
+     * layout and what stayed deliberately out of scope. Linked from
+     * ui_page_config.c's "Zones & Thermocouples" hub cell, which was a
+     * non-clickable "not built yet" placeholder until now. "zones_detail" is
+     * a second registered page, only ever reached via
+     * ui_page_zones_detail_prepare() + kiln_ui_show("zones_detail"), never
+     * linked to directly. */
+    err = kiln_ui_register_page("zones", ui_page_zones_build);
+    if (err != ESP_OK) return err;
+    err = kiln_ui_register_page("zones_detail", ui_page_zones_detail_build);
     if (err != ESP_OK) return err;
 
     /* NS2009 touch calibration -- see ui_page_touch_cal.c/.h. Linked from

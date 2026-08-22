@@ -13,6 +13,7 @@
 #include "http_form.h"
 #include "kiln_io.h"
 #include "thermo_owner.h"
+#include "web_encoding.h"
 #include "wifi_provision_http.h"
 
 static const char *TAG = "zones_http";
@@ -77,10 +78,12 @@ static const char *TAG = "zones_http";
  * the EXACT same ceiling parse_zone_fields() below enforces -- see
  * zones_http.h for the full rationale. */
 
-/* Embedded via EMBED_TXTFILES in CMakeLists.txt -- same convention as
- * wifi_provision_http.c's embedded pages. */
-extern const uint8_t zones_page_html_start[] asm("_binary_zones_page_html_start");
-extern const uint8_t zones_page_html_end[] asm("_binary_zones_page_html_end");
+/* Embedded via EMBED_TXTFILES, pre-gzipped at configure time by
+ * App/drivers/CMakeLists.txt -- same convention as every other *_page.html
+ * in this component (see web_encoding.h's header comment for the flash-
+ * budget reasoning that makes gzip the only stored representation). */
+extern const uint8_t zones_page_html_gz_start[] asm("_binary_zones_page_html_gz_start");
+extern const uint8_t zones_page_html_gz_end[] asm("_binary_zones_page_html_gz_end");
 
 /* One zone per configured thermocouple channel -- see zones_http.h. Bounded
  * by the hardware, not by anything a client can grow. */
@@ -1113,11 +1116,20 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c)
 
 /* ---- HTTP handlers --------------------------------------------------------- */
 
+/* Same content-negotiation shape as diagnostics_http.c's send_gz_page():
+ * web_client_accepts_gzip() covers the "no Accept-Encoding header" (legal,
+ * served gzip per RFC 9110 s12.5.3) and "header present but excludes gzip"
+ * (406, since this server keeps no uncompressed copy) cases; see
+ * web_encoding.h for the full rationale. */
 static esp_err_t page_get_handler(httpd_req_t *req)
 {
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "zones_page.html");
+    }
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, (const char *)zones_page_html_start,
-                           (size_t)(zones_page_html_end - zones_page_html_start));
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, (const char *)zones_page_html_gz_start,
+                           (size_t)(zones_page_html_gz_end - zones_page_html_gz_start));
 }
 
 /* Same escaping convention as wifi_provision_http.c's json_escape -- a zone

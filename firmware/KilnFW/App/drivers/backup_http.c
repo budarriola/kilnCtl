@@ -288,16 +288,19 @@ static esp_err_t backup_export_get_handler(httpd_req_t *req)
                                 (double)runaway_rate_c_per_min, (double)runaway_margin_c,
                                 (double)drift_period_s);
             backup_stream_printf(&s, "\"guard_sensor_fault_debounce_ticks\":%.0f,\"guard_frozen_window_s\":%.1f,"
-                                "\"cross_zone_max_delta_c\":%.1f,",
+                                "\"cross_zone_max_delta_c\":%.1f",
                                 (double)sensor_fault_debounce_ticks, (double)frozen_window_s,
                                 (double)cross_zone_max_delta_c);
         }
-        /* Trailing comma above is always followed by a real key (a JSON
-         * object can never end on ",}" here) since every entry that reaches
-         * this point already emitted pid_kp -- close with a dummy-free
-         * closer by re-emitting index would be wasteful; instead close on a
-         * field guaranteed present. Simplify: always end on a fixed key. */
-        backup_stream_printf(&s, "\"_\":0}");
+        /* cross_zone_max_delta_c above is the last key of this object and is
+         * always emitted (every entry that reaches this point already
+         * emitted pid_kp, have_model/have_tc are the only optional keys and
+         * both come before this block) -- no trailing-comma guard needed, so
+         * this just closes the object. Previously emitted a junk "_":0
+         * sentinel key here purely to dodge a trailing comma; removed
+         * (2026-08-21) since every real key already has a place before the
+         * close. */
+        backup_stream_printf(&s, "}");
     }
     backup_stream_printf(&s, "]");
 

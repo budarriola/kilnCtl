@@ -33,4 +33,17 @@ static inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t task, const char
 
 static inline void vTaskDelete(TaskHandle_t task) { (void)task; }
 
+/* 2026-08-21: added for uart_log_bridge.c's host test. uart_log_vprintf()
+ * calls this to detect (and drop) a log line produced by its own sender
+ * task, by comparing against uart_log_bridge_t.sender_task -- which is
+ * zero-initialized (NULL) until uart_log_bridge_start() runs, exactly the
+ * state the host tests exercise (they call uart_log_vprintf() directly,
+ * never uart_log_bridge_start()). Returning NULL here too would make every
+ * call look like it came from the (nonexistent) sender task and get
+ * silently self-filtered -- a stub artifact, not real firmware behavior
+ * (on target, "no task" is never a real return value here). A fixed
+ * non-NULL sentinel keeps "current task == sender_task" false, matching
+ * every real caller before the sender task exists. */
+static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)1; }
+
 #endif // TEST_STUB_TASK_H

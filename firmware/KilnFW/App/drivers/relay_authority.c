@@ -76,5 +76,5 @@ void relay_authority_release_mask(uint8_t relay_mask)
 bool relay_authority_manual_blocked_by_owner(uint8_t relay_index)
 {
     relay_owner_t owner = relay_authority_get_owner(relay_index);
-    return owner == RELAY_OWNER_PROFILE || owner == RELAY_OWNER_RULE;
+    return owner == RELAY_OWNER_PROFILE || owner == RELAY_OWNER_RULE || owner == RELAY_OWNER_AUTOTUNE;
 }

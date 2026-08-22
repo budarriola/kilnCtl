@@ -633,6 +633,65 @@ static void test_overlong_zone_name_rejected(void)
     TEST_CHECK(g_total_write_calls == 0, "nothing written -- not even pid_kp/ki/kd from the same entry");
 }
 
+// 2026-08-21, item 2 of the owner-report pass: backup_http.c's export used to
+// emit a junk "_":0 trailing-comma-guard key as the last key of every zone
+// object (removed now that the comma is emitted before each field after the
+// first instead). Two directions must both still import cleanly under THIS
+// build: a v2 body that never had the sentinel (what this build now
+// exports), and a v2 body that DOES still carry it (what firmware already
+// live on the bench exported before this fix, and may still be handed to
+// this build as a restore file).
+static void test_v2_body_without_sentinel_imports(void)
+{
+    TEST_SECTION("backup_import_apply -- v2 body with no \"_\" sentinel key imports cleanly (new export shape)");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1.5,\"pid_ki\":0.2,\"pid_kd\":0.05,"
+        "\"name\":\"Top\",\"relay_mask\":1,\"thermo_mask\":1,"
+        "\"cal_offset_c\":0,\"max_ramp_c_per_hr\":100,\"sanity_rate_c_per_min\":0,\"control_mode\":0,"
+        "\"max_temp_c\":1300,\"min_temp_c\":-20,\"heater_window_ms\":1000,"
+        "\"heater_min_on_ms\":0,\"heater_min_off_ms\":0,"
+        "\"guard_wrong_dir_window_s\":0,\"guard_wrong_dir_rate_c_per_min\":0,\"guard_off_settle_s\":0,"
+        "\"guard_runaway_rate_c_per_min\":0,\"guard_runaway_margin_c\":0,\"guard_drift_period_s\":0,"
+        "\"guard_sensor_fault_debounce_ticks\":0,\"guard_frozen_window_s\":0,"
+        "\"cross_zone_max_delta_c\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    (void)err;
+    TEST_CHECK(ok, "a well-formed v2 zone entry with no sentinel key must import");
+    TEST_CHECK(s_writes[0].set_pid_called, "pid gains committed");
+    TEST_CHECK(s_writes[0].set_xzone_called, "the real last key, cross_zone_max_delta_c, was reached and committed");
+}
+
+static void test_v2_body_with_stale_sentinel_still_imports(void)
+{
+    TEST_SECTION("backup_import_apply -- v2 body WITH the old \"_\":0 sentinel still imports (bench firmware's export)");
+    reset_stub_state();
+
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1.5,\"pid_ki\":0.2,\"pid_kd\":0.05,"
+        "\"name\":\"Top\",\"relay_mask\":1,\"thermo_mask\":1,"
+        "\"cal_offset_c\":0,\"max_ramp_c_per_hr\":100,\"sanity_rate_c_per_min\":0,\"control_mode\":0,"
+        "\"max_temp_c\":1300,\"min_temp_c\":-20,\"heater_window_ms\":1000,"
+        "\"heater_min_on_ms\":0,\"heater_min_off_ms\":0,"
+        "\"guard_wrong_dir_window_s\":0,\"guard_wrong_dir_rate_c_per_min\":0,\"guard_off_settle_s\":0,"
+        "\"guard_runaway_rate_c_per_min\":0,\"guard_runaway_margin_c\":0,\"guard_drift_period_s\":0,"
+        "\"guard_sensor_fault_debounce_ticks\":0,\"guard_frozen_window_s\":0,"
+        "\"cross_zone_max_delta_c\":0,\"_\":0}]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    (void)err;
+    TEST_CHECK(ok, "an old-shaped v2 zone entry carrying the now-removed \"_\":0 sentinel must still import "
+                  "under this build");
+    TEST_CHECK(s_writes[0].set_pid_called, "pid gains committed even with the stale sentinel key present");
+    TEST_CHECK(s_writes[0].set_xzone_called, "cross_zone_max_delta_c still committed despite the trailing junk key");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -641,4 +700,6 @@ void run_test_backup_import(void)
     test_version1_body_imports_under_v2_reader();
     test_out_of_range_model_rejected();
     test_overlong_zone_name_rejected();
+    test_v2_body_without_sentinel_imports();
+    test_v2_body_with_stale_sentinel_still_imports();
 }

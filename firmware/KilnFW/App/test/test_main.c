@@ -21,6 +21,9 @@ void run_test_profile_feasibility(void);
 void run_test_profile_plan_curve(void);
 void run_test_wifi_prov(void);
 void run_test_backup_import(void);
+void run_test_ota_record(void);
+void run_test_uart_log_bridge(void);
+void run_test_safety_watchdog(void);
 
 int main(void)
 {
@@ -38,6 +41,9 @@ int main(void)
     run_test_profile_plan_curve();
     run_test_wifi_prov();
     run_test_backup_import();
+    run_test_ota_record();
+    run_test_uart_log_bridge();
+    run_test_safety_watchdog();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

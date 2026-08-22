@@ -40,6 +40,9 @@ $sources = @(
     (Join-Path $testDir "test_profile_plan_curve.c"),
     (Join-Path $testDir "test_wifi_prov.c"),
     (Join-Path $testDir "test_backup_import.c"),
+    (Join-Path $testDir "test_ota_record.c"),
+    (Join-Path $testDir "test_uart_log_bridge.c"),
+    (Join-Path $testDir "test_safety_watchdog.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
@@ -47,6 +50,7 @@ $sources = @(
     (Join-Path $driversDir "pid_autotune.c"),
     (Join-Path $driversDir "ota_auth.c"),
     (Join-Path $driversDir "ota_interlock.c"),
+    (Join-Path $driversDir "ota_record.c"),
     (Join-Path $driversDir "heat_interlock.c"),
     (Join-Path $driversDir "thermo_combine.c"),
     (Join-Path $driversDir "profile_feasibility.c")

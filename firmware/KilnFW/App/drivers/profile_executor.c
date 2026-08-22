@@ -1528,6 +1528,14 @@ static void executor_task_entry(void *arg)
 static void watchdog_task_entry(void *arg)
 {
     (void)arg;
+    /* Edge-trigger for PROFILE_EXECUTOR_WD_ACTION_LOG_IDLE_TRIP -- declared
+     * outside the for(;;) below so it persists across loop iterations (this
+     * task never returns while running, so that's equivalent to `static`
+     * here, just without implying re-entrancy this function never has), and
+     * outside the switch case below because it's also read/cleared on ticks
+     * that land on a different action entirely (see the reset just after the
+     * switch). */
+    bool s_idle_trip_logged = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_PERIOD_MS));
 
@@ -1543,20 +1551,52 @@ static void watchdog_task_entry(void *arg)
          * comparison safety_link.c uses for the 1.5 s case, just against the
          * larger threshold. */
         uint16_t safety_age_ms = SAFETY_LINK_AGE_NEVER;
+        bool safety_diag_valid = false;
+        uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
+        uint8_t safety_diag_trip_reason = 0;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
                 safety_age_ms = safety_status.age_ms;
+                /* A trip report is only actionable while the DIAG frame it
+                 * came from is fresh -- diag_age_ms shares the same
+                 * cached_tick as age_ms (safety_link.c), so age_ms doubles as
+                 * the diag frame's own age here. Anything stale beyond
+                 * SAFETY_LINK_STALE_MS is exactly the "link went silent"
+                 * case the 30s check below already owns; this branch must
+                 * never act on a trip read off data that old, or a silent
+                 * link's LAST-KNOWN diag_state would get relabeled as a
+                 * fresh trip. */
+                safety_diag_valid = safety_status.diag_ever_received &&
+                                     !safety_link_is_stale(safety_age_ms, SAFETY_LINK_STALE_MS);
+                safety_diag_state = safety_status.diag_state;
+                safety_diag_trip_reason = safety_status.diag_trip_reason;
             }
         }
         bool safety_link_silent_30s = s_exec.safety != NULL &&
                                        safety_link_is_stale(safety_age_ms, SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+        /* The gap this closes (ROADMAP.md): the link staying HEALTHY while
+         * the safety processor itself actively trips is a different failure
+         * than the link going silent, and until now nothing here ever read
+         * diag_state/diag_trip_reason at all -- relay_authority already
+         * blocked new relay-on, but the run itself kept advancing its
+         * schedule and both GUIs kept showing a firing in progress while the
+         * kiln cooled. */
+        bool safety_processor_tripped = safety_diag_valid &&
+                                         safety_diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
 
         bool wdt_faulted = false;
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
         uint32_t since_ms = ticks_to_ms(now - s_exec.last_tick_tick);
-        if (since_ms > WATCHDOG_TICK_DEAD_MS) {
+        bool tick_stale = since_ms > WATCHDOG_TICK_DEAD_MS;
+
+        if (tick_stale) {
+            /* Guard 9 proper forces relays off unconditionally the instant the
+             * control task's own liveness tick goes stale, regardless of what
+             * profile_executor_wd_decide() below says to do about the STATE --
+             * this part is not delegated to that pure function (it always
+             * needs to happen, not just "when RUNNING/PAUSED"). */
             ESP_LOGE(TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
                      (unsigned long)since_ms);
             if (s_exec.io) {
@@ -1565,37 +1605,80 @@ static void watchdog_task_entry(void *arg)
             if (s_exec.safety) {
                 safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
             }
-            if (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) {
-                s_exec.state = PROFILE_EXEC_FAULTED;
-                snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
-                        "control task tick stale for %lums", (unsigned long)since_ms);
-                wdt_faulted = true;
-            }
-        } else if (safety_link_silent_30s &&
-                   (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED)) {
+        }
+
+        /* profile_executor_wd_decide() (profile_executor.h) is the pure
+         * classifier this pass extracted so it could be host-tested without
+         * pulling in FreeRTOS/kiln_io/relay_authority -- see that header's
+         * doc comment for the full reasoning. Every input it needs was
+         * already gathered above (outside s_exec.lock for the safety_link_
+         * get_status() call, per this task's own long-standing discipline);
+         * this call only classifies, all the I/O (relay writes, logging,
+         * state mutation) stays here in the caller. */
+        profile_executor_wd_input_t wd_in;
+        memset(&wd_in, 0, sizeof(wd_in));
+        wd_in.tick_stale = tick_stale;
+        wd_in.tick_stale_ms = since_ms;
+        wd_in.safety_processor_tripped = safety_processor_tripped;
+        wd_in.safety_trip_reason = safety_diag_trip_reason;
+        wd_in.safety_link_silent_30s = safety_link_silent_30s;
+        wd_in.state_running_or_paused = (s_exec.state == PROFILE_EXEC_RUNNING ||
+                                          s_exec.state == PROFILE_EXEC_PAUSED);
+        wd_in.state_faulted = (s_exec.state == PROFILE_EXEC_FAULTED);
+        profile_executor_wd_result_t wd_out = profile_executor_wd_decide(&wd_in);
+
+        switch (wd_out.action) {
+        case PROFILE_EXECUTOR_WD_ACTION_FAULT:
             /* "relays dropped and retried until the write succeeds" --
              * kiln_io_all_relays_off() is the same fail-toward-off call guard
              * 9 uses above; this task rechecks it every WATCHDOG_CHECK_
              * PERIOD_MS as long as the firing stays in this faulted state,
-             * which is the retry LINK_PROTOCOL.md sec 8 asks for. */
-            ESP_LOGE(TAG, "safety processor link silent for >=%lums -- aborting firing",
-                     (unsigned long)SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+             * which is the retry LINK_PROTOCOL.md sec 8 asks for (the RETRY
+             * case below is what performs those later rechecks). */
+            ESP_LOGE(TAG, "%s", wd_out.fault_reason);
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
             s_exec.state = PROFILE_EXEC_FAULTED;
-            snprintf(s_exec.fault_reason, sizeof(s_exec.fault_reason),
-                    "safety processor link silent for >=%lums, firing aborted",
-                    (unsigned long)SAFETY_LINK_FIRING_ABORT_SILENCE_MS);
+            strncpy(s_exec.fault_reason, wd_out.fault_reason, sizeof(s_exec.fault_reason) - 1);
+            s_exec.fault_reason[sizeof(s_exec.fault_reason) - 1] = '\0';
             wdt_faulted = true;
-        } else if (safety_link_silent_30s && s_exec.state == PROFILE_EXEC_FAULTED &&
-                   s_exec.io) {
-            /* Already faulted (this path or another) but the link is still
-             * silent -- keep retrying the relay-off write per sec 8's "dropped
-             * and retried until the write succeeds", without re-triggering
-             * run_state_note() (wdt_faulted stays false: nothing new
-             * happened). */
-            kiln_io_all_relays_off(s_exec.io);
+            break;
+        case PROFILE_EXECUTOR_WD_ACTION_RETRY_RELAYS_OFF:
+            /* Already faulted (this cause or another) but the underlying
+             * condition (trip still latched, or link still silent) hasn't
+             * cleared -- keep retrying the relay-off write per sec 8's
+             * "dropped and retried until the write succeeds", without
+             * touching fault_reason or re-triggering run_state_note()
+             * (wdt_faulted stays false: nothing NEW happened this tick). */
+            if (s_exec.io) {
+                kiln_io_all_relays_off(s_exec.io);
+            }
+            break;
+        case PROFILE_EXECUTOR_WD_ACTION_LOG_IDLE_TRIP:
+            /* Edge-triggered (s_idle_trip_logged just below) so a trip that
+             * stays latched for minutes logs once, not once every
+             * WATCHDOG_CHECK_PERIOD_MS. The GUIs surface this state
+             * themselves by reading diag_state directly (main_page.html's
+             * renderSafetyTrip(), ui_page_home.c's refresh()), so no shared
+             * state needs adding here just for display. */
+            if (!s_idle_trip_logged) {
+                ESP_LOGW(TAG, "safety processor tripped (%s) while idle -- no run to abort",
+                         profile_executor_safety_trip_words(safety_diag_trip_reason));
+            }
+            s_idle_trip_logged = true;
+            break;
+        case PROFILE_EXECUTOR_WD_ACTION_NONE:
+        default:
+            break;
+        }
+        /* Reset the edge-trigger the moment the trip input itself clears,
+         * outside the switch so it resets regardless of which action ran
+         * this tick (a cleared trip that was previously IDLE-logged may
+         * land on ACTION_NONE the very next tick, never revisiting the
+         * LOG_IDLE_TRIP case body). */
+        if (!safety_processor_tripped) {
+            s_idle_trip_logged = false;
         }
         run_snapshot_buf_t wdt_snap;
         if (wdt_faulted) {

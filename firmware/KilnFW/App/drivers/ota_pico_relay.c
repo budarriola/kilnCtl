@@ -62,10 +62,12 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_timer.h" // esp_timer_get_time() -- ota_record_t's uptime_s, same source ota_http.c uses
 
 #include "kilnlink/kilnlink_version.h"
 
 #include "ota_http.h"
+#include "ota_record.h"
 #include "uart_task_ids.h"
 
 static const char *TAG = "ota_pico_relay";
@@ -338,6 +340,8 @@ typedef struct {
     uint32_t image_length;
     uint32_t image_crc32;
     char version16[UPDATE_IMAGE_VERSION_LEN];
+    bool have_sha256;
+    uint8_t sha256[32];
 } relay_args_t;
 
 // Single instance: s_relay_running (checked-and-set in ota_pico_relay_start())
@@ -620,6 +624,33 @@ done:
         ESP_LOGE(TAG, "Pico relay failed: %s", reason);
     }
 
+    // ota_record_t's own header comment used to flag this: no record was
+    // EVER written for a Pico update, not even a failed one -- only the ESP
+    // self-update path called ota_record_append(). Closed here, in the one
+    // place every relay attempt (success, refusal, timeout, internal
+    // failure) funnels through. version_before/version_after are left ""
+    // rather than guessed: this ESP-side code has no trustworthy source for
+    // either (it does not parse a real version out of the raw uploaded
+    // image -- see OTA_PICO_RELAY_DEFAULT_VERSION's own header comment --
+    // and the Pico's OWN running version is not something this module reads
+    // back after a relay finishes). A blank version field is honest; a
+    // guessed one would not be.
+    {
+        char sha_hex[65] = "";
+        if (args.have_sha256) {
+            static const char digits[] = "0123456789abcdef";
+            for (size_t i = 0; i < sizeof(args.sha256); i++) {
+                sha_hex[2 * i] = digits[(args.sha256[i] >> 4) & 0xFu];
+                sha_hex[2 * i + 1] = digits[args.sha256[i] & 0xFu];
+            }
+            sha_hex[2 * sizeof(args.sha256)] = '\0';
+        }
+        ota_record_t rec;
+        ota_record_fill(&rec, (uint32_t)(esp_timer_get_time() / 1000000), "pico", "", "", ok, reason,
+                         sha_hex);
+        ota_record_append(&rec); // best-effort, logs its own failure -- see ota_record.h
+    }
+
     taskENTER_CRITICAL(&s_status_mux);
     s_relay_running = false;
     taskEXIT_CRITICAL(&s_status_mux);
@@ -637,7 +668,7 @@ done:
 }
 
 bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t image_crc32,
-                           const char *version16_or_null)
+                           const char *version16_or_null, const uint8_t image_sha256_or_null[32])
 {
     if (!link || image_length == 0) {
         return false;
@@ -658,6 +689,12 @@ bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t
     s_relay_args.link = link;
     s_relay_args.image_length = image_length;
     s_relay_args.image_crc32 = image_crc32;
+    s_relay_args.have_sha256 = (image_sha256_or_null != NULL);
+    if (s_relay_args.have_sha256) {
+        memcpy(s_relay_args.sha256, image_sha256_or_null, sizeof(s_relay_args.sha256));
+    } else {
+        memset(s_relay_args.sha256, 0, sizeof(s_relay_args.sha256));
+    }
     memset(s_relay_args.version16, ' ', sizeof(s_relay_args.version16));
     const char *v = version16_or_null ? version16_or_null : OTA_PICO_RELAY_DEFAULT_VERSION;
     size_t n = strnlen(v, sizeof(s_relay_args.version16));

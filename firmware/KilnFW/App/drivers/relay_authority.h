@@ -79,6 +79,13 @@ typedef enum {
     RELAY_OWNER_MANUAL,
     RELAY_OWNER_PROFILE,
     RELAY_OWNER_RULE,
+    /* TODO.md 6A.6 (2026-08-21): claimed by autotune_engine.c for the
+     * duration of a running step-test/relay-test (begin_run_locked() through
+     * force_relays_off()), same claim/release shape as RELAY_OWNER_PROFILE.
+     * Without this, a manual SET_RELAY/SET_RELAY_MASK arriving mid-test was
+     * refused by nothing -- relay_authority_zone_blocked() only stops a
+     * *safety fault*, not an unrelated manual command racing the test. */
+    RELAY_OWNER_AUTOTUNE,
 } relay_owner_t;
 
 /* relay_index is 1-based (matches kiln_io_set_relay's convention), 1..4. */
@@ -97,7 +104,7 @@ void relay_authority_release_mask(uint8_t relay_mask);
  * SX_WRITE_REG) against it must be refused. Independent of, and checked in
  * addition to, relay_authority_on_blocked()/relay_authority_zone_blocked()
  * -- a relay can be refused for a safety fault, for being owned by a
- * profile, or both. */
+ * profile (or an in-progress autotune test), or both. */
 bool relay_authority_manual_blocked_by_owner(uint8_t relay_index);
 
 #ifdef __cplusplus
