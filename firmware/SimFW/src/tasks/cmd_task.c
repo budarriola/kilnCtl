@@ -43,6 +43,7 @@
 #include "fault_sched.h"
 #include "i2c_owner.h"
 #include "wave_owner.h"
+#include "safe_reboot.h"
 #include "spi_emu_a.h"
 #include "spi_emu_b.h"
 #include "sim/sim_snapshot.h"
@@ -387,6 +388,35 @@ static void handle_sys_get_sim_state(const uint8_t *args, uint8_t args_len, uint
     *out_len = w.len;
 }
 
+// request: {u32 confirm}. cmd_ids.h's own comment on
+// SIMFW_CMD_SYS_REBOOT_BOOTLOADER has the full spec (magic requirement,
+// no-reply-on-success convention). safe_reboot_into_bootloader()
+// (safe_reboot.h) never returns on success (it jumps into the RP2040's ROM
+// USB bootloader after confirming the fixture is in a safe state) -- so
+// *out_len is only ever populated on the bad-magic or refusal paths below.
+static void handle_sys_reboot_bootloader(const uint8_t *args, uint8_t args_len, uint8_t *out, uint8_t *out_len,
+                                          uint8_t out_cap)
+{
+    arg_reader_t r;
+    ar_init(&r, args, args_len);
+    uint32_t confirm = ar_u32le(&r);
+
+    reply_writer_t w;
+    rw_init(&w, out, out_cap);
+    if (r.overflow || confirm != SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC) {
+        rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+
+    // Reached only on the refusal path -- see safe_reboot.h's "refuse,
+    // never reboot anyway" policy for why a timed-out safe-state
+    // confirmation is reported back rather than rebooting regardless.
+    (void)safe_reboot_into_bootloader();
+    rw_u8(&w, SIMFW_CMD_STATUS_ERR_BUSY);
+    *out_len = w.len;
+}
+
 // Named (not anonymous) so s_sys_commands[] below and cmd_group_t's
 // `commands` field (also below) refer to the exact same type -- two
 // structurally-identical anonymous struct definitions are still distinct,
@@ -406,6 +436,7 @@ static const cmd_table_entry_t s_sys_commands[] = {
     {SIMFW_CMD_SYS_SET_SEED, handle_sys_set_seed},
     {SIMFW_CMD_SYS_GET_CAPS, handle_sys_get_caps},
     {SIMFW_CMD_SYS_GET_SIM_STATE, handle_sys_get_sim_state},
+    {SIMFW_CMD_SYS_REBOOT_BOOTLOADER, handle_sys_reboot_bootloader},
 };
 
 // --- MODEL group handlers (sim_engine.h) ------------------------------------

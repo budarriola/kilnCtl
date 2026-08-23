@@ -99,6 +99,7 @@ to change shape for this.
 | `SET_SEED` | `0x05` | **implemented** |
 | `GET_CAPS` | `0x06` | **implemented** |
 | `GET_SIM_STATE` | `0x07` | **implemented** (gap-closure pass; new id, not in DESIGN_NOTES.md sec 5's original sketch) |
+| `REBOOT_BOOTLOADER` | `0x08` | **implemented** (later gap-closure pass, "flash over USB without BOOTSEL") |
 
 ### `PING` (request: `[0x01]`, no args)
 
@@ -220,6 +221,103 @@ source telemetry's TELEMETRY frame uses) rather than a standalone
 first tick (or right after `RESET_SIM`, whose effect lands at the next tick
 boundary like every other queued setter) `snapshot_valid` is 0 and both
 fields read 0 rather than a stale value.
+
+### `REBOOT_BOOTLOADER` (request: `[0x08, u32 confirm LE]`)
+
+Drops the RP2040 into its ROM USB bootloader so a PC-side tool can reflash
+over the same USB port, without the user physically pressing BOOTSEL. This
+is one of **two** independent triggers for the same underlying sequence —
+the other is the 1200-baud host-tooling touch convention described below —
+both implemented by `src/tasks/safe_reboot.c`'s single
+`safe_reboot_into_bootloader()`.
+
+`confirm` must equal `SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC`
+(`0xB007B007`, `cmd_ids.h`) exactly, or the request is refused with
+`ERR_BAD_ARGS` before any of the safety sequence below ever runs. This is on
+top of `benchproto`'s own CRC-16/addressing (a malformed or misrouted frame
+never reaches `cmd_task` at all) as defense in depth specifically for this
+command: it is the only one in this whole table whose success path ends the
+firmware session outright.
+
+**Why this needs a safety sequence at all — read before touching this
+code.** This fixture drives the DUT's E-stop loop and both DUT 12V power
+relays (section 5.5 below) through two MCP23017 I2C expanders
+(`src/tasks/i2c_owner.c`). Dropping the RP2040 into its ROM bootloader does
+**not** reset those expanders — nothing in `i2c_owner.c`,
+`src/drivers/mcp23017.{c,h}`, or the board docs (`HARDWARE.md` section 3.7,
+`BOM.md` section 6) documents an MCP23017 RESET pin tied to the Pico's RUN
+or to any Pico GPIO, and a search of all three turned up nothing. Per this
+project's safe-default doctrine, an undocumented hazard is treated as
+**present**, not absent: the expanders are assumed to **retain** their
+output state across a Pico-only reboot. A naive reboot commanded while the
+E-stop loop is closed ("healthy") and a DUT relay is on would leave the DUT
+powered, its E-stop loop still reporting fine, with nothing running on the
+fixture to fix that until a new image is flashed and boots.
+
+`safe_reboot_into_bootloader()` therefore, before ever calling
+`reset_usb_boot()`:
+
+1. Queues (`i2c_owner.h`/`wave_owner.h`'s own queue-then-apply-next-tick
+   contract — none of this is synchronous with the call):
+   `i2c_owner_set_estop(true)` (loop OPEN/STOP, the fail-safe direction),
+   `i2c_owner_set_dut_power_main(false)`, `i2c_owner_set_dut_power_safety(false)`,
+   and per CT channel `ct_wave_set_amps(ch, 0.0f)` followed by
+   `ct_wave_set_mode(ch, CT_WAVE_MODE_MANUAL)` (amps-then-mode so the channel
+   never passes through "MANUAL at a stale nonzero amps" for even one
+   zero-crossing).
+2. **Polls the readback**, not just the setters' return values, for up to
+   300 ms (10 ms between checks): `i2c_owner_get_estop_open()` /
+   `_get_dut_power_main_on()` / `_get_dut_power_safety_on()` and
+   `ct_wave_get_state()` for every channel must all confirm the commanded
+   values actually landed.
+3. Only once **every** condition is confirmed does it call
+   `reset_usb_boot(0, 0)` — which never returns.
+
+**If the 300 ms timeout elapses without full confirmation, this function
+returns `false` and does NOT reboot.** This is deliberate: rebooting anyway
+on a timeout risks exactly the hazard the sequence exists to prevent. A
+refusal is recoverable (the reply reports `ERR_BUSY`, so the client can
+retry or fall back to physical BOOTSEL); a reboot into an unconfirmed unsafe
+state is not recoverable by software once the RP2040 is in the bootloader.
+
+Reply: `[status]` — and only ever sent on the `ERR_BAD_ARGS` (bad/missing
+magic) or `ERR_BUSY` (safe-state confirmation timed out) paths. **On the
+success path there is no reply at all**: `reset_usb_boot()` never returns,
+so `cmd_task_fn()`'s `usb_owner_send_reply()` call after
+`cmd_task_dispatch()` simply never executes. A client must treat "no ACK
+ever arrived for this one command" as success, not a failure — see
+`kilnsim.link.SimLink.send_command_expect_reboot()` (`tools/PcTools/src/
+kilnsim/link.py`) for the PC-side half of that contract, and `kilnsim
+reboot-bootloader --yes` / the `sim_reboot_bootloader` MCP tool for the two
+PC-side entry points.
+
+### The 1200-baud touch convention (`src/tasks/usb_owner.c`)
+
+The second, protocol-independent trigger: the widely-supported convention
+(Arduino, `picotool`, and most flashing tools that speak to an Arduino-like
+board over a CDC-ACM port) where the host sets the CDC line coding to 1200
+baud with DTR deasserted to request a bootloader drop, so standard tooling
+can reflash this fixture without ever having to speak `benchproto` at all.
+
+Implemented directly in `usb_owner.c`'s own `tud_cdc_line_coding_cb()` /
+`tud_cdc_line_state_cb()` TinyUSB callbacks — **not** via pico-sdk's
+`PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE` (that SDK option lives inside
+`stdio_usb`, a separate CDC interface this project never enables,
+`CMakeLists.txt`'s `pico_enable_stdio_usb(SimFW 0)`; SimFW drives TinyUSB
+directly with its own CDC). Both callbacks call the exact same
+`safe_reboot_into_bootloader()` described above, so the safety sequence,
+timeout, and refuse-don't-reboot-anyway policy are identical regardless of
+which trigger fired.
+
+**Gated on baud AND DTR together, not baud alone** — unlike pico-sdk's own
+reference implementation (`reset_interface.c`'s `tud_cdc_line_coding_cb()`),
+which triggers on the magic baud rate by itself. An ordinary port open (e.g.
+a `kilnsim run` scenario connecting at its usual baud) changes the CDC line
+coding too, and triggering on baud alone would make an accidental reboot
+mid-scenario-run one stray reconnect away. Requiring DTR deasserted *at the
+same time* as the 1200 baud value is what keeps that from happening — see
+`firmware/SimFW/test/test_safe_reboot_logic.c`'s bootloader-touch-gate tests
+for the exercised accidental-trigger cases (baud alone, DTR alone, neither).
 
 ## 5. MODEL / TC / CT / RELAY / IO / FAULT
 

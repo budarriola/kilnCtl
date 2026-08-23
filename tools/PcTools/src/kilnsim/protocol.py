@@ -61,6 +61,24 @@ class SysCmd(enum.IntEnum):
     # real firmware's cmd_task.c real (non-stub) handlers for all four ids
     # 0x03-0x07. Not in DESIGN_NOTES.md sec 5's original sketch.
     GET_SIM_STATE = 7
+    # PROTOCOL.md sec 4 "REBOOT_BOOTLOADER" (later gap-closure pass, "flash
+    # over USB without BOOTSEL"): drops the RP2040 into its ROM USB
+    # bootloader after confirming the fixture reached a safe state
+    # (E-stop open, both DUT power relays off, CT outputs silent --
+    # firmware/SimFW/src/tasks/safe_reboot.c). Requires the request payload's
+    # confirm value to equal REBOOT_BOOTLOADER_MAGIC exactly; on success the
+    # device never replies at all (it jumps into the bootloader before it can
+    # ACK) -- see kilnsim.link's SimLink.send_command_expect_reboot() and
+    # payloads.py's _sys_encode/_sys_decode for cmd id 8.
+    REBOOT_BOOTLOADER = 8
+
+
+#: SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC (firmware/SimFW/src/tasks/cmd_ids.h)
+#: -- required exactly in SysCmd.REBOOT_BOOTLOADER's request payload. Kept as
+#: a public constant (not buried in payloads.py) since it is meaningful at
+#: this "what does this command mean" layer too, not just the wire-encoding
+#: layer.
+SYS_REBOOT_BOOTLOADER_MAGIC = 0xB007B007
 
 
 # --- MODEL -------------------------------------------------------------------

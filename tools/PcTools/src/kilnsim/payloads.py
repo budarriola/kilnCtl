@@ -36,7 +36,7 @@ import struct
 from typing import Optional
 
 from . import fault_catalog
-from .protocol import CommandGroup
+from .protocol import CommandGroup, SYS_REBOOT_BOOTLOADER_MAGIC
 
 STATUS_OK = 0x00
 STATUS_ERR_NOT_IMPL = 0x01
@@ -122,6 +122,14 @@ def _sys_encode(cmd: int, payload: dict) -> bytes:
         return bytes([cmd]) + struct.pack("<I", int(payload.get("value", 0)) & 0xFFFFFFFF)
     if cmd == 7:  # GET_SIM_STATE (PROTOCOL.md sec 4) -- no args
         return bytes([cmd])
+    if cmd == 8:  # REBOOT_BOOTLOADER (PROTOCOL.md sec 4): {u32 confirm LE}
+        # Always the real magic unless a caller explicitly passes a wrong
+        # one -- kilnsim's own selftest/negative-path tests are the only
+        # legitimate reason to ever override this (proving the firmware
+        # actually rejects a bad confirm value), so the override is an
+        # explicit, named payload key, not a positional footgun.
+        confirm = int(payload.get("confirm", SYS_REBOOT_BOOTLOADER_MAGIC)) & 0xFFFFFFFF
+        return bytes([cmd]) + struct.pack("<I", confirm)
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 
@@ -192,6 +200,15 @@ def _sys_decode(cmd: int, status: int, data: bytes) -> dict:
             "timescale": timescale_x100 / 100.0,
             "sim_time_us": sim_time_us,
         }
+    if cmd == 8:  # REBOOT_BOOTLOADER: {status} only -- see this module's own
+        # docstring and cmd_ids.h's comment on SIMFW_CMD_SYS_REBOOT_BOOTLOADER:
+        # a reply only ever arrives on the refusal path (bad magic, or the
+        # safe-state confirmation timed out) -- the success path never sends
+        # one at all, since the firmware jumps into the ROM bootloader before
+        # it can ACK. decode_reply()'s caller (link.py) still runs this
+        # decoder normally for whatever DOES arrive; there is nothing beyond
+        # the shared status byte to decode.
+        return {}
     raise PayloadError(f"SYS: unknown command id {cmd}")
 
 

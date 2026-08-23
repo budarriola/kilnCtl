@@ -36,7 +36,17 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _McpServer
 
 from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError
-from .protocol import CommandGroup, CtCmd, FaultCmd, IoCmd, ModelCmd, RelayCmd, SysCmd, TcCmd
+from .protocol import (
+    CommandGroup,
+    CtCmd,
+    FaultCmd,
+    IoCmd,
+    ModelCmd,
+    RelayCmd,
+    SysCmd,
+    SYS_REBOOT_BOOTLOADER_MAGIC,
+    TcCmd,
+)
 from .report import Report, evaluate_expectations
 from .scenario import ScenarioError, compile_faults, load_scenario
 
@@ -120,6 +130,30 @@ def sim_reset(keep_params: bool = False) -> str:
     """Fresh run: model to T0, faults cleared, event seq reset."""
     _link.send_command(CommandGroup.SYS, SysCmd.RESET_SIM, {"keep_params": keep_params})
     return "reset ok"
+
+
+@_tool()
+def sim_reboot_bootloader(confirm: bool = False) -> str:
+    """Drop the fixture into its USB ROM bootloader for reflashing, without
+    pressing BOOTSEL (PROTOCOL.md sec 4: SYS_REBOOT_BOOTLOADER). Requires
+    `confirm=True` -- this ends the current firmware session; the fixture
+    must be reflashed (or power-cycled) to run again. The firmware only
+    reboots after confirming it reached a safe state on its own (E-stop
+    loop open, both DUT power relays off, CT outputs silent --
+    firmware/SimFW/src/tasks/safe_reboot.c); it refuses (raising an error
+    here) rather than rebooting into an unconfirmed state if that check
+    times out."""
+    if not confirm:
+        raise SimLinkError(
+            "refusing to reboot into the USB bootloader without confirm=True -- "
+            "this ends the current firmware session"
+        )
+    reply = _link.send_command_expect_reboot(
+        CommandGroup.SYS, SysCmd.REBOOT_BOOTLOADER, {"confirm": SYS_REBOOT_BOOTLOADER_MAGIC}
+    )
+    if reply is None:
+        return "rebooting into USB bootloader (no reply expected -- this is success)"
+    return f"unexpected reply: {reply}"  # should not happen -- see cli.py's cmd_reboot_bootloader comment
 
 
 @_tool()

@@ -25,7 +25,7 @@ from typing import Optional
 
 from . import selftest as _selftest
 from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink, get_state_snapshot
-from .protocol import CommandGroup, CtCmd, FaultCmd, IoCmd, ModelCmd, RelayCmd, SysCmd
+from .protocol import CommandGroup, CtCmd, FaultCmd, IoCmd, ModelCmd, RelayCmd, SysCmd, SYS_REBOOT_BOOTLOADER_MAGIC
 from .report import evaluate_expectations
 from .runner import run_scenario
 from .scenario import ScenarioError, load_scenario
@@ -147,6 +147,38 @@ def cmd_power(args) -> int:
         return 1
     print(f"dut power ({domain}): {action}")
     return 0
+
+
+def cmd_reboot_bootloader(args) -> int:
+    if not args.yes:
+        print("error: refusing to reboot into the USB bootloader without --yes -- this ends the current "
+              "firmware session; the fixture must be reflashed (or power-cycled) to run again", file=sys.stderr)
+        return 1
+    link = _make_link(args)
+    _connect(link, args)
+    try:
+        # send_command_expect_reboot(), not send_command(): the firmware's
+        # SUCCESS path never replies at all (PROTOCOL.md sec 4 -- it jumps
+        # into the ROM bootloader before it can ACK), so an ordinary
+        # send_command() would spend three full retry timeouts waiting for a
+        # reply that only exists on the refusal path. `reply is None` here
+        # is the expected, good outcome. REBOOT_BOOTLOADER's own reply (when
+        # one does arrive) never carries STATUS_OK -- there is no "OK, about
+        # to reboot" reply, only ERR_BAD_ARGS (wrong/missing magic) or
+        # ERR_BUSY (safe-state confirmation timed out) -- so decode_reply()
+        # always raises CommandStatusError for it, surfaced here as
+        # SimLinkError, not returned as a dict.
+        reply = link.send_command_expect_reboot(
+            CommandGroup.SYS, SysCmd.REBOOT_BOOTLOADER, {"confirm": SYS_REBOOT_BOOTLOADER_MAGIC}
+        )
+    except SimLinkError as exc:
+        print(f"reboot refused: {exc}", file=sys.stderr)
+        return 1
+    if reply is None:
+        print("rebooting into USB bootloader (no reply expected -- this is success)")
+        return 0
+    print(f"unexpected reply: {reply}", file=sys.stderr)  # should not happen -- see comment above
+    return 1
 
 
 def _warn_if_k4_never_closed(report) -> None:
@@ -463,6 +495,15 @@ def build_parser() -> argparse.ArgumentParser:
              "to power-cycle both -- there is no single flag that does both at once.",
     )
     sp.set_defaults(func=cmd_power)
+
+    sp = sub.add_parser(
+        "reboot-bootloader",
+        help="drop the fixture into its USB ROM bootloader for reflashing, without pressing BOOTSEL "
+             "(requires --yes: this ends the current firmware session)",
+    )
+    sp.add_argument("--yes", action="store_true",
+                     help="required: confirms you intend to end the current firmware session")
+    sp.set_defaults(func=cmd_reboot_bootloader)
 
     sp = sub.add_parser("run", help="run a scenario YAML; exit code 0=PASS, 1=FAIL, 2=BLOCKED-only")
     sp.add_argument("scenario_path")

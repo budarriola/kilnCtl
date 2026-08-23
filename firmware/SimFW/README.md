@@ -89,10 +89,14 @@ cmake -G Ninja -B build -DPICO_BOARD=pico `
 cmake --build build
 ```
 
-Produces `build/SimFW.elf`, clean under `-Wall -Wextra -Werror`. No `.uf2`
-yet (picotool is not set up in this environment, same gap `SaftyFW`'s
-CMakeLists.txt documents) — flash the `.elf` over SWD/OpenOCD until that is
-resolved.
+Produces `build/SimFW.elf`, clean under `-Wall -Wextra -Werror`, plus a
+verified `build/SimFW.uf2` generated automatically by `tools/elf2uf2.py` (a
+POST_BUILD step in `CMakeLists.txt`) — picotool is still not set up in this
+environment (same gap `SaftyFW`'s CMakeLists.txt documents), but that
+script needs only `arm-none-eabi-objcopy` and the Python standard library,
+so BOOTSEL drag-and-drop works for `SimFW` without it. SWD/OpenOCD still
+works too, and remains the only flashing path for tools that don't get this
+treatment (e.g. `tools/spi_test_master`).
 
 Not to be confused with:
 

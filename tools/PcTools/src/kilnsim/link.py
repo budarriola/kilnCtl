@@ -166,6 +166,34 @@ class SimLink(abc.ABC):
         none are buffered yet. Never blocks longer than that. Returns []
         on timeout, not an error -- "no events yet" is normal."""
 
+    def send_command_expect_reboot(self, group: CommandGroup, cmd: int, payload: Optional[dict] = None,
+                                    timeout: Optional[float] = None) -> Optional[dict]:
+        """For a command whose SUCCESS path never sends a reply at all
+        (SysCmd.REBOOT_BOOTLOADER today, PROTOCOL.md sec 4: the firmware
+        jumps into the ROM USB bootloader before it can ACK) -- ordinary
+        :meth:`send_command` would retry ``benchproto``'s full
+        ``MAX_RETRIES`` count waiting for a reply that only exists on the
+        REFUSAL path, uselessly re-sending the request into a USB endpoint
+        that may already be mid-re-enumeration as the RP2040's bootloader.
+
+        Returns the decoded reply dict if one actually arrives (this only
+        happens on refusal -- bad magic, or the firmware's own safe-state
+        confirmation timing out), or ``None`` if the wait times out, which
+        is the EXPECTED outcome on success: the device rebooted and is no
+        longer there to answer. Still raises :class:`SimLinkError` for a
+        NACK (undeliverable -- the command group was never registered) or a
+        genuine transport failure, since those are not "the device
+        rebooted", they are real errors.
+
+        Default implementation here just delegates to :meth:`send_command`
+        unchanged -- correct for :class:`MockSimLink`, which never actually
+        disconnects, so its normal reply-or-raise contract already behaves
+        the way this method promises. :class:`_FramedSimLink` (the real
+        wire transports) overrides this with the single-attempt,
+        timeout-tolerant behavior described above.
+        """
+        return self.send_command(group, cmd, payload, timeout=timeout)
+
     def __enter__(self) -> "SimLink":
         self.connect()
         return self
@@ -435,6 +463,51 @@ class _FramedSimLink(SimLink):
             if self._reply_frame is None:
                 self._reply_cv.wait(timeout=timeout)
             return self._reply_frame
+
+    def send_command_expect_reboot(self, group: CommandGroup, cmd: int, payload: Optional[dict] = None,
+                                    timeout: Optional[float] = None) -> Optional[dict]:
+        # See SimLink.send_command_expect_reboot()'s docstring for the full
+        # rationale. Unlike send_command(), this writes the request exactly
+        # once -- no BENCHPROTO_LINK retry loop -- because a retry here would
+        # resend into a USB device that, on the success path, is already
+        # gone (re-enumerating as the RP2040's ROM bootloader), and because
+        # retrying would only delay reporting the one outcome this method
+        # actually needs to distinguish quickly: "a reply arrived" (refusal)
+        # vs. "nothing arrived" (assume success).
+        if not self.is_connected:
+            raise SimLinkError("not connected")
+
+        deadline_timeout = timeout if timeout is not None else DEFAULT_COMMAND_TIMEOUT_S
+        request_payload = pl.encode_request(group, cmd, payload)
+
+        with self._send_lock:
+            msg_index = self._link.next_msg_index()
+            self._pending.begin(dst_device=SIMFW_DEVICE_TARGET, dst_task=int(group), msg_index=msg_index)
+            frame = bp.Frame(
+                msg_type=bp.MsgType.DATA,
+                msg_index=msg_index,
+                src_device=SIMFW_DEVICE_HOST,
+                src_task=0,
+                dst_device=SIMFW_DEVICE_TARGET,
+                dst_task=int(group),
+                payload=request_payload,
+            )
+            try:
+                with self._reply_cv:
+                    self._reply_frame = None
+                self._write_frame(frame)
+                reply = self._wait_for_reply(deadline_timeout)
+            finally:
+                self._pending.clear()
+
+        if reply is None:
+            return None  # expected on success -- the device rebooted and never replied
+        if reply.msg_type == bp.MsgType.NACK:
+            raise SimLinkError(f"{group.name}/{cmd}: NACK (undeliverable -- task not registered)")
+        try:
+            return pl.decode_reply(group, cmd, reply.payload)
+        except pl.CommandStatusError as exc:
+            raise SimLinkError(str(exc)) from exc
 
     def read_events(self, timeout: float = 0.0) -> list:
         with self._events_cv:
@@ -716,6 +789,33 @@ class MockSimLink(SimLink):
 
         return self._default_response(group, cmd, payload)
 
+    def send_command_expect_reboot(self, group: CommandGroup, cmd: int, payload: Optional[dict] = None,
+                                    timeout: Optional[float] = None) -> Optional[dict]:
+        # Overridden (rather than inheriting SimLink's default, which just
+        # calls send_command()): a real REBOOT_BOOTLOADER success never
+        # replies at all (None, per SimLink.send_command_expect_reboot()'s
+        # own docstring), and this fake fixture has no real firmware to
+        # refuse with a genuine ERR_BUSY/ERR_BAD_ARGS reply either -- so the
+        # useful, smoke-testable behavior for a mock is to simulate the
+        # success outcome directly, still recording the attempt in
+        # `sent_commands`/`_scripts` exactly like any other command (a test
+        # that wants to simulate a REFUSAL instead can still
+        # script_response(..., error="...") for this (group, cmd), which
+        # send_command() honors before this override is even reached would
+        # not apply here -- so route scripted responses through first).
+        if not self._connected:
+            raise SimLinkError("not connected")
+        payload = payload or {}
+        self._history.append((group, cmd, payload))
+        key = (int(group), int(cmd))
+        queued = self._scripts.get(key)
+        if queued:
+            resp = queued.pop(0)
+            if resp.error:
+                raise SimLinkError(resp.error)
+            return dict(resp.payload)
+        return None
+
     def read_events(self, timeout: float = 0.0) -> list:
         # Single-threaded fake: nothing arrives asynchronously that isn't
         # already in self._events, so `timeout` is a no-op here (there is
@@ -780,6 +880,13 @@ class MockSimLink(SimLink):
                     "timescale": self._state["timescale"],
                     "sim_time_us": self._state["sim_time_us"],
                 }
+            if cmd == 8:  # REBOOT_BOOTLOADER -- this mock never actually
+                # reboots anything (there is no real device here), so it just
+                # answers as if the refusal path fired -- shape parity with a
+                # real reply (kilnsim.payloads._sys_decode's cmd==8 case
+                # returns {} too), not a claim that a real fixture would
+                # necessarily refuse.
+                return {}
         if group is CommandGroup.MODEL and cmd == 4:  # LOAD_PRESET
             return {"ok": True, "preset": payload.get("name")}
         if group is CommandGroup.TC and cmd == 1:  # GET_REGS

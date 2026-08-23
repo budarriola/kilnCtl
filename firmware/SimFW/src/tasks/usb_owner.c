@@ -40,6 +40,7 @@
 
 #include "cmd_ids.h"
 #include "cmd_task.h"
+#include "safe_reboot.h"
 #include "task_priorities.h"
 
 // Bumped from configMINIMAL_STACK_SIZE (the skeleton's own placeholder):
@@ -224,6 +225,69 @@ bool usb_owner_send_broadcast(uint8_t src_task, const uint8_t *payload, uint8_t 
 bool usb_owner_register_task(uint8_t task_id)
 {
     return benchproto_link_register_task(&s_link, task_id) == BENCHPROTO_LINK_OK;
+}
+
+// --- Bootloader trigger: 1200-baud host-tooling touch convention -----------
+// The widely-supported convention (Arduino, picotool, and most flashing
+// tools that speak to an Arduino-like board over a CDC-ACM port): the host
+// sets the CDC line coding to 1200 baud with DTR deasserted to ask the
+// device to drop into its bootloader, so standard tooling can trigger a
+// reflash without ever having to speak `benchproto`
+// (SIMFW_CMD_SYS_REBOOT_BOOTLOADER, cmd_ids.h/cmd_task.c, is the other,
+// protocol-level way to ask for the same thing). pico-sdk's own
+// `stdio_usb` layer implements a close cousin of this
+// (PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE, reset_interface.c) but SimFW
+// drives TinyUSB directly with its own CDC (this file), never enables that
+// SDK option (CMakeLists.txt's `pico_enable_stdio_usb(SimFW 0)`), and --
+// unlike that reference implementation, which triggers on baud alone --
+// gates on baud AND DTR together, exactly as the task asked: baud-rate
+// changes happen on ordinary port opens too (e.g. a scenario runner opening
+// this same CDC port at its usual baud), and triggering on baud alone would
+// make an accidental reboot mid-scenario-run one stray reconnect away.
+//
+// Both TinyUSB callbacks below can fire in either order depending on the
+// host's serial stack (some drop DTR before changing baud, some after), so
+// this tracks the last-seen value of each independently and re-checks the
+// joint condition from whichever callback fires second. Both callbacks run
+// synchronously inside tud_task() (usb_owner_task_fn()'s own call, below),
+// i.e. in usb_owner's own FreeRTOS task context -- safe to call
+// safe_reboot_into_bootloader(), which blocks this task for up to its own
+// bounded timeout (safe_reboot.h) while it confirms the fixture is actually
+// safe before rebooting.
+#define USB_OWNER_BOOTLOADER_TOUCH_BAUD 1200u
+
+// 0 is never a real CDC line-coding baud rate, so this starts guaranteed
+// unequal to USB_OWNER_BOOTLOADER_TOUCH_BAUD -- no trigger is possible until
+// the host has actually requested a real line-coding change at least once.
+static uint32_t s_last_cdc_baud_bps = 0;
+// Starts asserted: a link nobody has told anything about must never look
+// like "DTR was already dropped" before the host has said so explicitly.
+static bool s_last_cdc_dtr_asserted = true;
+
+static void usb_owner_check_bootloader_touch(void)
+{
+    if (s_last_cdc_baud_bps == USB_OWNER_BOOTLOADER_TOUCH_BAUD && !s_last_cdc_dtr_asserted) {
+        // Refusal path (safe state not confirmed within the bounded
+        // timeout) simply leaves the CDC link running -- there is nothing
+        // else to undo here, and the host's own retry (most tools that use
+        // this convention retry the touch on failure) is what recovers.
+        (void)safe_reboot_into_bootloader();
+    }
+}
+
+void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *p_line_coding)
+{
+    (void)itf;
+    s_last_cdc_baud_bps = p_line_coding->bit_rate;
+    usb_owner_check_bootloader_touch();
+}
+
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)itf;
+    (void)rts;
+    s_last_cdc_dtr_asserted = dtr;
+    usb_owner_check_bootloader_touch();
 }
 
 // --- RX --------------------------------------------------------------------

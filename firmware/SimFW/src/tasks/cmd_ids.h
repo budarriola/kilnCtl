@@ -55,6 +55,41 @@ extern "C" {
 #define SIMFW_CMD_SYS_SET_SEED      0x05u
 #define SIMFW_CMD_SYS_GET_CAPS      0x06u
 #define SIMFW_CMD_SYS_GET_SIM_STATE 0x07u
+// REBOOT_BOOTLOADER (gap-closure pass, docs/BENCH_RUNBOOK.md's "flashing
+// without BOOTSEL" work): drops the RP2040 into its ROM USB bootloader so a
+// PC-side tool can reflash over the same USB port, without the user
+// physically pressing BOOTSEL. Handled by cmd_task.c's
+// handle_sys_reboot_bootloader(), which delegates the actual safe-state
+// sequencing + reset to safe_reboot.h/.c (single shared implementation --
+// the 1200-baud host-tooling convention in usb_owner.c's
+// tud_cdc_line_coding_cb()/tud_cdc_line_state_cb() calls the exact same
+// function, see that file's header comment). See safe_reboot.h's own header
+// comment for the full safety rationale: this fixture drives the DUT's
+// E-stop loop and two 12V power relays through I2C expanders that do NOT
+// reset when the RP2040 does, so a naive reboot could leave the DUT powered
+// with the E-stop loop reporting "healthy" and nothing running on the
+// fixture to fix it.
+//
+// request: {u32 confirm} -- must equal SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC
+// exactly, or the command is refused with ERR_BAD_ARGS. This is on top of
+// benchproto's own CRC-16/addressing (a malformed or misrouted frame is
+// already discarded well before cmd_task ever sees it) as defense in depth
+// specifically for this one command: it is the only command in this whole
+// table whose success path ends the current firmware session outright, so a
+// bit-flip landing on a *different*, structurally similar command's cmd_id
+// byte and happening to decode as this one is exactly the accidental-
+// trigger case worth a second, explicit guard against.
+//
+// reply: {status} only -- and only ever sent on the REFUSAL path
+// (safe_reboot_into_bootloader() returned false: the safe state could not be
+// confirmed within its bounded timeout) or the bad-magic path. On the
+// SUCCESS path there is no reply at all: reset_usb_boot() never returns, so
+// cmd_task_fn()'s usb_owner_send_reply() call after cmd_task_dispatch()
+// simply never executes. A client must not treat "no ACK ever arrived" as a
+// failure for this one command -- see docs/PROTOCOL.md section 4 for the
+// full wire spec.
+#define SIMFW_CMD_SYS_REBOOT_BOOTLOADER 0x08u
+#define SIMFW_CMD_SYS_REBOOT_BOOTLOADER_MAGIC 0xB007B007u
 
 // Reply-payload status byte -- byte 0 of every SYS/MODEL/TC/CT/RELAY/IO/
 // FAULT reply payload (docs/PROTOCOL.md "Reply convention"). This is

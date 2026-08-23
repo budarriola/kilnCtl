@@ -131,6 +131,14 @@ add_custom_target(simfw_build_info ALL
 # usb_owner.h's header comment. Add each remaining library in the same
 # change that gives its owning task a real body, so an unused link never
 # masks a missing one.
+# src/tasks/safe_reboot.c (gap-closure pass, "flash over USB without
+# BOOTSEL"): the one place allowed to call pico-sdk's reset_usb_boot()
+# (pico/bootrom.h) -- both cmd_task.c's SIMFW_CMD_SYS_REBOOT_BOOTLOADER
+# handler and usb_owner.c's 1200-baud tud_cdc_line_coding_cb()/
+# tud_cdc_line_state_cb() touch-convention callbacks delegate to it, so the
+# safe-state-then-reboot sequence exists exactly once. See that file's
+# header comment for why this is more than an ordinary reboot (the
+# MCP23017 I2C expanders do not reset with the RP2040).
 set(SIMFW_APP_SOURCES
     src/main.c
     src/tasks/usb_owner.c
@@ -145,6 +153,7 @@ set(SIMFW_APP_SOURCES
     src/tasks/fault_sched.c
     src/tasks/wave_owner.c
     src/tasks/i2c_owner.c
+    src/tasks/safe_reboot.c
     src/tasks/telemetry.c
     src/tasks/log_task.c
     src/sim/tc_fault_state.c
@@ -200,6 +209,12 @@ target_link_libraries(SimFW PRIVATE
     hardware_irq
     pico_multicore
     pico_unique_id
+    # pico_bootrom's actual implementation (bootrom.c, the ROM function
+    # lookup reset_usb_boot()/rom_reset_usb_boot() needs) is a separate
+    # INTERFACE target from pico_bootrom_headers -- pico_crt0 (pulled in via
+    # pico_stdlib) links only the headers, not this, so src/tasks/
+    # safe_reboot.c's call needs it linked explicitly here.
+    pico_bootrom
     tinyusb_device
     benchproto
     FreeRTOS-Kernel
@@ -222,6 +237,21 @@ pico_enable_stdio_uart(SimFW 0)
 # machine for the same reason SaftyFW's CMakeLists.txt gives: picotool has
 # no prebuilt binary for this pico-sdk version and building it from source
 # needs a host C/C++ compiler that is not set up here (only arm-none-eabi-gcc
-# is configured). The plain .elf below is what OpenOCD/SWD flashes anyway;
-# BOOTSEL drag-and-drop (DESIGN_NOTES.md section 3.1/9) needs a .uf2, so re-enable
-# this line once picotool is available if that flashing path is wanted.
+# is configured). Instead, tools/elf2uf2.py (Python stdlib + objcopy only,
+# no picotool, no host C/C++ compiler) builds build/SimFW.uf2 as a POST_BUILD
+# step below, so BOOTSEL drag-and-drop (DESIGN_NOTES.md section 3.1/9) has a
+# real .uf2 to use -- see that script's module docstring for the UF2 format
+# and boot2-CRC verification it performs. Re-enable pico_add_extra_outputs()
+# instead of this custom command only if picotool ever becomes available and
+# its extra outputs (.hex/.dis) are actually wanted.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_custom_command(TARGET SimFW POST_BUILD
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/tools/elf2uf2.py build
+            $<TARGET_FILE:SimFW>
+            --bin $<TARGET_FILE_DIR:SimFW>/SimFW.bin
+            --uf2 $<TARGET_FILE_DIR:SimFW>/SimFW.uf2
+            --objcopy ${CMAKE_OBJCOPY}
+            --verify
+    COMMENT "Generating and verifying SimFW.uf2 (tools/elf2uf2.py, no picotool needed)"
+    VERBATIM
+)
