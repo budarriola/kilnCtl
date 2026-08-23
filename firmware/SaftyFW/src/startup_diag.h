@@ -48,10 +48,20 @@ extern "C" {
 // for this one.
 #define SAFTYFW_STARTUP_DIAG_MAGIC 0x53544152u // 'STAR'
 
-// The check-in mask watchdog_task_fn() last observed, rewritten every
-// period, OR'd with SAFTYFW_LAST_CHECKIN_WRITTEN. After a starvation reboot
-// this holds the final pre-reset value: strip the flag bit and XOR with
-// WATCHDOG_CHECKIN_ALL_MASK to get the bits that were missing.
+// The per-task check-in status watchdog_task_fn() last observed, rewritten
+// every period, OR'd with SAFTYFW_LAST_CHECKIN_WRITTEN. After a starvation
+// reboot this holds the final pre-reset value: strip the flag bit and XOR
+// with WATCHDOG_CHECKIN_ALL_MASK to get the bits that were missing.
+//
+// Meaning as of the per-task-deadline gate (watchdog_task.c /
+// watchdog_gate.h): bit i is set iff check-in id i was within ITS OWN
+// deadline (see watchdog_task.c's s_checkin_deadline_ms table) at the moment
+// of this evaluation -- it no longer means "checked in during this exact
+// SAFTYFW_PERIOD_WATCHDOG_TASK_MS window", because requiring that of every
+// task regardless of its own real period was the bug this gate replaced (a
+// perfectly healthy thermo_task cannot land in every 250 ms window when its
+// own unconfigured cadence is 500 ms). A missing bit still means exactly the
+// same thing operationally: that task is why the feed was skipped.
 //
 // The flag bit is load-bearing, not decoration. Without it a reading of 0
 // is ambiguous between the two most interesting cases -- "watchdog_task ran

@@ -20,6 +20,8 @@ void run_test_config_store(void);
 void run_test_ct_amps_cal(void);
 void run_test_snapshots(void);
 void run_test_boot_checkin_coverage(void);
+void run_test_watchdog_budget_coverage(void);
+void run_test_watchdog_gate(void);
 
 int main(void)
 {
@@ -35,6 +37,8 @@ int main(void)
     run_test_ct_amps_cal();
     run_test_snapshots();
     run_test_boot_checkin_coverage();
+    run_test_watchdog_budget_coverage();
+    run_test_watchdog_gate();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

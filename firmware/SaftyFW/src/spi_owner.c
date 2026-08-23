@@ -31,7 +31,26 @@ _Static_assert(SPI_OWNER_BAUDRATE_HZ <= 4000000u,
                "emulation's first-byte deadline requires -- see "
                "SimFW/docs/SPI_ACCESS_AUDIT.md section 9");
 
-#define SPI_OWNER_LOCK_TIMEOUT_MS 2000u
+// Bounded below the 1 s hardware watchdog timeout (SAFTYFW_WATCHDOG_TIMEOUT_MS,
+// main.c), not merely "bounded". thermo_task is the only caller today (see
+// this file's own single-owner reasoning above), so this mutex is never
+// actually contended in the current build -- but a wait timeout that is
+// itself allowed to exceed the watchdog deadline is a live defect regardless
+// of whether anything exercises it yet: the day a second caller is added (or
+// this call is reached while a prior holder is mid-transfer for any other
+// reason), thermo_task -- and with it watchdog_task_checkin(WATCHDOG_
+// CHECKIN_THERMO_TASK), since thermo_task_fn() calls this synchronously
+// before its own checkin -- could block for up to the old 2000 ms here alone,
+// more than the entire 1 s hardware budget, with nothing else in this file to
+// catch it. A genuine SPI transfer on this bus is a handful of microseconds
+// (8 bytes at 4 MHz, spi_owner_init()'s own budget comment); 200 ms is
+// already two orders of magnitude of margin over that, while still leaving
+// thermo_task's own DRDY-silence wait (thermo_task.c's ~302 ms worst case)
+// and every other core-1 task's own deadline room inside the 1 s watchdog
+// window. See test/test_watchdog_budget_coverage.c, which fails loudly if
+// this constant (or SAFTYFW_WATCHDOG_TIMEOUT_MS) ever drifts back out of this
+// relationship.
+#define SPI_OWNER_LOCK_TIMEOUT_MS 200u
 
 static SemaphoreHandle_t s_lock = NULL;
 static bool s_initialized = false;

@@ -77,6 +77,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/relay_owner.c
     src/tasks/relay_grace.c
     src/tasks/watchdog_task.c
+    src/tasks/watchdog_gate.c
     src/tasks/safety_core.c
     src/tasks/discrete_task.c
     src/tasks/thermo_task.c
