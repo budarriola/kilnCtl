@@ -177,6 +177,21 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc);
  * applies a fresh FW_VERSION frame (see this header's top comment). */
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc);
 
+/* 2026-08-23 panic fix: the actual NVS write safety_cfg_store_refetch() used
+ * to make directly (nvs_save_store()) now only ever runs via this function,
+ * which hands it to uart_bridge_ext.c's internal-SRAM-stack flash-safe
+ * worker (uart_bridge_ext_run_on_flash_worker()) instead of executing it on
+ * whatever task calls in -- safety_poll_task's own stack is PSRAM
+ * (safety_link.c:1636-1638), and a flash/NVS write from a PSRAM-stacked task
+ * aborts the whole board (ESP-IDF's esp_task_stack_is_sane_cache_disabled(),
+ * not a constraint of this driver -- see safety_cfg_store.c's
+ * caller_stack_is_external() comment). "Mark dirty, flush later on a safe
+ * task": safety_cfg_store_refetch() marks the in-RAM cache dirty right after
+ * updating it, then calls this. No-op (returns ESP_OK) if nothing is dirty.
+ * Exported so a future caller on any task can trigger a flush without ever
+ * risking a direct nvs_save_store() call of its own. */
+esp_err_t safety_cfg_store_flush_if_dirty(void);
+
 #ifdef __cplusplus
 }
 #endif

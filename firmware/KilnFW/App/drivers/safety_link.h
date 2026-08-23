@@ -262,6 +262,66 @@ static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
     return age_ms == SAFETY_LINK_AGE_NEVER || (uint32_t)age_ms > threshold_ms;
 }
 
+/* Bug fix (2026-08-23), pure decision -- host-testable, no locking/hardware.
+ * Pulled out of safety_link.c's safety_drain_inbox_ex() loop: after one
+ * inbox message has just been dispatched, should the next uart_protocol_
+ * receive() still be allowed to block (this call is still waiting for a
+ * specific shared-id reply it asked for), or is it safe to degrade to a
+ * zero-wait opportunistic drain?
+ *
+ * Each `want_*` is true iff the caller was handed a non-NULL out-param pair
+ * for that reply type (KILNLINK_CT_CAL_CMD / KILNLINK_CONFIG_PAGE_CMD /
+ * KILNLINK_COMMIT_CONFIG_REJECTED_CMD -- safety_link.c's shared-id replies);
+ * each matching `got_*` is true once that reply has actually been captured.
+ * A caller with no out-params at all (the plain safety_drain_inbox()
+ * wrapper -- the periodic poll's pre-drain / GET_STATUS wait) wants none of
+ * the three, so this always returns false and the caller's loop degrades to
+ * a zero-wait drain after the very first message, same as before this fix.
+ *
+ * The bug this closes: safety_link_get_config_page() (and its two siblings,
+ * safety_link_get_ct_cal() and safety_link_send_commit_config()) used to
+ * degrade to a zero-wait drain unconditionally after the FIRST message,
+ * whatever it was. The Pico also sends periodic/unsolicited broadcasts
+ * (GET_STATUS, DIAG, POWER, TRIP_EVENT, FW_VERSION) on this same inbox, and
+ * CONFIG_PAGE is this link's slowest reply to produce (SAFETY_LINK_REPLY_
+ * TIMEOUT_MS's own comment: "the Pico actually doing the work ... or walking
+ * its config store") -- so an unrelated frame routinely arrived first,
+ * degraded the wait to zero, and the very next non-blocking receive found
+ * nothing (the real CONFIG_PAGE reply was still in flight) and exited the
+ * loop having burned only a few ms of the ~1.2s budget. safety_link_get_
+ * config_page() then reported ESP_ERR_TIMEOUT even though the Pico answered
+ * every single request (observed live 2026-08-23: s_diag_get_config_page_
+ * handled_count tracking every one, safety_cfg_store_refetch() timing out on
+ * every one).
+ *
+ * This fix (round 1) let safety_drain_inbox_ex() block for its full declared
+ * wait_ms (~1.2s) whenever this returns true, which is safe in isolation
+ * (that ceiling already existed -- GET_STATUS's own exchange could already
+ * legitimately spend it against a dead link). It did NOT cause the
+ * subsequent task-watchdog panic scare (round 2) -- that turned out to be an
+ * unrelated, pre-existing bug the fetch NOW SUCCEEDING exposed for the first
+ * time: safety_cfg_store_refetch() calling nvs_save_store() from safety_
+ * poll_task, whose stack lives in PSRAM, right after a successful fetch --
+ * an NVS/flash write from a task with an external-RAM stack asserts inside
+ * ESP-IDF's cache-disable path (esp_task_stack_is_sane_cache_disabled()).
+ * See safety_cfg_store.c's deferred-flush mechanism for that fix; this
+ * predicate and the ~1.2s-per-call budget it gates were never the problem. */
+static inline bool safety_drain_still_waiting(bool want_ct_cal, bool got_ct_cal, bool want_config_page,
+                                               bool got_config_page, bool want_commit_rejected,
+                                               bool got_commit_rejected)
+{
+    if (want_ct_cal && !got_ct_cal) {
+        return true;
+    }
+    if (want_config_page && !got_config_page) {
+        return true;
+    }
+    if (want_commit_rejected && !got_commit_rejected) {
+        return true;
+    }
+    return false;
+}
+
 /* Per-request ACK timeout handed to uart_protocol_send. Deliberately much
  * shorter than the PC link's 200 ms default: uart_protocol retries up to
  * UART_PROTO_MAX_RETRIES (10) times internally, so with no peer at all every

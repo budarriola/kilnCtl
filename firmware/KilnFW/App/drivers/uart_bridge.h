@@ -96,6 +96,24 @@ esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *ow
  * to run that late and fails. */
 esp_err_t uart_bridge_ext_start_flash_worker(void);
 
+/* Runs fn(arg) on the SAME internal-SRAM-stack worker task
+ * uart_bridge_ext_start_flash_worker() creates, and blocks the calling task
+ * until it returns -- for ANY caller elsewhere in the firmware that needs to
+ * touch NVS/flash from a task whose own stack is not safely internal (see
+ * uart_bridge_ext.c:104-127's HAZARD block: a flash operation disables the
+ * cache, which makes PSRAM unreachable, and ESP-IDF's own
+ * esp_task_stack_is_sane_cache_disabled() asserts -- aborts the whole board
+ * -- if the calling task's stack lives there). safety_cfg_store.c's deferred
+ * NVS flush (2026-08-23) is the first caller outside this file's own three
+ * bridge handlers (CONTROL/PROFILES/AUTOTUNE), which is exactly what this
+ * export exists for: `arg` may point at the caller's stack, since the caller
+ * is blocked for the whole call and that storage stays live. Returns
+ * ESP_ERR_INVALID_ARG if fn is NULL, ESP_FAIL if the worker is not started
+ * or its job queue/lock could not be used (caller must not fall through to
+ * running fn() itself in that case -- that is precisely the bug this
+ * exists to prevent). */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+
 /* CONTROL (task 8): zone config reads + narrow PID/model writes -- see
  * uart_task_ids.h for the scope cap versus /api/zones. No hardware handle
  * needed; everything routes through zones_http.c's public getters/setters. */

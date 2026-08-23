@@ -342,6 +342,25 @@ static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
     return ok;
 }
 
+/* Public entry point for OTHER modules that need this same worker --
+ * 2026-08-23, safety_cfg_store.c's deferred NVS flush is the first outside
+ * caller (see that file's own comment for the incident: safety_poll_task's
+ * stack is PSRAM, same hazard as this file's own "HAZARD" block above
+ * describes for CONTROL/PROFILES/AUTOTUNE, so its NVS write is routed
+ * through here rather than a second internal-RAM-stack task being invented
+ * for it -- one worker doing this job is enough). Thin wrapper over the
+ * exact same bx_run_on_internal_stack() the three bridge handlers below
+ * already use; kept `static` there and exported here rather than made
+ * non-static directly so every OTHER caller in this file keeps calling the
+ * short internal name. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
+{
+    if (!fn) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return bx_run_on_internal_stack(fn, arg) ? ESP_OK : ESP_FAIL;
+}
+
 /* Shared shape for the three refactored handlers: the task's ctx plus the
  * message it just received. Lives on the bridge task's stack across the
  * blocking bx_run_on_internal_stack() call. */

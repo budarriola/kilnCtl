@@ -998,7 +998,19 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
 {
     uart_proto_message_t msg;
     bool got_status = false;
-    TickType_t wait = pdMS_TO_TICKS(wait_ms);
+    TickType_t total_wait_ticks = pdMS_TO_TICKS(wait_ms);
+    TickType_t wait = total_wait_ticks;
+    /* Elapsed-since-start, not a raw deadline tick value: xTaskGetTickCount()
+     * wraps (~497 days at the default 100 Hz), and comparing two raw tick
+     * snapshots the way `deadline > now` would is not safe across that wrap
+     * -- unsigned SUBTRACTION is (same idiom safety_elapsed_ms() above
+     * already uses). started is read once and never compared directly
+     * against another tick snapshot; only ever subtracted from a later one. */
+    TickType_t started = xTaskGetTickCount();
+
+    bool want_ct_cal = out_ct_cal && out_got_ct_cal;
+    bool want_config_page = out_config_page && out_got_config_page;
+    bool want_commit_rejected = out_commit_rejected && out_got_commit_rejected;
 
     while (uart_protocol_receive(link->inbox, &msg, wait) == ESP_OK) {
         if (msg.length >= 1) {
@@ -1053,7 +1065,32 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
                 break;
             }
         }
-        wait = 0; /* only the first receive is allowed to block */
+
+        /* Bug fix (2026-08-23): this used to be an unconditional `wait = 0`
+         * after the first receive, which silently starved a caller still
+         * waiting on a specific shared-id reply (CT_CAL/CONFIG_PAGE/
+         * COMMIT_CONFIG_REJECTED) whenever an unrelated frame -- GET_STATUS/
+         * DIAG/POWER/TRIP_EVENT/FW_VERSION, all of which the Pico also sends
+         * on this same inbox -- happened to arrive first. Fix: keep blocking
+         * against the REMAINING portion of this call's own declared wait_ms
+         * until the wanted reply arrives; degrade to zero-wait only once it
+         * has (or if nothing specific was ever wanted). This does not raise
+         * the per-call ceiling -- wait never exceeds total_wait_ticks, the
+         * same budget this call always had -- it only lets the call actually
+         * use that budget instead of abandoning it after one message. See
+         * safety_drain_still_waiting()'s doc comment in safety_link.h for
+         * the incident this closes, and safety_cfg_store.c's SAFETY_CFG_
+         * STORE_REFETCH_BUDGET_MS for the SEPARATE, unrelated fix this one
+         * exposed (an NVS write from safety_poll_task's PSRAM stack, not a
+         * timing issue in this function). */
+        if (safety_drain_still_waiting(want_ct_cal, want_ct_cal && *out_got_ct_cal, want_config_page,
+                                        want_config_page && *out_got_config_page, want_commit_rejected,
+                                        want_commit_rejected && *out_got_commit_rejected)) {
+            TickType_t elapsed = xTaskGetTickCount() - started; /* wrap-safe unsigned subtraction */
+            wait = (elapsed < total_wait_ticks) ? (total_wait_ticks - elapsed) : 0;
+        } else {
+            wait = 0; /* nothing more this call needs; drain any remainder opportunistically */
+        }
     }
     return got_status;
 }

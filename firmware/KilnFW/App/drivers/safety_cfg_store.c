@@ -1,13 +1,32 @@
 #include "safety_cfg_store.h"
 
+#include <stdbool.h>
 #include <string.h>
 
+#include "esp_heap_caps.h" /* esp_ptr_external_ram() -- the wrong-task guard below */
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
 #include "kilnlink/kilnlink_config_page.h"
+
+/* uart_bridge_ext.c's existing internal-SRAM-stack "flash-safe executor"
+ * (bx_flash_worker) -- see this file's nvs_save_store()/safety_cfg_store_
+ * flush_if_dirty() comments below for why this driver's own NVS write is
+ * routed through it rather than executed directly on whatever task calls
+ * safety_cfg_store_refetch(). Same mechanism, same precedent,
+ * uart_bridge_ext.c:104-127's HAZARD block.
+ *
+ * Declared here by hand rather than via #include "uart_bridge.h": that
+ * header pulls in ILI9488.h/screen_idle.h/kiln_io.h for its many OTHER
+ * hardware bridge task declarations, none of which this file needs or wants
+ * as a build dependency -- and which are not part of this file's host-test
+ * stub surface (App/test/stubs/), so pulling them in broke test_safety_cfg_
+ * store.c's direct #include of this .c file. The real declaration and its
+ * full doc comment live in uart_bridge.h; this one must be kept in sync with
+ * it by hand if that signature ever changes. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 
 static const char *TAG = "safety_cfg_store";
 
@@ -139,6 +158,37 @@ static int64_t s_fetched_at_us = -1;
 static int64_t s_last_refetch_fail_log_us = 0;
 static uint32_t s_refetch_fail_suppressed = 0;
 
+/* Wall-clock ceiling on how long ONE safety_cfg_store_refetch() call may
+ * spend across ALL of its page requests combined -- 2026-08-23 fix.
+ *
+ * This function runs synchronously inside safety_poll_task, and each page it
+ * fetches (safety_link_get_config_page()) can legitimately take up to
+ * SAFETY_LINK_REPLY_TIMEOUT_MS (~1.2s at the current 9600 baud) now that that
+ * call actually uses its full declared wait instead of abandoning it after
+ * the first unrelated frame (safety_link.h's safety_drain_still_waiting(),
+ * same date). Without a cap here, a slow-but-answering Pico -- or one that
+ * has genuinely gone quiet mid-fetch -- lets a multi-page refetch
+ * (CONFIG_REFERENCE.md's ~57 params packs into roughly 2-3 CONFIG_PAGE
+ * frames at typical entry sizes) spend several of those ~1.2s budgets back
+ * to back, all inside ONE safety_poll_task iteration, on top of that same
+ * iteration's own GET_STATUS exchange (which can itself already legitimately
+ * spend up to SAFETY_LINK_REPLY_TIMEOUT_MS against a dead link -- that part
+ * is unchanged and pre-existing).
+ *
+ * 2000 ms here, combined with GET_STATUS's own pre-existing ~1.2s worst case
+ * and FW_VERSION's ~50-500ms rare worst case, keeps one safety_poll_task
+ * iteration's own worst case around 3.2-3.7s -- comfortably under
+ * CONFIG_ESP_TASK_WDT_TIMEOUT_S (5s, sdkconfig.defaults) with well over a
+ * second of margin for scheduling jitter and the rest of that iteration's
+ * work. If this budget is exhausted mid-fetch, this function aborts exactly
+ * like a failed page request (cache left unchanged, logged, rate-limited) --
+ * nothing is lost: safety_cfg_store_maybe_refetch() re-invokes this from
+ * page 0 with a FRESH budget on the next poll for as long as the cached CRC
+ * keeps disagreeing, so a multi-page fetch simply spreads itself across
+ * however many poll iterations it needs instead of trying to fit inside
+ * one. */
+#define SAFETY_CFG_STORE_REFETCH_BUDGET_MS 2000u
+
 static esp_err_t nvs_partition_init(const char *partition)
 {
     esp_err_t err = nvs_flash_init_partition(partition);
@@ -219,8 +269,48 @@ static void nvs_load_store(void)
              (unsigned)loaded.version, (unsigned)SAFETY_CFG_STORE_VERSION);
 }
 
+/* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
+ * (PSRAM) -- a local variable's address is as good a proxy as any for "where
+ * is my stack", since it is allocated on whichever stack the calling task is
+ * currently running on, by construction.
+ *
+ * 2026-08-23 panic fix, ESP-IDF's constraint, not this driver's own: a
+ * flash/NVS write disables the cache (spi_flash_disable_interrupts_caches_
+ * and_other_cpu(), on the esp_flash_write()/esp_partition_read() path NVS
+ * uses underneath), which makes PSRAM unreachable while it is disabled --
+ * ESP-IDF's own esp_task_stack_is_sane_cache_disabled() (inlined at the top
+ * of that function) asserts if the calling task's stack lives there,
+ * ABORTING THE WHOLE BOARD rather than failing just this one call. This is
+ * exactly the hazard uart_bridge_ext.c:104-127's HAZARD block documents for
+ * the CONTROL/PROFILES/AUTOTUNE UART bridge tasks (also PSRAM-stacked, same
+ * reason -- internal-DRAM exhaustion at boot), reproduced here for
+ * safety_poll_task (safety_link.c:1636-1638's PSRAM stack comment): a
+ * successful safety_cfg_store_refetch() calling this function directly, from
+ * that task, panicked the board the first time the fetch ever actually
+ * succeeded (previously it always timed out first, so this code path had
+ * never executed). See nvs_save_store()'s own comment just below for the
+ * fix (route the write through uart_bridge_ext.c's flash-safe worker
+ * instead) -- this predicate is the belt to that fix's suspenders: even if a
+ * FUTURE caller reaches nvs_save_store() directly from the wrong task
+ * (bypassing safety_cfg_store_flush_if_dirty()), this refuses loudly with a
+ * diagnosable error instead of aborting the board. */
+static bool caller_stack_is_external(void)
+{
+    volatile int stack_probe = 0; /* volatile + initialised: only its ADDRESS matters, but -Werror=maybe-uninitialized rejects a bare declaration and a non-volatile one could be optimised out of the frame entirely. */
+    return esp_ptr_external_ram((void *)&stack_probe);
+}
+
 static esp_err_t nvs_save_store(void)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "nvs_save_store: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board "
+                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled(), not a constraint of "
+                      "this driver -- see caller_stack_is_external()'s comment). Call this "
+                      "through safety_cfg_store_flush_if_dirty() (which routes it via "
+                      "uart_bridge_ext_run_on_flash_worker()) instead of directly.");
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
@@ -233,6 +323,66 @@ static esp_err_t nvs_save_store(void)
     }
     nvs_close(h);
     return err;
+}
+
+/* True once s_store has changed in RAM since it was last successfully
+ * persisted to flash. Set by safety_cfg_store_refetch() right after it
+ * updates s_store; cleared only by safety_cfg_store_flush_if_dirty() on a
+ * successful flush. Not locked: every writer of s_store/s_dirty
+ * (safety_cfg_store_refetch(), always on safety_poll_task) runs its own
+ * flush call to completion, via bx_flash_worker, before returning -- there
+ * is no window where two tasks touch either at once. (Pre-existing note:
+ * s_store itself has no lock against concurrent READERS on other tasks
+ * either -- e.g. safety_cfg_http.c's commissioning JSON build -- but that is
+ * an existing property of this file unrelated to this fix; not introduced
+ * or worsened here.) */
+static bool s_dirty = false;
+
+/* The actual flash write, run ON bx_flash_worker's own internal-RAM stack
+ * (see uart_bridge_ext_run_on_flash_worker()'s doc comment) rather than on
+ * whoever calls safety_cfg_store_flush_if_dirty(). `arg` is the esp_err_t*
+ * this job reports its result back through -- safe to point at the caller's
+ * own stack local, since uart_bridge_ext_run_on_flash_worker() blocks the
+ * caller for the whole call (same contract bx_run_on_internal_stack()
+ * documents in uart_bridge_ext.c). */
+static void nvs_save_store_job(void *arg)
+{
+    esp_err_t *out_err = (esp_err_t *)arg;
+    *out_err = nvs_save_store();
+}
+
+/* Flushes s_store to NVS if (and only if) it has changed since the last
+ * successful flush -- the "mark dirty, flush later on a safe task" half of
+ * the 2026-08-23 panic fix. safety_cfg_store_refetch() is this function's
+ * only caller today (right after marking s_store dirty), but it is exported
+ * (safety_cfg_store.h) so a future caller on any task can trigger a flush
+ * without ever risking a direct nvs_save_store() call of its own -- the
+ * worker hand-off happens here, once, in one place. */
+esp_err_t safety_cfg_store_flush_if_dirty(void)
+{
+    if (!s_dirty) {
+        return ESP_OK; /* nothing to do -- already persisted */
+    }
+    esp_err_t save_err = ESP_FAIL;
+    esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(nvs_save_store_job, &save_err);
+    if (submit_err != ESP_OK) {
+        /* The worker isn't up yet (boot ordering -- app_main calls
+         * uart_bridge_ext_start_flash_worker() early, but "early" is still
+         * after safety_link_start(), so a refetch that races the very start
+         * of boot could in principle see this) or its queue/lock could not
+         * be used. Same "live but will not survive a reboot" outcome as an
+         * NVS write failure below: s_dirty stays true, so the NEXT
+         * successful refetch (or any other future caller of this function)
+         * tries again. */
+        ESP_LOGE(TAG, "safety_cfg_store: could not hand the NVS flush to the flash-safe worker "
+                      "(%s) -- cache is live but will not persist this attempt",
+                 esp_err_to_name(submit_err));
+        return submit_err;
+    }
+    if (save_err == ESP_OK) {
+        s_dirty = false;
+    }
+    return save_err;
 }
 
 static int index_for_id(uint16_t id)
@@ -347,8 +497,37 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
     scratch.version = SAFETY_CFG_STORE_VERSION;
     scratch.config_crc = config_crc;
 
+    /* SAFETY_CFG_STORE_REFETCH_BUDGET_MS -- 2026-08-23 fix, see that
+     * constant's own comment. This whole function runs synchronously inside
+     * safety_poll_task, and each page it fetches can legitimately take up to
+     * SAFETY_LINK_REPLY_TIMEOUT_MS now that safety_link_get_config_page()
+     * actually uses its full declared wait. A multi-page fetch must not be
+     * allowed to spend an unbounded number of those budgets back to back
+     * inside one poll iteration. */
+    int64_t refetch_started_us = esp_timer_get_time();
+
     uint8_t page_index = 0;
     for (;;) {
+        int64_t elapsed_us = esp_timer_get_time() - refetch_started_us;
+        if (elapsed_us >= (int64_t)SAFETY_CFG_STORE_REFETCH_BUDGET_MS * 1000) {
+            /* Same "cache left unchanged, retry next poll" outcome as a
+             * failed page request below -- safety_cfg_store_maybe_refetch()
+             * re-invokes this from scratch (page 0) on the very next poll as
+             * long as the CRC still disagrees, so nothing here is lost, only
+             * deferred to a later iteration that gets a fresh budget. */
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
+                ESP_LOGW(TAG, "safety_cfg_store_refetch: wall-clock budget (%u ms) exhausted after "
+                              "page %u -- cache left unchanged, retrying on a later poll",
+                         (unsigned)SAFETY_CFG_STORE_REFETCH_BUDGET_MS, (unsigned)page_index);
+                s_last_refetch_fail_log_us = now_us;
+                s_refetch_fail_suppressed = 0;
+            } else {
+                s_refetch_fail_suppressed++;
+            }
+            return false;
+        }
+
         kilnlink_config_page_t page;
         esp_err_t err = safety_link_get_config_page(link, page_index, &page);
         if (err != ESP_OK) {
@@ -398,9 +577,17 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
 
     s_store = scratch;
     s_fetched_at_us = esp_timer_get_time();
-    esp_err_t save_err = nvs_save_store();
+    /* 2026-08-23 fix: no longer nvs_save_store() directly -- this function
+     * runs on safety_poll_task, whose stack is PSRAM (safety_link.c:1636-
+     * 1638), and a flash write from there aborts the board (see
+     * nvs_save_store()'s own comment). Mark dirty and flush via the
+     * flash-safe worker instead -- same "HAZARD" class and same fix shape
+     * uart_bridge_ext.c:104-127 already established for CONTROL/PROFILES/
+     * AUTOTUNE. */
+    s_dirty = true;
+    esp_err_t save_err = safety_cfg_store_flush_if_dirty();
     if (save_err != ESP_OK) {
-        ESP_LOGE(TAG, "safety_cfg_store_refetch: fetched OK but nvs_save_store failed (%s) -- live "
+        ESP_LOGE(TAG, "safety_cfg_store_refetch: fetched OK but the NVS flush failed (%s) -- live "
                       "but will not survive a reboot",
                  esp_err_to_name(save_err));
     }

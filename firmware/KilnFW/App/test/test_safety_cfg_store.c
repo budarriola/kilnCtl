@@ -27,11 +27,21 @@ static size_t s_stub_page_count = 0;
 static esp_err_t s_stub_page_err = ESP_OK;      // returned instead of a real page, if != ESP_OK
 static int s_stub_fail_at_page = -1;            // page index at which s_stub_page_err is returned
 static int s_stub_get_config_page_calls = 0;
+// Simulates wall-clock time actually elapsing inside safety_link_get_config_
+// page() -- on real hardware each call can take up to SAFETY_LINK_REPLY_
+// TIMEOUT_MS (~1.2s). The stub esp_timer is otherwise frozen (host tests have
+// no real clock), so a budget-exhaustion test has to advance it explicitly;
+// this lets a test do that per-call instead of hand-rolling esp_timer_test_
+// set_now_us() calls around every stage_page().
+static int64_t s_stub_advance_us_per_call = 0;
 
 esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index, kilnlink_config_page_t *out)
 {
     (void)link;
     s_stub_get_config_page_calls++;
+    if (s_stub_advance_us_per_call > 0) {
+        esp_timer_test_set_now_us(esp_timer_get_time() + s_stub_advance_us_per_call);
+    }
     if (s_stub_fail_at_page >= 0 && (int)page_index == s_stub_fail_at_page) {
         return s_stub_page_err;
     }
@@ -42,6 +52,35 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
     return ESP_OK;
 }
 
+// ---------------------------------------------------------------------------
+// uart_bridge_ext_run_on_flash_worker() stub -- 2026-08-23 panic fix.
+// safety_cfg_store.c no longer calls nvs_save_store() directly; it hands the
+// job to this function instead (see safety_cfg_store_flush_if_dirty()). The
+// real implementation (uart_bridge_ext.c) runs the job on a SEPARATE task's
+// stack; this stub, like every other host test in this file, is single-
+// threaded, so it simply invokes the job inline -- exactly what the real
+// worker does from the caller's point of view (it blocks until the job
+// completes), so nvs_save_store()'s own behavior/stubbing is unaffected.
+// Controllable so a test can simulate the worker being unavailable (the
+// "boot ordering" case safety_cfg_store_flush_if_dirty()'s own comment
+// describes) without needing a real second task.
+// ---------------------------------------------------------------------------
+
+static int s_stub_flash_worker_calls = 0;
+static esp_err_t s_stub_flash_worker_submit_err = ESP_OK; // returned instead of running the job, if != ESP_OK
+
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
+{
+    s_stub_flash_worker_calls++;
+    if (s_stub_flash_worker_submit_err != ESP_OK) {
+        return s_stub_flash_worker_submit_err; // simulates "worker not started" -- job never runs
+    }
+    if (fn) {
+        fn(arg);
+    }
+    return ESP_OK;
+}
+
 static void stub_reset(void)
 {
     memset(s_stub_pages, 0, sizeof(s_stub_pages));
@@ -49,6 +88,9 @@ static void stub_reset(void)
     s_stub_page_err = ESP_OK;
     s_stub_fail_at_page = -1;
     s_stub_get_config_page_calls = 0;
+    s_stub_advance_us_per_call = 0;
+    s_stub_flash_worker_calls = 0;
+    s_stub_flash_worker_submit_err = ESP_OK;
 }
 
 // One page containing entries for the given (id, u16 value) pairs, `more`
@@ -80,6 +122,8 @@ static void reset_all(void)
     reset_to_defaults();
     esp_timer_test_set_now_us(0);
     s_fetched_at_us = -1;
+    s_dirty = false; /* 2026-08-23 fix -- a prior test's unflushed write must not bleed into the next */
+    esp_ptr_external_ram_test_set(false); /* default: called from a normal, internal-RAM stack */
     nvs_test_enable(false); /* every test except the version-refuse one runs without real NVS */
     nvs_test_clear();
 }
@@ -289,6 +333,213 @@ static void test_version_refuse_newer_than_firmware(void)
     nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
 }
 
+// ---------------------------------------------------------------------------
+// SAFETY_CFG_STORE_REFETCH_BUDGET_MS -- 2026-08-23 fix. Pins the bound that
+// keeps a multi-page refetch from accumulating unbounded wall-clock time
+// inside one safety_poll_task iteration (see that constant's own comment in
+// safety_cfg_store.c). A future edit that removed or loosened this cap
+// without noticing would silently reintroduce the risk it closes, so this
+// must be able to fail against the unbounded code.
+// ---------------------------------------------------------------------------
+
+static void test_refetch_aborts_when_wall_clock_budget_exhausted(void)
+{
+    TEST_SECTION("safety_cfg_store_refetch -- a multi-page fetch that runs long ABORTS at the budget, "
+                 "not after every page");
+    reset_all();
+
+    // Three pages, each carrying `more=1` except the last -- a real refetch
+    // would need all three to complete. Values are irrelevant; only the
+    // page count and the simulated per-call wall-clock cost matter here.
+    uint16_t ids_a[] = { 0x0203 };
+    uint16_t vals_a[] = { 1 };
+    stage_page(0, true, ids_a, vals_a, 1);
+    uint16_t ids_b[] = { 0x0205 };
+    uint16_t vals_b[] = { 2 };
+    stage_page(1, true, ids_b, vals_b, 1);
+    uint16_t ids_c[] = { 0x0206 };
+    uint16_t vals_c[] = { 3 };
+    stage_page(2, false, ids_c, vals_c, 1);
+
+    // Seed a previous good cache so a "left unchanged" claim is actually
+    // checked, not vacuously true because the cache started empty.
+    s_store.config_crc = 0x00AA;
+    s_store.entries[10].set = 1;
+    s_store.entries[10].value.u16_val = 111;
+
+    // Each simulated page "costs" 1.3s of wall clock -- comfortably inside
+    // SAFETY_LINK_REPLY_TIMEOUT_MS's real ~1.2s worst case (this is what a
+    // slow-but-still-answering Pico looks like), so two pages already exceed
+    // SAFETY_CFG_STORE_REFETCH_BUDGET_MS (2000ms) before a third is ever
+    // attempted.
+    s_stub_advance_us_per_call = 1300000; // 1.3s
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+
+    bool ok = safety_cfg_store_refetch(&fake_link, 0x00BB);
+
+    TEST_CHECK(ok == false, "the refetch aborts once its wall-clock budget is exhausted, "
+                            "even though every page it DID ask for would have succeeded");
+    TEST_CHECK(s_stub_get_config_page_calls == 2,
+               "exactly two pages were attempted (0 then 1, each costing 1.3s) before the budget "
+               "check refused a third -- proves this is a wall-clock bound, not a page-count one");
+    TEST_CHECK(safety_cfg_store_cached_crc() == 0x00AA,
+               "the previous cache is untouched by an aborted-for-budget refetch, same as any "
+               "other failed refetch");
+    safety_cfg_param_t p;
+    TEST_CHECK(safety_cfg_store_get_by_index(10, &p) && p.set && p.value.u16_val == 111,
+               "the previously-cached value survives the aborted refetch intact");
+}
+
+static void test_refetch_within_budget_still_completes_all_pages(void)
+{
+    TEST_SECTION("safety_cfg_store_refetch -- a multi-page fetch that stays within budget still "
+                 "completes normally");
+    reset_all();
+
+    uint16_t ids_a[] = { 0x0203 };
+    uint16_t vals_a[] = { 10 };
+    stage_page(0, true, ids_a, vals_a, 1);
+    uint16_t ids_b[] = { 0x0205 };
+    uint16_t vals_b[] = { 20 };
+    stage_page(1, false, ids_b, vals_b, 1);
+
+    // No simulated per-call cost here (s_stub_advance_us_per_call stays 0 --
+    // reset_all() -> stub_reset() zeroes it) -- proves the budget check
+    // itself never blocks a fetch that is actually fast, only one that is
+    // genuinely slow/stalled.
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+
+    bool ok = safety_cfg_store_refetch(&fake_link, 0xCAFE);
+
+    TEST_CHECK(ok == true, "a two-page fetch that costs no simulated wall-clock time completes normally");
+    TEST_CHECK(s_stub_get_config_page_calls == 2, "both pages were fetched -- the budget check "
+                                                   "never fires when nothing is actually slow");
+    TEST_CHECK(safety_cfg_store_cached_crc() == 0xCAFE, "the fetch committed -- cache updated");
+}
+
+// ---------------------------------------------------------------------------
+// Deferred NVS flush + wrong-task guard -- 2026-08-23 panic fix. A successful
+// safety_cfg_store_refetch() (called from safety_poll_task, whose stack is
+// PSRAM) used to call nvs_save_store() directly, which aborts the whole
+// board on real hardware the moment it actually executes (ESP-IDF's
+// esp_task_stack_is_sane_cache_disabled(), see safety_cfg_store.c's
+// caller_stack_is_external() comment). Two things are pinned here: the
+// refetch path now goes through the flash-safe worker (uart_bridge_ext_
+// run_on_flash_worker(), stubbed above) instead of writing directly, and the
+// wrong-task guard inside nvs_save_store() itself refuses (rather than
+// crashing) if ever called with an external-RAM stack underneath it.
+// ---------------------------------------------------------------------------
+
+static void test_successful_refetch_flushes_via_the_flash_worker_not_directly(void)
+{
+    TEST_SECTION("safety_cfg_store_refetch -- a successful fetch flushes via the flash-safe "
+                 "worker, not nvs_save_store() run directly on the caller");
+    reset_all();
+    nvs_test_enable(true); // this test checks the flush actually SUCCEEDED (s_dirty cleared), so it
+                            // needs the stub's real NVS round trip, not the "every open fails closed"
+                            // default every other test in this file relies on.
+
+    uint16_t ids[] = { 0x0203 };
+    uint16_t vals[] = { 55 };
+    stage_page(0, false, ids, vals, 1);
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+
+    bool ok = safety_cfg_store_refetch(&fake_link, 0x1234);
+
+    TEST_CHECK(ok == true, "the refetch itself still succeeds");
+    TEST_CHECK(s_stub_flash_worker_calls == 1,
+               "the NVS flush was handed to uart_bridge_ext_run_on_flash_worker() exactly once -- "
+               "this is the ONLY route safety_cfg_store.c may use to reach nvs_save_store() now");
+    TEST_CHECK(s_dirty == false, "a successful flush clears the dirty flag");
+
+    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+}
+
+static void test_flush_is_a_noop_when_nothing_is_dirty(void)
+{
+    TEST_SECTION("safety_cfg_store_flush_if_dirty -- a no-op (and no worker call) when nothing changed");
+    reset_all();
+
+    TEST_CHECK(s_dirty == false, "a freshly reset store is not dirty");
+    esp_err_t err = safety_cfg_store_flush_if_dirty();
+
+    TEST_CHECK(err == ESP_OK, "flushing a clean store reports success trivially");
+    TEST_CHECK(s_stub_flash_worker_calls == 0,
+               "the flash-safe worker is never bothered when there is nothing to persist");
+}
+
+static void test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry(void)
+{
+    TEST_SECTION("safety_cfg_store_flush_if_dirty -- the worker being unavailable leaves the "
+                 "cache dirty for the next attempt, rather than silently dropping the write");
+    reset_all();
+    nvs_test_enable(true); // the RETRY flush below needs to actually succeed to prove s_dirty clears
+
+    uint16_t ids[] = { 0x0203 };
+    uint16_t vals[] = { 77 };
+    stage_page(0, false, ids, vals, 1);
+
+    s_stub_flash_worker_submit_err = ESP_FAIL; // simulates "worker not started yet" (boot ordering)
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+
+    bool ok = safety_cfg_store_refetch(&fake_link, 0x5678);
+
+    TEST_CHECK(ok == true, "the refetch itself still reports success -- the in-RAM cache DID update, "
+                           "only the flash persist failed");
+    TEST_CHECK(s_dirty == true, "the dirty flag stays set -- the change is live but not yet on flash");
+
+    // Now simulate the worker coming up and a later flush attempt succeeding.
+    s_stub_flash_worker_submit_err = ESP_OK;
+    esp_err_t err = safety_cfg_store_flush_if_dirty();
+
+    TEST_CHECK(err == ESP_OK, "a later flush, once the worker is available, succeeds");
+    TEST_CHECK(s_dirty == false, "the dirty flag clears once the deferred write actually lands");
+    TEST_CHECK(s_stub_flash_worker_calls == 2,
+               "the worker was asked twice: once inside the failed refetch, once on the explicit retry");
+
+    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+}
+
+static void test_nvs_save_store_refuses_when_calling_stack_is_external_ram(void)
+{
+    TEST_SECTION("nvs_save_store -- refuses (does not crash) when called with a PSRAM stack underneath it");
+    reset_all();
+
+    esp_ptr_external_ram_test_set(true); // simulate being called from a PSRAM-stacked task
+
+    esp_err_t err = nvs_save_store();
+
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE,
+               "the wrong-task guard refuses with a diagnosable error, not a crash, exactly the "
+               "class of bug (an NVS write reached from a PSRAM-stack task) this whole fix closes");
+
+    esp_ptr_external_ram_test_set(false); // leave shared stub state as every other test expects
+}
+
+static void test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack(void)
+{
+    TEST_SECTION("nvs_save_store -- proceeds normally when the calling task's stack is internal RAM");
+    reset_all();
+    nvs_test_enable(true); // exercise the real stub NVS round trip for this one
+
+    // esp_ptr_external_ram_test_set(false) is reset_all()'s implicit state
+    // (the stub defaults to false and nothing here has set it true).
+    s_store.config_crc = 0x9999;
+    esp_err_t err = nvs_save_store();
+
+    TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write proceeds "
+                              "and succeeds exactly as it always did");
+
+    nvs_test_enable(false); // leave the shared stub state as every other test in this binary expects
+}
+
 void run_test_safety_cfg_store(void)
 {
     test_index_for_id_finds_known_and_rejects_unknown();
@@ -297,6 +548,13 @@ void run_test_safety_cfg_store(void)
     test_refetch_pages_until_more_is_false();
     test_refetch_unknown_id_is_skipped_not_fatal();
     test_refetch_failure_leaves_cache_untouched();
+    test_refetch_aborts_when_wall_clock_budget_exhausted();
+    test_refetch_within_budget_still_completes_all_pages();
+    test_successful_refetch_flushes_via_the_flash_worker_not_directly();
+    test_flush_is_a_noop_when_nothing_is_dirty();
+    test_flush_worker_unavailable_leaves_store_dirty_for_a_later_retry();
+    test_nvs_save_store_refuses_when_calling_stack_is_external_ram();
+    test_nvs_save_store_proceeds_normally_on_an_internal_ram_stack();
     test_unset_param_reports_set_false();
     test_lookup_by_id();
     test_version_refuse_newer_than_firmware();
