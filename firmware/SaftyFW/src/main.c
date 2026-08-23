@@ -109,6 +109,7 @@ int main(void)
     // pauses on debug can have its watchdog silently disabled by an attached
     // probe -- "the one component where that matters".
     watchdog_enable(SAFTYFW_WATCHDOG_TIMEOUT_MS, true);
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_WATCHDOG_ARMED);
 
     // --- Step 3: read boot_reason; latch it. --------------------------------
     // watchdog_caused_reboot()/watchdog_enable_caused_reboot() read
@@ -151,6 +152,7 @@ int main(void)
     // (SAFTY_CMD_SET_CONFIG or similar) to actually set any of this -- see
     // config_store.h's header comment.
     config_store_boot_load();
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_CONFIG_LOADED);
 
     // --- Step 5: spi_owner, adc_owner, uart_owner bring-up. -------------------
     // spi_owner (SPI0 + CS0, Phase 3) is real as of this pass -- see
@@ -173,7 +175,9 @@ int main(void)
     // fatal path exists before there is a log sink (Phase 8) to report
     // through.
     bool spi_owner_ok = spi_owner_init();
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_SPI_UP);
     bool uart_owner_ok = uart_owner_init();
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_UART_UP);
     (void)uart_owner_ok; // no log sink yet (Phase 8) to report this to
 
     // --- Step 6: probe the MAX31856. ------------------------------------------
@@ -234,6 +238,8 @@ int main(void)
     // unreadable in exactly the reboot loop it exists to diagnose. Read it
     // over SWD at SAFTYFW_STARTUP_DIAG_SCRATCH, guarded by the magic word in
     // SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH.
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_THERMO_PROBED);
+
     uint32_t start_failures = 0u;
 #define SAFTYFW_START_TASK(bit, call)        \
     do {                                     \
@@ -259,6 +265,7 @@ int main(void)
     SAFTYFW_START_TASK(WATCHDOG_CHECKIN_UPDATE_TASK, update_task_start());
 #undef SAFTYFW_START_TASK
 
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_TASKS_STARTED);
     watchdog_hw->scratch[SAFTYFW_STARTUP_DIAG_SCRATCH] = start_failures;
     watchdog_hw->scratch[SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH] =
         SAFTYFW_STARTUP_DIAG_MAGIC;
@@ -278,6 +285,7 @@ int main(void)
     // GRACE -> ARMED then happens automatically, 60 s later, inside that
     // task's own loop -- nothing here drives it.
 
+    SAFTYFW_BOOT_STAGE(SAFTYFW_BOOT_STAGE_SCHEDULER_ENTERED);
     vTaskStartScheduler();
 
     // vTaskStartScheduler() does not return on success. Reaching here means
