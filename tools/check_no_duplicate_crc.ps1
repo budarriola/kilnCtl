@@ -67,13 +67,19 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 
-# Directories never scanned: build output, vendored/managed deps, venvs.
+# Directories never scanned: build output, vendored/managed deps, venvs,
+# and throwaway agent worktrees. `.claude/worktrees/` holds full, disposable
+# copies of the repo used by background coding agents; they can contain
+# stale copies of files that have since been changed or deleted upstream; a
+# CRC hit inside one is not a real source hit and would just make this
+# check's output misleading noise.
 $excludeDirs = @(
     '\\build\\',
     '\\managed_components\\',
     '\\\.venv\\',
     '\\node_modules\\',
-    '\\components\\lvgl\\'
+    '\\components\\lvgl\\',
+    '\\\.claude\\worktrees\\'
 )
 
 # Known, already-tracked pre-migration duplicates (see header above).
