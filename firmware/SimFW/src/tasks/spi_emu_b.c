@@ -35,15 +35,18 @@
 #define SPI_EMU_B_MOSI_GPIO 13u
 #define SPI_EMU_B_MISO_GPIO 14u
 #define SPI_EMU_B_CS0_GPIO  15u
-// Safety-side ~DRDY (DESIGN_NOTES.md 3.6's "DRDY + ~FAULT (safety side) | 2 | direct
-// GPIO, via isolator"). GPIO26 = `DRDY_SAFETY` per docs/HARDWARE.md section
-// 1, wired to J7 pin 4 (`thermoDrdy`) through the fixture->board ISO7740DWR
-// (section 3.2). Its partner `FAULT_SAFETY` is GPIO27, adjacent on purpose:
-// these are the only two isolator-crossing direct-GPIO lines, and section 1
-// keeps them together (and next to the GPIO28 spare) so the safety domain's
-// pins do not interleave with GND_Main ones on the header. An earlier
-// revision claimed GPIO27 here, which took FAULT_SAFETY's pin and split the
-// pair across the isolation boundary -- see spi_emu_a.c's DRDY block.
+// Safety-side ~DRDY (DESIGN_NOTES.md 3.6's "DRDY + ~FAULT (safety side) | 2 |
+// direct GPIO"). GPIO26 = `DRDY_SAFETY` per docs/HARDWARE.md section 1, wired
+// straight to J7 pin 4 (`thermoDrdy`) -- no digital isolator in this path
+// since 2026-08-23 (DESIGN_NOTES.md section 3.5: the fixture's ground is
+// commoned with the DUT's). Its partner `FAULT_SAFETY` is GPIO27, adjacent
+// on purpose: these were the only two isolator-crossing direct-GPIO lines
+// when the isolator still existed, and section 1 keeps them together (and
+// next to the GPIO28 spare) so the safety domain's pins do not interleave
+// with GND_Main ones on the header -- a grouping that is still useful for
+// readability even with the isolator gone. An earlier revision claimed
+// GPIO27 here, which took FAULT_SAFETY's pin and split the pair across what
+// was then the isolation boundary -- see spi_emu_a.c's DRDY block.
 #define SPI_EMU_B_DRDY_GPIO 26
 
 static TaskHandle_t s_task_handle = NULL;

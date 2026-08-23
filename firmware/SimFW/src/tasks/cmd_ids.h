@@ -144,12 +144,14 @@ extern "C" {
 // DUT_POWER_SET/GET (0x06/0x08): deprecated aliases for the main-domain
 // relay only (i2c_owner_set/_get_dut_power_main_on()) -- kept exactly as-is
 // for backward compatibility. Deliberately NOT redefined to mean "both
-// relays": the whole point of two independent relays (docs/HARDWARE.md
-// section 3.7 / docs/BOM.md section 6) is that GND_Main and GND_Safty never
-// get bonded through a shared control path, so ganging them by default here
-// would quietly reintroduce the exact failure mode two relays exist to
-// avoid. Use DUT_POWER_MAIN_SET/GET or DUT_POWER_SAFETY_SET/GET (0x09/0x0A)
-// for explicit, single-domain control -- see docs/PROTOCOL.md section 5.5.
+// relays": the two independent relays (docs/HARDWARE.md section 3.7 /
+// docs/BOM.md section 6) exist for independent per-domain power-cycle/
+// brownout testing, not to avoid bonding GND_Main/GND_Safty (that rationale
+// is superseded, docs/DESIGN_NOTES.md section 3.5, 2026-08-23). Ganging
+// them by default here would still be wrong -- it would make a two-domain
+// decision on the caller's behalf implicitly. Use DUT_POWER_MAIN_SET/GET or
+// DUT_POWER_SAFETY_SET/GET (0x09/0x0A) for explicit, single-domain control
+// -- see docs/PROTOCOL.md section 5.5.
 #define SIMFW_CMD_IO_DUT_POWER_SET 0x06u
 #define SIMFW_CMD_IO_ESTOP_GET     0x07u
 #define SIMFW_CMD_IO_DUT_POWER_GET 0x08u

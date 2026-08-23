@@ -31,7 +31,7 @@ following have ever been measured on this hardware:
 | Figure | Status | Where it comes from |
 |---|---|---|
 | DUT-power inrush, ~60 A / ~190 µs (step 9) | **Derived.** Assumes ~0.2 Ω source+ESR resistance that was never measured. | `docs/BOM.md` §6 |
-| CT transformer ratio, ~3:1 (step 4/§5) | **Derived, medium confidence.** Built on a ~1.5 Vpk usable-Pico-drive estimate; the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its own datasheet. | `docs/DESIGN_NOTES.md` §3.3, `docs/HARDWARE.md` §5 |
+| CT transformer ratio, **1:1** (step 4/§5) | **Higher confidence than the earlier ~3:1 plan, but still not measured.** 1.06 V rms clears the board's ≈1 Vrms full-scale sense input with margin (a board property, independent of whichever CT is installed) even if the ~1.5 Vpk usable-Pico-drive estimate behind it is off; the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its own datasheet. | `docs/DESIGN_NOTES.md` §3.3, `docs/HARDWARE.md` §5 |
 | SPI first-byte timing budget, ~250 ns / ~1.6 µs (step 3) | **Derived.** RP2040-datasheet arithmetic; no Pico has ever been attached to confirm it. | `docs/SPI_ACCESS_AUDIT.md` §9, `docs/DESIGN_NOTES.md` §3.2.1 |
 | Relay debounce, ~24 ms worst case (step 8) | Derived from `mcp23017.h`'s stated debounce constant, not bench-timed. | `mcp23017.h` |
 | "Plausible, non-zero temperatures" on the DUT (step 6) | **Not proof the SPI framing is correct.** See step 6's note below — a whole-burst byte shift produces exactly this symptom. | §4 step 6, `docs/SPI_ACCESS_AUDIT.md` D2 |
@@ -203,17 +203,19 @@ definitions throughout, not ad hoc judgment calls:
   each step in this bring-up order exists specifically so failures are
   caught before they can reach the real board (`docs/PLAN.md` §14's stated
   rationale).
-- **ABORT** — anything ambiguous about ground-domain continuity (step 5),
-  anything that suggests the real board saw an out-of-spec signal (5 V where
-  3.3 V was expected, a connector plugged in reversed), or any smoke/smell/
-  unexpected heat. Safe abort action: **power off the fixture and the main
-  board immediately** (bench supply off, not just USB unplugged — the main
-  board's 12 V feed is a separate rail from USB), disconnect the harness
-  between fixture and main board, and do not reconnect until the suspected
-  cause is understood. A wrong result on step 5 or step 6 is the one place
-  in this whole procedure with real hardware-damage risk (`docs/PLAN.md`
-  §15's risk table: "Ground strap through the fixture defeats isolation" and
-  "J6 pinout traced wrong" are both flagged Impact: possible damage).
+- **ABORT** — anything ambiguous about the J7 pin-1 check or CT transformer
+  orientation (step 5), anything that suggests the real board saw an
+  out-of-spec signal (5 V where 3.3 V was expected, a connector plugged in
+  reversed), or any smoke/smell/unexpected heat. Safe abort action: **power
+  off the fixture and the main board immediately** (bench supply off, not
+  just USB unplugged — the main board's 12 V feed is a separate rail from
+  USB), disconnect the harness between fixture and main board, and do not
+  reconnect until the suspected cause is understood. A wrong result on step 5
+  or step 6 is the one place in this whole procedure with real
+  hardware-damage risk (`docs/PLAN.md` §15's risk table: "J6 pinout traced
+  wrong" is flagged Impact: possible damage; the fixture's ground is now
+  deliberately commoned with the DUT's, so the old "ground strap defeats
+  isolation" risk row no longer describes a fixture defect).
 
 ---
 
@@ -331,50 +333,59 @@ because no bench calibration run has ever populated real per-channel
 constants; behavior today is identity, same as the old placeholder. Judge
 this step on waveform cleanliness (frequency, shape, no carrier ripple
 bleeding through), not on absolute calibrated amplitude.
-**Also unmeasured: the transformer's ~3:1 step-up ratio itself.** It's built
-on a ~1.5 Vpk usable-Pico-drive estimate the project itself calls
-medium-confidence, and the candidate part's (Triad TY-300P) actual turns
-ratio has never been checked against its datasheet (`docs/DESIGN_NOTES.md`
-§3.3, `docs/HARDWARE.md` §5). If the transformer is populated this session,
+**Also unmeasured: the transformer's 1:1 ratio itself.** It's built on a
+~1.5 Vpk usable-Pico-drive estimate the project itself calls
+medium-confidence — though the fixture's basic correctness is far less
+sensitive to that estimate at 1:1 than it was under the earlier ~3:1 plan —
+and the candidate part's (Triad TY-300P) actual turns ratio has never been
+checked against its datasheet (`docs/DESIGN_NOTES.md` §3.3,
+`docs/HARDWARE.md` §5). If the transformer is populated this session,
 treat any voltage reading at the safety board's ADC as informational, not as
 confirmation the ratio is right — a wrong ratio here reads as a misleading
 current value on the DUT side, not damage (the safety board's clamp diodes
 D12/D13 are the backstop, per §5's CT troubleshooting row below).
 **NO-GO:** see §5's CT row.
 
-### Step 5 — GROUND-DOMAIN CHECK BEFORE FIRST DUT CONTACT
+### Step 5 — PRE-DUT SANITY CHECK BEFORE FIRST DUT CONTACT
 
 **Do not skip. Do not reorder. This is the step that protects the real
 board.**
 
-With the bring-up jumper (if one is fitted) **OUT**:
+**Revised 2026-08-23:** the fixture's ground is now deliberately commoned
+with the DUT's (`docs/DESIGN_NOTES.md` §3.5) — no digital isolators, no K4
+opto, no removable jumper. The old "no continuity between fixture `GND_Main`
+and `GND_Safty`" pass criterion is retired: continuity between those two
+labels is now the *expected*, correct result of the fixture's own wiring
+(e.g. K4's sense resistor bonds them directly), not a fault to abort on.
+This was never a check for a board-side isolation defect — it metered the
+fixture's own harness before connecting to the DUT — so nothing about the
+main board's own isolation was ever being verified here, and nothing about
+that changes now.
 
-1. With a multimeter in continuity mode, probe fixture `GND_Main` against
-   fixture `GND_Safty`. **Pass: no continuity (open circuit).** Any
-   continuity here means the fixture has become an unintended ground strap
-   between the main board's two isolated domains — **ABORT** per section 3,
-   do not connect to the real board until this is resolved.
-2. Verify isolator orientation (the two quad digital isolators — TI
-   ISO7740DWR, one per direction — carrying SPI bus B + `DRDY_SAFETY`/
-   `FAULT_SAFETY`, per `docs/HARDWARE.md` §3.2) and CT transformer
-   orientation against `docs/HARDWARE.md` §4's isolation boundary map, if
-   that hardware is populated this session.
-3. **Resolve the J7 pin-1 contradiction before wiring the isolated-side
-   supply.** `firmware/KilnFW/docs/HARDWARE.md` says J7 pin 1 is "no
-   connect"; `firmware/SaftyFW/docs/HARDWARE.md` §8 says the same physical
-   pin is `3.3v_Safty` (via R51, 0 Ω). `docs/HARDWARE.md` §0 item 5 follows
-   the `SaftyFW` doc as the more recently reviewed source, **but explicitly
+What this step checks instead:
+
+1. **CT transformer orientation and 1:1 wiring**, against
+   `docs/HARDWARE.md` §4's ground-domain map, if that hardware is populated
+   this session. The three CT channels are the one part of the fixture that
+   still stays floating from both ground domains, same as a real CT — get
+   this wrong and the isolation-transformer role those channels rely on for
+   correctness is defeated.
+2. **Resolve the J7 pin-1 contradiction before wiring the J7 harness.**
+   `firmware/KilnFW/docs/HARDWARE.md` says J7 pin 1 is "no connect";
+   `firmware/SaftyFW/docs/HARDWARE.md` §8 says the same physical pin is
+   `3.3v_Safty` (via R51, 0 Ω). `docs/HARDWARE.md` §0 item 5 follows the
+   `SaftyFW` doc as the more recently reviewed source, **but explicitly
    flags this as unverified**. With the real main board powered but nothing
    else connected, probe J7 pin 1 with a multimeter (continuity to the
    3.3 V safety rail, or DC voltage if the rail is live) to determine which
    doc is actually correct on this board revision, and record the answer in
-   `docs/HARDWARE.md` §0 item 5 in the same session. Getting this wrong
-   before wiring the isolated-side supply means either back-feeding an
-   unintended 3.3 V rail into a "no connect" pin, or leaving the isolator
-   side unpowered.
+   `docs/HARDWARE.md` §0 item 5 in the same session. The fixture's J7 harness
+   leaves pin 1 unconnected either way — getting this wrong before wiring
+   would mean back-feeding an unintended 3.3 V rail if a fixture wire
+   mistakenly lands on it.
 
-**Pass:** step 1's continuity check reads open, and the J7 pin-1 question is
-resolved (measured, not assumed) before any isolated-domain wire is landed.
+**Pass:** CT transformer orientation/ratio confirmed, and the J7 pin-1
+question is resolved (measured, not assumed) before the J7 harness is wired.
 **Do this with a meter every time the harness is rebuilt — not once and
 trusted forever** (`docs/HARDWARE.md` §6's own wording).
 
@@ -435,11 +446,13 @@ this early (K4 has not been asked to energize yet, and relays are not
 commanded by a PID with nothing to regulate toward); a lack of *temperature
 readings at all* is not expected and is a real fixture-path problem.
 
-### Step 7 — Safety path (J7, isolated)
+### Step 7 — Safety path (J7, direct GPIO)
 
 J7 mates **straight, pin-for-pin** to the safety daughterboard's J1 — no
 reversal, unlike J6 (`docs/HARDWARE.md` §3.2). Wire per that table, having
-already resolved the pin-1 question in step 5.
+already resolved the pin-1 question in step 5. No digital isolator sits in
+this path anymore — SPI bus B and `DRDY_SAFETY`/`FAULT_SAFETY` wire as
+direct GPIO (`docs/DESIGN_NOTES.md` §3.5).
 
 ```powershell
 kilnsim --port COMx state
@@ -589,13 +602,13 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 |---|---|
 | No waveform at all | PWM GPIO not wired, RC filter component missing/wrong values, or `wave_owner` mode is still MODEL (not MANUAL) and the thermal model has no simulated current on that zone yet — set `ct mode <ch> manual` first |
 | Waveform present but wildly wrong amplitude | Expected — the shipped calibration table is deliberately all-uncalibrated (identity behavior), not a fixture fault; do not chase this as a bug this session |
-| Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built (ratio decided as ~3:1 step-up, `docs/DESIGN_NOTES.md` §3.3, `docs/PLAN.md` §11 item 2, but the physical coupling network has not been built — still open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
+| Waveform visible on the fixture side but nothing at the safety board's ADC | Transformer not yet built (ratio decided as **1:1**, `docs/DESIGN_NOTES.md` §3.3, `docs/PLAN.md` §11 item 2, but the physical coupling network has not been built — still open), or the burden resistor question — **R72/R78/R84 on the real safety board are DNP by design** (`SaftyFW/docs/CURRENT_SENSE.md` §2: "self-burdened, voltage-output CT" expected); if the fixture's transformer secondary presents as current-output instead, the safety board's clamp diodes (D12/D13) will conduct and saturate the reading regardless of what's commanded |
 
-### Isolator / K4 / relay-sense-wetting-circuit symptoms
+### K4 / relay-sense-wetting-circuit symptoms
 
 | Symptom | Likely cause |
 |---|---|
-| Safety-side SPI (bus B) dead but bus A works fine | Digital isolator not powered from J7's safety-side rail, or the 3-board→fixture/3-fixture→board channel-direction split doesn't match the specific isolator part purchased (`docs/HARDWARE.md` §3.2 flags this as unconfirmed against any specific part) |
+| Safety-side SPI (bus B) dead but bus A works fine | Bus B wiring fault — as of 2026-08-23 there is no digital isolator in this path (`docs/DESIGN_NOTES.md` §3.5), so check the direct GPIO connections and series resistors instead |
 | K4 relay sense never shows closed even after a `SAFETY_CMD_REQUEST_ENABLE` with no guard tripped | Now a real fixture/DUT problem, not expected (section 2 — the enable path exists and is wired end to end). First confirm the request was actually sent and no guard is latched tripped; if both check out, treat this as a real wetting-circuit or relay_owner fault, and confirm K1/K2/K3/K5 sense correctly (they should) as a baseline |
 | K1/K2/K3/K5 relay sense never shows closed either | Now a real fixture problem — check the wetting-circuit voltage source + resistor per contact (`docs/HARDWARE.md` §5, "not sized" — verify it was actually built to a sane value) |
 
@@ -672,18 +685,18 @@ all.
    (or characterizes) the project's single biggest named risk
    (`docs/PLAN.md` §15's top row).
 3. The Saleae capture at 4 MHz, if the sweep passes and there's time left.
-4. Step 5's ground-domain and J7 pin-1 checks, **even if no fixture harness
-   exists yet to build on** — these can be done directly against the real
-   main board with just a multimeter, and resolving the J7 pin-1
-   contradiction on paper (`docs/HARDWARE.md` §0 item 5) unblocks safely
-   wiring the isolated side whenever that hardware does get built.
+4. Step 5's J7 pin-1 check, **even if no fixture harness exists yet to build
+   on** — this can be done directly against the real main board with just a
+   multimeter, and resolving the J7 pin-1 contradiction on paper
+   (`docs/HARDWARE.md` §0 item 5) unblocks safely wiring the J7 harness
+   whenever that hardware does get built.
 
 **Defer to a later session:**
 - Steps 6–10 (anything touching the real DUT) — these depend on fixture
   hardware existing beyond a bare Pico + jumper harness (CT transformers,
-  isolators, relay-sense wetting circuits, none of which are confirmed
-  built — §1.1). Attempting them before M-A is proven and the ground-domain
-  check has passed risks the real board for no proportionate benefit.
+  relay-sense wetting circuits, none of which are confirmed built — §1.1).
+  Attempting them before M-A is proven risks the real board for no
+  proportionate benefit.
 - CT calibration (M-D) — explicitly gated on hardware existing to calibrate
   against; the calibration *mechanism* is already in firmware, only the
   bench measurement and table generation remain.

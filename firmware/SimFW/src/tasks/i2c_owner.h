@@ -12,13 +12,20 @@
 //
 // Pin mapping (docs/HARDWARE.md section 3.7, docs/BOM.md section 6):
 //   MCP23017 #1 (0x20): GPA0-4 = relay sense K1/K2/K3/K5/K4 (in),
-//     GPA5 = `Fault` line sense (in), GPA6 = E-stop optoMOS drive (out),
+//     GPA5 = `Fault` line sense (in), GPA6 = E-stop loop direct drive
+//     (output-low = closed / input = open) -- see i2c_owner_set_estop()'s
+//     comment below; there is no longer a switching element between GPA6
+//     and SaftyFW's GPIO9 besides a 1 kOhm series protection resistor,
 //     GPA7 = DUT 12V power relay #1 / main domain / J18 (out),
 //     GPB0/GPB1 = J20 IO_3/IO_4 (i/o, default in+pullup),
 //     GPB2 = DUT 12V power relay #2 / safety domain / J19 (out) --
 //     resolved 2026-08-20 (docs/BOM.md section 6): two independent relays,
-//     not one shared feed, so GND_Main and GND_Safty are never bonded
-//     through a common relay downstream. GPB3-7 = 5 spare (default
+//     not one shared feed, so each domain can be power-cycled/browned-out
+//     independently of the other for scenario testing (docs/DESIGN_NOTES.md
+//     section 3.5 -- rationale updated 2026-08-23: this is no longer about
+//     avoiding a GND_Main/GND_Safty bond, since the fixture's ground is
+//     commoned elsewhere anyway; the two relays earn their keep on
+//     independent-domain test coverage alone). GPB3-7 = 5 spare (default
 //     in+pullup).
 //   MCP23017 #2 (0x21): all 16 pins spare/generic (default in+pullup) --
 //     DESIGN_NOTES.md section 3.6's documented fallback (moving the main-side
@@ -119,11 +126,24 @@ size_t i2c_owner_get_relay_edges(i2c_owner_relay_edge_t *out, size_t max_out, ui
 // false if the command could not be queued (queue full); true means queued,
 // not yet applied.
 //
-// open == true: E-stop loop is opened (tripped) -- DESIGN_NOTES.md section 3.4's
-// "an optoMOS/relay on the fixture sits in the E-stop loop so tests can open
-// it mid-firing." open == false: loop closed (normal/default-configurable
-// per the same section -- this pass drives whatever the caller commands and
-// does not itself pick a boot-time default; see i2c_owner.c's init comment).
+// open == true: E-stop loop is opened (tripped). open == false: loop closed
+// (healthy) -- DESIGN_NOTES.md section 3.4: the fixture drives J1's loop
+// directly from this GPA6 bit through a 1 kOhm series protection resistor,
+// same treatment every other fixture signal gets (no switching element in
+// between any more -- the CPC1017N optoMOS that used to sit here is removed,
+// DESIGN_NOTES.md section 3.5/14, since crossing the ground boundary was its
+// only real job and the fixture's ground is commoned with the DUT's now).
+//
+// This is a DIRECTION toggle, not a level write, because SaftyFW's GPIO9
+// side is a fail-safe normally-closed loop with its own R10 1k pull-up to
+// 3.3v_Safty (SaftyFW/docs/HARDWARE.md section 5): driving GPA6 high when
+// "open" would fight R10 into a different supply rail instead of just
+// releasing the line. So: open == false -> GPA6 configured as OUTPUT driving
+// LOW (pulls the loop closed); open == true -> GPA6 configured as INPUT,
+// i.e. high-Z, letting R10 pull GPIO9 (and this side of the resistor) high.
+// See i2c_owner.c's init comment for the boot-time default (input/high-Z,
+// matching both the MCP23017's own POR default and the board's fail-safe
+// intent).
 bool i2c_owner_set_estop(bool open);
 
 // on == true: DUT 12V power relay closed (board powered). DESIGN_NOTES.md section
@@ -132,13 +152,16 @@ bool i2c_owner_set_estop(bool open);
 // Two independent relays, two independent setters -- docs/HARDWARE.md
 // section 3.7 / docs/BOM.md section 6 (resolved 2026-08-20): the main board
 // has two electrically separate 12V inputs (J18/main, J19/safety) with no
-// shared copper downstream, so a single relay switching both would bond
-// GND_Main and GND_Safty through the shared return path and defeat the
-// isolation the rest of this fixture exists to preserve. There is
-// deliberately NO "set both" convenience call -- a caller that wants both
-// domains powered must call both setters explicitly, so a scenario author
-// (or reviewer) always sees two separate decisions, never one that silently
-// gangs the domains.
+// shared copper downstream. Originally justified because a single relay
+// switching both would bond GND_Main and GND_Safty through the shared
+// return path; that rationale is superseded (docs/DESIGN_NOTES.md section
+// 3.5, 2026-08-23) now that the fixture's ground is commoned elsewhere
+// anyway. The two relays are kept regardless, for independent per-domain
+// power-cycle/brownout testing -- a real capability a single shared relay
+// could never produce. There is deliberately NO "set both" convenience
+// call -- a caller that wants both domains powered must call both setters
+// explicitly, so a scenario author (or reviewer) always sees two separate
+// decisions, never one that happens as a side effect of a single call.
 bool i2c_owner_set_dut_power_main(bool on);   // relay #1 -> J18 (GND_Main)
 bool i2c_owner_set_dut_power_safety(bool on); // relay #2 -> J19 (GND_Safty)
 
@@ -146,10 +169,9 @@ bool i2c_owner_set_dut_power_safety(bool on); // relay #2 -> J19 (GND_Safty)
 // kept only for source/protocol backward compatibility with callers written
 // before relay #2 existed (this is also SIMFW_CMD_IO_DUT_POWER_SET/GET's
 // underlying call, docs/PROTOCOL.md section 5.5). Deliberately NOT redefined
-// to mean "both relays": ganging the two domains by default is exactly the
-// mistake two independent relays exist to prevent, so the old single command
-// keeps its original, narrower meaning -- main domain only -- rather than
-// growing new (and easy-to-miss) side effects on the safety domain. New
+// to mean "both relays": the old single command keeps its original,
+// narrower meaning -- main domain only -- rather than growing new (and
+// easy-to-miss) side effects on the safety domain. New
 // callers should use the explicit *_main()/*_safety() names above; this
 // alias may be removed once no caller depends on the unqualified name.
 bool i2c_owner_set_dut_power(bool on);

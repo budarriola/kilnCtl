@@ -1,6 +1,6 @@
 # SimFW — Bench Fixture Bill of Materials
 
-> **Status:** first pass, not yet ordered · **Last reviewed:** 2026-08-20
+> **Status:** first pass, not yet ordered · **Last reviewed:** 2026-08-23
 > **Purpose:** remove the literal blocker — you cannot build the bench
 > fixture until parts are ordered, and until this document existed there was
 > no orderable list. Every line below traces to a specific source: a
@@ -8,10 +8,12 @@
 > `docs/CURRENT_SENSE.md`/`docs/HARDWARE.md`, or a live Mouser lookup done
 > while writing this document (2026-08-20).
 >
-> **This is a first-pass BOM, not a purchase order.** Three items are
+> **This is a first-pass BOM, not a purchase order.** Four items are
 > explicitly flagged "needs bench measurement/confirmation before ordering"
-> in section 9 — do not one-click-buy the whole table without reading that
-> section first. Everything else is ready to order as written.
+> in section 9 — including a **blocking** one (item 1: the CT transformer's
+> unconfirmed primary inductance under direct DAC drive) — do not
+> one-click-buy the whole table without reading that section first.
+> Everything else is ready to order as written.
 
 ---
 
@@ -21,102 +23,109 @@
 |---|---|---|---|---|---|---|
 | 1 | Raspberry Pi Pico (RP2040) | 1 | Raspberry Pi **SC0915** (358-SC0915) | $4.00 | $4.00 | In stock 3915, confirmed live |
 | 2 | I/O expander, MCP23017 | 2 | Microchip **MCP23017-E/SO** (579-MCP23017-E/SO) | $1.62 | $3.24 | In stock 39,748 |
-| 3 | Digital isolator, quad, unidirectional | 2 | TI **ISO7740DWR** (595-ISO7740DWR) | $3.56 | $7.12 | In stock 104 — see §2 sizing |
-| 4 | CT coupling transformer | 3 | Triad **TY-300P** (553-TY300P) — **ratio unconfirmed, see §9** | $7.24 | $21.72 | In stock 338, ratio needs datasheet confirm |
-| 5 | K4 relay-sense optocoupler | 1 | Vishay **4N35** (78-4N35) | $0.66 | $0.66 | In stock 6,150 |
-| 6 | E-stop optoMOS (SSR) | 1 | Littelfuse/IXYS **CPC1017N** (849-CPC1017N) | $0.86 | $0.86 | In stock 273,541 |
-| 7 | DUT power relay | 2 | Omron **G5LE-14-DC12** (653-G5LE-14-DC12) | $1.61 | $3.22 | In stock 6,997 — **2, not 1, see §6** |
+| 4 | CT coupling transformer | 3 | Triad **TY-300P** (553-TY300P) — **NOT CONFIRMED SUITABLE for direct DAC drive, see §9 item 1 (BLOCKING)** | $7.24 | $21.72 | Ratio (1:1) is correct, but under direct DAC drive (item 18) the transformer must be sized on **primary inductance at 60 Hz**, not turns ratio — the TY-300P's suitability on that measure is unconfirmed and likely wrong for this part class; do not order until §9 item 1 is resolved |
+| 7 | DUT power relay | 2 | Omron **G5LE-14-DC12** (653-G5LE-14-DC12) | $1.61 | $3.22 | In stock 6,997 — **2, not 1, see §6** (rationale rewritten 2026-08-23: independent per-domain testing, not ground isolation) |
 | 8 | J6 mating header (main-side TC bus) | 2 strips | Würth **61300411121** 1×40 breakaway (710-61300411121) | $0.19 | $0.38 | In stock 69,754; cut to 1×20 |
 | 9 | J7 mating connector (safety-side TC bus, 2×6 @ 1.27 mm) | TBD | **Not selected — gender/pitch unconfirmed, see §9** | ~$1–3 | ~$3–9 (est.) | Placeholder, do not order yet |
 | 10 | CT jack, fixture-side (mates J13/J15/J17 via patch cable) | 3 | Same Sky/CUI **SJ-3523-SMT-TR** (490-SJ-3523-SMT-TR) | $0.88 | $2.64 | In stock 32,954 |
 | 11 | 3.5 mm mono male-male patch cable | 3 | Generic/commodity — no Mouser electronics MPN needed | ~$3.00 | ~$9.00 (est.) | Buy locally/Amazon; any shielded mono cable works |
-| 12 | Relay-sense wetting resistors | 5 | Generic 1 kΩ 0805/THT (already stocked from main-board BOM class) | ~$0.02 | ~$0.10 | See §4 — internal MCP23017 pull-ups do most of the work |
+| 12 | Relay-sense + E-stop series resistors | 6 | Generic 1 kΩ 0805/THT (already stocked from main-board BOM class) | ~$0.02 | ~$0.12 | See §4 (5x relay-sense, K4 included) and §5 (1x E-stop direct drive, replacing the removed CPC1017N — item 6) — internal MCP23017 pull-ups do most of the work; all 6 signals wire with the same series-resistor treatment |
 | 13 | Hookup wire + ferrules, for J1/J3/J4/J8/J10/J11 (fixed screw terminals) | 1 lot | Generic 22–24 AWG stranded + ferrule kit | — | ~$10 (est.) | See §8 — these connectors are **fixed**, not pluggable |
-| 14 | RC filter / DC-block / decoupling passives (3× CT channels + isolators + expanders) | 1 lot | Generic R/C, values in §3 | — | ~$10 (est.) | Commodity, mostly already-stocked values from main-board BOM |
+| 14 | DC-block / decoupling passives (3× CT channels + series-resistor protection + expanders + I2S DAC output blocking caps) | 1 lot | Generic R/C, values in §3 | — | ~$10 (est.) | Commodity, mostly already-stocked values from main-board BOM. Under the I2S DAC replacement (item 18), each DAC output needs its own series DC-blocking cap ahead of the transformer primary — the UDA1334A's ≈1.65 V DC bias (Vref = 0.5×VDD) will saturate the core / swamp the output stage otherwise (datasheet §14.1) — the PWM path's RC low-pass is no longer needed once the DAC path replaces it |
 | 15 | Protoboard/perfboard carrier + sockets for Pico/ICs | 1 | Generic 100×160 mm double-sided perfboard + 2×20 female header (socketed Pico) | — | ~$10 (est.) | Generic |
 | 16 | Debug UART / SWD to Debug Probe | 0 | **Reuse existing Raspberry Pi Debug Probe + cables from the `SaftyFW` bench setup** | $0 | $0 | No new purchase |
 | 17 | PCA9685 (optional PWM/LED stimulus) | 0 | Not included — PLAN.md marks it optional, not required for the base feature set | — | $0 | Deferred |
+| 18 | I2S stereo DAC breakout, UDA1334A | 2 | Adafruit **UDA1334A I2S Stereo DAC** breakout (or equivalent) | ~$7.00 | ~$14.00 | New 2026-08-23 — replaces PWM-based CT waveform synthesis; 2 modules (stereo, 2 ch each) cover 3 CT channels, 16 kHz sample rate; drives the 1:1 isolation transformer (item 4) directly, no amplifier — see §3 for sizing and §9 item 1 (**blocking**: transformer suitability under direct drive is unconfirmed) |
 
-**Rough total: ~$95–110**, excluding shipping, tools (screwdriver, DMM,
-soldering iron — assumed already on the bench), and the two placeholder
-lines (#4's ratio and #9's connector) which could each move the total by
+**Items 3 and 5 (the two TI ISO7740DWR digital isolators, and the K4
+Vishay 4N35 optocoupler) are removed as of 2026-08-23.** The fixture's
+ground is now commoned with the DUT's (`DESIGN_NOTES.md` §3.5) — SPI bus B
+wires as direct GPIO like bus A, and K4 senses exactly like K1/K2/K3/K5.
+Item numbers are kept stable rather than renumbered, so cross-references
+elsewhere in this repo don't break.
+
+**Item 6 (E-stop optoMOS, Littelfuse/IXYS CPC1017N) is removed as of
+2026-08-23.** `DESIGN_NOTES.md` §3.4/§3.5/§14: the part was kept through the
+ground-commoning pass on the argument that it was "the E-stop loop's
+switching element, not just an isolation crossing" — that argument was
+wrong. The CPC1017N was itself driven by MCP23017 #1 GPA6, so it was an
+extra stage between the same control bit and the same loop; crossing the
+ground boundary was its only real function, and that boundary no longer
+exists. GPA6 now drives J1's loop directly through the item-12 1 kΩ series
+resistor (§5). Item numbers are kept stable rather than renumbered, per this
+document's existing convention.
+
+**Rough total: ~$100–113** (down from the original ~$95–110 baseline: the
+isolator/4N35/optoMOS removals save ~$8.64 in parts, the 2x UDA1334A modules
+add ~$14.00), excluding shipping, tools
+(screwdriver, DMM, soldering iron — assumed already on the bench), and the
+remaining placeholder lines (#9's connector, and #18's transformer
+suitability, now **blocking** — see §9) which could each move the total by
 $5–20 once pinned down. This is a bench-fixture BOM for **one** unit; double
-everything except the shared bench tools if a second fixture is ever wanted.
+everything except the shared bench tools if a second fixture is ever
+wanted.
 
 ---
 
-## 2. Digital isolator — direction-split verification (item 3)
+## 2. Digital isolator — removed (item 3)
 
-`docs/HARDWARE.md` §5 flags this exact question: *"some 6-channel parts are
-fixed at a different forward/reverse split (e.g. 4/2) and would not fit this
-bus without re-routing a channel."* Verified against §3.2's own pin table:
-
-| Direction | Signals | Count |
-|---|---|---|
-| Board (safety Pico, master) → fixture | `CLK`, `MOSI`, `CS0` | 3 |
-| Fixture → board | `MISO`, `DRDY_SAFETY`, `FAULT_SAFETY` | 3 |
-
-**Exactly 3/3 across 6 channels.** No common multi-channel reinforced
-isolator ships as a fixed 3-forward/3-reverse 6-channel part — TI's family
-tops out at 4 channels per package with fixed splits of **4/0** (ISO7740),
-**3/1** (ISO7741), or **2/2** (ISO7742); none of those alone gives 3/3, and
-there is no 6-channel sibling to check instead.
-
-**Resolution: two TI ISO7740DWR (quad, all-4-channels-same-direction,
-SOIC-16),** one wired for the 3 board→fixture signals (1 spare channel), one
-wired for the 3 fixture→board signals (1 spare channel). This sidesteps the
-fixed-split problem entirely — each package only ever carries one direction,
-so there is no split to get wrong — at the cost of 2 spare channels going
-unused (available for a future safety-side signal if one is ever added).
-Confirmed in stock (104 units, Mouser 595-ISO7740DWR, $3.56 ea qty 1 / $2.68
-ea qty 10).
-
-Both are powered from the isolated (safety) side off J7's `3.3v_Safty` per
-`docs/HARDWARE.md` §4 — subject to the J7-pin-1 contradiction already flagged
-in that document (§0 item 5) and unchanged by this BOM.
+**Item 3 (two TI ISO7740DWR digital isolators) is removed as of 2026-08-23.**
+`docs/DESIGN_NOTES.md` §3.5 explains the decision: the fixture's ground is
+commoned with the DUT's, so SPI bus B and the safety-side `DRDY_SAFETY`/
+`FAULT_SAFETY` pair now wire as direct Pico GPIO, identical to SPI bus A.
+This section previously worked out a two-part 3/3 direction split to solve a
+fixed-split problem in TI's isolator family; that derivation no longer
+applies to any part in this BOM and is not reproduced here — see
+`docs/DESIGN_NOTES.md` §14 if the sizing reasoning is needed again.
 
 ---
 
-## 3. CT coupling transformer sizing (item 4) — the open question this task most needed to answer
+## 3. CT coupling transformer sizing (item 4)
 
-### 3.1 Target, from the board side (already established in `CURRENT_SENSE.md` §2)
+> **Decided 2026-08-23 (item 18): CT waveform generation moves from PWM+RC
+> to 2x UDA1334A I2S DAC modules at 16 kHz, driving this transformer
+> directly with no amplifier.** The ratio math below (§3.1–3.3, still 1:1)
+> is unaffected — the DAC's output level (≈990 mVrms at 3.3 V supply, NXP
+> UDA1334ATS datasheet §14.1) is close enough to the PWM path's ≈1.06 Vrms
+> estimate that the same 1:1 conclusion holds, now on a measured datasheet
+> spec instead of an estimated duty-cycle-derating figure. **What direct DAC
+> drive does change is what the transformer's primary has to present at
+> 60 Hz — see §9 item 1, BLOCKING: the TY-300P below is not confirmed
+> suitable under this new requirement.**
 
-Traced from `hardware/mainBoard/output/kiln.pdf` p.4 by a prior pass and
-confirmed here by reading `docs/CURRENT_SENSE.md` directly (R43 10k, R46
-7.15k, AD8542 U8):
+### 3.1 Target: the board's full-scale sense-input voltage, not a CT's rated current
 
-```
-V_adc  ≈  0.715 · V̂_ct                      (gain, inverting rectifier R46/R43)
-ADC/buffer full scale = 3.3 V ⇒ clamp conducts ~±4 V ⇒ practical ceiling:
-  V̂_ct ≈ 4.6 V peak  ⇒  V_ct,rms ≈ 3.26 V
-  with a 1 V/30 A CT model:  I_fs ≈ 98 A rms  (the "clipping" boundary)
-```
-
-That is the **ceiling** the fixture should be able to reach at least once
-(to exercise `CURRENT_FLAG_CLIPPED` — a real, tested code path per
-`CURRENT_SENSE.md` §2). It is not the *typical* operating point: a
-resistive kiln element at 240 V draws on the order of 10–25 A per zone
-(2.4–6 kW), i.e. `V_ct,rms` in the ~0.33–0.83 V range for the same 1 V/30 A
-CT model. The transformer has to comfortably cover the typical range and
-*reach* the clipping boundary, not necessarily sit there all day.
+**Revised 2026-08-23: the ratio target is the board's own full-scale sense
+input, not any particular CT's rated current.** Amps-per-volt is a property
+of whichever CT the user installs, not of this board and not of this
+fixture — the board itself has no opinion on amps. What the board *does*
+have an opinion on is voltage: **its sense input is full-scale at ≈1 Vrms**,
+and that is the number the fixture has to reach. An earlier pass (§13 of
+`docs/DESIGN_NOTES.md`) instead backed out a specific CT's rated current (a
+1 V/30 A part) from the ADC's clamp voltage and landed on ~3:1 — that was
+reasoning from the wrong target: it assumed a CT the fixture has no business
+assuming, and it never asked whether reaching the clamp was a requirement,
+only whether it was reachable. The board expects a **self-burdened,
+voltage-output CT** — `R72`/`R78`/`R84` (the burden resistors) are DNP on
+all three channels, which is a genuine board property, independent of which
+CT ends up installed (`SaftyFW/docs/CURRENT_SENSE.md` §2). An SCT-013-030
+(1 V at 30 A) is one compatible example, not the assumed or required part.
 
 ### 3.2 What the Pico can actually drive into the primary
 
-From `docs/DESIGN_NOTES.md` §3.3: three GPIOs run ~244 kHz PWM, duty-modulated by a
-60 Hz sine table, into a 2-pole RC low-pass (corner ~1–2 kHz). The RC output
-is a **unipolar** sine riding on a ~1.65 V DC bias (half of the 3.3 V logic
-rail), with a theoretical maximum swing of ±1.65 V at a 100 % modulation
-index. Real duty-cycle firmware always derates below the rails to avoid
-distortion near 0 %/100 % duty — **this document assumes a practical usable
-amplitude of 1.5 V peak** (≈91 % of the theoretical max), which is an
-estimate, not a measured or firmware-confirmed number. **Correction:** the
-amplitude-to-duty *mapping mechanism* (`src/sim/ct_calibration.{c,h}`) is no
-longer an unfinished placeholder — it applies a real per-channel
-`gain`/`offset` linear fit. What remains unfinished is the *table*: the
-compiled-in default is all-uncalibrated, so today's observed behavior is
-still identity (`pwm_scale = clamp(amps, 0, 1)`) until a bench calibration
-run populates real constants — the real ceiling still depends on whatever
-modulation-index cap the uncalibrated path ends up using.
+From `docs/DESIGN_NOTES.md` §3.3: three GPIOs run ~244 kHz PWM, duty-modulated
+by a 60 Hz sine table, into a 2-pole RC low-pass (corner ~1–2 kHz). The RC
+output is a **unipolar** sine riding on a ~1.65 V DC bias (half of the 3.3 V
+logic rail), with a theoretical maximum swing of ±1.65 V at a 100 %
+modulation index. Real duty-cycle firmware always derates below the rails to
+avoid distortion near 0 %/100 % duty — **this document assumes a practical
+usable amplitude of 1.5 V peak** (≈91 % of the theoretical max), which is an
+estimate, not a measured or firmware-confirmed number. The amplitude-to-duty
+*mapping mechanism* (`src/sim/ct_calibration.{c,h}`) applies a real
+per-channel `gain`/`offset` linear fit; the compiled-in default table is
+still all-uncalibrated, so today's observed behavior is identity
+(`pwm_scale = clamp(amps, 0, 1)`) until a bench calibration run populates
+real constants.
 
 A series DC-blocking capacitor (sized for a corner well below 60 Hz — e.g.
 1 µF into a primary of a few kΩ gives a corner around 20–30 Hz, more than a
@@ -127,104 +136,130 @@ leaving:
 V_pri,pk ≈ 1.5 V   →   V_pri,rms ≈ 1.5 / √2 ≈ 1.06 V
 ```
 
-### 3.3 Required step-up ratio
+### 3.3 Ratio: 1:1
 
 ```
-n = V_sec,pk / V_pri,pk = 4.6 V / 1.5 V ≈ 3.07   →   call it 3:1
+Board sense input full scale  ≈ 1 Vrms   (a board property, CT-independent, CURRENT_SENSE.md §2)
+V_pri,rms                     ≈ 1.06 V   (from §3.2)
+n = 1 (unity)  →  V_sec,rms ≈ 1.06 V, covering the board's full 0–1 Vrms range with margin
 ```
 
-**A 1:1 transformer (what `docs/DESIGN_NOTES.md` §3.3 currently says is "decided")
-cannot reach the 98 A clipping boundary** — at 1:1 the best the fixture can
-do is `V_ct,rms ≈ 1.06 V`, which on the 1 V/30 A model is only:
+That is the whole justification for 1:1 — it produces the voltage the board
+wants, with no CT part number entering the derivation.
 
-```
-I_max(1:1) ≈ 1.06 V / (0.715 · √2 · 0.0333 V/A) ≈ 31.5 A rms
-```
+**At 1:1 the fixture can reach the board's 1 Vrms full-scale input but not
+meaningfully past it** — `V_sec,rms` tops out around 1.06 V, well short of
+the ≈3.26 V rms clamp boundary. That is an accepted tradeoff, stated
+narrowly and without assuming a CT: the ADC clips at a certain input
+*voltage*, and what *current* that corresponds to depends entirely on
+whichever CT is installed — this fixture doesn't know that number and
+shouldn't guess it. `CURRENT_FLAG_CLIPPED` is not exercisable by this
+fixture at 1:1.
 
-That is **fine for the typical 10–25 A operating range** (comfortable
-margin), but it means the fixture, as currently specced, structurally
-cannot drive the safety board into `CURRENT_FLAG_CLIPPED` or test the top
-third of the ADC's range. Given the fixture's whole purpose is exercising
-edge cases the real kiln shouldn't be pushed into, this is worth fixing
-before ordering, not after.
+**Where the CT's amps-per-volt actually lives:** the per-channel calibration
+table (`src/sim/ct_calibration.h`) — `ct_cal_apply()` is
+`clamp(gain[ch] * amps + offset[ch], 0, 1)`, with no CT part hardcoded
+anywhere, and every channel ships uncalibrated (identity) until a real bench
+sweep against whichever CT is actually installed populates real
+`gain`/`offset` constants. That binding is per-install by construction — it
+is the answer to "how does the fixture handle a different CT," and it does
+not belong in the transformer ratio.
 
-**Recommendation: order a ~3:1 (or better) step-up transformer**, not the
-1:1 PLAN.md currently names. Candidate: **Triad Magnetics TY-300P** (audio/
-signal line-matching transformer, Mouser 553-TY300P, $7.24 ea, 338 in
-stock) — but see §9: **its exact turns/impedance ratio could not be
-confirmed in this pass** (its datasheet fetch timed out twice from this
-environment; Mouser's product-search API doesn't expose turns ratio as a
-structured field). Confirm the ratio from the linked datasheet
-(`mouser.com/datasheet/3/236/1/TY_300P.pdf`) before ordering; if it isn't
-≥3:1 loaded into the AD8542 stage's input impedance, either pick a
-different Triad/Xicon line-matching part with a documented ≥3:1 ratio, or
-fall back to a 1:1 transformer plus a simple ×3 non-inverting op-amp gain
-stage ahead of it (single-supply rail-to-rail op-amp off the Pico's 3.3 V or
-the fixture's 5 V rail, AC-coupled) — more parts, but decouples the gain
-question from transformer sourcing entirely.
+**Candidate part unchanged: Triad Magnetics TY-300P** (audio/signal
+line-matching transformer, Mouser 553-TY300P, $7.24 ea, 338 in stock),
+usable as a 1:1 coupling transformer even though it was originally sourced
+for a step-up role — see §9: **its exact turns/impedance ratio could not be
+confirmed in this pass** (datasheet fetch timed out twice; Mouser's
+product-search API doesn't expose turns ratio as a structured field).
+Confirm from the linked datasheet (`mouser.com/datasheet/3/236/1/TY_300P.pdf`)
+before ordering; any comparable 1:1 audio/isolation transformer works if
+sourcing changes.
 
 ### 3.4 Confidence level
 
-**Medium, not high.** Split out what's solid from what's assumed:
+**Higher than under the 3:1 plan, and less sensitive to the open estimate.**
+At 3:1, the medium-confidence 1.5 V peak primary-drive estimate directly
+gated whether the clamp boundary was reachable at all. At 1:1 it no longer
+does — 1.06 V rms clears the board's 1 Vrms full-scale target with margin
+even if the real usable drive comes in noticeably below 1.5 V peak.
 
-- **High confidence:** the 0.715 gain, the ~4.6 V/3.26 V clipping figures,
-  and the 1V/30A-CT full-scale math — all read directly from
-  `docs/CURRENT_SENSE.md`'s own traced schematic values, which that
-  document cross-checked against a working LTspice model (`ltspice/
-  currentMon.asc`).
+- **High confidence:** the 0.715 gain and the board's ≈1 Vrms full-scale
+  sense input — read directly from `docs/CURRENT_SENSE.md`'s own traced
+  schematic values, cross-checked against a working LTspice model
+  (`ltspice/currentMon.asc`). Both are board properties, independent of
+  which CT is installed.
 - **Medium confidence:** the 1.5 V peak primary-drive assumption — a
-  reasonable derating guess, not a measured or firmware-confirmed number.
-- **Low confidence / genuinely open:** the transformer's actual turns
-  ratio and how its primary impedance interacts with the RC filter's
-  corner and the DC-blocking cap — none of this is verifiable without
-  either the part's datasheet (fetch failed in this pass) or a bench
-  measurement once hardware exists.
+  reasonable derating guess, not a measured or firmware-confirmed number,
+  but the fixture's basic correctness no longer hinges tightly on it.
+- **Low confidence / genuinely open:** the transformer's actual turns ratio
+  and how its primary impedance interacts with the RC filter's corner and
+  the DC-blocking cap — none of this is verifiable without either the
+  part's datasheet or a bench measurement once hardware exists.
 
 ---
 
-## 4. Relay-sense wetting circuit (item 12) — K1/K2/K3/K5 direct, K4 via optocoupler
+## 4. Relay-sense wetting circuit (item 12) — all five relays direct, including K4
 
 `docs/HARDWARE.md` §3.4/§5 leaves this "not sized." The cheap, correct
 approach given what's already in the design:
 
 - **MCP23017 has internal 100 kΩ pull-ups** (the `GPPU` register), no
-  internal pull-downs. Wire each of the K1/K2/K3/K5 sense inputs so the
-  relay's NO/COM contact, when **closed**, pulls the expander pin straight
-  to `GND_Main` (through a small series protection resistor, 1 kΩ, to limit
-  fault current if the pin is ever accidentally driven), and enable that
-  pin's internal pull-up in firmware (`i2c_owner.c` — confirm `GPPU` is
-  actually set for these 5 pins; this document does not touch firmware).
-  Open contact reads high via the internal pull-up; closed contact reads
-  low. **No dedicated wetting supply or external pull-up resistor needed** —
-  this reuses a feature the part already has, at the cost of 5×1 kΩ series
-  resistors (a few cents).
-- **K4** (contact in `GND_Safty`, per §0 item 6/§3.4): the same idea, but
-  through the 4N35 optocoupler's phototransistor stage so the isolation
-  boundary is respected. LED side: wetted from a safety-side rail (via J7 —
-  subject to the same J7-pin-1 confirmation already flagged) through a 1 kΩ
-  series resistor when the K4 contact closes, giving an LED current of a
-  few mA (well within the 4N35's rated forward current and CTR range for a
-  reliable digital output). Phototransistor collector-emitter sits on the
-  `GND_Main` side, pulled up by the MCP23017's internal pull-up exactly like
-  the other four channels.
+  internal pull-downs. Wire each sense input so the relay's NO/COM contact,
+  when **closed**, pulls the expander pin straight to `GND_Main` (through a
+  small series protection resistor, 1 kΩ, to limit fault current if the pin
+  is ever accidentally driven), and enable that pin's internal pull-up in
+  firmware (`i2c_owner.c` — confirm `GPPU` is actually set for these 5 pins;
+  this document does not touch firmware). Open contact reads high via the
+  internal pull-up; closed contact reads low. **No dedicated wetting supply
+  or external pull-up resistor needed** — this reuses a feature the part
+  already has, at the cost of 5×1 kΩ series resistors (a few cents).
+- **K4 (contact in `GND_Safty`) wires identically, since 2026-08-23** —
+  no optocoupler. `DESIGN_NOTES.md` §3.5: the fixture's ground is commoned
+  with the DUT's, so K4's sense signal no longer needs to cross a domain
+  boundary. It uses the same 1 kΩ series resistor into the same MCP23017
+  pull-up as K1/K2/K3/K5, straight to fixture ground. The Vishay 4N35
+  optocoupler this used to require is removed.
 
 ---
 
-## 5. E-stop optoMOS (item 6)
+## 5. E-stop direct drive (item 6 removed 2026-08-23 — see item 12)
+
+**Item 6 (Littelfuse/IXYS CPC1017N E-stop optoMOS) is removed as of
+2026-08-23.** It was kept through the ground-commoning pass on the argument
+that it was "the E-stop loop's switching element, not just an isolation
+crossing" — that argument was wrong: the CPC1017N was itself driven by
+MCP23017 #1 GPA6, so it was an extra stage between the same control bit and
+the same loop, and crossing the ground boundary was its only real function
+(`DESIGN_NOTES.md` §3.4/§3.5/§14). That boundary no longer exists.
+
+**Replacement: GPA6 drives J1's loop directly**, through the same 1 kΩ
+series protection resistor every other fixture signal already gets (item 12
+above) — no switching element in between.
 
 `docs/HARDWARE.md` §3.6 / `SaftyFW/docs/HARDWARE.md` §5: J1's loop is
-GPIO9 with a 1 kΩ pull-up to `3.3v_Safty` and a 0.01 µF cap. Loop current
-when closed:
+GPIO9 with a 1 kΩ pull-up (R10) to `3.3v_Safty` and a 0.01 µF cap (C3).
+Because of that pull-up, the fixture cannot simply write a level to GPA6:
+driving it high to represent "open" would fight R10 into a different supply
+rail. So the control is a **direction toggle**, not a level write:
+
+- **Loop CLOSED (E-stop healthy):** GPA6 configured as OUTPUT, driving LOW.
+- **Loop OPEN (E-stop tripped):** GPA6 configured as INPUT, i.e. high-Z,
+  letting R10 pull GPIO9 (and this side of the resistor) high.
+
+Boot-time default is INPUT/high-Z (open/STOP) — matching both the
+MCP23017's own POR default (`IODIR` resets to all-input) and the board's
+fail-safe intent: an unpowered or un-initialised fixture must read STOP,
+never a falsely-healthy closed loop.
+
+Loop current when closed, against the same 1 kΩ series resistor:
 
 ```
 I_loop ≈ 3.3 V / 1 kΩ ≈ 3.3 mA
 ```
 
-**CPC1017N** (Littelfuse/IXYS optoMOS, single-pole normally-open) is rated
-for continuous load currents well above this (typical single-channel
-optoMOS parts in this family handle 100+ mA continuous) — 3.3 mA is a
-trivial fraction of its rating, so this part is comfortably sized with
-large margin. $0.86 ea, 273,541 in stock — no sourcing risk.
+well within the MCP23017's per-pin output drive capability, with the same
+comfortable margin the CPC1017N used to have. No new part needed beyond the
+1 kΩ series resistor already counted under item 12.
 
 ---
 
@@ -239,22 +274,21 @@ capacitors live on different sheets (`C9`/`C10`, 470 µF each, on
 is no shared copper between the two 12 V rails anywhere downstream of the
 connectors.
 
-**Recommendation: two relays, not one.** This isn't just "more thorough" —
-a single relay switching a single 12 V feed that the bench operator then
-splits to both J18 and J19 downstream of that one relay would **bond the
-two 12 V returns together**, which very likely commons `GND_Main` and
-`GND_Safty` through the shared supply return path. That directly undermines
-the isolation discipline the rest of this fixture (transformers, opto­
-couplers, digital isolators) exists to preserve, and it's exactly the kind
-of thing bring-up step 5's ground-continuity check (`docs/HARDWARE.md` §6)
-is there to catch — better to not build the mistake in the first place.
+**Recommendation: two relays, not one.** Originally justified because a
+single relay switching a single 12 V feed that the bench operator then
+splits to both J18 and J19 would bond the two 12 V returns together,
+undermining the ground-domain separation the rest of the fixture used to
+preserve. **That rationale is superseded as of 2026-08-23**
+(`DESIGN_NOTES.md` §3.5): the fixture's ground is now commoned with the
+DUT's anyway, so a single shared relay would no longer be uniquely
+problematic on isolation grounds.
 
-Two independent relays, each fed from its own bench-supply channel (or a
-dual-output bench supply) into its own connector (J18, J19), preserve the
-isolation and additionally let test scenarios brown out one domain
-independently of the other — a genuinely useful test case (`SaftyFW`
-noticing a main-side power loss while its own domain stays up, and vice
-versa) that a single shared relay could never produce.
+**The two relays are kept regardless**, because they earn their keep
+independently: each fed from its own bench-supply channel (or a dual-output
+bench supply) into its own connector (J18, J19), they let test scenarios
+brown out one domain independently of the other — a genuinely useful test
+case (`SaftyFW` noticing a main-side power loss while its own domain stays
+up, and vice versa) that a single shared relay could never produce.
 
 **Firmware note (out of scope for this BOM, flagged for the owning code
 change):** `i2c_owner.c` currently exposes one control bit,
@@ -328,7 +362,7 @@ it expects internal Pico pull-ups or external ones — not re-derived here).
 | **J7** (2×6, 1.27 mm, safety TC bus) | **Not selected — see §9** | Gender/pitch not confirmed against the physical board in any doc read for this task. Do not guess and order; confirm with calipers/visual inspection first. |
 | **J13/J15/J17** (3.5 mm CT jacks) | Fixture-side 3.5 mm mono jack (Same Sky/CUI SJ-3523-SMT-TR ×3) wired to each transformer secondary, connected to the board via standard 3.5 mm mono male-male patch cables ×3 | Simpler and cheaper than sourcing a bare 3.5 mm plug-to-wire part; commodity cables are everywhere. |
 | **J3/J4/J8/J10/J11** (relay sense terminal blocks) | **None needed — direct wire.** Mouser lists both J1's part (Phoenix 1935161) and J10's part (Phoenix 1935174) under "Fixed Terminal Blocks", not "Pluggable Terminal Blocks" | If this classification is right, these are captive screw terminals soldered straight to the board — the fixture connects with bare stripped/ferruled wire under the screws, no mating connector to buy. **Confirm visually at bring-up** (this document's datasheet fetch for both parts timed out twice and could not verify pluggability directly — see §9). |
-| **J1** (E-stop) | Same as above — direct wire into the CPC1017N's output leads | Phoenix 1935161, same caveat |
+| **J1** (E-stop) | Same as above — direct wire into GPA6's 1 kΩ series resistor (§5; no CPC1017N any more) | Phoenix 1935161, same caveat |
 | **J20** (spare I/O, 2-pin) | Not specified in any source doc read; treat as simple 2-conductor connection, generic 2.54 mm header/wire | Low risk either way — only 2 spare I/O lines |
 | Debug UART / SWD | **Reuse the existing Raspberry Pi Debug Probe and cables from the `SaftyFW` bench setup** | No new purchase; same bench pattern `docs/HARDWARE.md` §1 footnote already calls out |
 
@@ -336,17 +370,36 @@ it expects internal Pico pull-ups or external ones — not re-derived here).
 
 ## 9. Still needs measurement/confirmation before ordering
 
-Three items, in order of how much they block:
+Four items, in order of how much they block:
 
-1. **CT transformer exact ratio (§3).** The arithmetic here shows a ~3:1
-   step-up is needed to reach the ADC's clipping boundary, and that a 1:1
-   part (what PLAN.md currently names) would cap the fixture at ~31.5 A —
-   fine for typical currents, but unable to test the clipping path. Confirm
-   Triad TY-300P's actual turns/impedance ratio from its datasheet
-   (`mouser.com/datasheet/3/236/1/TY_300P.pdf` — this document's automated
-   fetch of it timed out twice) before ordering 3 of them; if it isn't
-   ≥3:1, either pick a different part with a documented ratio or add the
-   ×3 op-amp gain-stage fallback described in §3.3.
+1. **BLOCKING — CT transformer primary inductance, not just ratio (§3,
+   item 4, item 18).** Direct DAC drive changes what the transformer has to
+   satisfy, and **the TY-300P currently in this BOM is not confirmed
+   suitable — do not order it for this role without checking the number
+   below.** The UDA1334A datasheet (§13) specifies RL min = 3 kΩ at
+   (THD+N)/S < 0.1% and Io(max) = 1.6 mA. For the transformer primary to
+   present ≥3 kΩ at 60 Hz (the bottom of the CT waveform's fundamental),
+   its primary inductance must be:
+
+   ```
+   L ≥ RL_min / (2·π·60 Hz) = 3000 / 377 ≈ 8 H
+   ```
+
+   Typical 600:600 Ω audio/telecom **isolation** transformers — the TY-300P's
+   class — run **1–3 H**, i.e. only **≈380–1130 Ω at 60 Hz**. That is well
+   under both the 3 kΩ minimum and the DAC's 1.6 mA output-current limit,
+   and it shunts most of the 60 Hz signal to ground through the primary
+   before it ever reaches the transformer's mutual inductance. **A series
+   resistor does not fix this — it only makes the voltage divider worse.**
+   The turns ratio (1:1, confirmed correct in §3) was never the constraint
+   that matters here; **primary inductance at 60 Hz is.** The right class of
+   part is a small **50/60 Hz-rated 1:1 or 6V:6V power/audio transformer**
+   (not an audio-signal-line isolation transformer) — its poor high-frequency
+   response is irrelevant, since the fixture's waveform of interest tops out
+   a few hundred Hz above the 60 Hz fundamental, and at ≈1 V drive it sits
+   nowhere near core saturation. **Do not order the TY-300P (or any similar
+   600:600 audio isolation transformer) for this role until a replacement
+   part's primary inductance at 60 Hz is confirmed against the datasheet.**
 2. **J7 mating connector (§8).** Gender and exact pitch (1.27 mm is stated
    in `docs/HARDWARE.md`, but not confirmed against the physical board any
    more rigorously than that document's own provisional status already
@@ -358,8 +411,14 @@ Three items, in order of how much they block:
    probe capture at first power-on will pin this down properly; the G5LE-14
    recommendation should be revisited if that capture shows something
    uglier than the estimate.
+4. **DAC output DC bias (§3, item 18) — lower risk, same series as the
+   above.** UDA1334A Vref(DAC) = 0.5×VDD, ≈1.65 V DC bias on each output — a
+   series DC-blocking capacitor ahead of the transformer primary is required
+   (already counted under item 14) or the core saturates against DC and the
+   output stage is swamped. Not blocking in the sense of needing a part
+   decision, just a reminder this cap is mandatory, not optional.
 
-A fourth, lower-stakes one: **J3/J4/J8/J10/J11/J1's "fixed vs. pluggable"
+A fifth, lower-stakes one: **J3/J4/J8/J10/J11/J1's "fixed vs. pluggable"
 classification (§8)** — Mouser's category field says "Fixed Terminal
 Blocks" for both Phoenix part numbers involved, which is why this BOM
 recommends direct-wire rather than a mating connector, but this document

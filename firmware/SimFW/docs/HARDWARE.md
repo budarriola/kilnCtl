@@ -1,6 +1,6 @@
 # SimFW — Fixture Hardware Map
 
-> **Status:** planning — bench harness not yet built · **Last reviewed:** 2026-08-20
+> **Status:** planning — bench harness not yet built · **Last reviewed:** 2026-08-23
 > **Keep this file current.** This is the traced/reconciled authority for the
 > fixture's own wiring — its Pico pin map, its connectors, and how they mate
 > to the kilnCtl main board. If the physical harness disagrees with this
@@ -58,16 +58,27 @@ Read this section first.
    (UART0's other native pin pair, fully free) — see §1's footnote.
 
 5. **CONTRADICTION found between the two main-board hardware docs on J7 pin
-   1.** `firmware/KilnFW/docs/HARDWARE.md` ("Safety thermocouple board (J7 ->
-   J1)") says J7 pin 1 is "(no connect)". `firmware/SaftyFW/docs/HARDWARE.md`
-   §8 says J7 pin 1 is `3.3v_Safty (via R51, 0R)`. These cannot both be true
-   of the same physical connector. This document follows `SaftyFW`'s version
-   as the more recently reviewed, more narrowly scoped safety-domain source
+   1 — still matters, for a narrower reason since 2026-08-23.**
+   `firmware/KilnFW/docs/HARDWARE.md` ("Safety thermocouple board (J7 -> J1)")
+   says J7 pin 1 is "(no connect)". `firmware/SaftyFW/docs/HARDWARE.md` §8
+   says J7 pin 1 is `3.3v_Safty (via R51, 0R)`. These cannot both be true of
+   the same physical connector. This document follows `SaftyFW`'s version as
+   the more recently reviewed, more narrowly scoped safety-domain source
    (which has already corrected the `KilnFW` doc on other J7-adjacent facts —
    see that doc's §10 "Stale sources") — **but this is unverified and must be
-   confirmed by continuity check before the fixture's isolated-side power
-   feed is wired**, since getting this wrong means either back-feeding an
-   unintended 3.3 V rail or leaving the isolator side unpowered.
+   confirmed by continuity check before anything is wired near J7 pin 1.**
+   **Revised 2026-08-23 (`DESIGN_NOTES.md` §3.5): the digital isolators this
+   used to power from J7's safety rail are gone — the fixture's ground is now
+   commoned with the DUT's, so nothing on the fixture needs to *draw* power
+   from J7 pin 1 anymore.** The original reason this mattered (feed the
+   isolator's isolated side, or leave it unpowered) is retired along with the
+   isolators. **It still matters for a narrower reason: not back-feeding an
+   unintended rail.** The fixture's J7 harness must leave pin 1 unconnected
+   regardless of which doc is right — if it actually carries `3.3v_Safty` and
+   a fixture wire lands on it expecting "no connect," that back-feeds the
+   safety board's 3.3 V rail from whatever the fixture happens to drive
+   there. Confirm by continuity/voltage check before wiring the J7 harness
+   (§6 step 7).
 
 6. **Resolved 2026-08-20 (`docs/BOM.md` §6): two relays, not one.** The
    design gap this item originally flagged — the DUT-power relay (DESIGN_NOTES.md
@@ -77,14 +88,16 @@ Read this section first.
    (safety domain), each with its own TVS and no shared copper downstream
    (confirmed: `C9`/`C10` bulk caps on `/5V Regulator/`, `C53`/`C61` on
    `/SaftyRegulator/`, different sheets) — is resolved in favor of **two
-   independent relays**, not a common feed downstream of one. A single relay
-   bridging both domains would bond `GND_Main` and `GND_Safty` through the
-   shared 12 V return, undermining the isolation the rest of the fixture
-   exists to preserve — the same failure mode step 5's ground-continuity
-   check exists to catch, so better not to build it in. Two relays also let
-   test scenarios brown out one domain independently of the other (a real
-   test case: `SaftyFW` noticing a main-side power loss while its own domain
-   stays up, and vice versa). **Firmware closed (this pass):** `i2c_owner.c`
+   independent relays**, not a common feed downstream of one. Originally
+   justified because a single relay bridging both domains would bond
+   `GND_Main` and `GND_Safty` through the shared 12 V return — **that
+   rationale no longer applies as of 2026-08-23** (`DESIGN_NOTES.md` §3.5):
+   the fixture's ground is commoned elsewhere anyway. **The two relays are
+   kept regardless**, because they let test scenarios brown out one domain
+   independently of the other (a real test case: `SaftyFW` noticing a
+   main-side power loss while its own domain stays up, and vice versa) — a
+   capability worth keeping on its own merits. **Firmware closed (this
+   pass):** `i2c_owner.c`
    now exposes both relays as independently named/commanded outputs
    (`EXP1_PIN_DUT_POWER_MAIN` = exp1 pin 7, `EXP1_PIN_DUT_POWER_SAFETY` =
    exp1 pin 10, one of the 6 spare pins §3.7 recorded) — see §3.7 below and
@@ -191,10 +204,10 @@ that claims that pin must cite this table.
 | 9 | SPI bus A CS0 | `spi_emu_a.c` | GND_Main | J6 pin 8 (`CS0`) |
 | 10 | SPI bus A CS1 | `spi_emu_a.c` | GND_Main | J6 pin 7 (`CS1`) |
 | 11 | SPI bus A CS2 | `spi_emu_a.c` | GND_Main | J6 pin 6 (`CS2`) |
-| 12 | SPI bus B SCLK | `spi_emu_b.c` | crosses isolator → GND_Safty | J7 pin 9 (`CLK`) |
-| 13 | SPI bus B MOSI (fixture input) | `spi_emu_b.c` | crosses isolator → GND_Safty | J7 pin 5 (`MOSI`) |
-| 14 | SPI bus B MISO (fixture output) | `spi_emu_b.c` | crosses isolator → GND_Safty | J7 pin 7 (`MISO`) |
-| 15 | SPI bus B CS0 | `spi_emu_b.c` | crosses isolator → GND_Safty | J7 pin 11 (`CS0`) |
+| 12 | SPI bus B SCLK | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 9 (`CLK`) |
+| 13 | SPI bus B MOSI (fixture input) | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 5 (`MOSI`) |
+| 14 | SPI bus B MISO (fixture output) | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 7 (`MISO`) |
+| 15 | SPI bus B CS0 | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 11 (`CS0`) |
 | 16 | CT PWM ch0 (zone 0 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J13 (via RC + isolation xfmr) |
 | 17 | `DRDY_MAIN_2` (open-drain) | `spi_emu_a.c` | GND_Main | J6 pin 13 (`thermoDrdy_2`) |
 | 18 | CT PWM ch1 (zone 1 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J15 (via RC + isolation xfmr) |
@@ -205,8 +218,8 @@ that claims that pin must cite this table.
 | — | PWM pacer slice 3 (no GPIO bound) | `ct_wave_pwm.c` | n/a | n/a |
 | — | DMA_IRQ_1 (not a pin) | `ct_wave_pwm.c` | n/a | n/a |
 | 25 | Heartbeat LED (on-board, not a header pin) | *(none yet, DESIGN_NOTES.md 3.6)* | n/a | n/a |
-| 26 | `DRDY_SAFETY` (open-drain) | `spi_emu_b.c` (cites this table, §0 item 8) | crosses isolator → GND_Safty | J7 pin 4 (`thermoDrdy`) |
-| 27 | `FAULT_SAFETY` (open-drain) | *(none yet)* | crosses isolator → GND_Safty | J7 pin 3 (`thermoFault`) |
+| 26 | `DRDY_SAFETY` (open-drain) | `spi_emu_b.c` (cites this table, §0 item 8) | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 4 (`thermoDrdy`) |
+| 27 | `FAULT_SAFETY` (open-drain) | *(none yet)* | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 3 (`thermoFault`) |
 | **28** | **SPARE — the one pin DESIGN_NOTES.md 3.6 leaves free** | — | — | — |
 
 **25 of 26 header GPIOs assigned, 1 spare (GPIO28).** (GPIO23/24 are not
@@ -547,36 +560,31 @@ At least one GND pin must be tied for SPI bus A to have a common reference
 between the ESP32 (master) and the fixture (slave) — tie all four listed for
 margin, matching what the real daughterboard does.
 
-### 3.2 Fixture → J7 (safety-side thermocouple bus, isolated)
+### 3.2 Fixture → J7 (safety-side thermocouple bus)
 
 Main board **J7** is a 2×06, 1.27 mm header, **straight pin-for-pin** to the
 safety daughterboard's **J1** (no reversal, unlike J6) —
 `firmware/SaftyFW/docs/HARDWARE.md` §8.
 
+**Direct GPIO, no digital isolator** (`DESIGN_NOTES.md` §3.5, decided
+2026-08-23: the fixture's ground is commoned with the DUT's) — wired the same
+way as SPI bus A on J6. Series resistors give the same first-plug-in
+protection bus A already gets (`PLAN.md` §15).
+
 | J7 pin | Signal | Fixture GPIO | Notes |
 |---|---|---|---|
-| 1 | `3.3v_Safty` (via R51, per `SaftyFW` doc) — **see §0 item 5, contradicts `KilnFW` doc** | — | isolator-side supply candidate; confirm before wiring |
+| 1 | `3.3v_Safty` (via R51, per `SaftyFW` doc) — **see §0 item 5, contradicts `KilnFW` doc** | — | leave unconnected; nothing on the fixture needs to draw power from this pin (`DESIGN_NOTES.md` §3.5) |
 | 2 | `5v_Safty` | — | |
-| 3 | `thermoFault` | GPIO27 (`FAULT_SAFETY`) | via digital isolator |
-| 4 | `thermoDrdy` | GPIO26 (`DRDY_SAFETY`) | via digital isolator |
-| 5 | `MOSI` | GPIO13 | via isolator, fixture input |
+| 3 | `thermoFault` | GPIO27 (`FAULT_SAFETY`) | direct GPIO |
+| 4 | `thermoDrdy` | GPIO26 (`DRDY_SAFETY`) | direct GPIO |
+| 5 | `MOSI` | GPIO13 | direct GPIO, fixture input |
 | 6 | `SDA` | — | not wired |
-| 7 | `MISO` | GPIO14 | via isolator, fixture output |
+| 7 | `MISO` | GPIO14 | direct GPIO, fixture output |
 | 8 | `SCL` | — | not wired |
-| 9 | `CLK` | GPIO12 | via isolator, fixture input |
-| 10 | GND_Safty | — | fixture-side isolated ground reference — **not** tied to fixture GND_Main |
-| 11 | `CS0` | GPIO15 | via isolator, fixture input |
-| 12 | GND_Safty | — | same as pin 10 |
-
-Direction split across the isolator: 3 channels board→fixture (`CLK`,
-`MOSI`, `CS0`), 3 channels fixture→board (`MISO`, `thermoDrdy`,
-`thermoFault`). **Resolved 2026-08-20 (`docs/BOM.md` §2):** no common
-6-channel isolator ships with a fixed 3/3 split (TI's family tops out at 4
-channels/package, fixed at 4/0, 3/1, or 2/2) — so the design uses **two TI
-ISO7740DWR** (quad, all-4-channels-same-direction), one wired for the 3
-board→fixture signals and one for the 3 fixture→board signals, one spare
-channel on each. This sidesteps the fixed-split problem entirely rather than
-forcing a mismatched part.
+| 9 | `CLK` | GPIO12 | direct GPIO, fixture input |
+| 10 | GND_Safty | fixture GND_Main | tied to the fixture's common ground (`DESIGN_NOTES.md` §3.5) |
+| 11 | `CS0` | GPIO15 | direct GPIO, fixture input |
+| 12 | GND_Safty | fixture GND_Main | same as pin 10 |
 
 ### 3.3 Fixture → CT jacks (J13/J15/J17)
 
@@ -617,7 +625,7 @@ match the SX1509's `Relay1..4` scheme and reintroduces the trap.
 | K2 | J4 | `EXP1_PIN_K2` = 1 | GND_Main |
 | K3 | J8 | `EXP1_PIN_K3` = 2 | GND_Main |
 | K5 | J11 | `EXP1_PIN_K5` = 3 | GND_Main |
-| K4 | J10 | `EXP1_PIN_K4` = 4 | **contact is in GND_Safty; the wetting/opto stage must cross to GND_Main before this MCP23017 pin** (DESIGN_NOTES.md 3.4: "opto-isolated for K4") |
+| K4 | J10 | `EXP1_PIN_K4` = 4 | **contact is in GND_Safty; senses directly, no opto stage, since 2026-08-23** (`DESIGN_NOTES.md` §3.5) — wires exactly like K1/K2/K3/K5 |
 
 Each sense circuit supplies a small wetting voltage through the relay's
 NO/COM (and optionally NC) contact into the expander input — see §5's
@@ -636,13 +644,25 @@ The safety board's E-stop connector (`J1` on the `SaftyProcessor` sheet,
 Phoenix 1935161, 2-pin — `SaftyFW/docs/HARDWARE.md` §5) normally carries a
 normally-closed button or a jumper; **as-built, with neither fitted, GPIO9
 floats high and reads permanent STOP.** The fixture becomes that jumper
-(DESIGN_NOTES.md 3.4): its E-stop optoMOS output wires across J1's two terminals in
-place of the button, driven by `EXP1_PIN_ESTOP_DRIVE` (exp1 pin 6,
-`i2c_owner.c`). `configure_exp1()` idles this pin **de-asserted (low)** at
-boot — confirm at bring-up whether that idle state presents a *closed*
-(healthy) or *open* (STOP) contact to GPIO9, since the whole point of the
-fixture-as-jumper is to default to a known, intentional state rather than
-the as-built float.
+(DESIGN_NOTES.md §3.4): **`EXP1_PIN_ESTOP_DRIVE` (exp1 pin 6, `i2c_owner.c`)
+wires directly across J1's two terminals through a 1 kOhm series protection
+resistor, in place of the button** — no switching element in between any
+more. (The CPC1017N optoMOS that used to sit here is removed, 2026-08-23 —
+it was itself driven by this same GPA6 bit, so it was only ever an extra
+stage crossing the fixture/DUT ground boundary, and that boundary no longer
+exists per DESIGN_NOTES.md §3.5.)
+
+Because SaftyFW's GPIO9 side has its own fail-safe pull-up (R10, 1 kOhm to
+`3.3v_Safty` — `SaftyFW/docs/HARDWARE.md` §5), the fixture cannot simply
+write a level to GPA6: driving it high to represent "open" would fight R10
+into a different supply rail. Instead `i2c_owner_set_estop()` toggles GPA6's
+**direction**: loop closed (healthy) = GPA6 configured as OUTPUT driving
+LOW; loop open (STOP) = GPA6 configured as INPUT, i.e. high-Z, letting R10
+pull GPIO9 (and this side of the resistor) high. `configure_exp1()` sets
+GPA6 to **INPUT at boot** — matching both the MCP23017's own POR default
+(IODIR resets to all-input) and the board's fail-safe intent: an unpowered
+or un-initialised fixture must read STOP, never a falsely-healthy closed
+loop.
 
 ### 3.7 Fixture → DUT 12 V power
 
@@ -652,10 +672,15 @@ the as-built float.
 | Bench supply (independent channel) | fixture power-in connector → fixture relay #2 (`EXP1_PIN_DUT_POWER_SAFETY`, exp1 pin 10, added this pass — was a spare pin) → fixture power-out connector | J19 (safety 12 V in) |
 
 **Resolved (§0 item 6, `docs/BOM.md` §6): two independent relays, not one
-relay with a common downstream feed.** A single relay bridging both domains
-would bond `GND_Main` and `GND_Safty` through the shared 12 V return,
-defeating the isolation the rest of the fixture preserves. `i2c_owner.c` now
-implements both relays' control bits, each with its own named setter/getter
+relay with a common downstream feed.** Originally justified by avoiding
+bonding `GND_Main` and `GND_Safty` through a shared 12 V return — that
+rationale no longer applies now that the fixture's ground is commoned
+elsewhere anyway (`DESIGN_NOTES.md` §3.5). **The two relays are kept
+regardless**: they give independent per-domain power-cycle/brownout testing
+that a single shared relay could never produce (`SaftyFW` noticing a
+main-side power loss while its own domain stays up, and vice versa) — a
+capability worth keeping on its own merits. `i2c_owner.c` implements both
+relays' control bits, each with its own named setter/getter
 (`i2c_owner_set/_get_dut_power_main_on()`, `..._safety_on()`) and its own
 protocol command (`DUT_POWER_SAFETY_SET`/`GET` = `0x09`/`0x0A`, alongside the
 pre-existing `DUT_POWER_SET`/`GET` = `0x06`/`0x08` which keep their original
@@ -671,22 +696,21 @@ pending a bench scope/current-probe capture, not a measured figure.
 
 ---
 
-## 4. Isolation boundary map
+## 4. Ground-domain map (revised 2026-08-23 — fixture ground commoned with the DUT's)
 
-Per DESIGN_NOTES.md 3.5, restated against the pin map above:
+Per `DESIGN_NOTES.md` §3.5, restated against the pin map above. The fixture's
+ground is commoned with the DUT's: no galvanic isolation across the fixture
+boundary except the CT channels, which stay floating like a real CT.
 
-| Fixture signal group | Domain | Crosses via |
+| Fixture signal group | Domain | Notes |
 |---|---|---|
-| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, relay sense K1/K2/K3/K5, `Fault` line sense, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays — the MCP23017 output bits and the Pico-side I2C0 bus that drives them are GND_Main native for both; each relay's own *downstream* 12 V feed stays in its own domain, J18/main vs J19/safety, per §3.7) | GND_Main | — (native) |
-| SPI bus B, `DRDY_SAFETY`, `FAULT_SAFETY` | GND_Safty | two quad TI ISO7740DWR digital isolators (revised 2026-08-20 from a single 6-channel ISO7741-class part — see §3.2), powered from J7's safety-side rail (§0 item 5) on the isolated side |
-| 3× CT channels | floating (neither domain) | isolation transformer, **~3:1 step-up** (revised 2026-08-20 from an earlier 1:1 decision — a 1:1 ratio cannot reach the ADC's clipping boundary; see `DESIGN_NOTES.md` §3.3 and `docs/BOM.md` §3 for the arithmetic), per channel |
-| K4 relay sense | GND_Safty at the contact, GND_Main at the MCP23017 | optocoupler in the wetting circuit (§3.4) |
-| E-stop | GND_Safty at J1 | optoMOS, GND_Main-side control |
+| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, SPI bus B, `DRDY_SAFETY`/`FAULT_SAFETY`, relay sense K1/K2/K3/K5/K4, `Fault` line sense, E-stop direct drive, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays) | GND_Main, bonded to GND_Safty at the fixture | All direct GPIO/direct sense — no digital isolators, no optocoupler, no optoMOS. SPI bus B's two TI ISO7740DWR isolators, K4's 4N35 opto, and the E-stop loop's CPC1017N optoMOS are all removed (`DESIGN_NOTES.md` §3.5) — each was only ever crossing this same now-nonexistent ground boundary |
+| 3× CT channels | floating (neither domain) | isolation transformer, **1:1** (revised 2026-08-23, reversing the 2026-08-20 revision to ~3:1 — the earlier change backed out a specific CT's rated current from the ADC's clipping voltage; the board's own sense input is full-scale at ≈1 Vrms regardless of which CT is fitted, and 1:1 delivers that with margin. Tradeoff: `CURRENT_FLAG_CLIPPED` is not exercisable at 1:1 — see `DESIGN_NOTES.md` §3.3 and `docs/BOM.md` §3), per channel |
 
-**Standing rule (DESIGN_NOTES.md 3.5, unchanged here):** a deliberate, labeled,
-removable jumper may common the grounds for early breadboard bring-up, but
-**the standard test library must run with it out.** Bring-up step 5 (§6)
-exists specifically to verify this before the DUT is ever touched.
+**Standing rule retired 2026-08-23 (`DESIGN_NOTES.md` §3.5):** the removable
+ground jumper and the old "run the standard library with it out" rule no
+longer apply — the fixture's ground is always common with the DUT's, by
+design. Bring-up step 5 (§6) is rewritten accordingly.
 
 ---
 
@@ -694,10 +718,9 @@ exists specifically to verify this before the DUT is ever touched.
 
 | Part | Qty | Role | Sizing status |
 |---|---|---|---|
-| Digital isolator, quad unidirectional, TI ISO7740DWR (revised 2026-08-20; was "6-channel ISO7741-class, qty 1") | 2 | One for the 3 board→fixture channels (`CLK`/`MOSI`/`CS0`), one for the 3 fixture→board channels (`MISO`/`DRDY_SAFETY`/`FAULT_SAFETY`), 1 spare channel each | **Resolved (§3.2, `docs/BOM.md` §2):** no 6-channel part ships with a fixed 3/3 split, so two single-direction quad parts are used instead. In stock, Mouser 595-ISO7740DWR |
-| CT isolation transformer, **~3:1 step-up** audio/isolation (revised 2026-08-20; was 1:1) | 3 | One per CT channel, between the RC-filtered PWM output and the J13/J15/J17 jack | **Partially resolved (PLAN.md §11 item 2):** target transfer function sized — `SaftyFW/docs/CURRENT_SENSE.md` §2 (gain 0.715, full-scale ≈98 A rms for a 1 V/30 A CT or ≈326 A rms for a 1 V/100 A CT) against an estimated ~1.5 Vpk usable Pico drive gives ~3:1 (medium confidence — see `docs/BOM.md` §3). **Still open:** the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its datasheet, and the compiled-in CT calibration table remains all-uncalibrated (identity behavior) — the calibration *mechanism* itself now exists, see §6 step 4's correction (M-D) |
-| Relay-sense wetting circuit | 5 | One per relay (K1/K2/K3/K5 direct, K4 through an opto stage) into MCP23017 #1 inputs | **Resolved (`docs/BOM.md` §4):** no dedicated wetting supply needed — MCP23017's internal 100 kΩ pull-ups (`GPPU`) plus a 1 kΩ series resistor per contact (K1/K2/K3/K5 direct to `GND_Main`; K4 through the 4N35 opto stage's phototransistor, LED side wetted from J7's safety rail). Vishay 4N35 for K4's opto, per `docs/BOM.md` §5 |
-| E-stop optoMOS | 1 | In series with J1's E-stop loop, driven by `EXP1_PIN_ESTOP_DRIVE` | **Resolved (`docs/BOM.md` §5):** Littelfuse/IXYS CPC1017N — loop current ≈3.3 mA (3.3 V / 1 kΩ pull-up) against a part rated for 100+ mA continuous in this family, comfortable margin |
+| CT isolation transformer, **1:1** audio/isolation (revised 2026-08-23, reversing the 2026-08-20 revision to ~3:1) | 3 | One per CT channel, between the RC-filtered PWM output and the J13/J15/J17 jack | **Ratio corrected:** the board's sense input is full-scale at ≈1 Vrms (a board property, independent of whichever CT is installed — `SaftyFW/docs/CURRENT_SENSE.md` §2), fully covered at 1:1 with margin from an estimated ~1.5 Vpk usable Pico drive — see `docs/DESIGN_NOTES.md` §3.3, `docs/BOM.md` §3. Tradeoff accepted: `CURRENT_FLAG_CLIPPED` is not exercisable at 1:1. **Still open:** the candidate part's (Triad TY-300P) actual turns ratio is unconfirmed against its datasheet, and the compiled-in CT calibration table remains all-uncalibrated (identity behavior) — the calibration *mechanism* itself now exists, see §6 step 4's correction (M-D) |
+| Relay-sense wetting circuit | 5 | One per relay (K1/K2/K3/K5/K4, all direct, since 2026-08-23) into MCP23017 #1 inputs | **Resolved (`docs/BOM.md` §4):** no dedicated wetting supply needed — MCP23017's internal 100 kΩ pull-ups (`GPPU`) plus a 1 kΩ series resistor per contact, all five relays wired identically. K4's 4N35 opto stage is removed (`DESIGN_NOTES.md` §3.5) — the ground-commoning decision means it no longer needs to cross a domain boundary |
+| E-stop series resistor | 1 | 1 kΩ, in series between `EXP1_PIN_ESTOP_DRIVE` and J1's E-stop loop | **Resolved (`docs/BOM.md` §5, 2026-08-23):** CPC1017N optoMOS removed — GPA6 drives the loop directly (output-low = closed / input = open) through the same 1 kΩ series-resistor protection every other fixture signal already gets; loop current when closed ≈3.3 mA (3.3 V / 1 kΩ pull-up) |
 | DUT 12 V power relay | **2** (resolved 2026-08-20, §0 item 6 — one per domain, not one shared) | Fixture's own 12 V feed to J18 (relay #1) and J19 (relay #2) independently | Part: Omron G5LE-14-DC12 (10 A/250 VAC continuous, already used elsewhere on the main board), per `docs/BOM.md` §6. **Still open (PLAN.md §11 item 5):** inrush rating vs the board's actual inrush not measured — `docs/BOM.md` §6 estimates ~60 A / ~190 µs from ~940 µF per-domain bulk capacitance and an assumed ~0.2 Ω source resistance; this is an estimate, not a measurement, and needs a scope/current-probe capture at first power-on |
 | MCP23017 | 2 | 0x20 (fixed-role pins) and 0x21 (spare) on I2C0 | Sized; already in code |
 | PCA9685 (optional) | 0–1 | PWM/LED stimulus, not required for the base feature set | Not needed unless a test calls for analog-ish stimulus |
@@ -762,15 +785,18 @@ expands this same ten-step order in full.
   and `tools/gen_ct_cal_table.py` regenerates the default header. Still
   pending M-D hardware; the plumbing to consume a real table is not.
 
-- [ ] **Step 5 — GROUND-DOMAIN CHECK BEFORE FIRST DUT CONTACT. Do not skip,
-  do not reorder.**
-  With the bring-up jumper **OUT**: verify **no continuity** between fixture
-  GND_Main and GND_Safty; verify isolator and transformer orientation against
-  §4's table. This is the single check protecting the real board from the
-  fixture becoming an unintended ground strap (DESIGN_NOTES.md §3.5, PLAN.md §15's top risk
-  row). **Do this with a meter, on the bench, every time the harness is
-  rebuilt — not once and trusted forever.**
-  No `kilnsim` command substitutes for a physical continuity check.
+- [ ] **Step 5 — PRE-DUT SANITY CHECK. Do not skip, do not reorder.**
+  **Revised 2026-08-23:** the old "no continuity between fixture GND_Main and
+  GND_Safty" pass criterion is retired — the fixture's ground is now
+  deliberately commoned with the DUT's (`DESIGN_NOTES.md` §3.5), so
+  continuity between those two labels is the *expected*, correct result, not
+  a fault. There is no jumper to check for either. What this step checks
+  instead: verify the CT transformer orientation and 1:1 wiring against §4's
+  table (the CT channels are still the one part of this fixture that stays
+  floating from both domains, and getting that wrong is still a real risk).
+  **Do this with a meter, on the bench, every time the harness is rebuilt —
+  not once and trusted forever.**
+  No `kilnsim` command substitutes for a physical check.
 
 - [ ] **Step 6 — DUT thermocouple path: J6 unplugged from the real
   daughterboard, fixture in its place, `KilnFW` booted — temperatures
@@ -782,7 +808,7 @@ expands this same ten-step order in full.
   `kilnsim state` on the fixture side to confirm what it believes it is
   reporting.
 
-- [ ] **Step 7 — Safety path: J7 via isolator, `SaftyFW`'s single channel
+- [ ] **Step 7 — Safety path: J7 direct GPIO, `SaftyFW`'s single channel
   reads.**
   Pass: the safety Pico's own thermocouple reading tracks the fixture's zone
   0 (or configured blend) temperature.

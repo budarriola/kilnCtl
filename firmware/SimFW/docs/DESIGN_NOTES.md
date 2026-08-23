@@ -96,18 +96,19 @@ never gain one.
    │  FreeRTOS SMP, single-owner task per interface                      │
    │                                                                     │
    │  PIO0: SPI slave engine A (3x MAX31856 emu, ESP bus)                │
-   │  PIO1: SPI slave engine B (1x MAX31856 emu, safety bus, isolated)   │
+   │  PIO1: SPI slave engine B (1x MAX31856 emu, safety bus)             │
    │  PWM:  3x 60 Hz sine synthesis (high-rate PWM + RC filter)          │
    │  I2C0: MCP23017 #1, MCP23017 #2, (optional PCA9685)                 │
    └──┬──────┬───────┬─────────┬──────────┬──────────┬─────────┬────────┘
       │      │       │         │          │          │         │
  [SPI A]  [SPI B]  [3x PWM   [I2C bus]    │          │         │
   6 pins   4 pins   +RC LPF]     │        │          │         │
-      │   via dig.     │     ┌───┴──────────────────────────┐  │
-      │   isolator     │     │ MCP23017 #1: relay sense x5, │  │
-      │  (GND_Safty)   │     │  ESP Fault sense, E-stop     │  │
-      │      │         │     │  drive (optoMOS), DUT 12V    │
-      │      │         │     │  power relay, J20 IO_3/4     │  │
+      │   direct       │     ┌───┴──────────────────────────┐  │
+      │   GPIO, no     │     │ MCP23017 #1: relay sense x5, │  │
+      │   isolator     │     │  ESP Fault sense, E-stop     │  │
+      │  (GND_Safty,   │     │  direct drive, DUT 12V       │
+      │  bonded to     │     │  power relay, J20 IO_3/4     │  │
+      │  GND_Main)     │     │                               │  │
       │      │         │     │ MCP23017 #2: spares only     │  │
       │      │         │     │  (DRDY/~FAULT x8 moved to    │  │
       │      │         │     │  direct Pico GPIO, §3.4)     │  │
@@ -124,7 +125,7 @@ never gain one.
    ┌─────────────────────────────────────────────────────────────────┐
    │                      kilnCtl MAIN BOARD                         │
    │  GND_Main domain                    GND_Safty domain            │
-   │  J6 (1x20 socket)  ◄── SPI A        J7 ◄── SPI B (isolated)     │
+   │  J6 (1x20 socket)  ◄── SPI A        J7 ◄── SPI B (direct GPIO)  │
    │   SCLK/MOSI/MISO,                    SCLK/MOSI/MISO/CS0,        │
    │   CS0/CS1/CS2,                       thermoFault, thermoDrdy    │
    │   thermoFault_0..2,                  (safety Pico is master)    │
@@ -136,17 +137,19 @@ never gain one.
    │  J3  K1 NC/COM/NO ──► relay sense   J10 K4 NC/COM/NO ──► sense  │
    │  J4  K2 NC/COM/NO ──► relay sense    (pilot relay, safety)      │
    │  J8  K3 NC/COM/NO ──► relay sense                               │
-   │  J11 K5 NC/COM/NO ──► relay sense   E-stop net ◄── optoMOS      │
-   │                                      (fixture opens/closes it)  │
+   │  J11 K5 NC/COM/NO ──► relay sense   E-stop net ◄── GPA6 direct  │
+   │                                      drive (fixture opens/closes it) │
    │  J20 IO_3 / IO_4 ◄──► expander I/O                              │
    │  `Fault` (ESP GPIO6→U1) ──► sense                               │
    └─────────────────────────────────────────────────────────────────┘
 ```
 
-The double line marks the fixture's isolation boundary. Everything below it
-on the right (safety) side is referenced to `GND_Safty`; the main board's two
-ground domains share no copper, and the fixture must not become the strap
-that shorts them together (§3.5).
+The double line marks the CT channels' floating boundary — those three
+channels stay isolated from both ground domains regardless of anything else
+on this page (§3.3). Everywhere else, the fixture's ground is **commoned
+with the DUT's** (§3.5): no galvanic isolation across the fixture boundary.
+The main board's own isolation between `GND_Main` and `GND_Safty` is
+unchanged and out of scope for this decision.
 
 **Closed loops the fixture creates**
 
@@ -301,6 +304,18 @@ has 7.
 
 ### 3.3 CT waveform generation
 
+> **Decided 2026-08-23: CT waveform synthesis is moving from PWM+RC to 2x
+> UDA1334A I2S stereo DAC modules (one pair of channels per module, covering
+> all 3 CT channels), 16 kHz sample rate, DAC output driving the 1:1
+> isolation transformer directly with no amplifier — `docs/BOM.md` §3/§5/§9
+> has the full part selection and sizing. This is a documentation/BOM
+> decision only in this pass: no I2S driver has been written, and
+> `src/drivers/ct_wave_pwm.c` is unchanged, still the real, working, tested
+> waveform path.** The PWM-era sizing below is kept because it is still what
+> today's firmware actually does; where the DAC path changes a number (the
+> transformer-primary drive level, in particular), that is called out
+> explicitly rather than silently overwriting the PWM figure.
+
 - Three GPIO, each running high-carrier PWM (~250 kHz carrier, 244 kHz
   actual at 8-bit resolution / 125 MHz sysclk on a dedicated slice per
   channel) whose duty cycle is modulated by a 60 Hz sine table (256 entries/
@@ -308,37 +323,95 @@ has 7.
   RC low-pass (~1–2 kHz corner) on the fixture side. Carrier is far enough
   above the RC corner that residual ripple is negligible next to the AD8542
   stage's own filtering.
-- **Coupling into J13/J15/J17 via a step-up audio/isolation transformer**
-  (decided: transformer coupling, keeping the fixture out of the `GND_Safty`
-  domain for these channels, the way a real floating CT source would be).
+- **Coupling into J13/J15/J17 via a 1:1 audio/isolation transformer**
+  (decided: transformer coupling, keeping the fixture out of *both* ground
+  domains for these three channels, the way a real floating CT source would
+  be). **This is unaffected by the fixture-ground-commoning decision in
+  §3.5** — a CT's secondary floats relative to everything, including
+  `GND_Main` and `GND_Safty` alike, so the transformer's isolation role here
+  was never about crossing the fixture's isolation boundary in the first
+  place. With the ratio question below now resolved at 1:1, the
+  transformer's remaining jobs are the floating secondary (CT-emulation
+  correctness), AC-coupling/DC-blocking the PWM's ~1.65 V bias off the
+  secondary for free, and presenting the right source impedance to the
+  AD8542 stage — all still worth a transformer even with no gain to provide.
 
-  **Ratio: ~3:1 step-up**, corrected from an earlier 1:1 decision. At 1:1,
-  the Pico-drive ceiling caps the fixture at ~31.5 A rms on the safety
-  board's 1 V/30 A CT model — fine for the 10–25 A a resistive element draws,
-  but structurally incapable of reaching the ADC's clipping boundary
-  (≈98 A rms, from `SaftyFW/docs/CURRENT_SENSE.md` §2: gain 0.715, clamp
-  ≈4.6 V peak, 1 V/30 A CT), so a 1:1 fixture could never exercise
-  `CURRENT_FLAG_CLIPPED` handling — one of the fixture's stated purposes.
-  Derivation:
+  **Ratio: 1:1 — corrected 2026-08-23, reversing the 2026-08-20 revision to
+  ~3:1.** That revision reasoned from the wrong target: it backed out a
+  specific CT's rated current (a 1 V/30 A part) from the ADC's clipping
+  voltage and called the result "the" full-scale current — but amps-per-volt
+  is a property of *whichever CT the user installs*, not of this board and
+  not of this fixture. **The board itself has no opinion on amps; its sense
+  input is full-scale at 1 Vrms**, and that voltage figure — not any current
+  figure — is the number the fixture actually has to reach.
 
   ```
-  V_sec,pk (clip target)      ≈ 4.6 V   (CURRENT_SENSE.md §2, high confidence)
-  V_pri,pk (usable Pico drive) ≈ 1.5 V   (medium confidence, see caveat below)
-  n = V_sec,pk / V_pri,pk      ≈ 3.07  →  call it 3:1
+  Board sense input full scale  ≈ 1 Vrms          (a board property, CT-independent)
+  V_pri,pk (usable Pico drive)  ≈ 1.5 V   →   V_pri,rms ≈ 1.06 V   (medium confidence, see caveat below)
+  n = 1 (unity)  →  V_sec,rms ≈ 1.06 V, covering the board's full 0–1 Vrms range with headroom
   ```
 
-  The 1.5 V peak primary-drive figure is a **medium-confidence estimate**,
-  not measured or firmware-confirmed — it assumes ~91% of the theoretical
-  ±1.65 V (half the 3.3 V logic rail) swing before a DC-blocking cap. The
-  real ceiling depends on whatever modulation-index cap `ct_wave_pwm.c`'s
-  amplitude-to-duty mapping ends up using — that mapping is an
+  That is the whole justification for 1:1: it produces the voltage the board
+  wants, with no CT part number entering the derivation. **The board expects
+  a self-burdened, voltage-output CT** — `R72`/`R78`/`R84` (the burden
+  resistors) are DNP on all three channels, which is a genuine board
+  property, independent of which CT ends up installed
+  (`SaftyFW/docs/CURRENT_SENSE.md` §2). An SCT-013-030 (1 V at 30 A) is one
+  compatible example, not the assumed or required part.
+
+  **At 1:1 the fixture can reach the board's 1 Vrms full-scale input but not
+  meaningfully past it**, so `CURRENT_FLAG_CLIPPED` is not exercisable this
+  way. That is an accepted tradeoff, stated narrowly and without assuming a
+  CT: the ADC clips at a certain input *voltage* (`CURRENT_SENSE.md` §2's
+  ≈3.26 V rms / ≈4.6 V peak clamp boundary), and what *current* that
+  corresponds to depends entirely on whichever CT is installed — this
+  fixture doesn't know that number and shouldn't guess it. If
+  `CURRENT_FLAG_CLIPPED` coverage is ever wanted, it needs a deliberately
+  out-of-spec stimulus path (e.g. a separate MANUAL override that drives
+  past the board's normal full-scale input), not a transformer ratio
+  silently doing it by default.
+
+  **Under the decided I2S DAC replacement, the numbers firm up and the same
+  conclusion holds with more confidence.** The UDA1334A datasheet (NXP
+  UDA1334ATS, §14.1) specifies Vo(rms) = 900 mV typ at 0 dBFS at VDDA = 3.0 V,
+  scaling proportionally with supply — at the module's 3.3 V that is
+  ≈990 mVrms. Into the 1:1 transformer that is ≈990 mVrms at the board's
+  sense input, still well short of the ≈3.26 Vrms clamp boundary — a
+  higher-confidence version of the PWM-era 1.06 V figure above (measured
+  datasheet spec vs. an estimated duty-cycle-derating figure), reaching the
+  same conclusion: `CURRENT_FLAG_CLIPPED` is not exercisable by this fixture
+  at 1:1, under either waveform-generation path. If clip coverage is ever
+  wanted, it belongs in `virtual_dut` instead — feeding `current_sense.c`
+  counts directly bypasses the analog chain entirely, so it can drive past
+  the clamp on command without needing an out-of-spec stimulus rig on real
+  hardware.
+
+  **Where the CT's amps-per-volt actually lives:** the per-channel
+  calibration table (`src/sim/ct_calibration.h`) — `ct_cal_apply()` is
+  `clamp(gain[ch] * amps + offset[ch], 0, 1)`, with no CT part hardcoded
+  anywhere, and every channel ships uncalibrated (identity) until a real
+  bench sweep against whichever CT is actually installed populates real
+  `gain`/`offset` constants. That is by construction CT-agnostic and is the
+  correct place for this binding to live — not in the transformer ratio, and
+  not anywhere in this document.
+
+  **Confidence, and why the earlier caveat is downgraded.** The 1.5 V peak
+  primary-drive figure is still a **medium-confidence estimate**, not
+  measured or firmware-confirmed — it assumes ~91% of the theoretical
+  ±1.65 V (half the 3.3 V logic rail) swing before a DC-blocking cap. At 3:1
+  this estimate directly gated whether the clamp boundary was reachable at
+  all; at 1:1 it no longer does — 1.06 V rms clears the board's 1 Vrms
+  full-scale target with margin even if the real usable drive comes in
+  noticeably below 1.5 V peak, so the fixture's basic correctness is far
+  less sensitive to this number than it was under the 3:1 plan. The real
+  ceiling still depends on whatever modulation-index cap `ct_wave_pwm.c`'s
+  amplitude-to-duty mapping ends up using — that mapping is a
   `TODO(M-D calibration)` identity placeholder until M-D lands (`PLAN.md`
-  §10). Candidate part: Triad Magnetics TY-300P (`docs/BOM.md` §3) — its
-  exact turns/impedance ratio is unconfirmed against its datasheet; that
-  document also gives a same-cost fallback (1:1 transformer + ×3 op-amp gain
-  stage) if the part's real ratio doesn't hold up. Full sizing derivation and
-  confidence breakdown live in `docs/BOM.md` §3; treat this paragraph as the
-  decision summary.
+  §10). Candidate part: Triad Magnetics TY-300P (`docs/BOM.md` §3), chosen
+  originally as a step-up part but equally usable as a 1:1 coupling
+  transformer, or any comparable 1:1 audio/isolation transformer if sourcing
+  changes. Full sizing derivation lives in `docs/BOM.md` §3; treat this
+  paragraph as the decision summary.
 
 - **Programmable per channel:** amplitude (simulated amps, via calibration
   table), phase, DC offset, clipping, dropout (half-cycle skipping, as a
@@ -376,13 +449,34 @@ has 7.
 ### 3.4 Relay sensing and discrete I/O
 
 - Relay contacts sensed at the terminal blocks: fixture supplies a small
-  wetting voltage through the NO/COM contact into an MCP23017 input
-  (opto-isolated for K4, safety domain). Both NO and COM/NC sides observed
-  where useful, so "relay commanded but contact stuck" is distinguishable
-  from "relay never commanded."
-- **E-stop:** an optoMOS/relay sits in the E-stop loop so tests can open it
-  mid-firing. Default state configurable — the as-built board reads permanent
-  STOP with no jumper, so the fixture *becomes* the jumper.
+  wetting voltage through the NO/COM contact into an MCP23017 input. **K4
+  senses identically to K1/K2/K3/K5** — internal `GPPU` pull-up plus a 1 kΩ
+  series resistor, straight to fixture ground — now that the fixture commons
+  its ground with `GND_Safty` (§3.5). The 4N35 opto stage this used to need,
+  purely to cross that ground boundary, is gone; see §3.5 and §14 for the
+  superseded reasoning. Both NO and COM/NC sides observed where useful, so
+  "relay commanded but contact stuck" is distinguishable from "relay never
+  commanded."
+- **E-stop:** `EXP1_PIN_ESTOP_DRIVE` (exp1 pin 6) wires directly across J1's
+  two terminals through a 1 kOhm series protection resistor — the same
+  treatment every other fixture signal already gets — so tests can open the
+  loop mid-firing. **The CPC1017N optoMOS previously in this loop is removed
+  (2026-08-23).** The earlier "kept — it's the loop's switching element, not
+  merely an isolation crossing" argument was wrong: the optoMOS was itself
+  driven by this same GPA6 bit, so it was never anything but an extra stage
+  between the control bit and the loop, and crossing the ground boundary was
+  its only real function — a function that no longer exists once the
+  fixture's ground is commoned with the DUT's (§3.5). Because SaftyFW's
+  GPIO9 side has its own fail-safe pull-up (R10, `SaftyFW/docs/HARDWARE.md`
+  §5), the control is a **direction toggle, not a level write**: loop closed
+  (healthy) = GPA6 as OUTPUT driving LOW; loop open (STOP) = GPA6 as INPUT
+  (high-Z), letting R10 pull GPIO9 high without GPA6 fighting it into a
+  different supply rail. Boot-time default is INPUT/high-Z (open/STOP) —
+  matching the MCP23017's own POR default and the board's fail-safe intent
+  that an unpowered or un-initialised fixture never reads falsely healthy.
+  The fixture *becomes* the jumper the as-built board otherwise lacks (the
+  as-built board reads permanent STOP with neither a button nor a jumper
+  fitted).
 - **`Fault` line:** the ESP-driven fault output (GPIO6 → U1 opto) is sensed
   so tests can assert the main processor raised it.
 - **J20 IO_3/IO_4** and other spare I/O: MCP23017 pins, direction settable
@@ -390,42 +484,97 @@ has 7.
 - **DRDY/`~FAULT` outputs** (4 channels × 2 lines): **direct Pico GPIO**
   (decided, not I2C-expander), driven open-drain so the board's pull-ups set
   the idle level — microsecond-accurate DRDY timing with no I2C latency
-  dependency. The safety-side pair crosses the digital isolator with the
-  SPI B lines.
+  dependency. The safety-side pair is now direct GPIO too, same as the
+  main-side lines — the digital isolator these used to cross with SPI B is
+  removed (§3.5).
 - **DUT power switch** (decided): a fixture relay/high-side switch in the
   main board's 12 V feed, driven from MCP23017 #1, for cold-boot,
   power-cycle, and brownout tests (`power_blip` scenario). **Two relays, not
   one** — the main board has two independent 12 V inputs, J18 (main domain)
   and J19 (safety domain), with no shared copper downstream (their bulk caps
   live on different schematic sheets, `/5V Regulator/` vs `/SaftyRegulator/`).
-  A single relay bridging both downstream of itself would bond `GND_Main` and
-  `GND_Safty` through the shared 12 V return, undermining the isolation the
-  rest of the fixture preserves. Implemented (`f5cb4c3`):
-  `EXP1_PIN_DUT_POWER_MAIN` (pin 7, J18) and `EXP1_PIN_DUT_POWER_SAFETY`
-  (pin 10, J19), separate protocol commands, **deliberately no combined
-  "set both" call anywhere in the stack** — including CLI/GUI/MCP, which is
-  test-enforced (`0926213`) — so bonding the two ground domains can never be
-  a silent default. **K4 must never be masked on DUT power loss** (`63acef8`,
+  **Rationale updated under the ground-commoning decision (§3.5): the
+  original reason — a single relay bridging both 12 V returns would bond
+  `GND_Main` and `GND_Safty`, which the fixture no longer avoids anyway — no
+  longer applies.** The two relays are kept regardless, because they earn
+  their keep independently: they let test scenarios brown out or
+  power-cycle one domain without touching the other (`SaftyFW` noticing a
+  main-side power loss while its own domain stays up, and vice versa) — a
+  real test case a single shared relay could never produce. Implemented
+  (`f5cb4c3`): `EXP1_PIN_DUT_POWER_MAIN` (pin 7, J18) and
+  `EXP1_PIN_DUT_POWER_SAFETY` (pin 10, J19), separate protocol commands,
+  **deliberately no combined "set both" call anywhere in the stack** —
+  including CLI/GUI/MCP, which is test-enforced (`0926213`) — kept as-is so
+  a scenario author always makes the two-domain decision explicitly rather
+  than getting it as a side effect of one command, independent of the
+  isolation rationale that originally motivated it. **K4 must never be
+  masked on DUT power loss** (`63acef8`,
   `virtual_simfw.c`): its coil is on the separate GND_Safty relay fed from
   J19 and driven by the safety processor, while `FT_DUT_POWER_CUT` actuates
   only the GND_Main relay — only K1/K2/K3/K5 float open when GND_Main loses
   J18.
 
-### 3.5 Isolation discipline
+### 3.5 Ground-domain discipline (revised 2026-08-23: fixture ground is commoned with the DUT's)
 
-The main board keeps `GND_Main` and `GND_Safty` separate; the fixture must
-too, or every isolation-dependent behavior becomes untestable and a real
-design error could hide behind the fixture's ground strap.
+**Decided (2026-08-23): the fixture's ground is commoned with the DUT's — no
+galvanic isolation across the fixture boundary.** The main board's own
+`GND_Main`/`GND_Safty` separation is unchanged; this decision is only about
+the fixture not preserving that separation while it's plugged in. It is a
+bench fixture, not a production interface, and the bonding does not affect
+what the tests prove — every scenario in §7/§8 exercises logic-level fault
+behavior, not ground-domain integrity.
 
-- Fixture logic ground ties to **GND_Main** (SPI bus A, main-side relay
-  sense, J20, `Fault` sense).
-- **SPI bus B** (J7, safety domain) plus the safety-side DRDY/`~FAULT` pair
-  cross digital isolators (6 channels total, ISO7741-class parts) powered
-  from the safety side's 3.3 V at J7.
-- **CT channels** cross via transformer (§3.3).
-- **K4 sense and E-stop** cross via optocoupler/optoMOS.
-- A deliberate, labeled, removable jumper can common the grounds for early
-  breadboard bring-up — the standard test library must run with it out.
+**Per part, not a blanket removal — several parts justified by isolation
+also serve another purpose:**
+
+- **SPI bus B's two TI ISO7740DWR digital isolators are removed.** Their
+  only stated job was crossing the ground boundary; SPI bus B and the
+  safety-side `DRDY_SAFETY`/`FAULT_SAFETY` pair now wire as direct Pico GPIO,
+  identical to SPI bus A's main-side lines. Series resistors give the same
+  first-plug-in protection bus A already has (`PLAN.md` §15). This also
+  helps the SPI timing budget (§3.2.1): removing the isolators' propagation
+  delay only adds margin, never costs it.
+- **CT channels still cross via transformer (§3.3), unchanged.** A CT's
+  secondary floats relative to *both* ground domains in a real installation;
+  the transformer's floating-secondary role was never about crossing this
+  fixture's ground boundary. (Separately: the transformer's ratio was
+  corrected back to 1:1 on 2026-08-23 — see §3.3.)
+- **K4 sense no longer crosses an optocoupler.** K4 now senses exactly like
+  K1/K2/K3/K5: internal MCP23017 `GPPU` pull-up + 1 kΩ series resistor,
+  straight to fixture ground (§3.4, `BOM.md` §4).
+- **E-stop's CPC1017N optoMOS is removed (2026-08-23), reversing the earlier
+  "kept — it's the loop's switching element" call.** That argument was
+  wrong: the optoMOS was itself driven by the same MCP23017 GPA6 bit that
+  now drives the loop directly, so it was an extra stage between the same
+  control bit and the same loop, not an independent switching element —
+  crossing the ground boundary was its only real function, and that
+  boundary no longer exists. See §3.4's E-stop bullet for the direct-drive
+  replacement and its direction-toggle contract.
+- **The two independent DUT-power relays (J18/J19) are kept, rationale
+  rewritten.** The original reason — a single relay bridging both 12 V
+  returns would bond `GND_Main`/`GND_Safty` — no longer matters once the
+  fixture bonds them anyway. The relays earn their keep independently:
+  independent per-domain power-cycle/brownout testing (`SaftyFW` noticing a
+  main-side power loss while its own domain stays up, and vice versa) is a
+  real capability a single shared relay could never produce — see §3.4's
+  DUT-power bullet.
+- **The removable ground jumper and bring-up step 5's "no continuity" check
+  are retired.** There is no longer a jumper to remove for standard
+  testing — the ground is always common, by design. See
+  `docs/BENCH_RUNBOOK.md` and `docs/HARDWARE.md` §6 for the bring-up-step
+  rewrite.
+
+**What is actually given up, stated plainly.** The fixture never had, and
+this change does not remove, any ability to *detect* a board-side isolation
+defect — the old bring-up step 5 continuity check metered the fixture's own
+harness before connecting to the DUT, not the main board's isolation; it was
+never a board diagnostic. What this decision gives up is narrower: while the
+fixture is plugged in, its own wiring bonds `GND_Main` and `GND_Safty`
+through paths that wouldn't exist with the real daughterboards in place, so
+any test that depends on those domains staying genuinely separate *through
+the fixture* is no longer representative of how the board behaves
+standalone. Accepted, since nothing in this fixture's test library depends
+on that separation.
 
 ### 3.6 Pico pin budget
 
@@ -439,9 +588,9 @@ design error could hide behind the fixture's ground strap.
 | Function | Pins | Notes |
 |---|---|---|
 | SPI slave A: SCLK, MOSI, MISO, CS0, CS1, CS2 | 6 | PIO0, GND_Main |
-| SPI slave B: SCLK, MOSI, MISO, CS0 | 4 | PIO1, via isolator |
+| SPI slave B: SCLK, MOSI, MISO, CS0 | 4 | PIO1, direct GPIO (no isolator, §3.5) |
 | DRDY x3 + `~FAULT` x3 (main side) | 6 | direct GPIO, open-drain emulation |
-| DRDY + `~FAULT` (safety side) | 2 | direct GPIO, via isolator |
+| DRDY + `~FAULT` (safety side) | 2 | direct GPIO (no isolator, §3.5) |
 | CT sine PWM x3 | 3 | + external RC and transformer |
 | I2C0 SDA/SCL | 2 | both MCP23017s, optional PCA9685 |
 | Debug UART (to Debug Probe) | 2 | same bench pattern as SaftyFW |
@@ -457,7 +606,7 @@ level-only) move to MCP23017 #2, freeing 3 pins with no timing cost.
 |---|---|---|---|
 | MCP23017 #1 | 0x20 | 5 in | Relay sense K1/K2/K3/K5/K4 |
 | | | 1 in | `Fault` line sense |
-| | | 1 out | E-stop optoMOS drive |
+| | | 1 out/in (direction-toggled) | E-stop direct drive (output-low = closed / input = open) |
 | | | 1 out | DUT 12 V power relay |
 | | | 2 i/o | J20 IO_3/IO_4 |
 | | | 6 spare | future main-board I/O tests |
@@ -1083,8 +1232,17 @@ open.
 - **Does either master ever use write-then-read within one CS assertion?**
   Resolved no, by direct audit (`docs/SPI_ACCESS_AUDIT.md`, `46fa310`) — see
   §3.2.1 above for the finding and why it lets the PIO program freeze.
-- **DUT power control** — resolved: two independent fixture relays (§3.4),
-  not one, to preserve ground-domain isolation.
+- **DUT power control** — resolved: two independent fixture relays (§3.4).
+  Originally justified as preserving ground-domain isolation; that rationale
+  is superseded by the 2026-08-23 ground-commoning decision (§3.5) — the two
+  relays are kept anyway for independent per-domain power-cycle/brownout
+  testing, a capability worth its own keep regardless of ground scheme.
+- **Should the fixture's ground be isolated from the DUT's, or commoned?**
+  Resolved 2026-08-23: **commoned, deliberately** — see §3.5 for the full
+  per-part breakdown (SPI bus B's isolators, K4's opto, and the E-stop
+  loop's CPC1017N optoMOS all removed; CT transformers and the two
+  DUT-power relays kept, rationale updated where needed) and §14 for the
+  specific parts this superseded.
 - **Naming** — stays `SimFW`; README disambiguates vs `UnitTestFw`/
   `UnitTestFixture`.
 - **`UnitTestFw` protocol reuse mechanics** — resolved: extract into
@@ -1104,9 +1262,13 @@ open.
   deliberately — `list_candidate_ports()` still matches VID:PID only and
   takes the first candidate, so two SimFW fixtures on one bench remain
   ambiguous.
-- **CT input stage transfer function** — resolved via §3.3 above (target
-  gain/full-scale confirmed against `CURRENT_SENSE.md` §2; transformer ratio
-  corrected 1:1 → ~3:1).
+- **CT input stage transfer function** — resolved via §3.3 above: transformer
+  ratio corrected 1:1 → ~3:1 (2026-08-20), then reverted ~3:1 → **1:1**
+  (2026-08-23) once the target was re-derived from the *board's* full-scale
+  sense-input voltage (≈1 Vrms, `CURRENT_SENSE.md` §2 — a board property,
+  independent of whichever CT is installed) rather than from a specific CT's
+  rated current backed out of the ADC's clipping ceiling — see §3.3 for the
+  full reasoning and the accepted `CURRENT_FLAG_CLIPPED` tradeoff.
 - **Exact J6/J7 mating pinout and voltage levels** — substantially resolved
   by `HARDWARE.md` §3.1/3.2 (full mating table for both connectors,
   including J6's reverse-pin-order trap). The one still-open piece (the J6/
@@ -1144,6 +1306,32 @@ project's history have no lasting value beyond git blame and are not
 repeated here. The following are kept because the *reason* still guards
 against a specific, recurring mistake:
 
+- **Fixture ground isolation, superseded by ground-commoning (2026-08-23,
+  §3.5).** The original design isolated the fixture's safety-side signals
+  from `GND_Main` with two TI ISO7740DWR digital isolators (SPI bus B +
+  `DRDY_SAFETY`/`FAULT_SAFETY`), a Vishay 4N35 optocoupler (K4 sense), and a
+  Littelfuse/IXYS CPC1017N optoMOS (E-stop loop switching), plus a removable
+  ground jumper for early bring-up that the standard test library had to run
+  without. All five are gone: the isolators, the K4 opto, and the E-stop
+  optoMOS are replaced by direct GPIO/direct-sense/direct-drive wiring
+  identical to the main-side equivalents, and there is no longer a jumper to
+  remove since the ground is always common by design. **A first pass kept
+  the E-stop optoMOS on the argument that it was "the loop's switching
+  element, not just an isolation crossing" — that argument was wrong and was
+  corrected the same day (§3.4/§3.5):** the optoMOS was itself driven by the
+  MCP23017 GPA6 bit that now drives the loop directly, so it was never an
+  independent switching element, only an extra stage whose sole real job was
+  the ground crossing. The CT transformers and the two DUT-power relays,
+  by contrast, genuinely *were* not removed — each has a job independent of
+  isolation (floating-secondary correctness plus a now-corrected 1:1 ratio,
+  and independent per-domain power testing respectively) — see §3.5 for the
+  per-part reasoning. The recurring mistake this guards against, in both
+  directions: assuming every isolation-labeled part on this fixture existed
+  *only* for isolation (several didn't, and deleting them wholesale would
+  have broken the fixture) — and the mirror-image mistake, assuming a part
+  survives ground-commoning just because it *also* does something else,
+  without checking whether that "something else" is actually independent of
+  the very control bit that made it look load-bearing.
 - **PIO SPI mode bug (fixed).** The PIO slave engine originally sampled MOSI
   on SCLK's *rising* edge (textbook SPI mode 0) while labeling itself mode 1;
   corrected to sample on the *falling* edge, matching the MAX31856

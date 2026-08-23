@@ -182,8 +182,12 @@ typedef struct {
 
     // relay sense / discrete I/O -- never driven by a DUT in this harness
     // (see file header). k1..k5/k4 default false (open/not-sensed-closed);
-    // estop_open/dut_power_on have real defaults (closed loop, powered) so
-    // IO_ESTOP_GET/DUT_POWER_GET have a sane answer before any command.
+    // estop_open/dut_power_on have real defaults so IO_ESTOP_GET/
+    // DUT_POWER_GET have a sane answer before any command. estop_open
+    // defaults to true (loop open/STOP), mirroring real i2c_owner.c's
+    // boot-time default: GPA6 (the E-stop loop's direct drive, no switching
+    // element any more -- DESIGN_NOTES.md sec 3.4/3.5) resets to INPUT/
+    // high-Z, which is a fail-safe STOP, not a closed/healthy loop.
     bool k1, k2, k3, k5, k4;
     bool fault_line_asserted;
     bool estop_open;
@@ -1787,7 +1791,7 @@ static void device_init(device_t *d, uint32_t seed)
                              // does not itself pick an E-stop default, but a
                              // DUT power relay defaulting OFF would make
                              // every scenario start with a dead board)
-    d->estop_open = false;
+    d->estop_open = true; // fail-safe default: STOP -- see the field's comment above
     for (unsigned c = 0; c < CT_NUM_CHANNELS; c++) d->ct[c].apply_immediately = true;
     reset_device(d, false);
 }

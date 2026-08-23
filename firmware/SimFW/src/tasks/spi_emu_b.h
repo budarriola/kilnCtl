@@ -1,9 +1,10 @@
 // spi_emu_b.h -- single owner of PIO1 + DMA (docs/DESIGN_NOTES.md section 4.1 task
 // map): "1-channel MAX31856 register machine, safety bus." This is bus B
 // from section 3.2.1 -- one CS line into the safety Pico's thermocouple bus
-// (J7), crossing the digital isolator (section 3.5). Single-owner-per-
-// peripheral doctrine, DESIGN_NOTES.md section 4's opening paragraph: no other task
-// file may touch PIO1 or its DMA channels.
+// (J7), wired as direct GPIO (section 3.5: the fixture's ground is commoned
+// with the DUT's, so no digital isolator sits in this path). Single-owner-
+// per-peripheral doctrine, DESIGN_NOTES.md section 4's opening paragraph: no
+// other task file may touch PIO1 or its DMA channels.
 //
 // Real body: owns 1 max31856_channel_t register image (src/sim/
 // max31856_regs.h) and the PIO SPI slave engine (src/drivers/

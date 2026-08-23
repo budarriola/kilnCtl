@@ -39,16 +39,22 @@
 #define EXP1_PIN_K5          3u
 #define EXP1_PIN_K4          4u
 #define EXP1_PIN_FAULT_LINE  5u
-#define EXP1_PIN_ESTOP_DRIVE 6u
+#define EXP1_PIN_ESTOP_DRIVE 6u // direct drive into J1 via a 1 kOhm series
+                                 // resistor -- no switching element between
+                                 // this bit and SaftyFW's GPIO9 any more
+                                 // (i2c_owner.h's comment above
+                                 // i2c_owner_set_estop())
 #define EXP1_PIN_DUT_POWER_MAIN   7u // fixture relay #1 -> J18 (GND_Main domain)
 #define EXP1_PIN_J20_IO3     8u
 #define EXP1_PIN_J20_IO4     9u
 // docs/HARDWARE.md section 3.7 (resolved 2026-08-20, docs/BOM.md section 6):
-// two independent DUT-power relays, one per 12V input, so that no shared
-// copper ever bonds GND_Main and GND_Safty downstream of a single relay.
-// Pin 10 is the second relay's control bit, deliberately named *_SAFETY (not
-// "power2") so a reviewer sees a domain mismatch immediately if this bit
-// were ever wired to the wrong relay.
+// two independent DUT-power relays, one per 12V input, for independent
+// per-domain power-cycle/brownout testing (docs/DESIGN_NOTES.md section 3.5
+// -- rationale updated 2026-08-23: no longer justified by avoiding a
+// GND_Main/GND_Safty bond, since the fixture's ground is commoned elsewhere
+// anyway). Pin 10 is the second relay's control bit, deliberately named
+// *_SAFETY (not "power2") so a reviewer sees a domain mismatch immediately
+// if this bit were ever wired to the wrong relay.
 #define EXP1_PIN_DUT_POWER_SAFETY 10u // fixture relay #2 -> J19 (GND_Safty domain)
 // 11..15: 5 spare, default input+pullup.
 
@@ -98,7 +104,13 @@ static mcp23017_t s_exp2;
 
 // --- Mutex-guarded reader state (single writer: this task's own loop) -----
 static i2c_owner_relay_states_t s_relay_states; // .valid starts false
-static bool s_estop_open;      // last-commanded, defaults to false (loop closed) until a command says otherwise -- see i2c_owner.h's setter comment
+static bool s_estop_open = true; // last-commanded/reported. Starts true (loop
+                                  // open/STOP) to match GPA6's actual boot-time
+                                  // hardware state (INPUT/high-Z, configure_exp1())
+                                  // until a command says otherwise -- a reader
+                                  // calling i2c_owner_get_estop_open() before any
+                                  // SET_ESTOP command must see the real, fail-safe
+                                  // state, not a stale "closed" default.
 static bool s_dut_power_main_on;   // last-commanded, defaults to false (off) at boot -- relay #1 / J18 / GND_Main
 static bool s_dut_power_safety_on; // last-commanded, defaults to false (off) at boot -- relay #2 / J19 / GND_Safty.
                                     // Independently commanded; never derived from s_dut_power_main_on.
@@ -164,7 +176,8 @@ static bool signal_from_exp1_pin(uint8_t pin, i2c_owner_signal_t *out)
 // One-time bring-up of exp1's fixed pin roles (docs/DESIGN_NOTES.md section 3.7):
 // relay-sense + fault-line inputs (no internal pull-up -- the fixture drives
 // a wetting voltage through the sensed contact per DESIGN_NOTES.md section 3.4, an
-// internal pull-up would fight that), E-stop/DUT-power outputs idling
+// internal pull-up would fight that), E-stop defaulting to INPUT/high-Z
+// (fail-safe open/STOP -- see the block below), DUT-power outputs idling
 // de-asserted, J20 IO_3/IO_4 and the 6 spares defaulted to input+pullup (a
 // safe, non-driving default for pins whose direction a future test may
 // change via i2c_owner_io_set_dir()).
@@ -175,8 +188,19 @@ static void configure_exp1(void)
         mcp23017_pin_set_pullup(&s_exp1, pin, false);
     }
 
-    mcp23017_pin_write(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false);
-    mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false);
+    // E-stop: boot-time default is INPUT (high-Z), i.e. loop OPEN/STOP --
+    // matches both the MCP23017's own POR default (IODIR resets to
+    // all-input, mcp23017.h) and the board's fail-safe intent: an unpowered
+    // or un-initialised fixture must never present as "healthy." This is
+    // the direction-toggle contract i2c_owner_set_estop() implements below
+    // (i2c_owner.h's comment above that function) -- deliberately NOT a
+    // level write here, so GPA6 never transiently drives low (closed) on
+    // its way to this default. Pull-up left disabled: SaftyFW's own R10
+    // already pulls GPIO9 up through the 1 kOhm series resistor, and an
+    // MCP23017-side pull-up would needlessly add a second, parallel source
+    // into that same node.
+    mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_ESTOP_DRIVE, true);
+    mcp23017_pin_set_pullup(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false);
     mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER_MAIN, false);
     mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_DUT_POWER_MAIN, false);
 
@@ -218,13 +242,30 @@ static void apply_pending_commands(void)
     i2c_owner_cmd_t cmd;
     while (xQueueReceive(s_cmd_queue, &cmd, 0) == pdTRUE) {
         switch (cmd.type) {
-        case I2C_OWNER_CMD_SET_ESTOP:
-            if (mcp23017_pin_write(&s_exp1, EXP1_PIN_ESTOP_DRIVE, cmd.u.estop.open)) {
+        case I2C_OWNER_CMD_SET_ESTOP: {
+            // Direction toggle, not a level write -- i2c_owner.h's comment
+            // above i2c_owner_set_estop(). open == true must leave GPA6
+            // high-Z (INPUT), never driven high: SaftyFW's GPIO9 side has
+            // its own R10 pull-up to 3.3v_Safty, and driving GPA6 high would
+            // fight that pull-up into a different supply rail instead of
+            // just releasing the line.
+            bool ok;
+            if (cmd.u.estop.open) {
+                ok = mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_ESTOP_DRIVE, true);
+            } else {
+                // Write the output latch low *before* switching to OUTPUT,
+                // so the pin can never glitch high for even one bus
+                // transaction while the direction change takes effect.
+                ok = mcp23017_pin_write(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false);
+                ok = mcp23017_pin_set_dir(&s_exp1, EXP1_PIN_ESTOP_DRIVE, false) && ok;
+            }
+            if (ok) {
                 state_lock();
                 s_estop_open = cmd.u.estop.open;
                 state_unlock();
             }
             break;
+        }
         case I2C_OWNER_CMD_SET_DUT_POWER_MAIN:
             if (mcp23017_pin_write(&s_exp1, EXP1_PIN_DUT_POWER_MAIN, cmd.u.dut_power.on)) {
                 state_lock();
