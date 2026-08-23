@@ -31,13 +31,21 @@
 //
 //   GPIO27 -> BCLK   (still collides with reserved FAULT_SAFETY -- unavoidable, see above)
 //   GPIO28 -> WS     (the one true spare -- no conflict)
-//   GPIO16 -> DIN_A  (freed by ct_wave_pwm.c's retirement -- was zone 0's PWM carrier)
+//   GPIO16 -> DIN_A  (MOVED to GPIO20, 2026-08-23 -- see below)
 //   GPIO18 -> DIN_B  (freed by ct_wave_pwm.c's retirement -- was zone 1's PWM carrier)
 //
-// GPIO20 (freed, zone 2's former PWM carrier) is unused by this driver.
-// GPIO19 (FAULT_MAIN_0) and GPIO0/1 (debug UART) remain untouched, as
-// before. GPIO17 (DRDY_MAIN_2, actively driven by spi_emu_a.c) was never a
-// candidate and still isn't.
+// DIN_A MOVED off GPIO16 to GPIO20, 2026-08-23: the debug UART is physically
+// wired to GP16/17 (matching SaftyFW's own console_uart.c convention), which
+// collides head-on with DIN_A here. DIN_A has no adjacency requirement
+// (unlike BCLK/WS, which must be contiguous ascending for PIO side-set --
+// see the _Static_assert below), so it can move freely; GPIO20 is exactly
+// the "freed, zone 2's former PWM carrier, otherwise unused by this driver"
+// pin the paragraph above already called out as spare. This pin was, and
+// remains, PROVISIONAL -- no fixture hardware has been wired to it yet.
+// GPIO19 (FAULT_MAIN_0) remains untouched. GPIO17 (formerly DRDY_MAIN_2,
+// spi_emu_a.c) is now the debug UART's RX pin; DRDY_MAIN_2 moved to GPIO0
+// (spi_emu_a.c) to make room. See docs/HARDWARE.md section 1 for the
+// authoritative table.
 //
 // BCLK/WS MUST be two ADJACENT ascending GPIOs (27, 28): PIO side-set pins
 // are always a contiguous block starting at a configured base. Checked
@@ -132,7 +140,7 @@
 // --- GPIO assignment (see file header) ------------------------------------
 #define CT_WAVE_I2S_GPIO_BCLK  27u
 #define CT_WAVE_I2S_GPIO_WS    28u
-#define CT_WAVE_I2S_GPIO_DIN_A 16u
+#define CT_WAVE_I2S_GPIO_DIN_A 20u
 #define CT_WAVE_I2S_GPIO_DIN_B 18u
 
 _Static_assert(CT_WAVE_I2S_GPIO_WS == CT_WAVE_I2S_GPIO_BCLK + 1u,

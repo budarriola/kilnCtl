@@ -78,7 +78,23 @@ void simfw_fatal(const char *subsystem, const char *reason_fmt, ...)
     vsnprintf(reason, sizeof(reason), reason_fmt, ap);
     va_end(ap);
 
-    // Signal the other core FIRST, before spending ~2 s on the blink burst
+    // UART trace FIRST, before anything else in this function -- this is the
+    // single most valuable message the whole fixture can produce (bench
+    // debug pass, 2026-08-23: a dark LED and no USB left a real stack
+    // overflow completely undiagnosable, see vApplicationStackOverflowHook()'s
+    // comment in main.c). printf() here goes out over UART0 (pico_stdio_uart,
+    // CMakeLists.txt) if stdio_init_all() has already run; if this fires
+    // before that (main.c calls it before stdio_init_all() only in no code
+    // path today, but nothing here assumes otherwise), the call is a no-op,
+    // not a hang -- pico-sdk's stdio plumbing tolerates printf() before
+    // stdio_init_all() by simply dropping the output. Flushed explicitly
+    // since stdout may be buffered even though uart_write_blocking()
+    // underneath is not.
+    printf("\r\n*** SimFW FATAL [%s]: %s ***\r\n", subsystem, reason);
+    fflush(stdout);
+
+    // Signal the other core NEXT (the UART trace above is the only thing
+    // that runs before it), before spending ~2 s on the blink burst
     // below -- so a core-1 fatal starts halting core 0 immediately rather
     // than after this core's own LED sequence finishes. Harmless when there
     // is no other core to receive it yet (ct_wave_i2s.c's claim, like the

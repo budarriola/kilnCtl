@@ -40,9 +40,14 @@ Read this section first.
    these numbers or update this table in the same commit.
    **Partially closed 2026-08-20 (§0 item 8):** the 4 `~DRDY` lines
    (`DRDY_MAIN_0/1/2`, `DRDY_SAFETY`) now have owner files —
-   `spi_emu_a.c`/`spi_emu_b.c` — and use exactly §1's numbers. Still
-   unclaimed: the 4 `~FAULT` lines (GPIO19/21/22 main, GPIO27 safety) and
-   the 2 debug-UART pins (GPIO0/1). The warning above stands for those 6.
+   `spi_emu_a.c`/`spi_emu_b.c` — and use exactly §1's numbers
+   (`DRDY_MAIN_2` moved from GPIO17 to GPIO0 on 2026-08-23, see item 10
+   below, but is still owned the same way). Still unclaimed: the 4 `~FAULT`
+   lines (GPIO19/21/22 main, GPIO27 safety). **Closed 2026-08-23 (§0 item
+   10):** the debug UART is no longer unclaimed — it is on GPIO16/17 (SDK
+   `pico_stdio_uart`, see §1's footnote), not the GPIO0/1 this item
+   originally assigned. The warning above stands only for the remaining 4
+   `~FAULT` lines.
 
 3. **The remaining budget fits with exactly the margin PLAN.md predicted.**
    15 pins already claimed + 10 pins newly assigned here = 25 of the Pico's
@@ -51,11 +56,15 @@ Read this section first.
    done the arithmetic against all four files at once. Had any one of the
    four files picked one GPIO differently, this would not have come out even.
 
-4. **`SaftyFW`'s own debug-UART convention (GP16/GP17) cannot be reused
-   verbatim.** `ct_wave_pwm.c` already claims GPIO16 for CT channel 0's PWM
-   carrier. Copying `SaftyFW/docs/HARDWARE.md` §7b's GP16/GP17 pair onto this
-   fixture would silently collide. This document uses GPIO0/GPIO1 instead
-   (UART0's other native pin pair, fully free) — see §1's footnote.
+4. **RESOLVED, reversed 2026-08-23 (§0 item 10): `SaftyFW`'s own debug-UART
+   convention (GP16/GP17) IS what this fixture uses, after all.** This item
+   originally argued GP16/GP17 couldn't be reused because `ct_wave_pwm.c`
+   claimed GPIO16 for CT channel 0's PWM carrier, and assigned GPIO0/GPIO1
+   instead. `ct_wave_pwm.c` is deleted (§3.3's PWM→I2S decision), which
+   already made the GPIO16 objection stale — but the real reversal came from
+   discovering the bench debug UART was physically wired to GP16/17 (matching
+   `SaftyFW`'s own convention) before this document caught up. See §1's
+   footnote and item 10 below for the full pin-shuffle this caused.
 
 5. **CONTRADICTION found between the two main-board hardware docs on J7 pin
    1 — still matters, for a narrower reason since 2026-08-23.**
@@ -184,6 +193,31 @@ Read this section first.
    - **MCP23017 #1 bit allocation** (§3.7): pins 0–10 all distinct, 11–15
      spare, matching `i2c_owner.c`. No two-owner bit.
 
+10. **Debug UART moved to GPIO16/17, 2026-08-23 — a real hardware conflict
+    found and resolved, not a doc-only change.** The bench operator reported
+    the debug UART already physically wired to the Debug Probe on GP16/GP17
+    (matching `SaftyFW`'s `console_uart.c`: UART0, 115200 8N1, no flow
+    control, no inversion), superseding this document's earlier GPIO0/GPIO1
+    guess (§0 item 4, §1's old footnote). Checking GPIO16/17 against every
+    current claimant in `src/` found ONE genuine collision on each pin:
+    - **GPIO16** was `ct_wave_i2s.c`'s `DIN_A`. PROVISIONAL (that file's own
+      header says so) and has no adjacency requirement (unlike `BCLK`/`WS`,
+      which must be contiguous — the `_Static_assert` in that file), so it
+      moved freely to GPIO20 (already documented as the fixture's one true
+      spare after the PWM→I2S switch).
+    - **GPIO17** was `spi_emu_a.c`'s `DRDY_MAIN_2`. Also PROVISIONAL — this
+      file's own header says "no fixture hardware has ever been wired," and
+      this document's status line (top of file) still reads "bench harness
+      not yet built" as of the same day this collision was found — so moving
+      it costs nothing physical either. It moved to GPIO0, which GPIO0/1 no
+      longer need now that the UART is not there.
+    Net effect: the same 25-of-26 GPIOs are claimed as before the move, the
+    spare pin shifted from GPIO20 to GPIO1, and no signal that had real wire
+    on it (the DRDY/`~FAULT`/SPI/I2C lines other than the two above, all
+    "decided" per §0 items 1–2) was touched. See §1's table and footnote, and
+    `spi_emu_a.c`/`ct_wave_i2s.c`'s own header comments, for the same story
+    from the code side.
+
 ---
 
 ## 1. Authoritative Pico pin map
@@ -194,8 +228,8 @@ that claims that pin must cite this table.
 
 | GPIO | Signal | Owner file | Isolation domain | Main-board destination |
 |---|---|---|---|---|
-| 0 | Debug UART0 TX → Debug Probe RX | *(none yet — assign here)* | GND_Main (bench-local, not board-referenced) | n/a (bench probe only) |
-| 1 | Debug UART0 RX ← Debug Probe TX | *(none yet)* | GND_Main | n/a |
+| 0 | `DRDY_MAIN_2` (open-drain) — moved here 2026-08-23, was GPIO17 | `spi_emu_a.c` | GND_Main | J6 pin 13 (`thermoDrdy_2`) |
+| 1 | *(spare — freed 2026-08-23 when the debug UART moved to GP16/17)* | *(none)* | — | — |
 | 2 | `DRDY_MAIN_0` (open-drain) | `spi_emu_a.c` (cites this table, §0 item 8) | GND_Main | J6 pin 17 (`thermoDrdy_0`) |
 | 3 | `DRDY_MAIN_1` (open-drain) | `spi_emu_a.c` | GND_Main | J6 pin 15 (`thermoDrdy_1`) |
 | 4 | I2C0 SDA | `i2c_owner.c` (provisional, own header comment) | GND_Main | n/a (internal: MCP23017 #1/#2) |
@@ -210,11 +244,11 @@ that claims that pin must cite this table.
 | 13 | SPI bus B MOSI (fixture input) | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 5 (`MOSI`) |
 | 14 | SPI bus B MISO (fixture output) | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 7 (`MISO`) |
 | 15 | SPI bus B CS0 | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 11 (`CS0`) |
-| 16 | I2S `DIN_A` (module A serial data) | `ct_wave_i2s.c` | GND_Main (digital side; module A's DAC output then crosses the isolation transformer) | J13 (via UDA1334A module A + isolation xfmr) |
-| 17 | `DRDY_MAIN_2` (open-drain) | `spi_emu_a.c` | GND_Main | J6 pin 13 (`thermoDrdy_2`) |
+| 16 | Debug UART0 TX → Debug Probe RX — moved here 2026-08-23 (physically wired, same convention as `SaftyFW`'s `console_uart.c`); was I2S `DIN_A` | *(none — SDK stdio_uart)* | GND_Main (bench-local, not board-referenced) | n/a (bench probe only) |
+| 17 | Debug UART0 RX ← Debug Probe TX — moved here 2026-08-23; was `DRDY_MAIN_2` (moved to GPIO0) | *(none — SDK stdio_uart)* | GND_Main | n/a |
 | 18 | I2S `DIN_B` (module B serial data) | `ct_wave_i2s.c` | GND_Main (digital side; module B's DAC output then crosses the isolation transformer) | J15 (via UDA1334A module B + isolation xfmr) |
 | 19 | `FAULT_MAIN_0` (open-drain) | *(none yet)* | GND_Main | J6 pin 18 (`thermoFault_0`) |
-| 20 | *(freed 2026-08-23 — was CT PWM ch2, `ct_wave_pwm.c`, now deleted)* | *(none yet)* | — | — |
+| 20 | I2S `DIN_A` (module A serial data) — moved here 2026-08-23, was GPIO16 (freed 2026-08-23 — was CT PWM ch2, `ct_wave_pwm.c`, now deleted) | `ct_wave_i2s.c` | GND_Main (digital side; module A's DAC output then crosses the isolation transformer) | J13 (via UDA1334A module A + isolation xfmr) |
 | 21 | `FAULT_MAIN_1` (open-drain) | *(none yet)* | GND_Main | J6 pin 16 (`thermoFault_1`) |
 | 22 | `FAULT_MAIN_2` (open-drain) | *(none yet)* | GND_Main | J6 pin 14 (`thermoFault_2`) |
 | 25 | Heartbeat LED (on-board, not a header pin) | *(none yet, DESIGN_NOTES.md 3.6)* | n/a | n/a |
@@ -223,24 +257,36 @@ that claims that pin must cite this table.
 | 28 | I2S `WS` (word select) — was the one true spare pin; no longer spare | `ct_wave_i2s.c` | GND_Main | n/a (digital transport pin, no main-board destination) |
 | — | PIO1 SM0/SM1 (`ct_wave_i2s_out` program — see §1b.7) | `ct_wave_i2s.c` | n/a | n/a |
 
-**25 of 26 header GPIOs assigned, 1 spare — GPIO20 (revised 2026-08-23:
-was GPIO28 before the PWM→I2S switch; freeing GPIO16/18/20 by retiring
-`ct_wave_pwm.c` and immediately re-spending GPIO28 on I2S `WS` moved the
-spare pin, not the count).** (GPIO23/24 are not header pins on a stock Pico;
-GPIO25 is the on-board LED, also not a header pin — both excluded from the
-26-pin budget, per DESIGN_NOTES.md 3.6's own framing.)
+**25 of 26 header GPIOs assigned, 1 spare — GPIO1 (revised 2026-08-23: the
+debug UART turned out to already be physically wired to GP16/17, same
+convention as `SaftyFW`'s `console_uart.c` — see the footnote below. Moving
+the UART there displaced I2S `DIN_A` (→ GPIO20) and `DRDY_MAIN_2` (→ GPIO0),
+which is what moved the spare pin from GPIO20 to GPIO1; the *count* is
+unchanged from the PWM→I2S revision above).** (GPIO23/24 are not header pins
+on a stock Pico; GPIO25 is the on-board LED, also not a header pin — both
+excluded from the 26-pin budget, per DESIGN_NOTES.md 3.6's own framing.)
 
-### Footnote: why GPIO0/1 for the debug UART, not GP16/17
+### Footnote: why GPIO16/17 for the debug UART (GPIO0/1 was this document's earlier guess)
 
-`SaftyFW/docs/HARDWARE.md` §7b uses GP16/GP17 for its console UART because
-that is UART0's only fully-free native pin pair on *that* board's layout.
-On this fixture, GPIO16 is now I2S `DIN_A` (`ct_wave_i2s.c` — formerly CT
-channel 0's PWM carrier, `ct_wave_pwm.c`, deleted 2026-08-23), so reusing
-GP16/17 here would still collide. GPIO0/GPIO1 are UART0's other native
-TX/RX pair (RP2040 GPIO function table: UART0 on GPIO0/1, GPIO12/13 [taken
-by SPI bus B here], GPIO16/17 [taken by CT here]); they are unclaimed by
-anything else in this design, so this document assigns the debug UART there
-instead.
+This document originally assigned the debug UART to GPIO0/GPIO1, reasoning
+that `SaftyFW/docs/HARDWARE.md` §7b's GP16/GP17 convention couldn't be
+reused verbatim because GPIO16 was already I2S `DIN_A` here (see the old
+footnote text, superseded by this one). **That reasoning is now moot: the
+bench debug UART was physically wired to GP16/17 before this document was
+updated to match** — the fixture's harness, not this table, is the ground
+truth for where a signal already lands a probe, per this file's own header
+("if the physical harness disagrees with this file, the harness wins").
+GPIO16/17 is also UART0's native TX/RX pair on the RP2040 (same as GPIO0/1
+and GPIO12/13 [taken by SPI bus B]), and it is the exact pin pair
+`SaftyFW`'s `console_uart.c` uses for the identical purpose (UART0, 115200
+8N1, no flow control, no inversion — straight to the debug probe's
+USB-serial bridge), so `SimFW` now matches that convention instead of
+diverging from it. Resolving the resulting collision meant moving I2S
+`DIN_A` (provisional, no hardware wired to it yet) to GPIO20, and
+`DRDY_MAIN_2` (also provisional, per §0's "no fixture harness built yet"
+status) to GPIO0, which GPIO0/1 no longer need now that the UART lives on
+GPIO16/17 — see those two drivers' own header comments for the same story
+from their side.
 
 ### Footnote: why `ct_wave_i2s.c`'s BCLK could not also move off GPIO27
 

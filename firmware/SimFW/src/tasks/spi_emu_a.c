@@ -64,6 +64,16 @@
 // wins and this file follows it, per section 1's own rule that a driver
 // claiming a pin must cite that table or amend it in the same commit.
 //
+// DRDY_MAIN_2 MOVED off GPIO17 to GPIO0, 2026-08-23: the debug UART turned
+// out to already be physically wired to GP16/17 (matching SaftyFW's own
+// console_uart.c convention), which this document's earlier GPIO0/1 UART
+// assignment did not anticipate. GPIO17 collided head-on with the real
+// wiring; GPIO0 was free only because it had been reserved for a UART that
+// never actually landed on it. This pin was, and remains, PROVISIONAL --
+// docs/HARDWARE.md section 0's own status line confirms no fixture harness
+// has been built yet -- so moving it costs nothing physical. See
+// docs/HARDWARE.md section 1 for the authoritative table.
+//
 // The remaining main-side pins section 1 reserves are GPIO19/21/22 for
 // FAULT_MAIN_0/1/2, which nothing drives yet. There is no PIO adjacency
 // constraint on ~DRDY: max31856_pio_engine_init()'s config_is_sane() checks
@@ -71,7 +81,7 @@
 // toggled between output-low and input-Hi-Z (the open-drain emulation).
 #define SPI_EMU_A_DRDY0_GPIO 2
 #define SPI_EMU_A_DRDY1_GPIO 3
-#define SPI_EMU_A_DRDY2_GPIO 17
+#define SPI_EMU_A_DRDY2_GPIO 0
 
 static TaskHandle_t s_task_handle = NULL;
 static max31856_channel_t s_channels[SPI_EMU_A_CHANNEL_COUNT];

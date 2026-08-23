@@ -40,6 +40,32 @@ project(SimFW C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Debug UART pin/instance override -- MUST be set before pico_sdk_init()
+# below, which is what pulls in pico-sdk's board header (boards/pico.h) and
+# compiles pico_stdio_uart's own sources (src/rp2_common/pico_stdio_uart/
+# stdio_uart.c) against whatever PICO_DEFAULT_UART* the preprocessor sees at
+# THAT compile, not just SimFW's own translation units -- a
+# target_compile_definitions(SimFW ...) after pico_sdk_init() would not
+# reach that library. docs/HARDWARE.md section 1's footnote is the
+# authority: the bench debug UART is physically wired to GP16/GP17 (UART0),
+# same convention as ../SaftyFW/src/tasks/console_uart.c, discovered AFTER
+# this document's own earlier GPIO0/GPIO1 guess -- "if the physical harness
+# disagrees with this file, the harness wins" (that doc's own header). For
+# board=pico, GPIO0/1 would otherwise be the SDK's silent default, which is
+# exactly why this is set explicitly here rather than left implicit: a
+# future PICO_BOARD change must not silently move the UART off the wire
+# that is actually populated. 115200 8N1, no flow control, no inversion --
+# matches console_uart.c's own uart_set_hw_flow(false, false)/
+# uart_set_format(8, 1, UART_PARITY_NONE) defaults (pico-sdk's uart_init()
+# already defaults to 8N1/no-flow, so pico_stdio_uart's own init needs no
+# extra calls to match).
+add_compile_definitions(
+    PICO_DEFAULT_UART=0
+    PICO_DEFAULT_UART_TX_PIN=16
+    PICO_DEFAULT_UART_RX_PIN=17
+    PICO_DEFAULT_UART_BAUD_RATE=115200
+)
+
 # Forces TinyUSB's own CFG_TUSB_OS compile definition to OPT_OS_FREERTOS
 # (src/tusb_config.h's header comment explains why) instead of
 # lib/tinyusb/hw/bsp/rp2040/family.cmake's own default (OPT_OS_PICO, a bare
@@ -221,16 +247,28 @@ target_link_libraries(SimFW PRIVATE
     FreeRTOS-Kernel-Heap4
 )
 
-# No pico-sdk stdio backend enabled: native USB is usb_owner's own TinyUSB
-# CDC link (src/tasks/usb_owner.c, src/tasks/usb_descriptors.c) -- pico-sdk's
-# separate stdio_usb wrapper would fight it for the same peripheral, so it
-# stays off, matching the single-owner-per-peripheral doctrine every other
-# task in this project follows. There is no UART0 debug-probe bridge code in
-# this pass either (docs/DESIGN_NOTES.md section 3.6: "Debug UART (to Debug Probe) |
-# 2 | same bench pattern as SaftyFW" -- reserved, not wired). Matches
-# SaftyFW's own reasoning for disabling both by default.
+# stdio_usb stays OFF: native USB is usb_owner's own TinyUSB CDC link
+# (src/tasks/usb_owner.c, src/tasks/usb_descriptors.c) -- pico-sdk's separate
+# stdio_usb wrapper would fight it for the same peripheral, so it stays off,
+# matching the single-owner-per-peripheral doctrine every other task in this
+# project follows. USB is also the very thing broken on the bench right now
+# (no enumeration at all), so a UART-independent trace path matters more
+# than ever here.
+#
+# stdio_uart is ON, 2026-08-23 (bench boot-debug pass): the fixture is
+# showing up dead on the bench (dark LED, no USB) and the boot-stage LED
+# beacon (src/main.c's simfw_boot_beacon()) shows nothing either, so a trace
+# path that does not depend on the LED or on TinyUSB is needed to see how
+# far boot gets. This is the pico-sdk stdio backend, not a hand-rolled
+# owner file, because it needs nothing this project doesn't already get for
+# free from pico_stdlib: no ring buffer, no IRQ, no task -- printf() blocks
+# on uart_write_blocking() under the hood, same as SaftyFW's
+# console_uart.c, which is fine and even desirable for boot tracing (nothing
+# is dropped, unlike a non-blocking log queue that could itself hide a
+# hang). See the PICO_DEFAULT_UART* compile definitions above this project's
+# project() call for the pin/instance/baud choice.
 pico_enable_stdio_usb(SimFW 0)
-pico_enable_stdio_uart(SimFW 0)
+pico_enable_stdio_uart(SimFW 1)
 
 # pico_add_extra_outputs(SimFW) would generate .uf2/.bin/.hex/.dis and embed
 # the RP2040 boot-stage2 checksum via picotool -- left disabled on this
