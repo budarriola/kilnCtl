@@ -120,7 +120,15 @@ static void enter_recovery(void) __attribute__((noreturn));
 
 static void enter_recovery(void)
 {
-    uart_init(uart1, 115200u);
+    // 9600, not 115200: this is the same opto-isolated pair the application
+    // uses, and the TCMT1109 optocouplers cannot switch fast enough for a
+    // 8.7 us bit. Measured on the bench 2026-08-23 -- at 115200 and 57600 not
+    // one frame ever arrived, 38400 lost about a fifth, 9600 is clean. See
+    // the table in KilnFW/App/drivers/Kconfig under
+    // KILNCTL_SAFETY_BAUD_RATE, and keep this equal to the application's
+    // UART_OWNER_BAUD_RATE (src/tasks/uart_owner.c): recovery mode is
+    // useless if the host cannot talk to it.
+    uart_init(uart1, 9600u);
     gpio_set_function(SAFTYFW_PIN_UART1_TX, GPIO_FUNC_UART);
     gpio_set_function(SAFTYFW_PIN_UART1_RX, GPIO_FUNC_UART);
     // Plain hardware UART, no inversion, no PIO -- same as

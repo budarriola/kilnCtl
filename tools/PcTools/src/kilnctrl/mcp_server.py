@@ -843,11 +843,17 @@ def debug_step(peer: str) -> str:
 
 
 @_tool()
-def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> str:
+def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
+                      leave_halted: bool = False) -> str:
     """Reads `count` `width`-bit (8/16/32) words from `peer`'s memory starting
     at `address`. Read-only, no guard needed. Halts the core if it wasn't
-    already (OpenOCD requires this for a memory read)."""
-    ok, output = debug_probe.read_memory(peer, address, count, width)
+    already (OpenOCD requires this for a memory read), then resumes it unless
+    `leave_halted` is set -- a read that exits without resuming leaves the
+    board halted, which reads as "the firmware froze" to everything except a
+    debugger. Set `leave_halted` only when several reads must observe the same
+    frozen state."""
+    ok, output = debug_probe.read_memory(peer, address, count, width,
+                                         leave_halted=leave_halted)
     if ok:
         return output.strip()
     tail = "\n".join(output.strip().splitlines()[-25:])
@@ -890,15 +896,20 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
 
 
 @_tool()
-def debug_read_registers(peer: str, target: str | None = None) -> str:
+def debug_read_registers(peer: str, target: str | None = None,
+                         leave_halted: bool = False) -> str:
     """Reads the core registers for `peer`. Needs the core halted to read
     registers, so this halts it as a side effect if it was running.
 
     `target` picks one core by OpenOCD target name on a multi-core chip --
     "rp2040.core0" / "rp2040.core1" for the Pico. Omit it to read whichever
     core the config makes current (core 0 on the Pico).
+
+    Resumes the core afterwards unless `leave_halted` is set, for the same
+    reason `debug_read_memory` does.
     """
-    ok, output = debug_probe.read_registers(peer, target=target)
+    ok, output = debug_probe.read_registers(peer, target=target,
+                                            leave_halted=leave_halted)
     if ok:
         return output.strip()
     tail = "\n".join(output.strip().splitlines()[-25:])

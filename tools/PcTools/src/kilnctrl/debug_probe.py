@@ -346,7 +346,19 @@ def pico_armed_state() -> "tuple[Optional[bool], str]":
     return armed, f"s_state=0x{value:x} at 0x{addr:x} ({'ARMED' if armed else 'not armed'})"
 
 
-def read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> "tuple[bool, str]":
+# Resuming an RP2040 over OpenOCD's SMP grouping needs EVERY core in the group
+# halted first, or `resume` fails with "resume of a SMP target failed" and the
+# board is left stopped -- which is worse than not resuming at all, because it
+# looks like a firmware freeze. Halting each target by name first is generic
+# (single-core peers have a one-element list) and makes the resume reliable.
+_RESUME_TCL = (
+    "foreach _kctl_t [target names] {targets $_kctl_t; halt}; "
+    "targets [lindex [target names] 0]; resume;"
+)
+
+
+def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
+                leave_halted: bool = False) -> "tuple[bool, str]":
     """Reads ``count`` ``width``-bit words starting at ``address`` (read-only,
     no ARMED/safety implications). ``count`` is capped at 4096 to stop a
     runaway dump, not as a safety gate.
@@ -373,7 +385,8 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32) -> "tu
         f'{{puts [format "MEMRD 0x%08x 0x%0{step * 2}x" '
         f"[expr {{0x{address:x} + $_kctl_i * {step}}}] $_kctl_arr($_kctl_i)]}}"
     )
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {dump}; exit"
+    tail = "" if leave_halted else f" {_RESUME_TCL}"
+    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {dump};{tail} exit"
     return _run(peer, tcl)
 
 
@@ -402,7 +415,8 @@ _CORE_REGS = (
 )
 
 
-def read_registers(peer: str, target: "str | None" = None) -> "tuple[bool, str]":
+def read_registers(peer: str, target: "str | None" = None,
+                   leave_halted: bool = False) -> "tuple[bool, str]":
     """Reads the core registers. Needs the core halted to read registers, so
     this halts it as a side effect.
 
@@ -420,6 +434,16 @@ def read_registers(peer: str, target: "str | None" = None) -> "tuple[bool, str]"
     hard way, 2026-08-23, chasing a Pico core-1 launch failure where the
     empty result read as "the probe can't see the core" rather than "this
     function has never worked". ``puts`` is a plain Tcl stdout write.
+
+    Resumes the core afterwards unless ``leave_halted`` is set. A read has to
+    halt the core -- OpenOCD requires it -- and a one-shot batch session that
+    exits without resuming leaves it halted, so the board looks alive to a
+    debugger and completely dead to everything else. That cost a bench session
+    on 2026-08-23: SaftyFW's xTickCount appeared frozen and the isolated link
+    appeared to stop transmitting, when the only thing that had stopped them
+    was the previous read. Pass ``leave_halted=True`` when you genuinely want
+    the core held, e.g. across a series of reads that must all observe the
+    same frozen state.
     """
     peer_cfg = resolve_peer(peer)
     select = f"targets {target}; " if target else ""
@@ -427,5 +451,6 @@ def read_registers(peer: str, target: "str | None" = None) -> "tuple[bool, str]"
         f"foreach {{_kctl_n _kctl_v}} [get_reg {{{_CORE_REGS}}}] "
         '{puts [format "REG %-5s %s" $_kctl_n $_kctl_v]}'
     )
-    tcl = f"{_speed_prefix(peer_cfg)}init; {select}halt; {dump}; exit"
+    tail = "" if leave_halted else f" {_RESUME_TCL}"
+    tcl = f"{_speed_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
     return _run(peer, tcl)
