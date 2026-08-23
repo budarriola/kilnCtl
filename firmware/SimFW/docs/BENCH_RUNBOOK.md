@@ -57,10 +57,14 @@ that happens to match reality on the bench is still luck, not verification.
      (steps 6+) — that is the **real** A1 safety Pico and ESP32-S3 already on
      the main board, not a fixture part.
 - **Debug Probe** (or equivalent SWD adapter) — same bench pattern
-  `SaftyFW`/`KilnFW` already use. `SimFW` has no `.uf2` yet (picotool gap,
-  `firmware/SimFW/README.md`'s Build section) — SWD/OpenOCD is the only
-  flashing path for the fixture Pico today. BOOTSEL drag-and-drop works for
-  `spi_test_master` once you have a `.uf2`, otherwise SWD there too.
+  `SaftyFW`/`KilnFW` already use, and still the only flashing path for
+  `spi_test_master` (see below). `SimFW` itself no longer needs it for a
+  first flash: `cmake --build` now produces a verified `build/SimFW.uf2` via
+  `firmware/SimFW/tools/elf2uf2.py` (no picotool, no host C/C++ compiler —
+  see that script's docstring), so BOOTSEL drag-and-drop works for the
+  fixture Pico directly. Bring the Debug Probe anyway; it's still the only
+  option for `spi_test_master`, and useful if SWD-level debugging (not just
+  flashing) is ever needed on the fixture Pico too.
 - **Saleae logic analyzer** — required for M-A's actual exit criterion (a
   capture, not just a pass/fail table). ROADMAP.md records one was available
   and used on this bench 2026-08-18, so it should already be in the kit.
@@ -100,12 +104,44 @@ cmake -G Ninja -B firmware\SimFW\tools\spi_test_master\build -DPICO_BOARD=pico `
 cmake --build firmware\SimFW\tools\spi_test_master\build
 ```
 
-Flash both `.elf` files over SWD/OpenOCD (per the
+`spi_test_master` has no `.uf2` (its own `CMakeLists.txt` still disables
+`pico_add_extra_outputs()` for the same picotool-gap reason `SimFW`'s used
+to) — flash it over SWD/OpenOCD, per the
 [**"Use OpenOCD for ESP32 flashing"**]-style convention this repo follows for
-bench programming — use OpenOCD/the Debug Probe path, not a
-`.uf2`/BOOTSEL drag for `SimFW.elf` since none exists). Flash one Pico at a
-time; don't have both attached to the same Debug Probe simultaneously unless
-you know your SWD wiring supports it.
+bench programming.
+
+`SimFW` itself now has a real `.uf2` at `build/SimFW.uf2`, generated and
+verified automatically by the `cmake --build` step above
+(`tools/elf2uf2.py`, no picotool needed). For a first flash of a bare Pico
+in BOOTSEL mode, drag that file onto the `RPI-RP2` mass-storage drive it
+enumerates as. SWD/OpenOCD still works too, if the Debug Probe is already
+wired up for other reasons.
+
+Don't have both Picos attached to the same Debug Probe simultaneously
+unless you know your SWD wiring supports it.
+
+**Reflashing `SimFW` after the first flash — three routes, not two:**
+Besides BOOTSEL drag-and-drop with the `.uf2` above and SWD/OpenOCD, a
+fixture that is already running `SimFW` and reachable over its own USB CDC
+port can be told to drop into its ROM bootloader over that same port,
+without touching the board:
+
+```powershell
+kilnsim reboot-bootloader --yes
+```
+
+(or the `sim_reboot_bootloader` MCP tool, or any tool that speaks the
+1200-baud "set line coding to 1200 baud with DTR deasserted" touch
+convention against the fixture's port — see `docs/PROTOCOL.md`'s
+`REBOOT_BOOTLOADER` section for the full spec). The fixture only reboots
+after confirming on its own that the E-stop loop is open, both DUT power
+relays are off, and the CT outputs are silent (`src/tasks/safe_reboot.c`) —
+it refuses (reporting an error, staying on the current firmware) rather than
+reboot into an unconfirmed state if that check times out. Once it drops into
+the bootloader it enumerates as a `RPI-RP2` mass-storage device the same way
+a physical BOOTSEL boot would; drag a `.uf2` onto it or use `picotool` as
+usual. This route only exists for `SimFW` itself — `spi_test_master` has no
+such command, so SWD/OpenOCD or physical BOOTSEL are still its only options.
 
 **Confirm each board is alive, alone, before wiring them together:**
 
@@ -134,6 +170,45 @@ you know your SWD wiring supports it.
 
 If either board fails its solo check, stop here — do not proceed to wiring.
 See section 5's troubleshooting table.
+
+### 1.3 Boot-stage LED beacon — diagnosing a dead board with no debug probe
+
+**Added after a real bench boot failure** (first-ever flash to a bare Pico:
+dark LED, no USB enumeration at all) turned out to be a `telemetry` task
+stack overflow with zero visible signal — `vApplicationStackOverflowHook()`
+used to just disable interrupts and spin, which is indistinguishable at the
+bench from "board is fine, just hasn't lit anything yet." The fixture now
+drives the onboard LED (GPIO25, no header pin) at every major boot stage and
+with a distinct post-boot heartbeat, specifically so the *next* dead-board
+symptom is diagnosable by eye alone, with nothing attached but USB power.
+
+**How to read it:** count short flashes in a group, then check what state
+the LED settles into afterward.
+
+| What you see | Meaning |
+|---|---|
+| **N short flashes** (150 ms on/150 ms off), repeating in a group, followed by a ~700 ms dark gap before the next group | Stage **N** of boot just completed. Stages count up 1→10 in `main()`'s task-start order: 1=`spi_emu_a_start`, 2=`spi_emu_b_start`, 3=`wave_owner_start`, 4=`sim_engine_start`, 5=`usb_owner_start`, 6=`cmd_task_start`, 7=`fault_sched_start`, 8=`i2c_owner_start`, 9=`telemetry_start`, 10=`log_task_start`. |
+| **Groups count up to some N, then nothing (dark) forever** | The fixture crashed or hard-faulted *inside* stage **N+1**'s `_start()` call — before that call returned, and before anything called `simfw_fatal()`. This is the "true blank" case a debug probe would normally be needed for; report the last completed stage number. |
+| **10 groups (1 through 10), then the LED goes dark for good, no heartbeat** | Every task start returned, but `vTaskStartScheduler()` itself failed (out of heap for the idle/timer tasks) or the scheduler somehow never reached the idle task. Should not happen under normal heap pressure (`configTOTAL_HEAP_SIZE` is 32 KiB); treat as a real bug if seen. |
+| **A brief (100 ms) single flash, repeating steadily every ~2 s, forever** | Healthy steady state: the scheduler is running and core 0's idle task is getting CPU time normally (`vApplicationIdleHook()`). This is deliberately a single infrequent blink, not a cluster, so it can never be mistaken for a boot-stage group. |
+| **10 fast flashes (100 ms on/100 ms off) back-to-back, then SOLID ON forever** | `simfw_fatal()` fired — a real, named resource-claim failure or (as of this pass) a caught `vApplicationStackOverflowHook()`/`vApplicationMallocFailedHook()` event. This can happen at any point, mid-stage or post-boot; SWD (if a probe is available) will show `panic()`'s formatted message with the subsystem/reason. If NOT attached, at minimum you know the kernel caught something *and named it* — very different from silent corruption. |
+| **Completely dark, no flashes at all, from power-on** | The fixture never reached `main()`'s first beacon call at all -- boot ROM/stage-2 bootloader failure, bad flash, or a hardware fault before `stdio_init_all()`/`simfw_fatal_install_cross_core_halt()`. This is the one case the beacon cannot help diagnose (nothing has run yet); reflash and reseat first, then reach for a debug probe. |
+
+**Do not confuse:** boot-stage groups (150/150 ms, count varies 1-10, ~700 ms
+gap between groups) vs. the heartbeat (single 100 ms flash, ~2 s of dark
+between blinks) vs. `simfw_fatal()`'s signature (always exactly 10 fast
+100/100 ms flashes, then permanently solid) — three different cadences by
+design, per `src/main.c`'s `simfw_boot_beacon()`/`vApplicationIdleHook()` and
+`src/drivers/simfw_fatal.c`'s `simfw_fatal()`.
+
+**If a stack overflow is what you're chasing:** `firmware/SimFW/build` has
+`-fstack-usage` available as a one-off `target_compile_options()` addition in
+`CMakeLists.txt` (not left on by default — it emits a `.su` file per
+translation unit next to each `.obj`, listing every function's own stack
+frame size). Cross-reference against each task's `*_STACK_WORDS` define
+(`configMINIMAL_STACK_SIZE` is 1024 bytes; most tasks use a small multiple of
+that) rather than guessing from source alone — this is exactly how the real
+`telemetry` overflow above was found and confirmed, not eyeballed.
 
 ---
 
@@ -578,6 +653,7 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 |---|---|
 | `kilnsim state` times out / no port found | Wrong `--port`; VID:PID autodetect picked another RP2040 device (§1.2's caution) — pass `--port COMx` explicitly. Or the fixture Pico never actually flashed — reflash and power-cycle. |
 | Connects but every command errors | `benchproto` framing/CRC mismatch between `kilnsim`'s Python codec and the firmware build — confirm both are from the same commit; `virtual_simfw/README.md` notes the codec is proven byte-identical against `CommonFW`'s C library's shared test vectors, so a real mismatch here means a stale build on one side. |
+| **LED completely dark, no USB enumeration at all** (2E8A:F00A never appears) | Read §1.3's boot-beacon table first — this exact symptom was a real `telemetry` task stack overflow on this bench (fixed; see git history), caught silently because the overflow hook used to spin with no signal. With no debug probe, the beacon tells you the last stage that completed; a hard dark with zero flashes from power-on instead points at the boot ROM/flash image rather than application code. |
 
 ### I2C / expander symptoms
 

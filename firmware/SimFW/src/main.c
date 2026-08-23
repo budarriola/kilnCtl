@@ -88,20 +88,89 @@ _Static_assert(SIMFW_DMA_CHANNELS_CLAIMED <= NUM_DMA_CHANNELS,
 // a debugger attached over SWD (this bench fixture's flashing/debug path,
 // DESIGN_NOTES.md section 3.1) can see exactly where it happened instead of the
 // failure hiding behind a watchdog-looking reboot.
+//
+// BOTH HOOKS NOW ROUTE THROUGH simfw_fatal() -- they used to just
+// taskDISABLE_INTERRUPTS() and spin, which is INDISTINGUISHABLE AT THE BENCH
+// from a healthy-but-quiet fixture: no LED, no USB, nothing. That silence is
+// exactly what let telemetry_task's real stack overflow (see this task's
+// bench report: telemetry_build_and_send_state_frame() alone measured 10736
+// bytes of stack against a 1024-byte task stack, an order of magnitude over)
+// go undiagnosable from a dark board with no debug probe attached. A hook
+// that never lights the LED turns "the kernel caught a real bug" into "the
+// bench operator has no idea whether the fixture is dead or just idle."
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
     (void)xTask;
-    (void)pcTaskName;
-    taskDISABLE_INTERRUPTS();
-    for (;;) {
-    }
+    simfw_fatal("freertos", "stack overflow in task \"%s\"", pcTaskName ? pcTaskName : "?");
 }
 
 void vApplicationMallocFailedHook(void)
 {
-    taskDISABLE_INTERRUPTS();
-    for (;;) {
+    simfw_fatal("freertos", "heap allocation failed (configTOTAL_HEAP_SIZE exhausted)");
+}
+
+// --- Boot-stage beacon -------------------------------------------------------
+// GPIO25 (onboard LED) -- see simfw_fatal.c's header for why this pin has no
+// owner until now and why a heartbeat/beacon must yield it the instant
+// simfw_fatal() is entered rather than fight for it. This beacon and
+// simfw_fatal() never actually contend for the pin in practice: this
+// function only ever runs pre-scheduler, in main()'s own straight-line call
+// sequence on core 0, and simfw_fatal() halts whichever core called it
+// (disabling interrupts, looping forever) rather than returning -- so a
+// fatal firing mid-stage simply never returns control to finish that
+// stage's blink group, and no two writers are ever mid-sequence on GPIO25 at
+// once. This is the "distinct, countable blink pattern per stage" the bench
+// operator needs with no debug probe attached (see
+// docs/BENCH_RUNBOOK.md's decode table) -- added after a real bench boot
+// failure (dark LED, no USB) turned out to be a task stack overflow with
+// zero visible signal, see vApplicationStackOverflowHook() above.
+//
+// Deliberately NOT using pico-sdk's sleep_ms()/busy_wait_ms() distinction
+// here beyond picking busy_wait_ms(): no FreeRTOS tick is running yet
+// pre-scheduler, so sleep_ms() (which can rely on the SDK's own low-power
+// wait) is fine too, but busy_wait_ms() is the same primitive
+// simfw_fatal.c's own blink burst already uses -- one busy-wait convention
+// for every pre-scheduler LED sequence in this file, not two.
+#define SIMFW_BOOT_BEACON_LED_GPIO      25u // same physical LED as simfw_fatal.c's SIMFW_FATAL_LED_GPIO
+#define SIMFW_BOOT_BEACON_FLASH_ON_MS   150u
+#define SIMFW_BOOT_BEACON_FLASH_OFF_MS  150u
+#define SIMFW_BOOT_BEACON_GROUP_GAP_MS  700u // long dark gap between stage groups -- lets a human count flashes reliably
+
+static void simfw_boot_beacon(uint32_t stage_number)
+{
+    for (uint32_t i = 0; i < stage_number; i++) {
+        gpio_put(SIMFW_BOOT_BEACON_LED_GPIO, 1);
+        busy_wait_ms(SIMFW_BOOT_BEACON_FLASH_ON_MS);
+        gpio_put(SIMFW_BOOT_BEACON_LED_GPIO, 0);
+        busy_wait_ms(SIMFW_BOOT_BEACON_FLASH_OFF_MS);
     }
+    busy_wait_ms(SIMFW_BOOT_BEACON_GROUP_GAP_MS);
+}
+
+// --- Post-scheduler heartbeat -------------------------------------------------
+// configUSE_IDLE_HOOK is on (FreeRTOSConfig.h) solely for this: a slow,
+// unmistakable "the scheduler is alive and core 0 is idling normally"
+// signal, so a healthy fixture's final LED state is never just "dark" (which
+// this task's bench report shows is otherwise indistinguishable from a
+// silently hung fixture -- see vApplicationStackOverflowHook()'s comment).
+// One brief 100 ms flash every ~2 s: short and infrequent enough that it
+// cannot be mistaken for a boot-stage group (150/150 ms flashes clustered
+// back-to-back, this task's own SIMFW_BOOT_BEACON_* timing) or for
+// simfw_fatal()'s 10x 100/100 ms burst-then-solid-on. Runs only on core 0's
+// idle task (configUSE_PASSIVE_IDLE_HOOK is 0, configIDLE_AFFINITY is 0) --
+// core 1 never calls this. Non-blocking (time_us_64()-gated, not a sleep) so
+// it never delays the idle task's own tickless-idle/yield bookkeeping.
+// Naturally stops the instant simfw_fatal() disables interrupts and loops
+// forever: the idle task simply never runs again to call this, so there is
+// no explicit hand-off needed, matching simfw_fatal.c's "yield the pin"
+// requirement by construction rather than by an added flag.
+#define SIMFW_HEARTBEAT_PERIOD_MS 2000u
+#define SIMFW_HEARTBEAT_ON_MS     100u
+
+void vApplicationIdleHook(void)
+{
+    uint32_t phase = (uint32_t)(time_us_64() / 1000u) % SIMFW_HEARTBEAT_PERIOD_MS;
+    gpio_put(SIMFW_BOOT_BEACON_LED_GPIO, phase < SIMFW_HEARTBEAT_ON_MS ? 1 : 0);
 }
 
 int main(void)
@@ -122,6 +191,15 @@ int main(void)
     // inside vTaskStartScheduler() below), so irq_set_exclusive_handler()/
     // irq_set_enabled() are guaranteed to bind to core 0's own NVIC here.
     simfw_fatal_install_cross_core_halt();
+
+    // Boot-stage beacon init -- see simfw_boot_beacon()'s comment above.
+    // gpio_init()/gpio_set_dir() here, ONCE, is deliberately the same pattern
+    // simfw_fatal()'s own first two lines use for this pin; harmless to
+    // "re-init" if simfw_fatal() ever runs first (it does not touch this
+    // path -- both are core-0-only pre-scheduler code, sequential, never
+    // concurrent).
+    gpio_init(SIMFW_BOOT_BEACON_LED_GPIO);
+    gpio_set_dir(SIMFW_BOOT_BEACON_LED_GPIO, GPIO_OUT);
 
     // Start every task, in priority order (highest first), matching
     // docs/DESIGN_NOTES.md section 4.1's table and SaftyFW's own main.c convention.
@@ -154,15 +232,25 @@ int main(void)
     // the tasks being started). TODO: once log_task/telemetry have real
     // bodies, capture and report these.
     (void)spi_emu_a_start();
+    simfw_boot_beacon(1);
     (void)spi_emu_b_start();
+    simfw_boot_beacon(2);
     (void)wave_owner_start();
+    simfw_boot_beacon(3);
     (void)sim_engine_start();
+    simfw_boot_beacon(4);
     (void)usb_owner_start();
+    simfw_boot_beacon(5);
     (void)cmd_task_start();
+    simfw_boot_beacon(6);
     (void)fault_sched_start();
+    simfw_boot_beacon(7);
     (void)i2c_owner_start();
+    simfw_boot_beacon(8);
     (void)telemetry_start();
+    simfw_boot_beacon(9);
     (void)log_task_start();
+    simfw_boot_beacon(10);
 
     vTaskStartScheduler();
 

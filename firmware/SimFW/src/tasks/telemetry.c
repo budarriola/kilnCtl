@@ -31,7 +31,28 @@
 #include "task_priorities.h"
 #include "usb_owner.h"
 
-#define TELEMETRY_STACK_WORDS configMINIMAL_STACK_SIZE
+// BUMPED from the skeleton-era configMINIMAL_STACK_SIZE (1024 bytes) -- that
+// value was never revisited when this task's real body landed, and it was
+// wrong by roughly an order of magnitude. -fstack-usage (see this task's
+// bench report) measured telemetry_build_and_send_state_frame() ALONE at
+// 10736 bytes before the fault_slot_t array below moved off the stack (see
+// s_fault_slots's comment) -- the dominant term was a 32-entry
+// fault_slot_t slots[FAULT_ENGINE_MAX_SLOTS] local, each slot carrying two
+// nested fault_trigger_t's worth of doubles and a 24-byte name buffer.
+// configCHECK_FOR_STACK_OVERFLOW==2 (FreeRTOSConfig.h) only samples at
+// context-switch boundaries, not per-instruction, so a single call this far
+// past the top of a 1024-byte stack corrupts whatever memory sits above it
+// (the FreeRTOS heap, in this port's layout) LONG before the watermark check
+// ever gets a chance to fire -- consistent with this fixture's real bench
+// symptom (dark LED, no USB enumeration, no simfw_fatal trace of any kind):
+// the corruption almost certainly took out heap_4's free list or another
+// task's TCB before the overflow hook's next scheduling point.
+// configMINIMAL_STACK_SIZE * 4 (4096 bytes) is generous headroom over the
+// post-fix measured depth (task_fn + build_and_send_state_frame +
+// usb_owner_send_broadcast, or the drain-and-forward path's own
+// log_task_log() call) -- re-measure with -fstack-usage before shrinking
+// this back down.
+#define TELEMETRY_STACK_WORDS (configMINIMAL_STACK_SIZE * 4u)
 
 // The event ring is drained on every pass of this loop, independent of the
 // (possibly much slower) TELEMETRY frame rate, so an EVT frame is never
@@ -65,6 +86,19 @@ static volatile uint32_t s_evt_ring_hwm = 0;
 // sole writer, no lock needed (sim_event_ring_drain() itself is documented
 // safe for concurrent callers, but telemetry is the only one that exists).
 static uint32_t s_evt_next_seq = 0;
+
+// Scratch for telemetry_build_and_send_state_frame()'s fault_sched_list()
+// call -- file-scope static rather than a function-local array because
+// sizeof(fault_slot_t) * FAULT_ENGINE_MAX_SLOTS is several KB (each slot
+// carries two nested fault_trigger_t's worth of doubles plus a 24-byte name
+// buffer) and this task's stack was never sized for that as a local (see
+// TELEMETRY_STACK_WORDS's comment -- this was the actual bench-observed
+// overflow, not just theoretical headroom-shaving). Safe as `static`
+// because telemetry_task_fn() is this array's only caller, from its own
+// single task context, one iteration at a time -- never reentered, never
+// touched from an ISR or another task. Do NOT turn this back into a local:
+// that is exactly the regression that caused the original crash.
+static fault_slot_t s_fault_slots[FAULT_ENGINE_MAX_SLOTS];
 
 // --- Little-endian payload packing ------------------------------------------
 // benchproto's own header fields are big-endian (BENCHPROTO.md sec 3), but
@@ -202,11 +236,10 @@ static void telemetry_build_and_send_state_frame(void)
         return;
     }
 
-    fault_slot_t slots[FAULT_ENGINE_MAX_SLOTS];
-    size_t slot_count = fault_sched_list(slots, FAULT_ENGINE_MAX_SLOTS);
+    size_t slot_count = fault_sched_list(s_fault_slots, FAULT_ENGINE_MAX_SLOTS);
     uint16_t active_fault_count = 0;
     for (size_t s = 0; s < slot_count; s++) {
-        if (slots[s].state == FAULT_STATE_ACTIVE) {
+        if (s_fault_slots[s].state == FAULT_STATE_ACTIVE) {
             active_fault_count++;
         }
     }
