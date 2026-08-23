@@ -430,16 +430,18 @@
  *
  * Two things about that barrier that are easy to get backwards, both traced
  * from the schematic (see docs/HARDWARE.md for the full trace):
- *   - DataToSafty is the ESP's *TX* (GPIO4, feeding U2's LED, whose collector
- *     is the Pico's RX) and DataFromSafty is the ESP's *RX* (GPIO5, collector
- *     of U3, whose LED is driven by the Pico's TX). U3 is drawn mirrored
- *     relative to U1/U2 -- reading it with their orientation is what makes
- *     this look backwards when it is not.
+ *   - DataToSafty is the ESP's *TX* (GPIO5, feeding U2's LED through R12,
+ *     whose collector is the Pico's RX) and DataFromSafty is the ESP's *RX*
+ *     (GPIO4, collector of U3, whose LED is driven by the Pico's TX through
+ *     R7). Each optocoupler is unidirectional, so the direction of a pin is
+ *     fixed by which side of the barrier carries the LED: a pin wired to an
+ *     LED anode can only be an output, a pin wired to a collector can only
+ *     be an input.
  *   - Both directions are logically INVERTED. The driving side's LED is on
  *     when its line is high, which pulls the receiving side's collector low,
  *     so an idle-high UART line arrives as idle-low. The firmware fixes this
  *     with uart_set_line_inverse(TXD_INV | RXD_INV) rather than in software.
- *     GPIO5's only external pull-up is R15 (U3's collector has nothing else
+ *     GPIO4's only external pull-up is R15 (U3's collector has nothing else
  *     on that net besides the ESP); the internal pull-up is enabled too, as
  *     belt-and-braces.
  *   - The Fault line (GPIO6) is an ESP *output*: driving it high lights U1's

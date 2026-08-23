@@ -198,10 +198,11 @@ once; two inversions in series cancel. Adding inversion on the Pico side —
 PIO, or an external inverter — cancels the optocouplers' and the link goes
 dead. See `firmware/SaftyFW/docs/HARDWARE.md` §1.
 
-**Pins: `PicoTx` = GPIO4, `PicoRx` = GPIO5** (`firmware/SaftyFW/docs/HARDWARE.md` §2). On the ESP
-side these land on **GPIO4 = ESP TX** and **GPIO5 = ESP RX**, matching
-`KilnFW`'s `Kconfig` defaults since `firmware/SaftyFW/TODO.md` item 0.1 landed
-(2026-08-16) — it was swapped before that.
+**Pins: `PicoTx` = GP4, `PicoRx` = GP5** (`firmware/SaftyFW/docs/HARDWARE.md` §2). On the ESP
+side these land on **GPIO4 = ESP RX** and **GPIO5 = ESP TX**, matching
+`KilnFW`'s `Kconfig` defaults (`TX_IO = 5`, `RX_IO = 4`). Measured on the bench
+2026-08-23; the schematic-derived assignment used before that was inverted, and
+so were the defaults.
 
 ### Receiver robustness — required, not optional
 
@@ -947,7 +948,7 @@ Neither firmware is complete; these are the ESP-side items. Sequenced in
 
 | # | Change | Files |
 |---|---|---|
-| 0.1 | **Swap `KILNCTL_SAFETY_TX_IO` → 4 and `KILNCTL_SAFETY_RX_IO` → 5.** Move the internal pull-up onto the RX pin (GPIO5). Link is dead until this lands. **Done 2026-08-16.** | `App/drivers/Kconfig:189-200`, `sdkconfig`, `safety_link.c` |
+| 0.1 | **`KILNCTL_SAFETY_TX_IO` = 5, `KILNCTL_SAFETY_RX_IO` = 4**, internal pull-up on the RX pin (GPIO4, alongside external R15). Link is dead if these are swapped. Set the other way round on 2026-08-16 from a schematic trace; **corrected 2026-08-23 against a bench measurement.** | `App/drivers/Kconfig`, `sdkconfig`, `safety_link.c` |
 | 0.2 | Add `UART_PROTO_MSG_BROADCAST = 0x04` — send without waiting, receive without ACKing. **Done 2026-08-16**: the frame type and `uart_protocol_send_broadcast()` exist; nothing in `safety_link.c` calls it yet, that is 0.3 below | `espInterfaces/uart_protocol.{c,h}` |
 | 0.3 | Replace the `GET_STATUS` poll loop with a 500 ms context broadcast; build the frame in §4 | `safety_link.c` |
 | 0.4 | Track `relay_recent_mask` over a ≥150 s window. `relay_authority` already sees every relay command, so this belongs there | `relay_authority.{c,h}` |
@@ -981,7 +982,7 @@ Two more, driven by the borrowed-thermocouple option:
 ## 10. Completion checklist
 
 **Blocking (`firmware/SaftyFW/TODO.md` phase 0)**
-- [x] 0.1 Safety-UART pins swapped in `KilnFW` (TX→4, RX→5), pull-up moved to GPIO5
+- [x] 0.1 Safety-UART pins in `KilnFW` measured and set (TX→5, RX→4), pull-up on GPIO4
 - [x] 0.2 `UART_PROTO_MSG_BROADCAST = 0x04` added (send + receive path; not yet called from `safety_link.c`)
 - [x] 0.3 `firmware/KilnFW/docs/SAFETY_LINK.md` and `HARDWARE.md` optocoupler direction corrected
 - [~] 0.10 `KILNLINK_PROTOCOL_VERSION` bumped to 5, `UART_PROTOCOL_VERSION` aliased to it

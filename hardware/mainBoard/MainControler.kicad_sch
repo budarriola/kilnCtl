@@ -4195,6 +4195,12 @@
 		(uuid "09641876-0376-48ae-abb5-5be79f43fbf2")
 	)
 	(junction
+		(at 250.19 86.36)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "3c48d82f-b4e8-450d-9bfe-44d20d2d4899")
+	)
+	(junction
 		(at 265.43 208.28)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4217,12 +4223,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "5ac40770-f13e-416a-89ef-873172239923")
-	)
-	(junction
-		(at 250.19 88.9)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "61d731c3-bf27-4cef-a24d-5e507cc968b5")
 	)
 	(junction
 		(at 389.89 149.86)
@@ -4526,7 +4526,7 @@
 	)
 	(wire
 		(pts
-			(xy 218.44 86.36) (xy 255.27 86.36)
+			(xy 218.44 86.36) (xy 250.19 86.36)
 		)
 		(stroke
 			(width 0)
@@ -4633,6 +4633,16 @@
 			(type default)
 		)
 		(uuid "1653a2c7-e105-4524-97aa-08db822f58a8")
+	)
+	(wire
+		(pts
+			(xy 250.19 86.36) (xy 255.27 86.36)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "168a9c3f-ada6-4ea2-adaa-10fd05c4b848")
 	)
 	(wire
 		(pts
@@ -5606,7 +5616,7 @@
 	)
 	(wire
 		(pts
-			(xy 218.44 88.9) (xy 250.19 88.9)
+			(xy 218.44 88.9) (xy 255.27 88.9)
 		)
 		(stroke
 			(width 0)
@@ -6073,16 +6083,6 @@
 			(type default)
 		)
 		(uuid "b1f9d8a9-474e-43d2-9362-99f3d95172ae")
-	)
-	(wire
-		(pts
-			(xy 250.19 83.82) (xy 250.19 88.9)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b24b9ea5-a482-4f3d-9ff6-d3cef3456493")
 	)
 	(wire
 		(pts
@@ -6556,6 +6556,16 @@
 	)
 	(wire
 		(pts
+			(xy 250.19 83.82) (xy 250.19 86.36)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e6f967df-2ae2-4182-a7a7-28c63e373a96")
+	)
+	(wire
+		(pts
 			(xy 405.13 101.6) (xy 407.67 101.6)
 		)
 		(stroke
@@ -6623,16 +6633,6 @@
 			(type default)
 		)
 		(uuid "f205cfb1-6ac7-42ab-bba9-09287f94b580")
-	)
-	(wire
-		(pts
-			(xy 250.19 88.9) (xy 255.27 88.9)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f211de48-3c01-4c71-9e5c-e5c8b38f7f0a")
 	)
 	(wire
 		(pts
@@ -7628,8 +7628,8 @@
 		)
 		(uuid "7aa2c910-a50e-4b0b-be44-0ed7fa3b1541")
 	)
-	(hierarchical_label "DataToSafty"
-		(shape output)
+	(hierarchical_label "DataFromSafty"
+		(shape input)
 		(at 255.27 86.36 0)
 		(effects
 			(font
@@ -7650,8 +7650,8 @@
 		)
 		(uuid "b5d135be-53e6-401c-a72c-e50333d2870c")
 	)
-	(hierarchical_label "DataFromSafty"
-		(shape input)
+	(hierarchical_label "DataToSafty"
+		(shape output)
 		(at 255.27 88.9 0)
 		(effects
 			(font

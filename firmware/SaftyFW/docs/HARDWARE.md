@@ -1,10 +1,10 @@
 # Safety Processor Hardware Map
 
-> **Status:** planning · **Last reviewed:** 2026-08-18
-> **Keep this file current.** This is the traced-from-schematic authority for
-> the safety domain. If the board is revised, update it in the same commit as
-> the schematic and re-run the bench checks in §1. If it disagrees with the
-> board, **the board wins.** Checklist at the bottom.
+> **Status:** planning · **Last reviewed:** 2026-08-23
+> **Keep this file current.** This is the authority for the safety domain: §1
+> is a bench measurement, the rest is traced from the schematic. If the board
+> is revised, update it in the same commit as the schematic and re-measure §1.
+> If it disagrees with the board, **the board wins.** Checklist at the bottom.
 
 Everything here was traced from **`hardware/mainBoard/output/kiln.pdf`** (KiCad 10.0.4,
 the PDF added in commit `c50cded` "add pdf sch of same board"), cross-checked
@@ -25,201 +25,118 @@ shares no connection with `GND_Main` except through three optocouplers.
 
 ---
 
-## 1. The correction that matters most
+## 1. The isolated link, settled by measurement
 
-> **The isolated UART directions in `firmware/KilnFW/docs/HARDWARE.md` and
-> `firmware/KilnFW/docs/SAFETY_LINK.md` are inverted relative to the current board,
-> and `KilnFW`'s pin defaults are swapped with them.**
-
-`firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 1" states that the net names are backwards —
-that `DataToSafty` is the ESP's RX and `DataFromSafty` is the ESP's TX.
-**On this revision of the board that is false. The net names are correct as
-written.** Traced from the optocoupler symbols:
-
-| Opto | Pins 1,2 (LED) | Pins 3,4 (transistor) | Therefore |
-|------|----------------|-----------------------|-----------|
-| U1 | `Fault`, main side, via R11 390R | collector = Pico `mainFault` (GPIO10) + R8 1k pull-up to 3.3v_Safty; emitter = GND_Safty | ESP **drives** fault into the Pico |
-| U2 | `DataToSafty`, main side, via R12 390R | collector = Pico `PicoRx` (GPIO5) + R9 1k pull-up to 3.3v_Safty; emitter = GND_Safty | `DataToSafty` = **ESP TX** |
-| U3 | `PicoTx` (Pico GPIO4), **safety** side, via R7 390R | collector = `DataFromSafty`, main side; emitter = `MainProcessorDataGnd` | `DataFromSafty` = **ESP RX** |
-
-**U3 is drawn mirrored relative to U1 and U2** — its LED is on pins 1,2 on the
-*safety* side, where U1's and U2's LEDs are on pins 1,2 on the *main* side.
-Reading U3 with U1/U2's orientation is exactly the mistake that produces the
-docs' claim, and is the single easiest thing to get wrong on this whole board.
-
-On the main sheet (`kiln.pdf` p.7, `MainControler`):
+> **This section used to argue a pin map from the schematic. Two such
+> arguments were made, from different evidence, and both were wrong. The map
+> below is a bench measurement.**
 
 | ESP32-S3 GPIO | Net | Direction |
 |---|---|---|
-| **GPIO4** | `DataToSafty` | ESP **TX** (hierarchical pin drawn as an output) |
-| **GPIO5** | `DataFromSafty` | ESP **RX**, with **R15 1k to 3.3V_Main** on this net |
-| GPIO6 | `Fault` | ESP **output** (unchanged, docs are right about this) |
+| **GPIO4** | `DataFromSafty` | ESP **RX** — U3's collector, **R15 1k to 3.3V_Main** on this net |
+| **GPIO5** | `DataToSafty` | ESP **TX** — drives U2's LED through R12 390R |
+| GPIO6 | `Fault` | ESP **output** (this was always right) |
 
-**The R15 placement is the independent confirmation.** R15 is a 1k pull-up to
-`3.3V_Main` sitting on GPIO5. Under this trace, GPIO5 is the ESP's RX and is
-the bare collector of U3 — which is precisely, and only, where a collector
-pull-up belongs. Under the docs' trace, GPIO5 would be a push-pull TX output
-and R15 would be doing nothing at all. The passive component tells you which
-reading is right.
+`KilnFW`: `KILNCTL_SAFETY_TX_IO = 5`, `KILNCTL_SAFETY_RX_IO = 4`.
+`SaftyFW`: `SAFTYFW_PIN_UART1_TX = GP4`, `SAFTYFW_PIN_UART1_RX = GP5` —
+unchanged, these were always correct.
 
-### What this means for `KilnFW`
+The optocouplers, which nothing about this changes:
 
-`KilnFW`'s `Kconfig` defaults **were** `KILNCTL_SAFETY_TX_IO = GPIO5` and
-`KILNCTL_SAFETY_RX_IO = GPIO4` — **swapped** with respect to this board. As
-shipped, the ESP transmitted into U3's collector and listened on U2's LED
-drive, so the link could not work in either direction. **Fixed 2026-08-16**:
-defaults are now `TX_IO = GPIO4`, `RX_IO = GPIO5`.
+| Opto | Pins 1,2 (LED) | Pins 3,4 (transistor) | Therefore |
+|------|----------------|-----------------------|-----------|
+| U1 | `Fault`, main side, via R11 390R | collector = Pico `mainFault` (GP10) + R8 1k pull-up to 3.3v_Safty; emitter = GND_Safty | ESP **drives** fault into the Pico |
+| U2 | `DataToSafty`, main side, via R12 390R | collector = Pico `PicoRx` (GP5) + R9 1k pull-up to 3.3v_Safty; emitter = GND_Safty | `DataToSafty` = **ESP TX** |
+| U3 | `PicoTx` (Pico GP4), **safety** side, via R7 390R | collector = `DataFromSafty` (ESP GPIO4), main side; emitter = `MainProcessorDataGnd` | `DataFromSafty` = **ESP RX** |
 
-This was a `KilnFW` bug, not a `SaftyFW` one, but it was listed as
-**TODO.md item 0.1 (blocking)** because no amount of correct RP2040 firmware
-would bring the link up until it was fixed. Two consequences followed from the
-corrected map, both also changed on the ESP side:
+### The measurement (2026-08-23)
 
-- The ESP's **internal pull-up belongs on GPIO5** (RX, U3's bare collector),
-  not GPIO4. R15 already pulls GPIO5 up externally, so the internal one is
-  belt-and-braces rather than load-bearing — `safety_link_start()` now enables
-  it on the correct pin.
-- `SAFETY_LINK.md`'s boot-time note ("R15 idles the TX net high, which lights
-  U2's LED and holds the Pico's RX low — a continuous break") was **wrong for
-  this revision, in the safe direction**. R15 is on the ESP's RX, not its TX,
-  and nothing on the main board pulls `DataToSafty` anywhere. With the ESP in
-  reset, GPIO4 is high-impedance, U2's LED is dark, and R9 holds the Pico's RX
-  **high** — a clean idle line, not a break. The Pico still must tolerate a
-  break on RX (a half-driven line during ESP boot can produce one), but it is
-  no longer the guaranteed steady-state condition the docs describe.
+Both boards powered, `gpio_probe` on the ESP over its USB-serial bridge,
+`pico_gpio` on the Pico over SWD — each processor reached by a path that is
+not the link under test. Readings cross-checked against the GPIO input
+registers over the debuggers (`GPIO_IN_REG` 0x6000403C on the ESP,
+`SIO_GPIO_IN` 0xD0000004 on the Pico).
 
-### The passive-component pattern, which is the real proof
-
-The optocoupler outputs are **open collector**, so every crossing has exactly two
-resistors and they are not interchangeable: a **390 R** in series with the LED on
-the *driven* side, and a **1 k pull-up** on the *open-collector* side. Three
-crossings, three of each, and they line up perfectly:
-
-| Crossing | 390 R LED drive is on… | 1 k pull-up is on… | So the driven end is |
+| Step | Driven | Read | Result |
 |---|---|---|---|
-| U1 (fault) | R11, on `Fault` (main) | R8, on `mainFault` (safety) | ESP output — **undisputed** |
-| U3 (Pico data) | R7, on `PicoTx` (safety) | **R15**, on `DataFromSafty` = **GPIO5** (main) | Pico output ⇒ GPIO5 is the **ESP's RX** |
-| U2 (ESP data) | **R12**, on `DataToSafty` = **GPIO4** (main) | R9, on `PicoRx` (safety) | **GPIO4 is the ESP's TX** |
+| A | ESP GPIO5 = high | Pico GP5 | **low** — U2's LED lit |
+| A | ESP GPIO5 = low | Pico GP5 | **high** — R9 pulls up |
+| B | Pico GP4 = high | ESP GPIO4 | **low** — U3's LED lit |
+| B | Pico GP4 = low | ESP GPIO4 | **high** — R15 pulls up |
+| control | Pico GP5 driven high, then low | ESP GPIO4 | **no change** — it is the Pico's own receiver |
+| C | ESP GPIO6 = high (fault asserted) | Pico GP10 | **low** — U1's LED lit |
+| C | ESP held in reset (GPIO6 high-Z) | Pico GP10 | **high** — R8 pulls up |
 
-R12 is a 390 R in series into an LED anode. That is an LED drive resistor and
-nothing else — you do not put 390 R in series with a receiver input. And R15 is a
-1 k pull-up on GPIO5, which is only meaningful if GPIO5 is an open collector.
-The two conclusions are independent of each other and independent of how the
-symbols happen to be drawn.
+Register-level corroboration: ESP `GPIO_IN_REG` `0xAC000381` -> `0xAC000391`
+(exactly bit 4) when Pico GP4 went low; Pico `SIO_GPIO_IN` `0x02031B82` ->
+`0x02031BA2` (exactly bit 5) when ESP GPIO5 went low; ESP `GPIO_OUT_REG`
+(0x60004004) `0x00064740`, bit 6 set, with the fault asserted. Every crossing
+inverts, in both directions and on the fault line — three for three.
 
-### Verification status
+> **The fault line fails de-asserted.** Step C's last row is the one to design
+> around: with the ESP dead, unpowered or held in reset, U1's LED is dark and
+> R8 holds `mainFault` **high**, which reads as "the main controller is fine".
+> `SaftyFW` must infer a dead main controller from UART silence. This line
+> cannot tell it, and treating a high `mainFault` as positive evidence of
+> health is a fail-dangerous reading of it.
 
-| Evidence | Result | Done |
-|---|---|---|
-| Optocoupler symbol orientation, `kiln.pdf` p.2 | U3 mirrored vs U1/U2 ⇒ `DataFromSafty` is the ESP's RX | ✅ |
-| 390 R / 1 k passive pattern, all three crossings | consistent, three for three | ✅ |
-| **R15's net, parsed from `MainControler.kicad_sch`** | **R15 is on the `DataFromSafty` net** — a 1 k pull-up belongs only on an open collector | ✅ |
-| Quick pre-check (internal pull-downs, ESP alone) | — | ⬜ |
-| **Coordinated two-board GPIO test — pin/direction mapping** | **Confirmed 2026-08-18 by manual physical inspection**: ESP board pin 4 (GPIO4) and board pin 6 (GPIO6) are ESP outputs; Pico board pin 7 (GPIO5) reads ESP GPIO4, Pico board pin 6 (GPIO4) writes to ESP board pin 5 (GPIO5), Pico board pin 14 (GPIO10) is the fault read. Matches this document's map exactly | ✅ |
-| Coordinated two-board GPIO test — **electrical toggle/propagation** | Attempted 2026-08-18 via `gpio_probe`/`pico_gpio` + Saleae. ESP GPIO4 was seen to physically toggle (multi-second, inconsistent lag between command and pad transition — worth characterizing before trusting timing on this net) but **no propagation to any Pico-side channel was observed in any capture**, and Pico GPIO4 drive produced no visible edge anywhere. GPIO6 (fault) could not be driven at all — hard-denied unconditionally by `gpio_probe.c`'s deny-list, no override. Leading suspect: `12v_Safty` not powered during the test — **unconfirmed, needs bench check** | ⬜ |
-| Saleae capture under real traffic | — | ⬜ |
+### Why two schematic traces both failed
 
-Three independent lines of schematic evidence agree, and the pin/direction
-mapping now also has a fourth: **manual physical confirmation** (2026-08-18).
-**None of the electrical propagation is a measurement yet**, so the bench
-checks below still stand.
+Kept because the failure mode is instructive, and because it is the reason
+this document now leads with a measurement.
 
-### The definitive test: coordinated, both boards, both directions
+1. The **first** trace read U3 with U1/U2's orientation. U3 is drawn mirrored,
+   with its LED on the *safety* side, so that reading inverted the direction.
+2. The **second** trace fixed the mirroring and concluded GPIO4=TX / GPIO5=RX,
+   resting on what looked like decisive independent evidence: R15, a 1k
+   pull-up, sat on GPIO5, and a pull-up belongs only on an open collector.
+   That premise was true of the schematic and false of the board's intent —
+   **R15 was connected to the wrong net.** The passive that was supposed to
+   settle the question was itself the error.
 
-Both boards powered (main **and** `12v_Safty`), a minimal **GPIO probe on each
-processor**, and the PC driving both sides
-([`../../../tools/PcTools/TODO.md`](../../../tools/PcTools/TODO.md) §1).
+   The same trace also missed that the top-level sheet **crossed the two
+   hierarchical pins**: `MainControler`'s `DataToSafty` (an output) was wired
+   to `SaftyProcessor`'s `DataFromSafty` (also an output), and the two inputs
+   were wired to each other. That made the two names one net, which KiCad
+   named after the main sheet, so "U3's collector is on `DataFromSafty`" and
+   "GPIO4 is on `DataToSafty`" were simultaneously true statements about the
+   *same* wire and looked like a contradiction.
 
-> **The PC must reach each processor by a path that is not the link under test.**
-> ESP over its USB serial, Pico over SWD. You cannot test the isolated UART
-> over the isolated UART.
+Both schematic faults were corrected on 2026-08-22/23 (sheet pins uncrossed,
+labels renamed to match, R15 moved onto the GPIO4 net) and the board was
+reworked to match. The lesson that generalises: **a passive component's
+position is only evidence if you have confirmed the passive is where it was
+meant to be.** Symbol orientation and net names are weaker still.
 
-This single sitting verifies **both** traps at once — the pin assignment *and*
-the inversion — because every crossing is an optocoupler and must invert:
-a high on the driving side lights the LED and pulls the receiving collector low.
+### The rule that does survive tracing
 
-**Step A — ESP drives, Pico reads.**
-ESP: GPIO4 output, GPIO5 input. Pico: GPIO4, GPIO5, GPIO10 all inputs.
+Each optocoupler is unidirectional. A pin wired to an LED anode can only be an
+output; a pin wired to a collector can only be an input. The 390 R / 1 k
+pattern follows from that rather than standing on its own: a 390 R in series
+on the driven side, a 1 k pull-up on the open-collector side, three of each
+across three crossings.
 
-| Drive | Expect if this document is right |
-|---|---|
-| ESP GPIO4 → **HIGH** | Pico GPIO5 (`PicoRx`) reads **LOW** — U2's LED lit |
-| ESP GPIO4 → **LOW** | Pico GPIO5 reads **HIGH** — R9 pulls it up |
-| ESP GPIO5 → HIGH/LOW | **no change on any Pico pin** — it is the ESP's own receiver |
+### What the docs always got right
 
-**Step B — Pico drives, ESP reads.**
-Pico: GPIO4 output. ESP: GPIO4 and GPIO5 inputs.
-
-| Drive | Expect |
-|---|---|
-| Pico GPIO4 (`PicoTx`) → **HIGH** | ESP GPIO5 reads **LOW** — U3's LED lit |
-| Pico GPIO4 → **LOW** | ESP GPIO5 reads **HIGH** — R15 pulls it up |
-| Pico GPIO5 driven | **no change at the ESP** |
-
-**Step C — the fault line, which confirms the barrier model as a whole.**
-
-| Drive | Expect |
-|---|---|
-| ESP GPIO6 → **HIGH** | Pico GPIO10 (`mainFault`) reads **LOW** |
-| ESP GPIO6 → **LOW** | Pico GPIO10 reads **HIGH** |
-
-Safe to exercise during bring-up because no Pico firmware acts on `mainFault`
-yet — but **leave GPIO6 driven LOW when finished.**
-
-**Reading the result.**
-
-- Responses on ESP **GPIO4** in Step A and ESP **GPIO5** in Step B ⇒ this
-  document is correct and `KILNCTL_SAFETY_TX_IO`/`RX_IO` are swapped.
-- Responses the other way round ⇒ this document is wrong. **Say so loudly and
-  correct it** rather than working around it.
-- Every "drive HIGH ⇒ read LOW" is a direct confirmation of the inversion, and
-  therefore that the Pico must **not** invert in software (§"What the docs still
-  get right").
-- A pin that responds in *both* steps would mean the two nets are shorted — a
-  board fault, not a documentation question.
-
-### Quick pre-check, ESP alone, if the Pico is not yet available
-
-Not a substitute for the coordinated test, but it costs one read and needs no
-safety-domain power, no Pico and no probe.
-
-Configure **both GPIO4 and GPIO5 as inputs with the internal pull-*down***
-enabled and read them. The ESP32-S3's internal pull-down is roughly 45 kΩ;
-against R15's 1 kΩ to 3.3 V that divider sits at about 3.2 V.
-
-| Pin | Reads | Meaning |
-|---|---|---|
-| the one carrying R15 | **HIGH** | open collector with an external pull-up ⇒ the ESP's **RX** |
-| the other | **LOW** | no external pull-up ⇒ the ESP's **TX** |
-
-Repeating with internal pull-*ups* is the null control: both read high and the
-test yields nothing. That non-result is expected and proves the method, not the
-pinout.
-
-Static resistance checks, everything unpowered, as an independent cross-check:
-
-| Measure | Expected |
-|---|---|
-| GPIO4 to `MainProcessorDataGnd` | ~390 R plus a diode drop (R12 into U2's LED) |
-| GPIO5 to `MainProcessorDataGnd` | high — a phototransistor, not a diode |
-
-### Once both firmwares exist
-
-Capture the isolated pair with the Saleae and decode `kilnlink` framing
-(`tools/PcTools/TODO.md` §2). This is the only check that proves baud, polarity and
-the inversion pair together, under real traffic.
-
-### What the docs still get right
-
-**The inversion analysis is unchanged and still correct.** Each direction
-crosses exactly one optocoupler, and an optocoupler is an inverter: the
-driving side's logic high lights the LED, the receiving side's collector is
-pulled low. So exactly one end must invert, `KilnFW` does it in the ESP UART
-peripheral via `uart_set_line_inverse(UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV)`,
+**The inversion analysis is unchanged and still correct**, and is now measured
+in both directions. Each direction crosses exactly one optocoupler, and an
+optocoupler is an inverter: the driving side's logic high lights the LED, the
+receiving side's collector is pulled low. So exactly one end must invert,
+`KilnFW` does it in the ESP UART peripheral via
+`uart_set_line_inverse(UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV)`,
 and **the RP2040 therefore uses its plain hardware UART at standard polarity
 with no inversion, no PIO, and no external parts.** Do not "fix" polarity on
 the Pico side; two inversions in series cancel the optocouplers' and the link
 goes dead.
+
+### Still outstanding
+
+- **The link does not carry traffic yet.** With the corrected pins flashed,
+  `GET_LINK_STATS` reads `sent 26, received 0, timeouts 26`. The pin map and
+  the electrical path are now proven; whether `SaftyFW` answers the
+  `kilnlink` poll is a separate, firmware-side question.
+- Saleae capture under real traffic, to prove baud and framing together
+  (`tools/PcTools/TODO.md` §2).
 
 ---
 
@@ -233,8 +150,8 @@ Traced from `kiln.pdf` p.2. This table is authoritative for `SaftyFW`.
 | 2 | GPIO1 | `CS0` | out | MAX31856 `~CS`, active low. **10k pull-up to 3.3v_Safty** |
 | 4 | GPIO2 | `CLK` | out | SPI0 SCK |
 | 5 | GPIO3 | `MOSI` | out | SPI0 TX |
-| 6 | GPIO4 | `PicoTx` | out | UART TX → R7 390R → U3 LED → ESP GPIO5 |
-| 7 | GPIO5 | `PicoRx` | in | UART RX ← U2 collector. **R9 1k pull-up**, idles high |
+| 6 | GPIO4 | `PicoTx` | out | UART TX → R7 390R → U3 LED → ESP GPIO4 (`DataFromSafty`) |
+| 7 | GPIO5 | `PicoRx` | in | UART RX ← U2 collector, driven by ESP GPIO5 (`DataToSafty`). **R9 1k pull-up**, idles high |
 | 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized** |
 | 10 | GPIO7 | `SDA` | i/o | I2C0 SDA, **R48 2.2k pull-up**, out to J7 pin 6. Nothing answers today |
 | 11 | GPIO8 | `SCL` | out | I2C0 SCL, **R49 2.2k pull-up**, out to J7 pin 8 |
@@ -666,13 +583,16 @@ Recorded so the next person does not repeat the trace:
 | `hardware/mainBoard/output/kiln.pdf` | **current** | KiCad 10.0.4; values match the `.kicad_sch` sources; added by commit `c50cded` |
 | `hardware/mainBoard/*.kicad_sch` | **current** | spot-checked `CurrentSense.kicad_sch` — R43 10k, R46 7.15k, U8 AD8542, matches the PDF |
 | `hardware/mainBoard/kiln.net` | **deleted 2026-08-16** | was dated 2026-07-19; `(source)` was the pre-move `kilnCtl\kiln.kicad_sch`; said U10–U12 are LMV321 with 47k/475k (board has AD8542 with 10k/7.15k), put the safety MAX31856 on the main board (it is on the daughterboard via J7), and put `thermoFault`/`thermoDrdy` on GPIO7/8 (they are on GPIO11/12) |
-| `firmware/KilnFW/docs/HARDWARE.md` | **corrected 2026-08-16** | Pico pin map, J7 table and power notes all matched already. The three-optocoupler table's U2/U3 reversal is fixed |
-| `firmware/KilnFW/docs/SAFETY_LINK.md` | **corrected 2026-08-16** | "Trap 1" and the R15 boot note were wrong, see §1 |
+| `firmware/KilnFW/docs/HARDWARE.md` | **corrected 2026-08-23** | Pico pin map, J7 table and power notes always matched. The optocoupler table was corrected 2026-08-16 and corrected again 2026-08-23, this time against a measurement |
+| `firmware/KilnFW/docs/SAFETY_LINK.md` | **corrected 2026-08-23** | "Trap 1" has now been wrong twice, in opposite directions; see §1 for both failures |
+| `hardware/mainBoard/*.kicad_sch` (safety link) | **fixed 2026-08-22/23** | top-sheet `DataToSafty`/`DataFromSafty` pins were crossed, labels disagreed between sheets, and R15 sat on the TX net. All three fixed and the board reworked |
 | `ltspice/currentMon.asc` | **matches the built circuit** | same topology and same 10k/7.15k/1M/1µF values as the schematic; a genuinely useful model, see `CURRENT_SENSE.md` |
 
 **`kiln.net` was deleted** — `TODO.md` item 0.4, done. Leaving a stale netlist
-in the tree next to a correct schematic is how the two errors in §1 got into
-the documentation in the first place.
+in the tree next to a correct schematic is how the first pair of errors got
+into the documentation. The second pair came from a *correct* reading of an
+*incorrect* schematic, which no amount of tree hygiene would have caught —
+only the bench measurement in §1 did.
 
 
 ---
@@ -680,7 +600,7 @@ the documentation in the first place.
 ## Completion checklist
 
 **Verify before writing firmware**
-- [x] §1 pin/direction mapping confirmed by manual physical inspection 2026-08-18 (ESP pin4/pin6 out, Pico pin7/pin14 in, Pico pin6 out → ESP pin5 in) — [ ] **electrical toggle/propagation still not confirmed**, see Verification status table
+- [x] §1 pin/direction mapping **confirmed electrically 2026-08-23**: coordinated GPIO drive/read on both processors, both data directions and the fault line, cross-checked at register level over JTAG/SWD. ESP GPIO5 = TX, GPIO4 = RX. Supersedes the 2026-08-18 manual inspection, which agreed with the then-current (wrong) schematic
 - [x] `KilnFW` safety-UART pins corrected (TX→4, RX→5) and its docs fixed (2026-08-16)
 - [x] K4 interlock topology identified from the schematic (J10: 1=NO, 2=COM, 3=NC; §3) — [ ] **still needs confirming on the physical part**, the symbol-drawing convention this reading rests on is not a silkscreened label
 - [ ] De-energized K4 proven to open the contactor on the real wiring

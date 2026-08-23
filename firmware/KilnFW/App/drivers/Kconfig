@@ -300,20 +300,20 @@ menu "KilnCtrl Hardware Configuration"
     menu "Safety Processor Link (opto-isolated UART to the RP2040)"
         config KILNCTL_SAFETY_TX_IO
             int "Safety UART TX GPIO"
-            default 4
-            range 0 48
-            help
-                Drives U2's optocoupler LED via net DataToSafty, whose
-                collector is the Pico's RX (GPIO5, PicoRx).
-
-        config KILNCTL_SAFETY_RX_IO
-            int "Safety UART RX GPIO"
             default 5
             range 0 48
             help
-                U3's collector, net DataFromSafty (the Pico's TX, GPIO4,
-                drives its LED). R15 (1k to 3.3V_Main) is fitted externally
-                on this net; the driver's internal pull-up is belt-and-braces.
+                Drives U2's optocoupler LED through R12 (390R) via net
+                DataToSafty, whose collector is the Pico's RX (GP5, PicoRx).
+
+        config KILNCTL_SAFETY_RX_IO
+            int "Safety UART RX GPIO"
+            default 4
+            range 0 48
+            help
+                U3's collector, net DataFromSafty (the Pico's TX, GP4,
+                drives U3's LED through R7). R15 (1k to 3.3V_Main) is fitted
+                externally on this net; the internal pull-up is belt-and-braces.
 
         config KILNCTL_SAFETY_FAULT_IO
             int "Isolated fault line GPIO (output)"

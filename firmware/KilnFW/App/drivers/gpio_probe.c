@@ -314,7 +314,16 @@ esp_err_t uart_bridge_start_gpio_probe_task(uart_protocol_t *proto)
      * removes it from that internal-SRAM race entirely rather than papering
      * over it with retries. Not latency-critical -- it blocks on its inbox
      * like every other bridge task. */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(gpio_probe_task, "gpio_probe", 3072, &ctx, 3,
+    /* 2026-08-22: 3072 was not enough and overflowed on the *first* command
+     * this task ever handled (coredump: "A stack overflow in task gpio_probe
+     * has been detected", USED/FREE 3328/272, reached via SET_MODE's reply).
+     * The frame is inherently large for a bridge task: uart_proto_message_t
+     * msg (~260 B) lives across the whole loop, gp_reply() adds
+     * reply[UART_PROTO_MAX_PAYLOAD] (253 B), gp_reply_fail() nests its own
+     * body[98] under that, and every path ends in an ESP_LOGx whose
+     * vsnprintf wants another ~1.5 kB. 6144 leaves real headroom rather
+     * than trimming to the observed high-water mark. */
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(gpio_probe_task, "gpio_probe", 6144, &ctx, 3,
                                                          NULL, tskNO_AFFINITY,
                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {

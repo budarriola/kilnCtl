@@ -578,7 +578,7 @@
 				(justify left top)
 			)
 		)
-		(pin "DataFromSafty" input
+		(pin "DataToSafty" output
 			(at 101.6 105.41 0)
 			(uuid "9d085f55-5fcf-498c-9cf5-c8f5ea912a2f")
 			(effects
@@ -588,7 +588,7 @@
 				(justify right)
 			)
 		)
-		(pin "DataToSafty" output
+		(pin "DataFromSafty" input
 			(at 101.6 107.95 0)
 			(uuid "320f1f4e-d9a7-4d9d-b8d0-7e4a56e07b04")
 			(effects

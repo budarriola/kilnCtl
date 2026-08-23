@@ -240,8 +240,8 @@ _PIN_CONFIG_ENTRIES = (
     (48, 0x0A),  # thermoFault_2
     (7, 0x0B),   # IO_Expander_IRQ
     (10, 0x0C),  # IO_Expander_RST
-    (5, 0x0D),   # DataFromSafty -- the ESP's TX (net name reads backwards)
-    (4, 0x0E),   # DataToSafty   -- the ESP's RX
+    (5, 0x0D),   # DataToSafty   -- the ESP's TX (drives U2's LED via R12)
+    (4, 0x0E),   # DataFromSafty -- the ESP's RX (U3's collector, R15 pull-up)
     (6, 0x0F),   # Fault, an ESP OUTPUT to the safety processor
 )
 _PIN_CONFIG_REPLY = bytes([len(_PIN_CONFIG_ENTRIES)]) + b"".join(

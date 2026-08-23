@@ -97,12 +97,16 @@ or crashed safety processor means a kiln that will not fire
 
 ## Three things to know before touching this
 
-**The isolated UART pins were swapped in `KilnFW`, fixed 2026-08-16.** Traced
-from the schematic, ESP TX is **GPIO4** (`DataToSafty`) and ESP RX is **GPIO5**
-(`DataFromSafty`); `KILNCTL_SAFETY_TX_IO`/`RX_IO` now default to that, and
-`firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 1" is corrected to match. R15's
-placement is the independent confirmation
-([`docs/HARDWARE.md`](docs/HARDWARE.md) §1, `TODO.md` 0.1).
+**The isolated UART pin map is now a measurement, not a trace.** Measured on
+the bench 2026-08-23: ESP TX is **GPIO5** (`DataToSafty`), ESP RX is **GPIO4**
+(`DataFromSafty`), and `KILNCTL_SAFETY_TX_IO`/`RX_IO` default to 5/4. `SaftyFW`'s
+own pins (`GP4` = TX, `GP5` = RX) never changed and were always right.
+
+This was got wrong twice from the schematic before it was measured — once by
+misreading U3's mirrored symbol, and once by trusting R15's position when R15
+itself was wired to the wrong net. Do not re-derive it from the symbols; see
+([`docs/HARDWARE.md`](docs/HARDWARE.md) §1) for the measurement and both
+failures.
 
 **Every relay on this board is a pilot relay, for galvanic isolation only** —
 K4 included, and the schematic says so next to it. None carries element current;
@@ -144,7 +148,7 @@ put the on-module regulator in contention with it. Flash over SWD
 
 High-level only — each document carries its own. Phases refer to [`TODO.md`](TODO.md).
 
-- [ ] **Phase 0** blockers cleared, including the swapped safety-UART pins in `KilnFW`
+- [x] **Phase 0** safety-UART pin map settled by measurement 2026-08-23 (ESP TX=GPIO5, RX=GPIO4); remaining Phase 0 blockers still open
 - [ ] **Phase 1** `CommonFW` extracted and linked by both firmwares
 - [x] **Phase 2** skeleton: GPIO6 low first, watchdog, task/core layout —
       done 2026-08-16, build-verified clean under the real toolchain, never

@@ -63,8 +63,8 @@ def _row_y(row: int) -> int:
 #: validated against those anchors.
 PIN_POSITIONS: dict[int, tuple[str, int]] = {
     # -- left column ----------------------------------------------------
-    4: ("left", 207),        # measured -- DataToSafty  (safety link RX)
-    5: ("left", 237),        # measured -- DataFromSafty (safety link TX)
+    4: ("left", 207),        # measured -- DataFromSafty (safety link RX)
+    5: ("left", 237),        # measured -- DataToSafty   (safety link TX)
     6: ("left", 268),        # measured -- Fault (isolated fault OUT)
     7: ("left", _row_y(6)),  # IO_Expander_IRQ
     17: ("left", _row_y(9)),  # CS1

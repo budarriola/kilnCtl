@@ -19,29 +19,43 @@ Three TCMT1109 optocouplers, and nothing else, cross between `GND_Main` and
 
 | Part | LED driven by | Collector (output) | Direction |
 |------|---------------|--------------------|-----------|
-| U3 | Pico `PicoTx` (GPIO4, safety side) via R7 390R | ESP GPIO5, net `DataFromSafty`, R15 1k pull-up | Pico -> ESP data |
-| U2 | ESP GPIO4 via R12 390R, net `DataToSafty` | Pico `PicoRx` (GPIO5), R9 1k pull-up | ESP -> Pico data |
+| U3 | Pico `PicoTx` (GP4, safety side) via R7 390R | ESP GPIO4, net `DataFromSafty`, R15 1k pull-up | Pico -> ESP data |
+| U2 | ESP GPIO5 via R12 390R, net `DataToSafty` | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
 | U1 | ESP GPIO6 via R11 390R, net `Fault` | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault |
 
 There are three traps here, and getting any of them wrong produces a link that
 comes up cleanly and silently never works.
 
-### Trap 1: it is easy to mis-trace which side each net's driven from
+### Trap 1: this was got wrong twice by tracing, and is now settled by measurement
 
-The names actually read straightforwardly on this board revision:
-`DataToSafty` (GPIO4) is the ESP's **TX** and `DataFromSafty` (GPIO5) is the
-ESP's **RX** — matching the names' apparent direction. An earlier version of
-this document claimed the opposite (net names "backwards"), reasoning from
-U3's symbol as if it were drawn the same way round as U1 and U2. **It is not**
-— U3 is mirrored, with its LED on the *safety* side, where U1's and U2's LEDs
-are on the *main* side. Reading U3 with U1/U2's orientation is exactly the
-mistake that produced the old, wrong pin assignment. The independent check is
-R15: a 1k pull-up only belongs on an open collector, and R15 sits on GPIO5 —
-so GPIO5 must be the ESP's RX, not a push-pull TX output. `settings.h` and
-`Kconfig` now follow this (`KILNCTL_SAFETY_TX_IO` defaults to GPIO4,
-`KILNCTL_SAFETY_RX_IO` to GPIO5). Full derivation:
-[`SaftyFW/docs/HARDWARE.md`](../../SaftyFW/docs/HARDWARE.md) §"The
-correction that matters most".
+`DataToSafty` (**GPIO5**) is the ESP's **TX** and `DataFromSafty` (**GPIO4**)
+is the ESP's **RX**. `Kconfig` follows this: `KILNCTL_SAFETY_TX_IO` defaults
+to 5, `KILNCTL_SAFETY_RX_IO` to 4.
+
+Two earlier revisions of this document argued the opposite assignment, each
+from a different chain of schematic reasoning, and both were wrong. The
+history is worth keeping because the failure mode repeats:
+
+- The **first** version said the net names were "backwards" — that
+  `DataToSafty` was the ESP's RX — reasoning from U3's symbol as if it were
+  drawn the same way round as U1 and U2. U3 *is* mirrored, so that reasoning
+  was faulty, and the conclusion was wrong.
+- The **second** version corrected the mirroring but landed on GPIO4=TX /
+  GPIO5=RX, resting on what looked like an independent confirmation: R15, a 1k
+  pull-up, sat on GPIO5, and a pull-up only belongs on an open collector. The
+  premise was true of the schematic and false of the intent — **R15 was
+  connected to the wrong net**, and the trace inherited the error. The same
+  reasoning also missed that the top-level sheet crossed the two hierarchical
+  pins, so `DataToSafty` (main sheet) and `DataFromSafty` (safety sheet) were
+  a single net that KiCad happened to name after the main sheet.
+
+Both schematic errors were fixed on 2026-08-22/23 (R15 moved to the GPIO4 net,
+sheet pins uncrossed, labels renamed), and the pin map is now a **bench
+measurement** rather than a trace — see
+[`HARDWARE.md`](HARDWARE.md) §"How this was measured". The rule that survives:
+each optocoupler is unidirectional, so a pin wired to an LED anode can only be
+an output and a pin wired to a collector can only be an input. Everything else
+about symbol orientation is commentary.
 
 ### Trap 2: both data directions are logically inverted
 
@@ -65,12 +79,14 @@ optocoupler is itself an inverter and two inversions in series cancel:
 | Direction | ESP pin | Optocoupler | What the far pin sees |
 |-----------|---------|-------------|-----------------------|
 | ESP -> Pico | `TXD_INV` drives `NOT L` | U2 inverts again | `L` — standard polarity at the Pico's RX |
-| Pico -> ESP | — | U3 inverts `L` | `NOT L` at GPIO5, which `RXD_INV` turns back into `L` |
+| Pico -> ESP | — | U3 inverts `L` | `NOT L` at GPIO4, which `RXD_INV` turns back into `L` |
 
-Concretely, transmitting: an idle logical 1 becomes a physical low on GPIO4,
+Concretely, transmitting: an idle logical 1 becomes a physical low on GPIO5,
 so U2's LED is **off**, so R9 holds the Pico's RX **high** — a correct idle. A
-start bit (logical 0) drives GPIO4 high, lights the LED, and pulls the Pico's
-RX low. That is exactly what an ordinary UART start bit looks like.
+start bit (logical 0) drives GPIO5 high, lights the LED, and pulls the Pico's
+RX low. That is exactly what an ordinary UART start bit looks like. Both
+halves of that sentence are measured, not asserted: driving GPIO5 low reads
+GP5 high at the Pico, driving it high reads GP5 low.
 
 So the RP2040 can use its plain hardware UART, unmodified, at standard
 polarity. No PIO UART, no external inverter. The inversion is entirely an
@@ -83,17 +99,15 @@ inversions would cancel the optocoupler's and *that* is when nothing works.
 Two boot-time artefacts follow from this and are worth designing the Pico
 firmware around:
 
-- While the ESP is in reset or before `safety_link_start()` runs, GPIO4 (TX,
+- While the ESP is in reset or before `safety_link_start()` runs, GPIO5 (TX,
   `DataToSafty`) is high-impedance and nothing on the main board pulls it —
   R15 sits on the *RX* net, not this one. U2's LED is dark, and R9 holds the
   Pico's RX **high**, a clean idle, not a break. The Pico still must tolerate
   a break on its RX (a half-driven line during ESP boot can produce one), but
-  it is not the guaranteed steady-state condition through an ESP reset. (An
-  earlier version of this document had the pull-up on the wrong net and
-  concluded the opposite — wrong for this revision, in the safe direction.)
+  it is not the guaranteed steady-state condition through an ESP reset.
 - The reverse case is covered under "Side effect worth knowing about" below.
 
-`GPIO5` is the bare collector of U3. R15 (1k to 3.3V_Main) already sits on
+`GPIO4` is the bare collector of U3. R15 (1k to 3.3V_Main) already sits on
 this net — the ESP's internal pull-up is belt-and-braces, not load-bearing,
 but `safety_link_start()` still sets it explicitly rather than relying on an
 external part it does not control.
@@ -110,10 +124,18 @@ The line is configured as an output driven **low (de-asserted)** before the
 UART is even touched, because the pin powers up floating and a floating gate
 on U1 is an undefined fault state at the safety processor.
 
+Measured 2026-08-23: with the fault asserted, ESP `GPIO_OUT_REG` bit 6 is set
+and the Pico's `mainFault` (GP10) reads **low**; with the ESP held in reset,
+GP10 reads **high**. Note what the second reading means — **this line fails
+de-asserted.** A dead, unpowered or held-in-reset main controller leaves U1's
+LED dark and R8 holding `mainFault` high, which the Pico reads as "the main
+controller is fine". The safety processor must infer a dead main controller
+from UART silence; the fault line cannot tell it.
+
 ### Side effect worth knowing about
 
 With no Pico attached, U3's LED is never lit, the phototransistor never
-conducts, R15 and the internal pull-up hold GPIO5 high, and `RXD_INV` turns that into
+conducts, R15 and the internal pull-up hold GPIO4 high, and `RXD_INV` turns that into
 a continuously-low internal RX line — i.e. a permanent break condition. The
 UART event task in `uart_owner.c` counts those, so `uart_owner_get_rx_error_count()`
 for UART1 (and therefore the CRC/framing counter in `GET_LINK_STATS`) can climb
@@ -387,7 +409,7 @@ second, the rate limiter is broken; if `age` comes back as anything other than
 
 ### 2. Loopback with inversion (wire only)
 
-Tie **GPIO4 to GPIO5** directly (main-board TX to main-board RX, bypassing both
+Tie **GPIO5 to GPIO4** directly (main-board TX to main-board RX, bypassing both
 optocouplers). Because both signals are inverted in the peripheral, an
 inverted transmit sampled by an inverted receiver is self-consistent: the ESP
 sees its own frames back, correctly framed. Every `GET_STATUS` the poll task
@@ -409,7 +431,7 @@ end to end without any second processor.
 ### 3. PC-side stub on the safety UART
 
 The most useful option once a USB-TTL adapter is to hand. Connect the adapter
-to GPIO4/GPIO5 (adapter TX -> ESP RX GPIO5, adapter RX -> ESP TX GPIO4) with
+to GPIO4/GPIO5 (adapter TX -> ESP RX GPIO4, adapter RX -> ESP TX GPIO5) with
 the optocouplers out of circuit, and **invert on the PC side**: either an
 adapter that supports inverted signalling, or a small inverter, or accept that
 you must invert in software (in which case you are decoding the line yourself

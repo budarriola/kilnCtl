@@ -32,16 +32,28 @@ main board's.
 
 ## Capabilities to add, in priority order
 
-**Hardware-gated, bench status**: the coordinated two-board GPIO test
-(`firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C) has its pin/direction
-mapping confirmed manually (ESP pins 4/6 outputs, Pico pins 7/14 inputs, Pico
-pin 6 → ESP pin 5), but the **electrical propagation half is still open**: no
-edge has been captured crossing either direction in any attempt, and ESP
-GPIO6 (fault) cannot be driven at all (hard-denied by design). This is blocked
-on a real bug — `pico_gpio_probe.py`'s `write()` sets `CTRL.FUNCSEL` correctly
-(confirmed via Saleae) but does not reliably move the physical pad; root cause
-not found. Needs a scope/multimeter cross-check against a spare Pico GPIO to
-rule out firmware contention before assuming the tool is at fault.
+**Hardware-gated, bench status — DONE 2026-08-23.** The coordinated two-board
+GPIO test (`firmware/SaftyFW/docs/HARDWARE.md` §1 Steps A/B/C) passed in full,
+both data directions and the fault line, with a negative control and
+register-level corroboration over JTAG/SWD. Result: **ESP GPIO5 = TX,
+ESP GPIO4 = RX** — the opposite of what the schematic traces had concluded.
+
+Two things had been blamed for the earlier failures, and neither was the cause:
+
+- *"`12v_Safty` not powered"* — it was powered; Pico GP5 idles high off R9
+  from `3.3v_Safty`.
+- *"`pico_gpio_probe.py`'s `write()` sets FUNCSEL but does not move the pad"* —
+  `write()` works. Both real causes were on the ESP side: (1) `KilnFW`'s
+  UART1 still owned GPIO4 as an output under the old pin config, so the ESP was
+  itself holding the net the Pico was trying to drive, and (2) `gpio_probe`'s
+  task stack was 3072 bytes and overflowed on the first command it ever
+  handled, rebooting the board — which surfaced only as "ACKed but no reply".
+  Both fixed; stack raised to 6144 with a coredump-backed comment.
+
+ESP GPIO6 (fault) is still hard-denied by `gpio_probe.c` by design. Step C was
+run instead by observing the firmware's own fault assertion (Pico GP10 low,
+ESP `GPIO_OUT_REG` bit 6 set) against the ESP held in reset (GP10 high) — which
+also documents that **this line fails de-asserted**.
 
 ### 2. Saleae capture
 
@@ -170,8 +182,9 @@ not boot into either app slot or its own bootloader at all.
 - [ ] GUI grows a safety column rather than a second application
 
 **Capabilities**
-- [ ] 1c. Coordinated two-board test script: electrical propagation half still
-      open (see hazard note above) — pin/direction mapping half is confirmed.
+- [x] 1c. Coordinated two-board test: both halves confirmed electrically
+      2026-08-23. A reusable *script* for it is still unwritten — the run was
+      driven tool-call by tool-call.
 - [ ] 2. `kilnlink` frame decoding for a Saleae capture — not built,
       deliberately, until a board + analyzer are on the bench together.
 - [ ] 3. GUI-vs-MCP capability audit — not exhaustive; a full page-by-page

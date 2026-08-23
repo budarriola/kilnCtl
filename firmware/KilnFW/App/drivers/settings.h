@@ -196,8 +196,9 @@
 #define UART_PROTOCOL_STACK_SIZE     CONFIG_KILNCTL_UART_PROTOCOL_STACK_SIZE
 
 /* --- Safety processor link (opto-isolated, inverted) ---
- * SAFETY_TX_IO drives U2's LED (Pico RX); SAFETY_RX_IO is U3's collector
- * (Pico TX) and has no external pull-up, so the internal one must be on.
+ * SAFETY_TX_IO (GPIO5) drives U2's LED through R12 (Pico RX); SAFETY_RX_IO
+ * (GPIO4) is U3's collector (Pico TX), pulled up externally by R15 (1k to
+ * 3.3V_Main); the internal pull-up is enabled too as belt-and-braces.
  * Both directions are inverted by the optocouplers -- see uart_task_ids.h
  * and docs/HARDWARE.md. SAFETY_FAULT_IO is an OUTPUT: high asserts the
  * isolated fault line into the safety processor. */

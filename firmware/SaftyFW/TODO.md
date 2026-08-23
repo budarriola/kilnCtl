@@ -29,14 +29,16 @@ complete the code and host tests are, and is marked accordingly.
 
 ## Phase 0 — Blockers (do these first, in this order)
 
-- [ ] **0.0 Run the Tier 0 pin test** (`docs/HARDWARE.md` §1): both GPIO4 and
-      GPIO5 as inputs with internal **pull-downs**, read them. The pin that
-      reads HIGH is the one carrying R15 and is therefore the ESP's **RX**.
-      Needs no safety-domain power, no Pico, no probe. ⚠️ **Driving one pin and
-      reading the other proves nothing** — they are not connected to each other.
-      The coordinated two-board rig to run this exists
-      (`tools/PcTools/TODO.md` §1c) but has not resolved the electrical half —
-      see that file for the live `write()` bug blocking it.
+- [x] **0.0 Pin test — done 2026-08-23, electrically.** Coordinated two-board
+      GPIO drive/read (`docs/HARDWARE.md` §1) settled it: **ESP GPIO5 = TX,
+      ESP GPIO4 = RX**, both data directions and the fault line inverting as
+      predicted, cross-checked at register level over JTAG/SWD. The pull-down
+      variant of this test is no longer worth running: it reads R15's position,
+      and R15 was itself wired to the wrong net until 2026-08-22 — which is how
+      the schematic-derived map came out inverted twice. Drive and read across
+      the barrier instead. What was blocking the electrical half was a
+      `gpio_probe` task stack overflow in `KilnFW` (3072 bytes, overflowed on
+      its first command), fixed the same day.
 - [ ] **0.5a Fit a 3-pin DEBUG header and bring GP16/GP17 out** before A1 is
       soldered down — both are far cheaper at build time than after.
       `docs/HARDWARE.md` §7b.

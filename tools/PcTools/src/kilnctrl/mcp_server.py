@@ -1696,8 +1696,9 @@ def ota_rollback_pico() -> str:
 # Only answered on a firmware built with CONFIG_KILNCTL_ENABLE_GPIO_PROBE
 # (default off). Exists to answer "is this net actually where the schematic
 # says" without a one-off firmware -- tools/PcTools/TODO.md capability 1.
-# The firmware enforces its own deny-list (SPI/I2C/SX1509/display/PC-link/
-# safety-link pins) and refuses writes while a profile is running or paused;
+# The firmware enforces its own deny-list (SPI/I2C/SX1509/display/PC-link
+# pins plus the isolated fault line GPIO6, but NOT the safety-link UART data
+# pins) and refuses writes while a profile is running or paused;
 # this layer only surfaces the refusal reason, it does not re-implement the
 # policy.
 # ---------------------------------------------------------------------------
@@ -1707,9 +1708,11 @@ def gpio_probe_set_mode(gpio_num: int, mode: str) -> str:
 
     ``mode`` is one of "input", "input_pullup", "input_pulldown", "output".
     Refused for any pin on the firmware's deny-list (SPI, I2C, the SX1509
-    IRQ/RESET pins, the display CS, the PC-link UART pins, and every
-    safety-link pin including GPIO6) and while a profile is running or
-    paused. Requires a firmware built with CONFIG_KILNCTL_ENABLE_GPIO_PROBE
+    IRQ/RESET pins, the display CS, the PC-link UART pins, and the isolated
+    fault line GPIO6) and while a profile is running or paused. The
+    safety-link UART data pins (SAFETY_TX_IO/SAFETY_RX_IO) are deliberately
+    NOT denied -- the coordinated two-board GPIO test needs to drive them;
+    see gpio_probe.c. Requires a firmware built with CONFIG_KILNCTL_ENABLE_GPIO_PROBE
     (default off) -- a timeout here most likely means that option is not set.
     """
     mode_map = {

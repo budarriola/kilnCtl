@@ -50,7 +50,9 @@ RP2040 safety processor (`firmware/SaftyFW`).
 - **Board wiring traced from the schematics, not assumed** — `docs/HARDWARE.md`.
   Real discrepancies found and fixed: the safety link's pin assignment was
   swapped in `KilnFW`'s Kconfig defaults relative to the board
-  (`DataToSafty`/GPIO4 is the ESP's TX, `DataFromSafty`/GPIO5 is its RX), both
+  (`DataToSafty`/GPIO5 is the ESP's TX, `DataFromSafty`/GPIO4 is its RX —
+  measured on the bench 2026-08-23 after two schematic traces got it wrong in
+  opposite directions; see `docs/SAFETY_LINK.md` "Trap 1"), both
   isolated data directions are logically inverted by the optocouplers (fixed
   via `uart_set_line_inverse`; the RP2040 side needs no inversion of its own —
   see `docs/SAFETY_LINK.md`), and the isolated `Fault` line is an ESP

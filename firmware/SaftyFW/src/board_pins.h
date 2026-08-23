@@ -19,8 +19,8 @@
 // --- UART1: the opto-isolated link to the ESP (uart_owner / link_task) -----
 // NEVER referenced from safety_core.c or relay_owner.c -- see the CI grep
 // check in tools/check_isolation.ps1.
-#define SAFTYFW_PIN_UART1_TX    4   // GPIO4, PicoTx -> U3 -> ESP RX (GPIO5)
-#define SAFTYFW_PIN_UART1_RX    5   // GPIO5, PicoRx <- U2 <- ESP TX (GPIO4)
+#define SAFTYFW_PIN_UART1_TX    4   // GP4, PicoTx -> R7 -> U3 -> ESP RX (GPIO4)
+#define SAFTYFW_PIN_UART1_RX    5   // GP5, PicoRx <- U2 <- R12 <- ESP TX (GPIO5)
 
 // --- The safety actuator (relay_owner). The ONLY code that may write this. -
 #define SAFTYFW_PIN_RELAY       6   // GPIO6, saftyRelay -> Q4 gate -> K4 coil. High = energized.
