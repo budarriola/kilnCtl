@@ -397,9 +397,35 @@ def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple
     return _run(peer, tcl)
 
 
-def read_registers(peer: str) -> "tuple[bool, str]":
-    """Reads all core registers. Needs the core halted first to read
-    registers, so this halts it as a side effect (``halt; reg; exit``)."""
+_CORE_REGS = (
+    "r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc xpsr msp psp"
+)
+
+
+def read_registers(peer: str, target: "str | None" = None) -> "tuple[bool, str]":
+    """Reads the core registers. Needs the core halted to read registers, so
+    this halts it as a side effect.
+
+    ``target`` selects one core by its OpenOCD target name on a multi-core
+    chip (the RP2040 exposes ``rp2040.core0`` and ``rp2040.core1``); the
+    default reads whichever core the config file makes current, which is
+    core 0 for the Pico.
+
+    Uses ``get_reg`` + ``puts`` rather than OpenOCD's ``reg`` command for the
+    same reason ``read_memory`` avoids ``mdw`` -- see its docstring. ``reg``
+    prints through the interactive command-output channel, which a one-shot
+    ``-c`` batch session with no telnet/gdb client attached never surfaces on
+    stdout: the call returns success with the OpenOCD banner and shutdown
+    chatter as its entire output and not one register value. Confirmed the
+    hard way, 2026-08-23, chasing a Pico core-1 launch failure where the
+    empty result read as "the probe can't see the core" rather than "this
+    function has never worked". ``puts`` is a plain Tcl stdout write.
+    """
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; reg; exit"
+    select = f"targets {target}; " if target else ""
+    dump = (
+        f"foreach {{_kctl_n _kctl_v}} [get_reg {{{_CORE_REGS}}}] "
+        '{puts [format "REG %-5s %s" $_kctl_n $_kctl_v]}'
+    )
+    tcl = f"{_speed_prefix(peer_cfg)}init; {select}halt; {dump}; exit"
     return _run(peer, tcl)

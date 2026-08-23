@@ -890,10 +890,15 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
 
 
 @_tool()
-def debug_read_registers(peer: str) -> str:
-    """Reads all core registers for `peer`. Needs the core halted to read
-    registers, so this halts it as a side effect if it was running."""
-    ok, output = debug_probe.read_registers(peer)
+def debug_read_registers(peer: str, target: str | None = None) -> str:
+    """Reads the core registers for `peer`. Needs the core halted to read
+    registers, so this halts it as a side effect if it was running.
+
+    `target` picks one core by OpenOCD target name on a multi-core chip --
+    "rp2040.core0" / "rp2040.core1" for the Pico. Omit it to read whichever
+    core the config makes current (core 0 on the Pico).
+    """
+    ok, output = debug_probe.read_registers(peer, target=target)
     if ok:
         return output.strip()
     tail = "\n".join(output.strip().splitlines()[-25:])
