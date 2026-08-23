@@ -210,6 +210,55 @@ frame size). Cross-reference against each task's `*_STACK_WORDS` define
 that) rather than guessing from source alone — this is exactly how the real
 `telemetry` overflow above was found and confirmed, not eyeballed.
 
+### 1.4 Two Debug Probes on this bench — which one is which, verified 2026-08-23
+
+**There are now two Raspberry Pi Debug Probes on the bench, and they are the
+same model.** They are **indistinguishable by VID/PID**: both enumerate as
+`VID_2E8A`/`PID_000C`, a USB composite device with `MI_00` = "CMSIS-DAP v2
+Interface" (SWD) and `MI_01` = a USB Serial Device (COM port). The only thing
+that tells them apart is the adapter serial number burned into each unit.
+
+| Probe serial | Wired to | Must never be used for |
+|---|---|---|
+| `E66540F0A36C6E21` | `SaftyFW` safety processor (RP2040) | `SimFW` |
+| `E66540F0A38EA628` | `SimFW` bench fixture Pico (RP2040), along with that Pico's UART | `SaftyFW` |
+
+**Both targets are RP2040.** An OpenOCD session that connects successfully
+proves nothing about which board it reached — the target type cannot tell
+them apart, only the adapter serial can. COM port numbers (currently COM10
+for the safety probe, COM11 for the SimFW probe) are assigned by Windows and
+can change between sessions, so they are **not** a safe identifier either.
+
+`SimFW`'s own USB identity (so a flashed fixture is never confused with a
+probe): running, it is `VID_2E8A`/`PID_F00A` (§7's table in
+`firmware/SimFW/docs/HARDWARE.md`); in BOOTSEL it is `PID_0003` and mounts as
+a drive with `INFO_UF2.TXT` Board-ID `RPI-RP2`. **`PID_000C` is a Debug
+Probe, not `SimFW`.** On 2026-08-23 a flashed board was misidentified on this
+bench because only the VID was checked — `2E8A` covers the Pico, the probe,
+and the bootloader alike, so the VID alone never distinguishes them.
+
+**Tooling limitation, confirmed on this bench 2026-08-23:** the only OpenOCD
+installed here is the ESP32 variant at
+`~/.espressif/tools/openocd-esp32/v0.12.0-esp32-20260424/openocd-esp32/bin/openocd.exe`.
+It ships `interface/cmsis-dap.cfg` and `target/rp2040.cfg`, but it **cannot
+select these probes by serial** — it cannot read their USB string
+descriptors at all. Tried `adapter serial <serial>`, the legacy
+`cmsis_dap_serial <serial>`, and `cmsis-dap backend usb_bulk`; all three fail
+identically:
+```
+Warn : could not read serial number for device 0x2e8a:0x000c: Pipe error
+Error: unable to find a matching CMSIS-DAP device
+```
+
+**Do not work around this by removing the serial filter.** Unfiltered,
+OpenOCD picks a probe on its own and could halt or flash the **safety
+processor** instead of the fixture (or vice versa). The correct responses are
+(a) install an upstream/Raspberry Pi OpenOCD build, or `picotool`, that can
+actually read these probes' serials, or (b) use BOOTSEL drag-and-drop, which
+needs no probe at all — this is the proven working route for `SimFW`,
+verified 2026-08-23: hold BOOTSEL while plugging in, the drive mounts as
+`RPI-RP2`, copy `firmware/SimFW/build/SimFW.uf2` onto it.
+
 ---
 
 ## 2. Known DUT incompleteness — read this before you debug anything

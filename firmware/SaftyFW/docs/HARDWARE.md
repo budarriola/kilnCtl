@@ -458,6 +458,16 @@ firmware. Either presents two interfaces over a single USB cable to the PC:
 Any CMSIS-DAP, J-Link or ST-Link works for the SWD half, but most do not include
 the UART bridge, which is the reason to prefer the Debug Probe.
 
+> **There are now two Raspberry Pi Debug Probes on the bench, and they are
+> electrically indistinguishable** (same VID/PID, `2E8A:000C`) — only the
+> adapter serial number tells the safety processor's probe apart from
+> `SimFW`'s. Grabbing the wrong one and connecting OpenOCD will succeed
+> either way, since both targets are RP2040, so a successful connection
+> proves nothing about which board it reached. See
+> `firmware/SimFW/docs/BENCH_RUNBOOK.md` §1.4 for the two serials, which one
+> is safety-only, and why the OpenOCD build on this bench cannot select
+> between them by serial at all.
+
 ### SWD — 3 wires
 
 The Pico's DEBUG pads are on the module's short edge and are **not part of the

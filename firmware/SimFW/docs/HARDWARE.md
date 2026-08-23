@@ -1003,7 +1003,12 @@ Windows Device Manager directly:
   "spi_test_master (kilnCtl bench)", serial = its own RP2040 flash unique ID
   (pico-sdk's stock `stdio_usb` fills this in automatically, same mechanism).
 - **Safety processor's Debug Probe:** `2E8A:0004` (CDC) / `2E8A:000C`
-  (CMSIS-DAP) — untouched, not this project's firmware.
+  (CMSIS-DAP) — untouched, not this project's firmware. **As of 2026-08-23
+  there are two of these Debug Probes on the bench** (one wired to
+  `SaftyFW`, one to this fixture), both enumerating identically under
+  `2E8A:000C` — VID/PID cannot tell them apart, only the adapter serial can.
+  See `docs/BENCH_RUNBOOK.md` §1.4 for the two serials and the OpenOCD
+  limitation that means the serial filter must never be dropped.
 
 ---
 
