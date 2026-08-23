@@ -19,4 +19,12 @@ typedef unsigned int UBaseType_t;
 #define pdPASS 1
 #define pdFAIL 0
 
+/* 2026-08-22: added for profile_executor.c's/autotune_engine.c's host tests
+ * (test_profile_executor_prestart.c, test_autotune_engine_prestart.c), which
+ * #include those .c files directly and so need ticks_to_s()/ticks_to_ms()'s
+ * configTICK_RATE_HZ to resolve. Value is arbitrary (never actually reached
+ * by those tests -- every call site sits behind the pre-start guard under
+ * test), 1000 just matches this codebase's actual sdkconfig (1ms ticks). */
+#define configTICK_RATE_HZ 1000u
+
 #endif // TEST_STUB_FREERTOS_H

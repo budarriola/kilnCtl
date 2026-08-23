@@ -180,5 +180,32 @@ function extract_js_var_string(src, varName) {
   }
 }
 
+{
+  // watchdog_cfg.h's WATCHDOG_CFG_FIRING_WARNING vs main_page.html's
+  // WATCHDOG_CFG_FIRING_WARNING_JS -- same drift-prevention mechanism as the
+  // OTA_INTERLOCK_NO_SAFETY_WARNING/NO_SAFETY_WARNING pair just above, for
+  // the extra firing confirmation shown when the task-watchdog panic is
+  // disabled (also mirrored, verbatim, in the LCD's ui_page_home.c dialog).
+  const hPath = path.join(dir, 'watchdog_cfg.h');
+  const jsPath = path.join(dir, 'main_page.html');
+  if (fs.existsSync(hPath) && fs.existsSync(jsPath)) {
+    checked++;
+    const cText = extract_c_macro_string(fs.readFileSync(hPath, 'utf8'), 'WATCHDOG_CFG_FIRING_WARNING');
+    const jsText = extract_js_var_string(fs.readFileSync(jsPath, 'utf8'), 'WATCHDOG_CFG_FIRING_WARNING_JS');
+    if (cText === null) {
+      bad++;
+      console.log(`watchdog_cfg.h: could not find WATCHDOG_CFG_FIRING_WARNING macro`);
+    } else if (jsText === null) {
+      bad++;
+      console.log(`main_page.html: could not find WATCHDOG_CFG_FIRING_WARNING_JS variable`);
+    } else if (cText !== jsText) {
+      bad++;
+      console.log(`WATCHDOG_CFG_FIRING_WARNING (watchdog_cfg.h) and WATCHDOG_CFG_FIRING_WARNING_JS (main_page.html) disagree:\n` +
+                  `  C:  ${JSON.stringify(cText)}\n` +
+                  `  JS: ${JSON.stringify(jsText)}`);
+    }
+  }
+}
+
 console.log(`\nchecked ${checked} script/style blocks, ${bad} problem(s)`);
 process.exit(bad ? 1 : 0);

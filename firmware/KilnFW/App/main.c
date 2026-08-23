@@ -18,6 +18,7 @@
 
 #include "board_temps.h"
 #include "boot_guard.h"
+#include "watchdog_cfg.h"
 #include "crash_report.h"
 #include "dashboard_http.h"
 #include "diagnostics_http.h"
@@ -536,6 +537,13 @@ void app_main(void)
     boot_guard_init();
     bool recovery_mode = boot_guard_is_recovery_mode();
     rtc_watchdog_start();
+
+    // watchdog_cfg_init(): the task watchdog itself already exists by this
+    // point (CONFIG_ESP_TASK_WDT_EN=y creates it automatically before
+    // app_main() runs -- no call in this codebase creates it explicitly), so
+    // this is a safe place to re-apply a persisted "panic disabled"
+    // dev-mode setting via esp_task_wdt_reconfigure(). See watchdog_cfg.h.
+    watchdog_cfg_init();
 
     // Runs once the expander is in its safe state (relays off) but before
     // anything else starts talking on the bus, so the results reflect what is

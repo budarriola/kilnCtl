@@ -22,6 +22,21 @@
 
 static const char *TAG = "autotune_engine";
 
+/* Pre-start warnings from the POLLED readers below, throttled to one line
+ * each per boot.
+ *
+ * The action entry points (run/halt/pause/resume) log every time, which is
+ * right -- each is a discrete operator request that got refused, and there
+ * are never many. The readers are different: safety_link.c's poll task calls
+ * profile_executor_get_status() every 500 ms, the dashboard polls it every
+ * 2 s, and every GET /api/status hits it too. In recovery mode, where this
+ * module is deliberately never started, an unthrottled warning there is a
+ * continuous stream that floods the UART log bridge (this board already
+ * drops lines when that queue fills) and buries the recovery-mode banner --
+ * degrading exactly the mode these guards exist to make survivable. Once per
+ * boot says everything a reader needs; the hundredth copy says nothing. */
+#define LOG_PRESTART_ONCE(msg)                                                                       do {                                                                                                  static bool s_warned_once = false;                                                                if (!s_warned_once) {                                                                                 s_warned_once = true;                                                                             ESP_LOGW(TAG, msg " (further occurrences this boot are suppressed)");                         }                                                                                              } while (0)
+
 #define HEATER_WINDOW_MS 60000u
 #define HEATER_MIN_ON_MS 2000u
 #define HEATER_MIN_OFF_MS 2000u
@@ -760,6 +775,23 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * the lock NOT held on failure. */
 static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
 {
+    /* Recovery mode (boot_guard.h) deliberately skips autotune_engine_start()
+     * -- but other code that DOES still run in that mode can still call into
+     * this module's public API. s_at.lock is NULL until
+     * autotune_engine_start() creates it, and taking a NULL FreeRTOS mutex
+     * asserts (the exact failure profile_executor.c hit on the bench --
+     * safety_poll_task -> ... -> xQueueSemaphoreTake() -> "assert failed:
+     * (( pxQueue ))" -> panic; see that file for the full backtrace). Every
+     * public entry point below tests it first and returns a clean
+     * "not running" answer instead of touching s_at at all. This covers both
+     * autotune_engine_run() and autotune_engine_run_relay(), which both
+     * funnel through here before taking the lock themselves. */
+    if (s_at.lock == NULL) {
+        ESP_LOGW(TAG, "autotune begin_run() called before autotune_engine_start() -- refused");
+        if (err_msg) snprintf(err_msg, err_cap, "autotune engine not started");
+        return false;
+    }
+
     /* Direction B of the mutual OTA interlock (see profile_executor_run()'s
      * identical check and ota_http.h's doc comment above
      * ota_http_heat_blocked_by_update()): refuse to start EITHER autotune
@@ -1018,6 +1050,11 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
 
 void autotune_engine_abort(const char *reason)
 {
+    /* See begin_run_locked()'s guard comment above. */
+    if (s_at.lock == NULL) {
+        ESP_LOGW(TAG, "autotune_engine_abort() called before autotune_engine_start() -- refused");
+        return;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     if (!state_is_running(s_at.state)) {
         xSemaphoreGive(s_at.lock);
@@ -1030,6 +1067,11 @@ void autotune_engine_abort(const char *reason)
 
 bool autotune_engine_accept(void)
 {
+    /* See begin_run_locked()'s guard comment above. */
+    if (s_at.lock == NULL) {
+        ESP_LOGW(TAG, "autotune_engine_accept() called before autotune_engine_start() -- refused");
+        return false;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     bool have_result = (s_at.method == AUTOTUNE_METHOD_RELAY) ? s_at.relay.valid : s_at.model.valid;
     if (s_at.state != AUTOTUNE_ENGINE_DONE || !have_result) {
@@ -1101,6 +1143,14 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
 {
     if (!out) return;
     memset(out, 0, sizeof(*out));
+    /* See begin_run_locked()'s guard comment above. The zeroed struct above
+     * already reads as a well-formed IDLE snapshot (AUTOTUNE_ENGINE_IDLE ==
+     * 0), so a caller here needs nothing more than "don't touch the NULL
+     * lock". */
+    if (s_at.lock == NULL) {
+        LOG_PRESTART_ONCE("autotune_engine_get_status() called before autotune_engine_start() -- reporting IDLE");
+        return;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     out->state = s_at.state;
     out->method = s_at.method;
@@ -1132,6 +1182,11 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
 size_t autotune_engine_get_trace(autotune_sample_t *out, size_t start_index, size_t max_entries)
 {
     if (!out || max_entries == 0) return 0;
+    /* See begin_run_locked()'s guard comment above. */
+    if (s_at.lock == NULL) {
+        LOG_PRESTART_ONCE("autotune_engine_get_trace() called before autotune_engine_start() -- refused");
+        return 0;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     if (start_index >= s_at.trace_count) {
         xSemaphoreGive(s_at.lock);
@@ -1157,6 +1212,14 @@ size_t autotune_engine_get_trace(autotune_sample_t *out, size_t start_index, siz
 void autotune_engine_get_coupling_matrix(autotune_coupling_matrix_t *out)
 {
     if (!out) return;
+    /* See begin_run_locked()'s guard comment above. Zeroing here matches
+     * every cell's own "unmeasured" representation (autotune_coupling_cell_t
+     * ::valid == false), same as a never-run engine's real coupling matrix. */
+    if (s_at.lock == NULL) {
+        LOG_PRESTART_ONCE("autotune_engine_get_coupling_matrix() called before autotune_engine_start() -- reporting empty");
+        memset(out, 0, sizeof(*out));
+        return;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     *out = s_at.coupling;
     xSemaphoreGive(s_at.lock);
@@ -1194,6 +1257,10 @@ void autotune_engine_compute_rga(const autotune_coupling_matrix_t *m, autotune_r
 
 bool autotune_engine_is_active(void)
 {
+    /* See begin_run_locked()'s guard comment above. */
+    if (s_at.lock == NULL) {
+        return false;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     bool active = state_is_running(s_at.state);
     xSemaphoreGive(s_at.lock);
@@ -1202,6 +1269,10 @@ bool autotune_engine_is_active(void)
 
 bool autotune_engine_is_active_on_zone(uint8_t zone_index)
 {
+    /* See begin_run_locked()'s guard comment above. */
+    if (s_at.lock == NULL) {
+        return false;
+    }
     xSemaphoreTake(s_at.lock, portMAX_DELAY);
     bool active = state_is_running(s_at.state) && s_at.zone_index == zone_index;
     xSemaphoreGive(s_at.lock);

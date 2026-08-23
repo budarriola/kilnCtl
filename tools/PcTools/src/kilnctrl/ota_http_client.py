@@ -31,6 +31,12 @@ transfer)/section 9.5-era pico staging. Mirrored here, not re-derived:
        string), empty body -> 200 {"ok":true,"status":"rebooting",
        "version_before":"..."}. Explicit revert to the previous OTA image;
        reboots the board shortly after responding.
+  POST /api/ota/esp/recovery_exit, header X-Ota-Mac: <64 hex chars> over
+       context "recovery" (its own context, distinct from "esp"/
+       "esp-rollback"/"pico"), empty body -> 200 {"ok":true,
+       "status":"rebooting"}, or 403 "board is not in recovery mode" if the
+       board is not currently in boot_guard.h's recovery mode. Reboots the
+       board shortly after responding, same as rollback above.
 
 Failure responses (400/403/409/500) are PLAIN TEXT
 (httpd_resp_send_err()/httpd_resp_set_status()+httpd_resp_send()), not JSON --
@@ -125,8 +131,9 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     ota_http.h's doc comment on OTA_HTTP_CONTEXT_ESP_ROLLBACK for why a
     plain-update MAC must not double as a rollback authorization).
     """
-    if context not in ("esp", "pico", "esp-rollback"):
-        raise ValueError(f"context must be 'esp', 'pico', or 'esp-rollback', got {context!r}")
+    if context not in ("esp", "pico", "esp-rollback", "recovery"):
+        raise ValueError(
+            f"context must be 'esp', 'pico', 'esp-rollback', or 'recovery', got {context!r}")
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -352,3 +359,59 @@ def rollback_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_
         return json.loads(body_text)
     except Exception as exc:
         raise OtaHttpError(f"/api/ota/esp/rollback response was not valid JSON: {body_text!r}") from exc
+
+
+def recovery_exit_esp(host: str, ap_password: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/ota/esp/recovery_exit -- ask the board to reboot right now
+    to exit boot_guard.h's recovery mode, rather than waiting for it to
+    self-clear (App/drivers/ota_http.c's ota_recovery_exit_post_handler()).
+
+    Same challenge/MAC dance as rollback_esp(), signed over its own
+    "recovery" context (ota_http.h's OTA_HTTP_CONTEXT_RECOVERY_EXIT) -- NOT
+    interchangeable with an "esp"/"pico"/"esp-rollback" MAC. Refused (403)
+    the same way a wrong password is if auth fails, and ALSO refused (403,
+    "board is not in recovery mode") if the board is not currently in
+    recovery mode -- that check runs AFTER auth on the board side
+    specifically so a caller who never proves they hold the AP password
+    cannot use this call to probe whether the board is in recovery mode (see
+    ota_recovery_exit_post_handler()'s doc comment for the full reasoning).
+
+    On success (200), the board is already rebooting from a short-lived
+    background task -- this call returns as soon as the response arrives,
+    it does NOT wait for the reboot to finish. Returns the parsed JSON body,
+    {"ok": true, "status": "rebooting"}.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    response-parsing are unit-tested with mocked HTTP only (see
+    ota_http_client.py's module doc comment); no ESP32-S3 was available in
+    this environment to actually trigger recovery mode and exit it.
+    """
+    nonce = get_challenge(host, timeout)
+    mac_hex = derive_mac(ap_password, nonce, "recovery").hex()
+
+    req = urllib.request.Request(
+        _url(host, "/api/ota/esp/recovery_exit"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            "X-Ota-Mac": mac_hex,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/esp/recovery_exit refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        raise OtaHttpError(f"/api/ota/esp/recovery_exit unreachable: {detail}") from exc
+
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(
+            f"/api/ota/esp/recovery_exit response was not valid JSON: {body_text!r}") from exc

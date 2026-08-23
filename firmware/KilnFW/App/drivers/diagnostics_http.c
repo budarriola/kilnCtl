@@ -9,7 +9,9 @@
 
 #include "MAX31856.h"
 #include "crash_report.h"
+#include "http_form.h"
 #include "thermo_owner.h"
+#include "watchdog_cfg.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
 
@@ -281,6 +283,69 @@ static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, json, (n > 0) ? (size_t)n : 0);
 }
 
+/* GET /api/watchdog_cfg -- current state of the dev-only task-watchdog-panic
+ * disable switch (watchdog_cfg.h). Also carried in GET /api/status
+ * (dashboard_http.c) for the persistent indicator; this endpoint exists so
+ * the debug page's own control doesn't need to depend on that other page's
+ * response shape. */
+static esp_err_t watchdog_cfg_get_handler(httpd_req_t *req)
+{
+    char json[64];
+    int n = snprintf(json, sizeof(json), "{\"panic_disabled\":%s}",
+                     watchdog_cfg_panic_disabled() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+/* POST /api/watchdog_cfg -- body: disabled=0|1 (form-encoded, same
+ * convention as every other small POST setter in this codebase --
+ * dashboard_http.c's safety_log_level_post_handler() etc.). Persists to NVS
+ * AND applies immediately, no reboot needed -- see
+ * watchdog_cfg_set_panic_disabled(). The debug page itself gates turning
+ * this ON (disabled=1) behind window.kcConfirm before ever sending the
+ * request; this handler does not re-confirm, it just does what it's asked
+ * and logs loudly (watchdog_cfg.c already does that logging). */
+#define WATCHDOG_CFG_BODY_MAX 32
+static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > WATCHDOG_CFG_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+    char body[WATCHDOG_CFG_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char val[4];
+    int val_len = http_form_find_field(body, "disabled", val, sizeof(val));
+    if (val_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"disabled\" field");
+        return ESP_OK;
+    }
+    bool disabled = (val[0] == '1');
+
+    esp_err_t err = watchdog_cfg_set_panic_disabled(disabled, "web debug page");
+    char json[96];
+    int n;
+    if (err == ESP_OK) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"panic_disabled\":%s}", disabled ? "true" : "false");
+    } else {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+#undef WATCHDOG_CFG_BODY_MAX
+
 esp_err_t diagnostics_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -309,6 +374,12 @@ esp_err_t diagnostics_http_start(void)
     };
     static const httpd_uri_t crash_report_clear_uri = {
         .uri = "/api/crash_report/clear", .method = HTTP_POST, .handler = crash_report_clear_post_handler,
+    };
+    static const httpd_uri_t watchdog_cfg_get_uri = {
+        .uri = "/api/watchdog_cfg", .method = HTTP_GET, .handler = watchdog_cfg_get_handler,
+    };
+    static const httpd_uri_t watchdog_cfg_post_uri = {
+        .uri = "/api/watchdog_cfg", .method = HTTP_POST, .handler = watchdog_cfg_post_handler,
     };
 
     esp_err_t err = httpd_register_uri_handler(server, &diagnostics_uri);
@@ -344,6 +415,16 @@ esp_err_t diagnostics_http_start(void)
     err = httpd_register_uri_handler(server, &crash_report_clear_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report/clear) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &watchdog_cfg_get_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /api/watchdog_cfg) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &watchdog_cfg_post_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /api/watchdog_cfg) failed: %s", esp_err_to_name(err));
         return err;
     }
 

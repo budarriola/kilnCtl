@@ -872,8 +872,27 @@
  *                       out-of-range scope byte is rejected with no erase
  *                       and no reboot, same "reject cleanly before touching
  *                       anything" discipline as every other bridge here. */
+/*   0x03 GET_WATCHDOG_PANIC_DISABLED (no args) -- QUERY, see below. Unlike
+ *                       RESTART_UART/FACTORY_RESET this is a query, answered
+ *                       the same way INFO's queries are (a separate DATA
+ *                       reply sent back to the requester) -- see
+ *                       watchdog_cfg.h for what the flag itself means.
+ *   0x04 SET_WATCHDOG_PANIC_DISABLED byte1=disabled(0/1) -- persists AND
+ *                       applies immediately (watchdog_cfg_set_panic_
+ *                       disabled()), no reboot needed either direction. No
+ *                       reply frame -- like RESTART_UART/FACTORY_RESET, the
+ *                       ACK is the only confirmation; poll GET_WATCHDOG_
+ *                       PANIC_DISABLED afterward to read back the applied
+ *                       value.
+ *
+ * GET_WATCHDOG_PANIC_DISABLED response payload:
+ *   byte0 = SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED (0x03)
+ *   byte1 = disabled(0/1) -- watchdog_cfg_panic_disabled()
+ */
 #define SYSTEM_CMD_RESTART_UART  0x01u
 #define SYSTEM_CMD_FACTORY_RESET 0x02u
+#define SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED 0x03u
+#define SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED 0x04u
 
 /* --- INFO (task_id = UART_TASK_ID_INFO) ---
  * Unlike the device tasks, this is a query: the requester's DATA frame

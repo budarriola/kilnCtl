@@ -27,6 +27,7 @@
 #include "sim_backend.h"
 #include "uart_task_ids.h"
 #include "unit_pref.h"
+#include "watchdog_cfg.h"
 #include "wifi_provision_http.h"
 #include "zones_http.h"
 
@@ -523,6 +524,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * field, the same boundary point unit_pref_convert() enforces on the LCD
      * side. */
     APPEND(",\"temp_unit\":\"%s\"", unit_pref_suffix(ds.temp_unit));
+
+    /* watchdog_cfg.h -- a board running with this safety default disabled
+     * must say so somewhere always visible, not only at the moment of
+     * starting a firing (see the extra confirmation in
+     * profile_exec_start_post_handler() below and main_page.html/
+     * ui_page_home.c's own dialogs). */
+    APPEND(",\"watchdog_panic_disabled\":%s", watchdog_cfg_panic_disabled() ? "true" : "false");
 
     APPEND("}");
 
@@ -1344,6 +1352,16 @@ static esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
     if (id_len <= 0 || id < 0 || id > 255) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or invalid");
         return ESP_OK;
+    }
+
+    /* watchdog_cfg.h: a UI-only warning (main_page.html/ui_page_home.c's
+     * extra confirmation dialogs) is bypassable with curl straight to this
+     * endpoint. Do NOT refuse the start -- the owner wants this usable during
+     * development -- but log it loudly server-side so it is never a silent
+     * fact about a running firing. */
+    if (watchdog_cfg_panic_disabled()) {
+        ESP_LOGW(TAG, "profile_exec/start: id=%ld starting with the task-watchdog PANIC DISABLED -- "
+                      "a hung task during this firing will NOT reboot the board", id);
     }
 
     char err_msg[128] = "";

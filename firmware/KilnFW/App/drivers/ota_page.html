@@ -101,6 +101,17 @@ the board, only used locally in this page to sign each request.</p>
     <button id="espRollbackBtn" type="button" class="danger">Roll back ESP to previous image</button>
   </div>
 </div>
+<!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
+     see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
+     authenticated the same way as every other mutating OTA route (challenge
+     + HMAC over its own "recovery" context) -- App/drivers/ota_http.c's
+     ota_recovery_exit_post_handler() doc comment has the full reasoning. -->
+<div id="recoveryExitBox" class="blocker" style="display:none">
+  This board is running in RECOVERY MODE (a recent update did not
+  self-confirm within its window). It will self-clear and boot normally next
+  reboot on its own, but you can reboot right now instead of waiting.
+  <div><button id="recoveryExitBtn" type="button" class="danger">Exit recovery mode &amp; reboot now</button></div>
+</div>
 <div id="espProgressWrap" style="display:none">
   <div class="progress-outer"><div id="espProgressBar" class="progress-inner">0%</div></div>
 </div>
@@ -227,7 +238,7 @@ function hexToBytes(hex) {
  * derive_mac() both implement:
  *   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
  *   mac = HMAC-SHA256(key, nonce_bytes || context)
- * context is exactly "esp", "pico", or "esp-rollback". */
+ * context is exactly "esp", "pico", "esp-rollback", or "recovery". */
 var OTA_KDF_CONTEXT = "kilnctl-ota-v1";
 function deriveMac(apPassword, nonceBytes, context) {
   var key = hmacSha256(strToBytes(apPassword), strToBytes(OTA_KDF_CONTEXT));
@@ -366,6 +377,16 @@ function renderEspInfo(s) {
   } else {
     wrap.style.display = 'none';
   }
+
+  // recovery_mode is decided once at boot (boot_guard_is_recovery_mode())
+  // and cannot flip false->true or back within this same poll session
+  // other than via an actual reboot, but it CAN flip true->false the moment
+  // the board self-clears and the operator reboots it themselves (from this
+  // very button) or via the background self-confirm task -- so this box is
+  // re-hidden every poll, same as espPicker's idle-dependent visibility
+  // above, not just shown once.
+  document.getElementById('recoveryExitBox').style.display = s.recovery_mode ? '' : 'none';
+
   return s.phase;
 }
 
@@ -477,6 +498,31 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
     msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
   }).catch(function (e) {
     msg.textContent = 'Rollback failed: ' + e.message;
+  });
+});
+
+document.getElementById('recoveryExitBtn').addEventListener('click', function () {
+  var msg = document.getElementById('espMsg');
+  var pw = document.getElementById('apPassword').value;
+  if (!pw) { msg.textContent = 'Enter the Wi-Fi AP password first.'; return; }
+  if (!confirm('Reboot the board now to exit recovery mode?')) return;
+  msg.textContent = 'Requesting recovery-mode exit…';
+  getChallenge().then(function (nonce) {
+    var mac = deriveMac(pw, nonce, 'recovery');
+    return window.kcFetchWithSafetyAck('/api/ota/esp/recovery_exit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Ota-Mac': bytesToHex(mac) },
+      body: new Uint8Array(0),
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+      return JSON.parse(text);
+    });
+  }).then(function () {
+    msg.textContent = 'Recovery-mode exit accepted -- board is rebooting now.';
+  }).catch(function (e) {
+    msg.textContent = 'Recovery-mode exit failed: ' + e.message;
   });
 });
 

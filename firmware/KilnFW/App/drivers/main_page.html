@@ -445,6 +445,17 @@ function relayStatusHtml(channel, relaysData) {
 // change rather than waiting up to 2s for the next poll() tick -- see the
 // 'kcunitchange' listener near the bottom of this script block.
 var lastChannelsData = null;
+// watchdog_cfg.h -- updated on every /api/status poll (poll(), below), read
+// by the runBtn click handler's extra firing confirmation.
+var lastWatchdogPanicDisabled = false;
+// watchdog_cfg.h's WATCHDOG_CFG_FIRING_WARNING, verbatim -- App/test/
+// lint_pages.js compares this exact string against the C macro (same
+// mechanism it already uses for OTA_INTERLOCK_NO_SAFETY_WARNING/
+// NO_SAFETY_WARNING in app.js) so the two cannot drift apart.
+var WATCHDOG_CFG_FIRING_WARNING_JS =
+    'The task-watchdog panic is disabled for debugging. If a task hangs, the board will NOT ' +
+    'reboot -- it will sit hung with the relays in whatever state they were last commanded. ' +
+    'Start the firing anyway?';
 function renderChannels(data) {
   lastChannelsData = data;
   const el = document.getElementById('channels');
@@ -1174,6 +1185,11 @@ document.getElementById('runBtn').addEventListener('click', function () {
   if (id === undefined || id === '') return;
   const startName = profileTitleById[id] || ('profile ' + id);
   if (!confirm('Start firing "' + startName + '" now? This energises the heaters and will run for hours.')) return;
+  // Extra confirmation on top of the normal one above, only when the task-
+  // watchdog panic is currently disabled (dev/bench mode).
+  if (lastWatchdogPanicDisabled && !window.kcConfirm(WATCHDOG_CFG_FIRING_WARNING_JS)) {
+    return;
+  }
   fetch('/api/profile_exec/start', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'id=' + id,
@@ -1537,6 +1553,10 @@ function poll() {
     // just to learn the device's unit preference (see app.js's own
     // one-time-fetch fallback for pages that never poll /api/status at all).
     window.kcUnit.updateFromStatus(data);
+    // watchdog_cfg.h: cached here (not re-fetched on Start click) so the
+    // extra firing confirmation below reads the same live snapshot every
+    // other status-derived control on this page already uses.
+    lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
     renderChannels(data);
     renderSafetyTrip(data);
     // Idle dots are a LIVE temperature display (same data as the channel

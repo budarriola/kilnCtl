@@ -31,9 +31,20 @@ static inline SemaphoreHandle_t xSemaphoreCreateMutex(void)
     return (SemaphoreHandle_t)&dummy;
 }
 
+/* 2026-08-22: aborts on a NULL handle, matching real FreeRTOS's
+ * xQueueSemaphoreTake() assert(( pxQueue )) -- the exact panic recovery
+ * mode exposed in profile_executor.c/autotune_engine.c (a public function
+ * called before *_start() has run, taking a mutex that doesn't exist yet).
+ * Host tests proving those modules' pre-start guards
+ * (test_profile_executor_prestart.c, test_autotune_engine_prestart.c) rely
+ * on this to actually fail loudly if a guard is ever removed, rather than
+ * silently no-op'ing through a NULL handle the way this stub used to --
+ * which would have let a missing guard pass host tests while still
+ * panicking real hardware. */
+#include <assert.h>
 static inline BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks)
 {
-    (void)sem;
+    assert(sem != NULL && "xSemaphoreTake on a NULL handle -- would assert/panic on real FreeRTOS");
     (void)ticks;
     return pdFALSE;
 }

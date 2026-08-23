@@ -165,6 +165,16 @@ ambient reading (board_temps.c), a different number from the kiln-process
 temperature shown on the dashboard -- this is board/enclosure health, not
 firing progress.</p>
 
+<h2>Task-watchdog panic (dev only)</h2>
+<div class="card">
+  <div class="row"><span class="label">Panic on hung task</span><span class="value" id="wdPanicState">--</span></div>
+  <div class="row"><span class="label"></span><span class="value"><button id="wdPanicToggleBtn">--</button></span></div>
+</div>
+<p class="note">Disabling this stops a hung task from rebooting the board (dev/bench debugging only,
+e.g. sitting at a breakpoint) -- it does NOT stop the hang itself. A disabled panic is written to
+flash and survives a reboot; the setting is shown here and in the dashboard status so it is never
+silently on. Starting a firing while this is disabled requires an extra confirmation.</p>
+
 <h2>Subsystems &amp; storage</h2>
 <div class="card">
   <div class="row"><span class="label">I/O board</span><span class="value" id="ioReady">--</span></div>
@@ -305,6 +315,43 @@ thermocouple fault registers) lives on their own pages:</p>
     document.getElementById('cjRows').innerHTML = rows || '<div class="row"><span class="label">MAX31856 channels</span><span class="value">n/a</span></div>';
   }
 
+  // watchdog_cfg.h -- own small poll/render loop, same pattern as pollCrash()
+  // below: independent of the main status/board_temps Promise.all() so a
+  // slow/failed fetch here never delays that poll's stale-banner logic.
+  function renderWatchdogCfg(disabled) {
+    var stateEl = document.getElementById('wdPanicState');
+    var btn = document.getElementById('wdPanicToggleBtn');
+    if (disabled) {
+      stateEl.textContent = 'DISABLED -- a hung task will NOT reboot the board';
+      stateEl.style.color = 'var(--warn)';
+      btn.textContent = 'Re-enable panic';
+    } else {
+      stateEl.textContent = 'enabled (default)';
+      stateEl.style.color = '';
+      btn.textContent = 'Disable panic (dev only)';
+    }
+    btn.onclick = function () {
+      var nextDisabled = !disabled;
+      if (nextDisabled && !window.kcConfirm(
+          'Disable the task-watchdog panic? If a task hangs, the board will NOT reboot -- it will ' +
+          'sit hung with the relays in whatever state they were last commanded, instead of resetting. ' +
+          'This is for development/bench debugging only. Continue?')) {
+        return;
+      }
+      fetch('/api/watchdog_cfg', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'disabled=' + (nextDisabled ? '1' : '0'),
+      }).then(function (r) { return r.json(); }).then(function (result) {
+        renderWatchdogCfg(!!result.panic_disabled);
+      }).catch(function () {});
+    };
+  }
+  function pollWatchdogCfg() {
+    return fetch('/api/watchdog_cfg').then(function (r) { return r.json(); }).then(function (j) {
+      renderWatchdogCfg(!!j.panic_disabled);
+    }).catch(function () {});
+  }
+
   function setStale(staleSeconds) {
     var banner = document.getElementById('staleBanner');
     if (staleSeconds == null) {
@@ -421,6 +468,7 @@ thermocouple fault registers) lives on their own pages:</p>
   poll();
   schedule();
   pollCrash();
+  pollWatchdogCfg();
 
   // UI_PLAN.md item 7: re-render the two board-health temperatures in the
   // new unit immediately on toggle, from the cached last-good payload.

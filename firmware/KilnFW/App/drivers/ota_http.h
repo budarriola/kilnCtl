@@ -65,9 +65,9 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
                           SafetyLinkClass *safety_or_null);
 
 // The context a client authenticates for -- CommonFW/docs/UPDATE_PROTOCOL.md
-// section 2 step 2's literal "esp"/"pico"/"esp-rollback" HMAC context
-// string, and also which of the three independent per-endpoint lockout
-// states applies.
+// section 2 step 2's literal "esp"/"pico"/"esp-rollback"/"recovery" HMAC
+// context string, and also which of the four independent per-endpoint
+// lockout states applies.
 //
 // OTA_HTTP_CONTEXT_ESP_ROLLBACK is its own context, NOT a reuse of
 // OTA_HTTP_CONTEXT_ESP, even though both ultimately act on the ESP: a
@@ -79,10 +79,23 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 // keeps a future client bug (or a proxy that reorders/misroutes requests)
 // from a signed-for-update MAC ever being accepted as a signed-for-rollback
 // one, or vice versa.
+//
+// OTA_HTTP_CONTEXT_RECOVERY_EXIT is the same story for POST
+// /api/ota/esp/recovery_exit: that route used to be deliberately
+// unauthenticated (see the doc comment that used to sit above
+// ota_recovery_exit_post_handler() in ota_http.c -- superseded, the owner
+// reviewed it and chose authentication like every other mutating OTA route).
+// It gets its own context string ("recovery") and its own lockout state for
+// the same reason rollback did: forcing a reboot out of recovery mode is a
+// different action from pushing an image or rolling one back, so a MAC
+// signed for one must not double as authorization for another, and repeated
+// wrong-password guesses against this endpoint must not be able to also burn
+// through (or benefit from) the esp/pico/esp-rollback lockout budgets.
 typedef enum {
     OTA_HTTP_CONTEXT_ESP = 0,
     OTA_HTTP_CONTEXT_PICO,
     OTA_HTTP_CONTEXT_ESP_ROLLBACK,
+    OTA_HTTP_CONTEXT_RECOVERY_EXIT,
 } ota_http_context_t;
 
 typedef enum {

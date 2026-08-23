@@ -46,4 +46,12 @@ static inline void vTaskDelete(TaskHandle_t task) { (void)task; }
  * every real caller before the sender task exists. */
 static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)1; }
 
+/* 2026-08-22: added for profile_executor.c's/autotune_engine.c's host tests,
+ * which #include those .c files directly (same convention as the functions
+ * above). Neither is ever actually reached by those tests -- every call site
+ * sits behind the pre-start guard under test -- these exist purely so the
+ * translation unit compiles and links. */
+static inline TickType_t xTaskGetTickCount(void) { return 0; }
+static inline void vTaskDelay(TickType_t ticks) { (void)ticks; }
+
 #endif // TEST_STUB_TASK_H

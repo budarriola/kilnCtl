@@ -12,6 +12,7 @@
 #include "kiln_io.h"
 #include "kiln_ui.h"
 #include "ui_confirm.h"
+#include "watchdog_cfg.h"
 #include "ui_page_config.h"
 #include "safety_trip_words.h"
 #include "profile_executor.h"
@@ -400,9 +401,39 @@ static void do_stop(void)
  * implementation). See ui_confirm.h for the FLEX TRAP / cancel-safe-by-
  * default rationale that used to live in this comment. */
 
+/* Second dialog's Yes -- the operator has now read the watchdog-panic-
+ * disabled warning too. Same chaining pattern as ui_page_kiln_cfg_setup.c's
+ * apply_no_safety_ack_cb()/apply_confirm_yes_cb() pair for its own
+ * no-safety-processor warning. */
+static void confirm_start_watchdog_ack_cb(void *user_data)
+{
+    (void)user_data;
+    do_start();
+}
+
 static void confirm_start_yes_cb(void *user_data)
 {
     (void)user_data;
+
+    /* watchdog_cfg.h: a second, EXTRA confirmation on top of the one the
+     * operator just answered, only when the task-watchdog panic is
+     * currently disabled (dev/bench mode) -- same text on this dialog, the
+     * web start flow (main_page.html), and watchdog_cfg.h's own macro
+     * definition; App/test/lint_pages.js pins the web copy against the C
+     * macro so they cannot drift. */
+    if (watchdog_cfg_panic_disabled()) {
+        ui_confirm_params_t warn = {
+            .title = "Task-Watchdog Panic Disabled",
+            .body = WATCHDOG_CFG_FIRING_WARNING,
+            .confirm_label = "Start Anyway",
+            .confirm_color = UI_THEME_ACCENT_5,
+            .on_confirm = confirm_start_watchdog_ack_cb,
+            .user_data = NULL,
+        };
+        ui_confirm_show(&warn);
+        return;
+    }
+
     do_start();
 }
 

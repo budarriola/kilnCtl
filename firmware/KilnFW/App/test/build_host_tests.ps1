@@ -51,6 +51,7 @@ $sources = @(
     (Join-Path $testDir "test_rules_eval.c"),
     (Join-Path $testDir "test_boot_guard.c"),
     (Join-Path $testDir "test_crash_report.c"),
+    (Join-Path $testDir "test_watchdog_cfg.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
@@ -124,4 +125,82 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $exe3
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+# ---- test_profile_executor_prestart.c: its own FOURTH, separate executable-
+# Same reason as test_zones_http.c above: it #includes profile_executor.c
+# directly (recovery mode's "called before profile_executor_start() has run"
+# guard has no other seam to test through) and so defines its own fake
+# bodies for zones_config_*()/profiles_http_get()/etc, which would
+# multiply-define against other host tests' fakes of the same names if
+# linked into the main executable. pid.c/thermal_guard.c/heater_output.c/
+# thermo_combine.c are linked in for real (already host-tested elsewhere)
+# rather than faked, since profile_executor.c's own logic depends on them
+# compiling correctly even though these tests never reach past the guard.
+$exe4 = Join-Path $outDir "kilnctl_host_tests_profile_executor.exe"
+$peObjDir = Join-Path $outDir "pe"
+New-Item -ItemType Directory -Force -Path $peObjDir | Out-Null
+$cmd4 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$peObjDir\\`" /Fe:`"$exe4`" " +
+        "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" " +
+        "`"$(Join-Path $driversDir 'pid.c')`" `"$(Join-Path $driversDir 'thermal_guard.c')`" " +
+        "`"$(Join-Path $driversDir 'heater_output.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`""
+
+cmd.exe /c $cmd4
+if ($LASTEXITCODE -ne 0) {
+    throw "profile_executor prestart build failed"
+}
+
+& $exe4
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+# ---- test_autotune_engine_prestart.c: its own FIFTH, separate executable --
+# Same reasoning as test_profile_executor_prestart.c immediately above, for
+# autotune_engine.c's identical pre-start guard (begin_run_locked()'s
+# s_at.lock == NULL check). pid_autotune.c is linked in for real (already
+# host-tested) rather than faked, same reasoning as profile_executor's pid.c.
+$exe5 = Join-Path $outDir "kilnctl_host_tests_autotune_engine.exe"
+$aeObjDir = Join-Path $outDir "ae"
+New-Item -ItemType Directory -Force -Path $aeObjDir | Out-Null
+$cmd5 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$aeObjDir\\`" /Fe:`"$exe5`" " +
+        "`"$(Join-Path $testDir 'test_autotune_engine_prestart.c')`" " +
+        "`"$(Join-Path $driversDir 'thermal_guard.c')`" `"$(Join-Path $driversDir 'heater_output.c')`" " +
+        "`"$(Join-Path $driversDir 'thermo_combine.c')`" `"$(Join-Path $driversDir 'pid_autotune.c')`""
+
+cmd.exe /c $cmd5
+if ($LASTEXITCODE -ne 0) {
+    throw "autotune_engine prestart build failed"
+}
+
+& $exe5
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+# ---- test_rules_task_prestart.c: its own SIXTH, separate executable -------
+# rules_task.c turns out to need no pre-start guard at all -- it holds no
+# FreeRTOS mutex, and rules_task_get_status() only ever copies the
+# zero-initialized static status struct (see this file's header comment).
+# This #includes rules_task.c directly to prove that claim against the real
+# code rather than a hand-rolled copy, same convention as the two prestart
+# executables above; own executable for the same fake-body collision reason.
+$exe6 = Join-Path $outDir "kilnctl_host_tests_rules_task.exe"
+$rtObjDir = Join-Path $outDir "rt"
+New-Item -ItemType Directory -Force -Path $rtObjDir | Out-Null
+$cmd6 = "call `"$vcvars`" x64 >nul && cl /nologo /W3 /EHsc /std:c11 /I`"$stubDir`" /I`"$commonInc`" " +
+        "/Fo:`"$rtObjDir\\`" /Fe:`"$exe6`" " +
+        "`"$(Join-Path $testDir 'test_rules_task_prestart.c')`" " +
+        "`"$(Join-Path $driversDir 'rules_eval.c')`" `"$(Join-Path $driversDir 'thermo_combine.c')`""
+
+cmd.exe /c $cmd6
+if ($LASTEXITCODE -ne 0) {
+    throw "rules_task prestart build failed"
+}
+
+& $exe6
 exit $LASTEXITCODE

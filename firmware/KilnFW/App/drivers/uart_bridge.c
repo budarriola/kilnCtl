@@ -10,6 +10,7 @@
 
 #include "freertos/idf_additions.h"
 #include "factory_reset.h"
+#include "watchdog_cfg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -1780,6 +1781,27 @@ static void system_bridge_task(void *arg)
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u requested by host -- erasing and rebooting",
                              msg.payload[1]);
                 }
+                break;
+            }
+            case SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED: {
+                /* Query -- reply directly to whoever asked, same convention
+                 * as INFO's queries (info_bridge_task() above). */
+                uint8_t reply[2];
+                reply[0] = SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED;
+                reply[1] = watchdog_cfg_panic_disabled() ? 1 : 0;
+                esp_err_t err = uart_protocol_send(ctx->proto, msg.device, msg.task_id, UART_TASK_ID_SYSTEM,
+                                                   reply, sizeof(reply), BRIDGE_REPLY_ACK_TIMEOUT_MS);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "system: GET_WATCHDOG_PANIC_DISABLED reply failed: %s", esp_err_to_name(err));
+                }
+                break;
+            }
+            case SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED: {
+                if (!bridge_args_ok("system", &msg, 2)) {
+                    break;
+                }
+                bool disabled = msg.payload[1] != 0;
+                watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
                 break;
             }
             default:

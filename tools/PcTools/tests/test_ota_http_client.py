@@ -358,5 +358,124 @@ class DeriveMacRollbackContextTest(unittest.TestCase):
         self.assertEqual(len({mac_esp, mac_pico, mac_rollback}), 3)
 
 
+class DeriveMacRecoveryContextTest(unittest.TestCase):
+    def test_matches_manual_double_hmac(self):
+        nonce = bytes(range(16))
+        expected_key = hmac.new(b"hunter2", b"kilnctl-ota-v1", hashlib.sha256).digest()
+        expected = hmac.new(expected_key, nonce + b"recovery", hashlib.sha256).digest()
+        self.assertEqual(ota.derive_mac("hunter2", nonce, "recovery"), expected)
+
+    def test_all_four_contexts_diverge(self):
+        # The whole point of a per-action HMAC context is that a MAC
+        # computed for one action must never be accepted for another --
+        # this is what would silently break if recovery_exit's handler ever
+        # reused (say) the "esp" context string instead of its own
+        # "recovery" one. len(set(...)) == 4 fails immediately if any two
+        # collide.
+        nonce = bytes(range(16))
+        mac_esp = ota.derive_mac("pw", nonce, "esp")
+        mac_pico = ota.derive_mac("pw", nonce, "pico")
+        mac_rollback = ota.derive_mac("pw", nonce, "esp-rollback")
+        mac_recovery = ota.derive_mac("pw", nonce, "recovery")
+        self.assertEqual(len({mac_esp, mac_pico, mac_rollback, mac_recovery}), 4)
+
+    def test_recovery_mac_not_accepted_as_rollback_mac(self):
+        """The specific negative case ROADMAP/CLAUDE.md's 'prove it can
+        fail' rule asks for: a MAC signed over 'recovery' must not equal one
+        signed over 'esp-rollback' for the same nonce/password -- if
+        recovery_exit's context string were ever accidentally set to
+        'esp-rollback' (reusing OTA_HTTP_CONTEXT_ESP_ROLLBACK instead of its
+        own context), this assertion is what would catch it."""
+        nonce = bytes(range(16))
+        mac_recovery = ota.derive_mac("pw", nonce, "recovery")
+        mac_rollback = ota.derive_mac("pw", nonce, "esp-rollback")
+        self.assertNotEqual(mac_recovery, mac_rollback)
+
+    def test_rejects_old_three_context_only_error_message(self):
+        with self.assertRaises(ValueError):
+            ota.derive_mac("pw", bytes(16), "not-a-real-context")
+
+
+class RecoveryExitEspTest(unittest.TestCase):
+    def _mock_challenge_then(self, post_response=None, post_side_effect=None):
+        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            if post_side_effect is not None:
+                raise post_side_effect
+            return post_response
+
+        return fake_urlopen, calls
+
+    def test_sends_recovery_context_mac_and_empty_body(self):
+        ok_body = json.dumps({"ok": True, "status": "rebooting"}).encode()
+        challenge_body = json.dumps({"nonce": "33" * 16}).encode()
+
+        calls = {"n": 0}
+        captured_req = {}
+
+        def wrapper(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_response(challenge_body)
+            captured_req["req"] = req
+            return _fake_response(ok_body)
+
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=wrapper):
+            result = ota.recovery_exit_esp("kiln.local", "hunter2")
+
+        self.assertTrue(result["ok"])
+        req = captured_req["req"]
+        self.assertEqual(req.full_url, "http://kiln.local/api/ota/esp/recovery_exit")
+        self.assertEqual(req.data, b"")
+        mac_header = req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac")
+        self.assertIsNotNone(mac_header)
+        self.assertEqual(len(mac_header), 64)
+        # Must be signed over the "recovery" context, NOT "esp"/"esp-rollback"/
+        # "pico" -- a MAC for any of those other actions must not double as
+        # authorization for recovery-mode exit.
+        expected = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "recovery").hex()
+        self.assertEqual(mac_header, expected)
+        not_rollback_context = ota.derive_mac("hunter2", bytes.fromhex("33" * 16), "esp-rollback").hex()
+        self.assertNotEqual(mac_header, not_rollback_context)
+
+    def test_surfaces_403_not_in_recovery_mode(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp/recovery_exit", 403, "Forbidden", hdrs=None,
+            fp=io.BytesIO(b"board is not in recovery mode"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.recovery_exit_esp("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertIn("board is not in recovery mode", ctx.exception.detail)
+
+    def test_surfaces_403_wrong_password(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/ota/esp/recovery_exit", 403, "Forbidden", hdrs=None,
+            fp=io.BytesIO(b"wrong password"))
+        fake_urlopen, _ = self._mock_challenge_then(post_side_effect=err)
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.recovery_exit_esp("kiln.local", "hunter2")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_rejects_non_json_response(self):
+        fake_urlopen, _ = self._mock_challenge_then(_fake_response(b"not json"))
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.recovery_exit_esp("kiln.local", "hunter2")
+
+    def test_unreachable_host_raises(self):
+        err = urllib.error.URLError("no route to host")
+        with unittest.mock.patch.object(ota.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError):
+                ota.recovery_exit_esp("192.0.2.1", "hunter2")
+
+
 if __name__ == "__main__":
     unittest.main()

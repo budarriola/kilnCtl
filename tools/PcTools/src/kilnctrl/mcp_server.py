@@ -2102,6 +2102,49 @@ def ota_rollback_esp(password: str, host: Optional[str] = None) -> str:
 
 
 @_tool()
+def ota_recovery_exit_esp(password: str, host: Optional[str] = None) -> str:
+    """Ask the ESP32-S3 to reboot right now to exit boot_guard.h's recovery
+    mode -- POST /api/ota/esp/recovery_exit.
+
+    Recovery mode means a recent update did not self-confirm within its
+    window; the board already self-clears the counter that put it there
+    within OTA_CONFIRM_POLL_MS of any boot (recovery-mode boots included),
+    so the NEXT reboot lands back in normal mode on its own. This tool is
+    the impatient/uncertain case: reboot right now instead of waiting for
+    that background self-clear (or a watchdog) to do it.
+
+    `password`: same AP-password-derived HMAC scheme as ota_update_esp()/
+    ota_rollback_esp() -- but signed over yet another distinct context
+    ("recovery", not "esp" or "esp-rollback"), so a MAC captured for one
+    action cannot be reused to authorize this one. Refused (403) on a wrong
+    password/lockout, same as the other OTA routes, and ALSO refused (403,
+    "board is not in recovery mode") if the board is not currently in
+    recovery mode -- that check runs after auth specifically so a caller
+    who never proves they hold the AP password cannot use this to probe
+    whether the board is in recovery mode.
+
+    On success, the board is already rebooting from a short-lived
+    background task -- this call returns as soon as the response arrives,
+    it does NOT wait for the reboot to finish.
+
+    NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/HMAC/
+    response-parsing are unit-tested with mocked HTTP only; no ESP32-S3 was
+    available in this environment to actually trigger recovery mode and
+    exit it.
+    """
+    resolved = _ota_resolve_host(host)
+    try:
+        body = ota_http.recovery_exit_esp(resolved, password)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved})"
+    if not body.get("ok"):
+        return f"error: board reported failure: {body} (host={resolved})"
+    return (f"ok - recovery-mode exit accepted (host={resolved}) -- "
+            f"board is rebooting now")
+
+
+@_tool()
 def ota_update_pico(image_path: str, password: str, host: Optional[str] = None) -> str:
     """Push a new RP2040 safety-processor firmware image -- POST
     /api/ota/pico. Stages `image_path` (a raw SaftyFW .bin) into the ESP's

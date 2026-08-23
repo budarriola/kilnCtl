@@ -25,6 +25,21 @@
 
 static const char *TAG = "profile_executor";
 
+/* Pre-start warnings from the POLLED readers below, throttled to one line
+ * each per boot.
+ *
+ * The action entry points (run/halt/pause/resume) log every time, which is
+ * right -- each is a discrete operator request that got refused, and there
+ * are never many. The readers are different: safety_link.c's poll task calls
+ * profile_executor_get_status() every 500 ms, the dashboard polls it every
+ * 2 s, and every GET /api/status hits it too. In recovery mode, where this
+ * module is deliberately never started, an unthrottled warning there is a
+ * continuous stream that floods the UART log bridge (this board already
+ * drops lines when that queue fills) and buries the recovery-mode banner --
+ * degrading exactly the mode these guards exist to make survivable. Once per
+ * boot says everything a reader needs; the hundredth copy says nothing. */
+#define LOG_PRESTART_ONCE(msg)                                                                       do {                                                                                                  static bool s_warned_once = false;                                                                if (!s_warned_once) {                                                                                 s_warned_once = true;                                                                             ESP_LOGW(TAG, msg " (further occurrences this boot are suppressed)");                         }                                                                                              } while (0)
+
 /* Time-proportioning window defaults (TODO.md 6A.1), used when a zone
  * hasn't configured its own via zones_config_get_heater_cfg() (6A.9). 60s
  * matches the doc's "mechanical relay" default (the open question about SSR
@@ -1822,6 +1837,22 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
 
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
+    /* Recovery mode (boot_guard.h) deliberately skips profile_executor_start()
+     * so it can bring the board up with just Wi-Fi and the OTA HTTP routes --
+     * but other code that DOES still run in that mode (safety_link.c's poll
+     * task among others, found on the bench: safety_poll_task ->
+     * safety_build_and_send_context() -> profile_executor_get_status() ->
+     * xQueueSemaphoreTake() -> "assert failed: (( pxQueue ))" -> panic) can
+     * still call into this module's public API. s_exec.lock is NULL until
+     * profile_executor_start() creates it, and taking a NULL FreeRTOS mutex
+     * asserts. Every public entry point below tests it first and returns a
+     * clean "not running" answer instead of touching s_exec at all. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_run() called before profile_executor_start() -- refused");
+        if (err_msg) snprintf(err_msg, err_cap, "profile executor not started");
+        return false;
+    }
+
     profile_t p;
     if (!profiles_http_get(profile_id, &p)) {
         if (err_msg) snprintf(err_msg, err_cap, "no such profile");
@@ -2188,6 +2219,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
 void profile_executor_halt(void)
 {
+    /* See profile_executor_run()'s guard comment above -- s_exec.lock is
+     * NULL until profile_executor_start() runs. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_halt() called before profile_executor_start() -- refused");
+        return;
+    }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     if (s_exec.state == PROFILE_EXEC_IDLE) {
         xSemaphoreGive(s_exec.lock);
@@ -2238,6 +2275,11 @@ void profile_executor_halt(void)
 
 bool profile_executor_pause(void)
 {
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
+        return false;
+    }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     if (s_exec.state != PROFILE_EXEC_RUNNING) {
         xSemaphoreGive(s_exec.lock);
@@ -2266,6 +2308,11 @@ bool profile_executor_pause(void)
 
 bool profile_executor_resume(void)
 {
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        ESP_LOGW(TAG, "profile_executor_resume() called before profile_executor_start() -- refused");
+        return false;
+    }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     if (s_exec.state != PROFILE_EXEC_PAUSED) {
         xSemaphoreGive(s_exec.lock);
@@ -2317,6 +2364,17 @@ void profile_executor_get_status(profile_exec_status_t *out)
         return;
     }
     memset(out, 0, sizeof(*out));
+
+    /* See profile_executor_run()'s guard comment above -- this is the exact
+     * call chain (safety_poll_task -> safety_build_and_send_context() ->
+     * profile_executor_get_status()) that panicked on the bench. The zeroed
+     * struct above already reads as a well-formed IDLE snapshot
+     * (PROFILE_EXEC_IDLE == 0), so a caller here needs nothing more than
+     * "don't touch the NULL lock". */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_status() called before profile_executor_start() -- reporting IDLE");
+        return;
+    }
 
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     out->state = s_exec.state;
@@ -2380,6 +2438,11 @@ bool profile_executor_zone_is_active(uint8_t zone_index)
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_zone_is_active() called before profile_executor_start() -- refused");
+        return false;
+    }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     bool active = (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) &&
                   (s_exec.profile.zone_mask & (1u << zone_index)) != 0;
@@ -2389,6 +2452,11 @@ bool profile_executor_zone_is_active(uint8_t zone_index)
 
 size_t profile_executor_get_history_count(void)
 {
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_history_count() called before profile_executor_start() -- refused");
+        return 0;
+    }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     size_t count = s_exec.history_count;
     xSemaphoreGive(s_exec.lock);
@@ -2398,6 +2466,11 @@ size_t profile_executor_get_history_count(void)
 size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_index, size_t max_entries)
 {
     if (!out || max_entries == 0) {
+        return 0;
+    }
+    /* See profile_executor_run()'s guard comment above. */
+    if (s_exec.lock == NULL) {
+        LOG_PRESTART_ONCE("profile_executor_get_history() called before profile_executor_start() -- refused");
         return 0;
     }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);

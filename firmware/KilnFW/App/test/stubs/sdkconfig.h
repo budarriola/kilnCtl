@@ -17,4 +17,13 @@
 #define CONFIG_KILNCTL_WIFI_AP_CHANNEL 6
 #define CONFIG_KILNCTL_WIFI_STA_CONNECT_TIMEOUT_MS 15000
 
+/* Actually expanded by watchdog_cfg.c's build_twdt_config() -- values match
+ * sdkconfig's real CONFIG_ESP_TASK_WDT_TIMEOUT_S=5 /
+ * CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1=y so the host test's expected
+ * numbers double as a sanity check that this stub hasn't drifted from the
+ * real build's Kconfig. */
+#define CONFIG_ESP_TASK_WDT_TIMEOUT_S 5
+#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 1
+#define CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 1
+
 #endif // TEST_STUB_SDKCONFIG_H

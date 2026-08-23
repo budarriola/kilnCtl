@@ -110,6 +110,9 @@ static ota_auth_lockout_state_t s_lockout_pico;
 // is kept entirely separate from the plain-esp-update context, including
 // its own 3-strikes counter.
 static ota_auth_lockout_state_t s_lockout_esp_rollback;
+// Same reasoning again for the recovery-exit route -- see ota_http.h's doc
+// comment on OTA_HTTP_CONTEXT_RECOVERY_EXIT.
+static ota_auth_lockout_state_t s_lockout_recovery_exit;
 
 // The hardware pointers main.c hands to ota_http_start(), same pattern (and
 // same NULL-tolerant meaning) as dashboard_http.c's s_dash struct. Read-only
@@ -283,10 +286,11 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
     const char *ctx_str;
     ota_auth_lockout_state_t *lockout;
     switch (ctx) {
-        case OTA_HTTP_CONTEXT_ESP:          ctx_str = "esp";          lockout = &s_lockout_esp;          break;
-        case OTA_HTTP_CONTEXT_ESP_ROLLBACK: ctx_str = "esp-rollback"; lockout = &s_lockout_esp_rollback; break;
+        case OTA_HTTP_CONTEXT_ESP:            ctx_str = "esp";          lockout = &s_lockout_esp;          break;
+        case OTA_HTTP_CONTEXT_ESP_ROLLBACK:   ctx_str = "esp-rollback"; lockout = &s_lockout_esp_rollback; break;
+        case OTA_HTTP_CONTEXT_RECOVERY_EXIT:  ctx_str = "recovery";     lockout = &s_lockout_recovery_exit; break;
         case OTA_HTTP_CONTEXT_PICO:
-        default:                            ctx_str = "pico";         lockout = &s_lockout_pico;         break;
+        default:                              ctx_str = "pico";         lockout = &s_lockout_pico;         break;
     }
     const char *ip = client_ip ? client_ip : "unknown";
 
@@ -336,7 +340,10 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
                                key);
 
     // expected_mac = HMAC-SHA256(key, nonce || context)
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 12]; // "esp" (3), "pico" (4), or "esp-rollback" (12) -- 12 covers all three
+    uint8_t msg[OTA_AUTH_NONCE_LEN + 12]; // "esp" (3), "pico" (4), "esp-rollback" (12), or "recovery"
+                                           // (8) -- 12 covers all four context strings currently in
+                                           // use; if a future context string exceeds 12 chars, widen
+                                           // this buffer AND update this comment
     size_t ctx_len = strlen(ctx_str);
     memcpy(msg, nonce_copy, sizeof(nonce_copy));
     memcpy(msg + sizeof(nonce_copy), ctx_str, ctx_len);
@@ -1526,22 +1533,32 @@ static void ota_rollback_reboot_task(void *arg)
 // instead of waiting for that to happen (or for the RTC/task watchdog to do
 // it for you) and land back in normal mode this run.
 //
-// Deliberately UNAUTHENTICATED, unlike every other mutating route in this
-// file (esp/pico update, esp rollback all require ota_http_verify_request()).
-// Two reasons: (1) it does nothing an attacker could not already do just by
-// power-cycling the board or waiting out any of the three independent
-// watchdog paths that would reboot it anyway, and (2) gating it behind the
-// same challenge/HMAC dance as a firmware push would mean adding a FOURTH
-// ota_http_context_t (its own HMAC context string, its own lockout state,
-// its own client-side signing support in ota_http_client.py/mcp_server.py)
-// for a button whose entire job is "reboot this board" -- disproportionate
-// for what it does. FLAGGED FOR OWNER REVIEW: if this board is ever
-// reachable from an untrusted network, an unauthenticated forced reboot is a
-// nuisance-DoS vector worth reconsidering (though, same as the rollback
-// note in ota_esp_rollback_post_handler() below, an attacker on the LAN
-// already has other ways to disrupt this board). Refuses (409) outside
-// recovery mode specifically so this is not just a general-purpose
-// unauthenticated reboot button on a normal boot.
+// AUTHENTICATED, same as every other mutating route in this file (esp/pico
+// update, esp rollback) -- this used to be the one deliberately
+// unauthenticated exception (the reasoning was "it does nothing an attacker
+// could not already do by power-cycling the board", plus the cost of adding
+// a fourth ota_http_context_t for a button whose only job is "reboot this
+// board"). The owner reviewed that tradeoff and chose authentication: a
+// forced, unauthenticated reboot reachable from anywhere on the LAN is a
+// nuisance-DoS vector worth closing even though the same effect is
+// physically achievable by other means, and OTA_HTTP_CONTEXT_RECOVERY_EXIT
+// (its own HMAC context string "recovery", its own lockout state, its own
+// client-side signing support in ota_page.html/ota_http_client.py/
+// mcp_server.py) turned out not to be disproportionate once the other three
+// contexts already existed as a template to follow. See ota_http.h's doc
+// comment on OTA_HTTP_CONTEXT_RECOVERY_EXIT for why it is its own context
+// rather than reusing OTA_HTTP_CONTEXT_ESP.
+//
+// Auth runs BEFORE the recovery-mode check, not after: ota_interlock.h's doc
+// comment on why POST /api/ota/esp's real ordering is (once it exists) "auth
+// first, then interlocks" applies here too -- letting an unauthenticated
+// caller learn whether this board is currently in recovery mode (via the 403
+// "board is not in recovery mode" vs. proceeding past that check) is the
+// same class of live-state leak as revealing a zone temperature to someone
+// who hasn't proven they hold the AP password. Checking auth first means a
+// caller who fails the challenge/HMAC/lockout gate learns nothing about
+// recovery-mode state at all -- same verify_result_str() 403 shape as every
+// other route in this file, before any board-state check runs.
 static void ota_recovery_exit_reboot_task(void *arg)
 {
     (void)arg;
@@ -1552,6 +1569,46 @@ static void ota_recovery_exit_reboot_task(void *arg)
 
 static esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 {
+    char ip[46];
+    get_client_ip(req, ip, sizeof(ip));
+
+    // 1. X-Ota-Mac header present and exactly 64 hex chars -- same order as
+    // every other mutating handler in this file, before anything else is
+    // checked.
+    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, OTA_MAC_HEADER);
+    if (mac_hex_len != 64) {
+        ESP_LOGW(TAG, "OTA recovery_exit from %s: missing or malformed X-Ota-Mac header (len %u, want 64)",
+                 ip, (unsigned)mac_hex_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or malformed X-Ota-Mac header (want 64 hex chars)");
+        return ESP_OK;
+    }
+    char mac_hex[65];
+    if (httpd_req_get_hdr_value_str(req, OTA_MAC_HEADER, mac_hex, sizeof(mac_hex)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not read X-Ota-Mac header");
+        return ESP_OK;
+    }
+    uint8_t mac[32];
+    if (!hex_decode(mac_hex, 64, mac)) {
+        ESP_LOGW(TAG, "OTA recovery_exit from %s: X-Ota-Mac is not valid hex", ip);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Ota-Mac must be 64 hex characters");
+        return ESP_OK;
+    }
+
+    // 2. Auth -- its own context (OTA_HTTP_CONTEXT_RECOVERY_EXIT), see
+    // ota_http.h's doc comment on that enum value and the doc comment above
+    // this handler for why auth runs before the recovery-mode check below,
+    // not after.
+    ota_http_verify_result_t vr = ota_http_verify_request(OTA_HTTP_CONTEXT_RECOVERY_EXIT, mac, ip);
+    if (vr != OTA_HTTP_VERIFY_OK) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, verify_result_str(vr));
+        return ESP_OK;
+    }
+
+    // 3. Only meaningful in recovery mode -- refuses (403) outside it so
+    // this is not just a general-purpose authenticated reboot button on a
+    // normal boot. Runs AFTER auth (see doc comment above) so a caller who
+    // never proves they hold the AP password cannot use this route's
+    // response to probe whether the board is currently in recovery mode.
     if (!boot_guard_is_recovery_mode()) {
         httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "board is not in recovery mode");
         return ESP_OK;
@@ -1809,6 +1866,13 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     memset(&s_lockout_esp, 0, sizeof(s_lockout_esp));
     memset(&s_lockout_pico, 0, sizeof(s_lockout_pico));
     memset(&s_lockout_esp_rollback, 0, sizeof(s_lockout_esp_rollback));
+    /* The fourth context's lockout clears here too. It is a file-scope static
+     * so it is already zero at load and nothing is broken today -- but the
+     * three lines above exist precisely so that a restart of this layer
+     * starts from a clean auth state, and one context quietly keeping its
+     * failure count while the others reset is the kind of asymmetry that
+     * only shows up the day someone actually calls ota_http_start() twice. */
+    memset(&s_lockout_recovery_exit, 0, sizeof(s_lockout_recovery_exit));
     s_update_claim = OTA_UPDATE_NONE;
 
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -1907,8 +1971,9 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     }
 
     // boot_guard.h's "a way out of recovery mode" requirement -- see
-    // ota_recovery_exit_post_handler()'s own doc comment for why this is
-    // deliberately unauthenticated and refuses (403) outside recovery mode.
+    // ota_recovery_exit_post_handler()'s own doc comment for the auth
+    // (OTA_HTTP_CONTEXT_RECOVERY_EXIT) and recovery-mode-refuses-403 checks
+    // it runs, and the ordering between them.
     static const httpd_uri_t recovery_exit_uri = {
         .uri = "/api/ota/esp/recovery_exit", .method = HTTP_POST, .handler = ota_recovery_exit_post_handler
     };

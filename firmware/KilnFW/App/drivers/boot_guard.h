@@ -67,47 +67,50 @@ extern "C" {
  * dozens. */
 #define RECOVERY_MODE_BOOT_THRESHOLD 3
 
-// Recovery mode is BUILT BUT NOT ARMED. The counter still counts, the
-// threshold logic is still tested, and boot_guard_is_recovery_mode() still
-// answers -- but it always answers false, so no boot ever actually enters
-// the mode.
+// Recovery mode is ARMED (2026-08-22). Set to 0 to build it in but never
+// enter it -- the counter, the threshold logic and the reporting all stay
+// live either way; only ENTERING the mode is gated by this.
 //
-// Why: forcing recovery_mode true on the bench (2026-08-22) showed the mode
-// itself does not survive boot. Recovery mode skips the profile executor,
-// the autotune engine and the rules task, but other code that DOES still
-// start goes on calling into them, and takes mutexes those modules create in
-// their _start() functions:
+// It was briefly shipped disabled, and the reason is worth keeping: forcing
+// recovery_mode true on the bench showed the mode did not survive boot.
+// Recovery mode skips the profile executor, the autotune engine and the
+// rules task, but code that DOES still run went on calling into them and
+// asserted on mutexes those modules create in their _start():
 //
 //   1. ui_page_home.c, building the LCD home screen:
 //        assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
 //      Fixed by not starting LVGL in recovery mode (see main.c).
-//   2. Then a SECOND, different task panicked at the same assert. The new
-//      crash_report/coredump path caught this one with a clean backtrace and
-//      addr2line named it exactly:
-//        safety_poll_task            (safety_link.c:1414)
+//   2. Then a SECOND, different task at the same assert. The crash_report/
+//      coredump path caught that one with a clean backtrace and addr2line
+//      named it exactly:
+//        safety_poll_task              (safety_link.c:1414)
 //        safety_build_and_send_context (safety_link.c:527)
-//        profile_executor_get_status (profile_executor.c:2333)
-//        xQueueSemaphoreTake         -- on the executor's NULL mutex
-//      i.e. the safety link's own poll task asks the profile executor for
-//      status every cycle, and recovery mode never started the executor.
+//        profile_executor_get_status   (profile_executor.c:2333)
+//        xQueueSemaphoreTake           -- on the executor's NULL mutex
+//      i.e. the safety link's own poll task asks the executor for status
+//      every cycle, and recovery mode never started the executor.
 //
-// Two found means the real problem is not a list of call sites to gate, it
-// is that these modules' public functions are not safe to call before their
-// _start(). Fixing that properly -- a NULL-mutex guard on each entry point
-// that returns a clean "not running" instead of asserting, the same
-// treatment ota_http.c's update mutex already got -- is the work this needs,
-// and it is not a patch to bolt on at the end of a session.
+// Two found by accident meant the fix was not a list of call sites to gate
+// but making those modules safe to call before their _start(). That is now
+// done: every public entry point in profile_executor.c and autotune_engine.c
+// guards on its NULL mutex and returns a clean "not running" answer instead
+// of asserting (rules_task.c needed no guard -- it holds no mutex), each
+// covered by its own host test in App/test/test_*_prestart.c.
 //
-// Until then, arming this would mean a board that hit three unconfirmed
-// boots would enter a mode that panic-loops: strictly worse than not having
-// the feature, and precisely the failure it exists to prevent. So it stays
-// disabled, loudly, rather than shipped and hoped over.
+// Verified on hardware after that hardening, with recovery_mode forced true:
+// the board came up, served /ota, /api/ota/challenge, /diagnostics and
+// /api/status, held 200s for two solid minutes, kept every relay off, and
+// answered a profile start with "profile executor not started" rather than
+// panicking. POST /api/ota/esp/recovery_exit was exercised in the same boot
+// and rebooted the board on a correctly signed request.
 //
-// To enable: harden those modules, re-run the bench check (force
-// *out_recovery_mode = true in boot_guard.c's next_boot_count(), build,
-// flash, confirm the board serves /ota and /api/ota/challenge and stays up
-// for several minutes), then set this to 1.
-#define RECOVERY_MODE_ENABLED 0
+// If you change what recovery mode skips, re-run that bench check before
+// trusting it again: force *out_recovery_mode = true in boot_guard.c's
+// next_boot_count(), build, flash, and confirm the board serves the OTA
+// routes and stays up for several minutes. A recovery mode that panic-loops
+// is strictly worse than not having one -- it is precisely the failure the
+// feature exists to prevent.
+#define RECOVERY_MODE_ENABLED 1
 
 /* Must be called exactly once per boot, early in app_main() -- AFTER
  * kiln_io_init() has latched every relay off (this module's own increment
