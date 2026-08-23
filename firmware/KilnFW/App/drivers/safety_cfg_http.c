@@ -488,6 +488,22 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "malformed id/value pairs");
         return ESP_OK;
     }
+    /* Zero recognised pairs is a refusal, not a success. A body whose tokens
+     * are all unrecognised (e.g. "0x0101=1200", using the documentation's hex
+     * spelling of an id rather than the decimal "id=257&value=..." this
+     * endpoint parses) previously fell through apply_pairs() with n == 0 and
+     * answered {"ok":true} -- reporting that a commissioning value had been
+     * accepted when nothing whatsoever had been staged. A commissioning
+     * endpoint claiming success for a no-op is exactly the wrong failure
+     * direction for the subsystem that stops a runaway.
+     *
+     * `commit` alone is legitimate (a bare commit of already-staged values),
+     * so only refuse when there is neither a pair nor a commit. */
+    if (n == 0 && !commit) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "no recognised id/value pairs in body -- expected id=<decimal>&value=<v>");
+        return ESP_OK;
+    }
 
     char reason[160];
     bool ok = apply_pairs(s_link, pairs, n, commit, reason, sizeof(reason));

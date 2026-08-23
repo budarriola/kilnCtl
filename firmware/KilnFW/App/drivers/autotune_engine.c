@@ -771,6 +771,34 @@ static bool begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* Refuse up front if heat is blocked at all -- most importantly a safety
+     * link that is down or faulted. Every heat command this engine issues is
+     * already gated (see apply_duty()'s relay_authority_zone_blocked() call),
+     * so a run started this way was never DANGEROUS: the relays simply never
+     * closed. It was dishonest, which is its own problem. Observed on the
+     * bench: with no safety processor answering, POST /api/autotune/start
+     * returned {"ok":true} and the engine sat in "settling" indefinitely,
+     * heating nothing and explaining nothing, while the same condition makes
+     * a manual relay-ON return a 403 that says exactly what is wrong and
+     * makes a profile abort with "safety processor link silent". An autotune
+     * that cannot heat should say so at the point the operator asks for it,
+     * in the same words. */
+    {
+        uint32_t sources = 0;
+        if (relay_authority_on_blocked(s_at.safety, &sources)) {
+            if (err_msg) {
+                /* Kept under 128 chars: dashboard_http.c's autotune handler
+                 * passes a char[128], and the first draft of this message was
+                 * truncated mid-word on the page ("...so it w"). */
+                snprintf(err_msg, err_cap,
+                         "heat is blocked (fault sources 0x%02X, usually the safety link down) -- "
+                         "autotune cannot drive the element",
+                         (unsigned)sources);
+            }
+            return false;
+        }
+    }
+
     /* TODO.md 8.2 "Tie it to the guards, not only the UI": same explicit
      * refusal as profile_executor_run() -- must not rely on the relay_mask
      * check below happening to read 0 for a failed-to-load config too. */
