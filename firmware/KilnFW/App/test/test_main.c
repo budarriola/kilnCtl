@@ -30,6 +30,8 @@ void run_test_readiness_commissioning(void);
 void run_test_kiln_cfg_store(void);
 void run_test_safety_cfg_store(void);
 void run_test_rules_eval(void);
+void run_test_boot_guard(void);
+void run_test_crash_report(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
 // its own separate executable (build_host_tests.ps1's third build+run step),
 // same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
@@ -65,6 +67,8 @@ int main(void)
     run_test_kiln_cfg_store();
     run_test_safety_cfg_store();
     run_test_rules_eval();
+    run_test_boot_guard();
+    run_test_crash_report();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

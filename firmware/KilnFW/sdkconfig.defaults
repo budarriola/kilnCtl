@@ -349,3 +349,29 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_CAPTURE_DRAM=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
+
+# CONFIG_ESP_TASK_WDT_PANIC (ROADMAP.md watchdog-recovery pass, 2026-08-22):
+# without this, CONFIG_ESP_TASK_WDT_EN=y + CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+# (both ESP-IDF defaults this project already inherits -- see sdkconfig) only
+# LOG a hung task; nothing resets the board. A wedged task with the relays
+# left in whatever state they were last commanded is a kiln nobody is
+# controlling, silently, for as long as the process happens to sit there.
+# PANIC turns that log into a panic -> reset, which boot_guard.c's counter
+# then sees and counts toward recovery mode like any other reset.
+#
+# Checked before adding this (grepped the entire App/ tree for
+# esp_task_wdt_add(): zero call sites) -- no application task subscribes to
+# the task WDT explicitly. The only subscribers are the two idle tasks
+# (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1=y, also inherited defaults),
+# so this only panics if BOTH idle tasks are starved of CPU time for the
+# full 5 s on their core -- i.e. some higher-priority task monopolized a
+# core for 5+ seconds without ever yielding. NOT exhaustively verified
+# against every blocking call in this codebase (a long flash erase inside
+# esp_ota_write()/nvs_commit(), or an LVGL redraw that legitimately runs
+# long, could in principle do this) -- FLAGGED FOR OWNER REVIEW: watch the
+# first few real boots after this change for an unexpected TASK_WDT reset
+# reason (esp_reset_reason() is already logged at ERROR on every boot, see
+# main.c) that correlates with a known-long operation rather than a genuine
+# hang, and raise CONFIG_ESP_TASK_WDT_TIMEOUT_S or bracket that operation
+# with esp_task_wdt_add()/_delete() if one turns up.
+CONFIG_ESP_TASK_WDT_PANIC=y

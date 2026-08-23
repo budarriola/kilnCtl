@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "autotune_engine.h"
+#include "boot_guard.h"
 #include "kiln_io.h"
 #include "MAX31856.h"
 #include "ota_auth.h"
@@ -1428,19 +1429,29 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
     // the partition table (esp_partition_t::label), and inactive_version
     // comes from the SAME struct field on a partition this build itself
     // wrote (or its factory-default) -- none of these are attacker-supplied.
-    char body[720];
+    // boot_guard.h / ROADMAP.md watchdog-recovery pass: surfaced here so the
+    // OTA page (and anyone polling this JSON) can show "this board is in
+    // recovery mode" without needing a separate route. recovery_mode is
+    // decided once, at boot, by boot_guard_is_recovery_mode() -- it does not
+    // change within a boot even after boot_guard_mark_healthy() clears the
+    // counter for the NEXT boot (see boot_guard.h's doc comment).
+    bool recovery_mode = boot_guard_is_recovery_mode();
+
+    char body[768];
     int n;
     if (have_record) {
         n = snprintf(body, sizeof(body),
                       "{\"phase\":\"%s\",\"percent\":%u,"
                       "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
                       "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
+                      "\"recovery_mode\":%s,"
                       "\"last_update\":"
                       "{\"processor\":\"%s\",\"version_before\":\"%s\",\"version_after\":\"%s\","
                       "\"success\":%s,\"reason\":\"%s\",\"uptime_s\":%u,\"image_sha256\":\"%s\"}}",
                       esp_phase_str(phase), (unsigned)percent,
                       running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
                       FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
+                      recovery_mode ? "true" : "false",
                       rec.processor, rec.version_before,
                       rec.version_after, rec.success ? "true" : "false", rec.reason,
                       (unsigned)rec.uptime_s, rec.image_sha256_hex);
@@ -1449,10 +1460,12 @@ static esp_err_t ota_esp_status_get_handler(httpd_req_t *req)
                       "{\"phase\":\"%s\",\"percent\":%u,"
                       "\"version\":\"%s\",\"commit\":\"%s\",\"dirty\":%s,\"build_date\":\"%s\","
                       "\"active_slot\":\"%s\",\"inactive_slot\":\"%s\",\"inactive_version\":\"%s\","
+                      "\"recovery_mode\":%s,"
                       "\"last_update\":null}",
                       esp_phase_str(phase), (unsigned)percent,
                       running_version, FW_GIT_COMMIT, FW_GIT_DIRTY ? "true" : "false",
-                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version);
+                      FW_BUILD_DATE " " FW_BUILD_TIME, active_slot, inactive_slot, inactive_version,
+                      recovery_mode ? "true" : "false");
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);
@@ -1494,6 +1507,80 @@ static void ota_rollback_reboot_task(void *arg)
     ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot failed: %s -- "
                   "board NOT rebooted, still running the current image",
              esp_err_to_name(err));
+}
+
+// --- POST /api/ota/esp/recovery_exit -- boot_guard.h's "a way out of
+// recovery mode that does not require a successful OTA" requirement.
+//
+// Recovery mode is decided ONCE per boot (boot_guard_init(), very early in
+// app_main()) and cannot be un-decided for the boot that is currently
+// running -- see boot_guard.h's doc comment on boot_guard_is_recovery_mode().
+// What CAN happen immediately is clearing the counter that put the board
+// there, so the NEXT boot comes up normal; ota_rollback_confirm_task()
+// already does that automatically within OTA_CONFIRM_POLL_MS of every boot
+// (recovery-mode boots included, since Wi-Fi/dashboard/OTA HTTP all still
+// come up in recovery mode -- see boot_confirm_is_healthy()) -- so an
+// operator who lands here by accident is never actually stuck waiting on a
+// human to notice; the board self-clears and exits on its own next reboot.
+// This route exists for the impatient/uncertain case: reboot right now
+// instead of waiting for that to happen (or for the RTC/task watchdog to do
+// it for you) and land back in normal mode this run.
+//
+// Deliberately UNAUTHENTICATED, unlike every other mutating route in this
+// file (esp/pico update, esp rollback all require ota_http_verify_request()).
+// Two reasons: (1) it does nothing an attacker could not already do just by
+// power-cycling the board or waiting out any of the three independent
+// watchdog paths that would reboot it anyway, and (2) gating it behind the
+// same challenge/HMAC dance as a firmware push would mean adding a FOURTH
+// ota_http_context_t (its own HMAC context string, its own lockout state,
+// its own client-side signing support in ota_http_client.py/mcp_server.py)
+// for a button whose entire job is "reboot this board" -- disproportionate
+// for what it does. FLAGGED FOR OWNER REVIEW: if this board is ever
+// reachable from an untrusted network, an unauthenticated forced reboot is a
+// nuisance-DoS vector worth reconsidering (though, same as the rollback
+// note in ota_esp_rollback_post_handler() below, an attacker on the LAN
+// already has other ways to disrupt this board). Refuses (409) outside
+// recovery mode specifically so this is not just a general-purpose
+// unauthenticated reboot button on a normal boot.
+static void ota_recovery_exit_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(300));
+    ESP_LOGW(TAG, "recovery-mode exit requested over HTTP -- rebooting now");
+    esp_restart();
+}
+
+static esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
+{
+    if (!boot_guard_is_recovery_mode()) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "board is not in recovery mode");
+        return ESP_OK;
+    }
+    // boot_guard_mark_healthy() is very likely already a no-op here --
+    // ota_rollback_confirm_task() clears the counter automatically within
+    // OTA_CONFIRM_POLL_MS of boot whenever nvs/web/ota are all up, which they
+    // are in recovery mode too -- but calling it again is cheap and harmless
+    // (boot_guard_mark_healthy() no-ops once already cleared this boot), and
+    // removes any dependency on that background task's timing for this
+    // explicit, operator-requested exit.
+    boot_guard_mark_healthy();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"rebooting\"}");
+    /* Plain xTaskCreate -- an INTERNAL-RAM stack, deliberately, exactly like
+     * ota_rollback_reboot_task() above. This task calls esp_restart(), which
+     * goes through spi_flash_disable_interrupts_caches_and_other_cpu(); a
+     * task whose stack lives in PSRAM cannot run with the flash cache
+     * disabled and trips esp_task_stack_is_sane_cache_disabled(). Putting
+     * this stack in PSRAM to save 2 KB of internal DRAM would mean the
+     * recovery-mode escape hatch panics the board instead of rebooting it.
+     * (Same trap that produced a real crash in profile_executor.c earlier
+     * the same day; see its task-creation comment.) */
+    if (xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
+                    tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "
+                      "reboot; power-cycle it, the counter is already cleared");
+    }
+    return ESP_OK;
 }
 
 static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
@@ -1816,6 +1903,18 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = httpd_register_uri_handler(server, &esp_rollback_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // boot_guard.h's "a way out of recovery mode" requirement -- see
+    // ota_recovery_exit_post_handler()'s own doc comment for why this is
+    // deliberately unauthenticated and refuses (403) outside recovery mode.
+    static const httpd_uri_t recovery_exit_uri = {
+        .uri = "/api/ota/esp/recovery_exit", .method = HTTP_POST, .handler = ota_recovery_exit_post_handler
+    };
+    err = httpd_register_uri_handler(server, &recovery_exit_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/ota/esp/recovery_exit) failed: %s", esp_err_to_name(err));
         return err;
     }
 

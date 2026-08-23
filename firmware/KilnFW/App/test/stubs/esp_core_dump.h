@@ -1,0 +1,55 @@
+// Host-test stub -- see esp_err.h's own header comment for why these exist.
+// Added 2026-08-22 for crash_report.c's host tests.
+//
+// esp_core_dump_summary_t here is a type-only stand-in shaped like the real
+// xtensa esp_core_dump_summary_t (esp-idf/components/espcoredump/include/
+// esp_core_dump.h + include/port/xtensa/esp_core_dump_summary_port.h) --
+// only the fields crash_report.c's fill_from_summary() actually reads.
+// esp_core_dump_image_check() always reports "not found": crash_report.c's
+// only caller of these functions is crash_report_init(), which host tests do
+// not exercise (no real coredump exists on a host build) -- see
+// test_crash_report.c's header comment for what IS tested instead
+// (compute_crc/record_valid/persist/load, directly).
+#ifndef TEST_STUB_ESP_CORE_DUMP_H
+#define TEST_STUB_ESP_CORE_DUMP_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+
+typedef struct {
+    uint32_t bt[16];
+    uint32_t depth;
+    bool corrupted;
+} esp_core_dump_bt_info_t;
+
+typedef struct {
+    uint32_t exc_cause;
+    uint32_t exc_vaddr;
+} esp_core_dump_summary_extra_info_t;
+
+typedef struct {
+    char exc_task[16];
+    uint32_t exc_pc;
+    esp_core_dump_bt_info_t exc_bt_info;
+    esp_core_dump_summary_extra_info_t ex_info;
+} esp_core_dump_summary_t;
+
+static inline esp_err_t esp_core_dump_image_check(void)
+{
+    return ESP_ERR_NOT_FOUND;
+}
+
+static inline esp_err_t esp_core_dump_get_summary(esp_core_dump_summary_t *summary)
+{
+    (void)summary;
+    return ESP_ERR_NOT_FOUND;
+}
+
+static inline esp_err_t esp_core_dump_image_erase(void)
+{
+    return ESP_OK;
+}
+
+#endif // TEST_STUB_ESP_CORE_DUMP_H

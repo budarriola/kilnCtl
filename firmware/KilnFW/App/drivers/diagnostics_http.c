@@ -3,10 +3,12 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "crash_report.h"
 #include "thermo_owner.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -170,6 +172,115 @@ send:
 #undef APPEND
 }
 
+/* Own copy of dashboard_http.c's json_escape() -- that one is `static` to its
+ * own TU, and duplicating six lines is cheaper (and matches this codebase's
+ * existing precedent, e.g. run_state.c/ota_record.c/crash_report.c's three
+ * independent nvs_partition_init() copies) than introducing a shared header
+ * for one tiny helper. */
+static void json_escape(const char *src, char *out, size_t out_cap)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 2 < out_cap; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (o + 3 >= out_cap) {
+                break;
+            }
+            out[o++] = '\\';
+        }
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+}
+
+/* GET /api/crash_report -- the last-crash summary crash_report.c persisted
+ * (task/cause/PC/backtrace/reset-reason), for the diagnostics page's "Last
+ * crash" section. {"present":false} is a complete, valid response (the
+ * common case: no crash on record) -- every other field is only present
+ * alongside "present":true. */
+static esp_err_t crash_report_get_handler(httpd_req_t *req)
+{
+    crash_report_record_t rec;
+    bool present = crash_report_get(&rec);
+
+    char json[768];
+    size_t o = 0;
+    int n;
+
+    if (!present) {
+        n = snprintf(json, sizeof(json), "{\"present\":false}");
+        o = (n > 0) ? (size_t)n : 0;
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, json, o);
+    }
+
+    char task_esc[sizeof(rec.exc_task) * 2 + 1];
+    char cause_str_esc[sizeof(rec.exc_cause_str) * 2 + 1];
+    char reset_reason_esc[sizeof(rec.reset_reason) * 2 + 1];
+    json_escape(rec.exc_task, task_esc, sizeof(task_esc));
+    json_escape(rec.exc_cause_str, cause_str_esc, sizeof(cause_str_esc));
+    json_escape(rec.reset_reason, reset_reason_esc, sizeof(reset_reason_esc));
+
+#define APPEND(...)                                                                              \
+    do {                                                                                          \
+        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
+        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+            goto send;                                                                            \
+        }                                                                                          \
+        o += (size_t)n;                                                                            \
+    } while (0)
+
+    APPEND("{\"present\":true,\"acknowledged\":%s,\"exc_cause\":%lu,\"exc_cause_str\":\"%s\","
+          "\"exc_pc\":\"0x%08lx\",\"exc_addr\":\"0x%08lx\",\"exc_task\":\"%s\","
+          "\"found_on_boot_reset_reason\":\"%s\","
+          "\"backtrace\":[",
+          rec.acknowledged ? "true" : "false", (unsigned long)rec.exc_cause, cause_str_esc,
+          (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, task_esc, reset_reason_esc);
+    for (uint8_t i = 0; i < rec.bt_count && i < CRASH_REPORT_BT_MAX; i++) {
+        /* Hex strings, not JSON numbers: these are code addresses, and the
+         * only thing anyone does with them is paste them into addr2line.
+         * Decimal ("299") is unusable for that and reads as a plausible
+         * small integer rather than the obviously-wrong address it is. */
+        APPEND("%s\"0x%08lx\"", i == 0 ? "" : ",", (unsigned long)rec.backtrace_pc[i]);
+    }
+    APPEND("],\"backtrace_corrupted\":%s}", rec.bt_corrupted ? "true" : "false");
+
+send:
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, o);
+#undef APPEND
+}
+
+/* POST /api/crash_report/ack -- operator has seen the record, stop showing
+ * it as new. Does NOT erase the coredump/record -- see /clear for that. */
+static esp_err_t crash_report_ack_post_handler(httpd_req_t *req)
+{
+    bool ok = crash_report_acknowledge();
+    const char *json = ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"no crash record to acknowledge\"}";
+    httpd_resp_set_type(req, "application/json");
+    if (!ok) {
+        httpd_resp_set_status(req, "409 Conflict");
+    }
+    return httpd_resp_send(req, json, strlen(json));
+}
+
+/* POST /api/crash_report/clear -- acknowledge AND erase the coredump image
+ * plus this module's own NVS record, freeing the `coredump` partition slot
+ * for the next crash. */
+static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
+{
+    esp_err_t err = crash_report_clear();
+    char json[128];
+    int n;
+    if (err == ESP_OK) {
+        n = snprintf(json, sizeof(json), "{\"ok\":true}");
+    } else {
+        n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, (n > 0) ? (size_t)n : 0);
+}
+
 esp_err_t diagnostics_http_start(void)
 {
     httpd_handle_t server = wifi_provision_http_get_server();
@@ -190,6 +301,15 @@ esp_err_t diagnostics_http_start(void)
     static const httpd_uri_t thermo_faults_api_uri = {
         .uri = "/api/thermo/faults", .method = HTTP_GET, .handler = thermo_faults_get_handler,
     };
+    static const httpd_uri_t crash_report_api_uri = {
+        .uri = "/api/crash_report", .method = HTTP_GET, .handler = crash_report_get_handler,
+    };
+    static const httpd_uri_t crash_report_ack_uri = {
+        .uri = "/api/crash_report/ack", .method = HTTP_POST, .handler = crash_report_ack_post_handler,
+    };
+    static const httpd_uri_t crash_report_clear_uri = {
+        .uri = "/api/crash_report/clear", .method = HTTP_POST, .handler = crash_report_clear_post_handler,
+    };
 
     esp_err_t err = httpd_register_uri_handler(server, &diagnostics_uri);
     if (err != ESP_OK) {
@@ -209,6 +329,21 @@ esp_err_t diagnostics_http_start(void)
     err = httpd_register_uri_handler(server, &thermo_faults_api_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_register_uri_handler(/api/thermo/faults) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &crash_report_api_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &crash_report_ack_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report/ack) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = httpd_register_uri_handler(server, &crash_report_clear_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_register_uri_handler(/api/crash_report/clear) failed: %s", esp_err_to_name(err));
         return err;
     }
 

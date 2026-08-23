@@ -136,6 +136,9 @@ idf_component_register(SRCS "MAX31856.c"
                        "relay_authority.c"
                        "relay_cycles.c"
                        "run_state.c"
+                       "boot_guard.c"
+                       "rtc_watchdog.c"
+                       "crash_report.c"
                        "nvs_report.c"
                        "factory_reset.c"
                        "dashboard_http.c"
@@ -187,6 +190,8 @@ idf_component_register(SRCS "MAX31856.c"
                                 esp_driver_tsens
                                 esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
+                                esp_hw_support esp_hal_wdt
+                                espcoredump
                        PRIV_REQUIRES spi_flash)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated

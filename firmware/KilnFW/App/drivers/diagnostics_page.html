@@ -82,6 +82,17 @@
   .linklist a { display: block; padding: 0.6em 0.9em; min-height: 32px; box-sizing: border-box;
                 background: var(--button-bg); border: 1px solid var(--border);
                 border-radius: var(--ui-radius); text-decoration: none; }
+  /* Crash-record backtrace: a monospace, horizontally-scrollable box so a
+     long PC list (up to 16 frames, 10 hex chars each) can never force the
+     page itself wider than the viewport -- same overflow-x:auto discipline
+     every other wide-content block on this site uses. */
+  .crash-bt { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85em;
+              white-space: pre; overflow-x: auto; background: var(--bg); border: 1px solid var(--border);
+              border-radius: var(--ui-radius); padding: 0.5em 0.7em; margin: 0.4em 0; }
+  .crash-actions { display: flex; gap: 0.5em; margin: 0.5em 0 0.2em; flex-wrap: wrap; }
+  .crash-actions button { font: inherit; padding: 0.5em 0.9em; min-height: 32px; box-sizing: border-box;
+                background: var(--button-bg); border: 1px solid var(--border);
+                border-radius: var(--ui-radius); color: var(--fg); cursor: pointer; }
 </style>
 </head>
 <body>
@@ -106,6 +117,11 @@ refresh timers read, not a second implementation of either.</p>
   <div class="row"><span class="label">Build date/time</span><span class="value" id="fwBuild">--</span></div>
   <div class="row"><span class="label">Uptime</span><span class="value" id="uptime">--</span></div>
   <div class="row"><span class="label">Last reset reason</span><span class="value" id="resetReason">--</span></div>
+</div>
+
+<h2>Last crash</h2>
+<div class="card" id="crashCard">
+  <div class="row"><span class="label">Loading&hellip;</span><span class="value">--</span></div>
 </div>
 
 <h2>Safety-processor build</h2>
@@ -299,6 +315,75 @@ thermocouple fault registers) lives on their own pages:</p>
     }
   }
 
+  // Crash record: its own small, independent fetch -- not part of the
+  // Promise.all() below, deliberately, so a slow/failed crash_report fetch
+  // never delays or fails the live status/board_temps poll this page's
+  // stale-banner logic depends on. Rendered once on load and again after
+  // Acknowledge/Clear -- not on the 2s poll timer, since a crash record is a
+  // fact about the past (same "unmarked, not kc-live-value" treatment as
+  // resetReason above), not a figure that changes poll to poll.
+  function crashRow(label, value) {
+    return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) + '</span><span class="value">' +
+           window.kcEscapeHtml(String(value)) + '</span></div>';
+  }
+  function renderCrash(cr) {
+    var card = document.getElementById('crashCard');
+    if (!cr || !cr.present) {
+      card.innerHTML = crashRow('Status', 'No crash recorded.');
+      return;
+    }
+    var html = '';
+    html += crashRow('Acknowledged', cr.acknowledged ? 'yes' : 'NO -- new since last seen');
+    html += crashRow('Exception cause', cr.exc_cause_str ? (cr.exc_cause_str + ' (' + cr.exc_cause + ')') : cr.exc_cause);
+    html += crashRow('Faulting task', cr.exc_task || 'unknown');
+    // exc_pc/exc_addr/backtrace arrive from the firmware already formatted as
+    // "0x........" strings -- they are code addresses whose only use is
+    // addr2line, and emitting them as JSON numbers rendered them as unusable
+    // decimals ("299" for 0x0000012b).
+    html += crashRow('Program counter', cr.exc_pc || 'unknown');
+    html += crashRow('Fault address', cr.exc_addr || 'unknown');
+    // NOT the reset reason of the crash -- it is the reason for the boot on
+    // which this dump was first noticed. For a dump found after a reflash or
+    // a power cycle that says nothing about the crash, so it is labelled for
+    // what it actually is rather than left to be misread as the cause.
+    html += crashRow('Reset reason of the boot that found this',
+                     cr.found_on_boot_reset_reason || 'unknown');
+    var bt = (cr.backtrace || []).join('\n');
+    if (cr.backtrace_corrupted) {
+      // Say it in words, not just a parenthetical on the label. A corrupted
+      // frame chain is the NORMAL outcome of a stack overflow, and the
+      // addresses below are then meaningless -- an operator reading
+      // "0x0000012b" as a real program counter would chase a ghost. The
+      // faulting task name above survives this and is still trustworthy.
+      html += crashRow('Warning',
+                       'The saved backtrace is corrupted -- the addresses below are not reliable. ' +
+                       'This is expected after a stack overflow; the faulting task name above is ' +
+                       'still meaningful.');
+    }
+    html += '<div class="row"><span class="label">Backtrace' + (cr.backtrace_corrupted ? ' (corrupted)' : '') +
+            '</span><span class="value"></span></div>';
+    html += '<pre class="crash-bt">' + window.kcEscapeHtml(bt || '(empty)') + '</pre>';
+    html += '<div class="crash-actions">' +
+            '<button id="crashAckBtn"' + (cr.acknowledged ? ' disabled' : '') + '>Acknowledge</button>' +
+            '<button id="crashClearBtn">Clear crash log</button></div>';
+    card.innerHTML = html;
+
+    var ackBtn = document.getElementById('crashAckBtn');
+    if (ackBtn) {
+      ackBtn.addEventListener('click', function () {
+        fetch('/api/crash_report/ack', { method: 'POST' }).then(pollCrash);
+      });
+    }
+    document.getElementById('crashClearBtn').addEventListener('click', function () {
+      fetch('/api/crash_report/clear', { method: 'POST' }).then(pollCrash);
+    });
+  }
+  function pollCrash() {
+    return fetch('/api/crash_report').then(function (r) { return r.json(); }).then(renderCrash).catch(function () {
+      document.getElementById('crashCard').innerHTML = crashRow('Status', 'unable to load crash record');
+    });
+  }
+
   function poll() {
     Promise.all([
       fetch('/api/status').then(function (r) { return r.json(); }),
@@ -335,6 +420,7 @@ thermocouple fault registers) lives on their own pages:</p>
   });
   poll();
   schedule();
+  pollCrash();
 
   // UI_PLAN.md item 7: re-render the two board-health temperatures in the
   // new unit immediately on toggle, from the cached last-good payload.

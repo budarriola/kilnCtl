@@ -138,4 +138,22 @@ static inline esp_err_t nvs_set_blob(nvs_handle_t h, const char *key, const void
     return ESP_OK;
 }
 
+/* Added 2026-08-22 for crash_report.c's host tests (crash_report_clear()
+ * erases its NVS key). Same single-slot model as the rest of this stub: the
+ * one blob slot is simply marked absent. */
+static inline esp_err_t nvs_erase_key(nvs_handle_t h, const char *key)
+{
+    (void)h;
+    (void)key;
+    if (!s_stub_nvs_enabled) {
+        return ESP_OK;
+    }
+    if (!s_stub_nvs_has_blob) {
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+    s_stub_nvs_has_blob = false;
+    s_stub_nvs_blob_len = 0;
+    return ESP_OK;
+}
+
 #endif // TEST_STUB_NVS_H

@@ -17,6 +17,8 @@
 #include "freertos/task.h"
 
 #include "board_temps.h"
+#include "boot_guard.h"
+#include "crash_report.h"
 #include "dashboard_http.h"
 #include "diagnostics_http.h"
 #include "backup_http.h"
@@ -43,6 +45,7 @@
 #include "profiles_http.h"
 #include "readiness_http.h"
 #include "relay_cycles.h"
+#include "rtc_watchdog.h"
 #include "rules_http.h"
 #include "rules_task.h"
 #include "safety_link.h"
@@ -116,33 +119,40 @@ static void kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool s
  * slot on the next boot unless esp_ota_mark_app_valid_cancel_rollback() has
  * been called. UPDATE_PROTOCOL.md is emphatic, twice, that this must NOT be
  * called at the end of app_main() -- reaching the last line of main proves
- * nothing about whether the things that matter actually came up. An image
- * that boots but cannot reach the safety processor is exactly the image that
- * must roll back, and it would sail past a naive "we got to the end" check.
+ * nothing about whether the things that matter actually came up.
  *
- * So this runs as its own low-priority task, polling until all three of
- * UPDATE_PROTOCOL.md's preconditions are independently true -- NVS readable,
- * the safety link exchanging real frames, the web server up -- rather than
- * being invoked inline from app_main() at a fixed point. NVS and the web
- * server are booleans captured once, from state app_main already
- * established (nvs_report_get()'s mounted flags, dashboard_http_start()'s
- * return); the safety link is the one condition that can only become true
- * some number of poll periods AFTER boot, so it is checked live via
- * safety_link_get_status()->link_up on every pass -- that field is already
- * exactly "a valid status within SAFETY_LINK_UP_PERIODS polls", i.e. frames
- * are currently being exchanged, not just were once. No new safety_link.h
- * getter was needed for this.
+ * So this runs as its own low-priority task rather than being invoked inline
+ * from app_main() at a fixed point, and defers the actual "is this healthy"
+ * decision to boot_confirm_is_healthy() (boot_guard.h) -- the SAME function
+ * used a few lines below to decide whether to clear boot_guard's recovery
+ * counter. See that function's doc comment for the full story, but the short
+ * version: this used to ALSO require safety_link_get_status()->link_up, live,
+ * on every poll -- and on a board with no RP2040 attached or answering (this
+ * project's own bench board, right now), that condition is never true, so
+ * the image never confirmed and every OTA update silently reverted on the
+ * next reset. Confirmed on hardware 2026-08-22: "OTA rollback not yet
+ * confirmed ... safety_link_up=0" logged forever, then rollback on the next
+ * boot. A missing safety processor is a real, already-acknowledged condition
+ * elsewhere in this codebase (ota_interlock.h's
+ * OTA_INTERLOCK_REFUSED_NEEDS_ACK) -- it must not ALSO silently undo the
+ * operator's own OTA update.
  *
- * If nvs_ok or web_ok is false, it was false at boot and stays false for the
- * life of this boot, so the loop never confirms and the image is correctly
- * left PENDING_VERIFY -- that is the rollback doing its job, not a bug. If
- * safety was NULL (safety_link_start() itself failed), the link condition
- * can never become true either, for the same reason. */
+ * nvs_ok/web_ok/ota_ok are booleans captured once, from state app_main
+ * already established (nvs_report_get()'s mounted flags,
+ * dashboard_http_start()'s and ota_http_start()'s return codes) -- all three
+ * fixed at boot, so if boot_confirm_is_healthy() is false on the first poll
+ * it stays false for the life of this boot and the image is correctly left
+ * PENDING_VERIFY (that is the rollback doing its job, not a bug). The safety
+ * link's live up/down state is still read and logged here -- loudly, when
+ * down -- purely as an informational side note; it is NOT part of the
+ * confirm/clear decision itself. `safety` may be NULL if safety_link_start()
+ * failed this boot, same fail-closed convention as everywhere else in this
+ * file; the log below tolerates that. */
 typedef struct {
-    SafetyLinkClass *safety; /* NULL if safety_link_start() failed this boot --
-                              * the link condition can then never be satisfied */
+    SafetyLinkClass *safety; /* NULL if safety_link_start() failed this boot -- logged, not gating */
     bool nvs_ok;
     bool web_ok;
+    bool ota_ok; /* ota_http_start() succeeded -- the OTA routes this whole recovery mechanism needs exist */
 } ota_confirm_ctx_t;
 
 #define OTA_CONFIRM_POLL_MS   500
@@ -165,25 +175,41 @@ static void ota_rollback_confirm_task(void *arg)
             }
         }
 
-        if (ctx.nvs_ok && ctx.web_ok && link_up) {
+        if (boot_confirm_is_healthy(ctx.nvs_ok, ctx.web_ok, ctx.ota_ok)) {
             esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
             if (err == ESP_OK) {
-                ESP_LOGI(TAG, "OTA rollback confirmed: NVS readable, safety link exchanging "
-                              "frames, web server up -- this image is no longer PENDING_VERIFY");
+                ESP_LOGI(TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
+                              "-- this image is no longer PENDING_VERIFY");
             } else {
                 ESP_LOGE(TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s "
                               "(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE off, or not an OTA slot?)",
                          esp_err_to_name(err));
             }
+            if (!link_up) {
+                /* Degraded-but-recorded, per boot_guard.h's doc comment: this
+                 * confirmation did NOT wait for a live safety-link frame
+                 * exchange. Announced loudly rather than silently, so a board
+                 * that is SUPPOSED to have a safety processor answering does
+                 * not have that fact buried in an INFO line. */
+                ESP_LOGW(TAG, "OTA rollback confirmed WITHOUT a live safety-link check "
+                              "(safety_link_up=0) -- if this board is expected to have a safety "
+                              "processor answering, that is a separate problem worth investigating");
+            }
+            /* Same predicate as the rollback decision just above, by
+             * construction (boot_confirm_is_healthy() was already
+             * satisfied) -- see boot_guard.h's doc comment for why these two
+             * must never be allowed to disagree again. */
+            boot_guard_mark_healthy();
             vTaskDelete(NULL);
             return;
         }
 
         if (!warned && (xTaskGetTickCount() - start) > pdMS_TO_TICKS(OTA_CONFIRM_WARN_MS)) {
             ESP_LOGW(TAG, "OTA rollback not yet confirmed %lu ms after boot: nvs_ok=%d web_ok=%d "
-                          "safety_link_up=%d -- image stays PENDING_VERIFY until all three are true",
+                          "ota_ok=%d (safety_link_up=%d, informational only) -- image stays "
+                          "PENDING_VERIFY until nvs/web/ota are all true",
                      (unsigned long)OTA_CONFIRM_WARN_MS, (int)ctx.nvs_ok, (int)ctx.web_ok,
-                     (int)link_up);
+                     (int)ctx.ota_ok, (int)link_up);
             warned = true;
         }
 
@@ -369,6 +395,15 @@ void app_main(void)
             ESP_LOGE(TAG, "coredump check FAILED: %s -- a dump may exist but be unreadable",
                      esp_err_to_name(cd_err));
         }
+
+        // crash_report.c: captures a small NVS-persisted summary (task,
+        // cause, PC, backtrace) of the SAME coredump image just checked
+        // above, so the diagnostics web page can show "what the last crash
+        // was" without anyone plugging in a laptop to run espcoredump.py.
+        // Own module, own init call -- see crash_report.h's header comment.
+        // Never fails app_main; every error is logged and swallowed inside
+        // crash_report_init() itself.
+        crash_report_init();
     }
 
     // --- ESP32-S3 internal die-temperature sensor (TODO.md 10.7) -----------
@@ -482,6 +517,25 @@ void app_main(void)
             }
         }
     }
+
+    // --- boot_guard / RTC watchdog: the earliest point it is safe to arm
+    // any watchdog machinery ---------------------------------------------
+    // Relays are latched off above (kiln_io_init(), whether or not it
+    // succeeded -- io_ready reflects that, and boot_guard doesn't need it
+    // to be true; a boot with no expander is still a boot worth counting).
+    // Nothing before this point can plausibly run long enough to trip
+    // either mechanism, and everything after it can, so this is the
+    // earliest and latest-safe place for both:
+    //   - boot_guard_init() increments the persisted "unconfirmed boot"
+    //     counter and decides THIS boot's recovery_mode -- see boot_guard.h.
+    //     Read once into a local further down, right before the decision
+    //     of whether to start profile_executor/autotune/rules_task.
+    //   - rtc_watchdog_start() arms the hardware RTC watchdog as the
+    //     independent-of-the-scheduler last resort -- see rtc_watchdog.h.
+    //     Fed from monitor_task.c's existing heartbeat cadence.
+    boot_guard_init();
+    bool recovery_mode = boot_guard_is_recovery_mode();
+    rtc_watchdog_start();
 
     // Runs once the expander is in its safe state (relays off) but before
     // anything else starts talking on the bus, so the results reflect what is
@@ -772,12 +826,24 @@ void app_main(void)
     // exercising the dashboard UI) but withholds heat, per
     // profile_executor.h's doc comment. NOT YET VERIFIED AGAINST REAL RELAY/
     // THERMOCOUPLE HARDWARE -- see docs/PROJECT_STATUS.md.
-    esp_err_t exec_err = profile_executor_start(io_ready ? &kio : NULL,
-                                                thermo_bus.initialized ? &thermo_bus : NULL,
-                                                safety_err == ESP_OK ? &safety : NULL);
-    if (exec_err != ESP_OK) {
-        ESP_LOGW(TAG, "profile_executor_start failed: %s -- no profile execution this boot",
-                 esp_err_to_name(exec_err));
+    // RECOVERY MODE (boot_guard.h): skipped entirely. boot_guard_is_recovery_mode()
+    // was true because prior boots never reached "healthy" -- see
+    // boot_confirm_is_healthy() -- so this boot deliberately withholds every
+    // control-loop entry point (profile executor, autotune, and rules_task
+    // further below) and starts only Wi-Fi + the OTA HTTP routes + read-only
+    // pages, so an operator can flash a fix instead of the board silently
+    // reset-looping under a kiln nobody is watching.
+    esp_err_t exec_err = ESP_ERR_INVALID_STATE;
+    if (!recovery_mode) {
+        exec_err = profile_executor_start(io_ready ? &kio : NULL,
+                                          thermo_bus.initialized ? &thermo_bus : NULL,
+                                          safety_err == ESP_OK ? &safety : NULL);
+        if (exec_err != ESP_OK) {
+            ESP_LOGW(TAG, "profile_executor_start failed: %s -- no profile execution this boot",
+                     esp_err_to_name(exec_err));
+        }
+    } else {
+        ESP_LOGW(TAG, "RECOVERY MODE: profile_executor_start() skipped -- no profile execution this boot");
     }
 
     // ROADMAP.md M5 / LINK_PROTOCOL.md sec 4: gives the safety link's poll
@@ -793,11 +859,17 @@ void app_main(void)
     // --- Autotune engine (TODO.md 6A.4) -------------------------------------
     // Same bring-up convention and NULL-tolerance as profile_executor above;
     // must also come up before dashboard_http_start() (registers /api/autotune*).
-    esp_err_t autotune_err = autotune_engine_start(io_ready ? &kio : NULL,
-                                                   thermo_bus.initialized ? &thermo_bus : NULL,
-                                                   safety_err == ESP_OK ? &safety : NULL);
-    if (autotune_err != ESP_OK) {
-        ESP_LOGW(TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(autotune_err));
+    // RECOVERY MODE: skipped, same reasoning as profile_executor_start() above.
+    esp_err_t autotune_err = ESP_ERR_INVALID_STATE;
+    if (!recovery_mode) {
+        autotune_err = autotune_engine_start(io_ready ? &kio : NULL,
+                                             thermo_bus.initialized ? &thermo_bus : NULL,
+                                             safety_err == ESP_OK ? &safety : NULL);
+        if (autotune_err != ESP_OK) {
+            ESP_LOGW(TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(autotune_err));
+        }
+    } else {
+        ESP_LOGW(TAG, "RECOVERY MODE: autotune_engine_start() skipped -- no autotune this boot");
     }
 
     // --- Flash-safe executor for the CONTROL/PROFILES/AUTOTUNE bridges -------
@@ -926,36 +998,10 @@ void app_main(void)
     // it does not itself mount or erase anything.
     nvs_report_capture();
 
-    // TODO.md 9.2 / UPDATE_PROTOCOL.md sec 3: kick off OTA rollback
-    // confirmation now that NVS's mounted state and the web server's start
-    // result both exist to capture. See ota_rollback_confirm_task() above
-    // for why this is a background poller and not an inline call here.
-    {
-        size_t                       nvs_section_count = 0;
-        const nvs_report_section_t *nvs_sections = nvs_report_get(&nvs_section_count);
-        bool                         nvs_ok = (nvs_section_count > 0);
-        for (size_t i = 0; i < nvs_section_count; i++) {
-            if (!nvs_sections[i].mounted) {
-                nvs_ok = false;
-            }
-        }
-
-        ota_confirm_ctx_t *ota_ctx = calloc(1, sizeof(*ota_ctx));
-        if (ota_ctx) {
-            ota_ctx->safety = (safety_err == ESP_OK) ? &safety : NULL;
-            ota_ctx->nvs_ok = nvs_ok;
-            ota_ctx->web_ok = (dash_err == ESP_OK);
-            if (xTaskCreate(ota_rollback_confirm_task, "ota_confirm", 3072, ota_ctx,
-                             tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
-                ESP_LOGE(TAG, "Failed to start OTA rollback confirmation task -- this image "
-                              "will stay PENDING_VERIFY for the rest of this boot");
-                free(ota_ctx);
-            }
-        } else {
-            ESP_LOGE(TAG, "OTA rollback confirmation context alloc failed -- this image "
-                          "will stay PENDING_VERIFY for the rest of this boot");
-        }
-    }
+    // TODO.md 8.2's boot-time report -- kept here (its original spot); the
+    // OTA rollback confirmation task that used to be kicked off right after
+    // it now starts further below, after ota_http_start(), because it needs
+    // that call's result too (see boot_confirm_is_healthy()/ota_ok).
 
     // TODO.md 8.3: the "is this kiln ready to fire?" status page. Read-only
     // aggregator over the getters every module above already exposes --
@@ -1019,6 +1065,44 @@ void app_main(void)
                  esp_err_to_name(ota_http_err));
     }
 
+    // TODO.md 9.2 / UPDATE_PROTOCOL.md sec 3: kick off OTA rollback
+    // confirmation now that NVS's mounted state, the web server's start
+    // result, AND ota_http_start()'s own result all exist to capture. See
+    // ota_rollback_confirm_task() above for why this is a background poller
+    // and not an inline call here, and boot_confirm_is_healthy() (boot_guard.h)
+    // for what "healthy" means as of this pass. Moved here (from right after
+    // nvs_report_capture(), a few hundred lines above) specifically because
+    // ota_ok needs ota_http_err, which does not exist until this line.
+    {
+        size_t                       nvs_section_count = 0;
+        const nvs_report_section_t *nvs_sections = nvs_report_get(&nvs_section_count);
+        bool                         nvs_ok = (nvs_section_count > 0);
+        for (size_t i = 0; i < nvs_section_count; i++) {
+            if (!nvs_sections[i].mounted) {
+                nvs_ok = false;
+            }
+        }
+
+        ota_confirm_ctx_t *ota_ctx = calloc(1, sizeof(*ota_ctx));
+        if (ota_ctx) {
+            ota_ctx->safety = (safety_err == ESP_OK) ? &safety : NULL;
+            ota_ctx->nvs_ok = nvs_ok;
+            ota_ctx->web_ok = (dash_err == ESP_OK);
+            ota_ctx->ota_ok = (ota_http_err == ESP_OK);
+            if (xTaskCreate(ota_rollback_confirm_task, "ota_confirm", 3072, ota_ctx,
+                             tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to start OTA rollback confirmation task -- this image "
+                              "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "
+                              "counter will not be cleared this boot either");
+                free(ota_ctx);
+            }
+        } else {
+            ESP_LOGE(TAG, "OTA rollback confirmation context alloc failed -- this image "
+                          "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "
+                          "counter will not be cleared this boot either");
+        }
+    }
+
     // Rule evaluator. Deliberately started AFTER ota_http_start() above: its
     // 1 Hz fail-safe gate calls ota_http_heat_blocked_by_update(), which
     // takes a mutex that ota_http_start() creates. Started before it, that
@@ -1035,11 +1119,19 @@ void app_main(void)
     // `safety` may be NULL if safety_link_start() failed this boot -- same
     // fail-closed convention as kiln_io_owner_start(): every rule-driven
     // relay-ON decision is refused until a live link exists.
-    esp_err_t rules_task_err = rules_task_start(safety_err == ESP_OK ? &safety : NULL);
-    if (rules_task_err != ESP_OK) {
-        ESP_LOGE(TAG, "rules_task_start failed: %s -- saved rules will NOT be evaluated this boot "
-                      "(config storage/editing is unaffected)",
-                 esp_err_to_name(rules_task_err));
+    // RECOVERY MODE: skipped, same reasoning as profile_executor_start()/
+    // autotune_engine_start() above -- rules_task is a relay-commanding
+    // control loop same as those two.
+    esp_err_t rules_task_err = ESP_ERR_INVALID_STATE;
+    if (!recovery_mode) {
+        rules_task_err = rules_task_start(safety_err == ESP_OK ? &safety : NULL);
+        if (rules_task_err != ESP_OK) {
+            ESP_LOGE(TAG, "rules_task_start failed: %s -- saved rules will NOT be evaluated this boot "
+                          "(config storage/editing is unaffected)",
+                     esp_err_to_name(rules_task_err));
+        }
+    } else {
+        ESP_LOGW(TAG, "RECOVERY MODE: rules_task_start() skipped -- saved rules will NOT be evaluated this boot");
     }
 
     // Owner-report (2026-08-21 follow-up): saved "kiln config" slots --
@@ -1220,9 +1312,34 @@ void app_main(void)
     // Replaces the UART DISPLAY_CMD_* remote-draw path -- LVGL owns the panel
     // now (TODO.md 10.1). uart_bridge_start_display_task() is no longer
     // called here; it stays in uart_bridge.c as dead code for now.
-    if (display_ready &&
-        lvgl_port_start(&display, touch_ready ? &touch : NULL,
-                        screen_idle_ready ? &screen_idle : NULL) != ESP_OK) {
+    // RECOVERY MODE (boot_guard.h): the LCD UI is NOT started. Its pages are
+    // built against the control modules recovery mode deliberately skips --
+    // ui_page_home.c reads the profile executor and autotune engine as it
+    // builds the home screen -- and with those never started it takes a mutex
+    // that was never created:
+    //
+    //   I (6419) ui_page_home: status label width 424 of bar 464 ...
+    //   assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
+    //
+    // observed on the bench 2026-08-22 by forcing recovery_mode true. That
+    // panicked ~6.4 s into every boot, so the mode whose entire purpose is to
+    // make an unbootable board recoverable over Wi-Fi was itself a boot loop.
+    //
+    // Skipping the UI rather than teaching every page to tolerate a
+    // half-initialised system: recovery mode is defined as "Wi-Fi and the OTA
+    // routes, nothing else", the panel has nothing useful to show when no
+    // control module is running, and every additional page taught to handle
+    // NULL is another path that only ever executes on a board already in
+    // trouble. The blank panel is not silent -- boot_guard_init() prints the
+    // RECOVERY MODE banner at ERROR level, GET /api/ota/esp/status reports
+    // recovery_mode, and the OTA page shows it.
+    if (recovery_mode) {
+        ESP_LOGW(TAG, "RECOVERY MODE: LVGL/LCD UI skipped -- the panel stays blank this boot; "
+                      "recover over Wi-Fi (GET /ota) or POST /api/ota/esp/recovery_exit to reboot "
+                      "back into normal mode");
+    } else if (display_ready &&
+               lvgl_port_start(&display, touch_ready ? &touch : NULL,
+                               screen_idle_ready ? &screen_idle : NULL) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start LVGL display task");
     }
     if (pc_link_ready) {

@@ -18,6 +18,19 @@ static inline SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t *
     return (SemaphoreHandle_t)storage;
 }
 
+/* Added 2026-08-22 for boot_guard.c's host tests (test_boot_guard.c), which
+ * #includes boot_guard.c directly (same convention as test_kiln_cfg_store.c
+ * etc.) and so needs its xSemaphoreCreateMutex()/ensure_lock() call to link
+ * and return a non-NULL handle -- a single process-wide dummy is enough:
+ * xSemaphoreTake()/_Give() above are already no-ops on this stub, host tests
+ * are single-threaded, and no other file needs a SECOND distinguishable
+ * mutex identity. */
+static inline SemaphoreHandle_t xSemaphoreCreateMutex(void)
+{
+    static int dummy;
+    return (SemaphoreHandle_t)&dummy;
+}
+
 static inline BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks)
 {
     (void)sem;

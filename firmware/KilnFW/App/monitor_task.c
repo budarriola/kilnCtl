@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "freertos/idf_additions.h"
+#include "rtc_watchdog.h"
 
 static const char *TAG = "monitor_task";
 
@@ -65,6 +66,17 @@ static void monitor_task_entry(void *arg)
         const bool alive = (state != eInvalid && state != eDeleted);
         const TickType_t on = alive ? monitor->config.on_ticks : pdMS_TO_TICKS(500);
         const TickType_t off = alive ? monitor->config.off_ticks : pdMS_TO_TICKS(500);
+
+        /* rtc_watchdog.h: this feed is what proves the scheduler itself is
+         * still alive, independent of whether the ONE task this monitor
+         * watches (monitor->config.task_handle) is. A hang that stops the
+         * scheduler from ever running THIS task -- not just the watched one
+         * -- is exactly the lockup the RTC watchdog exists to catch; a feed
+         * hook on a task that only runs when its watched target is also
+         * healthy would defeat that. This runs every cycle (every
+         * on+off, ~300 ms with the default heartbeat timing), comfortably
+         * inside RTC_WATCHDOG_TIMEOUT_MS's 20 s margin. */
+        rtc_watchdog_feed();
 
         if (have_led) {
             gpio_set_level(monitor->config.led_gpio, 1);
