@@ -78,6 +78,15 @@ safety processor over the isolated UART link. Both require the Wi-Fi AP
 password (Settings &rarr; Network) as the update key -- it is never sent to
 the board, only used locally in this page to sign each request.</p>
 
+<!-- boot_button.h: a long-press on the ESP32-S3's BOOT button, WHILE THE
+     BOARD IS RUNNING, opens a ~5 minute window that bypasses the AP-password
+     check on every route below -- see GET /api/status's boot_button_bypass_
+     active/boot_button_bypass_remaining_s fields (dashboard_http.c) and
+     boot_button.h's own header comment. This is the single most important
+     place in the whole web UI to show it: it directly changes what this
+     page's own auth is doing. Hidden (empty) when not active. -->
+<div id="bootButtonBypassBox" class="blocker" style="display:none"></div>
+
 <h2>Kiln state</h2>
 <div id="interlockBox" class="card">Checking…</div>
 
@@ -543,11 +552,32 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
   });
 });
 
+/* ---- boot_button.h bypass banner -----------------------------------------
+ * GET /api/status (dashboard_http.c) is already the shared status endpoint
+ * every other page in this app polls -- this page has never needed it
+ * before (it drives everything else off the /api/ota/... status routes
+ * instead), so this is a small dedicated poll just for the two
+ * boot_button_bypass_* fields. */
+function pollBootButtonBypass() {
+  fetch('/api/status').then(function (r) { return r.json(); }).then(function (data) {
+    var box = document.getElementById('bootButtonBypassBox');
+    if (!data.boot_button_bypass_active) { box.style.display = 'none'; return; }
+    var remS = data.boot_button_bypass_remaining_s || 0;
+    var mm = Math.floor(remS / 60), ss = remS % 60;
+    box.style.display = '';
+    box.textContent = 'BOOT-BUTTON RECOVERY: OTA password check is BYPASSED right now -- ' +
+      'anyone on this network can push firmware with no password. Closes automatically in ' +
+      mm + ':' + (ss < 10 ? '0' : '') + ss + '.';
+  }).catch(function () {});
+}
+
 /* ---- Boot ------------------------------------------------------------------ */
 loadInterlock();
 setInterval(loadInterlock, 15000);
 pollEspStatus();
 pollPicoStatus();
+pollBootButtonBypass();
+setInterval(pollBootButtonBypass, 3000);
 
 (function () {
   var btn = document.getElementById('themeBtn');

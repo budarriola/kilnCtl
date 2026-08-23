@@ -90,6 +90,7 @@ from .protocol import (
     WIFI_MODE_HOME,
 )
 from .safety import SafetyClient, SafetyQueryError
+from .system import SystemClient, SystemQueryError
 from .serial_link import PortInfo, list_ports, recommend_port
 from .session_log import MAX_KEEP_LOGS, MIN_KEEP_LOGS, SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
@@ -209,6 +210,9 @@ class KilnCtrlApp:
         # (info_boot_push_task) is never missed if the board reboots while the
         # GUI is already connected.
         self.info = InfoClient(self.link, on_boot_push=self._on_boot_push)
+        #: Task SYSTEM (6) -- needed by the Danger Zone popup's watchdog-panic
+        #: query/toggle (dev-only bench escape hatch, see watchdog_cfg.h).
+        self.system = SystemClient(self.link)
         self.fw_version: Optional[FirmwareVersion] = None
         self.pin_config: Optional[list[PinConfigEntry]] = None
         self.wifi_status: Optional[WifiStatus] = None
@@ -1313,6 +1317,67 @@ class KilnCtrlApp:
         ttk.Button(
             top, text="Factory Reset...", command=self.danger_zone_confirm
         ).pack(padx=8, pady=(0, 8))
+
+        ttk.Separator(top, orient="horizontal").pack(fill="x", padx=8, pady=8)
+
+        tk.Label(
+            top,
+            text="Task-watchdog PANIC (bench debugging only): when disabled, a hung "
+            "task no longer reboots the board -- it sits hung with relays in "
+            "whatever state they were last commanded. Persists across reboots.",
+            fg=_BAD_COLOR, wraplength=440, justify="left",
+        ).pack(fill="x", padx=8, pady=(0, 4))
+        self.watchdog_panic_status_var = tk.StringVar(value="Not queried yet.")
+        ttk.Label(top, textvariable=self.watchdog_panic_status_var, anchor="w").pack(
+            fill="x", padx=8, pady=(0, 4)
+        )
+        wd_row = ttk.Frame(top)
+        wd_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(
+            wd_row, text="Get", command=self.watchdog_panic_get_async
+        ).pack(side="left")
+        ttk.Button(
+            wd_row, text="Disable Panic...", command=lambda: self.watchdog_panic_set_async(True)
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            wd_row, text="Enable Panic", command=lambda: self.watchdog_panic_set_async(False)
+        ).pack(side="left", padx=(6, 0))
+
+    def watchdog_panic_get_async(self) -> None:
+        def apply(disabled: bool) -> None:
+            self.watchdog_panic_status_var.set(
+                f"Watchdog panic disabled: {disabled}"
+            )
+        self.query_async(
+            "Get watchdog panic disabled",
+            lambda: self.system.get_watchdog_panic_disabled(),
+            apply,
+            error_types=(SystemQueryError,),
+        )
+
+    def watchdog_panic_set_async(self, disabled: bool) -> None:
+        if disabled and not messagebox.askyesno(
+            "Confirm Disable Watchdog Panic",
+            "Development-only setting. With the panic disabled, a hung task will "
+            "NOT reboot the board -- it will sit hung with relays in whatever "
+            "state they were last commanded. Never leave this disabled on a "
+            "board that will actually fire a kiln. Continue?",
+            icon="warning", parent=self.root,
+        ):
+            return
+        self.watchdog_panic_status_var.set(
+            f"Sending set watchdog panic disabled={disabled}..."
+        )
+        self.send_async(
+            f"Set watchdog panic disabled={disabled}",
+            UART_TASK_ID_SYSTEM,
+            lambda: devices.system_set_watchdog_panic_disabled(disabled),
+        )
+        self.session_log.info("watchdog panic disabled set to %s", disabled)
+        self.watchdog_panic_status_var.set(
+            f"Set watchdog panic disabled={disabled} sent -- no reply frame; "
+            "click Get to confirm the applied value."
+        )
 
     def danger_zone_confirm(self) -> None:
         scope_name = self.danger_scope_var.get()
@@ -3857,6 +3922,7 @@ class KilnCtrlApp:
             self._firing_stop_poll()
             for client in (
                 self.info,
+                self.system,
                 self.device_log,
                 self.thermo,
                 self.io,

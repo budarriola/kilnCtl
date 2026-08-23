@@ -8,6 +8,7 @@
 #include <math.h>
 
 #include "MAX31856.h"
+#include "boot_button.h"
 #include "dashboard_http.h"
 #include "kiln_io.h"
 #include "kiln_ui.h"
@@ -663,7 +664,23 @@ static void refresh_cb(lv_timer_t *timer)
     if (s_trip_strip != NULL) {
         bool safety_tripped = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
                               ds.diag_age_ms < SAFETY_LINK_STALE_MS;
-        if (safety_tripped) {
+        // boot_button.h's OTA-auth bypass window takes PRIORITY over the
+        // safety-trip text below: while it's open, anyone on the network can
+        // flash firmware with no password check at all, which this project
+        // treats as more urgent than an ordinary safety trip -- see
+        // main_page.html's renderBootButtonBypass() for the same ordering on
+        // the web side. Short on purpose (this strip's buffer is 96 chars
+        // and this page must never scroll, 480x320) -- states the fact and
+        // the remaining time, not the full recovery-hatch explanation.
+        if (boot_button_ota_bypass_active()) {
+            char bypass_buf[96];
+            uint32_t rem_s = boot_button_bypass_remaining_ms() / 1000u;
+            snprintf(bypass_buf, sizeof(bypass_buf),
+                     "OTA PASSWORD BYPASSED -- closes in %lu:%02lu",
+                     (unsigned long)(rem_s / 60u), (unsigned long)(rem_s % 60u));
+            lv_label_set_text(s_trip_strip, bypass_buf);
+            lv_obj_remove_flag(s_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (safety_tripped) {
             char trip_buf[96];
             snprintf(trip_buf, sizeof(trip_buf), "SAFETY TRIP -- %s",
                      safety_trip_words_short(ds.diag_trip_reason));

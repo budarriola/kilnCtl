@@ -1926,6 +1926,21 @@ def main() -> int:
     check("task id SYSTEM == 6", devices.UART_TASK_ID_SYSTEM, 6)
     check("task id SAFETY == 7", devices.UART_TASK_ID_SAFETY, 7)
     check("SYSTEM restart_uart bytes", devices.system_restart_uart(), b"\x01")
+    check(
+        "SYSTEM get_watchdog_panic_disabled bytes",
+        devices.system_get_watchdog_panic_disabled(),
+        b"\x03",
+    )
+    check(
+        "SYSTEM set_watchdog_panic_disabled(True) bytes",
+        devices.system_set_watchdog_panic_disabled(True),
+        b"\x04\x01",
+    )
+    check(
+        "SYSTEM set_watchdog_panic_disabled(False) bytes",
+        devices.system_set_watchdog_panic_disabled(False),
+        b"\x04\x00",
+    )
 
     print("\n== virtual link: two UartLinks cross-wired (no hardware) ==")
     loopback_checks()

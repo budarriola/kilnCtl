@@ -131,6 +131,14 @@ UART_TASK_ID_TOUCH = 13  # NS2009 touch controller on the display panel (J2)
 # frame either way, an out-of-range scope byte is rejected with no erase.
 SYSTEM_CMD_RESTART_UART = 0x01
 SYSTEM_CMD_FACTORY_RESET = 0x02
+#: Query -- like INFO, the request DATA frame is ACKed for delivery only and
+#: the answer arrives as a separate DATA frame back to the requester. Reply
+#: payload is 2 bytes: byte0 = 0x03 (echoed subcommand), byte1 = disabled(0/1).
+SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED = 0x03
+#: byte1 = disabled(0/1). No reply frame -- the ACK is the only confirmation;
+#: poll SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED afterward to read back the
+#: applied value.
+SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED = 0x04
 
 #: FACTORY_RESET scope byte values.
 FACTORY_RESET_SCOPE_WIFI = 0

@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include "autotune_engine.h"
+#include "boot_button.h"
 #include "boot_guard.h"
 #include "kiln_io.h"
 #include "MAX31856.h"
@@ -293,6 +294,23 @@ ota_http_verify_result_t ota_http_verify_request(ota_http_context_t ctx, const u
         default:                              ctx_str = "pico";         lockout = &s_lockout_pico;         break;
     }
     const char *ip = client_ip ? client_ip : "unknown";
+
+    // boot_button.h's recovery hatch: a BOOT-button long-press window,
+    // checked BEFORE the lockout/nonce work below, for ALL FOUR contexts
+    // ("esp", "pico", "esp-rollback", "recovery") -- see boot_button.h's
+    // "HOW THIS FITS TOGETHER WITH ota_http.c" comment for why scoping this
+    // to only one context would defeat the point (an operator who has lost
+    // the AP password has lost it for every context equally). Unmissable on
+    // purpose: this is a physical-presence override of a password check, and
+    // every attempt made under it must be loud in the log, naming both the
+    // context and the source IP, same as every other auth decision in this
+    // function.
+    if (boot_button_ota_bypass_active()) {
+        ESP_LOGE(TAG, "OTA verify(%s) from %s: AUTHENTICATION BYPASSED by the BOOT-button recovery "
+                      "window -- a long-press on GPIO0 opened this, %lu ms remain",
+                 ctx_str, ip, (unsigned long)boot_button_bypass_remaining_ms());
+        return OTA_HTTP_VERIFY_OK;
+    }
 
     uint32_t t = now_ms();
 

@@ -132,7 +132,9 @@ from .protocol import (
     SAFETY_CMD_SET_CONFIG,
     SAFETY_CMD_SET_FAULT_OUT,
     SAFETY_CMD_SET_POLL_PERIOD,
+    SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED,
     SYSTEM_CMD_RESTART_UART,
+    SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED,
     THERMO_CHANNEL_ALL,
     THERMO_CHANNEL_COUNT,
     THERMO_CMD_CLEAR_FAULTS,
@@ -185,6 +187,10 @@ __all__ = [
     "UART_TASK_ID_WIFI",
     "system_restart_uart",
     "system_factory_reset",
+    "system_get_watchdog_panic_disabled",
+    "system_set_watchdog_panic_disabled",
+    "SystemResponseError",
+    "parse_system_response",
     # CONTROL
     "ZoneConfig",
     "ControlResponseError",
@@ -496,6 +502,57 @@ def system_factory_reset(scope: int = FACTORY_RESET_SCOPE_ALL) -> bytes:
     return struct.pack(
         "<BB", SYSTEM_CMD_FACTORY_RESET, _check_range(scope, 0, 3, "scope")
     )
+
+
+def system_get_watchdog_panic_disabled() -> bytes:
+    """0x03 GET_WATCHDOG_PANIC_DISABLED request: byte0 = subcommand, no args.
+
+    Query -- like INFO, the request is ACKed for delivery only and the answer
+    arrives as a separate DATA frame; see :func:`parse_system_response`.
+    """
+    return struct.pack("<B", SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED)
+
+
+def system_set_watchdog_panic_disabled(disabled: bool) -> bytes:
+    """0x04 SET_WATCHDOG_PANIC_DISABLED: byte1 = disabled(0/1).
+
+    Persists AND applies immediately, no reboot needed either direction. No
+    reply frame -- the ACK is the only confirmation; poll
+    :func:`system_get_watchdog_panic_disabled` afterward to read back the
+    applied value.
+    """
+    return struct.pack("<BB", SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED, 1 if disabled else 0)
+
+
+class SystemResponseError(ValueError):
+    """Raised when a SYSTEM response payload does not match its wire layout."""
+
+
+def parse_system_response(payload: bytes) -> "tuple[int, bool]":
+    """Decode a SYSTEM query response payload.
+
+    Unlike INFO's replies, SYSTEM replies are self-describing: byte0 echoes
+    the subcommand. Currently only GET_WATCHDOG_PANIC_DISABLED replies (2
+    bytes: byte0 = 0x03, byte1 = disabled(0/1)).
+
+    Raises :class:`SystemResponseError` if the payload does not match this
+    layout, including a byte0 that doesn't echo
+    :data:`~kilnctrl.protocol.SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED`.
+    """
+    if len(payload) != 2:
+        raise SystemResponseError(
+            f"SYSTEM response length mismatch: got {len(payload)} bytes, want 2"
+        )
+    subcommand = payload[0]
+    if subcommand != SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED:
+        raise SystemResponseError(
+            f"SYSTEM response byte0=0x{subcommand:02X} does not echo "
+            f"GET_WATCHDOG_PANIC_DISABLED (0x{SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED:02X})"
+        )
+    disabled = payload[1]
+    if disabled > 1:
+        raise SystemResponseError(f"SYSTEM response disabled flag must be 0 or 1, got {disabled}")
+    return subcommand, bool(disabled)
 
 
 # ---------------------------------------------------------------------------

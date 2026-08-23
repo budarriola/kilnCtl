@@ -75,6 +75,7 @@ from .devices import LogLine
 from .display import BlitError, DisplayClient, DisplayQueryError
 from .touch import TouchClient, TouchQueryError
 from .info import InfoClient, InfoQueryError
+from .system import SystemClient, SystemQueryError
 from .io_expander import IoClient, IoQueryError
 from .link_hub import get_shared_link
 from .profiles import ProfilesClient, ProfilesQueryError
@@ -148,6 +149,10 @@ def _on_boot_push(version) -> None:  # devices.FirmwareVersion, avoid an import 
 #: same reason the GUI does it early: a push that arrives with no registered
 #: task is NACKed and lost.
 _info = InfoClient(_link, on_boot_push=_on_boot_push)
+
+#: Owns task SYSTEM (6) so GET_WATCHDOG_PANIC_DISABLED query replies have
+#: somewhere to land. Registered at import for the same reason as _info.
+_system = SystemClient(_link)
 
 #: Recent firmware log lines (task LOG), for the get_device_log tool below --
 #: an MCP client has no GUI terminal to watch live, so this is the pull-based
@@ -271,6 +276,7 @@ _action_ctx = actions.ActionContext(
     io=_io,
     display=_display,
     safety=_safety,
+    system=_system,
 )
 
 
@@ -304,6 +310,7 @@ def _tool():
                 TouchQueryError,
                 SafetyQueryError,
                 InfoQueryError,
+                SystemQueryError,
                 BlitError,
             ) as exc:
                 return f"error: {exc}"
@@ -508,7 +515,7 @@ def close_server() -> str:
     """
     def _shutdown() -> None:
         time.sleep(0.2)  # let the stdio transport flush this tool's reply first
-        for client in (_info, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
+        for client in (_info, _system, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
                        _control, _profiles, _autotune):
             client.close()
         _link.close()
@@ -529,6 +536,57 @@ def restart_uart() -> str:
     serial port; that's what disconnect()/connect() are for.
     """
     return _send(UART_TASK_ID_SYSTEM, devices.system_restart_uart())
+
+
+@_tool()
+def get_watchdog_panic_disabled() -> str:
+    """Query whether the ESP task-watchdog's PANIC half is disabled.
+
+    This is a dev-only bench escape hatch (watchdog_cfg.h): when disabled, a
+    task that hangs no longer triggers a panic/reboot -- the watchdog still
+    monitors and still logs the timeout, the RTC watchdog is completely
+    untouched and stays armed regardless, but a hung task now leaves the
+    board just sitting there hung, with the relays in whatever state they
+    were last commanded, instead of rebooting to clear it. The setting
+    persists across reboots (it lives in NVS, not RAM).
+    """
+    # Same protocol-version gate _send() applies to every non-INFO send, hand
+    # rolled here because this query goes through SystemClient rather than
+    # _send(). Only INFO is exempt from the gate (that is how compatibility is
+    # discovered at all); SYSTEM is not, and a v1 unit-test-fixture firmware
+    # would happily accept task-6 traffic and mean something else entirely by
+    # it -- see _send()'s docstring for that exact hazard.
+    if _info.compatible is not True:
+        reason = (
+            "protocol version mismatch"
+            if _info.compatible is False
+            else "firmware version not yet confirmed (call get_fw_version first)"
+        )
+        _session_log.error("refused SYSTEM watchdog query: %s", reason)
+        return f"error: refused - {reason}"
+    try:
+        disabled = _system.get_watchdog_panic_disabled()
+    except SystemQueryError as exc:
+        return f"error: {exc}"
+    return f"watchdog panic disabled: {disabled}"
+
+
+@_tool()
+def set_watchdog_panic_disabled(disabled: bool) -> str:
+    """Enable/disable the ESP task-watchdog's PANIC half.
+
+    Development-only setting -- never leave this disabled on a board that
+    will actually fire a kiln. With it disabled, a hung task no longer
+    reboots the board; it just sits hung with the relays in whatever state
+    they were last commanded. The watchdog's monitoring and logging keep
+    running either way, and the RTC watchdog is untouched and stays armed
+    regardless. The firmware will warn again before any firing is started
+    while this is off (see WATCHDOG_CFG_FIRING_WARNING). Takes effect
+    immediately and persists across reboots; no reply frame is sent for this
+    command -- poll get_watchdog_panic_disabled() afterward to confirm the
+    applied value.
+    """
+    return _send(UART_TASK_ID_SYSTEM, devices.system_set_watchdog_panic_disabled(disabled))
 
 
 # ---------------------------------------------------------------------------
@@ -2858,7 +2916,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        for client in (_info, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
+        for client in (_info, _system, _device_log, _thermo, _io, _display, _touch, _safety, _probe, _wifi,
                        _control, _profiles, _autotune):
             client.close()
         # close(), not disconnect(): this link may be shared with another

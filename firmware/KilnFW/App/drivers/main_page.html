@@ -248,6 +248,13 @@
      (renderSafetyTrip() below only ever fills it in, matching lastRunBanner's
      own hide-when-nothing-to-report pattern) -- never rendered as a green/
      blank "all clear" card, just absent when there is nothing to report. -->
+<!-- boot_button.h's BOOT-button OTA-auth bypass window. Sits ABOVE the
+     safety-trip banner: while this window is open, ANY device on the
+     network can push firmware with no password check at all, which is a
+     more urgent thing for an operator glancing at this page to know about
+     than an ordinary safety trip. Empty by default, same hide-when-nothing-
+     to-report pattern as safetyTripBanner/lastRunBanner below. -->
+<div id="bootButtonBypassBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -1033,6 +1040,24 @@ function renderSafetyTrip(data) {
     'Clear the trip on the safety processor before starting a new firing.</p></div>';
 }
 
+// boot_button.h -- same solid-fill "safety-trip" visual treatment as
+// renderSafetyTrip() below (border-only "banner" is what this page reserves
+// for merely informational strips like lastRunBanner; a window that lets
+// ANYONE on the network flash firmware with no password gets the same
+// impossible-to-miss styling as a live safety trip, not a quieter one).
+function renderBootButtonBypass(data) {
+  var el = document.getElementById('bootButtonBypassBanner');
+  if (!data.boot_button_bypass_active) { el.innerHTML = ''; return; }
+  var remS = data.boot_button_bypass_remaining_s || 0;
+  var mm = Math.floor(remS / 60), ss = remS % 60;
+  el.innerHTML = '<div class="banner safety-trip">' +
+    '<h3>BOOT-BUTTON RECOVERY: OTA PASSWORD CHECK BYPASSED</h3>' +
+    '<div class="row"><span>Any device on this network can flash firmware right now, no password.</span></div>' +
+    '<div class="row"><span>Closes automatically in</span><span class="kc-live-value">' +
+      mm + ':' + (ss < 10 ? '0' : '') + ss + '</span></div>' +
+    '</div>';
+}
+
 function renderLastRun(st) {
   const el = document.getElementById('lastRunBanner');
   const lr = st.last_run;
@@ -1558,6 +1583,7 @@ function poll() {
     // other status-derived control on this page already uses.
     lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
     renderChannels(data);
+    renderBootButtonBypass(data);
     renderSafetyTrip(data);
     // Idle dots are a LIVE temperature display (same data as the channel
     // cards above), so they refresh on this 2s status poll, not history.csv's

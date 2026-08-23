@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 
 #include "board_temps.h"
+#include "boot_button.h"
 #include "boot_guard.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
@@ -544,6 +545,25 @@ void app_main(void)
     // this is a safe place to re-apply a persisted "panic disabled"
     // dev-mode setting via esp_task_wdt_reconfigure(). See watchdog_cfg.h.
     watchdog_cfg_init();
+
+    // boot_button.h: the "I lost the AP password" long-press recovery hatch.
+    // Started in BOTH a normal boot and a recovery-mode boot -- deliberately
+    // NOT gated by `recovery_mode` the way profile_executor_start()/
+    // autotune_engine_start()/rules_task_start() further below are. Recovery
+    // mode is exactly the situation an operator locked out of OTA auth is
+    // most likely to be stuck in (a boot loop already forced the board into
+    // Wi-Fi+OTA-only mode), so refusing to start this hatch there would
+    // remove the one manual escape a stuck-and-locked-out operator has left.
+    // Safe to start this early: boot_button_task's own handle_open_requested()
+    // calls profile_executor_get_status(), and that function is hardened to
+    // answer a clean "not running" (profile_exec state IDLE, see
+    // profile_executor.c's NULL-mutex guard on every public entry point) even
+    // before profile_executor_start() has run -- exactly the same guarantee
+    // boot_guard.h's RECOVERY_MODE_ENABLED comment already documents was
+    // fixed and host-tested (App/test/test_profile_executor_prestart.c) for
+    // this precise "called before this module's own _start()" situation, so
+    // this call is safe on a normal boot too, before the block below runs.
+    boot_button_start();
 
     // Runs once the expander is in its safe state (relays off) but before
     // anything else starts talking on the bus, so the results reflect what is

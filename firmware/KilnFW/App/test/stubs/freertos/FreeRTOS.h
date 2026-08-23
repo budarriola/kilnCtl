@@ -27,4 +27,13 @@ typedef unsigned int UBaseType_t;
  * test), 1000 just matches this codebase's actual sdkconfig (1ms ticks). */
 #define configTICK_RATE_HZ 1000u
 
+/* 2026-08-22: added for boot_button.c's host tests (test_boot_button.c) --
+ * its now_ms() helper multiplies xTaskGetTickCount() by this, mirroring
+ * ota_http.c's identical now_ms(). 1, matching this codebase's actual
+ * sdkconfig (1ms ticks, same value configTICK_RATE_HZ above already
+ * encodes) -- never actually reached with a non-zero xTaskGetTickCount()
+ * by any host test (that stub always returns 0), so the value only matters
+ * for the code to compile. */
+#define portTICK_PERIOD_MS 1u
+
 #endif // TEST_STUB_FREERTOS_H

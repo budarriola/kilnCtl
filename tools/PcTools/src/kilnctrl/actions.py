@@ -36,6 +36,7 @@ from .protocol import (
 )
 from .safety import SafetyClient, SafetyQueryError
 from .serial_link import UartLink, list_ports
+from .system import SystemClient, SystemQueryError
 from .thermo import ThermoClient, ThermoQueryError
 
 
@@ -59,6 +60,8 @@ class ActionContext:
     display: Optional[DisplayClient] = None
     #: Owns task 7's inbox -- needed by the SAFETY status/link-stats queries.
     safety: Optional[SafetyClient] = None
+    #: Owns task 6's inbox -- needed by the SYSTEM GET_WATCHDOG_PANIC_DISABLED query.
+    system: Optional[SystemClient] = None
 
 
 @dataclass(frozen=True)
@@ -709,6 +712,31 @@ _register(
     "a recovery lever for a stuck/desynced link, without power-cycling the board.",
     {},
     lambda ctx: _send(ctx, UART_TASK_ID_SYSTEM, devices.system_restart_uart()),
+)
+_register(
+    "System: Get Watchdog Panic Disabled",
+    "Query whether the ESP task-watchdog's PANIC half is disabled (dev-only bench "
+    "escape hatch -- see watchdog_cfg.h). The watchdog's monitoring/logging and the "
+    "RTC watchdog are unaffected either way.",
+    {},
+    lambda ctx: _client_query(
+        ctx.system,
+        "SYSTEM",
+        SystemQueryError,
+        lambda disabled: f"watchdog panic disabled: {disabled}",
+        lambda system: system.get_watchdog_panic_disabled(),
+    ),
+)
+_register(
+    "System: Set Watchdog Panic Disabled",
+    "Enable/disable the ESP task-watchdog's PANIC half. Development-only -- with it "
+    "disabled a hung task leaves the board sitting hung with relays in whatever state "
+    "they were last commanded instead of rebooting. No reply frame; poll "
+    "\"System: Get Watchdog Panic Disabled\" afterward to confirm the applied value.",
+    {"disabled": bool},
+    lambda ctx, disabled: _send(
+        ctx, UART_TASK_ID_SYSTEM, devices.system_set_watchdog_panic_disabled(disabled)
+    ),
 )
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 
 #include "autotune_engine.h"
+#include "boot_button.h" /* boot_button_ota_bypass_active()/_remaining_ms() -- see the GET /api/status fields below */
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- see the ERR_UPDATING case below */
 #include "http_form.h"
 #include "kiln_io_owner.h"
@@ -531,6 +532,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * profile_exec_start_post_handler() below and main_page.html/
      * ui_page_home.c's own dialogs). */
     APPEND(",\"watchdog_panic_disabled\":%s", watchdog_cfg_panic_disabled() ? "true" : "false");
+
+    /* boot_button.h -- the BOOT-button OTA-auth bypass window. Same
+     * always-visible-in-status reasoning as watchdog_panic_disabled just
+     * above: a board currently reachable by anyone on the network with NO
+     * OTA password check must say so everywhere this status is read, not
+     * only at the moment a request happens to hit the bypassed check. */
+    APPEND(",\"boot_button_bypass_active\":%s", boot_button_ota_bypass_active() ? "true" : "false");
+    APPEND(",\"boot_button_bypass_remaining_s\":%lu",
+           (unsigned long)(boot_button_bypass_remaining_ms() / 1000u));
 
     APPEND("}");
 

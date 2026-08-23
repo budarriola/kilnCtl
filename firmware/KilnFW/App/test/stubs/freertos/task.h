@@ -8,6 +8,11 @@
 
 typedef struct task_s *TaskHandle_t;
 
+/* 2026-08-22: added for boot_button.c's host tests -- see xTaskCreate()
+ * below, added the same day for the same reason. Value is arbitrary (never
+ * reached: boot_button_start() is never called by the tests). */
+#define tskIDLE_PRIORITY 0u
+
 /* 2026-08-21: added for wifi_prov.c's host tests. xTaskCreatePinnedToCore()
  * deliberately never invokes pxTaskCode -- the tests call wifi_prov.c's
  * do_*() bodies directly rather than through owner_task()/dns_hijack_task(),
@@ -53,5 +58,24 @@ static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_
  * translation unit compiles and links. */
 static inline TickType_t xTaskGetTickCount(void) { return 0; }
 static inline void vTaskDelay(TickType_t ticks) { (void)ticks; }
+
+/* 2026-08-22: added for boot_button.c's host tests (test_boot_button.c),
+ * same reasoning as xTaskCreatePinnedToCore() above -- boot_button_start()
+ * is never called by the tests (only its pure boot_button_step()/
+ * state_refuses_bypass() logic is), but the translation unit still needs
+ * this symbol to link. */
+static inline BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint32_t stack_depth,
+                                      void *arg, UBaseType_t priority, TaskHandle_t *out_handle)
+{
+    (void)task;
+    (void)name;
+    (void)stack_depth;
+    (void)arg;
+    (void)priority;
+    if (out_handle) {
+        *out_handle = NULL;
+    }
+    return pdPASS;
+}
 
 #endif // TEST_STUB_TASK_H
