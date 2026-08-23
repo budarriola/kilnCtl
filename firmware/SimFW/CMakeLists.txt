@@ -141,6 +141,7 @@ set(SIMFW_APP_SOURCES
     src/sim/fault_engine.c
     src/drivers/mcp23017.c
     src/drivers/ct_wave_pwm.c
+    src/drivers/ct_wave_i2s.c
     src/drivers/simfw_fatal.c
     src/sim/sine_synth.c
     src/sim/ct_calibration.c
@@ -160,6 +161,14 @@ add_dependencies(SimFW simfw_build_info)
 # adds to SimFW's include path automatically -- no manual
 # target_include_directories entry needed for that generated header.
 pico_generate_pio_header(SimFW ${CMAKE_CURRENT_LIST_DIR}/src/drivers/max31856_spi_slave.pio)
+
+# ct_wave_i2s.pio: PIO I2S master transport for 2x UDA1334A DAC modules
+# (src/drivers/ct_wave_i2s.{c,h}), the planned replacement for
+# ct_wave_pwm.c's PWM+RC path -- see that header for the DMA-budget and
+# PIO1-program-memory conflicts this driver has with the existing SPI/PWM
+# claimants. Not called from anywhere yet (dead code, compiled only), same
+# posture as any other not-yet-wired-up driver in this tree.
+pico_generate_pio_header(SimFW ${CMAKE_CURRENT_LIST_DIR}/src/drivers/ct_wave_i2s.pio)
 
 target_include_directories(SimFW PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
