@@ -2101,9 +2101,15 @@ static void link_watchdog_task(void *arg)
 
         if (up) {
             if (!was_up) {
-                ESP_LOGW(TAG, "PC link back after %ums of silence -- clearing the link fault "
-                              "source; relays stay off until the host commands them",
+                ESP_LOGW(TAG, "PC link back after %ums of silence"
+#if CONFIG_KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT
+                              " -- clearing the link fault source;"
+#else
+                              ";"
+#endif
+                              " relays stay off until the host commands them",
                          (unsigned)UART_BRIDGE_LINK_TIMEOUT_MS);
+#if CONFIG_KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT
                 if (ctx->link) {
                     esp_err_t err = safety_link_set_fault_source(ctx->link,
                                                                  SAFETY_FAULT_SRC_PC_LINK, false);
@@ -2112,6 +2118,7 @@ static void link_watchdog_task(void *arg)
                                  esp_err_to_name(err));
                     }
                 }
+#endif
                 was_up = true;
                 relays_confirmed_off = false;
             }
@@ -2119,8 +2126,14 @@ static void link_watchdog_task(void *arg)
         }
 
         if (was_up) {
-            ESP_LOGE(TAG, "PC link lost (no frame or ACK for %ums) -- dropping all relays and "
-                          "asserting the isolated fault line",
+            ESP_LOGE(TAG, "PC link lost (no frame or ACK for %ums) -- dropping all relays"
+#if CONFIG_KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT
+                          " and asserting the isolated fault line"
+#else
+                          " (the isolated fault line is deliberately NOT asserted -- see "
+                          "KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT)"
+#endif
+                          ,
                      (unsigned)UART_BRIDGE_LINK_TIMEOUT_MS);
             was_up = false;
             relays_confirmed_off = false;
@@ -2150,9 +2163,18 @@ static void link_watchdog_task(void *arg)
             relays_confirmed_off = true; /* nothing more to try; stop repeating */
         }
 
+#if CONFIG_KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT
         /* Re-asserted every tick rather than once on the transition: it is a
          * single GPIO write, and doing it unconditionally means the line is
-         * still right even if something else cleared the source in between. */
+         * still right even if something else cleared the source in between.
+         *
+         * Compiled out by default -- see KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT.
+         * The PC link is the MCP tooling's debug and control channel, not
+         * something the kiln needs in order to run, so its absence is not a
+         * hazard and must not trip the safety processor. A board on the bench
+         * with nothing plugged in used to assert this five seconds after boot
+         * and sit there permanently tripped, because the trip latches on the
+         * far side and does not clear when the line goes back low. */
         if (ctx->link) {
             esp_err_t err = safety_link_set_fault_source(ctx->link, SAFETY_FAULT_SRC_PC_LINK, true);
             if (err != ESP_OK) {
@@ -2160,6 +2182,7 @@ static void link_watchdog_task(void *arg)
                          esp_err_to_name(err));
             }
         }
+#endif
     }
 }
 

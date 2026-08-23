@@ -139,6 +139,29 @@ menu "KilnCtrl Hardware Configuration"
                 A kiln element left on by a crashed or unplugged controller
                 is the failure this exists to prevent. Turn it off only for
                 bench work where the board is expected to run unattached.
+
+        config KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT
+            bool "Assert the isolated fault line when the PC link goes away"
+            default n
+            help
+                Whether losing the PC control link also asserts the isolated
+                fault line to the safety processor, which trips it.
+
+                Off by default, deliberately. The PC link is a debug and
+                control channel for the MCP tooling, not something the kiln
+                needs in order to run: this board has its own LCD and web UI
+                and is expected to fire without a host attached. With this on,
+                a board sitting on the bench with nothing plugged into it
+                asserts the fault line five seconds after boot, trips the
+                safety processor with S6a, and stays tripped -- the trip
+                latches, so it survives the link coming back. That is what a
+                standalone board did before this option existed, and it made
+                the panel show a permanent fault for no hazard.
+
+                Turn it on for a setup where the PC genuinely is the operator
+                interface and its absence really does mean the kiln is
+                unattended. The relay drop above is a separate switch and is
+                still on by default either way.
     endmenu
 
     menu "ILI9488 Display (BIGTREETECH TFT35 SPI V2.1, J2)"

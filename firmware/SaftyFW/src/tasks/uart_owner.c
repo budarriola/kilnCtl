@@ -26,12 +26,31 @@
 // "verified" the wiring.
 #define UART_OWNER_BAUD_RATE  9600u
 
-// Sized well past one worst-case stuffed Frame A/FW_VERSION frame (header 8 +
-// payload up to ~60 + crc 2 = ~70 raw bytes; stuffing can at most double that
-// plus two delimiters -- KILNLINK_FRAME_STUFFED_MAX in kilnlink_frame.h gives
-// the general bound). 128 bytes covers this link's actual traffic with
-// margin, without pretending to be a general-purpose byte pipe.
-#define UART_OWNER_TX_RING_SIZE  128u
+// Sized to hold one worst-case stuffed frame outright --
+// KILNLINK_FRAME_STUFFED_MAX is 528 bytes (header 8 + payload up to 253 + crc
+// 2 = 263 raw, which stuffing can nearly double, plus two delimiters), so
+// 1024 clears it with room for the payload bound to grow.
+//
+// This was 128, sized against "this link's actual traffic" when that meant
+// Frame A and FW_VERSION, both comfortably under 70 raw bytes. It stopped
+// being true when CONFIG_PAGE arrived: a full page is 4 + 32*7 = 228 raw
+// bytes of payload, about 470 stuffed, which is nearly four times the whole
+// ring. link_task_send_broadcast_to() builds the entire stuffed frame and
+// hands it to uart_owner_send() in one call, and uart_owner_send() is
+// all-or-nothing -- if the frame does not fit it drops the whole thing and
+// increments s_tx_dropped. So every GET_CONFIG_PAGE reply was discarded
+// before a single byte reached the FIFO, always, regardless of timing or
+// contention with the 500 ms status broadcast.
+//
+// The ESP saw that as safety_cfg_store_refetch() timing out forever on a
+// link whose telemetry was perfectly healthy -- small frames fit, this one
+// never could. s_tx_dropped was counting it the whole time and is carried in
+// the DIAG frame (link_task.c's .tx_frames_dropped), but nothing on the ESP
+// side raises it as a symptom, so it read as a mystery timeout rather than
+// "the far end could not fit the reply".
+//
+// Cost of the change is 896 bytes of static RAM on a chip with 264 KB.
+#define UART_OWNER_TX_RING_SIZE  1024u
 // RX has no hard per-frame bound to plan against (arbitrary noise/half-frames
 // can arrive) -- sized generously so a burst of garbage does not immediately
 // cost a real frame that happens to follow it within one link_task poll.
