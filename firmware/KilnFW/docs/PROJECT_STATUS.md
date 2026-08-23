@@ -76,6 +76,14 @@ RP2040 safety processor (`firmware/SaftyFW`).
   to 9600 — the TCMT1109 optocouplers cannot switch fast enough for 115200 —
   on top of the pin/inversion fixes above; see `docs/SAFETY_LINK.md`
   "Transport" and `firmware/SaftyFW/docs/HARDWARE.md` §1 for the measurement.
+  The safety thermocouple IC itself is not fitted on this bench unit yet, so
+  guard S5 (`SAFETY_TRIP_SENSOR_INVALID`) is expected to trip roughly a
+  minute after boot once nothing else trips first — that is "sensor still
+  absent" being reported correctly, not a regression. Before
+  `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` defaulted off (see `SAFETY_MODEL.md`
+  §3), S6a fired within five seconds and latched, which stopped guard
+  evaluation before S5 ever got a chance to run; with S6a gone by default, S5
+  becoming the reported trip on this board is the expected outcome.
 - **PC↔ESP UART link (command/telemetry): found dead 2026-08-19.** A
   different fault from the Pi↔ESP safety link (`ROADMAP.md` M0/M1) — this is
   the USB-serial link `pc_tools`/MCP use. With the board present, powered, and

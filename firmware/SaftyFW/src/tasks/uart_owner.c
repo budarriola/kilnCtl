@@ -65,6 +65,12 @@ static volatile uint32_t s_rx_head = 0; // next free slot to write into (produce
 static volatile uint32_t s_rx_tail = 0; // next byte to drain (consumer: uart_owner_rx_read)
 
 static volatile uint32_t s_tx_dropped = 0;
+// Diagnostic (2026-08-23): total bytes actually written to the UART data
+// register, split by who wrote them. Queued-but-never-sent is the failure
+// this pair exists to make visible -- compare against what link_task says it
+// handed over. Removable once the TX path has been trusted for a while.
+static volatile uint32_t s_tx_bytes_to_fifo = 0;
+static volatile uint32_t s_tx_bytes_from_isr = 0;
 
 static inline uint32_t ring_used(uint32_t head, uint32_t tail, uint32_t cap)
 {
@@ -107,6 +113,7 @@ static void uart_owner_irq_handler(void)
     while (uart_is_writable(UART_OWNER_INSTANCE) && s_tx_tail != s_tx_head) {
         uart_get_hw(UART_OWNER_INSTANCE)->dr = s_tx_ring[s_tx_tail];
         s_tx_tail = (s_tx_tail + 1u) % UART_OWNER_TX_RING_SIZE;
+        s_tx_bytes_from_isr++;
     }
     if (s_tx_tail == s_tx_head) {
         uart_set_irq_enables(UART_OWNER_INSTANCE, true, false);
@@ -118,6 +125,28 @@ bool uart_owner_init(void)
     uart_init(UART_OWNER_INSTANCE, UART_OWNER_BAUD_RATE);
     gpio_set_function(SAFTYFW_PIN_UART1_TX, GPIO_FUNC_UART);
     gpio_set_function(SAFTYFW_PIN_UART1_RX, GPIO_FUNC_UART);
+
+    // Invert the TX pin so the isolator sits IDLE-OFF rather than idle-on.
+    //
+    // An ordinary UART idles at mark, i.e. high. Driving U3's LED from a pin
+    // that idles high means the optocoupler conducts continuously whenever
+    // nothing is being sent, which is the whole time: the LED burns current
+    // around the clock, ages faster, and -- the part that actually bit us --
+    // starts every transmission out of deep saturation, so the first edges
+    // come out of a part that has to recover before it can switch cleanly.
+    //
+    // The RP2040's PL011 has no line-inversion control of its own, but the
+    // GPIO block does: GPIO_OVERRIDE_INVERT on the pin's outover flips the
+    // peripheral's output on the way to the pad. Idle mark therefore reaches
+    // the pad as low, the LED is dark between frames, and the phototransistor
+    // rests non-conducting with R15 holding the ESP's input high.
+    //
+    // This must be kept in step with the ESP: because this end now inverts,
+    // safety_link.c applies UART_SIGNAL_TXD_INV only, NOT RXD_INV. Exactly
+    // one inversion per direction. The ESP->Pico direction already worked out
+    // this way -- its TXD_INV means its pin idles low too, so U2 was already
+    // dark at idle; only this direction was wrong.
+    gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT);
     // Plain hardware UART, no inversion, no PIO -- the ESP inverts on its
     // side; see this file's header comment.
     uart_set_hw_flow(UART_OWNER_INSTANCE, false, false);
@@ -165,9 +194,39 @@ bool uart_owner_send(const uint8_t *data, size_t len)
     }
     s_tx_head = head;
 
-    // Make sure the drain interrupt is armed -- cheap to call unconditionally
-    // even if it was already enabled.
-    uart_set_irq_enables(UART_OWNER_INSTANCE, true, true);
+    // Prime the hardware FIFO here rather than waiting for the TX interrupt
+    // to do all of it.
+    //
+    // The PL011's TX interrupt is raised when the FIFO level passes DOWN
+    // THROUGH the trigger level -- it is a transition, not a standing "there
+    // is room" condition. Arming the interrupt while the FIFO is already
+    // empty therefore does not necessarily produce one: with nothing in the
+    // FIFO there is no level left to fall through, so the handler that would
+    // have pushed the first bytes may never run, and whatever is sitting in
+    // the ring stays there until some later send happens to re-arm it at a
+    // moment when the transition does occur.
+    //
+    // Frames up to the 32-byte FIFO depth were unaffected, which is why this
+    // went unnoticed for so long: the status broadcast is 35 bytes stuffed
+    // and effectively always got out. The first frame big enough to need
+    // several refills -- the 188-byte config-page reply -- did not. Observed
+    // on the bench 2026-08-23: the RP2040 queued all 188 bytes and reported
+    // the send accepted, while the ESP assembled only 140-142 of the 186 raw
+    // bytes before the next frame's delimiter closed it, every time.
+    //
+    // Writing directly here means the first bytes always leave, and the FIFO
+    // is left full enough that draining it genuinely does cross the trigger
+    // level and keep the handler firing for the rest.
+    while (uart_is_writable(UART_OWNER_INSTANCE) && s_tx_tail != s_tx_head) {
+        uart_get_hw(UART_OWNER_INSTANCE)->dr = s_tx_ring[s_tx_tail];
+        s_tx_tail = (s_tx_tail + 1u) % UART_OWNER_TX_RING_SIZE;
+        s_tx_bytes_to_fifo++;
+    }
+
+    // Arm the drain interrupt only if anything is actually left; arming it
+    // with an empty ring is what the handler's own tail-end check undoes
+    // anyway.
+    uart_set_irq_enables(UART_OWNER_INSTANCE, true, s_tx_tail != s_tx_head);
 
     restore_interrupts(save);
     return true;

@@ -282,6 +282,33 @@ SAFETY_CMD_SET_CONFIG = 0x16
 #: shows up as the link dropping and recovering with a new boot_id on the
 #: next GET_STATUS poll, not here.
 SAFETY_CMD_ROLLBACK = 0x17
+#: PC -> ESP, relayed to the Pico by uart_bridge.c's SAFETY_CMD_SET_CT_CAL
+#: case. Commissions one channel of SaftyFW's config_store.h ct_cal record
+#: (CommonFW/docs/LINK_PROTOCOL.md sec 4, kilnlink_set_ct_cal.h) -- the
+#: bench-tool's path to push a fitted gain/offset back into SaftyFW's own
+#: flash (firmware/SimFW/tools/ct_calibration/'s report: "no path exists to
+#: push calibration constants back into SaftyFW's own flash"). One channel
+#: per frame, not all three at once. Fire-and-forget, like SET_CONFIG: no
+#: reply on the wire; the outcome shows up on the next GET_CT_CAL readback,
+#: not here. Refused (logged on the Pico side) if the relay is currently
+#: ARMED, or if the channel is out of range -- both refusal decisions belong
+#: to SaftyFW, not this client.
+SAFETY_CMD_SET_CT_CAL = 0x19
+#: PC -> ESP query, shared id with the reply (SAFETY_CMD_CT_CAL, same value)
+#: -- request-vs-reply distinguished by length, same convention as
+#: GET_FW_VERSION above. UNLIKE GET_STATUS/GET_DIAG/GET_FW_VERSION this is
+#: NOT answered from a cache: uart_bridge.c's SAFETY_CMD_GET_CT_CAL case
+#: calls safety_link_get_ct_cal(), which is a live, blocking round trip
+#: across the isolated link to the Pico and can genuinely time out
+#: (kilnlink_get_ct_cal.h/kilnlink_ct_cal.h). Expect this call to take up to
+#: ~SAFETY_LINK_REPLY_TIMEOUT_MS (safety_link.h) longer than the other
+#: SAFETY queries, which never leave the ESP.
+SAFETY_CMD_GET_CT_CAL = 0x1A
+#: Number of CT calibration channels (config_store_ct_channel_cal_t[3]) --
+#: same value as KILNLINK_SET_CT_CAL_NUM_CHANNELS/KILNLINK_CT_CAL_NUM_CHANNELS
+#: in CommonFW.
+SAFETY_CT_CAL_NUM_CHANNELS = 3
+
 #: PC -> ESP queries, CommonFW/docs/LINK_PROTOCOL.md sec 7: "Mirror all of it
 #: on the PC-link SAFETY task as well" -- the same DIAG (Frame B) / TRIP_EVENT
 #: (Frame D) telemetry dashboard_http.c and ui_page_safety.c already read,

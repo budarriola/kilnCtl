@@ -160,14 +160,35 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
     }
     uint8_t length = raw[7];
     if (len != HEADER_LEN + length + 2u) {
-        ESP_LOGW(TAG, "frame length mismatch (hdr says %u, got %u bytes)", length, (unsigned)len);
+        /* The port number is load-bearing, not decoration. Two independent
+         * uart_protocol_t instances run in this firmware -- the PC link and
+         * the opto-isolated link to the safety processor -- and they share
+         * this TAG, so an unqualified message here is genuinely ambiguous
+         * about which wire is misbehaving. That cost a long detour on
+         * 2026-08-23: this exact line was read as a fault on the isolated
+         * link and chased there for some time, until SWD instrumentation on
+         * the RP2040 proved it had never sent a frame anywhere near this
+         * size, so the frame had to be coming from the PC link all along.
+         *
+         * Note the two numbers are not directly comparable and never were:
+         * `length` is the header's PAYLOAD length, `len` is the whole
+         * assembled raw frame, so the expected total is HEADER_LEN + length +
+         * 2. Both are printed with their meaning spelled out now, because
+         * subtracting one from the other looks meaningful and is not. */
+        ESP_LOGW(TAG, "uart%d: frame length mismatch (header declares %u payload bytes, so "
+                      "expected %u total, got %u) hdr=%02x %02x %02x %02x %02x %02x %02x %02x "
+                      "tail=%02x %02x %02x %02x",
+                 (int)proto->owner->port, length, (unsigned)(HEADER_LEN + length + 2u),
+                 (unsigned)len,
+                 raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                 raw[len - 4u], raw[len - 3u], raw[len - 2u], raw[len - 1u]);
         return;
     }
 
     uint16_t expected_crc = crc16_ccitt_false(raw, HEADER_LEN + length);
     uint16_t actual_crc = (uint16_t)((raw[HEADER_LEN + length] << 8) | raw[HEADER_LEN + length + 1]);
     if (expected_crc != actual_crc) {
-        ESP_LOGW(TAG, "frame CRC mismatch, dropping");
+        ESP_LOGW(TAG, "uart%d: frame CRC mismatch, dropping", (int)proto->owner->port);
         return;
     }
 
@@ -224,7 +245,8 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
     uart_proto_task_slot_t *slot = find_slot(proto, dst_task);
     if (!slot) {
         xSemaphoreGive(proto->tasks_lock);
-        ESP_LOGW(TAG, "dst task %u not registered, replying NACK (undeliverable)", dst_task);
+        ESP_LOGW(TAG, "uart%d: dst task %u not registered, replying NACK (undeliverable)",
+                 (int)proto->owner->port, dst_task);
         send_control_frame(proto, UART_PROTO_MSG_NACK, msg_index, src_device, src_task,
                             proto->own_device, dst_task);
         return;
@@ -256,7 +278,8 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
          * is handled fresh, giving the receiving task time to drain its
          * queue before we accept this message. */
         xSemaphoreGive(proto->tasks_lock);
-        ESP_LOGW(TAG, "inbox full for task %u, withholding ACK (sender will retry)", dst_task);
+        ESP_LOGW(TAG, "uart%d: inbox full for task %u, withholding ACK (sender will retry)",
+                 (int)proto->owner->port, dst_task);
         return;
     }
     dedup_record(slot, src_device, src_task, msg_index);
@@ -603,11 +626,13 @@ esp_err_t uart_protocol_send_limited(uart_protocol_t *proto,
         int64_t now_us = esp_timer_get_time();
         if (now_us - proto->last_retry_log_us >= RETRY_LOG_INTERVAL_US) {
             if (proto->suppressed_retry_logs > 0) {
-                ESP_LOGW(TAG, "no reply for msg %u to dev%u/task%u, retry %d/%d (+%lu more suppressed)",
+                ESP_LOGW(TAG, "uart%d: no reply for msg %u to dev%u/task%u, retry %d/%d (+%lu more suppressed)",
+                         (int)proto->owner->port,
                          msg_index, dst_device, dst_task, attempt + 1, max_retries,
                          (unsigned long)proto->suppressed_retry_logs);
             } else {
-                ESP_LOGW(TAG, "no reply for msg %u to dev%u/task%u, retry %d/%d", msg_index, dst_device,
+                ESP_LOGW(TAG, "uart%d: no reply for msg %u to dev%u/task%u, retry %d/%d",
+                         (int)proto->owner->port, msg_index, dst_device,
                          dst_task, attempt + 1, max_retries);
             }
             proto->last_retry_log_us = now_us;

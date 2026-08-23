@@ -41,6 +41,7 @@ from typing import Optional
 
 from . import devices
 from .devices import (
+    SafetyCtCal,
     SafetyDiag,
     SafetyFwVersion,
     SafetyLinkStats,
@@ -49,6 +50,7 @@ from .devices import (
     SafetyTripEvent,
 )
 from .protocol import (
+    SAFETY_CMD_GET_CT_CAL,
     SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_GET_FW_VERSION,
     SAFETY_CMD_GET_LINK_STATS,
@@ -66,6 +68,17 @@ log = logging.getLogger(__name__)
 #: Both queries are answered from ESP-side state, so this only has to cover
 #: one more UART round trip -- not the isolated link's own poll period.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+#: GET_CT_CAL's reply timeout. UNLIKE every other query on this task, the
+#: ESP does not answer from a cache -- uart_bridge.c's SAFETY_CMD_GET_CT_CAL
+#: case calls safety_link_get_ct_cal(), a live, blocking round trip across
+#: the isolated link to the Pico (SAFETY_LINK_REPLY_TIMEOUT_MS in
+#: firmware/KilnFW/App/drivers/safety_link.h, ~1.2 s at 9600 baud). This
+#: budget must cover that ESP-side wait plus one more PC<->ESP round trip on
+#: top of it, so it is DEFAULT_REPLY_TIMEOUT_S plus a multiple of
+#: safety_link.h's own worst case rather than the same flat 2.0 s every
+#: cache-only query uses.
+CT_CAL_REPLY_TIMEOUT_S = 5.0
 
 
 class SafetyQueryError(RuntimeError):
@@ -194,6 +207,31 @@ class SafetyClient:
             SAFETY_CMD_GET_FW_VERSION, devices.safety_get_fw_version(), timeout
         )
         return value  # type: ignore[return-value]
+
+    def get_ct_cal(self, timeout: float = CT_CAL_REPLY_TIMEOUT_S) -> SafetyCtCal:
+        """Read the three CT channels' stored calibration -- LIVE, not cached.
+
+        UNLIKE :meth:`get_status`/:meth:`get_diag`/:meth:`get_trip_event`/
+        :meth:`get_fw_version`, this is not answered from ESP-side state:
+        sending GET_CT_CAL makes the ESP do its own blocking round trip to
+        the Pico first (safety_link_get_ct_cal()), so a healthy call to this
+        method takes noticeably longer than the other queries here, and a
+        dead isolated link surfaces as THIS raising :class:`SafetyQueryError`
+        (a timeout) rather than as a successful reply with stale data -- the
+        opposite of :meth:`get_status`'s cache-based behaviour. Each channel's
+        ``calibrated`` flag must be checked before trusting its gain/offset;
+        an uncalibrated channel's numbers are meaningless (see
+        :class:`~kilnctrl.devices.SafetyCtCal`).
+        """
+        value = self._query(SAFETY_CMD_GET_CT_CAL, devices.safety_get_ct_cal(), timeout)
+        return value  # type: ignore[return-value]
+
+    def set_ct_cal(self, channel: int, calibrated: bool, gain: float, offset: float) -> SendResult:
+        """Commission one CT channel's calibration. Fire-and-forget: no reply
+        on the wire, delivery only (see :func:`devices.safety_set_ct_cal`).
+        Read the outcome from the next :meth:`get_ct_cal` call.
+        """
+        return self.send(devices.safety_set_ct_cal(channel, calibrated, gain, offset))
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:
         with self._query_lock:

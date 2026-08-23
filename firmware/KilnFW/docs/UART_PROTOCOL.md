@@ -439,9 +439,10 @@ Pico firmware exists, `link_up` is 0 and `age` is 65535.
 | `0x06` | `SET_FAULT_OUT` | byte1=assert(0/1) — drives the isolated fault line (GPIO6) |
 
 `SET_FAULT_OUT` is a manual override of a line the firmware otherwise asserts
-on its own (loss of the PC link, a thermocouple fault, watchdog). The line is
-high whenever *any* source is set, so clearing the manual source cannot clear
-an automatic one.
+on its own (a thermocouple fault, a watchdog, and — only if
+`KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` is turned on, default off — loss of the
+PC link; see `docs/SAFETY_MODEL.md` §3). The line is high whenever *any*
+source is set, so clearing the manual source cannot clear an automatic one.
 
 ```
 GET_STATUS response:

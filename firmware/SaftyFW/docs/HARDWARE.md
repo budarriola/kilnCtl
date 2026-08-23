@@ -116,18 +116,45 @@ pattern follows from that rather than standing on its own: a 390 R in series
 on the driven side, a 1 k pull-up on the open-collector side, three of each
 across three crossings.
 
-### What the docs always got right
+### What the docs always got right, and what changed since
 
-**The inversion analysis is unchanged and still correct**, and is now measured
-in both directions. Each direction crosses exactly one optocoupler, and an
-optocoupler is an inverter: the driving side's logic high lights the LED, the
-receiving side's collector is pulled low. So exactly one end must invert,
-`KilnFW` does it in the ESP UART peripheral via
-`uart_set_line_inverse(UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV)`,
-and **the RP2040 therefore uses its plain hardware UART at standard polarity
-with no inversion, no PIO, and no external parts.** Do not "fix" polarity on
-the Pico side; two inversions in series cancel the optocouplers' and the link
-goes dead.
+The core inversion analysis is unchanged: each direction crosses exactly one
+optocoupler, and an optocoupler is an inverter — the driving side's logic
+high lights the LED, the receiving side's collector is pulled low. So exactly
+one inversion is needed per direction. What changed on 2026-08-23 is *where*
+that inversion lives for the Pico -> ESP direction.
+
+**ESP -> Pico (GPIO5, through U2)** was always correct: `KilnFW` applies
+`UART_SIGNAL_TXD_INV` in the ESP UART peripheral, and the RP2040 side needs
+nothing — its plain hardware UART reads a standard-polarity idle-high on
+GP5/`PicoRx` with no inversion, no PIO, and no external parts.
+
+**Pico -> ESP (GP4, through U3) used to be wrong.** The RP2040's PL011 UART
+peripheral has no line-inversion control at all — unlike the ESP, there is no
+`uart_set_line_inverse()` equivalent to reach for. For a while `KilnFW`
+compensated by also setting `RXD_INV` on its own UART, which produced correct
+*data* (two inversions — U3's and `RXD_INV`'s — cancelling back to the right
+logic level) but left GP4 driving its natural UART idle state, mark (high),
+straight onto U3's LED — so U3 sat lit continuously between frames, not just
+while transmitting.
+
+The fix does not add UART-level inversion (there is none to add); it uses the
+RP2040's GPIO block instead, which does support an output-override, applied
+downstream of the UART peripheral's own signal:
+
+```c
+gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT);
+```
+
+in `src/tasks/uart_owner.c`. This inverts GP4 at the pad, so idle mark now
+reaches U3's LED as low — the LED is dark at idle, not lit — and R15's 1k
+pull-up presents a correct, standard-polarity idle-high on ESP GPIO4.
+Because the correction now happens on the Pico's pad, `KilnFW`'s
+`safety_link.c` applies `UART_SIGNAL_TXD_INV` only, **not** `RXD_INV`; GPIO4
+needs no inversion in the ESP UART peripheral any more. Do not add a second
+inversion on either side — one inversion per direction, applied once, is the
+invariant, whether it happens in the ESP's UART peripheral or the RP2040's
+GPIO pad override.
 
 ### The link now carries real traffic
 
@@ -178,7 +205,7 @@ Traced from `kiln.pdf` p.2. This table is authoritative for `SaftyFW`.
 | 2 | GPIO1 | `CS0` | out | MAX31856 `~CS`, active low. **10k pull-up to 3.3v_Safty** |
 | 4 | GPIO2 | `CLK` | out | SPI0 SCK |
 | 5 | GPIO3 | `MOSI` | out | SPI0 TX |
-| 6 | GPIO4 | `PicoTx` | out | UART TX → R7 390R → U3 LED → ESP GPIO4 (`DataFromSafty`) |
+| 6 | GPIO4 | `PicoTx` | out | UART TX, inverted at the pad via `gpio_set_outover(GPIO_OVERRIDE_INVERT)` in `uart_owner.c` → R7 390R → U3 LED → ESP GPIO4 (`DataFromSafty`). **LED dark at idle** |
 | 7 | GPIO5 | `PicoRx` | in | UART RX ← U2 collector, driven by ESP GPIO5 (`DataToSafty`). **R9 1k pull-up**, idles high |
 | 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized** |
 | 10 | GPIO7 | `SDA` | i/o | I2C0 SDA, **R48 2.2k pull-up**, out to J7 pin 6. Nothing answers today |

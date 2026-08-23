@@ -1561,7 +1561,28 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
      * and U3's inversion of the Pico's ordinary TX is undone by RXD_INV. The
      * RP2040 therefore needs no PIO UART and no external inverter -- exactly
      * one end inverts, and it is this one. */
-    err = uart_set_line_inverse(SAFETY_UART_PORT_NUM, UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV);
+    /* TXD_INV only -- deliberately NOT RXD_INV any more.
+     *
+     * Exactly one inversion per direction, and the requirement that decides
+     * which end does it is that each optocoupler must sit DARK when nothing
+     * is being sent. An ordinary UART idles at mark (high); a pin that idles
+     * high keeps its LED lit around the clock, which wastes current, ages the
+     * part, and makes every transmission start from a saturated
+     * phototransistor that has to recover before it can switch cleanly.
+     *
+     * ESP -> Pico: TXD_INV makes this pin idle LOW, so U2 is dark at idle.
+     * Kept.
+     *
+     * Pico -> ESP: the RP2040 now inverts its own TX pin in hardware
+     * (gpio_set_outover(GPIO_OVERRIDE_INVERT) in SaftyFW's uart_owner.c), so
+     * U3 is dark at idle too and the phototransistor rests non-conducting
+     * with R15 pulling GPIO4 high -- which is ordinary mark, already the
+     * right polarity. RXD_INV would now be a second inversion in the same
+     * direction and would break it. Removed.
+     *
+     * These two must change together. If one end is ever reverted, the other
+     * has to be as well. */
+    err = uart_set_line_inverse(SAFETY_UART_PORT_NUM, UART_SIGNAL_TXD_INV);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "uart_set_line_inverse failed: %s", esp_err_to_name(err));
         goto fail_owner;
@@ -1569,12 +1590,14 @@ esp_err_t safety_link_start(SafetyLinkClass *link)
 
     /* GPIO4 is the bare collector of U3, on net DataFromSafty -- R15's 1k
      * pull-up to 3.3V_Main is fitted on this net, and nothing else sits on
-     * it. With the phototransistor off the pin would otherwise float, so
-     * the pull-up is what
-     * defines the LED-off level (high at the pad = low after RXD_INV = the
-     * space/break level). uart_set_pin already asks for this, but it is
-     * restated because it is load-bearing rather than incidental: without it
-     * the link doesn't merely get noisy, it has no defined idle at all. */
+     * it. With the phototransistor off the pin would otherwise float, so the
+     * pull-up is what defines the LED-off level: high at the pad, which is
+     * ordinary mark and exactly the idle this input now expects (see the
+     * inversion comment above -- U3 is dark between frames, so LED-off IS the
+     * idle state rather than an exceptional one). uart_set_pin already asks
+     * for this, but it is restated because it is load-bearing rather than
+     * incidental: without it the link doesn't merely get noisy, it has no
+     * defined idle at all. */
     err = gpio_set_pull_mode((gpio_num_t)SAFETY_RX_IO, GPIO_PULLUP_ONLY);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rx pull-up on gpio%d failed: %s", SAFETY_RX_IO, esp_err_to_name(err));

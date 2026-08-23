@@ -395,9 +395,17 @@ mainFault asserted, debounced 200 ms   →  TRIP
 ```
 
 Unambiguous: the main controller is telling us it has a fault and wants heat
-gone. Cheap to act on, no reason to hesitate. Note the ESP asserts this on PC
-link loss, boot failures, and thermocouple faults (`SAFETY_FAULT_SRC_*` in
-`safety_link.h:151`), so in practice this fires more often than the others.
+gone. Cheap to act on, no reason to hesitate. The ESP asserts this on boot
+failures and thermocouple faults (`SAFETY_FAULT_SRC_*` in
+`safety_link.h:151`) unconditionally. PC-link loss used to be in that list
+unconditionally too, and was the single biggest source of real-world S6a
+trips — a bare board on the bench, powered with nothing plugged into the PC
+link, asserted `mainFault` five seconds after boot and latched a trip for no
+actual hazard. It is now gated behind `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT`
+(KilnFW `App/drivers/Kconfig`, default off), because this board is meant to
+fire unattended from its own LCD/web UI and the PC's absence alone is not a
+hazard. A deployment where the PC link is required equipment can still turn
+that option on to get the old behavior back.
 
 **(b) The link has gone quiet** — no valid frame within `link_timeout_s`.
 

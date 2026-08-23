@@ -1675,6 +1675,53 @@ def safety_set_tc_type(tc_type_name: str) -> str:
 
 
 @_tool()
+def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float) -> str:
+    """Commission one channel of the safety processor's CT current-sense
+    calibration (config_store.h's ct_cal record).
+
+    `channel` is 0-2 (one of the three current-sense channels), `gain`/
+    `offset` are the linear-fit constants a bench calibration run produces
+    (firmware/SimFW/tools/ct_calibration/calibrate_ct.py). Only one channel
+    is written per call -- writing channel 0 never touches channel 1/2's
+    stored constants.
+
+    Fire-and-forget, like safety_clear_trip/safety_set_tc_type: there is no
+    reply on the wire. Refused on the Pico side (relay currently ARMED, or an
+    out-of-range channel) shows up only in the Pico's own log, not here --
+    call safety_get_ct_cal() afterward to see whether it actually took.
+    """
+    return _send(
+        UART_TASK_ID_SAFETY, devices.safety_set_ct_cal(channel, calibrated, gain, offset)
+    )
+
+
+@_tool()
+def safety_get_ct_cal() -> str:
+    """Read the safety processor's three CT channels' stored calibration.
+
+    UNLIKE safety_get_status/other SAFETY queries, this is a LIVE round trip:
+    it is answered by the ESP asking the Pico right now, not from a cache, so
+    it can take noticeably longer and a dead isolated link shows up here as
+    an error (a timeout) rather than as a successful reply with stale data.
+
+    Each channel's ``calibrated`` flag must be checked before trusting its
+    gain/offset -- an uncalibrated channel's numbers are meaningless
+    (current_sense.c never reads them).
+    """
+    try:
+        cal = _safety.get_ct_cal()
+    except SafetyQueryError as exc:
+        return f"error: {exc}"
+    lines = []
+    for i, ch in enumerate(cal.channels):
+        if ch.calibrated:
+            lines.append(f"channel {i}: calibrated, gain={ch.gain:.6g}, offset={ch.offset:.6g}")
+        else:
+            lines.append(f"channel {i}: uncalibrated")
+    return "; ".join(lines)
+
+
+@_tool()
 def ota_rollback_pico() -> str:
     """Explicitly revert the safety processor (RP2040/SaftyFW) to its
     PREVIOUS bootloader slot, right now.

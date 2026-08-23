@@ -56,7 +56,7 @@ paragraph above as historical.
 | Source | Set by | Meaning |
 |---|---|---|
 | `SAFETY_FAULT_SRC_MANUAL` | `SAFETY_CMD_SET_FAULT_OUT` from the PC | Operator or GUI explicitly asserted it |
-| `SAFETY_FAULT_SRC_PC_LINK` | the link watchdog (`uart_bridge.c`) | No frame from, or ACK from, the PC within `UART_BRIDGE_LINK_TIMEOUT_MS` (5000 ms) |
+| `SAFETY_FAULT_SRC_PC_LINK` | the link watchdog (`uart_bridge.c`), gated by `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` (default off) | No frame from, or ACK from, the PC within `UART_BRIDGE_LINK_TIMEOUT_MS` (5000 ms) |
 | `SAFETY_FAULT_SRC_THERMO` | `App/main.c` at boot only — see gap below | SPI bus or all three thermocouple channels failed to come up |
 | `SAFETY_FAULT_SRC_SAFETY_LINK` | `safety_link.c`, `fault_on_link_loss` policy (default on) | The RP2040 hasn't answered a poll recently |
 | `SAFETY_FAULT_SRC_APP` | `App/main.c` at boot; `io_relay_on_blocked` when `safety` is NULL | Catch-all for "something upstream of this gate isn't there" |
@@ -70,11 +70,32 @@ blocks "on", not just the ones that are obviously about relays.
 
 A dedicated task at priority 6 (above every bridge task, so it keeps running
 even if a bridge is stuck waiting on a dead host's ACK) checks every 250 ms
-whether a frame or ACK has arrived from the PC within the last 5000 ms. On
-loss: relays are dropped and **retried every tick until the write actually
-succeeds** (one failed I2C transfer must not be the reason an element stays
-on), then `SAFETY_FAULT_SRC_PC_LINK` is asserted. Before the PC has ever
-spoken — including at boot with nothing attached — the link counts as lost.
+whether a frame or ACK has arrived from the PC within the last 5000 ms.
+Before the PC has ever spoken — including at boot with nothing attached — the
+link counts as lost. On loss, relays are dropped and **retried every tick
+until the write actually succeeds** (one failed I2C transfer must not be the
+reason an element stays on); this half is unconditional
+(`KILNCTL_SX1509_RELAYS_OFF_ON_LINK_LOSS`, default on).
+
+**Update (2026-08-2x): asserting `SAFETY_FAULT_SRC_PC_LINK` on the same loss
+is now a Kconfig option, `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT`, default OFF.**
+The original reasoning for asserting the fault line unconditionally still
+holds as the *rationale for the option's existence*: the PC link is the one
+channel `pc_tools`/MCP use to command relays, and a controller that has gone
+silent while something is calling for heat is exactly the case this doc's
+"fail-safe, not fail-open" stance is built around — turning the option on is
+the right call for a deployment where the PC is expected to stay attached.
+But this board also has its own LCD and web UI and is designed to fire with
+no host attached at all, so the PC's absence by itself is not a hazard on a
+standalone board — and the old unconditional behavior asserted the fault
+line five seconds after every boot with nothing plugged in, tripping the
+safety processor's S6a (`SAFETY_TRIP_MAIN_FAULT`) on a perfectly healthy
+kiln. That trip latches on the RP2040 and does not clear when the link comes
+back, so the board was left showing a permanent fault for no real hazard —
+which is why the default flipped to off. Turning `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT`
+on is still the right choice for any deployment that wants the PC treated as
+required equipment; it just is not this board's default. Either way, the
+relay drop above still happens.
 
 ### 4. Boot-time fault assertion (`App/main.c`)
 
@@ -190,7 +211,7 @@ note.
 
 | Failure | Detected? | Relay-on blocked? | Existing relays dropped? |
 |---|---|---|---|
-| PC link lost (cable, crash, USB) | Yes, 5 s | Yes | Yes, automatically |
+| PC link lost (cable, crash, USB) | Yes, 5 s | Only if `KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT` (default off) | Yes, automatically |
 | Expander fails at boot | Yes | Yes (`APP`) | N/A — nothing to drop yet |
 | SPI bus / all thermo channels fail at boot | Yes | Yes (`THERMO`) | No — only blocks new "on" |
 | One thermo channel faults during operation, **a profile is actively running that zone** | **Yes** — `thermal_guard.c` guard 6, 3-read debounce | **Yes** (`THERMO`, live-broadened) | Yes — `profile_executor.c` retries the drop every tick |

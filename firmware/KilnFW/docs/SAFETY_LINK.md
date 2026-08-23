@@ -66,44 +66,70 @@ each optocoupler is unidirectional, so a pin wired to an LED anode can only be
 an output and a pin wired to a collector can only be an input. Everything else
 about symbol orientation is commentary.
 
-### Trap 2: both data directions are logically inverted
+### Trap 2: each direction needs exactly one inversion, and both ends have to supply theirs correctly
 
 An optocoupler is not a wire. The driving side's high lights the LED, the
 phototransistor conducts, and the receiving side's collector is pulled **low**.
-So an idle-high UART line arrives idle-**low**, in both directions.
+Left uncorrected, an idle-high UART line would arrive idle-**low**, in both
+directions — and a continuously-lit LED between frames besides.
 
-The firmware fixes this in the UART peripheral, not in software:
+**ESP -> Pico (GPIO5, through U2)** is fixed entirely on the ESP side, in the
+UART peripheral:
 
 ```c
-uart_set_line_inverse(SAFETY_UART_PORT_NUM, UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV);
+uart_set_line_inverse(SAFETY_UART_PORT_NUM, UART_SIGNAL_TXD_INV);
 ```
 
 It must be called *after* `uart_param_config()` (which happens inside
-`uart_owner_init()`), because that rewrites the same register block.
+`uart_owner_init()`), because that rewrites the same register block. `TXD_INV`
+drives an idle logical 1 as a physical low on GPIO5, so U2's LED is **off** at
+idle, so R9 holds the Pico's RX **high** — a correct, standard-polarity idle
+that the Pico's plain hardware UART reads with no changes on its side at all.
+A start bit (logical 0) drives GPIO5 high, lights the LED, and pulls the
+Pico's RX low, exactly like an ordinary UART start bit. Both halves are
+measured, not asserted: driving GPIO5 low reads GP5 high at the Pico, driving
+it high reads GP5 low.
 
-**The Pico does not need to do anything.** Inverting on this side is not half
-a fix that the far end has to match — it is the whole fix, because each
-optocoupler is itself an inverter and two inversions in series cancel:
+**Pico -> ESP (GP4, through U3)** cannot be fixed the same way, because the
+RP2040's PL011 UART peripheral has no line-inversion control the way the
+ESP's does. For a long time this direction was simply left uncorrected:
+`SaftyFW` drove GP4 straight from its hardware UART TX, which idles high
+(UART mark), so U3's LED sat lit continuously between frames — burning power
+across the barrier the whole time the link was idle, not just while
+transmitting. The fix, landed and verified 2026-08-23, uses the RP2040's GPIO
+block instead of its UART block: `SaftyFW`'s `uart_owner.c` now calls
 
-| Direction | ESP pin | Optocoupler | What the far pin sees |
-|-----------|---------|-------------|-----------------------|
-| ESP -> Pico | `TXD_INV` drives `NOT L` | U2 inverts again | `L` — standard polarity at the Pico's RX |
-| Pico -> ESP | — | U3 inverts `L` | `NOT L` at GPIO4, which `RXD_INV` turns back into `L` |
+```c
+gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT);
+```
 
-Concretely, transmitting: an idle logical 1 becomes a physical low on GPIO5,
-so U2's LED is **off**, so R9 holds the Pico's RX **high** — a correct idle. A
-start bit (logical 0) drives GPIO5 high, lights the LED, and pulls the Pico's
-RX low. That is exactly what an ordinary UART start bit looks like. Both
-halves of that sentence are measured, not asserted: driving GPIO5 low reads
-GP5 high at the Pico, driving it high reads GP5 low.
+which inverts the signal at the pad after the UART peripheral has already
+produced it, independent of the peripheral's own polarity control (which
+doesn't exist for this purpose on this part). Idle mark now reaches the GP4
+pad as low, so U3's LED is dark at idle, and on the ESP side R15's 1k
+pull-up and the internal pull-up hold GPIO4 **high** — standard mark, exactly
+what a UART receiver expects. Because the inversion already happened on the
+Pico's pad, `KilnFW`'s `safety_link.c` applies `UART_SIGNAL_TXD_INV` only to
+its UART peripheral; it does **not** apply `RXD_INV`. GPIO4 needs no software
+inversion on the ESP side any more — the signal arriving at the pad is
+already correct polarity.
 
-So the RP2040 can use its plain hardware UART, unmodified, at standard
-polarity. No PIO UART, no external inverter. The inversion is entirely an
-ESP-side concern and the barrier is transparent to the far end.
+Summarizing both directions:
 
-The corollary is the one to remember: **exactly one end inverts.** If the Pico
-side were also inverted (PIO, or an inverter fitted at U2's collector), the two
-inversions would cancel the optocoupler's and *that* is when nothing works.
+| Direction | Where the inversion happens | ESP `uart_set_line_inverse` flags |
+|-----------|------------------------------|-------------------------------------|
+| ESP -> Pico | ESP UART peripheral (`TXD_INV`) | `UART_SIGNAL_TXD_INV` |
+| Pico -> ESP | Pico GPIO pad override (`gpio_set_outover(..., GPIO_OVERRIDE_INVERT)`) | none — GPIO4 needs no `RXD_INV` |
+
+The corollary to remember is unchanged in spirit but sharper now: **exactly
+one inversion per direction, applied once.** Before 2026-08-23 the firmware
+compensated for the missing Pico-side fix by also setting `RXD_INV` on the
+ESP, which happened to make the *data* correct (two inversions — U3's and
+`RXD_INV`'s — cancelling back to the right logic levels) while leaving U3's
+LED lit at idle the whole time; that combination worked for framing but was
+wrong for the optocoupler's operating point, see below. Do **not** add
+`RXD_INV` back now that the Pico-side fix is in place — the signal at GPIO4
+is already correct, and re-inverting it breaks the link.
 
 Two boot-time artefacts follow from this and are worth designing the Pico
 firmware around:
@@ -144,17 +170,25 @@ from UART silence; the fault line cannot tell it.
 ### Side effect worth knowing about
 
 With no Pico attached, U3's LED is never lit, the phototransistor never
-conducts, R15 and the internal pull-up hold GPIO4 high, and `RXD_INV` turns that into
-a continuously-low internal RX line — i.e. a permanent break condition. The
-UART event task in `uart_owner.c` counts those, so `uart_owner_get_rx_error_count()`
-for UART1 (and therefore the CRC/framing counter in `GET_LINK_STATS`) can climb
-on a board with no safety processor fitted. That is the wiring reporting itself
-accurately, not a driver fault.
+conducts, and R15 plus the internal pull-up hold GPIO4 high. Since GPIO4 no
+longer carries `RXD_INV` (see Trap 2), that high now reaches the UART
+peripheral as an ordinary idle mark, not as a permanent break — the absent
+safety processor simply looks like silence, which is what `link_up = 0` /
+`age = 65535` already expects. Before the 2026-08-23 fix, with `RXD_INV`
+still applied, the same idle-high GPIO4 was inverted into a continuously-low
+internal RX line — a permanent break condition — and the UART event task in
+`uart_owner.c` counted those, so `uart_owner_get_rx_error_count()` for UART1
+(and therefore the CRC/framing counter in `GET_LINK_STATS`) climbed on a
+board with no safety processor fitted. That side effect is gone now that
+GPIO4 needs no software inversion; a board with no Pico fitted should read a
+quiet, non-climbing error counter.
 
 ## ESP <-> Pico contract
 
 Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` (**9600**
-default — see below), both signals inverted as above. The payload framing is
+default — see below), inverted per-direction as described in Trap 2 above
+(ESP -> Pico inverted in the ESP UART peripheral, Pico -> ESP inverted at the
+Pico's GPIO pad). The payload framing is
 the **same `uart_protocol` stack the PC link uses** — 0x7E-delimited,
 byte-stuffed, CRC16/CCITT-FALSE, indexed DATA frames with ACK/NACK, retried and
 de-duplicated by the protocol layer. See `docs/UART_PROTOCOL.md` for the
@@ -450,18 +484,32 @@ second, the rate limiter is broken; if `age` comes back as anything other than
 
 ### 2. Loopback with inversion (wire only)
 
-Tie **GPIO5 to GPIO4** directly (main-board TX to main-board RX, bypassing both
-optocouplers). Because both signals are inverted in the peripheral, an
-inverted transmit sampled by an inverted receiver is self-consistent: the ESP
-sees its own frames back, correctly framed. Every `GET_STATUS` the poll task
-sends therefore arrives at the ESP's own protocol RX task, addressed to
+**A direct GPIO5-to-GPIO4 jumper on the ESP side is no longer a clean
+loopback**, now that only one direction is inverted in the ESP's UART
+peripheral. GPIO5 carries `TXD_INV`; GPIO4 carries no inversion at all
+(Trap 2). Tying them together directly feeds an inverted transmit into an
+uninverted receiver, which is exactly the "cancel wrong" failure Trap 2 warns
+about — the loop would not be self-consistent and would not prove anything
+useful.
+
+To loop back on the ESP side alone, jump GPIO5 to GPIO4 through a single
+external inverter (or a spare GPIO configured with `gpio_set_outover(...,
+GPIO_OVERRIDE_INVERT)`, mirroring what `SaftyFW` now does at GP4) so the net
+inversion round the loop is again exactly one. Done that way, the ESP sees
+its own frames back, correctly framed. Every `GET_STATUS` the poll task sends
+therefore arrives at the ESP's own protocol RX task, addressed to
 `(UART_PROTO_DEVICE_SAFETY, task 7)` — a device this end is not, so it is
-dropped rather than answered, and the poll still times out. What this proves is
-the physical path, the baud rate and the inversion pair; watch
+dropped rather than answered, and the poll still times out. What this proves
+is the physical path, the baud rate and the ESP-side inversion; watch
 `uart_owner_get_rx_error_count()` stay flat and the RX task stop reporting
-framing errors. A loopback across the *optocouplers* on the safety side (a
-wire jumped from U2's collector, `PicoRx`, back into U3's LED, `PicoTx`)
-additionally proves the parts, but needs the safety-domain 3.3 V rail powered.
+framing errors.
+
+A loopback across the *optocouplers* on the safety side (a wire jumped from
+U2's collector, `PicoRx`, back into U3's LED, `PicoTx`) needs no extra
+inverter — each optocoupler already inverts once, and with `SaftyFW`'s GP4
+pad override doing the Pico-side inversion, the round trip is still exactly
+one inversion per direction. This additionally proves the parts, but needs
+the safety-domain 3.3 V rail powered.
 
 For a loopback that actually answers, temporarily register task 7 with
 `own_device` swapped — i.e. bring up a second `uart_protocol_t` with
@@ -473,10 +521,14 @@ end to end without any second processor.
 
 The most useful option once a USB-TTL adapter is to hand. Connect the adapter
 to GPIO4/GPIO5 (adapter TX -> ESP RX GPIO4, adapter RX -> ESP TX GPIO5) with
-the optocouplers out of circuit, and **invert on the PC side**: either an
-adapter that supports inverted signalling, or a small inverter, or accept that
-you must invert in software (in which case you are decoding the line yourself
-and the framing layer will not help you).
+the optocouplers out of circuit, and match the ESP side's asymmetric
+inversion per Trap 2 rather than inverting both legs: GPIO4 (ESP RX) carries
+no software inversion any more, so the adapter's TX should idle at ordinary
+UART mark, standard polarity, no inversion needed. GPIO5 (ESP TX) still
+carries `TXD_INV`, so the adapter's RX needs to see an inverted line — either
+an adapter that supports inverted signalling, a small inverter, or accept
+that you must invert that leg in software (in which case you are decoding it
+yourself and the framing layer will not help you).
 
 Then speak the same `uart_protocol` framing the PC tools already implement
 (`pc_tools/src/kilnctrl/protocol.py`), with `own_device = UART_PROTO_DEVICE_SAFETY`,

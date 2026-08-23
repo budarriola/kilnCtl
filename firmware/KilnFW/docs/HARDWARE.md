@@ -15,8 +15,8 @@ ground domain as the safety processor; its firmware lives at
 
 | GPIO | Signal (schematic net) | Direction | What it is |
 |------|------------------------|-----------|------------|
-| 4  | `DataFromSafty`      | in  | Safety link **RX** (U3 collector). Inverted, R15 1k external pull-up. |
-| 5  | `DataToSafty`        | out | Safety link **TX** (drives U2's LED through R12). Inverted. |
+| 4  | `DataFromSafty`      | in  | Safety link **RX** (U3 collector). Not inverted in software — the Pico inverts at its GPIO pad instead, so this pin sees standard polarity. R15 1k external pull-up. |
+| 5  | `DataToSafty`        | out | Safety link **TX** (drives U2's LED through R12). Inverted (`UART_SIGNAL_TXD_INV`). |
 | 6  | `Fault`              | out | Isolated fault line to the safety processor (drives U1's LED). |
 | 7  | `IO_Expander_IRQ`    | in  | SX1509 `~INT`, active low. |
 | 8  | `SDA`                | i/o | I2C data (SX1509, and J2/J6 pass-through). |
@@ -158,11 +158,24 @@ Three things follow, and all three are easy to get wrong:
    of any one crossing is fixed by which side of the barrier carries the LED:
    a pin wired to an LED anode can only be an output, a pin wired to a
    collector can only be an input.
-2. **Both data directions are logically inverted.** A high on the driving side
-   lights the LED, which pulls the receiving collector low. An idle-high UART
-   line therefore arrives idle-low; the firmware calls
-   `uart_set_line_inverse(UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV)` rather
-   than trying to fix this in software.
+2. **Only one direction needs software inversion, and it is not the one you'd
+   guess from the schematic alone.** A high on the driving side lights the
+   LED, which pulls the receiving collector low, so left uncorrected an
+   idle-high UART line would arrive idle-low. ESP -> Pico (GPIO5 through U2)
+   was already handled: the ESP drives that pin with `TXD_INV`, so its idle-high
+   UART level leaves the pin idle-**low**, U2's LED is dark at idle, and R9
+   presents a correct idle-high to the Pico's RX. Pico -> ESP (GP4 through U3)
+   used to be wrong: the RP2040's PL011 UART has no line-inversion control, so
+   `SaftyFW` left GP4 idling at its natural UART mark (high), which kept U3's
+   LED lit continuously between frames. `SaftyFW`'s `uart_owner.c` now inverts
+   at the pad instead, via `gpio_set_outover(SAFTYFW_PIN_UART1_TX,
+   GPIO_OVERRIDE_INVERT)`, so GP4 idles low, U3's LED is dark, and R15's 1k
+   pull-up presents a correct idle-high on ESP GPIO4. Because the far side is
+   now driven correctly, `KilnFW`'s `safety_link.c` applies
+   `UART_SIGNAL_TXD_INV` only — **not** `RXD_INV` — to its own UART
+   peripheral; ESP GPIO4 needs no inversion in software any more, since the
+   inversion already happened on the Pico's pad. Applying `RXD_INV` on top of
+   this would re-invert an already-correct signal and break the link.
 3. **GPIO6 is an output.** The ESP asserts fault *to* the safety processor.
    There is no hardware path for the Pico to signal the ESP — everything coming
    back does so over the isolated UART.

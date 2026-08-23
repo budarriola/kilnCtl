@@ -209,11 +209,21 @@ device/task ids and line inversion instead, all of which were correct. See
 `firmware/KilnFW/docs/SAFETY_LINK.md`'s "Transport" section for the full
 measurement table.
 
-**Polarity: the Pico uses its plain hardware UART with no inversion.** The ESP
-inverts both directions in its own peripheral, and each optocoupler inverts
-once; two inversions in series cancel. Adding inversion on the Pico side —
-PIO, or an external inverter — cancels the optocouplers' and the link goes
-dead. See `firmware/SaftyFW/docs/HARDWARE.md` §1.
+**Polarity: exactly one inversion per direction, but the two directions do not
+invert in the same place.** ESP -> Pico is inverted entirely in the ESP's
+UART peripheral (`TXD_INV` on GPIO5); the Pico's plain hardware UART reads
+that direction at standard polarity with no inversion of its own. Pico -> ESP
+cannot use the same trick, because the RP2040's PL011 UART has no
+line-inversion control — so `SaftyFW` inverts at the GPIO pad instead, via
+`gpio_set_outover(SAFTYFW_PIN_UART1_TX, GPIO_OVERRIDE_INVERT)` in
+`uart_owner.c`, and `KilnFW` applies `TXD_INV` only (not `RXD_INV`) on its
+own UART for that direction, since GPIO4 already arrives at the correct
+polarity. This also means both optocouplers now sit dark (LED off) at idle:
+before the pad-override fix, GP4 idled at ordinary UART mark (high), keeping
+U3's LED lit continuously between frames; U2 was already correct. Adding a
+second inversion anywhere in either direction cancels the optocoupler's own
+inversion and the link goes dead. See `firmware/SaftyFW/docs/HARDWARE.md` §1
+and `firmware/KilnFW/docs/SAFETY_LINK.md` "Trap 2" for the full detail.
 
 **Pins: `PicoTx` = GP4, `PicoRx` = GP5** (`firmware/SaftyFW/docs/HARDWARE.md` §2). On the ESP
 side these land on **GPIO4 = ESP RX** and **GPIO5 = ESP TX**, matching

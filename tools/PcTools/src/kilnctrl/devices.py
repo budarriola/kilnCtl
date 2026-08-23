@@ -121,6 +121,7 @@ from .protocol import (
     IO_REG_READ_MAX,
     IO_RELAY_COUNT,
     SAFETY_AGE_NEVER,
+    SAFETY_CMD_GET_CT_CAL,
     SAFETY_CMD_GET_DIAG,
     SAFETY_CMD_CLEAR_TRIP,
     SAFETY_CMD_GET_FW_VERSION,
@@ -131,8 +132,10 @@ from .protocol import (
     SAFETY_CMD_REQUEST_ENABLE,
     SAFETY_CMD_ROLLBACK,
     SAFETY_CMD_SET_CONFIG,
+    SAFETY_CMD_SET_CT_CAL,
     SAFETY_CMD_SET_FAULT_OUT,
     SAFETY_CMD_SET_POLL_PERIOD,
+    SAFETY_CT_CAL_NUM_CHANNELS,
     SYSTEM_CMD_GET_WATCHDOG_PANIC_DISABLED,
     SYSTEM_CMD_RESTART_UART,
     SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED,
@@ -338,6 +341,10 @@ __all__ = [
     "safety_get_link_stats",
     "safety_set_poll_period",
     "safety_set_fault_out",
+    "safety_set_ct_cal",
+    "safety_get_ct_cal",
+    "SafetyCtCal",
+    "SafetyCtCalChannel",
     "parse_safety_response",
     # INFO / LOG
     "PinFunction",
@@ -1910,6 +1917,57 @@ def safety_set_fault_out(assert_fault: bool) -> bytes:
     return struct.pack("<BB", SAFETY_CMD_SET_FAULT_OUT, _check_bool_byte(assert_fault))
 
 
+def safety_set_ct_cal(channel: int, calibrated: bool, gain: float, offset: float) -> bytes:
+    """0x19 SET_CT_CAL: commission one channel of SaftyFW's config_store.h
+    ct_cal record (CommonFW/docs/LINK_PROTOCOL.md sec 4,
+    kilnlink_set_ct_cal.h). One channel per frame -- setting channel 0 must
+    never disturb channel 1/2's stored constants.
+
+    `channel` is checked locally against
+    :data:`~kilnctrl.protocol.SAFETY_CT_CAL_NUM_CHANNELS` (0..2); `gain`/
+    `offset` are checked finite (no NaN/inf on the wire). Both checks mirror
+    ones the receiver (SaftyFW) makes independently -- this is belt and
+    suspenders against stale numbers, not a substitute for the Pico's own
+    validation. `gain`/`offset` are opaque floats here: this call has no
+    opinion on units or which direction the linear fit runs, and
+    `calibrated` is carried explicitly rather than inferred from the numbers
+    (an uncalibrated channel's gain/offset are meaningless downstream -- see
+    config_store.h).
+
+    Refused (reason logged on the Pico side, never returned here) if the
+    relay is currently ARMED, or if `channel` is out of range. Fire-and-forget,
+    like SET_CONFIG/CLEAR_TRIP: no reply on the wire. Read the outcome from
+    :func:`safety_get_ct_cal`'s next readback, not from this call's return
+    value.
+    """
+    return struct.pack(
+        "<BBBff",
+        SAFETY_CMD_SET_CT_CAL,
+        _check_range(channel, 0, SAFETY_CT_CAL_NUM_CHANNELS - 1, "channel"),
+        _check_bool_byte(calibrated),
+        _check_finite(gain, "gain"),
+        _check_finite(offset, "offset"),
+    )
+
+
+def safety_get_ct_cal() -> bytes:
+    """0x1A GET_CT_CAL request (query): no args.
+
+    UNLIKE :func:`safety_get_status`/:func:`safety_get_diag`/
+    :func:`safety_get_fw_version`, this is **not** answered from the ESP's
+    cache -- there is no ct_cal state cached on the ESP side at all
+    (safety_link.h's safety_link_get_ct_cal() doc comment: "every call is a
+    live, blocking round trip to the Pico"). Sending this causes the Pico to
+    broadcast a fresh SAFETY_CMD_CT_CAL (0x1A) frame, which the ESP relays
+    back to the PC under the same shared id, distinguished from this request
+    by length (1 byte here, 28 bytes for the reply). Expect this call to take
+    noticeably longer than the other SAFETY queries -- it genuinely crosses
+    the isolated link and can time out if the Pico never answers, not just if
+    the ESP itself is unreachable.
+    """
+    return struct.pack("<B", SAFETY_CMD_GET_CT_CAL)
+
+
 #: Human-readable thermocouple type names -> the MAX31856 CR1 TC[3:0] wire
 #: value SAFETY_CMD_SET_CONFIG carries, mirroring firmware/SaftyFW/src/max31856.h's
 #: MAX31856_TC_TYPE_* ordering (B=0, E=1, J=2, K=3, N=4, R=5, S=6, T=7). Only
@@ -2147,9 +2205,34 @@ class SafetyFwVersion:
         return self.config_crc != 0
 
 
+@dataclass(frozen=True)
+class SafetyCtCalChannel:
+    """One channel's calibration, as SaftyFW's config_store.c holds it."""
+
+    calibrated: bool
+    gain: float
+    offset: float
+
+
+@dataclass(frozen=True)
+class SafetyCtCal:
+    """Decoded CT_CAL (0x1A) reply -- the three current-sense channels'
+    stored CT amps calibration, read live from the Pico (never cached on the
+    ESP; see :func:`safety_get_ct_cal`). ``channels`` is always exactly
+    :data:`~kilnctrl.protocol.SAFETY_CT_CAL_NUM_CHANNELS` (3) long, index 0-2.
+
+    A channel with ``calibrated`` False has meaningless gain/offset --
+    current_sense.c never reads them for such a channel -- so a caller must
+    check ``calibrated`` before displaying or trusting a channel's numbers as
+    a real correction.
+    """
+
+    channels: "tuple[SafetyCtCalChannel, ...]"
+
+
 def parse_safety_response(
     payload: bytes,
-) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion]":
+) -> "tuple[int, SafetyStatus | SafetyLinkStats | SafetyDiag | SafetyTripEvent | SafetyFwVersion | SafetyCtCal]":
     """Decode a SAFETY query reply into ``(subcommand, value)``.
 
     Layouts (uart_task_ids.h)::
@@ -2174,6 +2257,9 @@ def parse_safety_response(
                          datetime_len u8, datetime (N2 ASCII), boot_id u8,
                          config_version u8, config_crc u16 LE  (variable, see
                          CommonFW/docs/LINK_PROTOCOL.md sec 6 Frame C)
+        GET_CT_CAL:      byte0=0x1A, then 3 channels of
+                         [calibrated u8, gain f32 LE, offset f32 LE]
+                         (28 bytes total -- kilnlink_ct_cal.h)
     """
     if len(payload) < 1:
         raise SafetyResponseError("SAFETY response is empty")
@@ -2358,6 +2444,21 @@ def parse_safety_response(
             config_version=config_version,
             config_crc=config_crc,
         )
+
+    if subcommand == SAFETY_CMD_GET_CT_CAL:
+        expected_len = 1 + SAFETY_CT_CAL_NUM_CHANNELS * 9  # calibrated(1)+gain f32(4)+offset f32(4)
+        if len(payload) != expected_len:
+            raise SafetyResponseError(
+                f"GET_CT_CAL response must be {expected_len} bytes, got {len(payload)}"
+            )
+        channels = []
+        for ch in range(SAFETY_CT_CAL_NUM_CHANNELS):
+            offset = 1 + ch * 9
+            calibrated, gain, cal_offset = struct.unpack_from("<Bff", payload, offset)
+            channels.append(
+                SafetyCtCalChannel(calibrated=bool(calibrated), gain=gain, offset=cal_offset)
+            )
+        return subcommand, SafetyCtCal(channels=tuple(channels))
 
     raise SafetyResponseError(f"unknown SAFETY response subcommand 0x{subcommand:02X}")
 

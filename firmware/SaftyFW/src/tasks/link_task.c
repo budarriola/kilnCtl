@@ -339,6 +339,88 @@ static void link_task_ensure_staged_config(void)
 
 // --- TX ----------------------------------------------------------------
 
+// --- DIAGNOSTIC: 2026-08-23 truncation investigation --------------------
+// The ESP consistently reports a truncated frame ("hdr says 176, got 142
+// bytes") on the config-page reply, and the deframer + uart_owner_send()
+// drop counters have both been ruled out (see link_task_send_broadcast_to()
+// below). These statics latch what this Pico actually built and handed to
+// uart_owner_send() for the most recent frame of any kind, and separately
+// for the config-page reply specifically (cmd 0x1F,
+// KILNLINK_GET_CONFIG_PAGE_CMD), since the 500 ms status broadcast almost
+// always overwrites the generic set before it can be read over SWD.
+// `volatile` so the compiler can't optimize the stores away or keep them
+// in a register -- nothing in the firmware reads these back.
+//   s_last_tx_payload_len / s_last_page_payload_len   -- `length` argument (pre-encode payload size)
+//   s_last_tx_raw_len     / s_last_page_raw_len        -- kilnlink_frame_encode_raw() return (unstuffed frame bytes)
+//   s_last_tx_stuffed_len / s_last_page_stuffed_len    -- kilnlink_stuff() return (post-stuffing byte-stream length)
+//   s_last_tx_cmd                                       -- payload[0], the command id, so we know which frame type this was
+//   s_last_tx_accepted    / s_last_page_accepted        -- uart_owner_send()'s bool result
+// Safe to delete once the truncation's cause is found -- purely diagnostic,
+// no effect on behavior.
+static volatile uint32_t s_last_tx_payload_len;
+static volatile uint32_t s_last_tx_raw_len;
+static volatile uint32_t s_last_tx_stuffed_len;
+static volatile uint8_t  s_last_tx_cmd;
+static volatile uint32_t s_last_tx_accepted;
+
+static volatile uint32_t s_last_big_payload_len = 0;
+static volatile uint32_t s_last_big_raw_len = 0;
+static volatile uint32_t s_last_big_stuffed_len = 0;
+static volatile uint32_t s_last_big_accepted = 0;
+static volatile uint32_t s_last_big_count = 0;
+static volatile uint8_t  s_last_big_cmd = 0;
+static volatile uint8_t  s_last_big_dst_task = 0;
+static volatile uint32_t s_last_page_payload_len;
+static volatile uint32_t s_last_page_raw_len;
+static volatile uint32_t s_last_page_stuffed_len;
+static volatile uint32_t s_last_page_accepted;
+// --- end diagnostic statics ----------------------------------------------
+
+// --- DIAGNOSTIC: 2026-08-23 GET_CONFIG_PAGE stage1-vs-stage2 investigation -
+// The statics above proved this Pico never TRANSMITS a config-page reply
+// (s_last_page_* stayed all-zero over minutes of runtime), but that alone
+// does not say whether the ESP's SAFETY_CMD_GET_CONFIG_PAGE request never
+// arrives/dispatches (stage 1: link_task_handle_raw_frame()'s decode/
+// BROADCAST-filter/switch) or whether it dispatches into
+// link_task_handle_get_config_page() but that handler (or
+// link_task_send_config_page() below it) declines to reply (stage 2).
+// These four latch exactly that boundary, over SWD, without guessing:
+//   s_diag_dispatch_accepted_count     -- bumped once per BROADCAST frame
+//     that passes kilnlink_unstuff()+kilnlink_frame_decode()+the
+//     msg_type==BROADCAST/length!=0 filter, i.e. every frame that reaches
+//     the dispatch switch at all (any cmd, not just GET_CONFIG_PAGE). If
+//     this never moves, the request never even decodes -- stage 1, before
+//     the switch.
+//   s_diag_get_config_page_seen_count  -- bumped once per dispatched frame
+//     whose payload[0] == KILNLINK_GET_CONFIG_PAGE_CMD, REGARDLESS of
+//     whether frame.length matches KILNLINK_GET_CONFIG_PAGE_LEN. If this
+//     stays zero while s_diag_dispatch_accepted_count moves, the request is
+//     arriving as some OTHER frame type/cmd byte (stage 1, wrong cmd) --
+//     if this moves but s_diag_get_config_page_handled_count does not, the
+//     frame's length never matches (stage 1, wrong length).
+//   s_diag_get_config_page_handled_count -- bumped once per GET_CONFIG_PAGE
+//     frame whose length DID match, i.e. every call into
+//     link_task_handle_get_config_page(). If this moves, stage 1 is cleared
+//     entirely: the request arrives and dispatches correctly, and any
+//     silence is stage 2, inside the handler or link_task_send_config_page().
+//   s_diag_page_last_outcome -- one of the DIAG_PAGE_OUTCOME_* values below,
+//     set at every exit point link_task_handle_get_config_page()/
+//     link_task_send_config_page() can take, so the LAST one latched shows
+//     exactly why the last request got no reply.
+// `volatile` for the same reason as the block above (nothing reads these
+// back in firmware, only SWD). Safe to delete once this is settled --
+// purely diagnostic, no effect on behavior.
+static volatile uint32_t s_diag_dispatch_accepted_count = 0;
+static volatile uint32_t s_diag_get_config_page_seen_count = 0;
+static volatile uint32_t s_diag_get_config_page_handled_count = 0;
+static volatile uint8_t  s_diag_page_last_outcome = 0;
+#define DIAG_PAGE_OUTCOME_NONE            0u /* never touched this boot */
+#define DIAG_PAGE_OUTCOME_HANDLER_ENTERED 1u /* handler running, no verdict yet -- should never be the LAST value observed */
+#define DIAG_PAGE_OUTCOME_DECODE_REJECTED 2u /* kilnlink_get_config_page_decode() rejected the request payload */
+#define DIAG_PAGE_OUTCOME_PACK_FAILED     3u /* kilnlink_config_page_pack() returned 0 -- link_task_send_config_page() returned without sending */
+#define DIAG_PAGE_OUTCOME_REPLIED         4u /* link_task_send_broadcast() was called with the packed reply (accepted or not -- see s_last_page_accepted for that) */
+// --- end diagnostic statics ----------------------------------------------
+
 // dst_task-general version -- link_task_send_broadcast() below is the
 // existing SAFETY-task-id wrapper every Frame A/B/C call site already used
 // before this function existed; link_task_send_log() (added for log_task,
@@ -377,7 +459,39 @@ static bool link_task_send_broadcast_to(uint8_t dst_task, const uint8_t *payload
     // uart_owner_send() is itself non-blocking and drops the WHOLE frame if
     // the TX ring has no room (its own counter tracks that) -- exactly
     // LINK_PROTOCOL.md section 2 rule 3. Nothing here retries or escalates.
-    return uart_owner_send(stuffed, stuffed_len);
+    bool accepted = uart_owner_send(stuffed, stuffed_len);
+
+    // --- DIAGNOSTIC: 2026-08-23 truncation investigation, see statics
+    // declared above this function -- pure recording, no control-flow effect.
+    s_last_tx_payload_len = length;
+    s_last_tx_raw_len = (uint32_t)raw_len;
+    s_last_tx_stuffed_len = (uint32_t)stuffed_len;
+    s_last_tx_cmd = (length > 0) ? payload[0] : 0;
+    s_last_tx_accepted = accepted ? 1u : 0u;
+    // Any frame big enough to be the one the ESP reports truncated. The
+    // config-page latch below stayed all-zero on the bench, which proved the
+    // Pico never sends a config page at all -- so the 176-byte frame the ESP
+    // complains about is some OTHER frame type, and this catches it whatever
+    // it is. dst_task is recorded because that is what distinguishes a LOG
+    // frame from a SAFETY one.
+    if (length >= 100u) {
+        s_last_big_payload_len = length;
+        s_last_big_raw_len = (uint32_t)raw_len;
+        s_last_big_stuffed_len = (uint32_t)stuffed_len;
+        s_last_big_cmd = (length > 0) ? payload[0] : 0;
+        s_last_big_dst_task = dst_task;
+        s_last_big_accepted = accepted ? 1u : 0u;
+        s_last_big_count++;
+    }
+    if (length > 0 && payload[0] == KILNLINK_GET_CONFIG_PAGE_CMD) {
+        s_last_page_payload_len = length;
+        s_last_page_raw_len = (uint32_t)raw_len;
+        s_last_page_stuffed_len = (uint32_t)stuffed_len;
+        s_last_page_accepted = accepted ? 1u : 0u;
+    }
+    // --- end diagnostic ---
+
+    return accepted;
 }
 
 // Returns uart_owner_send()'s own accepted/dropped result now (previously
@@ -1476,17 +1590,21 @@ static void link_task_send_config_page(uint8_t page_index)
     size_t len = kilnlink_config_page_pack(page_index, &all[offset], total - offset, payload,
                                             sizeof(payload), &packed_now, &status);
     if (len == 0) {
+        s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_PACK_FAILED; // 2026-08-23 diagnostic
         return; // can't happen -- payload is sized to the wire's own payload cap
     }
     link_task_send_broadcast(payload, (uint8_t)len);
+    s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_REPLIED; // 2026-08-23 diagnostic
 }
 
 static void link_task_handle_get_config_page(const kilnlink_frame_t *frame)
 {
+    s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_HANDLER_ENTERED; // 2026-08-23 diagnostic
     kilnlink_get_config_page_t msg;
     kilnlink_get_config_page_status_t dstatus =
         kilnlink_get_config_page_decode(frame->payload, frame->length, &msg);
     if (dstatus != KILNLINK_GET_CONFIG_PAGE_OK) {
+        s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_DECODE_REJECTED; // 2026-08-23 diagnostic
         return; // malformed/wrong-length/wrong-cmd -- untrusted wire input
     }
     link_task_send_config_page(msg.page_index);
@@ -1516,6 +1634,8 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     if (frame.msg_type != KILNLINK_MSG_BROADCAST || frame.length == 0) {
         return; // the Pico never participates in the ACK'd DATA/ACK/NACK transport
     }
+
+    s_diag_dispatch_accepted_count++; // 2026-08-23 diagnostic -- see statics block above
 
     uint8_t cmd = frame.payload[0];
     switch (cmd) {
@@ -1587,7 +1707,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     case KILNLINK_GET_CONFIG_PAGE_CMD:
         // Same id as the reply (SAFETY_CMD_CONFIG_PAGE, KILNLINK_CONFIG_PAGE_CMD
         // -- both 0x1F), same shared-id convention as GET_PARAM/PARAM above.
+        s_diag_get_config_page_seen_count++; // 2026-08-23 diagnostic -- counts regardless of length match
         if (frame.length == KILNLINK_GET_CONFIG_PAGE_LEN) {
+            s_diag_get_config_page_handled_count++; // 2026-08-23 diagnostic
             link_task_handle_get_config_page(&frame);
         }
         break;
