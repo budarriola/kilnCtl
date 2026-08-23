@@ -118,5 +118,67 @@ for (const f of fs.readdirSync(dir).filter(n => /\.(html|js|css)$/.test(n))) {
   }
 }
 
+/* The operator warning shown for a 428 "safety processor not answering"
+ * response is duplicated in two languages: the C macro that would back an
+ * LCD/serial copy of the same sentence, and the JS copy actually shown by
+ * app.js's kcFetchWithSafetyAck. Nothing enforces they match at compile time
+ * -- they live in unrelated files, in unrelated languages -- so a wording
+ * edit to one without the other ships two different descriptions of the same
+ * risk. Extract each by concatenating its adjacent string literals in order
+ * and compare.
+ */
+function extract_c_macro_string(src, macroName) {
+  const re = new RegExp(`#define\\s+${macroName}\\b([\\s\\S]*?)(?:\\n(?!\\s*")|$)`);
+  const m = re.exec(src);
+  if (!m) return null;
+  let body = m[1];
+  // Strip line-continuation backslashes (and the newline they attach to).
+  body = body.replace(/\\\r?\n/g, ' ');
+  let out = '';
+  const lre = /"((?:[^"\\]|\\.)*)"/g;
+  let lm;
+  while ((lm = lre.exec(body))) {
+    out += lm[1].replace(/\\"/g, '"').replace(/\\n/g, '\n');
+  }
+  return out;
+}
+
+function extract_js_var_string(src, varName) {
+  const re = new RegExp(`\\b${varName}\\s*=([\\s\\S]*?);`);
+  const m = re.exec(src);
+  if (!m) return null;
+  let body = m[1];
+  let out = '';
+  const lre = /'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"/g;
+  let lm;
+  while ((lm = lre.exec(body))) {
+    const lit = lm[1] !== undefined ? lm[1] : lm[2];
+    out += lit.replace(/\\(['"])/g, '$1').replace(/\\n/g, '\n');
+  }
+  return out;
+}
+
+{
+  const hPath = path.join(dir, 'ota_interlock.h');
+  const jsPath = path.join(dir, 'app.js');
+  if (fs.existsSync(hPath) && fs.existsSync(jsPath)) {
+    checked++;
+    const cText = extract_c_macro_string(fs.readFileSync(hPath, 'utf8'), 'OTA_INTERLOCK_NO_SAFETY_WARNING');
+    const jsText = extract_js_var_string(fs.readFileSync(jsPath, 'utf8'), 'NO_SAFETY_WARNING');
+    if (cText === null) {
+      bad++;
+      console.log(`ota_interlock.h: could not find OTA_INTERLOCK_NO_SAFETY_WARNING macro`);
+    } else if (jsText === null) {
+      bad++;
+      console.log(`app.js: could not find NO_SAFETY_WARNING variable`);
+    } else if (cText !== jsText) {
+      bad++;
+      console.log(`OTA_INTERLOCK_NO_SAFETY_WARNING (ota_interlock.h) and NO_SAFETY_WARNING (app.js) disagree:\n` +
+                  `  C:  ${JSON.stringify(cText)}\n` +
+                  `  JS: ${JSON.stringify(jsText)}`);
+    }
+  }
+}
+
 console.log(`\nchecked ${checked} script/style blocks, ${bad} problem(s)`);
 process.exit(bad ? 1 : 0);

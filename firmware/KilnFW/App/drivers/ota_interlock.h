@@ -136,7 +136,32 @@ typedef struct {
     // configured ceiling ... Default 100 C." Callers should pass
     // OTA_INTERLOCK_TEMP_CEILING_C unless/until a real config item exists.
     float temp_ceiling_c;
+    // The operator has been shown the "no safety processor is watching this
+    // kiln -- heaters may come on, or stay stuck on, with nothing
+    // independent to cut them" warning for THIS request and chose to
+    // continue. Set from an explicit per-request token (a form field or an
+    // HTTP header), never from a stored preference: the acknowledgement is
+    // of one action taken now, not a mode the board is left in. Ignored
+    // entirely when safety_link_up is true.
+    bool  operator_ack_no_safety_processor;
 } ota_interlock_snapshot_t;
+
+// The warning an operator must be shown before their acknowledgement of
+// OTA_INTERLOCK_REFUSED_NEEDS_ACK means anything. Defined once, here, so the
+// web dialogs (app.js) and the LCD dialog (ui_page_kiln_cfg_setup.c) cannot
+// drift into describing the same risk two different ways -- the LCD includes
+// this header directly; the web copy (app.js's NO_SAFETY_WARNING) is
+// compared against this macro by App/test/lint_pages.js, so an edit to one
+// without the other fails that check rather than shipping two different
+// descriptions of the same risk.
+//
+// States the consequence, not the mechanism: an operator deciding whether to
+// restore a config needs to know that nothing will cut the heaters if they
+// stick on, not which UART is silent.
+#define OTA_INTERLOCK_NO_SAFETY_WARNING                                                          \
+    "The safety processor is not answering. Nothing independent is watching this kiln: the "     \
+    "heaters may come on, or stay stuck on, with no second processor able to cut them. "         \
+    "Continue anyway?"
 
 #define OTA_INTERLOCK_REASON_MAX 96 // same precedent as profile_exec_status_t::fault_reason
                                      // (profile_executor.h) -- one more 96-char human-readable
@@ -145,6 +170,29 @@ typedef struct {
 typedef enum {
     OTA_INTERLOCK_OK = 0,     // every precondition holds; caller may proceed to auth/transfer
     OTA_INTERLOCK_REFUSED,    // reason_out names the first unmet precondition found
+    // The safety link is down and the operator has not acknowledged that.
+    // Every OTHER precondition either passed or has not been reached yet.
+    //
+    // Split out from OTA_INTERLOCK_REFUSED (2026-08-22, owner request) so a
+    // caller can tell "you cannot do this" from "you can do this if you
+    // accept a specific risk, and here is the risk." Without the split, a
+    // board whose safety processor is absent or dead could not be updated
+    // or have its configuration restored AT ALL -- including restoring the
+    // very configuration that might get the safety processor commissioned.
+    // The refusal it replaced was inherited wholesale from
+    // UPDATE_PROTOCOL.md's rule about firmware TRANSFERS over a marginal
+    // link, which is not what a local config restore does.
+    //
+    // Only this precondition is overridable. The others describe a kiln
+    // that is actually doing something (updating, autotuning, firing, hot)
+    // where proceeding corrupts work in flight rather than merely removing
+    // a supervisor; there is no acknowledgement that makes those safe, so
+    // they keep returning OTA_INTERLOCK_REFUSED.
+    //
+    // Callers that only branch on `!= OTA_INTERLOCK_OK` keep refusing when
+    // they see this, which is the safe default for any site that has not
+    // been taught to offer the acknowledgement.
+    OTA_INTERLOCK_REFUSED_NEEDS_ACK,
 } ota_interlock_result_t;
 
 // Checks `snap` plus `zones[0..zone_count)` against every UPDATE_PROTOCOL.md
@@ -167,6 +215,10 @@ typedef enum {
 //      the link that (eventually) carries the safety processor's own
 //      corroborating view -- refusing here first avoids naming a specific
 //      zone temperature the operator has less reason to trust anyway.
+//      Returns OTA_INTERLOCK_REFUSED_NEEDS_ACK rather than
+//      OTA_INTERLOCK_REFUSED, and is skipped entirely when the caller set
+//      operator_ack_no_safety_processor -- in which case checks 3-7 below
+//      still run in full. See that enum value's comment.
 //   3. autotune_active -- an update mid-autotune abandons a test that is
 //      deliberately driving a zone away from steady state.
 //   4. profile_state RUNNING or PAUSED -- "an update mid-firing abandons a

@@ -60,6 +60,62 @@
     return window.confirm(message);
   };
 
+  // ---- kcFetchWithSafetyAck ------------------------------------------
+  //
+  // One wrapper for every action the board will perform without a working
+  // safety processor, but only if the operator says so: OTA updates and
+  // rollbacks, backup restore, and applying a saved kiln config.
+  //
+  // The board answers such a request with 428 Precondition Required (see
+  // ota_interlock.h's OTA_INTERLOCK_REFUSED_NEEDS_ACK) instead of the plain
+  // 409 it uses for refusals that cannot be argued with -- a running firing,
+  // a hot zone, another update already going. So the rule here is narrow and
+  // mechanical: 428 and only 428 gets a warning and a retry. A 409 is passed
+  // straight back to the caller to report, exactly as before.
+  //
+  // The warning text below is duplicated from OTA_INTERLOCK_NO_SAFETY_WARNING
+  // in App/drivers/ota_interlock.h, which is the LCD's copy of the same
+  // sentence. App/test/lint_pages.js compares the two on every run, so an
+  // edit to one without the other fails the check rather than shipping two
+  // different descriptions of the same risk.
+  var NO_SAFETY_WARNING =
+    'The safety processor is not answering. Nothing independent is watching this kiln: the ' +
+    'heaters may come on, or stay stuck on, with no second processor able to cut them. ' +
+    'Continue anyway?';
+
+  window.kcFetchWithSafetyAck = function (url, init) {
+    init = init || {};
+    return fetch(url, init).then(function (r) {
+      if (r.status !== 428) return r;
+      // Re-read the board's own reason and show it above the warning: the
+      // 428 is always the safety link today, but quoting what the firmware
+      // actually said keeps this from going stale if that ever widens.
+      return r.text().then(function (reason) {
+        var msg = (reason ? reason.trim() + '\n\n' : '') + NO_SAFETY_WARNING;
+        if (!window.kcConfirm(msg)) {
+          // Hand back the original refusal so the caller's error path runs
+          // unchanged -- declining is not a new kind of failure.
+          return r;
+        }
+        var retry = {};
+        for (var k in init) { if (Object.prototype.hasOwnProperty.call(init, k)) retry[k] = init[k]; }
+        retry.headers = {};
+        var src = init.headers || {};
+        // init.headers may be a plain object or a Headers instance; normalise
+        // to a plain object so adding one key cannot drop the others.
+        if (typeof src.forEach === 'function' && !(src instanceof Array)) {
+          src.forEach(function (v, k2) { retry.headers[k2] = v; });
+        } else {
+          for (var k3 in src) {
+            if (Object.prototype.hasOwnProperty.call(src, k3)) retry.headers[k3] = src[k3];
+          }
+        }
+        retry.headers['X-Ota-Ack-No-Safety'] = '1';
+        return fetch(url, retry);
+      });
+    });
+  };
+
   // ---- Unit preference (°C/°F) --------------------------------------
   //
   // UI_PLAN.md item 7 ("Unit parity"): the web should honour the same
@@ -350,6 +406,34 @@
       window.kcNav.updateBodyPadding();
     }
   }
+
+  // The Stop bar is `position: fixed; bottom: 0`, so it covers whatever
+  // happens to be at the bottom of the viewport. nav.js's updateBodyPadding()
+  // stops it from hiding the END of the document, but it cannot help a
+  // control sitting mid-page: at tablet width during a firing, the bar
+  // landed squarely on the profile editor's name field, so an operator could
+  // be typing into an input they could not see.
+  //
+  // Rather than reserve space unconditionally (which would leave a dead
+  // stripe on every page for the >99% of the time no firing is stoppable),
+  // move the one element that matters -- the one the operator just focused
+  // -- out from under the bar. Only ever scrolls DOWN-to-UP by the overlap
+  // amount, so it cannot fight a user who has deliberately scrolled
+  // somewhere, and it does nothing at all when the bar is hidden.
+  function keepFocusClearOfStopBar(ev) {
+    if (!stopBarEl || stopBarEl.hasAttribute('hidden')) return;
+    var el = ev.target;
+    if (!el || typeof el.getBoundingClientRect !== 'function') return;
+    var barTop = stopBarEl.getBoundingClientRect().top;
+    var rect = el.getBoundingClientRect();
+    // 8px of breathing room so the control does not end up flush against
+    // the bar's border.
+    var overlap = rect.bottom + 8 - barTop;
+    if (overlap > 0) {
+      window.scrollBy({ top: overlap, behavior: 'smooth' });
+    }
+  }
+  document.addEventListener('focusin', keepFocusClearOfStopBar);
 
   // ---- Heartbeat / poll loop --------------------------------------------
 

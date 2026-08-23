@@ -85,9 +85,88 @@ static void test_safety_link_down(void)
     ota_interlock_zone_snapshot_t zones[1] = { good_zone() };
     char reason[OTA_INTERLOCK_REASON_MAX] = { 0 };
 
-    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
-               "a down safety link refuses");
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason))
+                   == OTA_INTERLOCK_REFUSED_NEEDS_ACK,
+               "a down safety link refuses, and reports itself as the acknowledgeable refusal");
     TEST_CHECK(strstr(reason, "safety link") != NULL, "reason names the safety link specifically");
+    TEST_CHECK(OTA_INTERLOCK_REFUSED_NEEDS_ACK != OTA_INTERLOCK_OK,
+               "and it is still a refusal to any caller testing `!= OTA_INTERLOCK_OK`");
+}
+
+// The acknowledgement's whole point, and its whole limit. Written as
+// negative tests first: if operator_ack_no_safety_processor were wired to
+// short-circuit the WHOLE check rather than just precondition 2, every
+// assertion below about the other preconditions would fail.
+static void test_no_safety_ack_overrides_only_the_link(void)
+{
+    TEST_SECTION("ota_interlock_check -- the no-safety-processor acknowledgement");
+
+    ota_interlock_zone_snapshot_t zones[1] = { good_zone() };
+    char reason[OTA_INTERLOCK_REASON_MAX] = { 0 };
+
+    // 1. Acknowledged, link down, nothing else wrong -> proceeds.
+    ota_interlock_snapshot_t snap = good_snapshot();
+    snap.safety_link_up = false;
+    snap.operator_ack_no_safety_processor = true;
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_OK,
+               "an acknowledged down link proceeds when every other precondition holds");
+
+    // 2. The ack must NOT rescue any other precondition. Each of these has
+    // the ack set AND the link down -- exactly the state a real overriding
+    // operator is in -- so a bug that returned early on the ack would let
+    // every one of them through.
+    snap = good_snapshot();
+    snap.safety_link_up = false;
+    snap.operator_ack_no_safety_processor = true;
+    snap.profile_state = OTA_INTERLOCK_PROFILE_RUNNING;
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+               "the acknowledgement does NOT let a running profile through");
+    TEST_CHECK(strstr(reason, "running") != NULL, "and the reason is the profile, not the link");
+
+    snap = good_snapshot();
+    snap.safety_link_up = false;
+    snap.operator_ack_no_safety_processor = true;
+    snap.autotune_active = true;
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+               "the acknowledgement does NOT let a running autotune through");
+
+    snap = good_snapshot();
+    snap.safety_link_up = false;
+    snap.operator_ack_no_safety_processor = true;
+    snap.other_update_in_progress = true;
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+               "the acknowledgement does NOT let a second concurrent update through");
+
+    snap = good_snapshot();
+    snap.safety_link_up = false;
+    snap.operator_ack_no_safety_processor = true;
+    snap.run_state_interrupted = true;
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+               "the acknowledgement does NOT let an unacknowledged interrupted firing through");
+
+    {
+        ota_interlock_snapshot_t s2 = good_snapshot();
+        s2.safety_link_up = false;
+        s2.operator_ack_no_safety_processor = true;
+        ota_interlock_zone_snapshot_t hot[1] = { good_zone() };
+        hot[0].actual_c = 500.0f;
+        TEST_CHECK(ota_interlock_check(&s2, hot, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+                   "the acknowledgement does NOT let a hot zone through");
+        TEST_CHECK(strstr(reason, "500") != NULL, "and the reason names the temperature");
+
+        ota_interlock_zone_snapshot_t on[1] = { good_zone() };
+        on[0].heater_commanded = true;
+        TEST_CHECK(ota_interlock_check(&s2, on, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+                   "the acknowledgement does NOT let a commanded heater through");
+    }
+
+    // 3. The ack is inert when the link is UP -- it must never be a way to
+    // weaken anything on a healthy board.
+    snap = good_snapshot();
+    snap.operator_ack_no_safety_processor = true;
+    snap.profile_state = OTA_INTERLOCK_PROFILE_PAUSED;
+    TEST_CHECK(ota_interlock_check(&snap, zones, 1, reason, sizeof(reason)) == OTA_INTERLOCK_REFUSED,
+               "with the link up the acknowledgement changes nothing");
 }
 
 static void test_autotune_active(void)
@@ -241,6 +320,7 @@ void run_test_ota_interlock(void)
     test_all_clear();
     test_update_mutex_checked_first();
     test_safety_link_down();
+    test_no_safety_ack_overrides_only_the_link();
     test_autotune_active();
     test_profile_running_and_paused();
     test_run_state_interrupted();

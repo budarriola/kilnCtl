@@ -475,9 +475,55 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx)
     return in_progress;
 }
 
-ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap)
+/* Per-request acknowledgement token for the one overridable interlock
+ * precondition (ota_interlock.h's OTA_INTERLOCK_REFUSED_NEEDS_ACK). A
+ * header rather than a query parameter so it survives the binary-body
+ * upload routes unchanged, and so it never lands in a server access log or
+ * a browser history entry the way a URL would.
+ *
+ * NOT covered by the request HMAC (ota_http_verify_request()). That is a
+ * deliberate, bounded choice: every route that reads this already refuses
+ * unauthenticated callers outright, so nobody who cannot produce a valid
+ * signature can set this header on a request that gets this far. What the
+ * header relaxes is a local operator-policy check ("is a supervisor
+ * watching?"), never an authentication or authorisation decision, and it
+ * cannot turn a hard refusal (a running profile, a hot zone) into a pass.
+ */
+#define OTA_ACK_NO_SAFETY_HEADER "X-Ota-Ack-No-Safety"
+
+bool ota_http_req_ack_no_safety(httpd_req_t *req)
+{
+    char val[8];
+    if (httpd_req_get_hdr_value_str(req, OTA_ACK_NO_SAFETY_HEADER, val, sizeof(val)) != ESP_OK) {
+        return false;
+    }
+    return val[0] == '1';
+}
+
+/* Emits the right refusal for an interlock result, keeping the status code
+ * meaningful to the page: 428 Precondition Required means "there is a
+ * precondition you can satisfy by acknowledging it, ask the operator and
+ * retry with the header"; 409 Conflict keeps its old meaning of "the kiln
+ * is busy or hot, there is nothing to acknowledge." A client that does not
+ * know about 428 still sees a 4xx and still refuses, which is the safe
+ * default. */
+esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
+                                          const char *reason)
+{
+    if (r == OTA_INTERLOCK_REFUSED_NEEDS_ACK) {
+        httpd_resp_set_status(req, "428 Precondition Required");
+    } else {
+        httpd_resp_set_status(req, "409 Conflict");
+    }
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
+}
+
+ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
+                                                 size_t reason_cap)
 {
     ota_interlock_snapshot_t snap = { 0 };
+    snap.operator_ack_no_safety_processor = ack_no_safety_processor;
 
     // Profile executor state -- one-for-one map onto ota_interlock.h's own
     // enum (see that header's comment on why it can't just reuse
@@ -1000,12 +1046,11 @@ static esp_err_t ota_esp_post_handler(httpd_req_t *req)
     // similar") is set directly via httpd_resp_set_status() rather than
     // httpd_resp_send_err(), which only knows the enum's fixed set.
     char reason[OTA_INTERLOCK_REASON_MAX];
-    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
+                                                            sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(TAG, "OTA esp update from %s: refused by interlock: %s", ip, reason);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
     // 4. Single update mutex -- claimed before any body byte is read, so a
@@ -1284,12 +1329,11 @@ static esp_err_t ota_pico_post_handler(httpd_req_t *req)
     }
 
     char reason[OTA_INTERLOCK_REASON_MAX];
-    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
+                                                            sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(TAG, "OTA pico update from %s: refused by interlock: %s", ip, reason);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
     if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
@@ -1492,12 +1536,11 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // exactly as disruptive and must be refused under the same conditions
     // (kiln not idle/cool, safety link down, another update in progress, ...).
     char reason[OTA_INTERLOCK_REASON_MAX];
-    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
+                                                            sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(TAG, "OTA esp rollback from %s: refused by interlock: %s", ip, reason);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
     // 4. Single update mutex -- claimed as OTA_HTTP_CONTEXT_ESP (not a
@@ -1580,15 +1623,22 @@ static esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
 // a new one. Returns {"ok":true} or {"ok":false,"reason":"<why>"}.
 static esp_err_t ota_interlock_get_handler(httpd_req_t *req)
 {
+    /* Asked WITHOUT the acknowledgement on purpose: this endpoint reports
+     * the board's actual state so the page can decide what to show, and
+     * passing the ack here would hide the very condition the page needs to
+     * warn about. `needs_ack` tells the page that this particular refusal
+     * is the overridable one, so it can offer the warning dialog instead of
+     * greying the control out. */
     char reason[OTA_INTERLOCK_REASON_MAX];
-    ota_interlock_result_t r = ota_http_check_interlocks(reason, sizeof(reason));
+    ota_interlock_result_t r = ota_http_check_interlocks(false, reason, sizeof(reason));
 
-    char body[OTA_INTERLOCK_REASON_MAX + 32];
+    char body[OTA_INTERLOCK_REASON_MAX + 64];
     int n;
     if (r == OTA_INTERLOCK_OK) {
         n = snprintf(body, sizeof(body), "{\"ok\":true}");
     } else {
-        n = snprintf(body, sizeof(body), "{\"ok\":false,\"reason\":\"%s\"}", reason);
+        n = snprintf(body, sizeof(body), "{\"ok\":false,\"reason\":\"%s\",\"needs_ack\":%s}", reason,
+                     r == OTA_INTERLOCK_REFUSED_NEEDS_ACK ? "true" : "false");
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, n);

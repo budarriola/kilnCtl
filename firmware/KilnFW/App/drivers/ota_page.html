@@ -248,7 +248,7 @@ function getChallenge() {
 function pushImage(endpoint, context, apPassword, fileBytes, onDone) {
   return getChallenge().then(function (nonce) {
     var mac = deriveMac(apPassword, nonce, context);
-    return fetch(endpoint, {
+    return window.kcFetchWithSafetyAck(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
@@ -294,15 +294,25 @@ function loadInterlock() {
   var box = document.getElementById('interlockBox');
   box.classList.add('kc-live-value');
   return fetch('/api/ota/interlock').then(function (r) { return r.json(); }).then(function (s) {
+    // ok:false with needs_ack:true is not a hard refusal -- it means the
+    // safety processor isn't answering, and the operator can proceed past
+    // it via the 428/X-Ota-Ack-No-Safety warning dialog when they actually
+    // try the action. Only a plain ok:false (needs_ack absent or false --
+    // firing running, zone hot, another update in flight) disables the
+    // controls here.
+    var allowed = s.ok || s.needs_ack === true;
     if (s.ok) {
       box.className = 'ready kc-live-value';
       box.textContent = 'Idle -- updates are allowed.';
+    } else if (s.needs_ack) {
+      box.className = 'blocker kc-live-value';
+      box.textContent = 'Warning: ' + (s.reason || 'safety processor is not answering');
     } else {
       box.className = 'blocker kc-live-value';
       box.textContent = 'Blocked: ' + (s.reason || 'kiln is not idle');
     }
-    setPickersVisible(s.ok);
-    return s.ok;
+    setPickersVisible(allowed);
+    return allowed;
   }).catch(function () {
     box.className = 'blocker kc-live-value';
     box.textContent = 'Could not read interlock state -- assume blocked.';
@@ -453,7 +463,7 @@ document.getElementById('espRollbackBtn').addEventListener('click', function () 
   msg.textContent = 'Requesting rollback…';
   getChallenge().then(function (nonce) {
     var mac = deriveMac(pw, nonce, 'esp-rollback');
-    return fetch('/api/ota/esp/rollback', {
+    return window.kcFetchWithSafetyAck('/api/ota/esp/rollback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream', 'X-Ota-Mac': bytesToHex(mac) },
       body: new Uint8Array(0),

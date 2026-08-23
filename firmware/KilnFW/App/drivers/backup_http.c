@@ -1187,13 +1187,22 @@ static esp_err_t backup_import_post_handler(httpd_req_t *req)
      * second copy of the same profile/heater/temperature check) keeps there
      * being exactly one place this decision is made, matching the reuse this
      * pass's brief actually asked for even though the specific filename
-     * named was the other half of that pair. */
+     * named was the other half of that pair.
+     *
+     * 2026-08-22: the ONE precondition in that list a restore may proceed
+     * past is "the safety link is down", and only when the operator has
+     * answered the warning dialog for this request (the
+     * X-Ota-Ack-No-Safety header). Restoring a saved configuration streams
+     * nothing over that link -- the rule it was inheriting is
+     * UPDATE_PROTOCOL.md's about firmware TRANSFERS -- and refusing
+     * outright left a board whose safety processor is absent unable to
+     * restore the very configuration that gets it commissioned. Every other
+     * precondition still refuses unconditionally. */
     char reason[OTA_INTERLOCK_REASON_MAX];
-    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, reason, strlen(reason));
-        return ESP_OK;
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
+                                                            sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
     if (req->content_len <= 0 || (size_t)req->content_len > BACKUP_BODY_MAX) {

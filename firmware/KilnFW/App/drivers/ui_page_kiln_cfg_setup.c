@@ -129,30 +129,13 @@ static void row_clicked_cb(lv_event_t *e)
 
 /* ---- Apply -------------------------------------------------------------- */
 
-static void apply_confirm_yes_cb(void *user_data)
+/* The apply itself, once every gate has been answered. `ack` carries the
+ * operator's answer to the no-safety-processor warning, if they were asked
+ * one; it is false on the ordinary path where the safety link is up. */
+static void do_apply(int32_t id, bool ack)
 {
-    int32_t id = (int32_t)(intptr_t)user_data;
-
-    /* kiln_cfg_store_apply() itself does NOT check whether a firing is
-     * running or heaters are on (kiln_cfg_store.h's own header comment) --
-     * this call is the LCD's half of the "every caller must call
-     * ota_http_check_interlocks() first" requirement, same predicate
-     * kiln_cfg_http.c's own apply handler is required to use rather than a
-     * second, possibly-diverging check. */
-    char reason[128];
-    ota_interlock_result_t gate = ota_http_check_interlocks(reason, sizeof(reason));
-    if (gate != OTA_INTERLOCK_OK) {
-        set_status(reason, true);
-        ESP_LOGW(TAG, "apply(%ld) refused by interlocks: %s", (long)id, reason);
-        /* Re-read active id regardless -- never assume the refused apply left
-         * anything unchanged just because THIS path refused it; some other
-         * caller could have changed it concurrently (web dashboard). */
-        refresh();
-        return;
-    }
-
     char store_reason[OTA_INTERLOCK_REASON_MAX] = "";
-    bool ok = kiln_cfg_store_apply(id, store_reason, sizeof(store_reason));
+    bool ok = kiln_cfg_store_apply(id, ack, store_reason, sizeof(store_reason));
     if (!ok) {
         set_status(store_reason[0] ? store_reason : "Apply failed", true);
         ESP_LOGW(TAG, "kiln_cfg_store_apply(%ld) failed: %s", (long)id, store_reason);
@@ -164,6 +147,57 @@ static void apply_confirm_yes_cb(void *user_data)
      * leave the screen showing the new config as active when it was not
      * applied"). */
     refresh();
+}
+
+/* Second dialog's Yes -- the operator has now read the no-safety-processor
+ * warning. Re-runs the SAME gate with the acknowledgement rather than
+ * skipping it: between the two dialogs a profile could have started or a
+ * zone could have gone over the ceiling, and those refusals are not
+ * acknowledgeable. Only the link-down verdict is overridden here. */
+static void apply_no_safety_ack_cb(void *user_data)
+{
+    int32_t id = (int32_t)(intptr_t)user_data;
+    do_apply(id, true);
+}
+
+static void apply_confirm_yes_cb(void *user_data)
+{
+    int32_t id = (int32_t)(intptr_t)user_data;
+
+    /* kiln_cfg_store_apply() itself does NOT check whether a firing is
+     * running or heaters are on (kiln_cfg_store.h's own header comment) --
+     * this call is the LCD's half of the "every caller must call
+     * ota_http_check_interlocks() first" requirement, same predicate
+     * kiln_cfg_http.c's own apply handler is required to use rather than a
+     * second, possibly-diverging check. Asked WITHOUT the acknowledgement
+     * so a link-down board reaches the warning dialog below rather than
+     * silently proceeding. */
+    char reason[128];
+    ota_interlock_result_t gate = ota_http_check_interlocks(false, reason, sizeof(reason));
+    if (gate == OTA_INTERLOCK_REFUSED_NEEDS_ACK) {
+        ESP_LOGW(TAG, "apply(%ld): no safety processor -- asking the operator", (long)id);
+        ui_confirm_params_t warn = {
+            .title = "No Safety Processor",
+            .body = OTA_INTERLOCK_NO_SAFETY_WARNING,
+            .confirm_label = "Continue",
+            .confirm_color = UI_THEME_ACCENT_5,
+            .on_confirm = apply_no_safety_ack_cb,
+            .user_data = (void *)(intptr_t)id,
+        };
+        ui_confirm_show(&warn);
+        return;
+    }
+    if (gate != OTA_INTERLOCK_OK) {
+        set_status(reason, true);
+        ESP_LOGW(TAG, "apply(%ld) refused by interlocks: %s", (long)id, reason);
+        /* Re-read active id regardless -- never assume the refused apply left
+         * anything unchanged just because THIS path refused it; some other
+         * caller could have changed it concurrently (web dashboard). */
+        refresh();
+        return;
+    }
+
+    do_apply(id, false);
 }
 
 static void apply_btn_cb(lv_event_t *e)

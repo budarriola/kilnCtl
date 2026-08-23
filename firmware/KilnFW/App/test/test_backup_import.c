@@ -168,13 +168,43 @@ esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const 
 ota_interlock_result_t g_stub_ota_interlock_result = OTA_INTERLOCK_OK;
 char g_stub_ota_interlock_reason[OTA_INTERLOCK_REASON_MAX] = "";
 
-ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap)
+// g_stub_ota_interlock_saw_ack records the ack argument the code under test
+// passed, so a test can prove the acknowledgement is actually threaded
+// through rather than dropped on the floor somewhere between the handler and
+// the store.
+bool g_stub_ota_interlock_saw_ack = false;
+
+ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
+                                                 size_t reason_cap)
 {
+    g_stub_ota_interlock_saw_ack = ack_no_safety_processor;
     if (reason_out && reason_cap) {
         strncpy(reason_out, g_stub_ota_interlock_reason, reason_cap - 1);
         reason_out[reason_cap - 1] = '\0';
     }
     return g_stub_ota_interlock_result;
+}
+
+// The other two ota_http.h symbols backup_http.c's handler now references.
+// Neither is reachable from these tests -- they live in
+// backup_import_post_handler(), the HTTP entry point, while every test here
+// calls backup_import_apply() directly -- but the linker still needs a body
+// for each. Deliberately trivial: if a future test ever does exercise the
+// handler, these firing would be the signal that this stub needs real
+// behaviour rather than silently passing.
+bool ota_http_req_ack_no_safety(httpd_req_t *req)
+{
+    (void)req;
+    return false;
+}
+
+esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
+                                          const char *reason)
+{
+    (void)req;
+    (void)r;
+    (void)reason;
+    return ESP_OK;
 }
 
 // ---------------------------------------------------------------------------

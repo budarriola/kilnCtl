@@ -622,7 +622,7 @@ function kcSelectedConfig() {
 // generic toast, then reload the list so the UI reflects the board's
 // actual state -- never assumed from the request alone.
 function kcPost(path, formBody) {
-  return fetch(path, {
+  return window.kcFetchWithSafetyAck(path, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formBody,
   }).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (j) { return { httpOk: r.ok, body: j }; });

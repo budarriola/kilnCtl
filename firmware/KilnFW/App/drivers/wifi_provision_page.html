@@ -789,6 +789,11 @@ document.getElementById('ipModeStaticBtn').addEventListener('click', function ()
 
 let polling = false;
 let lastMode = null;
+/* Whether this page holds the AP's REAL password (it only does when the
+ * request came in over the AP itself -- see the poll() handler). Starts
+ * false so a Save that somehow beats the first poll omits the field and
+ * leaves the stored password alone, rather than blanking it. */
+let apPasswordKnown = false;
 function applyModeUi(mode) {
   if (mode === lastMode) return;
   lastMode = mode;
@@ -808,9 +813,26 @@ function poll() {
     /* Pre-fill the board's own AP password too -- deliberately different
      * from every saved *network* password (never sent by the backend at
      * all, anywhere) -- see wifi_prov_get_ap_password()'s doc comment in
-     * wifi_prov.h for why this one specifically is shown. */
-    if (document.activeElement !== document.getElementById('apPassword')) {
-      document.getElementById('apPassword').value = s.ap_password || '';
+     * wifi_prov.h for why this one specifically is shown.
+     *
+     * 2026-08-22: the backend now sends the real value ONLY to a client
+     * that reached this page over the board's own AP, where knowing it was
+     * already a precondition of connecting. Over the home network it sends
+     * "" with ap_password_known:false, and the field must then behave as
+     * "leave unchanged" -- NOT as "the password is blank". Getting that
+     * wrong would turn a Save the operator made to fix their SSID into a
+     * silent downgrade of the AP to an open network. */
+    var pwField = document.getElementById('apPassword');
+    apPasswordKnown = (s.ap_password_known === true);
+    if (document.activeElement !== pwField) {
+      pwField.value = s.ap_password || '';
+      if (!apPasswordKnown) {
+        pwField.placeholder = s.ap_password_set
+          ? 'unchanged -- open this page from the kiln’s own Wi-Fi to see it'
+          : 'no password set (open network)';
+      } else {
+        pwField.placeholder = '';
+      }
     }
     if (s.mode === 'ap') {
       renderApQr(s.ap_ssid, s.ap_password);
@@ -968,8 +990,17 @@ document.getElementById('connectCancelBtn').addEventListener('click', function (
 
 document.getElementById('apForm').addEventListener('submit', function (ev) {
   ev.preventDefault();
-  var body = 'ap_ssid=' + encodeURIComponent(document.getElementById('apSsid').value) +
-             '&ap_password=' + encodeURIComponent(document.getElementById('apPassword').value);
+  var body = 'ap_ssid=' + encodeURIComponent(document.getElementById('apSsid').value);
+  /* Send ap_password ONLY when this page actually holds the real one (we
+   * are on the AP) or the operator typed a new one. Omitting the field
+   * entirely is how the backend is told "leave the AP password alone" --
+   * wifi_provision_http.c only writes it when the field is present -- so
+   * this is what keeps a Save from an off-AP browser, where the field was
+   * deliberately not prefilled, from blanking the password. */
+  var pwValue = document.getElementById('apPassword').value;
+  if (apPasswordKnown || pwValue !== '') {
+    body += '&ap_password=' + encodeURIComponent(pwValue);
+  }
   var rows = document.getElementById('statusRows');
   rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Saving…</span></li>';
   fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })

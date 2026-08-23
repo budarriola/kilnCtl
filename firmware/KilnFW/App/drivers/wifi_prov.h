@@ -371,6 +371,15 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
  * comparisons and return immediately. */
 void wifi_prov_note_possible_static_reachability(int sockfd);
 
+/* True when the request served on `sockfd` arrived on the board's own SoftAP
+ * interface rather than over the home network. Pass httpd_req_to_sockfd(req).
+ *
+ * Exists so GET /status can decide whether echoing the AP password back is a
+ * disclosure: a client associated to the AP already had to know it, whereas
+ * the same field served over the STA interface hands it to every device on
+ * the LAN. Fails closed -- an uninspectable socket reports false. */
+bool wifi_prov_request_arrived_on_ap(int sockfd);
+
 #ifdef __cplusplus
 }
 #endif

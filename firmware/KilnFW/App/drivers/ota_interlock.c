@@ -32,9 +32,18 @@ ota_interlock_result_t ota_interlock_check(const ota_interlock_snapshot_t *snap,
 
     // 2. Safety link health -- UPDATE_PROTOCOL.md section 1: "Do not start a
     // transfer over a link that is already marginal."
-    if (!snap->safety_link_up) {
+    //
+    // This is the ONE precondition an operator may knowingly override (see
+    // ota_interlock.h's doc comment on OTA_INTERLOCK_REFUSED_NEEDS_ACK for
+    // why this one and no other). Without the acknowledgement it refuses as
+    // before, but with a DISTINCT result so the caller can offer the warning
+    // instead of reporting a dead end. With the acknowledgement it falls
+    // through to every remaining check below -- an override of "the safety
+    // processor is not answering" is not an override of "a profile is
+    // running" or "zone 2 is at 340 C", which stay hard refusals.
+    if (!snap->safety_link_up && !snap->operator_ack_no_safety_processor) {
         set_reason(reason_out, reason_cap, "safety link is down");
-        return OTA_INTERLOCK_REFUSED;
+        return OTA_INTERLOCK_REFUSED_NEEDS_ACK;
     }
 
     // 3. Autotune -- deliberately driving a zone away from steady state.

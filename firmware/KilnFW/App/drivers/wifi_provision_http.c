@@ -206,9 +206,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * anywhere -- see wifi_prov_get_saved_networks()'s doc comment), an
      * operator on the setup page needs to see what they configured for the
      * board's own identity. See wifi_prov_get_ap_password()'s doc comment
-     * for the full reasoning. */
+     * for the full reasoning.
+     *
+     * 2026-08-22: narrowed to requests that arrived ON the SoftAP. That
+     * original reasoning holds exactly there and nowhere else -- a client
+     * associated to the AP had to know the password to associate at all, so
+     * echoing it back discloses nothing. Served over the STA interface, the
+     * same field handed the board's AP password to every unauthenticated
+     * device on the house LAN, which is a real disclosure and was never the
+     * intent. Off-AP callers get an empty string; ap_password_known tells
+     * the page which case it is, so it can render "hidden -- open this page
+     * from the board's own Wi-Fi to see it" rather than "no password set",
+     * which would be a lie about an AP that is in fact protected. */
+    const bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
     char ap_password_escaped[WIFI_PROV_PASSWORD_MAX_LEN * 2 + 1];
-    json_escape(wifi_prov_get_ap_password(), ap_password_escaped, sizeof(ap_password_escaped));
+    json_escape(on_ap ? wifi_prov_get_ap_password() : "", ap_password_escaped,
+                sizeof(ap_password_escaped));
 
     char sta_ip[16];
     bool sta_connected = wifi_prov_is_sta_connected();
@@ -235,16 +248,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * join (unprovisioned/connecting/connected/reconnecting) -- both are
      * sent so the page can show one coherent switch plus a status line
      * without guessing at either from the other. */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32];
+    /* +64 over the previous size for the two new booleans and their keys. */
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":\"%s\",\"sta_connected\":%s,"
                      "\"sta_ip\":\"%s\",\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
                      "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":\"%s\","
-                     "\"static_netmask\":\"%s\",\"static_gateway\":\"%s\"}",
+                     "\"static_netmask\":\"%s\",\"static_gateway\":\"%s\","
+                     "\"ap_password_known\":%s,\"ap_password_set\":%s}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_escaped,
                      sta_connected ? "true" : "false", sta_ip, ap_ssid_escaped, ap_password_escaped,
                      (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip, static_netmask,
-                     static_gateway);
+                     static_gateway, on_ap ? "true" : "false",
+                     wifi_prov_get_ap_password()[0] ? "true" : "false");
     if (n < 0) {
         n = 0;
     }

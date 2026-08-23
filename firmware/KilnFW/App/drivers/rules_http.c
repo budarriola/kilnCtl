@@ -438,8 +438,19 @@ static const char *parse_line(char *line, rules_cfg_t *cfg, int *current_relay)
         if (rule_idx < 0 || rule_idx >= RULES_MAX_RULES_PER_RELAY) {
             return "rule index out of range (0-2)";
         }
-        if (zone_idx < 0 || zone_idx >= MAX31856_CHANNEL_COUNT) {
-            return "zone index out of range";
+        /* Bounded by the zones this board actually HAS, not by the number of
+         * MAX31856 channels it could carry. Every zones_config_* getter
+         * refuses an index >= thermo_count, so a condition on a zone past
+         * that count could be saved, reported back by GET /api/rules, and
+         * then silently never evaluate true -- the same "accepted, then
+         * quietly never fires" failure this file's temperature conditions
+         * were fixed for once already. Refuse it at save time instead, and
+         * name the count so the message says what to do about it. */
+        const uint8_t zone_count = zones_config_get_thermo_count();
+        if (zone_idx < 0 || zone_idx >= (int)zone_count) {
+            return zone_count == 0
+                       ? "no zones are configured yet -- set the thermocouple count first"
+                       : "zone index out of range for this kiln's configured zone count";
         }
         cmp_t cmp;
         if (!parse_cmp(cmp_str, &cmp)) {

@@ -229,19 +229,36 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* Existence BEFORE the interlock. An id that does not exist is a 404 no
+     * matter what the kiln is doing, and answering "safety link is down"
+     * for `id=999` sent the operator to diagnose a link that was not the
+     * problem -- the same misdirection the delete route already avoids by
+     * checking first. kiln_cfg_store_get_name() is the cheapest existence
+     * probe the store exposes (false = no such id). */
+    char exists_name[KILN_CFG_NAME_MAX_LEN + 1];
+    if (!kiln_cfg_store_get_name(id, exists_name, sizeof(exists_name))) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such kiln config");
+        return ESP_OK;
+    }
+
+    /* Applying a saved configuration writes zone/guard settings; it streams
+     * nothing over the safety link. So "the safety link is down" is
+     * overridable here with the operator's per-request acknowledgement (see
+     * ota_interlock.h's OTA_INTERLOCK_REFUSED_NEEDS_ACK), while a running
+     * firing or a hot zone still refuses outright. kiln_cfg_store_apply()'s
+     * own internal backstop is passed the same answer, below. */
     char reason[OTA_INTERLOCK_REASON_MAX];
     reason[0] = '\0';
-    if (ota_http_check_interlocks(reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+    const bool ack = ota_http_req_ack_no_safety(req);
+    ota_interlock_result_t gate = ota_http_check_interlocks(ack, reason, sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(TAG, "kiln config apply id=%ld refused by interlock: %s", (long)id, reason);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, reason, HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return ota_http_send_interlock_refusal(req, gate, reason);
     }
 
     char apply_reason[96];
     apply_reason[0] = '\0';
-    if (!kiln_cfg_store_apply(id, apply_reason, sizeof(apply_reason))) {
+    if (!kiln_cfg_store_apply(id, ack, apply_reason, sizeof(apply_reason))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, apply_reason[0] ? apply_reason : "apply failed");
         return ESP_OK;
     }

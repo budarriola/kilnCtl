@@ -464,7 +464,8 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
     return true;
 }
 
-bool kiln_cfg_store_apply(int32_t id, char *reason_out, size_t reason_cap)
+bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason_out,
+                          size_t reason_cap)
 {
     /* Backstop interlock -- see this function's SAFETY note
      * (kiln_cfg_store.h). Checked FIRST, before find_index_by_id() or
@@ -476,7 +477,8 @@ bool kiln_cfg_store_apply(int32_t id, char *reason_out, size_t reason_cap)
      * POST /api/ota/esp and /api/ota/pico gate on -- "is a profile running /
      * are the heaters on" -- deliberately NOT heat_interlock.c, which
      * answers the opposite question (may heat run during an update). */
-    if (ota_http_check_interlocks(reason_out, reason_cap) != OTA_INTERLOCK_OK) {
+    if (ota_http_check_interlocks(ack_no_safety_processor, reason_out, reason_cap)
+            != OTA_INTERLOCK_OK) {
         return false;
     }
 

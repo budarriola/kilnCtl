@@ -154,7 +154,7 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
   var reader = new FileReader();
   reader.onload = function () {
     status.textContent = 'Uploading...';
-    fetch('/api/backup/import', {
+    window.kcFetchWithSafetyAck('/api/backup/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: reader.result,

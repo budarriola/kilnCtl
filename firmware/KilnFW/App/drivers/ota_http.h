@@ -177,7 +177,35 @@ bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 // reason_out/reason_cap: same contract as ota_interlock_check() -- filled
 // with a specific, human-readable refusal reason on OTA_INTERLOCK_REFUSED,
 // untouched on OTA_INTERLOCK_OK. May be NULL/0.
-ota_interlock_result_t ota_http_check_interlocks(char *reason_out, size_t reason_cap);
+//
+// ack_no_safety_processor: pass through the per-request acknowledgement
+// token described by ota_interlock_snapshot_t::operator_ack_no_safety_
+// processor. Pass false at any call site that has no way to show the
+// operator the warning and collect an answer -- false is the pre-2026-08-22
+// behaviour exactly, and the resulting OTA_INTERLOCK_REFUSED_NEEDS_ACK is
+// still a refusal to every caller that only tests `!= OTA_INTERLOCK_OK`.
+ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, char *reason_out,
+                                                 size_t reason_cap);
+
+// True when this request carries the "X-Ota-Ack-No-Safety: 1" header -- the
+// per-request token an operator's confirmation dialog sets to answer the
+// "no safety processor is watching this kiln" warning. Feed the result
+// straight into ota_http_check_interlocks()'s first argument.
+//
+// Lives here, and is read from a header rather than a body field, so that
+// every route needing it reads it identically whether its body is a form
+// (POST /api/kiln_configs/apply), JSON (POST /api/backup/import), or a raw
+// firmware image (POST /api/ota/esp) -- and so a route that checks the
+// interlock BEFORE reading its body, as several do, can still see it.
+bool ota_http_req_ack_no_safety(httpd_req_t *req);
+
+// Sends the correct refusal for a non-OK ota_http_check_interlocks() result:
+// 428 Precondition Required for OTA_INTERLOCK_REFUSED_NEEDS_ACK (the caller
+// may retry with the header above after warning the operator), 409 Conflict
+// for every other refusal (nothing to acknowledge -- the kiln is busy or
+// hot). Body is `reason` as text/plain in both cases.
+esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result_t r,
+                                          const char *reason);
 
 // --- Heat interlock, the OTHER direction (TODO.md 9.4/ROADMAP.md M8's
 // mutual interlock: "updates are not allowed while the heaters are on or a

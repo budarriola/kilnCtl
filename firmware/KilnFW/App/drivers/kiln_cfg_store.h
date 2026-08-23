@@ -228,7 +228,8 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
  * exist, or zones_config_import_blob() refuses the stored blob; reason_out/
  * reason_cap (may be NULL/0) carry the specific reason in every failure
  * case. */
-bool kiln_cfg_store_apply(int32_t id, char *reason_out, size_t reason_cap);
+bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, char *reason_out,
+                          size_t reason_cap);
 
 /* Deletes saved config `id`. If it was the active one, the active id is
  * cleared to KILN_CFG_NO_ACTIVE_ID -- the LIVE zones config is untouched

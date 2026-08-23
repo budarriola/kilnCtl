@@ -1519,6 +1519,39 @@ static void do_confirm_static_reachable(void)
  * MUTATES it, not who may read a snapshot of a string field. Only the
  * actual mutation (do_confirm_static_reachable()) is funneled through
  * owner_task(). */
+/* True when this HTTP request arrived on the board's own SoftAP interface
+ * rather than over the home network. Used to decide whether it is safe to
+ * echo the AP password back (wifi_provision_http.c): a client already
+ * associated to the AP necessarily knows that password, so showing it there
+ * reveals nothing, while the same JSON served over the STA interface hands
+ * it to every device on the house LAN.
+ *
+ * Compares the socket's LOCAL address, not the peer's -- the peer address
+ * is whatever the client happens to have, whereas the local address is
+ * which of the board's own interfaces accepted the connection, which is the
+ * actual question. 192.168.4.1 is hardcoded for the same reason the
+ * captive-portal DNS task hardcodes it, twenty lines further down: nothing
+ * in this file ever calls esp_netif_set_ip_info(), so the SoftAP's address
+ * is always esp_netif_create_default_wifi_ap()'s well-known default.
+ *
+ * Fails CLOSED -- a socket that cannot be inspected is reported as "not the
+ * AP", so an unexpected error hides the password rather than leaking it. */
+bool wifi_prov_request_arrived_on_ap(int sockfd)
+{
+    if (sockfd < 0) {
+        return false;
+    }
+    struct sockaddr_in local_addr = { 0 };
+    socklen_t addr_len = sizeof(local_addr);
+    if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
+        return false;
+    }
+    if (local_addr.sin_family != AF_INET) {
+        return false;
+    }
+    return local_addr.sin_addr.s_addr == htonl(0xC0A80401u); /* 192.168.4.1 */
+}
+
 void wifi_prov_note_possible_static_reachability(int sockfd)
 {
     if (sockfd < 0) {

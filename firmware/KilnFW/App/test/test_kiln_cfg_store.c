@@ -165,7 +165,7 @@ static void test_save_clone_apply_roundtrip(void)
     // Applying the clone should feed zones_config_import_blob() the SAME
     // bytes the clone copied from the source (proving the clone really did
     // copy the blob, not just the name).
-    ok = kiln_cfg_store_apply(id2, reason, sizeof(reason));
+    ok = kiln_cfg_store_apply(id2, false, reason, sizeof(reason));
     TEST_CHECK(ok, "apply of the clone succeeds (interlock OK, stub import accepts)");
     TEST_CHECK(s_stub_import_call_count == 1, "zones_config_import_blob() was called exactly once");
     TEST_CHECK(s_stub_import_last_len == s_stub_blob_size &&
@@ -211,7 +211,7 @@ static void test_apply_refused_while_run_active(void)
     // a backup restore path, a factory-reset routine) would do. The
     // assertion below only holds if the check lives INSIDE
     // kiln_cfg_store_apply() itself.
-    bool ok = kiln_cfg_store_apply(id, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id, false, reason, sizeof(reason));
 
     TEST_CHECK(!ok, "apply is refused while a firing is running, even with no caller pre-check");
     TEST_CHECK(strcmp(reason, "a firing is currently running") == 0,
@@ -240,7 +240,7 @@ static void test_newer_version_blob_refused_by_store(void)
             sizeof(s_stub_import_reason) - 1);
 
     reason[0] = '\0';
-    bool ok = kiln_cfg_store_apply(id, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id, false, reason, sizeof(reason));
 
     TEST_CHECK(!ok, "apply is refused when the stored blob is newer than this firmware understands");
     TEST_CHECK(strstr(reason, "newer firmware") != NULL, "the specific refusal reason is propagated");
@@ -267,7 +267,7 @@ static void test_out_of_range_value_rejected_nothing_written(void)
     strncpy(s_stub_import_reason, "zone max_temp_c out of range", sizeof(s_stub_import_reason) - 1);
 
     reason[0] = '\0';
-    bool ok = kiln_cfg_store_apply(id_a, reason, sizeof(reason));
+    bool ok = kiln_cfg_store_apply(id_a, false, reason, sizeof(reason));
 
     TEST_CHECK(!ok, "apply is refused when a stored field fails re-validation");
     TEST_CHECK(strcmp(reason, "zone max_temp_c out of range") == 0, "the specific field reason is propagated");
