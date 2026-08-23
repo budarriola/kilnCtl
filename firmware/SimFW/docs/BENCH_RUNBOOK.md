@@ -405,9 +405,10 @@ provisional** — reconciled between four independently-written source files,
 never traced against physical copper or continuity-checked
 (`docs/HARDWARE.md`'s own status header). Do not treat a pin number as fact
 just because it appears in a table; if anything about `spi_emu_a.c`,
-`i2c_owner.c`, or `ct_wave_pwm.c` has changed since this document was last
-reviewed, re-derive from source before trusting the table over what you're
-about to wire.
+`i2c_owner.c`, or `ct_wave_i2s.c` (the CT waveform driver, replacing the
+deleted `ct_wave_pwm.c` — `DESIGN_NOTES.md` §3.3) has changed since this
+document was last reviewed, re-derive from source before trusting the table
+over what you're about to wire.
 
 **Fit fixture bus-A series resistors for this first plug-in.** This is
 `docs/PLAN.md` §15's own stated mitigation for exactly this step's risk row

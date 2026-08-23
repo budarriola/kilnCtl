@@ -82,9 +82,15 @@ applies to any part in this BOM and is not reproduced here — see
 
 ## 3. CT coupling transformer sizing (item 4)
 
-> **Decided 2026-08-23 (item 18): CT waveform generation moves from PWM+RC
-> to 2x UDA1334A I2S DAC modules at 16 kHz, driving this transformer
-> directly with no amplifier.** The ratio math below (§3.1–3.3, still 1:1)
+> **Implemented 2026-08-23 (item 18): CT waveform generation moved from
+> PWM+RC to 2x UDA1334A I2S DAC modules at 16 kHz, driving this transformer
+> directly with no amplifier.** `src/drivers/ct_wave_pwm.{c,h}` is deleted;
+> `src/drivers/ct_wave_i2s.{c,h}` + `src/sim/ct_i2s_gen.{c,h}` are the new
+> path — see `DESIGN_NOTES.md` §3.3. **Not yet a working CT output:**
+> `ct_wave_i2s_out`'s PIO program cannot fit in either PIO block's free
+> program memory on the current build (`docs/HARDWARE.md` §1b.7), so the
+> fixture halts at boot rather than running silently CT-less; `PLAN.md`
+> records the open resolutions. The ratio math below (§3.1–3.3, still 1:1)
 > is unaffected — the DAC's output level (≈990 mVrms at 3.3 V supply, NXP
 > UDA1334ATS datasheet §14.1) is close enough to the PWM path's ≈1.06 Vrms
 > estimate that the same 1:1 conclusion holds, now on a measured datasheet
@@ -111,16 +117,23 @@ all three channels, which is a genuine board property, independent of which
 CT ends up installed (`SaftyFW/docs/CURRENT_SENSE.md` §2). An SCT-013-030
 (1 V at 30 A) is one compatible example, not the assumed or required part.
 
-### 3.2 What the Pico can actually drive into the primary
+### 3.2 What the Pico can actually drive into the primary (superseded — kept for the historical PWM-era estimate this section's conclusion cross-checks against)
 
-From `docs/DESIGN_NOTES.md` §3.3: three GPIOs run ~244 kHz PWM, duty-modulated
-by a 60 Hz sine table, into a 2-pole RC low-pass (corner ~1–2 kHz). The RC
-output is a **unipolar** sine riding on a ~1.65 V DC bias (half of the 3.3 V
-logic rail), with a theoretical maximum swing of ±1.65 V at a 100 %
-modulation index. Real duty-cycle firmware always derates below the rails to
-avoid distortion near 0 %/100 % duty — **this document assumes a practical
-usable amplitude of 1.5 V peak** (≈91 % of the theoretical max), which is an
-estimate, not a measured or firmware-confirmed number. The amplitude-to-duty
+**The PWM path this subsection describes is deleted (`src/drivers/ct_wave_pwm.{c,h}`,
+2026-08-23) — see item 18's blockquote above for the current UDA1334A figure
+this subsection's own §3.3 conclusion now relies on instead.** Kept only
+because §3.3 explicitly cross-checks the new measured figure against this
+old estimate and finds them close enough that the 1:1 ratio conclusion is
+unaffected; this is not a description of anything the firmware still does.
+
+Historically: three GPIOs ran ~244 kHz PWM, duty-modulated by a 60 Hz sine
+table, into a 2-pole RC low-pass (corner ~1–2 kHz). The RC output was a
+**unipolar** sine riding on a ~1.65 V DC bias (half of the 3.3 V logic rail),
+with a theoretical maximum swing of ±1.65 V at a 100 % modulation index. Real
+duty-cycle firmware always derates below the rails to avoid distortion near
+0 %/100 % duty — **this document assumed a practical usable amplitude of
+1.5 V peak** (≈91 % of the theoretical max), which was an estimate, not a
+measured or firmware-confirmed number. The amplitude-to-duty
 *mapping mechanism* (`src/sim/ct_calibration.{c,h}`) applies a real
 per-channel `gain`/`offset` linear fit; the compiled-in default table is
 still all-uncalibrated, so today's observed behavior is identity

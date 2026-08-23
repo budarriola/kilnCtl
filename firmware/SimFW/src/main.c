@@ -17,7 +17,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#include "drivers/ct_wave_pwm.h"
+#include "drivers/ct_wave_i2s.h"
 #include "drivers/simfw_fatal.h"
 
 #include "tasks/cmd_task.h"
@@ -58,12 +58,17 @@
 //     channels = CT zones + sum over buses of (chips_on_bus + 2)
 //
 // where the +2 per bus is that bus's `dma_load` + `dma_data` (section 1b.1),
-// and each bus's chip count is one `dma_sniff[i]` per emulated chip. If a
-// third DMA claimant is ever added, add its term here AND to section 1b's
-// table AND to check_single_owner.ps1's $dmaBudgetTerms -- all three, in the
-// same commit.
+// and each bus's chip count is one `dma_sniff[i]` per emulated chip.
+// CT_WAVE_I2S_NUM_MODULES (2, one DMA channel per UDA1334A module) replaces
+// the retired ct_wave_pwm.c's CT_WAVE_PWM_NUM_CHANNELS (3) here, per
+// docs/DESIGN_NOTES.md section 3.3's 2026-08-23 PWM->I2S decision -- the DMA
+// count went down even though ct_wave_i2s.c cannot actually run yet
+// (docs/HARDWARE.md section 1b.7's PIO1 program-memory blocker is a separate
+// budget, not this one). If a third DMA claimant is ever added, add its term
+// here AND to section 1b's table AND to check_single_owner.ps1's
+// $dmaBudgetTerms -- all three, in the same commit.
 #define SIMFW_DMA_CHANNELS_CLAIMED                                            \
-    (CT_WAVE_PWM_NUM_CHANNELS + (SPI_EMU_A_CHANNEL_COUNT + 2u) +              \
+    (CT_WAVE_I2S_NUM_MODULES + (SPI_EMU_A_CHANNEL_COUNT + 2u) +              \
      (SPI_EMU_B_CHANNEL_COUNT + 2u))
 
 _Static_assert(SIMFW_DMA_CHANNELS_CLAIMED <= NUM_DMA_CHANNELS,
@@ -128,14 +133,18 @@ int main(void)
     // No return value is checked here, but that is no longer "every task
     // body is just an idle loop with nothing that can fail beyond
     // xTaskCreate()" -- it stopped being true the moment wave_owner_start()
-    // (ct_wave_pwm_init()) and spi_emu_a/b_start() (max31856_pio_engine_init())
-    // started claiming DMA channels from a shared, exhaustible 12-channel
-    // pool (docs/HARDWARE.md section 1b). What makes the (void) discards
-    // below still defensible is that a DMA claim failure no longer returns
+    // (ct_wave_i2s_init()) and spi_emu_a/b_start() (max31856_pio_engine_init())
+    // started claiming DMA/PIO resources from shared, exhaustible pools
+    // (docs/HARDWARE.md section 1b). What makes the (void) discards
+    // below still defensible is that a claim failure no longer returns
     // false up this chain at all: every dma_claim_unused_channel() call site
     // now halts loudly through drivers/simfw_fatal.h on exhaustion (see that
-    // header, and ct_wave_pwm.c/max31856_pio_engine.c's call sites) instead
-    // of degrading silently the way it used to. What a _start() function can
+    // header, and ct_wave_i2s.c/max31856_pio_engine.c's call sites) instead
+    // of degrading silently the way it used to -- ct_wave_i2s_init() is in
+    // fact EXPECTED to reach simfw_fatal() on the current build, since PIO1
+    // does not have the 8 free program-memory words it needs (section
+    // 1b.7); the fixture halts loudly at boot rather than running with a
+    // silently-dead CT path. What a _start() function can
     // still fail on -- and what these (void)s still discard -- is a plain
     // FreeRTOS allocation failure (xTaskCreate()/xQueueCreate()/
     // xSemaphoreCreateMutex() under heap pressure), which remains

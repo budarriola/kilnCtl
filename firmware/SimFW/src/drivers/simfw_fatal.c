@@ -81,8 +81,9 @@ void simfw_fatal(const char *subsystem, const char *reason_fmt, ...)
     // Signal the other core FIRST, before spending ~2 s on the blink burst
     // below -- so a core-1 fatal starts halting core 0 immediately rather
     // than after this core's own LED sequence finishes. Harmless when there
-    // is no other core to receive it yet (ct_wave_pwm.c's claim runs
-    // pre-scheduler on core 0 alone, before core 1 has been launched by the
+    // is no other core to receive it yet (ct_wave_i2s.c's claim, like the
+    // now-deleted ct_wave_pwm.c's before it, runs pre-scheduler on core 0
+    // alone, before core 1 has been launched by the
     // FreeRTOS SMP port): the word just sits in core 1's inbox unread, and
     // this core halts via panic() below regardless. multicore_fifo_push_blocking()
     // cannot deadlock here in practice -- the SIO FIFO is 4 words deep, this

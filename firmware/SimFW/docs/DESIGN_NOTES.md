@@ -304,25 +304,62 @@ has 7.
 
 ### 3.3 CT waveform generation
 
-> **Decided 2026-08-23: CT waveform synthesis is moving from PWM+RC to 2x
-> UDA1334A I2S stereo DAC modules (one pair of channels per module, covering
-> all 3 CT channels), 16 kHz sample rate, DAC output driving the 1:1
-> isolation transformer directly with no amplifier — `docs/BOM.md` §3/§5/§9
-> has the full part selection and sizing. This is a documentation/BOM
-> decision only in this pass: no I2S driver has been written, and
-> `src/drivers/ct_wave_pwm.c` is unchanged, still the real, working, tested
-> waveform path.** The PWM-era sizing below is kept because it is still what
-> today's firmware actually does; where the DAC path changes a number (the
-> transformer-primary drive level, in particular), that is called out
-> explicitly rather than silently overwriting the PWM figure.
+> **Implemented 2026-08-23: CT waveform synthesis moved from PWM+RC to 2x
+> UDA1334A I2S stereo DAC modules** (one pair of channels per module,
+> covering all 3 CT channels), 16 kHz sample rate, DAC output driving the
+> 1:1 isolation transformer directly with no amplifier — `docs/BOM.md`
+> §3/§5/§9 has the full part selection and sizing. `src/drivers/ct_wave_pwm.
+> {c,h}` (the PWM+RC path this replaces) is **deleted**, not merely
+> superseded in docs; `src/drivers/ct_wave_i2s.{c,h}` (PIO+DMA I2S transport)
+> and `src/sim/ct_i2s_gen.{c,h}` (the pure, host-testable per-sample
+> generator `src/tasks/wave_owner.c` drives it with) are the new path.
+> **This is a live, unresolved blocker, not a working feature yet:**
+> `ct_wave_i2s_out`'s PIO program needs 8 instruction words and PIO1 (the
+> only block with a free state machine, per §0 item 7 below) has only 3
+> program-memory words free — `docs/HARDWARE.md` §1b.7 has the full
+> derivation, `docs/PLAN.md` records the three candidate resolutions. The
+> fixture halts loudly via `simfw_fatal()` at boot rather than running with
+> a silently-dead CT path; there is no fallback to the old PWM backend.
 
-- Three GPIO, each running high-carrier PWM (~250 kHz carrier, 244 kHz
-  actual at 8-bit resolution / 125 MHz sysclk on a dedicated slice per
-  channel) whose duty cycle is modulated by a 60 Hz sine table (256 entries/
-  cycle, stepped at 15.36 kHz by a repeating timer/DMA chain), then a 2-pole
-  RC low-pass (~1–2 kHz corner) on the fixture side. Carrier is far enough
-  above the RC corner that residual ripple is negligible next to the AD8542
-  stage's own filtering.
+- Two UDA1334ATS stereo I2S DAC modules, PIO1-driven (one PIO state machine
+  per module, running the same program in lock-step so BCLK/WS never drift
+  relative to module B's own bit/frame counter), 16 kHz sample rate, 16-bit
+  signed samples. Module A carries CT channels 0 (left) and 1 (right);
+  module B carries channel 2 (left) and silence (right, always exactly 0,
+  never uninitialised). No amplifier stage: the DAC's own output drives the
+  1:1 isolation transformer primary directly.
+
+  **Samples are SIGNED and centred on zero (bipolar), not offset to a DC
+  bias.** The retired PWM path produced an unsigned duty-cycle table riding
+  a ~1.65 V DC bias (half the 3.3 V logic rail) that an external DC-blocking
+  cap stripped before the transformer primary ever saw it — the bias was an
+  artifact of driving a PWM carrier's compare register, which has no notion
+  of "negative." An I2S DAC has no such artifact: its output is inherently
+  centred on its own reference, so `src/sim/ct_i2s_gen.c` computes each
+  sample as a signed `int16_t` about zero and there is no bias term to add
+  or strip. (A caller may still opt a channel's `dc_offset` distortion knob
+  on deliberately, for testing — that is a selectable distortion, not a
+  required bias, exactly the same doctrine the PWM path used for its own
+  `dc_offset` knob.)
+
+  **Zero-crossing gating is now explicit in software, where it used to be a
+  free side effect of the DMA table boundary.** The PWM path's 256-entry
+  duty table was clocked at exactly 256 × 60 Hz = 15,360 Hz, so one full DMA
+  pass over the table WAS exactly one 60 Hz cycle — "the DMA just finished
+  the table and is about to restart it" was inherently a rising zero
+  crossing, and swapping a staged table in that IRQ needed no separate
+  zero-crossing check. At 16 kHz there is no such alignment:
+  16,000 / 60 = 266.67 samples per cycle, not an integer, so **no block
+  length is a whole number of cycles** — there is no "boundary" left to ride
+  for free. `src/sim/ct_i2s_gen.c` therefore gates explicitly, PER SAMPLE,
+  using `sine_synth_zero_crossing()` against the RAW reference waveform of
+  each channel's currently-active config (not the block boundary, not the
+  distorted output) — see `ct_i2s_gen.h`'s header and
+  `generate_one_sample()`'s implementation for the exact rule. This is
+  strictly finer-grained than the PWM path's once-per-256-sample gate, not a
+  regression: a pending config change can now apply at the very next real
+  zero crossing, which may arrive sooner than the old table boundary ever
+  did, never later.
 - **Coupling into J13/J15/J17 via a 1:1 audio/isolation transformer**
   (decided: transformer coupling, keeping the fixture out of *both* ground
   domains for these three channels, the way a real floating CT source would
@@ -332,9 +369,12 @@ has 7.
   was never about crossing the fixture's isolation boundary in the first
   place. With the ratio question below now resolved at 1:1, the
   transformer's remaining jobs are the floating secondary (CT-emulation
-  correctness), AC-coupling/DC-blocking the PWM's ~1.65 V bias off the
-  secondary for free, and presenting the right source impedance to the
-  AD8542 stage — all still worth a transformer even with no gain to provide.
+  correctness) and presenting the right source impedance to the AD8542
+  stage — still worth a transformer even with no gain to provide. (The PWM
+  path used to also lean on this transformer to AC-couple/DC-block its own
+  ~1.65 V bias off the secondary "for free" — that job no longer exists: the
+  I2S DAC's samples are signed/bipolar from the start, so there is no bias
+  to strip. See this section's synthesis-detail bullets above.)
 
   **Ratio: 1:1 — corrected 2026-08-23, reversing the 2026-08-20 revision to
   ~3:1.** That revision reasoned from the wrong target: it backed out a
@@ -395,19 +435,20 @@ has 7.
   correct place for this binding to live — not in the transformer ratio, and
   not anywhere in this document.
 
-  **Confidence, and why the earlier caveat is downgraded.** The 1.5 V peak
-  primary-drive figure is still a **medium-confidence estimate**, not
-  measured or firmware-confirmed — it assumes ~91% of the theoretical
-  ±1.65 V (half the 3.3 V logic rail) swing before a DC-blocking cap. At 3:1
-  this estimate directly gated whether the clamp boundary was reachable at
-  all; at 1:1 it no longer does — 1.06 V rms clears the board's 1 Vrms
-  full-scale target with margin even if the real usable drive comes in
-  noticeably below 1.5 V peak, so the fixture's basic correctness is far
-  less sensitive to this number than it was under the 3:1 plan. The real
-  ceiling still depends on whatever modulation-index cap `ct_wave_pwm.c`'s
-  amplitude-to-duty mapping ends up using — that mapping is a
-  `TODO(M-D calibration)` identity placeholder until M-D lands (`PLAN.md`
-  §10). Candidate part: Triad Magnetics TY-300P (`docs/BOM.md` §3), chosen
+  **Confidence, and why the earlier caveat is downgraded.** The PWM-era
+  1.5 V peak primary-drive estimate (assuming ~91% of the theoretical
+  ±1.65 V logic-rail swing before a DC-blocking cap) is superseded by the
+  measured UDA1334A datasheet figure above (≈990 mVrms at the module's
+  3.3 V supply) now that the PWM path is deleted. At 3:1 the old estimate
+  directly gated whether the clamp boundary was reachable at all; at 1:1 it
+  no longer does — either figure clears the board's 1 Vrms full-scale
+  target with margin, so the fixture's basic correctness is far less
+  sensitive to this number than it was under the 3:1 plan. The real ceiling
+  now depends on whatever amplitude cap `src/sim/ct_i2s_gen.c`'s
+  amplitude-to-DAC-scale mapping (`ct_wave_amps_to_pwm_scale()`, the
+  PWM-era name kept for source compatibility — see that function's own
+  comment) ends up using — that mapping is a `TODO(M-D calibration)`
+  identity placeholder until M-D lands (`PLAN.md` §10). Candidate part: Triad Magnetics TY-300P (`docs/BOM.md` §3), chosen
   originally as a step-up part but equally usable as a 1:1 coupling
   transformer, or any comparable 1:1 audio/isolation transformer if sourcing
   changes. Full sizing derivation lives in `docs/BOM.md` §3; treat this
@@ -591,7 +632,7 @@ on that separation.
 | SPI slave B: SCLK, MOSI, MISO, CS0 | 4 | PIO1, direct GPIO (no isolator, §3.5) |
 | DRDY x3 + `~FAULT` x3 (main side) | 6 | direct GPIO, open-drain emulation |
 | DRDY + `~FAULT` (safety side) | 2 | direct GPIO (no isolator, §3.5) |
-| CT sine PWM x3 | 3 | + external RC and transformer |
+| CT I2S transport (BCLK/WS/`DIN_A`/`DIN_B`) — revised 2026-08-23, was "CT sine PWM x3" | 4 | + 2x UDA1334A DAC modules and transformers, `docs/HARDWARE.md` §1 is authoritative; needs 1 more pin than this planning table budgeted, absorbed by reusing the freed PWM pins plus one `~FAULT` row, see HARDWARE.md §1's footnote |
 | I2C0 SDA/SCL | 2 | both MCP23017s, optional PCA9685 |
 | Debug UART (to Debug Probe) | 2 | same bench pattern as SaftyFW |
 | Heartbeat LED | (GPIO25) | on-board, not a header pin |

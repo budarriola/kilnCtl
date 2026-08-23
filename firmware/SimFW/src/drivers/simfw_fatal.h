@@ -7,7 +7,8 @@
 // commands while quietly having no CT output or one dead SPI bus. The
 // neighbouring pio_claim_unused_sm(pio, true) calls in the same functions
 // already panic on exhaustion (required = true); this file gives the DMA
-// call sites (drivers/ct_wave_pwm.c, drivers/max31856_pio_engine.c) the
+// call sites (drivers/ct_wave_i2s.c -- formerly drivers/ct_wave_pwm.c,
+// deleted 2026-08-23 -- and drivers/max31856_pio_engine.c) the
 // same halt-on-exhaustion posture, through one shared, nameable entry point
 // instead of four separate ad hoc panic() calls that could drift in wording
 // or, worse, quietly turn back into a `return false` under future editing.
@@ -28,7 +29,7 @@
 // message. NEVER RETURNS.
 //
 // Safe to call both before vTaskStartScheduler() (main.c's own startup
-// sequence, e.g. ct_wave_pwm_init()'s DMA claims) and from inside a running
+// sequence, e.g. ct_wave_i2s_init()'s PIO/DMA claims) and from inside a running
 // FreeRTOS task on either core (e.g. max31856_pio_engine_init(), called from
 // spi_emu_a.c/spi_emu_b.c's task bodies, which run AFTER the scheduler has
 // started).
@@ -55,8 +56,9 @@
 // more than it helps a remote operator, and a bench operator relies on the
 // LED, not on parsing telemetry, in the no-debugger case this file exists
 // for. Only the core-1-originated direction is wired up (no core-0-side
-// caller exists today -- ct_wave_pwm.c's claim runs pre-scheduler, so a
-// fatal there halts core 0 before core 1 even starts): a future simfw_fatal()
+// caller exists today -- ct_wave_i2s.c's claim, like the now-deleted
+// ct_wave_pwm.c's before it, runs pre-scheduler, so a fatal there halts
+// core 0 before core 1 even starts): a future simfw_fatal()
 // call from a core-0 task body would need the mirror (a SIO_IRQ_PROC1
 // handler installed from code that actually runs on core 1) added at that
 // time.

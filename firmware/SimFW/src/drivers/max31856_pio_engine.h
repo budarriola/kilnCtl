@@ -65,7 +65,8 @@
 // ESP-side 3-channel bus, PIO1 for the 1-channel safety bus), owned
 // exclusively by spi_emu_a.c / spi_emu_b.c respectively. This driver is also
 // the single owner of the DMA channels it claims (via dma_claim_unused_channel,
-// disjoint from ct_wave_pwm.c's three) and of the ~DRDY GPIOs.
+// disjoint from ct_wave_i2s.c's two -- formerly ct_wave_pwm.c's three,
+// deleted 2026-08-23, docs/DESIGN_NOTES.md §3.3) and of the ~DRDY GPIOs.
 //
 // BUILD-VERIFIED, NOT HARDWARE-TIMING-VERIFIED -- see max31856_spi_slave.pio's
 // file header for the full disclaimer. Nothing in this module has been run

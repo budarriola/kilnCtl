@@ -1,17 +1,15 @@
 // ct_wave_i2s.h -- PIO+DMA I2S MASTER transport for 2x UDA1334A stereo DAC
 // modules. This REPLACES the PWM+RC current-transformer CT waveform path
-// (ct_wave_pwm.{c,h}) as the chosen waveform-output backend going forward --
-// decided, not re-litigated here -- but ct_wave_pwm.{c,h} is NOT deleted or
-// modified by this file: the two backends physically coexist in this image
-// today (see "MUTUAL EXCLUSION" below) until whoever wires the backend
-// switch decides which one actually runs on a given boot. Nothing calls
-// ct_wave_i2s_init() yet -- this file is dead code, compiled but never
-// executed, until that switch lands.
+// (formerly ct_wave_pwm.{c,h}, deleted 2026-08-23 per docs/DESIGN_NOTES.md
+// section 3.3's decision) as wave_owner's CT synthesis backend -- decided,
+// not re-litigated here. wave_owner_start() now calls ct_wave_i2s_init()
+// unconditionally; see this header's PIO PROGRAM MEMORY note below for why
+// that call is EXPECTED TO FAIL on the current build regardless.
 //
 // SINGLE-OWNER DOCTRINE (docs/DESIGN_NOTES.md section 4): this is the ONLY
 // file in the tree that may touch PIO1's 2 free state machines (the ones
 // max31856_pio_engine.c's bus B leaves idle -- docs/HARDWARE.md section
-// 1b.6 note 7), the 2 DMA channels it claims, or GPIO27/28/21/22 as
+// 1b.6 note 7), the 2 DMA channels it claims, or GPIO27/28/16/18 as
 // configured below. See ct_wave_i2s.c's header for the GPIO/PIO/DMA
 // resource-conflict details this doctrine has to live with on THIS
 // fixture, which are real and unresolved, not oversights -- read that
@@ -57,22 +55,14 @@
 // see ct_wave_i2s.c's header for what a stall does to module B specifically
 // (it is worse than a click).
 //
-// MUTUAL EXCLUSION WITH ct_wave_pwm.c, AT RUNTIME, NOT AT COMPILE TIME.
-// docs/HARDWARE.md section 1b: 11 of the RP2040's 12 DMA channels are
-// already budgeted (ct_wave_pwm.c 3, bus A 5, bus B 3), leaving exactly 1
-// free. This driver claims 2 (one per module). If ct_wave_pwm_init() has
-// already run this boot (it does today, unconditionally, from
-// wave_owner_start() before the scheduler starts) and ct_wave_i2s_init()
-// also runs, its FIRST dma_claim_unused_channel() call takes the one
-// remaining free channel and the SECOND one fails -- deliberately routed
-// through simfw_fatal(), never silently, per this file's .c comment.
-// **The two CT output backends cannot both be initialised in the same
-// boot.** Whoever wires the backend switch must pick exactly one of
-// {ct_wave_pwm_init(), ct_wave_i2s_init()} to call, not both -- this is a
-// hardware DMA-budget fact, not a software limitation reorder-init could
-// lift.
+// DMA BUDGET, NOW THAT ct_wave_pwm.c IS GONE. docs/HARDWARE.md section 1b:
+// with the PWM backend deleted, bus A (5) + bus B (3) = 8 of the RP2040's 12
+// DMA channels are budgeted before this driver claims its 2 (one per
+// module), leaving 2 spare after this driver runs -- comfortable headroom,
+// unlike the PWM-era 1-channel margin. DMA is not what blocks this driver
+// today; see the PIO program-memory conflict below for what does.
 //
-// A SECOND, MORE SEVERE CONFLICT FOUND WHILE WRITING THIS DRIVER: PIO1
+// THE CONFLICT THAT ACTUALLY BLOCKS THIS DRIVER TODAY: PIO1
 // PROGRAM MEMORY, NOT JUST STATE-MACHINE COUNT. docs/HARDWARE.md section
 // 1b's "PIO1 has 2 SMs free" framing describes state-machine COUNT --
 // program memory is a separate, per-PIO-BLOCK 32-instruction-word budget
@@ -128,7 +118,7 @@ typedef void (*ct_wave_i2s_refill_fn)(uint8_t module, int16_t *out,
 // Claims 2 PIO1 state machines (running the same program instance, started
 // in lock-step via pio_enable_sm_mask_in_sync() so BCLK/WS and module B's
 // own bit/frame counter never drift relative to each other), 2 DMA channels
-// (one per module), and GPIO27 (BCLK), GPIO28 (WS), GPIO21 (DIN_A), GPIO22
+// (one per module), and GPIO27 (BCLK), GPIO28 (WS), GPIO16 (DIN_A), GPIO18
 // (DIN_B) -- ALL FOUR PROVISIONAL, see ct_wave_i2s.c's header for the
 // pin-budget conflict this creates against docs/HARDWARE.md section 1.
 // Pre-fills both buffers of both modules via `refill` before starting
@@ -139,12 +129,14 @@ typedef void (*ct_wave_i2s_refill_fn)(uint8_t module, int16_t *out,
 // failure (DMA exhaustion, PIO SM exhaustion, PIO1 program-memory
 // exhaustion) is routed through simfw_fatal() instead, per this project's
 // DMA/PIO exhaustion doctrine (docs/HARDWARE.md section 1b.5) -- see this
-// header's and ct_wave_i2s.c's top comments for exactly which failure modes
-// are EXPECTED to fire on the current build (both the DMA and the
-// PIO-program-memory conflicts are real today, not hypothetical).
+// header's and ct_wave_i2s.c's top comments for exactly which failure mode
+// is EXPECTED to fire on the current build (the PIO-program-memory conflict
+// is real today, not hypothetical; the DMA budget is not what blocks this
+// driver any more, now that ct_wave_pwm.c is gone).
 //
-// MUST be called at most once. MUST NOT be called in the same boot as
-// ct_wave_pwm_init() -- see this header's MUTUAL EXCLUSION note.
+// wave_owner_start() calls this unconditionally and treats any false return
+// (and every simfw_fatal() path below) as the fixture having no working CT
+// output -- there is no fallback backend to fall back to.
 bool ct_wave_i2s_init(ct_wave_i2s_refill_fn refill, void *user_ctx);
 
 // Call at least once per CT_WAVE_I2S_FRAMES_PER_BUFFER worth of playback

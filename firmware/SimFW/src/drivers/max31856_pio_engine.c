@@ -734,8 +734,11 @@ void max31856_pio_engine_start_irq(max31856_pio_bus_t *bus)
                                pio_idx == 0 ? irq_handler_pio0 : irq_handler_pio1);
     irq_set_enabled(pio_idx == 0 ? PIO0_IRQ_0 : PIO1_IRQ_0, true);
 
-    // DMA_IRQ_0 is shared by both buses (ct_wave_pwm.c owns DMA_IRQ_1, so the
-    // two drivers never contend for a vector).
+    // DMA_IRQ_0 is shared by both buses. (Historically ct_wave_pwm.c owned
+    // DMA_IRQ_1 so the two never contended for a vector; that driver is
+    // deleted -- docs/DESIGN_NOTES.md §3.3 -- and its replacement,
+    // ct_wave_i2s.c, installs no DMA IRQ handler at all, so DMA_IRQ_1 is
+    // simply unclaimed today, docs/HARDWARE.md §1b.6.)
     if (!s_dma_irq_installed) {
         irq_set_exclusive_handler(DMA_IRQ_0, irq_handler_dma);
         irq_set_enabled(DMA_IRQ_0, true);

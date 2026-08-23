@@ -161,24 +161,26 @@ Read this section first.
    26, `ct_wave_pwm.c` 16/18/20 — 18 distinct GPIOs, no overlap, and the
    7 pins §1 assigns with no owner file yet (0, 1, 19, 21, 22, 27, plus the
    GPIO25 LED) are claimed by nothing in code. Three *near*-misses were
-   checked and are not collisions, recorded so they are not re-litigated:
+   checked and are not collisions, recorded so they are not re-litigated.
+   **Superseded 2026-08-23: `ct_wave_pwm.c` is deleted (DESIGN_NOTES.md
+   §3.3's PWM→I2S decision), so the two PWM-specific bullets below (the
+   pacer-slice shadow and the CT channel-B pins) describe a trap that no
+   longer exists — no code anywhere in this tree calls
+   `gpio_set_function(..., GPIO_FUNC_PWM)` any more. Kept as a historical
+   record of what was checked, not as a live concern.** The third bullet
+   (MCP23017 bit allocation) is unaffected and still current.
 
-   - **PWM pacer slice 3 shadows GPIO6/7/22/23.** `ct_wave_pwm.c`'s pacer
-     slice is unbound to any pin, but slice 3's own candidate outputs are
-     GPIO6/GPIO22 (channel A) and GPIO7/GPIO23 (channel B). GPIO6/7 are SPI
-     bus A `SCLK`/`MOSI` (PIO function), GPIO22 is `FAULT_MAIN_2` (SIO),
-     GPIO23 is not a header pin — none is muxed to `GPIO_FUNC_PWM`, so the
-     free-running pacer reaches no pin. **Latent trap:** any future
-     `gpio_set_function(6|7|22, GPIO_FUNC_PWM)` would silently put the pacer
-     carrier on a claimed line. No slice is free of claimed pins at 25-of-26
-     occupancy, so this is inherent, not fixable by moving the pacer.
-   - **CT channel-B pins.** The three CT carriers are on even GPIOs
-     (16/18/20 = channel A of slices 0/1/2); the matching channel-B pins are
-     GPIO17/19/21 = `DRDY_MAIN_2`/`FAULT_MAIN_0`/`FAULT_MAIN_1`. `arm_dma()`
-     writes only the `CC` register's low halfword and never sets those pins
-     to PWM function, so channel B is inert on all three. This is the same
-     adjacency §1b.4's slice-packing optimization would exploit — which is
-     exactly why that optimization needs GPIO17 to move first.
+   - **PWM pacer slice 3 shadows GPIO6/7/22/23 (superseded, see above).**
+     `ct_wave_pwm.c`'s pacer slice was unbound to any pin, but slice 3's own
+     candidate outputs were GPIO6/GPIO22 (channel A) and GPIO7/GPIO23
+     (channel B) — none muxed to `GPIO_FUNC_PWM`, so the free-running pacer
+     reached no pin. Moot now that the driver is deleted.
+   - **CT channel-B pins (superseded, see above).** The three CT carriers
+     were on even GPIOs (16/18/20 = channel A of slices 0/1/2); the matching
+     channel-B pins were GPIO17/19/21 = `DRDY_MAIN_2`/`FAULT_MAIN_0`/
+     `FAULT_MAIN_1`, always inert. Moot now that the driver is deleted; the
+     §1b.4 slice-packing optimization this used to gate is likewise retired
+     (§1b.4).
    - **MCP23017 #1 bit allocation** (§3.7): pins 0–10 all distinct, 11–15
      spare, matching `i2c_owner.c`. No two-owner bit.
 
@@ -208,35 +210,52 @@ that claims that pin must cite this table.
 | 13 | SPI bus B MOSI (fixture input) | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 5 (`MOSI`) |
 | 14 | SPI bus B MISO (fixture output) | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 7 (`MISO`) |
 | 15 | SPI bus B CS0 | `spi_emu_b.c` | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 11 (`CS0`) |
-| 16 | CT PWM ch0 (zone 0 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J13 (via RC + isolation xfmr) |
+| 16 | I2S `DIN_A` (module A serial data) | `ct_wave_i2s.c` | GND_Main (digital side; module A's DAC output then crosses the isolation transformer) | J13 (via UDA1334A module A + isolation xfmr) |
 | 17 | `DRDY_MAIN_2` (open-drain) | `spi_emu_a.c` | GND_Main | J6 pin 13 (`thermoDrdy_2`) |
-| 18 | CT PWM ch1 (zone 1 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J15 (via RC + isolation xfmr) |
+| 18 | I2S `DIN_B` (module B serial data) | `ct_wave_i2s.c` | GND_Main (digital side; module B's DAC output then crosses the isolation transformer) | J15 (via UDA1334A module B + isolation xfmr) |
 | 19 | `FAULT_MAIN_0` (open-drain) | *(none yet)* | GND_Main | J6 pin 18 (`thermoFault_0`) |
-| 20 | CT PWM ch2 (zone 2 carrier) | `ct_wave_pwm.c` | crosses transformer → floating | J17 (via RC + isolation xfmr) |
+| 20 | *(freed 2026-08-23 — was CT PWM ch2, `ct_wave_pwm.c`, now deleted)* | *(none yet)* | — | — |
 | 21 | `FAULT_MAIN_1` (open-drain) | *(none yet)* | GND_Main | J6 pin 16 (`thermoFault_1`) |
 | 22 | `FAULT_MAIN_2` (open-drain) | *(none yet)* | GND_Main | J6 pin 14 (`thermoFault_2`) |
-| — | PWM pacer slice 3 (no GPIO bound) | `ct_wave_pwm.c` | n/a | n/a |
-| — | DMA_IRQ_1 (not a pin) | `ct_wave_pwm.c` | n/a | n/a |
 | 25 | Heartbeat LED (on-board, not a header pin) | *(none yet, DESIGN_NOTES.md 3.6)* | n/a | n/a |
 | 26 | `DRDY_SAFETY` (open-drain) | `spi_emu_b.c` (cites this table, §0 item 8) | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 4 (`thermoDrdy`) |
-| 27 | `FAULT_SAFETY` (open-drain) | *(none yet)* | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 3 (`thermoFault`) |
-| **28** | **SPARE — the one pin DESIGN_NOTES.md 3.6 leaves free** | — | — | — |
+| 27 | `FAULT_SAFETY` (open-drain) — **provisionally borrowed by `ct_wave_i2s.c` for I2S `BCLK`, unavoidably (see footnote)** | *(none yet)* | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 3 (`thermoFault`) |
+| 28 | I2S `WS` (word select) — was the one true spare pin; no longer spare | `ct_wave_i2s.c` | GND_Main | n/a (digital transport pin, no main-board destination) |
+| — | PIO1 SM0/SM1 (`ct_wave_i2s_out` program, blocked — see §1b.7) | `ct_wave_i2s.c` | n/a | n/a |
 
-**25 of 26 header GPIOs assigned, 1 spare (GPIO28).** (GPIO23/24 are not
-header pins on a stock Pico; GPIO25 is the on-board LED, also not a header
-pin — both excluded from the 26-pin budget, per DESIGN_NOTES.md 3.6's own framing.)
+**25 of 26 header GPIOs assigned, 1 spare — GPIO20 (revised 2026-08-23:
+was GPIO28 before the PWM→I2S switch; freeing GPIO16/18/20 by retiring
+`ct_wave_pwm.c` and immediately re-spending GPIO28 on I2S `WS` moved the
+spare pin, not the count).** (GPIO23/24 are not header pins on a stock Pico;
+GPIO25 is the on-board LED, also not a header pin — both excluded from the
+26-pin budget, per DESIGN_NOTES.md 3.6's own framing.)
 
 ### Footnote: why GPIO0/1 for the debug UART, not GP16/17
 
 `SaftyFW/docs/HARDWARE.md` §7b uses GP16/GP17 for its console UART because
 that is UART0's only fully-free native pin pair on *that* board's layout.
-On this fixture, GPIO16 is already CT channel 0's PWM carrier
-(`ct_wave_pwm.c`), so reusing GP16/17 here would collide. GPIO0/GPIO1 are
-UART0's other native TX/RX pair (RP2040 GPIO function table: UART0 on
-GPIO0/1, GPIO12/13 [taken by SPI bus B here], GPIO16/17 [taken by CT here]);
-they are unclaimed by anything else in this design, so this document assigns
-the debug UART there instead. If a future revision frees GP16/17 by moving
-the CT channel, GP0/1 stays valid regardless — no reason to move it again.
+On this fixture, GPIO16 is now I2S `DIN_A` (`ct_wave_i2s.c` — formerly CT
+channel 0's PWM carrier, `ct_wave_pwm.c`, deleted 2026-08-23), so reusing
+GP16/17 here would still collide. GPIO0/GPIO1 are UART0's other native
+TX/RX pair (RP2040 GPIO function table: UART0 on GPIO0/1, GPIO12/13 [taken
+by SPI bus B here], GPIO16/17 [taken by CT here]); they are unclaimed by
+anything else in this design, so this document assigns the debug UART there
+instead.
+
+### Footnote: why `ct_wave_i2s.c`'s BCLK could not also move off GPIO27
+
+Retiring `ct_wave_pwm.c` freed GPIO16/18/20, and `ct_wave_i2s.c`'s `DIN_A`/
+`DIN_B` moved onto two of them (GPIO16/18), returning `FAULT_MAIN_1` (21)
+and `FAULT_MAIN_2` (22) to genuinely unclaimed. `BCLK` could not follow the
+same path off `FAULT_SAFETY` (27): PIO side-set requires `BCLK`/`WS` to be
+two ADJACENT ascending GPIOs, and GPIO28 (`WS`, the fixture's one true spare
+pin before this change) has no adjacent partner among the newly-freed pins
+— GPIO16/18/20 are each two apart (RP2040 PWM channel-A spacing, an
+artifact of the now-deleted driver's own pin choice), and GPIO27 is the
+*only* GPIO adjacent to 28 at all. So `BCLK` stays on GPIO27, and this row's
+`FAULT_SAFETY` reservation remains provisionally borrowed — one pin
+borrowed instead of three, but not zero. See `ct_wave_i2s.c`'s header for
+the same derivation in code-comment form.
 
 ---
 
@@ -251,6 +270,12 @@ claim in the fixture comes from one of the two files below. Same convention as
 §1: this table is authoritative, and a third claimant must update it in the
 same commit.
 
+**Revised 2026-08-23: `ct_wave_pwm.c` (3 channels) is deleted and replaced by
+`ct_wave_i2s.c` (2 channels)** — DESIGN_NOTES.md §3.3's PWM→I2S decision. The
+DMA count went DOWN even though `ct_wave_i2s.c` cannot actually run yet on
+this build (§1b.7's PIO1 program-memory blocker is a separate budget from
+this one).
+
 ### 1b.1 The claim table
 
 Both owners claim through `dma_claim_unused_channel()`, so the *identities*
@@ -259,7 +284,7 @@ the **count** each subsystem takes and the vector it owns.
 
 | Owner file | Role | Count | Scales with | DMA IRQ |
 |---|---|---|---|---|
-| `ct_wave_pwm.c` | CT sine carrier: streams a 256-entry `uint16_t` duty table into one PWM slice's channel-A compare halfword, paced by pacer slice 3's wrap DREQ | 3 | `CT_WAVE_PWM_NUM_CHANNELS` (1 per CT zone) | `DMA_IRQ_1` |
+| `ct_wave_i2s.c` | CT waveform transport: streams one module's int16 sample buffer into its PIO1 state machine's TX FIFO, one DMA channel per UDA1334A module | 2 | `CT_WAVE_I2S_NUM_MODULES` (1 per DAC module) | none — polls `dma_channel_is_busy()` from task context instead, see `ct_wave_i2s.h`'s SEAM CHOICE note |
 | `max31856_pio_engine.c` (bus A, PIO0) | `dma_sniff[i]` — one per RX state machine, armed on that SM's RX-FIFO-not-empty DREQ, `transfer_count = 1`, captures the next transaction's address word into `bus->addr_capture`, chains to load | 3 | `channel_count` (1 per emulated chip) | `DMA_IRQ_0` |
 | `max31856_pio_engine.c` (bus A, PIO0) | `dma_load` — no DREQ, fires the instant sniff chains to it; its one write to the data channel's `al3_read_addr_trig` both supplies the read address and starts it, and raises `DMA_IRQ_0` | 1 | fixed, per bus | `DMA_IRQ_0` |
 | `max31856_pio_engine.c` (bus A, PIO0) | `dma_data` — 512-byte read-address ring into the TX FIFO, paced by TX-FIFO-not-full; this is the channel that actually puts response bytes on MISO | 1 | fixed, per bus | `DMA_IRQ_0` (status polled, IRQ not enabled on it) |
@@ -270,30 +295,36 @@ the **count** each subsystem takes and the vector it owns.
 ### 1b.2 The arithmetic
 
 ```
-ct_wave_pwm.c        = CT_WAVE_PWM_NUM_CHANNELS                     = 3
+ct_wave_i2s.c        = CT_WAVE_I2S_NUM_MODULES                      = 2
 bus A (spi_emu_a.c)  = SPI_EMU_A_CHANNEL_COUNT (3) + load 1 + data 1 = 5
 bus B (spi_emu_b.c)  = SPI_EMU_B_CHANNEL_COUNT (1) + load 1 + data 1 = 3
-                                                               total = 11
+                                                               total = 10
 RP2040 total                                                         = 12
-                                                             SPARE   =  1
+                                                             SPARE   =  2
 ```
 
 General form, so the next change can be checked without re-reading the code:
 
 ```
-channels = 3 (CT zones) + sum over buses of (chips_on_bus + 2)
+channels = 2 (CT DAC modules) + sum over buses of (chips_on_bus + 2)
 ```
 
-**11 of 12 claimed, 1 spare — independently verified against the source, not
-carried over from the commit message that first stated it.** The two vectors
-are disjoint (`DMA_IRQ_1` for CT, `DMA_IRQ_0` shared by both SPI buses via
-`s_dma_irq_installed`), and neither driver pokes another owner's channel
-registers.
+**10 of 12 claimed, 2 spare — independently verified against the source
+(`tools/check_single_owner.ps1`'s own re-derivation agrees), not carried over
+from the commit message that first stated it.** `DMA_IRQ_0` is owned by both
+SPI buses via `s_dma_irq_installed`; `DMA_IRQ_1` (formerly `ct_wave_pwm.c`'s)
+is now UNCLAIMED — `ct_wave_i2s.c` installs no DMA IRQ handler at all (see
+§1b.6's correction and `ct_wave_i2s.h`'s SEAM CHOICE note for why: neither
+DMA vector had a free slot left when this driver was designed, so it polls
+`dma_channel_is_busy()` from task context instead). Neither driver pokes
+another owner's channel registers.
 
-Claim order at boot: `ct_wave_pwm_init()` runs inside `wave_owner_start()`
+Claim order at boot: `ct_wave_i2s_init()` runs inside `wave_owner_start()`
 **before** `vTaskStartScheduler()`, while both SPI engines claim from their own
 task bodies **after** it. So CT takes the low channel numbers and the SPI
 engines take the rest — but nothing depends on that, and nothing should.
+(In practice `ct_wave_i2s_init()` never reaches its DMA claims on the current
+build — it halts earlier, at the PIO1 program-memory check, §1b.7.)
 
 ### 1b.3 Why none of the 11 is slack
 
@@ -320,34 +351,18 @@ channel by having the CPU do it" is not available here at any price:
 * **The data channel is per-bus and per-PIO by construction** (its DREQ is
   that bus's TX FIFO). Nothing to share.
 
-### 1b.4 The one channel that could be freed, if one is ever needed
+### 1b.4 The channel-pairing trick this section used to describe (superseded)
 
-**`ct_wave_pwm.c` can go from 3 channels to 2, at zero CPU cost, by pairing
-two CT zones onto one PWM slice.** An RP2040 PWM slice's `CC` register packs
-channel A in bits [15:0] and channel B in [31:16], so a single 32-bit DMA
-transfer sets *both* duties at once. Two zones moved to an adjacent even/odd
-GPIO pair (a slice's A and B outputs, e.g. GPIO16/17) would share one DMA
-channel streaming a 256-entry `uint32_t` interleaved table; the third zone
-keeps its own slice and channel. Total table bytes are unchanged, the pacer
-DREQ is unchanged, and the CPU stays entirely out of the loop.
-
-Costs, stated so the trade is visible: the two paired zones share one
-completion IRQ and therefore one zero-crossing table-swap event (harmless —
-they are already phase-locked to the same pacer slice); GPIO17 is assigned to
-`DRDY_MAIN_2` in §1 and — as of §0 item 8 — is now *driven* by `spi_emu_a.c`
-rather than merely reserved, so moving it is a code change plus a §1/§3.1
-edit, not a paper one; and the clean
-one-zone-one-slice symmetry `ct_wave_pwm.c`'s header argues for is lost.
-
-**All three zones cannot collapse onto one channel.** A slice has only two
-channels, and a single DMA channel cannot write three slices' `CC` registers:
-they are 20 bytes apart, which is neither a power-of-two write ring nor a
-uniform increment.
-
-A read-address ring on the CT channels would *not* free a channel either. It
-would let the table free-run without re-arming, which would retire the
-`DMA_IRQ_1` handler — but that handler is what performs the zero-crossing-gated
-table swap, which is the feature.
+**Superseded 2026-08-23.** This subsection used to describe a way to shrink
+`ct_wave_pwm.c` from 3 DMA channels to 2 by pairing two CT zones onto one PWM
+slice's 32-bit `CC` register. That driver is deleted (DESIGN_NOTES.md §3.3's
+PWM→I2S decision) and the trick was specific to its PWM-duty-table
+mechanism — it does not translate to `ct_wave_i2s.c`'s DMA-into-PIO-TX-FIFO
+transport. It is also no longer needed: §1b.2 already shows 2 spare DMA
+channels with `ct_wave_i2s.c`'s 2-channel budget, twice what the old
+1-spare PWM-era margin left. **Nothing to free today; this text is kept only
+so a future reader does not go looking for a PWM-only optimization that no
+longer applies to anything in the tree.**
 
 ### 1b.5 What happens today if a claim fails
 
@@ -362,15 +377,20 @@ owner, since no heartbeat body has ever claimed it) into a fast burst then
 solid-on, then calls `panic()` with the formatted subsystem+reason message —
 the same halt mechanism the neighbouring `pio_claim_unused_sm(pio, true)`
 calls already use for PIO state-machine exhaustion, closing the asymmetry
-recorded below. Verified by temporarily draining the whole 12-channel pool
-before `ct_wave_pwm_init()`'s per-zone claim and confirming (compiled ARM
-disassembly + `.rodata` inspection) that the forced failure reaches
-`simfw_fatal()` with the correct subsystem name and message, not a silent
-`return false`; reverted after confirming.
+recorded below. Verified (originally against `ct_wave_pwm_init()`, before its
+2026-08-23 deletion) by temporarily draining the whole 12-channel pool before
+the per-zone/per-module claim loop and confirming (compiled ARM disassembly +
+`.rodata` inspection) that the forced failure reaches `simfw_fatal()` with the
+correct subsystem name and message, not a silent `return false`; reverted
+after confirming. Not re-run against `ct_wave_i2s.c` specifically — its claim
+loop is structurally identical (`dma_claim_unused_channel(false)`, checked,
+`simfw_fatal()` on failure) and is in practice unreachable on the current
+build anyway, since `ct_wave_i2s_init()` halts earlier at the PIO1
+program-memory check (§1b.7) before ever reaching its DMA claims.
 
 | Call site | Arg | On failure |
 |---|---|---|
-| `ct_wave_pwm.c` (per CT zone) | `false` | `simfw_fatal("ct_wave_pwm", "DMA channel exhausted claiming zone %u of %u ...")`. Halts before `vTaskStartScheduler()` — this claim runs from `main()`, pre-scheduler, so no core is left running to enumerate USB or answer commands. |
+| `ct_wave_i2s.c` (per DAC module) | `false` | `simfw_fatal("ct_wave_i2s", "DMA channel exhausted claiming module %u of %u ...")`. Runs from `wave_owner_start()`, inside `main()`, pre-scheduler — same halt-before-`vTaskStartScheduler()` posture the old `ct_wave_pwm.c` claim had. In practice unreachable today: `ct_wave_i2s_init()` halts earlier, at the PIO1 program-memory check (§1b.7). |
 | `max31856_pio_engine.c` (`dma_data`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_data channel exhausted on pio%u ...")`. |
 | `max31856_pio_engine.c` (`dma_load`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_load channel exhausted on pio%u (dma_data already claimed; ...)")`. |
 | `max31856_pio_engine.c` (per `dma_sniff[i]`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_sniff[%u] channel exhausted on pio%u, channel_count=%u ...")` — halting here (rather than returning `false`) is also what closes the "mid-loop sniff failure is worse than an idle bus" hazard this section used to describe: `simfw_fatal()` never returns, so the half-initialised bus state (`s_bus_for_pio_index[]` published, `dma_load` armed with `DMA_IRQ_0` enabled) is never reachable by the other bus's shared `irq_handler_dma()`. |
@@ -414,9 +434,10 @@ Three things about this posture are worth stating plainly:
    silent `return false`; reverted after confirming.
 
 **Cross-core halt: fixed, this pass.** `panic()` (like the PIO precedent it
-matches) halts only the CALLING core. `ct_wave_pwm.c`'s claim runs
-pre-scheduler (single core), so it halts boot outright — no core-1 task has
-been launched yet, so there is nothing to notify. `spi_emu_a.c`/
+matches) halts only the CALLING core. `ct_wave_i2s.c`'s claim (like the
+now-deleted `ct_wave_pwm.c`'s before it) runs pre-scheduler (single core), so
+it halts boot outright — no core-1 task has been launched yet, so there is
+nothing to notify. `spi_emu_a.c`/
 `spi_emu_b.c`'s claims run from tasks pinned to `SIMFW_CORE_RT_PATH` (core 1,
 `task_priorities.h`) *after* the scheduler has started, so a claim failure
 there used to freeze only core 1 while core 0 (`usb_owner`/`telemetry`/
@@ -467,9 +488,62 @@ after it, for the same reason (`required = true` never returns negative).
 That was true when §0 was written and is **false as of commit `4221f70`**
 (`docs/SPI_ACCESS_AUDIT.md` §9's DMA-fed Plan B). The SPI engines now claim 8
 of the 12 channels and own `DMA_IRQ_0`. `ct_wave_pwm.c`'s defensive pick of
-`DMA_IRQ_1` turned out to be exactly right, and is now load-bearing rather
-than harmless. §1's pin map already carries the `DMA_IRQ_1` row; `DMA_IRQ_0`
-belongs to `max31856_pio_engine.c` and binds no pin.
+`DMA_IRQ_1` turned out to be exactly right, and was load-bearing rather than
+harmless, for as long as that driver existed.
+
+**Further correction, 2026-08-23: `DMA_IRQ_1` is unclaimed again.**
+`ct_wave_pwm.c` is deleted (DESIGN_NOTES.md §3.3's PWM→I2S decision) and its
+replacement, `ct_wave_i2s.c`, installs NO DMA IRQ handler at all — both
+vectors were already spoken for when it was designed (`DMA_IRQ_0` by
+`max31856_pio_engine.c`, `DMA_IRQ_1` by the not-yet-deleted `ct_wave_pwm.c`
+at the time), so it polls `dma_channel_is_busy()` from task context instead
+(`ct_wave_i2s.h`'s SEAM CHOICE note). `DMA_IRQ_0` still belongs to
+`max31856_pio_engine.c` and binds no pin; `DMA_IRQ_1` is free for a future
+claimant, first-come, same as any other unclaimed resource in this document.
+
+### 1b.7 PIO instruction memory — a separate budget from SM count, and the live blocker on `ct_wave_i2s.c`
+
+**This is the important correction in this pass.** Every table above (and
+§0 item 7's "PIO1 has 2 SMs free" framing) counts PIO resources in **state
+machines** — 4 per PIO block, 8 total across PIO0/PIO1. That is NOT the only
+PIO budget. Each PIO block also has its own **32-instruction-word program
+memory**, shared by all 4 of that block's state machines regardless of how
+many of them are actually running a program. A block can have idle state
+machines and zero free program memory at the same time — those are two
+independent resources, and "N SMs free" says nothing about whether a new
+program will fit.
+
+**Read literally, "PIO1 has 2 SMs free" was previously read as "there is
+room on PIO1" — that reading is wrong, and this subsection corrects it.**
+The state-machine count and the program-memory budget are independent
+quantities that happen to both live inside "PIO1"; having spare capacity in
+one says nothing about the other.
+
+**Verified word counts (`pioasm`-reported program lengths):**
+
+| PIO block | Programs loaded | Words used | Words free (of 32) |
+|---|---|---|---|
+| PIO0 (bus A) | `max31856_spi_rx` (12) + `max31856_spi_tx_a` (17) | 29 | 3 |
+| PIO1 (bus B) | `max31856_spi_rx` (12) + `max31856_spi_tx_b` (17) | 29 | 3 |
+
+Both blocks leave exactly **3 free words**, regardless of how many of their
+4 state machines are actually busy (bus B leaves 2 of PIO1's 4 SMs idle, per
+§0 item 7 — those 2 idle SMs still share the same 29-of-32-word program
+memory as the 2 busy ones).
+
+**`ct_wave_i2s_out` (`ct_wave_i2s.pio`) needs 8 instruction words. It CANNOT
+FIT in either block's 3 free words.** This is a live, current blocker, not a
+hypothetical one: `ct_wave_i2s_init()` checks this with `pio_can_add_program()`
+(never the panicking `pio_add_program()` alone) and calls `simfw_fatal()`
+with the exact word counts on failure — and since `wave_owner_start()` now
+calls `ct_wave_i2s_init()` unconditionally, **this IS what happens the moment
+the fixture boots on the current build.** There is no working CT waveform
+output today; see `PLAN.md`'s open items for the three candidate resolutions
+under consideration (none chosen yet).
+
+This is independent of the DMA budget in §1b.1–§1b.6 above — `ct_wave_i2s.c`
+never reaches its DMA claims, because it halts at the PIO program-memory
+check first, on every boot.
 
 ---
 
@@ -588,16 +662,22 @@ protection bus A already gets (`PLAN.md` §15).
 
 ### 3.3 Fixture → CT jacks (J13/J15/J17)
 
-Each channel: fixture PWM GPIO → 2-pole RC low-pass (DESIGN_NOTES.md 3.3) →
-isolation transformer primary (GND_Main-referenced) → transformer secondary
-(floating, isolated from **both** GND_Main and GND_Safty, exactly like a real
-CT) → jack tip/sleeve.
+**Revised 2026-08-23 (DESIGN_NOTES.md §3.3's PWM→I2S decision).** Each
+channel: fixture I2S digital data (GPIO16/18, `ct_wave_i2s.c`) → UDA1334A DAC
+module (analog output, no amplifier) → isolation transformer primary
+(GND_Main-referenced) → transformer secondary (floating, isolated from
+**both** GND_Main and GND_Safty, exactly like a real CT) → jack tip/sleeve.
+The 2-pole RC low-pass this row used to cite is gone with the PWM carrier it
+existed to filter — a DAC output needs no carrier-frequency filtering.
 
-| Zone | Fixture GPIO | Jack |
-|---|---|---|
-| 0 | GPIO16 | J13 (`Current1` on the safety side, `SaftyFW/docs/HARDWARE.md` §9) |
-| 1 | GPIO18 | J15 (`Current2`) |
-| 2 | GPIO20 | J17 (`Current3`) |
+| Zone | Fixture I2S data GPIO | DAC module / channel | Jack |
+|---|---|---|---|
+| 0 | GPIO16 (`DIN_A`) | Module A, left | J13 (`Current1` on the safety side, `SaftyFW/docs/HARDWARE.md` §9) |
+| 1 | GPIO16 (`DIN_A`) | Module A, right | J15 (`Current2`) |
+| 2 | GPIO18 (`DIN_B`) | Module B, left | J17 (`Current3`) |
+
+Module B's right channel carries no CT signal (always silence, `ct_i2s_gen.h`'s
+contract) and is not wired to a jack.
 
 **R72/R78/R84 (the burden resistors on the safety board's input, one per
 channel) are DNP on the real board** — `SaftyFW/docs/CURRENT_SENSE.md` §2:
@@ -704,8 +784,8 @@ boundary except the CT channels, which stay floating like a real CT.
 
 | Fixture signal group | Domain | Notes |
 |---|---|---|
-| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, SPI bus B, `DRDY_SAFETY`/`FAULT_SAFETY`, relay sense K1/K2/K3/K5/K4, `Fault` line sense, E-stop direct drive, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays) | GND_Main, bonded to GND_Safty at the fixture | All direct GPIO/direct sense — no digital isolators, no optocoupler, no optoMOS. SPI bus B's two TI ISO7740DWR isolators, K4's 4N35 opto, and the E-stop loop's CPC1017N optoMOS are all removed (`DESIGN_NOTES.md` §3.5) — each was only ever crossing this same now-nonexistent ground boundary |
-| 3× CT channels | floating (neither domain) | isolation transformer, **1:1** (revised 2026-08-23, reversing the 2026-08-20 revision to ~3:1 — the earlier change backed out a specific CT's rated current from the ADC's clipping voltage; the board's own sense input is full-scale at ≈1 Vrms regardless of which CT is fitted, and 1:1 delivers that with margin. Tradeoff: `CURRENT_FLAG_CLIPPED` is not exercisable at 1:1 — see `DESIGN_NOTES.md` §3.3 and `docs/BOM.md` §3), per channel |
+| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, SPI bus B, `DRDY_SAFETY`/`FAULT_SAFETY` (incl. GPIO27, provisionally `ct_wave_i2s.c`'s `BCLK` — digital-side, still GND_Main before the transformer), I2S `DIN_A`/`DIN_B`/`WS` (GPIO16/18/28, `ct_wave_i2s.c` — digital side only, see next row for the isolated side), relay sense K1/K2/K3/K5/K4, `Fault` line sense, E-stop direct drive, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays) | GND_Main, bonded to GND_Safty at the fixture | All direct GPIO/direct sense — no digital isolators, no optocoupler, no optoMOS. SPI bus B's two TI ISO7740DWR isolators, K4's 4N35 opto, and the E-stop loop's CPC1017N optoMOS are all removed (`DESIGN_NOTES.md` §3.5) — each was only ever crossing this same now-nonexistent ground boundary |
+| 3× CT channels | floating (neither domain) | UDA1334A DAC module output (`ct_wave_i2s.c`, replacing the retired PWM+RC carrier, DESIGN_NOTES.md §3.3) → isolation transformer, **1:1** (revised 2026-08-23, reversing the 2026-08-20 revision to ~3:1 — the earlier change backed out a specific CT's rated current from the ADC's clipping voltage; the board's own sense input is full-scale at ≈1 Vrms regardless of which CT is fitted, and 1:1 delivers that with margin. Tradeoff: `CURRENT_FLAG_CLIPPED` is not exercisable at 1:1 — see `DESIGN_NOTES.md` §3.3 and `docs/BOM.md` §3), per channel |
 
 **Standing rule retired 2026-08-23 (`DESIGN_NOTES.md` §3.5):** the removable
 ground jumper and the old "run the standard library with it out" rule no
@@ -937,5 +1017,6 @@ Windows Device Manager directly:
   `firmware/SimFW/src/tasks/spi_emu_a.c`, `firmware/SimFW/src/tasks/
   spi_emu_b.c`, `firmware/SimFW/src/drivers/max31856_spi_slave.pio`,
   `firmware/SimFW/src/drivers/max31856_pio_engine.{c,h}`,
-  `firmware/SimFW/src/drivers/ct_wave_pwm.{c,h}`, `firmware/SimFW/src/tasks/
-  wave_owner.c`, `firmware/SimFW/src/drivers/mcp23017.{c,h}`.
+  `firmware/SimFW/src/drivers/ct_wave_i2s.{c,h}`, `firmware/SimFW/src/sim/
+  ct_i2s_gen.{c,h}`, `firmware/SimFW/src/tasks/wave_owner.c`,
+  `firmware/SimFW/src/drivers/mcp23017.{c,h}`.

@@ -1,15 +1,21 @@
 // wave_owner.c -- see wave_owner.h for the public API and design summary.
-// Real body: docs/DESIGN_NOTES.md section 3.3's synthesis detail, milestone M-D
-// (section 10), implemented against src/drivers/ct_wave_pwm.h (the PWM+DMA
-// driver, this task's private peripheral) and src/sim/sine_synth.h (the
-// pure waveform math, reused verbatim -- not reimplemented here) plus
-// src/sim/sim_snapshot.h (the amplitude source in MODEL mode).
+// Real body: docs/DESIGN_NOTES.md section 3.3's synthesis detail, driving
+// src/drivers/ct_wave_i2s.h (the PIO+DMA I2S MASTER transport, this task's
+// private peripheral) through src/sim/ct_i2s_gen.h (the pure, host-testable
+// per-sample generator -- not reimplemented here), which itself calls into
+// src/sim/sine_synth.h and src/sim/ct_calibration.h.
+//
+// Replaces the retired PWM+RC path (formerly src/drivers/ct_wave_pwm.{c,h},
+// deleted 2026-08-23 per docs/DESIGN_NOTES.md section 3.3's PWM->I2S
+// decision). The old file's DMA/pacer hardware generated samples entirely on
+// its own once a table was loaded; this task's own loop is now the ONLY
+// thing that ever produces a sample (ct_i2s_gen_fill_block(), called from
+// this file's ct_wave_i2s_refill_fn implementation below), so this task's
+// tick period is now load-bearing for audio continuity, not just for
+// command/model-poll latency -- see WAVE_OWNER_TICK_MS's comment.
 #include "wave_owner.h"
 
-#include <math.h>
 #include <string.h>
-
-#include "pico/time.h"
 
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -17,34 +23,44 @@
 #include "task.h"
 
 #include "task_priorities.h"
-#include "drivers/ct_wave_pwm.h"
+#include "drivers/ct_wave_i2s.h"
+#include "drivers/simfw_fatal.h"
 #include "sim/ct_calibration.h"
+#include "sim/ct_i2s_gen.h"
 #include "sim/sim_snapshot.h"
-#include "sim/sine_synth.h"
 
-// ct_calibration.h deliberately does not include this header (src/sim/ must
-// stay RTOS/SDK-free, tools/check_sim_purity.ps1), so the two channel counts
-// are asserted equal here, at the one place both are visible.
+// ct_i2s_gen.h/ct_calibration.h deliberately do not include this header
+// (src/sim/ must stay RTOS/SDK-free, tools/check_sim_purity.ps1), so the
+// three channel counts are asserted equal here, at the one place all three
+// are visible.
 _Static_assert(CT_CAL_NUM_CHANNELS == CT_WAVE_NUM_CHANNELS,
                "ct_calibration.h's CT_CAL_NUM_CHANNELS must match wave_owner.h's CT_WAVE_NUM_CHANNELS");
+_Static_assert(CT_I2S_GEN_NUM_CHANNELS == CT_WAVE_NUM_CHANNELS,
+               "ct_i2s_gen.h's CT_I2S_GEN_NUM_CHANNELS must match wave_owner.h's CT_WAVE_NUM_CHANNELS");
 
-#define WAVE_OWNER_STACK_WORDS  (configMINIMAL_STACK_SIZE * 2u) // headroom for 3x 256-entry uint16_t table scratch buffers
-#define WAVE_OWNER_TICK_MS      10u  // 100 Hz command/model-poll rate; DMA (not this loop) is what actually feeds samples in steady state
+#define WAVE_OWNER_STACK_WORDS  (configMINIMAL_STACK_SIZE * 2u) // headroom for generate_joint_block()'s two per-module scratch buffers
 
-// Nominal synthesis sample rate per docs/DESIGN_NOTES.md 3.3: 256 entries x 60 Hz.
-// The real hardware pacer (ct_wave_pwm.c) lands at ~15,361.19 Hz, not this
-// exact value, for the integer-wrap-register reasons documented in that
-// file's header comment (~0.0077% off) -- irrelevant at the software-model
-// level this file works at, so the table is always computed against the
-// clean nominal rate below.
-#define CT_WAVE_NOMINAL_FREQ_HZ    60.0f
-#define CT_WAVE_NOMINAL_SAMPLE_HZ  ((float)SINE_SYNTH_TABLE_LEN * CT_WAVE_NOMINAL_FREQ_HZ) // 15,360 Hz
+// Poll/apply-commands period. ct_wave_i2s.h's SEAM CHOICE comment requires
+// ct_wave_i2s_poll() to run at least once per CT_WAVE_I2S_FRAMES_PER_BUFFER
+// worth of playback time (128 frames / 16,000 Hz = 8 ms), WITH MARGIN, or a
+// module's PIO state machine stalls waiting on its TX FIFO's autopull. 3 ms
+// leaves better than 2x margin under that 8 ms figure. This is a real
+// behavior change from the PWM-era file: there, the DMA/pacer hardware fed
+// samples on its own once a table was loaded, and this task's tick only
+// needed to keep up with COMMAND changes (10 ms was plenty). Now this task's
+// own loop is the sole sample source, so its period is an audio-continuity
+// deadline, not just a UI-latency one.
+#define WAVE_OWNER_TICK_MS      3u
 
-#define CT_WAVE_PWM_LEVEL_MAX 255u  // must match ct_wave_pwm.c's CT_WAVE_CARRIER_WRAP (8-bit resolution)
-#define CT_WAVE_PWM_LEVEL_MID (0.5f * (float)CT_WAVE_PWM_LEVEL_MAX)
+// Depth of the small per-module block queue below -- see its header comment
+// for why it exists. 4 is generous headroom over the 2 the current
+// call-order analysis requires; cheap to keep since a queued block is only
+// CT_WAVE_I2S_SAMPLES_PER_BUFFER int16s (512 bytes).
+#define CT_WAVE_BLOCK_QUEUE_DEPTH 4u
 
-// --- Command queue (the only path any other task has to make wave_owner
-// touch its PWM/DMA state -- mirrors i2c_owner.c's pattern) -----------------
+// --- Command queue (unchanged shape/doctrine from the PWM-era file -- the
+// only path any other task has to make wave_owner touch its state, mirrors
+// i2c_owner.c's pattern) -----------------------------------------------
 typedef enum {
     WAVE_OWNER_CMD_SET_MODE,
     WAVE_OWNER_CMD_SET_AMPS,
@@ -74,98 +90,148 @@ static TaskHandle_t s_task_handle = NULL;
 // ct_wave_get_state() reads it from any calling task.
 static ct_wave_channel_state_t s_channel_state[CT_WAVE_NUM_CHANNELS];
 
-// Last configuration actually pushed to ct_wave_pwm for each channel, so the
-// task only recomputes/reloads a 256-entry table when something actually
-// changed (steady state should cost ~nothing on core 1, matching DESIGN_NOTES.md
-// 4.1's "hard-real-time producers" framing -- the DMA does the steady-state
-// work, this loop is not meant to burn cycles every 10 ms recomputing an
-// unchanged waveform).
+// Last configuration actually staged into ct_i2s_gen for each channel, so
+// this task only calls ct_i2s_gen_stage_config() when something actually
+// changed -- mirrors the PWM-era file's wave_owner_applied_cfg_t/
+// applied_cfg_equal() pattern. Unlike that file, there is no software
+// zero-crossing pre-check here: ct_i2s_gen_stage_config()'s own gate runs
+// at EVERY sample (ct_i2s_gen.h's header explains why 16 kHz needs an
+// explicit per-sample gate, unlike the PWM path's once-per-256-sample DMA
+// boundary), so there is no coarser boundary left for a software shortcut
+// to usefully anticipate.
 typedef struct {
     bool valid;
-    uint8_t channel;  // which channel these constants/this config belong to -- the
-                       // calibration lookup is per channel, so build_table() must know it
     ct_wave_mode_t mode;
     float amps;
     float phase_deg;
     ct_wave_distortion_t distortion;
-} wave_owner_applied_cfg_t;
+} wave_owner_staged_cfg_t;
 
-static wave_owner_applied_cfg_t s_applied_cfg[CT_WAVE_NUM_CHANNELS];
+static wave_owner_staged_cfg_t s_last_staged[CT_WAVE_NUM_CHANNELS];
 
-// Software-side zero-crossing tracking, one reference phase per channel, so
-// a config change that lands just after a real zero crossing can be pushed
-// immediately instead of waiting up to one full ~16.7 ms cycle for
-// ct_wave_pwm's own DMA-completion-boundary gate (DESIGN_NOTES.md 3.3: "apply ...
-// at zero crossings only"). This is a latency optimization layered on top
-// of the driver's own always-correct hardware-level gate (ct_wave_pwm.h's
-// top comment) -- if this software detection misses a crossing between two
-// 10 ms ticks, the driver's boundary gate still catches it at worst one
-// cycle later, so correctness never depends on this task's own timing.
-// sine_synth_zero_crossing() (sim/sine_synth.h) is exactly the detector its
-// own header comment says a caller like this one should use.
-static float s_ref_prev_raw[CT_WAVE_NUM_CHANNELS];
-static bool s_ref_prev_valid[CT_WAVE_NUM_CHANNELS];
+// --- CT sample generation context and per-module block queue ---------------
+//
+// ct_i2s_gen_fill_block() produces module A's and module B's samples
+// TOGETHER, from one shared running time cursor (ct_i2s_gen.h: "no DDS/phase
+// accumulator", just an absolute time_s). ct_wave_i2s's refill callback,
+// though, asks for ONE module's samples per call, and its own prefill
+// sequence (ct_wave_i2s_init()) calls module A twice (buf0, buf1) before
+// module B gets any -- so naively calling ct_i2s_gen_fill_block() once per
+// refill would either desync the two modules' time cursors (each pulling
+// from a different point in time) or regenerate/skip a time window
+// depending on call order.
+//
+// The fix: every refill request pulls from a small per-module FIFO of
+// already-generated blocks. When the requested module's FIFO is empty, this
+// file generates exactly ONE joint block (advancing the shared cursor
+// exactly once) and pushes it into BOTH modules' FIFOs, then pops the
+// requested one. This keeps module A's and module B's samples aligned to
+// the same time windows no matter what order/pairing the driver happens to
+// call refill in -- verified against ct_wave_i2s_init()'s actual call order
+// (A-buf0, A-buf1, B-buf0, B-buf1): the two calls for A each generate a
+// fresh joint block (queueing one spare block for B each time), and B's two
+// calls then drain that queue in the same order the blocks were produced,
+// FIFO.
+typedef struct {
+    int16_t frames[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
+} wave_owner_block_t;
 
-static float s_sine_table[SINE_SYNTH_TABLE_LEN];
+static ct_i2s_gen_ctx_t s_gen_ctx;
+static wave_owner_block_t s_queue[CT_WAVE_I2S_NUM_MODULES][CT_WAVE_BLOCK_QUEUE_DEPTH];
+static uint8_t s_queue_head[CT_WAVE_I2S_NUM_MODULES];
+static uint8_t s_queue_count[CT_WAVE_I2S_NUM_MODULES];
+
+static void queue_push(uint8_t module, const int16_t *frames)
+{
+    if (s_queue_count[module] >= CT_WAVE_BLOCK_QUEUE_DEPTH) {
+        // Should not happen -- see this section's header comment; both
+        // modules drain at the same hardware rate, started in lock-step via
+        // pio_enable_sm_mask_in_sync() (ct_wave_i2s.c). If it ever does,
+        // drop the OLDEST queued block rather than overflow the array: an
+        // audible glitch on this bench-only fixture is a vastly better
+        // failure mode than corrupting this queue.
+        s_queue_head[module] = (uint8_t)((s_queue_head[module] + 1u) % CT_WAVE_BLOCK_QUEUE_DEPTH);
+        s_queue_count[module]--;
+    }
+    uint8_t idx = (uint8_t)((s_queue_head[module] + s_queue_count[module]) % CT_WAVE_BLOCK_QUEUE_DEPTH);
+    memcpy(s_queue[module][idx].frames, frames, sizeof(s_queue[module][idx].frames));
+    s_queue_count[module]++;
+}
+
+static void queue_pop(uint8_t module, int16_t *out)
+{
+    memcpy(out, s_queue[module][s_queue_head[module]].frames, sizeof(s_queue[module][0].frames));
+    s_queue_head[module] = (uint8_t)((s_queue_head[module] + 1u) % CT_WAVE_BLOCK_QUEUE_DEPTH);
+    s_queue_count[module]--;
+}
+
+// Advances s_gen_ctx by exactly one CT_WAVE_I2S_FRAMES_PER_BUFFER-frame
+// block and pushes the result into both modules' queues -- see this
+// section's header comment for why this must always generate for BOTH
+// modules together, never for just the one that happened to run dry.
+static void generate_joint_block(void)
+{
+    int16_t block_a[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
+    int16_t block_b[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
+    ct_i2s_gen_fill_block(&s_gen_ctx, block_a, block_b, CT_WAVE_I2S_FRAMES_PER_BUFFER);
+    queue_push(0, block_a);
+    queue_push(1, block_b);
+}
+
+// ct_wave_i2s_refill_fn implementation -- see ct_wave_i2s.h's contract:
+// called only from ct_wave_i2s_poll()'s own task context (this task is the
+// only caller, from wave_owner_task_fn() below), never from an ISR, so it
+// is free to do ordinary task-context work. It does not need to take
+// s_state_mutex: s_gen_ctx/s_queue/s_queue_head/s_queue_count are all
+// private to this one task.
+static void wave_owner_i2s_refill(uint8_t module, int16_t *out, uint32_t frame_count, void *user_ctx)
+{
+    (void)user_ctx;
+    if (module >= CT_WAVE_I2S_NUM_MODULES || frame_count != CT_WAVE_I2S_FRAMES_PER_BUFFER) {
+        // Contract violation by the caller (ct_wave_i2s.c always passes
+        // CT_WAVE_I2S_FRAMES_PER_BUFFER for a valid module today), not a
+        // runtime condition this function can do anything sensible about --
+        // there is no well-defined block to hand back. Fill with silence
+        // rather than leaving `out` uninitialised.
+        if (out != NULL && frame_count <= CT_WAVE_I2S_FRAMES_PER_BUFFER) {
+            memset(out, 0, (size_t)frame_count * 2u * sizeof(int16_t));
+        }
+        return;
+    }
+
+    while (s_queue_count[module] == 0) {
+        generate_joint_block();
+    }
+    queue_pop(module, out);
+}
 
 static void state_lock(void) { xSemaphoreTake(s_state_mutex, portMAX_DELAY); }
 static void state_unlock(void) { xSemaphoreGive(s_state_mutex); }
 
-static float clampf(float v, float lo, float hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
 float ct_wave_amps_to_pwm_scale(uint8_t channel, float amps)
 {
-    // Per-channel clamp(gain*amps + offset, 0, 1), from the compiled-in
-    // calibration table (sim/ct_calibration.h). That table is all-
+    // NAME IS NOW MISLEADING, kept for source compatibility. Before
+    // docs/DESIGN_NOTES.md section 3.3's 2026-08-23 PWM->I2S decision, this
+    // returned a PWM duty-cycle fraction; the PWM+RC backend is gone
+    // (formerly src/drivers/ct_wave_pwm.{c,h}) and this now returns a DAC
+    // FULL-SCALE AMPLITUDE fraction (0..1, "how much of the UDA1334A's
+    // output swing this channel uses"), not a duty cycle. The arithmetic
+    // itself is unchanged: per-channel clamp(gain*amps + offset, 0, 1) from
+    // the compiled-in calibration table (sim/ct_calibration.h). Kept under
+    // its old name only because cmd_task.c and other callers already depend
+    // on this symbol; see this task's report for a rename recommendation
+    // (e.g. ct_wave_amps_to_dac_scale()) for whoever next touches this API.
+    //
+    // ct_i2s_gen.c calls this exact same mapping again, internally, every
+    // sample (ct_cal_apply() against the same default table) when it turns
+    // a channel's `amps` into an actual DAC sample -- this function is not
+    // in that data path. It stays exported for ct_wave_get_state()'s
+    // last_pwm_scale reporting field and for any external caller that wants
+    // the mapping without generating a sample. That table is all-
     // UNCALIBRATED today -- no CT hardware exists and no calibration run has
     // ever been taken -- so every channel still resolves to exact identity,
-    // clamp(amps, 0, 1), the same behavior this function has always had. The
-    // arithmetic lives in src/sim/ so it is host-testable; the table is
-    // regenerated from the PC-side runner's JSON by
-    // tools/gen_ct_cal_table.py (see ct_calibration.h).
+    // clamp(amps, 0, 1).
     return ct_cal_apply(ct_cal_default_table(), channel, amps);
-}
-
-// Builds one channel's 256-entry PWM duty-level table from its current
-// applied config, reusing sine_synth.h's sample function verbatim (per this
-// pass's constraint: sine_synth.c/.h are not reimplemented, only called).
-static void build_table(const wave_owner_applied_cfg_t *cfg, uint16_t out_levels[SINE_SYNTH_TABLE_LEN])
-{
-    sine_channel_cfg_t sc = {
-        .amplitude = ct_wave_amps_to_pwm_scale(cfg->channel, cfg->amps),
-        .phase_deg = cfg->phase_deg,
-        .dc_offset = cfg->distortion.dc_offset,
-        .clip_fraction = cfg->distortion.clip_fraction,
-        .dropout_half_cycle = cfg->distortion.dropout_half_cycle,
-        .dropout_negative_half = cfg->distortion.dropout_negative_half,
-    };
-
-    for (uint32_t i = 0; i < SINE_SYNTH_TABLE_LEN; i++) {
-        float t_s = (float)i / CT_WAVE_NOMINAL_SAMPLE_HZ;
-        float sample = sine_synth_sample(&sc, s_sine_table, CT_WAVE_NOMINAL_FREQ_HZ, t_s);
-        sample = clampf(sample, -1.0f, 1.0f);
-
-        float level_f = CT_WAVE_PWM_LEVEL_MID + CT_WAVE_PWM_LEVEL_MID * sample;
-        long level = lroundf(level_f);
-        if (level < 0) level = 0;
-        if (level > (long)CT_WAVE_PWM_LEVEL_MAX) level = (long)CT_WAVE_PWM_LEVEL_MAX;
-        out_levels[i] = (uint16_t)level;
-    }
-}
-
-static bool applied_cfg_equal(const wave_owner_applied_cfg_t *a, const wave_owner_applied_cfg_t *b)
-{
-    return a->valid == b->valid &&
-           a->channel == b->channel &&
-           a->mode == b->mode &&
-           a->amps == b->amps &&
-           a->phase_deg == b->phase_deg &&
-           memcmp(&a->distortion, &b->distortion, sizeof(a->distortion)) == 0;
 }
 
 static void apply_pending_commands(void)
@@ -195,14 +261,24 @@ static void apply_pending_commands(void)
     }
 }
 
+static bool staged_cfg_equal(const wave_owner_staged_cfg_t *a, const wave_owner_staged_cfg_t *b)
+{
+    return a->valid == b->valid &&
+           a->mode == b->mode &&
+           a->amps == b->amps &&
+           a->phase_deg == b->phase_deg &&
+           memcmp(&a->distortion, &b->distortion, sizeof(a->distortion)) == 0;
+}
+
 // One tick: for each channel, resolve its current target (MODEL from the
 // sim snapshot, or MANUAL from the last commanded amps), and if the
-// resulting config actually differs from what was last pushed to
-// ct_wave_pwm, rebuild and push its table -- gated at a zero crossing
-// (immediately if one was just detected in software, or via ct_wave_pwm's
-// own DMA-boundary gate otherwise) unless the channel's own distortion
-// config asks for an immediate mid-cycle step.
-static void wave_owner_tick(uint64_t now_us)
+// resulting config actually differs from what was last staged, stage it
+// into ct_i2s_gen -- which does its own zero-crossing-gated apply (or
+// immediate step, per distortion.apply_immediately) at the sample level,
+// every sample, per ct_i2s_gen.h's contract. Unlike the PWM-era file, there
+// is no separate software zero-crossing pre-check here: that existed only to
+// anticipate a coarser 256-sample DMA-boundary gate, which no longer exists.
+static void wave_owner_tick(void)
 {
     sim_snapshot_t snap;
     bool have_snap = sim_snapshot_read(&snap);
@@ -224,38 +300,30 @@ static void wave_owner_tick(uint64_t now_us)
             amps = 0.0f; // no snapshot yet, or this channel has no backing zone this run
         }
 
-        wave_owner_applied_cfg_t new_cfg = {
+        wave_owner_staged_cfg_t new_cfg = {
             .valid = true,
-            .channel = ch,
             .mode = mode,
             .amps = amps,
             .phase_deg = phase_deg,
             .distortion = distortion,
         };
 
-        // Software zero-crossing tracking for the low-latency path (see
-        // s_ref_prev_raw's comment above) -- runs every tick regardless of
-        // whether a change is pending, so the reference phase never falls
-        // behind.
-        float t_s = (float)now_us / 1.0e6f;
-        float curr_raw = sine_synth_raw(s_sine_table, CT_WAVE_NOMINAL_FREQ_HZ, phase_deg, t_s);
-        bool crossed_since_last_tick = false;
-        if (s_ref_prev_valid[ch]) {
-            bool rising;
-            crossed_since_last_tick = sine_synth_zero_crossing(s_ref_prev_raw[ch], curr_raw, &rising);
-            (void)rising;
-        }
-        s_ref_prev_raw[ch] = curr_raw;
-        s_ref_prev_valid[ch] = true;
-
-        if (!applied_cfg_equal(&new_cfg, &s_applied_cfg[ch])) {
-            uint16_t levels[SINE_SYNTH_TABLE_LEN];
-            build_table(&new_cfg, levels);
-
-            bool apply_now = distortion.apply_immediately || crossed_since_last_tick;
-            ct_wave_pwm_load_table(ch, levels, apply_now);
-
-            s_applied_cfg[ch] = new_cfg;
+        if (!staged_cfg_equal(&new_cfg, &s_last_staged[ch])) {
+            ct_i2s_gen_channel_cfg_t gen_cfg = {
+                .mode = (mode == CT_WAVE_MODE_MANUAL) ? CT_I2S_GEN_MODE_MANUAL : CT_I2S_GEN_MODE_MODEL,
+                .amps = amps,
+                .synth = {
+                    .amplitude = 0.0f, // ignored/overwritten every sample by ct_i2s_gen.c -- see ct_i2s_gen.h
+                    .phase_deg = phase_deg,
+                    .dc_offset = distortion.dc_offset,
+                    .clip_fraction = distortion.clip_fraction,
+                    .dropout_half_cycle = distortion.dropout_half_cycle,
+                    .dropout_negative_half = distortion.dropout_negative_half,
+                },
+                .apply_immediately = distortion.apply_immediately,
+            };
+            ct_i2s_gen_stage_config(&s_gen_ctx, ch, &gen_cfg);
+            s_last_staged[ch] = new_cfg;
 
             state_lock();
             s_channel_state[ch].last_pwm_scale = ct_wave_amps_to_pwm_scale(ch, amps);
@@ -269,11 +337,10 @@ static void wave_owner_task_fn(void *arg)
 {
     (void)arg;
 
-    sine_synth_init_table(s_sine_table);
-
     for (;;) {
         apply_pending_commands();
-        wave_owner_tick(time_us_64());
+        wave_owner_tick();
+        ct_wave_i2s_poll();
         vTaskDelay(pdMS_TO_TICKS(WAVE_OWNER_TICK_MS));
     }
 }
@@ -291,14 +358,28 @@ bool wave_owner_start(void)
     }
 
     memset(s_channel_state, 0, sizeof(s_channel_state));
-    memset(s_applied_cfg, 0, sizeof(s_applied_cfg));
-    memset(s_ref_prev_valid, 0, sizeof(s_ref_prev_valid));
+    memset(s_last_staged, 0, sizeof(s_last_staged));
+    memset(s_queue_head, 0, sizeof(s_queue_head));
+    memset(s_queue_count, 0, sizeof(s_queue_count));
     for (uint8_t ch = 0; ch < CT_WAVE_NUM_CHANNELS; ch++) {
         s_channel_state[ch].mode = CT_WAVE_MODE_MODEL;
     }
 
-    if (!ct_wave_pwm_init()) {
-        return false;
+    ct_i2s_gen_init(&s_gen_ctx, ct_cal_default_table());
+
+    // wave_owner has no fallback CT backend to fall back to (ct_wave_pwm.c
+    // is deleted, docs/DESIGN_NOTES.md section 3.3) -- ct_wave_i2s_init()
+    // itself routes essentially every real failure mode (DMA exhaustion,
+    // PIO SM exhaustion, PIO1 program-memory exhaustion -- the one EXPECTED
+    // to actually fire on the current build, see ct_wave_i2s.h) through
+    // simfw_fatal() and never returns from those. Reaching a `false` return
+    // here only happens for its one non-fatal reason (a NULL refill
+    // callback), which cannot occur with the function pointer passed below
+    // -- but this task fails loudly anyway rather than silently booting
+    // with no CT output, per this project's "no silent stub" doctrine
+    // (drivers/simfw_fatal.h).
+    if (!ct_wave_i2s_init(wave_owner_i2s_refill, NULL)) {
+        simfw_fatal("wave_owner", "ct_wave_i2s_init() returned false -- no CT waveform backend available");
     }
 
     BaseType_t ok = xTaskCreate(wave_owner_task_fn, "wave_owner", WAVE_OWNER_STACK_WORDS, NULL,

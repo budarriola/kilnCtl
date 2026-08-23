@@ -18,15 +18,18 @@
 # usb_owner.h's public API (usb_owner_send_reply()/usb_owner_send_broadcast())
 # rather than including tusb.h themselves -- which is exactly the doctrine
 # working as intended, not a hole in it. Likewise hardware/pio.h is only ever
-# included by the MAX31856 PIO driver (drivers/max31856_pio_engine.{c,h});
-# the two SPI-emulation owner tasks (spi_emu_a.c/spi_emu_b.c) reach PIO only
-# through that driver's own header, never hardware/pio.h directly.
+# included by the MAX31856 PIO driver (drivers/max31856_pio_engine.{c,h}) and
+# by drivers/ct_wave_i2s.{c,h} (PIO1's I2S transport, docs/DESIGN_NOTES.md
+# section 3.3 -- ct_wave_pwm.c's PWM+RC predecessor never touched PIO and is
+# deleted); the two SPI-emulation owner tasks (spi_emu_a.c/spi_emu_b.c) reach
+# PIO only through max31856_pio_engine.c's own header, never hardware/pio.h
+# directly.
 #
 # hardware/gpio.h is deliberately NOT one of the checked headers here: unlike
-# I2C/PIO/PWM+DMA/USB, GPIO is used by several genuinely different owners for
+# I2C/PIO/DMA/USB, GPIO is used by several genuinely different owners for
 # genuinely different pins (DRDY/~FAULT lines via the PIO driver, discrete
-# I/O via i2c_owner.c's non-I2C GPIO helpers, CT sine synthesis via
-# ct_wave_pwm.c) with no single peripheral being shared -- a blanket
+# I/O via i2c_owner.c's non-I2C GPIO helpers, CT waveform synthesis via
+# ct_wave_i2s.c) with no single peripheral being shared -- a blanket
 # "hardware/gpio.h has one owner" rule would be false by construction, not a
 # real violation of DESIGN_NOTES.md section 4's rule (which is about one INTERFACE,
 # not the GPIO block in the abstract).
@@ -97,8 +100,11 @@ function Get-CodeOnlyLines {
 
 # The two files (plus their headers) that are allowed to own DMA channels.
 # Used both by the hardware/dma.h include rule and by the DMA safety rules
-# further down, so the two can never drift apart.
-$dmaOwnerFiles = @("drivers/ct_wave_pwm.c", "drivers/ct_wave_pwm.h",
+# further down, so the two can never drift apart. drivers/ct_wave_pwm.{c,h}
+# (the PWM+RC CT synthesis backend) is deleted, docs/DESIGN_NOTES.md section
+# 3.3's 2026-08-23 PWM->I2S decision; drivers/ct_wave_i2s.{c,h} is its
+# replacement.
+$dmaOwnerFiles = @("drivers/ct_wave_i2s.c", "drivers/ct_wave_i2s.h",
                    "drivers/max31856_pio_engine.c", "drivers/max31856_pio_engine.h")
 
 # Header -> regex matching its #include line -> allowed owner file(s),
@@ -112,12 +118,19 @@ $rules = @(
     @{
         Name    = "hardware/pio.h"
         Pattern = '#include\s*["<]hardware/pio\.h'
-        Allowed = @("drivers/max31856_pio_engine.c", "drivers/max31856_pio_engine.h")
+        Allowed = @("drivers/max31856_pio_engine.c", "drivers/max31856_pio_engine.h",
+                    "drivers/ct_wave_i2s.c", "drivers/ct_wave_i2s.h")
     },
     @{
+        # ct_wave_pwm.{c,h} (the only owner this rule ever had) is deleted --
+        # docs/DESIGN_NOTES.md section 3.3's 2026-08-23 PWM->I2S decision.
+        # Nothing in the tree may include hardware/pwm.h any more; kept as an
+        # empty-Allowed rule (rather than deleted outright) so a future
+        # re-introduction of a PWM-based CT path is still caught here, not
+        # just missed silently.
         Name    = "hardware/pwm.h"
         Pattern = '#include\s*["<]hardware/pwm\.h'
-        Allowed = @("drivers/ct_wave_pwm.c", "drivers/ct_wave_pwm.h")
+        Allowed = @()
     },
     @{
         Name    = "hardware/dma.h"
@@ -207,7 +220,7 @@ $bannedAcquire = @(
     @{
         Pattern = 'dma_channel_claim\s*\('
         What    = "dma_channel_claim(n)"
-        Fix     = "claim by number takes a specific channel out of the global pool, which is exactly how two owners collide. Use dma_claim_unused_channel(false) and keep the returned index, like drivers/ct_wave_pwm.c and drivers/max31856_pio_engine.c do."
+        Fix     = "claim by number takes a specific channel out of the global pool, which is exactly how two owners collide. Use dma_claim_unused_channel(false) and keep the returned index, like drivers/ct_wave_i2s.c and drivers/max31856_pio_engine.c do."
     },
     @{
         Pattern = 'dma_claim_mask\s*\('
@@ -225,8 +238,10 @@ $bannedRawHw = @(
 
 # --- Rule 2: IRQ vectors ---------------------------------------------------
 # Every irq_set_exclusive_handler() call site, plus the #define aliases that
-# stand in for a vector token (ct_wave_pwm.c passes CT_WAVE_DMA_IRQ, not
-# DMA_IRQ_1).
+# stand in for a vector token (max31856_pio_engine.c's own aliasing pattern
+# used to have company in ct_wave_pwm.c's now-deleted CT_WAVE_DMA_IRQ; kept
+# generic here since ct_wave_i2s.c installs no DMA IRQ handler at all --
+# see its header's SEAM CHOICE note -- and a future owner might still alias).
 $dmaIrqSites = @()
 $dmaIrqAliases = @{}
 
@@ -250,9 +265,10 @@ foreach ($f in $files) {
             }
         }
 
-        # Owners alias the vector behind a #define (ct_wave_pwm.c's
-        # CT_WAVE_DMA_IRQ), so matching the literal token alone would miss
-        # half the sites and quietly report "no conflict". Record the raw
+        # Owners may alias the vector behind a #define (max31856_pio_engine.c
+        # does; the now-deleted ct_wave_pwm.c used to as well), so matching
+        # the literal token alone would miss such a site and quietly report
+        # "no conflict". Record the raw
         # first argument here; resolve aliases per file below.
         if ($line -match 'irq_set_exclusive_handler\s*\(\s*([A-Za-z_][0-9A-Za-z_]*)\s*,') {
             $dmaIrqSites += [pscustomobject]@{
@@ -268,7 +284,8 @@ foreach ($f in $files) {
     }
 }
 
-# Resolve one level of aliasing (#define CT_WAVE_DMA_IRQ DMA_IRQ_1), then drop
+# Resolve one level of aliasing (e.g. max31856_pio_engine.c's own vector
+# #define), then drop
 # every site that is not a DMA vector -- PIO/UART/etc. exclusive handlers are
 # none of this rule's business.
 $dmaIrqSites = @($dmaIrqSites | ForEach-Object {
@@ -295,7 +312,7 @@ foreach ($grp in ($dmaIrqSites | Group-Object Vector)) {
 foreach ($grp in ($dmaIrqSites | Group-Object File)) {
     $vectors = @($grp.Group | ForEach-Object { $_.Vector } | Sort-Object -Unique)
     if ($vectors.Count -gt 1) {
-        $dmaFailures += "$($grp.Name): owns more than one DMA IRQ vector ($($vectors -join ', ')) -- the two vectors must live in distinct files.`n      docs/HARDWARE.md section 1b's whole no-overlap argument is that DMA_IRQ_1 belongs to drivers/ct_wave_pwm.c and DMA_IRQ_0 to drivers/max31856_pio_engine.c. One file holding both means the vectors are no longer a partition between owners.`n      See docs/HARDWARE.md section 1b (DMA channel budget)."
+        $dmaFailures += "$($grp.Name): owns more than one DMA IRQ vector ($($vectors -join ', ')) -- the two vectors must live in distinct files.`n      docs/HARDWARE.md section 1b: DMA_IRQ_0 belongs to drivers/max31856_pio_engine.c; DMA_IRQ_1 is unclaimed now that ct_wave_pwm.c is deleted (ct_wave_i2s.c installs no DMA IRQ handler at all, see its header's SEAM CHOICE note). One file holding both vectors would mean they are no longer a partition between owners.`n      See docs/HARDWARE.md section 1b (DMA channel budget)."
     }
 }
 
@@ -308,8 +325,8 @@ foreach ($grp in ($dmaIrqSites | Group-Object File)) {
 $dmaChannelsTotal = 12   # RP2040 NUM_DMA_CHANNELS; src/main.c's _Static_assert
                          # checks against the SDK's own macro, not this copy.
 $dmaBudgetTerms = @(
-    @{ File = "drivers/ct_wave_pwm.h"; Const = "CT_WAVE_PWM_NUM_CHANNELS"; Extra = 0
-       Role = "CT sine carrier, 1 channel per CT zone" },
+    @{ File = "drivers/ct_wave_i2s.h"; Const = "CT_WAVE_I2S_NUM_MODULES"; Extra = 0
+       Role = "CT I2S DAC transport, 1 DMA channel per UDA1334A module" },
     @{ File = "tasks/spi_emu_a.h";     Const = "SPI_EMU_A_CHANNEL_COUNT";  Extra = 2
        Role = "SPI bus A, 1 sniff per emulated chip + dma_load + dma_data" },
     @{ File = "tasks/spi_emu_b.h";     Const = "SPI_EMU_B_CHANNEL_COUNT";  Extra = 2
@@ -364,94 +381,18 @@ if (Test-Path $mainPath) {
 }
 
 # ---------------------------------------------------------------------------
-# PWM SAFETY RULES
-#
-# docs/HARDWARE.md section 0 item 9 (the pin-map re-check, commit 1d32e84)
-# found a latent trap: PWM slice 3 (the CT waveform generator's free-running
-# pacer, drivers/ct_wave_pwm.c) binds no GPIO today, but its own candidate
-# outputs -- and each CT channel's own slice's unused channel-B pin -- land on
-# six GPIOs docs/HARDWARE.md section 1 gives to non-PWM owners:
-#
-#   GPIO6/7   -- SPI bus A SCLK/MOSI (spi_emu_a.c, PIO function)
-#   GPIO17    -- DRDY_MAIN_2 (spi_emu_a.c, SIO open-drain)
-#   GPIO19/21 -- FAULT_MAIN_0/1 (unowned in code yet, but claimed in section 1)
-#   GPIO22    -- FAULT_MAIN_2 (unowned in code yet, but claimed in section 1)
-#
-# A future gpio_set_function(<one of those>, GPIO_FUNC_PWM) is legal C that
-# would silently put a free-running PWM carrier onto a claimed signal line.
-# The include rule above already makes drivers/ct_wave_pwm.{c,h} the ONLY
-# place in the tree allowed to include hardware/pwm.h, so it is also the only
-# place gpio_set_function(..., GPIO_FUNC_PWM) can legitimately appear. Two
-# checks, same split as the DMA section above:
-#
-#   1. COMPILE-TIME (the primary guard). drivers/ct_wave_pwm.c defines each
-#      CT channel's GPIO as its own macro (CT_WAVE_GPIO_0/1/2) specifically so
-#      a _Static_assert can check each one against the six forbidden pins --
-#      reassigning a channel to a forbidden GPIO is a build error. This
-#      script cannot run the compiler, so it confirms the guard block is
-#      still present (not deleted) rather than re-deriving it.
-#   2. LINT (this section). Independently greps every file for a literal-pin
-#      gpio_set_function(<N>, GPIO_FUNC_PWM) call and checks N against the
-#      forbidden list directly -- this catches a hardcoded call added
-#      somewhere that bypasses the CT_WAVE_GPIO_* macros entirely, which the
-#      _Static_assert above cannot see.
-#
-# See docs/HARDWARE.md section 0 item 9 for the full derivation.
-$pwmFailures = @()
-
-# GPIO -> "signal (owner)" exactly as docs/HARDWARE.md section 1 assigns it.
-# Plain @{}, not [ordered]@{} -- PowerShell's OrderedDictionary indexer
-# treats an integer key as a POSITIONAL index rather than a dictionary key
-# (verified: $h[22] on an [ordered]@{22=...} silently returns $null instead
-# of the value), which would make every lookup below resolve to an empty
-# string instead of failing loudly. A plain Hashtable's indexer does not have
-# that trap.
-$pwmForbiddenGpios = @{
-    6  = "SPI bus A SCLK (spi_emu_a.c) -- pacer slice 3's own channel-A candidate output"
-    7  = "SPI bus A MOSI (spi_emu_a.c) -- pacer slice 3's own channel-B candidate output"
-    17 = "DRDY_MAIN_2 (spi_emu_a.c) -- CT zone 0's own PWM slice's unused channel-B pin"
-    19 = "FAULT_MAIN_0 (docs/HARDWARE.md section 1, no owner file yet) -- CT zone 1's own PWM slice's unused channel-B pin"
-    21 = "FAULT_MAIN_1 (docs/HARDWARE.md section 1, no owner file yet) -- CT zone 2's own PWM slice's unused channel-B pin"
-    22 = "FAULT_MAIN_2 (docs/HARDWARE.md section 1, no owner file yet) -- pacer slice 3's own channel-A candidate output"
-}
-
-# --- Rule 1: lint every literal-pin gpio_set_function(N, GPIO_FUNC_PWM) ----
-foreach ($f in $files) {
-    $rel = $f.FullName.Substring($srcRoot.Length + 1) -replace '\\', '/'
-    $codeLines = Get-CodeOnlyLines -Path $f.FullName
-    for ($i = 0; $i -lt $codeLines.Count; $i++) {
-        $line = $codeLines[$i]
-        if ($line -match 'gpio_set_function\s*\(\s*([0-9]+)\s*u?\s*,\s*GPIO_FUNC_PWM\b') {
-            $pin = [int]$Matches[1]
-            if ($pwmForbiddenGpios.ContainsKey($pin)) {
-                $pwmFailures += "$($rel):$($i + 1): gpio_set_function(GPIO$pin, GPIO_FUNC_PWM) -- GPIO$pin is $($pwmForbiddenGpios[$pin]).`n      Binding a PWM function here would put a free-running carrier onto that claimed line. See docs/HARDWARE.md section 0 item 9.`n      Line: $($line.Trim())"
-            }
-        }
-    }
-}
-
-# --- Rule 2: the compile-time guard block must still exist -----------------
-# Mirrors the DMA section's "assertion missing" check: this lint's literal-pin
-# regex cannot see the CT_WAVE_GPIO_* macro path the real code uses (the pin
-# comes in through a variable, not a literal, at the actual call site), so the
-# _Static_assert block in drivers/ct_wave_pwm.c is the primary guard for that
-# path, not this script. If it disappears, say so rather than passing
-# silently on a codebase that is once again unguarded.
-$ctWavePath = Join-Path $srcRoot "drivers\ct_wave_pwm.c"
-if (Test-Path $ctWavePath) {
-    $ctWaveCode = (Get-CodeOnlyLines -Path $ctWavePath) -join "`n"
-    $requiredAsserts = @("CT_WAVE_GPIO_0", "CT_WAVE_GPIO_1", "CT_WAVE_GPIO_2")
-    foreach ($macroName in $requiredAsserts) {
-        if ($ctWaveCode -notmatch ('_Static_assert\s*\(\s*!CT_WAVE_PWM_GPIO_IS_FORBIDDEN\s*\(\s*' + [regex]::Escape($macroName) + '\s*\)')) {
-            $pwmFailures += "drivers/ct_wave_pwm.c: the compile-time PWM-pin guard for $macroName (_Static_assert(!CT_WAVE_PWM_GPIO_IS_FORBIDDEN($macroName), ...)) is missing.`n      That assertion is the compile-time half of docs/HARDWARE.md section 0 item 9's guard -- it is what turns reassigning a CT channel onto GPIO6/7/17/19/21/22 into a build error instead of a fixture that silently drives a PWM carrier onto a claimed SPI/FAULT/DRDY line. Restore it; do not rely on this script's lint alone, since the lint only sees literal-pin call sites."
-        }
-    }
-} else {
-    $pwmFailures += "PWM safety: drivers/ct_wave_pwm.c not found, so the compile-time guard block could not be confirmed."
-}
-
+# PWM SAFETY RULES -- REMOVED 2026-08-23. This section used to lint for a
+# free-running PWM carrier landing on a claimed SPI/FAULT/DRDY GPIO
+# (docs/HARDWARE.md section 0 item 9), a trap specific to
+# drivers/ct_wave_pwm.c's PWM slices. That driver is deleted
+# (docs/DESIGN_NOTES.md section 3.3's PWM->I2S decision) and nothing in the
+# tree may include hardware/pwm.h any more (see that rule, above, which is
+# kept as a still-live guard with an empty Allowed list) -- there is no PWM
+# GPIO-function call site left for this section to check, so it is deleted
+# rather than kept as dead code that would either false-fail (looking for a
+# guard block in a file that no longer exists) or pass vacuously forever.
 # ---------------------------------------------------------------------------
-if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0 -or $pwmFailures.Count -gt 0) {
+if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0) {
     if ($failures.Count -gt 0) {
         Write-Host "SINGLE-OWNER CHECK FAILED:" -ForegroundColor Red
         foreach ($f in $failures) {
@@ -464,17 +405,10 @@ if ($failures.Count -gt 0 -or $dmaFailures.Count -gt 0 -or $pwmFailures.Count -g
             Write-Host "  $f" -ForegroundColor Red
         }
     }
-    if ($pwmFailures.Count -gt 0) {
-        Write-Host "PWM SAFETY CHECK FAILED:" -ForegroundColor Red
-        foreach ($f in $pwmFailures) {
-            Write-Host "  $f" -ForegroundColor Red
-        }
-    }
-    throw "$($failures.Count) single-owner violation(s), $($dmaFailures.Count) DMA safety violation(s) and $($pwmFailures.Count) PWM safety violation(s) found -- see docs/DESIGN_NOTES.md section 4 ('every hardware interface has exactly one owner task'), docs/HARDWARE.md section 1b (DMA channel budget) and docs/HARDWARE.md section 0 item 9 (PWM pacer/channel-B latent trap)"
+    throw "$($failures.Count) single-owner violation(s) and $($dmaFailures.Count) DMA safety violation(s) found -- see docs/DESIGN_NOTES.md section 4 ('every hardware interface has exactly one owner task') and docs/HARDWARE.md section 1b (DMA channel budget)"
 }
 
 Write-Host "Single-owner check passed: hardware/i2c.h, hardware/pio.h, hardware/pwm.h, hardware/dma.h and tusb.h each appear only in their declared owner file(s)."
 $vectorSummary = ($dmaIrqSites | Sort-Object Vector | ForEach-Object { "$($_.Vector)->$($_.File)" }) -join ', '
 Write-Host "DMA safety check passed: every channel taken via dma_claim_unused_channel(); raw channel registers touched only by the owners; DMA vectors disjoint by file [$vectorSummary]; $dmaTotal of $dmaChannelsTotal channels claimed (HARDWARE.md section 1b)."
-Write-Host "PWM safety check passed: no gpio_set_function(..., GPIO_FUNC_PWM) call binds GPIO6/7/17/19/21/22 (SPI bus A SCLK/MOSI, DRDY_MAIN_2, FAULT_MAIN_0/1/2 -- HARDWARE.md section 0 item 9), and drivers/ct_wave_pwm.c's compile-time guard block is present."
 exit 0

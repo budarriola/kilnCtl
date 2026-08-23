@@ -98,21 +98,32 @@ add_custom_target(simfw_build_info ALL
 # hardware_i2c IS linked below too: i2c_owner now has a real body
 # (src/drivers/mcp23017.{c,h} + I2C0 init), docs/DESIGN_NOTES.md section 4.1's
 # relay-sense/E-stop/DUT-power milestone.
-# hardware_pwm/hardware_dma ARE linked below too: wave_owner now has a real
-# body (src/drivers/ct_wave_pwm.{c,h} + 3-channel PWM/DMA CT synthesis),
-# docs/DESIGN_NOTES.md section 4.1/3.3's CT-waveform milestone -- see
-# src/drivers/ct_wave_pwm.c's header comment for the GPIO/carrier/sample-rate
-# arithmetic. src/sim/sine_synth.c is linked alongside it: wave_owner.c calls
-# into it (256-entry table, distortion, zero-crossing detection) rather than
-# reimplementing any of that pure math, per docs/DESIGN_NOTES.md section 3.3 and
-# docs/PLAN.md section 13's "pure, host-testable" sim/ modules being the single source of truth.
-# src/sim/ct_calibration.c is linked for the same reason: wave_owner.c's
-# ct_wave_amps_to_pwm_scale() delegates the per-channel
+# hardware_dma/hardware_pio ARE linked below too: wave_owner now drives CT
+# synthesis through src/drivers/ct_wave_i2s.{c,h} (PIO+DMA I2S MASTER
+# transport for 2x UDA1334A stereo DAC modules) instead of the retired
+# PWM+RC path (src/drivers/ct_wave_pwm.{c,h}, deleted -- docs/DESIGN_NOTES.md
+# section 3.3's 2026-08-23 decision). src/sim/ct_i2s_gen.{c,h} is the pure,
+# host-testable sample-block generator wave_owner.c drives it with (see that
+# header for the explicit zero-crossing gate the 16 kHz path needs, unlike
+# the old PWM path's "one DMA table = one cycle" trick); src/sim/sine_synth.c
+# is linked alongside it since ct_i2s_gen.c calls into it (256-entry table,
+# distortion, zero-crossing detection) rather than reimplementing any of that
+# pure math, per docs/DESIGN_NOTES.md section 3.3 and docs/PLAN.md section
+# 13's "pure, host-testable" sim/ modules being the single source of truth.
+# src/sim/ct_calibration.c is linked for the same reason: ct_i2s_gen.c's
+# per-sample amplitude computation delegates the per-channel
 # clamp(gain*amps + offset, 0, 1) mapping to it rather than doing that
 # arithmetic inline, so the code the firmware runs is the code the MSVC host
 # tests exercise. Its constants live in the generated
 # src/sim/ct_calibration_defaults.h (tools/gen_ct_cal_table.py) and are
 # all-uncalibrated/identity today -- no CT hardware, no calibration run yet.
+# ct_wave_i2s.c/.pio cannot actually run yet: PIO1's program memory is
+# nearly full (bus B's RX+TX_b programs already occupy 29 of 32 words) and
+# the 8-word ct_wave_i2s_out program cannot fit in the 3 that remain -- see
+# ct_wave_i2s.h's header and docs/HARDWARE.md section 1b.7. wave_owner_start()
+# calls ct_wave_i2s_init() unconditionally and lets that failure reach
+# simfw_fatal() rather than hiding it behind a fallback, so the fixture halts
+# loudly instead of booting with a CT path that looks alive but is silent.
 # tinyusb_device/pico_unique_id (below) back usb_owner's real body: native
 # USB CDC framing/dispatch over `benchproto` (docs/DESIGN_NOTES.md section 4.1's
 # usb_owner/cmd_task rows) -- src/tusb_config.h and
@@ -140,11 +151,11 @@ set(SIMFW_APP_SOURCES
     src/sim/thermal_model.c
     src/sim/fault_engine.c
     src/drivers/mcp23017.c
-    src/drivers/ct_wave_pwm.c
     src/drivers/ct_wave_i2s.c
     src/drivers/simfw_fatal.c
     src/sim/sine_synth.c
     src/sim/ct_calibration.c
+    src/sim/ct_i2s_gen.c
 )
 
 add_executable(SimFW ${SIMFW_APP_SOURCES})
@@ -163,11 +174,13 @@ add_dependencies(SimFW simfw_build_info)
 pico_generate_pio_header(SimFW ${CMAKE_CURRENT_LIST_DIR}/src/drivers/max31856_spi_slave.pio)
 
 # ct_wave_i2s.pio: PIO I2S master transport for 2x UDA1334A DAC modules
-# (src/drivers/ct_wave_i2s.{c,h}), the planned replacement for
-# ct_wave_pwm.c's PWM+RC path -- see that header for the DMA-budget and
-# PIO1-program-memory conflicts this driver has with the existing SPI/PWM
-# claimants. Not called from anywhere yet (dead code, compiled only), same
-# posture as any other not-yet-wired-up driver in this tree.
+# (src/drivers/ct_wave_i2s.{c,h}), wave_owner's CT synthesis backend now that
+# ct_wave_pwm.c's PWM+RC path is retired -- see that header for the
+# PIO1-program-memory conflict this driver has with bus B (max31856_pio_engine.c):
+# the 8-word ct_wave_i2s_out program cannot fit in PIO1's 3 remaining free
+# words, so ct_wave_i2s_init() (called unconditionally from wave_owner_start())
+# is expected to reach simfw_fatal() on the current build. See
+# docs/HARDWARE.md section 1b.7 and docs/PLAN.md's open items.
 pico_generate_pio_header(SimFW ${CMAKE_CURRENT_LIST_DIR}/src/drivers/ct_wave_i2s.pio)
 
 target_include_directories(SimFW PRIVATE
@@ -182,7 +195,6 @@ target_link_libraries(SimFW PRIVATE
     pico_stdlib
     hardware_gpio
     hardware_i2c
-    hardware_pwm
     hardware_dma
     hardware_pio
     hardware_irq

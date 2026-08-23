@@ -5,38 +5,39 @@
 // doctrine). Nothing calls ct_wave_i2s_init() yet -- see ct_wave_i2s.h's
 // header comment.
 //
-// --- GPIO assignment (PROVISIONAL, and a KNOWN, DOCUMENTED CONFLICT with
-// docs/HARDWARE.md section 1 -- not an oversight) -------------------------
+// --- GPIO assignment (PROVISIONAL -- ct_wave_pwm.c retired 2026-08-23,
+// docs/DESIGN_NOTES.md section 3.3) ----------------------------------------
 //
-// docs/HARDWARE.md section 1 has 25 of the Pico's 26 header GPIOs already
-// assigned, with exactly ONE true spare: GPIO28. This driver needs FOUR
-// signals (BCLK, WS, DIN_A, DIN_B). There is no way to find 4 genuinely
-// free GPIOs on this fixture today -- so three of the four claims below
-// reuse GPIOs docs/HARDWARE.md section 1 already reserves for something
-// else that has no OWNER FILE yet (FAULT_SAFETY = 27, FAULT_MAIN_1 = 21,
-// FAULT_MAIN_2 = 22 -- all three rows say "owner file: (none yet)"), which
-// is exactly the kind of "sixth independent guess" docs/HARDWARE.md section
-// 0 item 2 warns against picking without updating that table in the same
-// commit. This file does NOT update docs/HARDWARE.md (out of this pass's
-// file scope) -- flagged loudly here and in this task's report instead, for
-// whoever reconciles it. The pins:
+// ct_wave_pwm.c's retirement frees GPIO16/18/20 (its 3 CT PWM carriers).
+// DIN_A and DIN_B move onto two of those three freed pins, which is a
+// genuine improvement: FAULT_MAIN_1 (21) and FAULT_MAIN_2 (22) go back to
+// "no owner file yet" exactly as docs/HARDWARE.md section 1 lists them,
+// instead of being silently borrowed. GPIO20 is left over, genuinely spare
+// again (this driver has no fourth signal to put there).
 //
-//   GPIO27 -> BCLK   (collides with reserved FAULT_SAFETY)
+// BCLK could NOT be moved off GPIO27 (FAULT_SAFETY), and this is a real,
+// checked constraint, not an oversight: BCLK and WS MUST be two ADJACENT
+// ascending GPIOs (PIO side-set pins are always a contiguous block starting
+// at a configured base -- see the _Static_assert below), and GPIO28 (the
+// one pin docs/HARDWARE.md section 1 was never trying to reserve for
+// anything -- the fixture's only true spare) has no adjacent partner among
+// the newly-freed pins: GPIO16/18/20 are two apart from each other (RP2040
+// PWM channel-A pins, ct_wave_pwm.c's own header explains why) and none of
+// them is GPIO27 or GPIO29. The only GPIO adjacent to 28 at all is 27, so
+// BCLK stays there. **This is the one borrowed pin this pass could not
+// return** -- flagged here and in this task's report; docs/HARDWARE.md
+// section 1's FAULT_SAFETY row still shows this driver as its de facto
+// (provisional, unverified) claimant.
+//
+//   GPIO27 -> BCLK   (still collides with reserved FAULT_SAFETY -- unavoidable, see above)
 //   GPIO28 -> WS     (the one true spare -- no conflict)
-//   GPIO21 -> DIN_A  (collides with reserved FAULT_MAIN_1)
-//   GPIO22 -> DIN_B  (collides with reserved FAULT_MAIN_2)
+//   GPIO16 -> DIN_A  (freed by ct_wave_pwm.c's retirement -- was zone 0's PWM carrier)
+//   GPIO18 -> DIN_B  (freed by ct_wave_pwm.c's retirement -- was zone 1's PWM carrier)
 //
-// GPIO19 (FAULT_MAIN_0) and GPIO0/1 (debug UART) were deliberately left
-// untouched, so at least one FAULT line and the whole debug-UART pair stay
-// available for their documented purposes if this driver is ever the one
-// that ships. GPIO16/18/20 (ct_wave_pwm.c's 3 CT PWM carriers) and GPIO17
-// (DRDY_MAIN_2) were left alone per this task's explicit instruction not to
-// reuse ct_wave_pwm.c's pins -- that driver is "still live" even though
-// this one exists to replace it eventually. If/when ct_wave_pwm.c is
-// actually retired, GPIO16/18/20 becomes the obvious real fix for this
-// section's conflict (3 GPIOs, exactly the number this driver borrows from
-// the FAULT_* rows) -- noted here for whoever does that later, not acted on
-// now.
+// GPIO20 (freed, zone 2's former PWM carrier) is unused by this driver.
+// GPIO19 (FAULT_MAIN_0) and GPIO0/1 (debug UART) remain untouched, as
+// before. GPIO17 (DRDY_MAIN_2, actively driven by spi_emu_a.c) was never a
+// candidate and still isn't.
 //
 // BCLK/WS MUST be two ADJACENT ascending GPIOs (27, 28): PIO side-set pins
 // are always a contiguous block starting at a configured base. Checked
@@ -131,8 +132,8 @@
 // --- GPIO assignment (see file header) ------------------------------------
 #define CT_WAVE_I2S_GPIO_BCLK  27u
 #define CT_WAVE_I2S_GPIO_WS    28u
-#define CT_WAVE_I2S_GPIO_DIN_A 21u
-#define CT_WAVE_I2S_GPIO_DIN_B 22u
+#define CT_WAVE_I2S_GPIO_DIN_A 16u
+#define CT_WAVE_I2S_GPIO_DIN_B 18u
 
 _Static_assert(CT_WAVE_I2S_GPIO_WS == CT_WAVE_I2S_GPIO_BCLK + 1u,
                "ct_wave_i2s.c: WS must be exactly one GPIO above BCLK -- "
@@ -280,21 +281,18 @@ bool ct_wave_i2s_init(ct_wave_i2s_refill_fn refill, void *user_ctx)
     // --- DMA channels: one per module -------------------------------------
     for (uint8_t module = 0; module < CT_WAVE_I2S_NUM_MODULES; module++) {
         // required = false, checked explicitly, simfw_fatal() on exhaustion
-        // -- same posture as ct_wave_pwm.c and max31856_pio_engine.c
-        // (docs/HARDWARE.md section 1b.5). THIS IS EXPECTED TO FAIL on
-        // module B's claim if ct_wave_pwm_init() already ran this boot:
-        // only 1 of the RP2040's 12 DMA channels is free once ct_wave_pwm.c
-        // (3) + bus A (5) + bus B (3) = 11 are budgeted, and this driver
-        // needs 2. See ct_wave_i2s.h's MUTUAL EXCLUSION note.
+        // -- same posture as max31856_pio_engine.c (docs/HARDWARE.md section
+        // 1b.5). NOT expected to fail on the current build: with
+        // ct_wave_pwm.c retired, bus A (5) + bus B (3) = 8 of the RP2040's
+        // 12 DMA channels are budgeted before this claim, leaving 4 free for
+        // this driver's 2 -- see docs/HARDWARE.md section 1b.2.
         int chan = dma_claim_unused_channel(false);
         if (chan < 0) {
             simfw_fatal("ct_wave_i2s",
                          "DMA channel exhausted claiming module %u of %u "
-                         "(docs/HARDWARE.md section 1b: only 1 of 12 "
-                         "channels is free once ct_wave_pwm.c/bus A/bus B "
-                         "are budgeted; ct_wave_i2s needs 2 -- the two CT "
-                         "output backends cannot both be initialised in the "
-                         "same boot, see ct_wave_i2s.h)",
+                         "(docs/HARDWARE.md section 1b: unexpected -- bus "
+                         "A/bus B should leave 4 of 12 channels free for "
+                         "this driver's 2)",
                          (unsigned)module, (unsigned)CT_WAVE_I2S_NUM_MODULES);
         }
         s_module[module].dma_chan = chan;

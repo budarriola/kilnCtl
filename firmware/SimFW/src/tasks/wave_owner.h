@@ -1,10 +1,15 @@
-// wave_owner.h -- single owner of the PWM slices + DMA (docs/DESIGN_NOTES.md section
-// 4.1 task map): "60 Hz synthesis, amplitude/phase/distortion updates at
-// zero-crossings." Drives the three CT sine-wave channels (section 3.3) into
-// J13/J15/J17 via isolation transformers, through src/drivers/ct_wave_pwm.h
-// (this task's private driver -- nothing else may touch those PWM slices or
-// DMA channels, single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's
-// opening paragraph).
+// wave_owner.h -- single owner of the CT waveform PIO state machines + DMA
+// (docs/DESIGN_NOTES.md section 4.1 task map): "60 Hz synthesis, amplitude/
+// phase/distortion updates at zero-crossings." Drives the three CT sine-wave
+// channels (section 3.3) into J13/J15/J17 via isolation transformers, through
+// src/drivers/ct_wave_i2s.h (this task's private driver -- nothing else may
+// touch those PIO1 state machines or DMA channels, single-owner-per-
+// peripheral doctrine, DESIGN_NOTES.md section 4's opening paragraph) and
+// src/sim/ct_i2s_gen.h (the pure sample generator that driver's refill
+// callback pulls from). Formerly drove src/drivers/ct_wave_pwm.h's PWM+RC
+// path; that backend is retired (deleted 2026-08-23, DESIGN_NOTES.md section
+// 3.3's PWM->I2S decision) and this header's public API below is unchanged
+// across that switch -- cmd_task.c and other callers needed no changes.
 //
 // Public API below mirrors i2c_owner.h's queue-then-apply-next-tick
 // contract: every setter posts a command to wave_owner's own queue and
@@ -68,8 +73,14 @@ typedef struct {
 
 // Creates wave_owner at SIMFW_PRIO_WAVE_OWNER, pinned to SIMFW_CORE_RT_PATH
 // (task_priorities.h) -- core 1, the hard-real-time producers' core.
-// Initializes ct_wave_pwm (PWM slices + DMA + IRQ) before the task loop
-// starts. Returns false if task creation or the PWM/DMA driver init failed.
+// Initializes ct_wave_i2s (PIO1 state machines + DMA) before the task loop
+// starts. There is no fallback CT backend: if ct_wave_i2s_init() cannot
+// claim its resources, wave_owner_start() halts the fixture via
+// simfw_fatal() rather than returning with a silently-dead CT path (see
+// wave_owner.c's header and ct_wave_i2s.h for why that failure is EXPECTED
+// on the current build -- PIO1 program-memory exhaustion, docs/HARDWARE.md
+// section 1b.7). Otherwise returns false only if task creation itself
+// failed.
 bool wave_owner_start(void);
 
 // MODEL (default) tracks the thermal model's current_a for this channel
@@ -98,13 +109,20 @@ bool ct_wave_get_state(uint8_t channel, ct_wave_channel_state_t *out);
 
 // Calibration hook (DESIGN_NOTES.md 3.3's "amplitude (in simulated amps, fixture
 // converts via calibration table)"). Converts a target current in simulated
-// amps into a PWM full-scale fraction (0..1, 0 = mid-scale/silent,
-// 1 = maximum swing the carrier's 8-bit resolution allows).
+// amps into a DAC full-scale amplitude fraction (0..1, 0 = silent/centre,
+// 1 = maximum swing the UDA1334A's output allows) -- NAME IS A HOLDOVER from
+// when this fed a PWM duty cycle instead (retired 2026-08-23, DESIGN_NOTES.md
+// section 3.3's PWM->I2S decision); kept because existing callers depend on
+// it. See wave_owner.c's header comment on this function for a rename
+// suggestion for whoever next touches this API.
 //
 // Implemented as clamp(gain[channel] * amps + offset[channel], 0, 1) against
 // the compiled-in per-channel table in sim/ct_calibration.h -- the arithmetic
 // DESIGN_NOTES.md 3.3 and tools/ct_calibration/README.md's "Remaining firmware work"
-// section specify.
+// section specify. src/sim/ct_i2s_gen.c applies this exact same mapping
+// again, internally, every sample; this function is not itself in that data
+// path -- it exists for ct_wave_get_state()'s last_pwm_scale field and for
+// any external caller that wants the mapping without generating a sample.
 //
 // M-D IS NOT CLOSED. No CT hardware exists on this bench and no calibration
 // run has ever been taken, so the compiled-in table
