@@ -23,10 +23,11 @@
 #define SIMFW_FATAL_H
 
 // Halts the fixture and reports which subsystem failed and why, in a form a
-// bench operator can see with ZERO tooling attached (stdio_uart and
-// stdio_usb are both disabled -- CMakeLists.txt -- so this cannot rely on a
-// console) as well as in a form a debugger session gets via panic()'s own
-// message. NEVER RETURNS.
+// bench operator can see with ZERO tooling attached (stdio_usb is disabled
+// -- CMakeLists.txt -- and stdio_uart, though enabled, only reaches a
+// console when a probe is wired to GP16/GP17, so this cannot rely on one)
+// as well as in a form a debugger session gets via panic()'s own message.
+// NEVER RETURNS.
 //
 // Safe to call both before vTaskStartScheduler() (main.c's own startup
 // sequence, e.g. ct_wave_i2s_init()'s PIO/DMA claims) and from inside a running

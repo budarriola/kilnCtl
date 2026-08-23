@@ -107,9 +107,15 @@ void simfw_fatal_install_cross_core_halt(void)
 // 3.6)*". No heartbeat body has ever landed, so nothing else in src/ claims
 // this pin; this file is its first owner. A fast blink burst followed by a
 // solid-on hold is the one signal available to a bench operator with zero
-// tooling attached -- no debugger, no USB terminal (stdio_usb is disabled,
-// CMakeLists.txt, and TinyUSB owns the one USB peripheral outright), no
-// serial port (stdio_uart is disabled too). If a real heartbeat task is ever
+// tooling attached -- no debugger and no USB terminal (stdio_usb is
+// disabled, CMakeLists.txt, and TinyUSB owns the one USB peripheral
+// outright). stdio_uart, by contrast, IS enabled as of 2026-08-23
+// (pico_enable_stdio_uart(SimFW 1), UART0 on GP16/GP17) -- but it only helps
+// if a probe is actually wired to those pins, which is exactly the case this
+// LED exists to cover. During the bench debug pass that added it, the
+// attached probe's UART delivered nothing at all and the LED was the only
+// working channel, so do not weaken this on the grounds that a console now
+// exists. If a real heartbeat task is ever
 // added, it must yield this pin the instant simfw_fatal() is entered rather
 // than fight it for control -- a live heartbeat blink on a dead fixture
 // would defeat the entire point of this file.
@@ -176,8 +182,9 @@ void simfw_fatal(const char *subsystem, const char *reason_fmt, ...)
     }
     gpio_put(SIMFW_FATAL_LED_GPIO, 1); // solid on: the final at-a-glance "this fixture is dead, do not trust it" state
 
-    // stdio_uart/stdio_usb are both disabled, so panic()'s own printf reaches
-    // no console -- called anyway for the two things it still buys: a
+    // stdio_usb is disabled and stdio_uart reaches a console only when a
+    // probe is wired to GP16/GP17, so panic()'s own printf often reaches
+    // nobody -- called anyway for the two things it still buys: a
     // debugger attached over SWD sees this exact formatted message, and it
     // is the SAME halt mechanism pio_claim_unused_sm(pio, true) already uses
     // for PIO state-machine exhaustion (docs/HARDWARE.md section 1b.5's
