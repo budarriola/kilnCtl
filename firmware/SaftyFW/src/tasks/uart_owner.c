@@ -15,15 +15,16 @@
 // hardcode it, there is no negotiation. Lowered from 115200 on 2026-08-23:
 // the opto-isolated pair (TCMT1109 with R15's 1k pull-up) simply cannot
 // switch fast enough for a 8.7 us bit. At 115200 and 57600 not one frame
-// ever arrived; 38400 lost about a fifth of them; 19200 is clean. See the
-// measurement table in KilnFW/App/drivers/Kconfig under
-// KILNCTL_SAFETY_BAUD_RATE.
+// ever arrived; 38400 lost about a fifth of them; 19200 looked clean over a
+// short window but still lost about a tenth over a longer one; 9600 tracks
+// one for one over minutes. See the measurement table in
+// KilnFW/App/drivers/Kconfig under KILNCTL_SAFETY_BAUD_RATE.
 //
 // Worth knowing why this hid for so long: DC level tests pass in both
 // directions at any baud rate, because the opto carries a static level
 // perfectly well. Bench GPIO high/low checks on this pair had already
 // "verified" the wiring.
-#define UART_OWNER_BAUD_RATE  19200u
+#define UART_OWNER_BAUD_RATE  9600u
 
 // Sized well past one worst-case stuffed Frame A/FW_VERSION frame (header 8 +
 // payload up to ~60 + crc 2 = ~70 raw bytes; stuffing can at most double that

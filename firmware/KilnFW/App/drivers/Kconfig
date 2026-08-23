@@ -325,7 +325,7 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_SAFETY_BAUD_RATE
             int "Safety link baud rate"
-            default 19200
+            default 9600
             help
                 Optocouplers, not a line driver -- the TCMT1109's switching
                 time is the limit here, so don't push this far without
@@ -340,7 +340,10 @@ menu "KilnCtrl Hardware Configuration"
                   115200 -- zero frames received, ever
                    57600 -- zero frames received, ever
                    38400 -- about 80% received (53 of 66), errors climbing
-                   19200 -- every frame received (20 of 20), errors static
+                   19200 -- clean over a short window, but over a longer one
+                            received lagged sent (107 of 118, then 117 of
+                            134): about 10% of frames still lost
+                    9600 -- received tracks sent one for one over minutes
 
                 Static GPIO high/low tests pass at any rate, which is what
                 made this so misleading: the opto path carries DC perfectly
