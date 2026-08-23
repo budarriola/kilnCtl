@@ -112,7 +112,23 @@
 // and link_task_handle_raw_frame() puts a same-sized `unstuffed[]` buffer on
 // its own stack frame -- two ~530-byte buffers plus the usual call-depth
 // margin no longer comfortably fits configMINIMAL_STACK_SIZE alone.
-#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 3)
+//
+// Bumped again 2026-08-23, from *3 to *6, after *3 overflowed on hardware:
+// core 0 was found parked in vApplicationStackOverflowHook() with
+// pcTaskName = "link_task", one FreeRTOS tick after the scheduler started.
+// Because that hook halts with interrupts disabled (main.c, deliberately),
+// the whole system stopped there: xTickCount froze at 1, no other task ever
+// ran, and the un-fed hardware watchdog rebooted the board about a second
+// later, over and over. Every downstream symptom -- "core 1 never runs a
+// task", "the isolated UART link never carries a frame", "the board is in a
+// reset loop" -- was this one overflow.
+//
+// Measure before trimming this: link_task_handle_raw_frame()'s worst-case
+// chain nests unstuffed[~520] + a handler's payload[] + link_send_frame()'s
+// raw[~259] and stuffed[~520] in one call path, so the true peak is only
+// reachable by a full-size UPDATE_DATA frame, not by the boot-time TX that
+// happened to trip it first.
+#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 6)
 // Bounded wait, not a blocking read: this task also owns the 500 ms TX
 // cadence and must check in with watchdog_task, so it polls uart_owner's RX
 // ring on a short period rather than blocking on a queue receive.
