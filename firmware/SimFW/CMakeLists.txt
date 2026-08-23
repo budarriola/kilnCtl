@@ -240,6 +240,15 @@ target_link_libraries(SimFW PRIVATE
     hardware_dma
     hardware_pio
     hardware_irq
+    # simfw_fatal.c's cross-core halt claims a dedicated hardware timer alarm
+    # (hardware_alarm_claim_unused()/hardware_alarm_set_callback()/
+    # hardware_alarm_force_irq()) instead of the SIO inter-core FIFO --
+    # see that file's "Cross-core halt" comment for why. pico_stdlib likely
+    # pulls hardware_timer in transitively already (busy_wait_ms() has always
+    # used it), but this is now a direct dependency, so it is listed
+    # explicitly rather than relying on that transitive link surviving future
+    # refactors.
+    hardware_timer
     pico_multicore
     pico_unique_id
     # pico_bootrom's actual implementation (bootrom.c, the ROM function

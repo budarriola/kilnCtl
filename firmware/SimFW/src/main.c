@@ -294,24 +294,19 @@ int main(void)
     // so the fixture cannot keep answering USB/telemetry as if healthy while
     // one bus is silently dead. Core 0 is the only core running at this
     // point in boot (the FreeRTOS RP2040 SMP port launches core 1 lazily,
-    // inside vTaskStartScheduler() below), so irq_set_exclusive_handler()/
-    // irq_set_enabled() are guaranteed to bind to core 0's own NVIC here.
+    // inside vTaskStartScheduler() below), so the alarm callback installed
+    // below is guaranteed to bind to core 0's own vtable/NVIC here.
     simfw_fatal_install_cross_core_halt();
-    printf("[boot] cross-core halt handler installed (SIO_IRQ_PROC0)\r\n");
+    printf("[boot] cross-core halt handler installed (hardware timer alarm)\r\n");
     fflush(stdout);
-    // Group 3 -- cross-core halt handler installed. NOTE: this is also the
-    // point past which a KNOWN, SEPARATE, ALREADY-CONFIRMED bug lies in wait
-    // several stages later: the FreeRTOS RP2040 SMP port's own
-    // xPortStartSchedulerOnCore() (FreeRTOS-Kernel's
-    // portable/ThirdParty/GCC/RP2040/port.c) installs a SECOND exclusive
-    // handler on this same SIO_IRQ_PROC0 via irq_set_exclusive_handler() when
-    // vTaskStartScheduler() runs, and pico-sdk's irq_set_exclusive_handler()
-    // hard_assert()s (hardware_irq/irq.c) if the vtable slot already holds a
-    // different handler than the one being installed -- which it will,
-    // because the line above just put a different one there. That failure
-    // is not this investigation's target (it can only fire AFTER group 14,
-    // once every _start() call below has already returned), so it is
-    // reported, not fixed, here -- see this pass's investigation notes.
+    // Group 3 -- cross-core halt handler installed. An earlier version of
+    // this mechanism used the SIO inter-core FIFO and its SIO_IRQ_PROC0
+    // handler, which was guaranteed to hard_assert() at vTaskStartScheduler()
+    // below (the FreeRTOS RP2040 SMP port installs its OWN exclusive handler
+    // on that same vector, and also drains that FIFO itself). It now claims a
+    // dedicated hardware timer alarm instead -- see simfw_fatal.c for the
+    // full rationale -- so nothing about this call site conflicts with the
+    // scheduler start any more.
     simfw_boot_beacon(3);
 
     // Boot-stage beacon init -- see simfw_boot_beacon()'s comment above.

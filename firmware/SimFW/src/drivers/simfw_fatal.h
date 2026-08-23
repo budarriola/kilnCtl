@@ -42,35 +42,39 @@
 // enumerated, telemetry keeps sending, cmd_task keeps answering, all while
 // the affected bus is permanently dead. For a fixture whose entire value is
 // being trustworthy at a bench, "give partial, stale answers forever" is a
-// worse failure mode than "go dark", so this function pushes a sentinel over
-// the RP2040 SIO inter-core FIFO (pico_multicore) before entering its own
-// halt; simfw_fatal_install_cross_core_halt() (called once from main(), core
-// 0, before vTaskStartScheduler()) installs the SIO_IRQ_PROC0 handler that
-// receives it and halts core 0 too -- interrupts disabled, spin forever, no
-// scheduler tick, no task runs again. The net effect: ANY simfw_fatal() call,
-// on either core, takes the WHOLE board down, not just the calling core. See
-// simfw_fatal.c for why a true halt was chosen over a "core 0 refuses to
-// report healthy" flag: the LED this function already drives solid-on is the
-// bench-visible "do not trust this fixture" signal; a half-alive board that
-// still answers protocol traffic (even truthfully) undermines that signal
-// more than it helps a remote operator, and a bench operator relies on the
-// LED, not on parsing telemetry, in the no-debugger case this file exists
-// for. Only the core-1-originated direction is wired up (no core-0-side
-// caller exists today -- ct_wave_i2s.c's claim, like the now-deleted
-// ct_wave_pwm.c's before it, runs pre-scheduler, so a fatal there halts
-// core 0 before core 1 even starts): a future simfw_fatal()
-// call from a core-0 task body would need the mirror (a SIO_IRQ_PROC1
-// handler installed from code that actually runs on core 1) added at that
-// time.
+// worse failure mode than "go dark", so this function forces a dedicated RP2040
+// hardware timer alarm before entering its own halt (simfw_fatal.c has the
+// full mechanism and why it is NOT the SIO inter-core FIFO/IRQ -- that
+// collides with, and was actively drained by, FreeRTOS-Kernel's own RP2040
+// SMP port); simfw_fatal_install_cross_core_halt() (called once from
+// main(), core 0, before vTaskStartScheduler()) installs the alarm callback
+// that receives it and halts core 0 too -- interrupts disabled, spin
+// forever, no scheduler tick, no task runs again. The net effect: ANY
+// simfw_fatal() call, on either core, takes the WHOLE board down, not just
+// the calling core. See simfw_fatal.c for why a true halt was chosen over a
+// "core 0 refuses to report healthy" flag: the LED this function already
+// drives solid-on is the bench-visible "do not trust this fixture" signal; a
+// half-alive board that still answers protocol traffic (even truthfully)
+// undermines that signal more than it helps a remote operator, and a bench
+// operator relies on the LED, not on parsing telemetry, in the no-debugger
+// case this file exists for. Only the core-1-originated direction is wired
+// up (no core-0-side caller exists today -- ct_wave_i2s.c's claim, like the
+// now-deleted ct_wave_pwm.c's before it, runs pre-scheduler, so a fatal
+// there halts core 0 before core 1 even starts): a future simfw_fatal() call
+// from a core-0 task body would need the mirror (a second alarm, or the same
+// one with core 1 also installing a callback for it, from code that
+// actually runs on core 1) added at that time.
 void simfw_fatal(const char *subsystem, const char *reason_fmt, ...)
     __attribute__((noreturn, format(printf, 2, 3)));
 
-// Installs the SIO_IRQ_PROC0 handler that lets simfw_fatal() halt core 0 in
-// response to a fatal raised on core 1 -- see simfw_fatal()'s cross-core-halt
-// comment above. MUST be called from core 0, before vTaskStartScheduler()
-// (main.c does this once, early in main()): irq_set_exclusive_handler()/
-// irq_set_enabled() bind to whichever core calls them, and core 0 is the only
-// core running at that point in boot.
+// Installs the hardware-timer-alarm callback that lets simfw_fatal() halt
+// core 0 in response to a fatal raised on core 1 -- see simfw_fatal()'s
+// cross-core-halt comment above, and simfw_fatal.c for why this claims a
+// dedicated RP2040 alarm instead of the SIO inter-core FIFO/IRQ. MUST be
+// called from core 0, before vTaskStartScheduler() (main.c does this once,
+// early in main()): hardware_alarm_set_callback() installs into whichever
+// core's own vtable calls it, and core 0 is the only core running at that
+// point in boot.
 void simfw_fatal_install_cross_core_halt(void);
 
 #endif // SIMFW_FATAL_H
