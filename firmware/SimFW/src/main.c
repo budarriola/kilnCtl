@@ -170,7 +170,17 @@ void vApplicationMallocFailedHook(void)
 #define SIMFW_BOOT_BEACON_SUBGROUP_GAP_MS 500u  // between the long sub-group and the short sub-group, only emitted when both are non-empty
 #define SIMFW_BOOT_BEACON_GROUP_GAP_MS    1200u // long dark gap between stage numbers -- lets a human count flashes reliably
 #define SIMFW_BOOT_BEACON_STAGE_COUNT     14u   // highest stage number main() ever emits -- see the two comment blocks above main()'s SIMFW_BOOT_STAGE calls for what each number means; docs/BENCH_RUNBOOK.md section 1.3 has the same table
-#define SIMFW_BOOT_BEACON_REPLAY_COUNT    3u    // extra full 1..14 replays once boot genuinely finishes, purely so a human can recount without needing a fresh power cycle -- see main()'s comment just above vTaskStartScheduler()
+// Extra full 1..14 replays once boot genuinely finishes, purely so a human
+// can recount without needing a fresh power cycle -- see main()'s comment
+// just above vTaskStartScheduler(). ZERO by default since 2026-08-23: one
+// full 1..14 pass costs ~39.5 s at the timings above, so the original 3
+// replays put ~158 s between reset and vTaskStartScheduler(). That is not
+// just slow, it actively misleads -- during the bench debug pass it made a
+// healthy board look hung, and it silently truncated every console capture
+// window that was sized for a normal boot. Raise this only for a deliberate
+// LED-only bisect on a board whose USB and UART are both dead, and put it
+// back to 0 afterwards.
+#define SIMFW_BOOT_BEACON_REPLAY_COUNT    0u
 
 static void simfw_boot_beacon(uint32_t stage_number)
 {
@@ -408,6 +418,7 @@ int main(void)
     // scheduler at all) or re-running any of the real boot work above a
     // second time (which would double-create tasks and double-claim DMA/PIO
     // resources).
+#if SIMFW_BOOT_BEACON_REPLAY_COUNT > 0u
     printf("[boot] all 14 stages reached -- replaying beacon sequence %u more time(s) before vTaskStartScheduler()\r\n",
            SIMFW_BOOT_BEACON_REPLAY_COUNT);
     fflush(stdout);
@@ -416,6 +427,10 @@ int main(void)
             simfw_boot_beacon(stage);
         }
     }
+#else
+    printf("[boot] all 14 stages reached (beacon replay disabled)\r\n");
+    fflush(stdout);
+#endif
 
     printf("[boot] all tasks started, calling vTaskStartScheduler()\r\n");
     fflush(stdout);
