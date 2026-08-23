@@ -21,7 +21,7 @@
 # unrelated CRCs of their own (different polynomial, different purpose:
 # file/image integrity, not link framing) and would be pure noise.
 #
-# KNOWN PRE-EXISTING DEBT (as of 2026-08-18, updated same day):
+# KNOWN PRE-EXISTING DEBT (as of 2026-08-18, updated 2026-08-23):
 # firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c has been migrated
 # to delegate its CRC/framing to kilnlink_crc16_ccitt_false/kilnlink_stuff
 # (proven byte-identical against the old local implementation by
@@ -29,20 +29,18 @@
 # "KilnFW delegating framing and CRC" item, now done) and no longer matches
 # the 0x1021 polynomial grep, so it has been removed from the allowlist below.
 #
-# firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c was
-# NOT migrated in that pass: it is a stale fork of the KilnFW file (missing
-# BROADCAST handling, the retry-log rate limiter, and the register_task retry
-# loop the current KilnFW file has), not a literal mirror, so treating it as
-# "the same file, done twice" would be wrong. It stays allowlisted below
-# until it is either resynced with KilnFW's file or migrated on its own
-# terms.
+# firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c (a
+# stale fork of the KilnFW file, never migrated) and its pc_tools mirror
+# firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py used to
+# be allowlisted here too. Both are gone: `firmware/UnitTestFw` was decommissioned
+# and deleted wholesale (SimFW is its replacement -- see
+# firmware/SimFW/docs/DESIGN_NOTES.md sec 12), so their grep hits disappeared
+# with the files rather than through a CRC migration. Their allowlist entries
+# are removed below per this script's own rule: an allowlist entry that no
+# longer has a matching file is dead weight.
 #
-# Two duplicates remain allowlisted:
-#   - firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c
-#     (stale fork of the now-migrated KilnFW file, used for host unit tests --
-#     see note above)
-#   - tools/PcTools/src/kilnctrl/protocol.py and its UnitTestFw mirror
-#     firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py
+# One duplicate remains allowlisted:
+#   - tools/PcTools/src/kilnctrl/protocol.py
 #     (a deliberate, documented pure-Python port -- see its own docstring,
 #     "Bit-for-bit port of crc16_ccitt_false() in uart_protocol.c" -- since
 #     pc_tools can't link a C library; tracked by the "pc_tools consuming
@@ -52,15 +50,15 @@
 # debt today. Making it fail loudly right now would just be a second,
 # redundant way of saying what ROADMAP.md M2 already says explicitly, and
 # would leave the script permanently red (and therefore ignorable) until
-# two unrelated, larger migration items land. Instead the known files are
-# an explicit allowlist below, so:
+# that one remaining item lands. Instead the known file is an explicit
+# allowlist below, so:
 #   - this check PASSES today, and stays wired to CI-able ahead of time
-#   - it FAILS the moment anyone adds a *fifth* file matching the CRC
+#   - it FAILS the moment anyone adds a *second* file matching the CRC
 #     polynomial, which is the actual failure mode this check exists to
 #     catch (an undetected, un-tracked new duplicate)
 #   - deleting an allowlist entry is required as part of finishing the
-#     migration items above, so the allowlist can't quietly go stale: once
-#     uart_protocol.c stops computing its own CRC, its grep hit disappears
+#     migration item above, so the allowlist can't quietly go stale: once
+#     protocol.py stops computing its own CRC, its grep hit disappears
 #     and the entry becomes dead weight that the next run of this reasoning
 #     would flag in review.
 #
@@ -81,9 +79,7 @@ $excludeDirs = @(
 # Known, already-tracked pre-migration duplicates (see header above).
 # Paths are relative to repo root, forward-slash, case-insensitive compare.
 $allowlist = @(
-    'firmware/UnitTestFw/UnitTest/App/drivers/espInterfaces/uart_protocol.c',
-    'tools/PcTools/src/kilnctrl/protocol.py',
-    'firmware/UnitTestFw/UnitTest/pc_tools/src/uart_control/protocol.py'
+    'tools/PcTools/src/kilnctrl/protocol.py'
 )
 
 $searchExtensions = @('*.c', '*.h', '*.cpp', '*.hpp', '*.py')
@@ -119,4 +115,5 @@ if ($violations.Count -gt 0) {
 
 Write-Host "Duplicate CRC check passed: no untracked CRC-16/CCITT-FALSE (0x1021) implementation outside firmware/CommonFW."
 Write-Host "  ($($allowlist.Count) known pre-migration duplicate(s) allowlisted -- see script header; tracked by ROADMAP.md M2)"
+
 exit 0

@@ -24,7 +24,6 @@
     { "name": "KilnFW", "path": "firmware/KilnFW" },
     { "name": "SaftyFW", "path": "firmware/SaftyFW" },
     { "name": "CommonFW", "path": "firmware/CommonFW" },
-    { "name": "UnitTestFw", "path": "firmware/UnitTestFw/UnitTest" },
     { "name": "PcTools", "path": "tools/PcTools" },
     { "name": "hardware", "path": "hardware" }
   ],
@@ -36,7 +35,6 @@
       "firmware/KilnFW": true,
       "firmware/SaftyFW": true,
       "firmware/CommonFW": true,
-      "firmware/UnitTestFw": true,
       "tools/PcTools": true,
       "hardware": true
     },

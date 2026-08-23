@@ -43,9 +43,6 @@ The generated files are **gitignored**, and the committed source is in
 | `templates/KilnFW.settings.json.in` | `firmware/KilnFW/.vscode/settings.json` |
 | `templates/KilnFW.c_cpp_properties.json.in` | `firmware/KilnFW/.vscode/c_cpp_properties.json` |
 | `templates/KilnFW.tasks.json.in` | `firmware/KilnFW/.vscode/tasks.json` |
-| `templates/UnitTestFw.settings.json.in` | `firmware/UnitTestFw/UnitTest/.vscode/settings.json` |
-| `templates/UnitTestFw.c_cpp_properties.json.in` | `firmware/UnitTestFw/UnitTest/.vscode/c_cpp_properties.json` |
-| `templates/UnitTestFwOuter.settings.json.in` | `firmware/UnitTestFw/.vscode/settings.json` |
 
 > **Edit the template, not the output.** The next setup run overwrites the
 > output without asking. This is the one foot-gun in the arrangement, which is

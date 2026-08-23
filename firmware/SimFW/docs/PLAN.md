@@ -31,9 +31,7 @@ thing:
 - **Genuinely hardware-gated — nothing below has ever touched real
   silicon:** the PIO SPI slave timing proof at 4 MHz (M-A's exit criterion —
   no Saleae capture exists, no fixture hardware has ever been built or
-  connected to a bench ESP32/Pico); the `UnitTestFw` decommission (§12 —
-  gated on SimFW's replacement link being *proven on real hardware*, so
-  `firmware/UnitTestFw/` still exists in the tree, untouched); the CT
+  connected to a bench ESP32/Pico); the CT
   calibration procedure (§10 M-D — `src/sim/ct_i2s_gen.c`'s amplitude
   mapping is currently an IDENTITY placeholder, explicitly marked
   `TODO(M-D calibration)`, not the real sweep-and-fit table -- the PIO
@@ -46,6 +44,12 @@ thing:
   against a real `KilnFW`+`SaftyFW` pair (a scenario existing and loading is
   not the same as it having ever executed against hardware — see §10's
   milestone table).
+
+**`UnitTestFw` is gone from the tree** (2026-08-23) — deleted wholesale
+(App, pc_tools, docs, embedded KiCad files) along with every stale
+reference, ahead of the M-B hardware-proof gate this used to describe, by
+explicit decision (SimFW is the replacement; not re-litigated). Extraction
+history in `DESIGN_NOTES.md` §12.
 
 **A fourth, software-only verification layer exists** —
 `firmware/SimFW/tools/virtual_simfw/` + `virtual_dut/` — that runs real
@@ -80,6 +84,11 @@ never `[x]`.
       failure paths (truncated args, range refusals, ownership refusals) stay
       silent by documented design; `tools/PcTools/src/kilnctrl` still only
       checks the transport ACK and would need updating to benefit.
+- [ ] **`hardware/UnitTestFixture/` deletion** — `firmware/UnitTestFw` (the
+      ESP32-S3 instrument bench firmware) was deleted 2026-08-23
+      (`DESIGN_NOTES.md` §12), but its embedded KiCad project,
+      `hardware/UnitTestFixture/`, was out of that change's scope and still
+      exists in the tree.
 
 ### 0.2 Hardware-gated (nothing here can progress without the fixture)
 
@@ -97,8 +106,6 @@ never `[x]`.
       explicit step in `docs/BENCH_RUNBOOK.md` rather than only a to-do
       here (`9c90d7b`). (§11 item 5)
 - [ ] **Verify every provisional GPIO assignment** in `HARDWARE.md`
-- [ ] **`UnitTestFw` decommission** — gated on proving the replacement link on
-      real hardware. (§12)
 - [ ] **Fixture hardware form factor** — breadboard vs a real
       `hardware/SimFixture/` board. Not answerable until M-E. (§11 item 6)
 
@@ -117,6 +124,10 @@ contents) rather than kept here — this plan only tracks what's left.
       stays an operator action.** Resolved by the SimFW scope boundary
       (physical-only: thermocouples, board I/O, relays, E-stop — never the
       UI, never a safety command) recorded in `DESIGN_NOTES.md` §1/§13.
+- [x] **`UnitTestFw` deleted** (2026-08-23) — the old ESP32-S3 instrument
+      bench tree removed wholesale, ahead of the hardware-proof gate this
+      item's plan originally called for, by explicit decision. History in
+      `DESIGN_NOTES.md` §12.
 
 ---
 
@@ -154,15 +165,15 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   task skeleton; CDC link speaking the extracted protocol; PING/VERSION/
   GET_CAPS; fresh `kilnsim` CLI talking to it.
   **Exit:** CLI round-trips against real hardware; CommonFW host tests green
-  under MSVC; **`UnitTestFw` decommission executed (§12)**.
+  under MSVC.
   **Status: PARTIALLY MET.** Extraction done (`benchproto` in `CommonFW`,
   spec in `BENCHPROTO.md`), CommonFW host tests green (18/18), task skeleton
   has real bodies throughout. **Not met:** no fixture exists to round-trip
   against — only host-side wire-format simulation has been exercised.
-  **Not met:** the `UnitTestFw` decommission — §12 step 2 ("prove the
-  replacement on real hardware") is exactly the hardware gate above, so
-  `firmware/UnitTestFw/` and `hardware/UnitTestFixture/` are both still in
-  the tree, untouched.
+  `firmware/UnitTestFw/` itself was deleted (2026-08-23, by explicit
+  decision, ahead of the "prove the replacement on real hardware" step this
+  milestone originally gated the deletion on — see `DESIGN_NOTES.md` §12);
+  `hardware/UnitTestFixture/` is untouched and out of this deletion's scope.
 - [~] **M-C — Thermal model + TC emulation wired.** 3+1 channels, model-driven
   temps, presets, time-scale, MODEL/MANUAL modes.
   **Exit:** host-test suite green incl. golden traces; on the bench, real
@@ -304,34 +315,6 @@ don't break.)
 
 ---
 
-## 12. `UnitTestFw` decommission plan
-
-`UnitTestFw` (the ESP32-S3 instrument bench) was a first attempt and is being
-thrown away (decided). Order matters — the protocol lives only there today.
-Extraction history and rationale: `DESIGN_NOTES.md` §12.
-
-1. [x] **Extract first (M-B)** — done; `benchproto` lives in `CommonFW`.
-2. [ ] **Prove the replacement:** SimFW's CDC link and the fresh `kilnsim` PC
-   link layer both speak the `CommonFW`-hosted protocol, PING/VERSION green
-   on real hardware. The independent Python implementation doubles as the
-   extraction's cross-check.
-3. [ ] **Delete, one commit, no stragglers:**
-   - `firmware/UnitTestFw/` entirely — App, pc_tools, docs, build trees, and
-     the embedded `UnitTestFixture.kicad_*` files plus
-     `UnitTestFixture-backups/`.
-   - `hardware/UnitTestFixture/` entirely.
-4. [ ] **Sweep the references in the same commit** (grep hit list as of
-   2026-08-20): `CLAUDE.md`, `README.md`, `ROADMAP.md`, `docs/SETUP.md`,
-   `docs/REPO_LAYOUT.md`, `kilnCtl.code-workspace` (folder/tasks entries),
-   `tools/setup.ps1`, `.gitignore`, and
-   `tools/check_no_duplicate_crc.ps1` — its allowlist entry for
-   `UnitTestFw`'s `uart_protocol.c` dies with the file (per that script's own
-   rule: deleting an allowlist entry is part of finishing a migration).
-   Re-grep for `UnitTestFw|UnitTestFixture` before committing.
-5. [x] **No tag needed** — git history is the archive.
-
----
-
 ## 13. Testing strategy
 
 Originally three layers, cheapest first; a fourth, unplanned layer now sits
@@ -388,6 +371,5 @@ written, same keep-it-current rule as `SaftyFW/docs/HARDWARE.md`.
 | J6 pinout traced wrong (reverse-order trap) | Possible damage on first plug-in | §11 item 1 resolved on paper *and* continuity-checked at bring-up step 5–6; series resistors on fixture bus-A lines for the first plug-in |
 | Ground strap through the fixture defeats isolation | Isolation-dependent behavior untestable; masks real design errors | §3.5 discipline (`DESIGN_NOTES.md`); bring-up step 5 explicit continuity check; standard library runs jumper-out |
 | CT amplitude calibration drifts / transformer nonlinearity | Current-based guards tested against wrong magnitudes | Calibration stored per channel with date; re-cal procedure in `kilnsim` (M-D); validity flag in reports if cal older than N days |
-| Protocol extraction stalls (stale-fork cleanup balloons) | M-B late, UnitTestFw lingers | Scope extraction to exactly what SimFW needs; the deletion deadline is the forcing function |
 | Pin budget overruns during layout | Redesign churn | Documented 3-pin fallback (`DESIGN_NOTES.md` §3.6) reserved before it is needed |
 | Fixture bugs masquerade as DUT bugs | Wasted debugging, false confidence | Shadow-truth in every reply, validity flags, selftest mode, instrumentation counters never silent |

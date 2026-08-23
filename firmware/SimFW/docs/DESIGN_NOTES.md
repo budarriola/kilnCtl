@@ -1300,8 +1300,18 @@ provenance/history, not the source of truth for current guard status.
 ## 12. `UnitTestFw` extraction history
 
 `UnitTestFw` (the ESP32-S3 instrument bench) was a first attempt superseded
-by SimFW, and is being decommissioned — decision and full remaining-step
-list in `PLAN.md` §12. The history worth keeping:
+by SimFW. **Decommissioned and deleted wholesale 2026-08-23** — `firmware/UnitTestFw`
+(App, pc_tools, docs, embedded KiCad project files) removed from the repo
+along with every stale reference (`CLAUDE.md`, `README.md`, `ROADMAP.md`,
+`docs/SETUP.md`, `kilnCtl.code-workspace`, `tools/setup.ps1`, `.gitignore`,
+`tools/check_no_duplicate_crc.ps1`'s allowlist, and this project's own
+`PLAN.md`/`README.md`), by explicit decision, ahead of the M-B
+hardware-proof step ("prove the replacement link on real hardware") the
+original decommission plan gated the deletion on — see `PLAN.md`'s M-B
+status for the honest accounting of what's still hardware-gated.
+`hardware/UnitTestFixture/` (the embedded KiCad project) was out of scope
+for that deletion and still exists — tracked in `PLAN.md` §0.1. The history
+worth keeping:
 
 - The protocol core — framing, CRC, reliability/retry/dedup, task
   registration — was extracted from `UnitTestFw/UnitTest/App/drivers/` into
@@ -1319,7 +1329,7 @@ list in `PLAN.md` §12. The history worth keeping:
   serves as the extraction's independent second implementation (the
   prove-it-twice pattern the kilnlink codecs used).
 - No tag was made for the pre-deletion state — git history is the archive,
-  and the eventual deletion commit message names `PLAN.md` §12 as rationale.
+  and the deletion commit message names this section as rationale.
 
 ---
 

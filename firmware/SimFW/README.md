@@ -20,7 +20,7 @@ test library exists as real YAML in `scenarios/`, and a fresh `kilnsim` PC
 toolset (CLI/GUI/MCP server) lives in `tools/PcTools/src/kilnsim/`, built
 against `benchproto` — a new hardened protocol library extracted into
 `firmware/CommonFW` from `UnitTestFw`'s prototype (see
-[`docs/PLAN.md`](docs/PLAN.md) section 12).
+[`docs/DESIGN_NOTES.md`](docs/DESIGN_NOTES.md) section 12).
 
 **What that status does *not* mean: nothing here has been hardware-verified.**
 No fixture hardware has ever been built or connected to a bench ESP32/Pico.
@@ -100,10 +100,6 @@ treatment (e.g. `tools/spi_test_master`).
 
 Not to be confused with:
 
-- `firmware/UnitTestFw` — the ESP32-S3 instrument bench (DAC / AD9833 / OLED /
-  PCF8575). A first attempt, **slated for deletion** once its wire protocol
-  is lifted into `CommonFW` and SimFW's link is proven — see
-  [`docs/PLAN.md`](docs/PLAN.md) section 12.
 - `firmware/SaftyFW` — the RP2040 **on** the main board (A1, safety
   processor). SimFW is a different Pico that lives on the bench and talks *to*
   the main board from outside.

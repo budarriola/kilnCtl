@@ -59,9 +59,6 @@ nul
 /firmware/KilnFW/.vscode/settings.json
 /firmware/KilnFW/.vscode/c_cpp_properties.json
 /firmware/KilnFW/.vscode/tasks.json
-/firmware/UnitTestFw/.vscode/settings.json
-/firmware/UnitTestFw/UnitTest/.vscode/settings.json
-/firmware/UnitTestFw/UnitTest/.vscode/c_cpp_properties.json
 
 # Claude Code creates a git worktree per subagent that runs with worktree
 # isolation. They are scratch checkouts, not project content -- four of them were

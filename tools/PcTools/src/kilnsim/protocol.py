@@ -8,11 +8,11 @@ fields), plus the trigger/duration/repeat spec in section 7.2 that
 ``scenario.compile_faults`` targets.
 
 Everything in this module is shape, not wire bytes. The actual byte-level
-encoding is SimFW's job once its protocol core is lifted from
-``firmware/UnitTestFw`` into ``firmware/CommonFW`` (DESIGN_NOTES.md sec 4.4, PLAN.md sec 12) --
-that happens in :mod:`kilnsim.link`, behind :class:`~kilnsim.link.SimLink`.
-Nothing in this module should need to change when that lift lands; only the
-encoder/decoder in ``link.py`` does.
+encoding is SimFW's job; its protocol core was lifted from
+``firmware/UnitTestFw`` into ``firmware/CommonFW`` as ``benchproto``
+(DESIGN_NOTES.md sec 4.4/12) -- that lives in :mod:`kilnsim.link`, behind
+:class:`~kilnsim.link.SimLink`. Nothing in this module needs to change for
+that; only the encoder/decoder in ``link.py`` cares about wire bytes.
 
 Command group / command numbering below is provisional (DESIGN_NOTES.md sec 5.2:
 "byte layouts frozen in PROTOCOL.md at M-B") -- it exists so

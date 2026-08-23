@@ -194,9 +194,6 @@ Expand-Template 'templates/mcp.json.in'                          '.mcp.json'    
 Expand-Template 'templates/KilnFW.settings.json.in'              'firmware/KilnFW/.vscode/settings.json'                       $map
 Expand-Template 'templates/KilnFW.c_cpp_properties.json.in'      'firmware/KilnFW/.vscode/c_cpp_properties.json'               $map
 Expand-Template 'templates/KilnFW.tasks.json.in'                 'firmware/KilnFW/.vscode/tasks.json'                          $map
-Expand-Template 'templates/UnitTestFw.settings.json.in'          'firmware/UnitTestFw/UnitTest/.vscode/settings.json'          $map
-Expand-Template 'templates/UnitTestFw.c_cpp_properties.json.in'  'firmware/UnitTestFw/UnitTest/.vscode/c_cpp_properties.json'  $map
-Expand-Template 'templates/UnitTestFwOuter.settings.json.in'     'firmware/UnitTestFw/.vscode/settings.json'                   $map
 
 # ------------------------------------------------------------- submodules ----
 

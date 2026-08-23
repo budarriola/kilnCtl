@@ -26,7 +26,7 @@ for the rationale and the move history.
 hardware/   KiCad projects (mainBoard, ThermocoupleBoard, SaftyThermocoupleBoard,
             UnitTestFixture), shared lib/, datasheets/, simulation/, sourcing/
 firmware/   KilnFW (ESP32-S3), SaftyFW (RP2040), CommonFW (shared link code),
-            UnitTestFw
+            SimFW (RP2040 bench-test fixture)
 tools/      PcTools (GUI + MCP for BOTH processors)
 docs/       System-level documents spanning both halves
 ```

@@ -369,10 +369,14 @@ hardware-trip rows, which is why it earns a milestone here.
       particular: M-A's SPI-timing exit criterion (Saleae capture, ≥10k
       transactions, zero underruns) is unmet and is the single biggest
       unproven risk; CT amplitude calibration is still an identity placeholder
-      pending the real sweep-fit-store procedure (M-D); the `UnitTestFw`
-      decommission is only half done (protocol extracted, hardware proof-out
-      not done, old tree still present); none of the 19 scenarios has run
-      against a real `KilnFW`+`SaftyFW` pair
+      pending the real sweep-fit-store procedure (M-D); none of the 19
+      scenarios has run against a real `KilnFW`+`SaftyFW` pair
+- [x] **`UnitTestFw` deleted** (2026-08-23) — the old ESP32-S3 instrument
+      bench tree (App, pc_tools, docs, embedded KiCad files) removed from the
+      repo along with every stale reference, ahead of the M-B hardware-proof
+      gate `docs/PLAN.md` originally called for, by explicit decision
+      (SimFW is the replacement; not re-litigated). Detail in
+      `firmware/SimFW/docs/DESIGN_NOTES.md` §12
 - [ ] **Dependency this milestone exists to unblock**: `GUARD_TEST_MATRIX.md`
       §3's hardware-trip rows (safe-state power-on, sensor open-circuit,
       current-mapping commissioning, every enabled guard's real trip) stay
