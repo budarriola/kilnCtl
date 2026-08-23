@@ -25,7 +25,6 @@
 #include "task_priorities.h"
 
 #define WATCHDOG_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
-#define WATCHDOG_HW_TIMEOUT_MS      1000
 
 // Every registered task's bit, per docs/ARCHITECTURE.md section 4.
 #define WATCHDOG_CHECKIN_ALL_MASK   ((1u << WATCHDOG_CHECKIN_COUNT) - 1u)
@@ -122,10 +121,17 @@ bool watchdog_task_start(void)
     gpio_set_dir(SAFTYFW_PIN_HEARTBEAT_LED, GPIO_OUT);
     gpio_put(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state);
 
-    // pause_on_debug = true: hardcoded for now, no release/debug distinction
-    // in this build yet. TODO: flip to false for a release build --
-    // ARCHITECTURE.md section 8, watchdog_enable(ms, pause_on_debug).
-    watchdog_enable(WATCHDOG_HW_TIMEOUT_MS, true);
+    // The hardware watchdog is armed exactly once, by main() step 3, using
+    // SAFTYFW_WATCHDOG_TIMEOUT_MS. This function deliberately does NOT arm it.
+    //
+    // It used to, with its own hardcoded WATCHDOG_HW_TIMEOUT_MS, and that was
+    // a real bug: watchdog_task_start() runs on core 0 after main() has
+    // already armed the watchdog, so pico-sdk's watchdog_enable() reprogrammed
+    // load/ctrl and silently overrode main()'s timeout. Editing
+    // SAFTYFW_WATCHDOG_TIMEOUT_MS then had no effect on hardware at all --
+    // the running chip kept showing a 1 s period no matter what main() asked
+    // for, which cost a bench session before the second call was found.
+    // Feeding the watchdog is this task's job; arming it is not.
 
     BaseType_t ok = xTaskCreate(watchdog_task_fn, "watchdog_task", WATCHDOG_TASK_STACK_WORDS, NULL,
                                  SAFTYFW_PRIO_WATCHDOG_TASK, &s_task_handle);
