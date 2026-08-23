@@ -1519,11 +1519,19 @@ static esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
      * (n^2 Lambda values plus the zone map, or a refusal reason). */
     char json[64 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 96
               + 128 + MAX31856_CHANNEL_COUNT * MAX31856_CHANNEL_COUNT * 16];
+    /* Report the zones this board actually HAS, not the number of MAX31856
+     * channels the hardware could carry. These differ whenever an operator
+     * has declared fewer thermocouples than are wired (thermo_count=1 on a
+     * 3-channel board is the bench's normal state), and every zones_config_*
+     * getter already refuses an index >= thermo_count -- so the extra rows
+     * and columns were cells that could never become valid, rendered as a
+     * 3x3 grid of "not measured yet" on a kiln with one zone. */
+    const uint8_t zone_count = zones_config_get_thermo_count();
     size_t o = 0;
-    o += snprintf(json + o, sizeof(json) - o, "{\"zone_count\":%u,\"cells\":[", (unsigned)MAX31856_CHANNEL_COUNT);
+    o += snprintf(json + o, sizeof(json) - o, "{\"zone_count\":%u,\"cells\":[", (unsigned)zone_count);
     bool first = true;
-    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-        for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
+    for (uint8_t i = 0; i < zone_count; i++) {
+        for (uint8_t j = 0; j < zone_count; j++) {
             const autotune_coupling_cell_t *c = &m.cell[i][j];
             if (!first) o += snprintf(json + o, sizeof(json) - o, ",");
             first = false;
@@ -1575,8 +1583,18 @@ static esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
         }
         o += snprintf(json + o, sizeof(json) - o, "]}");
     } else {
+        /* An RGA describes how n>=2 control loops interact. On a board with
+         * fewer than two declared zones there is nothing to interact, so
+         * autotune_engine_compute_rga()'s generic "no 2 zones yet have every
+         * cross-gain between them measured" reads as "keep tuning and it
+         * will appear" -- it never will. Say which of the two it is. */
         char rga_reason[sizeof(rga.invalid_reason) * 2 + 1];
-        json_escape(rga.invalid_reason, rga_reason, sizeof(rga_reason));
+        if (zone_count < 2) {
+            json_escape("this kiln has fewer than 2 zones -- an RGA needs at least 2 interacting zones",
+                        rga_reason, sizeof(rga_reason));
+        } else {
+            json_escape(rga.invalid_reason, rga_reason, sizeof(rga_reason));
+        }
         o += snprintf(json + o, sizeof(json) - o, ",\"rga\":{\"available\":false,\"code\":%d,\"reason\":\"%s\"}",
                       (int)rga.status, rga_reason);
     }

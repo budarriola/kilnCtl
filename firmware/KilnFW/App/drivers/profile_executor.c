@@ -1872,6 +1872,27 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
         return false;
     }
+    /* Refuse at the door when heat authority is already blocked -- the same
+     * check, in the same words, autotune_engine.c's begin_run_locked() makes.
+     * Without it a start on a board whose safety link is down answered
+     * {"ok":true}, entered RUNNING, and was killed ~1s later by the
+     * watchdog's "safety processor link silent for >=30000ms, firing
+     * aborted", leaving a latched fault the operator then had to Stop before
+     * anything else would start. Reporting success for a firing that cannot
+     * heat is the failure this refuses to repeat; the message stays under
+     * the char[128] dashboard_http.c's start handler passes. */
+    {
+        uint32_t sources = 0;
+        if (relay_authority_on_blocked(s_exec.safety, &sources)) {
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "heat is blocked (fault sources 0x%02X, usually the safety link down) -- "
+                         "a firing cannot start",
+                         (unsigned)sources);
+            }
+            return false;
+        }
+    }
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if ((p.zone_mask & (1u << zi)) && autotune_engine_is_active_on_zone(zi)) {
             if (err_msg) {
