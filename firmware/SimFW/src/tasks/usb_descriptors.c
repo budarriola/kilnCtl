@@ -1,11 +1,15 @@
 // usb_descriptors.c -- TinyUSB device/config/string descriptor callbacks for
-// SimFW's single CDC interface. Part of usb_owner's exclusive USB domain
-// (see usb_owner.h's header comment): this file and usb_owner.c are the only
-// two translation units that include tusb.h. Split out from usb_owner.c
-// itself only because TinyUSB's descriptor callbacks are conventionally
-// their own file (every example under lib/tinyusb/examples/device/ does the
-// same) -- there is no functional reason cmd_task.c or any other task file
-// would ever need to touch this.
+// SimFW's dual-CDC composite device (2026-08-23: a second CDC added
+// alongside the original benchproto-protocol CDC, dedicated to console/log
+// output -- see this file's "Configuration Descriptor" section below for the
+// two-IAD layout and usb_owner.c's header comment for why the two streams
+// must never share one wire). Part of usb_owner's exclusive USB domain (see
+// usb_owner.h's header comment): this file and usb_owner.c are the only two
+// translation units that include tusb.h. Split out from usb_owner.c itself
+// only because TinyUSB's descriptor callbacks are conventionally their own
+// file (every example under lib/tinyusb/examples/device/ does the same) --
+// there is no functional reason cmd_task.c or any other task file would ever
+// need to touch this.
 //
 // Modeled on lib/tinyusb/examples/device/cdc_msc_freertos/src/usb_descriptors.c
 // (see tusb_config.h's header comment for why that example is the closest
@@ -86,27 +90,79 @@ uint8_t const *tud_descriptor_device_cb(void)
 }
 
 //--------------------------------------------------------------------+
+// String Descriptor indices
+//--------------------------------------------------------------------+
+// Declared here, ahead of the Configuration Descriptor below, because
+// TUD_CDC_DESCRIPTOR()'s `_stridx` argument needs STRID_CDC0_INTERFACE /
+// STRID_CDC1_INTERFACE at that point in the file. The actual string TABLE
+// (string_desc_arr[]) stays down in the "String Descriptors" section with
+// tud_descriptor_string_cb() -- only the index enum needs to move.
+enum {
+    STRID_LANGID = 0,
+    STRID_MANUFACTURER,
+    STRID_PRODUCT,
+    STRID_SERIAL,
+    STRID_CDC0_INTERFACE, // "SimFW Control" -- the benchproto protocol CDC
+    STRID_CDC1_INTERFACE, // "SimFW Console" -- the log/console CDC
+};
+
+//--------------------------------------------------------------------+
 // Configuration Descriptor
 //--------------------------------------------------------------------+
-
+// Two CDC functions, each its own IAD (Interface Association Descriptor),
+// four USB interfaces total -- this is what a composite device needs for
+// Windows to bind both CDC-ACM instances at once. TinyUSB's own
+// TUD_CDC_DESCRIPTOR() macro already emits one IAD per invocation (the
+// 8-byte "Interface Associate" block ahead of that function's own
+// control+data interface pair), so two invocations back to back, one per
+// CDC function, is the entire IAD story here -- there is no separate IAD
+// table to hand-assemble.
+//
+// CDC0 = the benchproto PROTOCOL link, interfaces 0 (control) and 1 (data)
+//        -- byte-for-byte the same wire behavior the single-CDC build had
+//        (usb_owner.c's SLIP/benchproto framing over `tud_cdc_n_*(0, ...)`,
+//        which is what plain `tud_cdc_*()` resolves to for CDC instance 0).
+// CDC1 = the CONSOLE sink, interfaces 2 (control) and 3 (data) -- mirrors
+//        printf() output that already goes to UART0 (usb_owner.c's
+//        usb_owner_console_write(), driven by drivers/console_sink.c's
+//        stdio_driver_t). Declared SECOND, deliberately: TinyUSB's CDC
+//        instance index (the `itf` argument tud_cdc_n_*()/
+//        tud_cdc_line_coding_cb()/tud_cdc_line_state_cb() all take) is
+//        assigned in config-descriptor declaration order, so "CDC0 is the
+//        protocol link" is enforced by this ordering, not by convention --
+//        see usb_owner.c's header comment on why the 1200-baud bootloader
+//        touch is gated on instance 0 only.
 enum {
-    ITF_NUM_CDC = 0,
-    ITF_NUM_CDC_DATA,
+    ITF_NUM_CDC0_CTRL = 0,
+    ITF_NUM_CDC0_DATA,
+    ITF_NUM_CDC1_CTRL,
+    ITF_NUM_CDC1_DATA,
     ITF_NUM_TOTAL,
 };
 
-#define EPNUM_CDC_NOTIF 0x81u
-#define EPNUM_CDC_OUT   0x02u
-#define EPNUM_CDC_IN    0x82u
+// CDC0 (protocol) endpoints -- unchanged from the single-CDC build, so a
+// host-side capture/driver binding made against the old layout still lines
+// up for this function.
+#define EPNUM_CDC0_NOTIF 0x81u
+#define EPNUM_CDC0_OUT   0x02u
+#define EPNUM_CDC0_IN    0x82u
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
+// CDC1 (console) endpoints -- next free addresses. Full-speed bulk/interrupt
+// endpoints only (no isochronous), well inside the RP2040 USB controller's
+// endpoint budget alongside CDC0's three above.
+#define EPNUM_CDC1_NOTIF 0x83u
+#define EPNUM_CDC1_OUT   0x04u
+#define EPNUM_CDC1_IN    0x84u
+
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_CDC_DESC_LEN)
 
 static uint8_t const desc_fs_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
 
     // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC0_CTRL, STRID_CDC0_INTERFACE, EPNUM_CDC0_NOTIF, 8, EPNUM_CDC0_OUT, EPNUM_CDC0_IN, 64),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC1_CTRL, STRID_CDC1_INTERFACE, EPNUM_CDC1_NOTIF, 8, EPNUM_CDC1_OUT, EPNUM_CDC1_IN, 64),
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
@@ -118,21 +174,23 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 //--------------------------------------------------------------------+
 // String Descriptors
 //--------------------------------------------------------------------+
-
-enum {
-    STRID_LANGID = 0,
-    STRID_MANUFACTURER,
-    STRID_PRODUCT,
-    STRID_SERIAL,
-    STRID_CDC_INTERFACE,
-};
+// STRID_* indices themselves are declared earlier (see that section's own
+// comment for why). Distinct, descriptive strings for the two CDC
+// interfaces matter for more than cosmetics: kilnsim's PC-side port
+// discovery (tools/PcTools/src/kilnsim/link.py's `list_protocol_ports()`)
+// reads these back (via pyserial's `interface`/`description`/`product`
+// fields, which mirror a USB interface's iInterface string on most OSes) to
+// tell the two same-VID/PID COM ports apart -- and a human staring at
+// Device Manager/`ls /dev/serial/by-id` gets the same disambiguation for
+// free.
 
 static char const *const string_desc_arr[] = {
     NULL,                      // 0: LANGID, handled specially below
     "kilnCtl",                 // 1: Manufacturer
     "SimFW Bench Fixture",     // 2: Product
     NULL,                      // 3: Serial -- filled from the RP2040's unique board id, see below
-    "SimFW Control",           // 4: CDC Interface
+    "SimFW Control",           // 4 (STRID_CDC0_INTERFACE): benchproto protocol CDC
+    "SimFW Console",           // 5 (STRID_CDC1_INTERFACE): log/console CDC
 };
 
 // RP2040's flash unique id is 8 bytes -> 16 hex chars, well under

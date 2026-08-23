@@ -33,6 +33,7 @@ $sources = @(
     (Join-Path $testDir "test_dut_power_domains.c"),
     (Join-Path $testDir "test_ct_i2s_gen.c"),
     (Join-Path $testDir "test_safe_reboot_logic.c"),
+    (Join-Path $testDir "test_usb_dual_cdc_logic.c"),
     (Join-Path $simDir "thermal_model.c"),
     (Join-Path $simDir "max31856_regs.c"),
     (Join-Path $simDir "max31856_resp_image.c"),

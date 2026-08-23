@@ -67,6 +67,7 @@ except ImportError:  # pragma: no cover - exercised implicitly by CI without pys
     serial = None
     _list_ports = None
 
+import re as _re
 import socket as _socket
 
 #: SimFW's claimed USB VID:PID -- Raspberry Pi's VID (0x2E8A, informal reuse,
@@ -78,6 +79,20 @@ import socket as _socket
 #: firmware/SimFW/docs/HARDWARE.md's "USB identity" section for the full
 #: reasoning and firmware/SimFW/src/tasks/usb_descriptors.c for where it's set.
 SIMFW_VID_PID = "2E8A:F00A"
+
+#: The two CDC interfaces' string descriptors (firmware/SimFW/src/tasks/
+#: usb_descriptors.c's STRID_CDC0_INTERFACE / STRID_CDC1_INTERFACE, added
+#: 2026-08-23 when the fixture grew a second CDC dedicated to console/log
+#: output). Both COM ports now share one VID:PID -- SIMFW_VID_PID alone no
+#: longer identifies WHICH port is the benchproto control link, so
+#: list_protocol_ports() below reads these back to disambiguate. pyserial
+#: mirrors a USB interface's iInterface string into a `ListPortInfo`'s
+#: `interface`/`description`/`product` fields on most backends (Linux reads
+#: it straight from sysfs; Windows composite-CDC friendly names commonly
+#: include it) -- see that function's own doc comment for the fallback chain
+#: when a given OS/backend doesn't expose it.
+SIMFW_CDC_INTERFACE_STRING_PROTOCOL = "SimFW Control"
+SIMFW_CDC_INTERFACE_STRING_CONSOLE = "SimFW Console"
 
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
@@ -534,26 +549,95 @@ class SerialSimLink(_FramedSimLink):
 
     # -- discovery -----------------------------------------------------------
     @staticmethod
-    def list_candidate_ports() -> list:
-        """Ports whose VID:PID matches :data:`SIMFW_VID_PID`."""
+    def _list_candidate_port_infos() -> list:
+        """Raw pyserial ``ListPortInfo`` objects whose VID:PID matches
+        :data:`SIMFW_VID_PID` -- both the protocol CDC and the console CDC
+        match this (they share one VID:PID; only the interface differs), so
+        this alone is exactly one fixture's worth of ports, not one port."""
         if _list_ports is None:
             raise SimLinkError("pyserial is not installed -- cannot enumerate serial ports")
-        out = []
-        for p in _list_ports.comports():
-            hwid = (p.hwid or "").upper()
-            if SIMFW_VID_PID in hwid:
-                out.append(p.device)
-        return out
+        return [p for p in _list_ports.comports() if SIMFW_VID_PID in (p.hwid or "").upper()]
+
+    @classmethod
+    def list_candidate_ports(cls) -> list:
+        """Device paths of every VID:PID match -- BOTH of a fixture's CDC
+        ports today (protocol and console), not just the one this link
+        actually wants. Kept for backward compatibility (existing callers,
+        tests) and for diagnostics ("what does this bench see at all"); a
+        link that wants to actually connect should use
+        :meth:`list_protocol_ports` instead, which picks out the one that is
+        actually the benchproto control link."""
+        return [p.device for p in cls._list_candidate_port_infos()]
+
+    @staticmethod
+    def _port_mentions(p, needle: str) -> bool:
+        haystack = " ".join(
+            str(getattr(p, attr, "") or "") for attr in ("interface", "description", "product")
+        )
+        return needle.lower() in haystack.lower()
+
+    @classmethod
+    def list_protocol_ports(cls) -> list:
+        """Of the VID:PID-matching candidates, the ones that are actually
+        the benchproto PROTOCOL CDC (usb_descriptors.c's "SimFW Control"
+        interface string) -- never the console CDC ("SimFW Console"), which
+        enumerates as an indistinguishable-by-VID:PID second COM port on the
+        same fixture as of the 2026-08-23 dual-CDC firmware
+        (firmware/SimFW/docs/PROTOCOL.md sec 1). Connecting to the console
+        port by mistake looks exactly like a dead link: it never speaks
+        `benchproto` at all, so the PING handshake in
+        :meth:`_FramedSimLink.connect` would simply time out.
+
+        Three-tier fallback, each tier only used if the previous one found
+        nothing, because guessing wrong here is worse than being loud about
+        an uncertain answer:
+
+        1. Match :data:`SIMFW_CDC_INTERFACE_STRING_PROTOCOL` against the
+           port's `interface`/`description`/`product` fields (see that
+           constant's own comment for which OSes actually populate these).
+        2. If no port exposed the interface string at all, fall back to
+           Windows' composite-device hwid convention: the protocol CDC's
+           control interface is always USB interface/function number 0
+           (usb_descriptors.c declares it first), which Windows encodes as
+           ``MI_00`` in `hwid` for exactly this reason.
+        3. If neither identifies anything, fall back to every VID:PID match
+           (the pre-dual-CDC behavior) with a loud warning -- silently
+           guessing which of two indistinguishable ports is the right one is
+           worse than an explicit "I don't know, here's everything" that at
+           least lets a caller notice and pass an explicit port.
+        """
+        candidates = cls._list_candidate_port_infos()
+        by_string = [p for p in candidates if cls._port_mentions(p, SIMFW_CDC_INTERFACE_STRING_PROTOCOL)]
+        if by_string:
+            return [p.device for p in by_string]
+
+        by_mi00 = [p for p in candidates if _re.search(r"\bMI_00\b", (p.hwid or ""), _re.IGNORECASE)]
+        if by_mi00:
+            log.warning(
+                "could not read SimFW's CDC interface strings on this OS/pyserial backend; "
+                "falling back to USB interface/function number 0 (Windows 'MI_00') to identify "
+                "the protocol CDC"
+            )
+            return [p.device for p in by_mi00]
+
+        if candidates:
+            log.warning(
+                "could not identify SimFW's protocol CDC by interface string or by USB "
+                "interface number 0 among %d VID:PID match(es) -- falling back to all of them; "
+                "this may pick the console CDC instead of the protocol CDC",
+                len(candidates),
+            )
+        return [p.device for p in candidates]
 
     def _transport_open(self, port: Optional[str]) -> str:
         if serial is None:
             raise SimLinkError("pyserial is not installed -- pip install pyserial")
         if port is None:
-            candidates = self.list_candidate_ports()
+            candidates = self.list_protocol_ports()
             if not candidates:
                 raise SimLinkError(
-                    f"no SimFW-looking port found (VID:PID {SIMFW_VID_PID}); "
-                    "pass an explicit port"
+                    f"no SimFW protocol-CDC-looking port found (VID:PID {SIMFW_VID_PID}, "
+                    f"interface '{SIMFW_CDC_INTERFACE_STRING_PROTOCOL}'); pass an explicit port"
                 )
             port = candidates[0]
         self._serial = serial.Serial(port=port, baudrate=self.baudrate, timeout=0.2)

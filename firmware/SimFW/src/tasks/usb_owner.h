@@ -4,8 +4,9 @@
 // single-owner-per-peripheral doctrine, DESIGN_NOTES.md section 4's opening
 // paragraph. Only this file and usb_descriptors.c include tusb.h; no other
 // task file should include TinyUSB headers or call its API -- route
-// everything through the two functions this header exports for cmd_task's
-// use (usb_owner_register_task() / usb_owner_send_reply()) instead.
+// everything through the functions this header exports (cmd_task's
+// usb_owner_register_task() / usb_owner_send_reply(), and now
+// drivers/console_sink.c's usb_owner_console_write()) instead.
 //
 // Real body: SLIP-style frame RX/TX over TinyUSB CDC, feeding/draining
 // `benchproto_frame`'s codec and `benchproto_link`'s reliability/task-
@@ -13,10 +14,48 @@
 // task is the sole owner of the one `benchproto_link_t` on SimFW's side of
 // the link -- cmd_task never touches it directly, only through the two
 // functions below.
+//
+// --- Dual CDC (2026-08-23) ---------------------------------------------
+// usb_descriptors.c's config descriptor now declares TWO CDC-ACM instances
+// on one composite device: instance 0 is everything above (unchanged --
+// plain `tud_cdc_*()` calls in this file's TX/RX code all resolve to
+// instance 0), instance 1 is a console/log sink (usb_owner_console_write()
+// below), added because interleaving human-readable log text into the
+// benchproto binary stream would corrupt its framing -- these had to be two
+// genuinely separate CDC functions, not two uses of one.
+//
+// **1200-baud bootloader touch is honoured on instance 0 ONLY.** This task's
+// tud_cdc_line_coding_cb()/tud_cdc_line_state_cb() callbacks receive an
+// `itf` argument (the CDC instance the line-coding/line-state change
+// happened on) and now check it before ever calling
+// usb_owner_check_bootloader_touch(). Deliberate, not an oversight: CDC1 is
+// the port a bench operator's ordinary terminal program (PuTTY, screen,
+// TeraTerm, a serial monitor) opens just to watch log text, and terminal
+// programs are exactly the class of tool that fiddles with line coding and
+// DTR on open/close for reasons that have nothing to do with asking this
+// fixture to reboot -- some default to legacy baud rates, and DTR toggling
+// on port open/close is near-universal. Honouring the touch on CDC1 too
+// would mean "a human plugs in a log viewer" could occasionally, silently,
+// reboot the fixture into its bootloader -- exactly the accidental-trigger
+// class PROTOCOL.md's "gated on baud AND DTR together" reasoning already
+// exists to prevent, just one interface over. The protocol CDC (instance 0)
+// is where PC-side tooling that legitimately wants to trigger a reflash
+// actually connects (kilnsim, picotool-alikes), so that is the one interface
+// this convention needs to work on.
+//
+// usb_owner_console_write() is deliberately non-blocking and drops (never
+// buffers, never blocks the calling task) whenever CDC1 isn't connected or
+// its TX FIFO can't take the whole write right now -- a bench tool that
+// stalls its own tasks because no terminal is attached to the log port would
+// be worse than one that silently drops a line of text nobody was reading
+// anyway. Safe to call from ANY task, on either core, before or after
+// usb_owner_start() has run (returns false, does nothing, if usb_owner's own
+// TinyUSB init hasn't completed yet).
 #ifndef SIMFW_TASKS_USB_OWNER_H
 #define SIMFW_TASKS_USB_OWNER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -95,6 +134,21 @@ bool usb_owner_send_reply(uint8_t responding_task_id, uint8_t dst_device, uint8_
 // ACKs are -- BROADCAST frames are never acknowledged or retried by
 // definition (BENCHPROTO.md sec 4), so there is nothing to resend.
 bool usb_owner_send_broadcast(uint8_t src_task, const uint8_t *payload, uint8_t length);
+
+// Writes `len` bytes of console/log text to CDC1 (the console CDC instance
+// -- see this header's "Dual CDC" section above), for drivers/console_sink.c's
+// stdio_driver_t to call from its out_chars callback. NEVER blocks and NEVER
+// buffers/retries: returns false immediately (no bytes written) if CDC1 has
+// no host attached, if the write would not fit CDC1's TX FIFO right now, or
+// if usb_owner's own TinyUSB init hasn't completed yet -- a caller (the
+// stdio layer, ultimately printf()/simfw_fatal()) must treat a dropped
+// console line the same way it already treats a line that never made it to
+// the retained log ring: not an error worth propagating, just "nobody was
+// listening on that channel this time." UART0 output (pico_stdio_uart) is
+// completely independent of this function and keeps working whether or not
+// this returns true -- see main.c's console_sink_register() call site for
+// why both channels stay live rather than one replacing the other.
+bool usb_owner_console_write(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

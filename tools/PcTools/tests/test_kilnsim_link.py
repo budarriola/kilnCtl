@@ -10,10 +10,13 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from kilnsim.link import MockSimLink, SimLinkError  # noqa: E402
+from kilnsim import link as kilnsim_link  # noqa: E402
+from kilnsim.link import MockSimLink, SerialSimLink, SimLinkError  # noqa: E402
 from kilnsim.protocol import CommandGroup, Event, EventType, FaultCmd, IoCmd, SysCmd, TcCmd  # noqa: E402
 
 
@@ -265,6 +268,88 @@ class EventRoundTripTests(unittest.TestCase):
         evt = Event(seq=9, sim_time_us=42, event_type=EventType.DUT_POWER, payload={"on": False})
         restored = Event.from_dict(evt.to_dict())
         self.assertEqual(evt, restored)
+
+
+def _fake_port(device, hwid="", interface=None, description="", product=""):
+    """A pyserial ListPortInfo-shaped stand-in -- SimpleNamespace, since
+    SerialSimLink._port_mentions()/_list_candidate_port_infos() only ever
+    read .hwid/.interface/.description/.product/.device via getattr()."""
+    return SimpleNamespace(device=device, hwid=hwid, interface=interface,
+                            description=description, product=product)
+
+
+class ProtocolPortDiscoveryTests(unittest.TestCase):
+    """SerialSimLink.list_protocol_ports() -- the dual-CDC port-disambiguation
+    logic added 2026-08-23 alongside SimFW's new console CDC
+    (firmware/SimFW/docs/PROTOCOL.md sec 1). Both CDC ports share one VID:PID
+    now, so list_candidate_ports() alone can no longer tell them apart;
+    these tests pin the three-tier fallback (interface string -> Windows
+    MI_00 -> "give up, return everything") by faking pyserial's
+    list_ports.comports() return value -- no real hardware or pyserial I/O.
+    """
+
+    def setUp(self):
+        patcher = mock.patch.object(kilnsim_link, "_list_ports")
+        self.mock_list_ports = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _set_comports(self, ports):
+        self.mock_list_ports.comports.return_value = ports
+
+    def test_prefers_the_interface_string_when_available(self):
+        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Console")
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
+        self._set_comports([console, protocol])
+        self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM6"])
+
+    def test_matches_the_string_in_description_or_product_too(self):
+        # Not every OS/pyserial backend populates .interface -- description
+        # and product are the other two fields real composite-CDC friendly
+        # names commonly carry the interface string in.
+        protocol = _fake_port("COM7", hwid="USB VID:PID=2E8A:F00A", description="SimFW Control (COM7)")
+        self._set_comports([protocol])
+        self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM7"])
+
+    def test_falls_back_to_windows_mi00_when_no_interface_string_visible(self):
+        # Neither port exposes the interface string at all (interface/
+        # description/product all empty) -- the Windows composite-device
+        # hwid convention (MI_00 == USB function/interface number 0, always
+        # the protocol CDC's control interface per usb_descriptors.c's
+        # declaration order) is the fallback.
+        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A&MI_02")
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A&MI_00")
+        self._set_comports([console, protocol])
+        self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM6"])
+
+    def test_last_resort_returns_every_vid_pid_match(self):
+        # Nothing distinguishes the two ports at all (no interface string,
+        # no MI_XX in hwid) -- the final fallback is "everything that
+        # matched VID:PID", same as the pre-dual-CDC behavior, rather than
+        # silently guessing one.
+        a = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A")
+        b = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A")
+        self._set_comports([a, b])
+        self.assertEqual(sorted(SerialSimLink.list_protocol_ports()), ["COM5", "COM6"])
+
+    def test_ignores_ports_with_a_different_vid_pid(self):
+        # Deliberately gives the WRONG-VID:PID device the exact interface
+        # string too -- so this only passes if the VID:PID gate is applied
+        # BEFORE the interface-string match, not because the string match
+        # alone happened to prefer the right port.
+        other_device = _fake_port("COM3", hwid="USB VID:PID=1234:5678", interface="SimFW Control")
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
+        self._set_comports([other_device, protocol])
+        self.assertEqual(SerialSimLink.list_protocol_ports(), ["COM6"])
+
+    def test_list_candidate_ports_still_returns_both_cdc_ports(self):
+        # list_candidate_ports() is the "everything at this VID:PID" view
+        # (kept for backward compatibility / diagnostics) -- it must NOT be
+        # narrowed to just the protocol port, or a caller relying on it to
+        # see the whole fixture would silently lose visibility into CDC1.
+        console = _fake_port("COM5", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Console")
+        protocol = _fake_port("COM6", hwid="USB VID:PID=2E8A:F00A", interface="SimFW Control")
+        self._set_comports([console, protocol])
+        self.assertEqual(sorted(SerialSimLink.list_candidate_ports()), ["COM5", "COM6"])
 
 
 if __name__ == "__main__":

@@ -62,22 +62,31 @@ extern "C" {
 #endif
 
 //------------- CLASS -------------//
-// CDC only: SimFW's whole USB surface is the benchproto command/telemetry
-// stream (usb_descriptors.c's single interface). No MSC/HID/MIDI/vendor
-// class -- there is nothing else on this link.
-#define CFG_TUD_CDC    1
+// CDC only: SimFW's whole USB surface is two CDC-ACM instances (2026-08-23) --
+// instance 0 is the benchproto command/telemetry stream (unchanged),
+// instance 1 is a console/log sink added alongside it (usb_descriptors.c's
+// dual-CDC composite config descriptor, usb_owner.c's usb_owner_console_write()).
+// No MSC/HID/MIDI/vendor class -- there is nothing else on this link.
+#define CFG_TUD_CDC    2
 #define CFG_TUD_MSC    0
 #define CFG_TUD_HID    0
 #define CFG_TUD_MIDI   0
 #define CFG_TUD_VENDOR 0
 
-// CDC FIFO/endpoint buffer sizes: sized to comfortably hold one full
-// BENCHPROTO_FRAME_STUFFED_MAX (~530 bytes, benchproto_frame.h) worth of
-// wire bytes without TinyUSB itself needing multiple USB transactions per
-// frame at full speed's 64-byte max packet size -- not a hard requirement
-// (usb_owner.c's own byte-at-a-time SLIP assembler tolerates a frame
-// arriving split across several tud_cdc_read() calls regardless), just
-// generous enough that the common case is one clean read.
+// CDC FIFO/endpoint buffer sizes -- these apply per CDC instance (TinyUSB
+// sizes CFG_TUD_CDC_RX_BUFSIZE/CFG_TUD_CDC_TX_BUFSIZE identically for every
+// CFG_TUD_CDC instance; there is no per-instance override), so instance 1's
+// console traffic gets the same generous sizing as instance 0's protocol
+// link even though it needs far less -- console lines are short and this
+// project's RAM budget has ample room for two of these buffers (see
+// docs/HARDWARE.md for the RP2040's overall RAM budget). Sized to
+// comfortably hold one full BENCHPROTO_FRAME_STUFFED_MAX (~530 bytes,
+// benchproto_frame.h) worth of wire bytes on instance 0 without TinyUSB
+// itself needing multiple USB transactions per frame at full speed's 64-byte
+// max packet size -- not a hard requirement (usb_owner.c's own
+// byte-at-a-time SLIP assembler tolerates a frame arriving split across
+// several tud_cdc_read() calls regardless), just generous enough that the
+// common case is one clean read.
 #define CFG_TUD_CDC_RX_BUFSIZE 640
 #define CFG_TUD_CDC_TX_BUFSIZE 640
 #define CFG_TUD_CDC_EP_BUFSIZE 64

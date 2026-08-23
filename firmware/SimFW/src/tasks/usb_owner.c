@@ -24,6 +24,13 @@
 // nothing in BENCHPROTO.md's request/reply description (section 3: "waits
 // for a reply (ACK/NACK)") requires the two-frame split. See
 // usb_owner_send_reply()'s doc comment in usb_owner.h.
+//
+// Dual CDC (2026-08-23): everything above is CDC instance 0 only, byte-for-
+// byte the same as before this pass. This file additionally owns CDC
+// instance 1 (the console/log sink) -- see usb_owner.h's "Dual CDC" section
+// for the full design (why two interfaces, not one; where the 1200-baud
+// bootloader touch does and does not apply) and this file's own "CDC1:
+// console/log sink" section, below, for the implementation.
 #include "usb_owner.h"
 
 #include <string.h>
@@ -76,6 +83,24 @@ typedef struct {
 
 static TaskHandle_t s_task_handle = NULL;
 static SemaphoreHandle_t s_tx_lock = NULL;
+
+// Separate mutex for CDC1 (console) TX, deliberately not s_tx_lock: that one
+// guards CDC0's protocol TX path + ACK cache specifically, and reusing it
+// for CDC1 would mean a console write from a low-priority task (this is
+// exactly what happens -- printf() calls run from whatever task called
+// them, including ones with nothing to do with usb_owner) could contend
+// with -- or, worse, be starved by -- cmd_task's reply path. The two CDC
+// instances share nothing at the TinyUSB level that needs one shared lock
+// between them; each only needs to serialize its OWN concurrent writers
+// (this project is FreeRTOS SMP on two cores, so two cores could otherwise
+// call usb_owner_console_write() at the same instant).
+static SemaphoreHandle_t s_console_tx_lock = NULL;
+
+// Set true once usb_owner_task_fn() has called tusb_init() -- see
+// usb_owner_console_write()'s own comment for why this guard exists (a
+// caller, including boot-time printf()s in main.c, may run before that has
+// happened).
+static volatile bool s_console_ready = false;
 
 static benchproto_link_t s_link;
 static usb_owner_ack_cache_slot_t s_ack_cache[USB_OWNER_ACK_CACHE_SLOTS];
@@ -227,6 +252,62 @@ bool usb_owner_register_task(uint8_t task_id)
     return benchproto_link_register_task(&s_link, task_id) == BENCHPROTO_LINK_OK;
 }
 
+// --- CDC1: console/log sink --------------------------------------------
+// See usb_owner.h's own doc comment on this function for the full contract
+// (never blocks, never buffers/retries). CDC1 is the second CDC instance in
+// usb_descriptors.c's dual-CDC composite config descriptor; plain
+// tud_cdc_*() calls elsewhere in this file all mean instance 0, so this is
+// the one call site in the whole codebase that uses the `_n` (instance-
+// numbered) TinyUSB CDC API.
+#define USB_OWNER_CONSOLE_ITF 1u
+
+// Short bounded wait, not USB_OWNER_TX_LOCK_WAIT_MS's 50ms: a console write
+// contending with another console write is rare (at most two cores'
+// printf() calls landing at the same instant) and short-lived (a small
+// tud_cdc_n_write() call, same as the protocol path), and this function's
+// whole contract is "drop rather than delay the caller" -- a caller that
+// waited the full 50ms for a lock on every dropped log line would defeat
+// that contract's own purpose.
+#define USB_OWNER_CONSOLE_LOCK_WAIT_MS 5u
+
+bool usb_owner_console_write(const uint8_t *data, size_t len)
+{
+    if (data == NULL || len == 0) {
+        return false;
+    }
+    if (!s_console_ready || s_console_tx_lock == NULL) {
+        return false; // usb_owner_task_fn() hasn't called tusb_init() yet
+    }
+    if (xSemaphoreTake(s_console_tx_lock, pdMS_TO_TICKS(USB_OWNER_CONSOLE_LOCK_WAIT_MS)) != pdTRUE) {
+        return false;
+    }
+
+    bool ok = false;
+    if (tud_cdc_n_connected(USB_OWNER_CONSOLE_ITF)) {
+        // Same "drop the whole line, never a truncated one" rule
+        // usb_owner_cdc_write_locked() applies to CDC0 above: checking
+        // available space first, rather than just calling
+        // tud_cdc_n_write() and comparing the return count, means a line
+        // that would only partially fit is dropped whole rather than
+        // silently truncated mid-word on the far end.
+        uint32_t avail = tud_cdc_n_write_available(USB_OWNER_CONSOLE_ITF);
+        if (avail >= len) {
+            uint32_t written = tud_cdc_n_write(USB_OWNER_CONSOLE_ITF, data, (uint32_t)len);
+            if (written == len) {
+                tud_cdc_n_write_flush(USB_OWNER_CONSOLE_ITF);
+                ok = true;
+            }
+        }
+    }
+    // !connected (nobody has a terminal open on CDC1) is the expected,
+    // common case on this bench-tool project -- not logged, not counted:
+    // there is nowhere left to report a console-sink drop TO once the
+    // console sink itself is what dropped it.
+
+    xSemaphoreGive(s_console_tx_lock);
+    return ok;
+}
+
 // --- Bootloader trigger: 1200-baud host-tooling touch convention -----------
 // The widely-supported convention (Arduino, picotool, and most flashing
 // tools that speak to an Arduino-like board over a CDC-ACM port): the host
@@ -256,6 +337,18 @@ bool usb_owner_register_task(uint8_t task_id)
 // safe before rebooting.
 #define USB_OWNER_BOOTLOADER_TOUCH_BAUD 1200u
 
+// The dual-CDC composite (usb_descriptors.c, 2026-08-23) gives
+// tud_cdc_line_coding_cb()/tud_cdc_line_state_cb() an `itf` argument that
+// now genuinely matters: instance 0 is the benchproto PROTOCOL CDC
+// (usb_descriptors.c declares it first), instance 1 is the CONSOLE CDC. The
+// touch is honoured on instance 0 ONLY -- see usb_owner.h's "Dual CDC"
+// section for the full reasoning (short version: CDC1 is where an ordinary
+// terminal program watching logs connects, and terminal programs routinely
+// touch baud/DTR on open/close for reasons unrelated to asking this fixture
+// to reboot; gating the touch to the interface PC-side reflash tooling
+// actually uses keeps a log viewer from ever being able to trigger it).
+#define USB_OWNER_BOOTLOADER_TOUCH_ITF 0u
+
 // 0 is never a real CDC line-coding baud rate, so this starts guaranteed
 // unequal to USB_OWNER_BOOTLOADER_TOUCH_BAUD -- no trigger is possible until
 // the host has actually requested a real line-coding change at least once.
@@ -264,9 +357,23 @@ static uint32_t s_last_cdc_baud_bps = 0;
 // like "DTR was already dropped" before the host has said so explicitly.
 static bool s_last_cdc_dtr_asserted = true;
 
+// Pure predicate (no side effects, no globals) so this exact condition can
+// be pinned by a host test (test_safe_reboot_logic.c's own mirror) without
+// pulling in FreeRTOS/TinyUSB -- see that file's header comment for why this
+// codebase mirrors rather than links firmware task logic into host tests.
+// Kept in sync BY HAND with usb_owner_check_bootloader_touch() below; if
+// this condition ever changes, update both. Does NOT itself check `itf` --
+// s_last_cdc_baud_bps/s_last_cdc_dtr_asserted are only ever updated for
+// instance 0 in the first place (see the two callbacks below), so by the
+// time this runs the interface question is already settled.
+static bool usb_owner_bootloader_touch_matches(uint32_t baud_bps, bool dtr_asserted)
+{
+    return baud_bps == USB_OWNER_BOOTLOADER_TOUCH_BAUD && !dtr_asserted;
+}
+
 static void usb_owner_check_bootloader_touch(void)
 {
-    if (s_last_cdc_baud_bps == USB_OWNER_BOOTLOADER_TOUCH_BAUD && !s_last_cdc_dtr_asserted) {
+    if (usb_owner_bootloader_touch_matches(s_last_cdc_baud_bps, s_last_cdc_dtr_asserted)) {
         // Refusal path (safe state not confirmed within the bounded
         // timeout) simply leaves the CDC link running -- there is nothing
         // else to undo here, and the host's own retry (most tools that use
@@ -277,15 +384,29 @@ static void usb_owner_check_bootloader_touch(void)
 
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *p_line_coding)
 {
-    (void)itf;
+    // CDC1 (console) line-coding changes are deliberately ignored, not just
+    // "not acted on": s_last_cdc_baud_bps/s_last_cdc_dtr_asserted below are
+    // ONE shared pair of variables, not one per CDC instance, so if this
+    // callback updated them for instance 1 too, a later instance-0 event
+    // could read back stale instance-1 state and misfire the touch on the
+    // wrong interface entirely -- the exact cross-interface contamination
+    // usb_owner.h's "Dual CDC" section warns against, just one layer lower.
+    // Ignoring instance 1's callback here entirely (not merely skipping the
+    // trigger check for it) is what keeps this pair of variables meaning
+    // "instance 0's last-seen line coding" and nothing else.
+    if (itf != USB_OWNER_BOOTLOADER_TOUCH_ITF) {
+        return;
+    }
     s_last_cdc_baud_bps = p_line_coding->bit_rate;
     usb_owner_check_bootloader_touch();
 }
 
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
-    (void)itf;
     (void)rts;
+    if (itf != USB_OWNER_BOOTLOADER_TOUCH_ITF) {
+        return; // see tud_cdc_line_coding_cb()'s comment above
+    }
     s_last_cdc_dtr_asserted = dtr;
     usb_owner_check_bootloader_touch();
 }
@@ -426,6 +547,11 @@ static void usb_owner_task_fn(void *arg)
     };
     tusb_init(0, &dev_init);
 
+    // Only now is it safe for usb_owner_console_write() (any task, any
+    // core) to touch CDC1 -- see that function's own guard and
+    // usb_owner.h's doc comment on why a caller may run before this point.
+    s_console_ready = true;
+
     // cmd_task_start() (main.c's existing call order: usb_owner_start()
     // then cmd_task_start(), both before vTaskStartScheduler()) has already
     // run by the time this task body executes, so cmd_task_get_inbox()
@@ -459,6 +585,12 @@ bool usb_owner_start(void)
 
     s_tx_lock = xSemaphoreCreateMutex();
     if (!s_tx_lock) {
+        return false;
+    }
+
+    s_console_ready = false;
+    s_console_tx_lock = xSemaphoreCreateMutex();
+    if (!s_console_tx_lock) {
         return false;
     }
 

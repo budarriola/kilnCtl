@@ -15,16 +15,39 @@ discipline `task_priorities.h`'s header comment asks of DESIGN_NOTES.md section
 
 ## 1. Transport
 
-Native USB CDC (TinyUSB device stack), one interface, full speed only. No
-pico-sdk `stdio_usb` — the CDC interface belongs entirely to `usb_owner`
-(`src/tasks/usb_owner.c`), the single owner of the USB peripheral (DESIGN_NOTES.md
-section 4's opening paragraph). VID/PID `0xCafe`/`0x4001`
-(`src/tasks/usb_descriptors.c`) — a placeholder pair (this is a one-off bench
-fixture, never mass produced), same one TinyUSB's own examples use, chosen
-for the same reason: every OS's generic CDC-ACM driver binds to it without a
-custom `.inf`/driver install. The USB serial-number string descriptor is the
-RP2040's own 64-bit flash unique id (16 hex chars), so `kilnsim`'s PC-side
-auto-detect can tell two SimFW fixtures apart on the same host.
+Native USB CDC (TinyUSB device stack), **two CDC-ACM instances on one
+composite device** (2026-08-23 — a second CDC added alongside the original),
+full speed only. No pico-sdk `stdio_usb` — the whole USB peripheral belongs
+entirely to `usb_owner` (`src/tasks/usb_owner.c`, `src/tasks/
+usb_descriptors.c`), its single owner (DESIGN_NOTES.md section 4's opening
+paragraph).
+
+- **CDC0 — protocol** (this document's entire subject from here on). Every
+  byte described below — the `benchproto` framing, the command groups, the
+  TELEMETRY/EVT broadcasts — travels on this interface, unchanged from the
+  single-CDC build.
+- **CDC1 — console/log**. A plain, unframed byte stream: every line this
+  firmware's `printf()`/`simfw_fatal()` calls send to UART0 is mirrored here
+  too (`src/drivers/console_sink.c`, `usb_owner_console_write()`) — not
+  `benchproto`-framed, not part of this protocol, just human-readable text.
+  Added because interleaving log text into CDC0's binary stream would
+  corrupt its framing; a genuinely separate interface was the only option.
+  Non-blocking and drop-if-nobody's-listening: see `usb_owner.h`'s own doc
+  comment on `usb_owner_console_write()`.
+
+VID/PID `0x2E8A`/`0xF00A` (`src/tasks/usb_descriptors.c` — see that file's
+own header comment for the full reasoning: an informal, never-shipped reuse
+of Raspberry Pi's VID with a fixture-specific PID chosen to avoid every
+documented RPi PID this toolchain's checkout references). Two distinct
+interface string descriptors — `"SimFW Control"` (CDC0) and `"SimFW
+Console"` (CDC1) — let both a human (Device Manager, `ls /dev/serial/by-id`)
+and `kilnsim`'s PC-side port discovery (`tools/PcTools/src/kilnsim/link.py`'s
+`list_protocol_ports()`) tell the fixture's two same-VID/PID COM ports apart;
+picking the wrong one looks like a dead link, since CDC1 never speaks
+`benchproto` at all. The USB serial-number string descriptor (shared by both
+interfaces, since it names the *device*, not either interface) is the
+RP2040's own 64-bit flash unique id (16 hex chars), so `kilnsim`'s auto-detect
+can also tell two SimFW fixtures apart on the same host.
 
 ## 2. Framing, addressing, reliability
 
@@ -318,6 +341,24 @@ mid-scenario-run one stray reconnect away. Requiring DTR deasserted *at the
 same time* as the 1200 baud value is what keeps that from happening — see
 `firmware/SimFW/test/test_safe_reboot_logic.c`'s bootloader-touch-gate tests
 for the exercised accidental-trigger cases (baud alone, DTR alone, neither).
+
+**Gated on CDC0 (protocol) only, not CDC1 (console)** — the second
+independent, deliberate decision the dual-CDC pass (section 1 above) had to
+make. `tud_cdc_line_coding_cb()`/`tud_cdc_line_state_cb()` both receive
+which CDC instance changed, and CDC1's changes are ignored outright before
+even reaching the baud/DTR check. Reasoning: CDC1 is exactly the port an
+ordinary terminal program (PuTTY, `screen`, TeraTerm, a serial monitor) opens
+to watch log text, and terminal programs are a class of tool that routinely
+touches line coding and DTR on open/close for reasons that have nothing to
+do with rebooting a device — some default to legacy baud rates on connect,
+and DTR toggling on port open/close is close to universal behavior. Honoring
+the touch on CDC1 too would mean a human plugging in a log viewer could,
+occasionally and silently, drop this fixture into its bootloader — precisely
+the accidental-trigger class the baud+DTR conjunction above already exists
+to rule out, one interface further out. PC-side tooling that legitimately
+wants to trigger a reflash (`kilnsim`, picotool-alikes) connects to CDC0
+anyway (it is the protocol interface `kilnsim` uses for everything else), so
+restricting the touch to CDC0 costs that use case nothing.
 
 ## 5. MODEL / TC / CT / RELAY / IO / FAULT
 

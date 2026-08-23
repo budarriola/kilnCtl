@@ -84,7 +84,7 @@ pico_sdk_init()
 include(${CMAKE_CURRENT_LIST_DIR}/FreeRTOS_Kernel_import.cmake)
 
 # `benchproto` -- SimFW's USB control protocol core (docs/DESIGN_NOTES.md
-# sections 4.4/5, docs/PLAN.md section 12, firmware/CommonFW/docs/BENCHPROTO.md): framing, CRC, reliability/
+# sections 4.4/5, docs/DESIGN_NOTES.md section 12, firmware/CommonFW/docs/BENCHPROTO.md): framing, CRC, reliability/
 # retry/dedup, task registration, now lifted into CommonFW as its own
 # library. Pulled in the same mechanism SaftyFW uses for kilnlink
 # (../SaftyFW/CMakeLists.txt: `add_subdirectory(.../CommonFW kilnlink)`) --
@@ -157,6 +157,12 @@ add_custom_target(simfw_build_info ALL
 # usb_owner.h's header comment. Add each remaining library in the same
 # change that gives its owning task a real body, so an unused link never
 # masks a missing one.
+# src/drivers/console_sink.{c,h} (2026-08-23, "give SimFW a second USB CDC
+# interface, dedicated to console/log output"): a small pico-sdk
+# stdio_driver_t that mirrors printf()/log output to usb_owner's new CDC1
+# console sink alongside the existing UART0 output -- see that file's header
+# comment and usb_owner.h's "Dual CDC" section. Links no new library (only
+# pico_stdio, already pulled in transitively via pico_stdlib below).
 # src/tasks/safe_reboot.c (gap-closure pass, "flash over USB without
 # BOOTSEL"): the one place allowed to call pico-sdk's reset_usb_boot()
 # (pico/bootrom.h) -- both cmd_task.c's SIMFW_CMD_SYS_REBOOT_BOOTLOADER
@@ -188,6 +194,7 @@ set(SIMFW_APP_SOURCES
     src/drivers/mcp23017.c
     src/drivers/ct_wave_i2s.c
     src/drivers/simfw_fatal.c
+    src/drivers/console_sink.c
     src/sim/sine_synth.c
     src/sim/ct_calibration.c
     src/sim/ct_i2s_gen.c
