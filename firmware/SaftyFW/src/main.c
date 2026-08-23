@@ -27,6 +27,7 @@
 
 #include "board_pins.h"
 #include "boot_reason.h"
+#include "startup_diag.h"
 #include "config_store.h"
 #include "max31856.h"
 #include "spi_owner.h"
@@ -210,28 +211,57 @@ int main(void)
     // this file does not set affinity itself, so there is exactly one place
     // per task that can get it wrong, not two.
     //
-    // Every failure here is logged-and-continued rather than fatal, matching
+    // Every failure here is latched-and-continued rather than fatal, matching
     // firmware/KilnFW/App/main.c's "only two failures abort app_main"
     // convention (here: none do, since there is no PC-equivalent link this
     // phase whose absence would leave every other subsystem unreachable --
     // that is Phase 7's link_task, and even it does not gate anything else).
-    // TODO: once log_task/link_task have real bodies, replace these dropped
-    // return values with an actual logged warning.
-    (void)relay_owner_start();
-    (void)watchdog_task_start();
-    (void)safety_core_start();
-    (void)discrete_task_start();
-    (void)thermo_task_start();
-    (void)current_task_start();
-    (void)link_task_start();
-    (void)log_task_start();
+    // TODO: once log_task has a real sink, also emit these as a logged
+    // warning rather than only as the scratch-register latch below.
+    // Start results are LATCHED, not discarded. A task that fails to create
+    // never sets its watchdog check-in bit; s_checkin_mask can then never
+    // equal WATCHDOG_CHECKIN_ALL_MASK, watchdog_task_fn() never feeds, and
+    // the board reboots every second with nothing anywhere to say which task
+    // was missing -- exactly how the 2026-08-21 update_task regression
+    // presented, and how the same symptom presented again on the bench
+    // 2026-08-23. Discarding these returns is what made a one-line bug cost
+    // two debugging sessions.
+    //
+    // The latch is a watchdog scratch register rather than a static, because
+    // it has to survive the very reset it explains: RAM is re-zeroed every
+    // boot, this board has no log sink yet (Phase 8), and GP16/GP17's console
+    // header is not fitted (TODO.md 0.5a), so a plain variable would be
+    // unreadable in exactly the reboot loop it exists to diagnose. Read it
+    // over SWD at SAFTYFW_STARTUP_DIAG_SCRATCH, guarded by the magic word in
+    // SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH.
+    uint32_t start_failures = 0u;
+#define SAFTYFW_START_TASK(bit, call)        \
+    do {                                     \
+        if (!(call)) {                       \
+            start_failures |= (1u << (bit)); \
+        }                                    \
+    } while (0)
+
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_RELAY_OWNER, relay_owner_start());
+    SAFTYFW_START_TASK(SAFTYFW_START_BIT_WATCHDOG_TASK, watchdog_task_start());
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_SAFETY_CORE, safety_core_start());
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_DISCRETE_TASK, discrete_task_start());
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_THERMO_TASK, thermo_task_start());
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_CURRENT_TASK, current_task_start());
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_LINK_TASK, link_task_start());
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_LOG_TASK, log_task_start());
     // update_task registered a WATCHDOG_CHECKIN_UPDATE_TASK bit (Phase 10)
     // but was never actually started here -- that bit could then never be
     // set, s_checkin_mask could never equal WATCHDOG_CHECKIN_ALL_MASK, and
     // watchdog_task_fn() (watchdog_task.c) would never call watchdog_update(),
     // so the 1 s hardware watchdog fired forever. Root cause of the bench
     // reset loop found 2026-08-21; see ROADMAP.md.
-    (void)update_task_start();
+    SAFTYFW_START_TASK(WATCHDOG_CHECKIN_UPDATE_TASK, update_task_start());
+#undef SAFTYFW_START_TASK
+
+    watchdog_hw->scratch[SAFTYFW_STARTUP_DIAG_SCRATCH] = start_failures;
+    watchdog_hw->scratch[SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH] =
+        SAFTYFW_STARTUP_DIAG_MAGIC;
 
     console_uart_puts("SaftyFW: tasks started, entering scheduler\r\n");
 

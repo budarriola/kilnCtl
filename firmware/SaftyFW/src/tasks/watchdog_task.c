@@ -21,6 +21,7 @@
 #include "hardware/watchdog.h"
 
 #include "board_pins.h"
+#include "startup_diag.h"
 #include "task_priorities.h"
 
 #define WATCHDOG_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
@@ -58,6 +59,22 @@ static void watchdog_task_fn(void *arg)
         uint32_t mask = s_checkin_mask;
         s_checkin_mask = 0;
         taskEXIT_CRITICAL();
+
+        // Publish the observed mask where it survives the reset it is about
+        // to cause. The "TODO: log which bit(s) were missing" below is the
+        // right long-term answer, but a log sink cannot report a starvation
+        // that reboots the board a few hundred milliseconds later, and this
+        // board has no console header fitted anyway (TODO.md 0.5a). A scratch
+        // register does survive, so after a watchdog reboot the last
+        // pre-reset mask is still readable over SWD:
+        // mask ^ WATCHDOG_CHECKIN_ALL_MASK is the set of tasks that missed.
+        // Written unconditionally, before the feed decision, so it never
+        // reads as "everything was fine" merely because the write was
+        // skipped -- and OR'd with SAFTYFW_LAST_CHECKIN_WRITTEN so that a
+        // stored zero is distinguishable from a register nothing has touched
+        // since power-on (see startup_diag.h).
+        watchdog_hw->scratch[SAFTYFW_LAST_CHECKIN_MASK_SCRATCH] =
+            mask | SAFTYFW_LAST_CHECKIN_WRITTEN;
 
         if (mask == WATCHDOG_CHECKIN_ALL_MASK) {
             watchdog_update();
