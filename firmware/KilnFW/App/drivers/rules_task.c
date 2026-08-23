@@ -1,5 +1,6 @@
 #include "rules_task.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -13,10 +14,12 @@
 #include "kiln_io.h"
 #include "kiln_io_owner.h"
 #include "ota_http.h"
+#include "thermo_owner.h"
 #include "profile_executor.h"
 #include "relay_authority.h"
 #include "rules_eval.h"
 #include "rules_http.h"
+#include "thermo_combine.h"
 #include "zones_http.h"
 
 static const char *TAG = "rules_task";
@@ -139,9 +142,86 @@ static void gather_inputs(rules_eval_inputs_t *in, bool *out_relay_commanded_on 
     in->profile_running = (exec.state == PROFILE_EXEC_RUNNING);
     in->profile_elapsed_s = exec.total_elapsed_s;
 
+    /* Zone temperatures. The executor is the preferred source while a firing
+     * is under way -- it is already combining each zone's thermocouples the
+     * same way the control loop sees them, so a rule and the PID loop agree
+     * on what "zone 0" reads.
+     *
+     * But the executor only populates zones[] while it is RUNNING, and rules
+     * exist to drive vents, blowers and reduction flame -- hardware whose
+     * whole point may be a cooling kiln with no profile running. Sourcing
+     * temperature ONLY from the executor made every TEMP condition
+     * permanently false when idle: the rule could never fire, the page showed
+     * "Firing: no" with no reason, and the thermocouples were reading
+     * perfectly the whole time. Found while testing the live board with a
+     * zone at 32C and a rule of "zone 0 >= 20C" that never fired.
+     *
+     * So: fall back to the live thermocouple readings, combined per zone with
+     * the same thermo_combine() the executor itself uses (via each zone's
+     * configured thermo_mask), whenever the executor has nothing for a zone.
+     * A zone with no valid thermocouple still reads invalid, and an invalid
+     * zone still fails its condition closed -- the fail-safe direction is
+     * unchanged. */
+    /* Live thermocouple readings, via thermo_owner's queue.
+     *
+     * NOT dashboard_get_status(): that assembles the whole /api/status
+     * picture (every channel plus the safety/link block) and needs more stack
+     * than this 3072-byte task has. Calling it here overflowed the stack and
+     * left the board crash-looping -- "***ERROR*** A stack overflow in task
+     * rules_task", five boots in a row. thermo_owner_command_read_all() is
+     * the narrow read this actually needs.
+     *
+     * Calibration is applied with the same zones_config_apply_cal() the
+     * dashboard and the control loop use, so a rule threshold means the same
+     * temperature the operator reads on the page. Comparing an operator's
+     * "open the vent at 200C" against an uncalibrated number would be a
+     * quiet, dangerous disagreement. */
+    MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+    size_t n_read = 0;
+    memset(readings, 0, sizeof(readings));
+    (void)thermo_owner_command_read_all(readings, MAX31856_CHANNEL_COUNT, &n_read);
+
+    float ch_c[MAX31856_CHANNEL_COUNT];
+    bool ch_ok[MAX31856_CHANNEL_COUNT];
+    for (uint8_t ci = 0; ci < MAX31856_CHANNEL_COUNT; ci++) {
+        /* Freshness judged by age_ms against KILN_TEMP_STALE_AGE_MS, the same
+         * user-facing rule MAX31856.h documents -- NOT by ::stale, which only
+         * means "no new conversion since the last poll" and is true for a
+         * perfectly good reading taken 200ms ago. */
+        bool have = (ci < n_read) && !readings[ci].spi_failed &&
+                    !isnan(readings[ci].tc_temperature_c) &&
+                    readings[ci].age_ms != MAX31856_READING_AGE_UNKNOWN &&
+                    readings[ci].age_ms < KILN_TEMP_STALE_AGE_MS;
+        ch_c[ci] = have ? zones_config_apply_cal(ci, readings[ci].tc_temperature_c) : 0.0f;
+        ch_ok[ci] = have;
+    }
+
+    /* Per-zone temperature. The executor is preferred while a firing is under
+     * way -- it is already combining each zone's thermocouples exactly as the
+     * control loop sees them, so a rule and the PID agree on what "zone 0"
+     * reads. Otherwise combine the live readings ourselves with the same
+     * thermo_combine() and the zone's configured thermo_mask.
+     *
+     * The fallback is the whole point: rules drive vents, blowers and
+     * reduction flame, and those may well need to act on a cooling kiln with
+     * no profile running. Sourcing zone temperature ONLY from the executor
+     * (as this did originally) left every TEMP condition false whenever idle
+     * -- the rule simply never fired, with the page showing "Firing: no" and
+     * no hint why, while the thermocouples read perfectly the whole time. */
     for (uint8_t zi = 0; zi < RULES_EVAL_ZONE_COUNT; zi++) {
-        in->zone_temp_valid[zi] = exec.zones[zi].active && exec.zones[zi].actual_valid;
-        in->zone_temp_c[zi] = exec.zones[zi].actual_c;
+        if (exec.zones[zi].active && exec.zones[zi].actual_valid) {
+            in->zone_temp_valid[zi] = true;
+            in->zone_temp_c[zi] = exec.zones[zi].actual_c;
+            continue;
+        }
+        uint8_t thermo_mask = 0;
+        bool combined_valid = false;
+        float combined_c = 0.0f;
+        if (zi < zones_config_get_thermo_count() && zones_config_get_thermo_mask(zi, &thermo_mask)) {
+            combined_c = thermo_combine(ch_c, ch_ok, MAX31856_CHANNEL_COUNT, thermo_mask, &combined_valid);
+        }
+        in->zone_temp_valid[zi] = combined_valid;
+        in->zone_temp_c[zi] = combined_valid ? combined_c : 0.0f;
     }
 
     /* Current commanded relay state, for COND_RELAY conditions. A read
