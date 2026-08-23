@@ -375,8 +375,8 @@ def fault_schedule(fault_type: str, target: str, trigger: dict,
         "fault_type": fault_type,
         "target": target,
         "trigger": trigger,
-        "duration": duration or "permanent",
-        "repeat": repeat or "once",
+        "duration": duration or {"kind": "permanent"},
+        "repeat": repeat or {"kind": "once"},
         "params": params or [0.0, 0.0, 0.0, 0.0],
     }
     reply = _link.send_command(CommandGroup.FAULT, FaultCmd.SCHEDULE, payload)

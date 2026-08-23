@@ -94,7 +94,7 @@ def cmd_fault(args) -> int:
         "fault_type": args.fault_type,
         "target": args.target,
         "trigger": trigger,
-        "duration": "permanent",
+        "duration": {"kind": "permanent"},
     }
     try:
         link.send_command(CommandGroup.FAULT, 1, payload)  # FaultCmd.SCHEDULE

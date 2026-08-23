@@ -1064,7 +1064,12 @@ class MockSimLink(SimLink):
         if group is CommandGroup.FAULT and cmd == 1:  # SCHEDULE
             slot = payload.get("fault_slot", payload.get("slot_id", 0))
             duration = payload.get("duration", {}) or {}
-            duration_kind = duration.get("kind")
+            # duration may be the documented dict form or a bare string
+            # naming the kind (payloads.py's _normalize_kind_field accepts
+            # both for the same reason -- see its docstring); mirror that
+            # tolerance here so the mock link doesn't AttributeError on the
+            # same shapes the real encoder now accepts.
+            duration_kind = duration.get("kind") if isinstance(duration, dict) else duration
             if duration_kind in (2, "until_trigger"):
                 # Frame 1 of the two-frame design: park, do not arm yet.
                 self._pending_until_trigger.add(slot)

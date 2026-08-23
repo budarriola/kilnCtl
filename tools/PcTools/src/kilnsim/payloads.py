@@ -611,6 +611,32 @@ def _encode_trigger_fields(trigger: dict) -> bytes:
     return bytes(out)
 
 
+def _normalize_kind_field(value, kind_map: dict, default: str):
+    """`duration` and `repeat` are documented as dicts ({"kind": ..., ...}),
+    but the CLI (cli.py's `fault` subcommand) and the MCP server's
+    `fault_schedule` tool both shipped passing a bare string naming the kind
+    ("permanent" / "once") instead -- an AttributeError on every single
+    `kilnsim fault` invocation, since `duration.get("kind", ...)` doesn't
+    exist on a str. Nothing caught it because selftest.py is the only thing
+    that exercised this encoder, and it always used the dict form. Accepting
+    dict / bare-string-kind / int-kind / None (-> `default`) here means any
+    future caller in any of these shapes is normalized in one place instead
+    of re-breaking silently. Returns (kind_id, extra_fields_dict) where
+    extra_fields_dict is the original dict (for pulling out "t"/"period"/etc)
+    or {} when the caller only supplied a bare kind.
+    """
+    if value is None:
+        value = default
+    if isinstance(value, dict):
+        kind = value.get("kind", default)
+        extra = value
+    else:
+        kind = value
+        extra = {}
+    kind_id = kind if isinstance(kind, int) else kind_map[str(kind)]
+    return kind_id, extra
+
+
 def _encode_fault_schedule(payload: dict) -> bytes:
     slot_id = int(payload.get("fault_slot", payload.get("slot_id", 0)))
     # fault_type/target arrive as the scenario's own catalog strings (e.g.
@@ -638,14 +664,10 @@ def _encode_fault_schedule(payload: dict) -> bytes:
     # without arming the slot; duration_for_s is ignored. The release
     # trigger is supplied separately via FAULT_SET_UNTIL_TRIGGER (cmd 0x05),
     # which performs the actual arm -- see that command's encoder below.
-    duration = payload.get("duration", {})
-    duration_kind = duration.get("kind", "permanent")
-    duration_kind_id = duration_kind if isinstance(duration_kind, int) else _DURATION_KIND_TO_ID[str(duration_kind)]
+    duration_kind_id, duration = _normalize_kind_field(payload.get("duration"), _DURATION_KIND_TO_ID, "permanent")
     duration_for_s = float(duration.get("t", 0.0) or 0.0)
 
-    repeat = payload.get("repeat", {})
-    repeat_kind = repeat.get("kind", "once")
-    repeat_kind_id = repeat_kind if isinstance(repeat_kind, int) else _REPEAT_KIND_TO_ID[str(repeat_kind)]
+    repeat_kind_id, repeat = _normalize_kind_field(payload.get("repeat"), _REPEAT_KIND_TO_ID, "once")
     repeat_period_s = float(repeat.get("period", 0.0) or 0.0)
     repeat_jitter_s = float(repeat.get("jitter", 0.0) or 0.0)
     repeat_n = int(repeat.get("n", 0) or 0)
