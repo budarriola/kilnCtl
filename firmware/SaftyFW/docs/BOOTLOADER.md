@@ -372,12 +372,13 @@ is a bench visit to every board.
       calls `flash_range_erase()`/`flash_range_program()` against
       `BOOTLOADER_METADATA_FLASH_OFFSET`/`_SIZE`.
 - [x] Recovery mode: UART1 only, GPIO6 low, no timeout out, full minimal frame
-      subset — `enter_recovery()` brings up UART1 at 115200 8N1 (**flag: the
-      normal link now runs at 9600 because the TCMT1109 optocouplers cannot
-      switch fast enough for 115200 — see `docs/HARDWARE.md` §1 — and it is
-      the same physical UART1/optocoupler path recovery mode uses; whether
-      `enter_recovery()`'s baud was updated to match has not been checked as
-      part of this pass and needs verifying against the code**) then calls
+      subset — `enter_recovery()` brings up UART1 at 9600 8N1, matching the
+      application's `UART_OWNER_BAUD_RATE`: the TCMT1109 optocouplers cannot
+      switch fast enough for 115200 (`docs/HARDWARE.md` §1), and recovery mode
+      shares the same physical UART1/optocoupler path, so it was updated to
+      9600 along with everything else on this link — confirmed against
+      `bootloader/main.c`'s `enter_recovery()`, which now says so explicitly —
+      then calls
       `recovery_update.c`'s `recovery_update_run()`, which parses
       `kilnlink`-framed `UPDATE_BEGIN`/`UPDATE_DATA`/`UPDATE_END`/
       `UPDATE_ABORT` and emits a real framed `UPDATE_STATUS` every ~1s,

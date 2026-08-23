@@ -27,7 +27,7 @@ LINK_PROTOCOL.md's own rules make claims about:
   receiving side must decode it the same way twice. DUPLICATE tests that.
 
 Deliberately NOT implemented: byte-level reordering. The link is a single
-UART byte stream (sec 3: "8N1, 115200 baud", one TX pin, one RX pin, no
+UART byte stream (sec 3: "8N1, 9600 baud", one TX pin, one RX pin, no
 flow control) -- frames cannot arrive out of the order they were clocked
 out in. Nothing in LINK_PROTOCOL.md claims otherwise; the *seq*/*boot_id*
 fields in the context and status frames exist to detect *loss*, not

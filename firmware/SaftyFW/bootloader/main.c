@@ -67,12 +67,11 @@
 // 1u << capacity_code (e.g. a W25Q16-class part reports 0x15, and
 // 1u << 0x15 == 2097152 == 2 MiB, matching BOOTLOADER_FLASH_TOTAL_SIZE).
 //
-// NOT independently verified against real pico-sdk headers or hardware in
-// this pass -- no toolchain/hardware was available to build and confirm it
-// against a real flash datasheet or a pico-sdk example (e.g. the SDK's own
-// flash_id-style examples). Double-check this encoding before trusting it on
-// real hardware; this codebase's own discipline is to never claim more
-// confidence than has actually been verified.
+// Verified on real hardware 2026-08-23: read over SWD, this board's onboard
+// flash reports JEDEC id 0x1540ef -- a W25Q16JV, 2048 KiB -- so capacity code
+// 0x15 decoding to 1u << 0x15 == 2097152 bytes is correct and matches
+// BOOTLOADER_FLASH_TOTAL_SIZE exactly. The encoding below is confirmed, not
+// merely assumed.
 static bool flash_capacity_at_least_expected(void)
 {
     uint8_t txbuf[4] = { 0x9Fu, 0x00u, 0x00u, 0x00u };

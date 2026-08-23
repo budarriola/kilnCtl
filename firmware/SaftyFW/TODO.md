@@ -366,10 +366,14 @@ The flash layout, metadata format, bootloader (including recovery mode's full
 minimal frame subset), application-side staged writes with read-modify-write
 flash programming, whole-slot CRC-verify-from-flash, and image-header
 validation before the first erase are all built and build-verified against the
-real toolchain. **Nothing in this phase has been exercised against real
-RP2040 hardware** — no probe or board attached to any build machine, so no
-bootloader has ever actually been flashed over SWD, no application has ever
-run from either slot, and no update has ever crossed real wire.
+real toolchain. As of 2026-08-23 the bootloader has been exercised against
+real RP2040 hardware over SWD: it reaches `main`, its flash-capacity sanity
+check passes against the board's real JEDEC id (`bootloader/main.c`'s
+`flash_capacity_at_least_expected()`), and it correctly falls into recovery
+mode when no valid slot metadata exists. Flashing `SaftyFW.elf` directly over
+SWD and running the application works fine. What is still unproven is booting
+the application *through* the bootloader from a slot — see the open item
+below — and a real end-to-end update crossing the isolated link.
 
 - [x] **10.0 Measure the isolated link's error rate — done 2026-08-23, and
       it is not 115200.** The TCMT1109 optocouplers turned out to be the
@@ -397,6 +401,16 @@ run from either slot, and no update has ever crossed real wire.
       backstop, but one "round" can take far longer in practice than
       `UPDATE_PROTOCOL.md`'s throughput section seems to assume — not measured
       against a real link (blocked on 10.0).
+- [ ] **10.9 Open: application booted through the bootloader stops
+      transmitting on the isolated link.** Measured 2026-08-23: when the
+      application is booted from slot A via the bootloader hand-off, it runs
+      (`xTickCount` advances) but never gets a frame onto UART1 — the RP2040's
+      `s_status_tx_ok_count` freezes and the ESP's received-frame counter
+      stops climbing while its sent-frame counter keeps going. Flashing
+      `SaftyFW.elf` directly over SWD (bypassing the bootloader entirely)
+      works fine, so this is specific to something about the hand-off itself,
+      not the application's UART1 setup in general. Root cause unknown;
+      hardware-gated, unstarted.
 - [ ] 10.10 Verification: power cut during erase, during streaming, and during
       the metadata write; corrupt slot rejected; bad-but-booting image rolled
       back; both slots invalidated and recovered over the link with no probe.

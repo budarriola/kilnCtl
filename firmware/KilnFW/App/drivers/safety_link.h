@@ -138,6 +138,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_param_value.h"
 #include "uart_owner.h"
@@ -270,10 +271,29 @@ static inline bool safety_link_is_stale(uint16_t age_ms, uint32_t threshold_ms)
  * ~2 ms on the wire at 115200, so 50 ms is still ~25x the round trip. */
 #define SAFETY_LINK_ACK_TIMEOUT_MS 50u
 
-/* How long to wait for the status DATA frame *after* the request was ACKed.
- * Separate from the ACK timeout because this covers the Pico actually reading
- * its thermocouple and three ADC channels, not just its receive interrupt. */
-#define SAFETY_LINK_REPLY_TIMEOUT_MS 250u
+/* How long to wait for a reply frame. Separate from the ACK timeout because
+ * this covers the Pico actually doing the work -- reading its thermocouple
+ * and three ADC channels, or walking its config store -- not just its receive
+ * interrupt.
+ *
+ * Derived from the configured baud rate rather than fixed, because it stopped
+ * working when it was fixed. This was 250 ms flat, chosen when the link ran
+ * at 115200, where the longest frame is about 46 ms on the wire. At 9600 --
+ * where this link now has to run, because the optocouplers cannot switch any
+ * faster (see KILNCTL_SAFETY_BAUD_RATE's help text) -- that same frame takes
+ * about 550 ms, so a large reply could never arrive inside the window. The
+ * symptom was safety_cfg_store_refetch() timing out forever on a link that
+ * was otherwise healthy: the Pico answered every time, just not fast enough
+ * for a constant written for a wire eight times quicker.
+ *
+ * Worst-case wire time is KILNLINK_FRAME_STUFFED_MAX bytes at 10 bits each
+ * (8N1 plus start and stop). Doubled, because request and reply both cross
+ * the same wire, plus a fixed 100 ms for the Pico's own task latency. That
+ * gives ~1.2 s at 9600 and ~190 ms at 115200, so this stays close to the old
+ * value at the old baud rate and only grows where it has to. */
+#define SAFETY_LINK_REPLY_TIMEOUT_MS \
+    ((uint32_t)(((KILNLINK_FRAME_STUFFED_MAX * 10u * 1000u * 2u) \
+                 / CONFIG_KILNCTL_SAFETY_BAUD_RATE) + 100u))
 
 /* Floor on the sleep between polls, so a link whose requests already burn
  * most of the period (see SAFETY_LINK_ACK_TIMEOUT_MS) still yields. */

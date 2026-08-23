@@ -2160,9 +2160,21 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
         safety_unlock(link);
     }
 
-    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
-                                        UART_TASK_ID_SAFETY, request, req_len,
-                                        SAFETY_LINK_ACK_TIMEOUT_MS);
+    /* BROADCAST, not the ACK'd DATA transport -- same fix and same reason as
+     * safety_exchange()'s GET_STATUS send and safety_link_get_config_page()
+     * below. The Pico's link_task_handle_raw_frame() drops every frame that
+     * is not a zero-length-header BROADCAST, so an ACK'd DATA request is
+     * discarded before it reaches any command dispatch, and the send burns
+     * its full UART_PROTO_MAX_RETRIES * SAFETY_LINK_ACK_TIMEOUT_MS budget
+     * waiting for an ACK from a peer that never sends one. A send failure
+     * here is a local UART fault, not "peer didn't answer".
+     *
+     * All four of these call sites had the same bug. Anything addressed to
+     * UART_PROTO_DEVICE_SAFETY must go out as a broadcast; if you add a
+     * fifth, it does too. */
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  request, req_len);
     if (err != ESP_OK) {
         if (safety_lock(link)) {
             link->stats.timeouts++;
@@ -2244,8 +2256,21 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
         link->stats.frames_sent++;
         safety_unlock(link);
     }
-    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
-                                        UART_TASK_ID_SAFETY, payload, len, SAFETY_LINK_ACK_TIMEOUT_MS);
+    /* BROADCAST, not the ACK'd DATA transport -- same fix and same reason as
+     * safety_exchange()'s GET_STATUS send and safety_link_get_config_page()
+     * below. The Pico's link_task_handle_raw_frame() drops every frame that
+     * is not a zero-length-header BROADCAST, so an ACK'd DATA request is
+     * discarded before it reaches any command dispatch, and the send burns
+     * its full UART_PROTO_MAX_RETRIES * SAFETY_LINK_ACK_TIMEOUT_MS budget
+     * waiting for an ACK from a peer that never sends one. A send failure
+     * here is a local UART fault, not "peer didn't answer".
+     *
+     * All four of these call sites had the same bug. Anything addressed to
+     * UART_PROTO_DEVICE_SAFETY must go out as a broadcast; if you add a
+     * fifth, it does too. */
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  payload, len);
     if (err != ESP_OK && safety_lock(link)) {
         link->stats.timeouts++;
         safety_unlock(link);
@@ -2314,8 +2339,21 @@ esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_pa
         link->stats.frames_sent++;
         safety_unlock(link);
     }
-    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
-                                        UART_TASK_ID_SAFETY, payload, len, SAFETY_LINK_ACK_TIMEOUT_MS);
+    /* BROADCAST, not the ACK'd DATA transport -- same fix and same reason as
+     * safety_exchange()'s GET_STATUS send and safety_link_get_config_page()
+     * below. The Pico's link_task_handle_raw_frame() drops every frame that
+     * is not a zero-length-header BROADCAST, so an ACK'd DATA request is
+     * discarded before it reaches any command dispatch, and the send burns
+     * its full UART_PROTO_MAX_RETRIES * SAFETY_LINK_ACK_TIMEOUT_MS budget
+     * waiting for an ACK from a peer that never sends one. A send failure
+     * here is a local UART fault, not "peer didn't answer".
+     *
+     * All four of these call sites had the same bug. Anything addressed to
+     * UART_PROTO_DEVICE_SAFETY must go out as a broadcast; if you add a
+     * fifth, it does too. */
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  payload, len);
     if (err != ESP_OK && safety_lock(link)) {
         link->stats.timeouts++;
         safety_unlock(link);
@@ -2392,13 +2430,26 @@ esp_err_t safety_link_get_config_page(SafetyLinkClass *link, uint8_t page_index,
         safety_unlock(link);
     }
 
-    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
-                                        UART_TASK_ID_SAFETY, request, req_len, SAFETY_LINK_ACK_TIMEOUT_MS);
+    /* Same fix as safety_exchange()'s GET_STATUS send (see that call site's
+     * comment): the Pico's link_task drops every frame that isn't a
+     * zero-length-header BROADCAST (firmware/SaftyFW/src/tasks/link_task.c,
+     * link_task_handle_raw_frame()'s "the Pico never participates in the
+     * ACK'd DATA/ACK/NACK transport" filter). This request went out as an
+     * ACK'd DATA frame -- uart_protocol_send() -- so the Pico silently
+     * discarded every copy and this call burned its full
+     * UART_PROTO_MAX_RETRIES * SAFETY_LINK_ACK_TIMEOUT_MS budget against a
+     * peer that would never ACK it, every single time
+     * safety_cfg_store_maybe_refetch() found a CRC mismatch worth pursuing
+     * (i.e. every poll while the fetch keeps failing) -- observed live
+     * 2026-08-22 as a continuous "page 0 failed (ESP_ERR_TIMEOUT)" flood.
+     * Sent as a BROADCAST instead: one shot, no ACK wait, no retry, and the
+     * reply this elicits (link_task_send_config_page() -> link_task_send_
+     * broadcast()) was already a broadcast the ESP was listening for below.
+     * As with GET_STATUS, a send failure here is a local UART fault, not
+     * "peer didn't answer" -- not counted in stats.timeouts. */
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
+                                                  UART_TASK_ID_SAFETY, request, req_len);
     if (err != ESP_OK) {
-        if (safety_lock(link)) {
-            link->stats.timeouts++;
-            safety_unlock(link);
-        }
         xSemaphoreGive(link->xact_lock);
         return err;
     }

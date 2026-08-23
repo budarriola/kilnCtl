@@ -124,6 +124,21 @@ static safety_cfg_store_blob_t s_store;
  * monotonic microsecond counter needs none). */
 static int64_t s_fetched_at_us = -1;
 
+/* Rate-limits the "page N failed" warning below -- same 5 s cadence and
+ * "one line, with a suppressed-count, not silence" discipline
+ * uart_protocol.c's RETRY_LOG_INTERVAL_US already uses for its own
+ * no-reply-from-peer warning. safety_cfg_store_maybe_refetch() is called
+ * once per safety poll (SAFETY_POLL_PERIOD_MS, a few hundred ms) and keeps
+ * retrying for as long as the cached CRC disagrees with the peer's -- by
+ * design (a Pico that only just came back up should not need a reboot to be
+ * noticed) -- but on a link this bandwidth-constrained a genuinely stuck
+ * fetch must not cost a log line every single poll forever; it still must
+ * never go silent, since a real, persistent failure is exactly what an
+ * operator needs to see. */
+#define SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US 5000000
+static int64_t s_last_refetch_fail_log_us = 0;
+static uint32_t s_refetch_fail_suppressed = 0;
+
 static esp_err_t nvs_partition_init(const char *partition)
 {
     esp_err_t err = nvs_flash_init_partition(partition);
@@ -337,8 +352,22 @@ bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
         kilnlink_config_page_t page;
         esp_err_t err = safety_link_get_config_page(link, page_index, &page);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left unchanged",
-                     (unsigned)page_index, esp_err_to_name(err));
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - s_last_refetch_fail_log_us >= SAFETY_CFG_STORE_REFETCH_LOG_INTERVAL_US) {
+                if (s_refetch_fail_suppressed > 0) {
+                    ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left "
+                                  "unchanged (+%lu more failed attempts suppressed)",
+                             (unsigned)page_index, esp_err_to_name(err),
+                             (unsigned long)s_refetch_fail_suppressed);
+                } else {
+                    ESP_LOGW(TAG, "safety_cfg_store_refetch: page %u failed (%s) -- cache left unchanged",
+                             (unsigned)page_index, esp_err_to_name(err));
+                }
+                s_last_refetch_fail_log_us = now_us;
+                s_refetch_fail_suppressed = 0;
+            } else {
+                s_refetch_fail_suppressed++;
+            }
             return false;
         }
         for (uint8_t i = 0; i < page.entry_count; i++) {

@@ -1630,6 +1630,28 @@ def safety_set_fault_out(assert_fault: bool) -> str:
 
 
 @_tool()
+def safety_clear_trip() -> str:
+    """Clear a latched safety trip on the safety processor.
+
+    A trip LATCHES on the Pico: once `safety_guards_tick()` sets `is_tripped`
+    it returns early and stops re-evaluating, so removing whatever caused the
+    trip does not clear it by itself. A board that tripped because the
+    isolated fault line went high stays tripped after the line goes low. This
+    is the only way out short of a power cycle.
+
+    Clearing is a request, not an order. `link_task_handle_clear_trip()` calls
+    `safety_guards_try_clear()`, which re-checks the guard against live inputs
+    and refuses while the condition still holds -- so this cannot be used to
+    dismiss a fault that is still present. If the trip does not clear, the
+    cause is still there.
+
+    Fire-and-forget: no reply on the wire. Check `safety_get_status()`
+    afterwards to see whether it actually cleared.
+    """
+    return _send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
+
+
+@_tool()
 def safety_set_tc_type(tc_type_name: str) -> str:
     """Commission the safety processor's thermocouple type (config_store.h).
 

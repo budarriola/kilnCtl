@@ -258,6 +258,18 @@ SAFETY_CMD_PING = 0x03
 SAFETY_CMD_GET_LINK_STATS = 0x04
 SAFETY_CMD_SET_POLL_PERIOD = 0x05
 SAFETY_CMD_SET_FAULT_OUT = 0x06
+#: PC -> ESP, relayed to the Pico by uart_bridge.c's SAFETY_CMD_CLEAR_TRIP
+#: case. Clears a latched safety trip. It takes NO arguments over this link:
+#: the ESP derives the trip_mask itself from its own cached Pico DIAG state
+#: rather than trusting one supplied over the PC link (see
+#: safety_link_send_clear_trip()'s doc comment). Fire-and-forget, no reply on
+#: the wire; the outcome shows up on the next GET_STATUS poll.
+#:
+#: This matters more than it looks: a safety trip LATCHES on the Pico
+#: (safety_guards.c returns early once is_tripped is set), so deasserting
+#: whatever caused it does NOT clear it. Without this command a tripped board
+#: stays tripped until it is power-cycled.
+SAFETY_CMD_CLEAR_TRIP = 0x0A
 #: ESP -> Pico, CommonFW/docs/LINK_PROTOCOL.md sec 4 -- commissions
 #: SaftyFW's config_store.h tc_type. Fire-and-forget, no reply on the wire;
 #: the outcome shows up on the next GET_DIAG/GET_STATUS poll, not here.

@@ -122,6 +122,7 @@ from .protocol import (
     IO_RELAY_COUNT,
     SAFETY_AGE_NEVER,
     SAFETY_CMD_GET_DIAG,
+    SAFETY_CMD_CLEAR_TRIP,
     SAFETY_CMD_GET_FW_VERSION,
     SAFETY_CMD_GET_LINK_STATS,
     SAFETY_CMD_GET_STATUS,
@@ -1871,6 +1872,33 @@ def safety_set_poll_period(period_ms: int) -> bytes:
     return struct.pack(
         "<BH", SAFETY_CMD_SET_POLL_PERIOD, _check_u16(period_ms, "period_ms")
     )
+
+
+def safety_clear_trip() -> bytes:
+    """0x0A CLEAR_TRIP: clear a latched safety trip on the Pico. No args.
+
+    The trip_mask deliberately does not travel over this link. The ESP
+    derives it from its own cached copy of the Pico's DIAG state rather than
+    trusting one supplied by the PC (safety_link_send_clear_trip()'s doc
+    comment), so this request is the bare command byte.
+
+    This exists because a trip LATCHES. Once safety_guards_tick() sets
+    is_tripped it returns early and stops re-evaluating, so removing whatever
+    caused the trip does NOT clear it -- a board that tripped because the
+    isolated fault line went high stays tripped after the line goes low
+    again. Until this command existed on the PC side, the only way out was a
+    power cycle.
+
+    Clearing is a request, not an order: link_task_handle_clear_trip() calls
+    safety_guards_try_clear(), which re-evaluates the guard against live
+    inputs and refuses if the condition still holds. So this cannot be used
+    to paper over a real fault -- asking to clear a trip whose cause is still
+    present simply leaves it tripped.
+
+    Fire-and-forget, like SET_CONFIG: no reply on the wire. Read the outcome
+    from the next safety_get_status() poll.
+    """
+    return struct.pack("<B", SAFETY_CMD_CLEAR_TRIP)
 
 
 def safety_set_fault_out(assert_fault: bool) -> bytes:
