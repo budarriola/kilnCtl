@@ -210,11 +210,24 @@ typedef enum {
 bool i2c_owner_io_set_dir(i2c_owner_expander_t exp, uint8_t pin, bool input, bool pullup);
 bool i2c_owner_io_write(i2c_owner_expander_t exp, uint8_t pin, bool level);
 
+// Distinguishes i2c_owner_io_read()'s two distinct failure causes -- both
+// report the same plain `false` return, but a caller mapping to a protocol-
+// level status (cmd_task.c's handle_io_read(), SIMFW_CMD_STATUS_ERR_BAD_ARGS
+// vs SIMFW_CMD_STATUS_ERR_NO_SAMPLE) needs to tell them apart.
+typedef enum {
+    I2C_OWNER_IO_READ_OK = 0,
+    I2C_OWNER_IO_READ_BAD_ARGS,  // exp/pin out of range or reserved, or level == NULL
+    I2C_OWNER_IO_READ_NO_SAMPLE, // valid target, but no scan sample taken yet
+} i2c_owner_io_read_status_t;
+
 // Reads the raw (non-debounced) level last seen for this pin during
-// i2c_owner's scan loop -- mutex-read, does not itself touch I2C0. false if
-// no sample has been taken yet (immediately after boot) or the arguments
-// are out of range.
-bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level);
+// i2c_owner's scan loop -- mutex-read, does not itself touch I2C0. Returns
+// false if no sample has been taken yet (immediately after boot, or no
+// expander has ever ACKed) or the arguments are out of range; out_status
+// (may be NULL) reports which of those two applied -- see
+// i2c_owner_io_read_status_t above.
+bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level,
+                        i2c_owner_io_read_status_t *out_status);
 
 #ifdef __cplusplus
 }

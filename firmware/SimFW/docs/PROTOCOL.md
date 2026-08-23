@@ -72,6 +72,7 @@ Every command reply's payload starts with a **status byte**, byte 0:
 | `0x02` | `SIMFW_CMD_STATUS_ERR_BAD_ARGS` | args failed to decode (short/overflowed payload) or a target (zone/channel/expander/pin/slot) was out of range |
 | `0x03` | `SIMFW_CMD_STATUS_ERR_INTERNAL` | dispatch reached an inconsistent state (should not happen — see `cmd_task.c`'s dispatch fallthrough comment) |
 | `0x04` | `SIMFW_CMD_STATUS_ERR_BUSY` | args were well-formed and in range, but the owning task could not apply the command right now (its internal command queue was full, or an immediate action such as `FAULT_FIRE_NOW` could not complete) — added this pass (section 5), see `cmd_ids.h`'s own comment on the constant |
+| `0x05` | `SIMFW_CMD_STATUS_ERR_NO_SAMPLE` | args were valid, but the fixture has no reading to return yet — typically the hardware the read depends on has never responded (e.g. `IO/READ` with no MCP23017 attached to J20) or no scan tick has run since boot. Unlike `ERR_BUSY` this is not transient in the "retry in a moment" sense — the underlying hardware has to actually start answering first. Unlike `ERR_BAD_ARGS` the request itself was fine; see `cmd_ids.h`'s comment on the constant |
 
 This is deliberately a separate layer from `benchproto`'s own ACK/NACK:
 ACK/NACK say only whether the frame was *delivered* to a registered task
@@ -662,7 +663,11 @@ safety on pin 10) and for a transiently full command queue —
 indistinguishable from the bool alone, so this handler reports
 `ERR_BAD_ARGS` for both (the reserved-pin case is the far more likely cause
 for a well-behaved client). `WRITE`: `[u8 exp, u8 pin, u8 level]`.
-`READ`: `[u8 exp, u8 pin]`, reply `[status, level]`.
+`READ`: `[u8 exp, u8 pin]`, reply `[status, level]`. `i2c_owner_io_read()`
+reports `ERR_BAD_ARGS` for an out-of-range/reserved pin exactly as above, but
+`ERR_NO_SAMPLE` (section 4's Reply-convention table) if the pin itself is
+fine and no expander has ever ACKed a scan on that bus yet — the common
+bench case with no MCP23017 attached to J20.
 
 `ESTOP_SET`: `[u8 open]` (1 = loop opened/tripped). `ESTOP_GET`: no args,
 reply `[status, open]`. `FAULT_LINE_GET`: no args, reply

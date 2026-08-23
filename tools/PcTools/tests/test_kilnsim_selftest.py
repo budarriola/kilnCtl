@@ -175,6 +175,43 @@ class IndividualCheckTests(unittest.TestCase):
         self.assertEqual(status, st.STATUS_NOT_RUNNABLE)
         self.assertIn("MockSimLink", detail)
 
+    def test_expander_read_after_write_skips_on_no_sample(self):
+        # Bench-day case CONFIRMED BUG fix targets: a real device (not
+        # virtual_simfw/MockSimLink) with no MCP23017 physically attached to
+        # J20. i2c_owner_io_read()/handle_io_read() answer ERR_NO_SAMPLE
+        # (cmd_ids.h 0x05) for this -- a legal request the fixture simply
+        # cannot satisfy yet, not a caller mistake -- so the check must
+        # SKIP with an explanatory message, never FAIL.
+        self.link.script_response(CommandGroup.SYS, SysCmd.GET_VERSION, {
+            "protocol_version": 1, "min_compatible": 1, "fw_version": "1.2.3",
+            "fw_version_major": 1, "fw_version_minor": 2, "fw_version_patch": 3,
+            "fw_git_dirty": False, "fw_git_hash": "deadbee",  # real-looking, not "virtual"/"0000000"
+        })
+        self.link.script_response(CommandGroup.IO, 1, {"ok": True})  # SET_DIR
+        self.link.script_response(CommandGroup.IO, 2, {"ok": True})  # WRITE (high)
+        self.link.script_response(CommandGroup.IO, 3, {}, error="IO/3: ERR_NO_SAMPLE")  # READ
+        status, detail = st._check_expander_read_after_write(self.link)
+        self.assertEqual(status, st.STATUS_SKIP)
+        self.assertIn("no MCP23017 responding", detail)
+        self.assertIn("attach the fixture", detail)
+
+    def test_expander_read_after_write_still_fails_on_genuine_bad_args(self):
+        # A real ERR_BAD_ARGS (the request itself is wrong) must still FAIL
+        # -- only ERR_NO_SAMPLE gets the SKIP treatment. Proves the SKIP
+        # branch is matching the specific status name, not swallowing every
+        # SimLinkError from the READ call.
+        self.link.script_response(CommandGroup.SYS, SysCmd.GET_VERSION, {
+            "protocol_version": 1, "min_compatible": 1, "fw_version": "1.2.3",
+            "fw_version_major": 1, "fw_version_minor": 2, "fw_version_patch": 3,
+            "fw_git_dirty": False, "fw_git_hash": "deadbee",
+        })
+        self.link.script_response(CommandGroup.IO, 1, {"ok": True})  # SET_DIR
+        self.link.script_response(CommandGroup.IO, 2, {"ok": True})  # WRITE (high)
+        self.link.script_response(CommandGroup.IO, 3, {}, error="IO/3: ERR_BAD_ARGS")  # READ
+        status, detail = st._check_expander_read_after_write(self.link)
+        self.assertEqual(status, st.STATUS_FAIL)
+        self.assertIn("ERR_BAD_ARGS", detail)
+
     def test_hardware_only_checks_always_not_runnable(self):
         for fn in (st._check_spi_master_loopback, st._check_ct_adc_loopback):
             status, detail = fn(self.link)

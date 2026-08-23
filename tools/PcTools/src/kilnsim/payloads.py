@@ -43,6 +43,13 @@ STATUS_ERR_NOT_IMPL = 0x01
 STATUS_ERR_BAD_ARGS = 0x02
 STATUS_ERR_INTERNAL = 0x03
 STATUS_ERR_BUSY = 0x04
+# The fixture's args were valid, but it has no reading to answer with yet --
+# e.g. IO/READ against a pin whose expander has never ACKed a scan (no
+# MCP23017 attached to J20), or no scan tick has run since boot. Distinct
+# from ERR_BUSY (transient -- retry is likely to succeed) and ERR_BAD_ARGS
+# (the request itself is wrong -- retrying never helps). Mirrors
+# firmware/SimFW/src/tasks/cmd_ids.h's SIMFW_CMD_STATUS_ERR_NO_SAMPLE.
+STATUS_ERR_NO_SAMPLE = 0x05
 
 _STATUS_NAMES = {
     STATUS_OK: "OK",
@@ -50,6 +57,7 @@ _STATUS_NAMES = {
     STATUS_ERR_BAD_ARGS: "ERR_BAD_ARGS",
     STATUS_ERR_INTERNAL: "ERR_INTERNAL",
     STATUS_ERR_BUSY: "ERR_BUSY",
+    STATUS_ERR_NO_SAMPLE: "ERR_NO_SAMPLE",
 }
 
 

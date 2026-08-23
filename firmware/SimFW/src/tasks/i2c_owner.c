@@ -543,9 +543,13 @@ bool i2c_owner_io_write(i2c_owner_expander_t exp, uint8_t pin, bool level)
     return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
 }
 
-bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level)
+bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level,
+                        i2c_owner_io_read_status_t *out_status)
 {
     if (!io_pin_allowed(exp, pin) || !level) {
+        if (out_status) {
+            *out_status = I2C_OWNER_IO_READ_BAD_ARGS;
+        }
         return false;
     }
 
@@ -562,8 +566,14 @@ bool i2c_owner_io_read(i2c_owner_expander_t exp, uint8_t pin, bool *level)
     state_unlock();
 
     if (!valid) {
+        if (out_status) {
+            *out_status = I2C_OWNER_IO_READ_NO_SAMPLE;
+        }
         return false;
     }
     *level = (word & (uint16_t)(1u << pin)) != 0;
+    if (out_status) {
+        *out_status = I2C_OWNER_IO_READ_OK;
+    }
     return true;
 }

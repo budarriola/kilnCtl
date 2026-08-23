@@ -1198,9 +1198,20 @@ static void handle_io_read(const uint8_t *args, uint8_t args_len, uint8_t *out, 
 
     reply_writer_t w;
     rw_init(&w, out, out_cap);
-    bool level = false;
-    if (r.overflow || exp > (uint8_t)I2C_OWNER_EXP_2 || !i2c_owner_io_read((i2c_owner_expander_t)exp, pin, &level)) {
+    if (r.overflow || exp > (uint8_t)I2C_OWNER_EXP_2) {
         rw_u8(&w, SIMFW_CMD_STATUS_ERR_BAD_ARGS);
+        *out_len = w.len;
+        return;
+    }
+    bool level = false;
+    i2c_owner_io_read_status_t read_status = I2C_OWNER_IO_READ_OK;
+    if (!i2c_owner_io_read((i2c_owner_expander_t)exp, pin, &level, &read_status)) {
+        // read_status tells apart a genuinely bad/reserved pin (ERR_BAD_ARGS
+        // -- retrying will never help) from "no expander has ever ACKed on
+        // this bus yet" (ERR_NO_SAMPLE -- expected and benign on a bench with
+        // no MCP23017 attached; see cmd_ids.h's comment on the constant).
+        rw_u8(&w, read_status == I2C_OWNER_IO_READ_NO_SAMPLE ? SIMFW_CMD_STATUS_ERR_NO_SAMPLE
+                                                              : SIMFW_CMD_STATUS_ERR_BAD_ARGS);
         *out_len = w.len;
         return;
     }

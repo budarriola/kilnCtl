@@ -385,6 +385,21 @@ def _check_expander_read_after_write(link: SimLink) -> "tuple[str, str]":
         link.send_command(CommandGroup.IO, IoCmd.WRITE, {"exp": exp, "pin": pin, "level": False})
         low = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin})
     except SimLinkError as exc:
+        # ERR_NO_SAMPLE (payloads.STATUS_ERR_NO_SAMPLE) means the args were
+        # fine but i2c_owner has never gotten a successful MCP23017 ACK on
+        # this bus -- exactly the expected state with no expander physically
+        # attached to J20, not a fixture defect. SimLinkError only carries
+        # str(CommandStatusError) (kilnsim.link wraps and drops the
+        # structured .status), so the status name is matched in the message
+        # text -- the same convention this module's other checks/comments
+        # already use for status names (e.g. the "FAULT/SET_UNTIL_TRIGGER:
+        # ERR_BAD_ARGS" wording in link.py). A genuine ERR_BAD_ARGS (wrong
+        # exp/pin) is not caught by this and still fails below.
+        if "ERR_NO_SAMPLE" in str(exc):
+            return STATUS_SKIP, (
+                "no MCP23017 responding -- attach the fixture to the board to exercise this "
+                f"({exc})"
+            )
         return STATUS_FAIL, f"expander read-after-write round trip errored: {exc}"
     if high.get("level") is True and low.get("level") is False:
         return STATUS_PASS, f"exp{exp} pin{pin}: wrote high->read {high.get('level')}, wrote low->read {low.get('level')}"

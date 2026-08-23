@@ -59,6 +59,44 @@ class SysGroupTests(unittest.TestCase):
         with self.assertRaises(pl.PayloadError):
             pl.decode_reply(CommandGroup.SYS, 1, b"")
 
+    def test_reboot_bootloader_request_default_confirm(self):
+        # No "confirm" key supplied -> encodes the real magic
+        # (SYS_REBOOT_BOOTLOADER_MAGIC), not zero -- a caller who just wants
+        # to reboot should not have to know the magic value exists.
+        from kilnsim.protocol import SYS_REBOOT_BOOTLOADER_MAGIC
+        req = pl.encode_request(CommandGroup.SYS, 8, {})
+        self.assertEqual(req[0], 8)
+        (confirm,) = struct.unpack_from("<I", req, 1)
+        self.assertEqual(confirm, SYS_REBOOT_BOOTLOADER_MAGIC)
+
+    def test_reboot_bootloader_request_explicit_wrong_confirm(self):
+        # An explicit override (e.g. a negative-path test proving the
+        # firmware rejects a bad magic) is still honored byte-for-byte.
+        req = pl.encode_request(CommandGroup.SYS, 8, {"confirm": 0x00000000})
+        self.assertEqual(req, bytes([8, 0x00, 0x00, 0x00, 0x00]))
+
+    def test_reboot_bootloader_reply_bad_args_raises(self):
+        # A wrong/missing confirm value comes back as ERR_BAD_ARGS
+        # (cmd_ids.h's own comment on SIMFW_CMD_SYS_REBOOT_BOOTLOADER).
+        with self.assertRaises(pl.CommandStatusError):
+            pl.decode_reply(CommandGroup.SYS, 8, bytes([pl.STATUS_ERR_BAD_ARGS]))
+
+    def test_reboot_bootloader_reply_busy_raises(self):
+        # A timed-out safe-state confirmation comes back as ERR_BUSY.
+        with self.assertRaises(pl.CommandStatusError):
+            pl.decode_reply(CommandGroup.SYS, 8, bytes([pl.STATUS_ERR_BUSY]))
+
+    def test_no_sample_status_raises_with_readable_name(self):
+        # SIMFW_CMD_STATUS_ERR_NO_SAMPLE (cmd_ids.h 0x05): args were valid but
+        # the fixture has no reading yet (e.g. IO/READ with no MCP23017
+        # attached). Must decode to a readable name, not a bare "0x05" --
+        # that readability is exactly what kilnsim.selftest's SKIP-vs-FAIL
+        # branch string-matches on.
+        with self.assertRaises(pl.CommandStatusError) as ctx:
+            pl.decode_reply(CommandGroup.IO, 3, bytes([pl.STATUS_ERR_NO_SAMPLE]))
+        self.assertIn("ERR_NO_SAMPLE", str(ctx.exception))
+        self.assertEqual(ctx.exception.status, pl.STATUS_ERR_NO_SAMPLE)
+
 
 class ModelGroupTests(unittest.TestCase):
     def test_set_zone_params_round_trip_via_get(self):

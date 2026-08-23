@@ -112,6 +112,21 @@ extern "C" {
 // Distinct from ERR_BAD_ARGS so a client can tell "try again" apart from
 // "fix your request."
 #define SIMFW_CMD_STATUS_ERR_BUSY         0x04u
+// Added this pass (i2c_owner_io_read()'s three-way failure ambiguity --
+// docs/PROTOCOL.md IO/READ, section 5.5): the command and its arguments
+// were valid (target in range, out-params non-NULL), but the fixture has no
+// sample to answer with yet. Typically means the hardware the read depends
+// on has never responded -- no MCP23017 physically attached to J20, or the
+// bus otherwise never ACKed -- or i2c_owner's scan loop simply hasn't
+// completed a tick since boot (`s_exp1_raw_valid`/`s_exp2_raw_valid` still
+// false). Distinct from ERR_BUSY: ERR_BUSY means a transient condition an
+// immediate retry will likely clear (a full command queue); ERR_NO_SAMPLE
+// means retrying alone will never help -- the expander has to actually
+// start answering (or a scan tick has to run) first. Distinct from
+// ERR_BAD_ARGS: ERR_BAD_ARGS means the caller's own request is wrong (an
+// out-of-range or reserved exp/pin) and no amount of waiting or retrying
+// will ever make it succeed.
+#define SIMFW_CMD_STATUS_ERR_NO_SAMPLE    0x05u
 
 // --- MODEL group command ids (SIMFW_TASK_ID_MODEL) -- docs/PROTOCOL.md
 // section 5.1, backed by sim_engine.h's MODEL-group command surface. ---
