@@ -182,23 +182,60 @@ drives the onboard LED (GPIO25, no header pin) at every major boot stage and
 with a distinct post-boot heartbeat, specifically so the *next* dead-board
 symptom is diagnosable by eye alone, with nothing attached but USB power.
 
-**How to read it:** count short flashes in a group, then check what state
-the LED settles into afterward.
+**2026-08-23, second pass:** a SECOND real dead-board failure showed a
+fixture that was completely dark from power-on — not even stage 1 of the
+table below (at the time, stage 1 was `spi_emu_a_start`, well into `main()`).
+That is too coarse to tell "crashed before `main()` even started" apart from
+"crashed somewhere in `main()`'s first few lines, before the first beacon
+call." The stage count was renumbered 1→14 with four new checkpoints ahead
+of the first `_start()` call — group 1 is now the literal first two
+statements `main()` executes, before `stdio_init_all()` — and the flash
+encoding changed from a straight tally (unreadable much past ~5) to a
+base-5 long/short odometer so stage 14 is still countable at a glance.
+
+**How to read it:** each stage number is encoded as `floor(N/5)` LONG
+flashes, then (only if the remainder is non-zero) a medium gap and
+`N mod 5` SHORT flashes. Recover N as `5*(long count) + (short count)`. A
+long dark gap separates one stage's whole number from the next.
+
+| Flash shape | Meaning |
+|---|---|
+| LONG flash: 400 ms on / 250 ms off | Counts a group of five. |
+| SHORT flash: 120 ms on / 180 ms off | Counts one (used for the 0-4 remainder). |
+| ~500 ms medium gap | Separates the long sub-group from the short sub-group (only present when BOTH are non-empty). |
+| ~1.2 s dark gap | Separates one stage number from the next. |
+
+| Longs | Shorts | Stage N | Checkpoint reached |
+|---|---|---|---|
+| 0 | 1 | **1** | Literal first statement of `main()` — before `stdio_init_all()`. If this never appears, the fault is before `main()` (crt0/pico-sdk runtime_init, boot ROM, or the flash image) — instrumenting `main()` further cannot see it; reach for a debug probe. |
+| 0 | 2 | **2** | `stdio_init_all()` returned. (The proven-good `tools/boot_probe/blink_uart` control image calls this exact same function, same UART pins/baud, and blinks fine standalone — so 1-but-not-2 means something SimFW links in changes this call's behavior, not that the call is broken in general.) |
+| 0 | 3 | **3** | `simfw_fatal_install_cross_core_halt()` returned (SIO_IRQ_PROC0 handler installed). |
+| 0 | 4 | **4** | Beacon GPIO re-init done, last checkpoint before the first `_start()` call. 4-but-not-5 means the fault is inside `spi_emu_a_start()`. |
+| 1 | 0 | **5** | `spi_emu_a_start()` |
+| 1 | 1 | **6** | `spi_emu_b_start()` |
+| 1 | 2 | **7** | `wave_owner_start()` |
+| 1 | 3 | **8** | `sim_engine_start()` |
+| 1 | 4 | **9** | `usb_owner_start()` |
+| 2 | 0 | **10** | `cmd_task_start()` |
+| 2 | 1 | **11** | `fault_sched_start()` |
+| 2 | 2 | **12** | `i2c_owner_start()` |
+| 2 | 3 | **13** | `telemetry_start()` |
+| 2 | 4 | **14** | `log_task_start()` — every task started. |
 
 | What you see | Meaning |
 |---|---|
-| **N short flashes** (150 ms on/150 ms off), repeating in a group, followed by a ~700 ms dark gap before the next group | Stage **N** of boot just completed. Stages count up 1→10 in `main()`'s task-start order: 1=`spi_emu_a_start`, 2=`spi_emu_b_start`, 3=`wave_owner_start`, 4=`sim_engine_start`, 5=`usb_owner_start`, 6=`cmd_task_start`, 7=`fault_sched_start`, 8=`i2c_owner_start`, 9=`telemetry_start`, 10=`log_task_start`. |
-| **Groups count up to some N, then nothing (dark) forever** | The fixture crashed or hard-faulted *inside* stage **N+1**'s `_start()` call — before that call returned, and before anything called `simfw_fatal()`. This is the "true blank" case a debug probe would normally be needed for; report the last completed stage number. |
-| **10 groups (1 through 10), then the LED goes dark for good, no heartbeat** | Every task start returned, but `vTaskStartScheduler()` itself failed (out of heap for the idle/timer tasks) or the scheduler somehow never reached the idle task. Should not happen under normal heap pressure (`configTOTAL_HEAP_SIZE` is 32 KiB); treat as a real bug if seen. |
+| **Stage numbers count up to some N, then nothing (dark) forever, never reaching 14** | The fixture crashed or hard-faulted *inside* the checkpoint after N — before that call/statement completed, and before anything called `simfw_fatal()`. This is the "true blank" case a debug probe would normally be needed for; report the last completed stage number from the table above. |
+| **1→14 appears once, then the WHOLE 1→14 sequence repeats two more times (three passes total), then the LED goes dark and only the heartbeat follows** | Full boot success. The three-pass replay (LED-only, no repeated side-effecting calls) is `main()`'s own recount aid before it calls `vTaskStartScheduler()` — no fresh power cycle needed to double check the count. If you see fewer than 3 full replays before darkness, `vTaskStartScheduler()` itself failed (out of heap for the idle/timer tasks) or the scheduler never reached the idle task; treat as a real bug. |
 | **A brief (100 ms) single flash, repeating steadily every ~2 s, forever** | Healthy steady state: the scheduler is running and core 0's idle task is getting CPU time normally (`vApplicationIdleHook()`). This is deliberately a single infrequent blink, not a cluster, so it can never be mistaken for a boot-stage group. |
 | **10 fast flashes (100 ms on/100 ms off) back-to-back, then SOLID ON forever** | `simfw_fatal()` fired — a real, named resource-claim failure or (as of this pass) a caught `vApplicationStackOverflowHook()`/`vApplicationMallocFailedHook()` event. This can happen at any point, mid-stage or post-boot; SWD (if a probe is available) will show `panic()`'s formatted message with the subsystem/reason. If NOT attached, at minimum you know the kernel caught something *and named it* — very different from silent corruption. |
-| **Completely dark, no flashes at all, from power-on** | The fixture never reached `main()`'s first beacon call at all -- boot ROM/stage-2 bootloader failure, bad flash, or a hardware fault before `stdio_init_all()`/`simfw_fatal_install_cross_core_halt()`. This is the one case the beacon cannot help diagnose (nothing has run yet); reflash and reseat first, then reach for a debug probe. |
+| **Completely dark, no flashes at all, from power-on** | The fixture never reached `main()`'s literal first two statements (stage 1) at all — boot ROM/stage-2 bootloader failure, bad flash, or a hardware fault before `main()` is ever entered. This is the one case the beacon cannot help diagnose (nothing has run yet); reflash and reseat first, then reach for a debug probe. |
 
-**Do not confuse:** boot-stage groups (150/150 ms, count varies 1-10, ~700 ms
-gap between groups) vs. the heartbeat (single 100 ms flash, ~2 s of dark
-between blinks) vs. `simfw_fatal()`'s signature (always exactly 10 fast
-100/100 ms flashes, then permanently solid) — three different cadences by
-design, per `src/main.c`'s `simfw_boot_beacon()`/`vApplicationIdleHook()` and
+**Do not confuse:** boot-stage groups (long/short odometer encoding above,
+~1.2 s dark gap between stage numbers) vs. the heartbeat (single 100 ms
+flash, ~2 s of dark between blinks) vs. `simfw_fatal()`'s signature (always
+exactly 10 fast 100/100 ms flashes, then permanently solid) — three
+different cadences by design, per `src/main.c`'s
+`simfw_boot_beacon()`/`vApplicationIdleHook()` and
 `src/drivers/simfw_fatal.c`'s `simfw_fatal()`.
 
 **If a stack overflow is what you're chasing:** `firmware/SimFW/build` has
