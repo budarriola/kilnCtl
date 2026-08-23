@@ -1092,17 +1092,27 @@ static esp_err_t safety_exchange(SafetyLinkClass *link, const uint8_t *request, 
         safety_unlock(link);
     }
 
-    esp_err_t err = uart_protocol_send(&link->proto, UART_PROTO_DEVICE_SAFETY, UART_TASK_ID_SAFETY,
-                                        UART_TASK_ID_SAFETY, request, length,
-                                        SAFETY_LINK_ACK_TIMEOUT_MS);
+    /* LINK_PROTOCOL.md sec "SAFETY_CMD_GET_STATUS ... no longer a poll" and
+     * sec 9 item 0.3: the Pico's link_task never runs the ACK'd DATA/ACK/NACK
+     * transport at all (firmware/SaftyFW/src/tasks/link_task.c drops anything
+     * that isn't a zero-length BROADCAST), so uart_protocol_send() here would
+     * never see an ACK and would burn its full UART_PROTO_MAX_RETRIES *
+     * SAFETY_LINK_ACK_TIMEOUT_MS budget on *every* call, poll after poll,
+     * against a peer that is behaving exactly as designed. Sent as a
+     * BROADCAST instead: one shot, no ACK wait, no retry. This also means a
+     * failure here can only be "the UART write itself failed"
+     * (uart_protocol_send_broadcast's ESP_FAIL/ESP_ERR_INVALID_ARG), never
+     * "no ACK" -- so it must NOT be counted as a stats.timeouts the way the
+     * old ACK'd send's failure was; that counter now means "asked, and got no
+     * reply", which is decided below by whether a reply frame actually
+     * showed up, not by whether the send itself succeeded. */
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  request, length);
     if (err != ESP_OK) {
-        if (safety_lock(link)) {
-            link->stats.timeouts++;
-            safety_unlock(link);
-        }
-        /* NOT logged here: with no Pico attached this fires on every single
-         * poll. The poll task logs the *state* (link down) at most once per
-         * SAFETY_LINK_DOWN_LOG_PERIOD_MS instead -- see safety_update_health. */
+        /* Only a local UART write failure, not "peer didn't answer" -- see
+         * the comment above. Not counted in stats.timeouts for the same
+         * reason; frames_sent above already recorded the attempt. */
         xSemaphoreGive(link->xact_lock);
         return err;
     }

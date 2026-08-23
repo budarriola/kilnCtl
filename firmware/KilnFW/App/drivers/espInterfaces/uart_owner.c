@@ -17,7 +17,33 @@ static const char *TAG = "uart_owner";
 
 /* Watches the driver's event queue for line/buffer errors so a flaky wire
  * (noise, wrong baud, disconnected sensor) doesn't leave stale garbage
- * sitting in the RX ring buffer for the next transaction to read. */
+ * sitting in the RX ring buffer for the next transaction to read.
+ *
+ * What it does NOT do is flush on a per-character line error. A framing or
+ * parity error means one character was mangled; it says nothing about the
+ * bytes already sitting in the ring behind it. uart_flush_input() throws
+ * away the whole ring, so a single glitched character destroys every
+ * complete frame queued behind it -- including frames that had already
+ * arrived intact and were simply waiting to be read.
+ *
+ * That is a bad trade for this protocol, because the frame layer is already
+ * self-synchronising: frames are 0x7E-delimited and CRC-checked, so the
+ * parser resynchronises on the next delimiter and rejects the corrupted
+ * frame on its own. Flushing cannot make a mangled frame good; it can only
+ * take good ones with it.
+ *
+ * It is a *ruinous* trade on the isolated safety link specifically. That
+ * line sits in a break condition whenever the far end is in reset (see
+ * safety_link.h), and a peer that reboots -- or any noise on a 3 m opto
+ * link -- produces a line error every cycle, arriving interleaved with the
+ * peer's telemetry. Flushing on each one deletes the telemetry, which
+ * presents as "frames_received stays 0 forever while the error counters
+ * climb", with a perfectly good wire and a perfectly good peer.
+ *
+ * So: count every line error (that is what rx_error_count and GET_LINK_STATS
+ * are for -- the diagnosis must stay visible), but only flush when the ring
+ * genuinely holds unusable state, i.e. FIFO overflow and ring-full, where
+ * bytes have already been dropped and framing is broken by definition. */
 static void uart_owner_event_task(void *arg)
 {
     uart_owner_t *owner = (uart_owner_t *)arg;
@@ -48,14 +74,17 @@ static void uart_owner_event_task(void *arg)
                 owner->rx_error_count++;
                 break;
             case UART_PARITY_ERR:
+                /* Counted, not flushed -- see this task's header comment. */
                 ESP_LOGW(TAG, "parity error on uart%d", owner->port);
                 owner->rx_error_count++;
-                uart_flush_input(owner->port);
                 break;
             case UART_FRAME_ERR:
+                /* Counted, not flushed -- see this task's header comment.
+                 * The frame parser resynchronises on the next 0x7E and the
+                 * CRC rejects whatever this corrupted; flushing here would
+                 * additionally delete every intact frame behind it. */
                 ESP_LOGW(TAG, "frame error on uart%d (check baud/wiring)", owner->port);
                 owner->rx_error_count++;
-                uart_flush_input(owner->port);
                 break;
             default:
                 break;
