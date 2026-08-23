@@ -143,6 +143,23 @@ static float s_zone_duty_override_value[THERMAL_MODEL_MAX_ZONES];
 static bool  s_zone_health_override_active[THERMAL_MODEL_MAX_ZONES];
 static float s_zone_health_override_value[THERMAL_MODEL_MAX_ZONES];
 
+// Scratch for sim_engine_tick()'s fault_sched_tick() call -- file-scope
+// static rather than a function-local array because
+// sizeof(fault_event_t) * FAULT_ENGINE_MAX_SLOTS * 2u is 1536 bytes, and as
+// a local it pushed sim_engine_tick()'s own frame to 1920 bytes; stacked on
+// top of fault_sched_tick()+recompute_overrides_locked()'s call chain
+// (24 + 312 bytes, -fstack-usage measured) plus the task wrapper, the
+// worst-case chain measured at 2328 bytes against this task's 2048-byte
+// stack (SIM_ENGINE_STACK_WORDS) -- a real, bench-observed overflow
+// (vApplicationStackOverflowHook() -> simfw_fatal(), solid-LED after all
+// boot beacons complete), same species as telemetry.c's s_fault_slots fix.
+// Safe as `static` because sim_engine_tick() is this array's only caller,
+// from its own single task context (sim_engine_task_fn()'s for(;;) loop),
+// never reentered, never touched from an ISR or another task. Do NOT turn
+// this back into a local: that is exactly the regression that caused the
+// original crash.
+static fault_event_t s_fault_events[FAULT_ENGINE_MAX_SLOTS * 2u];
+
 // --- Published snapshot (sim_snapshot.h's seq-counter protocol) -----------
 // Same lock-free discipline as src/sim/tc_fault_state.c: RP2040 SMP cores
 // are in-order with no data cache, so a volatile seq counter + a compiler
@@ -331,9 +348,8 @@ static void sim_engine_tick(void)
         .event_count = 0,
     };
 
-    fault_event_t fault_events[FAULT_ENGINE_MAX_SLOTS * 2u];
-    size_t fault_event_count = fault_sched_tick(&fault_snap, fault_events,
-                                                 sizeof(fault_events) / sizeof(fault_events[0]));
+    size_t fault_event_count = fault_sched_tick(&fault_snap, s_fault_events,
+                                                 sizeof(s_fault_events) / sizeof(s_fault_events[0]));
 
     // --- duty[] : relay-derived base, then any fault override, then K4's
     // veto -----------------------------------------------------------------
@@ -500,10 +516,10 @@ static void sim_engine_tick(void)
 
     // --- Fault fired/cleared events ----------------------------------------
     for (size_t i = 0; i < fault_event_count; i++) {
-        sim_event_type_t type = (fault_events[i].kind == FAULT_EVENT_FIRED)
+        sim_event_type_t type = (s_fault_events[i].kind == FAULT_EVENT_FIRED)
                                      ? SIM_EVENT_FAULT_FIRED
                                      : SIM_EVENT_FAULT_CLEARED;
-        ring_push(type, (uint8_t)fault_events[i].slot_id, 0u, 0.0f);
+        ring_push(type, (uint8_t)s_fault_events[i].slot_id, 0u, 0.0f);
     }
 }
 

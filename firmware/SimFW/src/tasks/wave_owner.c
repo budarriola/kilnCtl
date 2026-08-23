@@ -141,6 +141,26 @@ static wave_owner_block_t s_queue[CT_WAVE_I2S_NUM_MODULES][CT_WAVE_BLOCK_QUEUE_D
 static uint8_t s_queue_head[CT_WAVE_I2S_NUM_MODULES];
 static uint8_t s_queue_count[CT_WAVE_I2S_NUM_MODULES];
 
+// Scratch for generate_joint_block()'s ct_i2s_gen_fill_block() call --
+// file-scope static rather than two function-local arrays because
+// 2 * sizeof(int16_t[CT_WAVE_I2S_SAMPLES_PER_BUFFER]) is 1024 bytes, and as
+// locals they pushed generate_joint_block()'s own frame to 1048 bytes
+// (-fstack-usage measured). Chained under wave_owner_task_fn() ->
+// ct_wave_i2s_poll() -> wave_owner_i2s_refill() -> generate_joint_block(),
+// that measured ~1360 bytes against this task's 2048-byte stack
+// (WAVE_OWNER_STACK_WORDS) -- only ~34% headroom, the same species as the
+// sim_engine.c/telemetry.c overflow (see s_fault_events above), fixed
+// preventively before it became a bench-observed one. Safe as `static`
+// because generate_joint_block() is called only from
+// wave_owner_i2s_refill(), which per its own header comment runs solely
+// from ct_wave_i2s_poll()'s task context (this task's loop), never from an
+// ISR and never on the other core -- confirmed by reading ct_wave_i2s.c,
+// which claims no DMA IRQ vector at all (see its file header) and never
+// calls the refill callback outside of ct_wave_i2s_poll(). Do NOT turn
+// these back into locals.
+static int16_t s_block_a[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
+static int16_t s_block_b[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
+
 static void queue_push(uint8_t module, const int16_t *frames)
 {
     if (s_queue_count[module] >= CT_WAVE_BLOCK_QUEUE_DEPTH) {
@@ -171,11 +191,9 @@ static void queue_pop(uint8_t module, int16_t *out)
 // modules together, never for just the one that happened to run dry.
 static void generate_joint_block(void)
 {
-    int16_t block_a[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
-    int16_t block_b[CT_WAVE_I2S_SAMPLES_PER_BUFFER];
-    ct_i2s_gen_fill_block(&s_gen_ctx, block_a, block_b, CT_WAVE_I2S_FRAMES_PER_BUFFER);
-    queue_push(0, block_a);
-    queue_push(1, block_b);
+    ct_i2s_gen_fill_block(&s_gen_ctx, s_block_a, s_block_b, CT_WAVE_I2S_FRAMES_PER_BUFFER);
+    queue_push(0, s_block_a);
+    queue_push(1, s_block_b);
 }
 
 // ct_wave_i2s_refill_fn implementation -- see ct_wave_i2s.h's contract:
