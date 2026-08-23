@@ -8,8 +8,8 @@ silicon and says so.
 
 The controller is an **ESP32-S3-DevKitC** (U4) plugged into the main board. A
 second processor, a **Raspberry Pi Pico / RP2040** (A1), sits in an isolated
-ground domain as the safety processor; its firmware is not part of this
-repository.
+ground domain as the safety processor; its firmware lives at
+`firmware/SaftyFW` in this repository, not in this firmware's tree.
 
 ## ESP32-S3 pin assignments
 
@@ -172,6 +172,19 @@ reset, GPIO5 (TX) is high-impedance and nothing pulls it, so U2's LED is dark
 and the Pico's RX reads a clean idle-high, not a break (measured: Pico GP5
 high with the ESP held in reset). GPIO4 has no other external pull-up besides
 R15; the driver's internal one is belt-and-braces.
+
+4. **The TCMT1109/R15 pair cannot switch fast enough for 115200.** Measured
+   2026-08-23 walking the baud rate down with a Pico transmitting a status
+   frame every 500 ms: 115200 and 57600 delivered zero frames, ever; 38400 lost
+   roughly 20%; 19200 looked clean over a short window but lost ~10% over a
+   longer one; 9600 tracked sent-to-received one for one over minutes and is
+   the committed value on both firmwares (`CONFIG_KILNCTL_SAFETY_BAUD_RATE` in
+   `KilnFW`, `UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c`,
+   both hardcoded with no negotiation). A static GPIO high/low test across the
+   pair passes at any baud rate — an optocoupler carries a DC level fine — so
+   this ceiling is invisible to that test and only shows up once real UART
+   framing is exchanged. See `docs/SAFETY_LINK.md`'s "Transport" section for
+   the full table.
 
 ### How this was measured (2026-08-23)
 

@@ -19,11 +19,15 @@ board), `docs/CURRENT_SENSE.md` (the analog front end),
 (every tunable) and `docs/GUARD_TEST_MATRIX.md` (how each guard is proven)
 throughout.
 
-**Hardware-gated, repo-wide**: the ESP32<->RP2040 isolated link has never been
-proven end to end — `link_status` reports `frames_received: 0`, the Pico
-console emits zero bytes, and the TCMT1109 optocouplers are suspect. Every item
-below whose real verification depends on that link is open no matter how
-complete the code and host tests are, and is marked accordingly.
+**Hardware-gated, repo-wide, historical**: the ESP32<->RP2040 isolated link
+went unproven for a long time — `link_status` reported `frames_received: 0`
+and the Pico console emitted zero bytes. The cause turned out to be the
+TCMT1109 optocouplers' bandwidth, not the pin map or firmware: at 115200 baud
+zero frames were ever received. Walking the baud rate down settled on 9600,
+which both firmwares now hardcode, and the link has run end to end on the
+bench (2026-08-23) — see `docs/HARDWARE.md` §1 for the measurement. Items
+below marked hardware-gated may still be open for their own reasons; the link
+itself is no longer the blocker.
 
 ---
 
@@ -367,11 +371,16 @@ RP2040 hardware** — no probe or board attached to any build machine, so no
 bootloader has ever actually been flashed over SWD, no application has ever
 run from either slot, and no update has ever crossed real wire.
 
-- [ ] **10.0 Measure the isolated link's error rate at 115200** over a sustained
-      multi-megabyte transfer. The TCMT1109 optocouplers are the bandwidth limit
-      and nobody has characterised them. A 5 % frame loss turns a 35 s update
-      into minutes, because retries cost 200 ms each up to ten times.
-      Hardware-gated.
+- [x] **10.0 Measure the isolated link's error rate — done 2026-08-23, and
+      it is not 115200.** The TCMT1109 optocouplers turned out to be the
+      bandwidth limit: 115200 and 57600 delivered zero frames, ever; 38400 lost
+      about 20%; 19200 looked clean over a short window but lost ~10% over a
+      longer one; 9600 tracked sent-to-received one for one over minutes and is
+      now the committed, hardcoded value on both sides. What remains open is
+      the *update-transfer* error rate at 9600 over a sustained multi-megabyte
+      run — untested, and at this baud a 5% frame loss turns a 35 s update at
+      115200 into something much longer, because retries still cost 200 ms
+      each up to ten times. Hardware-gated.
 - [ ] Signature/public-key reservation (`BOOTLOADER.md` §6) is designed
       (768 B pubkey slot, `slot[2].signature[64]`, `sig_required`) but not yet
       in code — `flash_layout.h`/`metadata.h` have neither field. Signature

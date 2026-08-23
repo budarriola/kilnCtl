@@ -68,9 +68,14 @@ RP2040 safety processor (`firmware/SaftyFW`).
   hardware.
 - **Relay/SX1509 expander: not confirmed attached** as of the last session
   that checked.
-- **RP2040 safety processor: unpopulated on this bench board's own ICs** —
-  the safety-processor peer itself does not exist yet as a firmware; see
-  `ROADMAP.md` M3.
+- **RP2040 safety processor: link proven end to end (2026-08-23).**
+  `SaftyFW` now runs and the isolated link has carried real traffic for the
+  first time — `safety_get_status()` returns live telemetry (link up, safety
+  thermocouple invalid with no sensor fitted, all three currents 0.00 A, a few
+  hundred milliseconds old). Getting there needed the UART baud rate dropped
+  to 9600 — the TCMT1109 optocouplers cannot switch fast enough for 115200 —
+  on top of the pin/inversion fixes above; see `docs/SAFETY_LINK.md`
+  "Transport" and `firmware/SaftyFW/docs/HARDWARE.md` §1 for the measurement.
 - **PC↔ESP UART link (command/telemetry): found dead 2026-08-19.** A
   different fault from the Pi↔ESP safety link (`ROADMAP.md` M0/M1) — this is
   the USB-serial link `pc_tools`/MCP use. With the board present, powered, and
@@ -92,10 +97,12 @@ RP2040 safety processor (`firmware/SaftyFW`).
   `ARCHITECTURE.md` §4 for the full per-task verification table — it is the
   authoritative source for what's build- vs. boot-smoke- vs.
   hardware-verified, current as of 2026-08-19).
-- **Never run on hardware**: the RP2040 safety processor (doesn't exist yet);
-  live thermocouple-fault gating outside of an active profile run (general
-  case, only the profile-running case above closed); the safety processor
-  influencing main-board relays (isolated link is ESP→Pico only today); any
+- **Never run on hardware**: the RP2040 safety processor's own guard trips
+  (guards evaluate, but a live bench trip test has not been run); the safety
+  processor influencing main-board relays (isolated link is ESP→Pico only
+  today — see below); live thermocouple-fault gating outside of an active
+  profile run (general
+  case, only the profile-running case above closed); any
   on-target automated test suite (only host-side `App/test/` and PC-side
   `selfcheck.py` exist); PID autotune of either method (aborts on guard 6 with
   no thermocouples attached at the time it was last tried, before the ICs
@@ -107,11 +114,12 @@ RP2040 safety processor (`firmware/SaftyFW`).
 
 ## Explicitly NOT done — do not assume otherwise
 
-- **The RP2040 safety-processor firmware does not exist.** The ESP-side
-  `safety_link.c` and its wire contract (`uart_task_ids.h`, SAFETY task) are
-  written and documented so a Pico firmware has something concrete to
-  implement against, but nothing runs on the Pico today. The link degrades to
-  "no peer" correctly (fail-safe fault assertion, not a hang).
+- **The RP2040 safety-processor firmware exists and the link now works.**
+  `firmware/SaftyFW` runs on real hardware and the isolated link has carried
+  real telemetry end to end (2026-08-23), after the UART baud rate was
+  corrected to 9600 — see `docs/SAFETY_LINK.md`. With no Pico attached the
+  link still degrades to "no peer" correctly (fail-safe fault assertion, not a
+  hang).
 - **Live thermocouple faults gate relays only while a profile is actively
   running that zone.** `thermal_guard.c` guard 6 trips on
   `spi_failed`/`NaN`/`THERMO_FAULT_OPEN`/`OVUV`/`TCRANGE` after 3 consecutive
@@ -120,9 +128,10 @@ RP2040 safety processor (`firmware/SaftyFW`).
   a running profile — is still only reported, never acted on. See
   `docs/SAFETY_MODEL.md` for the precise scope.
 - **The safety processor cannot influence the main board's relays.** An
-  E-stop or fault reported back from the (nonexistent) Pico firmware is
-  visible in `SAFETY_CMD_GET_STATUS` and drops nothing on the main board.
-  Isolated-fault-line traffic today is one-directional, ESP → Pico only.
+  E-stop or fault reported back from the Pico firmware over the (now-working)
+  telemetry link is visible in `SAFETY_CMD_GET_STATUS` and drops nothing on
+  the main board directly. Isolated-fault-line traffic (GPIO6) is
+  one-directional, ESP → Pico only; the Pico has no hardware path back.
 - **Raw expander debug commands bypass the relay-on gate for direction
   changes.** `IO_CMD_SX_SET_DIR` unconditionally refuses flipping a relay pin
   to an input; `SX_WRITE_REG` is gated per-pin against

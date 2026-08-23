@@ -70,12 +70,13 @@ Four facts set the order. Everything else can be shuffled.
 
 Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phase 0.
 
-- [ ] **Link confirmed not working end-to-end (2026-08-18). Needs bench
-      measurement, not more code guessing.** Scope pins/logic analyzer TX and RX
-      lines at both opto boundaries during a coordinated GPIO test (`tools/PcTools`
-      coordinated test, M1 below) to find where the byte actually dies — idle
-      level, framing, baud mismatch, or opto polarity. Do not touch pin config
-      again until the trace shows what's wrong
+- [x] **Link confirmed working end-to-end (2026-08-23).** The bench
+      measurement found the byte actually died on baud mismatch, not idle
+      level, framing or opto polarity: the TCMT1109 optocouplers cannot switch
+      fast enough for 115200. Walking the rate down settled on 9600, now
+      hardcoded on both sides, and `safety_get_status()` returns live
+      telemetry. See `firmware/KilnFW/docs/SAFETY_LINK.md` "Transport" and
+      `firmware/SaftyFW/docs/HARDWARE.md` §1.
 - [ ] Tier 0 pin test settles ESP TX/RX by measurement (`HARDWARE.md` §1) — still
       needs the Pico physically attached
 - [x] ESP TX/RX GPIO assignment and pull-up fixed in code, docs corrected,
@@ -294,8 +295,10 @@ path. Two facts set the shape of this milestone:
   partition table with two app slots, and a partition table can only be written
   over a cable.
 
-- [ ] **Measure the isolated link's real error rate at 115200 first.** Nobody has
-      characterised the optocouplers; retry cost is 200 ms × up to 10
+- [x] **Measure the isolated link's real error rate — done, and 115200 does
+      not work at all.** The optocouplers cap the link at 9600 (see M0); the
+      update transfer's error rate at that baud, over a sustained
+      multi-megabyte run, is still unmeasured. Retry cost is still 200 ms × up to 10
 - [x] Real flash size established (N16R8, 16 MB/8 MB PSRAM) and declared in
       `sdkconfig` — 2026-08-17. `partitions.csv` still maps only the first 2 MB
       (single factory slot); the two-app-slot OTA table is the next item.

@@ -1,6 +1,6 @@
 # SaftyFW — kiln safety processor firmware
 
-> **Status:** early implementation, first real-hardware boot succeeded · **Last reviewed:** 2026-08-18
+> **Status:** early implementation, first real-hardware boot succeeded, isolated link now proven end to end · **Last reviewed:** 2026-08-23
 > **Keep this file current.** It is the entry point; if the document set or the
 > headline facts change, update it in the same commit.
 
@@ -122,9 +122,11 @@ debugs it through the same OpenOCD substrate used for ESP flashing — reset,
 halt, step and memory read/write are all exposed to an agent this way. The
 Pico's console reaches the GUI as `kilnlink` LOG frames relayed by the ESP —
 no extra cable ([`../../tools/PcTools/TODO.md`](../../tools/PcTools/TODO.md)).
-The safety link itself has still never run against the ESP; `ota_update_pico`
-cannot be used for bring-up because its interlock requires an already-healthy
-safety link — a chicken-and-egg that SWD flashing sidesteps.
+The safety link itself now runs against the ESP (proven 2026-08-23 once the
+baud rate was corrected to 9600 — see `docs/HARDWARE.md` §1), but
+`ota_update_pico` still cannot be used for first-flash bring-up because its
+interlock requires an already-healthy safety link — a chicken-and-egg that SWD
+flashing sidesteps.
 
 **Do not connect USB to the Pico while `12v_Safty` is applied.** A1's 3V3 pin is
 back-fed from the board's regulator with VSYS and VBUS unconnected; USB would

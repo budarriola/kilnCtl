@@ -7,10 +7,19 @@ the C API on the ESP side (`App/drivers/safety_link.h`), the UART subcommands
 the PC can drive it with, and how to exercise the whole thing with no Pico
 attached.
 
-The RP2040 firmware does not exist yet. That is a designed-for state, not a
-bug: the link comes up, polls go out, every one times out, and `GET_STATUS`
-reports `link_up = 0` with `age = 65535`. Nothing is faked and nothing aborts
-startup.
+The RP2040 firmware (`firmware/SaftyFW`) now exists and the link has been run
+end to end on the bench for the first time (2026-08-23): `safety_get_status()`
+returns real telemetry — link up, safety thermocouple invalid (no sensor
+fitted on that run), all three currents 0.00 A, the frame a few hundred
+milliseconds old. Getting there needed a baud-rate correction (see
+"Transport" below) on top of the pin/inversion fixes in the traps below.
+
+With no Pico attached, or before it is flashed, the link still comes up
+cleanly on the ESP side alone: polls go out, every one times out, and
+`GET_STATUS` reports `link_up = 0` with `age = 65535`. That is a designed-for
+state, not a bug, and it is what the "How to test this without a Pico"
+section below still exercises. Nothing is faked and nothing aborts startup
+either way.
 
 ## The isolation barrier
 
@@ -144,12 +153,40 @@ accurately, not a driver fault.
 
 ## ESP <-> Pico contract
 
-Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` (115200
-default), both signals inverted as above. The payload framing is the **same
-`uart_protocol` stack the PC link uses** — 0x7E-delimited, byte-stuffed,
-CRC16/CCITT-FALSE, indexed DATA frames with ACK/NACK, retried and de-duplicated
-by the protocol layer. See `docs/UART_PROTOCOL.md` for the envelope; there is
-deliberately no bespoke framing on this link.
+Transport: ESP32-S3 **UART1**, 8N1, `CONFIG_KILNCTL_SAFETY_BAUD_RATE` (**9600**
+default — see below), both signals inverted as above. The payload framing is
+the **same `uart_protocol` stack the PC link uses** — 0x7E-delimited,
+byte-stuffed, CRC16/CCITT-FALSE, indexed DATA frames with ACK/NACK, retried and
+de-duplicated by the protocol layer. See `docs/UART_PROTOCOL.md` for the
+envelope; there is deliberately no bespoke framing on this link.
+
+### The baud rate is capped by the optocouplers, not by the UART
+
+The TCMT1109s and R15's 1k pull-up cannot switch fast enough for a 115200 bit
+(8.7 us). Measured 2026-08-23, walking the rate down with both sides changed
+together, RP2040 transmitting a status frame every 500 ms:
+
+| Baud | Result |
+|-----:|--------|
+| 115200 | zero frames received, ever |
+| 57600 | zero frames received, ever |
+| 38400 | ~80% received (53 of 66), errors climbing |
+| 19200 | clean over a short window (20 of 20), but ~10% lost over a longer one (107/118, then 117/134) |
+| 9600 | received tracks sent one for one over minutes (48/52, then 72/75) — **committed** |
+
+`CONFIG_KILNCTL_SAFETY_BAUD_RATE` on this side and `UART_OWNER_BAUD_RATE` in
+`SaftyFW`'s `src/tasks/uart_owner.c` are both hardcoded to 9600; there is no
+negotiation, so a change to one without the other is a dead link. Raising it
+again needs a faster optocoupler or a real line driver in place of the
+TCMT1109/R15 pair, not a config change.
+
+**A static GPIO high/low test across this pair passes at any baud rate**, because
+an optocoupler carries a DC level perfectly well — only a bit that switches
+fast enough to matter exposes the limit. The wiring here had already been
+bench-verified in both directions that way, fault line included, which is
+exactly why the baud ceiling took so long to find: the wire looked proven, so
+suspicion fell on framing, device/task ids and line inversion instead, all of
+which were in fact already correct.
 
 Addressing:
 
@@ -353,7 +390,8 @@ to `uart_protocol_send`.
 | `0x06 SET_FAULT_OUT` | `06 01` | assert the isolated fault line |
 | | `06 00` | release the manual assertion |
 
-`GET_STATUS` reply, no peer present (what you get today) — 25 bytes:
+`GET_STATUS` reply, no peer present (what you get with no Pico flashed or
+attached) — 25 bytes:
 
 ```
 01 00 00 00 C0 7F 00 00 C0 7F 00 00 00 C0 7F 00 00 C0 7F 00 00 C0 7F FF FF
@@ -395,7 +433,10 @@ frame behind it. `frame_errors` is this driver's rejected payloads plus
 
 ## How to test this without a Pico
 
-Nothing below needs the RP2040 firmware to exist.
+A Pico running `SaftyFW` is no longer required to get a real reply — see the
+"live peer" example below. Nothing in this section needs it, though, and it
+remains the right way to bring up the ESP side alone (bench work without the
+safety domain populated, or CI).
 
 ### 1. The no-peer path (zero hardware)
 

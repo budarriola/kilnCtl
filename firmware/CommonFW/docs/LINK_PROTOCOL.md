@@ -134,9 +134,9 @@ The constraint is about **waiting**, not about transmitting, and the hardware is
 why. Only three signals cross the barrier — `DataToSafty`, `DataFromSafty`,
 `Fault`. **There is no RTS/CTS, no flow control of any kind.** A UART
 transmitter with no flow control cannot be backpressured: bytes written to the
-TX FIFO are clocked out by the shift register at 115200 baud whether or not
-anything is listening, or is even powered. A frozen ESP is *physically unable*
-to stall the Pico's transmitter.
+TX FIFO are clocked out by the shift register at the configured baud (9600 —
+see §3) whether or not anything is listening, or is even powered. A frozen ESP
+is *physically unable* to stall the Pico's transmitter.
 
 The hang risk is real, but it lives entirely in the software above the
 peripheral — waiting for an ACK, blocking on a full buffer, sharing a lock with
@@ -190,7 +190,24 @@ byte-stuffing implementation anywhere in the tree.
 | Max payload | 253 | `uart_protocol.h:48` |
 | Device ids | ESP = 0, HOST = 1, **SAFETY = 2** | `uart_protocol.h:70-72` |
 | Task id | **7** (`UART_TASK_ID_SAFETY`) | `uart_task_ids.h:60` |
-| Line | 8N1, **115200** baud | `Kconfig:214` |
+| Line | 8N1, **9600** baud | `Kconfig:214` |
+
+**The baud rate is capped by the TCMT1109 optocouplers, not by the UART
+peripheral on either side.** Measured 2026-08-23, walking the rate down with
+both ends changed together while the Pico transmitted a status frame every
+500 ms: 115200 and 57600 delivered zero frames, ever; 38400 lost about 20%;
+19200 looked clean over a short window but lost ~10% over a longer one; 9600
+tracked sent-to-received one for one over minutes and is the value both
+firmwares now hardcode, with no negotiation — `KILNCTL_SAFETY_BAUD_RATE` in
+`KilnFW`, `UART_OWNER_BAUD_RATE` in `SaftyFW`'s `src/tasks/uart_owner.c`.
+Raising it again needs a faster part or a line driver in place of the
+optocoupler/pull-up pair, not a config change. **A static GPIO high/low test
+across this link passes at any baud rate** — an optocoupler carries a DC level
+fine — which is why this ceiling was found late: the wiring had already been
+bench-verified that way in both directions, so suspicion fell on framing,
+device/task ids and line inversion instead, all of which were correct. See
+`firmware/KilnFW/docs/SAFETY_LINK.md`'s "Transport" section for the full
+measurement table.
 
 **Polarity: the Pico uses its plain hardware UART with no inversion.** The ESP
 inverts both directions in its own peripheral, and each optocoupler inverts

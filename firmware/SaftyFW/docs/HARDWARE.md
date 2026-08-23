@@ -129,14 +129,42 @@ with no inversion, no PIO, and no external parts.** Do not "fix" polarity on
 the Pico side; two inversions in series cancel the optocouplers' and the link
 goes dead.
 
-### Still outstanding
+### The link now carries real traffic
 
-- **The link does not carry traffic yet.** With the corrected pins flashed,
-  `GET_LINK_STATS` reads `sent 26, received 0, timeouts 26`. The pin map and
-  the electrical path are now proven; whether `SaftyFW` answers the
-  `kilnlink` poll is a separate, firmware-side question.
-- Saleae capture under real traffic, to prove baud and framing together
-  (`tools/PcTools/TODO.md` §2).
+With the corrected pins flashed, `GET_LINK_STATS` initially still read `sent
+26, received 0, timeouts 26` — the pin map and electrical path were proven,
+but nothing was arriving. The remaining cause was the UART baud rate: the
+TCMT1109 optocouplers and R15's 1k pull-up cannot switch fast enough for
+115200. Measured 2026-08-23, walking the rate down with both sides changed
+together and the Pico transmitting a status frame every 500 ms:
+
+| Baud | Result |
+|-----:|--------|
+| 115200 | zero frames received, ever |
+| 57600 | zero frames received, ever |
+| 38400 | ~80% received (53 of 66), errors climbing |
+| 19200 | clean over a short window (20 of 20), but ~10% lost over a longer one (107/118, then 117/134) |
+| 9600 | received tracks sent one for one over minutes (48/52, then 72/75) — **committed** |
+
+Both firmwares now hardcode **9600** — `KILNCTL_SAFETY_BAUD_RATE` in `KilnFW`,
+`UART_OWNER_BAUD_RATE` in `src/tasks/uart_owner.c` here — with no negotiation.
+Raising it again needs a faster optocoupler or a real line driver, not a
+config change.
+
+**A static GPIO high/low test across this link passes at any baud rate**,
+because an optocoupler carries a DC level perfectly well; only a bit that
+switches fast enough to matter exposes the ceiling. That is exactly why this
+took so long to find — §1's coordinated drive/read test above had already
+proven the wiring in both directions, so suspicion fell on framing, device/task
+ids and line inversion instead, all of which were in fact already correct.
+
+With the baud corrected, the link works end to end: `safety_get_status()` on
+the ESP side returns real telemetry (link up, safety thermocouple invalid with
+no sensor fitted, all three currents 0.00 A, a few hundred milliseconds old).
+
+Saleae capture under real traffic, to prove baud and framing together in one
+trace, is still worth doing (`tools/PcTools/TODO.md` §2) but is no longer
+blocking.
 
 ---
 

@@ -370,22 +370,30 @@ Additive to `LINK_PROTOCOL.md`. All are ESP→Pico except the responses.
 
 ### Throughput, honestly
 
-At 115200 baud a full 253-byte frame is roughly 260 bytes on the wire before
-byte-stuffing, about 23 ms, and the protocol is stop-and-wait with a 200 ms ACK
-timeout. A 200 KB image is about 830 frames — call it 35 s at 40 ms per
-round trip.
+**The link runs at 9600, not 115200.** Measured 2026-08-23 (`firmware/SaftyFW/docs/HARDWARE.md`
+§1): the TCMT1109 optocouplers and R15's 1k pull-up cannot switch fast enough
+for 115200 or 57600 — zero frames received, ever, at either — and 9600 is the
+fastest rate that tracked sent-to-received one for one over a multi-minute
+run. At 9600 baud a full 253-byte frame is roughly 260 bytes on the wire before
+byte-stuffing, about 270 ms, and the protocol is stop-and-wait with a 200 ms ACK
+timeout. A 200 KB image is about 830 frames — call it several minutes at this
+rate, not the 35 s a 115200 assumption would suggest.
 
-That is fine. What is **not** fine is the retry behaviour: `UART_PROTO_MAX_RETRIES`
+That makes the retry behaviour matter more, not less: `UART_PROTO_MAX_RETRIES`
 is 10 at a 200 ms timeout, so a single persistently-failing frame costs 2 s, and
-a link that is dropping 5 % of frames turns a 35 s update into minutes. Before
-building this:
+any nonzero frame-loss rate at 9600 stretches an already-slow update
+substantially further. Before building this:
 
-- [ ] **Measure the real error rate of the isolated link at 115200** over a
-      sustained multi-megabyte transfer. The TCMT1109 optocouplers are the
-      bandwidth limit and nobody has characterised them yet.
+- [ ] **Measure the real error rate of the isolated link at 9600** over a
+      sustained multi-megabyte transfer. The per-poll baud-walk measurement
+      (`firmware/SaftyFW/docs/HARDWARE.md` §1) showed received tracking sent
+      one for one over minutes of 500 ms status frames, but that is a much
+      lighter load than a saturated update transfer.
 - [ ] Decide whether to raise the baud rate for the duration of an update, and
-      whether the optocouplers can take it. A negotiated rate in `UPDATE_BEGIN`
-      with an automatic fallback is the flexible option.
+      whether the optocouplers can take it — the measurement above suggests
+      not without a faster part or a line driver in place of the
+      TCMT1109/R15 pair. A negotiated rate in `UPDATE_BEGIN` with an automatic
+      fallback is the flexible option if a faster part is ever fitted.
 - [ ] Report progress to the GUI at least every 2 s. A silent 35-second bar is
       indistinguishable from a hang.
 
@@ -746,9 +754,14 @@ and "Pico update" sections below for what each actually covers.
       the envelope, not per-frame payload logic, per that layer's existing
       scope. Not what this item's exact wording ("to `CommonFW`'s codecs")
       envisioned; flagged as a deviation, not silently reinterpreted.
-- [ ] **Isolated-link error rate measured at 115200 before this is built** --
-      still not measured; this pass built against the documented frame
-      contracts without that measurement, same gap this item already named.
+- [ ] **Isolated-link error rate measured under a sustained update-sized
+      transfer, at the link's real baud of 9600** -- still not measured; this
+      pass built against the documented frame contracts without that
+      measurement. The 115200 this item originally named was itself wrong:
+      measured 2026-08-23, the TCMT1109 optocouplers deliver zero frames at
+      115200 or 57600, and 9600 is the committed rate (`firmware/SaftyFW/docs/HARDWARE.md`
+      §1). The sustained-transfer error rate at 9600 is a separate,
+      still-open measurement.
 - [x] `UPDATE_DATA` sent unacknowledged; Pico keeps a received-range bitmap
       and emits a gap report every 500 ms (SaftyFW, already frozen);
       **2026-08-17**: the ESP side (`KilnFW/App/drivers/ota_pico_relay.c`)

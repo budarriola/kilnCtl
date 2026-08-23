@@ -65,9 +65,11 @@ This one *is* runtime-configurable, and should be exposed per-peer in the GUI
 (`tools/PcTools/TODO.md`, "Logging and consoles"). Default: **errors and warnings
 only**, with verbose levels enabled on demand.
 
-The reason to default it quiet is not bandwidth. At 115200 baud the link moves
-~11.5 KB/s and telemetry uses roughly 5 % of it, so there is ample room. The
-reason is the **TX ring**:
+The reason to default it quiet is not bandwidth. Even at the link's actual
+baud — **9600**, capped by the TCMT1109 optocouplers, not the 115200 originally
+assumed here (`docs/HARDWARE.md` §1) — the link moves ~960 B/s, and telemetry's
+23-byte frame every 500 ms uses only a small fraction of it, so there is still
+ample room. The reason is the **TX ring**:
 
 > **A log frame must never be able to displace a telemetry frame.**
 
@@ -217,6 +219,29 @@ useful than older context.
 - **`watchdog_task` must not depend on `safety_core`.** A control loop cannot
   be its own watchdog — the same reasoning `thermal_guard.h:19-22` gives for
   keeping `KilnFW`'s guard 9 in a separate task.
+- **The watchdog is armed exactly once, in `main()`, at `SAFTYFW_WATCHDOG_TIMEOUT_MS`.**
+  `watchdog_task_start()` used to call `watchdog_enable()` again with its own
+  hardcoded 1000 ms, silently overriding whatever `main()` had configured.
+  Fixed 2026-08-23: arming now happens only in `main()`; `watchdog_task_start()`
+  no longer touches it.
+
+### A stack overflow on `link_task` looked like core 1 never scheduling anything
+
+Found and fixed 2026-08-23. `link_task`'s stack was
+`configMINIMAL_STACK_SIZE * 3`, too small, and it overflowed. Because
+`vApplicationStackOverflowHook()` halts with interrupts disabled, core 0
+stopped inside the hook one FreeRTOS tick after the scheduler started —
+`xTickCount` froze at 1, no task on either core ever ran again, nothing fed
+the hardware watchdog, and the board rebooted about once a second, forever.
+
+Everything that had previously been attributed to "core 1 never runs a task"
+was this bug, not an SMP or affinity problem: core 1 was healthy the whole
+time, sitting in the idle task with nothing schedulable, because core 0 had
+already wedged inside the stack-overflow hook before core 1's own tasks got a
+meaningful chance to do anything either. The FreeRTOS SMP port, the core
+affinity masks in §4, and the `pico_multicore` linkage are all correct and
+were never the problem. The fix was raising `link_task`'s stack to
+`configMINIMAL_STACK_SIZE * 6`.
 
 ---
 

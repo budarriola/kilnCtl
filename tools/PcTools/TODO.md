@@ -25,9 +25,12 @@ main board's.
 
 - [ ] `Peer` abstraction (`ESP` | `SAFETY`) threaded through `link_hub.py`; every
       tool takes a peer argument
-- [ ] Pico-through-the-ESP path working end to end (no second cable) — blocked
-      on the isolated link itself, currently dead on the bench
-      (`link_status`: `frames_received: 0`)
+- [x] Pico-through-the-ESP path working end to end (no second cable) —
+      unblocked 2026-08-23: the isolated link was capped at 9600 baud by the
+      TCMT1109 optocouplers (115200 delivered zero frames, ever), not dead.
+      With the baud corrected on both sides, `link_status` shows real frames
+      received and `safety_get_status()` returns live telemetry. See
+      `firmware/SaftyFW/docs/HARDWARE.md` §1
 - [ ] GUI grows a safety column rather than a second application
 
 ## Capabilities to add, in priority order

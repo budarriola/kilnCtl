@@ -140,21 +140,24 @@ decision this document still does not make on its own for that broader case.
 
 **Nothing on the main board reacts to a safety-processor-reported E-stop or
 fault.** `safety_link_get_status()` surfaces `SAFETY_FLAG_ESTOP` and
-`SAFETY_FLAG_FAULT` from the (not yet written) RP2040 firmware's replies, and
-the isolated fault line is currently one-directional — an ESP *output* into
-the Pico (see `docs/SAFETY_LINK.md`, "Trap 3"). Whether the Pico's own
-interlocks (its relay K4, its own thermocouple) are sufficient on their own,
-or whether an E-stop/fault reported back over the isolated UART should also
-drop the *main* board's relays, is a system-design call above what this
-firmware currently implements. Today: no.
+`SAFETY_FLAG_FAULT` from `SaftyFW`'s replies — the link now carries real
+telemetry (see `docs/SAFETY_LINK.md`, "Transport") — and the isolated fault
+line is currently one-directional — an ESP *output* into the Pico (see
+`docs/SAFETY_LINK.md`, "Trap 3"). Whether the Pico's own interlocks (its relay
+K4, its own thermocouple) are sufficient on their own, or whether an
+E-stop/fault reported back over the isolated UART should also drop the *main*
+board's relays, is a system-design call above what this firmware currently
+implements. Today: no.
 
-**The RP2040 safety-processor firmware does not exist.** Every claim above
-about `SAFETY_FAULT_SRC_SAFETY_LINK` and E-stop is aspirational until that
-firmware is written; today the safety link degrades to "no peer" and
-`fault_on_link_loss` (default on) keeps the fault line correctly asserted for
-that reason, which is arguably the single best thing about the current state
-of the safety story: the failure mode of "nobody wrote the other half yet"
-is fail-safe, not fail-open.
+**The RP2040 safety-processor firmware now exists and the link works, but
+`SAFETY_FAULT_SRC_SAFETY_LINK` still means link staleness, not a real safety
+opinion from the Pico.** With no peer, or before this firmware was written,
+`fault_on_link_loss` (default on) kept the fault line correctly asserted,
+which was arguably the single best thing about the earlier state of the
+safety story: the failure mode of "nobody wrote the other half yet" was
+fail-safe, not fail-open. That reasoning still applies to a genuinely dead
+link; it no longer excuses the claims above about acting on a *live* Pico's
+own E-stop/fault opinion, which remain unimplemented on the main board today.
 
 **Refusal is invisible on the wire.** As documented in
 `docs/UART_PROTOCOL.md`, a refused `SET_RELAY` produces no reply — the PC
