@@ -221,7 +221,7 @@ that claims that pin must cite this table.
 | 26 | `DRDY_SAFETY` (open-drain) | `spi_emu_b.c` (cites this table, §0 item 8) | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 4 (`thermoDrdy`) |
 | 27 | `FAULT_SAFETY` (open-drain) — **provisionally borrowed by `ct_wave_i2s.c` for I2S `BCLK`, unavoidably (see footnote)** | *(none yet)* | GND_Safty (direct, no isolator — `DESIGN_NOTES.md` §3.5) | J7 pin 3 (`thermoFault`) |
 | 28 | I2S `WS` (word select) — was the one true spare pin; no longer spare | `ct_wave_i2s.c` | GND_Main | n/a (digital transport pin, no main-board destination) |
-| — | PIO1 SM0/SM1 (`ct_wave_i2s_out` program, blocked — see §1b.7) | `ct_wave_i2s.c` | n/a | n/a |
+| — | PIO1 SM0/SM1 (`ct_wave_i2s_out` program — see §1b.7) | `ct_wave_i2s.c` | n/a | n/a |
 
 **25 of 26 header GPIOs assigned, 1 spare — GPIO20 (revised 2026-08-23:
 was GPIO28 before the PWM→I2S switch; freeing GPIO16/18/20 by retiring
@@ -272,9 +272,9 @@ same commit.
 
 **Revised 2026-08-23: `ct_wave_pwm.c` (3 channels) is deleted and replaced by
 `ct_wave_i2s.c` (2 channels)** — DESIGN_NOTES.md §3.3's PWM→I2S decision. The
-DMA count went DOWN even though `ct_wave_i2s.c` cannot actually run yet on
-this build (§1b.7's PIO1 program-memory blocker is a separate budget from
-this one).
+DMA count went down; separately, §1b.7's PIO1 program-memory budget (a
+different resource from DMA channels) is now resolved too, so
+`ct_wave_i2s.c` runs on this build.
 
 ### 1b.1 The claim table
 
@@ -323,8 +323,8 @@ Claim order at boot: `ct_wave_i2s_init()` runs inside `wave_owner_start()`
 **before** `vTaskStartScheduler()`, while both SPI engines claim from their own
 task bodies **after** it. So CT takes the low channel numbers and the SPI
 engines take the rest — but nothing depends on that, and nothing should.
-(In practice `ct_wave_i2s_init()` never reaches its DMA claims on the current
-build — it halts earlier, at the PIO1 program-memory check, §1b.7.)
+(§1b.7's PIO1 program-memory check now passes, so `ct_wave_i2s_init()` does
+reach its DMA claims on the current build.)
 
 ### 1b.3 Why none of the 11 is slack
 
@@ -384,13 +384,14 @@ the per-zone/per-module claim loop and confirming (compiled ARM disassembly +
 correct subsystem name and message, not a silent `return false`; reverted
 after confirming. Not re-run against `ct_wave_i2s.c` specifically — its claim
 loop is structurally identical (`dma_claim_unused_channel(false)`, checked,
-`simfw_fatal()` on failure) and is in practice unreachable on the current
-build anyway, since `ct_wave_i2s_init()` halts earlier at the PIO1
-program-memory check (§1b.7) before ever reaching its DMA claims.
+`simfw_fatal()` on failure), and is now reachable on the current build:
+§1b.7's PIO1 program-memory check passes, so `ct_wave_i2s_init()` proceeds to
+its DMA claims (§1b.2's 2-channel budget has ample spare, so this path is
+not expected to fire, just no longer structurally dead code).
 
 | Call site | Arg | On failure |
 |---|---|---|
-| `ct_wave_i2s.c` (per DAC module) | `false` | `simfw_fatal("ct_wave_i2s", "DMA channel exhausted claiming module %u of %u ...")`. Runs from `wave_owner_start()`, inside `main()`, pre-scheduler — same halt-before-`vTaskStartScheduler()` posture the old `ct_wave_pwm.c` claim had. In practice unreachable today: `ct_wave_i2s_init()` halts earlier, at the PIO1 program-memory check (§1b.7). |
+| `ct_wave_i2s.c` (per DAC module) | `false` | `simfw_fatal("ct_wave_i2s", "DMA channel exhausted claiming module %u of %u ...")`. Runs from `wave_owner_start()`, inside `main()`, pre-scheduler — same halt-before-`vTaskStartScheduler()` posture the old `ct_wave_pwm.c` claim had. |
 | `max31856_pio_engine.c` (`dma_data`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_data channel exhausted on pio%u ...")`. |
 | `max31856_pio_engine.c` (`dma_load`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_load channel exhausted on pio%u (dma_data already claimed; ...)")`. |
 | `max31856_pio_engine.c` (per `dma_sniff[i]`) | `false` | `simfw_fatal("max31856_pio_engine", "dma_sniff[%u] channel exhausted on pio%u, channel_count=%u ...")` — halting here (rather than returning `false`) is also what closes the "mid-loop sniff failure is worse than an idle bus" hazard this section used to describe: `simfw_fatal()` never returns, so the half-initialised bus state (`s_bus_for_pio_index[]` published, `dma_load` armed with `DMA_IRQ_0` enabled) is never reachable by the other bus's shared `irq_handler_dma()`. |
@@ -501,49 +502,53 @@ at the time), so it polls `dma_channel_is_busy()` from task context instead
 `max31856_pio_engine.c` and binds no pin; `DMA_IRQ_1` is free for a future
 claimant, first-come, same as any other unclaimed resource in this document.
 
-### 1b.7 PIO instruction memory — a separate budget from SM count, and the live blocker on `ct_wave_i2s.c`
+### 1b.7 PIO instruction memory — a separate budget from SM count; RESOLVED for PIO1
 
-**This is the important correction in this pass.** Every table above (and
-§0 item 7's "PIO1 has 2 SMs free" framing) counts PIO resources in **state
-machines** — 4 per PIO block, 8 total across PIO0/PIO1. That is NOT the only
-PIO budget. Each PIO block also has its own **32-instruction-word program
-memory**, shared by all 4 of that block's state machines regardless of how
-many of them are actually running a program. A block can have idle state
-machines and zero free program memory at the same time — those are two
-independent resources, and "N SMs free" says nothing about whether a new
-program will fit.
-
-**Read literally, "PIO1 has 2 SMs free" was previously read as "there is
-room on PIO1" — that reading is wrong, and this subsection corrects it.**
-The state-machine count and the program-memory budget are independent
-quantities that happen to both live inside "PIO1"; having spare capacity in
-one says nothing about the other.
+**Every table above (and §0 item 7's "PIO1 has 2 SMs free" framing) counts
+PIO resources in state machines** — 4 per PIO block, 8 total across
+PIO0/PIO1. That is NOT the only PIO budget. Each PIO block also has its own
+**32-instruction-word program memory**, shared by all 4 of that block's
+state machines regardless of how many of them are actually running a
+program. A block can have idle state machines and zero free program memory
+at the same time — those are two independent resources, and "N SMs free"
+says nothing about whether a new program will fit.
 
 **Verified word counts (`pioasm`-reported program lengths):**
 
 | PIO block | Programs loaded | Words used | Words free (of 32) |
 |---|---|---|---|
 | PIO0 (bus A) | `max31856_spi_rx` (12) + `max31856_spi_tx_a` (17) | 29 | 3 |
-| PIO1 (bus B) | `max31856_spi_rx` (12) + `max31856_spi_tx_b` (17) | 29 | 3 |
+| PIO1 (bus B) | `max31856_spi_rx` (12) + `max31856_spi_tx_b` (10) + `ct_wave_i2s_out` (8) | 30 | 2 |
 
-Both blocks leave exactly **3 free words**, regardless of how many of their
-4 state machines are actually busy (bus B leaves 2 of PIO1's 4 SMs idle, per
-§0 item 7 — those 2 idle SMs still share the same 29-of-32-word program
-memory as the 2 busy ones).
+`max31856_spi_tx_b` was rewritten to use the dedicated `jmp pin, <target>`
+instruction for its CS idle/active test instead of the
+`in pins,1` / `mov x,isr` / `mov isr,null` / `jmp x!=y` idiom tx_a still
+uses (that idiom exists to turn a *multi*-bit CS sample into a comparable
+word; bus B's single CS line is already a single bit, so the dedicated
+one-instruction pin test is a direct substitute). That dropped tx_b from
+17 words to **10**, freeing 7 of PIO1's words — 2 more than the 5
+`ct_wave_i2s_out` needed. See `DESIGN_NOTES.md` for the differential
+equivalence proof (old vs new tx_b, cycle-level PIO simulator, 5 edge cases
+plus 4 deliberately-induced-and-caught failures) and the full trap list this
+rewrite had to avoid (`sm_config_set_jmp_pin()` is a separate, mandatory,
+no-good-default config field from `sm_config_set_in_pins()`).
 
-**`ct_wave_i2s_out` (`ct_wave_i2s.pio`) needs 8 instruction words. It CANNOT
-FIT in either block's 3 free words.** This is a live, current blocker, not a
-hypothetical one: `ct_wave_i2s_init()` checks this with `pio_can_add_program()`
-(never the panicking `pio_add_program()` alone) and calls `simfw_fatal()`
-with the exact word counts on failure — and since `wave_owner_start()` now
-calls `ct_wave_i2s_init()` unconditionally, **this IS what happens the moment
-the fixture boots on the current build.** There is no working CT waveform
-output today; see `PLAN.md`'s open items for the three candidate resolutions
-under consideration (none chosen yet).
+PIO0 (bus A) is untouched and still shows 3 free words — `tx_a` was not
+touched by this change and `ct_wave_i2s_out` only ever targeted PIO1
+(`ct_wave_i2s.c`'s `CT_WAVE_I2S_PIO` is `pio1`), so PIO0's headroom was never
+part of this blocker and needed no work.
 
-This is independent of the DMA budget in §1b.1–§1b.6 above — `ct_wave_i2s.c`
-never reaches its DMA claims, because it halts at the PIO program-memory
-check first, on every boot.
+**`ct_wave_i2s_out` (`ct_wave_i2s.pio`, 8 instruction words) now fits in
+PIO1's 32-word program memory** (22 words used by the two MAX31856 programs
++ 8 = 30, 2 words to spare). `ct_wave_i2s_init()`'s `pio_can_add_program()`
+check (never the panicking `pio_add_program()` alone) now passes instead of
+calling `simfw_fatal()`, so `wave_owner_start()` no longer halts the fixture
+at boot on this path. This check itself was not modified — it simply stops
+firing, which is the intended proof that the conflict is gone rather than
+papered over.
+
+This was independent of the DMA budget in §1b.1–§1b.6 above, which remains
+unaffected by this change.
 
 ---
 

@@ -302,6 +302,66 @@ physical MISO), TX FIFO surplus leading the next transaction, a vacuous
 `first_byte_late` counter, and a 4-bit register address space where the part
 has 7.
 
+**Resolved 2026-08-23: `max31856_spi_tx_b` shrunk from 17 to 10 PIO words,
+freeing the room `ct_wave_i2s_out` needed (§3.3 below; `docs/HARDWARE.md`
+§1b.7 has the verified word counts and the resulting PIO1 budget).**
+Bus B has exactly one CS line, so its idle/active test does not need tx_a's
+"sample N pins into the ISR, mov to X, clear the ISR, compare against a
+SET-loaded constant" idiom — that idiom exists only to turn a *multi*-bit
+sample into a comparable word. With a single CS bit, "is CS asserted" already
+IS a single pin's level, which is exactly what the dedicated `jmp pin,
+<target>` instruction tests in one word (branches when the configured JMP
+pin reads HIGH). Replacing both occurrences of the 4-instruction idiom (the
+idle poll and the per-bit mid-transaction re-check) with `jmp pin` drops the
+program from 17 words to 10. tx_a is untouched — it still needs the
+multi-bit idiom and its ISR shift-direction requirement (SPI_ACCESS_AUDIT.md
+D1) still applies there.
+
+Two things this rewrite had to get right, because this file's failure mode
+is a plausible wrong temperature, not a crash:
+
+- **`jmp pin` reads from `sm_config_set_jmp_pin()`, a separate config field
+  from `sm_config_set_in_pins()`, and it takes an absolute GPIO number, not
+  an offset.** `max31856_pio_engine.c` did not set it at all before this
+  change (tx SMs had never used `jmp pin`); the fix adds
+  `sm_config_set_jmp_pin(&tc, cfg->cs_gpio[0])` alongside the existing
+  `sm_config_set_in_pins()` call. Getting this wrong is exactly D1's failure
+  shape (SM silently tests the wrong GPIO, MISO permanently driven or never
+  driven) via a missing config call instead of a wrong shift direction.
+  `IN_BASE` (`sm_config_set_in_pins`) is unchanged and still what
+  `wait ... pin 29` resolves its SCLK offset against — `jmp pin` and
+  `wait ... pin N` read from two different config fields, and the new
+  program's `wait` lines needed no change at all.
+- **`sm_config_set_in_shift(&tc, false, false, 32)` — D1's original fix —
+  is now unused by tx_b specifically**, since the new program issues no `in`
+  instruction at all. It is left in place rather than removed: the call
+  configures a `pio_sm_config` shared by whichever TX program variant gets
+  loaded (tx_a or tx_b), tx_a still needs it, and branching the C code per
+  program variant to drop one dead-for-tx_b config call would add real
+  complexity for zero behavioural gain. `max31856_spi_slave.pio`'s header
+  comment and `max31856_pio_engine.c`'s call site both flag this explicitly
+  so a future reader does not mistake it for a live tx_b dependency.
+
+**Verification (no fixture hardware exists, so this is simulation, not a
+bench measurement — flagged the same way the rest of this section already
+is):** a cycle-level PIO instruction simulator was built to run the
+committed 17-word program and the new 10-word program against byte-identical
+stimulus (realistic 4 MHz mode-1 CS/SCLK waveforms) across five scenarios —
+a clean multi-byte transaction, CS released mid-byte, back-to-back
+transactions with a short gap, a long idle period with no CS at all, and CS
+glitching high for a single SCLK period — asserting bit-identical MISO
+output at every SCLK sample point and settled-correct pindirs (tri-state)
+throughout every CS-deasserted interval in all five. All five passed. The
+new program's CS-detection latency measured faster (5 SM cycles from CS
+assertion to driving MISO, vs. 8 for the old idiom) without any case of
+driving before the master could possibly be clocking. Four deliberately
+broken variants (wrong `jmp pin` polarity/source, a missing tri-state `set`,
+inverted `wait` edge polarity, and a phase-shifted OUT/WAIT ordering) were
+run through the same harness and were all caught — the phase-shift mutant by
+a direct MISO bit-value mismatch, the other three by the settled-tri-state
+property — establishing that the test actually discriminates a real bug from
+a correct rewrite, not just from a clean run.
+
 ### 3.3 CT waveform generation
 
 > **Implemented 2026-08-23: CT waveform synthesis moved from PWM+RC to 2x
@@ -313,13 +373,14 @@ has 7.
 > superseded in docs; `src/drivers/ct_wave_i2s.{c,h}` (PIO+DMA I2S transport)
 > and `src/sim/ct_i2s_gen.{c,h}` (the pure, host-testable per-sample
 > generator `src/tasks/wave_owner.c` drives it with) are the new path.
-> **This is a live, unresolved blocker, not a working feature yet:**
-> `ct_wave_i2s_out`'s PIO program needs 8 instruction words and PIO1 (the
-> only block with a free state machine, per §0 item 7 below) has only 3
-> program-memory words free — `docs/HARDWARE.md` §1b.7 has the full
-> derivation, `docs/PLAN.md` records the three candidate resolutions. The
-> fixture halts loudly via `simfw_fatal()` at boot rather than running with
-> a silently-dead CT path; there is no fallback to the old PWM backend.
+> **Resolved 2026-08-23: `ct_wave_i2s_out`'s PIO program-memory conflict on
+> PIO1 is cleared** — `ct_wave_i2s_out` needs 8 instruction words; PIO1 had
+> only 3 free after `max31856_spi_rx` (12) + `max31856_spi_tx_b` (17), and
+> §3.2.1 above's `max31856_spi_tx_b` rewrite (17 words -> 10, using `jmp pin`
+> in place of the old ISR-shuffle CS test) freed the room, leaving 2 words to
+> spare (`docs/HARDWARE.md` §1b.7 has the verified word counts). The fixture
+> no longer halts via `simfw_fatal()` at boot on this path; there is still no
+> fallback to the old PWM backend, but none is needed now that I2S runs.
 
 - Two UDA1334ATS stereo I2S DAC modules, PIO1-driven (one PIO state machine
   per module, running the same program in lock-step so BCLK/WS never drift

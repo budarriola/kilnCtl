@@ -88,8 +88,11 @@ static bool s_dma_irq_installed;
 // lead the NEXT CS assertion and shift every subsequent transaction's MISO
 // stream by a byte, exactly as it did before, only more of it.
 // pio_sm_restart() is what clears the OSR shift counter and the stalled
-// state; clear_fifos() drops the surplus; the jmp re-enters the program at its
-// `set y, N` preamble so the idle-compare constant is reloaded.
+// state; clear_fifos() drops the surplus; the jmp re-enters the program at
+// its first instruction -- on bus A that is the `set y, N` preamble, so the
+// idle-compare constant is reloaded; on bus B (max31856_spi_tx_b, rewritten
+// with `jmp pin` and no compare constant at all) the first instruction IS
+// poll_idle, so this jmp lands exactly there with nothing to reload.
 static void tx_reset(max31856_pio_bus_t *bus)
 {
     pio_sm_set_enabled(bus->pio, bus->sm_tx, false);
@@ -630,6 +633,19 @@ bool max31856_pio_engine_init(max31856_pio_bus_t *bus,
         ? max31856_spi_tx_b_program_get_default_config(bus->offset_tx)
         : max31856_spi_tx_a_program_get_default_config(bus->offset_tx);
     sm_config_set_in_pins(&tc, cfg->cs_gpio[0]);        // IN_BASE = first (of channel_count consecutive) CS gpio
+    // JMP_PIN is a SEPARATE config field from IN_BASE, taking an absolute
+    // gpio rather than an IN_BASE-relative offset (RP2040 datasheet section
+    // 3.5.4). Only tx_b's `jmp pin` instructions consume it -- tx_a has none,
+    // so this is a harmless no-op there -- but tx_b has NO other pin
+    // configured to test CS with, since its old `in pins, 1` idiom is gone
+    // (max31856_spi_slave.pio's tx_b header comment). Get this wrong and
+    // tx_b silently branches on the wrong gpio: exactly SPI_ACCESS_AUDIT.md
+    // D1's failure shape (plausible wrong MISO / stuck-driven bus), just via
+    // a missing config call instead of a wrong shift direction. cs_gpio[0]
+    // is correct for both variants: bus B's only CS line, and bus A's CS0
+    // (tx_a doesn't use this field, so which of the 3 CS lines is irrelevant
+    // for it).
+    sm_config_set_jmp_pin(&tc, cfg->cs_gpio[0]);
     sm_config_set_out_pins(&tc, cfg->miso_gpio, 1);      // drives MISO's value
     sm_config_set_set_pins(&tc, cfg->miso_gpio, 1);       // drives MISO's pindir (tri-state control)
     sm_config_set_out_shift(&tc, false, true, 8);          // shift-left, autopull, 8-bit threshold: OUT emits OSR bit 31, so each image word carries its byte in bits[31:24]

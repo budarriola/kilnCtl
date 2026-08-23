@@ -36,9 +36,11 @@ thing:
   `firmware/UnitTestFw/` still exists in the tree, untouched); the CT
   calibration procedure (§10 M-D — `src/sim/ct_i2s_gen.c`'s amplitude
   mapping is currently an IDENTITY placeholder, explicitly marked
-  `TODO(M-D calibration)`, not the real sweep-and-fit table, and M-D is
-  gated behind §0.1's PIO program-memory blocker regardless since there is
-  no working CT output to calibrate against yet); every
+  `TODO(M-D calibration)`, not the real sweep-and-fit table -- the PIO
+  program-memory blocker that used to gate M-D behind "no working CT output
+  to calibrate against" is resolved, `docs/HARDWARE.md` §1b.7; M-D remains
+  hardware-gated on its own merits, needing a real calibration sweep against
+  `SaftyFW`'s ADC readback); every
   relay-sense, E-stop, DUT-power, and ground-isolation claim in
   `DESIGN_NOTES.md` §3; and every one of the 27 scenarios actually *running*
   against a real `KilnFW`+`SaftyFW` pair (a scenario existing and loading is
@@ -71,39 +73,6 @@ never `[x]`.
 
 ### 0.1 Doable now, in software (no hardware required)
 
-- [ ] **CT I2S PIO program-memory blocker — no working CT output exists
-      until this is resolved.** `ct_wave_pwm.c` (PWM+RC) is deleted
-      (`DESIGN_NOTES.md` §3.3's 2026-08-23 decision); its replacement,
-      `ct_wave_i2s.c`, cannot actually run: `ct_wave_i2s_out`'s PIO program
-      needs 8 instruction words, and PIO1 (the only block with a free state
-      machine — bus B leaves 2 of 4 idle) has only 3 program-memory words
-      free, because program memory is a separate 32-word-per-block budget
-      shared by all 4 SMs, independent of how many SMs are actually busy
-      (`docs/HARDWARE.md` §1b.7 has the verified word counts). This is not
-      hardware-gated — it is a firmware/PIO-allocation decision available to
-      make on a PC today. `wave_owner_start()` calls `ct_wave_i2s_init()`
-      unconditionally and lets the resulting `simfw_fatal()` halt the
-      fixture at boot rather than hide a silently-dead CT path, so this item
-      blocks the fixture having ANY working CT waveform output, not just
-      M-D's calibration exit criterion. Three candidate resolutions, none
-      chosen yet:
-      1. **Shrink `max31856_spi_slave.pio`'s `max31856_spi_tx_b` program**
-         from 17 words to 9 or fewer, freeing enough of PIO1's budget for
-         `ct_wave_i2s_out`'s 8. Out of scope for whoever lands the I2S
-         driver — shrinking a working, timing-proven SPI-slave TX program is
-         a separate decision the SPI-emulation owner has not made, and this
-         plan does not choose it here.
-      2. **Move to a part with more PIO memory.** The RP2350 has 3 PIO
-         blocks instead of 2 (and more SMs); would need its own bring-up,
-         toolchain, and board-support work — a bigger change than swapping
-         one program.
-      3. **A no-PIO approach**: PWM-generate BCLK and have DMA write whole
-         GPIO words directly, bypassing PIO's I2S framing entirely. Contends
-         with the SPI-slave emulation's own ~250 ns hard deadline
-         (`DESIGN_NOTES.md` §3.2.1) for CPU/bus bandwidth in a way that has
-         not been analyzed — not a free option, just a different budget to
-         blow.
-      Recorded here as the open item; no resolution chosen.
 - [ ] **Bridge ACK still precedes dispatch — narrower than it was.** Every
       unimplemented subcommand's silent-ACK case is now fixed (`c91ed50`: all
       11 `default:` branches reply `ok=0` with the echoed subcmd). **Still
@@ -207,23 +176,21 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   **Exit:** calibration table fitted against `SaftyFW`'s own ADC readback;
   commanded 0→N A sweep reads back within ±5% over the usable range;
   one-relay/one-channel commissioning check passes.
-  **Status: NOT MET, further from met than the others, and now blocked on a
-  software decision before it can even become hardware-gated.** The
-  waveform generates in software (`src/sim/ct_i2s_gen.c`) and passes host
-  tests. Both halves of the calibration *machinery* exist and are tested
-  (PC-side sweep/fit/crosstalk runner in `tools/ct_calibration/`; firmware
-  apply-path in `src/sim/ct_calibration.{c,h}`) — see `DESIGN_NOTES.md`
-  §3.3. **Newly blocking, not hardware-gated: §0.1's CT I2S PIO
-  program-memory item** — `ct_wave_i2s_out` cannot fit in either PIO block's
-  free program memory on the current build, so `ct_wave_i2s_init()` halts
-  the fixture via `simfw_fatal()` at boot; there is no CT output to
-  calibrate against until that is resolved. **Once it is, what remains is
-  hardware-gated:** a real bench run against real CT/transformer/ADC
-  hardware to produce the first JSON table, then regenerating the header
-  from it. The shipped table is an explicit "no data" marker, not
-  placeholder constants. No transformer coupling network has been built.
-  "Store the table in fixture flash keyed by channel" also waits on a SimFW
-  `config_store`, which does not exist.
+  **Status: NOT MET, but the software-only blocker is now cleared --
+  purely hardware-gated from here.** The waveform generates in software
+  (`src/sim/ct_i2s_gen.c`) and passes host tests. Both halves of the
+  calibration *machinery* exist and are tested (PC-side sweep/fit/crosstalk
+  runner in `tools/ct_calibration/`; firmware apply-path in
+  `src/sim/ct_calibration.{c,h}`) — see `DESIGN_NOTES.md` §3.3. The CT I2S
+  PIO program-memory conflict that used to block `ct_wave_i2s_init()` at
+  boot is resolved (`max31856_spi_tx_b` shrunk from 17 to 10 words,
+  `docs/HARDWARE.md` §1b.7), so `ct_wave_i2s_out` now fits and the fixture
+  has a working CT output path. **What remains is hardware-gated:** a real
+  bench run against real CT/transformer/ADC hardware to produce the first
+  JSON table, then regenerating the header from it. The shipped table is an
+  explicit "no data" marker, not placeholder constants. No transformer
+  coupling network has been built. "Store the table in fixture flash keyed
+  by channel" also waits on a SimFW `config_store`, which does not exist.
 - [ ] **M-E — Relay sense + discrete I/O.** Expanders, E-stop, fault line, DUT
   power switch.
   **Exit:** heat loop closes end-to-end — DUT PID actually regulates a

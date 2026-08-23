@@ -94,9 +94,19 @@
 ;   max31856_spi_tx_b    (bus B: single CS, tri-stating kept for symmetry
 ;     even though PLAN.md notes it is "optional/simpler" there -- costs
 ;     nothing and means one C code path instead of two):
-;     Same as tx_a but `in pins, 1` (only CS0 exists) and the idle-compare
-;     constant is 1 instead of 7. SCLK offset is still 29 by construction
-;     (same CS-to-SCLK gpio spacing reused on bus B, see the C glue).
+;     With only one CS line, "is CS asserted" collapses to a single pin
+;     level, so this program uses `jmp pin` instead of tx_a's
+;     in/mov/mov/jmp idiom (see the program's own header comment for why):
+;       IN_BASE = this channel's CS gpio, used ONLY by `wait ... pin 29`
+;                 below -- unchanged from before this program was shrunk.
+;       JMP_PIN = the SAME CS gpio, but a SEPARATE config field
+;                 (sm_config_set_jmp_pin(), absolute gpio, active LOW same
+;                 sense as the RX program's JMP_PIN above) that the C glue
+;                 must set explicitly -- there is no default that makes this
+;                 "just work", unlike the old idiom's shift-direction trap.
+;     SCLK offset is still 29 by construction (same CS-to-SCLK gpio spacing
+;     reused on bus B, see the C glue) and is unaffected by JMP_PIN, since
+;     `wait ... pin N` always resolves against IN_BASE, never JMP_PIN.
 ;
 ; --- Shift-direction / byte-justification contract (also enforced by the C
 ; glue, called out here so the two files can be cross-checked) ---
@@ -128,16 +138,23 @@
 ;       The image base MUST be 1024-byte aligned for the OR-into-the-top-bits
 ;       trick to be an OR at all; max31856_pio_engine_publish_image() checks
 ;       that at run time and refuses a misaligned image.
-;   TX (IN side -- the CS idle/active test, NOT a byte stream):
+;   TX (IN side -- the CS idle/active test, NOT a byte stream) -- TX_A ONLY
+;     as of the tx_b `jmp pin` rewrite (tx_b has no `in` instruction any
+;     more, see its own program comment; this paragraph is kept because
+;     tx_a is unchanged and still depends on it):
 ;       sm_config_set_in_shift(shift_right=false, autopush=false, 32).
-;       MANDATORY. The `in pins, N` / `mov x, isr` / `jmp x!=y` sequence in
-;       both TX programs compares against a `set`-loaded constant (7 on bus
-;       A, 1 on bus B). Only shifting LEFT lands the N sampled CS bits in
-;       ISR[N-1:0] where those constants mean something; the pico-sdk
-;       DEFAULT is shift-RIGHT, which parks them at ISR[31:32-N] (0xE0000000
-;       for an idle bus A) so the compare never matches, MISO is never
-;       tri-stated, and the SM never returns to poll_idle. This was a real
-;       shipped bug -- see docs/SPI_ACCESS_AUDIT.md D1.
+;       MANDATORY for tx_a. The `in pins, N` / `mov x, isr` / `jmp x!=y`
+;       sequence in tx_a compares against a `set`-loaded constant (7, all 3
+;       CS lines idle-high). Only shifting LEFT lands the N sampled CS bits
+;       in ISR[N-1:0] where that constant means something; the pico-sdk
+;       DEFAULT is shift-RIGHT, which parks them at ISR[31:32-N]
+;       (0xE0000000 for an idle bus A) so the compare never matches, MISO is
+;       never tri-stated, and the SM never returns to poll_idle. This was a
+;       real shipped bug -- see docs/SPI_ACCESS_AUDIT.md D1. The C glue
+;       (max31856_pio_engine.c) sets this once for a `pio_sm_config` shared
+;       by whichever TX program variant gets loaded; it is harmless-unused
+;       for tx_b rather than removed, since removing it would need a
+;       per-program branch for zero behavioural gain.
 ;   TX: sm_config_set_out_shift(shift_right=false, autopull=true,
 ;       threshold=8). OUT shifts LEFT and emits the current MSB of a 32-bit
 ;       OSR each time, so the C side must LEFT-JUSTIFY each response byte
@@ -228,29 +245,57 @@ byte_loop:
     jmp poll_idle
 
 ; ---------------------------------------------------------------------------
-; TX (bus B variant): identical structure to tx_a, but only 1 CS line exists
-; (DESIGN_NOTES.md 3.2.1: "bus B has just 1 CS so tri-stating is optional/simpler
-; there" -- kept anyway, at zero extra pin-budget cost, purely so bus B does
-; not need a third, near-duplicate C code path). `in pins, 1` / compare
-; constant 1 replace tx_a's `in pins, 3` / constant 7.
+; TX (bus B variant): bus B has exactly ONE CS line, which means the
+; idle/active test doesn't need tx_a's "sample N pins into the ISR, stash in
+; X, clear the ISR, compare against a SET-loaded constant" idiom at all --
+; that idiom exists only to turn a multi-bit sample into a single comparable
+; word. With one CS bit, "is CS asserted" IS a single pin's level, which is
+; exactly what the dedicated `jmp pin, <target>` instruction tests in ONE
+; word (branches when the configured JMP pin reads HIGH). CS is idle-high on
+; this bus like every other, so `jmp pin, idle_state` is a direct substitute
+; for the old 4-instruction "in/mov/mov/jmp" block, both places it appeared
+; (the idle poll and the mid-byte CS re-check). That drops this program from
+; 17 words to 10, which is what frees the PIO1 program-memory room
+; ct_wave_i2s_out needs (docs/DESIGN_NOTES.md section 3.2.1 / this file's TX pin-mapping
+; contract above records the follow-on C-side change: the tx SM's JMP pin is
+; now explicitly configured via sm_config_set_jmp_pin(), separately from
+; IN_BASE, in max31856_pio_engine.c).
+;
+; IMPORTANT -- two separate pin-config fields, do not confuse them:
+;   - IN_BASE (sm_config_set_in_pins) is UNCHANGED: still this channel's CS
+;     gpio, still what `wait 1/0 pin 29` resolves its offset-29 SCLK index
+;     against (see the file's pin-mapping contract above). This program has
+;     no `in` instruction any more, so IN_BASE only matters for the two
+;     `wait ... pin 29` lines below.
+;   - JMP_PIN (sm_config_set_jmp_pin) is a DIFFERENT config field that takes
+;     an ABSOLUTE gpio number (not an IN_BASE-relative offset). It must be
+;     set to this same CS gpio explicitly on the C side, or `jmp pin` tests
+;     the wrong line and this SM never tri-states MISO or notices CS rise --
+;     exactly D1's failure shape (SPI_ACCESS_AUDIT.md), just on a different
+;     instruction. sm_config_set_jmp_pin() has no useful default; leaving it
+;     unset is not a "does nothing" mistake the way the old shift-direction
+;     default was, it is undefined which pin gets tested.
+;
+; Because this program issues no `in` instruction, the ISR/IN-shift-direction
+; contract in this file's header (the "MANDATORY... shift LEFT" paragraph)
+; no longer applies to this program -- it still applies to tx_a, which is
+; unchanged and still uses the old idiom. max31856_pio_engine.c's shared
+; sm_config_set_in_shift() call is therefore dead weight for this SM
+; specifically; it is left in place because it is still load-bearing for
+; tx_a's shared config object and removing it would need a per-program branch
+; for zero behavioural gain (see that file's comment at the call site).
 .program max31856_spi_tx_b
-    set y, 1                   ; compare constant: 0b1 == the single CS line idle-high
 poll_idle:
-    in pins, 1
-    mov x, isr
-    mov isr, null
-    jmp x!=y, active
-    set pindirs, 0
+    jmp pin, idle_state          ; CS (JMP_PIN, absolute gpio, see above) HIGH == deasserted -> stay idle
+    jmp active                    ; CS LOW -> a transaction is starting
+idle_state:
+    set pindirs, 0                 ; tri-state MISO -- no CS asserted
     jmp poll_idle
 active:
-    set pindirs, 1
+    set pindirs, 1                  ; drive MISO -- CS asserted
 byte_loop:
-    wait 1 pin 29                ; SCLK rising edge (mode-1 leading edge; same offset-29 CS-to-SCLK spacing as bus A, see header)
-    out pins, 1
-    wait 0 pin 29                ; SCLK falling edge (mode-1 trailing/sample edge)
-    in pins, 1
-    mov x, isr
-    mov isr, null
-    jmp x!=y, byte_loop
-    set pindirs, 0
-    jmp poll_idle
+    wait 1 pin 29                     ; SCLK rising edge (mode-1 leading edge; offset-29 CS-to-SCLK spacing off IN_BASE, unchanged -- see header)
+    out pins, 1                        ; shift next bit out; autopull refills the OSR from the TX FIFO at the 8-bit threshold, blocking if empty (same structural first-transaction stall as tx_a, see that program's byte_loop comment)
+    wait 0 pin 29                       ; SCLK falling edge (mode-1 trailing/sample edge) -- hold the bit steady through the master's sample window
+    jmp pin, idle_state                  ; CS released (mid-byte or at a boundary) -> tri-state, re-poll
+    jmp byte_loop
