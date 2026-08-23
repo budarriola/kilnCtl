@@ -80,8 +80,8 @@ left_bit:
     out pins, 1         side 0b10  ; falling edge -- LEFT bit0 (LSB); WS flips to 1 now, anticipating RIGHT
     set x, 14            side 0b11 ; rising edge / sample point for LEFT's LSB (WS=1); also reloads the counter for the RIGHT word -- free, see header
 right_bit:
-    out pins, 1          side 0b11  ; falling edge, WS=1 (right) -- bits 15..1
-    jmp x--, right_bit    side 0b10 ; rising edge / sample point, WS=1
+    out pins, 1          side 0b10  ; falling edge, WS=1 (right) -- bits 15..1
+    jmp x--, right_bit    side 0b11 ; rising edge / sample point, WS=1
     out pins, 1           side 0b00 ; falling edge -- RIGHT bit0 (LSB); WS flips to 0 now, anticipating the NEXT LEFT word
     set x, 14              side 0b01 ; rising edge / sample point for RIGHT's LSB (WS=0); reloads the counter for the next LEFT word
 .wrap
