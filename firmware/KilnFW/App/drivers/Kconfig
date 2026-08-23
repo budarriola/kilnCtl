@@ -325,11 +325,29 @@ menu "KilnCtrl Hardware Configuration"
 
         config KILNCTL_SAFETY_BAUD_RATE
             int "Safety link baud rate"
-            default 115200
+            default 19200
             help
                 Optocouplers, not a line driver -- the TCMT1109's switching
                 time is the limit here, so don't push this far without
                 looking at the waveform.
+
+                That warning turned out to be exactly right, and 115200 was
+                over the limit. Measured on the bench 2026-08-23, with the
+                RP2040 confirmed transmitting a status frame every 500 ms and
+                the DC levels on both directions of the isolated pair already
+                verified good:
+
+                  115200 -- zero frames received, ever
+                   57600 -- zero frames received, ever
+                   38400 -- about 80% received (53 of 66), errors climbing
+                   19200 -- every frame received (20 of 20), errors static
+
+                Static GPIO high/low tests pass at any rate, which is what
+                made this so misleading: the opto path carries DC perfectly
+                and simply cannot switch fast enough for a 8.7 us bit. Raising
+                this needs a faster part or a real line driver, not a config
+                change. Must stay equal to SaftyFW's UART_OWNER_BAUD_RATE
+                (src/tasks/uart_owner.c) -- both sides hardcode it.
 
         config KILNCTL_SAFETY_POLL_PERIOD_MS
             int "Safety processor poll period (ms)"
