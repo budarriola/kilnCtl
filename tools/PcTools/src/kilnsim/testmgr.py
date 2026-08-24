@@ -115,6 +115,22 @@ from .scenario import (
     load_scenario,
 )
 
+
+class GuardObserverUnavailable(RuntimeError):
+    """Raised by :func:`run_suite` when ``guards=True`` was requested but a
+    real :class:`~kilnsim.guard_observer.SafetyGuardObserver` cannot be
+    attached this session (kilnctrl not importable, no live SaftyFW link,
+    or ``mock=True`` requested alongside ``guards=True``).
+
+    Deliberately a loud failure, not a silent downgrade: requirement (2) of
+    the task this class closes is that a run asked to attach a guard
+    observer must never quietly fall back to running without one and then
+    report guard coverage as if nothing were missing -- see this module's
+    ``compute_guard_coverage`` and TEST_MANAGER.md sec 9's first bullet for
+    the exact failure mode this exists to prevent. Callers (``kilnsim.cli
+    .cmd_testmgr``) catch this and print a clear error instead of letting
+    the suite run degrade silently."""
+
 # ---------------------------------------------------------------------------
 # guard list -- firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md is authoritative
 # ---------------------------------------------------------------------------
@@ -472,6 +488,16 @@ class ScenarioOutcome:
     detail: str = ""
     duration_s: float = 0.0
     report: "Optional[Report]" = None
+    #: Whether a real kilnsim.guard_observer.GuardObserver was actually
+    #: attached to kilnsim.runner.run_scenario for THIS run. Independent of
+    #: has_runner_gap (a static, YAML-only classification of whether a
+    #: clause targets a guard-only event type) -- this field is the runtime
+    #: fact that decides whether such a clause's outcome is real hardware
+    #: evidence or, per runner.py's own
+    #: _block_expectations_missing_guard_observer, a BLOCKED placeholder.
+    #: See compute_guard_coverage's use of the two fields together for why
+    #: requirement (3) needs both, not just has_runner_gap alone.
+    guard_observer_attached: bool = False
 
     def to_dict(self) -> dict:
         d = {
@@ -481,6 +507,7 @@ class ScenarioOutcome:
             "min_tier": self.min_tier,
             "min_tier_name": _TIER_NAMES.get(self.min_tier, str(self.min_tier)),
             "has_runner_gap": self.has_runner_gap,
+            "guard_observer_attached": self.guard_observer_attached,
             "verdict": self.verdict,
             "detail": self.detail,
             "duration_s": round(self.duration_s, 3),
@@ -520,7 +547,20 @@ def run_one_scenario(
     *,
     mock: bool,
     request_enable_fn: "Optional[Callable[[], None]]" = None,
+    guard_observer_factory: "Optional[Callable[[], tuple]]" = None,
 ) -> ScenarioOutcome:
+    # `guard_observer_factory`, when given, is called fresh for EVERY
+    # scenario (never shared across scenarios) and must return
+    # ``(observer, close_fn)``. Fresh per scenario, deliberately: a
+    # SafetyGuardObserver's edge trackers (_last_trip_reason etc., see
+    # guard_observer.py) carry state, and this module's own known-state-
+    # reset discipline (module docstring point 4 -- SYS/RESET_SIM before
+    # every scenario) would be undermined if a leftover "already saw this
+    # trip reason" from scenario A silently suppressed detecting the SAME
+    # trip reason firing again in scenario B. Only called when mock=False
+    # (run_suite() itself refuses guards=True with mock=True -- see
+    # GuardObserverUnavailable), and only for scenarios that actually run
+    # (never for a NOT_RUNNABLE outcome, decided below).
     req = classify_scenario(scenario)
     path = str(scenario.source_path) if scenario.source_path else scenario.name
 
@@ -567,25 +607,53 @@ def run_one_scenario(
                 "docs/TEST_MANAGER.md's known-limitations section."
             )
 
+    # Attach a real guard observer for this one scenario, if requested. Built
+    # here (not by the caller) so its lifetime is scoped to exactly this
+    # scenario's run -- opened right before run_scenario, closed in the
+    # `finally` below regardless of how the run ends. NOT constructed for
+    # mock=True (guard_observer_factory is only ever passed non-None when
+    # run_suite() has already confirmed mock=False -- see
+    # GuardObserverUnavailable's mock+guards check) -- the mock branch below
+    # calls evaluate_expectations directly and has no guard_observer
+    # parameter to give one to.
+    guard_observer = None
+    close_guard_observer: "Optional[Callable[[], None]]" = None
+    if guard_observer_factory is not None and not mock:
+        try:
+            guard_observer, close_guard_observer = guard_observer_factory()
+        except Exception as exc:  # noqa: BLE001 - fail loudly, never silently run without one
+            raise GuardObserverUnavailable(
+                f"--guards requested but a guard observer could not be attached for "
+                f"scenario {scenario.name!r}: {exc}"
+            ) from exc
+
     t0 = time.monotonic()
     try:
-        if mock:
-            link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": scenario.seed})
-            link.send_command(CommandGroup.SYS, SysCmd.SET_TIMESCALE, {"value": scenario.timescale})
-            if scenario.preset:
-                link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": scenario.preset})
-            events = link.read_events(timeout=0.0)
-            report = evaluate_expectations(scenario, events, seed=scenario.seed, timescale=scenario.timescale)
-        else:
-            report = run_scenario(link, scenario, seed=scenario.seed, timescale=scenario.timescale)
-    except SimLinkError as exc:
-        detail = f"run failed: {exc}"
-        if enable_note:
-            detail += f" [{enable_note}]"
-        return ScenarioOutcome(
-            name=scenario.name, path=path, exercises=list(scenario.exercises),
-            min_tier=req.min_tier, has_runner_gap=req.has_runner_gap, verdict=ERROR, detail=detail,
-        )
+        try:
+            if mock:
+                link.send_command(CommandGroup.SYS, SysCmd.SET_SEED, {"value": scenario.seed})
+                link.send_command(CommandGroup.SYS, SysCmd.SET_TIMESCALE, {"value": scenario.timescale})
+                if scenario.preset:
+                    link.send_command(CommandGroup.MODEL, ModelCmd.LOAD_PRESET, {"name": scenario.preset})
+                events = link.read_events(timeout=0.0)
+                report = evaluate_expectations(scenario, events, seed=scenario.seed, timescale=scenario.timescale)
+            else:
+                report = run_scenario(
+                    link, scenario, seed=scenario.seed, timescale=scenario.timescale,
+                    guard_observer=guard_observer,
+                )
+        except SimLinkError as exc:
+            detail = f"run failed: {exc}"
+            if enable_note:
+                detail += f" [{enable_note}]"
+            return ScenarioOutcome(
+                name=scenario.name, path=path, exercises=list(scenario.exercises),
+                min_tier=req.min_tier, has_runner_gap=req.has_runner_gap, verdict=ERROR, detail=detail,
+                guard_observer_attached=guard_observer is not None,
+            )
+    finally:
+        if close_guard_observer is not None:
+            close_guard_observer()
     duration = time.monotonic() - t0
 
     detail = enable_note
@@ -597,6 +665,7 @@ def run_one_scenario(
         name=scenario.name, path=path, exercises=list(scenario.exercises),
         min_tier=req.min_tier, has_runner_gap=req.has_runner_gap, verdict=report.verdict,
         detail=detail, duration_s=duration, report=report,
+        guard_observer_attached=guard_observer is not None,
     )
 
 
@@ -630,6 +699,42 @@ def make_request_enable_fn(port: Optional[str] = None) -> "Optional[Callable[[],
     return _fn
 
 
+def default_guard_observer_factory(port: Optional[str] = None) -> "tuple":
+    """Builds one live :class:`~kilnsim.guard_observer.SafetyGuardObserver`
+    over its own fresh ``kilnctrl.serial_link.UartLink``, and returns
+    ``(observer, close_fn)``.
+
+    Unlike :func:`make_request_enable_fn` above, this function does NOT
+    catch ``ImportError`` and degrade to returning ``None`` -- requirement
+    (2) of the task this closes is that a run asked to attach a guard
+    observer must fail loudly, never silently drop it. Any exception here
+    (kilnctrl not importable, the port not opening, SafetyClient construction
+    failing) is left to propagate to the caller
+    (:func:`run_one_scenario`/:func:`run_suite`), which wraps it in
+    :class:`GuardObserverUnavailable` -- a distinct, clearly-named error
+    rather than a bare ``ImportError``/``SimLinkError`` a caller might
+    reasonably mistake for something else going wrong.
+
+    The link is opened fresh per call (mirrors ``make_request_enable_fn``'s
+    own per-call UartLink, not the presence probe's shared one) so its
+    lifetime is exactly one scenario's run -- see
+    :func:`run_one_scenario`'s own comment on why a shared, suite-lifetime
+    observer would be wrong (stale edge-tracker state leaking between
+    scenarios)."""
+    from kilnctrl.serial_link import UartLink  # type: ignore
+
+    from .guard_observer import make_safety_guard_observer
+
+    link = UartLink()
+    link.connect(port)
+    observer = make_safety_guard_observer(link)
+
+    def _close() -> None:
+        link.disconnect()
+
+    return observer, _close
+
+
 # ---------------------------------------------------------------------------
 # guard coverage (module docstring point 5)
 # ---------------------------------------------------------------------------
@@ -657,7 +762,7 @@ def compute_guard_coverage(
         detail: "list[str]" = []
         any_clean_pass = False
         any_not_runnable = False
-        any_gap = False
+        any_gap_no_observer = False
         any_ran = False
         for name in declared:
             outcome = by_name.get(name)
@@ -669,14 +774,39 @@ def compute_guard_coverage(
                 detail.append(f"{name}: {outcome.verdict} ({outcome.detail})")
                 continue
             any_ran = True
-            if outcome.has_runner_gap:
-                any_gap = True
+            if outcome.has_runner_gap and not outcome.guard_observer_attached:
+                # Requirement (3): "guard observed, no trip seen" and "guard
+                # never observable because no observer was attached" are
+                # different facts and must not print the same. This branch is
+                # the LATTER -- has_runner_gap is a static, YAML-only
+                # classification ("this clause targets a guard-only event
+                # type"), and guard_observer_attached is the runtime fact of
+                # whether anything actually watched SaftyFW for this run. No
+                # observer attached means this guard's state was genuinely
+                # never observed this session, full stop -- not "observed and
+                # quiet".
+                any_gap_no_observer = True
                 detail.append(
-                    f"{name}: ran (overall {outcome.verdict}), but its guard-evidence clause(s) "
-                    "are a kilnsim.runner gap -- NO real hardware evidence for this guard from it"
+                    f"{name}: ran (overall {outcome.verdict}), but no guard observer was attached "
+                    "this session -- guard state was NEVER OBSERVED for this clause (no real "
+                    "hardware evidence either way); run `kilnsim testmgr --guards` with SaftyFW "
+                    "attached to close this"
                 )
                 continue
-            detail.append(f"{name}: ran, overall {outcome.verdict}")
+            # Either an ordinary (non-guard-only) clause, or a guard-only
+            # clause that a real SafetyGuardObserver actually watched this
+            # run (guard_observer_attached=True) -- in both cases
+            # outcome.verdict is real evidence, not vacuous:
+            # runner.py's own _block_expectations_missing_guard_observer only
+            # downgrades a guard-typed clause to BLOCKED when no observer was
+            # attached at all, which this branch has already excluded. A
+            # PASS here for a has_runner_gap clause means the observer really
+            # saw (or, for a `forbid`, really watched for and never saw) the
+            # guard trip -- "guard observed, no trip seen" is exactly the
+            # SKIPPED/PASS-on-forbid case this note distinguishes from the
+            # branch above.
+            observed_note = " (guard observer attached)" if outcome.has_runner_gap else ""
+            detail.append(f"{name}: ran, overall {outcome.verdict}{observed_note}")
             if outcome.verdict == PASS:
                 any_clean_pass = True
 
@@ -684,8 +814,12 @@ def compute_guard_coverage(
             status = "no scenario declares exercises: [%s]" % guard
         elif any_clean_pass:
             status = "hardware evidence obtained this session (a scenario ran clean, no runner gap)"
-        elif any_ran and any_gap and not any_not_runnable:
-            status = "declared and ran, but every scenario's guard clause is a kilnsim.runner gap -- no usable evidence"
+        elif any_ran and any_gap_no_observer and not any_not_runnable:
+            status = (
+                "declared and ran, but every scenario's guard clause is a kilnsim.runner gap -- "
+                "no usable evidence (no guard observer was attached this session; run with "
+                "--guards and SaftyFW attached to close this)"
+            )
         elif any_not_runnable and not any_ran:
             status = "declared, but hardware tier unavailable this session -- none of its scenarios ran"
         elif any_ran:
@@ -709,6 +843,13 @@ class SuiteReport:
     guard_coverage: "dict[str, GuardCoverage]"
     started_at: float
     duration_s: float
+    #: Whether `--guards` was requested for this run. Purely a reporting
+    #: field -- run_suite() has already raised GuardObserverUnavailable
+    #: before this dataclass is ever constructed if `guards=True` couldn't
+    #: actually be honored, so by the time a SuiteReport exists, `guards`
+    #: True here always means every real (non-mock, non-NOT_RUNNABLE)
+    #: scenario outcome's own guard_observer_attached is also True.
+    guards: bool = False
 
     @property
     def exit_code(self) -> int:
@@ -732,6 +873,7 @@ class SuiteReport:
         return {
             "presence": self.presence.to_dict(),
             "quick": self.quick,
+            "guards": self.guards,
             "selftest": self.selftest.to_dict() if self.selftest is not None else None,
             "scenario_outcomes": [o.to_dict() for o in self.scenario_outcomes],
             "guard_coverage": {g: c.to_dict() for g, c in self.guard_coverage.items()},
@@ -752,6 +894,13 @@ class SuiteReport:
         lines.append(f"  SaftyFW: {'PRESENT' if self.presence.saftyfw.present else 'absent'} -- {self.presence.saftyfw.detail}")
         lines.append(f"  ESP:     {'PRESENT' if self.presence.esp.present else 'absent'} -- {self.presence.esp.detail}")
         lines.append(f"  max tier available: {self.presence.max_tier} ({_TIER_NAMES[self.presence.max_tier]})")
+        lines.append(
+            "  guard observation: "
+            + ("ENABLED -- a real SafetyGuardObserver was attached to every real scenario run"
+               if self.guards else
+               "disabled (default) -- guard-typed expectations were reported BLOCKED, "
+               "never vacuously PASS; pass --guards (with SaftyFW attached) for real evidence")
+        )
         lines.append("")
 
         if self.selftest is not None:
@@ -804,19 +953,58 @@ def run_suite(
     fixture_probe: "Optional[Callable[[SimLink, Optional[str]], PresenceResult]]" = None,
     esp_saftyfw_probe: "Optional[Callable[[], tuple[PresenceResult, PresenceResult]]]" = None,
     request_enable_fn_factory: "Optional[Callable[[Optional[str]], Optional[Callable[[], None]]]]" = None,
+    guards: bool = False,
+    guard_observer_factory: "Optional[Callable[[Optional[str]], tuple]]" = None,
 ) -> SuiteReport:
     """Runs the whole tiered suite against ``link`` (constructed but not yet
     connected). This is the one function ``kilnsim testmgr`` calls.
 
     Every probe/factory parameter defaults to the real implementation
     (:func:`default_fixture_probe`, :func:`default_esp_and_saftyfw_probe`,
-    :func:`make_request_enable_fn`) and exists as a parameter specifically so
-    tests can inject fakes -- see ``tests/test_kilnsim_testmgr.py``.
+    :func:`make_request_enable_fn`, :func:`default_guard_observer_factory`)
+    and exists as a parameter specifically so tests can inject fakes -- see
+    ``tests/test_kilnsim_testmgr.py``.
+
+    ``guards`` (default **False** -- opt-in): attach a real
+    :class:`~kilnsim.guard_observer.SafetyGuardObserver` to every scenario run
+    for real (never for ``mock=True``), so guard-typed expectations can get
+    real hardware evidence instead of always being downgraded to BLOCKED by
+    ``kilnsim.runner``'s own ``_block_expectations_missing_guard_observer``.
+    Kept default-off deliberately: attaching one opens a SECOND link, through
+    kilnctrl, to a real SaftyFW board, and must never become a surprise
+    dependency of a run that didn't ask for it (this is exactly the same
+    "``--mock`` must never touch real hardware" property
+    ``esp_saftyfw_probe``'s own mock branch above already protects, extended
+    to this second link).
+
+    When ``guards=True`` but a real observer genuinely cannot be attached --
+    ``mock=True`` requested alongside it, or SaftyFW not reachable this
+    session per ``presence.saftyfw`` (this reuses the SAME tier-detection
+    presence result ``run_one_scenario`` already uses for tier-gating,
+    requirement (4) -- there is no separate, parallel SaftyFW-reachability
+    check here) -- this function raises :class:`GuardObserverUnavailable`
+    rather than silently running without one. A run that quietly drops guard
+    observation and then reports guard coverage as if it had some is exactly
+    the failure mode this whole feature exists to close (requirement (2)).
     """
     started_at = time.time()
     t0 = time.monotonic()
     scenarios_dir = scenarios_dir or default_scenarios_dir()
     fixture_probe = fixture_probe or default_fixture_probe
+    if guards and mock:
+        # Fail fast, before touching `link` at all: mock=True never runs
+        # kilnsim.runner.run_scenario (run_one_scenario's mock branch calls
+        # evaluate_expectations directly, which has no guard_observer
+        # parameter to accept one), so a real observer could never be used
+        # even if one were built. Raising here rather than silently ignoring
+        # `guards` keeps the promise explicit instead of a caller discovering
+        # it only by noticing guard coverage never improved.
+        raise GuardObserverUnavailable(
+            "--guards requested together with --mock -- a mock run never opens a real "
+            "SaftyFW link (kilnsim.runner.run_scenario, which is what a guard observer "
+            "attaches to, is never called against MockSimLink), so a guard observer can "
+            "never be attached; drop --mock or drop --guards"
+        )
     if esp_saftyfw_probe is None:
         if mock:
             # --mock means "no real hardware at all, ever" -- the default
@@ -829,6 +1017,7 @@ def run_suite(
         else:
             esp_saftyfw_probe = lambda: default_esp_and_saftyfw_probe(port)  # noqa: E731
     request_enable_fn_factory = request_enable_fn_factory or make_request_enable_fn
+    guard_observer_factory = guard_observer_factory or default_guard_observer_factory
 
     scenarios, load_errors = discover_scenarios(scenarios_dir)
 
@@ -840,6 +1029,24 @@ def run_suite(
         saftyfw = PresenceResult(False, "not probed: SimFW fixture is not present")
     presence = HardwarePresence(fixture=fixture, saftyfw=saftyfw, esp=esp)
 
+    if guards and not presence.saftyfw.present:
+        # Requirement (4): reuse the SAME presence result run_one_scenario's
+        # tier-gating already computed above, rather than a second,
+        # parallel "is SaftyFW really there" probe that could disagree with
+        # it. Best-effort disconnect before raising -- fixture_probe() may
+        # have left `link` connected on success (its own docstring), and
+        # this early return skips the normal try/finally disconnect below.
+        try:
+            link.disconnect()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
+        raise GuardObserverUnavailable(
+            f"--guards requested but SaftyFW is not reachable this session "
+            f"({presence.saftyfw.detail}) -- guard-typed expectations cannot be given real "
+            "hardware evidence without a live safety-processor link; attach SaftyFW (through "
+            "the ESP's UART bridge) or drop --guards"
+        )
+
     if not fixture.present:
         outcomes = list(load_errors) + _not_runnable_outcomes(
             scenarios, f"SimFW fixture not present: {fixture.detail}"
@@ -848,6 +1055,7 @@ def run_suite(
         return SuiteReport(
             presence=presence, quick=quick, selftest=None, scenario_outcomes=outcomes,
             guard_coverage=coverage, started_at=started_at, duration_s=time.monotonic() - t0,
+            guards=guards,
         )
 
     outcomes = list(load_errors)
@@ -866,8 +1074,20 @@ def run_suite(
         if presence.saftyfw.present and not mock:
             request_enable_fn = request_enable_fn_factory(port)
 
+        # Only ever non-None when `guards=True` -- the two early-exit checks
+        # above have already confirmed mock=False and presence.saftyfw.present
+        # by the time we get here, so every call below builds a real,
+        # fresh-per-scenario observer (run_one_scenario's own comment on why
+        # fresh-per-scenario, not one shared across the whole suite).
+        per_scenario_guard_factory = (lambda: guard_observer_factory(port)) if guards else None
+
         for s in run_list:
-            outcomes.append(run_one_scenario(link, s, presence, mock=mock, request_enable_fn=request_enable_fn))
+            outcomes.append(
+                run_one_scenario(
+                    link, s, presence, mock=mock, request_enable_fn=request_enable_fn,
+                    guard_observer_factory=per_scenario_guard_factory,
+                )
+            )
         outcomes.extend(
             _skipped_quick_outcomes(skip_list)
         )
@@ -881,6 +1101,7 @@ def run_suite(
     return SuiteReport(
         presence=presence, quick=quick, selftest=selftest_report, scenario_outcomes=outcomes,
         guard_coverage=coverage, started_at=started_at, duration_s=time.monotonic() - t0,
+        guards=guards,
     )
 
 

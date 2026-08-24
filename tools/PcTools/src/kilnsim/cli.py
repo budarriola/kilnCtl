@@ -546,10 +546,24 @@ def cmd_tasks(args) -> int:
 def cmd_testmgr(args) -> int:
     link = _make_link(args)
     scenarios_dir = Path(args.scenarios_dir) if args.scenarios_dir else None
-    report = _testmgr.run_suite(
-        link, scenarios_dir,
-        quick=args.quick, mock=args.mock, port=args.port,
-    )
+    try:
+        report = _testmgr.run_suite(
+            link, scenarios_dir,
+            quick=args.quick, mock=args.mock, port=args.port,
+            guards=args.guards,
+        )
+    except _testmgr.GuardObserverUnavailable as exc:
+        # `--guards` (default off, kilnsim.testmgr.run_suite's own docstring)
+        # opens a SECOND link, through kilnctrl, to a real SaftyFW board --
+        # requirement (2) of the task that added this flag is that a run
+        # asked for that link and unable to get it fails loudly here, never
+        # silently falling back to a guardless run whose coverage report
+        # would then lie about having real hardware evidence. This is the
+        # one place that promise is enforced for the CLI entry point --
+        # run_suite() itself raises before constructing any SuiteReport, so
+        # there is no partial report to print, only this message.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if args.json:
         print(report.to_json())
     else:
@@ -776,6 +790,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="machine-readable report instead of a text summary")
     sp.add_argument("--scenarios-dir", default=None,
                      help="override the scenario directory (default: firmware/SimFW/scenarios)")
+    sp.add_argument(
+        "--guards", action=argparse.BooleanOptionalAction, default=False,
+        help="attach a real kilnsim.guard_observer.SafetyGuardObserver to every scenario run "
+             "(a SECOND link, through kilnctrl, to a real SaftyFW board) so guard-typed "
+             "expectations (guard_trip/guard_warn/link_up/trip_ineffective_latched) get real "
+             "hardware evidence instead of always being reported BLOCKED. Default off -- this "
+             "must never become a surprise dependency of a --mock run, and errors out loudly "
+             "(rather than silently running without one) if SaftyFW isn't reachable this "
+             "session. --no-guards is the explicit opposite of the default, for scripts that "
+             "want to say so.",
+    )
     sp.set_defaults(func=cmd_testmgr)
 
     sp = sub.add_parser("monitor", help="tail live telemetry/events")

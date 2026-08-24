@@ -116,19 +116,21 @@ Five verdicts:
 
 ### The runner-gap caveat — read this before trusting a clean PASS
 
-`kilnsim.protocol.EventType` defines four values — `GUARD_TRIP`,
-`GUARD_WARN`, `LINK_UP`, `TRIP_INEFFECTIVE_LATCHED` — as, in its own words,
-"kilnsim-local/synthetic only ... nothing in SimFW's own EVT wire stream can
-produce them today". `kilnsim.runner` (the module that actually assembles a
-scenario's event list against real hardware) only ever synthesizes
-`fault_line`/`estop`/`current` edges from TELEMETRY — never these four.
-**25 of the 27 shipped scenarios reference one of these types in an
-`expect:` clause.** Run one of those scenarios for real via `kilnsim run`
-today and that clause's cause event never occurs, so
-`evaluate_expectations` reports it **SKIPPED** ("triggering event never
-occurred") — which does not fail the run. A report reader sees a clean
-overall PASS with no obvious sign that the guard-trip evidence the scenario
-exists to produce was never actually gathered.
+**Updated 2026-08-24 — the underlying gap is now closable, but only if you
+ask for it.** `kilnsim.protocol.EventType` defines four values —
+`GUARD_TRIP`, `GUARD_WARN`, `LINK_UP`, `TRIP_INEFFECTIVE_LATCHED` — that no
+SimFW EVT wire frame can carry, because that state lives in SaftyFW, not in
+the fixture. **25 of the 27 shipped scenarios reference one of these types
+in an `expect:` clause.**
+
+`kilnsim/guard_observer.py` (`6f1cbbf`) can now produce them, by polling a
+real SaftyFW through `kilnctrl` on a second link, and `testmgr --guards`
+attaches it. Without `--guards` — still the default — nothing observes guard
+state, and those clauses come back **BLOCKED** with an explicit reason
+rather than the old silent **SKIPPED**. That distinction is the point: a
+SKIPPED clause reads as "the triggering condition never arose", which is
+indistinguishable from "nothing was ever watching". Any run whose guard
+evidence you intend to trust must be a `--guards` run.
 
 `testmgr` closes the *reporting* half of this gap (not the underlying one —
 see §5): every scenario outcome carries a `has_runner_gap` flag, and any
@@ -277,21 +279,35 @@ section with what actually happened, the same discipline
 
 ## 9. Known limitations, summarized
 
-- **The runner gap is closed in `kilnsim.runner`, but `testmgr` does not
-  attach an observer yet** (updated 2026-08-24, `6f1cbbf`).
-  `kilnsim/guard_observer.py` now polls a `kilnctrl` SafetyClient over a
-  second link and edge-detects GUARD_TRIP/GUARD_WARN/LINK_UP/
+- **The runner gap is closed in `kilnsim.runner`, and `testmgr` now attaches
+  an observer — opt-in, via `kilnsim testmgr --guards`** (updated
+  2026-08-24). `kilnsim/guard_observer.py` polls a `kilnctrl` SafetyClient
+  over a second link and edge-detects GUARD_TRIP/GUARD_WARN/LINK_UP/
   TRIP_INEFFECTIVE_LATCHED, and `run_scenario(..., guard_observer=...)`
-  merges them into the event stream. When **no** observer is passed — which
-  is still every call this suite makes — guard-typed expectations are
-  reported `BLOCKED` with an explicit reason rather than passing vacuously,
-  so the honesty property below is unchanged and is now enforced in the
-  runner itself rather than only surfaced by this suite. **What remains:**
-  wiring the observer into `testmgr`'s own runs, and confirming the
-  SafetyClient polling shape against a real board — it has only been
-  exercised against fakes. Note also that `GUARD_WARN` carries
-  `guard: None` on purpose: `link_task.c` says `warn_mask` has no per-guard
-  identity in this build, so there is nothing honest to map it to.
+  merges them into the event stream. `run_suite(..., guards=True)` builds one
+  fresh `SafetyGuardObserver` per scenario (`default_guard_observer_factory`)
+  and passes it through `run_one_scenario` into every real (non-mock)
+  scenario run — `guards` defaults to **False**, so a plain `kilnsim testmgr`
+  or `kilnsim --mock testmgr` still opens no second link, exactly as before.
+  When `--guards` IS passed but a real observer genuinely can't be attached
+  this session — `--mock` requested alongside it, or SaftyFW not reachable
+  per the SAME presence/tier detection `run_one_scenario` already uses for
+  tier-gating (no second, parallel probe) — `run_suite` raises
+  `kilnsim.testmgr.GuardObserverUnavailable` and `kilnsim.cli.cmd_testmgr`
+  reports it as a loud CLI error (exit 1); it never silently falls back to
+  running without one. `ScenarioOutcome.guard_observer_attached` records,
+  per scenario, whether an observer actually watched that run, and
+  `compute_guard_coverage` (§3) now tells apart "a guard-typed clause ran
+  with a real observer attached but produced no clean PASS" from "no
+  observer was attached this session at all, so the guard's state was never
+  observed either way" — the two are printed with different wording rather
+  than collapsing into one "no usable evidence" bucket. **What remains:**
+  confirming the SafetyClient polling shape against a real board — it has
+  only been exercised against fakes (unit tests inject a fake
+  `guard_observer_factory`; no real `kilnctrl.serial_link.UartLink` has been
+  opened by this code). Note also that `GUARD_WARN` carries `guard: None` on
+  purpose: `link_task.c` says `warn_mask` has no per-guard identity in this
+  build, so there is nothing honest to map it to.
   For contrast, `virtual_dut`'s separate approach covers the
   host-simulated case (`firmware/SimFW/tools/virtual_dut/dut_core` runs the
   real, unmodified `safety_guards.c`/`relay_grace.c` against a simulated

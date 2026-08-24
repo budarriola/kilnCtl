@@ -573,5 +573,279 @@ class RunSuiteTests(unittest.TestCase):
         self.assertIn("guard coverage", text)
 
 
+# ---------------------------------------------------------------------------
+# guard observer wiring -- the task this pass closes: testmgr previously
+# passed NO guard_observer on every scenario run, so every guard-typed
+# expectation came back BLOCKED (kilnsim.runner's own
+# _block_expectations_missing_guard_observer) and compute_guard_coverage
+# could never credit a guard with real hardware evidence. These tests never
+# touch a real kilnctrl/SaftyFW link -- run_one_scenario's real (non-mock)
+# branch calls kilnsim.testmgr's own module-level `run_scenario` name, which
+# is monkeypatched here to a tiny stub that only records what it was called
+# with, exactly the same technique test_kilnsim_runner_guard_and_spi.py uses
+# for its own _FakeGuardObserver (a duck-typed test double, no hardware).
+# ---------------------------------------------------------------------------
+class _StubReport:
+    """The only two attributes run_one_scenario's real-run branch reads off
+    a Report: `.verdict` (for the outcome and describe_runner_gap) and
+    `.events` (never read on this path, but kept absent-safe -- accessing it
+    would raise AttributeError, which is itself a useful signal if some
+    future change starts reading more of the report than expected here)."""
+
+    def __init__(self, verdict: str) -> None:
+        self.verdict = verdict
+
+
+class GuardObserverWiringTests(unittest.TestCase):
+    def _presence(self, saftyfw_present: bool) -> tm.HardwarePresence:
+        present = tm.PresenceResult(True, "ok")
+        return tm.HardwarePresence(
+            present,
+            present if saftyfw_present else tm.PresenceResult(False, "no saftyfw"),
+            tm.PresenceResult(False, "n/a"),
+        )
+
+    def test_run_one_scenario_passes_the_built_observer_to_run_scenario(self):
+        link = MockSimLink()
+        link.connect()
+        scenario = _load(_TIER1_YAML)
+
+        fake_observer = object()
+        closed = []
+
+        def fake_factory():
+            return fake_observer, lambda: closed.append(1)
+
+        captured = {}
+
+        def fake_run_scenario(link_, scenario_, *, seed, timescale, guard_observer=None):
+            captured["guard_observer"] = guard_observer
+            return _StubReport(report_mod.PASS)
+
+        orig = tm.run_scenario
+        tm.run_scenario = fake_run_scenario
+        try:
+            outcome = tm.run_one_scenario(
+                link, scenario, self._presence(True), mock=False,
+                guard_observer_factory=fake_factory,
+            )
+        finally:
+            tm.run_scenario = orig
+
+        self.assertIs(captured.get("guard_observer"), fake_observer)
+        self.assertTrue(outcome.guard_observer_attached)
+        self.assertEqual(closed, [1], "close_fn must run even when the scenario itself succeeds")
+
+    def test_run_one_scenario_closes_observer_even_when_run_scenario_raises(self):
+        link = MockSimLink()
+        link.connect()
+        scenario = _load(_TIER1_YAML)
+        closed = []
+
+        def fake_factory():
+            return object(), lambda: closed.append(1)
+
+        def fake_run_scenario(link_, scenario_, *, seed, timescale, guard_observer=None):
+            raise SimLinkError("simulated: link dropped mid-run")
+
+        orig = tm.run_scenario
+        tm.run_scenario = fake_run_scenario
+        try:
+            outcome = tm.run_one_scenario(
+                link, scenario, self._presence(True), mock=False,
+                guard_observer_factory=fake_factory,
+            )
+        finally:
+            tm.run_scenario = orig
+
+        self.assertEqual(outcome.verdict, tm.ERROR)
+        self.assertEqual(closed, [1], "close_fn must run even when run_scenario raises")
+
+    def test_run_one_scenario_never_attaches_when_no_factory_given(self):
+        link = MockSimLink()
+        link.connect()
+        outcome = tm.run_one_scenario(link, _load(_TIER0_YAML), self._presence(True), mock=True)
+        self.assertFalse(outcome.guard_observer_attached)
+
+    def test_guard_observer_factory_failure_raises_guardobserverunavailable(self):
+        link = MockSimLink()
+        link.connect()
+
+        def broken_factory():
+            raise RuntimeError("simulated: kilnctrl UartLink.connect() failed")
+
+        with self.assertRaises(tm.GuardObserverUnavailable) as ctx:
+            tm.run_one_scenario(
+                link, _load(_TIER1_YAML), self._presence(True), mock=False,
+                guard_observer_factory=broken_factory,
+            )
+        self.assertIn("simulated: kilnctrl UartLink.connect() failed", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# run_suite: guards=True's fail-loudly contract (requirement 2) and its
+# reuse of the SAME presence/tier detection run_one_scenario already uses
+# (requirement 4), never a second, parallel SaftyFW-reachability probe.
+# ---------------------------------------------------------------------------
+class RunSuiteGuardsTests(unittest.TestCase):
+    def test_guards_with_mock_raises_before_touching_the_link(self):
+        link = MockSimLink()
+        probe_calls = []
+
+        def spy_fixture_probe(link_, port):
+            probe_calls.append(1)
+            return tm.default_fixture_probe(link_, port)
+
+        with self.assertRaises(tm.GuardObserverUnavailable) as ctx:
+            tm.run_suite(
+                link, tm.default_scenarios_dir(), quick=True, mock=True, guards=True,
+                fixture_probe=spy_fixture_probe,
+            )
+        self.assertIn("--mock", str(ctx.exception))
+        self.assertEqual(probe_calls, [], "must fail before even probing for the fixture")
+        self.assertFalse(link.is_connected, "must fail before ever connecting the fixture link")
+
+    def test_guards_without_saftyfw_present_raises(self):
+        link = MockSimLink()
+        with self.assertRaises(tm.GuardObserverUnavailable) as ctx:
+            tm.run_suite(
+                link, tm.default_scenarios_dir(), quick=True, mock=False, guards=True,
+                fixture_probe=lambda link, port: tm.default_fixture_probe(link, port),
+                esp_saftyfw_probe=lambda: (tm.PresenceResult(False, "n/a"), tm.PresenceResult(False, "no saftyfw")),
+            )
+        self.assertIn("SaftyFW is not reachable", str(ctx.exception))
+
+    def test_guards_attaches_a_fresh_observer_per_scenario(self):
+        """With SaftyFW present and guards=True, run_suite must call the
+        guard_observer_factory once per scenario that actually runs (never
+        shared across scenarios -- see run_one_scenario's own comment on
+        stale edge-tracker state), and every such scenario's outcome must
+        carry guard_observer_attached=True."""
+        link = MockSimLink()
+        factory_calls = []
+
+        def fake_guard_observer_factory(port):
+            factory_calls.append(port)
+            return object(), lambda: None
+
+        def fake_run_scenario(link_, scenario_, *, seed, timescale, guard_observer=None):
+            return _StubReport(report_mod.PASS)
+
+        orig = tm.run_scenario
+        tm.run_scenario = fake_run_scenario
+        try:
+            report = tm.run_suite(
+                link, tm.default_scenarios_dir(), quick=True, mock=False, guards=True, port="COMX",
+                fixture_probe=lambda link, port: tm.default_fixture_probe(link, port),
+                esp_saftyfw_probe=lambda: (tm.PresenceResult(True, "ok"), tm.PresenceResult(True, "ok")),
+                request_enable_fn_factory=lambda port: None,
+                guard_observer_factory=fake_guard_observer_factory,
+            )
+        finally:
+            tm.run_scenario = orig
+
+        ran = [o for o in report.scenario_outcomes if o.verdict not in (tm.NOT_RUNNABLE, tm.SKIPPED_QUICK, tm.ERROR)]
+        self.assertGreater(len(ran), 0)
+        self.assertEqual(len(factory_calls), len(ran))
+        self.assertTrue(all(p == "COMX" for p in factory_calls))
+        self.assertTrue(all(o.guard_observer_attached for o in ran))
+        self.assertTrue(report.guards)
+
+
+# ---------------------------------------------------------------------------
+# guard coverage: distinguishing "observed, no trip seen" from "never
+# observable -- no observer attached" (requirement 3). These two facts are
+# genuinely different and must print differently, not collapse into the same
+# "no usable evidence" bucket the pre-existing runner-gap-only status used.
+# ---------------------------------------------------------------------------
+class GuardCoverageObserverDistinctionTests(unittest.TestCase):
+    def _make_outcome(self, name, exercises, verdict, has_gap=False, observer_attached=False):
+        return tm.ScenarioOutcome(
+            name=name, path=name, exercises=exercises, min_tier=1,
+            has_runner_gap=has_gap, verdict=verdict,
+            guard_observer_attached=observer_attached,
+        )
+
+    def _scenario_stub(self, name, exercises):
+        return _load(f"""
+name: {name}
+version: 1
+exercises: {exercises}
+faults: []
+expect: []
+""")
+
+    def test_gap_clause_with_no_observer_attached_is_never_observed(self):
+        scenarios = [self._scenario_stub("s_e", "[S4]")]
+        outcomes = [self._make_outcome("s_e", ["S4"], report_mod.PASS, has_gap=True, observer_attached=False)]
+        cov = tm.compute_guard_coverage(scenarios, outcomes)
+        self.assertIn("no usable evidence", cov["S4"].status)
+        self.assertIn("no guard observer was attached", cov["S4"].detail[0])
+        self.assertIn("NEVER OBSERVED", cov["S4"].detail[0])
+
+    def test_gap_clause_with_observer_attached_and_clean_pass_counts_as_evidence(self):
+        scenarios = [self._scenario_stub("s_f", "[S5]")]
+        outcomes = [self._make_outcome("s_f", ["S5"], report_mod.PASS, has_gap=True, observer_attached=True)]
+        cov = tm.compute_guard_coverage(scenarios, outcomes)
+        self.assertIn("hardware evidence obtained", cov["S5"].status)
+
+    def test_gap_clause_with_observer_attached_but_not_pass_is_distinguishable_from_no_observer(self):
+        # SKIPPED here stands in for "the observer really watched, but the
+        # triggering trip just never happened this run" -- a genuinely
+        # different fact from "nothing was watching at all" (the previous
+        # test in this class). Both fall short of "clean PASS", but their
+        # detail lines must not read the same.
+        scenarios = [self._scenario_stub("s_g", "[S7]")]
+        outcomes = [self._make_outcome("s_g", ["S7"], report_mod.SKIPPED, has_gap=True, observer_attached=True)]
+        cov = tm.compute_guard_coverage(scenarios, outcomes)
+        self.assertNotIn("no usable evidence", cov["S7"].status)
+        self.assertIn("did not produce a clean PASS", cov["S7"].status)
+        self.assertIn("(guard observer attached)", cov["S7"].detail[0])
+        self.assertNotIn("NEVER OBSERVED", cov["S7"].detail[0])
+
+
+# ---------------------------------------------------------------------------
+# kilnsim.cli wiring: --guards/--no-guards on `kilnsim testmgr`, and
+# cmd_testmgr's loud-failure handling of GuardObserverUnavailable. Not
+# test_kilnsim_cli.py (that file is owned by a concurrent session, task
+# constraint) -- these live here since they exercise this task's own
+# addition to kilnsim.cli.build_parser/cmd_testmgr.
+# ---------------------------------------------------------------------------
+class CliGuardsFlagTests(unittest.TestCase):
+    def test_guards_defaults_to_false(self):
+        from kilnsim.cli import build_parser
+
+        args = build_parser().parse_args(["testmgr"])
+        self.assertFalse(args.guards)
+
+    def test_guards_flag_sets_true(self):
+        from kilnsim.cli import build_parser
+
+        args = build_parser().parse_args(["testmgr", "--guards"])
+        self.assertTrue(args.guards)
+
+    def test_no_guards_flag_is_explicit_false(self):
+        from kilnsim.cli import build_parser
+
+        args = build_parser().parse_args(["testmgr", "--no-guards"])
+        self.assertFalse(args.guards)
+
+    def test_cmd_testmgr_reports_guardobserverunavailable_loudly_not_a_traceback(self):
+        from kilnsim.cli import build_parser, cmd_testmgr
+
+        args = build_parser().parse_args(["--mock", "testmgr", "--guards", "--quick"])
+
+        def _raise(*a, **k):
+            raise tm.GuardObserverUnavailable("simulated: no SaftyFW this session")
+
+        orig = tm.run_suite
+        tm.run_suite = _raise
+        try:
+            rc = cmd_testmgr(args)
+        finally:
+            tm.run_suite = orig
+        self.assertEqual(rc, 1, "a guard-observer-unavailable error must be a real failure, not exit 0")
+
+
 if __name__ == "__main__":
     unittest.main()
