@@ -312,15 +312,31 @@ happens — one implementation updated, the other two not.
 
 ## Versioning
 
-`KILNLINK_PROTOCOL_VERSION` lives in `kilnlink_version.h` and is **the** source
-of truth. `KilnFW`'s `UART_PROTOCOL_VERSION` becomes an alias of it rather than
-a second number.
+`KILNLINK_PROTOCOL_VERSION` lives in `kilnlink_version.h` and is the source of
+truth for the **ESP<->Pico isolated safety link only**. `KilnFW`'s
+`UART_PROTOCOL_VERSION` (`App/drivers/uart_task_ids.h`) is the **PC<->ESP
+link**'s own, independent version — the two links are different contracts and
+version separately.
 
-Bump it when a change would break a peer running the old value: renumbering an
-id, changing a payload layout or length, or changing the envelope. Do not bump
-for comments or internal refactors. It is a human judgement call, deliberately
-not a hash of the file — the reasoning in `firmware/KilnFW/App/drivers/uart_task_ids.h:8-20`
-applies unchanged and should be carried over with the constant.
+From 2026-08-17 to 2026-08-24 `UART_PROTOCOL_VERSION` was a plain alias of
+`KILNLINK_PROTOCOL_VERSION` rather than a second number. That alias bit real
+hardware three times: a bump driven purely by the isolated link's own contract
+(most notably 2026-08-23's Frame A `tx_dropped_sat` addition, which touched
+nothing on the PC link) silently dragged the PC link's version along with it,
+and `devices.FirmwareVersion.compatible` in `pc_tools` — a hard equality gate —
+then refused every PC command against a board that, from the PC link's own
+point of view, had not changed at all. The alias is gone; the two constants
+are independent literals again and must stay that way.
+`tools/check_uart_version_independence.ps1` (repo root) is the CI grep that
+enforces it.
+
+Bump each one when **its own** link's contract would break a peer running the
+old value: renumbering an id, changing a payload layout or length, or changing
+the envelope. Do not bump for comments or internal refactors, and do not bump
+one because the other moved. It is a human judgement call, deliberately not a
+hash of the file — the reasoning in
+`firmware/KilnFW/App/drivers/uart_task_ids.h:8-20` applies unchanged and should
+be carried over with each constant.
 
 ---
 

@@ -1,10 +1,22 @@
 #ifndef KILNLINK_VERSION_H
 #define KILNLINK_VERSION_H
 
-/* The single source of truth for the wire protocol version. KilnFW's
- * UART_PROTOCOL_VERSION (App/drivers/uart_task_ids.h) becomes an alias of
- * this rather than a second number -- see CommonFW/README.md "Versioning".
+/* The single source of truth for the ESP<->Pico isolated safety link's wire
+ * protocol version. From 2026-08-17 to 2026-08-24 KilnFW's
+ * UART_PROTOCOL_VERSION (App/drivers/uart_task_ids.h) was a plain alias of
+ * this number rather than a second, independently-maintained one -- see
+ * CommonFW/README.md "Versioning" for that history. It no longer is: three
+ * separate incidents of a bump here silently refusing all PC<->ESP traffic
+ * (once, 2026-08-17's 5->6, for a change that never touched the PC link at
+ * all) proved the two links' contracts diverge often enough that aliasing
+ * them was actively dangerous rather than merely redundant. The two numbers
+ * are now independent and must be bumped separately, each only when ITS OWN
+ * link's contract changes -- see uart_task_ids.h's UART_PROTOCOL_VERSION
+ * doc comment for the full rule and the failure it prevents in both
+ * directions, and tools/check_uart_version_independence.ps1 for the CI grep
+ * that keeps this constant from being re-aliased into that one.
  *
+
  * Bump when a change would break a peer running the old value: renumbering
  * an id, changing a payload layout or length, or changing the envelope. Do
  * not bump for comments or internal refactors -- a human judgement call,

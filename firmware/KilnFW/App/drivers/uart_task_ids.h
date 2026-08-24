@@ -1,8 +1,6 @@
 #ifndef UART_TASK_IDS_H
 #define UART_TASK_IDS_H
 
-#include "kilnlink/kilnlink_version.h"
-
 /* Shared uart_protocol task_id numbering. Both the ESP firmware and the PC
  * side must agree on these -- see pc_tools/src/kilnctrl/protocol.py for the
  * matching Python constants and command payload (de)serialization. */
@@ -61,18 +59,64 @@
  * task_id 13 would otherwise report a false "compatible" against firmware
  * whose new command it cannot use. See docs/UART_PROTOCOL.md.
  *
- * TODO.md Phase 7b.1 (2026-08-17): this is now an alias of CommonFW's
- * KILNLINK_PROTOCOL_VERSION (firmware/CommonFW/include/kilnlink/
+ * TODO.md Phase 7b.1 (2026-08-17): this briefly became an alias of
+ * CommonFW's KILNLINK_PROTOCOL_VERSION (firmware/CommonFW/include/kilnlink/
  * kilnlink_version.h) rather than a second, independently-maintained number
- * -- that header's own doc comment says exactly this: "KilnFW's
+ * -- that header's own doc comment said exactly this: "KilnFW's
  * UART_PROTOCOL_VERSION becomes an alias of this rather than a second
- * number", because kilnlink's framing layer is byte-for-byte the same
- * envelope uart_protocol.c already speaks for the PC link. If the isolated
- * safety link's contract ever changes independently of the PC link's, that
- * header's own comment says it becomes its own number at that point -- this
- * define does not need to move when that happens, only the value it aliases
- * does. */
-#define UART_PROTOCOL_VERSION ((uint16_t)KILNLINK_PROTOCOL_VERSION)
+ * number", because at that moment kilnlink's framing layer was byte-for-byte
+ * the same envelope uart_protocol.c already speaks for the PC link, and the
+ * two numbers had never yet diverged. That same comment named its own exit
+ * condition: "if the isolated safety link's contract ever changes
+ * independently of the PC link's, it becomes its own number at that point."
+ *
+ * TODO.md "Shared ids split out of uart_task_ids.h; PC-link ids left
+ * behind" (2026-08-24): that condition has now occurred, three times over.
+ * KILNLINK_PROTOCOL_VERSION moved 5->6 (2026-08-17, alias created) and 6->7
+ * (2026-08-24, SAFETY_CMD_GET_CT_CAL/GET_PARAM/GET_CONFIG_PAGE split off
+ * their shared reply ids -- see those subcommands' own doc comments below)
+ * for reasons that originate on the ESP<->Pico link's own contract; because
+ * this constant was a plain alias, each bump dragged UART_PROTOCOL_VERSION
+ * along whether or not the PC<->ESP wire itself had changed, and each time
+ * an un-rebuilt pc_tools was refused with "device speaks vN, pc_tools speaks
+ * vN-1" against real hardware, including once (5->6) where the PC link's
+ * own contract had not changed AT ALL.
+ *
+ * UART_PROTOCOL_VERSION is therefore back to being its OWN,
+ * independently-maintained literal, exactly as it was before 2026-08-17 --
+ * it must never again be defined in terms of KILNLINK_PROTOCOL_VERSION or
+ * any other kilnlink_version.h symbol. Frozen at 7, not reset to some
+ * smaller number: the PC link's own contract genuinely did change in the
+ * same commit that pushed kilnlink to 7 (GET_CT_CAL/GET_PARAM/
+ * GET_CONFIG_PAGE are mirrored PC->ESP on this same UART_TASK_ID_SAFETY task
+ * -- see SAFETY_CMD_GET_CT_CAL's doc comment below -- and their ids moved on
+ * this link exactly as they did on the isolated one), so 7 is the honest
+ * value for what a PC build must speak today. Resetting to 1, or to
+ * whatever the two numbers last agreed on before the alias, would falsely
+ * advertise compatibility with a PC build that predates the CONTROL/
+ * PROFILES/AUTOTUNE/WIFI/TOUCH task ids and the GET_CT_CAL/GET_PARAM/
+ * GET_CONFIG_PAGE id split -- a real regression dressed up as a version
+ * reset.
+ *
+ * From here on the two numbers move INDEPENDENTLY, each bumped only when
+ * ITS OWN link's contract changes:
+ *   - Bump this constant when a PC<->ESP wire-incompatible change lands
+ *     (task_id/subcommand renumbering, payload layout/length/endianness, or
+ *     envelope change -- see the bump policy above), whether or not
+ *     anything on the isolated ESP<->Pico link changed.
+ *   - Do NOT bump this constant when only KILNLINK_PROTOCOL_VERSION changes
+ *     for a reason confined to the isolated link (e.g. Frame A growing
+ *     tx_dropped_sat, 5->6, kilnlink_version.h's own comment) -- that is not
+ *     a PC-link change, and bumping this number for it would force every
+ *     pc_tools build to re-sync for no reason on ITS side of the barrier.
+ * The failure this independence prevents, in EITHER direction: a change to
+ * one link's contract silently making the OTHER link's exact-match version
+ * gate (devices.FirmwareVersion.compatible in pc_tools) refuse all traffic,
+ * even though that other link's own contract never moved.
+ * tools/check_uart_version_independence.ps1 (repo root) greps for this
+ * define being re-aliased to a KILNLINK_* symbol and fails CI if it ever is
+ * again -- see that script for why a comment alone was judged too weak. */
+#define UART_PROTOCOL_VERSION ((uint16_t)7)
 
 #define UART_TASK_ID_THERMO   1u  /* MAX31856 x3 on the thermocouple board (J6) */
 #define UART_TASK_ID_IO       2u  /* SX1509 expander: relays, digital I/O, DRDY */

@@ -648,13 +648,28 @@ byte(4+N1)     datetime_len (N2)
 N2 bytes       build date+time, ASCII "YYYY-MM-DD HH:MM:SSZ", not null-terminated
 ```
 
-`UART_PROTOCOL_VERSION` (`uart_task_ids.h`, currently **4**) is a manually
+`UART_PROTOCOL_VERSION` (`uart_task_ids.h`, currently **7**) is a manually
 maintained integer bumped whenever a wire-incompatible change is made
 (task_id/subcommand renumbering, a payload's byte layout/length/endianness, or
 the envelope itself). It is deliberately **not** an automatic hash of the
 header: a hash would flag harmless edits — comments, reordering, adding an
 unrelated new command — as incompatible just as readily as an actual break.
 See the comment above the `#define` for the exact bump policy.
+
+**This is a different number from `KILNLINK_PROTOCOL_VERSION`**
+(`firmware/CommonFW/include/kilnlink/kilnlink_version.h`), which versions the
+separate ESP<->Pico isolated safety link, not this PC<->ESP one. From
+2026-08-17 to 2026-08-24 `UART_PROTOCOL_VERSION` was a plain C alias of that
+other constant; the alias was removed after it silently bumped this number
+whenever the isolated link's own contract changed for a reason that had
+nothing to do with this protocol — most notably 2026-08-23's addition of a
+`tx_dropped_sat` byte to the isolated link's status frame, which touched none
+of what follows in this document but still got every PC command refused on
+real hardware ("device speaks vN, pc_tools speaks vN-1"). The two numbers now
+move **independently**: bump this one only when THIS document's contract
+changes, never merely because `KILNLINK_PROTOCOL_VERSION` moved, and vice
+versa. `tools/check_uart_version_independence.ps1` (repo root) is the CI grep
+that keeps `UART_PROTOCOL_VERSION` from being re-aliased.
 
 Compatibility should be treated as an **exact match**, not `>=`: any mismatch,
 newer or older, means the two sides can disagree about numbering or layouts,

@@ -1106,6 +1106,14 @@ Two more, driven by the borrowed-thermocouple option:
       constant unilaterally risked stepping on that work. Revisit together,
       in one commit touching both firmwares, per this file's own header
       guidance ("bump `KILNLINK_PROTOCOL_VERSION` if a peer would break").
+      **Superseded 2026-08-24**: the alias itself turned out to be the
+      problem it was trying to avoid, not a solution — a `KILNLINK_PROTOCOL_
+      VERSION` bump driven purely by the isolated link (5->6, `tx_dropped_
+      sat`) silently dragged `UART_PROTOCOL_VERSION` with it and got every PC
+      command refused on real hardware, with no PC-link contract change to
+      justify it. `UART_PROTOCOL_VERSION` is once again its own,
+      independently-maintained literal (frozen at 7); see that header's own
+      doc comment and `tools/check_uart_version_independence.ps1`.
 
 **ESP → Pico**
 - [ ] `SAFETY_CMD_PUSH_CONTEXT` (0x07) built and broadcast at 500 ms

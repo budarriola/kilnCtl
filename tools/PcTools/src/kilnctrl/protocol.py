@@ -106,6 +106,18 @@ DEFAULT_BAUD_RATE = 921600
 #: sends 0x22 where it used to send 0x1A for GET_CT_CAL, and must be built
 #: against this version or the mismatched id gets no reply at all. Same
 #: same-number-moves-together reasoning as version 6's own bump.
+#:
+#: 2026-08-24, SaftyFW/TODO.md "Shared ids split out of uart_task_ids.h;
+#: PC-link ids left behind": the alias described above is gone.
+#: uart_task_ids.h's C-side UART_PROTOCOL_VERSION is once again its own,
+#: independently-maintained literal (frozen at 7 -- honest for the reasons
+#: version 7's own paragraph above already gives) and must never again be
+#: defined in terms of KILNLINK_PROTOCOL_VERSION; see that header's doc
+#: comment and tools/check_uart_version_independence.ps1 (repo root) for the
+#: CI grep that enforces it. This Python constant is likewise independent
+#: of kilnlink's version from here on: bump it only when THIS protocol's own
+#: contract changes, never merely because the isolated ESP<->Pico link's
+#: number moved.
 UART_PROTOCOL_VERSION = 7
 
 
