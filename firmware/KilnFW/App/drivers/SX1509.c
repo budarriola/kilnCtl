@@ -26,9 +26,12 @@ static const char *TAG = "SX1509";
 
 /* ~RESET pulse. The datasheet's minimum is 200 ns; 10 us costs nothing and
  * survives any amount of RC on the net. The recovery wait afterwards is the
- * part's internal reset procedure (t_RESET) -- the datasheet describes it but
- * this version of it never gives the number, so 5 ms is a deliberately
- * generous guess rather than a spec figure. */
+ * part's internal reset procedure (t_RESET), which the datasheet in this repo
+ * DOES specify: 2.5 ms max, hardware/datasheets/mainBoard_SX1509/SX1509.pdf
+ * page 8's electrical characteristics table (verified 2026-08-24 -- this
+ * comment previously claimed the number was absent and called 5 ms a guess;
+ * it is not a guess, it clears the 2.5 ms max with 2x margin). Same table
+ * gives the pulse minimum as 200 ns t_PULSE, which 10 us clears easily. */
 #define SX1509_RESET_PULSE_US 10
 #define SX1509_RESET_RECOVERY_MS 5
 

@@ -323,15 +323,21 @@ static esp_err_t nvs_partition_init(const char *partition)
 
 /* Reads NVS_NAMESPACE/NVS_KEY_ZONES out of `partition` into *out_cfg, applying
  * the three-outcome version handling nvs_load() relies on. *out_found reports
- * whether the namespace/key existed at all (vs. existing but unreadable),
- * which is what the one-time migration below keys off. */
+ * whether the key held something WORTH NOT DISTURBING -- true for a
+ * decoded-and-trustworthy blob (current or migrated-older) AND for a blob
+ * refused as newer-than-firmware (a real config this build must not clobber,
+ * even though it can't use it), false for genuine corruption (too short, or
+ * the wrong size for its claimed version) where there is nothing being
+ * protected and a caller is free to look elsewhere. This is what the
+ * one-time migration below keys off. */
 /* out_valid, if non-NULL, reports whether *out_cfg is a real decoded config
  * that later stages (zones_http_start(), zones_config_is_valid()) may treat
  * as trustworthy -- see s_zones_config_valid's comment for the exact rule.
- * Distinct from *out_found: found means "the key existed at all" (what the
- * one-time migration keys off), valid means "and what came back is safe to
- * run a kiln against." A newer-refuses-to-load blob is found but not
- * valid; a migrated older blob is both. */
+ * Distinct from *out_found: found means "there is real data here that must
+ * not be overwritten by a migration," valid means "and it's actually usable
+ * to run a kiln against right now." A newer-refuses-to-load blob is found
+ * but not valid; a migrated older blob is both; genuine corruption is
+ * neither. */
 static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool *out_found, bool *out_valid)
 {
     if (out_found) {
@@ -382,6 +388,16 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
         ESP_LOGW(TAG, "zones_cfg blob from '%s' is too short to contain a version -- treating as unreadable",
                  partition);
         memset(out_cfg, 0, sizeof(*out_cfg));
+        /* FIX 1: this is genuine corruption, not a rollback refusal -- there
+         * is no real, understandable-by-someone config being protected here,
+         * so unlike the newer-than-firmware case below, this must NOT block
+         * a caller (migrate_from_default_partition() via zones_http_start())
+         * from trying the other partition for something usable. *out_found
+         * reports "nothing worth keeping was found here", matching *out_valid
+         * staying false. */
+        if (out_found) {
+            *out_found = false;
+        }
         return ESP_OK;
     }
 
@@ -389,10 +405,16 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
         if (len != sizeof(*out_cfg)) {
             /* Current version but wrong size can only mean genuine
              * corruption -- a real current-version blob is always written
-             * at exactly sizeof(*out_cfg). */
+             * at exactly sizeof(*out_cfg). Same "corrupt, not refused"
+             * reasoning as the too-short branch above: *out_found reports
+             * nothing worth keeping was found, so migration is still free to
+             * run. */
             ESP_LOGW(TAG, "zones_cfg blob from '%s' claims current version but is the wrong size -- "
                           "treating as unreadable", partition);
             memset(out_cfg, 0, sizeof(*out_cfg));
+            if (out_found) {
+                *out_found = false;
+            }
             return ESP_OK;
         }
         if (out_valid) {
@@ -426,8 +448,20 @@ static esp_err_t nvs_load_from(const char *partition, zones_cfg_t *out_cfg, bool
                   "refusing to load, flash data left untouched",
              partition, (unsigned)out_cfg->version, (unsigned)ZONES_CFG_VERSION);
     memset(out_cfg, 0, sizeof(*out_cfg));
+    /* FIX 1 (bug found in review): *out_found must be TRUE here, the
+     * opposite of what this used to do. A refused newer-version blob is a
+     * real, deliberately-protected config -- kiln_nvs genuinely has
+     * something -- so a caller deciding whether it is safe to run the
+     * legacy-partition migration (zones_http_start()) MUST see this as
+     * "found" and skip migration, or it will overwrite the very data this
+     * refusal exists to protect with a stale pre-split copy. This is why
+     * *out_found and *out_valid are reported separately in the first place:
+     * found means "the key existed", valid means "and it's safe to run a
+     * kiln against" -- a refused blob is found-but-not-valid, never treated
+     * as "nothing here" the way genuine corruption (the two branches above)
+     * is. */
     if (out_found) {
-        *out_found = false; /* don't let a newer-version blob look migratable */
+        *out_found = true;
     }
     /* out_valid already false: refused, not trustworthy for this boot. */
     return ESP_OK;
@@ -506,13 +540,30 @@ static void migrate_from_default_partition(void)
     if (err != ESP_OK || !found_in_default) {
         return; /* nothing to migrate */
     }
+    if (!valid_in_default) {
+        /* found_in_default is true for two different reasons now (see FIX 1
+         * in nvs_load_from()): a refused newer-than-firmware blob, or a
+         * genuinely current/older key nvs_get_blob() actually read that
+         * turned out corrupt is instead reported found=false above, so the
+         * only way to reach here with valid_in_default false is the
+         * refused-newer case. Copying it forward would destroy exactly the
+         * kind of data this whole refuse-and-leave-untouched discipline
+         * exists to protect -- for the SAME reason it must not be
+         * overwritten in kiln_nvs, it must not be blindly migrated out of
+         * the default partition either. Leave both partitions as they are;
+         * this runs again next boot with no data lost either way. */
+        ESP_LOGW(TAG, "zones_cfg in the default NVS partition exists but nvs_load_from() refused it -- "
+                      "not migrating it to '%s'", KILN_NVS_PARTITION);
+        return;
+    }
 
     ESP_LOGI(TAG, "migrating zones_cfg from the default NVS partition to '%s'", KILN_NVS_PARTITION);
 
     s_zones.cfg = from_default;
-    /* A found-but-invalid blob (newer-than-us, refused) never gets here --
-     * nvs_load_from() clears out_found in that case -- so anything that
-     * reaches this point was actually decoded, current or migrated. */
+    /* Reaching here means valid_in_default was true -- nvs_load_from()
+     * actually decoded from_default, current version or an older version
+     * successfully migrated -- so this is always something ready to run a
+     * kiln against, never a corrupt or refused blob (both return above). */
     s_zones_config_valid = valid_in_default;
     esp_err_t save_err = nvs_save();
     if (save_err != ESP_OK) {
@@ -521,10 +572,17 @@ static void migrate_from_default_partition(void)
     }
 }
 
-static esp_err_t nvs_load(bool *out_valid)
+/* out_found/out_valid are nvs_load_from()'s own outputs, passed straight
+ * through -- see FIX 1's history here: zones_http_start() used to reconstruct
+ * "was anything found in kiln_nvs" from s_zones.cfg.version != 0 after this
+ * call, which cannot tell "genuinely nothing was ever saved" (version reads
+ * 0 because nothing was ever written) from "something WAS found, but it was
+ * a newer-than-firmware blob nvs_load_from() refused and zeroed" (version
+ * also reads 0, because the refusal path memsets out_cfg). Both callers now
+ * get the real found/valid flags instead of guessing from the zeroed struct. */
+static esp_err_t nvs_load(bool *out_found, bool *out_valid)
 {
-    bool found = false;
-    return nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, &found, out_valid);
+    return nvs_load_from(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid);
 }
 
 static esp_err_t nvs_save(void)
@@ -1488,7 +1546,14 @@ static bool parse_u8_field(const char *body, const char *key, long min, long max
     }
     char *end = NULL;
     long v = strtol(val, &end, 10);
-    if (end == val || v < min || v > max) {
+    /* *end != '\0' catches trailing garbage after a valid numeric prefix
+     * (e.g. "1200X" -> strtol happily returns 1200 with end pointing at 'X')
+     * -- end == val alone only rejects "no digits at all", not "some digits
+     * then junk". Every operator-settable field this function backs is
+     * safety-relevant (see this module's header note), so a value that
+     * isn't ENTIRELY the number it claims to be must be refused outright,
+     * not silently truncated to whatever numeric prefix happened to parse. */
+    if (end == val || *end != '\0' || v < min || v > max) {
         return false;
     }
     *out = (uint8_t)v;
@@ -1504,7 +1569,11 @@ static bool parse_float_field(const char *body, const char *key, float min, floa
     }
     char *end = NULL;
     float v = strtof(val, &end);
-    if (end == val || isnan(v) || v < min || v > max) {
+    /* *end != '\0' -- same trailing-garbage rejection as parse_u8_field()
+     * above; see its comment. NaN is already correctly rejected here, and
+     * inf is caught incidentally by the finite min/max bounds -- neither of
+     * those is what this check is for. */
+    if (end == val || *end != '\0' || isnan(v) || v < min || v > max) {
         return false;
     }
     *out = v;
@@ -1954,7 +2023,10 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         if (len > 0) {
             char *end = NULL;
             long v = strtol(val, &end, 10);
-            if (end == val || v < 0 || v > KILN_IO_RELAY_COUNT) {
+            /* *end != '\0' rejects trailing garbage after a valid numeric
+             * prefix (e.g. "2X"), same gap as parse_u8_field()/
+             * parse_float_field() above -- end == val alone lets it through. */
+            if (end == val || *end != '\0' || v < 0 || v > KILN_IO_RELAY_COUNT) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "max_simultaneous_relays out of range");
                 return ESP_OK;
             }
@@ -2010,7 +2082,9 @@ static esp_err_t zones_post_handler(httpd_req_t *req)
         if (len > 0) {
             char *end = NULL;
             long v = strtol(val, &end, 10);
-            if (end == val || v < 0 || v > ZONE_TC_TYPE_MAX_REAL) {
+            /* *end != '\0' rejects trailing garbage, same gap as the other
+             * numeric parsers in this file -- see parse_u8_field()'s comment. */
+            if (end == val || *end != '\0' || v < 0 || v > ZONE_TC_TYPE_MAX_REAL) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                     "safety_tc_type must be a real thermocouple type (0-7: "
                                     "B/E/J/K/N/R/S/T), not a voltage-input mode");
@@ -2063,9 +2137,24 @@ esp_err_t zones_http_start(void)
     esp_err_t err = ESP_OK;
     if (part_err == ESP_OK) {
         bool valid = false;
-        err = nvs_load(&valid);
+        bool found = false;
+        err = nvs_load(&found, &valid);
         s_zones_config_valid = (err == ESP_OK) && valid;
-        bool found_in_kiln_nvs = (err == ESP_OK && s_zones.cfg.version != 0);
+        /* FIX 1 (bug found in review): this used to be
+         * (err == ESP_OK && s_zones.cfg.version != 0), which cannot
+         * distinguish "kiln_nvs has never had anything saved" from "kiln_nvs
+         * HAS a blob, but nvs_load_from() refused it as newer-than-firmware
+         * and zeroed s_zones.cfg" -- both read version == 0 through that
+         * proxy. The real found flag (threaded through nvs_load() above)
+         * tells them apart directly: a refused blob is found (the key
+         * existed) but not valid, so found_in_kiln_nvs is now true for it and
+         * the migration below is correctly skipped. Without this, a
+         * firmware-rollback-refused newer blob fell through to
+         * migrate_from_default_partition(), which then overwrote it with
+         * whatever stale copy the old default-partition namespace still
+         * holds -- destroying the very data nvs_load_from() had just gone out
+         * of its way to leave untouched. */
+        bool found_in_kiln_nvs = (err == ESP_OK && found);
         if (!found_in_kiln_nvs) {
             /* Nothing usable in kiln_nvs yet -- see if the old default
              * partition has a pre-split copy worth carrying forward.

@@ -1,3 +1,10 @@
+// Datasheet: firmware/KilnFW/Datasheets/ILI9488.pdf (343 pages), with
+// firmware/KilnFW/docs/ILI9488.md as the local commentary. NOT under
+// hardware/datasheets/ -- see NS2009.c's header for why that matters.
+// Section citations in the comments below were verified against this
+// document on 2026-08-24 (reset timing 13.4 Table 39 p308, SWRESET 5.2.2
+// p150, SLPIN/SLPOUT 5.2.12/13 p165-166, COLMOD 5.2.34 p200, MADCTL
+// 5.2.30 p192, SPI clock limits 17.4.3 p332).
 #include "ILI9488.h"
 
 #include <stdio.h>

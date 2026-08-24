@@ -508,6 +508,14 @@ version-vs-size-ordering pattern as the pre-fix `zones_http.c` bug — not
 independently fixed since none of them needed a field added this pass; fix
 the same way whichever future change actually grows one of those structs.
 
+A related bug (fixed 2026-08-24, see `docs/ARCHITECTURE_DECISIONS.md`'s "NVS
+rollback-refusal vs. legacy-partition migration" section): a refused
+newer-than-firmware blob could still get silently overwritten by 8.1's
+legacy-partition migration, because the migration decision couldn't tell
+"refused" apart from "nothing was ever saved." Any new module that adds
+both a version check AND a migration off another partition must read that
+section before wiring the two together.
+
 - [ ] **Migration path never verified on real hardware** — that a board with
       real saved zone/rules/profile/relay-cycle data actually carries it
       forward into `kiln_nvs`/`profiles_nvs` on first boot after this

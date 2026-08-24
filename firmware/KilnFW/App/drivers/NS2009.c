@@ -1,3 +1,10 @@
+// Datasheet: hardware/mainBoard/parts/TFT35-SPI/v2/Hardware/NS2009.PDF
+// (NOT under hardware/datasheets/ -- an audit pass on 2026-08-24 concluded
+// this part had no datasheet in the repo because it only looked there, and
+// so could not verify the command bytes or the 12-bit unpack against the
+// primary source. They were subsequently verified exact: address bytes
+// Table 4 p13, command bytes Table 3 p11 / Table 5 p13, and the two-byte
+// result layout Figure 8 p14.)
 #include "NS2009.h"
 
 #include <string.h>
@@ -157,11 +164,20 @@ esp_err_t NS2009_read(NS2009Class *t, bool *out_pressed, uint16_t *out_x, uint16
     if (err != ESP_OK) return err;
 
     /* NOT "touch drives Z1 low, untouched floats near full scale" as
-     * originally assumed (and as the NS2009 datasheet's typical application
-     * implies) -- bench testing 2026-08-19 (device log, NS2009 diagnostic)
+     * originally assumed -- bench testing 2026-08-19 (device log, NS2009 diagnostic)
      * found the opposite on this board revision: untouched floats near
      * *zero* (0-30 continuously with nothing touching the panel) and a real
-     * firm press drove Z1 to 1047. So the gate compares the other
+     * firm press drove Z1 to 1047.
+     *
+     * Checked against the primary source 2026-08-24
+     * (hardware/mainBoard/parts/TFT35-SPI/v2/Hardware/NS2009.PDF): the
+     * datasheet never states what an UNTOUCHED Z1 measurement reads as. It
+     * documents the touched-state mux/driver config for the Z1 ADC path
+     * (Table 3) and, separately, the polarity of the digital PENIRQ pin
+     * (touched = XP pulled low = PENIRQ low) -- but PENIRQ is a different
+     * circuit, not this ADC value. So there was never a documented default
+     * for the bench measurement to contradict; it is the only evidence
+     * available, not a deviation from spec. So the gate compares the other
      * direction, and the threshold sits between those two measured bands
      * (KILNCTL_TOUCH_Z1_MAX_THRESHOLD's Kconfig help text has the numbers
      * and the reasoning for where the default landed). */

@@ -44,13 +44,25 @@
 //     allowed to command what, only who is allowed to do the writing.
 //
 // Every producer is a bounded, non-blocking POST (xQueueSend with 0 ticks)
-// followed by a bounded WAIT on a per-call result (a stack-allocated binary
-// semaphore, per relay_owner.c's own "never block the queue, but the
-// caller may still wait for its own answer" shape) -- callers here are the
+// followed by a bounded WAIT on a per-call result -- callers here are the
 // UART bridge task, the HTTP worker task, lvgl_port_task (a single I2C
 // write's worth of latency, not a multi-second operation), and
 // profile_executor's/autotune_engine's own control tasks, none of which are
 // the owner task itself, so none of them can deadlock waiting on it.
+//
+// 2026-08-24: the per-call result/semaphore pair used to be stack-allocated
+// in the calling producer's own frame (relay_owner.c's original shape).
+// That was a lifetime bug: a producer that gave up after the bounded wait
+// could return -- freeing/reusing that stack frame -- while the owner task
+// was still going to write through the now-dangling pointers it had
+// already been handed, a cross-task stack corruption reachable any time the
+// owner task legitimately took longer than the wait (SX1509.c's own I2C
+// lock timeout is 6000ms, 30x the 200ms wait). Fixed by moving both the
+// result storage and the semaphore into a small, fixed, MODULE-owned pool
+// (kiln_io_owner.c's `s_slots[]`) instead -- see owner_slot_pool.h for the
+// two-sided release protocol that makes it safe for a producer to give up
+// at any point without ever corrupting memory, and kiln_io_owner.c's
+// KILN_IO_OWNER_WAIT_MS comment for why the wait itself stayed at 200ms.
 //
 // Explicitly NOT covered: kiln_io_lcd_dc()/kiln_io_lcd_reset(). Those are
 // ILI9488.c's own hot path, called once per display command from

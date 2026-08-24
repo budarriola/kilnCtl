@@ -140,6 +140,26 @@ Body caps by handler: `/provision` 384, `/api/relay` 64,
 `relay_h`/`rule` on top of `zone`), `/api/profile/delete` 64, `/api/profile`
 2048, `/api/rules` 2048, `/api/zones` 3200 (`ZONES_BODY_MAX`), `/api/sim` 256.
 
+**Numeric field parsing** must reject trailing garbage, not just a wholly
+non-numeric value: check `end == val` (nothing parsed at all) **and**
+`*end != '\0'` (something parsed, but there were leftover bytes) after every
+`strtol`/`strtof` call on a decoded form field. `end == val` alone lets
+`"1200X"` through as `1200` — found and fixed 2026-08-24 in
+`zones_http.c`'s `parse_u8_field()`/`parse_float_field()` and its two inline
+`strtol` call sites (`max_simultaneous_relays`, `safety_tc_type`); every
+numeric field this server accepts from an operator is safety-relevant
+(thresholds, gains, masks), so a value that isn't *entirely* the number it
+claims to be must be refused outright, same "reject outright, never guess"
+discipline as the `-2`/too-long case above. Before tightening an existing
+parser this way, confirm the real page never sends what the stricter check
+would newly reject (a stray unit suffix, trailing whitespace, a locale
+decimal comma) — `zones_page.html`'s save handler pushes raw
+`<input type="number">.value` straight into the body, which is always plain
+ASCII digits/`.`/`-` per the HTML spec regardless of browser locale, so this
+was safe to tighten with no page-side change needed; a handler whose page
+does something fancier (client-side formatting, a text input instead of
+`type="number"`) would need to check that first.
+
 ## Wi-Fi endpoints (`wifi_provision_http.c`)
 
 Full semantics are in [`docs/WIFI_PROVISIONING.md`](WIFI_PROVISIONING.md);

@@ -5,6 +5,7 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "max31856_codec.h"
 #include "settings.h"
 
 static const char *TAG = "MAX31856";
@@ -258,55 +259,6 @@ static uint32_t max31856_age_ms(const MAX31856Class *ch)
      * answer -- and it is already far past KILN_TEMP_STALE_AGE_MS either
      * way. */
     return (ms >= MAX31856_READING_AGE_UNKNOWN) ? MAX31856_READING_AGE_UNKNOWN : (uint32_t)ms;
-}
-
-/* --- Fixed-point decoding (datasheet register bit-weight tables) ------- */
-
-/* CJTH:CJTL -- sign + 2^6..2^-6 with the low two bits of CJTL hard-wired to 0.
- * Treating the pair as a plain int16 and dividing by 256 lands every bit on
- * its documented weight, and the sign bit is already in the right place. */
-static float max31856_decode_cj(uint8_t cjth, uint8_t cjtl)
-{
-    int16_t raw = (int16_t)(((uint16_t)cjth << 8) | cjtl);
-    return (float)raw * MAX31856_CJ_TEMP_C_PER_LSB;
-}
-
-/* LTCBH:LTCBM:LTCBL -- 19 significant bits at the top of a 24-bit word: sign +
- * 2^10..2^-7, with LTCBL[4:0] documented as don't-care. Mask those five bits
- * off (they are not guaranteed zero), sign-extend the 24-bit value into an
- * int32, then divide by 4096 so bit 12 is the 1 degC place. That is the same
- * number as (code19 * 0.0078125) but without an implementation-defined
- * arithmetic shift of a negative value. */
-static float max31856_decode_tc(uint8_t ltcbh, uint8_t ltcbm, uint8_t ltcbl)
-{
-    uint32_t raw = ((uint32_t)ltcbh << 16) | ((uint32_t)ltcbm << 8) | (uint32_t)ltcbl;
-    raw &= 0x00FFFFE0u;
-
-    int32_t signed_raw = (int32_t)raw;
-    if (raw & 0x00800000u) {
-        signed_raw = (int32_t)(raw | 0xFF000000u); /* sign-extend bit 23 */
-    }
-    return (float)signed_raw * MAX31856_TC_TEMP_C_PER_LSB;
-}
-
-/* degC -> the LTHFTH/LTHFTL (and LTLFTH/LTLFTL) pair: sign + 2^10..2^-4, i.e.
- * a two's-complement int16 at 1/16 degC per LSB. Rounds to nearest and clamps;
- * the clamped ends (+2047.9375 / -2048 degC) are already well outside every
- * thermocouple type's range, so clamping can only ever disable a threshold,
- * never move one somewhere surprising. */
-static int16_t max31856_encode_tc_threshold(float temperature_c)
-{
-    if (isnan(temperature_c)) {
-        return 0;
-    }
-    float lsbs = roundf(temperature_c / MAX31856_TC_THRESHOLD_C_PER_LSB);
-    if (lsbs > 32767.0f) {
-        return INT16_MAX;
-    }
-    if (lsbs < -32768.0f) {
-        return INT16_MIN;
-    }
-    return (int16_t)lsbs;
 }
 
 /* --- Fault logging ----------------------------------------------------- */

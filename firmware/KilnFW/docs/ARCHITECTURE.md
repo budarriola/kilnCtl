@@ -115,12 +115,49 @@ enum + tagged command struct, a small bounded `xQueueCreate`d queue, one
 Every producer is a bounded, non-blocking `xQueueSend(..., 0)` — never
 blocks the caller if the queue is full — followed by a bounded wait
 (200 ms, `KILN_IO_OWNER_WAIT_MS`/`THERMO_OWNER_WAIT_MS`) on a per-call
-result via a stack-allocated binary semaphore, given by the owner task
-last. Queue depth is 8 for both `kiln_io_owner` and `thermo_owner`
+result. Queue depth is 8 for both `kiln_io_owner` and `thermo_owner`
 (`KILN_IO_OWNER_QUEUE_LEN`/`THERMO_OWNER_QUEUE_LEN`,
 `kiln_io_owner.c:15`/`thermo_owner.c:14`). A timeout is treated exactly
 like an I/O failure — fail closed, never "assume it worked"
 (`kiln_io_owner_relay_result_t`'s `ERR_TIMEOUT` case).
+
+**Result/semaphore storage — module-owned pool, never the caller's stack
+(read this before writing the next owner task).** The result struct and the
+"done" semaphore a producer waits on used to be locals in the producer's own
+stack frame (this is `relay_owner.c`'s original shape, and Phase 1/2 copied
+it faithfully). That is a use-after-free waiting to happen: the producer's
+bounded wait (200 ms) is a client-patience budget, **not** a bound on how
+long the owner task can actually take — `SX1509_LOCK_TIMEOUT_MS` alone is
+6000 ms, thirty times the wait — so a stalled bus let a timed-out producer
+return (freeing/reusing its stack frame) while the owner task was still
+going to write the result and give the semaphore through pointers into that
+now-dead frame: a cross-task write into whatever the frame held next.
+Found and fixed 2026-08-24 in both `kiln_io_owner.c` and `thermo_owner.c`
+(`i2c_owner.c`/`uart_owner.c` did **not** share this bug — see their own
+`_transfer()` functions, which wait `portMAX_DELAY` on the semaphore instead
+of a client-side timeout, so their producer never gives up while the owner
+side might still be working; that is a valid alternative fix but was
+rejected here because it would let a stalled bus block an HTTP handler or
+`rules_task`'s watchdog-fed control loop for up to 6 s).
+
+The fix, and the pattern any **new** owner task in this codebase must
+follow: a small, fixed pool of result slots (`s_slots[]`, sized to the
+command queue depth) owned by the module itself — static storage, never
+freed — with each slot's lifecycle tracked by a two-sided reference count
+(`App/drivers/owner_slot_pool.h`/`.c`, host-tested by
+`App/test/test_owner_slot_pool.c`). A slot handed out by
+`owner_slot_pool_alloc()` is held by **both** the producer and the owner
+task; each releases its own half exactly once (the producer after it stops
+waiting, success or timeout; the owner task after it writes the result and
+gives the semaphore), and only the release that arrives **second** actually
+returns the slot to the free pool. This makes the order irrelevant — a
+producer timing out before the owner finishes, and the owner finishing
+before the producer's timeout fires, both end in the same state — and
+guarantees a slot can never be reused (silently corrupting a *different*,
+newer command's result) while either side might still touch it. See
+`owner_slot_pool.h`'s top comment for the full invariant and
+`kiln_io_owner.c`'s `post_and_wait()`/`owner_task()` for the reference
+wiring.
 
 `wifi_prov_owner` additionally routes the Wi-Fi **driver's own event
 handlers** (`on_wifi_event`, `on_ip_event`, `ap_fallback_timer_cb`,
@@ -331,10 +368,18 @@ match.
    command-driven (`kiln_io_owner`/`thermo_owner` both use
    `portMAX_DELAY` today — neither has periodic work of its own).
 5. **`post_and_wait()` helper**: `xQueueSend(queue, &cmd, 0)` (never blocks
-   the caller — 0 ticks), then `xSemaphoreTake(done, pdMS_TO_TICKS(200))`
-   on a **stack-allocated** binary semaphore the caller creates and owns.
-   A timeout is a real failure, reported exactly like an I/O error — fail
-   closed, never silently assume success.
+   the caller — 0 ticks), then `xSemaphoreTake(slot->sem, pdMS_TO_TICKS(200))`
+   on a semaphore from the module's own **static, module-owned slot pool** —
+   see §3's "Result/semaphore storage" note and `App/drivers/
+   owner_slot_pool.h` for why it must NOT be a semaphore (or result struct)
+   the caller allocates on its own stack: a producer that gives up after
+   the bounded wait can return, freeing that stack frame, while the owner
+   task is still going to write through pointers into it — exactly the bug
+   fixed 2026-08-24 in `kiln_io_owner.c`/`thermo_owner.c`. Every new owner
+   task must use `owner_slot_pool_alloc()`/`_release()` (or an equivalent
+   two-sided release protocol) the same way. A timeout is a real failure,
+   reported exactly like an I/O error — fail closed, never silently assume
+   success.
 6. **Producer functions**, one `<name>_owner_command_<verb>()` per verb,
    with the caller's existing signature preserved wherever possible so
    call sites don't change shape (both existing owners achieved zero or

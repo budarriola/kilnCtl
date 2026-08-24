@@ -740,6 +740,57 @@ static void test_v2_body_with_stale_sentinel_still_imports(void)
     TEST_CHECK(s_writes[0].set_xzone_called, "cross_zone_max_delta_c still committed despite the trailing junk key");
 }
 
+// FIX 3: json_field_str() silently truncates to cap-1 bytes with no way to
+// tell the caller it did so -- before this fix, the profile-name buffer was
+// sized exactly PROFILE_NAME_MAX_LEN+1, so an overlong name came back
+// pre-truncated to a fit and there was no length check at all to catch it
+// (the interactive POST /api/profile path rejects the identical input via
+// http_form_find_field()'s -2 return -- import silently accepted what that
+// path refuses). Modeled directly on test_overlong_zone_name_rejected()
+// above, which solves the identical problem for zone names.
+static void test_overlong_profile_name_rejected(void)
+{
+    TEST_SECTION("backup_import_apply -- an overlong profile name is rejected, nothing written (FIX 3)");
+    reset_stub_state();
+
+    // PROFILE_NAME_MAX_LEN is 15; this name is well past it.
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":[{\"id\":0,\"name\":\"ThisNameIsWayTooLongForOneProfile\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+        "\"zones\":[]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(!ok, "a profile name over PROFILE_NAME_MAX_LEN must be rejected in validation");
+    TEST_CHECK(strstr(err, "name too long") != NULL, "error message should say what's wrong");
+    TEST_CHECK(g_profile_save_calls == 0, "nothing written -- not even a profile whose other fields were in range");
+}
+
+// Positive control, sibling to the rejection test above: a name whose length
+// is EXACTLY PROFILE_NAME_MAX_LEN (the boundary, not one over it) must still
+// import -- proves the fix's ">" check, not ">=", and that it isn't
+// over-rejecting valid input at the limit.
+static void test_profile_name_at_limit_accepted(void)
+{
+    TEST_SECTION("backup_import_apply -- a profile name exactly at PROFILE_NAME_MAX_LEN is accepted (FIX 3)");
+    reset_stub_state();
+
+    // PROFILE_NAME_MAX_LEN is 15 -- this name is exactly 15 characters.
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":[{\"id\":0,\"name\":\"ExactlyFifteenC\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+        "\"zones\":[]}";
+    char err[160];
+    bool ok = backup_import_apply(body, err, sizeof(err));
+
+    TEST_CHECK(strlen("ExactlyFifteenC") == PROFILE_NAME_MAX_LEN, "test setup sanity: name is exactly at the limit");
+    TEST_CHECK(ok, "a name exactly at the limit must be accepted, not rejected as \"too long\"");
+    TEST_CHECK(g_profile_save_calls == 1, "the profile was committed");
+    TEST_CHECK(strcmp(g_last_saved_profile.name, "ExactlyFifteenC") == 0, "the full, untruncated name was written");
+}
+
 void run_test_backup_import(void)
 {
     test_malformed_body_writes_nothing();
@@ -750,4 +801,6 @@ void run_test_backup_import(void)
     test_overlong_zone_name_rejected();
     test_v2_body_without_sentinel_imports();
     test_v2_body_with_stale_sentinel_still_imports();
+    test_overlong_profile_name_rejected();
+    test_profile_name_at_limit_accepted();
 }

@@ -482,6 +482,26 @@ One byte, no arguments — same shape as `SAFETY_CMD_GET_FW_VERSION`. The
 Pico answers every copy it sees, under the **same** command byte
 (`SAFETY_CMD_CT_CAL`, §6 Frame G), distinguished by direction and length.
 
+### `SAFETY_CMD_ROLLBACK` = `0x17` (ESP → Pico)
+
+One byte, no arguments — same shape as `SAFETY_CMD_GET_FW_VERSION`.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x17` |
+
+The explicit "go back to the previously-running bootloader slot, right now"
+command — the Pico-side half of `tools/PcTools/TODO.md`'s
+`ota_rollback(processor)` line (the ESP half, `POST /api/ota/esp/rollback`,
+already exists in `firmware/KilnFW/App/drivers/ota_http.c`). Fire-and-forget,
+same as `CLEAR_TRIP`/`SET_CONFIG`: never ACKed on the wire.
+
+The refuse/proceed decision — is the other bootloader slot even valid to
+fall back to? — is entirely `SaftyFW`'s, in `bootloader/metadata.c`'s
+`bootloader_decide_rollback()`. This codec (`kilnlink_rollback.{c,h}`) only
+serializes the one-byte frame; it carries no opinion about whether a
+rollback should be allowed.
+
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
 One byte, no arguments. Sent by the ESP at boot and whenever the Pico's
@@ -619,6 +639,36 @@ every poll burns 10 retries × 50 ms against a peer that never ACKs.
 It may still be sent as a `BROADCAST` to request an immediate extra push —
 useful behind a "refresh" button in the GUI — but nothing depends on it, and
 the 500 ms cadence is the real mechanism.
+
+### `SAFETY_CMD_INJECT_TC` = `0x21` (ESP → Pico)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x21` |
+| 1 | u8 | `valid` (0/1) |
+| 2..5 | f32 LE | `tc_c` |
+| 6..9 | f32 LE | `cj_c` |
+| 10 | u8 | `fault_bits` — `SAFETY_THERMO_FAULT_*` bits (`safety_guards.h`) |
+
+Feeds a synthetic thermocouple reading into `SaftyFW`'s guard chain
+(`thermo_task.c`'s published snapshot), so the whole S1/S5/S11/S12 guard
+chain can be exercised on real hardware before the physical safety
+MAX31856 exists. `valid` mirrors `thermo_snapshot_t`'s own valid flag; when
+0, the receiver ignores `tc_c`/`cj_c` and substitutes NaN itself (per that
+struct's own "NaN when `!valid`, never 0, never stale" contract) — this
+frame still carries real bytes for both regardless of `valid`, rather than
+omitting them, keeping it the same fixed size as every other command in
+this family.
+
+**Honoured only while `safety_tc_installed == 0`.** The moment `SaftyFW`
+has a real safety thermocouple wired and commissioned, every
+`INJECT_TC` frame is refused — this is not a mode flag the ESP can leave
+set; it is a structural gate inside `thermo_task_inject_reading()` itself,
+the one function that can act on this command, and it is never persisted.
+A reader of this document must not assume `INJECT_TC` is unconditionally
+honoured just because a well-formed frame was sent. This codec
+(`kilnlink_inject_tc.{c,h}`) only serializes the payload bytes; it has no
+opinion about, and cannot see, whether the gate is currently open.
 
 ---
 

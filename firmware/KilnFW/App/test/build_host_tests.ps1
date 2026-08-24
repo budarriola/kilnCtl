@@ -54,6 +54,8 @@ $sources = @(
     (Join-Path $testDir "test_crash_report.c"),
     (Join-Path $testDir "test_watchdog_cfg.c"),
     (Join-Path $testDir "test_ui_page_home_graph.c"),
+    (Join-Path $testDir "test_max31856_codec.c"),
+    (Join-Path $testDir "test_owner_slot_pool.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),
@@ -66,7 +68,9 @@ $sources = @(
     (Join-Path $driversDir "thermo_combine.c"),
     (Join-Path $driversDir "profile_feasibility.c"),
     (Join-Path $driversDir "rules_eval.c"),
-    (Join-Path $driversDir "ui_page_home_graph.c")
+    (Join-Path $driversDir "ui_page_home_graph.c"),
+    (Join-Path $driversDir "max31856_codec.c"),
+    (Join-Path $driversDir "owner_slot_pool.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

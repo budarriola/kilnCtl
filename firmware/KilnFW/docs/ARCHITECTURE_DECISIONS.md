@@ -270,6 +270,47 @@ purely as a trailing-comma guard in the streaming writer — junk in an
 otherwise user-facing format that consumers must ignore; recorded here so
 nobody "fixes" it as a stray field without understanding why it's there.
 
+## NVS rollback-refusal vs. legacy-partition migration (TODO.md 8.1/8.2)
+
+Two "DONE" pieces of TODO.md 8.1/8.2 interact in a way that is easy to
+re-break: 8.2's refuse-newer-than-firmware discipline (`zones_http.c`'s
+`nvs_load_from()` — never wipe a blob whose version is newer than this
+build, memset the caller's copy but leave flash untouched) and 8.1's
+one-time migration off the old shared default `nvs` partition
+(`migrate_from_default_partition()`). A bug shipped and was fixed
+2026-08-24: the migration decision used to be made from `s_zones.cfg.version
+!= 0` *after* the load, which cannot tell "kiln_nvs has never had anything
+saved" from "kiln_nvs has a real blob that was just correctly refused as
+newer-than-firmware" — both read `version == 0`, because the refusal path
+memsets the caller's struct. A firmware rollback would refuse the newer
+blob exactly as designed, then immediately fall through to the migration
+and overwrite it with whatever stale pre-split copy the old `nvs` partition
+still holds (never deleted, by 8.1's own design, specifically to survive a
+rollback) — silently destroying the config the refusal had just gone out of
+its way to protect.
+
+**The rule going forward**: a version-checking loader that also feeds a
+migration decision must expose *found* (something is at this key, valid or
+not — including a refused newer-than-firmware blob) as a value distinct
+from *valid* (safe to run against right now), and the migration must key
+off *found*, never off whether the decoded struct happens to read as
+zeroed. `nvs_load_from()`'s `out_found`/`out_valid` pair is the reference
+implementation — see its header comment for the exact per-branch contract
+(newer-than-firmware is found-but-not-valid; too-short/wrong-size corruption
+is neither, since there is nothing there worth protecting from being
+overwritten by a migration). `kiln_cfg_store.c`'s `nvs_load_store()` follows
+the same refuse-newer/corrupt-is-different split for its own version check,
+even though it has no migration of its own yet (`KILN_CFG_STORE_VERSION`
+has only ever been 1) — get the distinction right before a future version
+bump adds one, not after.
+
+Any future module that adds its own versioned persisted section (rules,
+relay-cycles, profiles — see 8.2's note that they share the pre-fix
+version-vs-size-ordering pattern and haven't needed a migration yet) and
+later grows a migration path off another partition must apply this same
+found/valid split, not the single "did I get something back" boolean it
+might otherwise reach for.
+
 ## Static-IP AP-fallback fix
 
 A wrong-but-parseable static IP (bad gateway/subnet) still associates at L2,

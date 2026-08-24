@@ -350,6 +350,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
     add_test(NAME test_config_page COMMAND test_config_page)
 
+    add_executable(test_inject_tc test/test_inject_tc.c)
+    target_link_libraries(test_inject_tc PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_inject_tc PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_inject_tc PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_inject_tc COMMAND test_inject_tc)
+
     # -- benchproto host tests (independent of everything above) --------------
     add_executable(test_benchproto_frame test/test_benchproto_frame.c)
     target_link_libraries(test_benchproto_frame PRIVATE benchproto)

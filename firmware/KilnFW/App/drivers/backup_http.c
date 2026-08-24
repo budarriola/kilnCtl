@@ -633,8 +633,28 @@ static bool backup_import_apply(const char *body, char *err_msg, size_t err_cap)
             c->id = (uint8_t)did;
         }
 
-        char name[PROFILE_NAME_MAX_LEN + 1];
+        /* +2, not +1: json_field_str() silently truncates to cap-1 bytes with
+         * no way to tell the caller it did so, so a buffer sized exactly
+         * PROFILE_NAME_MAX_LEN+1 could never actually observe an overlong
+         * name -- it would just come back pre-truncated to a fit, and any
+         * "name too long" check below would be permanently unreachable (dead)
+         * code. Same fix as the zone-name pass below (its buffer's comment
+         * has the full walkthrough): sizing one byte larger than the real
+         * limit means ANY name whose true length exceeds
+         * PROFILE_NAME_MAX_LEN still results in strlen(name) ==
+         * PROFILE_NAME_MAX_LEN+1 after the copy (truncated to fit this
+         * buffer, but still detectably over the limit), so the length check
+         * that follows can actually fire -- matching the "name too long"
+         * rejection the interactive POST /api/profile path already gives
+         * for the same input (parse_profile_fields(), via
+         * http_form_find_field()'s -2 return). Without this, import
+         * silently accepted what the interactive path refuses. */
+        char name[PROFILE_NAME_MAX_LEN + 2];
         if (json_field_str(pe, "name", name, sizeof(name))) {
+            if (strlen(name) > PROFILE_NAME_MAX_LEN) {
+                snprintf(err_msg, err_cap, "profile entry %u: name too long", (unsigned)candidate_count);
+                return false;
+            }
             strncpy(c->p.name, name, PROFILE_NAME_MAX_LEN);
             c->p.name[PROFILE_NAME_MAX_LEN] = '\0';
         }

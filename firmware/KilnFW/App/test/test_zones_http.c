@@ -105,11 +105,35 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     (void)buf_len;
     return ESP_OK;
 }
+/* Test hooks added for FIX 2's zones_post_handler() end-to-end coverage
+ * (the two inline strtol sites -- max_simultaneous_relays/safety_tc_type --
+ * have no seam of their own to call directly, unlike parse_u8_field()/
+ * parse_float_field()). NULL/false by default so every pre-existing test in
+ * this file, which only calls parse_zone_fields() directly and never
+ * zones_post_handler(), is completely unaffected -- same opt-in convention
+ * stubs/nvs.h's nvs_test_enable() uses. */
+static const char *s_test_post_body = NULL;
+static bool s_test_err_called = false;
+static char s_test_err_msg[256];
+static bool s_test_ok_called = false;
+
+static void test_post_hooks_reset(void)
+{
+    s_test_post_body = NULL;
+    s_test_err_called = false;
+    s_test_err_msg[0] = '\0';
+    s_test_ok_called = false;
+}
+
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r;
     (void)error;
-    (void)msg;
+    s_test_err_called = true;
+    if (msg) {
+        strncpy(s_test_err_msg, msg, sizeof(s_test_err_msg) - 1);
+        s_test_err_msg[sizeof(s_test_err_msg) - 1] = '\0';
+    }
     return ESP_OK;
 }
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
@@ -122,14 +146,26 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
     (void)r;
     (void)s;
+    s_test_ok_called = true;
     return ESP_OK;
 }
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
-    return 0;
+    /* Single-shot: hands back the whole staged body in one call. Every real
+     * caller in zones_http.c loops until `received` reaches content_len, but
+     * a test always stages a body whose length equals the content_len it
+     * sets on the request, so one call satisfies the loop's condition and
+     * exits without a second, zero-length call. */
+    if (!s_test_post_body) {
+        return 0;
+    }
+    size_t len = strlen(s_test_post_body);
+    if (len > buf_len) {
+        len = buf_len;
+    }
+    memcpy(buf, s_test_post_body, len);
+    return (int)len;
 }
 
 // ---- web_encoding.h -- only reached from page_get_handler(), never called
@@ -306,11 +342,293 @@ static void test_old_behaviour_would_have_zeroed_it(void)
               "caller's zero-init for any zone index >= thermo_count");
 }
 
+// ---------------------------------------------------------------------------
+// FIX 2 -- parse_u8_field()/parse_float_field() trailing-garbage rejection,
+// plus the two inline strtol sites (max_simultaneous_relays/safety_tc_type)
+// zones_post_handler() has no other seam for. Blast-radius check (see the
+// task's own instructions): zones_page.html's saveBtn handler pushes raw
+// <input type="number">.value strings straight into the form body (see
+// zones_page.html's saveBtn click handler) -- never with a unit suffix,
+// trailing whitespace, or a locale decimal comma (a number input's .value is
+// always plain ASCII digits/'.'/'-' per the HTML spec, regardless of the
+// browser's locale) -- so the real client can never trigger a rejection this
+// stricter check newly introduces. Confirmed by reading zones_page.html
+// directly rather than assumed.
+// ---------------------------------------------------------------------------
+
+static void test_parse_u8_field_rejects_trailing_garbage(void)
+{
+    TEST_SECTION("parse_u8_field -- trailing garbage after a valid numeric prefix is rejected (FIX 2)");
+    uint8_t out = 99;
+    bool ok = parse_u8_field("thermo_count=3X", "thermo_count", 0, 10, &out);
+    TEST_CHECK(!ok, "\"3X\" must be rejected outright, not silently accepted as 3");
+    TEST_CHECK(out == 99, "out must be untouched on rejection");
+}
+
+static void test_parse_u8_field_accepts_clean_value(void)
+{
+    TEST_SECTION("parse_u8_field -- positive control: a clean in-range value is still accepted");
+    uint8_t out = 0;
+    bool ok = parse_u8_field("thermo_count=3", "thermo_count", 0, 10, &out);
+    TEST_CHECK(ok, "a clean value must still parse");
+    TEST_CHECK(out == 3, "parsed value must be correct");
+}
+
+static void test_parse_float_field_rejects_trailing_garbage(void)
+{
+    TEST_SECTION("parse_float_field -- trailing garbage after a valid numeric prefix is rejected (FIX 2)");
+    float out = -1.0f;
+    bool ok = parse_float_field("z0_kp=1200X", "z0_kp", 0.0f, 5000.0f, &out);
+    TEST_CHECK(!ok, "\"1200X\" must be rejected outright, not silently accepted as 1200.0");
+    TEST_CHECK(out == -1.0f, "out must be untouched on rejection");
+}
+
+static void test_parse_float_field_rejects_unit_suffix(void)
+{
+    TEST_SECTION("parse_float_field -- a value with a trailing unit suffix is rejected (FIX 2)");
+    float out = -1.0f;
+    bool ok = parse_float_field("z0_maxtemp=1300C", "z0_maxtemp", 0.0f, 1400.0f, &out);
+    TEST_CHECK(!ok, "\"1300C\" must be rejected outright, not silently accepted as 1300.0");
+}
+
+static void test_parse_float_field_accepts_clean_value(void)
+{
+    TEST_SECTION("parse_float_field -- positive control: a clean in-range value is still accepted");
+    float out = 0.0f;
+    bool ok = parse_float_field("z0_kp=2.5", "z0_kp", 0.0f, 5000.0f, &out);
+    TEST_CHECK(ok, "a clean value must still parse");
+    TEST_CHECK_NEAR(out, 2.5, 1e-6, "parsed value must be correct");
+}
+
+// zones_post_handler() end-to-end, for the two inline strtol sites that have
+// no standalone function to call directly. thermo_count=0/relay_count=0
+// keeps the body minimal -- every zone block is then past thermo_count, so
+// parse_zone_fields() treats all its fields as optional/preserve-existing
+// (see test_out_of_range_zone_preserves_stored_fields() above), and no
+// z%u_* fields are required at all.
+static void run_zones_post(const char *body)
+{
+    test_post_hooks_reset();
+    s_test_post_body = body;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(body);
+    esp_err_t err = zones_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "zones_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
+}
+
+static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(void)
+{
+    TEST_SECTION("zones_post_handler -- max_simultaneous_relays trailing garbage rejected (FIX 2, inline strtol site 1)");
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2X");
+    TEST_CHECK(s_test_err_called, "\"2X\" must be rejected, not silently accepted as 2");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+    TEST_CHECK(strstr(s_test_err_msg, "max_simultaneous_relays") != NULL,
+              "error message should name the offending field");
+}
+
+static void test_zones_post_safety_tc_type_rejects_trailing_garbage(void)
+{
+    TEST_SECTION("zones_post_handler -- safety_tc_type trailing garbage rejected (FIX 2, inline strtol site 2)");
+    run_zones_post("thermo_count=0&relay_count=0&safety_tc_type=3Q");
+    TEST_CHECK(s_test_err_called, "\"3Q\" must be rejected, not silently accepted as 3");
+    TEST_CHECK(!s_test_ok_called, "must not report success for a rejected submission");
+}
+
+static void test_zones_post_accepts_clean_minimal_body(void)
+{
+    TEST_SECTION("zones_post_handler -- positive control: clean values on the same two fields are still accepted");
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2&safety_tc_type=3");
+    TEST_CHECK(!s_test_err_called, "a clean submission must not be rejected");
+    TEST_CHECK(s_test_ok_called, "a clean submission must report success");
+}
+
+// ---------------------------------------------------------------------------
+// FIX 1 -- a found-but-refused newer-version zones blob must not look like
+// "nothing found" to the legacy-migration decision, and must never be
+// overwritten by it. nvs_load_from() is `static`; reached directly, same
+// convention as parse_zone_fields() above. Uses stubs/nvs.h's opt-in
+// single-blob-slot NVS stub (nvs_test_enable()/nvs_test_clear()) -- off by
+// default, so every test above this section (which never touches NVS) is
+// unaffected.
+// ---------------------------------------------------------------------------
+
+static void stage_zones_blob(const void *data, size_t len)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition("whatever", NVS_NAMESPACE, NVS_READWRITE, &h);
+    (void)err; // the stub always succeeds once nvs_test_enable(true) is set
+    nvs_set_blob(h, NVS_KEY_ZONES, data, len);
+    nvs_close(h);
+}
+
+static void test_nvs_load_from_too_short_is_corrupt_not_refused(void)
+{
+    TEST_SECTION("nvs_load_from -- a too-short blob is corrupt: found=false, valid=false (migration may still run)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    stage_zones_blob("", 0); // shorter than zones_cfg_t::version itself
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true; // deliberately pre-set to the wrong answer
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "a too-short blob is a handled outcome, not an NVS error");
+    TEST_CHECK(!found, "too-short (genuine corruption) must report found=false, so a caller is free to "
+                       "look elsewhere (e.g. the legacy-partition migration) instead of treating it as "
+                       "protected data");
+    TEST_CHECK(!valid, "too-short must not be trustworthy");
+    TEST_CHECK(out_cfg.version == 0, "out_cfg must come back zeroed");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused(void)
+{
+    TEST_SECTION("nvs_load_from -- current-version blob at the wrong size is corrupt: found=false, valid=false");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    stage_zones_blob(&src, sizeof(src) - 1); // right version, truncated by one byte
+
+    zones_cfg_t out_cfg;
+    bool found = true, valid = true;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "a wrong-size blob is a handled outcome, not an NVS error");
+    TEST_CHECK(!found, "wrong-size-for-its-version (genuine corruption) must report found=false, same "
+                       "reasoning as the too-short branch");
+    TEST_CHECK(!valid, "wrong-size must not be trustworthy");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_load_from_current_version_happy_path(void)
+{
+    TEST_SECTION("nvs_load_from -- current version, right size: found=true, valid=true");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = ZONES_CFG_VERSION;
+    src.thermo_count = 2;
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = false;
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(found, "a real current-version blob must report found=true");
+    TEST_CHECK(valid, "a real current-version blob must report valid=true");
+    TEST_CHECK(out_cfg.thermo_count == 2, "the decoded config must actually come through");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_load_from_newer_than_firmware_is_found_but_not_valid(void)
+{
+    TEST_SECTION("nvs_load_from -- FIX 1: a newer-than-firmware blob is found=true, valid=false "
+                 "(refused, but must block migration, not invite it)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = (uint8_t)(ZONES_CFG_VERSION + 1); // firmware-rollback case
+    src.thermo_count = 3; // something a stale migration would clobber if this leaked through
+    stage_zones_blob(&src, sizeof(src));
+
+    zones_cfg_t out_cfg;
+    bool found = false, valid = true; // deliberately pre-set to the wrong answers
+    esp_err_t err = nvs_load_from("kiln_nvs", &out_cfg, &found, &valid);
+
+    TEST_CHECK(err == ESP_OK, "refusing to load is a handled outcome, not an NVS error");
+    TEST_CHECK(found, "FIX 1: a refused newer-version blob MUST report found=true -- it is real, "
+                      "deliberately-protected data, not \"nothing was ever saved\". Before FIX 1 this "
+                      "was false, which is exactly what let zones_http_start() fall through to "
+                      "migrate_from_default_partition() and overwrite it.");
+    TEST_CHECK(!valid, "refused data must not be reported trustworthy for this boot");
+    TEST_CHECK(out_cfg.version == 0, "out_cfg must come back zeroed, not the newer struct's raw contents");
+    TEST_CHECK(out_cfg.thermo_count == 0, "the refused blob's fields must not leak into out_cfg");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// The scenario FIX 1 actually fixes, exercised through zones_http_start()
+// itself rather than nvs_load_from() in isolation: a newer-than-firmware
+// blob staged as "what's on flash" must survive a boot completely
+// untouched -- not clobbered by the legacy-partition migration, which the
+// old (err == ESP_OK && s_zones.cfg.version != 0) proxy could not tell apart
+// from "kiln_nvs has never had anything saved". stubs/nvs.h's stub has a
+// single blob slot shared across every (partition, key) pair, which happens
+// to model this exact bug perfectly: if zones_http_start() ever calls
+// migrate_from_default_partition() here, THAT function's own
+// nvs_load_from(NVS_DEFAULT_PART_NAME, ...) call reads the very same staged
+// blob right back (there is only one slot), decides it cannot use it either
+// (same refusal), and returns without saving -- so any accidental migration
+// attempt is invisible to a check that only looks at "did anything change".
+// The real, load-bearing assertion here is s_zones_config_valid staying
+// false AND the staged bytes in the stub's one slot staying byte-for-byte
+// identical after the call: an nvs_save() from ANY path (migration or
+// otherwise) would stamp a fresh ZONES_CFG_VERSION into byte 0, which the
+// staged (ZONES_CFG_VERSION + 1) can never equal.
+static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
+{
+    TEST_SECTION("zones_http_start -- FIX 1: a refused newer-version blob on flash survives a boot untouched");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    zones_cfg_t src;
+    memset(&src, 0, sizeof(src));
+    src.version = (uint8_t)(ZONES_CFG_VERSION + 1);
+    src.thermo_count = 3;
+    stage_zones_blob(&src, sizeof(src));
+
+    uint8_t blob_before[sizeof(zones_cfg_t)];
+    memcpy(blob_before, &src, sizeof(src));
+
+    s_zones_config_valid = true; // deliberately wrong, so a no-op bug can't accidentally read as a pass
+    (void)zones_http_start(); // returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
+                              // NVS load/migration logic below has already run -- exactly what's under test.
+
+    TEST_CHECK(!s_zones_config_valid, "a refused newer-version blob must leave the config NOT valid for "
+                                      "this boot -- zone commanding must stay refused, not silently run "
+                                      "off a stale migrated copy");
+    TEST_CHECK(s_stub_nvs_blob_len == sizeof(src) &&
+                  memcmp(s_stub_nvs_blob, blob_before, sizeof(src)) == 0,
+              "FIX 1: the on-flash blob must be byte-for-byte unchanged -- if migrate_from_default_"
+              "partition() ran and saved, nvs_save() would have stamped ZONES_CFG_VERSION (not "
+              "ZONES_CFG_VERSION+1) into byte 0, which this check catches");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 void run_test_zones_http(void)
 {
     test_out_of_range_zone_preserves_stored_fields();
     test_in_range_zone_thermo_mask_legacy_fallback_unchanged();
     test_old_behaviour_would_have_zeroed_it();
+
+    test_parse_u8_field_rejects_trailing_garbage();
+    test_parse_u8_field_accepts_clean_value();
+    test_parse_float_field_rejects_trailing_garbage();
+    test_parse_float_field_rejects_unit_suffix();
+    test_parse_float_field_accepts_clean_value();
+    test_zones_post_max_simultaneous_relays_rejects_trailing_garbage();
+    test_zones_post_safety_tc_type_rejects_trailing_garbage();
+    test_zones_post_accepts_clean_minimal_body();
+
+    test_nvs_load_from_too_short_is_corrupt_not_refused();
+    test_nvs_load_from_wrong_size_current_version_is_corrupt_not_refused();
+    test_nvs_load_from_current_version_happy_path();
+    test_nvs_load_from_newer_than_firmware_is_found_but_not_valid();
+    test_zones_http_start_refused_newer_blob_not_overwritten();
 }
 
 int main(void)

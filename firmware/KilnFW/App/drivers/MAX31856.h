@@ -48,6 +48,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "max31856_codec.h"
 #include "uart_task_ids.h"
 
 #ifdef __cplusplus
@@ -142,20 +143,17 @@ extern "C" {
 #define MAX31856_DEFAULT_FAULT_MASK \
     ((uint8_t)(MAX31856_MASK_ALL & ~(MAX31856_MASK_OPEN | MAX31856_MASK_OVUV)))
 
-/* --- Fixed-point scales (datasheet register bit-weight tables) --- */
-/* LTHFTH/LTHFTL and LTLFTH/LTLFTL: sign + 2^10..2^-4 => 1/16 degC per LSB. */
-#define MAX31856_TC_THRESHOLD_C_PER_LSB 0.0625f
+/* --- Fixed-point scales (datasheet register bit-weight tables) ---
+ * MAX31856_TC_THRESHOLD_C_PER_LSB, MAX31856_CJ_TEMP_C_PER_LSB and
+ * MAX31856_TC_TEMP_C_PER_LSB live in max31856_codec.h (included above),
+ * alongside the decode/encode functions that use them -- see that header for
+ * why the split. CJTO's offset scale below is not part of that codec (it is
+ * a plain int8, not one of the three fixed-point conversions moved out) so it
+ * stays here with everything else this header owns. */
 /* CJTO: sign + 2^2..2^-4 => 1/16 degC per LSB, so +-8 degC of range. */
 #define MAX31856_CJ_OFFSET_C_PER_LSB    0.0625f
 #define MAX31856_CJ_OFFSET_MIN_C        (-8.0f)
 #define MAX31856_CJ_OFFSET_MAX_C        (7.9375f)
-/* CJTH/CJTL: sign + 2^6..2^-6, low two bits hard 0 => 1/256 degC per raw LSB
- * of the combined 16-bit word. */
-#define MAX31856_CJ_TEMP_C_PER_LSB      (1.0f / 256.0f)
-/* LTCBH/M/L: sign + 2^10..2^-7 in the top 19 bits of a 24-bit word, low 5 bits
- * unused => 1/4096 degC per raw LSB of the combined 24-bit word (equivalently
- * 0.0078125 degC per 19-bit code). */
-#define MAX31856_TC_TEMP_C_PER_LSB      (1.0f / 4096.0f)
 
 /* Optional hook for observing ~DRDY, which on this board is an SX1509 pin and
  * so is unreachable from this driver (see the file header). Return true if

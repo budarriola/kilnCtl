@@ -184,6 +184,30 @@ touches NVS itself). `POST /api/autotune/abort` works at any point; the
 engine also self-aborts on a guard trip or on hitting the 4h budget without
 a fittable trace.
 
+**Guard coverage during STEPPING with no `max_temp_c` configured (fixed
+2026-08-24).** The step test has no real setpoint, so `thermal_guard`'s
+`setpoint_c` is synthesized each tick: the zone's `max_temp_c` ceiling when
+one is configured, else `raw_c + STEP_TEST_GUARD_HEADROOM_C` (a fixed 5 °C
+headroom, not a real target — guard 1's math only ever reads the *sign* of
+`setpoint_c - measurement_c`). Before the fix, the no-ceiling fallback was
+bare `raw_c`, which pinned `error` at exactly 0.0 every tick and silently
+disabled guard 1 (HEATING_FAILED) for the whole run — a dead element or a
+flat thermocouple went undetected for up to 4h with duty legitimately on.
+Guard 2 (WRONG_DIRECTION) was not actually broken by this (its math never
+reads `setpoint_c`'s magnitude, only real measurement deltas), but it is
+narrower than guard 1 and was the only thing running in that state, so a
+stalled-but-not-yet-falling reading still passed. The fix keeps `error`
+strictly positive so guard 1 — which already subsumes guard 2's case —
+stays live regardless of whether a ceiling is configured. Guard 4 (DRIFT)
+is unaffected by the fix either way: without a real setpoint it was already
+only a best-effort check (dormant unless the zone happens to settle within
+`DRIFT_HYSTERESIS_C` of the ceiling), and `autotune_engine_run()` logs a
+WARN at start when no ceiling is configured, naming guard 4 specifically, so
+this remaining limitation is visible rather than silent. See
+`autotune_engine.c`'s `STEP_TEST_GUARD_HEADROOM_C` comment and its use site
+for the full reasoning, and `test_autotune_engine_prestart.c`'s
+STEPPING-loop tests for the regression coverage.
+
 Since 2026-08-12 acceptance also persists the **model**, not just the gains:
 `zones_config_set_model()` stores `{K, tau, L}` per zone next to the gains,
 because the feedforward term (6A.2) is computed from `K` and `tau` and the

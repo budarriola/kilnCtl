@@ -49,6 +49,17 @@ static const char *TAG = "autotune_engine";
 #define SETTLE_CHECK_BAND_C 1.0f
 #define MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK 12u /* don't even look until well past the dead-time region */
 
+/* Step-test guards 1/2 fallback headroom -- see the thermal_guard_input_t
+ * comment at its use site below for the full defect this fixes. Any strictly
+ * positive value works for guard 1: its "did it rise enough" math
+ * (thermal_guard.c) never reads the *size* of setpoint_c - measurement_c,
+ * only its sign, so this doesn't need to resemble a real target temperature.
+ * Kept comfortably under thermal_guard.c's DRIFT_HYSTERESIS_C (25.0f) so
+ * guard 4 reads this fallback the same way it always has when no ceiling is
+ * configured -- "at setpoint" (abs_error <= hysteresis), i.e. still dormant,
+ * not a new false trip. */
+#define STEP_TEST_GUARD_HEADROOM_C 5.0f
+
 typedef struct {
     kiln_io_t *io;
     MAX31856BusClass *thermo_bus;
@@ -466,6 +477,284 @@ static void finalize_relay_fit(void)
              (double)s_at.proposed_gains.kd);
 }
 
+/* One tick of the SETTLING/STEPPING/RELAY_APPROACH/RELAY_CYCLING state
+ * machine, factored out of task_entry() so host tests can drive it
+ * deterministically (see test_autotune_engine_prestart.c's STEPPING-loop
+ * guard-coverage tests) without a real FreeRTOS task or vTaskDelay(). Caller
+ * must already hold s_at.lock and have confirmed state_is_running(s_at.state)
+ * -- this function never takes or gives the lock itself, matching
+ * task_entry()'s existing discipline; every early-return below stands in for
+ * that loop's "xSemaphoreGive(s_at.lock); continue;" pairs. */
+static void autotune_engine_tick_locked(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    uint32_t dt_ms = ticks_to_ms(now - s_at.prev_tick);
+    if (dt_ms == 0) dt_ms = AUTOTUNE_ENGINE_TICK_MS;
+    s_at.prev_tick = now;
+
+    float raw_c = NAN;
+    bool sensor_ok = false;
+    /* TODO.md 6A.5(b): every channel's reading is captured this tick,
+     * not just the zone under test -- MAX31856_read_all() already reads
+     * the whole bus, so logging every zone's response is free (no extra
+     * SPI traffic).
+     *
+     * ch_raw_c/ch_ok are indexed by physical MAX31856 channel, exactly
+     * like profile_executor.c's identical split (TODO.md 10.8). Every
+     * OTHER slot of raw_by_zone/ok_by_zone below still means what it
+     * always has here -- "physical channel z's own reading", because the
+     * coupling-matrix cross-fit in finalize_fit() is unchanged 6A.5(b)
+     * scope and still assumes channel i == zone i for the peer zones.
+     * Only index s_at.zone_index -- the zone actually under test, whose
+     * baseline/trace/actual_c this tick's control math reads -- is
+     * overwritten with thermo_combine()'s result across every channel
+     * that zone's thermo_mask names, same pattern profile_executor.c's
+     * control tick uses for every active zone. TODO.md 10.8 called this
+     * file out by name as the one read path a previous pass left on the
+     * legacy single-channel mapping. */
+    float raw_by_zone[MAX31856_CHANNEL_COUNT];
+    bool  ok_by_zone[MAX31856_CHANNEL_COUNT];
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        raw_by_zone[z] = NAN;
+        ok_by_zone[z] = false;
+    }
+    if (sim_backend_enabled() || (s_at.thermo_bus && s_at.thermo_bus->initialized)) {
+        float ch_raw_c[MAX31856_CHANNEL_COUNT];
+        bool  ch_ok[MAX31856_CHANNEL_COUNT];
+        for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+            ch_raw_c[z] = NAN;
+            ch_ok[z] = false;
+        }
+        MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
+        size_t count = 0;
+        if (sim_backend_enabled()) {
+            sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
+        } else {
+            MAX31856_read_all(s_at.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
+        }
+        for (size_t i = 0; i < count; i++) {
+            uint8_t ch = readings[i].channel;
+            if (ch >= MAX31856_CHANNEL_COUNT) continue;
+            bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
+            bool ok = !readings[i].spi_failed && !isnan(readings[i].tc_temperature_c) && !fault_bits_bad;
+            ch_raw_c[ch] = readings[i].tc_temperature_c;
+            ch_ok[ch] = ok;
+        }
+        /* Peer zones (finalize_fit()'s cross-gain rows): legacy
+         * channel-equals-zone mapping, unchanged from before 10.8. */
+        for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+            raw_by_zone[z] = ch_raw_c[z];
+            ok_by_zone[z] = ch_ok[z];
+        }
+        /* The zone actually under test: its real thermo_mask, combined,
+         * is what drives the step, the guards, and the fit. */
+        uint8_t tmask = 0;
+        zones_config_get_thermo_mask(s_at.zone_index, &tmask);
+        bool combined_valid = false;
+        float combined_c =
+            thermo_combine(ch_raw_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask, &combined_valid);
+        raw_by_zone[s_at.zone_index] = combined_c;
+        ok_by_zone[s_at.zone_index] = combined_valid;
+        raw_c = combined_c;
+        sensor_ok = combined_valid;
+    }
+    s_at.actual_valid = sensor_ok;
+    s_at.actual_c = sensor_ok ? zones_config_apply_cal(s_at.zone_index, raw_c) : NAN;
+
+    /* The relay law has to run in BOTH of its states: the approach is the
+     * same law, just not yet recorded. Its edge report is consumed by the
+     * phase logic further down, after the guards have had their say --
+     * nothing about a cycle boundary may pre-empt a guard trip. */
+    bool relay_edge = false;
+    float want_duty;
+    if (s_at.method == AUTOTUNE_METHOD_RELAY) {
+        want_duty = relay_law_tick(sensor_ok, s_at.actual_c, &relay_edge);
+    } else {
+        want_duty = (s_at.state == AUTOTUNE_ENGINE_SETTLING) ? 0.0f : s_at.step_duty;
+    }
+    bool want_relay_on = heater_output_duty(&s_at.heater_state, &s_at.heater_cfg, sensor_ok ? want_duty : 0.0f, dt_ms);
+    apply_relay(want_relay_on);
+    s_at.duty = want_relay_on ? want_duty : 0.0f;
+
+    thermal_guard_input_t gin = {
+        .sensor_ok = sensor_ok,
+        .measurement_c = raw_c,
+        /* A relay run has a real setpoint, so guard 4 (drift after
+         * settling) becomes a genuine check that the oscillation stayed
+         * around the target instead of walking away from it -- the step
+         * test has no setpoint and can only feed the guard its ceiling.
+         * The comparison is raw-vs-calibrated by exactly the zone's
+         * calibration offset, which is worth far less than guard 4's 25degC
+         * band, and guards must keep seeing raw readings (TODO.md 6A.7:
+         * a calibration offset may never hide a sensor from a guard).
+         *
+         * When no ceiling is configured (max_temp_c == 0, the default for a
+         * zone the operator has never set one on -- readiness_http.c's
+         * non-blocking "guard_max_temp" item), this used to fall back to
+         * raw_c itself. That made setpoint_c == measurement_c on every tick,
+         * pinning thermal_guard's `error` at exactly 0.0f for the whole run.
+         * error > 0.0f is guard 1's (heating-failed / no-progress) branch
+         * selector, so with error permanently at 0 guard 1 never ran at
+         * all -- a dead element or a flat-but-plausible thermocouple could
+         * duty-cycle for the full 4h budget undetected. Guard 2
+         * (wrong-direction) isn't actually broken by this -- its own math
+         * (thermal_guard.c) only ever reads real measurement deltas across
+         * the progress window, never setpoint_c's magnitude -- but pinning
+         * error at exactly 0 permanently steers every window into guard 2's
+         * branch instead of guard 1's, so a stalled-but-not-yet-falling zone
+         * (delta ~= 0, the common dead-element case) still passed guard 2's
+         * "not falling faster than threshold" test with nothing to catch it
+         * on the way through.
+         *
+         * Fix: fall back to raw_c + a fixed positive headroom instead of
+         * bare raw_c. That keeps error strictly positive every tick, which
+         * keeps every progress window on guard 1's branch -- the guard whose
+         * job this actually is, since "delta < expected-rise" already
+         * catches both a flat AND a falling reading, guard 2's narrower
+         * "falling" case included. This was chosen over refusing to start a
+         * step test without a configured ceiling (which would contradict
+         * autotune_engine_run_relay()'s own comment that no-ceiling is
+         * "survivable for a step test the operator watches climb" -- that
+         * reasoning covers guard 5, not guards 1/2, but a step test's open
+         * loop and short-ish default budget make an outright refusal more
+         * restrictive than this bug warrants) and over silently disabling
+         * guards 1/2 with a logged flag (unnecessary now that they are
+         * genuinely covered). Guard 4 keeps behaving exactly as before in
+         * this configuration -- see STEP_TEST_GUARD_HEADROOM_C's own comment. */
+        .setpoint_c = (s_at.method == AUTOTUNE_METHOD_RELAY)
+                          ? s_at.relay_setpoint_c
+                          : (s_at.guard_cfg.max_temp_c > 0.0f ? s_at.guard_cfg.max_temp_c
+                                                               : raw_c + STEP_TEST_GUARD_HEADROOM_C),
+        .commanded_duty = want_relay_on ? want_duty : 0.0f,
+        .dt_s = (float)dt_ms / 1000.0f,
+    };
+    if (thermal_guard_tick(&s_at.guard_state, &s_at.guard_cfg, &gin)) {
+        escalate_and_abort(s_at.guard_state.reason, s_at.guard_state.detail);
+        return;
+    }
+
+    s_at.elapsed_s = ticks_to_s(now - s_at.phase_start_tick);
+
+    if (s_at.state == AUTOTUNE_ENGINE_SETTLING) {
+        if (s_at.elapsed_s >= AUTOTUNE_ENGINE_SETTLE_S) {
+            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+                s_at.zone_baseline_valid[z] = ok_by_zone[z];
+                s_at.zone_baseline_c[z] = ok_by_zone[z] ? zones_config_apply_cal(z, raw_by_zone[z]) : 0.0f;
+                s_at.zone_last_valid_c[z] = s_at.zone_baseline_c[z];
+            }
+            s_at.state = AUTOTUNE_ENGINE_STEPPING;
+            s_at.phase_start_tick = now;
+            s_at.last_sample_tick = now;
+            s_at.trace_count = 0;
+            heater_output_reset(&s_at.heater_state);
+            ESP_LOGI(TAG, "autotune zone %u: settled at %.1fC, stepping duty to %.2f", s_at.zone_index,
+                     (double)s_at.zone_baseline_c[s_at.zone_index], (double)s_at.step_duty);
+        }
+    } else if (s_at.state == AUTOTUNE_ENGINE_STEPPING) {
+        if (s_at.elapsed_s >= AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S) {
+            finalize_fit(); /* attempt a fit on whatever we have; ABORTED if it doesn't fit */
+            return;
+        }
+        if (ticks_to_s(now - s_at.last_sample_tick) >= AUTOTUNE_ENGINE_SAMPLE_PERIOD_S) {
+            s_at.last_sample_tick = now;
+            /* The shared index only advances on the tested zone's own valid
+             * sample -- other zones carry forward zone_last_valid_c on a
+             * momentary bad read of their own, so a single dropped reading
+             * on a non-tested zone can't shift its trace out of alignment
+             * with the tested zone's t_s. */
+            if (s_at.actual_valid) {
+                record_trace_sample(raw_by_zone, ok_by_zone);
+            }
+
+            if (s_at.trace_count >= MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK &&
+                s_at.trace_count >= SETTLE_CHECK_SAMPLES) {
+                float lo = 1e9f, hi = -1e9f;
+                for (uint16_t i = s_at.trace_count - SETTLE_CHECK_SAMPLES; i < s_at.trace_count; i++) {
+                    int16_t dc = s_at.zone_trace[s_at.zone_index][i];
+                    if (dc == AUTOTUNE_TRACE_TEMP_INVALID) continue;
+                    float v = (float)dc / 10.0f;
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+                if (hi - lo <= SETTLE_CHECK_BAND_C) {
+                    finalize_fit();
+                    return;
+                }
+            }
+        }
+    } else if (s_at.state == AUTOTUNE_ENGINE_RELAY_APPROACH) {
+        /* Nothing is recorded here. The kiln is climbing (or falling) to
+         * the setpoint under the relay's high (or low) branch, and that
+         * transit is a step response at best and a half-cycle of nothing
+         * at worst -- feeding it to pid_autotune_fit_relay() would put a
+         * long monotonic ramp in the head of the trace, which both wastes
+         * the fixed-size buffer and drags the midline the crossing
+         * detector slices cycles against away from the oscillation's own
+         * centre. Recording starts at the first high->low edge instead:
+         * the first moment the plant is provably at temperature and the
+         * relay's phase is known. */
+        if (s_at.elapsed_s >= AUTOTUNE_RELAY_APPROACH_MAX_S) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "did not reach %.0fC within %us -- setpoint out of reach",
+                     (double)s_at.relay_setpoint_c, (unsigned)AUTOTUNE_RELAY_APPROACH_MAX_S);
+            abort_locked(msg);
+            ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
+            return;
+        }
+        if (relay_edge) {
+            s_at.state = AUTOTUNE_ENGINE_RELAY_CYCLING;
+            s_at.phase_start_tick = now;   /* the cycling budget is its own, not the approach's leftovers */
+            s_at.last_sample_tick = now;
+            s_at.trace_count = 0;
+            s_at.relay_cycles_seen = 0;
+            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+                s_at.zone_last_valid_c[z] = ok_by_zone[z] ? zones_config_apply_cal(z, raw_by_zone[z]) : NAN;
+            }
+            ESP_LOGI(TAG, "autotune zone %u: reached %.1fC, relay cycling around %.1fC (d=%.2f h=%.1fC)",
+                     s_at.zone_index, (double)s_at.actual_c, (double)s_at.relay_setpoint_c,
+                     (double)s_at.relay_d, (double)s_at.relay_h);
+        }
+    } else if (s_at.state == AUTOTUNE_ENGINE_RELAY_CYCLING) {
+        /* Edges are counted before the budget check so a run that
+         * completes its last cycle on the same tick the budget expires is
+         * treated as the success it is. */
+        if (relay_edge && s_at.relay_cycles_seen < UINT16_MAX) {
+            s_at.relay_cycles_seen++;
+            ESP_LOGI(TAG, "autotune zone %u: relay cycle %u of %u complete", s_at.zone_index,
+                     (unsigned)s_at.relay_cycles_seen, (unsigned)AUTOTUNE_RELAY_TARGET_CYCLES);
+        }
+
+        if (ticks_to_s(now - s_at.last_sample_tick) >= AUTOTUNE_ENGINE_SAMPLE_PERIOD_S) {
+            s_at.last_sample_tick = now;
+            /* Same rule as the step path: the shared index only advances on
+             * a valid reading of the tested zone, so its row never contains
+             * a hole. For a relay run that also protects Tu, since t_s is
+             * implicit in the sample index -- a recorded gap would show up
+             * as a shortened period rather than as missing data. A dropout
+             * long enough to matter trips guard 6 and ends the run anyway. */
+            if (s_at.actual_valid) {
+                record_trace_sample(raw_by_zone, ok_by_zone);
+            }
+        }
+
+        /* Enough cycles, or the trace buffer is full (which at 10s
+         * sampling is the 4h budget by another name) -- fit. */
+        if (s_at.relay_cycles_seen >= AUTOTUNE_RELAY_TARGET_CYCLES ||
+            s_at.trace_count >= AUTOTUNE_ENGINE_MAX_SAMPLES ||
+            s_at.elapsed_s >= AUTOTUNE_RELAY_CYCLE_MAX_S) {
+            /* On budget expiry this still attempts the fit rather than
+             * aborting outright, exactly as the step path does: the fit is
+             * the thing that decides whether the data is usable, and
+             * pid_autotune_fit_relay() refuses a trace that never settled
+             * into a limit cycle. Either way finalize_relay_fit() leaves
+             * the relays off -- DONE with a proposal, or ABORTED with the
+             * fitter's own reason. */
+            finalize_relay_fit();
+            return;
+        }
+    }
+}
+
 static void task_entry(void *arg)
 {
     (void)arg;
@@ -478,242 +767,7 @@ static void task_entry(void *arg)
             continue;
         }
 
-        TickType_t now = xTaskGetTickCount();
-        uint32_t dt_ms = ticks_to_ms(now - s_at.prev_tick);
-        if (dt_ms == 0) dt_ms = AUTOTUNE_ENGINE_TICK_MS;
-        s_at.prev_tick = now;
-
-        float raw_c = NAN;
-        bool sensor_ok = false;
-        /* TODO.md 6A.5(b): every channel's reading is captured this tick,
-         * not just the zone under test -- MAX31856_read_all() already reads
-         * the whole bus, so logging every zone's response is free (no extra
-         * SPI traffic).
-         *
-         * ch_raw_c/ch_ok are indexed by physical MAX31856 channel, exactly
-         * like profile_executor.c's identical split (TODO.md 10.8). Every
-         * OTHER slot of raw_by_zone/ok_by_zone below still means what it
-         * always has here -- "physical channel z's own reading", because the
-         * coupling-matrix cross-fit in finalize_fit() is unchanged 6A.5(b)
-         * scope and still assumes channel i == zone i for the peer zones.
-         * Only index s_at.zone_index -- the zone actually under test, whose
-         * baseline/trace/actual_c this tick's control math reads -- is
-         * overwritten with thermo_combine()'s result across every channel
-         * that zone's thermo_mask names, same pattern profile_executor.c's
-         * control tick uses for every active zone. TODO.md 10.8 called this
-         * file out by name as the one read path a previous pass left on the
-         * legacy single-channel mapping. */
-        float raw_by_zone[MAX31856_CHANNEL_COUNT];
-        bool  ok_by_zone[MAX31856_CHANNEL_COUNT];
-        for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-            raw_by_zone[z] = NAN;
-            ok_by_zone[z] = false;
-        }
-        if (sim_backend_enabled() || (s_at.thermo_bus && s_at.thermo_bus->initialized)) {
-            float ch_raw_c[MAX31856_CHANNEL_COUNT];
-            bool  ch_ok[MAX31856_CHANNEL_COUNT];
-            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-                ch_raw_c[z] = NAN;
-                ch_ok[z] = false;
-            }
-            MAX31856Reading readings[MAX31856_CHANNEL_COUNT];
-            size_t count = 0;
-            if (sim_backend_enabled()) {
-                sim_backend_read_all(readings, MAX31856_CHANNEL_COUNT, &count);
-            } else {
-                MAX31856_read_all(s_at.thermo_bus, readings, MAX31856_CHANNEL_COUNT, &count);
-            }
-            for (size_t i = 0; i < count; i++) {
-                uint8_t ch = readings[i].channel;
-                if (ch >= MAX31856_CHANNEL_COUNT) continue;
-                bool fault_bits_bad = (readings[i].fault_status & (0x01u | 0x02u | 0x40u)) != 0;
-                bool ok = !readings[i].spi_failed && !isnan(readings[i].tc_temperature_c) && !fault_bits_bad;
-                ch_raw_c[ch] = readings[i].tc_temperature_c;
-                ch_ok[ch] = ok;
-            }
-            /* Peer zones (finalize_fit()'s cross-gain rows): legacy
-             * channel-equals-zone mapping, unchanged from before 10.8. */
-            for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-                raw_by_zone[z] = ch_raw_c[z];
-                ok_by_zone[z] = ch_ok[z];
-            }
-            /* The zone actually under test: its real thermo_mask, combined,
-             * is what drives the step, the guards, and the fit. */
-            uint8_t tmask = 0;
-            zones_config_get_thermo_mask(s_at.zone_index, &tmask);
-            bool combined_valid = false;
-            float combined_c =
-                thermo_combine(ch_raw_c, ch_ok, MAX31856_CHANNEL_COUNT, tmask, &combined_valid);
-            raw_by_zone[s_at.zone_index] = combined_c;
-            ok_by_zone[s_at.zone_index] = combined_valid;
-            raw_c = combined_c;
-            sensor_ok = combined_valid;
-        }
-        s_at.actual_valid = sensor_ok;
-        s_at.actual_c = sensor_ok ? zones_config_apply_cal(s_at.zone_index, raw_c) : NAN;
-
-        /* The relay law has to run in BOTH of its states: the approach is the
-         * same law, just not yet recorded. Its edge report is consumed by the
-         * phase logic further down, after the guards have had their say --
-         * nothing about a cycle boundary may pre-empt a guard trip. */
-        bool relay_edge = false;
-        float want_duty;
-        if (s_at.method == AUTOTUNE_METHOD_RELAY) {
-            want_duty = relay_law_tick(sensor_ok, s_at.actual_c, &relay_edge);
-        } else {
-            want_duty = (s_at.state == AUTOTUNE_ENGINE_SETTLING) ? 0.0f : s_at.step_duty;
-        }
-        bool want_relay_on = heater_output_duty(&s_at.heater_state, &s_at.heater_cfg, sensor_ok ? want_duty : 0.0f, dt_ms);
-        apply_relay(want_relay_on);
-        s_at.duty = want_relay_on ? want_duty : 0.0f;
-
-        thermal_guard_input_t gin = {
-            .sensor_ok = sensor_ok,
-            .measurement_c = raw_c,
-            /* A relay run has a real setpoint, so guard 4 (drift after
-             * settling) becomes a genuine check that the oscillation stayed
-             * around the target instead of walking away from it -- the step
-             * test has no setpoint and can only feed the guard its ceiling.
-             * The comparison is raw-vs-calibrated by exactly the zone's
-             * calibration offset, which is worth far less than guard 4's 25degC
-             * band, and guards must keep seeing raw readings (TODO.md 6A.7:
-             * a calibration offset may never hide a sensor from a guard). */
-            .setpoint_c = (s_at.method == AUTOTUNE_METHOD_RELAY)
-                              ? s_at.relay_setpoint_c
-                              : (s_at.guard_cfg.max_temp_c > 0.0f ? s_at.guard_cfg.max_temp_c : raw_c),
-            .commanded_duty = want_relay_on ? want_duty : 0.0f,
-            .dt_s = (float)dt_ms / 1000.0f,
-        };
-        if (thermal_guard_tick(&s_at.guard_state, &s_at.guard_cfg, &gin)) {
-            escalate_and_abort(s_at.guard_state.reason, s_at.guard_state.detail);
-            xSemaphoreGive(s_at.lock);
-            continue;
-        }
-
-        s_at.elapsed_s = ticks_to_s(now - s_at.phase_start_tick);
-
-        if (s_at.state == AUTOTUNE_ENGINE_SETTLING) {
-            if (s_at.elapsed_s >= AUTOTUNE_ENGINE_SETTLE_S) {
-                for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-                    s_at.zone_baseline_valid[z] = ok_by_zone[z];
-                    s_at.zone_baseline_c[z] = ok_by_zone[z] ? zones_config_apply_cal(z, raw_by_zone[z]) : 0.0f;
-                    s_at.zone_last_valid_c[z] = s_at.zone_baseline_c[z];
-                }
-                s_at.state = AUTOTUNE_ENGINE_STEPPING;
-                s_at.phase_start_tick = now;
-                s_at.last_sample_tick = now;
-                s_at.trace_count = 0;
-                heater_output_reset(&s_at.heater_state);
-                ESP_LOGI(TAG, "autotune zone %u: settled at %.1fC, stepping duty to %.2f", s_at.zone_index,
-                         (double)s_at.zone_baseline_c[s_at.zone_index], (double)s_at.step_duty);
-            }
-        } else if (s_at.state == AUTOTUNE_ENGINE_STEPPING) {
-            if (s_at.elapsed_s >= AUTOTUNE_ENGINE_DEFAULT_MAX_DURATION_S) {
-                finalize_fit(); /* attempt a fit on whatever we have; ABORTED if it doesn't fit */
-                xSemaphoreGive(s_at.lock);
-                continue;
-            }
-            if (ticks_to_s(now - s_at.last_sample_tick) >= AUTOTUNE_ENGINE_SAMPLE_PERIOD_S) {
-                s_at.last_sample_tick = now;
-                /* The shared index only advances on the tested zone's own valid
-                 * sample -- other zones carry forward zone_last_valid_c on a
-                 * momentary bad read of their own, so a single dropped reading
-                 * on a non-tested zone can't shift its trace out of alignment
-                 * with the tested zone's t_s. */
-                if (s_at.actual_valid) {
-                    record_trace_sample(raw_by_zone, ok_by_zone);
-                }
-
-                if (s_at.trace_count >= MIN_STEPPING_SAMPLES_BEFORE_SETTLE_CHECK &&
-                    s_at.trace_count >= SETTLE_CHECK_SAMPLES) {
-                    float lo = 1e9f, hi = -1e9f;
-                    for (uint16_t i = s_at.trace_count - SETTLE_CHECK_SAMPLES; i < s_at.trace_count; i++) {
-                        int16_t dc = s_at.zone_trace[s_at.zone_index][i];
-                        if (dc == AUTOTUNE_TRACE_TEMP_INVALID) continue;
-                        float v = (float)dc / 10.0f;
-                        if (v < lo) lo = v;
-                        if (v > hi) hi = v;
-                    }
-                    if (hi - lo <= SETTLE_CHECK_BAND_C) {
-                        finalize_fit();
-                        xSemaphoreGive(s_at.lock);
-                        continue;
-                    }
-                }
-            }
-        } else if (s_at.state == AUTOTUNE_ENGINE_RELAY_APPROACH) {
-            /* Nothing is recorded here. The kiln is climbing (or falling) to
-             * the setpoint under the relay's high (or low) branch, and that
-             * transit is a step response at best and a half-cycle of nothing
-             * at worst -- feeding it to pid_autotune_fit_relay() would put a
-             * long monotonic ramp in the head of the trace, which both wastes
-             * the fixed-size buffer and drags the midline the crossing
-             * detector slices cycles against away from the oscillation's own
-             * centre. Recording starts at the first high->low edge instead:
-             * the first moment the plant is provably at temperature and the
-             * relay's phase is known. */
-            if (s_at.elapsed_s >= AUTOTUNE_RELAY_APPROACH_MAX_S) {
-                char msg[96];
-                snprintf(msg, sizeof(msg), "did not reach %.0fC within %us -- setpoint out of reach",
-                         (double)s_at.relay_setpoint_c, (unsigned)AUTOTUNE_RELAY_APPROACH_MAX_S);
-                abort_locked(msg);
-                ESP_LOGW(TAG, "autotune zone %u: %s", s_at.zone_index, s_at.abort_reason);
-                xSemaphoreGive(s_at.lock);
-                continue;
-            }
-            if (relay_edge) {
-                s_at.state = AUTOTUNE_ENGINE_RELAY_CYCLING;
-                s_at.phase_start_tick = now;   /* the cycling budget is its own, not the approach's leftovers */
-                s_at.last_sample_tick = now;
-                s_at.trace_count = 0;
-                s_at.relay_cycles_seen = 0;
-                for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
-                    s_at.zone_last_valid_c[z] = ok_by_zone[z] ? zones_config_apply_cal(z, raw_by_zone[z]) : NAN;
-                }
-                ESP_LOGI(TAG, "autotune zone %u: reached %.1fC, relay cycling around %.1fC (d=%.2f h=%.1fC)",
-                         s_at.zone_index, (double)s_at.actual_c, (double)s_at.relay_setpoint_c,
-                         (double)s_at.relay_d, (double)s_at.relay_h);
-            }
-        } else if (s_at.state == AUTOTUNE_ENGINE_RELAY_CYCLING) {
-            /* Edges are counted before the budget check so a run that
-             * completes its last cycle on the same tick the budget expires is
-             * treated as the success it is. */
-            if (relay_edge && s_at.relay_cycles_seen < UINT16_MAX) {
-                s_at.relay_cycles_seen++;
-                ESP_LOGI(TAG, "autotune zone %u: relay cycle %u of %u complete", s_at.zone_index,
-                         (unsigned)s_at.relay_cycles_seen, (unsigned)AUTOTUNE_RELAY_TARGET_CYCLES);
-            }
-
-            if (ticks_to_s(now - s_at.last_sample_tick) >= AUTOTUNE_ENGINE_SAMPLE_PERIOD_S) {
-                s_at.last_sample_tick = now;
-                /* Same rule as the step path: the shared index only advances on
-                 * a valid reading of the tested zone, so its row never contains
-                 * a hole. For a relay run that also protects Tu, since t_s is
-                 * implicit in the sample index -- a recorded gap would show up
-                 * as a shortened period rather than as missing data. A dropout
-                 * long enough to matter trips guard 6 and ends the run anyway. */
-                if (s_at.actual_valid) {
-                    record_trace_sample(raw_by_zone, ok_by_zone);
-                }
-            }
-
-            /* Enough cycles, or the trace buffer is full (which at 10s
-             * sampling is the 4h budget by another name) -- fit. */
-            if (s_at.relay_cycles_seen >= AUTOTUNE_RELAY_TARGET_CYCLES ||
-                s_at.trace_count >= AUTOTUNE_ENGINE_MAX_SAMPLES ||
-                s_at.elapsed_s >= AUTOTUNE_RELAY_CYCLE_MAX_S) {
-                /* On budget expiry this still attempts the fit rather than
-                 * aborting outright, exactly as the step path does: the fit is
-                 * the thing that decides whether the data is usable, and
-                 * pid_autotune_fit_relay() refuses a trace that never settled
-                 * into a limit cycle. Either way finalize_relay_fit() leaves
-                 * the relays off -- DONE with a proposal, or ABORTED with the
-                 * fitter's own reason. */
-                finalize_relay_fit();
-                xSemaphoreGive(s_at.lock);
-                continue;
-            }
-        }
+        autotune_engine_tick_locked();
 
         xSemaphoreGive(s_at.lock);
     }
@@ -947,10 +1001,22 @@ bool autotune_engine_run(uint8_t zone_index, float step_duty, char *err_msg, siz
     s_at.method = AUTOTUNE_METHOD_STEP;
     s_at.step_duty = step_duty;
     s_at.state = AUTOTUNE_ENGINE_SETTLING;
+    bool no_ceiling = !(s_at.guard_cfg.max_temp_c > 0.0f);
     xSemaphoreGive(s_at.lock);
 
     ESP_LOGI(TAG, "autotune zone %u starting: settling %us at duty 0 before stepping to %.2f", zone_index,
              AUTOTUNE_ENGINE_SETTLE_S, (double)step_duty);
+    if (no_ceiling) {
+        /* Not a refusal (see the guard-fallback comment at this run's
+         * thermal_guard_input_t construction) -- guards 1/2 stay fully
+         * covered without a ceiling. Guard 4 (drift near the ceiling) does
+         * not, though, and this is the one place that's ever surfaced: the
+         * failure mode must be visible, not just silently absorbed the way
+         * the old error==0 fallback used to hide it. */
+        ESP_LOGW(TAG, "autotune zone %u: no max_temp_c configured -- guard 4 (drift near ceiling) has "
+                      "nothing to compare against for this run; guards 1/2/5/6 are unaffected",
+                 zone_index);
+    }
     return true;
 }
 

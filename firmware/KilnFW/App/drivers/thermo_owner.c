@@ -9,15 +9,29 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "owner_slot_pool.h"
+
 static const char *TAG = "thermo_owner";
 
 #define THERMO_OWNER_QUEUE_LEN 8
-/* Same reasoning as kiln_io_owner.c's own KILN_IO_OWNER_WAIT_MS: how long a
- * producer waits for the owner task to answer once its command is queued,
- * not the owner task's own receive timeout (it has no periodic duty of its
- * own, so it blocks portMAX_DELAY on the queue itself). A producer that
+
+/* Same reasoning and same 2026-08-24 history as kiln_io_owner.c's own
+ * KILN_IO_OWNER_WAIT_MS -- see that file's comment for the full story
+ * (this file had the identical stack-lifetime bug, fixed the identical way,
+ * via owner_slot_pool.h). How long a producer waits for the owner task to
+ * answer once its command is queued, not the owner task's own receive
+ * timeout (it has no periodic duty of its own, so it blocks portMAX_DELAY
+ * on the queue itself). Kept at 200ms: giving up here can no longer corrupt
+ * memory, and 200ms is still the right responsiveness budget for the same
+ * callers kiln_io_owner.c names (an HTTP handler, a watchdog-fed control
+ * task) against MAX31856's own SPI transaction timeouts. A producer that
  * times out treats the result exactly like an SPI failure -- fail closed. */
 #define THERMO_OWNER_WAIT_MS 200
+
+/* Slot pool sized to the command queue depth -- see kiln_io_owner.c's
+ * identical KILN_IO_OWNER_SLOT_COUNT comment; the same "can never exceed
+ * this many commands in flight" argument applies here unchanged. */
+#define THERMO_OWNER_SLOT_COUNT THERMO_OWNER_QUEUE_LEN
 
 typedef enum {
     CMD_CONFIG_CHANNEL,
@@ -48,8 +62,10 @@ typedef struct {
 
 typedef struct {
     cmd_type_t type;
-    owner_result_t *result; /* caller-owned, filled by the owner task */
-    SemaphoreHandle_t done; /* caller-owned binary semaphore, given last */
+    int slot; /* index into s_slots[] -- module-owned result storage and
+               * semaphore, assigned by post_and_wait() via
+               * owner_slot_pool_alloc(). Never a pointer into the caller's
+               * stack -- see owner_slot_pool.h's top comment for why. */
     union {
         struct { uint8_t channel; uint8_t tc_type; uint8_t avg_mode; bool filter_50hz;
                  bool auto_convert; } config_channel;
@@ -66,6 +82,18 @@ typedef struct {
 
 static QueueHandle_t s_cmd_queue;
 static MAX31856BusClass *s_bus;
+
+/* ---- Module-owned result-slot pool -- see owner_slot_pool.h's top comment
+ * and kiln_io_owner.c's identical pool for the full invariant. ---- */
+typedef struct {
+    owner_result_t result;
+    StaticSemaphore_t sem_storage;
+    SemaphoreHandle_t sem;
+} owner_slot_t;
+
+static owner_slot_t s_slots[THERMO_OWNER_SLOT_COUNT];
+static uint8_t s_slot_refcount[THERMO_OWNER_SLOT_COUNT];
+static SemaphoreHandle_t s_slot_lock;
 
 /* ---- Owner task -- the only code that ever calls MAX31856_*() below ---- */
 
@@ -165,11 +193,23 @@ static void owner_task(void *arg)
         }
 
 answer:
-        if (cmd.result) {
-            *cmd.result = r;
-        }
-        if (cmd.done) {
-            xSemaphoreGive(cmd.done);
+        /* Write into the module-owned slot (never the caller's stack -- see
+         * owner_slot_pool.h) and give its semaphore first, exactly as
+         * before; only what happens AFTER differs -- see kiln_io_owner.c's
+         * identical owner_task() tail for the full order-independence
+         * argument, unchanged here. */
+        {
+            owner_slot_t *slot = &s_slots[cmd.slot];
+            slot->result = r;
+            xSemaphoreGive(slot->sem);
+
+            xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+            bool free_now = owner_slot_pool_release(s_slot_refcount, THERMO_OWNER_SLOT_COUNT, cmd.slot);
+            if (free_now) {
+                xSemaphoreTake(slot->sem, 0); /* drain a Give() nobody ever collected */
+                memset(&slot->result, 0, sizeof(slot->result));
+            }
+            xSemaphoreGive(s_slot_lock);
         }
     }
 }
@@ -181,6 +221,19 @@ esp_err_t thermo_owner_start(MAX31856BusClass *bus)
     }
 
     s_bus = bus;
+
+    s_slot_lock = xSemaphoreCreateMutex();
+    if (!s_slot_lock) {
+        return ESP_ERR_NO_MEM;
+    }
+    for (size_t i = 0; i < THERMO_OWNER_SLOT_COUNT; i++) {
+        s_slots[i].sem = xSemaphoreCreateBinaryStatic(&s_slots[i].sem_storage);
+        if (!s_slots[i].sem) {
+            vSemaphoreDelete(s_slot_lock);
+            s_slot_lock = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     s_cmd_queue = xQueueCreate(THERMO_OWNER_QUEUE_LEN, sizeof(owner_cmd_t));
     if (!s_cmd_queue) {
@@ -197,8 +250,13 @@ esp_err_t thermo_owner_start(MAX31856BusClass *bus)
     return ESP_OK;
 }
 
-/* ---- Generic post-and-wait, identical shape to kiln_io_owner.c's ---- */
-
+/* ---- Generic post-and-wait, identical shape to kiln_io_owner.c's --
+ *
+ * INVARIANT (owner_slot_pool.h): the result this function reads on success,
+ * and the semaphore it waits on, live in s_slots[] -- module-owned static
+ * storage, never this function's own stack frame. Giving up on timeout
+ * therefore cannot destroy anything the owner task still holds a pointer
+ * to. ---- */
 static bool post_and_wait(owner_cmd_t *cmd, owner_result_t *result)
 {
     memset(result, 0, sizeof(*result));
@@ -208,29 +266,41 @@ static bool post_and_wait(owner_cmd_t *cmd, owner_result_t *result)
         return false;
     }
 
-    /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
-     * and i2c_owner_transfer() (2026-08-20): removes this owner's
-     * contribution to the per-call internal-SRAM churn that was starving
-     * Wi-Fi AP client handshakes. */
-    StaticSemaphore_t done_storage;
-    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
-    if (!done) {
+    xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+    int idx = owner_slot_pool_alloc(s_slot_refcount, THERMO_OWNER_SLOT_COUNT);
+    xSemaphoreGive(s_slot_lock);
+    if (idx < 0) {
+        ESP_LOGW(TAG, "owner slot pool exhausted -- treating as failed");
         return false;
     }
-
-    cmd->result = result;
-    cmd->done = done;
+    cmd->slot = idx;
 
     bool ok = false;
     if (xQueueSend(s_cmd_queue, cmd, 0) == pdTRUE) {
-        ok = xSemaphoreTake(done, pdMS_TO_TICKS(THERMO_OWNER_WAIT_MS)) == pdTRUE;
-        if (!ok) {
+        ok = xSemaphoreTake(s_slots[idx].sem, pdMS_TO_TICKS(THERMO_OWNER_WAIT_MS)) == pdTRUE;
+        if (ok) {
+            *result = s_slots[idx].result; /* safe: read before this side's own release below */
+        } else {
             ESP_LOGW(TAG, "owner task did not answer within %ums -- treating as failed",
                      (unsigned)THERMO_OWNER_WAIT_MS);
         }
+
+        xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+        bool free_now = owner_slot_pool_release(s_slot_refcount, THERMO_OWNER_SLOT_COUNT, idx);
+        if (free_now) {
+            xSemaphoreTake(s_slots[idx].sem, 0); /* drain a Give() nobody ever collected */
+            memset(&s_slots[idx].result, 0, sizeof(s_slots[idx].result));
+        }
+        xSemaphoreGive(s_slot_lock);
+    } else {
+        /* Never queued -- release both halves ourselves right now, same
+         * reasoning as kiln_io_owner.c's identical branch. */
+        xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+        owner_slot_pool_release(s_slot_refcount, THERMO_OWNER_SLOT_COUNT, idx);
+        owner_slot_pool_release(s_slot_refcount, THERMO_OWNER_SLOT_COUNT, idx);
+        xSemaphoreGive(s_slot_lock);
     }
 
-    vSemaphoreDelete(done);
     return ok;
 }
 

@@ -9,18 +9,47 @@
 #include "freertos/task.h"
 
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
+#include "owner_slot_pool.h"
 #include "relay_authority.h"
 
 static const char *TAG = "kiln_io_owner";
 
 #define KILN_IO_OWNER_QUEUE_LEN 8
+
 /* How long a producer waits for the owner task to answer once its command
  * is queued -- not the owner task's own receive timeout (it has no other
- * periodic duty, so it blocks portMAX_DELAY on the queue itself). Generous
- * against a slow I2C bus stall; a producer that times out treats the
- * result exactly like an I2C failure -- fail closed, never "assume it
- * worked" (this header's own doc comment). */
+ * periodic duty, so it blocks portMAX_DELAY on the queue itself).
+ *
+ * 2026-08-24: this used to be commented "generous against a slow I2C bus
+ * stall", which was backwards -- SX1509.c's own SX1509_LOCK_TIMEOUT_MS is
+ * 6000ms (SX1509_TIMEOUT_MS * (I2C_WRITE_RETRY_ATTEMPTS + 1)), thirty times
+ * this value, so a stalled bus was exactly the condition this timeout could
+ * not survive. Kept at 200ms anyway, now that giving up here can no longer
+ * corrupt memory (see owner_slot_pool.h and post_and_wait() below) --
+ * 200ms is chosen on responsiveness grounds instead:
+ *   - rules_task.c's control loop ticks every RULES_TASK_TICK_MS (1000ms)
+ *     and force-drives relays off if its OWN tick goes stale for
+ *     RULES_WATCHDOG_STALE_MS (5000ms, rules_task.c). A 200ms fail-fast
+ *     keeps a single stalled-bus tick well under a fifth of that budget;
+ *     6000ms would blow through it on the very first stall.
+ *   - the RTC watchdog's own timeout (RTC_WATCHDOG_TIMEOUT_MS, rtc_watchdog.h)
+ *     is 20000ms -- 200ms is noise against it either way, but 6000ms spent
+ *     blocked inside a single HTTP handler call is not.
+ *   - a dashboard_http.c /api/relay request blocking for 200ms is
+ *     imperceptible; blocking for 6000ms would read as a hung UI.
+ * A producer that times out still treats the result exactly like an I2C
+ * failure -- fail closed, never "assume it worked" (this header's own doc
+ * comment) -- that behavior is unchanged, only what a timeout is now safe
+ * to mean has changed. */
 #define KILN_IO_OWNER_WAIT_MS 200
+
+/* Slot pool sized to the command queue depth: the queue can never hold more
+ * than KILN_IO_OWNER_QUEUE_LEN commands in flight at once (post_and_wait()
+ * only ever enqueues one at a time per call, and a non-blocking xQueueSend
+ * fails outright once the queue is full), so this can never be exhausted by
+ * legitimate concurrent traffic -- see owner_slot_pool.h's alloc() doc
+ * comment. */
+#define KILN_IO_OWNER_SLOT_COUNT KILN_IO_OWNER_QUEUE_LEN
 
 typedef enum {
     CMD_SET_RELAY,
@@ -58,8 +87,10 @@ typedef struct {
 
 typedef struct {
     cmd_type_t type;
-    owner_result_t *result; /* caller-owned, filled by the owner task */
-    SemaphoreHandle_t done; /* caller-owned binary semaphore, given last */
+    int slot; /* index into s_slots[] -- module-owned result storage and
+               * semaphore, assigned by post_and_wait() via
+               * owner_slot_pool_alloc(). Never a pointer into the caller's
+               * stack -- see owner_slot_pool.h's top comment for why. */
     union {
         struct { uint8_t relay; bool on; } set_relay;
         struct { uint8_t mask, value; } set_relay_mask;
@@ -79,6 +110,23 @@ typedef struct {
 static QueueHandle_t s_cmd_queue;
 static kiln_io_t *s_io;
 static SafetyLinkClass *s_safety;
+
+/* ---- Module-owned result-slot pool -- see owner_slot_pool.h's top comment
+ * for the full invariant and why this replaced a per-call stack-allocated
+ * result/semaphore pair. Storage is `static`, so it is never freed and
+ * never means something else after a client gives up -- only WHICH command
+ * currently owns a slot changes, tracked by s_slot_refcount[] via
+ * owner_slot_pool_alloc()/_release(), both always called with s_slot_lock
+ * held. ---- */
+typedef struct {
+    owner_result_t result;
+    StaticSemaphore_t sem_storage;
+    SemaphoreHandle_t sem;
+} owner_slot_t;
+
+static owner_slot_t s_slots[KILN_IO_OWNER_SLOT_COUNT];
+static uint8_t s_slot_refcount[KILN_IO_OWNER_SLOT_COUNT];
+static SemaphoreHandle_t s_slot_lock;
 
 /* ---- Gate logic -- the one place these checks live now (this header's
  * top comment). Ported from uart_bridge.c's io_relay_on_blocked()/
@@ -315,12 +363,33 @@ static void owner_task(void *arg)
         }
         }
 
-        if (cmd.result) {
-            *cmd.result = r;
+        /* Write into the module-owned slot (never the caller's stack -- see
+         * owner_slot_pool.h) and give its semaphore first, exactly as
+         * before; only what happens AFTER differs. */
+        owner_slot_t *slot = &s_slots[cmd.slot];
+        slot->result = r;
+        xSemaphoreGive(slot->sem);
+
+        /* Release the owner's half of this slot's two-sided hold (owner_
+         * slot_pool.h's INVARIANT). Whichever side -- this one, or the
+         * client giving up on timeout in post_and_wait() -- calls release()
+         * SECOND is the one that actually frees the slot, so the order
+         * between "client gave up" and "owner finished" never matters:
+         *   - if the client already timed out (its own release already ran,
+         *     refcount already 1), THIS call brings it to 0: this owner
+         *     task is the one that must drain the semaphore `give` above
+         *     (nobody is left to collect it) and reset the slot before it
+         *     can look free.
+         *   - if the client is still waiting, THIS call only brings it to 2
+         *     -> 1; the client's own post-Take release (below) is what
+         *     frees it, AFTER it has already copied the result out. */
+        xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+        bool free_now = owner_slot_pool_release(s_slot_refcount, KILN_IO_OWNER_SLOT_COUNT, cmd.slot);
+        if (free_now) {
+            xSemaphoreTake(slot->sem, 0); /* drain a Give() nobody ever collected */
+            memset(&slot->result, 0, sizeof(slot->result));
         }
-        if (cmd.done) {
-            xSemaphoreGive(cmd.done);
-        }
+        xSemaphoreGive(s_slot_lock);
     }
 }
 
@@ -337,6 +406,19 @@ esp_err_t kiln_io_owner_start(kiln_io_t *io, SafetyLinkClass *safety)
     s_io = io;
     s_safety = safety;
 
+    s_slot_lock = xSemaphoreCreateMutex();
+    if (!s_slot_lock) {
+        return ESP_ERR_NO_MEM;
+    }
+    for (size_t i = 0; i < KILN_IO_OWNER_SLOT_COUNT; i++) {
+        s_slots[i].sem = xSemaphoreCreateBinaryStatic(&s_slots[i].sem_storage);
+        if (!s_slots[i].sem) {
+            vSemaphoreDelete(s_slot_lock);
+            s_slot_lock = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     s_cmd_queue = xQueueCreate(KILN_IO_OWNER_QUEUE_LEN, sizeof(owner_cmd_t));
     if (!s_cmd_queue) {
         return ESP_ERR_NO_MEM;
@@ -352,8 +434,15 @@ esp_err_t kiln_io_owner_start(kiln_io_t *io, SafetyLinkClass *safety)
     return ESP_OK;
 }
 
-/* ---- Generic post-and-wait, shared by every producer below ---- */
-
+/* ---- Generic post-and-wait, shared by every producer below ----
+ *
+ * INVARIANT (owner_slot_pool.h): the result this function reads on success,
+ * and the semaphore it waits on, live in s_slots[] -- module-owned static
+ * storage, never this function's own stack frame. Giving up on timeout
+ * therefore cannot destroy anything the owner task still holds a pointer
+ * to; owner_slot_pool_release() below only decides WHEN the slot becomes
+ * available for a future command, not whether it is safe to write into
+ * right now (it always is). */
 static bool post_and_wait(owner_cmd_t *cmd, owner_result_t *result)
 {
     memset(result, 0, sizeof(*result));
@@ -363,29 +452,44 @@ static bool post_and_wait(owner_cmd_t *cmd, owner_result_t *result)
         return false;
     }
 
-    /* Static, stack-resident semaphore -- same fix as uart_owner_transfer()
-     * and i2c_owner_transfer() (2026-08-20): removes this owner's
-     * contribution to the per-call internal-SRAM churn that was starving
-     * Wi-Fi AP client handshakes. */
-    StaticSemaphore_t done_storage;
-    SemaphoreHandle_t done = xSemaphoreCreateBinaryStatic(&done_storage);
-    if (!done) {
+    xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+    int idx = owner_slot_pool_alloc(s_slot_refcount, KILN_IO_OWNER_SLOT_COUNT);
+    xSemaphoreGive(s_slot_lock);
+    if (idx < 0) {
+        /* Cannot happen with a healthy queue -- see KILN_IO_OWNER_SLOT_COUNT's
+         * doc comment -- but fail closed exactly like a full queue would. */
+        ESP_LOGW(TAG, "owner slot pool exhausted -- treating as failed");
         return false;
     }
-
-    cmd->result = result;
-    cmd->done = done;
+    cmd->slot = idx;
 
     bool ok = false;
     if (xQueueSend(s_cmd_queue, cmd, 0) == pdTRUE) {
-        ok = xSemaphoreTake(done, pdMS_TO_TICKS(KILN_IO_OWNER_WAIT_MS)) == pdTRUE;
-        if (!ok) {
+        ok = xSemaphoreTake(s_slots[idx].sem, pdMS_TO_TICKS(KILN_IO_OWNER_WAIT_MS)) == pdTRUE;
+        if (ok) {
+            *result = s_slots[idx].result; /* safe: read before this side's own release below */
+        } else {
             ESP_LOGW(TAG, "owner task did not answer within %ums -- treating as failed",
                      (unsigned)KILN_IO_OWNER_WAIT_MS);
         }
+
+        xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+        bool free_now = owner_slot_pool_release(s_slot_refcount, KILN_IO_OWNER_SLOT_COUNT, idx);
+        if (free_now) {
+            xSemaphoreTake(s_slots[idx].sem, 0); /* drain a Give() nobody ever collected */
+            memset(&s_slots[idx].result, 0, sizeof(s_slots[idx].result));
+        }
+        xSemaphoreGive(s_slot_lock);
+    } else {
+        /* Never queued -- the owner task will never see this command and so
+         * will never call its half of the release. Release both halves
+         * ourselves right now so the slot doesn't leak forever. */
+        xSemaphoreTake(s_slot_lock, portMAX_DELAY);
+        owner_slot_pool_release(s_slot_refcount, KILN_IO_OWNER_SLOT_COUNT, idx);
+        owner_slot_pool_release(s_slot_refcount, KILN_IO_OWNER_SLOT_COUNT, idx);
+        xSemaphoreGive(s_slot_lock);
     }
 
-    vSemaphoreDelete(done);
     return ok;
 }
 

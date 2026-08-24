@@ -366,7 +366,20 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [x] `kilnlink_set_clock.{c,h}` — ESP → Pico, `SAFETY_CMD_SET_CLOCK` (0x0C,
       sec 4, optional). 2026-08-19
 - [x] `kilnlink_status.{c,h}` — Pico → ESP Frame A, `SAFETY_CMD_GET_STATUS`
-      (0x01, sec 6, the existing 23-byte layout). 2026-08-18
+      (0x01, sec 6, the existing 23-byte layout). 2026-08-18. **2026-08-24:**
+      updated for protocol 5→6's optional 24th byte (`tx_dropped_sat`,
+      `KILNLINK_STATUS_LEN_V2`) — decode accepts either 23 or 24 bytes,
+      encode emits 24 iff the caller sets `has_tx_dropped`, mirroring
+      `link_frame_pack_status()`'s own negotiation. `has_tx_dropped` is
+      explicit on `kilnlink_status_t` so "peer never sent this" is never
+      confused with a real `tx_dropped_sat == 0`. Still latent: nothing
+      calls `kilnlink_status_decode`/`_encode` yet (see Migration)
+- [x] `kilnlink_inject_tc.{c,h}` — ESP → Pico, `SAFETY_CMD_INJECT_TC`
+      (0x21, sec 4, synthetic thermocouple injection gated by
+      `safety_tc_installed == 0` on the receiving side). Codec existed
+      already; it was the only payload codec with no host test until
+      2026-08-24 (`test_inject_tc.c`, 9 cases including a valid=0 "codec
+      does not editorialize" check and bit-exact NaN/Inf round trips)
 - [x] `kilnlink_diag.{c,h}` — Pico → ESP Frame B, `SAFETY_CMD_DIAG` (0x08, sec 6). 2026-08-18
 - [x] `kilnlink_trip.{c,h}` — Pico → ESP Frame D, `SAFETY_CMD_TRIP_EVENT` (0x0D, sec 6). 2026-08-18
 - [x] `kilnlink_power.{c,h}` — Pico → ESP Frame E, `SAFETY_CMD_POWER` (0x0E, sec 6). 2026-08-18
@@ -442,6 +455,16 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       `clear_trip` is wired receive-only (`SaftyFW`'s `link_task.c`) with no
       `KilnFW` send side yet. See the 2026-08-19 note above for the exact
       state of each
+- [ ] **Frame C (`SAFETY_CMD_FW_VERSION`, §6) has no `CommonFW` codec.**
+      `SaftyFW`'s `link_frame.c` (`link_frame_pack_fw_version()`) and
+      `KilnFW`'s `safety_link.c` still hand-roll it independently against
+      `LINK_PROTOCOL.md` §6's offset table — exactly the two-independent-
+      implementations risk this directory exists to close. Audited
+      2026-08-24: the two currently agree, so this is not a live bug, but
+      it is the one frame where a future silent misread would misinform
+      the ESP about whether the Pico is even safe to trust. Give it a real
+      `kilnlink_fw_version.{c,h}` and migrate both sides in one coordinated
+      commit — not safe to do piecemeal from one side of the link alone.
 
 ## Related
 

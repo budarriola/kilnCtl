@@ -100,12 +100,17 @@ static void reset_to_defaults(void)
 
 /* Loads the persisted store blob, or defaults to an empty store if nothing
  * was ever saved. No migration chain exists yet (KILN_CFG_STORE_VERSION==1
- * is the only version this build has ever written) -- a future version bump
- * needs one here, mirroring zones_http.c's nvs_load_from()/
- * migrate_zones_cfg_v1_to_current(); until then, any blob that doesn't match
- * both the current version AND the current size is treated as unusable and
- * reset, same fail-safe-not-fail-guessing choice zones_http.c makes for a
- * newer-than-firmware blob. */
+ * is the only version this build has ever written, so the "older version"
+ * branch below is unreachable today) -- a future version bump needs one
+ * here, mirroring zones_http.c's nvs_load_from()/
+ * migrate_zones_cfg_v1_to_current(). Follows that same file's "refuse and
+ * leave flash alone, don't reset-and-treat-as-corrupt" discipline for a
+ * newer-than-firmware blob specifically -- see the version-check block
+ * below for the per-branch reasoning (zones_http.c's FIX 1 found exactly
+ * this distinction missing there; kiln_cfg_store.c cannot yet trigger the
+ * same bug since it never runs a migration off the version it reads here,
+ * but getting the distinction right now means a future change that DOES add
+ * one won't have to rediscover it). */
 static void nvs_load_store(void)
 {
     reset_to_defaults();
@@ -123,12 +128,50 @@ static void nvs_load_store(void)
     if (err != ESP_OK) {
         return; /* nothing stored, or unreadable -- defaults stand */
     }
-    if (len != sizeof(loaded) || loaded.version != KILN_CFG_STORE_VERSION) {
-        ESP_LOGW(TAG, "kiln_cfg_store blob is the wrong size or an unknown version -- resetting to "
-                      "an empty store rather than risking a half-understood layout");
-        return; /* defaults stand */
+    if (len != sizeof(loaded)) {
+        /* Wrong size for ANY version's claimed layout is genuine corruption
+         * -- a real blob is always written at exactly sizeof(s_store) (see
+         * nvs_save_store()). Nothing here is worth protecting; defaults
+         * stand, same as "nothing was ever saved." */
+        ESP_LOGW(TAG, "kiln_cfg_store blob is the wrong size -- treating as corrupt, resetting to an "
+                      "empty store rather than risking a half-understood layout");
+        return;
     }
-    s_store = loaded;
+    if (loaded.version == KILN_CFG_STORE_VERSION) {
+        s_store = loaded; /* current version, right size -- happy path */
+        return;
+    }
+    if (loaded.version < KILN_CFG_STORE_VERSION) {
+        /* Unreachable today (KILN_CFG_STORE_VERSION has only ever been 1),
+         * but reachable the moment a second version exists and no migration
+         * chain has been written for it yet -- an older-version blob with no
+         * defined conversion is exactly as unusable as a wrong-size one, not
+         * a case where the data is newer than this firmware understands, so
+         * it is treated as corrupt rather than refused. */
+        ESP_LOGW(TAG, "kiln_cfg_store blob is version %u, older than this firmware's %u, and no "
+                      "migration chain exists yet -- treating as corrupt, resetting to an empty store",
+                 (unsigned)loaded.version, (unsigned)KILN_CFG_STORE_VERSION);
+        return;
+    }
+    /* loaded.version > KILN_CFG_STORE_VERSION: written by newer firmware
+     * than this build -- the same firmware-rollback case zones_http.c's
+     * nvs_load_from() guards against (see that function's comment, and its
+     * FIX 1 note above). Refuse to load rather than reset: resetting costs
+     * nothing THIS boot (defaults already stand either way), but
+     * zones_http.c's bug was a caller downstream conflating "refused" with
+     * "genuinely nothing was ever saved" and writing a fresh, empty blob
+     * back over the newer one. kiln_cfg_store_init() below never does that
+     * automatically today -- it only calls nvs_save_store() when
+     * s_store.active_id != KILN_CFG_NO_ACTIVE_ID, and reset_to_defaults()
+     * (called at the top of this function, above) always clears active_id
+     * first -- so this is a documentation-only distinction for now. It stops
+     * being one the instant a future change adds any automatic write-back
+     * after a load, which is exactly why the distinct log message and this
+     * reasoning are written down here rather than left for that change to
+     * rediscover. */
+    ESP_LOGW(TAG, "kiln_cfg_store blob is version %u, newer than this firmware's %u -- refusing to "
+                  "load, flash data left untouched",
+             (unsigned)loaded.version, (unsigned)KILN_CFG_STORE_VERSION);
 }
 
 static esp_err_t nvs_save_store(void)

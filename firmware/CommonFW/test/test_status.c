@@ -161,13 +161,106 @@ static void test_decode_too_short(void)
 
 static void test_decode_too_long(void)
 {
-    /* This is a fixed-size frame, not a minimum size -- one byte too many is
-     * exactly as invalid as one byte too few. */
-    uint8_t buf[KILNLINK_STATUS_LEN + 1] = {0};
+    /* 24 bytes is now a legal V2 frame (see the V2 tests below) -- "too
+     * long" for this two-length codec means one byte past the LONGER of
+     * the two legal lengths, not past the original 23. */
+    uint8_t buf[KILNLINK_STATUS_LEN_V2 + 1] = {0};
     buf[0] = KILNLINK_STATUS_CMD;
     kilnlink_status_t out;
     CHECK(kilnlink_status_decode(buf, sizeof(buf), &out) == KILNLINK_STATUS_ERR_LENGTH_MISMATCH,
-          "decode() of a 24-byte (one too many) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 25-byte (one past the longer V2 length) payload -> ERR_LENGTH_MISMATCH");
+}
+
+/* -- V2 (protocol 6, optional tx_dropped_sat byte) ------------------------ */
+
+static void test_round_trip_v2_tx_dropped(void)
+{
+    /* kilnlink_version.h's 5->6 addition: byte 23, tx_dropped_sat, present
+     * only when the sender has negotiated it. Mirrors
+     * link_frame_pack_status()'s own negotiation -- see kilnlink_status.h's
+     * file comment. */
+    kilnlink_status_t st = {0};
+    st.flags = KILNLINK_STATUS_FLAG_ESTOP;
+    st.safety_tc_c = 100.0f;
+    st.cold_junction_c = 25.0f;
+    st.tc_fault = 0;
+    st.current1_a = 0.5f;
+    st.current2_a = 0.0f;
+    st.current3_a = 0.0f;
+    st.has_tx_dropped = 1;
+    st.tx_dropped_sat = 42;
+
+    uint8_t buf[KILNLINK_STATUS_LEN_V2];
+    kilnlink_status_status_t status;
+    size_t n = kilnlink_status_encode(&st, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_STATUS_OK, "V2: encode() reports OK");
+    CHECK(n == KILNLINK_STATUS_LEN_V2, "V2: encode() writes exactly 24 bytes when has_tx_dropped is set");
+    CHECK(buf[23] == 42, "V2: byte 23 on the wire is tx_dropped_sat");
+
+    kilnlink_status_t decoded;
+    CHECK(kilnlink_status_decode(buf, n, &decoded) == KILNLINK_STATUS_OK, "V2: decode() of a 24-byte frame is OK");
+    CHECK(decoded.has_tx_dropped == 1, "V2: decode() sets has_tx_dropped for a 24-byte frame");
+    CHECK(decoded.tx_dropped_sat == 42, "V2: tx_dropped_sat round-trips");
+    CHECK(decoded.flags == st.flags, "V2: flags round-trips alongside the new byte");
+}
+
+static void test_encode_v1_when_has_tx_dropped_clear(void)
+{
+    /* has_tx_dropped == 0 is the "peer never negotiated V2" case -- encode()
+     * must fall back to the original 23-byte layout, not silently emit a
+     * 24th byte of stale/garbage tx_dropped_sat. */
+    kilnlink_status_t st = {0};
+    st.has_tx_dropped = 0;
+    st.tx_dropped_sat = 0xAAu; /* garbage the encoder must ignore -- not on the wire at all */
+
+    uint8_t buf[KILNLINK_STATUS_LEN_V2] = {0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu,
+                                            0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu,
+                                            0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
+    kilnlink_status_status_t status;
+    size_t n = kilnlink_status_encode(&st, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_STATUS_OK, "V1 fallback: encode() reports OK");
+    CHECK(n == KILNLINK_STATUS_LEN_V1, "V1 fallback: encode() writes exactly 23 bytes when has_tx_dropped is clear");
+    CHECK(buf[23] == 0xFFu, "V1 fallback: byte 23 is untouched (not part of the returned length)");
+}
+
+static void test_decode_absent_tx_dropped_distinguishable_from_real_zero(void)
+{
+    /* The whole point of has_tx_dropped: a 23-byte (V1) frame must decode
+     * to has_tx_dropped == 0 -- "not sent" -- and must NOT be
+     * indistinguishable from a 24-byte (V2) frame that legitimately carries
+     * tx_dropped_sat == 0 ("sent, and the real count is zero"). Collapsing
+     * those two into the same observable state is exactly the bug this
+     * struct field exists to prevent. */
+    kilnlink_status_t st = {0};
+    st.tx_dropped_sat = 7; /* must be ignored by encode() while has_tx_dropped == 0 */
+
+    uint8_t buf_v1[KILNLINK_STATUS_LEN_V1];
+    kilnlink_status_status_t status;
+    size_t n1 = kilnlink_status_encode(&st, buf_v1, sizeof(buf_v1), &status);
+    CHECK(n1 == KILNLINK_STATUS_LEN_V1, "distinguishability: V1 frame is 23 bytes");
+
+    kilnlink_status_t absent;
+    CHECK(kilnlink_status_decode(buf_v1, n1, &absent) == KILNLINK_STATUS_OK, "distinguishability: V1 decode OK");
+    CHECK(absent.has_tx_dropped == 0, "distinguishability: a V1 (23-byte) frame decodes has_tx_dropped == 0");
+
+    kilnlink_status_t st_zero = {0};
+    st_zero.has_tx_dropped = 1;
+    st_zero.tx_dropped_sat = 0; /* a REAL zero -- peer is on V2 and has genuinely dropped nothing */
+
+    uint8_t buf_v2[KILNLINK_STATUS_LEN_V2];
+    size_t n2 = kilnlink_status_encode(&st_zero, buf_v2, sizeof(buf_v2), &status);
+    CHECK(n2 == KILNLINK_STATUS_LEN_V2, "distinguishability: V2 frame is 24 bytes");
+
+    kilnlink_status_t real_zero;
+    CHECK(kilnlink_status_decode(buf_v2, n2, &real_zero) == KILNLINK_STATUS_OK, "distinguishability: V2 decode OK");
+    CHECK(real_zero.has_tx_dropped == 1,
+          "distinguishability: a V2 (24-byte) frame decodes has_tx_dropped == 1, even when the count is 0");
+    CHECK(real_zero.tx_dropped_sat == 0, "distinguishability: the real count (0) round-trips");
+
+    /* The actual proof: these two decoded results must differ in
+     * has_tx_dropped even though tx_dropped_sat reads 0 in both. */
+    CHECK(absent.has_tx_dropped != real_zero.has_tx_dropped,
+          "distinguishability: absent (V1) and real-zero (V2) are NOT the same observable state");
 }
 
 static void test_decode_wrong_cmd(void)
@@ -200,6 +293,9 @@ int main(void)
     test_decode_too_long();
     test_decode_wrong_cmd();
     test_encode_buffer_too_small();
+    test_round_trip_v2_tx_dropped();
+    test_encode_v1_when_has_tx_dropped_clear();
+    test_decode_absent_tx_dropped_distinguishable_from_real_zero();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

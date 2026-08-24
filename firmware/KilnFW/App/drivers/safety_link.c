@@ -90,11 +90,25 @@ static const char *TAG = "safety_link";
  * named owner able to release it, and -- far worse -- a wildcard clear such as
  * ~0u would release every *other* source's assertion as a side effect. The
  * whole point of the source mask is that no reason can drop another reason's
- * fault, so the mask itself has to be closed. */
+ * fault, so the mask itself has to be closed.
+ *
+ * KEEP THIS IN SYNC WITH safety_fault_source_t. Every bit the enum
+ * defines must appear here, or set_fault_source() refuses it outright.
+ * SAFETY_FAULT_SRC_THERMAL_SANITY was added to the enum but not to this
+ * mask, which silently defeated it at both of its call sites
+ * (profile_executor.c's escalate_guard_trip(), autotune_engine.c's
+ * escalate_and_abort()) for every RUNAWAY/MAX_TEMP/MIN_TEMP trip: the
+ * isolated fault line to the Pico was never asserted, fault_sources never
+ * gained the bit so relay_authority_on_blocked() gave no re-arm backstop,
+ * and dashboard_http.c's THERMAL_SANITY display branch was dead code.
+ * The local relay force-off still happened, so this cost the
+ * defense-in-depth path, not the primary one -- which is exactly why
+ * nothing surfaced it. An omission here fails CLOSED at the mask and
+ * OPEN at the hazard, so it cannot be caught by testing the happy path. */
 #define SAFETY_FAULT_SRC_ALL                                                       \
     ((uint32_t)(SAFETY_FAULT_SRC_MANUAL | SAFETY_FAULT_SRC_PC_LINK |               \
                 SAFETY_FAULT_SRC_THERMO | SAFETY_FAULT_SRC_SAFETY_LINK |           \
-                SAFETY_FAULT_SRC_APP))
+                SAFETY_FAULT_SRC_APP | SAFETY_FAULT_SRC_THERMAL_SANITY))
 
 /* Ceiling on how long a caller waits to start its own request/reply exchange.
  * One exchange is bounded by the ACK timeout times uart_protocol's retries plus
