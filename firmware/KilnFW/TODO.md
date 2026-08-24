@@ -262,12 +262,38 @@ that constrain the design: relays are EE2-12NUH electromechanical parts on
 12V coils (expander pin high = energized), each on a 3-pin terminal block; a
 "duty cycle" is therefore a slow time-proportioned window over I2C, not PWM.
 
-- [ ] **Open question, blocks picking the duty-window period:** do the relays
-      switch kiln elements directly, or drive external SSRs/contactors? A
-      mechanical relay switching an element has a contact-life budget (~1e5
-      ops) a short window would burn through in hours; an SSR has no such
-      budget and allows much finer control. Until answered, the design
-      assumes the pessimistic (mechanical, long window) case.
+- [x] **ANSWERED 2026-08-24 (owner): the on-board relays exist for galvanic
+      isolation and switch other relays only.** They never carry element
+      current. The part itself makes this unambiguous -- K1-K4 are
+      **EE2-12NUH, a KEMET EC2/EE2 miniature SIGNAL relay**
+      (`hardware/datasheets/mainBoard_Relay/EE2-12NUH.pdf` p7): max switching
+      current **2 A**, max switching power **60 W / 125 VA**. A kiln element
+      is kW-scale at tens of amps, so this relay physically cannot switch one
+      and was never intended to.
+
+      **Consequence for the duty window:** the pessimistic ~1e5-op budget this
+      section assumed does not apply. The datasheet's loaded running spec is
+      **1e6 operations** (50 VDC 0.1 A resistive, 85 degC, 5 Hz), with
+      non-load life 1e8 and stable characteristics to 1e7 -- pilot duty into
+      an SSR input or a small coil sits at the easy end of that. Taking 1e6 as
+      the budget and one operation per window: a **10 s window** spends it in
+      ~2,800 hours of *continuous* firing (~116 days), i.e. over a decade at
+      40 h/week. A 2 s window still gives ~555 hours continuous (~2.7 years at
+      40 h/week). So the window is a control-quality decision now, not a
+      contact-life one; 10 s is comfortable and shorter is viable.
+
+      Operate ~2 ms / release ~1 ms, so switching latency is irrelevant at any
+      window we would pick.
+- [ ] **New, narrower open question this raises:** what does each relay
+      actually drive, and what is ITS switching cost? The on-board relay is no
+      longer the limiting part -- the downstream device is. An SSR input is
+      effectively unlimited; a mechanical contactor has its own electrical
+      life (typically 1e5-1e6 ops) which then dominates the window choice.
+      **Also a real ratings check, not a formality:** if a downstream
+      contactor coil is 240 VAC, the relay's 125 VA switching limit allows
+      only ~0.52 A at that voltage, and contactor coil INRUSH can exceed
+      sealed current several-fold. Confirm the coil's inrush VA against the
+      125 VA limit before driving one directly.
 
 ### 6A.1 Actuator model: time-proportioned output, not bang-bang
 
@@ -441,9 +467,13 @@ alternate method.
 
 ### 6A.11 Open questions, collected
 
-- [ ] Do the on-board relays switch elements directly or drive external
-      SSRs/contactors? (Sets the duty-window period and contact-life budget
-      — 6A.0.)
+- [x] Do the on-board relays switch elements directly or drive external
+      SSRs/contactors? **ANSWERED 2026-08-24: galvanic isolation only, they
+      switch other relays.** K1-K4 are EE2-12NUH signal relays (2 A / 125 VA
+      max), so element switching was never physically possible. Duty window is
+      now a control-quality choice, not a contact-life one — see 6A.0 for the
+      arithmetic and for the narrower question it replaces (what the
+      downstream device is, and its coil inrush against the 125 VA limit).
 - [ ] Element power per zone and total supply/breaker capacity — decides
       whether load staggering (6A.5) is mandatory or optional.
 - [ ] Maximum rated temperature of the kiln and of the thermocouples fitted
