@@ -42,7 +42,7 @@ project rather than two.
 | [`firmware/CommonFW/docs/LINK_PROTOCOL.md`](firmware/CommonFW/docs/LINK_PROTOCOL.md) | The wire, both ends — the contract neither side may break alone |
 | [`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](firmware/CommonFW/docs/UPDATE_PROTOCOL.md) | Field updates for both processors: interlocks, one-password auth, ESP OTA partitioning |
 | [`firmware/SaftyFW/docs/BOOTLOADER.md`](firmware/SaftyFW/docs/BOOTLOADER.md) | The RP2040 bootloader, flash layout and recovery mode |
-| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission. **Software complete, hardware-gated**: no fixture has ever been built or connected. A software-only cross-check (`tools/virtual_simfw` + `tools/virtual_dut`) runs real `SaftyFW` guard code against the simulator on a PC — see M9 |
+| [`firmware/SimFW/docs/PLAN.md`](firmware/SimFW/docs/PLAN.md) | Kiln simulator / unit-test fixture (a *third* firmware, a second Pico on the bench): MAX31856 emulation, CT waveforms, relay sensing, thermal model, fault injection, its own MCP/CLI/GUI (`kilnsim`); also owns the `UnitTestFw` decommission. **Running on real silicon since 2026-08-24** — the fixture Pico boots, every command group is hardware-verified, fault injection reaches the emulated MAX31856 registers, and two I/O expanders are attached. Still gated on the SPI-timing proof (M-A, `spi_txn_count` is 0) and on the relay/E-stop/DUT-power harness. `kilnsim testmgr` is the one-command regression entry point; `firmware/SimFW/docs/TEST_MANAGER.md` documents it — see M9 |
 | [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md) | GUI, MCP, GPIO probe, debug and logging for **both** processors |
 | [`docs/REPO_LAYOUT.md`](docs/REPO_LAYOUT.md) | The hardware/software reorganisation and its blockers |
 | [`docs/SETUP.md`](docs/SETUP.md) | Fresh-clone setup: what is machine-specific, and how `tools/setup.ps1` handles it |
@@ -364,13 +364,45 @@ hardware-trip rows, which is why it earns a milestone here.
       - the DUT-power relay (a single MCP23017 bit) can only brown out one of
         the main board's two independent 12 V inputs unless the bench
         operator deliberately commons them downstream of that relay
-- [ ] **Hardware-gated, nothing below has ever touched real silicon** — no
-      fixture (breadboard or PCB) has ever been built or connected. In
-      particular: M-A's SPI-timing exit criterion (Saleae capture, ≥10k
-      transactions, zero underruns) is unmet and is the single biggest
-      unproven risk; CT amplitude calibration is still an identity placeholder
-      pending the real sweep-fit-store procedure (M-D); none of the 19
-      scenarios has run against a real `KilnFW`+`SaftyFW` pair
+- [~] **First silicon: the fixture Pico now runs on the bench** (2026-08-24).
+      `SimFW` boots, enumerates, and every command group (SYS/MODEL/TC/CT/
+      RELAY/IO/FAULT) is verified against the real board. Fault injection
+      works end to end — a PC-side `TC_DISCONNECTED` flips the emulated
+      MAX31856's open-circuit flag and clears on cancel. Two MCP23017
+      expanders are attached and pass six selftest checks. Link soaked at 960
+      commands over six reconnects with zero anomalies. `kilnsim testmgr`
+      gives a one-command tiered regression verdict; `kilnsim tasks` reports
+      per-task stack high-water marks, and `kilnsim selftest` now fails below
+      a 2x margin.
+
+      Getting there took four real firmware defects, all fixed: a
+      `sim_engine` stack overflow that stopped the board booting at all; a
+      cross-core-halt design that would have panicked at every scheduler
+      start; a msg_index/dedup lifetime mismatch that silently returned a
+      *stale reply from a different command* after every reconnect; and a
+      `pio_claim_unused_sm(..., true)` whose own error guard was unreachable
+      and which would have halted only core 1, leaving core 0 answering as if
+      healthy.
+- [ ] **Still hardware-gated** — M-A's SPI-timing exit criterion (Saleae
+      capture, ≥10k transactions, zero underruns) remains unmet and is still
+      the single biggest unproven risk: `spi_txn_count` is 0, so the PIO
+      MAX31856 emulation has never been clocked by any master. It needs a
+      second Pico as reference master (`tools/spi_test_master/` builds clean,
+      but its checked-in `build/` is stale — rebuild before flashing). Most of
+      M-A is achievable without a Saleae; the analyzer is only needed for the
+      electrical timing margin, not functional correctness. CT amplitude
+      calibration is still an identity placeholder (M-D). Relay sense, E-stop,
+      fault line and DUT power are unwired, so no scenario has yet run against
+      a real `KilnFW`+`SaftyFW` pair.
+- [ ] **Guard assertions in the scenario suite are currently vacuous**
+      (found 2026-08-24). `kilnsim`'s `EventType` defines `GUARD_TRIP`/
+      `GUARD_WARN`/`LINK_UP`/`TRIP_INEFFECTIVE_LATCHED`, but `runner.py`
+      never synthesizes any of them — verified, it contains no reference to
+      them. 25 of the 27 scenarios have a clause referencing one, so those
+      clauses cannot fail. The suite's guard coverage is therefore nominal,
+      not real, independently of whether hardware is attached. `testmgr`
+      refuses to credit such a pass as evidence; the fix belongs in
+      `runner.py`.
 - [x] **`UnitTestFw` deleted** (2026-08-23) — the old ESP32-S3 instrument
       bench tree (App, pc_tools, docs, embedded KiCad files) removed from the
       repo along with every stale reference, ahead of the M-B hardware-proof
@@ -500,6 +532,11 @@ not a single flag-day cutover.
 | `uart_owner_transfer()` called `xSemaphoreCreateBinary()` (a heap alloc) on every single UART transfer; under real interactive load this exhausted internal SRAM (`ESP_ERR_NO_MEM` bursts every ~40s). Fixed with a static, stack-resident semaphore | 2026-08-18 | `firmware/KilnFW/App/drivers/espInterfaces/uart_owner.c` |
 | SimFW's PIO SPI-slave engine originally sampled/shifted on the wrong clock edges (mode 0, despite being labeled mode 1); corrected to match the MAX31856 datasheet's Table 5 (CPOL=0) and both real masters' actual config | 2026-08-20 | `firmware/SimFW/src/drivers/max31856_spi_slave.pio`, `docs/DESIGN_NOTES.md` §3.2.1 |
 | LVGL hit-testing cannot escape a parent that doesn't contain the touch point, and a non-`LV_OBJ_FLAG_FLOATING` child of a flex column silently joins the flow and eats the page's content budget | 2026-08-20 | `firmware/KilnFW/App/drivers/ui_topbar.h` |
+| SimFW would not boot at all: `sim_engine`'s 2048-byte stack against a measured 2328-byte chain, caused by one non-static local (`fault_event_t[64]`, 1536 B). Third instance of this species after `telemetry` and `wave_owner`. Note the chain crosses a module boundary — `fault_sched`'s per-tick work runs on `sim_engine`'s stack while its own task idles — so neither file looks wrong read alone | 2026-08-24 | `firmware/SimFW/src/tasks/sim_engine.c` |
+| SimFW's cross-core halt used the SIO inter-core FIFO, which is FreeRTOS's own SMP doorbell — it would have `hard_assert`ed at every `vTaskStartScheduler()`, and sharing the handler would not have helped since FreeRTOS drains that FIFO without inspecting it. Moved to a dedicated hardware timer alarm | 2026-08-23 | `firmware/SimFW/src/drivers/simfw_fatal.c` |
+| benchproto returned a **stale reply from a different command** after every PC reconnect: the host's `msg_index` restarts at 0 per connection while the firmware's dedup ring and per-task ACK cache live for the MCU's boot lifetime. `FAULT_LIST` reported "0 faults" while 8 were armed — a clean-decoding wrong answer, diagnosed by reply *length* (3 bytes is `FAULT_SCHEDULE`'s shape, not an empty list's 2). Fixed with a `SYS_SESSION_RESET` handshake that must itself bypass dedup | 2026-08-23 | `firmware/CommonFW/src/benchproto_link.c`, `firmware/SimFW/src/tasks/usb_owner.c` |
+| `pio_claim_unused_sm(pio, true)` panics internally and never returns, making the `if (sm < 0)` guard after it dead code — and a bare `panic()` halts only the calling core, while `spi_emu_a/b` are pinned to core 1, so core 0 would have kept serving USB against a fixture whose SPI emulation never started. Fourth structurally-unfailable check shipped in this repo | 2026-08-24 | `firmware/SimFW/src/drivers/max31856_pio_engine.c` |
+| A 0-byte `i2c_write_blocking()` reports **every** address as present: pico-sdk guards `len == 0` with `invalid_params_if`, a no-op in release builds, so the transfer loop never runs and the address phase is never driven. Caught while writing a bus scanner, before it produced a wrong answer | 2026-08-24 | `firmware/SimFW/src/tasks/i2c_owner.c` |
 
 ---
 
