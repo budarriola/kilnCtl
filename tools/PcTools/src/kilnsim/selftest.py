@@ -357,64 +357,123 @@ def _check_ct_adc_loopback(link: SimLink) -> "tuple[str, str]":
 # transcribed here with an explicit pointer back, not re-derived from guesswork.
 MCP23017_SCAN_PERIOD_S = 0.008
 
+#: Protocol `exp` field values (PROTOCOL.md sec 5.5) -- 0 is
+#: firmware's I2C_OWNER_EXP_1 (0x25, fixed-role board: relay sense,
+#: fault-line sense, E-stop drive, DUT-power-main/-safety on pins 0..7 and
+#: 10), 1 is I2C_OWNER_EXP_2 (0x26, fully generic -- every pin boots
+#: input+pullup, no reserved roles at all, i2c_owner.c's configure_exp2()).
+EXP1 = 0
+EXP2 = 1
 
-def _check_expander_read_after_write(link: SimLink) -> "tuple[str, str]":
-    # Real hardware: IO_WRITE then IO_READ the same pin genuinely round-trips
-    # through the I2C expander (i2c_owner.h). virtual_simfw's own README is
-    # explicit that its IO_SET_DIR/WRITE/READ "ack but do nothing" (no I2C
-    # expander hardware modeled) -- so a mismatch there is the simulator's
-    # documented behavior, not a fixture defect, and asserting on it here
-    # would be a false failure on the one link kilnsim can actually reach
-    # today. fw_git_hash == "virtual" is virtual_simfw.c's own self-
-    # identification (its GET_VERSION handler hard-codes hash = "virtual");
-    # a heuristic, not a protocol-level flag, but the only one available.
+#: i2c_owner.c's EXP1_RESERVED_MAX_PIN (7) plus the standalone
+#: EXP1_PIN_DUT_POWER_SAFETY (10) -- io_pin_allowed() rejects both. Every
+#: check below that touches exp1 pins picks from OUTSIDE this set (8, 9,
+#: 11..15); nothing here ever asks for K1..K5/FAULT_LINE/ESTOP_DRIVE/
+#: DUT_POWER_MAIN/DUT_POWER_SAFETY, so a real fixture never has its E-stop
+#: driven or a DUT-power relay switched by this module.
+EXP1_RESERVED_PINS = frozenset({0, 1, 2, 3, 4, 5, 6, 7, 10})
+
+
+def _classify_expander_link(link: SimLink) -> "Optional[tuple[str, str]]":
+    """Shared by every expander check below: returns ``None`` if `link`
+    looks like real SimFW hardware, or a ready-to-return
+    ``(STATUS_NOT_RUNNABLE, detail)`` (or ``(STATUS_FAIL, detail)`` if
+    GET_VERSION itself couldn't be read) otherwise.
+
+    virtual_simfw's own README is explicit that its IO_SET_DIR/WRITE/READ
+    "ack but do nothing" (no I2C expander hardware modeled) -- so a
+    mismatch there is the simulator's documented behavior, not a fixture
+    defect, and asserting on it would be a false failure on the one link
+    kilnsim can actually reach pre-bench. fw_git_hash == "virtual" is
+    virtual_simfw.c's own self-identification (its GET_VERSION handler
+    hard-codes hash = "virtual"); "0000000" is MockSimLink's canned
+    placeholder (kilnsim.link's _default_response). Neither is real I2C
+    expander hardware. A heuristic, not a protocol-level flag, but the only
+    one available -- same one the original expander_read_after_write check
+    used before this helper was pulled out of it.
+    """
     try:
         version = link.send_command(CommandGroup.SYS, SysCmd.GET_VERSION)
     except SimLinkError as exc:
         return STATUS_FAIL, f"could not read GET_VERSION to identify the link: {exc}"
     git_hash = version.get("fw_git_hash")
     if git_hash in ("virtual", "0000000"):
-        # "virtual" is virtual_simfw.c's own self-identification; "0000000"
-        # is MockSimLink's canned placeholder (kilnsim.link's
-        # _default_response) -- neither is real I2C expander hardware.
         why = "virtual_simfw" if git_hash == "virtual" else "MockSimLink"
         return STATUS_NOT_RUNNABLE, (
             f"connected device self-identifies as {why} (fw_git_hash == {git_hash!r}), which does not "
-            "model real I2C expander hardware for IO_SET_DIR/WRITE/READ -- a read-after-write "
-            "mismatch here would be expected, not a fixture defect"
+            "model real I2C expander hardware for IO_SET_DIR/WRITE/READ -- a mismatch here would be "
+            "expected, not a fixture defect"
         )
-    pin, exp = 8, 0  # port B pin 0 -- outside exp1's reserved fixed-role 0..7 range
-    # SET_DIR/WRITE are QUEUED on i2c_owner's command queue and only take
-    # effect on the expander at the START of its next scan tick
-    # (apply_pending_commands() drains the queue, THEN scan_tick() refreshes
-    # the raw GPIO word i2c_owner.h's IO_READ answers from -- i2c_owner.c,
-    # MCP23017_DEBOUNCE_SCAN_MS == 8). READ is a synchronous snapshot of
-    # whatever that last completed tick saw. Reading immediately after
-    # writing, with no wait, can win the race and observe the PRE-write
-    # value -- confirmed on real hardware 2026-08-24: a bare
-    # write-then-read-immediately sequence reported "wrote low -> read
-    # True" even though the expander was answering correctly (a separate
-    # CLI invocation per command, with real process/USB overhead between
-    # them, always passed). So this polls for the expander's OWN answer to
-    # change, bounded by a timeout well past one scan period, rather than
-    # trusting a single immediate read -- which is also a closer match to
-    # how a real client should use this asynchronous write path.
-    def _read_until(expected: bool, timeout_s: float = 0.5) -> dict:
-        deadline = time.monotonic() + timeout_s
-        last = {}
-        while time.monotonic() < deadline:
-            last = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin})
-            if last.get("level") is expected:
-                return last
-            time.sleep(MCP23017_SCAN_PERIOD_S)
-        return last
+    return None
 
+
+def _expander_read_until(link: SimLink, exp: int, pin: int, expected: bool, timeout_s: float = 0.5) -> dict:
+    """Polls IO_READ(exp, pin) until it reports `expected`, bounded by
+    `timeout_s`. SET_DIR/WRITE are QUEUED on i2c_owner's command queue and
+    only take effect on the expander at the START of its next scan tick
+    (apply_pending_commands() drains the queue, THEN scan_tick() refreshes
+    the raw GPIO word i2c_owner.h's IO_READ answers from --
+    i2c_owner.c, MCP23017_DEBOUNCE_SCAN_MS == 8). READ is a synchronous
+    snapshot of whatever that last completed tick saw. Reading immediately
+    after writing, with no wait, can win the race and observe the
+    PRE-write value -- confirmed on real hardware 2026-08-24: a bare
+    write-then-read-immediately sequence reported "wrote low -> read True"
+    even though the expander was answering correctly (a separate CLI
+    invocation per command, with real process/USB overhead between them,
+    always passed). So every check below polls for the expander's OWN
+    answer to change, rather than trusting a single immediate read -- which
+    is also a closer match to how a real client should use this
+    asynchronous write path. Shared here (this used to be a check-local
+    closure) so every check added alongside expander_read_after_write reuses
+    the exact same wait discipline instead of a second bare
+    write-then-read."""
+    deadline = time.monotonic() + timeout_s
+    last: dict = {}
+    while time.monotonic() < deadline:
+        last = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin})
+        if last.get("level") is expected:
+            return last
+        time.sleep(MCP23017_SCAN_PERIOD_S)
+    return last
+
+
+def _expander_write_and_confirm(link: SimLink, exp: int, pin: int, level: bool, timeout_s: float = 0.5) -> dict:
+    """IO_WRITE then poll (via :func:`_expander_read_until`) for the
+    expander to actually report the new level -- the write half of the
+    read-after-write pattern every check below shares."""
+    link.send_command(CommandGroup.IO, IoCmd.WRITE, {"exp": exp, "pin": pin, "level": level})
+    return _expander_read_until(link, exp, pin, level, timeout_s)
+
+
+def _restore_pin_to_safe_default(link: SimLink, exp: int, pin: int) -> None:
+    """Best-effort: put `pin` back to the firmware's own boot-time safe
+    default for a generic pin -- INPUT with pullup enabled (i2c_owner.c's
+    configure_exp1() J20 IO_3/IO_4 + 5-spare loop, and configure_exp2()'s
+    equivalent for every exp2 pin) -- so nothing is left driving into
+    whatever gets plugged into this header next. Called from every check
+    below's `finally` block, including on the failure path. Swallows
+    SimLinkError deliberately: a check that already failed (or a link that
+    just dropped mid-check) must not raise a SECOND exception out of its
+    own cleanup and mask the real failure -- _run_check only sees whatever
+    this function's caller returns, and a cleanup-time exception here would
+    otherwise replace an honest FAIL detail with an unrelated one."""
+    try:
+        link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": True, "pullup": True})
+    except SimLinkError:
+        pass
+
+
+def _check_expander_read_after_write(link: SimLink) -> "tuple[str, str]":
+    # Real hardware: IO_WRITE then IO_READ the same pin genuinely round-trips
+    # through the I2C expander (i2c_owner.h).
+    verdict = _classify_expander_link(link)
+    if verdict is not None:
+        return verdict
+    exp, pin = EXP1, 8  # J20 IO_3 -- outside exp1's reserved fixed-role set
     try:
         link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": False, "pullup": False})
-        link.send_command(CommandGroup.IO, IoCmd.WRITE, {"exp": exp, "pin": pin, "level": True})
-        high = _read_until(True)
-        link.send_command(CommandGroup.IO, IoCmd.WRITE, {"exp": exp, "pin": pin, "level": False})
-        low = _read_until(False)
+        high = _expander_write_and_confirm(link, exp, pin, True)
+        low = _expander_write_and_confirm(link, exp, pin, False)
     except SimLinkError as exc:
         # ERR_NO_SAMPLE (payloads.STATUS_ERR_NO_SAMPLE) means the args were
         # fine but i2c_owner has never gotten a successful MCP23017 ACK on
@@ -432,9 +491,235 @@ def _check_expander_read_after_write(link: SimLink) -> "tuple[str, str]":
                 f"({exc})"
             )
         return STATUS_FAIL, f"expander read-after-write round trip errored: {exc}"
+    finally:
+        # Leaves pin 8 driven low otherwise -- restore to the boot-time
+        # safe default before returning, on every path.
+        _restore_pin_to_safe_default(link, exp, pin)
     if high.get("level") is True and low.get("level") is False:
         return STATUS_PASS, f"exp{exp} pin{pin}: wrote high->read {high.get('level')}, wrote low->read {low.get('level')}"
     return STATUS_FAIL, f"exp{exp} pin{pin}: wrote high->read {high.get('level')!r}, wrote low->read {low.get('level')!r}"
+
+
+def _check_expander_exp2_read_after_write(link: SimLink) -> "tuple[str, str]":
+    """The bench now has a SECOND MCP23017 physically attached (0x26,
+    protocol exp=1 / firmware's I2C_OWNER_EXP_2) -- _check_expander_read_after_write
+    above only ever exercises exp=0 (I2C_OWNER_EXP_1, 0x25), so exp2 has had
+    zero automated coverage until now. exp2 is fully generic (configure_exp2():
+    every pin boots input+pullup, no fixed relay/E-stop/DUT-power roles at
+    all, unlike exp1), so any pin is fair game; pin 0 is used here
+    specifically because it's the one pin number that WOULD be reserved
+    (EXP1_PIN_K1) if this were exp1 -- proving the two boards are genuinely
+    treated differently, not that "pin 0 happens to be safe everywhere"."""
+    verdict = _classify_expander_link(link)
+    if verdict is not None:
+        return verdict
+    exp, pin = EXP2, 0
+    try:
+        link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": False, "pullup": False})
+        high = _expander_write_and_confirm(link, exp, pin, True)
+        low = _expander_write_and_confirm(link, exp, pin, False)
+    except SimLinkError as exc:
+        if "ERR_NO_SAMPLE" in str(exc):
+            return STATUS_SKIP, (
+                f"no MCP23017 responding at exp{exp} (0x26) -- attach the fixture to exercise this ({exc})"
+            )
+        return STATUS_FAIL, f"exp{exp} (0x26) read-after-write round trip errored: {exc}"
+    finally:
+        _restore_pin_to_safe_default(link, exp, pin)
+    if high.get("level") is True and low.get("level") is False:
+        return STATUS_PASS, (
+            f"exp{exp} (0x26) pin{pin}: wrote high->read {high.get('level')}, wrote low->read {low.get('level')}"
+        )
+    return STATUS_FAIL, (
+        f"exp{exp} (0x26) pin{pin}: wrote high->read {high.get('level')!r}, wrote low->read {low.get('level')!r}"
+    )
+
+
+def _check_expander_exp1_multi_pin_read_after_write(link: SimLink) -> "tuple[str, str]":
+    """A single pin (8, in expander_read_after_write above) round-tripping
+    correctly doesn't prove the other generic exp1 pins do too -- a
+    per-pin bug in mcp23017.c's IODIR/OLAT bit indexing wouldn't
+    necessarily show up on pin 8 alone. Exercises three more of exp1's
+    generic pins: 9 (J20 IO_4) and 11, 15 (true spares) --
+    i2c_owner.c's io_pin_allowed()/EXP1_RESERVED_PINS above. Deliberately
+    skips 0..7 and 10 (relay sense, fault-line sense, E-stop drive,
+    DUT-power-main/-safety)."""
+    verdict = _classify_expander_link(link)
+    if verdict is not None:
+        return verdict
+    exp = EXP1
+    pins = (9, 11, 15)
+    results: dict = {}
+    errors: list = []
+    try:
+        for pin in pins:
+            try:
+                link.send_command(
+                    CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": False, "pullup": False}
+                )
+                high = _expander_write_and_confirm(link, exp, pin, True)
+                low = _expander_write_and_confirm(link, exp, pin, False)
+            except SimLinkError as exc:
+                if "ERR_NO_SAMPLE" in str(exc):
+                    return STATUS_SKIP, (
+                        f"no MCP23017 responding at exp{exp} (0x25) -- attach the fixture to exercise this ({exc})"
+                    )
+                errors.append(f"pin{pin}: {exc}")
+                continue
+            results[pin] = (high.get("level"), low.get("level"))
+    finally:
+        for pin in pins:
+            _restore_pin_to_safe_default(link, exp, pin)
+    if errors:
+        return STATUS_FAIL, "; ".join(errors)
+    bad = {pin: rl for pin, rl in results.items() if rl != (True, False)}
+    if bad:
+        return STATUS_FAIL, f"exp{exp} pin(s) did not round-trip high/low correctly: {bad}"
+    return STATUS_PASS, f"exp{exp} (0x25) pins {list(pins)} each wrote high->read True, wrote low->read False"
+
+
+def _check_expander_pin_independence(link: SimLink) -> "tuple[str, str]":
+    """Writing one pin must not disturb another -- catches a
+    shadow-register/read-modify-write bug in mcp23017.c's IODIR/GPPU/OLAT
+    handling (e.g. a WRITE that recomputes the whole port byte from a stale
+    cached value instead of setting/clearing just its own bit). Uses exp2
+    (fully generic, no reserved-pin bookkeeping needed) pins 0 and 1: both
+    set to output+low, then pin 0 flipped high while confirming pin 1
+    stays low, then pin 1 flipped high while confirming pin 0 stays high --
+    checked in both directions so a bug that only corrupts "the other
+    pin" in one specific write order isn't missed."""
+    verdict = _classify_expander_link(link)
+    if verdict is not None:
+        return verdict
+    exp = EXP2
+    pin_a, pin_b = 0, 1
+    try:
+        for pin in (pin_a, pin_b):
+            link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": False, "pullup": False})
+        _expander_write_and_confirm(link, exp, pin_a, False)
+        b_before = _expander_write_and_confirm(link, exp, pin_b, False)
+        a_after_a_high = _expander_write_and_confirm(link, exp, pin_a, True)
+        # A_high is already confirmed via polling above, so this immediate
+        # READ of pin_b is safe -- it's a synchronous snapshot of the same
+        # already-completed scan tick that just proved pin_a's write landed.
+        b_after_a_high = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin_b})
+        b_after_b_high = _expander_write_and_confirm(link, exp, pin_b, True)
+        a_after_b_high = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin_a})
+    except SimLinkError as exc:
+        if "ERR_NO_SAMPLE" in str(exc):
+            return STATUS_SKIP, (
+                f"no MCP23017 responding at exp{exp} (0x26) -- attach the fixture to exercise this ({exc})"
+            )
+        return STATUS_FAIL, f"pin-independence probe errored: {exc}"
+    finally:
+        for pin in (pin_a, pin_b):
+            _restore_pin_to_safe_default(link, exp, pin)
+    if a_after_a_high.get("level") is not True:
+        return STATUS_FAIL, f"exp{exp} pin{pin_a} never read high after WRITE(true) -- can't assess independence"
+    if b_before.get("level") is not False or b_after_a_high.get("level") is not False:
+        return STATUS_FAIL, (
+            f"exp{exp} pin{pin_b} changed after writing pin{pin_a} alone: before="
+            f"{b_before.get('level')!r} after={b_after_a_high.get('level')!r} -- "
+            "possible shadow-register read-modify-write bug"
+        )
+    if b_after_b_high.get("level") is not True:
+        return STATUS_FAIL, f"exp{exp} pin{pin_b} never read high after WRITE(true) -- can't assess independence"
+    if a_after_b_high.get("level") is not True:
+        return STATUS_FAIL, (
+            f"exp{exp} pin{pin_a} (previously written high) changed after writing pin{pin_b}: now="
+            f"{a_after_b_high.get('level')!r} -- possible shadow-register read-modify-write bug"
+        )
+    return STATUS_PASS, (
+        f"exp{exp}: pin{pin_a}/pin{pin_b} each independently reflect their own last WRITE, "
+        "unaffected by writes to the other"
+    )
+
+
+def _check_expander_input_pullup_reads_high(link: SimLink) -> "tuple[str, str]":
+    """A pin set to INPUT with its internal pull-up enabled, with nothing
+    externally attached to pull it low, must read high -- a real, checkable
+    property of the attached hardware (task context: "nothing else is
+    attached -- no relays, no thermocouple boards, no CT transformers, no
+    DUT" on either expander's header). Probes one generic pin per
+    expander: exp1 (0x25) pin 11 (a true spare, well clear of the 0..7/10
+    reserved set) and exp2 (0x26) pin 5 (fully generic)."""
+    verdict = _classify_expander_link(link)
+    if verdict is not None:
+        return verdict
+    probes = ((EXP1, 11), (EXP2, 5))
+    results: dict = {}
+    try:
+        for exp, pin in probes:
+            link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": True, "pullup": True})
+        for exp, pin in probes:
+            reading = _expander_read_until(link, exp, pin, True)
+            results[(exp, pin)] = reading.get("level")
+    except SimLinkError as exc:
+        if "ERR_NO_SAMPLE" in str(exc):
+            return STATUS_SKIP, f"no MCP23017 responding -- attach the fixture to exercise this ({exc})"
+        return STATUS_FAIL, f"pull-up probe errored: {exc}"
+    finally:
+        for exp, pin in probes:
+            _restore_pin_to_safe_default(link, exp, pin)
+    bad = {k: v for k, v in results.items() if v is not True}
+    if bad:
+        return STATUS_FAIL, (
+            f"expected internal pull-up to read high with nothing externally attached; got {bad} "
+            f"(full results {results})"
+        )
+    return STATUS_PASS, f"exp/pin {list(results.keys())} all read high with INPUT+pullup: {results}"
+
+
+def _check_expander_reserved_pin_rejected(link: SimLink) -> "tuple[str, str]":
+    """Proves the reserved-pin safety interlock actually works, rather than
+    just assuming it: attempts SET_DIR on exp1 pin 0 (EXP1_PIN_K1, a
+    reserved relay-sense input -- i2c_owner.c's io_pin_allowed()) and
+    requires the firmware to REJECT it. Never attempts WRITE on a reserved
+    pin -- for EXP1_PIN_ESTOP_DRIVE/DUT_POWER_MAIN/DUT_POWER_SAFETY that
+    could assert the fixture's E-stop or switch a DUT-power relay if the
+    interlock this check is trying to prove were actually broken, so
+    SET_DIR is used instead (also gated by the same io_pin_allowed(), with
+    no such physical side effect if it somehow succeeded).
+
+    Status matching: io_pin_allowed() rejects a reserved pin BEFORE it is
+    ever enqueued (cmd_task.c's handle_io_set_dir()), so this always
+    answers ERR_BAD_ARGS today -- deterministically, never the transient
+    ERR_BUSY (full command queue), which can only occur for an *allowed*
+    pin that got past the reserved check. A concurrent firmware pass (in
+    flight as of this check being written) is adding ERR_BUSY as a
+    distinct status for that separate queue-full case in the same two
+    handlers -- unrelated to this reserved-pin path, but to stay robust
+    against exactly-this-kind-of-adjacent-change, this matches on "the
+    request was rejected with a recognized rejection status" (ERR_BAD_ARGS
+    or ERR_BUSY) rather than hard-coding ERR_BAD_ARGS alone."""
+    verdict = _classify_expander_link(link)
+    if verdict is not None:
+        return verdict
+    exp, pin = EXP1, 0  # EXP1_PIN_K1 -- reserved relay-sense input
+    try:
+        try:
+            link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": False, "pullup": False})
+        except SimLinkError as exc:
+            msg = str(exc)
+            if "ERR_BAD_ARGS" in msg or "ERR_BUSY" in msg:
+                return STATUS_PASS, (
+                    f"SET_DIR on exp{exp} pin{pin} (reserved relay-sense input) correctly rejected: {msg}"
+                )
+            return STATUS_FAIL, (
+                f"SET_DIR on exp{exp} pin{pin} (reserved) was rejected, but not with a recognized "
+                f"rejection status: {msg}"
+            )
+        # No exception at all means the firmware answered OK -- accepting a
+        # SET_DIR on a reserved, safety-relevant pin is exactly the
+        # interlock failure this check exists to catch.
+        return STATUS_FAIL, (
+            f"SET_DIR on exp{exp} pin{pin} (reserved relay-sense input, EXP1_PIN_K1) was NOT rejected -- "
+            "safety interlock failure"
+        )
+    finally:
+        # If the interlock actually failed above, the pin may now be a
+        # driven output -- restore it regardless of which path was taken.
+        _restore_pin_to_safe_default(link, exp, pin)
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +736,11 @@ _CHECKS: "list[tuple[str, Callable[[SimLink], tuple]]]" = [
     ("event_sequence_continuity", _check_event_sequence_continuity),
     ("determinism_spot_check", _check_determinism_spot),
     ("expander_read_after_write", _check_expander_read_after_write),
+    ("expander_exp2_read_after_write", _check_expander_exp2_read_after_write),
+    ("expander_exp1_multi_pin_read_after_write", _check_expander_exp1_multi_pin_read_after_write),
+    ("expander_pin_independence", _check_expander_pin_independence),
+    ("expander_input_pullup_reads_high", _check_expander_input_pullup_reads_high),
+    ("expander_reserved_pin_rejected", _check_expander_reserved_pin_rejected),
     ("spi_master_loopback", _check_spi_master_loopback),
     ("ct_adc_loopback", _check_ct_adc_loopback),
 ]
