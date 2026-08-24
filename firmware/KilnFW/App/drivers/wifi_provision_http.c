@@ -798,8 +798,51 @@ esp_err_t wifi_provision_http_start(void)
      * comment above) -- thin enough that the NEXT small addition anywhere in
      * the tree silently 404s a page again, exactly the failure mode the
      * 72->80 bump above was already fixing. 84 restores the same few-routes
-     * headroom this cap has been kept at every time before. */
-    config.max_uri_handlers = 84;
+     * headroom this cap has been kept at every time before.
+     *
+     * **Found the hard way a FOURTH time (2026-08-24, bench, commit
+     * 750dc33)**: 84 was already one short by the time it shipped. Boot log:
+     * `httpd_register_uri_handler(/api/safety/commissioning/bench_preset)
+     * failed: ESP_ERR_HTTPD_HANDLERS_FULL`. Recounted by machine this time
+     * (tools/check_uri_handler_cap.ps1, see below), not by hand: every
+     * `.uri = "..."` literal under firmware/KilnFW/App/drivers (every .c file
+     * there), comments
+     * stripped. Per-file, in a normal build: wifi_provision_http.c (11) +
+     * dashboard_http.c (20) + board_temps.c (2) + zones_http.c (3) +
+     * rules_http.c (4) + profiles_http.c (8) + factory_reset.c (1) +
+     * readiness_http.c (2) + diagnostics_http.c (9) + settings_http.c (3) +
+     * ota_http.c (9) + kiln_cfg_http.c (6) + backup_http.c (3) +
+     * safety_cfg_http.c (4) = 85. safety_cfg_http.c actually carries 4
+     * routes today, not the 3 the paragraph above counted (it also has the
+     * page route, GET /safety/commissioning) -- that single miscount plus
+     * backup_http.c's 3 routes (kiln_cfg_http.c's config-store surface,
+     * added since the 72->80 bump but never rolled into this comment) is
+     * most of how 84 went stale: nobody re-derived the number from source,
+     * they trusted the running total. Add sim_backend.c's 2
+     * CONFIG_KILNCTL_SIM_PLANT-only routes for the true worst case: 87.
+     *
+     * RAM cost of a bump here: esp_http_server allocates
+     * `hd->hd_calls = calloc(config.max_uri_handlers, sizeof(httpd_uri_t *))`
+     * once at httpd_start() (esp-idf components/esp_http_server/src/
+     * httpd_main.c) -- an array of POINTERS, not of httpd_uri_t structs (the
+     * structs themselves are static const in each driver file already, cap-
+     * independent). sizeof(httpd_uri_t *) is 4 bytes on this target's 32-bit
+     * Xtensa pointers, so each extra slot costs 4 bytes, not the several-
+     * hundred-byte size of the struct it points to. Bumping 84 -> 95 (below)
+     * costs 11 * 4 = 44 bytes -- against the 12483-byte dram_free this
+     * project has measured at the uart_bridges_1 heap stage (and the
+     * documented ~11.9 kB failure floor where HTTP sockets start resetting
+     * and /app.js comes back truncated), 44 bytes is noise, not a threat.
+     *
+     * Set to 95: 87 plus 8 spare slots, the same order of headroom every
+     * bump above used (7-13), not double the real count. This time the
+     * "keep it ahead of the real count" promise is backed by
+     * tools/check_uri_handler_cap.ps1, which recounts `.uri = "..."` under
+     * every .c file in drivers/ and fails the moment this cap falls behind again --
+     * because after three prose-comment-only bumps still missing the real
+     * count, and now a fourth, a comment alone has a 0% success rate on
+     * this exact bug. */
+    config.max_uri_handlers = 95;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

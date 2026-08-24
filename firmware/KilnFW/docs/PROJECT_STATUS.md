@@ -204,6 +204,105 @@ sections above, but move anything with lasting design value out to
 `ARCHITECTURE.md`/`ARCHITECTURE_DECISIONS.md`/`BRINGUP_HAZARDS.md` once it
 lands, rather than letting it grow indefinitely.
 
+### 2026-08-24 — Internal-DRAM boot trough investigated; low-water alarm added
+
+Bench (commit 750dc33) showed `heap stage uart_bridges_1 largest= 7680
+delta= +0 dram_free= 12483` — a ~35KB drop in `dram_free` since the
+`executor+autotune` stage. Itemized as far as static analysis honestly goes:
+~20.5KB is attributable to internal-only (plain `xTaskCreatePinnedToCore`,
+not `*WithCaps(MALLOC_CAP_SPIRAM)`) task stacks created in that window —
+`uart_owner_task`+`uart_owner_evt_task` (4096B each), `uart_proto_rx`
+(4096B), `rules_task`+`rules_watchdog` (3072+2048B), `system_uart_bridge`
+(3072B). `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384` means every one of
+these lands internal regardless of PSRAM being present, since none of them
+requests `MALLOC_CAP_SPIRAM` explicitly. The remaining ~14KB is NOT
+attributed to any single line found by inspection — candidates (per-task
+TCB/newlib-reent overhead across ~10 tasks created in the window, NVS handle
+opens in `kiln_cfg_store_init()`/`safety_cfg_store_init()`) were checked and
+none is individually large enough to close the gap; this is reported as a
+genuine gap, not filled with a guess.
+
+The collapse of `largest` (31744 → 7680) is mostly consumption (a
+monotonically shrinking heap during a boot sequence that creates ~10 tasks
+back to back), but real fragmentation is also present at that instant: free
+(12483) is well above largest (7680), meaning ~4.8KB is free but scattered
+into pieces smaller than the largest block — a single allocation between
+7680 and 12483 bytes fails there even though "12.4KB free" sounds fine.
+
+Good news found while tracing this: the historical cause of the identical
+7680-byte figure (LVGL's 8192-byte task stack racing other internal-SRAM
+consumers) is already fixed — `lvgl_port.c` now uses a static `.bss` stack
+array, decided at link time, which no longer competes for a dynamic
+contiguous block at all. `uart_bridge_ext_start_flash_worker()`'s 8192-byte
+internal stack is also already started early (before this window), per its
+own file-header comment. Both of those fixes predate this investigation and
+remain correct; nothing here was found to have regressed them.
+
+Risk verdict: the 12483/7680 boot-time trough is in the same neighborhood as
+the ONE documented real failure with numbers attached — `free=11903,
+largest=8704` at 8000s of *steady-state* uptime (not boot), which broke
+`/app.js` delivery (`ERR_CONNECTION_RESET`, truncated JS, "Loading..."
+forever) — see the session's DRAM-exhaustion memory note. These are not the
+same measurement point (a boot-time trough vs. a multi-hour steady-state
+floor) so treat "~500 bytes of margin" as suggestive, not literal; but they
+are the same heap cap (`MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT`) and the same
+order of magnitude, and DRAM fragmentation only gets worse with uptime, not
+better — a board starting this close to the known failure zone at boot has
+no demonstrated slack before it degrades into the same failure over a long
+firing. Not verified on this bench past `uart_bridges_1`; the later stages
+(`lvgl_start`, `uart_bridges_2`, `app_main_done`) were not captured in the
+log this investigation had, so whether this recovers by end of boot (as an
+earlier, differently-configured pass's own recorded figures suggest it
+might) is unconfirmed, not assumed.
+
+**Implemented**: `App/drivers/dram_margin.h` (`dram_margin_check()`, pure
+and host-tested) wired into `main.c`'s `heap_stage()` — logs `ESP_LOGE` at
+any stage where `largest < 8704` or `dram_free < 11903` (the documented
+failure's own figures, not an invented margin). Host-tested in
+`App/test/test_dram_margin.c`, including a negative test using this
+session's actual bench figures (7680/12483) that must trip the alarm;
+verified failing when the threshold was temporarily weakened, then restored
+green (921/921). Not yet exercised on real hardware — will fire the next
+time this board boots.
+
+**Not implemented, needs a bench measurement before it's safe to do**:
+shrinking `uart_owner`/`uart_protocol`/`rules_task`/`system_uart_bridge`'s
+stacks (see `feedback_negative_test_every_check`/prior `SimFW stack sizing`
+species note — must be backed by `uxTaskGetStackHighWaterMark()`, not a
+guess) or moving any of them to `MALLOC_CAP_SPIRAM` (each such task must be
+individually checked against the flash-cache-disabled hazard
+`uart_bridge_ext.c` documents before being PSRAM-stacked). Left for a
+future pass with real hardware access.
+
+### 2026-08-24 — HTTP `max_uri_handlers` cap fell behind for the 4th time; now machine-guarded
+
+Bench boot log (commit `750dc33`):
+`httpd_register_uri_handler(/api/safety/commissioning/bench_preset) failed:
+ESP_ERR_HTTPD_HANDLERS_FULL` — that route silently 404s. `max_uri_handlers`
+(84) was one short. Recounted by machine, not by hand: every
+`.uri = "..."` `httpd_uri_t` literal under `App/drivers/*.c`, comments
+stripped, gives **85 routes in a normal build, 87 with
+`CONFIG_KILNCTL_SIM_PLANT`** (sim_backend.c's 2 `/api/sim` routes are the
+only conditionally-compiled ones). Raised to **95** (worst case + 8
+headroom, same order as the three prior bumps: 59→72→80→84). RAM cost:
+`esp_http_server` allocates `hd_calls` as an array of 4-byte pointers, not
+structs, so the bump costs 11 × 4 = **44 bytes** — noise against the
+12483-byte `dram_free` this same boot log measured.
+
+The fix that matters more than the number: `tools/check_uri_handler_cap.ps1`,
+a standalone guard (comments stripped, `throw`-based non-zero exit, refuses
+to run blind on an implausible route count) that recounts every
+`.uri = "..."` under `App/drivers/` and fails when `max_uri_handlers` is
+below that count. This is the fourth time this cap has drifted behind the
+real count with only a prose comment guarding it — the comment has a 0%
+save rate on this bug across three prior misses, which is why this pass
+adds a script instead of another paragraph. Verified failing three
+different ways (unmodified tree before the fix, cap manually set one below
+the true count, and 9 dummy routes added elsewhere in `drivers/` with the
+cap left untouched) and passing again after each was reverted — see
+`firmware/KilnFW/TODO.md` section 12 for the full readout. Not yet wired
+into any build/CI step; running it is still a manual step.
+
 ### 2026-08-20 — MAX31856 thermocouple ICs fitted
 
 Supersedes every earlier note in this repo saying the ICs are physically not

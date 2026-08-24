@@ -56,6 +56,7 @@ $sources = @(
     (Join-Path $testDir "test_ui_page_home_graph.c"),
     (Join-Path $testDir "test_max31856_codec.c"),
     (Join-Path $testDir "test_owner_slot_pool.c"),
+    (Join-Path $testDir "test_dram_margin.c"),
     (Join-Path $testDir "sim_plant.c"),
     (Join-Path $driversDir "pid.c"),
     (Join-Path $driversDir "thermal_guard.c"),

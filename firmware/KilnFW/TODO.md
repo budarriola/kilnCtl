@@ -1630,3 +1630,85 @@ comparable since several unrelated commits (the `KILNLINK_PROTOCOL_VERSION`
 id-sharing bump, `kiln_ui.c`/`ui_page_*` work) landed in the same window
 from other concurrent sessions and changed the suite's total independent of
 this pass.
+
+## 12. HTTP `max_uri_handlers` cap — DONE 2026-08-24, now machine-guarded
+
+Bench boot log (commit `750dc33`) showed
+`httpd_register_uri_handler(/api/safety/commissioning/bench_preset) failed:
+ESP_ERR_HTTPD_HANDLERS_FULL` — `wifi_provision_http.c`'s
+`config.max_uri_handlers` (then 84) had fallen behind the tree's real route
+count for the **fourth** time (previous bumps: 59→72, 72→80, 80→84, all
+logged in that file's own comment history above the assignment). Real
+worst-case count, recounted by machine rather than by hand: every
+`.uri = "..."` `httpd_uri_t` literal under `App/drivers/*.c` (comments
+stripped) is **85 in a normal build, 87 with `CONFIG_KILNCTL_SIM_PLANT`**
+(sim_backend.c's 2 `/api/sim` routes are the only conditionally-compiled
+ones; no loops or macro-generated route tables exist anywhere in the tree).
+Cap raised 84 → **95** (worst case + 8, same headroom order as every
+previous bump). RAM cost: `esp_http_server` allocates
+`hd_calls = calloc(max_uri_handlers, sizeof(httpd_uri_t *))` — an array of
+4-byte pointers on this target, not of structs — so the bump costs
+11 × 4 = **44 bytes**, negligible against the 12483-byte `dram_free`
+this same boot log measured (and negligible next to the ~11.9 kB failure
+floor documented for that stage).
+
+**The actual fix**: `tools/check_uri_handler_cap.ps1` — a standalone
+PowerShell guard (same shape as `tools/check_bridge_reject_reason.ps1` /
+`tools/check_uart_version_independence.ps1`: comments stripped, non-zero
+exit via `throw`, refuses to run blind if its own route count drops below
+a sanity floor). It recounts every `.uri = "..."` under `App/drivers/`
+(every `.c` file there, not a hardcoded module list, so a brand-new route
+file is covered automatically) and fails if `max_uri_handlers` is below
+that count. Not wired into a build step yet — that's the one thing left
+open here; running it is currently a manual/CI-TODO step, not enforced on
+every build. **Verified it actually catches the bug it exists for**: run
+against the tree exactly as found (cap still 84) it failed with the real
+87-route count before any fix was applied; lowering the restored cap by
+one (95→86) reproduces the same failure; and, separately, adding 9 dummy
+routes to `kiln_cfg_http.c` with the cap left untouched at 95 also failed
+(96 routes > 95 cap) — proving the guard is coupled to the actual route
+literals in source, not just to a number typed by hand, and would catch
+tomorrow's forgotten bump the same way it caught this one. All three
+failure modes were restored and the guard re-confirmed passing (87 routes,
+cap 95, 8 spare) before this entry was written.
+
+## 13. Internal-DRAM boot-time low-water alarm — DONE 2026-08-24
+
+Same bench boot log as section 12 above prompted a separate investigation:
+`heap stage uart_bridges_1 largest= 7680 delta= +0 dram_free= 12483`, a
+~35KB drop in `dram_free` since the `executor+autotune` stage three log
+lines earlier. Full itemization, the fragmentation-vs-consumption verdict,
+and the risk read against the documented `free=11903, largest=8704`
+HTTP-socket-reset failure (steady-state, 8000s uptime — NOT the same
+measurement point as this boot-time trough, so "~500 bytes of margin" is
+suggestive, not literal) are written up in `docs/PROJECT_STATUS.md`'s
+2026-08-24 session-log entry — that is the authoritative record, not
+repeated here. Short version: ~20.5KB of the ~35KB is attributable to six
+internal-only task stacks created in that window (none uses
+`MALLOC_CAP_SPIRAM`); ~14KB is an honest, unfilled gap.
+
+**Shipped**: `App/drivers/dram_margin.h` (`dram_margin_check()`) wired into
+`main.c`'s `heap_stage()` — every boot-time heap-stage log line now also
+checks `largest`/`dram_free` against the documented failure's own figures
+and logs `ESP_LOGE` if either is crossed, so a future regression here shows
+up in the boot log instead of only surfacing later as "the web page won't
+load". Host-tested in `App/test/test_dram_margin.c`, including a test using
+this investigation's real bench figures that must trip the alarm — proven
+non-vacuous by temporarily weakening the threshold, watching that test fail
+(2 FAILURE(S), 919/921), then restoring it (921/921 green). Not yet seen to
+fire on real hardware.
+
+**Left open, needs bench measurement (`uxTaskGetStackHighWaterMark()`)
+before any of it is safe to act on** — do NOT resize any of these from the
+numbers in this entry alone:
+- `uart_owner`/`uart_protocol` task stacks (`Kconfig`'s
+  `KILNCTL_UART_OWNER_STACK_SIZE`/`KILNCTL_UART_PROTOCOL_STACK_SIZE`,
+  4096B each, 3 tasks, all internal) — candidates to shrink or move to
+  PSRAM, but PSRAM-stacking any of them needs the same flash-cache-disabled
+  audit `uart_bridge_ext.c`'s header comment already did for the bridge
+  tasks before this is safe.
+- `rules_task`/`rules_watchdog` (3072B/2048B, internal,
+  `App/drivers/rules_task.c`) and `system_uart_bridge` (3072B, internal,
+  `App/drivers/uart_bridge.c`) — same two options, same caveat.
+- The ~14KB unattributed gap itself — worth a live coredump/heap-trace pass
+  with real hardware rather than further static-analysis guessing.

@@ -1,0 +1,115 @@
+/* Internal-DRAM low-water alarm, checked at every main.c heap_stage() call.
+ *
+ * WHY these two thresholds, specifically: they are not a guess and not "the
+ * size of the next allocation" (there isn't one to point to here -- LVGL's
+ * 8192-byte task stack, the historical reason for an 8192 threshold, moved to
+ * a static .bss array on 2026-08-21 and no longer competes for a dynamic
+ * block at all; see lvgl_port.c's lvgl_port_start() comment). They are the
+ * exact figures the board reported, live, the one time this project's own
+ * memory of a real failure was captured with numbers attached:
+ *
+ *   2026-08-22, /api/status at 8000s uptime: heap_internal free=11903,
+ *   largest_free_block=8704. A browser loading /app.js got
+ *   ERR_CONNECTION_RESET, the truncated file failed to parse, and every page
+ *   depending on it sat on "Loading..." forever. Root cause: wifi_provision_
+ *   http.c's max_open_sockets=13 with an 8192-byte httpd stack, more lwIP
+ *   sockets than internal SRAM could back at that fragmentation level.
+ *
+ * That is a STEADY-STATE figure (8000s of uptime, not a boot-time reading),
+ * so it is not directly comparable to heap_stage()'s boot-time trace without
+ * that caveat -- see the KilnFW DRAM investigation note in docs/PROJECT_
+ * STATUS.md for the full discussion. What it is unambiguously good for is a
+ * name for "the smallest largest-free-block value at which this exact
+ * failure mode has already happened, once, for real" -- which is what an
+ * early-warning alarm needs, not a theoretical safety margin invented for
+ * the occasion.
+ *
+ * Pure and host-testable: see App/test/test_dram_margin.c. */
+#ifndef DRAM_MARGIN_H
+#define DRAM_MARGIN_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#define KILN_DRAM_LARGEST_ALARM_BYTES ((size_t)8704)
+#define KILN_DRAM_FREE_ALARM_BYTES    ((size_t)11903)
+
+/* The worst figures the CURRENT firmware actually reaches on the bench.
+ *
+ * Measured 2026-08-24 with this alarm live, across EVERY heap_stage() call
+ * rather than the one stage that had been quoted before: the trough is not
+ * `uart_bridges_1` (largest=7680, dram_free=12383) but `app_main_done`
+ * (largest=7680, dram_free=11415) -- `lvgl_start` and `uart_bridges_2` sit
+ * between them at 12039 and 11519. Earlier notes on this problem quoted the
+ * uart_bridges_1 figure as the trough and reasoned from it; that was simply
+ * the last stage anyone had looked at, and it understates the real minimum by
+ * about 1 kB.
+ *
+ * That correction matters: 11415 is BELOW the 11903 documented failure figure
+ * above, so the end of boot is already inside the zone where this exact
+ * failure has happened once -- not comfortably above it.
+ *
+ * Recorded because `largest` is ALREADY below KILN_DRAM_LARGEST_ALARM_BYTES,
+ * so the alarm is a STANDING condition on every boot, not an event.
+ *
+ * That distinction is the whole reason these exist. An alarm that fires on
+ * every single boot is indistinguishable from a broken alarm: everyone
+ * learns to scroll past it, and the first genuine regression then arrives
+ * inside a line that has been ignored for months. So the check reports two
+ * different things -- "you are in the documented failure zone", which is
+ * true today and expected, and "you are worse than this firmware has ever
+ * been", which is news and is the line worth acting on.
+ *
+ * KEEP THESE CURRENT. If a change legitimately improves the trough, lower
+ * them, in the same commit, with the new measured figures -- otherwise the
+ * regression check silently stops being able to detect anything, which is
+ * the same vacuous-check failure this repo has already shipped three times.
+ * If a change makes them worse, that is precisely what the alarm is for:
+ * do not raise these to silence it. */
+#define KILN_DRAM_LARGEST_KNOWN_BYTES ((size_t)7680)
+#define KILN_DRAM_FREE_KNOWN_BYTES    ((size_t)11415)
+
+/* Boot-to-boot slack. The figures above are single-boot measurements, and the
+ * late stages depend on Wi-Fi association and DHCP timing, so a few hundred
+ * bytes of variation between two boots of the SAME binary is expected.
+ * Without slack the regression line would flap, which destroys its value just
+ * as surely as firing on every boot does. 512 bytes is chosen to be larger
+ * than observed jitter and far smaller than any real growth worth catching --
+ * the 44-byte max_uri_handlers bump is the smallest deliberate change
+ * measured so far, and a genuine leak or a new task stack is kilobytes. If
+ * the regression line starts flapping anyway, MEASURE the spread across
+ * several boots and widen this with the numbers recorded -- do not widen it
+ * by feel. */
+#define KILN_DRAM_REGRESSION_SLACK_BYTES ((size_t)512)
+
+typedef struct {
+    bool tripped;      /* either alarm condition below is true */
+    bool largest_low;  /* largest contiguous internal 8-bit block < alarm */
+    bool free_low;     /* total free internal 8-bit heap < alarm */
+    bool regressed;    /* worse than the known-current trough -- the NEW news */
+    bool largest_regressed;
+    bool free_regressed;
+} dram_margin_result_t;
+
+/* Pure decision function -- no I/O, no ESP-IDF calls. Takes the same two
+ * figures main.c's heap_stage() already computes via heap_caps_get_largest_
+ * free_block()/heap_caps_get_free_size() and decides whether either has
+ * reached the documented failure zone above. */
+static inline dram_margin_result_t dram_margin_check(size_t largest_free_bytes, size_t total_free_bytes)
+{
+    dram_margin_result_t r;
+    r.largest_low = largest_free_bytes < KILN_DRAM_LARGEST_ALARM_BYTES;
+    r.free_low = total_free_bytes < KILN_DRAM_FREE_ALARM_BYTES;
+    r.tripped = r.largest_low || r.free_low;
+    /* Strictly below the known trough minus slack: equalling the trough, or
+     * missing it by less than boot-to-boot jitter, is this firmware behaving
+     * as measured. Only going meaningfully past it is news. */
+    r.largest_regressed =
+        largest_free_bytes + KILN_DRAM_REGRESSION_SLACK_BYTES < KILN_DRAM_LARGEST_KNOWN_BYTES;
+    r.free_regressed =
+        total_free_bytes + KILN_DRAM_REGRESSION_SLACK_BYTES < KILN_DRAM_FREE_KNOWN_BYTES;
+    r.regressed = r.largest_regressed || r.free_regressed;
+    return r;
+}
+
+#endif /* DRAM_MARGIN_H */

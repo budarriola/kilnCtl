@@ -23,6 +23,7 @@
 #include "watchdog_cfg.h"
 #include "crash_report.h"
 #include "dashboard_http.h"
+#include "dram_margin.h"
 #include "diagnostics_http.h"
 #include "backup_http.h"
 #include "settings_http.h"
@@ -298,6 +299,56 @@ static void heap_stage(const char *stage)
     s_prev_largest = largest;
     ESP_LOGW(TAG, "heap stage %-18s largest=%6u delta=%+7d dram_free=%7u", stage,
              (unsigned)largest, delta, (unsigned)free8);
+
+    /* See dram_margin.h for exactly why these two thresholds and not some
+     * other pair -- they are the documented figures from the one time this
+     * exact failure (HTTP sockets resetting, /app.js truncated, "Loading..."
+     * forever) was caught with numbers attached, not an invented margin.
+     * Logged at ERROR, not just returned, because heap_stage() callers never
+     * check a return value today and this alarm exists precisely so a
+     * regression announces itself in the boot log instead of only showing up
+     * later as an unrelated-looking front-end bug report. */
+    dram_margin_result_t margin = dram_margin_check(largest, free8);
+    if (margin.regressed) {
+        /* The line that is actually news: worse than this firmware has ever
+         * measured. Distinct wording from the standing alarm below on purpose
+         * -- grep for "DRAM REGRESSION" to find only real changes. */
+        ESP_LOGE(TAG,
+                 "heap stage %-18s DRAM REGRESSION: largest=%u (was %u%s) "
+                 "dram_free=%u (was %u%s) -- this build uses MORE internal DRAM "
+                 "than any measured before it. Do not raise the thresholds in "
+                 "dram_margin.h to silence this; find what grew",
+                 stage, (unsigned)largest, (unsigned)KILN_DRAM_LARGEST_KNOWN_BYTES,
+                 margin.largest_regressed ? ", WORSE" : "", (unsigned)free8,
+                 (unsigned)KILN_DRAM_FREE_KNOWN_BYTES,
+                 margin.free_regressed ? ", WORSE" : "");
+    } else if (margin.tripped) {
+        /* Standing condition, true on every boot today: `largest` at the
+         * uart_bridges_1 stage is already below the documented failure figure.
+         * Deliberately WARNING, not ERROR -- it is real and must stay visible,
+         * but an ERROR that fires every single boot is one everybody learns to
+         * scroll past, and then the DRAM REGRESSION line above would arrive
+         * inside a message that has been ignored for months. See
+         * dram_margin.h's comment on why the two are separated.
+         *
+         * The level split has a second, useful consequence on this board:
+         * uart_log_bridge.c prioritises ERROR lines so they survive the
+         * boot-burst log queue (commit f183b96), while WARN lines can be
+         * dropped when that queue fills -- and it does fill during boot. So
+         * the regression line, which is news, is the one guaranteed to reach
+         * the host, and the standing line, which says only "still true", is
+         * the one allowed to be dropped. That is the right way round; do not
+         * "fix" the standing line by promoting it to ERROR. */
+        ESP_LOGW(TAG,
+                 "heap stage %-18s DRAM margin (standing, expected): largest=%u "
+                 "(failure-zone <%u: %s) dram_free=%u (failure-zone <%u: %s) -- at "
+                 "or below the documented HTTP-socket-reset figures (dram_margin.h); "
+                 "a single allocation bigger than the largest figure will fail even "
+                 "though dram_free looks nonzero",
+                 stage, (unsigned)largest, (unsigned)KILN_DRAM_LARGEST_ALARM_BYTES,
+                 margin.largest_low ? "yes" : "no", (unsigned)free8,
+                 (unsigned)KILN_DRAM_FREE_ALARM_BYTES, margin.free_low ? "yes" : "no");
+    }
 }
 
 /* Every task creation in this file is a single-line "start" call -- the
