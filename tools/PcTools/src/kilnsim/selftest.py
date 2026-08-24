@@ -39,7 +39,18 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .link import SimLink, SimLinkError
-from .protocol import CommandGroup, CtCmd, EventType, FaultCmd, IoCmd, ModelCmd, RelayCmd, SysCmd, TcCmd
+from .protocol import (
+    CommandGroup,
+    CtCmd,
+    EventType,
+    FaultCmd,
+    IoCmd,
+    ModelCmd,
+    RelayCmd,
+    SysCmd,
+    TASK_STACK_MARGIN_WARN_THRESHOLD,
+    TcCmd,
+)
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -185,6 +196,72 @@ def _check_command_groups_reachable(link: SimLink) -> "tuple[str, str]":
     if failures:
         return STATUS_FAIL, f"{len(ok_names)}/{len(ok_names) + len(failures)} groups OK; failed: " + "; ".join(failures)
     return STATUS_PASS, f"all {len(ok_names)} probed command groups (SYS already proven by earlier checks) answered"
+
+
+def _check_task_stack_margins(link: SimLink) -> "tuple[str, str]":
+    """The preventive half of the per-task-stack-margin feature
+    (PROTOCOL.md sec 4, GET_TASK_STATS / cmd_ids.h's
+    SIMFW_CMD_SYS_GET_TASK_STATS): FAILS if any FreeRTOS task's stack
+    margin (allocated / peak-used) is under TASK_STACK_MARGIN_WARN_THRESHOLD
+    (2.0, protocol.py -- the working standard this project's own
+    cmd_task/spi_emu_a/spi_emu_b audit used, shared with `kilnsim tasks`'
+    human-readable flagging so the two thresholds can never silently
+    drift apart). This is what turns the feature preventive rather than
+    merely informative: after this check exists, a future undersized task
+    stack is caught by `kilnsim selftest` on the bench, before it ships,
+    instead of being found the way the first three incidents were --
+    telemetry (1024 B allocated vs. 10736 B actually used) and sim_engine
+    (2048 B vs. a 2328 B measured worst case, which actually bricked a
+    board) by a live SWD session, and cmd_task/spi_emu_a/spi_emu_b by a
+    manual -fstack-usage audit.
+
+    Same fw_git_hash-based virtual/mock detection every other
+    hardware-dependent check in this module uses (see
+    `_classify_expander_link`'s own comment for the full reasoning):
+    virtual_simfw does not run real FreeRTOS at all (no
+    uxTaskGetStackHighWaterMark() to report -- its own README documents it
+    as a protocol-shape stand-in, not a timing/memory-accurate emulation),
+    so a real-hardware-only check like this one is honestly reported
+    NOT_RUNNABLE there rather than either faking a pass or failing on an
+    irrelevant mismatch."""
+    try:
+        version = link.send_command(CommandGroup.SYS, SysCmd.GET_VERSION)
+    except SimLinkError as exc:
+        return STATUS_FAIL, f"could not read GET_VERSION to identify the link: {exc}"
+    git_hash = version.get("fw_git_hash")
+    if git_hash in ("virtual", "0000000"):
+        why = "virtual_simfw" if git_hash == "virtual" else "MockSimLink"
+        return STATUS_NOT_RUNNABLE, (
+            f"connected device self-identifies as {why} (fw_git_hash == {git_hash!r}), which does not "
+            "run real FreeRTOS (no uxTaskGetStackHighWaterMark() to report) -- a stack-margin check "
+            "here would be meaningless, not a fixture defect"
+        )
+
+    try:
+        result = link.send_command(CommandGroup.SYS, SysCmd.GET_TASK_STATS)
+    except SimLinkError as exc:
+        return STATUS_FAIL, f"GET_TASK_STATS round trip errored: {exc}"
+
+    tasks = result.get("tasks", [])
+    if not tasks:
+        return STATUS_FAIL, "GET_TASK_STATS reported zero tasks -- expected ~13 (10 app tasks + 2 SMP idle + timer)"
+
+    low = [
+        f"{t.get('task_stats_id_name') or t['task_stats_id']} ({t['margin']:.2f}x, "
+        f"{t['peak_used_bytes']}/{t['allocated_bytes']}B used)"
+        for t in tasks
+        if t["margin"] < TASK_STACK_MARGIN_WARN_THRESHOLD
+    ]
+    if low:
+        return STATUS_FAIL, (
+            f"{len(low)}/{len(tasks)} task(s) under {TASK_STACK_MARGIN_WARN_THRESHOLD:.1f}x stack margin: "
+            + "; ".join(low)
+        )
+    tightest = min(t["margin"] for t in tasks)
+    return STATUS_PASS, (
+        f"{len(tasks)} task(s) reported, all >= {TASK_STACK_MARGIN_WARN_THRESHOLD:.1f}x stack margin "
+        f"(tightest {tightest:.2f}x)"
+    )
 
 
 def _check_telemetry_cadence(link: SimLink) -> "tuple[str, str]":
@@ -732,6 +809,7 @@ _CHECKS: "list[tuple[str, Callable[[SimLink], tuple]]]" = [
     ("ping_roundtrip", _check_ping_roundtrip),
     ("version_and_caps", _check_version_and_caps),
     ("command_groups_reachable", _check_command_groups_reachable),
+    ("task_stack_margins", _check_task_stack_margins),
     ("telemetry_cadence", _check_telemetry_cadence),
     ("event_sequence_continuity", _check_event_sequence_continuity),
     ("determinism_spot_check", _check_determinism_spot),

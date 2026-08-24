@@ -728,6 +728,16 @@ exercised.
 
 ### Step 10 — First closed-loop firing attempt
 
+**For a single scenario, use `kilnsim run` as below. For "confirm a whole
+firmware/hardware update didn't break anything" (repeated bench sessions,
+not a first bring-up), use `kilnsim testmgr` / `kilnsim testmgr --quick`
+instead — it detects which hardware tier is actually attached, runs every
+scenario that tier supports, and reports a guard-coverage table against
+`GUARD_TEST_MATRIX.md`'s S1..S13. See `docs/TEST_MANAGER.md` for the full
+account; it has never been run against real hardware as of this writing, so
+treat that as untested until someone runs it here and updates that doc's
+§8.**
+
 ```powershell
 kilnsim --port COMx run firmware\SimFW\scenarios\baseline_firing.yaml --report out.json
 ```

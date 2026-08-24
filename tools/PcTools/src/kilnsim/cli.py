@@ -21,11 +21,23 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from . import selftest as _selftest
+from . import testmgr as _testmgr
 from .link import MockSimLink, SerialSimLink, SimLink, SimLinkError, TcpSimLink, get_state_snapshot
-from .protocol import CommandGroup, CtCmd, FaultCmd, IoCmd, ModelCmd, RelayCmd, SysCmd, SYS_REBOOT_BOOTLOADER_MAGIC
+from .protocol import (
+    CommandGroup,
+    CtCmd,
+    FaultCmd,
+    IoCmd,
+    ModelCmd,
+    RelayCmd,
+    SysCmd,
+    SYS_REBOOT_BOOTLOADER_MAGIC,
+    TASK_STACK_MARGIN_WARN_THRESHOLD,
+)
 from .report import evaluate_expectations
 from .runner import run_scenario
 from .scenario import ScenarioError, load_scenario
@@ -456,6 +468,79 @@ def cmd_selftest(args) -> int:
     return 0 if report.passed else 1
 
 
+def _format_task_stats_table(result: dict) -> str:
+    """Pure formatting, no I/O -- kept separate from :func:`cmd_tasks` so a
+    test can call it directly against a decoded GET_TASK_STATS reply
+    without needing a link (see tools/PcTools/tests/test_kilnsim_task_stats.py).
+    Columns: task, allocated, peak used, headroom, margin -- flags anything
+    under TASK_STACK_MARGIN_WARN_THRESHOLD with a leading ``!`` marker and a
+    summary line, since that is the entire reason this command exists (this
+    feature's own task instructions: "FLAG anything under 2x margin
+    prominently -- that threshold is what this whole feature exists to
+    police")."""
+    tasks = result.get("tasks", [])
+    if not tasks:
+        return "(no tasks reported)"
+    rows = sorted(tasks, key=lambda t: t["margin"])
+    header = f"  {'task':<12} {'allocated':>10} {'peak used':>10} {'headroom':>10} {'margin':>8}"
+    lines = [header, "-" * len(header)]
+    flagged = []
+    for t in rows:
+        name = t.get("task_stats_id_name") or str(t["task_stats_id"])
+        is_low = t["margin"] < TASK_STACK_MARGIN_WARN_THRESHOLD
+        marker = "!" if is_low else " "
+        margin_str = "inf" if t["margin"] == float("inf") else f"{t['margin']:.2f}x"
+        lines.append(
+            f"{marker} {name:<12} {t['allocated_bytes']:>9}B {t['peak_used_bytes']:>9}B "
+            f"{t['hwm_free_bytes']:>9}B {margin_str:>8}"
+        )
+        if is_low:
+            flagged.append(f"{name} ({margin_str})")
+    if flagged:
+        lines.append("")
+        lines.append(
+            f"! {len(flagged)}/{len(tasks)} task(s) under {TASK_STACK_MARGIN_WARN_THRESHOLD:.1f}x stack "
+            f"margin: {', '.join(flagged)}"
+        )
+    return "\n".join(lines)
+
+
+def cmd_tasks(args) -> int:
+    """``kilnsim tasks`` -- GET_TASK_STATS (PROTOCOL.md sec 4): per-task
+    FreeRTOS stack allocated/peak-used/headroom/margin, the PC-side half of
+    the per-task-stack-margin feature (cmd_ids.h's
+    SIMFW_CMD_SYS_GET_TASK_STATS). Exit code 1 (not just a printed flag) if
+    any task is under TASK_STACK_MARGIN_WARN_THRESHOLD, so this is usable as
+    a CI/bench gate on its own, not just a human-readable report."""
+    link = _make_link(args)
+    _connect(link, args)
+    try:
+        result = link.send_command(CommandGroup.SYS, SysCmd.GET_TASK_STATS)
+    except SimLinkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(_format_task_stats_table(result))
+    low_margin = [t for t in result.get("tasks", []) if t["margin"] < TASK_STACK_MARGIN_WARN_THRESHOLD]
+    return 1 if low_margin else 0
+
+
+def cmd_testmgr(args) -> int:
+    link = _make_link(args)
+    scenarios_dir = Path(args.scenarios_dir) if args.scenarios_dir else None
+    report = _testmgr.run_suite(
+        link, scenarios_dir,
+        quick=args.quick, mock=args.mock, port=args.port,
+    )
+    if args.json:
+        print(report.to_json())
+    else:
+        print(report.to_text())
+    return report.exit_code
+
+
 def cmd_monitor(args) -> int:
     link = _make_link(args)
     _connect(link, args)
@@ -653,6 +738,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--json", action="store_true", help="machine-readable report instead of a text summary")
     sp.set_defaults(func=cmd_selftest)
+
+    sp = sub.add_parser(
+        "tasks",
+        help="per-task FreeRTOS stack allocated/peak-used/headroom/margin (GET_TASK_STATS) -- "
+             "flags anything under a 2x stack margin; exits 1 if any task is flagged",
+    )
+    sp.add_argument("--json", action="store_true", help="machine-readable reply instead of a text table")
+    sp.set_defaults(func=cmd_tasks)
+
+    sp = sub.add_parser(
+        "testmgr",
+        help="one-command tiered regression suite: hardware presence detection, "
+             "kilnsim selftest, every runnable SimFW scenario, and a guard-coverage "
+             "report against SaftyFW's S1..S13 list. Exit code 0=PASS, 1=FAIL, "
+             "2=BLOCKED-only (same convention as `kilnsim run`).",
+    )
+    sp.add_argument("--quick", action="store_true",
+                     help="fast subset only (the shortest-estimated-duration scenarios) -- "
+                          "for 'I just reflashed, is it still sane'")
+    sp.add_argument("--json", action="store_true", help="machine-readable report instead of a text summary")
+    sp.add_argument("--scenarios-dir", default=None,
+                     help="override the scenario directory (default: firmware/SimFW/scenarios)")
+    sp.set_defaults(func=cmd_testmgr)
 
     sp = sub.add_parser("monitor", help="tail live telemetry/events")
     sp.add_argument("--json", action="store_true")

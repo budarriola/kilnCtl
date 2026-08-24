@@ -228,6 +228,17 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   **Still NOT MET:** relay sense, E-stop loop, fault line and DUT power are
   all unwired, so the closed-loop, DUT-power-cycle and E-stop exit behaviours
   remain undemonstrated. The exit criterion above is unchanged.
+
+  **`kilnsim testmgr` (2026-08-24)** — a one-command tiered regression suite
+  built on top of this milestone's own scenario runner/selftest, orchestrating
+  presence detection, `kilnsim selftest`, every scenario the attached
+  hardware tier supports, and a guard-coverage report against
+  `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md`'s S1..S13 list. Built and
+  unit-tested against fakes only (`tools/PcTools/tests/test_kilnsim_testmgr.py`);
+  never yet run against real hardware. Full account, including honest known
+  limitations (SaftyFW-without-ESP detection not implemented, timed
+  `operator_actions` not replayed, the pre-existing `kilnsim.runner`
+  guard-event synthesis gap it surfaces but does not fix): `docs/TEST_MANAGER.md`.
 - [~] **M-F — Fault engine + scheduler.** Full catalog, trigger spec, slots,
   composition rules.
   **Exit:** same scenario + seed twice ⇒ byte-identical event logs;
