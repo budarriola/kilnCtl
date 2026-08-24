@@ -226,22 +226,30 @@ A failed operation is always logged on the device and forwarded over task
 `LOG`. Whether it also produces a reply frame depends on the subcommand and
 the task:
 
-- Every mutating subcommand on THERMO/IO/SAFETY that can be *refused before*
-  touching hardware (truncated payload, out-of-range argument, relay
-  refused for ownership/safety/OTA reasons) replies `{subcmd, ok=0,
-  [reason]}` per the "ACK means queued, not done" rule above, so the PC does
-  not have to wait out a timeout to learn a command was rejected.
-- THERMO and IO additionally reply `{subcmd, ok=0, "driver error"}` when a
-  subcommand reaches its driver call and fails *there* (e.g. a SPI/I2C
-  transfer error) — `thermo_bridge_task()`/`io_bridge_task()`'s bottom
-  `if (err != ESP_OK)` block.
-- SAFETY, DISPLAY and TOUCH do **not** reply on that same driver-call-failed
-  case (their own bottom `if (err != ESP_OK)` blocks still only log) — a PC
-  client talking to one of those three still sees a reply timeout, not a
-  fabricated value, if the underlying transfer fails after an
-  otherwise-valid command was accepted. This is the same silent shape the
-  fix above closed for THERMO/IO; it has not been extended to these three
-  yet (`firmware/KilnFW/TODO.md` §11).
+- Every mutating subcommand on THERMO/IO/SAFETY/DISPLAY/TOUCH that can be
+  *refused before* touching hardware (truncated payload, out-of-range
+  argument, relay refused for ownership/safety/OTA reasons) replies
+  `{subcmd, ok=0, [reason]}` per the "ACK means queued, not done" rule
+  above, so the PC does not have to wait out a timeout to learn a command
+  was rejected.
+- Every one of those five tasks additionally replies `{subcmd, ok=0,
+  "driver error"}` when a subcommand reaches its driver call and fails
+  *there* (e.g. a SPI/I2C transfer error, or a failed round trip to the
+  RP2040 on SAFETY) — each task's bottom `if (err != ESP_OK)` block.
+  `SAFETY_CMD_GET_CT_CAL`/`GET_PARAM`/`GET_CONFIG_PAGE` used to share their
+  id with their own success reply, which structurally forbade this refusal
+  (the host's exact-length check would misread it as a malformed success);
+  moving those three requests onto their own ids (0x22/0x23/0x24,
+  `KILNLINK_PROTOCOL_VERSION` 7) removed that block, so every subcommand on
+  every task now replies the same way on a driver-call failure
+  (`firmware/KilnFW/TODO.md` §11).
+- `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` reply `{subcmd, count}`
+  where `count` can legitimately be 0 (an honest empty result). To keep
+  that indistinguishable from nothing else, `bridge_reply_unsupported()`
+  (the `default:` case for an unrecognized subcommand) replies with a real
+  reason, `{subcmd, ok=0, len, "unsupported"}`, rather than the bare
+  2-byte `{subcmd, 0}` it used to send — the two shapes can no longer
+  collide (`firmware/KilnFW/TODO.md` §11).
 
 ## Command payloads
 

@@ -1530,3 +1530,39 @@ section had named.
   subtests/2 failed at the point this pass started — the 2 failures were the
   pre-existing `TOUCH_CMD_GET_STATE` tests above, not a regression this pass
   introduced).
+
+**Two more decode-then-discard instances of the CONTROL/PROFILES bug,
+found while finishing the audit above**: `parse_autotune_response()`'s
+`ABORT`/`ACCEPT` branch and `parse_wifi_uart_response()`'s
+`ADD_NETWORK`/`SET_MODE`/`SET_AP_IDENTITY`/`FORGET` branch both still
+reduced their reply to a bare `bool(payload[1])`, discarding the reason
+text `autotune_handle_message()`/`wifi_bridge_task()` (`uart_bridge_ext.c`)
+already send on refusal (`ACCEPT`'s "no completed autotune result to
+accept"; WIFI's "ssid too long", "saved network list is full",
+"ap_password must be empty or 8-63 characters", "could not forget network",
+etc). Both now return `OkReason`. `autotune.py`'s `AutotuneClient.abort()`/
+`accept()` and `wifi_uart.py`'s `WifiUartClient.add_network()`/
+`set_mode()`/`set_ap_identity()`/`forget()` changed their return type from
+bare `bool` to `OkReason` (queries, not fire-and-forget writes — always
+answered — so this is purely the same decode fix, no wait-window needed).
+Wired through `mcp_server.py`'s matching tools (surfacing `.reason`) and
+`gui.py`'s Wi-Fi Settings popup (`wifi_connect_async()`/
+`wifi_set_mode_async()`'s `apply()` callbacks, previously typed for a bare
+`bool`). `gui.py` has no UI for `set_ap_identity`/`forget`, so nothing else
+to rewire there. Tests: `AutotuneAbortAcceptReasonTests`/
+`WifiUartReasonTests` added (2 + 5 tests), each negative-tested by
+reverting its decode branch back to `bool(payload[1])` (2 and 5 failures
+respectively, all `AttributeError: 'bool' object has no attribute 'ok'` or
+a missed `OkReason` type check), then restored.
+
+**Running total for this whole pass, `tools/PcTools -m pytest -q`,
+excluding `tests/test_kilnsim_testmgr.py`** (owned by a concurrent session
+mid-edit at the time of this pass; 4 unrelated failures there, none in a
+file this pass touched): 628 passed / 91 subtests / 0 failed right after
+the DISPLAY/TOUCH/IO fixes, then 630 (+2, autotune) then 635 (+5, wifi) —
+**635 passed, 91 subtests, 0 failed** final. Task-stated baseline before
+this pass was 672 passed/91 subtests; the two figures aren't directly
+comparable since several unrelated commits (the `KILNLINK_PROTOCOL_VERSION`
+id-sharing bump, `kiln_ui.c`/`ui_page_*` work) landed in the same window
+from other concurrent sessions and changed the suite's total independent of
+this pass.

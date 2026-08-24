@@ -59,7 +59,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
     # mcp >= 2.0 renamed FastMCP to MCPServer (same decorator/run API).
@@ -83,12 +83,8 @@ from .protocol import (
     PROFILES_SAVE_ID_NEW,
     profile_id_is_builtin,
     THERMO_CHANNEL_ALL,
-    UART_TASK_ID_DISPLAY,
-    UART_TASK_ID_IO,
     UART_TASK_ID_SAFETY,
     UART_TASK_ID_SYSTEM,
-    UART_TASK_ID_THERMO,
-    UART_TASK_ID_TOUCH,
     WIFI_MODE_AP,
     WIFI_MODE_HOME,
     Device,
@@ -1237,13 +1233,30 @@ def io_set_relay_mask(mask: int, value: int) -> str:
     )
 
 
+def _io_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
+    """Run one plain IO write (not SET_RELAY/SET_RELAY_MASK, which keep their
+    own RelayResult-based formatting above) and format its :class:`OkReason`.
+
+    Same shape as _display_mutating()/_touch_mutating() -- see
+    IoClient._write_style().
+    """
+    try:
+        result = call()
+    except IoQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - {label}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - {label}{detail}"
+
+
 @_tool()
 def io_all_relays_off() -> str:
     """De-energize all four relays unconditionally.
 
     The same state the firmware falls back to on link loss or a safety fault.
     """
-    return _send(UART_TASK_ID_IO, devices.io_all_relays_off())
+    return _io_mutating("all relays off", lambda: _io.all_relays_off())
 
 
 @_tool()
@@ -1253,13 +1266,15 @@ def io_set_output(io: int, level: bool) -> str:
     IO1 = opto-isolated input from J24, IO2 = opto-isolated output to J25,
     IO3/IO4 = J20 pins 1/2, IO5/IO6 = J21 pins 1/2, IO7 = J23 pin 1.
     """
-    return _send(UART_TASK_ID_IO, devices.io_set_io(io, level))
+    return _io_mutating(f"IO{io} set {'high' if level else 'low'}", lambda: _io.set_io(io, level))
 
 
 @_tool()
 def io_set_direction(io: int, is_input: bool, pullup: bool = False) -> str:
     """Set digital I/O 1-7 as an input (with optional pull-up) or an output."""
-    return _send(UART_TASK_ID_IO, devices.io_set_io_dir(io, is_input, pullup))
+    return _io_mutating(
+        f"IO{io} direction set", lambda: _io.set_io_dir(io, is_input, pullup)
+    )
 
 
 @_tool()
@@ -1269,7 +1284,9 @@ def io_set_auto_report(period_ms: int = 500) -> str:
     Pushes also happen immediately on every ~INT edge, so an input change is
     reported without waiting out the period. Read them with io_get_reports().
     """
-    return _send(UART_TASK_ID_IO, devices.io_set_auto_report(period_ms))
+    return _io_mutating(
+        f"auto-report period {period_ms}ms", lambda: _io.set_auto_report(period_ms)
+    )
 
 
 @_tool()
@@ -1316,31 +1333,34 @@ def expander_read_reg(reg: int, length: int = 1) -> str:
 @_tool()
 def expander_write_reg(reg: int, value: int) -> str:
     """Raw SX1509 register write (debug)."""
-    return _send(UART_TASK_ID_IO, devices.sx_write_reg(reg, value))
+    return _io_mutating(f"reg 0x{reg:02X} <- 0x{value:02X}", lambda: _io.sx_write_reg(reg, value))
 
 
 @_tool()
 def expander_set_dir(mask: int) -> str:
     """Write RegDir: u16, bit N = 1 makes expander pin N an input."""
-    return _send(UART_TASK_ID_IO, devices.sx_set_dir(mask))
+    return _io_mutating(f"RegDir <- 0x{mask:04X}", lambda: _io.sx_set_dir(mask))
 
 
 @_tool()
 def expander_set_pullup(mask: int) -> str:
     """Write RegPullUp: u16, bit N = 1 enables pin N's pull-up."""
-    return _send(UART_TASK_ID_IO, devices.sx_set_pullup(mask))
+    return _io_mutating(f"RegPullUp <- 0x{mask:04X}", lambda: _io.sx_set_pullup(mask))
 
 
 @_tool()
 def expander_set_opendrain(mask: int) -> str:
     """Write RegOpenDrain: u16, bit N = 1 makes pin N open-drain."""
-    return _send(UART_TASK_ID_IO, devices.sx_set_opendrain(mask))
+    return _io_mutating(f"RegOpenDrain <- 0x{mask:04X}", lambda: _io.sx_set_opendrain(mask))
 
 
 @_tool()
 def expander_set_debounce(enable_mask: int, config: int = 0) -> str:
     """Enable debounce on the masked pins; `config` 0-7 selects 0.5ms << config."""
-    return _send(UART_TASK_ID_IO, devices.sx_set_debounce(enable_mask, config))
+    return _io_mutating(
+        f"debounce mask 0x{enable_mask:04X} config {config}",
+        lambda: _io.sx_set_debounce(enable_mask, config),
+    )
 
 
 @_tool()
@@ -1349,7 +1369,10 @@ def expander_set_int_mask(mask: int, sense: int = 0) -> str:
 
     `sense` is 2 bits per pin *pair*, exactly as the part encodes them.
     """
-    return _send(UART_TASK_ID_IO, devices.sx_set_int_mask(mask, sense))
+    return _io_mutating(
+        f"RegInterruptMask <- 0x{mask:04X}, sense 0x{sense:04X}",
+        lambda: _io.sx_set_int_mask(mask, sense),
+    )
 
 
 @_tool()
@@ -1358,13 +1381,16 @@ def expander_led_driver(pin: int, enable: bool, intensity: int = 0) -> str:
 
     `intensity` 0-255, where 0 is *full on* for this part's sink driver.
     """
-    return _send(UART_TASK_ID_IO, devices.sx_led_driver(pin, enable, intensity))
+    return _io_mutating(
+        f"pin {pin} LED driver {'on' if enable else 'off'} @ {intensity}",
+        lambda: _io.sx_led_driver(pin, enable, intensity),
+    )
 
 
 @_tool()
 def expander_reset(hard: bool = False) -> str:
     """Reset the SX1509: software reset via RegReset, or pulse ~RESET (GPIO10)."""
-    return _send(UART_TASK_ID_IO, devices.sx_reset(hard))
+    return _io_mutating(f"SX1509 {'hard' if hard else 'soft'} reset", lambda: _io.sx_reset(hard))
 
 
 # ---------------------------------------------------------------------------
@@ -1402,60 +1428,102 @@ def display_rgb565(r: int, g: int, b: int) -> str:
     return f"{color} (0x{color:04X})"
 
 
+def _touch_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
+    """Run one TOUCH write (INJECT/SET_TAP_DUMP/LOG_TAP_TARGETS) and format
+    its :class:`OkReason` -- same shape as :func:`_display_mutating`, see
+    TouchClient._write()."""
+    try:
+        result = call()
+    except TouchQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - {label}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - {label}{detail}"
+
+
+def _display_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
+    """Run one DISPLAY one-shot write and format its :class:`OkReason`.
+
+    Same shape as thermo_config_channel()/safety_request_enable() etc: a
+    refusal (driver-error reply) is a normal return, not an exception --
+    only a delivery failure (no transport ACK) raises. Before this, every
+    DISPLAY write below went through the bare fire-and-forget ``_send()``,
+    which cannot see a refusal at all -- see display.py's DisplayClient._write.
+    """
+    try:
+        result = call()
+    except DisplayQueryError as exc:
+        return f"error: {exc}"
+    if result.ok:
+        return f"ok - {label}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - {label}{detail}"
+
+
 @_tool()
 def display_reset(hard: bool = False) -> str:
     """Reset the panel: software reset command, or pulse ~RESET via the expander."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_reset(hard))
+    return _display_mutating("panel reset", lambda: _display.reset(hard))
 
 
 @_tool()
 def display_set_power(on: bool) -> str:
     """Turn the panel on, or off (display-off + sleep-in)."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_set_power(on))
+    return _display_mutating(f"power {'on' if on else 'off'}", lambda: _display.set_power(on))
 
 
 @_tool()
 def display_set_rotation(rotation: int) -> str:
     """Set MADCTL rotation 0-3: 0/2 portrait 320x480, 1/3 landscape 480x320."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_set_rotation(rotation))
+    return _display_mutating(f"rotation {rotation}", lambda: _display.set_rotation(rotation))
 
 
 @_tool()
 def display_set_invert(invert: bool) -> str:
     """Invert (or restore) the panel's display polarity."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_set_invert(invert))
+    return _display_mutating(
+        f"invert {'on' if invert else 'off'}", lambda: _display.set_invert(invert)
+    )
 
 
 @_tool()
 def display_clear(color: int = 0x0000) -> str:
     """Fill the whole screen with one RGB565 color (default black)."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_clear(color))
+    return _display_mutating(f"clear to 0x{color:04X}", lambda: _display.clear(color))
 
 
 @_tool()
 def display_fill_rect(x: int, y: int, w: int, h: int, color: int) -> str:
     """Fill a rectangle with an RGB565 color."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_fill_rect(x, y, w, h, color))
+    return _display_mutating(
+        f"fill_rect ({x},{y} {w}x{h})", lambda: _display.fill_rect(x, y, w, h, color)
+    )
 
 
 @_tool()
 def display_draw_rect(x: int, y: int, w: int, h: int, color: int) -> str:
     """Draw a 1px rectangle outline in an RGB565 color."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_draw_rect(x, y, w, h, color))
+    return _display_mutating(
+        f"draw_rect ({x},{y} {w}x{h})", lambda: _display.draw_rect(x, y, w, h, color)
+    )
 
 
 @_tool()
 def display_draw_line(x0: int, y0: int, x1: int, y1: int, color: int) -> str:
     """Draw a line from (x0,y0) to (x1,y1) in an RGB565 color."""
-    return _send(
-        UART_TASK_ID_DISPLAY, devices.display_draw_line(x0, y0, x1, y1, color)
+    return _display_mutating(
+        f"draw_line ({x0},{y0})-({x1},{y1})",
+        lambda: _display.draw_line(x0, y0, x1, y1, color),
     )
 
 
 @_tool()
 def display_set_text_cursor(x: int, y: int) -> str:
     """Move the text cursor to a pixel position (top-left of the next glyph)."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_set_text_cursor(x, y))
+    return _display_mutating(
+        f"text cursor ({x},{y})", lambda: _display.set_text_cursor(x, y)
+    )
 
 
 @_tool()
@@ -1463,16 +1531,16 @@ def display_set_text_style(
     fg: int, bg: int = 0x0000, size: int = 1, opaque_background: bool = True
 ) -> str:
     """Set text colors (RGB565), integer scale 1-8, and background opacity."""
-    return _send(
-        UART_TASK_ID_DISPLAY,
-        devices.display_set_text_style(fg, bg, size, opaque_background),
+    return _display_mutating(
+        "text style set",
+        lambda: _display.set_text_style(fg, bg, size, opaque_background),
     )
 
 
 @_tool()
 def display_print(text: str) -> str:
     """Draw ASCII text at the cursor, which advances and wraps at the right edge."""
-    return _send(UART_TASK_ID_DISPLAY, devices.display_print(text))
+    return _display_mutating("text printed", lambda: _display.print_text(text))
 
 
 @_tool()
@@ -1581,7 +1649,8 @@ def touch_inject(x: int, y: int, pressed: bool = True) -> str:
     An injected press takes priority over the physical NS2009 for as long as
     it is held, so it will not race a stray touch on the bench.
     """
-    return _send(UART_TASK_ID_TOUCH, devices.touch_inject(x, y, pressed))
+    return _touch_mutating(f"touch injected ({x},{y},{'down' if pressed else 'up'})",
+                            lambda: _touch.inject(x, y, pressed))
 
 
 @_tool()
@@ -1596,7 +1665,9 @@ def touch_set_tap_dump(enable: bool) -> str:
     driving a sequence of navigations and wanting every switch's targets
     logged without a separate call after each one.
     """
-    return _send(UART_TASK_ID_TOUCH, devices.touch_set_tap_dump(enable))
+    return _touch_mutating(
+        f"tap dump {'on' if enable else 'off'}", lambda: _touch.set_tap_dump(enable)
+    )
 
 
 @_tool()
@@ -1607,11 +1678,12 @@ def touch_log_tap_targets() -> str:
     panel -- there is no framebuffer readback. The dump covers the active
     screen plus lv_layer_top()/lv_layer_sys() (where modal overlays such as
     ui_confirm.c's confirmation dialogs and ui_num_pad.c's keypad live), and
-    walks any open lv_keyboard's individual keys. Fire-and-forget: the dump
-    itself arrives as ESP_LOGI "tap target ..." lines over the device log
-    (get_device_log / get_device_log_json), not as a reply to this call.
+    walks any open lv_keyboard's individual keys. The dump itself still
+    arrives as ESP_LOGI "tap target ..." lines over the device log
+    (get_device_log / get_device_log_json), not as this call's return value --
+    but a driver-error refusal is no longer silent, see _touch_mutating().
     """
-    return _send(UART_TASK_ID_TOUCH, devices.touch_log_tap_targets())
+    return _touch_mutating("tap-target dump requested", lambda: _touch.log_tap_targets())
 
 
 # ---------------------------------------------------------------------------
@@ -2122,10 +2194,13 @@ def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None)
             return "error: no ssid given and no saved credentials found (set Wi-Fi up once via the GUI first)"
         ssid, password = saved["ssid"], saved["password"]
     try:
-        ok = _wifi.add_network(ssid, password or "")
+        result = _wifi.add_network(ssid, password or "")
     except WifiUartQueryError as exc:
         return f"error: {exc}"
-    return f"ok - saved {ssid!r}" if ok else f"refused - could not save {ssid!r}"
+    if result.ok:
+        return f"ok - saved {ssid!r}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not save {ssid!r}{detail}"
 
 
 @_tool()
@@ -2137,10 +2212,13 @@ def wifi_set_mode(mode: str) -> str:
     if mode_val is None:
         return f"error: mode must be 'home' or 'ap', got {mode!r}"
     try:
-        ok = _wifi.set_mode(mode_val)
+        result = _wifi.set_mode(mode_val)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
-    return f"ok - mode set to {mode}" if ok else f"refused - could not set mode to {mode}"
+    if result.ok:
+        return f"ok - mode set to {mode}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not set mode to {mode}{detail}"
 
 
 @_tool()
@@ -2148,10 +2226,13 @@ def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[st
     """Rename the board's own provisioning AP and/or change its password.
     Leave either argument unset (None) to keep it unchanged."""
     try:
-        ok = _wifi.set_ap_identity(ap_ssid, ap_password)
+        result = _wifi.set_ap_identity(ap_ssid, ap_password)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
-    return "ok - AP identity updated" if ok else "refused - could not update AP identity"
+    if result.ok:
+        return "ok - AP identity updated"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - could not update AP identity{detail}"
 
 
 @_tool()
@@ -2178,10 +2259,13 @@ def wifi_get_networks() -> str:
 def wifi_forget(ssid: str) -> str:
     """Delete a saved network."""
     try:
-        ok = _wifi.forget(ssid)
+        result = _wifi.forget(ssid)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
-    return f"ok - forgot {ssid!r}" if ok else f"refused - no such saved network {ssid!r}"
+    if result.ok:
+        return f"ok - forgot {ssid!r}"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - no such saved network {ssid!r}{detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -2814,20 +2898,26 @@ def autotune_start(
 def autotune_abort() -> str:
     """Abort the running autotune."""
     try:
-        ok = _autotune.abort()
+        result = _autotune.abort()
     except AutotuneQueryError as exc:
         return f"error: {exc}"
-    return "ok - aborted" if ok else "refused - nothing running to abort"
+    if result.ok:
+        return "ok - aborted"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - nothing running to abort{detail}"
 
 
 @_tool()
 def autotune_accept() -> str:
     """Accept the finished autotune's proposed gains, writing them into the zone's PID config."""
     try:
-        ok = _autotune.accept()
+        result = _autotune.accept()
     except AutotuneQueryError as exc:
         return f"error: {exc}"
-    return "ok - gains accepted" if ok else "refused - nothing to accept"
+    if result.ok:
+        return "ok - gains accepted"
+    detail = f": {result.reason}" if result.reason else ""
+    return f"refused - nothing to accept{detail}"
 
 
 # ---------------------------------------------------------------------------

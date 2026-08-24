@@ -82,10 +82,19 @@ class AutotuneClient:
             timeout,
         )  # type: ignore[return-value]
 
-    def abort(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def abort(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "devices.OkReason":
+        """Abort the running autotune, and learn *why* if refused.
+
+        Returns an :class:`~kilnctrl.devices.OkReason` (truthy/falsy like
+        the bare ``bool`` this used to return) so a caller that wants the
+        refusal text no longer has to go elsewhere for it -- see
+        ``parse_autotune_response()``'s ABORT/ACCEPT branch.
+        """
         return self._query(AUTOTUNE_CMD_ABORT, devices.autotune_abort(), timeout)  # type: ignore[return-value]
 
-    def accept(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def accept(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "devices.OkReason":
+        """Accept the finished autotune's proposed gains, and learn *why*
+        if refused (e.g. "no completed autotune result to accept")."""
         return self._query(AUTOTUNE_CMD_ACCEPT, devices.autotune_accept(), timeout)  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

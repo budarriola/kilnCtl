@@ -27,9 +27,22 @@ import threading
 from typing import Callable, Optional
 
 from . import devices
-from .devices import DisplayId, DisplayResponseError
+from .devices import DisplayId, DisplayResponseError, OkReason
 from .protocol import (
+    DISPLAY_CMD_BLIT_BEGIN,
+    DISPLAY_CMD_BLIT_END,
+    DISPLAY_CMD_CLEAR,
+    DISPLAY_CMD_DRAW_LINE,
+    DISPLAY_CMD_DRAW_RECT,
+    DISPLAY_CMD_FILL_RECT,
+    DISPLAY_CMD_PRINT,
     DISPLAY_CMD_READ_ID,
+    DISPLAY_CMD_RESET,
+    DISPLAY_CMD_SET_INVERT,
+    DISPLAY_CMD_SET_POWER,
+    DISPLAY_CMD_SET_ROTATION,
+    DISPLAY_CMD_SET_TEXT_CURSOR,
+    DISPLAY_CMD_SET_TEXT_STYLE,
     UART_TASK_ID_DISPLAY,
     Device,
     Frame,
@@ -42,6 +55,18 @@ log = logging.getLogger(__name__)
 #: READ_ID is one short SPI read plus the two expander transfers the D/C
 #: toggle costs.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+#: How long a one-shot DISPLAY write waits for an optional driver-error
+#: refusal reply before concluding it went through. display_bridge_task()
+#: only ever replies to a write subcommand when the driver call itself
+#: failed (bridge_reply_reject(..., "driver error")) -- success is silent.
+#: Same shape and sizing rationale as io_expander.py's
+#: SET_RELAY_REJECT_WINDOW_S. Deliberately NOT applied to BLIT_DATA: a full
+#: image is thousands of chunks (see MAX_BLIT_PIXELS below), and waiting
+#: this long after each one would turn a ~1-minute transfer into ~20 minutes
+#: for a failure mode BLIT_BEGIN/BLIT_END already bookend -- see blit()'s
+#: comment.
+DRIVER_ERROR_REJECT_WINDOW_S = 0.5
 
 #: Hard ceiling on a blit's geometry. Coordinates are u16 on the wire, so
 #: without this a caller (or a model) could ask for 65535x65535 -- 8.6 GB of
@@ -144,10 +169,125 @@ class DisplayClient:
 
     # -- writes ------------------------------------------------------------
     def send(self, payload: bytes) -> SendResult:
-        """Send one non-query subcommand payload (built by ``devices.py``)."""
+        """Send one non-query subcommand payload (built by ``devices.py``).
+
+        Fire-and-forget: the returned :class:`SendResult` proves delivery to
+        the task's inbox only, never that the driver call underneath it
+        succeeded -- a failed drawing call now gets a
+        ``bridge_reply_reject(..., "driver error")`` reply
+        (``display_bridge_task()``'s bottom-of-task check), which nothing
+        here waits for. The one-shot commands below (``reset`` through
+        ``print_text``) go through :meth:`_write` instead, which does wait
+        for that optional refusal -- see :data:`DRIVER_ERROR_REJECT_WINDOW_S`.
+        Only :meth:`blit`'s per-chunk BLIT_DATA sends still use this raw
+        ``send`` (see that method's comment for why).
+        """
         return self.link.send(
             dst_task=self.task_id, src_task=self.task_id, payload=payload
         )
+
+    def _write(
+        self, subcommand: int, payload: bytes, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S
+    ) -> OkReason:
+        """Send one write subcommand and wait out ``timeout`` for the
+        *optional* driver-error refusal reply -- same send/wait-window shape
+        as :class:`kilnctrl.io_expander.IoClient`'s ``set_relay()``.
+
+        Raises :class:`DisplayQueryError` only if the request itself was not
+        delivered (no transport ACK); a refusal is a normal
+        ``OkReason(ok=False, ...)`` return, not an exception.
+        """
+        with self._query_lock:
+            pending = _Pending(subcommand)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self.link.send(
+                    dst_task=self.task_id,
+                    src_task=self.task_id,
+                    payload=payload,
+                    dst_device=Device.ESP,
+                )
+                if not result.ok:
+                    raise DisplayQueryError(
+                        f"DISPLAY request 0x{subcommand:02X} not delivered: "
+                        f"{result.describe()}",
+                        send_result=result,
+                    )
+                if pending.event.wait(timeout):
+                    # A reply arrived -- display_bridge_task() only ever
+                    # sends one for a write subcommand on refusal.
+                    return pending.value  # type: ignore[return-value]
+                # Silence within the window: the write happened.
+                return OkReason(ok=True)
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
+
+    def reset(self, hard: bool = False, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Reset the panel: software reset command, or pulse ~RESET via the expander."""
+        return self._write(DISPLAY_CMD_RESET, devices.display_reset(hard), timeout)
+
+    def set_power(self, on: bool, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Turn the panel on, or off (display-off + sleep-in)."""
+        return self._write(DISPLAY_CMD_SET_POWER, devices.display_set_power(on), timeout)
+
+    def set_rotation(self, rotation: int, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Set MADCTL rotation 0-3."""
+        return self._write(DISPLAY_CMD_SET_ROTATION, devices.display_set_rotation(rotation), timeout)
+
+    def set_invert(self, invert: bool, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Invert (or restore) the panel's display polarity."""
+        return self._write(DISPLAY_CMD_SET_INVERT, devices.display_set_invert(invert), timeout)
+
+    def clear(self, color: int = 0x0000, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Fill the whole screen with one RGB565 color."""
+        return self._write(DISPLAY_CMD_CLEAR, devices.display_clear(color), timeout)
+
+    def fill_rect(
+        self, x: int, y: int, w: int, h: int, color: int,
+        timeout: float = DRIVER_ERROR_REJECT_WINDOW_S,
+    ) -> OkReason:
+        """Fill a rectangle with an RGB565 color."""
+        return self._write(DISPLAY_CMD_FILL_RECT, devices.display_fill_rect(x, y, w, h, color), timeout)
+
+    def draw_rect(
+        self, x: int, y: int, w: int, h: int, color: int,
+        timeout: float = DRIVER_ERROR_REJECT_WINDOW_S,
+    ) -> OkReason:
+        """Draw a 1px rectangle outline in an RGB565 color."""
+        return self._write(DISPLAY_CMD_DRAW_RECT, devices.display_draw_rect(x, y, w, h, color), timeout)
+
+    def draw_line(
+        self, x0: int, y0: int, x1: int, y1: int, color: int,
+        timeout: float = DRIVER_ERROR_REJECT_WINDOW_S,
+    ) -> OkReason:
+        """Draw a line from (x0,y0) to (x1,y1) in an RGB565 color."""
+        return self._write(
+            DISPLAY_CMD_DRAW_LINE, devices.display_draw_line(x0, y0, x1, y1, color), timeout
+        )
+
+    def set_text_cursor(
+        self, x: int, y: int, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S
+    ) -> OkReason:
+        """Move the text cursor to a pixel position (top-left of the next glyph)."""
+        return self._write(DISPLAY_CMD_SET_TEXT_CURSOR, devices.display_set_text_cursor(x, y), timeout)
+
+    def set_text_style(
+        self, fg: int, bg: int = 0x0000, size: int = 1, opaque_background: bool = True,
+        timeout: float = DRIVER_ERROR_REJECT_WINDOW_S,
+    ) -> OkReason:
+        """Set text colors (RGB565), integer scale 1-8, and background opacity."""
+        return self._write(
+            DISPLAY_CMD_SET_TEXT_STYLE,
+            devices.display_set_text_style(fg, bg, size, opaque_background),
+            timeout,
+        )
+
+    def print_text(self, text: str, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Draw ASCII text at the cursor, which advances and wraps at the right edge."""
+        return self._write(DISPLAY_CMD_PRINT, devices.display_print(text), timeout)
 
     # -- blit --------------------------------------------------------------
     def blit(
@@ -171,8 +311,19 @@ class DisplayClient:
         the panel is filled top-to-bottom as it arrives.
 
         Raises :class:`BlitError` on the first send that doesn't come back OK,
-        after attempting a BLIT_END so the firmware isn't left with a window
-        open.
+        or on a BLIT_BEGIN the firmware refuses (e.g. an out-of-bounds
+        window -- see ``ILI9488_blit_begin``), after attempting a BLIT_END so
+        the firmware isn't left with a window open.
+
+        BLIT_BEGIN and BLIT_END wait out :data:`DRIVER_ERROR_REJECT_WINDOW_S`
+        for an optional driver-error refusal reply, same as the other
+        one-shot write methods on this client. The BLIT_DATA chunks in
+        between deliberately do not: a full frame is thousands of chunks,
+        and that wait per chunk would turn a ~1-minute transfer into ~20
+        minutes for a failure BLIT_BEGIN/BLIT_END already bookend. A
+        mid-stream BLIT_DATA driver failure (as opposed to a delivery
+        failure, which this already catches via the transport ACK) is not
+        yet surfaced to the caller -- see firmware/KilnFW/TODO.md section 11.
         """
         width, height = _check_blit_size(width, height)
         expected = width * height * 2
@@ -186,9 +337,12 @@ class DisplayClient:
         chunks = list(devices.iter_blit_chunks(pixels))
         total = len(chunks)
         with self._blit_lock:
-            result = self.send(devices.display_blit_begin(x, y, width, height))
-            if not result.ok:
-                raise BlitError(f"BLIT_BEGIN failed: {result.describe()}")
+            try:
+                begin = self._write(DISPLAY_CMD_BLIT_BEGIN, devices.display_blit_begin(x, y, width, height))
+            except DisplayQueryError as exc:
+                raise BlitError(f"BLIT_BEGIN failed: {exc}") from exc
+            if not begin.ok:
+                raise BlitError(f"BLIT_BEGIN failed: {begin.describe()}")
             try:
                 for index, chunk in enumerate(chunks, start=1):
                     result = self.send(chunk)
@@ -203,8 +357,15 @@ class DisplayClient:
             finally:
                 # Always try to close the window, even on failure: leaving a
                 # blit open would make the *next* command an error on the
-                # firmware side too.
-                self.send(devices.display_blit_end())
+                # firmware side too. A refusal here is logged, not raised --
+                # this runs in a `finally` and must not shadow whatever
+                # exception (if any) is already propagating.
+                try:
+                    end = self._write(DISPLAY_CMD_BLIT_END, devices.display_blit_end())
+                    if not end.ok:
+                        log.warning("BLIT_END refused: %s", end.describe())
+                except DisplayQueryError as exc:
+                    log.warning("BLIT_END not delivered: %s", exc)
         return total
 
     # -- queries -----------------------------------------------------------

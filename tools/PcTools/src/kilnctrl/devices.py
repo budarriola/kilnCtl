@@ -1451,9 +1451,36 @@ class ExpanderRegisters:
         return f"reg 0x{self.reg:02X}: " + " ".join(f"{b:02X}" for b in self.data)
 
 
+#: Every other IO write subcommand (not SET_RELAY/SET_RELAY_MASK, which get
+#: their own RelayResult/RelayRefusal classification above) is fire-and-
+#: forget on success -- io_bridge_task() sends nothing back. A reply under
+#: one of these ids is always a refusal: truncated/out-of-range args, the
+#: "safety" guard SX_WRITE_REG/SX_SET_DIR share with the relay commands (see
+#: uart_bridge.c), or the generic bottom-of-task driver-error reject. Before
+#: this, any of these ids raised "unknown IO response subcommand" and the
+#: refusal was dropped in IoClient._handle_reply, invisible to a caller that
+#: used the fire-and-forget ``send()``.
+_IO_WRITE_SUBCOMMANDS = frozenset(
+    {
+        IO_CMD_SET_IO,
+        IO_CMD_SET_IO_DIR,
+        IO_CMD_SET_AUTO_REPORT,
+        IO_CMD_ALL_RELAYS_OFF,
+        IO_CMD_SX_WRITE_REG,
+        IO_CMD_SX_SET_DIR,
+        IO_CMD_SX_SET_PULLUP,
+        IO_CMD_SX_SET_OPENDRAIN,
+        IO_CMD_SX_SET_DEBOUNCE,
+        IO_CMD_SX_SET_INT_MASK,
+        IO_CMD_SX_LED_DRIVER,
+        IO_CMD_SX_RESET,
+    }
+)
+
+
 def parse_io_response(
     payload: bytes,
-) -> "tuple[int, IoState | ExpanderRegisters | list[int] | RelayResult]":
+) -> "tuple[int, IoState | ExpanderRegisters | list[int] | RelayResult | OkReason]":
     """Decode an IO query reply (or auto-report push) into ``(subcmd, value)``.
 
     Layouts (uart_task_ids.h)::
@@ -1467,6 +1494,14 @@ def parse_io_response(
                             replies on success, so any frame with this
                             subcmd IS a refusal; see :class:`RelayResult` /
                             :class:`RelayRefusal`.
+        Every other write subcommand (SET_IO, SET_IO_DIR, SET_AUTO_REPORT,
+                            ALL_RELAYS_OFF, SX_WRITE_REG, SX_SET_DIR,
+                            SX_SET_PULLUP, SX_SET_OPENDRAIN, SX_SET_DEBOUNCE,
+                            SX_SET_INT_MASK, SX_LED_DRIVER, SX_RESET): same
+                            ``{subcmd, ok=0, [len, reason]}`` refusal shape,
+                            decoded into a plain :class:`OkReason` (no
+                            per-reason classification -- RelayRefusal is
+                            SET_RELAY/SET_RELAY_MASK-specific).
 
     Raises :class:`IoResponseError` on anything that doesn't match.
     """
@@ -1481,6 +1516,9 @@ def parse_io_response(
             reason_text=ok_reason.reason,
             refusal=RelayRefusal.from_wire(ok_reason.reason),
         )
+
+    if subcommand in _IO_WRITE_SUBCOMMANDS:
+        return subcommand, _decode_ok_reason(payload, IoResponseError, "IO write")
 
     if subcommand == IO_CMD_READ:
         if len(payload) != 9:
@@ -1764,17 +1802,55 @@ class DisplayId:
         return f"ID {ident} [{status}], {self.width}x{self.height} as rotated"
 
 
-def parse_display_response(payload: bytes) -> "tuple[int, DisplayId]":
-    """Decode a DISPLAY query reply into ``(subcommand, value)``.
+#: Every DISPLAY write subcommand (RESET..BLIT_END) is fire-and-forget on
+#: success -- display_bridge_task() sends nothing back. The only reply that
+#: can ever arrive under one of these ids is the bottom-of-task
+#: ``bridge_reply_reject(..., "driver error")`` when the driver call itself
+#: failed (see uart_bridge.c). READ_ID is excluded: it always replies, with
+#: its own 9-byte layout below, and never falls through to that generic
+#: reject (its case sets ``err = ESP_OK`` unconditionally).
+_DISPLAY_WRITE_SUBCOMMANDS = frozenset(
+    {
+        DISPLAY_CMD_RESET,
+        DISPLAY_CMD_SET_POWER,
+        DISPLAY_CMD_SET_ROTATION,
+        DISPLAY_CMD_SET_INVERT,
+        DISPLAY_CMD_CLEAR,
+        DISPLAY_CMD_FILL_RECT,
+        DISPLAY_CMD_DRAW_RECT,
+        DISPLAY_CMD_DRAW_LINE,
+        DISPLAY_CMD_SET_TEXT_CURSOR,
+        DISPLAY_CMD_SET_TEXT_STYLE,
+        DISPLAY_CMD_PRINT,
+        DISPLAY_CMD_BLIT_BEGIN,
+        DISPLAY_CMD_BLIT_DATA,
+        DISPLAY_CMD_BLIT_END,
+    }
+)
 
-    Layout::
 
-        READ_ID: byte0=0x0F, byte1=ok(0/1), bytes2..4 = RDDID bytes,
-                 bytes5..6 = width u16 LE, bytes7..8 = height u16 LE
+def parse_display_response(payload: bytes) -> "tuple[int, object]":
+    """Decode a DISPLAY reply into ``(subcommand, value)``.
+
+    Two shapes share this one task:
+
+    - READ_ID (the only query): byte0=0x0F, byte1=ok(0/1), bytes2..4 = RDDID
+      bytes, bytes5..6 = width u16 LE, bytes7..8 = height u16 LE. Always
+      replies, so a caller waiting on it can always tell "answered" from
+      "still waiting" -- see the length check below.
+    - Every other (write) subcommand: no reply on success. A reply under one
+      of those ids is always a refusal -- ``{subcmd, ok=0, [len, reason]}``,
+      decoded via :func:`_decode_ok_reason` into an :class:`OkReason` so the
+      caller learns *why*, the same shape THERMO/SAFETY/IO/PROFILES/CONTROL
+      already use. Before this, any of these ids raised "unknown DISPLAY
+      response subcommand" and the refusal was dropped in
+      ``DisplayClient._handle_reply`` -- invisible to whoever sent the write.
     """
     if len(payload) < 1:
         raise DisplayResponseError("DISPLAY response is empty")
     subcommand = payload[0]
+    if subcommand in _DISPLAY_WRITE_SUBCOMMANDS:
+        return subcommand, _decode_ok_reason(payload, DisplayResponseError, "DISPLAY write")
     if subcommand != DISPLAY_CMD_READ_ID:
         raise DisplayResponseError(
             f"unknown DISPLAY response subcommand 0x{subcommand:02X}"
@@ -1902,8 +1978,18 @@ class TouchState:
         )
 
 
-def parse_touch_response(payload: bytes) -> "tuple[int, TouchState]":
-    """Decode a TOUCH query reply into ``(subcommand, value)``.
+#: The three fire-and-forget writes on this task (INJECT, SET_TAP_DUMP,
+#: LOG_TAP_TARGETS) reply only on the bottom-of-task driver-error refusal
+#: (``bridge_reply_reject(..., "driver error")``) -- success is silent. A
+#: reply under one of these ids is always that refusal, decoded the same way
+#: as DISPLAY's write subcommands below.
+_TOUCH_WRITE_SUBCOMMANDS = frozenset(
+    {TOUCH_CMD_INJECT, TOUCH_CMD_SET_TAP_DUMP, TOUCH_CMD_LOG_TAP_TARGETS}
+)
+
+
+def parse_touch_response(payload: bytes) -> "tuple[int, object]":
+    """Decode a TOUCH reply into ``(subcommand, value)``.
 
     Layout::
 
@@ -1916,6 +2002,16 @@ def parse_touch_response(payload: bytes) -> "tuple[int, TouchState]":
             bytes11..14 = injected_delivered_count u32 LE
             bytes15..18 = kiln_ui_show entries u32 LE
             bytes19..22 = kiln_ui_show completed exits u32 LE
+        GET_STATE driver-error refusal ({subcmd=0x01, ok=0, len, reason},
+        16 bytes with today's "driver error" text): returned as an
+        :class:`OkReason` instead of a :class:`TouchState` -- see the length
+        check below.
+        INJECT / SET_TAP_DUMP / LOG_TAP_TARGETS: no reply on success; a
+        reply under one of these ids is always a ``{subcmd, ok=0, [len,
+        reason]}`` driver-error refusal, decoded into an :class:`OkReason`.
+        Before this, any of these ids raised "unknown TOUCH response
+        subcommand" and the refusal was dropped in
+        ``TouchClient._handle_reply``.
 
     A reply shorter than the full 23 bytes but at least 6 is accepted (older
     firmware, or a firmware built before some later field was added) -- only
@@ -1927,27 +2023,31 @@ def parse_touch_response(payload: bytes) -> "tuple[int, TouchState]":
     if len(payload) < 1:
         raise TouchResponseError("TOUCH response is empty")
     subcommand = payload[0]
+    if subcommand in _TOUCH_WRITE_SUBCOMMANDS:
+        return subcommand, _decode_ok_reason(payload, TouchResponseError, "TOUCH write")
     if subcommand != TOUCH_CMD_GET_STATE:
         raise TouchResponseError(f"unknown TOUCH response subcommand 0x{subcommand:02X}")
     # Exactly 6 (original fields only) or 23 (+ the 2026-08-21 diagnostic
     # fields) -- uart_bridge.c's TOUCH_CMD_GET_STATE case only ever emits one
-    # of those two lengths, never anything in between (the old `< 6` check
-    # here nominally tolerated any longer length "for a hypothetical
-    # in-between firmware build", but no such build ever existed). Tightened
-    # to this exact set 2026-08-24, the same day touch_bridge_task() started
-    # sending a driver-error refusal ({subcmd, ok=0, len, "driver error"} --
-    # 16 bytes) on a failed screen_idle_get_state(): a loose `>= 6` check
-    # would decode that refusal as if it were a real reply (byte1=ok=0 reads
-    # as a valid screen_on=False, the reason bytes read as garbage idle_ms) --
+    # of those two lengths on success, never anything in between (the old
+    # `< 6` check here nominally tolerated any longer length "for a
+    # hypothetical in-between firmware build", but no such build ever
+    # existed). Tightened to this exact set 2026-08-24, the same day
+    # touch_bridge_task() started sending a driver-error refusal ({subcmd,
+    # ok=0, len, "driver error"} -- 16 bytes) on a failed
+    # screen_idle_get_state(): a loose `>= 6` check would decode that refusal
+    # as if it were a real reply (byte1=ok=0 reads as a valid
+    # screen_on=False, the reason bytes read as garbage idle_ms) --
     # confidently WRONG data with no exception, worse than the silent drop
     # this refusal reply exists to replace. See CommonFW/docs/LINK_PROTOCOL.md's
     # "Request/reply ids must never be shared" rule -- this is the same
     # length-ambiguity failure mode on a task that has no second id to split
-    # onto, so the fix here is a strict length allowlist instead.
+    # onto. Any other length -- 16 bytes with today's "driver error" text,
+    # or anything else a future reason string produces -- is decoded as the
+    # refusal it is, rather than just excluded, so the caller learns why
+    # instead of getting a generic malformed-response drop.
     if len(payload) not in (6, 23):
-        raise TouchResponseError(
-            f"GET_STATE response must be 6 or 23 bytes, got {len(payload)}"
-        )
+        return subcommand, _decode_ok_reason(payload, TouchResponseError, "GET_STATE")
     screen_on = payload[1]
     if screen_on > 1:
         raise TouchResponseError(f"GET_STATE screen_on flag must be 0 or 1, got {screen_on}")
@@ -3986,9 +4086,14 @@ def parse_autotune_response(payload: bytes) -> "tuple[int, object]":
         return subcommand, (False, error)
 
     if subcommand in (AUTOTUNE_CMD_ABORT, AUTOTUNE_CMD_ACCEPT):
-        if len(payload) < 2:
-            raise AutotuneResponseError("response is missing its ok byte")
-        return subcommand, bool(payload[1])
+        # Used to reduce this to bool(payload[1]) and throw away everything
+        # past it -- the same decode-then-discard bug CONTROL's
+        # SET_ZONE_PID/SET_ZONE_MODEL and PROFILES' DELETE/PAUSE/RESUME/
+        # ACK_LAST_RUN/STOP had (see their fixes above). ACCEPT's refusal
+        # carries a real reason ("no completed autotune result to accept",
+        # autotune_handle_message()'s ACCEPT case) that this was silently
+        # dropping.
+        return subcommand, _decode_ok_reason(payload, AutotuneResponseError, "ABORT/ACCEPT")
 
     raise AutotuneResponseError(f"unknown AUTOTUNE response subcommand 0x{subcommand:02X}")
 
@@ -4188,9 +4293,15 @@ def parse_wifi_uart_response(payload: bytes) -> "tuple[int, object]":
         WIFI_CMD_SET_AP_IDENTITY,
         WIFI_CMD_FORGET,
     ):
-        if len(payload) < 2:
-            raise WifiUartResponseError("response is missing its ok byte")
-        return subcommand, bool(payload[1])
+        # Used to reduce this to bool(payload[1]) -- the same decode-then-
+        # discard bug CONTROL/PROFILES/AUTOTUNE had (see their fixes
+        # above). wifi_bridge_task() (uart_bridge_ext.c) gives every one of
+        # these a real reason on refusal ("ssid too long", "saved network
+        # list is full", "ap_password must be empty or 8-63 characters",
+        # "could not forget network", etc) that this was silently dropping.
+        return subcommand, _decode_ok_reason(
+            payload, WifiUartResponseError, "ADD_NETWORK/SET_MODE/SET_AP_IDENTITY/FORGET"
+        )
 
     raise WifiUartResponseError(f"unknown WIFI response subcommand 0x{subcommand:02X}")
 

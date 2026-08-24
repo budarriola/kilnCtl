@@ -20,9 +20,12 @@ import threading
 from typing import Optional
 
 from . import devices
-from .devices import TouchResponseError, TouchState
+from .devices import OkReason, TouchResponseError, TouchState
 from .protocol import (
     TOUCH_CMD_GET_STATE,
+    TOUCH_CMD_INJECT,
+    TOUCH_CMD_LOG_TAP_TARGETS,
+    TOUCH_CMD_SET_TAP_DUMP,
     UART_TASK_ID_TOUCH,
     Device,
     Frame,
@@ -34,6 +37,15 @@ log = logging.getLogger(__name__)
 #: GET_STATE is answered from screen_idle's in-memory state, no hardware
 #: round trip involved -- short timeout is fine.
 DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+#: How long inject()/set_tap_dump()/log_tap_targets() wait for an optional
+#: driver-error refusal reply before concluding the write went through.
+#: touch_bridge_task() only ever replies to these three subcommands when the
+#: driver call itself failed (bridge_reply_reject(..., "driver error"));
+#: success is silent. Same shape and same reasoning as
+#: io_expander.py's SET_RELAY_REJECT_WINDOW_S -- sized with margin over a
+#: normal round trip, not over the transport ACK timeout.
+DRIVER_ERROR_REJECT_WINDOW_S = 0.5
 
 
 class TouchQueryError(RuntimeError):
@@ -85,35 +97,77 @@ class TouchClient:
         self.link.unregister_task(self.task_id)
 
     # -- writes ------------------------------------------------------------
-    def inject(self, x: int, y: int, pressed: bool) -> SendResult:
-        """Send a synthetic touch, fire-and-forget -- see devices.touch_inject."""
-        return self.link.send(
-            dst_task=self.task_id, src_task=self.task_id,
-            payload=devices.touch_inject(x, y, pressed),
-        )
+    def inject(
+        self, x: int, y: int, pressed: bool, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S
+    ) -> OkReason:
+        """Send a synthetic touch, and learn if the driver call refused it.
 
-    def set_tap_dump(self, enable: bool) -> SendResult:
+        See :data:`DRIVER_ERROR_REJECT_WINDOW_S` -- this waits out that
+        window for an optional refusal reply; silence means it went through.
+        Raises :class:`TouchQueryError` only if the request itself was not
+        delivered (no transport ACK).
+        """
+        return self._write(TOUCH_CMD_INJECT, devices.touch_inject(x, y, pressed), timeout)
+
+    def set_tap_dump(
+        self, enable: bool, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S
+    ) -> OkReason:
         """Turn the firmware's automatic per-page-switch tap-target dump
-        on/off, fire-and-forget -- see devices.touch_set_tap_dump."""
-        return self.link.send(
-            dst_task=self.task_id, src_task=self.task_id,
-            payload=devices.touch_set_tap_dump(enable),
-        )
+        on/off -- see devices.touch_set_tap_dump and :data:`DRIVER_ERROR_REJECT_WINDOW_S`."""
+        return self._write(TOUCH_CMD_SET_TAP_DUMP, devices.touch_set_tap_dump(enable), timeout)
 
-    def log_tap_targets(self) -> SendResult:
-        """Request an on-demand tap-target dump for the current screen,
-        fire-and-forget -- see devices.touch_log_tap_targets. The dump itself
-        arrives as ESP_LOGI lines over the device log (get_device_log /
-        get_device_log_json), not as a reply here."""
-        return self.link.send(
-            dst_task=self.task_id, src_task=self.task_id,
-            payload=devices.touch_log_tap_targets(),
-        )
+    def log_tap_targets(self, timeout: float = DRIVER_ERROR_REJECT_WINDOW_S) -> OkReason:
+        """Request an on-demand tap-target dump for the current screen --
+        see devices.touch_log_tap_targets and :data:`DRIVER_ERROR_REJECT_WINDOW_S`.
+        The dump itself arrives as ESP_LOGI lines over the device log
+        (get_device_log / get_device_log_json), not as a reply here."""
+        return self._write(TOUCH_CMD_LOG_TAP_TARGETS, devices.touch_log_tap_targets(), timeout)
+
+    def _write(self, subcommand: int, payload: bytes, timeout: float) -> OkReason:
+        """Send one write subcommand and wait out ``timeout`` for the
+        *optional* driver-error refusal reply -- same send/wait-window shape
+        as :class:`kilnctrl.io_expander.IoClient`'s ``set_relay()``."""
+        with self._query_lock:
+            pending = _Pending(subcommand)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self.link.send(
+                    dst_task=self.task_id,
+                    src_task=self.task_id,
+                    payload=payload,
+                    dst_device=Device.ESP,
+                )
+                if not result.ok:
+                    raise TouchQueryError(
+                        f"TOUCH request 0x{subcommand:02X} not delivered: "
+                        f"{result.describe()}",
+                        send_result=result,
+                    )
+                if pending.event.wait(timeout):
+                    # A reply arrived -- touch_bridge_task() only ever sends
+                    # one for these subcommands on refusal.
+                    return pending.value  # type: ignore[return-value]
+                # Silence within the window: the write happened.
+                return OkReason(ok=True)
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
 
     # -- queries -----------------------------------------------------------
     def get_state(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> TouchState:
-        """Whether the screen is on and how long it's been idle."""
+        """Whether the screen is on and how long it's been idle.
+
+        Raises :class:`TouchQueryError` if ``screen_idle_get_state()`` itself
+        failed on the firmware side -- decoded from the driver-error refusal
+        reply (see ``parse_touch_response``'s GET_STATE branch) rather than
+        surfacing as a generic timeout or an ``AttributeError`` from treating
+        an :class:`~kilnctrl.devices.OkReason` as a :class:`TouchState`.
+        """
         value = self._query(TOUCH_CMD_GET_STATE, devices.touch_get_state(), timeout)
+        if isinstance(value, OkReason):
+            raise TouchQueryError(f"GET_STATE refused: {value.describe()}")
         return value  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

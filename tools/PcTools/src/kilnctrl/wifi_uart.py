@@ -82,18 +82,25 @@ class WifiUartClient:
     def scan(self, timeout: float = SCAN_REPLY_TIMEOUT_S) -> "tuple[list[UartWifiScanEntry], bool]":
         return self._query(WIFI_CMD_SCAN, devices.wifi_uart_scan(), timeout)  # type: ignore[return-value]
 
-    def add_network(self, ssid: str, password: str = "", timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def add_network(
+        self, ssid: str, password: str = "", timeout: float = DEFAULT_REPLY_TIMEOUT_S
+    ) -> "devices.OkReason":
+        """Add a saved network, and learn *why* if refused (e.g. "ssid too
+        long", "saved network list is full")."""
         return self._query(
             WIFI_CMD_ADD_NETWORK, devices.wifi_uart_add_network(ssid, password), timeout
         )  # type: ignore[return-value]
 
-    def set_mode(self, mode: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def set_mode(self, mode: int, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "devices.OkReason":
+        """Switch AP/home mode, and learn *why* if refused."""
         return self._query(WIFI_CMD_SET_MODE, devices.wifi_uart_set_mode(mode), timeout)  # type: ignore[return-value]
 
     def set_ap_identity(
         self, ap_ssid: "Optional[str]" = None, ap_password: "Optional[str]" = None,
         timeout: float = DEFAULT_REPLY_TIMEOUT_S,
-    ) -> bool:
+    ) -> "devices.OkReason":
+        """Set the AP-mode SSID/password, and learn *why* if refused (e.g.
+        "ap_password must be empty or 8-63 characters")."""
         return self._query(
             WIFI_CMD_SET_AP_IDENTITY,
             devices.wifi_uart_set_ap_identity(ap_ssid, ap_password),
@@ -103,7 +110,8 @@ class WifiUartClient:
     def get_networks(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "tuple[list[UartWifiSavedNetwork], bool]":
         return self._query(WIFI_CMD_GET_NETWORKS, devices.wifi_uart_get_networks(), timeout)  # type: ignore[return-value]
 
-    def forget(self, ssid: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> bool:
+    def forget(self, ssid: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> "devices.OkReason":
+        """Forget a saved network, and learn *why* if refused."""
         return self._query(WIFI_CMD_FORGET, devices.wifi_uart_forget(ssid), timeout)  # type: ignore[return-value]
 
     def _query(self, subcommand: int, payload: bytes, timeout: float) -> object:

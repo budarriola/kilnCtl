@@ -73,12 +73,9 @@ from .protocol import (
     THERMO_CHANNEL_COUNT,
     UART_TASK_ID_AUTOTUNE,
     UART_TASK_ID_CONTROL,
-    UART_TASK_ID_DISPLAY,
-    UART_TASK_ID_IO,
     UART_TASK_ID_PROFILES,
     UART_TASK_ID_SAFETY,
     UART_TASK_ID_SYSTEM,
-    UART_TASK_ID_THERMO,
     UART_TASK_ID_WIFI,
     AUTOTUNE_METHOD_RELAY,
     AUTOTUNE_METHOD_STEP,
@@ -1858,15 +1855,18 @@ class KilnCtrlApp:
             self.wifi_settings_status_var.set(f"Sending credentials for {ssid!r} over UART...")
             self.session_log.info("wifi (UART) settings: add network %r", ssid)
 
-            def apply(ok: bool) -> None:
+            def apply(result: OkReason) -> None:
                 if not self._wifi_settings_is_open():
                     return
-                self.wifi_settings_status_var.set(
-                    f"Credentials sent for {ssid!r}. Joining in the background -- Refresh Status "
-                    "to check progress." if ok else f"Add network {ssid!r}: REJECTED."
-                )
-                if ok:
+                if result.ok:
+                    self.wifi_settings_status_var.set(
+                        f"Credentials sent for {ssid!r}. Joining in the background -- Refresh "
+                        "Status to check progress."
+                    )
                     self.wifi_settings_refresh_status_async()
+                else:
+                    detail = f" ({result.reason})" if result.reason else ""
+                    self.wifi_settings_status_var.set(f"Add network {ssid!r}: REJECTED{detail}.")
 
             self.query_async(
                 "Wi-Fi add network (UART)",
@@ -1905,11 +1905,14 @@ class KilnCtrlApp:
                 f"Switching to {'Access Point' if want_mode == 'ap' else 'Home Wi-Fi'} mode over UART..."
             )
 
-            def apply(ok: bool) -> None:
+            def apply(result: OkReason) -> None:
                 if self._wifi_settings_is_open():
-                    self.wifi_settings_status_var.set(f"Mode change: {'ok' if ok else 'REJECTED'}.")
-                    if ok:
+                    if result.ok:
+                        self.wifi_settings_status_var.set("Mode change: ok.")
                         self.wifi_settings_refresh_status_async()
+                    else:
+                        detail = f" ({result.reason})" if result.reason else ""
+                        self.wifi_settings_status_var.set(f"Mode change: REJECTED{detail}.")
 
             self.query_async(
                 "Wi-Fi set mode (UART)", lambda: self.wifi_uart_client.set_mode(mode_byte), apply,
@@ -2633,8 +2636,8 @@ class KilnCtrlApp:
         ttk.Button(
             relays,
             text="ALL RELAYS OFF",
-            command=lambda: self.send_async(
-                "All relays off", UART_TASK_ID_IO, devices.io_all_relays_off
+            command=lambda: self._io_mutating_async(
+                "All relays off", lambda: self.io.all_relays_off()
             ),
         ).grid(row=0, column=3, rowspan=2, padx=(20, 8), pady=4, sticky="ns")
         ttk.Label(
@@ -2745,10 +2748,9 @@ class KilnCtrlApp:
         ttk.Button(
             raw,
             text="Write",
-            command=lambda: self.send_async(
+            command=lambda: self._io_mutating_async(
                 "Expander write reg",
-                UART_TASK_ID_IO,
-                lambda: devices.sx_write_reg(
+                lambda: self.io.sx_write_reg(
                     _as_int(self.io_reg_addr, "register"), _as_int(self.io_reg_value, "value")
                 ),
             ),
@@ -2760,24 +2762,25 @@ class KilnCtrlApp:
         ttk.Entry(raw, textvariable=self.io_mask_extra, width=7).grid(
             row=1, column=3, padx=2, pady=(0, 6)
         )
-        for column, (label, builder) in enumerate(
+        for column, (label, method) in enumerate(
             (
-                ("Dir", lambda m, _e: devices.sx_set_dir(m)),
-                ("Pull-up", lambda m, _e: devices.sx_set_pullup(m)),
-                ("Open-drain", lambda m, _e: devices.sx_set_opendrain(m)),
-                ("Debounce", lambda m, e: devices.sx_set_debounce(m, e)),
-                ("Int mask", lambda m, e: devices.sx_set_int_mask(m, e)),
+                ("Dir", lambda io, m, _e: io.sx_set_dir(m)),
+                ("Pull-up", lambda io, m, _e: io.sx_set_pullup(m)),
+                ("Open-drain", lambda io, m, _e: io.sx_set_opendrain(m)),
+                ("Debounce", lambda io, m, e: io.sx_set_debounce(m, e)),
+                ("Int mask", lambda io, m, e: io.sx_set_int_mask(m, e)),
             ),
             start=4,
         ):
             ttk.Button(
                 raw,
                 text=label,
-                command=lambda lbl=label, b=builder: self.send_async(
+                command=lambda lbl=label, m=method: self._io_mutating_async(
                     f"Expander {lbl} mask",
-                    UART_TASK_ID_IO,
-                    lambda b=b: b(
-                        _as_int(self.io_mask_var, "mask"), _as_int(self.io_mask_extra, "config/sense")
+                    lambda m=m: m(
+                        self.io,
+                        _as_int(self.io_mask_var, "mask"),
+                        _as_int(self.io_mask_extra, "config/sense"),
                     ),
                 ),
             ).grid(row=1, column=column, padx=2, pady=(0, 6))
@@ -2797,10 +2800,9 @@ class KilnCtrlApp:
         ttk.Button(
             led,
             text="Enable",
-            command=lambda: self.send_async(
+            command=lambda: self._io_mutating_async(
                 "Expander LED driver on",
-                UART_TASK_ID_IO,
-                lambda: devices.sx_led_driver(
+                lambda: self.io.sx_led_driver(
                     self.io_led_pin.get(), True, self.io_led_intensity.get()
                 ),
             ),
@@ -2808,24 +2810,23 @@ class KilnCtrlApp:
         ttk.Button(
             led,
             text="Disable",
-            command=lambda: self.send_async(
+            command=lambda: self._io_mutating_async(
                 "Expander LED driver off",
-                UART_TASK_ID_IO,
-                lambda: devices.sx_led_driver(self.io_led_pin.get(), False, 0),
+                lambda: self.io.sx_led_driver(self.io_led_pin.get(), False, 0),
             ),
         ).pack(side="left", padx=6)
         ttk.Button(
             led,
             text="Soft Reset",
-            command=lambda: self.send_async(
-                "Expander soft reset", UART_TASK_ID_IO, lambda: devices.sx_reset(False)
+            command=lambda: self._io_mutating_async(
+                "Expander soft reset", lambda: self.io.sx_reset(False)
             ),
         ).pack(side="left", padx=(20, 4))
         ttk.Button(
             led,
             text="Hard Reset (~RESET pin)",
-            command=lambda: self.send_async(
-                "Expander hard reset", UART_TASK_ID_IO, lambda: devices.sx_reset(True)
+            command=lambda: self._io_mutating_async(
+                "Expander hard reset", lambda: self.io.sx_reset(True)
             ),
         ).pack(side="left")
 
@@ -2849,39 +2850,48 @@ class KilnCtrlApp:
 
         self.query_async(label, lambda: self.io.set_relay(relay, on), apply, error_types=(IoQueryError,))
 
+    def _io_mutating_async(self, description: str, action: "Callable[[], OkReason]") -> None:
+        """Run an IO write and surface a refusal (with reason, when the
+        firmware gave one) instead of letting it land silently in
+        IoClient's own consumer thread -- same shape as
+        :meth:`_thermo_mutating_async`, wired to :class:`IoClient`'s
+        ``_write_style``-based methods instead of the fire-and-forget
+        ``send_async`` every one of these used to go through.
+        """
+        def apply(result: OkReason) -> None:
+            if result.ok:
+                self.set_status(f"{description}: ok.")
+            else:
+                detail = f" ({result.reason})" if result.reason else ""
+                self.set_status(f"{description}: REJECTED{detail}.", error=True)
+
+        self.query_async(description, action, apply, error_types=(IoQueryError,))
+
     def _io_write_level(self, io: int, level: bool) -> None:
-        self.send_async(
-            f"IO {io} = {int(level)}",
-            UART_TASK_ID_IO,
-            lambda: devices.io_set_io(io, level),
-        )
+        self._io_mutating_async(f"IO {io} = {int(level)}", lambda: self.io.set_io(io, level))
 
     def _io_write_dir(self, io: int) -> None:
         is_input = self._io_dir_vars[io - 1].get()
         pullup = self._io_pullup_vars[io - 1].get()
-        self.send_async(
+        self._io_mutating_async(
             f"IO {io} dir = {'input' if is_input else 'output'}",
-            UART_TASK_ID_IO,
-            lambda: devices.io_set_io_dir(io, is_input, pullup),
+            lambda: self.io.set_io_dir(io, is_input, pullup),
         )
 
     def _io_start_reporting(self) -> None:
         if not self._is_open("io"):
             return
         period = max(0, int(self.io_period_var.get()))
-        self.send_async(
+        self._io_mutating_async(
             f"Expander auto-report {period} ms",
-            UART_TASK_ID_IO,
-            lambda: devices.io_set_auto_report(period),
+            lambda: self.io.set_auto_report(period),
         )
 
     def _io_stop_reporting(self) -> None:
         if not self.link.is_connected or self.info.compatible is not True:
             return
-        self.send_async(
-            "Expander auto-report off",
-            UART_TASK_ID_IO,
-            lambda: devices.io_set_auto_report(0),
+        self._io_mutating_async(
+            "Expander auto-report off", lambda: self.io.set_auto_report(0)
         )
 
     def io_read_async(self) -> None:
@@ -2968,29 +2978,29 @@ class KilnCtrlApp:
         ttk.Button(
             panel,
             text="Reset (soft)",
-            command=lambda: self.send_async(
-                "Display soft reset", UART_TASK_ID_DISPLAY, lambda: devices.display_reset(False)
+            command=lambda: self._display_mutating_async(
+                "Display soft reset", lambda: self.display.reset(False)
             ),
         ).grid(row=0, column=0, padx=(8, 4), pady=6)
         ttk.Button(
             panel,
             text="Reset (~RESET pin)",
-            command=lambda: self.send_async(
-                "Display hard reset", UART_TASK_ID_DISPLAY, lambda: devices.display_reset(True)
+            command=lambda: self._display_mutating_async(
+                "Display hard reset", lambda: self.display.reset(True)
             ),
         ).grid(row=0, column=1, padx=4)
         ttk.Button(
             panel,
             text="Power On",
-            command=lambda: self.send_async(
-                "Display power on", UART_TASK_ID_DISPLAY, lambda: devices.display_set_power(True)
+            command=lambda: self._display_mutating_async(
+                "Display power on", lambda: self.display.set_power(True)
             ),
         ).grid(row=0, column=2, padx=(12, 4))
         ttk.Button(
             panel,
             text="Power Off",
-            command=lambda: self.send_async(
-                "Display power off", UART_TASK_ID_DISPLAY, lambda: devices.display_set_power(False)
+            command=lambda: self._display_mutating_async(
+                "Display power off", lambda: self.display.set_power(False)
             ),
         ).grid(row=0, column=3, padx=4)
 
@@ -3002,10 +3012,9 @@ class KilnCtrlApp:
             to=3,
             textvariable=self.display_rotation,
             width=3,
-            command=lambda: self.send_async(
+            command=lambda: self._display_mutating_async(
                 f"Display rotation {self.display_rotation.get()}",
-                UART_TASK_ID_DISPLAY,
-                lambda: devices.display_set_rotation(self.display_rotation.get()),
+                lambda: self.display.set_rotation(self.display_rotation.get()),
             ),
         ).grid(row=0, column=5, padx=2)
         self.display_invert = tk.BooleanVar(value=False)
@@ -3013,10 +3022,9 @@ class KilnCtrlApp:
             panel,
             text="Invert",
             variable=self.display_invert,
-            command=lambda: self.send_async(
+            command=lambda: self._display_mutating_async(
                 f"Display invert {self.display_invert.get()}",
-                UART_TASK_ID_DISPLAY,
-                lambda: devices.display_set_invert(self.display_invert.get()),
+                lambda: self.display.set_invert(self.display_invert.get()),
             ),
         ).grid(row=0, column=6, padx=(12, 4))
         ttk.Button(panel, text="Read ID", command=self.display_read_id_async).grid(
@@ -3038,10 +3046,9 @@ class KilnCtrlApp:
         ttk.Button(
             draw,
             text="Clear Screen",
-            command=lambda: self.send_async(
+            command=lambda: self._display_mutating_async(
                 "Display clear",
-                UART_TASK_ID_DISPLAY,
-                lambda: devices.display_clear(_as_int(self.display_color_var, "color")),
+                lambda: self.display.clear(_as_int(self.display_color_var, "color")),
             ),
         ).grid(row=0, column=3, padx=(12, 8))
 
@@ -3056,21 +3063,21 @@ class KilnCtrlApp:
             ttk.Spinbox(draw, from_=0, to=1000, textvariable=var, width=6).grid(
                 row=1, column=column * 2 + 1, padx=2, pady=(0, 6)
             )
-        for column, (label, builder) in enumerate(
+        for column, (label, method) in enumerate(
             (
-                ("Fill Rect", devices.display_fill_rect),
-                ("Draw Rect", devices.display_draw_rect),
-                ("Draw Line", devices.display_draw_line),
+                ("Fill Rect", lambda d, *a: d.fill_rect(*a)),
+                ("Draw Rect", lambda d, *a: d.draw_rect(*a)),
+                ("Draw Line", lambda d, *a: d.draw_line(*a)),
             ),
             start=8,
         ):
             ttk.Button(
                 draw,
                 text=label,
-                command=lambda lbl=label, b=builder: self.send_async(
+                command=lambda lbl=label, m=method: self._display_mutating_async(
                     f"Display {lbl.lower()}",
-                    UART_TASK_ID_DISPLAY,
-                    lambda b=b: b(
+                    lambda m=m: m(
+                        self.display,
                         self.display_x.get(),
                         self.display_y.get(),
                         self.display_w.get(),
@@ -3092,19 +3099,17 @@ class KilnCtrlApp:
         ttk.Button(
             text_frame,
             text="Print",
-            command=lambda: self.send_async(
+            command=lambda: self._display_mutating_async(
                 f"Display print {self.display_text.get()!r}",
-                UART_TASK_ID_DISPLAY,
-                lambda: devices.display_print(self.display_text.get()),
+                lambda: self.display.print_text(self.display_text.get()),
             ),
         ).grid(row=0, column=2, padx=4)
         ttk.Button(
             text_frame,
             text="Set Cursor (x,y above)",
-            command=lambda: self.send_async(
+            command=lambda: self._display_mutating_async(
                 "Display text cursor",
-                UART_TASK_ID_DISPLAY,
-                lambda: devices.display_set_text_cursor(
+                lambda: self.display.set_text_cursor(
                     self.display_x.get(), self.display_y.get()
                 ),
             ),
@@ -3121,10 +3126,9 @@ class KilnCtrlApp:
         ttk.Button(
             text_frame,
             text="Apply Style",
-            command=lambda: self.send_async(
+            command=lambda: self._display_mutating_async(
                 "Display text style",
-                UART_TASK_ID_DISPLAY,
-                lambda: devices.display_set_text_style(
+                lambda: self.display.set_text_style(
                     _as_int(self.display_color_var, "color"),
                     _as_int(self.display_bg_var, "background"),
                     self.display_text_size.get(),
@@ -3183,6 +3187,23 @@ class KilnCtrlApp:
             self.set_status(f"Color: {exc}", error=True)
             return
         self.display_color_var.set(f"0x{color:04X}")
+
+    def _display_mutating_async(self, description: str, action: "Callable[[], OkReason]") -> None:
+        """Run a DISPLAY one-shot write and surface a driver-error refusal
+        (with reason, when the firmware gave one) instead of letting it land
+        silently in DisplayClient's own consumer thread -- same shape as
+        :meth:`_thermo_mutating_async`, wired to :class:`DisplayClient`'s
+        ``_write``-based methods instead of the fire-and-forget
+        ``send_async`` every one of these used to go through.
+        """
+        def apply(result: OkReason) -> None:
+            if result.ok:
+                self.set_status(f"{description}: ok.")
+            else:
+                detail = f" ({result.reason})" if result.reason else ""
+                self.set_status(f"{description}: REJECTED{detail}.", error=True)
+
+        self.query_async(description, action, apply, error_types=(DisplayQueryError,))
 
     def display_read_id_async(self) -> None:
         def apply(ident) -> None:

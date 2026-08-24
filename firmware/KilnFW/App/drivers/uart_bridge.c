@@ -217,9 +217,12 @@ static void bridge_reply(uart_protocol_t *proto, const uart_proto_message_t *msg
  * shape uart_bridge_ext.c's bx_reply_ok_err() already uses for known-but-
  * refused commands there, so a PC client that already understands that
  * convention needs no new parser to recognize this as a rejection. `reason`
- * is optional: NULL/empty reproduces bridge_reply_unsupported()'s original
- * 2-byte {subcmd, 0} wire shape exactly (still the only shape a client that
- * predates this change will ever see -- the default: case below). A non-NULL
+ * is optional in the sense that a NULL/empty one still produces a valid
+ * 2-byte {subcmd, 0} rejection -- but NOTHING in this file passes NULL any
+ * more, and nothing should: that shape collides with the honest empty-success
+ * reply of THERMO_CMD_READ_FAULTS and IO_CMD_SX_SCAN, which is why the
+ * default: cases now pass "unsupported" (see bridge_reply_unsupported()
+ * below). Always give a reason. A non-NULL
  * reason is appended as a length-prefixed ASCII string -- same encoding
  * bx_put_lstring() uses in uart_bridge_ext.c -- truncated rather than
  * overrunning `reply` on the (never expected in practice) chance a caller
@@ -249,13 +252,24 @@ static void bridge_reply_reject(uart_protocol_t *proto, const uart_proto_message
 }
 
 /* Thin wrapper kept for the default: cases below -- an unrecognized subcmd
- * has no more specific reason to give than "unsupported", and this preserves
- * the exact 2-byte reply every existing caller (and any PC client already
- * parsing it) was built against. */
+ * has no more specific reason to give than "unsupported".
+ *
+ * Passes a real reason string rather than NULL (TODO.md section 11): two
+ * query replies in this file echo their subcmd byte with byte[1] as a count
+ * that can legitimately be 0 -- THERMO_CMD_READ_FAULTS and IO_CMD_SX_SCAN --
+ * so their honest empty-success reply, {subcmd, 0}, was exactly 2 bytes,
+ * byte-identical to this function's old NULL-reason output. A reasoned
+ * reply is always longer (subcmd + ok=0 + len + at least one reason byte),
+ * so "unsupported" can never again be misread as "found nothing". This
+ * changes the *unsupported* reply's length, never the *empty-success*
+ * reply's, so every existing decoder for a real subcommand (which checks
+ * its own success shape, not this one) is unaffected -- see this commit's
+ * message for the survey of tools/PcTools' parsers that was done before
+ * making this change. */
 static void bridge_reply_unsupported(uart_protocol_t *proto, const uart_proto_message_t *msg,
                                      uint8_t src_task, uint8_t subcmd)
 {
-    bridge_reply_reject(proto, msg, src_task, subcmd, NULL);
+    bridge_reply_reject(proto, msg, src_task, subcmd, "unsupported");
 }
 
 /* An unsolicited push (an auto-report tick). Shorter ACK timeout than a reply:
@@ -1317,18 +1331,31 @@ static void display_bridge_task(void *arg)
 
         switch (subcmd) {
             case DISPLAY_CMD_RESET: {
-                if (!bridge_args_ok("display", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_reset(ctx->disp, msg.payload[1] != 0);
                 break;
             }
             case DISPLAY_CMD_SET_POWER: {
-                if (!bridge_args_ok("display", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_set_power(ctx->disp, msg.payload[1] != 0);
                 break;
             }
             case DISPLAY_CMD_SET_ROTATION: {
-                if (!bridge_args_ok("display", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("display", subcmd, "rotation", msg.payload[1], 0, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -1336,17 +1363,29 @@ static void display_bridge_task(void *arg)
                 break;
             }
             case DISPLAY_CMD_SET_INVERT: {
-                if (!bridge_args_ok("display", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_set_invert(ctx->disp, msg.payload[1] != 0);
                 break;
             }
             case DISPLAY_CMD_CLEAR: {
-                if (!bridge_args_ok("display", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_clear(ctx->disp, bridge_u16_le(&msg.payload[1]));
                 break;
             }
             case DISPLAY_CMD_FILL_RECT: {
-                if (!bridge_args_ok("display", &msg, 11)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 11)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 /* Coordinates and extents are checked against the panel's
                  * current rotation inside ILI9488 (ili9488_rect_in_bounds),
                  * which is the only place that knows them -- an off-screen rect
@@ -1359,7 +1398,11 @@ static void display_bridge_task(void *arg)
                 break;
             }
             case DISPLAY_CMD_DRAW_RECT: {
-                if (!bridge_args_ok("display", &msg, 11)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 11)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_draw_rect(ctx->disp, bridge_u16_le(&msg.payload[1]),
                                         bridge_u16_le(&msg.payload[3]),
                                         bridge_u16_le(&msg.payload[5]),
@@ -1368,7 +1411,11 @@ static void display_bridge_task(void *arg)
                 break;
             }
             case DISPLAY_CMD_DRAW_LINE: {
-                if (!bridge_args_ok("display", &msg, 11)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 11)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_draw_line(ctx->disp, bridge_u16_le(&msg.payload[1]),
                                         bridge_u16_le(&msg.payload[3]),
                                         bridge_u16_le(&msg.payload[5]),
@@ -1377,15 +1424,27 @@ static void display_bridge_task(void *arg)
                 break;
             }
             case DISPLAY_CMD_SET_TEXT_CURSOR: {
-                if (!bridge_args_ok("display", &msg, 5)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 5)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_set_text_cursor(ctx->disp, bridge_u16_le(&msg.payload[1]),
                                               bridge_u16_le(&msg.payload[3]));
                 break;
             }
             case DISPLAY_CMD_SET_TEXT_STYLE: {
-                if (!bridge_args_ok("display", &msg, 7)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 7)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 if (!bridge_range_ok("display", subcmd, "text size", msg.payload[5], 1,
-                                     ILI9488_TEXT_SIZE_MAX)) { rejected = true; break; }
+                                     ILI9488_TEXT_SIZE_MAX)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "out of range");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_set_text_style(ctx->disp, bridge_u16_le(&msg.payload[1]),
                                              bridge_u16_le(&msg.payload[3]), msg.payload[5],
                                              msg.payload[6] != 0);
@@ -1397,13 +1456,21 @@ static void display_bridge_task(void *arg)
                  * length is derived from msg.length rather than assumed, so a
                  * bare PRINT with no text is a zero-length write, not a read of
                  * whatever the previous frame left in the payload buffer. */
-                if (!bridge_args_ok("display", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 err = ILI9488_write(ctx->disp, (const char *)&msg.payload[1],
                                     (size_t)(msg.length - 1));
                 break;
             }
             case DISPLAY_CMD_BLIT_BEGIN: {
-                if (!bridge_args_ok("display", &msg, 9)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 9)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 /* Window bounds and the w*h pixel budget are validated by
                  * ILI9488_blit_begin; every later BLIT_DATA chunk is checked
                  * against what remains of that budget, so no run of frames can
@@ -1415,7 +1482,11 @@ static void display_bridge_task(void *arg)
                 break;
             }
             case DISPLAY_CMD_BLIT_DATA: {
-                if (!bridge_args_ok("display", &msg, 3)) { rejected = true; break; }
+                if (!bridge_args_ok("display", &msg, 3)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 /* RGB565 pixels, so the pixel bytes must come in pairs. The
                  * driver aborts the whole blit on an odd length (a half pixel
                  * shifts every pixel after it); catching it here means the open
@@ -1423,6 +1494,7 @@ static void display_bridge_task(void *arg)
                 if (((msg.length - 1u) & 1u) != 0) {
                     ESP_LOGW(TAG, "display: subcmd 0x%02X carries %u pixel bytes (odd, half an "
                                   "RGB565 pixel) -- rejected", subcmd, (unsigned)(msg.length - 1u));
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_DISPLAY, subcmd, "out of range");
                     rejected = true;
                     break;
                 }
@@ -1607,7 +1679,11 @@ static void touch_bridge_task(void *arg)
                 break;
             }
             case TOUCH_CMD_INJECT: {
-                if (!bridge_args_ok("touch", &msg, 6)) { rejected = true; break; }
+                if (!bridge_args_ok("touch", &msg, 6)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_TOUCH, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 uint16_t inj_x = bridge_u16_le(&msg.payload[1]);
                 uint16_t inj_y = bridge_u16_le(&msg.payload[3]);
                 bool inj_pressed = msg.payload[5] != 0;
@@ -1628,7 +1704,11 @@ static void touch_bridge_task(void *arg)
                 break;
             }
             case TOUCH_CMD_SET_TAP_DUMP: {
-                if (!bridge_args_ok("touch", &msg, 2)) { rejected = true; break; }
+                if (!bridge_args_ok("touch", &msg, 2)) {
+                    bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_TOUCH, subcmd, "truncated");
+                    rejected = true;
+                    break;
+                }
                 kiln_ui_set_auto_tap_dump(msg.payload[1] != 0);
                 err = ESP_OK;
                 break;

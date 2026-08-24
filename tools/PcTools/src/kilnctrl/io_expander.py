@@ -34,11 +34,23 @@ from typing import Callable, Optional
 from . import devices
 from .devices import ExpanderRegisters, IoResponseError, IoState, RelayResult
 from .protocol import (
+    IO_CMD_ALL_RELAYS_OFF,
     IO_CMD_READ,
+    IO_CMD_SET_AUTO_REPORT,
+    IO_CMD_SET_IO,
+    IO_CMD_SET_IO_DIR,
     IO_CMD_SET_RELAY,
     IO_CMD_SET_RELAY_MASK,
+    IO_CMD_SX_LED_DRIVER,
     IO_CMD_SX_READ_REG,
+    IO_CMD_SX_RESET,
     IO_CMD_SX_SCAN,
+    IO_CMD_SX_SET_DEBOUNCE,
+    IO_CMD_SX_SET_DIR,
+    IO_CMD_SX_SET_INT_MASK,
+    IO_CMD_SX_SET_OPENDRAIN,
+    IO_CMD_SX_SET_PULLUP,
+    IO_CMD_SX_WRITE_REG,
     UART_TASK_ID_IO,
     Device,
     Frame,
@@ -143,10 +155,15 @@ class IoClient:
 
         Fire-and-forget: the returned :class:`SendResult` proves delivery to
         the task's inbox only, never that the subcommand switch did
-        anything. Relay writes should go through :meth:`set_relay` /
-        :meth:`set_relay_mask` instead -- see their docstrings for why plain
-        ``send()`` cannot distinguish "relay energized" from "refused
-        because a profile owns it" from "refused because safety is faulted"
+        anything. Every write below (:meth:`set_relay`/:meth:`set_relay_mask`
+        and the plain :meth:`set_io`/:meth:`set_io_dir`/:meth:`set_auto_report`/
+        :meth:`all_relays_off`/:meth:`sx_write_reg`/:meth:`sx_set_dir`/
+        :meth:`sx_set_pullup`/:meth:`sx_set_opendrain`/:meth:`sx_set_debounce`/
+        :meth:`sx_set_int_mask`/:meth:`sx_led_driver`/:meth:`sx_reset`) should
+        go through its own method instead of this one -- see their
+        docstrings for why plain ``send()`` cannot distinguish "it happened"
+        from "refused because a profile owns it" / "safety is faulted" /
+        "truncated" / "out of range" / "driver error"
         (ROADMAP.md "KilnFW PC-link command acknowledgement").
         """
         return self.link.send(
@@ -189,6 +206,105 @@ class IoClient:
         )
 
     def _set_relay_style(self, subcommand: int, payload: bytes, timeout: float) -> RelayResult:
+        on_silence = RelayResult(ok=True, reason_text=None, refusal=devices.RelayRefusal.OTHER)
+        return self._write_style(subcommand, payload, timeout, on_silence)
+
+    # -- other IO writes (truncated/out-of-range/safety/driver-error can all
+    # refuse these too, same as the relay commands above -- see
+    # parse_io_response()'s _IO_WRITE_SUBCOMMANDS) --------------------------
+    def set_io(
+        self, io: int, level: bool, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Drive one of the seven general-purpose digital outputs."""
+        return self._write_style(IO_CMD_SET_IO, devices.io_set_io(io, level), timeout)
+
+    def set_io_dir(
+        self, io: int, is_input: bool, pullup: bool, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Set one digital I/O's direction, and its pull-up if it's an input."""
+        return self._write_style(
+            IO_CMD_SET_IO_DIR, devices.io_set_io_dir(io, is_input, pullup), timeout
+        )
+
+    def set_auto_report(
+        self, period_ms: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Enable/disable (period_ms=0) the periodic + ~INT-edge READ push."""
+        return self._write_style(
+            IO_CMD_SET_AUTO_REPORT, devices.io_set_auto_report(period_ms), timeout
+        )
+
+    def all_relays_off(self, timeout: float = SET_RELAY_REJECT_WINDOW_S) -> "devices.OkReason":
+        """Force all four relays off in one call, bypassing individual ownership."""
+        return self._write_style(
+            IO_CMD_ALL_RELAYS_OFF, devices.io_all_relays_off(), timeout
+        )
+
+    def sx_write_reg(
+        self, reg: int, value: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Raw SX1509 register write (debug) -- refused if it would touch a relay pin."""
+        return self._write_style(
+            IO_CMD_SX_WRITE_REG, devices.sx_write_reg(reg, value), timeout
+        )
+
+    def sx_set_dir(self, mask: int, timeout: float = SET_RELAY_REJECT_WINDOW_S) -> "devices.OkReason":
+        """Raw SX1509 direction-register write -- refused if it would retarget a relay pin."""
+        return self._write_style(IO_CMD_SX_SET_DIR, devices.sx_set_dir(mask), timeout)
+
+    def sx_set_pullup(self, mask: int, timeout: float = SET_RELAY_REJECT_WINDOW_S) -> "devices.OkReason":
+        """Raw SX1509 pull-up register write."""
+        return self._write_style(IO_CMD_SX_SET_PULLUP, devices.sx_set_pullup(mask), timeout)
+
+    def sx_set_opendrain(
+        self, mask: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Raw SX1509 open-drain register write."""
+        return self._write_style(
+            IO_CMD_SX_SET_OPENDRAIN, devices.sx_set_opendrain(mask), timeout
+        )
+
+    def sx_set_debounce(
+        self, enable_mask: int, config: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Raw SX1509 debounce config write."""
+        return self._write_style(
+            IO_CMD_SX_SET_DEBOUNCE, devices.sx_set_debounce(enable_mask, config), timeout
+        )
+
+    def sx_set_int_mask(
+        self, mask: int, sense: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Raw SX1509 interrupt mask/sense write."""
+        return self._write_style(
+            IO_CMD_SX_SET_INT_MASK, devices.sx_set_int_mask(mask, sense), timeout
+        )
+
+    def sx_led_driver(
+        self, pin: int, enable: bool, intensity: int, timeout: float = SET_RELAY_REJECT_WINDOW_S
+    ) -> "devices.OkReason":
+        """Enable/disable one pin's LED driver (ClkX/breathe) at a given intensity."""
+        return self._write_style(
+            IO_CMD_SX_LED_DRIVER, devices.sx_led_driver(pin, enable, intensity), timeout
+        )
+
+    def sx_reset(self, hard: bool, timeout: float = SET_RELAY_REJECT_WINDOW_S) -> "devices.OkReason":
+        """Reset the SX1509 (software register reset, or pulse ~RESET)."""
+        return self._write_style(IO_CMD_SX_RESET, devices.sx_reset(hard), timeout)
+
+    def _write_style(self, subcommand: int, payload: bytes, timeout: float, on_silence: object = None):
+        """Send one write subcommand and wait out ``timeout`` for the
+        *optional* refusal reply -- shared by :meth:`set_relay`/
+        :meth:`set_relay_mask` (``on_silence`` a :class:`RelayResult`) and
+        every other IO write above (``on_silence`` defaults to a plain
+        ``OkReason(ok=True)``): a reply within the window IS the refusal,
+        decoded by ``parse_io_response``; silence means the write happened.
+
+        Raises :class:`IoQueryError` only if the request itself was not
+        delivered (no transport ACK).
+        """
+        if on_silence is None:
+            on_silence = devices.OkReason(ok=True)
         with self._query_lock:
             pending = _Pending(subcommand)
             with self._pending_lock:
@@ -208,10 +324,10 @@ class IoClient:
                     )
                 if pending.event.wait(timeout):
                     # A reply arrived -- io_bridge_task() only ever sends one
-                    # for these two subcommands on refusal.
-                    return pending.value  # type: ignore[return-value]
+                    # for these subcommands on refusal.
+                    return pending.value
                 # Silence within the window: the write happened.
-                return RelayResult(ok=True, reason_text=None, refusal=devices.RelayRefusal.OTHER)
+                return on_silence
             finally:
                 with self._pending_lock:
                     if self._pending is pending:
