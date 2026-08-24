@@ -127,11 +127,40 @@ simulate: **there is no DUT**. See "What this does NOT simulate" below.
   for precisely this reason). A `RANDOM_IN` *trigger*, by contrast, picks
   its fire time relative to "now" at first evaluation and IS measurably
   affected by this wrinkle -- documented, not swept under the rug.
-* **CJ (cold-junction) temperature is a fixed 25 C**, not the "slow ambient
-  drift" DESIGN_NOTES.md sec 3.2 describes for the eventual real firmware. Nothing
-  in the required scenario set needs CJ drift over time; `cj_fault.yaml`
-  injects an explicit CJ *offset*, which this simplification does not
-  affect.
+* **DUT-power relays boot ON here, OFF on real firmware.** `device_init()`
+  sets both `dut_power_on` and `dut_power_safety_on` true, so no scenario
+  starts against a dead board; real `i2c_owner.c` boots
+  `s_dut_power_main_on`/`s_dut_power_safety_on` both false. **This is the
+  deviation most likely to matter**, because it changes the *starting
+  electrical state* every scenario runs from -- a real-firmware regression
+  where DUT power fails to come up at boot could never be caught by a
+  `--virtual` run. Both domains deviate identically, so J18/J19 independence
+  (PROTOCOL.md sec 5.5) is preserved. Added to this list 2026-08-24: it had
+  been explained only in an inline C comment, which is not where someone
+  deciding whether to trust a virtual run will look.
+* **CJ (cold-junction) temperature is a fixed 25 C.** *Not currently a
+  deviation from real firmware* -- `spi_emu_a.c`/`spi_emu_b.c` use the same
+  fixed 25 C stand-in for the same reason, so both sides do the identical
+  thing today. What it deviates from is the "slow ambient drift"
+  DESIGN_NOTES.md sec 3.2 describes for the *eventual* real firmware. Kept
+  here rather than deleted because it will become a real divergence the
+  moment that drift is implemented on one side only -- but it is listed
+  under the wrong heading until then, and a list that mixes "differs from
+  shipping code" with "differs from a future plan" is a list people stop
+  reading carefully. Nothing in the required scenario set needs CJ drift;
+  `cj_fault.yaml` injects an explicit CJ *offset*, which this simplification
+  does not affect.
+* **Four real commands are unimplemented here and answer `ERR_NOT_IMPL`:**
+  SYS `REBOOT_BOOTLOADER` (0x08), SYS `SESSION_RESET` (0x09), SYS
+  `GET_TASK_STATS` (0x0A), and IO `BUS_SCAN` (0x0B) -- all four are
+  implemented on real firmware (PROTOCOL.md sec 4). They fail loudly
+  (`SimLinkError`), never with a canned reply, so nothing silently passes;
+  and `GET_TASK_STATS` is already handled gracefully upstream, since
+  `selftest._check_task_stack_margins()` detects the `fw_git_hash ==
+  "virtual"` sentinel and reports NOT_RUNNABLE without sending it. No
+  current scenario or `testmgr` path exercises the other three -- but the
+  next person writing a `kilnsim io scan` regression test against
+  `--virtual` will hit an undocumented wall, which is why they are listed.
 * **No `RELAY_SET_CONTACT_FAULT`** -- matches real firmware/PROTOCOL.md
   exactly (deliberately not allocated; `FAULT_SCHEDULE`'s `welded_relay`/
   `stuck_open_relay` types are the real path either way).
