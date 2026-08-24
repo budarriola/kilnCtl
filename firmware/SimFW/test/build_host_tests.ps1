@@ -52,6 +52,7 @@ $sources = @(
     (Join-Path $testDir "test_usb_owner_session_reset_logic.c"),
     (Join-Path $testDir "test_task_stats_encoding.c"),
     (Join-Path $testDir "test_sim_engine_ring_drain_reset.c"),
+    (Join-Path $testDir "test_virtual_simfw_port_drift_coverage.c"),
     (Join-Path $simDir "thermal_model.c"),
     (Join-Path $simDir "max31856_regs.c"),
     (Join-Path $simDir "max31856_resp_image.c"),
