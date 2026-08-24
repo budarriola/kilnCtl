@@ -64,6 +64,21 @@ unsigned char g_stub_last_queue_item[256];
 
 #include "../drivers/uart_log_bridge.c"
 
+// ---- Ring-mode backing storage for the eviction tests below (see
+// stubs/freertos/queue.h's 2026-08-24 comments). Defined here, after the
+// #include above, because TEST_STUB_QUEUE_RING_MAX_CAPACITY is only visible
+// once freertos/queue.h has been pulled in transitively by
+// uart_log_bridge.c's own #include "freertos/queue.h". Left disabled
+// (g_stub_queue_ring_enabled = 0) so test_verbatim_forward() and friends
+// above -- and test_wifi_prov.c, compiled into the same executable -- see
+// the exact original always-pdFALSE stub with no behavior change. ----
+int g_stub_queue_ring_enabled = 0;
+unsigned char g_stub_queue_ring[TEST_STUB_QUEUE_RING_MAX_CAPACITY][256];
+unsigned long g_stub_queue_ring_item_len[TEST_STUB_QUEUE_RING_MAX_CAPACITY];
+int g_stub_queue_ring_capacity = 0;
+int g_stub_queue_ring_count = 0;
+int g_stub_queue_ring_head = 0;
+
 // uart_log_bridge.c's only call into uart_protocol.c proper -- never
 // actually invoked by these tests (they call uart_log_vprintf() directly,
 // never uart_log_bridge_start()/uart_log_bridge_task()), but the symbol
@@ -148,6 +163,137 @@ static void test_forwards_empty_message_faithfully(void)
                "empty message forwarded as empty, not silently dropped or altered");
 }
 
+// ---- Eviction-under-pressure tests (2026-08-24). These need to tell "the
+// queue actually has this line" from "the queue does not", which the
+// default always-pdFALSE stub can never distinguish -- so these turn on
+// ring mode (g_stub_queue_ring_enabled = 1) before calling
+// uart_log_bridge_early_init(), which is what latches
+// UART_LOG_BRIDGE_QUEUE_LEN as the ring's real capacity (see xQueueCreate()
+// in the stub). Every test above this point runs with ring mode off and is
+// therefore untouched by any of this. ----
+
+// Reads the text of the ring slot `offset_from_head` positions after the
+// current oldest entry (0 = oldest/front, count-1 = newest/tail) -- mirrors
+// captured_entry_text()'s decode of the same uart_log_entry_t wire layout,
+// but reads directly out of the ring backing array instead of the
+// last-xQueueSend-call snapshot, since the whole point here is to inspect
+// what is actually still queued, not just what was last offered.
+static void ring_entry_text(int offset_from_head, char *out, size_t out_size)
+{
+    int idx = (g_stub_queue_ring_head + offset_from_head) % TEST_STUB_QUEUE_RING_MAX_CAPACITY;
+    uint8_t len = g_stub_queue_ring[idx][1];
+    const char *text = (const char *)&g_stub_queue_ring[idx][2];
+    size_t n = len < out_size - 1 ? len : out_size - 1;
+    memcpy(out, text, n);
+    out[n] = '\0';
+}
+
+// Fills the (freshly created, empty) ring queue to exactly
+// UART_LOG_BRIDGE_QUEUE_LEN entries with distinguishable INFO lines, so a
+// later test can tell whether the front (oldest) one survived or was
+// evicted.
+static void fill_queue_with_info(void)
+{
+    for (int i = 0; i < UART_LOG_BRIDGE_QUEUE_LEN; i++) {
+        call_uart_log_vprintf("I (%d) filltag: line%d", i, i);
+    }
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "setup: queue filled to capacity");
+}
+
+static void ring_test_setup(void)
+{
+    g_stub_queue_ring_enabled = 1;
+    uart_log_bridge_early_init(); // latches ring capacity = UART_LOG_BRIDGE_QUEUE_LEN, resets ring
+    s_dropped_lines = 0;
+}
+
+static void test_full_queue_error_evicts_oldest(void)
+{
+    ring_test_setup();
+    fill_queue_with_info();
+
+    char oldest_before[64];
+    ring_entry_text(0, oldest_before, sizeof(oldest_before));
+    TEST_CHECK(strcmp(oldest_before, "I (0) filltag: line0") == 0, "setup: line0 is the oldest queued entry");
+
+    call_uart_log_vprintf("E (999) boom: something failed\r\n");
+
+    // The privileged path: exactly one line lost (the evicted INFO line, per
+    // the code's own comment -- "the evicted line, not this one"), and the
+    // queue is still full (evict + reinsert nets to no size change).
+    TEST_CHECK(s_dropped_lines == 1, "one drop counted for the evicted line, not the error");
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue stays full after evict+reinsert");
+
+    // The oldest entry is gone -- line0 was evicted, line1 is now the front.
+    char oldest_after[64];
+    ring_entry_text(0, oldest_after, sizeof(oldest_after));
+    TEST_CHECK(strcmp(oldest_after, "I (1) filltag: line1") == 0, "oldest entry (line0) was evicted");
+
+    // And the error itself made it in -- it's the newest (tail) entry.
+    char newest[64];
+    ring_entry_text(UART_LOG_BRIDGE_QUEUE_LEN - 1, newest, sizeof(newest));
+    TEST_CHECK(strcmp(newest, "E (999) boom: something failed") == 0,
+               "the error line is now queued, at the tail");
+}
+
+static void test_full_queue_non_error_not_privileged(void)
+{
+    ring_test_setup();
+    fill_queue_with_info();
+
+    char oldest_before[64];
+    ring_entry_text(0, oldest_before, sizeof(oldest_before));
+
+    call_uart_log_vprintf("W (999) noisy: just a warning\r\n");
+
+    // Not queued: dropped, no eviction attempted, queue contents unchanged.
+    TEST_CHECK(s_dropped_lines == 1, "the warning itself is counted as dropped");
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue still full, nothing removed");
+    char oldest_after[64];
+    ring_entry_text(0, oldest_after, sizeof(oldest_after));
+    TEST_CHECK(strcmp(oldest_before, oldest_after) == 0, "oldest entry untouched -- no eviction for a non-error");
+
+    // Try INFO too, for the same claim.
+    call_uart_log_vprintf("I (1000) noisy: just info\r\n");
+    TEST_CHECK(s_dropped_lines == 2, "the info line is also counted as dropped");
+    TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN, "queue still full after the info line too");
+}
+
+static void test_room_available_no_eviction(void)
+{
+    ring_test_setup();
+    // Room to spare: well under UART_LOG_BRIDGE_QUEUE_LEN.
+    for (int i = 0; i < 5; i++) {
+        call_uart_log_vprintf("I (%d) roomtag: line%d", i, i);
+    }
+    TEST_CHECK(g_stub_queue_ring_count == 5, "setup: five entries queued, room left");
+
+    call_uart_log_vprintf("E (500) boom: with room to spare\r\n");
+
+    TEST_CHECK(s_dropped_lines == 0, "no drop when the queue had room");
+    TEST_CHECK(g_stub_queue_ring_count == 6, "error simply appended, no eviction needed");
+    char newest[64];
+    ring_entry_text(5, newest, sizeof(newest));
+    TEST_CHECK(strcmp(newest, "E (500) boom: with room to spare") == 0, "the error is queued intact");
+}
+
+static void test_eviction_bounded_per_call(void)
+{
+    ring_test_setup();
+    fill_queue_with_info();
+
+    // Several consecutive errors against a full queue: each may evict AT
+    // MOST one entry for itself. If eviction were a loop instead of a single
+    // attempt, repeated errors would drain the queue below capacity; here it
+    // must stay pinned at capacity after every single one.
+    for (int i = 0; i < 5; i++) {
+        call_uart_log_vprintf("E (%d) boom: repeated failure %d\r\n", 2000 + i, i);
+        TEST_CHECK(g_stub_queue_ring_count == UART_LOG_BRIDGE_QUEUE_LEN,
+                   "queue stays exactly at capacity after each individual eviction");
+    }
+    TEST_CHECK(s_dropped_lines == 5, "five drops counted, one per evicted line -- none lost track of");
+}
+
 static void test_one_enqueue_per_call(void)
 {
     uart_log_bridge_early_init();
@@ -168,4 +314,8 @@ void run_test_uart_log_bridge(void)
     test_verbatim_forward();
     test_forwards_empty_message_faithfully();
     test_one_enqueue_per_call();
+    test_full_queue_error_evicts_oldest();
+    test_full_queue_non_error_not_privileged();
+    test_room_available_no_eviction();
+    test_eviction_bounded_per_call();
 }
