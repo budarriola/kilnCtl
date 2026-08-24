@@ -29,8 +29,24 @@
 #define I2C_OWNER_I2C_PORT  i2c0
 #define I2C_OWNER_BAUD_HZ   400000u // MCP23017 supports up to 1.7 MHz (datasheet); 400 kHz Fast-mode is a conservative, uncontested-bus default
 
-#define MCP23017_ADDR_1 0x20u
-#define MCP23017_ADDR_2 0x21u
+// Bench addresses, not the datasheet POR default (0x20/0x21) -- confirmed
+// 2026-08-24 by a one-shot firmware I2C bus scan (0x08..0x77, real 1-byte
+// address-phase probes, SWD-read back) against these two physical
+// expanders: only 0x25 and 0x26 ACKed. The bench units' A0/A1/A2 straps are
+// evidently not at their default (all-low) positions. If a board is ever
+// re-strapped or a fresh unit swapped in, re-run the scan rather than
+// assuming these values -- do not revert to 0x20/0x21 without confirming on
+// the actual hardware in hand.
+//
+// Which physical board is "exp1" (fixed-role: relay sense, E-stop drive,
+// DUT-power) vs "exp2" (spare pins only) could not be determined from the
+// bus scan alone -- ACK/NACK says nothing about a device's wiring role, only
+// that it answers at that address. This assignment is UNCONFIRMED; verify
+// against the physical board before relying on relay-sense/E-stop-drive
+// behavior, and swap the two values below if a read/write round trip shows
+// the wrong board answering for the wrong role.
+#define MCP23017_ADDR_1 0x25u
+#define MCP23017_ADDR_2 0x26u
 
 // --- Exp1 (0x20) pin roles (docs/DESIGN_NOTES.md section 3.7) ----------------------
 #define EXP1_PIN_K1          0u

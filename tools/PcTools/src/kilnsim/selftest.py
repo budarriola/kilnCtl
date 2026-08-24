@@ -352,6 +352,12 @@ def _check_ct_adc_loopback(link: SimLink) -> "tuple[str, str]":
     )
 
 
+# Mirrors firmware/SimFW/src/tasks/i2c_owner.c's MCP23017_DEBOUNCE_SCAN_MS
+# (8 ms) -- the PC side has no way to import that #define, so it is
+# transcribed here with an explicit pointer back, not re-derived from guesswork.
+MCP23017_SCAN_PERIOD_S = 0.008
+
+
 def _check_expander_read_after_write(link: SimLink) -> "tuple[str, str]":
     # Real hardware: IO_WRITE then IO_READ the same pin genuinely round-trips
     # through the I2C expander (i2c_owner.h). virtual_simfw's own README is
@@ -378,12 +384,37 @@ def _check_expander_read_after_write(link: SimLink) -> "tuple[str, str]":
             "mismatch here would be expected, not a fixture defect"
         )
     pin, exp = 8, 0  # port B pin 0 -- outside exp1's reserved fixed-role 0..7 range
+    # SET_DIR/WRITE are QUEUED on i2c_owner's command queue and only take
+    # effect on the expander at the START of its next scan tick
+    # (apply_pending_commands() drains the queue, THEN scan_tick() refreshes
+    # the raw GPIO word i2c_owner.h's IO_READ answers from -- i2c_owner.c,
+    # MCP23017_DEBOUNCE_SCAN_MS == 8). READ is a synchronous snapshot of
+    # whatever that last completed tick saw. Reading immediately after
+    # writing, with no wait, can win the race and observe the PRE-write
+    # value -- confirmed on real hardware 2026-08-24: a bare
+    # write-then-read-immediately sequence reported "wrote low -> read
+    # True" even though the expander was answering correctly (a separate
+    # CLI invocation per command, with real process/USB overhead between
+    # them, always passed). So this polls for the expander's OWN answer to
+    # change, bounded by a timeout well past one scan period, rather than
+    # trusting a single immediate read -- which is also a closer match to
+    # how a real client should use this asynchronous write path.
+    def _read_until(expected: bool, timeout_s: float = 0.5) -> dict:
+        deadline = time.monotonic() + timeout_s
+        last = {}
+        while time.monotonic() < deadline:
+            last = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin})
+            if last.get("level") is expected:
+                return last
+            time.sleep(MCP23017_SCAN_PERIOD_S)
+        return last
+
     try:
         link.send_command(CommandGroup.IO, IoCmd.SET_DIR, {"exp": exp, "pin": pin, "is_input": False, "pullup": False})
         link.send_command(CommandGroup.IO, IoCmd.WRITE, {"exp": exp, "pin": pin, "level": True})
-        high = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin})
+        high = _read_until(True)
         link.send_command(CommandGroup.IO, IoCmd.WRITE, {"exp": exp, "pin": pin, "level": False})
-        low = link.send_command(CommandGroup.IO, IoCmd.READ, {"exp": exp, "pin": pin})
+        low = _read_until(False)
     except SimLinkError as exc:
         # ERR_NO_SAMPLE (payloads.STATUS_ERR_NO_SAMPLE) means the args were
         # fine but i2c_owner has never gotten a successful MCP23017 ACK on
