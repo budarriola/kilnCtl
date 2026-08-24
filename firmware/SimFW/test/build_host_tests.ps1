@@ -41,6 +41,7 @@ $sources = @(
     (Join-Path $testDir "test_i2c_owner_io_set.c"),
     (Join-Path $testDir "test_i2c_owner_apply_cmd_logging.c"),
     (Join-Path $testDir "test_i2c_owner_bus_scan.c"),
+    (Join-Path $testDir "test_i2c_owner_bus_scan_probe_len_coverage.c"),
     (Join-Path $testDir "test_k4_gating_logic.c"),
     (Join-Path $testDir "test_ct_calibration.c"),
     (Join-Path $testDir "test_dut_power_domains.c"),

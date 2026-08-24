@@ -21,6 +21,7 @@ void run_test_i2c_owner_io_read(void);
 void run_test_i2c_owner_io_set(void);
 void run_test_i2c_owner_apply_cmd_logging(void);
 void run_test_i2c_owner_bus_scan(void);
+void run_test_i2c_owner_bus_scan_probe_len_coverage(void);
 void run_test_k4_gating_logic(void);
 void run_test_ct_calibration(void);
 void run_test_dut_power_domains(void);
@@ -46,6 +47,7 @@ int main(void)
     run_test_i2c_owner_io_set();
     run_test_i2c_owner_apply_cmd_logging();
     run_test_i2c_owner_bus_scan();
+    run_test_i2c_owner_bus_scan_probe_len_coverage();
     run_test_k4_gating_logic();
     run_test_ct_calibration();
     run_test_dut_power_domains();
