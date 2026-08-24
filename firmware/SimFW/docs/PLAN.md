@@ -95,14 +95,20 @@ never `[x]`.
       are flagged in `5df2190`'s message for whoever picks it up:
       `THERMO_CMD_READ_FAULTS` and `IO_CMD_SX_SCAN` have an empty-success
       reply that is byte-identical to a reasonless rejection.
-- [ ] **Select a replacement CT coupling transformer.** Not hardware-gated
-      and not a measurement: the acceptance test is a datasheet one (50/60 Hz
-      rated, ≥8 H primary inductance or ≥3 kΩ primary impedance at 60 Hz —
-      `BOM.md` §9 item 1). The former candidate, Triad TY-300P, was
-      **eliminated 2026-08-24 by its own datasheet** (`Frequency Range: 300
-      to 3500 Hz` against a 60 Hz fundamental); the same check confirmed the
-      1:1 ratio and the drive-level budget were both right, so only part
-      selection remains. This blocks ordering, and therefore M-D.
+- [x] **Replacement CT coupling transformer selected: Hammond 140QEX**
+      (Mouser 546-140QEX, $100.18 ea, 42 in stock, checked 2026-08-24). 1:1
+      ratio, 20 Hz – 20 kHz rated, and its own datasheet states Primary
+      Inductance = 10.62 H @ 1 kHz (clears the ≥8 H floor — `BOM.md` §9
+      item 1). Two ranked alternates recorded there (Triad HS-56, whose
+      datasheet states inductance measured directly at 60 Hz but costs ~4x;
+      Hammond 1140-LN-B, flagged a near-miss because its datasheet never
+      states impedance/inductance at 60 Hz or in Henries). The former
+      candidate, Triad TY-300P, was **eliminated 2026-08-24 by its own
+      datasheet** (`Frequency Range: 300 to 3500 Hz` against a 60 Hz
+      fundamental); the same check confirmed the 1:1 ratio and the
+      drive-level budget were both right, so only part selection was open.
+      Ordering is now unblocked; M-D (CT calibration) is unblocked
+      downstream of this item, still hardware-gated per §0.2.
 - [ ] **`hardware/UnitTestFixture/` deletion** — `firmware/UnitTestFw` (the
       ESP32-S3 instrument bench firmware) was deleted 2026-08-23
       (`DESIGN_NOTES.md` §12), but its embedded KiCad project,
@@ -117,9 +123,11 @@ never `[x]`.
       The transformer ratio behind it is **1:1**, not the ~3:1 this line used
       to claim, and it is now datasheet-confirmed rather than estimated
       (2026-08-24, §11 item 2) — but the calibration sweep itself is still
-      genuinely hardware-gated, and it is now also blocked upstream by having
-      no transformer part selected at all (see 0.1). `docs/BENCH_RUNBOOK.md`
-      step 4 carries the bench-side caveats.
+      genuinely hardware-gated. The upstream block is cleared: a transformer
+      part (Hammond 140QEX) is now selected and ordering is unblocked (see
+      0.1) — this item still can't run until the fixture and the physical
+      part exist. `docs/BENCH_RUNBOOK.md` step 4 carries the bench-side
+      caveats.
 - [ ] **J7 pin 1 continuity check** — the two main-board docs contradict each
       other; getting it wrong back-feeds a rail or leaves the isolator side
       unpowered. (§11 item 9)

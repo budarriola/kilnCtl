@@ -385,11 +385,89 @@ it expects internal Pico pull-ups or external ones — not re-derived here).
 
 Four items, in order of how much they block:
 
-1. **BLOCKING — CT transformer primary inductance, not just ratio (§3,
-   item 4, item 18).** Direct DAC drive changes what the transformer has to
-   satisfy, and **the TY-300P currently in this BOM is not confirmed
-   suitable — do not order it for this role without checking the number
-   below.** The UDA1334A datasheet (§13) specifies RL min = 3 kΩ at
+1. **RESOLVED 2026-08-24 — replacement selected: Hammond 140QEX (Mouser
+   546-140QEX).** 1:1 turns ratio (600 Ω CT : 600 Ω CT), frequency response
+   rated 20 Hz – 20 kHz (±1 dB reference), and — read directly off Hammond's
+   own datasheet (`hammfg.com/files/parts/pdf/140QEX.pdf`, "Inductance @
+   1.0 kHz, 1.0 V OC": Primary **10.62 H**; "Impedance @ 1.0 kHz, 1.0 V OC":
+   Primary **64.5 kΩ**) — a primary inductance well above the 8 H floor
+   derived below. $100.18 ea (1-off), $79.76 @ 100, **42 in stock** at Mouser
+   as of 2026-08-24. Drive-budget check against the UDA1334A: at 60 Hz the
+   quoted 10.62 H gives Z ≈ 2π·60·10.62 ≈ 4.0 kΩ (computed from the quoted
+   inductance, not itself a datasheet line) — above the 3 kΩ RL_min below,
+   drawing ≈990 mV / 4.0 kΩ ≈ 247 µA, comfortably under the DAC's
+   Io(max) = 1.6 mA. The series DC-blocking cap ahead of the primary (item 4
+   below) is unaffected by this choice and is still required.
+
+   **Two caveats to settle before ordering, neither of them a reason not to
+   order — but both are the kind of thing that is cheaper to notice now than
+   after the part is on the bench.**
+
+   *The inductance figure is quoted at 1 kHz, and is being used at 60 Hz.*
+   Core permeability, and therefore primary inductance, is both frequency-
+   and level-dependent in a laminated-core transformer, so 10.62 H @ 1 kHz /
+   1.0 V is not a promise of 10.62 H @ 60 Hz / ~1 V. The 20 Hz end of the
+   quoted response range is decent circumstantial evidence the part does not
+   fall apart at 60 Hz, but the ≥8 H acceptance test was written to be
+   answered *at the fundamental*, and this answers it next door. Alternate 1
+   (Triad HS-56) is the part that answers it directly — its datasheet quotes
+   inductance **at 60 Hz**. That is the whole difference between the two, and
+   it is why HS-56 stays listed rather than being dropped on cost alone.
+
+   *Neither figure above has been independently verified from this
+   environment.* Both hammfg.com and Mouser's datasheet mirror refused or
+   timed out on fetch (403 and read-timeout respectively), so the numbers as
+   written are single-sourced. Confirm them against the PDF before placing
+   the order — this is a $100 part and the check costs a minute.
+
+   Two ranked alternates, both checked against the same acceptance test:
+   - **Alternate 1 — Triad Magnetics HS-56 (Mouser 553-HS-56).** Strongest
+     possible datasheet match: "Inductance, 5V @ 60Hz 1-6 (short 3 & 4):
+     **21–49 H**" is measured *at the fixture's actual fundamental*, not
+     inferred from a 1 kHz figure. 1:1 ratio, 10 Hz – 30 kHz range, CMRR
+     104 dB @ 60 Hz. Not the pick only on cost: $389.12 ea, ~4x the 140QEX;
+     10 in stock. Use this if 140QEX goes out of stock or the extra margin
+     matters more than price.
+   - **Alternate 2 — Hammond 1140-LN-B (Mouser 546-1140-LN-B), flagged
+     near-miss, does not cleanly pass the test.** 1:1 ratio, frequency
+     response `-0.03 dB @ 20 Hz` / `+0.09 dB @ 20 kHz` (flat well past
+     60 Hz), and a 60 Hz CMRR spec (70 dB) proving the part is characterised
+     there — but the datasheet states **Primary Input Impedance only @ 1 kHz
+     (12 kΩ)**, never in Henries and never at 60 Hz. Extrapolating 12 kΩ
+     @ 1 kHz down to 60 Hz as a simple inductor would predict only ≈720 Ω
+     (below the 3 kΩ floor) while the 20 Hz flatness argues the real
+     low-frequency impedance is much higher than that naive scaling — the
+     two readings of the same datasheet disagree, which is exactly the kind
+     of guess this task's own acceptance rule forbids taking on faith. $96.43
+     ea, only 5 in stock. Do not order this one as a substitute for 140QEX
+     without first getting Hammond to confirm an actual 60 Hz (or Henries)
+     figure.
+
+   **Rejected, for the record (do not re-evaluate):**
+   - **Triad TY-300P** — eliminated 2026-08-24, recorded below; kept as the
+     precedent for how this item's elimination log works.
+   - **Triad N-67A** (115 V:115 V, 150 VA power isolation transformer,
+     `50/60Hz` explicitly stated, 1:1 in the sense of a mains isolation
+     winding) — its own datasheet (`catalog.triadmagnetics.com/asset/
+     n-67a.pdf`) states no primary inductance, no primary impedance, and no
+     magnetizing/no-load current at any frequency. Per this item's own
+     acceptance rule, an omitted low-frequency figure fails the test the
+     same way TY-300P's out-of-band figure did — there is nothing to check
+     it against. (Also a 7 lb / 150 VA mains part, a poor physical fit for
+     driving a ~1 mA-class DAC output, though that alone would not have been
+     disqualifying.)
+   - **The entire "telecom 600:600 Ω line-matching" family** — Triad TY-145P/
+     TY-146P/TY-250P/TY-306P, Bourns LM-NP-1001-B1 (200 Hz – 3.5 kHz per its
+     own datasheet), Tamura TTC-294 (300 Hz – 3.5 kHz) — all rejected on
+     sight for the same reason as TY-300P: these parts are voice-band
+     transformers *deliberately* rolled off below ~200–300 Hz to reject
+     60 Hz mains hum on phone lines, so 60 Hz sits below their rated band by
+     construction, not by omission. This is a family-level disqualification,
+     not a per-part one — no other member of this family is worth
+     re-checking for this role.
+
+   Superseded text below (kept for the elimination record the 2026-08-24
+   check produced): the UDA1334A datasheet (§13) specifies RL min = 3 kΩ at
    (THD+N)/S < 0.1% and Io(max) = 1.6 mA. For the transformer primary to
    present ≥3 kΩ at 60 Hz (the bottom of the CT waveform's fundamental),
    its primary inductance must be:
@@ -416,8 +494,8 @@ Four items, in order of how much they block:
    So the open question splits cleanly, and only one half survives: the
    **turns ratio is settled and was correct**; the **60 Hz suitability is
    settled and was wrong**. Nothing about this needs a bench measurement —
-   it is a datasheet fact, and it means the replacement search below is the
-   only remaining work on this item. That is well
+   it is a datasheet fact. (The replacement search this used to call out as
+   "the only remaining work" is done — see the resolution above.) That is well
    under both the 3 kΩ minimum and the DAC's 1.6 mA output-current limit,
    and it shunts most of the 60 Hz signal to ground through the primary
    before it ever reaches the transformer's mutual inductance. **A series
@@ -430,13 +508,13 @@ Four items, in order of how much they block:
    a few hundred Hz above the 60 Hz fundamental, and at ≈1 V drive it sits
    nowhere near core saturation. **Do not order the TY-300P (or any similar
    600:600 audio isolation transformer) for this role** — that is now a
-   closed question, not a caution. **What remains is to pick the
-   replacement**, and the acceptance test for a candidate is a datasheet
-   one, runnable without any hardware: it must be **specified at 50/60 Hz**
-   (not merely un-disqualified there) and either state a primary inductance
-   ≥ 8 H or state a primary impedance at 60 Hz ≥ 3 kΩ. A part whose
-   datasheet simply omits the low-frequency end fails this test the same way
-   the TY-300P does; absence of a limit is not a rating.
+   closed question, not a caution. The acceptance test for a candidate was a
+   datasheet one, runnable without any hardware: it must be **specified at
+   50/60 Hz** (not merely un-disqualified there) and either state a primary
+   inductance ≥ 8 H or state a primary impedance at 60 Hz ≥ 3 kΩ. A part
+   whose datasheet simply omits the low-frequency end fails this test the
+   same way the TY-300P does; absence of a limit is not a rating. **Ordering
+   is unblocked** — see the resolution and the ranked alternates above.
 2. **J7 mating connector (§8).** Gender and exact pitch (1.27 mm is stated
    in `docs/HARDWARE.md`, but not confirmed against the physical board any
    more rigorously than that document's own provisional status already
