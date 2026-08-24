@@ -1369,6 +1369,34 @@ same bump (0x23/0x24). All three bridge tasks' bottom `err != ESP_OK` block
 now calls `bridge_reply_reject(..., "driver error")` — verified by reading
 the current file, not assumed from an old commit message.
 
+**FIRST, THE CAVEAT THAT OUTRANKS EVERYTHING BELOW: `display_bridge_task`
+is dead code.** `main.c` never calls `uart_bridge_start_display_task()` —
+LVGL owns the panel exclusively now, and the comment at `main.c:1392` says
+so explicitly ("no longer called here; it stays in uart_bridge.c as dead
+code for now"). This TODO already recorded the consequence at section 10.1
+("`tools/PcTools`' 12+ MCP `display_*` tools are stale ... every invocation
+silently fails"), and it was confirmed on the bench 2026-08-24 after
+flashing `750dc33`:
+
+```
+W uart_proto: uart0: dst task 4 not registered, replying NACK (undeliverable)
+```
+
+i.e. every DISPLAY frame is refused by the *transport* before any bridge
+handler exists to reach. So the DISPLAY half of the work described below is
+**correct but unreachable in shipped firmware** — it matters only if section
+10.1 is ever resolved as option (b), "restore a minimal firmware handler".
+It was not wasted (the file is now internally consistent, and a revived task
+would be right from the first boot), but nobody should read the entry below
+as having changed observable behaviour on the DISPLAY group. **TOUCH is a
+different matter and is live** — `uart_bridge_start_touch_task()` *is*
+called (`main.c:1426`, gated on `screen_idle_ready`), verified on the same
+boot by a successful `touch_set_tap_dump` round trip.
+
+Both agents that worked this item missed the dead-code note, as did the
+item's own framing. Check section 10.1 before spending further effort on
+`display_bridge_task`.
+
 **DISPLAY / TOUCH's per-guard rejection paths closed this pass**: the
 gap this section flagged as *wider* than the driver-error item above —
 `display_bridge_task`'s and `touch_bridge_task`'s `bridge_args_ok()`/

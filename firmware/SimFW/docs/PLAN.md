@@ -103,10 +103,15 @@ never `[x]`.
       `{subcmd, 0}` can only mean an honest empty success, guarded by
       `tools/check_bridge_reject_reason.ps1` because a Python test cannot
       fail when the C regresses.
-      **One documented gap remains, deliberately:** `BLIT_DATA` stays raw
-      fire-and-forget, since a per-chunk wait would turn a ~1 minute image
-      transfer into ~20 minutes, so a mid-stream driver failure there is
-      still not surfaced.
+      **Two caveats.** `BLIT_DATA` stays raw fire-and-forget on purpose —
+      a per-chunk wait would turn a ~1 minute image transfer into ~20
+      minutes — so a mid-stream driver failure there is still not surfaced.
+      And the DISPLAY share of this work is **unreachable in shipped
+      firmware**: `main.c` never starts `display_bridge_task` (LVGL owns the
+      panel), so every DISPLAY frame is NACKed by the transport as
+      "dst task 4 not registered" — confirmed on the bench after flashing
+      `750dc33`. `KilnFW/TODO.md` §10.1 owns that decision. TOUCH is live and
+      was verified on the same boot.
 - [x] **Replacement CT coupling transformer selected: Hammond 140QEX**
       (Mouser 546-140QEX, $100.18 ea, 42 in stock, checked 2026-08-24). 1:1
       ratio, 20 Hz – 20 kHz rated, and its own datasheet states Primary
