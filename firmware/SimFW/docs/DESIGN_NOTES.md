@@ -704,7 +704,15 @@ level-only) move to MCP23017 #2, freeing 3 pins with no timing cost.
 
 ### 3.7 I/O expander allocation
 
-| Device | Addr | Pins used | Function |
+**Addresses below are the datasheet POR default (all address pins low) and are
+NOT what the current bench units are strapped to.** As of 2026-08-24 the two
+physical expanders answer at **0x25 and 0x26**, confirmed by a firmware bus
+scan; `i2c_owner.c`'s `MCP23017_ADDR_1`/`_2` track the bench, not this table.
+Any strap combination is legitimate — `HAEN` is MCP23S17-only, so on the I2C
+MCP23017 the address pins are always enabled. Run `kilnsim io scan` to see
+configured-vs-found; treat the scan as authoritative over this table.
+
+| Device | Addr (POR default) | Pins used | Function |
 |---|---|---|---|
 | MCP23017 #1 | 0x20 | 5 in | Relay sense K1/K2/K3/K5/K4 |
 | | | 1 in | `Fault` line sense |

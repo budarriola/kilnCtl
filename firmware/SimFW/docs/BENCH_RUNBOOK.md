@@ -406,13 +406,40 @@ that document was written — **that gap is now closed**: `cli.py` has a real
 workaround `docs/HARDWARE.md` describes (treat that line in `HARDWARE.md` as
 stale and worth a follow-up correction).
 
+Start with the bus scan — it answers "are they there, and at the addresses the
+firmware expects?" in one round trip, and is the fastest way to spot a
+strapping mismatch:
+
 ```powershell
-kilnsim --port COMx io write 8 on --exp 0    # J20 IO_3 spare pin, EXP1_PIN_J20_IO3
-kilnsim --port COMx io read 8 --exp 0
+kilnsim --port COMx io scan
+# configured 0x25/0x26, found 0x25/0x26 -- OK
 ```
-**Pass:** both MCP23017s ACK on I2C0 (0x20, 0x21 — confirm no I2C error from
-either `io write`/`io read` call), and the spare pin round-trips the value
+
+Then the round-trip check. **Note the direction step:** a generic pin boots as
+INPUT with pull-up (the safe non-driving default), so a bare `io write` only
+updates the output latch and the pin keeps reading high. Set it to output
+first, or the round trip will look broken when it is not:
+
+```powershell
+kilnsim --port COMx io dir 8 out --exp 0     # J20 IO_3 spare pin, EXP1_PIN_J20_IO3
+kilnsim --port COMx io write 8 on --exp 0
+kilnsim --port COMx io read 8 --exp 0
+kilnsim --port COMx io dir 8 in --exp 0 --pullup   # restore the safe default
+```
+
+**Pass:** `io scan` reports `-- OK`, and the spare pin round-trips the value
 just written.
+
+**Addresses are bench-specific.** As of 2026-08-24 the two units on this bench
+are strapped to **0x25 and 0x26**, not the datasheet POR default 0x20/0x21;
+`i2c_owner.c`'s `MCP23017_ADDR_1`/`_2` match. If `io scan` reports MISMATCH,
+believe the scan and update those two defines — do not assume 0x20/0x21.
+`HAEN` (the address-pin enable bit) is MCP23S17-only; on the I2C MCP23017 the
+address pins are always enabled, so any strap combination is legitimate.
+
+**Prefer `kilnsim selftest`** over doing this by hand — it now covers both
+expanders, multiple pins, pin independence, pull-up behaviour and the
+reserved-pin interlock, and restores every pin it touches.
 **NO-GO:** see §5's I2C row.
 
 ### Step 3 — SPI A loopback against `spi_test_master` (M-A's core proof)
@@ -745,7 +772,10 @@ SCENARIO_RESULTS.md` beforehand to know what shape of result to expect.
 
 | Symptom | Likely cause |
 |---|---|
-| `io write`/`io read` errors on both expanders | I2C0 SDA/SCL not wired, or one/both MCP23017s not powered — check `docs/HARDWARE.md` §1 pin map (GPIO4/5) and §3.7's device table. |
+| `io write`/`io read` errors on both expanders | **Run `kilnsim io scan` first — it distinguishes these causes in one command.** If it finds nothing at all: I2C0 SDA/SCL not wired, or the MCP23017s unpowered — check `docs/HARDWARE.md` §1 pin map (GPIO4/5) and §3.7's device table. If it finds addresses that are not the configured pair, the parts are strapped differently — update `MCP23017_ADDR_1`/`_2` in `i2c_owner.c` to what the scan reports. That exact mismatch (0x25/0x26 vs an assumed 0x20/0x21) cost about an hour of SWD debugging before this command existed. |
+| `IO/3: ERR_NO_SAMPLE` on a read | The arguments were fine, but no MCP23017 has ever ACKed on this bus, so there is no sample to return. Distinct from `ERR_BAD_ARGS` (which means the pin is reserved or out of range and retrying will never help) and from `ERR_BUSY` (the command queue was transiently full — retry). Run `io scan`. |
+| A pin always reads high no matter what you write | Expected if the pin is still INPUT: `io write` only sets the output latch, and an input pin with its pull-up on reads high regardless. `io dir <pin> out` first. |
+| A write appears not to take effect, then does a moment later | Not a fault. `io dir`/`io write` are queued and land on `i2c_owner`'s next 8 ms scan tick, while `io read` returns a snapshot of the last completed tick. A read issued immediately after a write can observe the pre-write value — poll rather than reading once. |
 | One expander (0x20 or 0x21) responds, the other doesn't | Address strapping wrong on the non-responding part, or that device simply isn't populated yet (0x21 is spare-only per §3.7 — it may not be a priority to stuff first). |
 
 ### SPI (M-A) symptoms — see `tools/spi_test_master/README.md`'s own table for the authoritative version; summarized:

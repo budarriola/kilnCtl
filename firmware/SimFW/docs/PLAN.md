@@ -207,11 +207,27 @@ in this table's sense. Where it matters (M-G/M-H, which talk about scenarios
   **Exit:** heat loop closes end-to-end — DUT PID actually regulates a
   simulated zone through relay cycling with no fixture intervention;
   `kilnsim power cycle` reboots the DUT and telemetry shows it.
-  **Status: NOT MET.** Drivers are host- and build-verified, and
-  `docs/HARDWARE.md` has reconciled their pin claims against the other
-  driver files with zero collisions found. The closed-loop,
-  DUT-power-cycle, and E-stop exit behaviors are all bench-only
-  demonstrations that have not been attempted — no fixture hardware exists.
+  **Status: PARTIALLY MET (updated 2026-08-24).** The expander half is now
+  proven on real hardware — two MCP23017s are physically attached and
+  verified: both boards answer, generic pins round-trip write/read, pins are
+  independent (no shadow-register bleed across 14 pins x 6 neighbours),
+  input+pull-up reads high, the output latch survives a direction round trip,
+  and the reserved-pin interlock genuinely refuses `SET_DIR` on relay-sense,
+  E-stop-drive and both DUT-power bits while accepting generic pins. All of
+  it runs from `kilnsim selftest` (6 expander checks) and every pin is
+  restored to input+pull-up afterwards. `kilnsim io scan` reports
+  configured-vs-found addresses in one round trip.
+
+  Two caveats worth keeping visible. The bench units are strapped to
+  **0x25/0x26**, not the 0x20/0x21 in `DESIGN_NOTES.md` §3.7 — the firmware
+  tracks the bench. And which physical board is exp1 (fixed roles) vs exp2
+  (spare) is only proven *internally consistent*: nothing is wired to either
+  board's pins yet, so the harness could still be attached to the wrong one.
+  That is settled when the relay harness goes on.
+
+  **Still NOT MET:** relay sense, E-stop loop, fault line and DUT power are
+  all unwired, so the closed-loop, DUT-power-cycle and E-stop exit behaviours
+  remain undemonstrated. The exit criterion above is unchanged.
 - [~] **M-F — Fault engine + scheduler.** Full catalog, trigger spec, slots,
   composition rules.
   **Exit:** same scenario + seed twice ⇒ byte-identical event logs;
