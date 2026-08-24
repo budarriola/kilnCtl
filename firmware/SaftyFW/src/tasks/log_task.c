@@ -22,7 +22,59 @@
 #include "link_task.h"
 #include "tx_watermark.h"
 
-#define LOG_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
+// 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's final finding:
+// this was configMINIMAL_STACK_SIZE (256 words / 1KB) unmultiplied --
+// confirmed by the reset-surviving vApplicationStackOverflowHook() latch
+// (main.c) as the actual overflowing task, after safety_core_task (fixed
+// earlier the same day, *4 then *6) was cleared by the same mechanism.
+//
+// The arithmetic, not a guess: log_task_fn()'s own frame holds
+// log_entry_t entry (2 + LOG_ENTRY_MSG_MAX(96) = 98 bytes) and
+// uint8_t payload[1 + LOG_ENTRY_MSG_MAX] (97 bytes) live simultaneously in
+// the branch that sends -- call it 195 bytes plus ~10 bytes of scalars
+// (the float fill fraction, the BaseType_t receive result). That calls
+// link_task_send_log() (a thin, near-zero-cost forward) into
+// link_task_send_broadcast_to() (link_task.c), which is where the real
+// cost is: kilnlink_frame_t frame (~16 bytes) plus
+// uint8_t raw[KILNLINK_FRAME_RAW_MAX] -- confirmed 263 bytes
+// (8 header + 253 max payload + 2 CRC, kilnlink_frame.h) -- plus
+// uint8_t stuffed[KILNLINK_FRAME_STUFFED_MAX] -- confirmed 528 bytes
+// (263 * 2 + 2, worst-case byte-stuffing) -- plus a few scalars. That is
+// 263 + 528 = 791 bytes of buffers alone in ONE function's frame, the
+// dominant cost by a wide margin; the coordinator's own estimate of
+// "~530 and ~1060 bytes" was roughly double the real figures on both
+// counts, corrected here against the actual #define values rather than
+// repeated.
+//
+// Known, exact-by-construction total: 205 (log_task_fn) + ~16
+// (link_task_send_log's own thin frame) + 811 (frame struct + raw[263] +
+// stuffed[528] + status/stuffed_len scalars in link_task_send_broadcast_to)
+// = ~1032 bytes, already exceeding the old 1024-byte budget on the known
+// buffers alone, before counting a single byte of compiler-generated
+// register-save/call-frame overhead across the ~4 nested calls in this
+// chain (log_task_fn -> link_task_send_log -> link_task_send_broadcast_to
+// -> kilnlink_frame_encode_raw/kilnlink_stuff) or the two leaf calls' own
+// small frames. Call that overhead 100-150 bytes, unmeasured (this
+// codebase's history: a per-checkin uxTaskGetStackHighWaterMark() census
+// was tried and removed the same day for distorting watchdog timing,
+// watchdog_task.c's own comment -- that was about instrumenting EVERY
+// task's EVERY check-in, not a one-off measurement of this one path, but
+// nothing here re-attempts even that lighter version, so treat the
+// overhead figure as an estimate, not a measurement) -- call the true
+// peak ~1130-1180 bytes.
+//
+// *2 (512 words / 2048 bytes) is the number this arithmetic supports: a
+// stated ~1.7-1.8x margin over the ~1130-1180 byte estimate, deliberately
+// smaller than link_task's own *6 (6144 bytes) -- link_task's worst case
+// nests an RX unstuffed[~520] buffer AND a handler payload AND this same
+// raw[263]/stuffed[528] pair simultaneously (that file's own comment), a
+// genuinely deeper chain than log_task's single send path, so copying its
+// multiplier here would not be reasoned, just imitated.
+// test/test_log_task_stack_budget.c enforces the floor as a source-text
+// check, same discipline as safety_core.c's own SAFETY_CORE_STACK_WORDS
+// guard, so a future edit cannot silently shrink this back toward the
+// value that just caused a live reboot.
+#define LOG_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 2)
 // Bounded wait on the queue receive below, not an indefinite block: this
 // task still owns its own watchdog checkin, and a bounded wait is what lets
 // it happen even when the queue is empty (mirrors link_task's own reasoning
@@ -97,12 +149,36 @@ static void log_task_count_dropped(void)
 // small (well under uart_owner's 128-byte ring per frame, uart_owner.c's own
 // sizing comment), so even a burst of several queued log lines competing
 // for the remaining half still leaves comfortable headroom for the next
-// status/diag send to find room. A tighter reserve (e.g. 25%) would starve
-// log throughput further for a link that in practice uses roughly 5% of its
-// 115200-baud budget on telemetry (ARCHITECTURE.md section 1) -- there is no
-// bandwidth pressure here, only the displacement risk the doc warns about,
-// and 50% is a comfortably conservative answer to that without being
-// needlessly stingy on debug visibility.
+// status/diag send to find room.
+//
+// STALE justification, left uncorrected on purpose (2026-08-23, the
+// DIAG-frame-went-dark investigation): the paragraph this replaced argued
+// 50% was "comfortably conservative" against a link that "in practice uses
+// roughly 5% of its 115200-baud budget on telemetry". uart_owner.c's baud
+// rate was dropped 115200 -> 9600 on 2026-08-23 (a ~12x cut, TCMT1109
+// optocoupler switching-speed limit, see that file's own comment) and
+// nothing about this fraction was re-derived afterward -- so the number
+// below predates the very budget it now has to operate under, and whether
+// 0.5 is still the right value for a ~960 B/s link is presently unmeasured,
+// not re-confirmed.
+//
+// A round-robin reordering of link_task_fn()'s status/diag/power sends was
+// tried and reverted the same investigation day: it was built on the
+// (plausible, but wrong) theory that program order was starving diag/power
+// under TX-ring congestion. The tx_dropped_sat (link_frame.h's Frame A V2)
+// and broadcast_dropped (KilnFW's uart_protocol.c) counters added alongside
+// it both read a clean 0 on the exact hardware run where diag/power were
+// still completely silent -- proving neither the Pico's TX ring nor the
+// ESP's inbox was dropping anything, which rules out arbitration/congestion
+// as the mechanism entirely. Whatever is actually happening to diag/power is
+// upstream of both instruments (see link_task_send_diag()'s own history for
+// the live investigation), not a reordering problem, so reordering was
+// reverted rather than kept "just in case" against a premise that evidence
+// had already killed. Those two counters are the real, load-bearing result
+// of that pass and remain in place; do not treat their cleanliness as
+// evidence this fraction is fine too -- it answers a different question.
+// Changing 0.5 on a guess, without a real measurement of THIS fraction, is
+// exactly what this comment is here to prevent.
 #define LOG_TX_RESERVE_FRACTION 0.5f
 
 #ifdef SAFTYFW_ENABLE_USB_STDIO

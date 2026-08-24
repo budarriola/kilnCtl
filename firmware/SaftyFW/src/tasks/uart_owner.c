@@ -6,8 +6,10 @@
 #include "hardware/irq.h"
 #include "hardware/sync.h"
 #include "hardware/uart.h"
+#include "hardware/regs/uart.h"
 
 #include "board_pins.h"
+#include "uart_owner_tx_policy.h"
 
 #define UART_OWNER_INSTANCE   uart1
 #define UART_OWNER_IRQ        UART1_IRQ
@@ -72,6 +74,79 @@ static volatile uint32_t s_tx_dropped = 0;
 static volatile uint32_t s_tx_bytes_to_fifo = 0;
 static volatile uint32_t s_tx_bytes_from_isr = 0;
 
+// Diagnostic (2026-08-23, size-window investigation): the coordinator's own
+// reading of the histogram narrows the DIAG/POWER-never-arrive symptom to a
+// size boundary between 34 and 36 raw bytes -- suspiciously close to the
+// RP2040 PL011's 32-byte TX FIFO depth, and exactly where uart_owner_send()'s
+// same-day priming write operates (see that function's own comment). These
+// three latch, for the MOST RECENT uart_owner_send() call only, exactly what
+// that call did: how many bytes it asked to send, how many the priming loop
+// got directly into the hardware FIFO before uart_is_writable() went false,
+// and how many were left queued in the ring for the ISR to pick up. Read
+// alongside s_tx_bytes_from_isr (above): if s_tx_last_remainder is nonzero
+// after a DIAG/POWER send but s_tx_bytes_from_isr never climbs afterward,
+// that is direct proof the ISR is not draining the remainder for THIS call
+// -- the exact mechanism the coordinator's lead points at. Cross-reference
+// against link_task.c's own s_last_tx_cmd (same diagnostic generation,
+// latched at the same call) to know which command this was.
+// `volatile`, nothing in firmware reads these back -- SWD only. Safe to
+// delete once the size-window question is settled.
+static volatile uint32_t s_tx_last_send_len = 0;   // bytes uart_owner_send() was asked to queue
+static volatile uint32_t s_tx_last_primed = 0;     // of those, how many the priming loop wrote directly to the HW FIFO this call
+static volatile uint32_t s_tx_last_remainder = 0;  // len - primed: bytes left in the ring, dependent on the ISR to ever leave
+// Times uart_owner_irq_handler() ran with TX bytes still pending at entry
+// (s_tx_tail != s_tx_head) -- distinguishes "the ISR never ran again after
+// arming" (this stays flat) from "it ran but uart_is_writable() was false
+// the whole time" (this climbs, s_tx_bytes_from_isr does not).
+static volatile uint32_t s_tx_isr_pending_entries = 0;
+
+// 2026-08-23, root cause found: the counter above (s_tx_isr_pending_entries)
+// and its siblings were what pinned this down. This is the fix's own
+// visibility counter -- see uart_owner_tx_policy.h's header comment for the
+// full mechanism. Kept permanently (not diagnostic-only, not slated for
+// deletion): a send that has to force its own re-arm is rare-but-legitimate
+// under real traffic (any two sends close enough together that the second's
+// FIFO write finds it still full from the first), and this is the one place
+// that condition is visible after the fix -- exactly the discipline
+// requested: the symptom is fixed, the CONDITION stays observable rather
+// than going dark again.
+static volatile uint32_t s_tx_self_start_failures = 0;
+
+// 2026-08-23, coordinator's ring-pointer-bug hypothesis (round 6): DIAG/POWER
+// arrive at the right cadence with valid CRCs but frozen, byte-identical
+// content -- consistent with the ISR replaying the same ring window rather
+// than genuinely advancing. This counts how many times uart_owner_send()'s
+// PRIMING loop actually ran its body at least once (primed_this_call > 0),
+// separate from s_tx_bytes_to_fifo (a byte total, which climbs even if the
+// same bytes were somehow re-primed). If this is NOT climbing at the same
+// rate DIAG/POWER sends happen, priming itself is being skipped for them --
+// if it IS climbing correctly, the fault is downstream of priming.
+static volatile uint32_t s_tx_priming_calls = 0;
+
+// 2026-08-23, coordinator's follow-up: the fix above gets bytes OUT of the
+// ring (self_start_failures counts right, the ring empties) but the ESP
+// still counts zero DIAG/POWER frames -- so either the bytes that leave are
+// wrong, or something after uart_owner.c mangles them. These two buffers let
+// that be checked directly rather than argued: `expected` is a snapshot of
+// the first bytes actually QUEUED for a self-start-failure frame, taken here
+// in uart_owner_send() the moment the failure is detected (the frame's true
+// first byte MUST be KILNLINK_FRAME_DELIM, 0x7E, if the ring's stuffed
+// content is intact); `actual` is what uart_owner_irq_handler() really wrote
+// to UARTDR the very next time it drains this frame's bytes. If the two
+// differ, the corruption is inside uart_owner.c (the ring or the ISR write
+// itself); if they match, the bytes left this file correctly and the fault
+// is downstream (the physical link, or the ESP's own deframer). Captured
+// once per self-start-failure event (s_tx_trace_pending gates it so a
+// LATER, unrelated ISR drain -- e.g. status's own next cycle -- can't
+// overwrite `actual` before the coordinator reads it). SWD-only, safe to
+// delete once this question is settled.
+#define UART_OWNER_TRACE_LEN 8u
+static volatile uint8_t  s_tx_trace_expected[UART_OWNER_TRACE_LEN];
+static volatile uint8_t  s_tx_trace_actual[UART_OWNER_TRACE_LEN];
+static volatile uint32_t s_tx_trace_expected_len = 0;
+static volatile uint32_t s_tx_trace_actual_len = 0;
+static volatile bool     s_tx_trace_pending = false; // true from the moment a self-start-failure is detected until the ISR has captured `actual`
+
 static inline uint32_t ring_used(uint32_t head, uint32_t tail, uint32_t cap)
 {
     return (head - tail) % cap;
@@ -110,8 +185,28 @@ static void uart_owner_irq_handler(void)
     // accept. Once the ring is empty, disable the TX interrupt -- it is
     // level-triggered on FIFO-below-threshold, so leaving it enabled with
     // nothing left to send would fire continuously.
+    if (s_tx_tail != s_tx_head) {
+        s_tx_isr_pending_entries++; // 2026-08-23 diagnostic, see statics above
+    }
     while (uart_is_writable(UART_OWNER_INSTANCE) && s_tx_tail != s_tx_head) {
-        uart_get_hw(UART_OWNER_INSTANCE)->dr = s_tx_ring[s_tx_tail];
+        uint8_t b = s_tx_ring[s_tx_tail];
+        // --- DIAGNOSTIC: 2026-08-23, coordinator's byte-integrity check --
+        // captures the first UART_OWNER_TRACE_LEN bytes this ISR invocation
+        // actually writes to UARTDR while a self-start-failure trace is
+        // pending, for direct comparison against s_tx_trace_expected (see
+        // that static's own comment in uart_owner_send()). Cleared
+        // (s_tx_trace_pending = false) once full so it captures exactly one
+        // event at a time and never overwrites itself mid-frame.
+        if (s_tx_trace_pending && s_tx_trace_actual_len < UART_OWNER_TRACE_LEN) {
+            s_tx_trace_actual[s_tx_trace_actual_len] = b;
+            s_tx_trace_actual_len++;
+            if (s_tx_trace_actual_len >= UART_OWNER_TRACE_LEN ||
+                s_tx_trace_actual_len >= s_tx_trace_expected_len) {
+                s_tx_trace_pending = false;
+            }
+        }
+        // --- end diagnostic ---
+        uart_get_hw(UART_OWNER_INSTANCE)->dr = b;
         s_tx_tail = (s_tx_tail + 1u) % UART_OWNER_TX_RING_SIZE;
         s_tx_bytes_from_isr++;
     }
@@ -217,10 +312,114 @@ bool uart_owner_send(const uint8_t *data, size_t len)
     // Writing directly here means the first bytes always leave, and the FIFO
     // is left full enough that draining it genuinely does cross the trigger
     // level and keep the handler firing for the rest.
+    //
+    // 2026-08-23, size-window follow-up: the claim two paragraphs up ("the
+    // 188-byte config-page reply... did not [get out]... this fixes it") was
+    // never actually re-confirmed against a real on-wire capture after this
+    // priming write was added -- link_task.c's own s_last_page_* diagnostic
+    // block (link_task_send_config_page(), added the SAME day to chase a
+    // *different* symptom) stayed all-zero for the rest of that
+    // investigation, because GET_CONFIG_PAGE stopped reaching this function
+    // at all for an unrelated dispatch-side reason. So this fix shipped on
+    // the strength of the FIRST bench observation (truncation) plus a
+    // plausible mechanism, not a confirmed-fixed second observation. DIAG
+    // (36 raw / ~38 stuffed) and POWER (65 raw / ~67 stuffed) are both
+    // BROADCAST frames through this exact function, same as CONFIG_PAGE, so
+    // if the remainder below is genuinely never picked up by the ISR for
+    // some size- or timing-dependent reason this write alone doesn't cover,
+    // it would look exactly like what is currently observed: accepted here,
+    // never on the wire. primed/remainder below make that directly
+    // observable instead of inferred.
+    uint32_t primed_this_call = 0;
     while (uart_is_writable(UART_OWNER_INSTANCE) && s_tx_tail != s_tx_head) {
         uart_get_hw(UART_OWNER_INSTANCE)->dr = s_tx_ring[s_tx_tail];
         s_tx_tail = (s_tx_tail + 1u) % UART_OWNER_TX_RING_SIZE;
         s_tx_bytes_to_fifo++;
+        primed_this_call++;
+    }
+    if (primed_this_call > 0) {
+        s_tx_priming_calls++; // 2026-08-23 diagnostic, see static's own comment
+    }
+
+    // --- DIAGNOSTIC: 2026-08-23 size-window investigation, see statics
+    // declared above uart_owner_irq_handler() -- pure recording, no
+    // control-flow effect.
+    s_tx_last_send_len = (uint32_t)len;
+    s_tx_last_primed = primed_this_call;
+    uint32_t remainder = (uint32_t)len - primed_this_call;
+    s_tx_last_remainder = remainder;
+    // --- end diagnostic ---
+
+    // 2026-08-23, ROOT CAUSE FIX (the DIAG/POWER-went-dark hunt): if this
+    // call primed NOTHING (the FIFO was already full when it started, e.g.
+    // link_task_fn()'s status -> diag -> power sequence running back-to-back
+    // in the same loop iteration -- status always primes first and leaves
+    // the FIFO full, so diag and power always find it full and never get a
+    // byte in edgewise) yet left a nonzero remainder, simply re-writing
+    // uart_set_irq_enables() with the SAME "enabled" value it already had
+    // does not reliably produce a fresh interrupt once the FIFO later drains
+    // -- that was the actual mechanism: the frame sat in the ring forever,
+    // accepted, undropped, uncorrupted, and simply never transmitted. See
+    // uart_owner_tx_policy.h for the pure (host-tested) classification this
+    // branches on, and the narrowed-fix comment inside the `if` below for
+    // exactly what forcing the transition now does (revised once already --
+    // this does NOT busy-wait for FIFO space either way, both mechanisms are
+    // plain register writes).
+    //
+    // 2026-08-23 FOLLOW-UP: forcing the transition got bytes out of the ring
+    // (self_start_failures counts correctly, the ring empties) but did NOT
+    // make the frames arrive at the ESP -- so either the ORIGINAL shape of
+    // this fix (uart_set_irq_enables() called twice) was corrupting
+    // something via a side effect, or the fault is entirely downstream of
+    // this file. Narrowed below to rule out the former as far as possible;
+    // s_tx_trace_expected/s_tx_trace_actual (see their own comment) are what
+    // will show whether it was.
+    bool self_start_failure = uart_owner_tx_send_is_self_start_failure(primed_this_call, remainder);
+    if (self_start_failure) {
+        s_tx_self_start_failures++;
+
+        // --- DIAGNOSTIC: 2026-08-23, coordinator's byte-integrity check --
+        // snapshot the first bytes actually sitting in the ring starting at
+        // s_tx_tail (unchanged by this call, since primed_this_call == 0
+        // means the tail never moved) -- this is exactly what the ISR must
+        // write first. Only armed if nothing else is already pending a
+        // capture, so a burst (diag immediately followed by power, both
+        // self-start failures in the same loop iteration) does not let
+        // power's capture silently overwrite diag's before the ISR ever
+        // gets to diag's bytes.
+        if (!s_tx_trace_pending) {
+            uint32_t n = remainder < UART_OWNER_TRACE_LEN ? remainder : UART_OWNER_TRACE_LEN;
+            uint32_t t = s_tx_tail;
+            for (uint32_t i = 0; i < n; i++) {
+                s_tx_trace_expected[i] = s_tx_ring[t];
+                t = (t + 1u) % UART_OWNER_TX_RING_SIZE;
+            }
+            s_tx_trace_expected_len = n;
+            s_tx_trace_actual_len = 0;
+            s_tx_trace_pending = true;
+        }
+        // --- end diagnostic ---
+
+        // 2026-08-23, ROOT CAUSE FIX, narrowed per coordinator's follow-up:
+        // this used to call the SDK's uart_set_irq_enables() twice (disable,
+        // then re-enable) to force the interrupt-enable bit to make a real
+        // transition -- see uart_owner_tx_policy.h for why a transition is
+        // needed at all. That helper (pico-sdk hardware/uart.h,
+        // uart_set_irqs_enabled()) does more than write IMSC.TXIM though: it
+        // reconstructs the ENTIRE imsc register from scratch (RXIM/RTIM
+        // included, rewritten to the same value they already held) and,
+        // whenever tx_needs_data is true, ALSO rewrites UARTIFLS's
+        // TXIFLSEL bits via hw_write_masked. None of that is needed to
+        // produce the one transition this fix actually depends on, and
+        // touching more than necessary is exactly the kind of side effect
+        // the coordinator asked to rule out. hw_clear_bits()/hw_set_bits()
+        // (hardware/address_mapped.h) toggle ONLY the TXIM bit, atomically,
+        // via the RP2040's hardware SET/CLR alias registers -- no RXIM/RTIM
+        // rewrite, no IFLS touch here at all (the unconditional call two
+        // lines below still does its own single IFLS rewrite exactly as it
+        // always has, unchanged).
+        hw_clear_bits(&uart_get_hw(UART_OWNER_INSTANCE)->imsc, UART_UARTIMSC_TXIM_BITS);
+        hw_set_bits(&uart_get_hw(UART_OWNER_INSTANCE)->imsc, UART_UARTIMSC_TXIM_BITS);
     }
 
     // Arm the drain interrupt only if anything is actually left; arming it
@@ -272,4 +471,49 @@ size_t uart_owner_get_tx_used(void)
 size_t uart_owner_get_tx_capacity(void)
 {
     return UART_OWNER_TX_RING_SIZE;
+}
+
+size_t uart_owner_get_last_send_remainder(void)
+{
+    return (size_t)s_tx_last_remainder;
+}
+
+uint32_t uart_owner_get_tx_bytes_from_isr(void)
+{
+    return s_tx_bytes_from_isr;
+}
+
+uint32_t uart_owner_get_tx_bytes_to_fifo(void)
+{
+    return s_tx_bytes_to_fifo;
+}
+
+uint32_t uart_owner_get_tx_self_start_failures(void)
+{
+    return s_tx_self_start_failures;
+}
+
+uint32_t uart_owner_get_tx_head(void)
+{
+    // Snapshot only -- the producer (uart_owner_send()) can be updating this
+    // concurrently from link_task's perspective across two separate SWD
+    // reads, same "not a guarantee, adequate for a coarse comparison"
+    // caveat as uart_owner_get_tx_used()'s own doc comment.
+    return s_tx_head;
+}
+
+uint32_t uart_owner_get_tx_tail(void)
+{
+    // Snapshot only, same caveat as uart_owner_get_tx_head() -- the ISR
+    // drains this concurrently. Read alongside uart_owner_get_tx_head() a
+    // few seconds apart: if tail is not advancing while head climbs, or the
+    // two settle into a small, unchanging gap that repeats exactly every
+    // DIAG/POWER cycle, that is the ring-pointer bug the coordinator is
+    // checking for.
+    return s_tx_tail;
+}
+
+uint32_t uart_owner_get_tx_last_primed_calls(void)
+{
+    return s_tx_priming_calls;
 }

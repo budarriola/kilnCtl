@@ -66,7 +66,19 @@ $sources = @(
     (Join-Path $commonSrcDir "kilnlink_get_config_page.c"),
     (Join-Path $commonSrcDir "kilnlink_config_page.c"),
     (Join-Path $commonSrcDir "kilnlink_set_log_level.c"),
-    (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c")
+    (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c"),
+    (Join-Path $commonSrcDir "kilnlink_inject_tc.c"),
+    (Join-Path $testDir "test_kilnlink_inject_tc.c"),
+    (Join-Path $srcDir "tasks\uart_owner_tx_policy.c"),
+    (Join-Path $testDir "test_uart_owner_tx_policy.c"),
+    (Join-Path $srcDir "tasks\clock_health.c"),
+    (Join-Path $testDir "test_clock_health.c"),
+    (Join-Path $testDir "test_safety_core_stack_budget.c"),
+    (Join-Path $srcDir "clear_trip_diag_codec.c"),
+    (Join-Path $testDir "test_clear_trip_diag_codec.c"),
+    (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
+    (Join-Path $testDir "test_watchdog_overdue_diag_codec.c"),
+    (Join-Path $testDir "test_log_task_stack_budget.c")
 )
 
 $sourceArgs = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "

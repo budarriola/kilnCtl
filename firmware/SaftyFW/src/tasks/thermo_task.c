@@ -26,6 +26,7 @@
 #include "hardware/gpio.h"
 
 #include "board_pins.h"
+#include "config_store.h" // safety_tc_installed (0x0211) -- the structural injection gate, see thermo_task.h
 #include "max31856.h"
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -52,6 +53,16 @@ static TaskHandle_t s_task_handle = NULL;
 static SemaphoreHandle_t s_snapshot_lock = NULL;
 static thermo_snapshot_t s_snapshot; // guarded by s_snapshot_lock
 static bool s_snapshot_published = false;
+
+// TC value injection (thermo_task.h) -- both guarded by s_snapshot_lock,
+// same as s_snapshot above. s_inject_active starts false, is only ever set
+// by thermo_task_inject_reading() (after that call's own gate check), and
+// is never touched by anything that reaches flash -- a reboot always
+// starts this back at false, satisfying "never persisted, cleared on every
+// reboot" structurally (there is simply no code path that could make it
+// otherwise survive one).
+static bool s_inject_active = false;
+static thermo_snapshot_t s_inject_snapshot; // meaningless while !s_inject_active
 
 // The only GPIO-IRQ callback registered anywhere in this firmware today
 // (discrete_task polls instead of using an IRQ) -- pico-sdk routes every
@@ -108,8 +119,92 @@ bool thermo_task_get_snapshot(thermo_snapshot_t *out)
         return false;
     }
     *out = s_snapshot;
+
+    // Injection override, re-gated on EVERY read, not just at the moment
+    // thermo_task_inject_reading() was called -- see thermo_task.h's own
+    // comment on why this live re-check is what actually closes the "real
+    // sensor commissioned mid-injection" window. config_store_get_full_
+    // record() is the same cheap cached-copy read safety_core.c's build_
+    // input() now does every tick; calling it again here (rather than
+    // trusting s_inject_active alone) means a config change from another
+    // task is visible on the very next snapshot read, with no separate
+    // notification path required.
+    if (s_inject_active) {
+        config_store_record_t rec;
+        config_store_get_full_record(&rec);
+        if (rec.safety_tc_installed == 0u) {
+            *out = s_inject_snapshot;
+        } else {
+            // The gate closed underneath an active injection (safety_tc_
+            // installed flipped back to 1 by a SET_PARAM/COMMIT_CONFIG since
+            // the injection was armed) -- deactivate it here rather than
+            // just skipping the override this one call, so the next call
+            // does not have to repeat this same "was it still gated"
+            // question, and thermo_task_injection_active() (read by link_
+            // task's status builder) stops reporting an injection that can
+            // no longer take effect.
+            s_inject_active = false;
+        }
+    }
+
     xSemaphoreGive(s_snapshot_lock);
     return true;
+}
+
+bool thermo_task_inject_reading(bool tc_valid, float tc_c, float cj_c, uint8_t fault_bits)
+{
+    // Structural gate: refuse unless the operator has declared the safety
+    // TC not installed. This check is what makes the gate structural rather
+    // than advisory -- it runs here, inside the one function that can ever
+    // turn injection on, regardless of what any caller (link_task.c's wire
+    // command handler, a future test harness, anything else) does or fails
+    // to check on its own.
+    config_store_record_t rec;
+    config_store_get_full_record(&rec);
+    if (rec.safety_tc_installed != 0u) {
+        return false;
+    }
+
+    if (!s_snapshot_lock) {
+        return false;
+    }
+    if (xSemaphoreTake(s_snapshot_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+
+    s_inject_snapshot.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    s_inject_snapshot.valid = tc_valid;
+    // Same "NaN when !valid, never 0, never stale" contract every producer
+    // in this codebase follows for thermo_snapshot_t (this file's own
+    // header comment, snapshots.h's doc comment) -- injected data is not
+    // exempt from it.
+    s_inject_snapshot.tc_c = tc_valid ? tc_c : NAN;
+    s_inject_snapshot.cj_c = tc_valid ? cj_c : NAN;
+    s_inject_snapshot.fault_bits = fault_bits;
+    s_inject_snapshot.spi_failed = false; // injection models a successful synthetic transfer;
+                                           // callers wanting to exercise S5's spi_failed path
+                                           // pass tc_valid=false instead, same as a real bad read
+    s_inject_active = true;
+
+    xSemaphoreGive(s_snapshot_lock);
+    return true;
+}
+
+void thermo_task_inject_clear(void)
+{
+    if (!s_snapshot_lock) {
+        return;
+    }
+    if (xSemaphoreTake(s_snapshot_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    s_inject_active = false;
+    xSemaphoreGive(s_snapshot_lock);
+}
+
+bool thermo_task_injection_active(void)
+{
+    return s_inject_active;
 }
 
 static void thermo_task_fn(void *arg)

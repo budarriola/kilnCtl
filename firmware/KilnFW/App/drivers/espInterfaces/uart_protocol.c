@@ -182,6 +182,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
                  (unsigned)len,
                  raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
                  raw[len - 4u], raw[len - 3u], raw[len - 2u], raw[len - 1u]);
+        proto->frame_length_mismatch++;
         return;
     }
 
@@ -189,8 +190,10 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
     uint16_t actual_crc = (uint16_t)((raw[HEADER_LEN + length] << 8) | raw[HEADER_LEN + length + 1]);
     if (expected_crc != actual_crc) {
         ESP_LOGW(TAG, "uart%d: frame CRC mismatch, dropping", (int)proto->owner->port);
+        proto->frame_crc_mismatch++;
         return;
     }
+    proto->frames_deframed++; /* CRC-valid, any type/dest -- see uart_protocol_t's own doc comment */
 
     uart_proto_msg_type_t type = (uart_proto_msg_type_t)raw[0];
     uint16_t msg_index = (uint16_t)((raw[1] << 8) | raw[2]);
@@ -205,6 +208,11 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
             msg_index == proto->awaited_index) {
             proto->ack_result = type;
             xSemaphoreGive(proto->ack_sem);
+        } else {
+            /* Well-formed ACK/NACK, but not for anything we're currently
+             * waiting on (stale retry, or this side isn't in an exchange
+             * right now) -- counted, not silently swallowed. */
+            proto->frames_routed_nowhere++;
         }
         return;
     }
@@ -216,6 +224,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
         xSemaphoreTake(proto->tasks_lock, portMAX_DELAY);
         uart_proto_task_slot_t *bslot = find_slot(proto, dst_task);
         if (!bslot) {
+            proto->frames_routed_nowhere++;
             xSemaphoreGive(proto->tasks_lock);
             return; /* fire-and-forget: no NACK, unregistered task is just dropped */
         }
@@ -227,8 +236,19 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
         };
         memcpy(bmsg.payload, &raw[HEADER_LEN], length);
         /* No dedup, no reply either way: a lost or duplicated broadcast is
-         * the sender's problem to notice (staleness), never this layer's. */
-        xQueueSend(bslot->inbox, &bmsg, 0);
+         * the sender's problem to notice (staleness), never this layer's --
+         * EXCEPT for "the inbox was already full", which the sender can
+         * never even find out about (no ACK, no NACK, no retry on a
+         * BROADCAST) and which used to leave zero trace anywhere on this
+         * side either. 2026-08-23: counted now, per task, so it is at least
+         * visible to whoever owns that inbox (safety_link.c's GET_LINK_STATS
+         * mirror, for task 7) -- see uart_proto_task_slot_t::
+         * broadcast_dropped's own doc comment. */
+        if (xQueueSend(bslot->inbox, &bmsg, 0) != pdTRUE) {
+            bslot->broadcast_dropped++;
+            ESP_LOGW(TAG, "uart%d: inbox full for task %u, BROADCAST dropped (no retry possible)",
+                     (int)proto->owner->port, dst_task);
+        }
         xSemaphoreGive(proto->tasks_lock);
         return;
     }
@@ -244,6 +264,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
     xSemaphoreTake(proto->tasks_lock, portMAX_DELAY);
     uart_proto_task_slot_t *slot = find_slot(proto, dst_task);
     if (!slot) {
+        proto->frames_routed_nowhere++;
         xSemaphoreGive(proto->tasks_lock);
         ESP_LOGW(TAG, "uart%d: dst task %u not registered, replying NACK (undeliverable)",
                  (int)proto->owner->port, dst_task);
@@ -340,6 +361,7 @@ static void uart_protocol_rx_task(void *arg)
             } else {
                 /* Oversized/corrupt frame: resync on next delimiter. */
                 in_frame = false;
+                proto->frame_resync++;
             }
         }
     }
@@ -542,6 +564,53 @@ esp_err_t uart_protocol_unregister_task(uart_protocol_t *proto, uint8_t task_id)
     vQueueDeleteWithCaps(slot->inbox);
     memset(slot, 0, sizeof(*slot));
     xSemaphoreGive(proto->tasks_lock);
+    return ESP_OK;
+}
+
+esp_err_t uart_protocol_get_task_broadcast_dropped(uart_protocol_t *proto, uint8_t task_id,
+                                                    uint32_t *out)
+{
+    if (!proto || !proto->initialized || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(proto->tasks_lock, portMAX_DELAY);
+    uart_proto_task_slot_t *slot = find_slot(proto, task_id);
+    if (!slot) {
+        xSemaphoreGive(proto->tasks_lock);
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out = slot->broadcast_dropped;
+    xSemaphoreGive(proto->tasks_lock);
+    return ESP_OK;
+}
+
+esp_err_t uart_protocol_get_deframe_stats(uart_protocol_t *proto, uint32_t *out_frames_deframed,
+                                          uint32_t *out_frames_routed_nowhere,
+                                          uint32_t *out_frame_length_mismatch,
+                                          uint32_t *out_frame_crc_mismatch,
+                                          uint32_t *out_frame_resync)
+{
+    if (!proto || !proto->initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* No lock: single-writer (uart_protocol_rx_task() only) plain volatile
+     * counters, same pattern uart_proto_task_slot_t::broadcast_dropped
+     * already uses without one. */
+    if (out_frames_deframed) {
+        *out_frames_deframed = proto->frames_deframed;
+    }
+    if (out_frames_routed_nowhere) {
+        *out_frames_routed_nowhere = proto->frames_routed_nowhere;
+    }
+    if (out_frame_length_mismatch) {
+        *out_frame_length_mismatch = proto->frame_length_mismatch;
+    }
+    if (out_frame_crc_mismatch) {
+        *out_frame_crc_mismatch = proto->frame_crc_mismatch;
+    }
+    if (out_frame_resync) {
+        *out_frame_resync = proto->frame_resync;
+    }
     return ESP_OK;
 }
 

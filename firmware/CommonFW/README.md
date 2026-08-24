@@ -15,7 +15,7 @@ and linked into both.
 request/reply protocol (framing, CRC16, retry/dedup, task registration) for
 bench/instrument firmwares talking to a PC, extracted from
 `firmware/UnitTestFw`'s UART prototype for `SimFW`'s USB-CDC link (see
-`firmware/SimFW/docs/DESIGN_NOTES.md` sec 4.4, `firmware/SimFW/docs/PLAN.md` sec 12). It shares no code with `kilnlink`
+`firmware/SimFW/docs/DESIGN_NOTES.md` sec 4.4/12). It shares no code with `kilnlink`
 — see `docs/BENCHPROTO.md` sec 1 for why the two look alike but are kept
 apart — and is host-tested the same way (`test_benchproto_frame.c`,
 `test_benchproto_link.c`, both wired into this file's `CMakeLists.txt`).
@@ -416,8 +416,10 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [x] `KilnFW`'s `uart_protocol.c` delegating framing/CRC to `kilnlink_frame`
       (2026-08-18): `App/drivers/espInterfaces/uart_protocol.c` calls
       `kilnlink_crc16_ccitt_false`/`kilnlink_stuff` instead of its own copies.
-      `firmware/UnitTestFw`'s fork is a stale mirror, not migrated, and stays
-      on the CI grep's allowlist below
+      `firmware/UnitTestFw`'s fork was a stale mirror, never migrated; moot
+      now, since `UnitTestFw` was decommissioned and deleted wholesale
+      (SimFW is its replacement — see `firmware/SimFW/docs/DESIGN_NOTES.md`
+      sec 12), so its allowlist entry below is gone with it
 - [x] Round-trip proven against the *pre-refactor* implementation's output before old code is deleted
       (`test/test_uart_protocol_delegate.c`, known vectors + 528 fuzz cases)
 - [x] `SaftyFW` linking `kilnlink` with no duplicated protocol code —
@@ -429,9 +431,10 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [x] `grep` check in CI: no CRC or stuffing implementation outside `CommonFW`
       (`tools/check_no_duplicate_crc.ps1`, 2026-08-18) — not registered in any
       CI pipeline yet (none exists for it to join), and scoped to an explicit
-      allowlist of the pre-migration copies still in the tree (`KilnFW`'s
-      `uart_protocol.c` mirror under `UnitTestFw`, `pc_tools`' `protocol.py`
-      mirror)
+      allowlist of the one pre-migration copy still in the tree (`pc_tools`'
+      `protocol.py` mirror). `KilnFW`'s `uart_protocol.c` mirror under
+      `UnitTestFw` dropped off the allowlist when `UnitTestFw` was deleted
+      wholesale (2026-08-23)
 - [ ] Payload codecs (`context`/`ceiling`/`get_fw_version`/`set_clock`/
       `status`/`diag`/`trip`/`power`) wired into either firmware's real
       send/receive dispatch — most are still codec-only. `announce` and

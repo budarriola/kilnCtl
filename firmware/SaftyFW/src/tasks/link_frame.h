@@ -28,11 +28,52 @@
 extern "C" {
 #endif
 
-// --- Frame A: SAFETY_CMD_GET_STATUS (0x01), 23 bytes ------------------------
+// --- Frame A: SAFETY_CMD_GET_STATUS (0x01), 23 or 24 bytes ------------------
 // Byte-for-byte the layout firmware/KilnFW/App/drivers/safety_link.h already
 // parses -- see that file's header comment for the authoritative offsets.
 #define LINK_FRAME_STATUS_CMD 0x01u
-#define LINK_FRAME_STATUS_LEN 23u
+
+// V1 (original, bytes 0..22) and V2 (V1 + byte 23, tx_dropped_sat) lengths.
+// 2026-08-23: V2 added to surface uart_owner's TX-ring drop counter on a
+// channel that (unlike Frame B/DIAG, which carries the real, non-saturating
+// count) is provably still arriving when DIAG itself has gone dark -- that
+// was the entire point of putting it here rather than widening Frame B.
+// LINK_FRAME_STATUS_LEN kept as an alias of the V1 length: every existing
+// caller/test that names it wants "the original, always-valid prefix",
+// which is still true of a V2 frame's first 23 bytes too.
+#define LINK_FRAME_STATUS_LEN_V1 23u
+#define LINK_FRAME_STATUS_LEN_V2 24u
+#define LINK_FRAME_STATUS_LEN    LINK_FRAME_STATUS_LEN_V1
+
+// Byte 23 (V2 only): uart_owner_get_tx_dropped(), saturating -- 254 is the
+// largest real count this byte can carry, 255 means "254 or more", same
+// sentinel discipline kilnlink_diag.h's KILNLINK_DIAG_CONTEXT_AGE_NEVER (255)
+// already uses. Not the same information as Frame B's tx_frames_dropped
+// (that one is a real, non-saturating uint32_t) -- this is a coarser
+// same-counter view chosen specifically to fit in the one spare byte a V2
+// Frame A has room for, and to be readable over a channel Frame B's own
+// numbers cannot describe themselves through while THEY are the ones going
+// missing.
+#define LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX 254u
+
+// Saturates a real (uint32_t) drop count into byte 23's wire representation.
+// Pure -- host-tested (test_link_frame_wire.c) same as every other function
+// in this file.
+uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped);
+
+// Peer-protocol_version floor a receiver must have announced (via
+// ANNOUNCE_VERSION, kilnlink_version.h's KILNLINK_PROTOCOL_VERSION field)
+// before link_task_send_status() ever emits a V2 (24-byte) frame at it --
+// see link_frame_pack_status()'s own doc comment below for the full
+// skew-safety argument this constant is the linchpin of.
+#define LINK_FRAME_STATUS_V2_MIN_PROTOCOL 6u
+
+// Pure wrapper around the comparison above -- named and host-tested
+// (test_link_frame_wire.c) same as link_frame_versions_compatible() just
+// below is for its own, larger compatibility question, so the ">=" itself,
+// and its boundary, is pinned down by a test rather than left as an inline
+// comparison only ever exercised indirectly through link_task_send_status().
+bool link_frame_status_v2_supported(uint16_t peer_protocol_version);
 
 // flags byte (offset 1): bits 0/1 (LINK_UP, FAULT) are the ESP's to own --
 // this module never sets them, they simply are not parameters below.
@@ -40,15 +81,71 @@ extern "C" {
 #define LINK_FLAG_RELAY      0x08u
 #define LINK_FLAG_ENABLED    0x10u
 #define LINK_FLAG_TEMP_VALID 0x20u
+// Bits 6/7 -- added for the "safety TC not physically installed" declared
+// state (config param 0x0211, SAFETY_MODEL.md section 4 S5) and its bench
+// TC-injection dev switch (thermo_task.h). Additive: the frame stayed
+// LINK_FRAME_STATUS_LEN_V1 (23) bytes when these landed, only the flags byte
+// gained two previously-unused bits -- an ESP build that predates these two
+// bits simply never sets/reads them and keeps working exactly as before
+// (bits 0/1 already establish that "some bits are reserved and unused by
+// this side" is a normal, already-relied-upon state for this byte). Both
+// bits are now spent -- byte 1 has no room left, which is exactly why the
+// tx_dropped_sat addition above needed a whole new byte (23) rather than a
+// ninth flag bit.
+#define LINK_FLAG_TC_NOT_INSTALLED 0x40u /* safety_tc_installed == 0 -- heat is refused (safety_core_request_enable()) */
+#define LINK_FLAG_TC_INJECTED      0x80u /* thermo_task_injection_active() -- reading is synthetic, not from the part */
 
-// Packs the 23-byte status payload into `out` (must have room for
-// LINK_FRAME_STATUS_LEN bytes). `safety_tc_c`/`cj_c` should already be NaN
-// when `temp_valid` is false -- this function passes them through unchanged
-// rather than substituting 0, matching LINK_PROTOCOL.md's "send NaN, never
-// 0" rule; it does not itself decide validity.
-void link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN], bool estop, bool relay_energized,
-                             bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
-                             uint8_t tc_fault_bits, float amps1, float amps2, float amps3);
+// Packs the status payload into `out` (must have room for
+// LINK_FRAME_STATUS_LEN_V2 bytes, whether or not this call ends up using all
+// of them). `safety_tc_c`/`cj_c` should already be NaN when `temp_valid` is
+// false -- this function passes them through unchanged rather than
+// substituting 0, matching LINK_PROTOCOL.md's "send NaN, never 0" rule; it
+// does not itself decide validity. `tc_not_installed`/`tc_injected` set
+// LINK_FLAG_TC_NOT_INSTALLED/LINK_FLAG_TC_INJECTED above, independent of
+// temp_valid -- a declared-absent sensor still reports temp_valid accurately
+// (false while blind, per S5's existing contract); these two bits are
+// additional context, not a replacement for it.
+//
+// `peer_supports_status_v2`/`tx_dropped_sat` control byte 23 (2026-08-23,
+// the DIAG-frame-went-dark investigation). Returns LINK_FRAME_STATUS_LEN_V2
+// (24) and writes tx_dropped_sat into byte 23 iff `peer_supports_status_v2`
+// is true; otherwise returns LINK_FRAME_STATUS_LEN_V1 (23) and touches
+// nothing past byte 22 -- the caller must send back exactly the returned
+// length, not a fixed constant, or a V1-peer receiver's exact-length check
+// will reject the frame outright.
+//
+// SKEW SAFETY, both directions -- this is why the length is chosen HERE, by
+// the sender, rather than the receiver simply tolerating either length
+// unconditionally:
+//   - Newer ESP (accepts both 23 and 24) + older Pico (never calls this with
+//     peer_supports_status_v2 true, or predates the parameter entirely):
+//     sends 23. The newer ESP's receiver already accepts 23 explicitly (see
+//     safety_link.c's updated safety_apply_status()) -- no regression,
+//     tx_dropped simply reads as "not reported" on that ESP.
+//   - Newer Pico + older ESP (fixed, already-compiled exact msg->length !=
+//     23 check -- cannot be changed after the fact; this is not a case
+//     "handling" can fix, only avoiding can): if this function were called
+//     with peer_supports_status_v2 unconditionally true, it would send 24
+//     bytes at an ESP that rejects anything but exactly 23, and Frame A
+//     itself -- the one channel PROVEN to still work while DIAG is dark --
+//     would go dark too. That is why the caller (link_task_send_status())
+//     is REQUIRED to gate peer_supports_status_v2 on having positively
+//     received an ANNOUNCE_VERSION from this peer with protocol_version >=
+//     LINK_FRAME_STATUS_V2_MIN_PROTOCOL (6) -- see link_task.c's
+//     s_peer_protocol_version. Before any ANNOUNCE_VERSION has ever arrived
+//     (a fresh boot, or a peer that predates ANNOUNCE_VERSION entirely) the
+//     safe default is false: send the 23-byte frame every old receiver
+//     already accepts, and only grow to 24 once the peer has proven it can
+//     take it. A newer ESP + older Pico, and a newer Pico + an ESP it has
+//     not yet confirmed as new enough, are the SAME safe state (23 bytes)
+//     from this function's point of view -- the asymmetry is deliberately
+//     all on "do I know the peer is new", never on which side has which
+//     build.
+size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V2], bool estop, bool relay_energized,
+                               bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
+                               uint8_t tc_fault_bits, float amps1, float amps2, float amps3,
+                               bool tc_not_installed, bool tc_injected,
+                               bool peer_supports_status_v2, uint8_t tx_dropped_sat);
 
 // --- Frame C: SAFETY_CMD_FW_VERSION (0x0B) -----------------------------------
 // Also the reply to, and identical command byte as, SAFETY_CMD_GET_FW_VERSION

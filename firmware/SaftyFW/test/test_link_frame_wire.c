@@ -6,16 +6,20 @@
 // parsing logic in firmware/KilnFW/App/drivers/safety_link.c.
 //
 // KilnFW/App/drivers/safety_link.c cannot be linked into this host test: it
-// depends on ESP-IDF (FreeRTOS mutexes, esp_log.h, etc.) and per this task's
-// rules is off-limits to edit right now (another agent is working in
-// firmware/KilnFW/App/drivers/) even if an adapter seam were worth adding.
-// So the two functions below are TRANSCRIPTIONS, not links, of:
-//   - safety_apply_status()   firmware/KilnFW/App/drivers/safety_link.c:639-682
-//   - safety_parse_fw_version() firmware/KilnFW/App/drivers/safety_link.c:299-333
+// depends on ESP-IDF (FreeRTOS mutexes, esp_log.h, etc.), even if an adapter
+// seam were worth adding. So the two functions below are TRANSCRIPTIONS, not
+// links, of:
+//   - safety_apply_status()   firmware/KilnFW/App/drivers/safety_link.c
+//   - safety_parse_fw_version() firmware/KilnFW/App/drivers/safety_link.c
 // Every offset, mask, and the NaN-substitution rule below is copied from
 // those exact lines. If this test ever disagrees with the real file, that
 // disagreement is the point: it means one of the two copies drifted and
 // needs reconciling by hand, not that the test is wrong.
+//
+// 2026-08-23: mirror_apply_status() updated for Frame A's V1/V2 split
+// (LINK_FRAME_STATUS_LEN_V1 == 23, LINK_FRAME_STATUS_LEN_V2 == 24, byte 23 =
+// tx_dropped_sat) -- see link_frame.h's own doc comment on
+// link_frame_pack_status() for the full skew-safety story this mirrors.
 #include <math.h>
 #include <string.h>
 
@@ -45,11 +49,12 @@
 #define MIRROR_SAFETY_FLAG_ENABLED    0x10u
 #define MIRROR_SAFETY_FLAG_TEMP_VALID 0x20u
 
-// safety_link.h:157's SAFETY_LINK_STATUS_FRAME_LEN, restated here (not
-// #included -- that header pulls in ESP-IDF-adjacent types) since it must
-// equal LINK_FRAME_STATUS_LEN for the two sides to agree at all; the very
-// first assertion in test_status_frame_round_trip() below proves that.
-#define SAFETY_LINK_STATUS_FRAME_LEN_MIRROR 23u
+// safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN_V1/_V2, restated here (not
+// #included -- that header pulls in ESP-IDF-adjacent types) since they must
+// equal LINK_FRAME_STATUS_LEN_V1/_V2 for the two sides to agree at all; the
+// very first assertions in test_status_frame_round_trip() below prove that.
+#define SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR 23u
+#define SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR 24u
 
 typedef struct {
     bool ok;
@@ -58,6 +63,8 @@ typedef struct {
     float cj_temp_c;
     uint8_t tc_fault;
     float current_a[3];
+    bool tx_dropped_known; // true iff a V2 (24-byte) frame was parsed
+    uint8_t tx_dropped_sat; // meaningless when tx_dropped_known is false
 } mirror_status_t;
 
 static float mirror_read_f32_le(const uint8_t *p)
@@ -69,34 +76,43 @@ static float mirror_read_f32_le(const uint8_t *p)
     return v;
 }
 
-// Mirrors safety_apply_status(), safety_link.c:639-682, field for field.
+// Mirrors safety_apply_status(), firmware/KilnFW/App/drivers/safety_link.c,
+// field for field -- updated 2026-08-23 for the V1/V2 length tolerance that
+// same file's real length check now has (accepts EITHER 23 or 24, never just
+// one, so an old peer's 23-byte frame and a new peer's 24-byte frame are
+// both still accepted -- see link_frame.h's skew-safety comment for why
+// that symmetry matters).
 static mirror_status_t mirror_apply_status(const uint8_t *payload, uint8_t length)
 {
     mirror_status_t out;
     memset(&out, 0, sizeof(out));
 
-    // safety_link.c:644
-    if (length != SAFETY_LINK_STATUS_FRAME_LEN_MIRROR || payload[0] != LINK_FRAME_STATUS_CMD) {
+    if ((length != SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR &&
+         length != SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR) ||
+        payload[0] != LINK_FRAME_STATUS_CMD) {
         out.ok = false;
         return out;
     }
 
     const uint8_t *p = payload;
-    // safety_link.c:661
     out.flags = (uint8_t)(p[1] & ~(MIRROR_SAFETY_FLAG_LINK_UP | MIRROR_SAFETY_FLAG_FAULT));
-    // safety_link.c:662-663
     out.tc_temp_c = mirror_read_f32_le(&p[2]);
     out.cj_temp_c = mirror_read_f32_le(&p[6]);
-    // safety_link.c:669-672
     if (!(out.flags & MIRROR_SAFETY_FLAG_TEMP_VALID)) {
         out.tc_temp_c = NAN;
         out.cj_temp_c = NAN;
     }
-    // safety_link.c:673-676
     out.tc_fault = p[10];
     out.current_a[0] = mirror_read_f32_le(&p[11]);
     out.current_a[1] = mirror_read_f32_le(&p[15]);
     out.current_a[2] = mirror_read_f32_le(&p[19]);
+    if (length == SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR) {
+        out.tx_dropped_known = true;
+        out.tx_dropped_sat = p[23];
+    } else {
+        out.tx_dropped_known = false;
+        out.tx_dropped_sat = 0;
+    }
     out.ok = true;
     return out;
 }
@@ -205,14 +221,17 @@ static void test_status_frame_round_trip(void)
 {
     TEST_SECTION("status frame (Frame A) -- pack -> kilnlink wire -> mirror parse");
 
-    TEST_CHECK(LINK_FRAME_STATUS_LEN == SAFETY_LINK_STATUS_FRAME_LEN_MIRROR,
-               "LINK_FRAME_STATUS_LEN (SaftyFW) == SAFETY_LINK_STATUS_FRAME_LEN (KilnFW) -- "
+    TEST_CHECK(LINK_FRAME_STATUS_LEN_V1 == SAFETY_LINK_STATUS_FRAME_LEN_V1_MIRROR,
+               "LINK_FRAME_STATUS_LEN_V1 (SaftyFW) == SAFETY_LINK_STATUS_FRAME_LEN_V1 (KilnFW) -- "
                "the very first thing that has to agree");
+    TEST_CHECK(LINK_FRAME_STATUS_LEN_V2 == SAFETY_LINK_STATUS_FRAME_LEN_V2_MIRROR,
+               "LINK_FRAME_STATUS_LEN_V2 (SaftyFW) == SAFETY_LINK_STATUS_FRAME_LEN_V2 (KilnFW)");
 
-    uint8_t payload[LINK_FRAME_STATUS_LEN];
+    uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
     link_frame_pack_status(payload, /*estop=*/true, /*relay_energized=*/true,
                             /*heating_enabled=*/false, /*temp_valid=*/true, 851.25f, 23.5f,
-                            0x03u, 1.25f, 2.5f, 3.75f);
+                            0x03u, 1.25f, 2.5f, 3.75f, /*tc_not_installed=*/false, /*tc_injected=*/false,
+                            /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/0);
 
     // link_frame_pack_status() never sets bits 0/1 (LINK_UP/FAULT are
     // documented as "the ESP's to own", link_frame.h) -- so on its own this
@@ -225,11 +244,11 @@ static void test_status_frame_round_trip(void)
     // below is actually exercising the mask, not just observing its absence.
     payload[1] |= (MIRROR_SAFETY_FLAG_LINK_UP | MIRROR_SAFETY_FLAG_FAULT);
 
-    uint8_t wire_payload[LINK_FRAME_STATUS_LEN];
+    uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V1];
     uint8_t wire_length = 0;
-    bool sent = wire_round_trip(payload, LINK_FRAME_STATUS_LEN, wire_payload, &wire_length);
+    bool sent = wire_round_trip(payload, LINK_FRAME_STATUS_LEN_V1, wire_payload, &wire_length);
     TEST_CHECK(sent, "status frame survives kilnlink_frame_encode_raw+stuff+unstuff+decode");
-    TEST_CHECK(wire_length == LINK_FRAME_STATUS_LEN, "wire length unchanged by the codec round trip");
+    TEST_CHECK(wire_length == LINK_FRAME_STATUS_LEN_V1, "wire length unchanged by the codec round trip");
 
     mirror_status_t parsed = mirror_apply_status(wire_payload, wire_length);
     TEST_CHECK(parsed.ok, "mirror of safety_apply_status() accepts the wire bytes");
@@ -268,7 +287,7 @@ static void test_status_frame_nan_when_invalid(void)
     // enforce it here rather than trusting the far side to have been
     // careful" -- is what makes the assertions below pass, not the packer.
     link_frame_pack_status(payload, false, false, false, /*temp_valid=*/false, 777.0f, 888.0f, 0,
-                            0.0f, 0.0f, 0.0f);
+                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0);
 
     uint8_t wire_payload[LINK_FRAME_STATUS_LEN];
     uint8_t wire_length = 0;
@@ -286,7 +305,7 @@ static void test_status_frame_nan_when_invalid(void)
     // flag, not just always emitted.
     uint8_t payload2[LINK_FRAME_STATUS_LEN];
     link_frame_pack_status(payload2, false, false, false, /*temp_valid=*/true, 100.0f, 20.0f, 0,
-                            0.0f, 0.0f, 0.0f);
+                            0.0f, 0.0f, 0.0f, false, false, /*peer_supports_status_v2=*/false, 0);
     uint8_t wire2[LINK_FRAME_STATUS_LEN];
     uint8_t wire2_len = 0;
     TEST_CHECK(wire_round_trip(payload2, LINK_FRAME_STATUS_LEN, wire2, &wire2_len),
@@ -299,33 +318,143 @@ static void test_status_frame_nan_when_invalid(void)
 
 static void test_status_frame_negative(void)
 {
-    TEST_SECTION("status frame -- mirror parser rejects malformed frames");
+    TEST_SECTION("status frame -- mirror parser rejects malformed frames, tolerates V1/V2");
 
-    uint8_t payload[LINK_FRAME_STATUS_LEN];
-    link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0, 0.0f, 0.0f, 0.0f);
+    uint8_t payload[LINK_FRAME_STATUS_LEN_V1];
+    link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0, 0.0f, 0.0f, 0.0f,
+                            false, false, /*peer_supports_status_v2=*/false, 0);
 
-    // Truncated payload: one byte short.
+    // Truncated payload: one byte short of the (still valid) V1 length.
     {
-        mirror_status_t parsed = mirror_apply_status(payload, LINK_FRAME_STATUS_LEN - 1);
-        TEST_CHECK(!parsed.ok, "length one short of 23 is rejected");
+        mirror_status_t parsed = mirror_apply_status(payload, LINK_FRAME_STATUS_LEN_V1 - 1);
+        TEST_CHECK(!parsed.ok, "length one short of V1 (22) is rejected");
     }
 
     // Wrong opcode: corrupt byte0.
     {
-        uint8_t bad[LINK_FRAME_STATUS_LEN];
+        uint8_t bad[LINK_FRAME_STATUS_LEN_V1];
         memcpy(bad, payload, sizeof(bad));
         bad[0] = 0x0Bu; // FW_VERSION's opcode, not GET_STATUS's
-        mirror_status_t parsed = mirror_apply_status(bad, LINK_FRAME_STATUS_LEN);
+        mirror_status_t parsed = mirror_apply_status(bad, LINK_FRAME_STATUS_LEN_V1);
         TEST_CHECK(!parsed.ok, "wrong opcode (0x0B where 0x01 is expected) is rejected");
     }
 
-    // Wrong length: one byte too long (e.g. trailing garbage).
+    // 2026-08-23: 24 (V2) is now a LEGITIMATE length, not "trailing garbage"
+    // -- this is the length-boundary case that would have caught a
+    // regression to the old exact-match-23-only check (the very bug this
+    // whole pass fixes on the real KilnFW side). One byte past V1 must be
+    // ACCEPTED now, where it used to be rejected.
     {
-        uint8_t bad[LINK_FRAME_STATUS_LEN + 1];
-        memcpy(bad, payload, LINK_FRAME_STATUS_LEN);
-        bad[LINK_FRAME_STATUS_LEN] = 0xFFu;
-        mirror_status_t parsed = mirror_apply_status(bad, LINK_FRAME_STATUS_LEN + 1);
-        TEST_CHECK(!parsed.ok, "length one over 23 (trailing garbage) is rejected");
+        uint8_t v2[LINK_FRAME_STATUS_LEN_V2];
+        memcpy(v2, payload, LINK_FRAME_STATUS_LEN_V1);
+        v2[LINK_FRAME_STATUS_LEN_V1] = 42u; // tx_dropped_sat
+        mirror_status_t parsed = mirror_apply_status(v2, LINK_FRAME_STATUS_LEN_V2);
+        TEST_CHECK(parsed.ok, "length 24 (V2) is ACCEPTED, not rejected as trailing garbage");
+        TEST_CHECK(parsed.tx_dropped_known, "a V2-length frame reports tx_dropped_known");
+        TEST_CHECK(parsed.tx_dropped_sat == 42u, "byte 23 is read as tx_dropped_sat on a V2 frame");
+    }
+
+    // The new boundary: one byte past the WIDER length (25) is still
+    // trailing garbage and must still be rejected -- proves the tolerance
+    // added above is exactly {23, 24}, not "any length >= 23".
+    {
+        uint8_t bad[LINK_FRAME_STATUS_LEN_V2 + 1];
+        memcpy(bad, payload, LINK_FRAME_STATUS_LEN_V1);
+        bad[LINK_FRAME_STATUS_LEN_V1] = 42u;
+        bad[LINK_FRAME_STATUS_LEN_V2] = 0xFFu;
+        mirror_status_t parsed = mirror_apply_status(bad, LINK_FRAME_STATUS_LEN_V2 + 1);
+        TEST_CHECK(!parsed.ok, "length one over V2 (25, trailing garbage) is still rejected");
+    }
+}
+
+// link_frame_status_v2_supported() -- the pure peer-version gate
+// link_task_send_status() uses to decide whether it may EVER emit a V2
+// frame at the current peer. Boundary-tested directly, same as
+// link_frame_versions_compatible() below is for the larger question.
+static void test_status_v2_supported_gate(void)
+{
+    TEST_SECTION("link_frame_status_v2_supported -- peer protocol_version gate boundary");
+
+    TEST_CHECK(!link_frame_status_v2_supported(0u),
+               "0 (never announced -- s_peer_protocol_version's default) is NOT supported: "
+               "the safe default before any ANNOUNCE_VERSION has arrived");
+    TEST_CHECK(!link_frame_status_v2_supported(5u),
+               "protocol_version 5 (the pre-V2 version this whole repo shipped until now) "
+               "is NOT supported");
+    TEST_CHECK(link_frame_status_v2_supported(6u),
+               "protocol_version 6 (LINK_FRAME_STATUS_V2_MIN_PROTOCOL itself) IS supported");
+    TEST_CHECK(link_frame_status_v2_supported(7u), "protocol_version 7 (above the floor) IS supported");
+}
+
+// 2026-08-23, the DIAG-frame-went-dark investigation: link_frame_saturate_
+// tx_dropped() (link_frame.c) is the pure conversion feeding byte 23's
+// tx_dropped_sat wire value. Tested directly at its own boundaries first --
+// no wire round trip needed for the saturation math itself.
+static void test_saturate_tx_dropped(void)
+{
+    TEST_SECTION("link_frame_saturate_tx_dropped -- saturation boundary");
+
+    TEST_CHECK(link_frame_saturate_tx_dropped(0u) == 0u, "0 drops -> 0");
+    TEST_CHECK(link_frame_saturate_tx_dropped(1u) == 1u, "1 drop -> 1");
+    TEST_CHECK(link_frame_saturate_tx_dropped(LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX) ==
+                   (uint8_t)LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX,
+               "the largest real value (254) is carried through exactly, not saturated early");
+    TEST_CHECK(link_frame_saturate_tx_dropped(LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX + 1u) == 255u,
+               "one past the max (255 real drops) saturates to the 255 sentinel");
+    TEST_CHECK(link_frame_saturate_tx_dropped(0xFFFFFFFFu) == 255u,
+               "the largest possible uint32_t input also saturates to 255, not wraps/truncates");
+}
+
+// V2 (24-byte) Frame A -- the actual point of this pass: verify the byte is
+// both present when the peer is known to support it, absent (frame stays 23
+// bytes) when it is not, and readable by the mirror in the V2 case. This is
+// the "verify that claim against your own change" the coordinator asked
+// for, not an assumption.
+static void test_status_frame_v2_tx_dropped(void)
+{
+    TEST_SECTION("status frame -- V2 tx_dropped_sat byte, both directions of peer support");
+
+    // Peer NOT known to support V2 (the safe default: never announced, or
+    // announced an old protocol_version) -- must stay 23 bytes, byte 23
+    // never written, mirror reports tx_dropped_known == false.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
+        memset(payload, 0xAAu, sizeof(payload)); // poison byte 23 so "untouched" is provable
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/false, /*tx_dropped_sat=*/77u);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V1,
+                   "peer_supports_status_v2=false -> returns the V1 (23) length");
+        TEST_CHECK(payload[LINK_FRAME_STATUS_LEN_V1] == 0xAAu,
+                   "byte 23 is left untouched (still poisoned) when V2 is not emitted -- "
+                   "tx_dropped_sat=77 passed in is NOT written anywhere");
+
+        mirror_status_t parsed = mirror_apply_status(payload, (uint8_t)len);
+        TEST_CHECK(parsed.ok, "V1-length frame still parses");
+        TEST_CHECK(!parsed.tx_dropped_known, "mirror correctly reports tx_dropped_known == false for a V1 frame");
+    }
+
+    // Peer KNOWN to support V2 -- 24 bytes, byte 23 carries tx_dropped_sat,
+    // mirror reads it back.
+    {
+        uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
+        size_t len = link_frame_pack_status(payload, false, false, false, true, 1.0f, 2.0f, 0,
+                                             0.0f, 0.0f, 0.0f, false, false,
+                                             /*peer_supports_status_v2=*/true, /*tx_dropped_sat=*/200u);
+        TEST_CHECK(len == LINK_FRAME_STATUS_LEN_V2,
+                   "peer_supports_status_v2=true -> returns the V2 (24) length");
+        TEST_CHECK(payload[LINK_FRAME_STATUS_LEN_V1] == 200u, "byte 23 carries tx_dropped_sat exactly");
+
+        uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V2];
+        uint8_t wire_length = 0;
+        TEST_CHECK(wire_round_trip(payload, (uint8_t)len, wire_payload, &wire_length),
+                   "V2 status frame survives the real kilnlink wire round trip");
+        TEST_CHECK(wire_length == LINK_FRAME_STATUS_LEN_V2, "wire length is 24, unchanged by the codec");
+
+        mirror_status_t parsed = mirror_apply_status(wire_payload, wire_length);
+        TEST_CHECK(parsed.ok, "V2-length frame parses");
+        TEST_CHECK(parsed.tx_dropped_known, "mirror correctly reports tx_dropped_known == true for a V2 frame");
+        TEST_CHECK(parsed.tx_dropped_sat == 200u, "tx_dropped_sat survives pack->wire->parse");
     }
 }
 
@@ -565,15 +694,21 @@ static void test_telemetry_keeps_flowing_on_version_mismatch(void)
 
     // Build and wire-round-trip a status telemetry frame exactly as
     // test_status_frame_round_trip() does above -- nothing here consults
-    // mismatch_compatible, by construction, because link_frame_pack_status()
-    // has no parameter through which it could.
-    uint8_t payload[LINK_FRAME_STATUS_LEN];
+    // mismatch_compatible, by construction: link_frame_pack_status() gained
+    // a peer_supports_status_v2 parameter (2026-08-23) since this comment
+    // was first written, but that parameter is driven by link_task.c's
+    // separately-cached peer protocol_version, never by
+    // link_frame_versions_compatible()'s min_compatible-range verdict --
+    // passed false here, matching this test's whole point: even a
+    // definitely-incompatible peer still gets a valid (V1) telemetry frame,
+    // not a withheld or malformed one.
+    uint8_t payload[LINK_FRAME_STATUS_LEN_V1];
     link_frame_pack_status(payload, /*estop=*/false, /*relay_energized=*/false,
                             /*heating_enabled=*/false, /*temp_valid=*/true, 500.0f, 22.0f, 0, 0.1f,
-                            0.2f, 0.3f);
-    uint8_t wire_payload[LINK_FRAME_STATUS_LEN];
+                            0.2f, 0.3f, false, false, /*peer_supports_status_v2=*/false, 0);
+    uint8_t wire_payload[LINK_FRAME_STATUS_LEN_V1];
     uint8_t wire_length = 0;
-    TEST_CHECK(wire_round_trip(payload, LINK_FRAME_STATUS_LEN, wire_payload, &wire_length),
+    TEST_CHECK(wire_round_trip(payload, LINK_FRAME_STATUS_LEN_V1, wire_payload, &wire_length),
                "status telemetry (Frame A) still packs and survives the wire round trip "
                "during a version mismatch -- no guard exists to silence it");
     mirror_status_t parsed = mirror_apply_status(wire_payload, wire_length);
@@ -603,6 +738,9 @@ void run_test_link_frame_wire(void)
     test_status_frame_round_trip();
     test_status_frame_nan_when_invalid();
     test_status_frame_negative();
+    test_status_v2_supported_gate();
+    test_saturate_tx_dropped();
+    test_status_frame_v2_tx_dropped();
     test_fw_version_round_trip();
     test_fw_version_negative();
     test_version_compatibility_named_matrix();

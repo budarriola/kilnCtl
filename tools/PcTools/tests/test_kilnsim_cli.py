@@ -161,6 +161,46 @@ class PowerSubcommandTests(_CapturedOutputTestCase):
         self.assertEqual(safety_state, {"on": True})  # untouched
 
 
+class RebootBootloaderSubcommandTests(_CapturedOutputTestCase):
+    """``kilnsim reboot-bootloader`` -- the destructive nature of this
+    command (it ends the current firmware session) means --yes must be
+    required, and the accidental-invocation case (forgetting --yes) must
+    fail loudly WITHOUT ever connecting to/touching a real link."""
+
+    def test_without_yes_refuses_and_never_connects(self):
+        code, out, err = self.run_cli(["--mock", "reboot-bootloader"])
+        self.assertEqual(code, 1)
+        self.assertIn("--yes", err)
+        # No "connected: ..." line -- _connect() must never run without --yes.
+        self.assertNotIn("connected", err)
+
+    def test_with_yes_against_mock_reports_success(self):
+        # MockSimLink.send_command_expect_reboot() simulates the real
+        # success outcome (returns None -- link.py's own override comment
+        # explains why: a real REBOOT_BOOTLOADER success never replies at
+        # all, and this fake fixture has no real firmware to genuinely
+        # refuse with), so --mock exercises the same "reply is None ->
+        # success" path a real link would take on success.
+        code, out, err = self.run_cli(["--mock", "reboot-bootloader", "--yes"])
+        self.assertIn("connected", err)
+        self.assertEqual(code, 0)
+        self.assertIn("rebooting", out)
+
+    def test_scripted_refusal_is_surfaced(self):
+        # A test (or a future scenario-runner negative-path check) can still
+        # script a REFUSAL through MockSimLink.script_response() -- proving
+        # the CLI's refusal-reporting path (SimLinkError -> exit 1) actually
+        # fires, not just the success path above.
+        from kilnsim.link import MockSimLink
+        from kilnsim.protocol import CommandGroup, SysCmd
+
+        link = MockSimLink()
+        link.script_response(CommandGroup.SYS, SysCmd.REBOOT_BOOTLOADER, {}, error="SYS/8: ERR_BUSY")
+        link.connect("MOCK")
+        with self.assertRaises(Exception):
+            link.send_command_expect_reboot(CommandGroup.SYS, SysCmd.REBOOT_BOOTLOADER, {"confirm": 0})
+
+
 class RelaySubcommandTests(_CapturedOutputTestCase):
     def test_states(self):
         code, out, _ = self.run_cli(["--mock", "relay", "states"])

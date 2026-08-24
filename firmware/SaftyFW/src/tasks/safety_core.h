@@ -69,23 +69,85 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
                                   uint8_t *out_diag_state);
 
 // Explicit operator-acknowledged clear -- the only way out of a latched trip
-// (SAFETY_MODEL.md section 2). Re-evaluates against a fresh input snapshot
-// before honoring the clear (safety_guards_try_clear(), see its own doc
-// comment in safety_guards.h for exactly what this does and does not catch
-// -- in short, an unwindowed guard like S7/S6a/S6b's hard backstop is caught
-// reliably if still active, a graduated guard like S1/S2/S3/S5/S9/S11/S12/S13
-// is not guaranteed to retrip on this single retick even if its underlying
-// condition persists). Returns true if the trip is now clear (or was already
-// not tripped), false if the clear was refused because the guard retripped.
+// (SAFETY_MODEL.md section 2).
 //
-// Called from link_task_handle_clear_trip() (src/tasks/link_task.c) on a
-// SAFETY_CMD_CLEAR_TRIP (0x0A) frame whose trip_mask matches the currently-
-// latched trip -- link_task checks the mask match and the "nothing tripped"
-// case itself (via safety_core_get_diag_status()) before calling this, so by
-// the time this is reached there is a real latched trip whose mask the ESP
-// echoed correctly; the only refusal left for this function to make is the
-// retick-still-tripped one described above.
+// ASYNC as of the 2026-08-23 reboot-on-clear-trip investigation. This used
+// to call safety_guards_try_clear() synchronously, in whichever task's
+// context called it -- which in practice meant core 0's link_task (see
+// link_task_handle_clear_trip()) mutating core 1's s_guard_state
+// (safety_core.c's own, single-writer-by-design state, normally touched only
+// by safety_core_task's own 100ms tick) with no lock. A hardware run
+// reproduced a watchdog reboot specifically on this path, and only when a
+// trip was actually latched -- exactly the branch that used to touch
+// s_guard_state at all; the "nothing tripped" early-return never wrote
+// anything and never reproduced. That symmetry, plus the total absence of
+// any lock around a struct safety_core_task ticks every 100ms on the other
+// core, is why this was changed to a queue rather than kept synchronous: it
+// restores s_guard_state to single-writer, matching the pattern
+// relay_owner.c already uses for exactly this reason (a command queue only
+// the owning task drains).
+//
+// This is very likely what caused the reboot, but is not the only plausible
+// mechanism the investigation flagged, and the fix does not require having
+// picked the right one: the same call site also placed a
+// safety_guard_input_t (130+ bytes) plus trip()'s vararg vsnprintf() into
+// detail[96] onto link_task's stack, a stack that has already had to be
+// raised once before for a real overflow (link_task.c's
+// LINK_TASK_STACK_WORDS, configMINIMAL_STACK_SIZE*3 -> *6). Moving this work
+// onto safety_core_task's own stack removes that frame from link_task
+// entirely, so the fix is correct either way. See
+// safety_core_get_clear_trip_stats() below for the counters that will tell
+// us which mechanism it actually was if a reboot still happens.
+//
+// Now only enqueues a request; safety_core_task (safety_core.c) dequeues it
+// and runs safety_guards_try_clear() on its own tick, on its own stack, on
+// the one task/core allowed to write s_guard_state at all. This matches
+// CommonFW/docs/LINK_PROTOCOL.md's own documented CLEAR_TRIP contract --
+// "refused, with the reason reported in the next diagnostic frame" -- which
+// was already async on the wire; only this function's internal
+// implementation was (wrongly) synchronous. The return value reflects that:
+// true means "queued for safety_core to process", never "cleared" -- this
+// function always enqueues (link_task has already screened out the
+// "nothing tripped" case before ever calling it); the actual accept/refuse
+// decision, including the case where is_tripped has since gone false, and
+// its log line, now happen inside safety_core_task once it dequeues the
+// request (see safety_guards_decide_clear_trip_outcome(), safety_guards.h).
+//
+// Returns false only if the queue was full (safety_core_task did not drain
+// a previous request in time before this one arrived) -- a dropped request
+// is not retried here; same fire-and-forget contract as every other
+// non-ACKed command in this protocol, and link_task_handle_clear_trip()
+// logs the drop.
 bool safety_core_request_clear_trip(void);
+
+// Outcome of the most recently PROCESSED CLEAR_TRIP request (see
+// safety_core_get_clear_trip_stats() below) -- NONE until at least one has
+// been dequeued and run. safety_clear_trip_outcome_t itself lives in
+// safety_guards.h (this header already includes it), classified by the
+// pure, host-tested safety_guards_decide_clear_trip_outcome() -- see that
+// function's own doc comment for why it is there and not here.
+//
+// Diagnostics for the CLEAR_TRIP queue above -- added alongside the
+// queue-based fix so a hardware run is diagnostic rather than another guess
+// (this investigation already burned two wrong diagnoses on inference
+// alone). Distinguishes "link_task never received/forwarded the frame"
+// (link_task.c has its own received-frame counter, logged there) from
+// "safety_core never dequeued it" from "try_clear ran and refused", without
+// needing a debugger session.
+//   out_requested: count of successful xQueueSend()s from
+//     safety_core_request_clear_trip() -- how many requests reached this
+//     queue.
+//   out_processed: how many of those safety_core_task has actually dequeued
+//     and resolved (accepted or refused, either way).
+//   out_last_outcome: the most recently processed one's result;
+//     SAFETY_CLEAR_TRIP_OUTCOME_NONE if out_processed == 0.
+// A live request/processed gap after a reboot (requested > processed) means
+// safety_core_task itself stopped running before it could dequeue -- the
+// single most useful fact this pair can report. Any output pointer may be
+// NULL. Safe to call from any task -- three single-writer statics, same
+// pattern as safety_core_get_trip_event()'s s_trip_* fields.
+void safety_core_get_clear_trip_stats(uint32_t *out_requested, uint32_t *out_processed,
+                                       safety_clear_trip_outcome_t *out_last_outcome);
 
 // Trip-event pull for link_task's Frame D (SAFETY_CMD_TRIP_EVENT,
 // CommonFW/docs/LINK_PROTOCOL.md sec 6). Same channel pattern as

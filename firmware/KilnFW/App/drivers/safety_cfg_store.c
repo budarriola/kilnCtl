@@ -84,6 +84,15 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[SAFETY_CFG_PARAM_COUN
     { 0x020E, KILNLINK_PARAM_TYPE_U16, "borrowed_stale_s" },
     { 0x020F, KILNLINK_PARAM_TYPE_U16, "borrowed_stale_trip_s" },
     { 0x0210, KILNLINK_PARAM_TYPE_U8, "borrowed_type_expected" },
+    /* 2026-08-23. Not a CONFIG_REFERENCE.md sec 2 guard threshold like the
+     * ids above it -- a declaration about the BENCH: "the Pico's own safety
+     * thermocouple is not physically wired up". 1 (installed) is the safe
+     * default and what every Pico reports until an operator says otherwise;
+     * 0 makes S5 stop promoting a permanent bad-read streak to a TRIP and
+     * makes the Pico refuse every heating-enable request outright. Listed
+     * here so /api/safety-cfg can show and set it like any other param --
+     * the Pico is the authority on the value, this table only names it. */
+    { 0x0211, KILNLINK_PARAM_TYPE_U8, "safety_tc_installed" },
     /* sec 3 -- current channels */
     { 0x0301, KILNLINK_PARAM_TYPE_F32, "i_present_a" },
     { 0x0302, KILNLINK_PARAM_TYPE_U16, "zero_counts[0]" },

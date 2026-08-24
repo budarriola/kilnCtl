@@ -32,15 +32,18 @@
 
 #include "board_pins.h"
 #include "startup_diag.h"
+#include "watchdog_overdue_diag.h" // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's actual conclusion, see its own header comment
 #include "task_priorities.h"
 #include "watchdog_gate.h"
 
 #define WATCHDOG_TASK_STACK_WORDS   configMINIMAL_STACK_SIZE
 
 // Every registered task's bit, per docs/ARCHITECTURE.md section 4. Still
-// used for s_ever_checkin_mask / watchdog_task_all_checked_in_since_boot()
-// and as the "everything present" value the SAFTYFW_LAST_CHECKIN_MASK_SCRATCH
-// comment (startup_diag.h) compares a captured mask against.
+// used for s_ever_checkin_mask / watchdog_task_all_checked_in_since_boot(),
+// and to XOR against watchdog_gate_all_within_deadline()'s ok_mask below to
+// get the overdue set watchdog_overdue_diag_mark() latches (2026-08-23,
+// scratch[5], repurposed -- see watchdog_overdue_diag.h's own header
+// comment).
 #define WATCHDOG_CHECKIN_ALL_MASK   ((1u << WATCHDOG_CHECKIN_COUNT) - 1u)
 
 // --- Per-task check-in deadlines --------------------------------------------
@@ -152,28 +155,6 @@ static void watchdog_task_fn(void *arg)
         uint32_t ok_mask = 0;
         bool all_ok = watchdog_gate_all_within_deadline(entries, WATCHDOG_CHECKIN_COUNT, &ok_mask);
 
-        // Publish the observed per-task ok/not-ok mask where it survives the
-        // reset it may be about to cause. A log sink cannot report a
-        // starvation that reboots the board a few hundred milliseconds
-        // later, and this board has no console header fitted anyway
-        // (TODO.md 0.5a). A scratch register does survive, so after a
-        // watchdog reboot the last pre-reset evaluation is still readable
-        // over SWD.
-        //
-        // Meaning, now that the gate is per-task rather than one-window: bit
-        // i set means check-in id i was WITHIN ITS OWN DEADLINE at this
-        // evaluation, not "checked in during this exact 250 ms window" --
-        // see startup_diag.h's updated comment on
-        // SAFTYFW_LAST_CHECKIN_MASK_SCRATCH. ok_mask ^ WATCHDOG_CHECKIN_ALL_MASK
-        // is still the set of tasks that were the problem, same as before.
-        // Written unconditionally, before the feed decision, so it never
-        // reads as "everything was fine" merely because the write was
-        // skipped -- and OR'd with SAFTYFW_LAST_CHECKIN_WRITTEN so that a
-        // stored zero is distinguishable from a register nothing has touched
-        // since power-on (see startup_diag.h).
-        watchdog_hw->scratch[SAFTYFW_LAST_CHECKIN_MASK_SCRATCH] =
-            ok_mask | SAFTYFW_LAST_CHECKIN_WRITTEN;
-
         s_diag_watchdog_loops++;
 
         if (all_ok) {
@@ -188,24 +169,56 @@ static void watchdog_task_fn(void *arg)
             // physically keep moving once this branch stops running.
             s_led_state = !s_led_state;
             gpio_put(SAFTYFW_PIN_HEARTBEAT_LED, s_led_state);
+        } else {
+            // At least one task is past its own deadline. Do NOT feed --
+            // the watchdog will reboot the chip in <= 1s, which is the
+            // fail-safe by construction the doc describes.
+            //
+            // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's
+            // actual conclusion: that reboot was never a fault -- it is
+            // THIS branch, firing because some task missed its own deadline
+            // for a still-unidentified reason. watchdog_overdue_diag_mark()
+            // latches exactly which task(s) (a bitmask, ok_mask's
+            // complement) and, for whichever one missed by the largest
+            // margin, by how much -- "missed by 20ms" and "missed by
+            // 2000ms" point at completely different causes, so the worst
+            // offender's overage is recorded, not just its identity.
+            // Reset-surviving (watchdog_overdue_diag.h, scratch[5],
+            // repurposed from this register's old unconditional-every-
+            // evaluation write -- see that file's own header comment for
+            // why that repurposing is safe) precisely because a log sink
+            // cannot report a starvation that reboots the board a few
+            // hundred milliseconds later, and this board has no console
+            // header fitted anyway (TODO.md 0.5a).
+            uint8_t overdue_mask = (uint8_t)((ok_mask ^ WATCHDOG_CHECKIN_ALL_MASK) & 0xFFu);
+            uint8_t worst_task_id = 0;
+            uint32_t worst_overage_ms = 0;
+            for (unsigned i = 0; i < WATCHDOG_CHECKIN_COUNT; i++) {
+                if ((overdue_mask & (1u << i)) == 0u) {
+                    continue; // this task was within its own deadline
+                }
+                if (entries[i].elapsed_ms <= entries[i].deadline_ms) {
+                    continue; // defensive only -- overdue_mask says it should not be, but never trust a derived value over the raw facts it was derived from
+                }
+                uint32_t overage_ms = entries[i].elapsed_ms - entries[i].deadline_ms;
+                if (overage_ms > worst_overage_ms) {
+                    worst_overage_ms = overage_ms;
+                    worst_task_id = (uint8_t)i;
+                }
+            }
+            watchdog_overdue_diag_mark(overdue_mask, worst_task_id,
+                                        (uint16_t)(worst_overage_ms > 0xFFFFu ? 0xFFFFu : worst_overage_ms));
+
+            // The LED is deliberately left untouched in this branch too: it
+            // freezes at whatever level it was last driven to (per TODO.md's
+            // "going dark or freezing should track the same condition") instead
+            // of being forced to a fixed "fault" level. Forcing a level here
+            // would mean this code path decides what the LED does on a miss,
+            // which is exactly the kind of second, independent liveness
+            // judgement the header comment above says must not exist -- a
+            // frozen LED is simply what "the toggle above stopped running"
+            // looks like from outside the chip.
         }
-        // else: at least one task is past its own deadline. Do NOT feed --
-        // the watchdog will reboot the chip in <= 1s, which is the
-        // fail-safe by construction the doc describes. TODO: log which
-        // bit(s) were missing once log_task exists (Phase 2 later item /
-        // Phase 8), so a watchdog reboot's cause is diagnosable rather than
-        // just "it happened" -- the scratch register above already lets an
-        // SWD session answer this today.
-        //
-        // The LED is deliberately left untouched in this branch too: it
-        // freezes at whatever level it was last driven to (per TODO.md's
-        // "going dark or freezing should track the same condition") instead
-        // of being forced to a fixed "fault" level. Forcing a level here
-        // would mean this code path decides what the LED does on a miss,
-        // which is exactly the kind of second, independent liveness
-        // judgement the header comment above says must not exist -- a
-        // frozen LED is simply what "the toggle above stopped running"
-        // looks like from outside the chip.
     }
 }
 

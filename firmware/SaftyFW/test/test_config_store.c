@@ -54,6 +54,87 @@ static void test_pack_unpack_roundtrip(void)
     TEST_CHECK(memcmp(back.reserved, rec.reserved, sizeof(rec.reserved)) == 0,
                "reserved bytes roundtrip byte-for-byte");
 
+    // safety_tc_installed -- explicit 0 must roundtrip too, not just 1
+    // (memset(0) above already made `rec` hold 0, so this is the meaningful
+    // direction to check: an explicit "not installed" declaration must
+    // survive a real pack/unpack, not just default to the safe value by
+    // accident of being zeroed).
+    TEST_CHECK(back.safety_tc_installed == 0u,
+               "safety_tc_installed (explicit 0, declared not installed) roundtrips");
+    rec.safety_tc_installed = 1u;
+    config_store_pack(&rec, record);
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok && back.safety_tc_installed == 1u, "safety_tc_installed = 1 roundtrips");
+
+    // Legacy-flash polarity -- THE CASE THAT ACTUALLY OCCURS ON REAL
+    // HARDWARE, not the 0xFF case an earlier version of this test asserted
+    // (confirmed live, 2026-08-23: that assertion was vacuous -- it proved
+    // the decoder handles a byte value real flash never contains). What a
+    // record written by firmware from BEFORE safety_tc_installed existed
+    // actually holds at this offset is 0x00: old config_store_pack() did
+    //     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved))
+    // with the OLD REC_OFF_RESERVED == 204 (this field's offset today) and
+    // rec->reserved a 300-byte array that config_store_default() left at
+    // memset(0) -- so out[204] = rec.reserved[0] = 0x00, not 0xFF. This is
+    // simulated by hand below, calling this file's OWN pack() with the
+    // record's reserved[0] forced to 0 and then hand-writing 0x00 at
+    // offset 204 to stand in for "old firmware, which had no
+    // safety_tc_installed field at all, wrote whatever its own reserved[0]
+    // happened to be" -- CRC recomputed over it, matching how a real old
+    // record's CRC legitimately covers that 0x00 byte.
+    //
+    // config_store_unpack() must decode 0x00 as installed (1) -- the whole
+    // point of the positive-sentinel fix (SAFETY_TC_INSTALLED_MARKER_NOT_
+    // INSTALLED, 0xA5): 0x00 is emphatically NOT that sentinel.
+    rec.safety_tc_installed = 1u; // irrelevant to what gets written below -- overwritten by hand
+    config_store_pack(&rec, record);
+    record[204] = 0x00u; // REC_OFF_SAFETY_TC_INSTALLED -- the real legacy byte value
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok, "the simulated legacy record (0x00 at the safety_tc_installed offset, "
+                    "CRC recomputed over it, matching real pre-existing flash) unpacks");
+    TEST_CHECK(back.safety_tc_installed == 1u,
+               "0x00 at the safety_tc_installed offset -- what every pre-existing board's "
+               "flash actually contains -- decodes as installed (1), NOT as "
+               "declared-not-installed. This is the check that matters: a board with a "
+               "persisted config from before this field existed must come up as installed.");
+
+    // Erased flash (0xFF) must ALSO decode as installed -- a record that
+    // was never written at all (or genuinely does hold the old reserved-
+    // fill byte from some other offset/path) must not accidentally trip
+    // the not-installed sentinel either.
+    config_store_pack(&rec, record);
+    record[204] = 0xFFu;
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok && back.safety_tc_installed == 1u,
+               "0xFF (erased flash) at the safety_tc_installed offset also decodes as installed");
+
+    // Positive proof the sentinel itself still works: ONLY 0xA5 decodes as
+    // not-installed. Uses config_store_pack()'s real encode path (rec.
+    // safety_tc_installed = 0), not a hand-written byte, so this also
+    // proves the encoder emits the sentinel this decode check depends on.
+    rec.safety_tc_installed = 0u;
+    config_store_pack(&rec, record);
+    TEST_CHECK(record[204] == 0xA5u,
+               "config_store_pack() encodes declared-not-installed as the explicit "
+               "0xA5 sentinel, not as a bare 0x00");
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok && back.safety_tc_installed == 0u,
+               "the 0xA5 sentinel round-trips back to declared-not-installed");
+
     // calibration_missing = true must roundtrip too, not just its zero value.
     rec.calibration_missing = true;
     config_store_pack(&rec, record);
@@ -122,6 +203,9 @@ static void test_default(void)
     TEST_CHECK(rec.seq == 0, "default seq is 0");
     TEST_CHECK(rec.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE, "default tc_type is K");
     TEST_CHECK(rec.calibration_missing == true, "default calibration_missing is true");
+    TEST_CHECK(rec.safety_tc_installed == 1u,
+               "default safety_tc_installed is 1 -- \"I expect a sensor and will trip if "
+               "it's missing\", not the reverse");
     for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
         TEST_CHECK(rec.ct_cal[i].calibrated == false,
                    "default ct_cal[i].calibrated is false -- uncalibrated, not zero-gain");
@@ -958,6 +1042,19 @@ static void test_config_params_set_range_validation(void)
     v.u8_val = 7u;
     TEST_CHECK(config_params_set(&rec, 0x0210u, KILNLINK_PARAM_TYPE_U8, v),
                "borrowed_type_expected = 7 (T, the boundary value) is accepted");
+
+    // safety_tc_installed (0x0211) -- 0/1 only, no third state.
+    config_store_default(&rec);
+    v.u8_val = 2u;
+    TEST_CHECK(!config_params_set(&rec, 0x0211u, KILNLINK_PARAM_TYPE_U8, v),
+               "safety_tc_installed = 2 is refused (0/1 only)");
+    v.u8_val = 1u;
+    TEST_CHECK(config_params_set(&rec, 0x0211u, KILNLINK_PARAM_TYPE_U8, v),
+               "safety_tc_installed = 1 (installed, the boundary/default value) is accepted");
+    v.u8_val = 0u;
+    TEST_CHECK(config_params_set(&rec, 0x0211u, KILNLINK_PARAM_TYPE_U8, v),
+               "safety_tc_installed = 0 (declared not installed) is accepted");
+    TEST_CHECK(rec.safety_tc_installed == 0u, "the declared-not-installed value actually lands in the record");
 
     // --- Floats: NaN/+Inf/-Inf refused for EVERY F32 field ------------------
     // abs_max_temp_c is the single most dangerous field in this table -- a

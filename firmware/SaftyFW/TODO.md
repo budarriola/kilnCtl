@@ -78,10 +78,13 @@ gating items are:
 - [x] CI grep: no CRC or byte-stuffing implementation outside `CommonFW` —
       2026-08-22, `tools/check_link_impl_isolation.ps1`. Standalone (matching
       `check_isolation.ps1`'s convention), not build-wired. **It currently
-      reports 4 real hits**, all of them the un-done delegation item above:
-      `KilnFW`'s `uart_protocol.c` (`crc16_ccitt_false()`/`stuff_and_send()`)
-      and its `UnitTestFw` host-test twin. That is the check working, not a
-      false positive — it goes green when the item above lands.
+      reports real hits** in `KilnFW`'s `uart_protocol.c`
+      (`crc16_ccitt_false()`/`stuff_and_send()`), the un-done delegation item
+      above. That is the check working, not a false positive — it goes green
+      when the item above lands. Its `UnitTestFw` host-test twin used to add
+      a second hit here; `firmware/UnitTestFw` was decommissioned and deleted
+      wholesale (2026-08-23, SimFW is its replacement), so that hit is gone
+      with the file, not because it was fixed.
 
 ## Phase 2 — Skeleton
 

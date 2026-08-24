@@ -237,6 +237,27 @@ typedef struct {
     uint8_t  fault_bits;   /* SAFETY_THERMO_FAULT_* bits, SR register */
     bool     spi_failed;
 
+    /* S5's declared-hardware-state escape hatch (config param 0x0211,
+     * config_store.h's safety_tc_installed). Named with the INVERTED sense
+     * of that config field, deliberately: every other bool in this struct
+     * is false-by-default-safe (zero-initializing a test's or a stub
+     * caller's input struct produces the normal, fully-armed guard
+     * behaviour), and safety_tc_installed's own polarity (1 = normal, 0 =
+     * escape hatch) would break that convention here -- a caller (or an
+     * existing test literal written before this field existed) that leaves
+     * this struct zero-initialized must still get S5's real TRIP behaviour,
+     * not silently inherit the "sensor declared absent" downgrade. false
+     * here means "installed" (the normal case); safety_core_build_input()
+     * is the one place that does the inversion, from config_store's
+     * safety_tc_installed. Read only by S5's grace-exceeded branch in
+     * safety_guards.c -- see that block's own comment for what flipping
+     * this changes (WARN stays, TRIP is withheld) and, just as
+     * importantly, what it does NOT change: heating itself is refused
+     * unconditionally elsewhere (safety_core_request_enable()) whenever the
+     * declaring config field is 0, which is the only reason downgrading
+     * this guard's own trip is safe at all. */
+    bool safety_tc_not_installed_declared;
+
     /* S7. Already debounced (50ms) by discrete_task -- ARCHITECTURE.md's
      * module table gives debouncing to discrete_task, not to this pure
      * evaluator, the same division profile_executor.c / thermal_guard.c
@@ -370,6 +391,16 @@ typedef struct {
     uint16_t s5_bad_streak;
     float    s5_bad_elapsed_s;
     bool     s5_warn; /* WARN state active -- caller clears TEMP_VALID while this is true */
+    bool     s5_not_installed; /* true while blind_grace_s has been exceeded
+                                 * AND in->safety_tc_not_installed_declared was
+                                 * true on the tick that happened -- the
+                                 * caller's cue to report "safety TC declared
+                                 * not installed, heat blocked" rather than a
+                                 * clean status, distinct from s5_warn (which
+                                 * also covers the ordinary, expected-to-
+                                 * recover intermittent-connector case).
+                                 * Cleared the instant a read is good again,
+                                 * same as s5_warn. */
 
     /* S11: value-identity window, gated on heat_commanded. */
     bool  s11_window_active;
@@ -453,6 +484,35 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
 // (the guard still does its job), it is a scope limit of THIS function.
 bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                               const safety_guard_input_t *in);
+
+// Outcome of one CLEAR_TRIP (0x0A) request as resolved by
+// safety_core_task's queue-drain loop (src/tasks/safety_core.c) -- lives
+// here, not in safety_core.h, so safety_guards_decide_clear_trip_outcome()
+// just below can be pure and host-tested the same way
+// link_frame_decide_clear_trip() (src/tasks/link_frame.c) already is for
+// link_task's OWN pair of CLEAR_TRIP refusal checks. safety_core.h re-uses
+// this exact enum (it already includes this header) rather than defining a
+// second, convertible one.
+typedef enum {
+    SAFETY_CLEAR_TRIP_OUTCOME_NONE = 0,                // nothing processed yet this boot
+    SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED,                // cleared: TRIPPED -> ARMED
+    SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,   // safety_guards_try_clear() retripped
+    SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED, // is_tripped was already false
+                                                        // by the time the request was dequeued
+} safety_clear_trip_outcome_t;
+
+// Pure 3-way classification of a queued CLEAR_TRIP request's result, given
+// the two facts safety_core_task already has in hand right after it dequeues
+// one: whether a trip was still latched at the moment of dequeue, and (only
+// if so) what safety_guards_try_clear() returned. Factored out purely so
+// this classification is host-testable like the rest of this file --
+// safety_core.c's own queue-drain loop is not (FreeRTOS-shaped), but the
+// three-way decision it makes from those two booleans is exactly as pure as
+// link_frame_decide_clear_trip()'s two-way one, and just as worth pinning
+// down with a test as that one was (see CommonFW's/this project's "every new
+// check must be proven capable of failing" standard).
+safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tripped,
+                                                                      bool try_clear_result);
 
 // Best-effort "what number decided this trip" for CommonFW/docs/LINK_PROTOCOL.md
 // sec 6 Frame D's `deciding_threshold` field ("Capturing the deciding values

@@ -667,7 +667,7 @@ pin)` rule.
 | 16 | 5 | `thermoFault_1` | GPIO21 (`FAULT_MAIN_1`) | |
 | 15 | 6 | `thermoDrdy_1` | GPIO3 (`DRDY_MAIN_1`) | |
 | 14 | 7 | `thermoFault_2` | GPIO22 (`FAULT_MAIN_2`) | |
-| 13 | 8 | `thermoDrdy_2` | GPIO17 (`DRDY_MAIN_2`) | |
+| 13 | 8 | `thermoDrdy_2` | GPIO0 (`DRDY_MAIN_2`) | moved off GPIO17 on 2026-08-23, see §0 item 10 |
 | 12 | 9 | GND | fixture GND_Main | |
 | 11 | 10 | `MOSI` | GPIO7 | fixture **input** (ESP32 is bus master) |
 | 10 | 11 | `MISO` | GPIO8 | fixture **output**, tri-stated when no CS asserted |
@@ -714,7 +714,7 @@ protection bus A already gets (`PLAN.md` §15).
 ### 3.3 Fixture → CT jacks (J13/J15/J17)
 
 **Revised 2026-08-23 (DESIGN_NOTES.md §3.3's PWM→I2S decision).** Each
-channel: fixture I2S digital data (GPIO16/18, `ct_wave_i2s.c`) → UDA1334A DAC
+channel: fixture I2S digital data (GPIO20/18, `ct_wave_i2s.c`) → UDA1334A DAC
 module (analog output, no amplifier) → isolation transformer primary
 (GND_Main-referenced) → transformer secondary (floating, isolated from
 **both** GND_Main and GND_Safty, exactly like a real CT) → jack tip/sleeve.
@@ -723,8 +723,8 @@ existed to filter — a DAC output needs no carrier-frequency filtering.
 
 | Zone | Fixture I2S data GPIO | DAC module / channel | Jack |
 |---|---|---|---|
-| 0 | GPIO16 (`DIN_A`) | Module A, left | J13 (`Current1` on the safety side, `SaftyFW/docs/HARDWARE.md` §9) |
-| 1 | GPIO16 (`DIN_A`) | Module A, right | J15 (`Current2`) |
+| 0 | GPIO20 (`DIN_A`) | Module A, left | J13 (`Current1` on the safety side, `SaftyFW/docs/HARDWARE.md` §9) |
+| 1 | GPIO20 (`DIN_A`) | Module A, right | J15 (`Current2`) |
 | 2 | GPIO18 (`DIN_B`) | Module B, left | J17 (`Current3`) |
 
 Module B's right channel carries no CT signal (always silence, `ct_i2s_gen.h`'s
@@ -835,7 +835,7 @@ boundary except the CT channels, which stay floating like a real CT.
 
 | Fixture signal group | Domain | Notes |
 |---|---|---|
-| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, SPI bus B, `DRDY_SAFETY`/`FAULT_SAFETY` (incl. GPIO27, provisionally `ct_wave_i2s.c`'s `BCLK` — digital-side, still GND_Main before the transformer), I2S `DIN_A`/`DIN_B`/`WS` (GPIO16/18/28, `ct_wave_i2s.c` — digital side only, see next row for the isolated side), relay sense K1/K2/K3/K5/K4, `Fault` line sense, E-stop direct drive, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays) | GND_Main, bonded to GND_Safty at the fixture | All direct GPIO/direct sense — no digital isolators, no optocoupler, no optoMOS. SPI bus B's two TI ISO7740DWR isolators, K4's 4N35 opto, and the E-stop loop's CPC1017N optoMOS are all removed (`DESIGN_NOTES.md` §3.5) — each was only ever crossing this same now-nonexistent ground boundary |
+| I2C0 (both MCP23017s), SPI bus A, `DRDY_MAIN_*`/`FAULT_MAIN_*`, SPI bus B, `DRDY_SAFETY`/`FAULT_SAFETY` (incl. GPIO27, provisionally `ct_wave_i2s.c`'s `BCLK` — digital-side, still GND_Main before the transformer), I2S `DIN_A`/`DIN_B`/`WS` (GPIO20/18/28, `ct_wave_i2s.c` — digital side only, see next row for the isolated side), relay sense K1/K2/K3/K5/K4, `Fault` line sense, E-stop direct drive, J20 IO_3/IO_4, debug UART, DUT-power relay control (both relays) | GND_Main, bonded to GND_Safty at the fixture | All direct GPIO/direct sense — no digital isolators, no optocoupler, no optoMOS. SPI bus B's two TI ISO7740DWR isolators, K4's 4N35 opto, and the E-stop loop's CPC1017N optoMOS are all removed (`DESIGN_NOTES.md` §3.5) — each was only ever crossing this same now-nonexistent ground boundary |
 | 3× CT channels | floating (neither domain) | UDA1334A DAC module output (`ct_wave_i2s.c`, replacing the retired PWM+RC carrier, DESIGN_NOTES.md §3.3) → isolation transformer, **1:1** (revised 2026-08-23, reversing the 2026-08-20 revision to ~3:1 — the earlier change backed out a specific CT's rated current from the ADC's clipping voltage; the board's own sense input is full-scale at ≈1 Vrms regardless of which CT is fitted, and 1:1 delivers that with margin. Tradeoff: `CURRENT_FLAG_CLIPPED` is not exercisable at 1:1 — see `DESIGN_NOTES.md` §3.3 and `docs/BOM.md` §3), per channel |
 
 **Standing rule retired 2026-08-23 (`DESIGN_NOTES.md` §3.5):** the removable
@@ -1001,6 +1001,20 @@ at the same time.
 | Manufacturer string | `kilnCtl` | `src/tasks/usb_descriptors.c` |
 | Product string | `SimFW Bench Fixture` | `src/tasks/usb_descriptors.c` |
 | Serial number | RP2040 flash unique ID, 16 hex chars | `src/tasks/usb_descriptors.c`, via `pico_get_unique_board_id_string()` |
+| CDC0 interface string | `SimFW Control` | `src/tasks/usb_descriptors.c` — the benchproto protocol CDC (`docs/PROTOCOL.md` sec 1) |
+| CDC1 interface string | `SimFW Console` | `src/tasks/usb_descriptors.c` — the console/log CDC, added 2026-08-23 |
+
+**Two CDC-ACM interfaces, one shared VID/PID/serial (2026-08-23):** the
+fixture is a composite USB device with two CDC functions (`src/tasks/
+usb_descriptors.c`'s dual-IAD config descriptor) that both enumerate under
+the identity above — VID/PID/serial name the *device*, not either
+interface, so they cannot by themselves tell CDC0 (protocol) and CDC1
+(console) apart. The two interface strings above are what disambiguates
+them, both for a human (Device Manager, `ls /dev/serial/by-id`) and for
+`kilnsim`'s PC-side port discovery (`tools/PcTools/src/kilnsim/link.py`'s
+`SerialSimLink.list_protocol_ports()`), which reads them back through
+pyserial to pick the protocol port specifically — see `docs/PROTOCOL.md`
+sec 1 for the full two-CDC rationale.
 
 **VID choice:** this fixture is a one-off in-house bench tool, never mass
 produced and never sold, so no formal USB-IF VID has been (or will be)

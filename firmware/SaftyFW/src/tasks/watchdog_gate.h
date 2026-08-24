@@ -48,10 +48,12 @@ typedef struct {
 //
 // If out_ok_mask is non-NULL, *out_ok_mask gets bit i set for every entry
 // that was within its own deadline, bit i clear for every entry that was
-// not -- this is what watchdog_task.c latches to SAFTYFW_LAST_CHECKIN_MASK_SCRATCH
-// (see startup_diag.h), so after a starvation reboot the cleared bits are
-// exactly the tasks that were over their own deadline at the last evaluation
-// before the reset.
+// not -- watchdog_task.c XORs this against WATCHDOG_CHECKIN_ALL_MASK to get
+// the overdue set it latches via watchdog_overdue_diag_mark() (2026-08-23,
+// scratch[5], repurposed -- see that module's own header comment) whenever
+// it decides to withhold the feed, so after a starvation reboot the tasks
+// that were over their own deadline at the last evaluation before the
+// reset are still readable.
 bool watchdog_gate_all_within_deadline(const watchdog_gate_entry_t *entries, uint32_t count,
                                         uint32_t *out_ok_mask);
 

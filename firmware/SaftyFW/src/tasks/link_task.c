@@ -48,6 +48,7 @@
 #include "link_task.h"
 
 #include <math.h>
+#include <stdio.h> // snprintf -- clear-trip received-count log line, see link_task_handle_clear_trip()
 #include <string.h>
 
 #include "FreeRTOS.h"
@@ -95,6 +96,7 @@
 #include "kilnlink/kilnlink_get_config_page.h" // SAFETY_CMD_GET_CONFIG_PAGE (0x1F), see link_task_handle_get_config_page()
 #include "kilnlink/kilnlink_get_ct_cal.h" // SAFETY_CMD_GET_CT_CAL, see link_task_handle_get_ct_cal()
 #include "kilnlink/kilnlink_get_param.h" // SAFETY_CMD_GET_PARAM (0x1E request), see link_task_handle_get_param()
+#include "kilnlink/kilnlink_inject_tc.h" // SAFETY_CMD_INJECT_TC (0x21), see link_task_handle_inject_tc()
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
@@ -205,6 +207,19 @@ static TaskHandle_t s_task_handle = NULL;
 // relay_owner.h already use for their own cross-task flags.
 static volatile bool s_degraded_no_context = false;
 
+// The peer ESP's own protocol_version, as last announced via ANNOUNCE_VERSION
+// -- cached alongside s_degraded_no_context (same writer, same single-word/
+// volatile-read pattern), but a raw number rather than a compatibility bool,
+// so link_task_send_status() can ask a narrower, additive-feature-specific
+// question ("has this peer proven it understands V2?") independent of
+// link_frame_versions_compatible()'s own min_compatible-range verdict. 0
+// (no real protocol_version this codebase has ever shipped) means "no
+// ANNOUNCE_VERSION received yet this boot" -- the same safe-default-to-old
+// state as a peer that predates ANNOUNCE_VERSION entirely, see
+// link_frame_pack_status()'s own doc comment (link_frame.h) for why "unknown"
+// and "known old" must behave identically here.
+static volatile uint16_t s_peer_protocol_version = 0;
+
 static uint16_t s_msg_index = 0;
 static uint8_t s_boot_id = 0;
 
@@ -226,6 +241,15 @@ static bool s_context_published = false;
 // above but for a handful of scalars instead of one bool.
 static uint32_t s_context_frames_ok = 0;
 static uint32_t s_context_frames_bad = 0;
+
+// CLEAR_TRIP frames this task has decoded successfully, single-writer/no-lock
+// same as the pair above -- added alongside safety_core.c's own
+// s_clear_trip_requested/_processed counters (safety_core_get_clear_trip_
+// stats()) so a hardware run can tell "did the frame even reach the Pico"
+// apart from "did safety_core's queue receive it" apart from "did
+// safety_core resolve it" -- see link_task_handle_clear_trip()'s own comment
+// for where each count is logged.
+static uint32_t s_clear_trip_rx_count = 0;
 // Tick of the last SUCCESSFUL parse. Never read until s_context_frames_ok > 0
 // (see link_task_send_diag()), so its zero-initialised value before the
 // first frame never gets treated as a real timestamp -- DIAG keeps sending
@@ -376,6 +400,92 @@ static volatile uint32_t s_last_page_stuffed_len;
 static volatile uint32_t s_last_page_accepted;
 // --- end diagnostic statics ----------------------------------------------
 
+// --- DIAGNOSTIC: 2026-08-23 size-window investigation ---------------------
+// Coordinator's own lead: the DIAG/POWER-never-arrives boundary sits between
+// 34 and 36 RAW bytes, next to the RP2040's 32-byte TX FIFO depth and
+// exactly where uart_owner_send()'s priming write operates (see that
+// function's own comment, uart_owner.c). uart_owner_get_last_send_remainder()
+// reports how many bytes of the frame THIS call just sent were left
+// dependent on the TX ISR rather than the priming write -- latched here into
+// DIAG/POWER-SPECIFIC statics (not the generic s_last_tx_* above, which the
+// 500ms status broadcast overwrites long before anyone can read a 2s-cadence
+// DIAG/POWER sample over SWD) alongside a snapshot of
+// uart_owner_get_tx_bytes_from_isr() taken at the same instant. A caller
+// polling this pair a few hundred ms after a DIAG send, and finding
+// s_last_diag_isr_bytes_from_isr unchanged from the value latched at send
+// time despite s_last_diag_remainder > 0, has direct proof the ISR never
+// drained that frame's tail. Safe to delete once the size-window question is
+// settled.
+static volatile uint32_t s_last_diag_remainder = 0;
+static volatile uint32_t s_last_diag_stuffed_len = 0;
+static volatile uint32_t s_last_diag_isr_bytes_from_isr_at_send = 0;
+static volatile uint32_t s_last_power_remainder = 0;
+static volatile uint32_t s_last_power_stuffed_len = 0;
+static volatile uint32_t s_last_power_isr_bytes_from_isr_at_send = 0;
+// --- end diagnostic statics ----------------------------------------------
+
+// --- DIAGNOSTIC: 2026-08-23 round 6, coordinator's ring-pointer-bug
+// hypothesis -- DIAG/POWER now arrive at the right cadence with valid CRCs
+// but every decoded DIAG carries byte-identical, frozen content (uptime_ms
+// stuck at one value for 90+ seconds on the bench) despite diag_applied
+// climbing and the tick clock confirmed advancing normally. Two things
+// worth separating: (1) is fresh content genuinely being BUILT and ENQUEUED
+// each call (this file's job), or (2) is fresh content built and enqueued
+// correctly but the RING/ISR replays a stale window instead of draining it
+// (uart_owner.c's job, see its own s_tx_head/s_tx_tail getters added this
+// round). s_last_diag_payload_snapshot answers (1) directly: it is the
+// first 10 bytes of `payload` -- the RAW (pre-stuffing) diag payload this
+// exact call built -- which per kilnlink_diag.c's own OFF_UPTIME=6 layout
+// covers cmd/trip_reason/warn_mask/trip_mask/the first two uptime_ms bytes.
+// If successive reads of this snapshot show the SAME bytes every time,
+// content generation itself is frozen (bug is in link_task_send_diag() or
+// what it reads from); if the snapshot visibly changes each read but the
+// ESP still decodes stale content, the bug is downstream in uart_owner.c's
+// ring, exactly the coordinator's hypothesis. s_last_diag_send_seq is a
+// plain monotonic call counter (distinct from uart_owner's own
+// s_tx_priming_calls) so "is link_task_send_diag() even being called at the
+// right rate" is answerable from this file alone. The head/tail pair are
+// uart_owner_get_tx_head()/_tail() read immediately after THIS send
+// returns, for direct correlation against uart_owner.c's own free-running
+// getters of the same values.
+#define LINK_TASK_DIAG_SNAPSHOT_LEN 10u
+static volatile uint8_t  s_last_diag_payload_snapshot[LINK_TASK_DIAG_SNAPSHOT_LEN];
+static volatile uint32_t s_last_diag_send_seq = 0;
+static volatile uint32_t s_last_diag_tx_head_after = 0;
+static volatile uint32_t s_last_diag_tx_tail_after = 0;
+// --- end diagnostic statics ----------------------------------------------
+
+// --- DIAGNOSTIC: 2026-08-23 call-path investigation -----------------------
+// Coordinator's own next step: the size-window theory is dead (a 51-byte
+// send drained an 18-byte remainder through the ISR just fine), and the
+// DIAG/POWER-specific remainder latches above read all-zero -- meaning
+// link_task_send_broadcast_to() is never even CALLED with a DIAG or POWER
+// payload. That leaves exactly three places the chain from
+// link_task_fn()'s due-check to the wire could be silently exiting:
+// (1) the send function is never entered at all, (2) it is entered but its
+// kilnlink_*_encode() call returns len == 0 (the "can't happen" comment is
+// wrong), or (3) len is fine but something between the encode and the
+// link_task_send_broadcast() call still exits. These three counters, plus
+// the encode outcome, pin it exactly -- one triplet per frame type, and one
+// more for CONFIG_PAGE (also codec-built, also observed dark) to learn
+// whether this is one bug or three. `volatile`, SWD-only, safe to delete
+// once the call-path question is settled.
+static volatile uint32_t s_diag_send_entry_count = 0;
+static volatile uint32_t s_diag_encode_len = 0;
+static volatile uint8_t  s_diag_encode_status = 0;
+static volatile uint32_t s_diag_pre_broadcast_count = 0;
+
+static volatile uint32_t s_power_send_entry_count = 0;
+static volatile uint32_t s_power_encode_len = 0;
+static volatile uint8_t  s_power_encode_status = 0;
+static volatile uint32_t s_power_pre_broadcast_count = 0;
+
+static volatile uint32_t s_config_page_send_entry_count = 0;
+static volatile uint32_t s_config_page_encode_len = 0;
+static volatile uint8_t  s_config_page_encode_status = 0;
+static volatile uint32_t s_config_page_pre_broadcast_count = 0;
+// --- end diagnostic statics ----------------------------------------------
+
 // --- DIAGNOSTIC: 2026-08-23 GET_CONFIG_PAGE stage1-vs-stage2 investigation -
 // The statics above proved this Pico never TRANSMITS a config-page reply
 // (s_last_page_* stayed all-zero over minutes of runtime), but that alone
@@ -489,6 +599,31 @@ static bool link_task_send_broadcast_to(uint8_t dst_task, const uint8_t *payload
         s_last_page_stuffed_len = (uint32_t)stuffed_len;
         s_last_page_accepted = accepted ? 1u : 0u;
     }
+    // 2026-08-23 size-window diagnostic -- see statics' own comment above.
+    // Latched AFTER uart_owner_send() returns, same call, so remainder and
+    // the isr-bytes snapshot describe exactly this frame.
+    if (length > 0 && payload[0] == KILNLINK_DIAG_CMD) {
+        s_last_diag_remainder = (uint32_t)uart_owner_get_last_send_remainder();
+        s_last_diag_stuffed_len = (uint32_t)stuffed_len;
+        s_last_diag_isr_bytes_from_isr_at_send = uart_owner_get_tx_bytes_from_isr();
+        // 2026-08-23 round 6 diagnostic -- see statics' own comment above.
+        {
+            uint32_t n = (uint32_t)length < LINK_TASK_DIAG_SNAPSHOT_LEN
+                             ? (uint32_t)length
+                             : LINK_TASK_DIAG_SNAPSHOT_LEN;
+            for (uint32_t i = 0; i < n; i++) {
+                s_last_diag_payload_snapshot[i] = payload[i];
+            }
+            s_last_diag_send_seq++;
+            s_last_diag_tx_head_after = uart_owner_get_tx_head();
+            s_last_diag_tx_tail_after = uart_owner_get_tx_tail();
+        }
+    }
+    if (length > 0 && payload[0] == KILNLINK_POWER_CMD) {
+        s_last_power_remainder = (uint32_t)uart_owner_get_last_send_remainder();
+        s_last_power_stuffed_len = (uint32_t)stuffed_len;
+        s_last_power_isr_bytes_from_isr_at_send = uart_owner_get_tx_bytes_from_isr();
+    }
     // --- end diagnostic ---
 
     return accepted;
@@ -521,14 +656,37 @@ static void link_task_send_status(void)
 
     bool estop = discrete_task_estop_pressed();
 
-    uint8_t payload[LINK_FRAME_STATUS_LEN];
+    // safety_tc_installed (0x0211) / injection status -- item 4/5's status
+    // reporting, so an operator or the ESP/MCP can tell "declared not
+    // installed, heat blocked" and "this reading is synthetic" apart from a
+    // clean status. config_store_get_full_record() is the same cheap
+    // cached-copy read used everywhere else this field is consulted.
+    config_store_record_t status_cfg;
+    config_store_get_full_record(&status_cfg);
+    bool tc_not_installed = (status_cfg.safety_tc_installed == 0u);
+    bool tc_injected = thermo_task_injection_active();
+
+    // V2 (24-byte, tx_dropped_sat) status frame gate -- see
+    // link_frame_pack_status()'s own doc comment (link_frame.h) for the full
+    // skew-safety argument. Only ever true once this boot has positively
+    // received an ANNOUNCE_VERSION naming a peer protocol_version >=
+    // LINK_FRAME_STATUS_V2_MIN_PROTOCOL; s_peer_protocol_version's own
+    // "0 == unknown" default makes "never announced" and "announced, but
+    // old" collapse to the same safe (false) outcome here without a separate
+    // check.
+    bool peer_supports_status_v2 = link_frame_status_v2_supported(s_peer_protocol_version);
+    uint8_t tx_dropped_sat = link_frame_saturate_tx_dropped(uart_owner_get_tx_dropped());
+
+    uint8_t payload[LINK_FRAME_STATUS_LEN_V2];
     bool energized_bit = false;
     bool enabled_bit = false;
     safety_core_get_output_status(&energized_bit, &enabled_bit);
-    link_frame_pack_status(payload, estop, energized_bit, enabled_bit, temp_valid, tc_c, cj_c,
-                            fault_bits, cur.amps[0], cur.amps[1], cur.amps[2]);
+    size_t len = link_frame_pack_status(payload, estop, energized_bit, enabled_bit, temp_valid, tc_c, cj_c,
+                                         fault_bits, cur.amps[0], cur.amps[1], cur.amps[2],
+                                         tc_not_installed, tc_injected,
+                                         peer_supports_status_v2, tx_dropped_sat);
 
-    if (link_task_send_broadcast(payload, LINK_FRAME_STATUS_LEN)) {
+    if (link_task_send_broadcast(payload, (uint8_t)len)) {
         s_status_tx_ok_count++;
     }
 }
@@ -626,6 +784,8 @@ static uint8_t link_task_context_age_100ms(void)
 
 static void link_task_send_diag(void)
 {
+    s_diag_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
+
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     bool warn_active = false;
     uint8_t diag_state = 0;
@@ -719,10 +879,15 @@ static void link_task_send_diag(void)
     uint8_t payload[KILNLINK_DIAG_LEN];
     kilnlink_diag_status_t status;
     size_t len = kilnlink_diag_encode(&dg, payload, sizeof(payload), &status);
+    // 2026-08-23 call-path diagnostic, checkpoint 2 -- recorded regardless of
+    // outcome, before the early-return can act on it.
+    s_diag_encode_len = (uint32_t)len;
+    s_diag_encode_status = (uint8_t)status;
     if (len == 0) {
         return; // can't happen for a fixed sizeof(payload) == KILNLINK_DIAG_LEN buffer
     }
 
+    s_diag_pre_broadcast_count++; // 2026-08-23 call-path diagnostic, checkpoint 3
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
@@ -757,6 +922,8 @@ static void link_task_send_trip_event(const kilnlink_trip_t *tr)
 // this file does not need calibration-struct visibility to build the frame.
 static void link_task_send_power(void)
 {
+    s_power_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
+
     current_sense_power_t pw;
     current_task_get_power(&pw);
 
@@ -789,6 +956,10 @@ static void link_task_send_power(void)
     uint8_t payload[KILNLINK_POWER_LEN];
     kilnlink_power_status_t status;
     size_t len = kilnlink_power_encode(&frame, payload, sizeof(payload), &status);
+    // 2026-08-23 call-path diagnostic, checkpoint 2 -- recorded regardless of
+    // outcome, before the early-return can act on it.
+    s_power_encode_len = (uint32_t)len;
+    s_power_encode_status = (uint8_t)status;
     if (len == 0) {
         return; // KILNLINK_POWER_ERR_BUFFER_TOO_SMALL -- can't happen for a
                  // fixed sizeof(payload) == KILNLINK_POWER_LEN buffer, but
@@ -796,6 +967,7 @@ static void link_task_send_power(void)
                  // other encode call site in this file.
     }
 
+    s_power_pre_broadcast_count++; // 2026-08-23 call-path diagnostic, checkpoint 3
     link_task_send_broadcast(payload, (uint8_t)len);
 }
 
@@ -897,6 +1069,16 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     uint16_t peer_protocol = msg.protocol_version;
     uint16_t peer_min_compatible = msg.min_compatible;
 
+    // Cached unconditionally, even if this peer turns out incompatible below
+    // -- an incompatible peer's own protocol_version is still real,
+    // meaningful data (it is, after all, why the compatibility check just
+    // failed), and link_task_send_status() needs it regardless of the
+    // DEGRADED_NO_CONTEXT verdict: LINK_FRAME_STATUS_V2_MIN_PROTOCOL gating
+    // is deliberately a narrower, additive-feature-specific question than
+    // "are we fully compatible" (see link_frame_pack_status()'s doc comment,
+    // link_frame.h).
+    s_peer_protocol_version = peer_protocol;
+
     bool compatible = link_frame_versions_compatible(KILNLINK_PROTOCOL_VERSION,
                                                        KILNLINK_MIN_COMPATIBLE, peer_protocol,
                                                        peer_min_compatible);
@@ -956,16 +1138,20 @@ static void link_task_handle_request_enable(const kilnlink_frame_t *frame)
 }
 
 // SAFETY_CMD_CLEAR_TRIP (0x0A), CommonFW/docs/LINK_PROTOCOL.md section 4 --
-// the GUI's path to acknowledging a trip. This function only decodes and
-// validates the wire frame and logs the outcome; the actual refuse/clear
-// policy (still-tripped retick) is safety_core_request_clear_trip()'s job,
-// called from here the same direction link_task already calls
-// safety_core_get_diag_status()/_get_output_status()/_get_trip_event() --
-// link_task calling INTO safety_core, never the reverse, so this file still
+// the GUI's path to acknowledging a trip. This function decodes and
+// validates the wire frame and forwards a valid, matching request to
+// safety_core's own queue; the actual refuse/clear policy (still-tripped
+// retick) is safety_core_task's job now, not this function's -- see
+// safety_core_request_clear_trip()'s doc comment in safety_core.h for why
+// this changed from a direct, synchronous call (2026-08-23: that direct
+// call was writing safety_core's un-locked s_guard_state from this task's
+// own core while safety_core_task ticked the same struct on the other core,
+// and reproduced a hardware watchdog reboot). link_task calling INTO
+// safety_core (never the reverse) is otherwise unchanged -- this file still
 // never needs to be called by, or export anything to, safety_core.c.
 //
-// Two refusal paths per the protocol doc, both checked here before
-// safety_core is even asked:
+// Two refusal paths per the protocol doc, both checked here, entirely
+// locally, before safety_core's queue is ever touched:
 //   1. Nothing currently tripped (trip_reason == SAFETY_TRIP_NONE) -- there
 //      is nothing to clear, and the wire trip_mask (whatever the ESP sent)
 //      cannot possibly match a mask of 0 from an actual trip, so this is
@@ -978,6 +1164,23 @@ static void link_task_handle_request_enable(const kilnlink_frame_t *frame)
 //      degraded-approximation this build's Frame B (DIAG) already reports,
 //      so a GUI that echoes back the trip_mask it last saw in a DIAG frame
 //      matches correctly.
+//
+// LOGGING CONTRACT: this function only ever logs that a frame arrived, was
+// screened, and was queued (or dropped/refused locally) -- never
+// "accepted"/"cleared". The actual accept/refuse decision happens inside
+// safety_core_task once it dequeues the request, and IT logs that outcome
+// (safety_core.c's own "clear_trip" log line, with req/proc counts and the
+// resolved outcome) -- matching LINK_PROTOCOL.md's documented CLEAR_TRIP
+// contract of "refused, with the reason reported in the next diagnostic
+// frame", which was always async on the wire; this file's log line is
+// diagnostic-only telemetry, not the wire-visible outcome.
+//
+// s_clear_trip_rx_count (incremented on every successfully DECODED frame,
+// before either local refusal check) plus safety_core_get_clear_trip_stats()'s
+// requested/processed/outcome triple together answer, from the log alone,
+// exactly how far a given CLEAR_TRIP got: received here, queued to
+// safety_core, dequeued by safety_core, resolved -- so a repeat of the
+// hardware reboot can be localized to a specific hop instead of guessed at.
 //
 // Never ACKs on the wire -- link_task never participates in the ACK'd
 // transport (see link_task_handle_raw_frame()'s own BROADCAST-only check
@@ -995,6 +1198,7 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
         // link_task_handle_raw_frame()'s own comments).
         return;
     }
+    s_clear_trip_rx_count++;
 
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     safety_core_get_diag_status(&trip_reason, NULL, NULL);
@@ -1012,12 +1216,12 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
         return;
     }
 
-    bool cleared = safety_core_request_clear_trip();
-    if (cleared) {
-        log_task_log(LOG_LEVEL_INFO, "clear_trip", "accepted");
-    } else {
-        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, condition still holds");
-    }
+    bool queued = safety_core_request_clear_trip();
+    char msg_buf[64];
+    snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu",
+             queued ? "queued" : "dropped, safety_core queue full",
+             (unsigned long)s_clear_trip_rx_count);
+    log_task_log(queued ? LOG_LEVEL_INFO : LOG_LEVEL_WARN, "clear_trip", msg_buf);
 }
 
 // SAFETY_CMD_SET_CONFIG (0x16), CommonFW/docs/LINK_PROTOCOL.md section 4 --
@@ -1352,6 +1556,39 @@ static void link_task_handle_set_log_level(const kilnlink_frame_t *frame)
     log_task_log(LOG_LEVEL_INFO, "set_log_level", "accepted");
 }
 
+// SAFETY_CMD_INJECT_TC (0x21), CommonFW/docs/LINK_PROTOCOL.md section 4 --
+// item 5 of the safety-TC-not-installed pass: feeds a synthetic reading into
+// thermo_task.c so S1/S5/S11/S12 can be exercised on real hardware before
+// the physical safety MAX31856 exists. Deliberately thin: ALL gating
+// (accepted only while safety_tc_installed == 0, never persisted) lives in
+// thermo_task_inject_reading() itself (thermo_task.h's own doc comment has
+// the full argument for why that makes the gate structural rather than
+// advisory) -- this handler does not duplicate that check, the same "the
+// codec/handler split does not own the policy" division kilnlink_clear_
+// trip.h documents for its own refusal logic. If a caller ever forgets to
+// close this off in some other reachable path, thermo_task_inject_reading()
+// still refuses on its own.
+static void link_task_handle_inject_tc(const kilnlink_frame_t *frame)
+{
+    kilnlink_inject_tc_t msg;
+    kilnlink_inject_tc_status_t dstatus =
+        kilnlink_inject_tc_decode(frame->payload, frame->length, &msg);
+    if (dstatus != KILNLINK_INJECT_TC_OK) {
+        // Malformed/wrong-length/wrong-cmd -- untrusted wire input, discarded
+        // silently like every other decode failure in this file.
+        return;
+    }
+
+    bool accepted = thermo_task_inject_reading(msg.valid != 0u, msg.tc_c, msg.cj_c, msg.fault_bits);
+    if (!accepted) {
+        log_task_log(LOG_LEVEL_WARN, "inject_tc",
+                     "refused -- safety_tc_installed != 0 (a real sensor is expected)");
+        return;
+    }
+    log_task_log(LOG_LEVEL_WARN, "inject_tc",
+                 "accepted -- reporting a SYNTHETIC reading, not the real MAX31856");
+}
+
 // SAFETY_CMD_SET_PARAM (0x1C), docs/COMMISSIONING.md section 2 -- stages one
 // (param_id, value) pair into the in-RAM record, per config_params.c's id
 // table. Nothing here reaches flash: config_params_set() only mutates
@@ -1541,6 +1778,8 @@ static void link_task_handle_get_param(const kilnlink_frame_t *frame)
 // bytes, keeping only how many entries each replayed page consumed.
 static void link_task_send_config_page(uint8_t page_index)
 {
+    s_config_page_send_entry_count++; // 2026-08-23 call-path diagnostic, checkpoint 1
+
     config_store_record_t rec;
     config_store_get_full_record(&rec);
 
@@ -1589,10 +1828,16 @@ static void link_task_send_config_page(uint8_t page_index)
     uint8_t payload[KILNLINK_FRAME_MAX_PAYLOAD];
     size_t len = kilnlink_config_page_pack(page_index, &all[offset], total - offset, payload,
                                             sizeof(payload), &packed_now, &status);
+    // 2026-08-23 call-path diagnostic, checkpoint 2 -- the FINAL pack call's
+    // outcome (the one whose payload/len actually matter), recorded before
+    // the early-return can act on it.
+    s_config_page_encode_len = (uint32_t)len;
+    s_config_page_encode_status = (uint8_t)status;
     if (len == 0) {
         s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_PACK_FAILED; // 2026-08-23 diagnostic
         return; // can't happen -- payload is sized to the wire's own payload cap
     }
+    s_config_page_pre_broadcast_count++; // 2026-08-23 call-path diagnostic, checkpoint 3
     link_task_send_broadcast(payload, (uint8_t)len);
     s_diag_page_last_outcome = DIAG_PAGE_OUTCOME_REPLIED; // 2026-08-23 diagnostic
 }
@@ -1688,6 +1933,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
         break;
     case KILNLINK_SET_LOG_LEVEL_CMD:
         link_task_handle_set_log_level(&frame);
+        break;
+    case KILNLINK_INJECT_TC_CMD:
+        link_task_handle_inject_tc(&frame);
         break;
     case KILNLINK_SET_PARAM_CMD:
         link_task_handle_set_param(&frame);
@@ -1905,6 +2153,7 @@ bool link_task_start(void)
     // true entropy is not required.
     s_boot_id = (uint8_t)(time_us_64() ^ (time_us_64() >> 8));
     s_degraded_no_context = false;
+    s_peer_protocol_version = 0; // unknown until this boot's own ANNOUNCE_VERSION arrives
     s_msg_index = 0;
     s_rx_assembly_len = 0;
     s_rx_collecting = false;

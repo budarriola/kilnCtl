@@ -21,7 +21,7 @@ static SafetyLinkClass *s_link = NULL;
 /* Small bodies -- up to SAFETY_CFG_PARAM_COUNT id/value pairs plus commit=1,
  * "id=<n>&value=<v>" repeated per field (see parse_set_param_body()'s own
  * comment for why this shape, not a single-key form, is what this handler
- * expects). Generous headroom: worst case every one of the 57 known fields
+ * expects). Generous headroom: worst case every one of the 58 known fields
  * submitted as an f32 (~12 chars) plus its id (~6 chars) plus separators is
  * under 1200 bytes; this is double that. Checked against Content-Length
  * before a single byte is read, same discipline as every other handler in

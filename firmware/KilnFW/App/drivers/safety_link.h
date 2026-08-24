@@ -156,8 +156,24 @@ extern "C" {
  * ROADMAP.md M5's SAFETY_CMD_PUSH_CONTEXT frame (0x07, LINK_PROTOCOL.md sec
  * 4), casts back. safety_link_set_context_sources() is the only setter. */
 
-/* Length of the Pico's status frame (see the contract above). */
-#define SAFETY_LINK_STATUS_FRAME_LEN 23u
+/* Length of the Pico's status frame (see the contract above). V1 (original,
+ * bytes 0..22) and V2 (V1 + byte 23, tx_dropped_sat -- uart_owner's TX-ring
+ * drop counter, saturating, 255 = "254 or more") -- 2026-08-23, the
+ * DIAG-frame-went-dark investigation: this byte was added specifically
+ * because it needed to be readable on a channel PROVEN to still arrive when
+ * Frame B (DIAG) itself has gone dark, which ruled out widening DIAG
+ * instead. safety_apply_status() (safety_link.c) accepts EITHER length --
+ * an older Pico sending 23 and a newer one sending 24 must both keep
+ * working, in both directions of independent flashing (see
+ * firmware/SaftyFW/src/tasks/link_frame.h's link_frame_pack_status() doc
+ * comment for the full skew-safety argument the Pico side observes to make
+ * that promise: it only ever sends 24 once it has positively confirmed,
+ * via ANNOUNCE_VERSION, that the ESP peer is built against protocol_version
+ * >= 6). SAFETY_LINK_STATUS_FRAME_LEN kept as an alias of the V1 length --
+ * every existing reference wants "the original, always-valid prefix". */
+#define SAFETY_LINK_STATUS_FRAME_LEN_V1 23u
+#define SAFETY_LINK_STATUS_FRAME_LEN_V2 24u
+#define SAFETY_LINK_STATUS_FRAME_LEN    SAFETY_LINK_STATUS_FRAME_LEN_V1
 
 /* Length of the Pico's power frame (SAFETY_CMD_POWER / Frame E,
  * CommonFW/docs/LINK_PROTOCOL.md sec 6), byte-for-byte
@@ -215,11 +231,76 @@ extern "C" {
 #define SAFETY_LINK_TRIP_EVENT_CHANNELS 3u
 
 /* Length of the PC-facing GET_STATUS payload -- the frame above plus the
- * ESP-measured age -- as specified in uart_task_ids.h. */
-#define SAFETY_LINK_STATUS_PAYLOAD_LEN 25u
+ * ESP-measured age -- as specified in uart_task_ids.h.
+ *
+ * 2026-08-23: grew from 25 to 27 (byte25 tx_dropped_sat, byte26 extra-flags
+ * bit0 tx_dropped_known) -- closing the last hop of the DIAG-frame-went-dark
+ * investigation's drop counter, which reached SaftyFW's own Frame A (byte
+ * 23 there) and safety_link_status_t's cache but stopped there, invisible to
+ * the PC tool. Not version-gated the way Frame A itself had to be: this
+ * payload only ever crosses the PC<->ESP link, which already hard-gates on
+ * devices.FirmwareVersion.compatible (an EQUALITY check on
+ * UART_PROTOCOL_VERSION) before the PC tool sends ANY command at all -- by
+ * the time this specific reply is built, PC and ESP are already confirmed on
+ * the same wire contract, so there is no skew window to protect against the
+ * way there was between two independently-flashed processors on the
+ * isolated link. */
+#define SAFETY_LINK_STATUS_PAYLOAD_LEN_V1 25u
+#define SAFETY_LINK_STATUS_PAYLOAD_LEN_V2 27u
+#define SAFETY_LINK_STATUS_PAYLOAD_LEN    SAFETY_LINK_STATUS_PAYLOAD_LEN_V2
 
-/* Length of the PC-facing GET_LINK_STATS payload (uart_task_ids.h). */
-#define SAFETY_LINK_STATS_PAYLOAD_LEN 19u
+/* byte26 (V2 only): extra flags beyond the original byte1 (which has no
+ * spare bits left -- see safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN
+ * comment, same exhaustion on the Pico-facing side). */
+#define SAFETY_LINK_STATUS_EXTRA_FLAG_TX_DROPPED_KNOWN 0x01u
+
+/* Length of the PC-facing GET_LINK_STATS payload (uart_task_ids.h).
+ *
+ * 2026-08-23: grew twice the same day, both times additive, neither
+ * version-gated -- this payload only ever crosses the PC<->ESP link, already
+ * hard-gated on UART_PROTOCOL_VERSION equality before any command is sent at
+ * all (same reasoning SAFETY_LINK_STATUS_PAYLOAD_LEN's own comment gives).
+ *   19 -> 23 (bytes19..22, broadcast_dropped u32 LE): the ESP-side half of
+ *     the DIAG-frame-went-dark investigation's first "count what gets
+ *     discarded" ask. Always real -- purely local to this ESP, never
+ *     depends on what the Pico has sent -- so no "known" bit needed.
+ *   23 -> 31 (bytes23..26 diag_applied, bytes27..30 power_applied, both u32
+ *     LE): real "applied N times" counters for DIAG/POWER, added once
+ *     broadcast_dropped==0 and tx_dropped==0 both measured clean on
+ *     hardware while DIAG stayed permanently dark -- ruling out both TX-ring
+ *     loss and inbox-full loss meant the open question became "has DIAG
+ *     actually been applied more than once at all", which
+ *     safety_link_status_t's diag_ever_received (a one-shot bool) cannot
+ *     answer and diag_uptime_ms cannot answer reliably (an SWD halt of the
+ *     Pico can freeze/perturb its own clock mid-investigation, but cannot
+ *     un-increment this counter). Also always real, same reasoning as
+ *     broadcast_dropped. */
+#define SAFETY_LINK_STATS_PAYLOAD_LEN_V1 19u
+#define SAFETY_LINK_STATS_PAYLOAD_LEN_V2 23u
+#define SAFETY_LINK_STATS_PAYLOAD_LEN_V3 31u
+/* V3 -> V4 (51): bytes31..34 frames_deframed, bytes35..38
+ * frames_routed_nowhere, bytes39..42 frame_length_mismatch, bytes43..46
+ * frame_crc_mismatch, bytes47..50 frame_resync (all u32 LE) -- the
+ * deframer/dispatch-level counters uart_protocol_t now keeps, see
+ * safety_link_stats_t's own doc comment on these five fields for why they
+ * were added. Same additive/not-version-gated reasoning as V2/V3. */
+#define SAFETY_LINK_STATS_PAYLOAD_LEN_V4 51u
+/* V4 -> V5 (60): bytes51..54 dequeued_total, bytes55..58 unmatched_cmd_count
+ * (both u32 LE), byte59 last_unmatched_cmd_byte (u8) -- safety_link_stats_t's
+ * own doc comment on these three fields has the full "why" (the drain-level
+ * follow-up once frames_deframed proved DIAG/POWER arrive CRC-valid and
+ * broadcast_dropped proved the inbox isn't backing up). Same additive/
+ * not-version-gated reasoning as V2/V3/V4. */
+#define SAFETY_LINK_STATS_PAYLOAD_LEN_V5 60u
+/* V5 -> V6 (96): bytes60..95, nine u32 LE per-command dequeue counts (see
+ * safety_link_stats_t's own doc comment on cmd_status_count etc. for the
+ * exact field order/offsets and the "why now" reasoning) -- the measurement
+ * that ends the DIAG-frame-went-dark investigation's inference phase: reads
+ * exactly what every dequeued message's command byte actually was, rather
+ * than continuing to rule hypotheses out one counter at a time. Same
+ * additive/not-version-gated reasoning as V2-V5. */
+#define SAFETY_LINK_STATS_PAYLOAD_LEN_V6 96u
+#define SAFETY_LINK_STATS_PAYLOAD_LEN    SAFETY_LINK_STATS_PAYLOAD_LEN_V6
 
 /* Length of the PC-facing GET_DIAG / GET_TRIP_EVENT payloads
  * (uart_task_ids.h). */
@@ -489,6 +570,17 @@ typedef struct {
     float    current_a[3];   /* current sense 1..3, amps */
     bool     fault_asserted; /* what this firmware is driving on GPIO6 */
 
+    /* V2 status frame (byte 23, SAFETY_LINK_STATUS_FRAME_LEN_V2) --
+     * 2026-08-23. tx_dropped_known is false (and tx_dropped_sat meaningless)
+     * whenever the most recently applied status frame was V1-length (23) --
+     * an older Pico, or one that has not yet confirmed this ESP supports V2
+     * (see safety_link.h's SAFETY_LINK_STATUS_FRAME_LEN comment). Same
+     * "false/meaningless until proven otherwise" convention as
+     * power_ever_received/diag_ever_received below, at Frame-A scope
+     * instead of a whole separate frame's. */
+    bool     tx_dropped_known;
+    uint8_t  tx_dropped_sat; /* saturating uart_owner TX-ring-drop count, Pico-side; 255 = "254 or more" */
+
     /* SAFETY_CMD_POWER (Frame E) telemetry -- ROADMAP.md M5/M6, TODO.md
      * 10.10. NaN/false fields below mean "never received" or "not a valid
      * reading", same convention as tc_temp_c/cj_temp_c above; a board with
@@ -563,12 +655,148 @@ typedef struct {
 typedef struct {
     uint32_t frames_sent;     /* requests handed to uart_protocol_send (retransmissions
                                * happen inside that call and are not counted again) */
-    uint32_t frames_received; /* well-formed status frames accepted */
+    /* well-formed GET_STATUS (Frame A) replies accepted -- ONLY that frame
+     * type, despite the generic-sounding name. 2026-08-23, the DIAG-frame-
+     * went-dark investigation: this field was read, more than once this
+     * session, as "total frames received of any kind" -- it never was.
+     * DIAG/POWER/TRIP_EVENT/FW_VERSION arriving and applying correctly
+     * would never move this counter even in a perfectly healthy build; its
+     * staying in lockstep with frames_sent at exactly the poll rate is
+     * therefore NOT evidence that other frame types are being dropped, only
+     * that GET_STATUS replies keep arriving. See diag_applied/power_applied
+     * below for the counters that actually answer "has DIAG/POWER been
+     * applied more than once" -- added specifically because this field
+     * cannot. */
+    uint32_t frames_received;
     uint32_t frame_errors;    /* malformed/unexpected payloads seen by this driver,
                                * plus uart_owner's line-error count for UART1 */
     uint32_t timeouts;        /* requests that produced no usable answer (no ACK,
                                * a NACK, or an ACK with no status frame behind it) */
     uint16_t poll_period_ms;  /* current period; 0 = polling off */
+    /* 2026-08-23, the DIAG-frame-went-dark investigation, continued: real,
+     * monotonic "this frame type was successfully applied N times" counts --
+     * unlike safety_link_status_t's diag_ever_received/power_ever_received
+     * (booleans, true forever after the first success, so they cannot
+     * distinguish "applied once" from "applied continuously"), and unlike
+     * diag_uptime_ms/the Pico's own clock fields (which an SWD halt of the
+     * Pico can perturb, and did, during this investigation -- a frozen
+     * uptime_ms does not by itself prove nothing since has arrived; a frozen
+     * diag_applied does). Incremented at the end of safety_apply_diag()/
+     * safety_apply_power() on every successful application, same
+     * "monotonic since start" contract as every other field here. */
+    uint32_t diag_applied;
+    uint32_t power_applied;
+    /* 2026-08-23, the DIAG-frame-went-dark investigation: BROADCAST frames
+     * (GET_STATUS/DIAG/POWER/TRIP_EVENT/FW_VERSION -- everything SaftyFW's
+     * link_task.c sends) whose delivery into this task's inbox failed
+     * because the inbox was already full -- uart_protocol_get_task_
+     * broadcast_dropped()'s own doc comment has the full "why this is a
+     * distinct number from frame_errors" reasoning: frame_errors only counts
+     * a frame that reached safety_apply_status()/_diag()/_power() and failed
+     * ITS OWN check; this counts a frame that never got that far at all. A
+     * lost BROADCAST has no ACK to withhold and the sender never retries, so
+     * this is the ONLY record of it happening anywhere. */
+    uint32_t broadcast_dropped;
+    /* 2026-08-23, the DIAG-frame-went-dark investigation, final round:
+     * diag_applied/power_applied pinned at exactly 1 per boot even with
+     * tx_dropped==0 (Pico TX ring, confirmed live by SWD read) and
+     * broadcast_dropped==0 (this ESP's per-task inbox, confirmed live by a
+     * real nonzero reading during a reflash burst) both clean -- meaning
+     * neither bracket of the pipeline was losing frames, yet the frames
+     * were still vanishing somewhere between them. These five mirror
+     * uart_protocol_t's own deframer/dispatch-level counters (see that
+     * struct's doc comment for the full "why five, why now" reasoning) --
+     * confirmed by reading the whole of handle_raw_frame()/
+     * uart_protocol_rx_task() first that nothing already existed at this
+     * layer under another name. */
+    uint32_t frames_deframed;       /* CRC-valid frames of ANY type/dest this port pulled
+                                     * off the wire -- upstream of every type-based branch,
+                                     * including GET_STATUS/DIAG/POWER/TRIP_EVENT/FW_VERSION
+                                     * alike (unlike frames_received above, which is
+                                     * GET_STATUS only) */
+    uint32_t frames_routed_nowhere; /* deframed, CRC-valid, but found no home: an
+                                     * unregistered dst_task, or an ACK/NACK matching no
+                                     * outstanding transaction. NOT a dst_device mismatch
+                                     * (normal traffic filtering, not a loss) */
+    uint32_t frame_length_mismatch; /* handle_raw_frame()'s own length check failed */
+    uint32_t frame_crc_mismatch;    /* handle_raw_frame()'s own CRC16/CCITT-FALSE check failed */
+    uint32_t frame_resync;          /* uart_protocol_rx_task()'s raw assembly buffer
+                                     * overflowed before a delimiter closed the frame --
+                                     * oversized/corrupt, discarded, resynced */
+    /* 2026-08-23, the DIAG-frame-went-dark investigation, one round further:
+     * frames_deframed proved DIAG/POWER ARE arriving CRC-valid (roughly the
+     * expected extra ~0.83 f/s over status alone), frames_routed_nowhere
+     * stayed 0 (not an unregistered dst_task), and broadcast_dropped stayed
+     * flat at 0 across 30s against a 4-deep inbox -- which, combined,
+     * ruled out "enqueued and never consumed" (that would fill a 4-deep
+     * queue within ~4s of a stalled consumer, not sit flat). The remaining
+     * question was whether safety_drain_inbox_ex() (the ONE registered
+     * consumer of this inbox -- confirmed by grep, see the comment at its
+     * own call to uart_protocol_receive()) is the thing draining them, and
+     * if so, why its switch isn't applying them. These two answer that
+     * directly rather than by further elimination. */
+    uint32_t dequeued_total;       /* every successful uart_protocol_receive() return inside
+                                    * safety_drain_inbox_ex(), counted BEFORE the switch --
+                                    * compare against frames_deframed minus frames_received
+                                    * (status): a match means the drain IS consuming
+                                    * DIAG/POWER and the loss is inside the switch; a gap
+                                    * means something other than this drain is emptying the
+                                    * queue */
+    uint32_t unmatched_cmd_count;  /* times the switch's default: branch was hit -- a
+                                    * dequeued, CRC-valid message whose payload[0] matched
+                                    * none of the switch's case labels */
+    uint8_t  last_unmatched_cmd_byte; /* the actual payload[0] value from the most recent
+                                       * unmatched_cmd_count hit -- meaningless (0) if
+                                       * unmatched_cmd_count is still 0. Recording the real
+                                       * byte rather than just a count on purpose: if DIAG is
+                                       * somehow dequeued with the wrong first byte, this is
+                                       * what shows what it actually was instead of leaving it
+                                       * to be inferred */
+    /* 2026-08-23, the DIAG-frame-went-dark investigation, the measurement
+     * that finally ends it: a per-command histogram of every message this
+     * drain actually dequeues, one field per switch case (see
+     * safety_count_cmd_byte()'s own doc comment, safety_link.c, for the full
+     * "why now" reasoning -- dequeued_total tracked frames_deframed almost
+     * exactly and unmatched_cmd_count stayed 0, yet diag_applied/
+     * power_applied both stayed 0 against ~80 unaccounted messages, which is
+     * only possible if the working "non-status traffic is DIAG/POWER"
+     * assumption was wrong). Summing all nine of these plus
+     * unmatched_cmd_count must equal dequeued_total exactly -- every
+     * dequeued message lands in exactly one bucket, never more than one,
+     * never none. */
+    uint32_t cmd_status_count;                  /* SAFETY_CMD_GET_STATUS (0x01) */
+    uint32_t cmd_fw_version_count;               /* SAFETY_CMD_FW_VERSION (0x0B) */
+    uint32_t cmd_update_status_count;            /* SAFETY_CMD_UPDATE_STATUS (0x14) */
+    uint32_t cmd_power_count;                    /* SAFETY_CMD_POWER (0x0E) */
+    uint32_t cmd_diag_count;                     /* SAFETY_CMD_DIAG (0x08) */
+    uint32_t cmd_trip_event_count;                /* SAFETY_CMD_TRIP_EVENT (0x0D) */
+    uint32_t cmd_ct_cal_count;                    /* KILNLINK_CT_CAL_CMD (0x1A) */
+    uint32_t cmd_config_page_count;               /* KILNLINK_CONFIG_PAGE_CMD (0x1F) */
+    uint32_t cmd_commit_config_rejected_count;    /* KILNLINK_COMMIT_CONFIG_REJECTED_CMD (0x20) */
+
+    /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
+     * cmd byte a dequeued frame carried, but says nothing about how LONG it
+     * was -- and the leading FW_VERSION theory (safety_poll_task() retries
+     * SAFETY_CMD_GET_FW_VERSION every poll cycle until peer_version_known
+     * latches; safety_apply_fw_version() only requires msg.length >= 5 to
+     * latch it) hinges entirely on length. If every cmd_fw_version_count hit
+     * this boot has length == 1 (the ESP's own 1-byte request length, never
+     * a real >=5-byte Pico reply), that is what is silently defeating
+     * safety_parse_fw_version() and keeping the retry loop alive -- and it
+     * would show here as last_fw_version_len pinned at 1 no matter how high
+     * cmd_fw_version_count climbs. Captured for every counted cmd, not just
+     * FW_VERSION, since it costs nothing extra here and the DIAG/POWER
+     * lengths (should either ever start arriving) are exactly the field the
+     * size-window hypothesis needs next. */
+    uint8_t last_status_len;
+    uint8_t last_fw_version_len;
+    uint8_t last_update_status_len;
+    uint8_t last_power_len;
+    uint8_t last_diag_len;
+    uint8_t last_trip_event_len;
+    uint8_t last_ct_cal_len;
+    uint8_t last_config_page_len;
+    uint8_t last_commit_config_rejected_len;
 } safety_link_stats_t;
 
 typedef struct {

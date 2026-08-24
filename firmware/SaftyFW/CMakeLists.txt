@@ -54,6 +54,10 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../CommonFW kilnlink)
 set(SAFTYFW_APP_SOURCES
     src/main.c
     src/boot_reason.c
+    src/clear_trip_diag.c
+    src/clear_trip_diag_codec.c
+    src/watchdog_overdue_diag.c
+    src/watchdog_overdue_diag_codec.c
     src/safety_guards.c
     src/spi_owner.c
     src/max31856.c
@@ -78,11 +82,13 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/relay_grace.c
     src/tasks/watchdog_task.c
     src/tasks/watchdog_gate.c
+    src/tasks/clock_health.c
     src/tasks/safety_core.c
     src/tasks/discrete_task.c
     src/tasks/thermo_task.c
     src/tasks/current_task.c
     src/tasks/uart_owner.c
+    src/tasks/uart_owner_tx_policy.c
     src/tasks/console_uart.c
     src/tasks/link_frame.c
     src/tasks/link_task.c

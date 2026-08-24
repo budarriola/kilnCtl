@@ -23,8 +23,14 @@
 #include "safety_core.h"
 
 #include <math.h>
+#include <stdio.h> // snprintf -- clear-trip outcome log line, see safety_core_task()
+#include <string.h> // memcpy -- exact float bit-pattern capture, see s_clear_trip_pre_tc_c_bits
 
 #include "FreeRTOS.h"
+#include "queue.h" // s_clear_trip_queue -- see safety_core_request_clear_trip()'s doc
+                    // comment in safety_core.h for why this is a queue rather than a
+                    // direct call; "queue" is not a link/uart-named header, fine for
+                    // check_isolation.ps1
 #include "task.h"
 
 #include "pico/time.h" // to_ms_since_boot(get_absolute_time()) -- hardware timing, not
@@ -36,10 +42,25 @@
 #include "watchdog_task.h"
 
 #include "boot_reason.h"
+#include "clock_health.h" // 2026-08-23 stalled-get_absolute_time() detector, see its own header comment
+#include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints that survive the reboot -- see its own header comment
+#include "config_store.h" // safety_tc_installed (param 0x0211) -- read directly here, every tick,
+                           // rather than routed through s_guard_cfg: s_guard_cfg is not yet wired to
+                           // config_store at all (see this file's own header comment on that Phase 9
+                           // gap), and adding this one field to that pipeline would either have to
+                           // fix the whole gap or add a second, inconsistent loading path. config_store_
+                           // get_full_record() is the same "read one specific field directly, right where
+                           // it's used" pattern config_store_get_tc_type()/link_task.c's own config
+                           // reads already establish -- no "link"/"uart" in this header's name, so this
+                           // stays legal under this file's own isolation rule above.
 #include "current_task.h" // any_current_present (S3/S4/S6b/S11) -- current_task is a real, independent
                            // Phase-6 producer (its own ADC, not link-derived), not link/uart-shaped,
                            // fine for check_isolation.ps1
 #include "discrete_task.h"
+#include "log_task.h" // clear-trip outcome logging, see safety_core_task()'s queue drain below --
+                       // not link/uart-shaped (drains into link_task's TX ring on the OTHER side of
+                       // that boundary, same as every task's log_task_log() call), fine for
+                       // check_isolation.ps1
 #include "reboot_announce.h" // SAFETY_CMD_ANNOUNCE_REBOOT (0x18) grace-window fact for
                               // S6b -- see that header's own doc comment for why this,
                               // and not link_task.h, is the safe way to cross the
@@ -61,7 +82,74 @@
                           // narrow fact (current_task.h/thermo_task.h above) rather than the link
                           // itself -- see safety_core_request_enable() for the one call site.
 
-#define SAFETY_CORE_STACK_WORDS   configMINIMAL_STACK_SIZE
+// 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation, final finding:
+// this was configMINIMAL_STACK_SIZE (256 words / 1KB) unmultiplied -- the
+// tightest stack budget of any task in this firmware, and the one task
+// whose call graph includes safety_guards.c's trip(), which vsnprintf()s
+// TWO %.1f (float, promoted to double through varargs) conversions plus a
+// %u into a 96-byte buffer (safety_guards.h's detail[96]) every time a guard
+// newly trips. newlib's (non-nano) floating-point vfprintf path is
+// documented as stack-hungry on Cortex-M0+ -- several hundred bytes for its
+// own internal frame alone, on top of safety_core_task()'s own already-
+// substantial locals (safety_core_build_input() returns a
+// safety_guard_input_t by value, held live in safety_core_task()'s frame
+// for the whole tick). 1KB total was not enough headroom for that call, and
+// vApplicationStackOverflowHook() (main.c) halts with interrupts disabled
+// rather than resetting -- so the actual failure was silent: the 1s hardware
+// watchdog (unfed, because nothing runs to feed it) reboots the board about
+// a second later, indistinguishable from any other reboot from the ESP's
+// side, landing exactly at the tick a guard's trip_mask should have flipped.
+// S5's blind-thermocouple trip is the one guard whose grace window
+// (blind_grace_s, 60s default) is long enough, and reliable enough now that
+// the TIMER_DBGPAUSE fix (main.c) actually lets the clock run, to make this
+// reproduce on a clean, predictable ~50-60s cycle -- but EVERY guard's
+// trip() call is the identical vsnprintf shape (see safety_guards.c's own
+// trip() call sites), so this was never S5-specific; S5 was just the guard
+// most likely to actually fire first under a normal bench boot with no
+// thermocouple fitted.
+//
+// link_task.c's own LINK_TASK_STACK_WORDS carries the matching lesson from
+// this exact codebase already (see that file's own comment, dated the same
+// day): configMINIMAL_STACK_SIZE*3 overflowed on real hardware and had to
+// go to *6.
+//
+// 2026-08-23 FOLLOW-UP, *4 was not enough either: *4 fixed the PERIODIC trip
+// path (safety_core_task() -> safety_guards_tick() -> trip() -> vsnprintf(),
+// proven on hardware: S5 now latches and stays latched) but CLEAR_TRIP still
+// rebooted the Pico every time, on a DIFFERENT, DEEPER path through the
+// exact same vsnprintf call:
+//   safety_core_task()'s clear-trip drain block (own locals: clear_trip_
+//   token/was_tripped/try_clear_result/outcome) -> safety_guards_try_clear()
+//   -- ONE MORE STACK FRAME than the periodic path ever adds -- which, when
+//   guard_condition_still_immediate() does NOT short-circuit it, falls
+//   through to safety_guards_clear() + safety_guards_tick() + trip() +
+//   vsnprintf(), the identical float-formatting call, now one frame deeper
+//   than the path that only just barely fit in *4.
+// On top of that, the periodic trip path does NOT call log_task_log() at
+// all yet (see safety_core_task()'s own "TODO (Phase 8): step 4... trip
+// itself is still not implemented here" comment, a few lines above the
+// clear-trip drain block) -- but the CLEAR path does, twice over: this
+// file's own outcome snprintf() (char msg[64], no floats) immediately
+// followed by log_task_log() itself, which allocates ITS OWN ~100-byte
+// log_entry_t (level+len+char msg[96]) plus a second, independent snprintf
+// call -- log_task.c:234, `entry.msg`, no floats but a real stack cost on
+// WHATEVER task calls log_task_log(), not something this file's earlier
+// stack-budget comment accounted for because the periodic trip path had
+// literally never reached it.
+//
+// So the clear path is proven deeper by TWO independent, additive causes,
+// not one -- an extra wrapper frame around the same expensive vsnprintf,
+// and an entirely separate log_task_log() call the periodic path doesn't
+// exercise. *6 (matching link_task's own already-established multiplier for
+// this exact class of problem) is the response: comfortable margin over the
+// now-understood deepest path, not just the shallowest one that happened to
+// get exercised first. The exact right number is still not measured on
+// hardware (see this file's own "stack high-water" discussion removed
+// 2026-08-23 from watchdog_task.c for distorting checkin timing) --
+// test/test_safety_core_stack_budget.c enforces the floor as a source-text
+// check so a future edit cannot silently shrink this back toward either
+// value that has already caused a live reboot.
+#define SAFETY_CORE_STACK_WORDS   (configMINIMAL_STACK_SIZE * 6)
 
 // KilnFW/TODO.md's "SAFETY_CMD_ANNOUNCE_REBOOT sent before the ESP reboots"
 // line: how long S6b's trip stays suppressed after the most recent
@@ -133,6 +221,31 @@ static TaskHandle_t s_task_handle = NULL;
 static safety_guard_cfg_t s_guard_cfg;
 static safety_guard_state_t s_guard_state;
 
+// CLEAR_TRIP queue -- see safety_core_request_clear_trip()'s doc comment in
+// safety_core.h for the full "why a queue, not a direct call" reasoning.
+// Small and non-blocking, same convention as relay_owner.h's own command
+// queue: a backlog here means safety_core_task's 100ms tick is not draining
+// it, which is a bug worth surfacing as a dropped request (xQueueSend(...,
+// 0) returning false), never a reason to block the caller. 2, not 1: a
+// second CLEAR_TRIP arriving in the same 100ms window as the first (e.g. a
+// GUI double-click) is a real, if unlikely, case worth not silently
+// dropping; there is no legitimate reason for a third to queue up before
+// the tick drains the first two. The queue holds a one-byte token with no
+// payload -- link_task has already validated trip_mask
+// (link_frame_decide_clear_trip()) before ever calling
+// safety_core_request_clear_trip(), so there is nothing left to carry.
+#define SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN 2
+static QueueHandle_t s_clear_trip_queue = NULL;
+
+// Single-writer statics backing safety_core_get_clear_trip_stats() --
+// s_clear_trip_requested written only inside safety_core_request_clear_trip()
+// (called only from link_task, so effectively single-core-writer too, same
+// as link_task.c's own s_context_frames_ok/bad); s_clear_trip_processed/
+// s_clear_trip_last_outcome written only inside safety_core_task() below.
+static uint32_t s_clear_trip_requested = 0;
+static uint32_t s_clear_trip_processed = 0;
+static safety_clear_trip_outcome_t s_clear_trip_last_outcome = SAFETY_CLEAR_TRIP_OUTCOME_NONE;
+
 // Trip-event capture (Frame D, SAFETY_CMD_TRIP_EVENT) -- written only from
 // safety_core_task() the instant safety_guards_tick() reports newly_tripped
 // (this task's own thread), read from any task via
@@ -155,11 +268,56 @@ static uint32_t s_trip_uptime_ms = 0;
 static float s_trip_tc_c = 0.0f; // meaningless while s_trip_seq == 0 -- the getter
 static float s_trip_deciding_threshold = 0.0f; // never reports these until a real trip sets them
 
+// 2026-08-23, the DIAG-content-frozen investigation: single-writer state for
+// clock_health_observe(), touched only from safety_core_build_input(), which
+// itself has exactly one call site (safety_core_task()'s own loop, paced by
+// vTaskDelayUntil() -- see that function below) -- same single-writer/no-lock
+// reasoning as every other plain static in this file. Zero-initialised,
+// matching clock_health.h's own "zero-initialise before first use" contract.
+static clock_health_state_t s_clock_health;
+
+// 2026-08-23, round 3 of the CLEAR_TRIP investigation: the differential
+// (S6a clear accepted and survives; S5 clear refused and crashes) rules out
+// stack depth for THIS branch specifically -- the refusal path
+// (safety_guards_try_clear() -> guard_condition_still_immediate() ->
+// s5_bad_read_now()) is structurally SHALLOWER than the accept path
+// (safety_guards_try_clear() -> safety_guards_clear() +
+// safety_guards_tick(), the same big function the periodic trip path
+// already proved survives at *6), yet it is the one that crashes. Read
+// exhaustively; found no C-level bug (no null deref, no array indexing, no
+// uninitialised field -- s5_bad_read_now()'s in->spi_failed/tc_valid/tc_c/
+// fault_bits are all plain, valid reads on a pointer alive for the whole
+// tick). One fact worth having pinned down precisely, though: once a guard
+// LATCHES, safety_guards_tick()'s very first line (`if (state->is_tripped)`)
+// short-circuits to the S9-only branch and never reaches S5's own
+// s5_bad_read_now() call again -- so guard_condition_still_immediate()'s S5
+// case is not just "the same check running one frame deeper", it is the
+// FIRST time s5_bad_read_now()/isnan(in->tc_c) has run via THIS call chain
+// since before the trip latched. These SWD-readable statics latch every
+// input guard_condition_still_immediate() is about to be handed, and a
+// before/after call counter, so the coordinator can read exactly what `in`
+// contained and confirm whether the call ever returned -- written here
+// (safety_core.c, hardware-linked) rather than in safety_guards.c (pure,
+// host-tested, deliberately free of anything hardware-facing) even though
+// the values describe safety_guards.c's own call, same split link_task.c's
+// diagnostic checkpoints already use for calls into CommonFW's codecs.
+static volatile uint32_t s_clear_trip_pre_call_count = 0;  // incremented immediately BEFORE safety_guards_try_clear()
+static volatile uint32_t s_clear_trip_post_call_count = 0; // incremented immediately AFTER it returns -- pre > post after a crash means it never came back
+static volatile uint8_t  s_clear_trip_pre_reason = 0;       // state->reason at the moment of the call (safety_trip_t)
+static volatile uint8_t  s_clear_trip_pre_tc_valid = 0;
+static volatile uint32_t s_clear_trip_pre_tc_c_bits = 0;    // raw IEEE-754 bit pattern of in->tc_c (memcpy, not a cast) -- exact NaN payload visible, not just "is it NaN"
+static volatile uint8_t  s_clear_trip_pre_fault_bits = 0;
+static volatile uint8_t  s_clear_trip_pre_spi_failed = 0;
+
 // Builds one tick's worth of safety_guard_input_t from the current live
 // snapshots -- factored out of safety_core_task()'s loop so
 // safety_core_request_clear_trip() below can build the exact same fresh
 // input for its re-evaluation retick (safety_guards_try_clear()) instead of
 // duplicating this construction.
+// Defined below, next to safety_core.h's outcome enum -- forward-declared
+// here because safety_core_task()'s log line above uses it before that point.
+static const char *clear_trip_outcome_str(safety_clear_trip_outcome_t outcome);
+
 static safety_guard_input_t safety_core_build_input(void)
 {
     // Phase 3: thermo_task now owns a real MAX31856 (max31856.c, ported
@@ -216,17 +374,36 @@ static safety_guard_input_t safety_core_build_input(void)
     thermo_snapshot_t thermo;
     (void)thermo_task_get_snapshot(&thermo);
 
+    // 2026-08-23, the DIAG-content-frozen investigation: ONE read of the
+    // hardware clock per tick, shared by both staleness checks below (was
+    // two independent to_ms_since_boot(get_absolute_time()) calls) and fed
+    // to clock_health_observe() so a stalled clock is detected from this
+    // exact read, not inferred. main.c now clears TIMER_DBGPAUSE at boot so
+    // this should not happen on this hardware any more (see that fix's own
+    // comment for the full mechanism) -- this check does not trust that it
+    // took. dt_s is the same fixed, tick-paced constant used elsewhere in
+    // this function (this function is single-call-site, see s_clock_health's
+    // own declaration comment), so clock_health_observe() is comparing this
+    // read against a genuinely reliable "how much wall-clock time really
+    // passed."
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    bool clock_stalled =
+        clock_health_observe(&s_clock_health, now_ms, (float)SAFTYFW_PERIOD_SAFETY_CORE_MS / 1000.0f);
+
     // SAFETY_CMD_ANNOUNCE_REBOOT grace window: this is the ONE place that
     // does the announced-timestamp-to-now arithmetic -- safety_guards.c
     // receives only the already-computed bool, per that struct field's own
     // doc comment. reboot_announce_get() returning false ("never announced
     // this boot") correctly collapses to reboot_grace_active = false, the
     // same "unknown means not-suppressed" default every other guard input
-    // in this function already uses.
+    // in this function already uses -- clock_stalled collapses to that same
+    // default now too: a stalled clock cannot honestly answer "still within
+    // the grace window", and the safe answer to an unanswerable question
+    // here is "not suppressed", exactly like a boot that was never announced
+    // at all.
     uint32_t announced_at_ms = 0;
     bool reboot_grace_active = false;
-    if (reboot_announce_get(&announced_at_ms)) {
-        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (!clock_stalled && reboot_announce_get(&announced_at_ms)) {
         // Unsigned subtraction is deliberately safe here even across a
         // pico/time wraparound: both operands come from the same
         // to_ms_since_boot() clock, so (now_ms - announced_at_ms) wraps
@@ -245,15 +422,19 @@ static safety_guard_input_t safety_core_build_input(void)
     context_snapshot_t ctx;
     bool ctx_published = link_task_get_context_snapshot(&ctx);
 
-    // "Stale context is no context" -- collapses never-received, stale, AND
-    // a version mismatch (DEGRADED_NO_CONTEXT, SAFETY_MODEL.md section 6a:
-    // "the context-dependent guards report as disabled") into the single
-    // context_valid fact safety_guards.c's own doc comment expects: it does
-    // not, and must not, need to re-derive any of these three conditions
-    // itself.
+    // "Stale context is no context" -- collapses never-received, stale, a
+    // version mismatch (DEGRADED_NO_CONTEXT, SAFETY_MODEL.md section 6a:
+    // "the context-dependent guards report as disabled"), AND now a stalled
+    // local clock into the single context_valid fact safety_guards.c's own
+    // doc comment expects: it does not, and must not, need to re-derive any
+    // of these four conditions itself. The clock_stalled case matters on its
+    // own merits, not just as belt-and-suspenders against main.c's fix: a
+    // dead ESP-side context read as fresh forever (age_ms pinned near zero
+    // because both operands come from the same stalled clock) is exactly the
+    // failure "stale context is no context" exists to prevent, and it is
+    // silent -- no counter, no log line, nothing -- without this check.
     bool context_valid = false;
-    if (ctx_published && ctx.valid && !link_task_get_degraded_no_context()) {
-        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (!clock_stalled && ctx_published && ctx.valid && !link_task_get_degraded_no_context()) {
         // Same wraparound-safe unsigned subtraction reasoning as
         // reboot_grace_active above -- both ctx.timestamp_ms and now_ms come
         // from the same to_ms_since_boot() clock.
@@ -350,12 +531,24 @@ static safety_guard_input_t safety_core_build_input(void)
     // borrowed_zone_index is real.
     bool sample_counter_advancing = false;
 
+    // safety_tc_installed (config param 0x0211) -- config_store_get_full_
+    // record() is a cheap cached-copy read (config_store_flash.c), safe to
+    // call every 100ms tick, same as config_store_get_tc_type()'s own use
+    // elsewhere. Inverted into safety_tc_not_installed_declared here (see
+    // that field's own doc comment in safety_guards.h for why the pure
+    // module's input struct deliberately uses the opposite polarity from
+    // the config field it is derived from).
+    config_store_record_t cfg_rec;
+    config_store_get_full_record(&cfg_rec);
+    bool safety_tc_not_installed_declared = (cfg_rec.safety_tc_installed == 0u);
+
     return (safety_guard_input_t){
         .tc_valid = thermo.valid,
         .tc_c = thermo.tc_c,
         .cj_c = thermo.cj_c,
         .fault_bits = thermo.fault_bits,
         .spi_failed = thermo.spi_failed,
+        .safety_tc_not_installed_declared = safety_tc_not_installed_declared,
         .estop_pressed = discrete_task_estop_pressed(),
         // S6a, the sibling of estop_pressed above and read exactly the same
         // way: discrete_task samples GPIO10 as `!gpio_get(...)` (active low)
@@ -444,11 +637,109 @@ static void safety_core_task(void *arg)
                                                                             &s_guard_cfg);
             s_trip_seq++; // wraps uint8_t -- see the variable's own doc comment
 
-            // TODO (Phase 8): log_task has no ring/drain/transport yet
-            // (task_priorities.h's own shell-only status) -- there is
-            // nowhere to log this trip to yet, so step 4 of the 4-step
-            // order (logging) is deliberately not implemented here rather
-            // than faked with a printf that goes nowhere real.
+            // TODO (Phase 8): step 4 of SAFETY_MODEL.md section 6's 4-step
+            // trip order (logging the trip itself) is still not implemented
+            // here -- log_task now exists (see the CLEAR_TRIP drain right
+            // below, which does use it), but wiring the ORIGINAL trip event
+            // to it is separate, later work, not this pass's.
+        }
+
+        // CLEAR_TRIP: drain at most one queued request per tick. Must run
+        // here, inside safety_core_task, using THIS tick's own `input` --
+        // see safety_core_request_clear_trip()'s doc comment in
+        // safety_core.h for why it may no longer be called directly from
+        // link_task's context. Non-blocking receive: a request sitting in
+        // the queue is picked up on the very next 100ms tick, never held up
+        // by, and never itself holding up, anything link_task or the link
+        // is doing.
+        uint8_t clear_trip_token;
+        if (xQueueReceive(s_clear_trip_queue, &clear_trip_token, 0) == pdTRUE) {
+            (void)clear_trip_token; // no payload, see s_clear_trip_queue's doc comment
+
+            // link_task already screened the "nothing tripped" case before
+            // enqueuing (link_frame_decide_clear_trip(), against a
+            // slightly-older read of trip_reason) -- was_tripped can still
+            // be false here if is_tripped changed in the window between
+            // that check and this dequeue (e.g. an E-stop-cycle clear, or a
+            // second queued request already resolved it). Not an error,
+            // just stale; safety_guards_try_clear() is skipped entirely in
+            // that case (nothing to retest against) --
+            // safety_guards_decide_clear_trip_outcome() (safety_guards.c,
+            // host-tested) is the pure classification of the two facts
+            // below into one of the three outcomes.
+            bool was_tripped = s_guard_state.is_tripped;
+            bool try_clear_result = false;
+            // 2026-08-23 round 3 diagnostic (SWD-readable BSS statics, kept
+            // for a live non-crash quick check) -- see statics' own comment
+            // above. SUPERSEDED as the authoritative record by
+            // clear_trip_diag_mark() below (round 4): the crash under
+            // investigation reboots the chip, and a watchdog reset zeroes
+            // .bss before anyone can read what these held -- see
+            // clear_trip_diag.h's own header comment for the full reasoning.
+            // Kept anyway because they are still readable for a manual,
+            // non-crashing single-step over SWD, which the scratch-register
+            // version does not need to bother offering.
+            uint8_t reason_u8 = 0;
+            uint8_t fault_bits_u8 = 0;
+            bool tc_valid_snapshot = false;
+            bool spi_failed_snapshot = false;
+            bool tc_c_is_nan_snapshot = false;
+            if (was_tripped) {
+                reason_u8 = (uint8_t)s_guard_state.reason;
+                fault_bits_u8 = input.fault_bits;
+                tc_valid_snapshot = input.tc_valid;
+                spi_failed_snapshot = input.spi_failed;
+                tc_c_is_nan_snapshot = isnan(input.tc_c) != 0;
+
+                s_clear_trip_pre_reason = reason_u8;
+                s_clear_trip_pre_tc_valid = tc_valid_snapshot ? 1u : 0u;
+                uint32_t tc_c_bits = 0;
+                memcpy(&tc_c_bits, &input.tc_c, sizeof(tc_c_bits)); // exact bit pattern, not a cast -- see static's own comment
+                s_clear_trip_pre_tc_c_bits = tc_c_bits;
+                s_clear_trip_pre_fault_bits = fault_bits_u8;
+                s_clear_trip_pre_spi_failed = spi_failed_snapshot ? 1u : 0u;
+                s_clear_trip_pre_call_count++;
+
+                // 2026-08-23 round 4: the reset-surviving checkpoint. Written
+                // immediately before the suspect call, with outcome not yet
+                // known (0/NONE) -- if the board reboots between here and
+                // the next mark(), THIS is the last stage that will read
+                // back after reset, which alone tells the coordinator the
+                // fault is inside (or entered by) safety_guards_try_clear().
+                clear_trip_diag_mark(CLEAR_TRIP_DIAG_STAGE_PRE_TRY_CLEAR, reason_u8, fault_bits_u8,
+                                      tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
+                                      0u);
+
+                try_clear_result = safety_guards_try_clear(&s_guard_state, &s_guard_cfg, &input);
+
+                s_clear_trip_post_call_count++; // reached iff the call above actually returned
+                clear_trip_diag_mark(CLEAR_TRIP_DIAG_STAGE_POST_TRY_CLEAR, reason_u8, fault_bits_u8,
+                                      tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
+                                      0u);
+            }
+            safety_clear_trip_outcome_t outcome =
+                safety_guards_decide_clear_trip_outcome(was_tripped, try_clear_result);
+            if (outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED) {
+                (void)relay_owner_clear_trip();
+            }
+
+            s_clear_trip_processed++;
+            s_clear_trip_last_outcome = outcome;
+
+            clear_trip_diag_mark(CLEAR_TRIP_DIAG_STAGE_PRE_OUTCOME_LOG, reason_u8, fault_bits_u8,
+                                  tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
+                                  (uint8_t)outcome);
+
+            char msg[64];
+            snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s",
+                     (unsigned long)s_clear_trip_requested, (unsigned long)s_clear_trip_processed,
+                     clear_trip_outcome_str(outcome));
+            log_task_log(outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED ? LOG_LEVEL_INFO : LOG_LEVEL_WARN,
+                         "clear_trip", msg);
+
+            clear_trip_diag_mark(CLEAR_TRIP_DIAG_STAGE_POST_LOG_TASK, reason_u8, fault_bits_u8,
+                                  tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
+                                  (uint8_t)outcome);
         }
 
         watchdog_task_checkin(WATCHDOG_CHECKIN_SAFETY_CORE);
@@ -556,32 +847,58 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
     return true;
 }
 
-// Explicit operator-acknowledged clear -- the only way out of a latched
-// trip (SAFETY_MODEL.md section 2). Re-evaluates against a fresh input
-// snapshot before honoring the clear (safety_guards_try_clear(), see its
-// own doc comment for exactly what this does and does not catch). If the
-// clear holds, tells relay_owner to leave TRIPPED; if refused, s_guard_state
-// is already freshly re-tripped by safety_guards_try_clear() and
-// relay_owner's own TRIPPED latch (set at the original trip) is untouched
-// and still correct -- nothing further to do in that branch.
-//
-// NOT YET CALLED FROM ANYWHERE in this build -- same honesty as
-// relay_owner_clear_trip()'s own header comment: the real trigger is
-// Phase 7's link_task CLEAR_TRIP (0x0A) command from the ESP/GUI, which
-// does not exist yet. This function is the policy/API half of that; wiring
-// an actual caller is a separate, later pass.
+// See safety_core.h's doc comment on this function for the full "why a
+// queue, not a direct call" history -- this is now purely an enqueue, never
+// a direct touch of s_guard_state. safety_core_task() (below) is the only
+// code that actually runs safety_guards_try_clear().
 bool safety_core_request_clear_trip(void)
 {
-    if (!s_guard_state.is_tripped) {
-        return true;
+    if (s_clear_trip_queue == NULL) {
+        return false;
     }
 
-    safety_guard_input_t input = safety_core_build_input();
-    bool cleared = safety_guards_try_clear(&s_guard_state, &s_guard_cfg, &input);
-    if (cleared) {
-        (void)relay_owner_clear_trip();
+    // Content unused -- see s_clear_trip_queue's own doc comment: this is a
+    // pure "a request is pending" signal, link_task already validated
+    // trip_mask before ever calling this function.
+    uint8_t token = 0;
+    if (xQueueSend(s_clear_trip_queue, &token, 0) != pdTRUE) {
+        return false;
     }
-    return cleared;
+    s_clear_trip_requested++;
+    return true;
+}
+
+// String form of safety_clear_trip_outcome_t for the log line
+// safety_core_task() emits once it dequeues and resolves a request --
+// factored out only so that log line and this comment stay next to the enum
+// definition's own doc comment in safety_core.h rather than drifting apart.
+static const char *clear_trip_outcome_str(safety_clear_trip_outcome_t outcome)
+{
+    switch (outcome) {
+    case SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED:
+        return "accepted";
+    case SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED:
+        return "refused-still-tripped";
+    case SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED:
+        return "refused-nothing-latched";
+    case SAFETY_CLEAR_TRIP_OUTCOME_NONE:
+    default:
+        return "none";
+    }
+}
+
+void safety_core_get_clear_trip_stats(uint32_t *out_requested, uint32_t *out_processed,
+                                       safety_clear_trip_outcome_t *out_last_outcome)
+{
+    if (out_requested) {
+        *out_requested = s_clear_trip_requested;
+    }
+    if (out_processed) {
+        *out_processed = s_clear_trip_processed;
+    }
+    if (out_last_outcome) {
+        *out_last_outcome = s_clear_trip_last_outcome;
+    }
 }
 
 bool safety_core_request_enable(bool enable)
@@ -598,6 +915,29 @@ bool safety_core_request_enable(bool enable)
     if (enable && !relay_energize_allowed_during_update(update_task_transfer_active())) {
         return false;
     }
+
+    // safety_tc_installed (config param 0x0211) refusal -- the other half
+    // of the S5 trade documented in safety_guards.c's grace-exceeded block
+    // and in config_store.h's own field comment. When the operator has
+    // declared the safety thermocouple not installed, S5 stops promoting a
+    // persistent bad-read streak to TRIP (it stays a permanent WARN
+    // instead) -- and that downgrade is only safe BECAUSE this function
+    // refuses the ON direction unconditionally whenever the same field is
+    // 0, with no time box, no accumulator, and no way for any other code
+    // path to re-grant heat while it is declared absent. Same "only the ON
+    // direction, de-energizing is always reachable" shape as the update-
+    // interlock check just above: a board correctly reporting itself
+    // untestable for heat must still be able to de-energize on command
+    // (e.g. an operator flipping a clear latched trip, or the normal
+    // GRACE-to-IDLE path), never refused in that direction.
+    if (enable) {
+        config_store_record_t cfg_rec;
+        config_store_get_full_record(&cfg_rec);
+        if (cfg_rec.safety_tc_installed == 0u) {
+            return false;
+        }
+    }
+
     // See safety_core.h's doc comment: deliberately a thin forward beyond
     // the check above, no second policy layer duplicating relay_owner's
     // own state machine. relay_owner_command_energize() already refuses
@@ -608,6 +948,15 @@ bool safety_core_request_enable(bool enable)
 
 bool safety_core_start(void)
 {
+    // Created before the task itself -- safety_core_request_clear_trip()
+    // (callable from link_task the instant this returns true) must never
+    // observe a NULL queue that safety_core_task would have created for
+    // itself a moment later.
+    s_clear_trip_queue = xQueueCreate(SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN, sizeof(uint8_t));
+    if (s_clear_trip_queue == NULL) {
+        return false;
+    }
+
     BaseType_t ok = xTaskCreate(safety_core_task, "safety_core", SAFETY_CORE_STACK_WORDS, NULL,
                                  SAFTYFW_PRIO_SAFETY_CORE, &s_task_handle);
     if (ok != pdPASS) {

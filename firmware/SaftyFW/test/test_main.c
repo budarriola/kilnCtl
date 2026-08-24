@@ -22,6 +22,13 @@ void run_test_snapshots(void);
 void run_test_boot_checkin_coverage(void);
 void run_test_watchdog_budget_coverage(void);
 void run_test_watchdog_gate(void);
+void run_test_kilnlink_inject_tc(void);
+void run_test_uart_owner_tx_policy(void);
+void run_test_clock_health(void);
+void run_test_safety_core_stack_budget(void);
+void run_test_clear_trip_diag_codec(void);
+void run_test_watchdog_overdue_diag_codec(void);
+void run_test_log_task_stack_budget(void);
 
 int main(void)
 {
@@ -39,6 +46,13 @@ int main(void)
     run_test_boot_checkin_coverage();
     run_test_watchdog_budget_coverage();
     run_test_watchdog_gate();
+    run_test_kilnlink_inject_tc();
+    run_test_uart_owner_tx_policy();
+    run_test_clock_health();
+    run_test_safety_core_stack_budget();
+    run_test_clear_trip_diag_codec();
+    run_test_watchdog_overdue_diag_codec();
+    run_test_log_task_stack_budget();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -42,13 +42,6 @@ void safety_guards_clear(safety_guard_state_t *state)
     safety_guards_reset(state);
 }
 
-bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
-                              const safety_guard_input_t *in)
-{
-    safety_guards_clear(state);
-    return !safety_guards_tick(state, cfg, in);
-}
-
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
     state->is_tripped = true;
@@ -69,6 +62,97 @@ static float effective_f(float cfg_val, float fallback)
 static uint16_t effective_u16(uint16_t cfg_val, uint16_t fallback)
 {
     return (cfg_val != 0u) ? cfg_val : fallback;
+}
+
+/* S5's single-tick "is this reading bad right now" test, factored out of
+ * safety_guards_tick()'s S5 block so safety_guards_try_clear()'s immediate-
+ * condition check (below) can ask the exact same question without
+ * duplicating -- and risking drifting out of sync with -- the trip logic's
+ * own definition of a bad read. See safety_guards_tick()'s S5 comment for
+ * why each term is included. */
+static bool s5_bad_read_now(const safety_guard_input_t *in)
+{
+    return in->spi_failed || !in->tc_valid || isnan(in->tc_c) ||
+           ((in->fault_bits & (SAFETY_THERMO_FAULT_OPEN | SAFETY_THERMO_FAULT_OVUV |
+                                SAFETY_THERMO_FAULT_TCRANGE)) != 0u);
+}
+
+/* 2026-08-23 hardware finding: safety_guards_try_clear() resets every
+ * graduated guard's elapsed-time accumulator to zero (safety_guards_clear())
+ * before its one-tick retest. For a guard whose trip condition needs several
+ * seconds-to-minutes of SUSTAINED input to re-fire (S5/S12/S13/S6b below),
+ * that reset means the retest tick almost never re-trips even when the
+ * underlying hazard is still happening RIGHT NOW -- observed live: clearing
+ * a latched S5 trip against a still-absent safety TC granted ~45s of
+ * heating-enabled operation with a genuinely blind sensor, because the
+ * cleared s5_bad_streak/s5_bad_elapsed_s had to re-accumulate from zero
+ * before WARN, let alone TRIP, could fire again. safety_guards_try_clear()'s
+ * own doc comment already documented the general "graduated guards don't
+ * necessarily re-trip on this exact call" limitation as an accepted scope
+ * limit -- what this function closes is the specific, worse case: heat gets
+ * PERMITTED, not just "trip not yet re-confirmed", while the immediate,
+ * single-tick-checkable condition is still true.
+ *
+ * Deliberately narrow: only the four guards below have a trip condition that
+ * is fully decidable from THIS tick's raw input alone (a level, not
+ * something that itself needs a window) -- S1/S2/S3/S9/S11 are graduated
+ * guards too, but do NOT have that property (S1 is a 3-tick debounce with
+ * no single-tick "the value itself is disqualifying" test short of the
+ * trip condition itself; S2/S3 need the ESP's already-windowed relay-
+ * correlation facts, which are just as reconstructable this tick as S5's
+ * bad-read test, but were not part of the reported hardware finding and are
+ * flagged, not fixed, here rather than guessed at under this pass's time
+ * budget; S11 requires comparing against last tick's value, which
+ * safety_guards_clear() also zeroes, so "is it frozen right now" is not
+ * even well-defined immediately after a clear). Returning false for any
+ * other reason leaves safety_guards_try_clear()'s existing one-tick-retest
+ * behaviour completely unchanged for every guard not listed here. */
+static bool guard_condition_still_immediate(safety_trip_t reason, const safety_guard_cfg_t *cfg,
+                                             const safety_guard_input_t *in)
+{
+    switch (reason) {
+    case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
+        return s5_bad_read_now(in);
+    case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 -- cj_c still over cj_max_c right now */
+        return in->tc_valid && !isnan(in->cj_c) &&
+               in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
+    case SAFETY_TRIP_BORROWED_STALE: /* S13 -- channel still not producing fresh samples */
+        return (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE ||
+                cfg->tc_source == SAFETY_TC_SOURCE_BOTH) &&
+               !in->sample_counter_advancing;
+    case SAFETY_TRIP_LINK_DEAD: /* S6b -- link still silent right now */
+        return !in->link_up;
+    default:
+        return false;
+    }
+}
+
+bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
+                              const safety_guard_input_t *in)
+{
+    /* Refuse before touching any accumulator at all, for the four guards
+     * whose trip condition is a plain level this tick's `in` already answers
+     * -- see guard_condition_still_immediate()'s own comment for why only
+     * these four and why this check has to run BEFORE safety_guards_clear()
+     * zeroes the state that would otherwise mask it. `state` is left
+     * completely untouched here (still is_tripped, same reason, same
+     * accumulators it had on entry) -- a refused clear must look exactly
+     * like a clear that was never attempted. */
+    if (state->is_tripped && guard_condition_still_immediate(state->reason, cfg, in)) {
+        return false;
+    }
+    safety_guards_clear(state);
+    return !safety_guards_tick(state, cfg, in);
+}
+
+safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tripped,
+                                                                      bool try_clear_result)
+{
+    if (!was_tripped) {
+        return SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED;
+    }
+    return try_clear_result ? SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED
+                             : SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED;
 }
 
 float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guard_cfg_t *cfg)
@@ -224,9 +308,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * tc_c to NaN still gets caught as a bad read rather than silently
      * falling through to S1/S11/S12 below with an un-flagged garbage
      * value. */
-    bool bad_read = in->spi_failed || !in->tc_valid || isnan(in->tc_c) ||
-                     ((in->fault_bits & (SAFETY_THERMO_FAULT_OPEN | SAFETY_THERMO_FAULT_OVUV |
-                                          SAFETY_THERMO_FAULT_TCRANGE)) != 0u);
+    bool bad_read = s5_bad_read_now(in);
 
     if (bad_read) {
         if (state->s5_bad_streak < UINT16_MAX) {
@@ -245,10 +327,37 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
 
             float grace = effective_f(cfg->blind_grace_s, BLIND_GRACE_S_DEFAULT);
             if (state->s5_bad_elapsed_s >= grace) {
-                trip(state, SAFETY_TRIP_SENSOR_INVALID,
-                     "blind for %.1fs (>= blind_grace_s %.1fs), %u consecutive bad reads",
-                     (double)state->s5_bad_elapsed_s, (double)grace, (unsigned)state->s5_bad_streak);
-                return true;
+                /* Declared-not-installed escape hatch (config param 0x0211,
+                 * safety_core.c's inversion into
+                 * in->safety_tc_not_installed_declared). SAFETY_MODEL.md
+                 * section 4's whole point for S5 is that a PERMANENTLY
+                 * blind processor must not silently preside over a firing
+                 * -- but "permanently blind" here means "no sensor was ever
+                 * wired up", a state the operator has explicitly declared,
+                 * not an unexplained hardware fault. Promoting to TRIP in
+                 * that case would just be a second, redundant way of saying
+                 * what s5_warn (set unconditionally above, regardless of
+                 * this branch) already says, while permanently blocking
+                 * every bench task this board is needed for. The trade this
+                 * makes is deliberately asymmetric and is NOT a weakening
+                 * on its own: safety_core_request_enable() refuses the ON
+                 * direction unconditionally whenever this same config field
+                 * is 0 (see that function's own comment), so downgrading
+                 * THIS trip to a permanent warning never grants heat by
+                 * itself -- the enable path is the one actually doing the
+                 * refusing, every time, with no time-boxing or accumulator
+                 * to reset. s5_bad_streak/s5_bad_elapsed_s keep
+                 * accumulating exactly as before (this branch does not
+                 * touch them) so diagnostics -- "how long has it actually
+                 * been blind" -- are unaffected. */
+                if (in->safety_tc_not_installed_declared) {
+                    state->s5_not_installed = true;
+                } else {
+                    trip(state, SAFETY_TRIP_SENSOR_INVALID,
+                         "blind for %.1fs (>= blind_grace_s %.1fs), %u consecutive bad reads",
+                         (double)state->s5_bad_elapsed_s, (double)grace, (unsigned)state->s5_bad_streak);
+                    return true;
+                }
             }
         }
 
@@ -262,6 +371,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     state->s5_bad_streak = 0;
     state->s5_bad_elapsed_s = 0.0f;
     state->s5_warn = false;
+    state->s5_not_installed = false;
 
     /* --- S1: absolute over-temperature ---------------------------------------
      * abs_max_temp_c == 0 means "not commissioned" -- never trip, and never

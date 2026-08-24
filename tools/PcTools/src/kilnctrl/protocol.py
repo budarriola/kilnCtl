@@ -82,7 +82,21 @@ DEFAULT_BAUD_RATE = 921600
 #: controller on the display panel -- GET_STATE plus INJECT, the latter
 #: letting this side feed a synthetic touch the firmware treats exactly like
 #: a real press. See docs/UART_PROTOCOL.md's "Version 5" section.
-UART_PROTOCOL_VERSION = 5
+#: Version 6 (2026-08-23): nothing about the PC<->ESP wire changed at all.
+#: uart_task_ids.h defines UART_PROTOCOL_VERSION as a plain alias of
+#: KILNLINK_PROTOCOL_VERSION (the *isolated* ESP<->Pico link's number), so
+#: widening that link's status frame by one byte -- tx_dropped_sat, an
+#: additive change entirely between the two processors -- moved this number
+#: too, as a side effect of the alias rather than as a statement about this
+#: protocol. Because FirmwareVersion.compatible below is a hard equality
+#: gate, leaving this at 5 made the firmware refuse every PC command with
+#: "device speaks v6, pc_tools speaks v5" (observed live, 2026-08-23).
+#: Bumping it here is the correct resolution while the alias stands: the two
+#: numbers are one number today, so they move together or the toolchain
+#: stops working. If the two links ever need to version independently, the
+#: fix is to give uart_task_ids.h its own constant rather than to relax the
+#: equality gate -- see that header's own comment on the alias.
+UART_PROTOCOL_VERSION = 6
 
 
 class Device(enum.IntEnum):

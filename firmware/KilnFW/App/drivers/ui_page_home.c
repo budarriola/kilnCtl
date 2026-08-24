@@ -19,6 +19,7 @@
 #include "profile_executor.h"
 #include "profile_feasibility.h"
 #include "profiles_http.h"
+#include "ui_page_home_graph.h"
 #include "run_state.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
@@ -288,6 +289,34 @@ static int32_t s_chart_planned_pts[UI_PAGE_HOME_CHART_POINTS];
 static lv_obj_t *s_chart_y_hi_label; /* top-left: current Y-axis max, in the user's unit_pref */
 static lv_obj_t *s_chart_y_lo_label; /* bottom-left: current Y-axis min, in the user's unit_pref */
 static lv_obj_t *s_chart_x_label;    /* top-right: the plotted window's time span, "0:00-MM:SS" */
+
+/* 2026-08-23 owner request ("the LCD profile graph should look like the web
+ * GUI's profile graph"): a small filled blue dot marking the current
+ * position along the planned curve, matching main_page.html's own current-
+ * position marker. A plain circular lv_obj (not a chart point-bullet style,
+ * which would also mark every OTHER point on the series) positioned every
+ * refresh_cb() tick via lv_chart_get_point_pos_by_id() -- that call does the
+ * axis-range-to-pixel mapping chart-internally, so this file does not
+ * reimplement lv_chart's own y = f(value) math a second time. Hidden
+ * whenever there is no live run to mark a position on (idle, or no plan
+ * points), same discipline as the Y/X overlay labels above. */
+static lv_obj_t *s_chart_now_dot;
+
+/* Web-match purple for the planned-profile curve -- main_page.html's own
+ * planned-curve stroke is `ctx.strokeStyle = '#96c'` (CSS 3-digit shorthand,
+ * i.e. #9966CC), read directly out of that file at ~line 1484. Kept as its
+ * own named color here rather than reusing UI_THEME_ACCENT_2 (a similar but
+ * NOT identical purple, 0xa15fd6) -- matching the reference image byte-for-
+ * byte is the point of this task, an approximate purple would not be. */
+#define UI_PAGE_HOME_PLAN_COLOR_HEX 0x9966cc
+
+/* Dash pattern for the planned curve, in pixels -- matches main_page.html's
+ * `ctx.setLineDash([6, 4])` exactly (6 on, 4 off). See
+ * chart_draw_event_cb()'s own comment for how this gets applied: LVGL's
+ * lv_chart has no built-in dashed-series style, so this is injected via a
+ * LV_EVENT_DRAW_TASK_ADDED hook rather than a style property. */
+#define UI_PAGE_HOME_PLAN_DASH_WIDTH_PX 6
+#define UI_PAGE_HOME_PLAN_DASH_GAP_PX   4
 
 static lv_obj_t *s_fire_btn;      /* merged Start/Stop button */
 static lv_obj_t *s_fire_btn_label;
@@ -632,6 +661,35 @@ static float plan_lookup(const profile_plan_point_t *pts, size_t n, float t)
     return pts[n - 1].c;
 }
 
+/* LV_EVENT_DRAW_TASK_ADDED hook on s_chart -- the only way to get a dashed
+ * series line out of LVGL 9.5's lv_chart (grepped this tree's own
+ * lv_chart.c/.h first: draw_series_line() builds one lv_draw_line_dsc_t per
+ * series from LV_PART_ITEMS style properties and calls lv_draw_line() with
+ * it -- there is no per-series "dashed" flag or style selector to reach any
+ * other way). lv_draw_line_dsc_t itself DOES support dashing natively
+ * (dash_width/dash_gap fields, draw/lv_draw_line.h) -- LVGL's line drawing
+ * primitive can dash, the chart widget just never exposes it -- so this
+ * intercepts each line draw task after the chart builds it and, for the one
+ * belonging to the planned-profile series (identified by its already-applied
+ * color, set from s_chart_planned_series's own color at lv_chart_add_series()
+ * time below), turns on the same 6-on/4-off dash main_page.html's
+ * `ctx.setLineDash([6, 4])` uses. Every other draw task (the actual-series
+ * line, any bullets, the card background/border) passes through untouched. */
+static void chart_draw_event_cb(lv_event_t *e)
+{
+    lv_draw_task_t *draw_task = lv_event_get_draw_task(e);
+    lv_draw_line_dsc_t *line_dsc = lv_draw_task_get_line_dsc(draw_task);
+    if (line_dsc == NULL) {
+        return; /* not a line task (rect/label/etc) -- nothing to dash */
+    }
+    lv_color_t plan_color = lv_color_hex(UI_PAGE_HOME_PLAN_COLOR_HEX);
+    if (!lv_color_eq(line_dsc->color, plan_color)) {
+        return; /* the actual-series line (or anything else), leave solid */
+    }
+    line_dsc->dash_width = UI_PAGE_HOME_PLAN_DASH_WIDTH_PX;
+    line_dsc->dash_gap = UI_PAGE_HOME_PLAN_DASH_GAP_PX;
+}
+
 static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -733,6 +791,9 @@ static void refresh_cb(lv_timer_t *timer)
          * Hidden here unconditionally; the running branch below is the only
          * place that ever un-hides it. */
         lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+        /* No planned curve, so no "current position along the curve" to mark
+         * either -- same honesty rule as the x-label above. */
+        lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         if (!isnan(val)) {
             int32_t v = (int32_t)lroundf(val);
             s_chart_actual_pts[0] = v;
@@ -867,7 +928,39 @@ static void refresh_cb(lv_timer_t *timer)
                 s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
             }
         }
-        if (have_range) {
+        /* 2026-08-23 owner request ("the LCD profile graph should look like
+         * the web GUI's profile graph"): main_page.html's Y axis is labelled
+         * at exactly two points, 0 at the bottom and the planned curve's own
+         * PEAK at the top -- not a padded min/max of whatever's plotted, the
+         * way this chart's axis worked before. Only applied when there IS a
+         * live plan to take a peak from (state_active && plan_n>0); every
+         * other case (idle-with-history, or a running state whose plan came
+         * back empty -- profile_feasibility_plan_curve()'s own -1/empty
+         * path) falls back to the previous data-driven min/max-with-padding
+         * behaviour below, since there is no "planned peak" to honestly
+         * anchor a 0..peak axis to in those cases. */
+        if (state_active && plan_n > 0) {
+            float peak_c = ui_page_home_plan_peak_c(plan_pts, plan_n);
+            if (!isnan(peak_c)) {
+                float peak_disp = unit_pref_convert(peak_c, unit, UNIT_PREF_KIND_ABSOLUTE);
+                int32_t axis_hi = (int32_t)lroundf(peak_disp);
+                int32_t axis_lo = 0;
+                if (axis_hi <= axis_lo) {
+                    axis_hi = axis_lo + 1; /* guard a degenerate/zero-peak profile */
+                }
+                lv_chart_set_axis_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, axis_lo, axis_hi);
+                char hi_buf[16], lo_buf[16];
+                snprintf(hi_buf, sizeof(hi_buf), "%d%s", (int)axis_hi, unit_pref_suffix(unit));
+                snprintf(lo_buf, sizeof(lo_buf), "%d%s", (int)axis_lo, unit_pref_suffix(unit));
+                lv_label_set_text(s_chart_y_hi_label, hi_buf);
+                lv_label_set_text(s_chart_y_lo_label, lo_buf);
+                lv_obj_remove_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_chart_y_hi_label, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_chart_y_lo_label, LV_OBJ_FLAG_HIDDEN);
+            }
+        } else if (have_range) {
             float range = hi - lo;
             if (range < 1.0f) range = 1.0f;
             float pad_c = range * 0.1f;
@@ -934,14 +1027,59 @@ static void refresh_cb(lv_timer_t *timer)
          * (2) + up to 15 bytes of a second duration + "|now" (4) + NUL = 43
          * max -- rounded up with margin, same discipline the other
          * snprintf-into-fixed-buffer call sites in this file already use. */
-        char span_buf[48];
+        /* 64: worst case four "%lu:%02lu" ticks (up to 10 bytes each for a
+         * uint32_t seconds count near UINT32_MAX / 60) + 3 "|" separators +
+         * NUL -- rounded up with margin. 2026-08-23: state_active's four
+         * ticks now use ui_page_home_x_ticks()/ui_page_home_format_mmss()
+         * (0, h/3, 2h/3, h in total-elapsed M:SS, no hour rollover) to match
+         * main_page.html's own four-tick x-axis exactly, instead of this
+         * page's earlier three-point 0/mid/end using format_duration()'s
+         * hh:mm:ss-beyond-an-hour shape. The idle-with-history branch below
+         * is UNCHANGED (still three points, still format_duration()) --
+         * main_page.html's four-tick spec is for the PLANNED-profile axis,
+         * which idle-with-history has none of (see this branch's own
+         * comment above). */
+        char span_buf[64];
         if (state_active && plan_n > 0) {
-            char mid_buf[16], end_buf[16];
-            format_duration((uint32_t)lroundf(horizon_s / 2.0f), mid_buf, sizeof(mid_buf));
-            format_duration((uint32_t)lroundf(horizon_s), end_buf, sizeof(end_buf));
-            snprintf(span_buf, sizeof(span_buf), "0:00|%s|%s", mid_buf, end_buf);
+            float ticks[4];
+            ui_page_home_x_ticks(horizon_s, ticks);
+            char t1_buf[16], t2_buf[16], t3_buf[16];
+            ui_page_home_format_mmss((uint32_t)lroundf(ticks[1]), t1_buf, sizeof(t1_buf));
+            ui_page_home_format_mmss((uint32_t)lroundf(ticks[2]), t2_buf, sizeof(t2_buf));
+            ui_page_home_format_mmss((uint32_t)lroundf(ticks[3]), t3_buf, sizeof(t3_buf));
+            snprintf(span_buf, sizeof(span_buf), "0:00|%s|%s|%s", t1_buf, t2_buf, t3_buf);
             lv_label_set_text(s_chart_x_label, span_buf);
             lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+
+            /* Current-position dot -- see its own static declaration comment.
+             * Only meaningful here (a live plan with a real horizon to place
+             * a position along); positioned on the ACTUAL series when a real
+             * sample already exists at that bucket, else on the PLANNED
+             * series (covers the first tick or two of a run before any
+             * actual sample has been recorded yet) so the dot never just
+             * vanishes at the very start of a firing. */
+            size_t now_idx =
+                ui_page_home_now_bucket_index(horizon_s, (float)st.total_elapsed_s, UI_PAGE_HOME_CHART_POINTS);
+            lv_point_t dot_pos;
+            bool have_dot_pos = false;
+            if (s_chart_actual_pts[now_idx] != LV_CHART_POINT_NONE) {
+                lv_chart_get_point_pos_by_id(s_chart, s_chart_actual_series, (uint32_t)now_idx, &dot_pos);
+                have_dot_pos = true;
+            } else if (s_chart_planned_pts[now_idx] != LV_CHART_POINT_NONE) {
+                lv_chart_get_point_pos_by_id(s_chart, s_chart_planned_series, (uint32_t)now_idx, &dot_pos);
+                have_dot_pos = true;
+            }
+            if (have_dot_pos) {
+                /* lv_chart_get_point_pos_by_id() returns a position relative
+                 * to the chart's own top-left content origin, per its own
+                 * doc comment (lv_chart.h) -- s_chart_now_dot is a CHILD of
+                 * s_chart, so lv_obj_set_pos() (parent-relative) is the right
+                 * call here, not lv_obj_align() or an absolute coordinate. */
+                lv_obj_set_pos(s_chart_now_dot, dot_pos.x - 3, dot_pos.y - 3);
+                lv_obj_remove_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
+            }
         } else if (!state_active && count > 1) {
             char mid_buf[16], end_buf[16];
             format_duration((uint32_t)lroundf(horizon_s / 2.0f), mid_buf, sizeof(mid_buf));
@@ -949,8 +1087,12 @@ static void refresh_cb(lv_timer_t *timer)
             snprintf(span_buf, sizeof(span_buf), "hist -%s|-%s|now", end_buf, mid_buf);
             lv_label_set_text(s_chart_x_label, span_buf);
             lv_obj_remove_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+            /* No live plan in this branch (idle with leftover history) --
+             * nothing to mark a "current position along the curve" on. */
+            lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
         }
         lv_chart_refresh(s_chart);
     }
@@ -1184,7 +1326,16 @@ lv_obj_t *ui_page_home_build(void)
      * UI_THEME_ACCENT_1, planned is UI_THEME_ACCENT_3, same colours this
      * codebase has used for those two concepts everywhere else). */
     s_chart_actual_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_1, LV_CHART_AXIS_PRIMARY_Y);
-    s_chart_planned_series = lv_chart_add_series(s_chart, UI_THEME_ACCENT_3, LV_CHART_AXIS_PRIMARY_Y);
+    /* 2026-08-23: was UI_THEME_ACCENT_3 (teal) -- now the exact web-match
+     * purple (see UI_PAGE_HOME_PLAN_COLOR_HEX's own comment). This color is
+     * also how chart_draw_event_cb() (registered just below) picks the
+     * planned line's draw task out from the actual line's, so it must stay
+     * in sync with that macro. */
+    s_chart_planned_series =
+        lv_chart_add_series(s_chart, lv_color_hex(UI_PAGE_HOME_PLAN_COLOR_HEX), LV_CHART_AXIS_PRIMARY_Y);
+    /* Dashing hook -- see chart_draw_event_cb()'s own comment for why this is
+     * the only way to get a dashed lv_chart series line in LVGL 9.5. */
+    lv_obj_add_event_cb(s_chart, chart_draw_event_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
     for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
         s_chart_actual_pts[i] = LV_CHART_POINT_NONE;
         s_chart_planned_pts[i] = LV_CHART_POINT_NONE;
@@ -1227,6 +1378,23 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_radius(s_chart_x_label, 4, 0);
     lv_obj_align(s_chart_x_label, LV_ALIGN_TOP_RIGHT, -2, 2);
     lv_obj_add_flag(s_chart_x_label, LV_OBJ_FLAG_HIDDEN);
+
+    /* Current-position dot -- see its own static declaration comment above.
+     * 6px filled circle, blue, matching main_page.html's current-position
+     * marker; positioned every refresh_cb() tick via
+     * lv_chart_get_point_pos_by_id(), built hidden like the labels above
+     * (only shown once refresh_cb() has a real "now" to mark). Zero border
+     * (a plain filled dot, not a ring) so it reads as a single solid marker
+     * against the dark card background at this size. */
+    s_chart_now_dot = lv_obj_create(s_chart);
+    lv_obj_remove_flag(s_chart_now_dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_chart_now_dot, 6, 6);
+    lv_obj_set_style_radius(s_chart_now_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_chart_now_dot, lv_color_hex(0x2196f3), 0); /* plain blue, matches the web dot */
+    lv_obj_set_style_bg_opa(s_chart_now_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chart_now_dot, 0, 0);
+    lv_obj_set_style_pad_all(s_chart_now_dot, 0, 0);
+    lv_obj_add_flag(s_chart_now_dot, LV_OBJ_FLAG_HIDDEN);
 
     /* 2026-08-21 owner request: "remove the zone [] section" -- no zone row
      * widgets are built on this page any more (see s_zone_count's own comment

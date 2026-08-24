@@ -488,14 +488,95 @@
  *   bytes15..18 = current sense 2, f32 LE, amps
  *   bytes19..22 = current sense 3, f32 LE, amps
  *   bytes23..24 = age of this data, u16 LE, ms (65535 = never received)
+ *   byte25    = Pico TX-ring drop count, saturating u8, 255 = "254 or more"
+ *               (2026-08-23, the DIAG-frame-went-dark investigation --
+ *               mirrors SaftyFW's own Frame A V2 byte 23, kilnlink/
+ *               link_frame.h's LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX). Only
+ *               meaningful when byte26 bit0 is set.
+ *   byte26    = extra flags: bit0 tx_dropped_known (byte25 is real data --
+ *               the Pico sent a V2, 24-byte status frame this boot; clear
+ *               means the Pico only ever sent V1/23-byte frames, or has not
+ *               sent one yet, and byte25 must be read as "unknown", never
+ *               as a real zero)
  *
  * GET_LINK_STATS response payload:
  *   byte0      = SAFETY_CMD_GET_LINK_STATS (0x04)
  *   bytes1..4  = frames sent,     u32 LE
- *   bytes5..8  = frames received, u32 LE
+ *   bytes5..8  = frames received -- GET_STATUS (Frame A) replies ONLY,
+ *                despite the name; see safety_link_stats_t::frames_received's
+ *                own doc comment (safety_link.h) before reading this as
+ *                "total frames of any kind" -- it never was, and DIAG/POWER
+ *                staying dark while this climbs in lockstep with bytes1..4
+ *                is not by itself evidence they are being dropped
  *   bytes9..12 = CRC/framing errors, u32 LE
  *   bytes13..16= timeouts, u32 LE
  *   bytes17..18= poll period, u16 LE, ms
+ *   bytes19..22= BROADCAST frames dropped (task-7 inbox was full when one
+ *                arrived), u32 LE (2026-08-23, the DIAG-frame-went-dark
+ *                investigation -- always a real count, never "unknown":
+ *                purely local to this ESP, unlike GET_STATUS's
+ *                tx_dropped_sat above which depends on what the Pico sent)
+ *   bytes23..26= DIAG applied count, u32 LE -- real "safety_apply_diag()
+ *                succeeded N times" counter, added same investigation once
+ *                tx_dropped_sat==0 and broadcast_dropped==0 both measured
+ *                clean while DIAG stayed dark on the ESP; distinguishes
+ *                "applied once, ever" from "applying repeatedly", which
+ *                diag_ever_received (a one-shot bool) cannot, and does not
+ *                depend on the Pico's own clock the way diag_uptime_ms does
+ *                (an SWD halt of the Pico can perturb that clock; it cannot
+ *                un-increment this counter)
+ *   bytes27..30= POWER applied count, u32 LE, same reasoning as DIAG above
+ *   bytes31..34= frames deframed, u32 LE -- CRC-valid frames of ANY type or
+ *                destination this UART port pulled off the wire, upstream
+ *                of every type-based branch (unlike bytes5..8, which is
+ *                GET_STATUS replies only -- see that field's own note above)
+ *   bytes35..38= frames routed nowhere, u32 LE -- deframed, CRC-valid, but
+ *                addressed to an unregistered task, or an ACK/NACK matching
+ *                no outstanding transaction (NOT a dst_device mismatch,
+ *                which is normal traffic filtering)
+ *   bytes39..42= frame length mismatches, u32 LE (deframer's own length
+ *                check failed)
+ *   bytes43..46= frame CRC mismatches, u32 LE (deframer's own CRC16/
+ *                CCITT-FALSE check failed)
+ *   bytes47..50= frame resyncs, u32 LE (oversized/corrupt frame, assembly
+ *                buffer overflowed before a delimiter closed it)
+ *                (bytes31..50 are V4, added 2026-08-23 once frames_
+ *                deframed itself was the only number left that could still
+ *                distinguish "the Pico never sent it" from "it arrived and
+ *                was lost below the per-task inbox")
+ *   bytes51..54= total messages dequeued from the safety inbox by
+ *                safety_drain_inbox_ex() (the confirmed sole consumer of
+ *                that inbox), u32 LE, counted BEFORE the dispatch switch --
+ *                compare against bytes31..34 minus bytes5..8 (frames
+ *                deframed minus GET_STATUS replies) to tell "the drain is
+ *                consuming DIAG/POWER and losing them in the switch" apart
+ *                from "something else is emptying the inbox first"
+ *   bytes55..58= times that switch's default: branch was hit (a dequeued,
+ *                CRC-valid message whose first payload byte matched no
+ *                case), u32 LE
+ *   byte59     = the actual payload[0] value from the most recent
+ *                bytes55..58 hit, u8 -- meaningless (0) if bytes55..58 is
+ *                still 0
+ *                (bytes51..59 are V5, added 2026-08-23, same day as V4:
+ *                frames_deframed proved DIAG/POWER arrive CRC-valid at
+ *                roughly the expected rate; this narrows the remaining gap
+ *                to "does the one known consumer actually pull them out,
+ *                and if so what does it see")
+ *   bytes60..63= SAFETY_CMD_GET_STATUS (0x01) dequeue count, u32 LE
+ *   bytes64..67= SAFETY_CMD_FW_VERSION (0x0B) dequeue count, u32 LE
+ *   bytes68..71= SAFETY_CMD_UPDATE_STATUS (0x14) dequeue count, u32 LE
+ *   bytes72..75= SAFETY_CMD_POWER (0x0E) dequeue count, u32 LE
+ *   bytes76..79= SAFETY_CMD_DIAG (0x08) dequeue count, u32 LE
+ *   bytes80..83= SAFETY_CMD_TRIP_EVENT (0x0D) dequeue count, u32 LE
+ *   bytes84..87= KILNLINK_CT_CAL_CMD (0x1A) dequeue count, u32 LE
+ *   bytes88..91= KILNLINK_CONFIG_PAGE_CMD (0x1F) dequeue count, u32 LE
+ *   bytes92..95= KILNLINK_COMMIT_CONFIG_REJECTED_CMD (0x20) dequeue count,
+ *                u32 LE
+ *                (bytes60..95 are V6, added 2026-08-23, same day as V5: the
+ *                per-command histogram that ends the inference phase --
+ *                bytes60..95 plus bytes55..58 (unmatched_cmd_count) must sum
+ *                to exactly bytes51..54 (dequeued_total); every dequeued
+ *                message lands in exactly one of these ten buckets)
  *
  * SAFETY_CMD_FW_VERSION (0x0B, Pico -> ESP) and SAFETY_CMD_ANNOUNCE_VERSION
  * (0x0F, ESP -> Pico) share one layout (CommonFW/docs/LINK_PROTOCOL.md

@@ -62,11 +62,11 @@ extern "C" {
 
 /* Every CONFIG_REFERENCE.md secs 1-5 tunable, per COMMISSIONING.md sec 2.1's
  * param_id table -- 8 (sec 1) + 16 (sec 2) + 24 (sec 3) + 5 (sec 4) +
- * 4 (sec 5) = 57. Bump this (and safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE)
+ * 4 (sec 5) = 57, plus safety_tc_installed (0x0211, 2026-08-23) = 58. Bump this (and safety_cfg_store.c's SAFETY_CFG_PARAM_TABLE)
  * only when CONFIG_REFERENCE.md itself grows a field -- ids are permanent
  * (COMMISSIONING.md sec 2.1: "a field that is removed leaves its id burned,
  * never reused"), so this count only ever goes up. */
-#define SAFETY_CFG_PARAM_COUNT 57u
+#define SAFETY_CFG_PARAM_COUNT 58u
 
 /* One row of safety_cfg_store_get_by_index()'s output -- everything
  * safety_cfg_http.c's GET handler needs to emit one `params[]` entry.

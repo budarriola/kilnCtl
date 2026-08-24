@@ -56,7 +56,22 @@
 //    173     4  config_check_period_s
 //    177    27  ct_cal: 3 channels x 9 B each (calibrated u8 + gain f32 LE +
 //               offset f32 LE) -- unchanged shape/offset-within-block from v1
-//    204   300  reserved, 0xFF-filled (headroom for a future field)
+//    204     1  safety_tc_installed_marker (u8) -- carved out of the former
+//               300 B reserved block's first byte; see REC_OFF_SAFETY_TC_
+//               INSTALLED below. NOT a 0/1 bool on the wire: a record from
+//               before this field existed holds 0x00 here (confirmed on
+//               real hardware -- old config_store_pack() memcpy'd rec->
+//               reserved, and config_store_default() memset that array to
+//               0, so 0x00 -- not the erased-flash 0xFF this comment used
+//               to claim -- is what every pre-existing record actually
+//               contains). A "declared not installed" state must therefore
+//               be a positive, improbable assertion (SAFETY_TC_INSTALLED_
+//               MARKER_NOT_INSTALLED, 0xA5) rather than inferred from the
+//               byte's absence -- every other value (0x00 legacy, 0xFF
+//               erased flash, this build's own 0x01 "installed" marker,
+//               or any garbage byte) decodes as installed, the safe
+//               default. See unpack_v2_fields()'s comment at this offset.
+//    205   299  reserved, 0xFF-filled (headroom for a future field)
 //    504     4  record_crc32, over bytes [0, 504)
 //    508     4  reserved, 0xFF-filled (pad to CONFIG_STORE_RECORD_LEN)
 //    512  total = CONFIG_STORE_RECORD_LEN
@@ -108,9 +123,23 @@
 #define REC_OFF_CONFIG_CHECK_PERIOD_S  173u
 #define REC_OFF_CT_CAL                 177u
 #define REC_CT_CAL_CHANNEL_LEN         9u /* calibrated u8(1) + gain f32(4) + offset f32(4) */
-#define REC_OFF_RESERVED \
+#define REC_OFF_SAFETY_TC_INSTALLED \
     (REC_OFF_CT_CAL + CONFIG_STORE_CT_CAL_NUM_CHANNELS * REC_CT_CAL_CHANNEL_LEN) /* 204 */
-#define REC_RESERVED_LEN               300u
+#define REC_OFF_RESERVED               (REC_OFF_SAFETY_TC_INSTALLED + 1u) /* 205 */
+#define REC_RESERVED_LEN               299u
+
+// The one byte at REC_OFF_SAFETY_TC_INSTALLED is NOT a 0/1 bool -- see this
+// file's own layout-table comment above for the hardware-confirmed reason:
+// a record written before this field existed holds 0x00 there (not 0xFF),
+// so "not installed" must be a positive, improbable assertion rather than
+// anything inferable from an old record's incidental contents. 0xA5 was
+// picked because it is neither 0x00 (every legacy record), 0xFF (erased
+// flash / the old reserved-fill), nor 0x01 (this build's own "installed"
+// marker, chosen only for readability in a flash dump -- decode treats
+// every non-0xA5 byte identically, so 0x01 has no special status the
+// decoder actually depends on).
+#define SAFETY_TC_INSTALLED_MARKER_INSTALLED     0x01u
+#define SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED 0xA5u
 #define REC_OFF_CRC                    504u
 
 // --- v1 (legacy) byte layout -- kept ONLY for config_store_unpack()'s
@@ -290,6 +319,12 @@ void config_store_pack(const config_store_record_t *rec,
 
     pack_ct_cal(&out[REC_OFF_CT_CAL], rec->ct_cal, REC_CT_CAL_CHANNEL_LEN);
 
+    // Explicit sentinel encoding -- see unpack_v2_fields()'s comment at this
+    // same offset for why 0/1 was replaced with a positive assertion.
+    out[REC_OFF_SAFETY_TC_INSTALLED] = rec->safety_tc_installed
+                                            ? SAFETY_TC_INSTALLED_MARKER_INSTALLED
+                                            : SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED;
+
     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved));
     // bytes [REC_OFF_RESERVED + REC_RESERVED_LEN, REC_OFF_CRC) already 0xFF
     // from the initial memset -- further headroom.
@@ -361,6 +396,34 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     out->config_check_period_s = get_u32_le(&in[REC_OFF_CONFIG_CHECK_PERIOD_S]);
 
     unpack_ct_cal(&in[REC_OFF_CT_CAL], out->ct_cal, REC_CT_CAL_CHANNEL_LEN);
+
+    // ONLY the explicit sentinel SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED
+    // (0xA5) means "not installed" -- every other byte value decodes as
+    // installed. This is deliberately NOT "explicit 0 means not installed,
+    // anything else means installed" (what this comment used to claim):
+    // that polarity was checked against hardware and found wrong -- a
+    // record written by firmware from before this field existed holds
+    // 0x00 here, not 0xFF, because old config_store_pack() memcpy'd
+    // rec->reserved (a 300-byte array starting at this exact offset) over
+    // it, and config_store_default() left that array at memset(0). An
+    // "explicit 0 means not installed" decoder therefore read every
+    // pre-existing board as declared-absent on first boot of this
+    // firmware -- confirmed live: S5 silently downgraded to WARN and
+    // heat refused with nobody having declared anything. A positive,
+    // improbable sentinel closes that: 0x00 (every legacy record), 0xFF
+    // (erased flash / the old reserved-fill), 0x01 (this build's own
+    // "installed" marker), and any other garbage byte all decode as
+    // installed -- the safe default -- and ONLY a real SET_PARAM/
+    // COMMIT_CONFIG that has genuinely declared the sensor absent (which
+    // writes the sentinel explicitly, config_store_pack() below) reads
+    // back as not-installed. This is the same polarity direction as
+    // unpack_ct_cal()'s calibrated flag just above (an old/unknown byte
+    // decodes to the SAFE state, not the asserted one) -- the earlier
+    // "opposite polarity" framing of this comment was itself wrong, a
+    // symptom of the same unverified assumption this whole comment now
+    // corrects.
+    out->safety_tc_installed =
+        (in[REC_OFF_SAFETY_TC_INSTALLED] == SAFETY_TC_INSTALLED_MARKER_NOT_INSTALLED) ? 0u : 1u;
 
     memcpy(out->reserved, &in[REC_OFF_RESERVED], sizeof(out->reserved));
 }
@@ -462,6 +525,8 @@ void config_store_default(config_store_record_t *out)
                                                                      // gates it
     out->calibration_missing = true; // always true until a real commissioning
                                       // pass clears it -- see config_store.h
+    out->safety_tc_installed = 1u;   // default: installed -- see config_store.h's
+                                      // header comment on this field
 
     // Section 2: temperature guards -- CONFIG_REFERENCE.md section 2 defaults.
     out->firing_margin_c = 100.0f;

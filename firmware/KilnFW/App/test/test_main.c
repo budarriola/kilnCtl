@@ -34,6 +34,7 @@ void run_test_boot_guard(void);
 void run_test_boot_button(void);
 void run_test_crash_report(void);
 void run_test_watchdog_cfg(void);
+void run_test_ui_page_home_graph(void);
 // run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
 // its own separate executable (build_host_tests.ps1's third build+run step),
 // same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
@@ -73,6 +74,7 @@ int main(void)
     run_test_boot_button();
     run_test_crash_report();
     run_test_watchdog_cfg();
+    run_test_ui_page_home_graph();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

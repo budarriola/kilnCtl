@@ -99,6 +99,16 @@ class PeerConfig:
     default_elf: Callable[[], str]  # lazily resolves a repo-relative default path
     adapter_speed_khz: Optional[int]
     root: str
+    # USB serial number of the specific debug probe this peer must be reached
+    # through, or None to let OpenOCD pick whatever matching adapter it finds
+    # first. None is only safe while exactly one matching probe is plugged in:
+    # `interface/cmsis-dap.cfg` with no `adapter serial` binds to the first
+    # CMSIS-DAP device enumerated, so a second probe on the bench makes the
+    # choice silently arbitrary -- and "silently arbitrary" here means
+    # flashing or halting the wrong board. Overridable at runtime by the
+    # environment variable named in _PROBE_SERIAL_ENV below, for a bench where
+    # the probe has been swapped for another unit.
+    adapter_serial: Optional[str] = None
 
 
 _PEERS = {
@@ -115,6 +125,14 @@ _PEERS = {
         default_elf=_safty_fw_elf,
         adapter_speed_khz=5000,  # confirmed working this session
         root=_safty_fw_root(),
+        # Raspberry Pi Debug Probe, USB VID 2E8A PID 000C, serial recorded
+        # 2026-08-23 from the bench this firmware is developed on. Pinned
+        # deliberately: the ESP is reached through the ESP32-S3's own built-in
+        # USB JTAG (VID 303A PID 1001) and so can never be confused with this
+        # one, but a SECOND CMSIS-DAP probe would be indistinguishable from
+        # this one to `interface/cmsis-dap.cfg` alone. See adapter_serial's
+        # comment on PeerConfig.
+        adapter_serial="E66540F0A36C6E21",
     ),
 }
 
@@ -137,10 +155,38 @@ def _openocd_exe_or_raise() -> str:
     return exe
 
 
-def _speed_prefix(peer_cfg: PeerConfig) -> str:
-    if peer_cfg.adapter_speed_khz is None:
-        return ""
-    return f"adapter speed {peer_cfg.adapter_speed_khz}; "
+#: Environment variable that overrides the compiled-in PeerConfig.adapter_serial
+#: for the Pico. Set it to another probe's serial to use a different unit, or to
+#: the empty string to go back to "first matching adapter wins".
+_PROBE_SERIAL_ENV = "KILNCTL_PICO_PROBE_SERIAL"
+
+
+def _adapter_serial(peer_cfg: PeerConfig) -> Optional[str]:
+    """Which probe serial to bind to, environment override taking precedence.
+
+    An explicitly empty environment variable means "do not pin", which is not
+    the same as the variable being unset (fall back to the compiled-in value).
+    """
+    override = os.environ.get(_PROBE_SERIAL_ENV)
+    if override is not None:
+        override = override.strip()
+        return override or None
+    return peer_cfg.adapter_serial
+
+
+def _adapter_prefix(peer_cfg: PeerConfig) -> str:
+    """TCL preamble pinning the adapter and its speed, in that order.
+
+    `adapter serial` must precede `init` (it selects which USB device to open),
+    which every caller's TCL satisfies -- they all put this prefix first.
+    """
+    prefix = ""
+    serial = _adapter_serial(peer_cfg)
+    if serial:
+        prefix += f"adapter serial {serial}; "
+    if peer_cfg.adapter_speed_khz is not None:
+        prefix += f"adapter speed {peer_cfg.adapter_speed_khz}; "
+    return prefix
 
 
 def _run(peer: str, tcl_commands: str, timeout_s: int = 30) -> "tuple[bool, str]":
@@ -172,7 +218,7 @@ def program(peer: str, elf_path: Optional[str] = None) -> "tuple[bool, str]":
     # OpenOCD on Windows and sidestep the whole escaping question rather than
     # trying to double every backslash.
     elf_tcl = elf.replace("\\", "/")
-    tcl = f'{_speed_prefix(peer_cfg)}program "{elf_tcl}" verify reset exit'
+    tcl = f'{_adapter_prefix(peer_cfg)}program "{elf_tcl}" verify reset exit'
     return _run(peer, tcl, timeout_s=90)
 
 
@@ -189,19 +235,19 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
     # against the every function below that wasn't program(). None of this
     # module's non-program() functions had ever been exercised successfully
     # before that.
-    tcl = f"{_speed_prefix(peer_cfg)}init; reset {mode}; exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; reset {mode}; exit"
     return _run(peer, tcl)
 
 
 def halt(peer: str) -> "tuple[bool, str]":
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; halt; exit"
     return _run(peer, tcl)
 
 
 def resume(peer: str) -> "tuple[bool, str]":
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}init; resume; exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; resume; exit"
     return _run(peer, tcl)
 
 
@@ -213,7 +259,7 @@ def step(peer: str) -> "tuple[bool, str]":
     not resume after the step, it stays halted at the next instruction.
     """
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; step; exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; halt; step; exit"
     return _run(peer, tcl)
 
 
@@ -386,7 +432,7 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
         f"[expr {{0x{address:x} + $_kctl_i * {step}}}] $_kctl_arr($_kctl_i)]}}"
     )
     tail = "" if leave_halted else f" {_RESUME_TCL}"
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {dump};{tail} exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; halt; {dump};{tail} exit"
     return _run(peer, tcl)
 
 
@@ -406,7 +452,7 @@ def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple
     if cmd is None:
         raise ValueError(f"width must be one of {sorted(_MEM_WIDTH_WRITE_CMDS)}, got {width!r}")
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_speed_prefix(peer_cfg)}init; halt; {cmd} 0x{address:x} 0x{value:x}; exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; halt; {cmd} 0x{address:x} 0x{value:x}; exit"
     return _run(peer, tcl)
 
 
@@ -452,5 +498,5 @@ def read_registers(peer: str, target: "str | None" = None,
         '{puts [format "REG %-5s %s" $_kctl_n $_kctl_v]}'
     )
     tail = "" if leave_halted else f" {_RESUME_TCL}"
-    tcl = f"{_speed_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
+    tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
     return _run(peer, tcl)

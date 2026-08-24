@@ -725,8 +725,19 @@ static bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_
 {
     /* Length before payload[0]: a zero-length frame has no subcommand byte to
      * read, and the || below short-circuits in the right order only if the
-     * length test comes first. */
-    if (msg->length != SAFETY_LINK_STATUS_FRAME_LEN || msg->payload[0] != SAFETY_CMD_GET_STATUS) {
+     * length test comes first.
+     *
+     * 2026-08-23: accepts EITHER SAFETY_LINK_STATUS_FRAME_LEN_V1 (23) or _V2
+     * (24) -- never just one. An older Pico (23 bytes, no tx_dropped_sat)
+     * and a newer one (24 bytes) must both keep working here regardless of
+     * which side gets flashed first; rejecting either length would silence
+     * Frame A itself, the one channel this whole investigation proved still
+     * works when Frame B (DIAG) does not. See safety_link.h's
+     * SAFETY_LINK_STATUS_FRAME_LEN comment for the Pico-side half of this
+     * same skew-safety argument. */
+    if ((msg->length != SAFETY_LINK_STATUS_FRAME_LEN_V1 &&
+         msg->length != SAFETY_LINK_STATUS_FRAME_LEN_V2) ||
+        msg->payload[0] != SAFETY_CMD_GET_STATUS) {
         if (safety_lock(link)) {
             link->stats.frame_errors++;
             safety_unlock(link);
@@ -759,6 +770,20 @@ static bool safety_apply_status(SafetyLinkClass *link, const uart_proto_message_
     link->cached.current_a[0] = safety_read_f32_le(&p[11]);
     link->cached.current_a[1] = safety_read_f32_le(&p[15]);
     link->cached.current_a[2] = safety_read_f32_le(&p[19]);
+    /* Byte 23 -- only present on a V2-length frame (checked above, msg->length
+     * already verified to be exactly V1 or V2 by this point, nothing else).
+     * V1 leaves both fields at their prior cached value if not explicitly
+     * reset here, so tx_dropped_known is set unconditionally either way
+     * rather than only on the true branch -- a peer that regresses from V2
+     * to V1 mid-session (e.g. a rollback) must not leave a stale "known"
+     * flag pointing at a now-meaningless stale byte. */
+    if (msg->length == SAFETY_LINK_STATUS_FRAME_LEN_V2) {
+        link->cached.tx_dropped_known = true;
+        link->cached.tx_dropped_sat = p[23];
+    } else {
+        link->cached.tx_dropped_known = false;
+        link->cached.tx_dropped_sat = 0;
+    }
     link->cached_tick = xTaskGetTickCount();
     link->ever_received = true;
     link->stats.frames_received++;
@@ -819,6 +844,7 @@ static bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t
     /* bytes47..54 (energy_wh) intentionally not cached -- nothing in this
      * build's dashboard/LCD reads it yet; add a field here when it does. */
     link->cached.power_ever_received = true;
+    link->stats.power_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     safety_unlock(link);
     return true;
 }
@@ -871,6 +897,7 @@ static bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t 
     link->cached.diag_state = p[24];
     link->cached.diag_flags = p[25];
     link->cached.diag_ever_received = true;
+    link->stats.diag_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     safety_unlock(link);
     return true;
 }
@@ -991,6 +1018,86 @@ static bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_mess
  * ROADMAP.md "no wire codec carries a per-field COMMIT_CONFIG rejection
  * reason back to the ESP" loose end. Never cached: it is meaningful only to
  * the one commit that provoked it, exactly like CT_CAL/CONFIG_PAGE above. */
+/* 2026-08-23, the DIAG-frame-went-dark investigation, final measurement:
+ * dequeued_total proved this drain is the sole consumer and it IS pulling
+ * every deframed message out (dequeued_total tracked frames_deframed almost
+ * exactly), and unmatched_cmd_count stayed 0 (nothing hit the switch's
+ * default:) -- yet diag_applied/power_applied both stayed 0 while ~80
+ * messages over one 30s window were neither GET_STATUS nor logged as
+ * unmatched. That is only possible if those ~80 messages ARE matching one of
+ * the switch's OTHER real cases (FW_VERSION/UPDATE_STATUS/TRIP_EVENT/CT_CAL/
+ * CONFIG_PAGE/COMMIT_CONFIG_REJECTED), which would mean the working
+ * assumption that "the non-status traffic is DIAG and POWER" was simply
+ * wrong -- supported independently by six SWD samples of the Pico's own
+ * s_last_tx_cmd that saw 0x08 (DIAG) zero times out of six. This is the one
+ * measurement that settles it: a real per-command histogram, so the answer
+ * is read directly rather than inferred from what it is NOT. Called once per
+ * dequeued message with a length, right where the existing dequeued_total
+ * counter already sits, so every message this drain ever sees is counted
+ * exactly once, under exactly the same lock discipline as every other
+ * counter in this file (safety_lock()/safety_unlock() around each field
+ * write). Bytes that match no case still land in unmatched_cmd_count (see
+ * the switch's own default: branch) -- this function does not duplicate
+ * that, it only counts the ones that DO match a real case, one field per
+ * case, so summing all nine plus unmatched_cmd_count must equal
+ * dequeued_total exactly; if it does not, that mismatch is itself a finding
+ * worth reporting, not silently absorbed into a stray bucket. */
+/* `len` is msg.length, clamped by the caller to uint8_t (the wire's own
+ * length field is a byte, so no truncation risk) -- see last_fw_version_len
+ * etc.'s own doc comment in safety_link.h for why this is captured
+ * per-command rather than just counted. */
+static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t len)
+{
+    if (!safety_lock(link)) {
+        return;
+    }
+    switch (cmd) {
+    case SAFETY_CMD_GET_STATUS:
+        link->stats.cmd_status_count++;
+        link->stats.last_status_len = len;
+        break;
+    case SAFETY_CMD_FW_VERSION:
+        link->stats.cmd_fw_version_count++;
+        link->stats.last_fw_version_len = len;
+        break;
+    case SAFETY_CMD_UPDATE_STATUS:
+        link->stats.cmd_update_status_count++;
+        link->stats.last_update_status_len = len;
+        break;
+    case SAFETY_CMD_POWER:
+        link->stats.cmd_power_count++;
+        link->stats.last_power_len = len;
+        break;
+    case SAFETY_CMD_DIAG:
+        link->stats.cmd_diag_count++;
+        link->stats.last_diag_len = len;
+        break;
+    case SAFETY_CMD_TRIP_EVENT:
+        link->stats.cmd_trip_event_count++;
+        link->stats.last_trip_event_len = len;
+        break;
+    case KILNLINK_CT_CAL_CMD: /* == SAFETY_CMD_GET_CT_CAL, shared id */
+        link->stats.cmd_ct_cal_count++;
+        link->stats.last_ct_cal_len = len;
+        break;
+    case KILNLINK_CONFIG_PAGE_CMD: /* == SAFETY_CMD_GET_CONFIG_PAGE, shared id */
+        link->stats.cmd_config_page_count++;
+        link->stats.last_config_page_len = len;
+        break;
+    case KILNLINK_COMMIT_CONFIG_REJECTED_CMD:
+        link->stats.cmd_commit_config_rejected_count++;
+        link->stats.last_commit_config_rejected_len = len;
+        break;
+    default:
+        /* Not counted here -- the switch in safety_drain_inbox_ex() below
+         * already counts and records this exact case via
+         * unmatched_cmd_count/last_unmatched_cmd_byte. Never double-count
+         * the same byte in two places. */
+        break;
+    }
+    safety_unlock(link);
+}
+
 static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
                                    uart_proto_message_t *out_ct_cal, bool *out_got_ct_cal,
                                    uart_proto_message_t *out_config_page, bool *out_got_config_page,
@@ -1013,7 +1120,22 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
     bool want_commit_rejected = out_commit_rejected && out_got_commit_rejected;
 
     while (uart_protocol_receive(link->inbox, &msg, wait) == ESP_OK) {
+        /* 2026-08-23: this is the ONE registered consumer of link->inbox --
+         * confirmed by grepping every uart_protocol_receive() call site in
+         * this codebase; every other call site reads a DIFFERENT task's
+         * inbox on a DIFFERENT uart_protocol_t instance (uart_bridge.c's own
+         * UART_TASK_ID_SAFETY registration is on the PC-link's uart_proto,
+         * not link->proto -- two independent instances, two independent
+         * task-7 slots, no aliasing). Counted here, before the switch, so it
+         * can be compared against frames_deframed - frames_received (the
+         * non-status frame arrival rate) to tell "this drain is consuming
+         * them" apart from "something else is". */
+        if (safety_lock(link)) {
+            link->stats.dequeued_total++;
+            safety_unlock(link);
+        }
         if (msg.length >= 1) {
+            safety_count_cmd_byte(link, msg.payload[0], (uint8_t)msg.length); /* per-command histogram + length, see its own doc comment */
             switch (msg.payload[0]) {
             case SAFETY_CMD_GET_STATUS:
                 if (safety_apply_status(link, &msg)) {
@@ -1062,6 +1184,16 @@ static bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms,
                 }
                 break;
             default:
+                /* Dequeued, CRC-valid, but payload[0] matched no case above
+                 * -- recorded, both the count and the actual byte, rather
+                 * than inferred: if DIAG/POWER are somehow arriving with an
+                 * unexpected first byte, this is what shows what it really
+                 * was. */
+                if (safety_lock(link)) {
+                    link->stats.unmatched_cmd_count++;
+                    link->stats.last_unmatched_cmd_byte = msg.payload[0];
+                    safety_unlock(link);
+                }
                 break;
             }
         }
@@ -1835,6 +1967,23 @@ esp_err_t safety_link_get_stats(SafetyLinkClass *link, safety_link_stats_t *out)
      * outside the lock -- it's a plain volatile counter owned by the UART
      * event task. */
     out->frame_errors += uart_owner_get_rx_error_count(&link->owner);
+    /* Read outside state_lock, same reasoning as the rx_error_count call
+     * just above: this is a plain counter owned by uart_protocol's own
+     * tasks_lock, not this driver's state. Best-effort -- if task 7
+     * somehow isn't registered (should not happen after safety_link_start()
+     * has run), broadcast_dropped is simply left at whatever *out already
+     * had (0, from the *out = link->stats copy above) rather than treated
+     * as a hard failure of the whole stats read. */
+    (void)uart_protocol_get_task_broadcast_dropped(&link->proto, UART_TASK_ID_SAFETY,
+                                                    &out->broadcast_dropped);
+    /* Deframer/dispatch-level counters, same best-effort/read-outside-lock
+     * reasoning as broadcast_dropped just above -- these live on the
+     * uart_protocol_t instance itself (per-port, not per-task), see that
+     * struct's own doc comment. */
+    (void)uart_protocol_get_deframe_stats(&link->proto, &out->frames_deframed,
+                                          &out->frames_routed_nowhere,
+                                          &out->frame_length_mismatch,
+                                          &out->frame_crc_mismatch, &out->frame_resync);
     return ESP_OK;
 }
 
@@ -2733,6 +2882,16 @@ size_t safety_link_build_status_payload(SafetyLinkClass *link, uint8_t *out)
     safety_put_f32_le(&out[15], status.current_a[1]);
     safety_put_f32_le(&out[19], status.current_a[2]);
     safety_put_u16_le(&out[23], status.age_ms);
+    /* V2 (2026-08-23): tx_dropped_sat + its own known-bit -- see
+     * SAFETY_LINK_STATUS_PAYLOAD_LEN's doc comment for why this is always
+     * emitted (V1 retired here, unlike Frame A on the Pico-facing side)
+     * rather than version-gated. tx_dropped_sat itself is meaningless
+     * (left at whatever safety_link_status_t's zero-init/last-V1-frame
+     * left it at) whenever status.tx_dropped_known is false -- the PC tool
+     * must read byte26 bit0 before trusting byte25, never infer "no drops"
+     * from an absent/zero byte. */
+    out[25] = status.tx_dropped_sat;
+    out[26] = status.tx_dropped_known ? SAFETY_LINK_STATUS_EXTRA_FLAG_TX_DROPPED_KNOWN : 0u;
     return SAFETY_LINK_STATUS_PAYLOAD_LEN;
 }
 
@@ -2749,6 +2908,26 @@ size_t safety_link_build_stats_payload(SafetyLinkClass *link, uint8_t *out)
     safety_put_u32_le(&out[9], stats.frame_errors);
     safety_put_u32_le(&out[13], stats.timeouts);
     safety_put_u16_le(&out[17], stats.poll_period_ms);
+    safety_put_u32_le(&out[19], stats.broadcast_dropped);
+    safety_put_u32_le(&out[23], stats.diag_applied);
+    safety_put_u32_le(&out[27], stats.power_applied);
+    safety_put_u32_le(&out[31], stats.frames_deframed);
+    safety_put_u32_le(&out[35], stats.frames_routed_nowhere);
+    safety_put_u32_le(&out[39], stats.frame_length_mismatch);
+    safety_put_u32_le(&out[43], stats.frame_crc_mismatch);
+    safety_put_u32_le(&out[47], stats.frame_resync);
+    safety_put_u32_le(&out[51], stats.dequeued_total);
+    safety_put_u32_le(&out[55], stats.unmatched_cmd_count);
+    out[59] = stats.last_unmatched_cmd_byte;
+    safety_put_u32_le(&out[60], stats.cmd_status_count);
+    safety_put_u32_le(&out[64], stats.cmd_fw_version_count);
+    safety_put_u32_le(&out[68], stats.cmd_update_status_count);
+    safety_put_u32_le(&out[72], stats.cmd_power_count);
+    safety_put_u32_le(&out[76], stats.cmd_diag_count);
+    safety_put_u32_le(&out[80], stats.cmd_trip_event_count);
+    safety_put_u32_le(&out[84], stats.cmd_ct_cal_count);
+    safety_put_u32_le(&out[88], stats.cmd_config_page_count);
+    safety_put_u32_le(&out[92], stats.cmd_commit_config_rejected_count);
     return SAFETY_LINK_STATS_PAYLOAD_LEN;
 }
 

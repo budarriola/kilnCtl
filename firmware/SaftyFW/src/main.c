@@ -23,10 +23,14 @@
 #include "task.h"
 
 #include "hardware/gpio.h"
+#include "hardware/regs/timer.h" // TIMER_DBGPAUSE_BITS, see step 1b below
+#include "hardware/timer.h" // timer_hw->dbgpause, see step 1b below
 #include "hardware/watchdog.h"
 
 #include "board_pins.h"
 #include "boot_reason.h"
+#include "clear_trip_diag.h" // 2026-08-23 round 4, CLEAR_TRIP crash checkpoints, see its own header comment
+#include "watchdog_overdue_diag.h" // 2026-08-23, the CLEAR_TRIP investigation's actual conclusion, see its own header comment
 #include "startup_diag.h"
 #include "config_store.h"
 #include "max31856.h"
@@ -59,7 +63,69 @@
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
     (void)xTask;
-    (void)pcTaskName;
+
+    // DO NOT REMOVE THE WRITE BELOW AS DEAD WEIGHT. It is not decoration --
+    // it is the ONLY reason the CLEAR_TRIP-reboots-the-Pico investigation
+    // was ever solvable. Before it existed, a stack overflow on this
+    // firmware was bit-for-bit indistinguishable from any other watchdog
+    // reset: this hook disables interrupts and hangs (below), so
+    // watchdog_task never runs again to leave its own diagnostic, and the
+    // reboot that follows carries no evidence of what actually happened.
+    // Two live suspects (safety_core_task, then log_task) were each
+    // eliminated or confirmed ONLY once this write existed to name the
+    // real one on the next boot. Removing it returns this firmware to that
+    // blind state.
+    //
+    // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's actual
+    // mechanism: this hook disables interrupts and hangs, deliberately (see
+    // the comment above), which means watchdog_task never runs again, the
+    // unfed hardware watchdog resets the chip about a second later, and
+    // -- until this write existed -- NO diagnostic of any kind survived:
+    // scratch[5]'s overdue-checkin latch read magic_ok == false after a
+    // reproduced crash, proving watchdog_task_fn() never even reached the
+    // branch that would have written it. A stack overflow on this firmware
+    // was, until now, indistinguishable from any other watchdog reset.
+    //
+    // This write closes that gap. It shares watchdog_hw->scratch[5] with
+    // watchdog_overdue_diag_codec.c's own overdue-checkin format, tagged
+    // with a DIFFERENT magic byte (0xE3 vs that format's 0xD9) so the two
+    // never collide -- see watchdog_overflow_diag_t's own doc comment
+    // (watchdog_overdue_diag_codec.h) for why sharing one register is
+    // correct: a stack overflow's interrupt-disable is exactly what
+    // prevents watchdog_task from ever reaching its own write, so the two
+    // events are mutually exclusive by construction.
+    //
+    // Deliberately NOT calling into watchdog_overdue_diag.c/_codec.c's own
+    // functions: this hook may be running moments after the very stack
+    // such a call would need has overflowed, so nothing beyond a plain MMIO
+    // write is safe here -- no snprintf, no strlen, no function call beyond
+    // this one register write. pcTaskName[0]/[1] are safe to read
+    // regardless: FreeRTOS points pcTaskName at the task's own registered
+    // name, a static string literal in .rodata (see every xTaskCreate()
+    // call site in this codebase), never the corrupted stack itself. Two
+    // bytes is enough to disambiguate every task this firmware currently
+    // registers (current_task/discrete_task/link_task/log_task/
+    // relay_owner/safety_core/thermo_task/update_task/watchdog_task all
+    // differ in their first two characters) --
+    // test_two_name_bytes_disambiguate_every_current_task in
+    // test_watchdog_overdue_diag_codec.c is the regression guard for that
+    // fact holding as tasks are added.
+    //
+    // The bit layout (magic byte in [31:24], name bytes in [23:16]/[15:8])
+    // is kept in exact, hand-maintained sync with
+    // watchdog_overflow_diag_decode() (watchdog_overdue_diag_codec.c) --
+    // there is deliberately no shared encoder, for the same "cannot safely
+    // call into another compilation unit here" reason.
+    uint8_t name0 = 0u;
+    uint8_t name1 = 0u;
+    if (pcTaskName != NULL) {
+        name0 = (uint8_t)pcTaskName[0];
+        if (name0 != 0u) {
+            name1 = (uint8_t)pcTaskName[1];
+        }
+    }
+    watchdog_hw->scratch[5] = (0xE3u << 24) | ((uint32_t)name0 << 16) | ((uint32_t)name1 << 8);
+
     taskDISABLE_INTERRUPTS();
     for (;;) {
     }
@@ -101,6 +167,59 @@ int main(void)
     // selected in CMakeLists.txt.
     stdio_init_all();
 
+    // --- Step 1b: un-pause the hardware TIMER peripheral for debug halts. --
+    // 2026-08-23, the DIAG-content-frozen investigation's actual root cause:
+    // TIMER_DBGPAUSE (timer_hw->dbgpause, a register belonging to the TIMER
+    // peripheral itself -- NOT watchdog_hw->ctrl's PAUSE_DBG0/DBG1/JTAG bits,
+    // which only gate the watchdog's own countdown) resets to 0x7 on this
+    // silicon: both DBG0 and DBG1 set, meaning the shared timer counter that
+    // to_ms_since_boot(get_absolute_time())/time_us_64() read PAUSES the
+    // instant either core is halted by a debugger. Confirmed on the bench:
+    // dbgpause read 0x7, TIMERAWL held dead flat (507171us, matching the
+    // frozen uptime_ms=507 every DIAG frame reported) across an 8s window,
+    // reproduced from a clean flash+run with zero SWD contact afterward --
+    // not an artifact of any particular read, an artifact of core 1 coming
+    // up (multicore_launch_core1(), inside vTaskStartScheduler() below)
+    // while a probe is attached and DBG1 is still at its power-on default.
+    // Meanwhile xTaskGetTickCount() stayed healthy throughout, because
+    // configTICK_CORE pins the FreeRTOS tick to core 0's own SysTick, a
+    // core-local peripheral this register has no effect on -- so the board
+    // looked completely alive on every FreeRTOS-tick-paced check while every
+    // get_absolute_time()-based timestamp on it silently stopped.
+    //
+    // This firmware has never configured TIMER_DBGPAUSE (grepped the full
+    // git history: never referenced before this line) -- the freeze is
+    // RP2040 silicon default behaviour, not a regression, and it predates
+    // this fix being visible only because DIAG frames never reached the ESP
+    // before 2026-08-23's separate UART self-start-failure fix (uart_owner.c)
+    // let anyone actually read a frozen uptime_ms in the first place.
+    //
+    // THE TRADE-OFF, stated on purpose rather than left implicit: clearing
+    // this means get_absolute_time()/time_us_64() keep advancing even while
+    // a core is halted mid-debug-session, instead of freezing in step with
+    // it. That is a real loss for anyone who wanted debug-correlated timer
+    // pausing (e.g. "does this ISR still fire while I'm single-stepping the
+    // other core" style debugging). The trade is taken anyway: a debug probe
+    // is attached to this board essentially continuously (JTAG/SWD is the
+    // only sanctioned flashing path here, per docs/HARDWARE.md), so a timer
+    // that silently stops whenever a core halts means every wall-clock
+    // timestamp and every clock-based staleness check on a SAFETY processor
+    // is unreliable during exactly the situations most likely to have a
+    // probe attached -- worth more than debug-correlated pausing, which
+    // nothing in this project depends on. safety_core.c's own clock_health.c
+    // (added the same pass) is the belt to this fix's suspenders: it detects
+    // a stalled get_absolute_time() explicitly and fails the two clock-based
+    // staleness checks (context_valid, reboot_grace_active) closed even if
+    // this register write is ever lost (a future SDK update, a differently
+    // configured probe, RP2350 hardware with its own TICKS block, etc.) --
+    // this fix should not be the ONLY thing standing between a stalled clock
+    // and a guard that silently passes.
+    //
+    // Must run before vTaskStartScheduler() (step 8, below) brings up core 1
+    // -- the whole point is that DBG1's pause-on-halt is already live the
+    // instant core 1 exists to be halted.
+    hw_clear_bits(&timer_hw->dbgpause, TIMER_DBGPAUSE_BITS);
+
     // --- Step 2: hardware watchdog, 1 s. ------------------------------------
     // pause_on_debug = true: hardcoded for now -- there is no release/debug
     // build distinction yet in this CMake project. TODO: add a build option
@@ -137,6 +256,57 @@ int main(void)
     // stale one. Safe to do unconditionally: boot_reason above already holds
     // whatever this boot needs.
     boot_reason_clear_trip();
+
+    // --- Step 3b: read the CLEAR_TRIP crash checkpoint; clear it. -----------
+    // 2026-08-23 round 4 of the CLEAR_TRIP-reboots-the-Pico investigation:
+    // same shape as step 3 immediately above (read, then clear, before
+    // anything else can touch the register), deliberately a SEPARATE call
+    // pair rather than folded into boot_reason_read()/boot_reason_clear_trip()
+    // -- this diagnostic must never risk the load-bearing trip-reason latch
+    // those two functions own. See clear_trip_diag.h's own header comment
+    // for the scratch-register budget and why this needed its own module
+    // (watchdog_hw->scratch[7] is the one free register; boot_reason.c's
+    // own [0]/[1] pair was never available to reuse).
+    clear_trip_diag_t clear_trip_diag = clear_trip_diag_read();
+
+    // TODO: surface clear_trip_diag in the DIAG frame (link_task.c,
+    // SAFETY_CMD_DIAG) now that DIAG reliably reaches the ESP again
+    // (2026-08-23's TIMER_DBGPAUSE fix) -- not done this pass; read and
+    // preserved here, same "not yet surfaced" state boot_reason was left in
+    // above, SWD-readable via clear_trip_diag_get_cached() in the meantime.
+    (void)clear_trip_diag;
+
+    clear_trip_diag_clear();
+
+    // --- Step 3c: read the overdue-checkin latch; clear it. -----------------
+    // 2026-08-23, the CLEAR_TRIP-reboots-the-Pico investigation's actual
+    // conclusion: same read-then-clear shape as steps 3/3b immediately
+    // above. Unlike those two, this scratch word (repurposed
+    // SAFTYFW_LAST_CHECKIN_MASK_SCRATCH, watchdog_hw->scratch[5]) is not
+    // guaranteed to hold anything from THIS reboot -- it is only ever
+    // written when watchdog_task_fn() actually withholds a feed, so most
+    // boots will read magic_ok == false here, correctly. See
+    // watchdog_overdue_diag.h's own header comment for why repurposing this
+    // specific register was safe.
+    watchdog_overdue_diag_t watchdog_overdue_diag = watchdog_overdue_diag_read();
+
+    // 2026-08-23, round 2: the sibling event sharing this same register --
+    // see watchdog_overflow_diag_t's own doc comment
+    // (watchdog_overdue_diag_codec.h) and vApplicationStackOverflowHook()'s
+    // own comment above for the full mechanism. Read BEFORE the clear
+    // below, same as watchdog_overdue_diag itself -- at most one of the two
+    // will ever report magic_ok == true for a given boot.
+    watchdog_overflow_diag_t watchdog_overflow_diag = watchdog_overflow_diag_read();
+
+    // TODO: surface watchdog_overdue_diag/watchdog_overflow_diag in the
+    // DIAG frame (link_task.c, SAFETY_CMD_DIAG), same not-yet-surfaced
+    // state as boot_reason/clear_trip_diag above -- SWD-readable via
+    // watchdog_overdue_diag_get_cached()/watchdog_overflow_diag_get_cached()
+    // in the meantime.
+    (void)watchdog_overdue_diag;
+    (void)watchdog_overflow_diag;
+
+    watchdog_overdue_diag_clear(); // clears the one shared register regardless of which format was present, if either
 
     // --- Step 4: config from flash. ------------------------------------------
     // config_store_boot_load() (Phase 9) reads the config store's flash

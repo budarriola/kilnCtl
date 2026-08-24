@@ -104,6 +104,21 @@ typedef struct {
         uint16_t msg_index;
     } dedup[UART_PROTO_DEDUP_DEPTH];
     uint8_t dedup_next;
+    /* 2026-08-23, the DIAG-frame-went-dark investigation: a BROADCAST frame
+     * (the only kind SaftyFW's link_task.c ever sends -- GET_STATUS, DIAG,
+     * POWER, TRIP_EVENT, FW_VERSION, all of it) whose xQueueSend() into this
+     * slot's inbox fails because the inbox is already full is silently
+     * dropped by uart_protocol_rx_task()'s dispatch (unlike the ACK'd DATA
+     * path just below it in that same function, which at least logs a
+     * warning) -- there is no ACK to withhold, no retry the sender will ever
+     * attempt, and until this counter existed, nothing on this side recorded
+     * it happened at all. A dropped BROADCAST is invisible in
+     * stats.frame_errors too: that counter only increments once a frame
+     * reaches safety_apply_status()/_diag()/_power() and fails ITS OWN
+     * length/opcode check -- a frame dropped here never gets that far, so
+     * "crc/framing errors 0" can read perfectly clean while broadcasts are
+     * still being lost. See uart_protocol_get_task_broadcast_dropped(). */
+    uint32_t broadcast_dropped;
 } uart_proto_task_slot_t;
 
 typedef struct {
@@ -151,6 +166,44 @@ typedef struct {
         bool ever_replied;
     } peer_seen[8];
 
+    /* Deframer/dispatch-level counters, 2026-08-23 (the DIAG-frame-went-dark
+     * investigation, continued): everything above (broadcast_dropped,
+     * frame_errors, timeouts) brackets the gap between "the Pico's TX ring
+     * accepted the frame" and "safety_apply_diag()/_power() ran" without
+     * covering it -- broadcast_dropped only fires on an inbox already at
+     * capacity (confirmed innocent: it moved from 0 to a real, explicable 7
+     * during a Pico reflash burst, proving the counter works, and sat at 0
+     * everywhere else), and frame_errors only fires on a frame that already
+     * reached a per-command length/opcode check post-dispatch. Nothing
+     * existed below the per-task inbox, at the deframer/routing level, until
+     * these five fields -- confirmed by reading the whole of handle_raw_
+     * frame()/uart_protocol_rx_task() before adding anything, per the
+     * standing "surface an existing number rather than add an ambiguous
+     * fifth one" caution this investigation has already paid for once
+     * (frames_received). None of these five already existed under another
+     * name; all are genuinely new. Single-writer (uart_protocol_rx_task()
+     * only), plain volatile read from any task, same pattern
+     * uart_proto_task_slot_t::broadcast_dropped already uses -- see
+     * uart_protocol_get_deframe_stats(). */
+    volatile uint32_t frames_deframed;        /* CRC-valid frames of ANY type/dest pulled off
+                                                * the wire -- the raw "what did this port
+                                                * actually receive" number, upstream of every
+                                                * type-based branch below */
+    volatile uint32_t frames_routed_nowhere;  /* deframed, CRC-valid, but found no home:
+                                                * BROADCAST/DATA for an unregistered dst_task,
+                                                * or an ACK/NACK matching no outstanding
+                                                * transaction -- NOT a dst_device mismatch,
+                                                * which is normal traffic filtering, not a loss */
+    volatile uint32_t frame_length_mismatch;  /* handle_raw_frame()'s own length check failed
+                                                * (header's declared length disagreed with the
+                                                * assembled frame) */
+    volatile uint32_t frame_crc_mismatch;     /* handle_raw_frame()'s own CRC16/CCITT-FALSE
+                                                * check failed */
+    volatile uint32_t frame_resync;           /* uart_protocol_rx_task()'s raw assembly buffer
+                                                * overflowed before a delimiter closed the
+                                                * frame -- oversized/corrupt, discarded,
+                                                * resynced on the next 0x7E */
+
     bool initialized;
 } uart_protocol_t;
 
@@ -172,6 +225,26 @@ esp_err_t uart_protocol_register_task(uart_protocol_t *proto,
                                        UBaseType_t inbox_len,
                                        QueueHandle_t *out_inbox);
 esp_err_t uart_protocol_unregister_task(uart_protocol_t *proto, uint8_t task_id);
+
+/* Count of BROADCAST frames addressed to task_id whose delivery into its
+ * inbox failed because the inbox was already full -- see
+ * uart_proto_task_slot_t::broadcast_dropped's own doc comment for why this
+ * is the ONE place a lost SaftyFW telemetry frame is actually recorded.
+ * Monotonic since uart_protocol_register_task(task_id), never reset.
+ * Returns ESP_ERR_INVALID_ARG if task_id was never registered; *out is left
+ * untouched in that case. Safe to call from any task. */
+esp_err_t uart_protocol_get_task_broadcast_dropped(uart_protocol_t *proto, uint8_t task_id,
+                                                    uint32_t *out);
+
+/* Reads all five deframer/dispatch-level counters (uart_protocol_t's own
+ * doc comment on them has the full "why these five" reasoning) in one call.
+ * Any output pointer may be NULL. Monotonic since uart_protocol_init(),
+ * never reset. Safe to call from any task. */
+esp_err_t uart_protocol_get_deframe_stats(uart_protocol_t *proto, uint32_t *out_frames_deframed,
+                                          uint32_t *out_frames_routed_nowhere,
+                                          uint32_t *out_frame_length_mismatch,
+                                          uint32_t *out_frame_crc_mismatch,
+                                          uint32_t *out_frame_resync);
 
 esp_err_t uart_protocol_receive(QueueHandle_t inbox, uart_proto_message_t *out_msg, TickType_t wait_ticks);
 

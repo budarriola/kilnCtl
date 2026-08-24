@@ -50,9 +50,23 @@ static float unpack_f32_le(const uint8_t *in)
     return v;
 }
 
-void link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN], bool estop, bool relay_energized,
-                             bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
-                             uint8_t tc_fault_bits, float amps1, float amps2, float amps3)
+bool link_frame_status_v2_supported(uint16_t peer_protocol_version)
+{
+    return peer_protocol_version >= LINK_FRAME_STATUS_V2_MIN_PROTOCOL;
+}
+
+uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped)
+{
+    return (tx_dropped > LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX)
+               ? (uint8_t)(LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX + 1u) // 255, "254 or more"
+               : (uint8_t)tx_dropped;
+}
+
+size_t link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN_V2], bool estop, bool relay_energized,
+                               bool heating_enabled, bool temp_valid, float safety_tc_c, float cj_c,
+                               uint8_t tc_fault_bits, float amps1, float amps2, float amps3,
+                               bool tc_not_installed, bool tc_injected,
+                               bool peer_supports_status_v2, uint8_t tx_dropped_sat)
 {
     out[0] = LINK_FRAME_STATUS_CMD;
 
@@ -71,6 +85,12 @@ void link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN], bool estop, bool
     if (temp_valid) {
         flags |= LINK_FLAG_TEMP_VALID;
     }
+    if (tc_not_installed) {
+        flags |= LINK_FLAG_TC_NOT_INSTALLED;
+    }
+    if (tc_injected) {
+        flags |= LINK_FLAG_TC_INJECTED;
+    }
     out[1] = flags;
 
     pack_f32_le(&out[2], safety_tc_c);
@@ -79,6 +99,15 @@ void link_frame_pack_status(uint8_t out[LINK_FRAME_STATUS_LEN], bool estop, bool
     pack_f32_le(&out[11], amps1);
     pack_f32_le(&out[15], amps2);
     pack_f32_le(&out[19], amps3);
+
+    // See this function's own doc comment (link_frame.h) for the full
+    // skew-safety argument -- the caller decides peer_supports_status_v2,
+    // this function only ever acts on that verdict.
+    if (peer_supports_status_v2) {
+        out[23] = tx_dropped_sat;
+        return LINK_FRAME_STATUS_LEN_V2;
+    }
+    return LINK_FRAME_STATUS_LEN_V1;
 }
 
 size_t link_frame_pack_fw_version(uint8_t *out, size_t out_cap, uint16_t protocol_version,

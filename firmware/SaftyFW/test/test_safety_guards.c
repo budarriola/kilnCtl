@@ -382,6 +382,107 @@ static void test_s5(void)
     }
 }
 
+// S5's declared-not-installed escape hatch (config param 0x0211,
+// safety_guard_input_t.safety_tc_not_installed_declared -- the pure module's
+// field is deliberately the INVERSE polarity of the config field itself; see
+// safety_guards.h's own comment on it for why). Task 1 of the safety-TC-not-
+// installed pass: heat is blocked elsewhere (safety_core_request_enable(),
+// not reachable from this pure module), so this only needs to prove S5
+// itself never promotes to TRIP while the flag is set, and prove it does
+// exactly as before when the flag is left at its default (false).
+static void test_s5_not_installed(void)
+{
+    TEST_SECTION("S5 -- declared-not-installed escape hatch (safety_tc_installed == 0)");
+
+    /* The flag alone changes nothing: WARN still fires on schedule, exactly
+     * like the ordinary case in test_s5() above. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.tc_c = (float)NAN;
+        bad.dt_s = 5.0f;
+        bad.safety_tc_not_installed_declared = true;
+        for (int i = 0; i < 9; i++) {
+            TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "still under 10 reads: not tripped");
+        }
+        TEST_CHECK(!s.s5_warn, "still under 10 reads: not yet WARN either");
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "tick 10 (50s): WARN, not TRIP (grace is 60s)");
+        TEST_CHECK(s.s5_warn, "WARN fires on schedule even with the flag set");
+        TEST_CHECK(!s.s5_not_installed, "s5_not_installed is not set before blind_grace_s is reached");
+    }
+
+    /* Past blind_grace_s WITHOUT the flag: trips, exactly as test_s5()
+     * already proves -- repeated here as the negative control this test's
+     * own positive case is compared against. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.tc_c = (float)NAN;
+        bad.dt_s = 61.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &bad);
+        }
+        TEST_CHECK(tripped, "negative control: without the flag, blind past grace TRIPS");
+        TEST_CHECK(s.reason == SAFETY_TRIP_SENSOR_INVALID, "reason is SENSOR_INVALID");
+        TEST_CHECK(!s.s5_not_installed, "s5_not_installed stays false on the real TRIP path");
+    }
+
+    /* Past blind_grace_s WITH the flag: WARN persists, s5_not_installed
+     * flips true, is_tripped stays false -- no matter how long it runs. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.tc_c = (float)NAN;
+        bad.dt_s = 61.0f;
+        bad.safety_tc_not_installed_declared = true;
+        bool tripped = false;
+        for (int i = 0; i < 10; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &bad) || tripped;
+        }
+        TEST_CHECK(!tripped, "declared not installed: blind past grace never TRIPS");
+        TEST_CHECK(!s.is_tripped, "is_tripped stays false");
+        TEST_CHECK(s.s5_warn, "s5_warn stays set (this is still a real fault worth reporting)");
+        TEST_CHECK(s.s5_not_installed, "s5_not_installed reports the declared-absent state");
+        // Diagnostics keep accumulating regardless -- "how long has it
+        // actually been blind" must still be answerable.
+        TEST_CHECK(s.s5_bad_elapsed_s > 60.0f, "s5_bad_elapsed_s keeps accumulating past grace");
+        // Extend the run far past any plausible firing length -- proves
+        // "never promoted to TRIP" means never, not just "not yet".
+        for (int i = 0; i < 10000; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &bad) || tripped;
+        }
+        TEST_CHECK(!tripped, "still never trips after ~1000x blind_grace_s worth of ticks");
+    }
+
+    /* Recovery: a good read clears s5_not_installed exactly like s5_warn. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.tc_c = (float)NAN;
+        bad.dt_s = 61.0f;
+        bad.safety_tc_not_installed_declared = true;
+        for (int i = 0; i < 10; i++) safety_guards_tick(&s, &cfg, &bad);
+        TEST_CHECK(s.s5_not_installed, "sanity: s5_not_installed set");
+        safety_guard_input_t good = base_input();
+        safety_guards_tick(&s, &cfg, &good);
+        TEST_CHECK(!s.s5_not_installed, "a good read clears s5_not_installed");
+        TEST_CHECK(!s.s5_warn, "a good read clears s5_warn too");
+    }
+}
+
 static void test_s7(void)
 {
     TEST_SECTION("S7 -- E-stop");
@@ -2003,6 +2104,143 @@ static void test_try_clear(void)
         }
         TEST_CHECK(retripped, "S1 re-trips on its own normal timescale once the streak rebuilds");
     }
+
+    /* 2026-08-23 hardware finding: S5 (and S12/S13/S6b below) are the four
+     * guards guard_condition_still_immediate() now checks BEFORE
+     * safety_guards_clear() runs, precisely because -- unlike S1 above --
+     * their trip condition is a single-tick-decidable level, so granting a
+     * clear while it is still true would hand out a real window of
+     * heating-enabled operation against an ongoing hazard, not just "the
+     * trip isn't re-confirmed yet". Observed live: an S5 clear against a
+     * still-blind safety TC. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.tc_c = (float)NAN;
+        bad.dt_s = 61.0f;
+        bool tripped = false;
+        for (int i = 0; i < 10 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &bad);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "sanity: S5 tripped");
+
+        /* Still bad at clear time: refused outright, accumulators untouched. */
+        uint16_t streak_before = s.s5_bad_streak;
+        float elapsed_before = s.s5_bad_elapsed_s;
+        bool cleared = safety_guards_try_clear(&s, &cfg, &bad);
+        TEST_CHECK(!cleared, "S5 clear refused while the reading is STILL bad -- the hardware-finding fix");
+        TEST_CHECK(s.is_tripped, "refused: still latched");
+        TEST_CHECK(s.reason == SAFETY_TRIP_SENSOR_INVALID, "refused: reason unchanged");
+        TEST_CHECK(s.s5_bad_streak == streak_before && s.s5_bad_elapsed_s == elapsed_before,
+                   "refused clear leaves S5's accumulators completely untouched (no partial reset)");
+
+        /* Good read: de-escalation is reachable once the reading recovers. */
+        safety_guard_input_t good = base_input();
+        cleared = safety_guards_try_clear(&s, &cfg, &good);
+        TEST_CHECK(cleared, "S5 clear succeeds once the reading is actually good again");
+        TEST_CHECK(!s.is_tripped, "cleared: not tripped");
+    }
+
+    /* S12 (enclosure/cold-junction over-temp): same shape, cj_c still over
+     * cj_max_c at clear time. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t hot = base_input();
+        hot.cj_c = 90.0f; /* > cj_max_c default (85) */
+        hot.dt_s = 61.0f; /* > cj_time_s default (60) in one tick */
+        bool tripped = safety_guards_tick(&s, &cfg, &hot);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "sanity: S12 tripped");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &hot);
+        TEST_CHECK(!cleared, "S12 clear refused while cj_c is STILL over cj_max_c");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "refused: still latched, same reason");
+
+        safety_guard_input_t cool = base_input();
+        cool.cj_c = 25.0f;
+        cleared = safety_guards_try_clear(&s, &cfg, &cool);
+        TEST_CHECK(cleared, "S12 clear succeeds once cj_c is back under cj_max_c");
+    }
+
+    /* S13 (borrowed channel stale): same shape, sample_counter_advancing
+     * still false at clear time. Requires tc_source BORROWED_ZONE/BOTH. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE;
+        safety_guard_input_t stale = base_input();
+        stale.context_valid = true; /* S13 lives in the context-dependent block -- see safety_guards.c */
+        stale.sample_counter_advancing = false;
+        stale.dt_s = 61.0f; /* > borrowed_stale_trip_s default (60) in one tick */
+        bool tripped = safety_guards_tick(&s, &cfg, &stale);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_BORROWED_STALE, "sanity: S13 tripped");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &stale);
+        TEST_CHECK(!cleared, "S13 clear refused while the channel is STILL not advancing");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_BORROWED_STALE, "refused: still latched, same reason");
+
+        safety_guard_input_t advancing = base_input();
+        advancing.context_valid = true;
+        advancing.sample_counter_advancing = true;
+        cleared = safety_guards_try_clear(&s, &cfg, &advancing);
+        TEST_CHECK(cleared, "S13 clear succeeds once the channel is advancing again");
+    }
+
+    /* S6b (link dead, hard backstop): same shape, link still down at clear
+     * time. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t down = base_input();
+        down.link_up = false;
+        down.dt_s = 121.0f; /* > link_dead_hard_s default (120) in one tick */
+        bool tripped = safety_guards_tick(&s, &cfg, &down);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LINK_DEAD, "sanity: S6b tripped (hard backstop)");
+
+        bool cleared = safety_guards_try_clear(&s, &cfg, &down);
+        TEST_CHECK(!cleared, "S6b clear refused while the link is STILL down");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_LINK_DEAD, "refused: still latched, same reason");
+
+        safety_guard_input_t up = base_input();
+        up.link_up = true;
+        cleared = safety_guards_try_clear(&s, &cfg, &up);
+        TEST_CHECK(cleared, "S6b clear succeeds once the link is back up");
+    }
+}
+
+/* 2026-08-23 reboot-on-clear-trip investigation: safety_core_task's queue-
+ * drain loop (src/tasks/safety_core.c) now resolves each dequeued CLEAR_TRIP
+ * request into one of three outcomes purely from two booleans it already has
+ * in hand -- whether a trip was still latched at dequeue time, and (only if
+ * so) what safety_guards_try_clear() returned. safety_guards_decide_clear_
+ * trip_outcome() is that classification, pulled out so it is host-testable
+ * the same way link_frame_decide_clear_trip() already is for link_task's own
+ * pair of CLEAR_TRIP refusal checks -- the FreeRTOS queue/task machinery
+ * around it is not host-testable, but this 3-way decision is exactly as pure
+ * as that one was. */
+static void test_decide_clear_trip_outcome(void)
+{
+    TEST_SECTION("safety_guards_decide_clear_trip_outcome -- pure 3-way classification");
+
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, false) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
+               "was_tripped=false -> nothing-latched regardless of try_clear_result");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
+               "was_tripped=false, try_clear_result=true -> still nothing-latched "
+               "(try_clear must not even have run against nothing)");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED,
+               "was_tripped=true, try_clear succeeded -> accepted");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,
+               "was_tripped=true, try_clear refused -> refused-still-tripped");
 }
 
 /* GUARD_TEST_MATRIX.md: "Property tests: ceiling monotonicity over the float
@@ -2234,6 +2472,7 @@ void run_test_safety_guards(void)
     test_s1();
     test_s1_ceiling_properties();
     test_s5();
+    test_s5_not_installed();
     test_s7();
     test_s11();
     test_s12();
@@ -2249,5 +2488,6 @@ void run_test_safety_guards(void)
     test_independence_invariant();
     test_tx_independence_representative_sequence();
     test_try_clear();
+    test_decide_clear_trip_outcome();
     test_deciding_threshold();
 }

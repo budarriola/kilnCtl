@@ -16,7 +16,7 @@
 #   benchproto -- a *separate* protocol family for bench/instrument-fixture
 #                 firmwares talking to a PC (first consumer: SimFW's USB CDC
 #                 link, see docs/BENCHPROTO.md and
-#                 firmware/SimFW/docs/DESIGN_NOTES.md sec 4.4/5, firmware/SimFW/docs/PLAN.md sec 12). Same
+#                 firmware/SimFW/docs/DESIGN_NOTES.md sec 4.4/5/12). Same
 #                 freestanding-C11 rules, same "host tests build standalone"
 #                 pattern, deliberately zero shared source with kilnlink --
 #                 see include/benchproto/benchproto_frame.h's file comment
@@ -54,6 +54,7 @@ add_library(kilnlink STATIC
     src/kilnlink_set_param.c
     src/kilnlink_commit_config.c
     src/kilnlink_commit_config_rejected.c
+    src/kilnlink_inject_tc.c
     src/kilnlink_get_param.c
     src/kilnlink_param.c
     src/kilnlink_get_config_page.c

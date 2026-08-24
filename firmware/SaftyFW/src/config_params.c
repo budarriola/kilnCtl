@@ -73,6 +73,18 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x020Eu, KILNLINK_PARAM_TYPE_U16 }, // borrowed_stale_s
     { 0x020Fu, KILNLINK_PARAM_TYPE_U16 }, // borrowed_stale_trip_s
     { 0x0210u, KILNLINK_PARAM_TYPE_U8 },  // borrowed_type_expected
+    // 0x0207 is already frozen_window_s (S11) -- the task brief that minted
+    // this param asked for 0x0207, which collides with an existing entry in
+    // this same table (see the entry three lines above at 0x0206/0x0207).
+    // Following the brief's number here would silently misroute
+    // safety_tc_installed writes into frozen_window_s's slot (or vice
+    // versa) -- exactly the "wrong id/type pairing silently misroutes a
+    // commissioned value" bug this file's own header comment warns about.
+    // Minted 0x0211 instead: the next unallocated id after 0x0210 in this
+    // same section-1-style commissioning group, following the same
+    // "append after the last used id in the field's own doc section" rule
+    // every other id in this table already follows.
+    { 0x0211u, KILNLINK_PARAM_TYPE_U8 },  // safety_tc_installed
     { 0x0301u, KILNLINK_PARAM_TYPE_F32 }, // i_present_a
     { 0x0302u, KILNLINK_PARAM_TYPE_U16 }, // zero_counts[0]
     { 0x0303u, KILNLINK_PARAM_TYPE_U16 }, // zero_counts[1]
@@ -168,6 +180,7 @@ bool config_params_get(const config_store_record_t *rec, uint16_t id, uint8_t *o
     case 0x020Eu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->borrowed_stale_s); return true;
     case 0x020Fu: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = clamp_u16(rec->borrowed_stale_trip_s); return true;
     case 0x0210u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->borrowed_type_expected; return true;
+    case 0x0211u: *out_type = KILNLINK_PARAM_TYPE_U8;  out_value->u8_val = rec->safety_tc_installed; return true;
 
     case 0x0301u: *out_type = KILNLINK_PARAM_TYPE_F32; out_value->f32_val = rec->i_present_a; return true;
     case 0x0302u: *out_type = KILNLINK_PARAM_TYPE_U16; out_value->u16_val = rec->zero_counts[0]; return true;
@@ -294,6 +307,15 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x020Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->borrowed_stale_s = value.u16_val; return true;
     case 0x020Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->borrowed_stale_trip_s = value.u16_val; return true;
     case 0x0210u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(7u); /* MAX31856_TC_TYPE_T -- see 0x0105 above */ rec->borrowed_type_expected = value.u8_val; return true;
+    // safety_tc_installed: 0/1 only (CHECK_U8_MAX(1u)) -- a boolean-shaped
+    // field carried as u8 for wire-type consistency with every other
+    // section-1 commissioning field. NOT fields_set-gated: unlike
+    // abs_max_temp_c (no safe default is possible) this field's default of
+    // 1 -- "I expect a sensor and I will trip if it is missing" -- IS safe
+    // for an uncommissioned board, so it follows tc_type/borrowed_type_
+    // expected's convention (a real compiled default, not an unset-until-
+    // commissioned flag) rather than the four/six no-safe-default fields'.
+    case 0x0211u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U8);  CHECK_U8_MAX(1u); rec->safety_tc_installed = value.u8_val; return true;
 
     case 0x0301u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_NONNEG(); rec->i_present_a = value.f32_val; return true;
     case 0x0302u: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->zero_counts[0] = value.u16_val; return true;

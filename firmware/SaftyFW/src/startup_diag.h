@@ -16,9 +16,16 @@
 //   [2] startup diag       -- this file
 //   [3] startup diag magic -- this file
 //   [4] watchdog_enable()  -- pico-sdk, do not touch (see main.c step 3)
-//   [5] last check-in mask -- this file
+//   [5] overdue-task latch -- src/watchdog_overdue_diag.c (2026-08-23,
+//       repurposed from this file's own SAFTYFW_LAST_CHECKIN_MASK_SCRATCH,
+//       see below and that module's own header comment for why the
+//       repurposing was safe)
 //   [6] boot stage        -- this file
-//   [7] free
+//   [7] CLEAR_TRIP crash checkpoint -- src/clear_trip_diag.c (2026-08-23, one
+//       packed word: an 8-bit magic tag plus stage/reason/fault_bits/
+//       tc_valid/spi_failed/tc_c_is_nan/outcome -- see that file's own
+//       header comment for the exact bit layout; no register left free
+//       after this one)
 #ifndef SAFTYFW_STARTUP_DIAG_H
 #define SAFTYFW_STARTUP_DIAG_H
 
@@ -48,29 +55,28 @@ extern "C" {
 // for this one.
 #define SAFTYFW_STARTUP_DIAG_MAGIC 0x53544152u // 'STAR'
 
-// The per-task check-in status watchdog_task_fn() last observed, rewritten
-// every period, OR'd with SAFTYFW_LAST_CHECKIN_WRITTEN. After a starvation
-// reboot this holds the final pre-reset value: strip the flag bit and XOR
-// with WATCHDOG_CHECKIN_ALL_MASK to get the bits that were missing.
+// --- Overdue check-in latch, scratch[5] -----------------------------------
 //
-// Meaning as of the per-task-deadline gate (watchdog_task.c /
-// watchdog_gate.h): bit i is set iff check-in id i was within ITS OWN
-// deadline (see watchdog_task.c's s_checkin_deadline_ms table) at the moment
-// of this evaluation -- it no longer means "checked in during this exact
-// SAFTYFW_PERIOD_WATCHDOG_TASK_MS window", because requiring that of every
-// task regardless of its own real period was the bug this gate replaced (a
-// perfectly healthy thermo_task cannot land in every 250 ms window when its
-// own unconfigured cadence is 500 ms). A missing bit still means exactly the
-// same thing operationally: that task is why the feed was skipped.
+// 2026-08-23: this register used to hold a raw ok_mask, rewritten
+// UNCONDITIONALLY every watchdog_task_fn() evaluation (live state, not a
+// latch) -- which turned out to be the wrong shape for exactly the question
+// it was meant to answer. The CLEAR_TRIP-reboots-the-Pico investigation
+// eventually proved the reboot it was supposed to help diagnose was a
+// watchdog timeout, not a fault -- but by the time anyone could read this
+// register over SWD after the reset, the fresh boot's OWN healthy
+// evaluations had already overwritten the pre-reset value several times
+// over (watchdog_task_fn() runs every 250ms; a human reading a debug probe
+// does not).
 //
-// The flag bit is load-bearing, not decoration. Without it a reading of 0
-// is ambiguous between the two most interesting cases -- "watchdog_task ran
-// and saw no check-ins at all" and "watchdog_task never ran, so nothing has
-// written this register since power-on" -- which are different faults with
-// different fixes. With it, 0 means the latter and
-// SAFTYFW_LAST_CHECKIN_WRITTEN alone means the former.
-#define SAFTYFW_LAST_CHECKIN_MASK_SCRATCH 5u
-#define SAFTYFW_LAST_CHECKIN_WRITTEN      (1u << 31)
+// Repurposed (src/watchdog_overdue_diag.c/.h) to the same magic-tagged,
+// write-only-on-the-interesting-event, read-then-clear-at-boot pattern
+// boot_reason.c/clear_trip_diag.c already use: written ONLY when
+// watchdog_task_fn() decides to withhold the feed, packing which task(s)
+// missed their own deadline (a bitmask) and, for the worst offender, by how
+// many milliseconds -- see watchdog_overdue_diag_codec.h for the exact bit
+// layout. Safe to repurpose: nothing in this firmware ever read the old
+// ok_mask value back at runtime, it existed purely as SWD-readable forensic
+// output, and the new format serves the identical purpose strictly better.
 
 // --- Boot-stage latch ----------------------------------------------------
 //

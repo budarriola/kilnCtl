@@ -10,8 +10,8 @@ itself.
 
 **First consumer:** `SimFW` (the bench test-fixture Pico, see
 [`../../SimFW/docs/DESIGN_NOTES.md`](../../SimFW/docs/DESIGN_NOTES.md) sections 4.4, 5, 5.1
-(and [`../../SimFW/docs/PLAN.md`](../../SimFW/docs/PLAN.md) §12 for the still-pending
-`UnitTestFw` decommission steps), speaking it over native USB CDC to its PC-side `kilnsim` tools.
+(and §12 for the `UnitTestFw` extraction history — decommission complete,
+`firmware/UnitTestFw` deleted 2026-08-23), speaking it over native USB CDC to its PC-side `kilnsim` tools.
 Framing, CRC, reliability, and task registration are implemented once here;
 `SimFW`'s command groups (`SYS`/`MODEL`/`TC`/`CT`/`RELAY`/`IO`/`FAULT`/`EVT`,
 DESIGN_NOTES.md sec 5) register as addressable tasks the same way this document's
@@ -39,9 +39,9 @@ differences from `kilnlink`:
   purpose: its reliability/dedup/task-registration logic **is** the shared,
   host-tested part (`benchproto_link.{c,h}`), because unlike the safety
   link, every side of a `benchproto` link is expected to run the same
-  request/reply discipline (see `firmware/UnitTestFw`'s decommission note
-  in `firmware/SimFW/docs/PLAN.md` sec 12 for why this extraction exists at
-  all).
+  request/reply discipline (see `firmware/UnitTestFw`'s extraction history
+  in `firmware/SimFW/docs/DESIGN_NOTES.md` sec 12 for why this extraction
+  exists at all).
 - `kilnlink`'s frame envelope is a closed contract between two specific,
   already-shipping firmwares (`KILNLINK_PROTOCOL_VERSION`, currently 5,
   tracks `KilnFW`'s existing PC-link version because the two have not

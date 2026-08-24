@@ -2031,6 +2031,16 @@ class SafetyStatus:
     fault_status: ThermoFault
     current_a: "tuple[float, float, float]"
     age_ms: int
+    #: uart_owner's TX-ring drop count on the Pico, saturating (254 =
+    #: "254 or more"), as of the last status frame the Pico sent -- None
+    #: means "unknown", not "zero": either the Pico has only ever sent a
+    #: V1 (23-byte) status frame this ESP boot, or none at all yet. Added
+    #: 2026-08-23 (the DIAG-frame-went-dark investigation) specifically to
+    #: be readable on a channel proven to still arrive when GET_DIAG's own
+    #: tx_frames_dropped cannot -- do not collapse None to 0 anywhere this
+    #: value is displayed or logged; that is exactly the ambiguity this
+    #: field exists to remove.
+    tx_dropped_sat: "int | None"
 
     @property
     def link_up(self) -> bool:
@@ -2084,7 +2094,13 @@ class SafetyStatus:
             else "safety TC invalid"
         )
         currents = ", ".join(f"{a:.2f} A" for a in self.current_a)
-        return f"{'; '.join(set_flags)} | {temp} | currents {currents} | {age}"
+        if self.tx_dropped_sat is None:
+            tx_dropped = "tx_dropped unknown (peer sent no V2 status frame yet)"
+        elif self.tx_dropped_sat >= 254:
+            tx_dropped = "tx_dropped 254+"
+        else:
+            tx_dropped = f"tx_dropped {self.tx_dropped_sat}"
+        return f"{'; '.join(set_flags)} | {temp} | currents {currents} | {age} | {tx_dropped}"
 
 
 @dataclass(frozen=True)
@@ -2093,15 +2109,131 @@ class SafetyLinkStats:
     UART, so these move even while the far side is silent."""
 
     frames_sent: int
+    #: GET_STATUS (Frame A) replies applied, ONLY that frame type, despite
+    #: the generic-sounding name -- mirrors safety_link_stats_t::
+    #: frames_received's own doc comment (firmware/KilnFW/App/drivers/
+    #: safety_link.h). 2026-08-23, the DIAG-frame-went-dark investigation:
+    #: this field was read more than once this session as "total frames of
+    #: any kind" -- it never was. DIAG/POWER staying dark while this climbs
+    #: in lockstep with frames_sent, at exactly the poll rate, is a
+    #: measurement artifact of what this counter has always meant, not
+    #: evidence those frame types are being dropped. See diag_applied/
+    #: power_applied below for the counters that actually answer that.
     frames_received: int
     crc_errors: int
     timeouts: int
     poll_period_ms: int
+    #: BROADCAST frames (GET_STATUS/DIAG/POWER/TRIP_EVENT/FW_VERSION -- any
+    #: of it) the ESP's own task-7 inbox had no room for and silently
+    #: discarded -- distinct from crc_errors, which only counts a frame that
+    #: arrived intact and reached a driver-level length/opcode check;
+    #: broadcast_dropped counts one that never got that far at all, so it
+    #: can be nonzero while crc_errors reads perfectly clean. Added
+    #: 2026-08-23 (the DIAG-frame-went-dark investigation). None means
+    #: "unknown", same "do not collapse to 0" discipline SafetyStatus.
+    #: tx_dropped_sat documents -- a peer ESP built before this field
+    #: existed genuinely might have been dropping broadcasts the whole time
+    #: with nothing counting it; reporting 0 in that case would claim a
+    #: clean bill of health this tool cannot actually vouch for.
+    broadcast_dropped: "int | None"
+    #: Real "safety_apply_diag()/_power() succeeded N times" counters --
+    #: added 2026-08-23 once tx_dropped_sat==0 and broadcast_dropped==0 both
+    #: measured clean on hardware while DIAG stayed permanently dark on the
+    #: ESP, which meant the open question became "has DIAG actually been
+    #: applied more than once, ever" -- something SafetyDiag's own
+    #: ever_received (a one-shot bool) cannot answer, and something the
+    #: Pico's own diag_uptime_ms cannot answer reliably (an SWD halt of the
+    #: Pico can perturb its clock mid-measurement; it cannot un-increment
+    #: this counter). None means "unknown", same discipline as
+    #: broadcast_dropped/tx_dropped_sat above.
+    diag_applied: "int | None"
+    power_applied: "int | None"
+    #: Deframer/dispatch-level counters, added 2026-08-23 (final round of the
+    #: DIAG-frame-went-dark investigation) once diag_applied/power_applied
+    #: pinned at exactly 1 per boot with tx_dropped_sat==0 (Pico TX ring,
+    #: confirmed live by an SWD read) and broadcast_dropped==0 (this ESP's
+    #: per-task inbox, confirmed live by a real nonzero reading during a
+    #: reflash burst) both clean -- meaning frames were vanishing somewhere
+    #: between "TX ring accepted it" and "the per-task inbox", a gap none of
+    #: the existing counters covered. frames_deframed is the raw "what did
+    #: this port actually pull off the wire" number, upstream of every
+    #: type-based branch (unlike frames_received, GET_STATUS-only).
+    #: frames_routed_nowhere is deframed-but-found-no-destination. The
+    #: remaining three are deframer reject counts -- confirmed, by reading
+    #: the ESP source first, not to already exist under another name before
+    #: adding them (this session already spent several rounds on
+    #: frames_received turning out to mean something narrower than its
+    #: name suggested; these five do not repeat that). None means
+    #: "unknown", same discipline as every other counter above.
+    frames_deframed: "int | None"
+    frames_routed_nowhere: "int | None"
+    frame_length_mismatch: "int | None"
+    frame_crc_mismatch: "int | None"
+    frame_resync: "int | None"
+    #: 2026-08-23, one round further: frames_deframed proved DIAG/POWER
+    #: arrive CRC-valid at roughly the expected rate; frames_routed_nowhere
+    #: and broadcast_dropped both stayed 0, ruling out an unregistered
+    #: dst_task and an inbox backing up. dequeued_total is the count of
+    #: successful uart_protocol_receive() returns inside
+    #: safety_drain_inbox_ex() -- the ESP's confirmed sole consumer of this
+    #: inbox (grepped every uart_protocol_receive() call site; every other
+    #: one reads a different task's inbox on a different uart_protocol_t
+    #: instance) -- counted before its dispatch switch. Compare against
+    #: frames_deframed minus frames_received: a match means the drain IS
+    #: pulling DIAG/POWER out and losing them inside the switch; a gap means
+    #: something else is emptying the queue. unmatched_cmd_count/
+    #: last_unmatched_cmd_byte record hits of that switch's default: branch
+    #: -- a dequeued, CRC-valid message whose first payload byte matched no
+    #: case -- with the actual byte value, not just a count, so a wrong
+    #: first byte is seen directly rather than inferred.
+    dequeued_total: "int | None"
+    unmatched_cmd_count: "int | None"
+    last_unmatched_cmd_byte: "int | None"
+    #: 2026-08-23, the measurement that ends the DIAG-frame-went-dark
+    #: investigation's inference phase: a per-command dequeue histogram,
+    #: one field per safety_drain_inbox_ex() switch case (see
+    #: SafetyLinkStats' own module-level doc / safety_link.h's
+    #: cmd_status_count doc comment for the exact field list and the "why
+    #: now" reasoning). These nine plus unmatched_cmd_count must sum to
+    #: exactly dequeued_total -- every dequeued message lands in exactly one
+    #: of these ten buckets.
+    cmd_status_count: "int | None"
+    cmd_fw_version_count: "int | None"
+    cmd_update_status_count: "int | None"
+    cmd_power_count: "int | None"
+    cmd_diag_count: "int | None"
+    cmd_trip_event_count: "int | None"
+    cmd_ct_cal_count: "int | None"
+    cmd_config_page_count: "int | None"
+    cmd_commit_config_rejected_count: "int | None"
 
     def describe(self) -> str:
+        def _fmt(value: "int | None") -> str:
+            return "unknown" if value is None else str(value)
+
         return (
             f"sent {self.frames_sent}, received {self.frames_received}, "
             f"crc/framing errors {self.crc_errors}, timeouts {self.timeouts}, "
+            f"broadcast dropped {_fmt(self.broadcast_dropped)}, "
+            f"diag applied {_fmt(self.diag_applied)}, "
+            f"power applied {_fmt(self.power_applied)}, "
+            f"frames deframed {_fmt(self.frames_deframed)}, "
+            f"routed nowhere {_fmt(self.frames_routed_nowhere)}, "
+            f"length mismatch {_fmt(self.frame_length_mismatch)}, "
+            f"crc mismatch {_fmt(self.frame_crc_mismatch)}, "
+            f"resync {_fmt(self.frame_resync)}, "
+            f"dequeued {_fmt(self.dequeued_total)}, "
+            f"unmatched cmd count {_fmt(self.unmatched_cmd_count)}, "
+            f"last unmatched cmd byte {_fmt(self.last_unmatched_cmd_byte)}, "
+            f"cmd histogram [status={_fmt(self.cmd_status_count)} "
+            f"fw_version={_fmt(self.cmd_fw_version_count)} "
+            f"update_status={_fmt(self.cmd_update_status_count)} "
+            f"power={_fmt(self.cmd_power_count)} "
+            f"diag={_fmt(self.cmd_diag_count)} "
+            f"trip_event={_fmt(self.cmd_trip_event_count)} "
+            f"ct_cal={_fmt(self.cmd_ct_cal_count)} "
+            f"config_page={_fmt(self.cmd_config_page_count)} "
+            f"commit_config_rejected={_fmt(self.cmd_commit_config_rejected_count)}], "
             f"poll period {self.poll_period_ms} ms"
         )
 
@@ -2238,9 +2370,31 @@ def parse_safety_response(
     Layouts (uart_task_ids.h)::
 
         GET_STATUS:      byte0=0x01, flags u8, tc f32, cj f32, SR u8,
-                         current1..3 f32, age u16 LE                (25 bytes)
-        GET_LINK_STATS:  byte0=0x04, sent u32, received u32, crc u32,
-                         timeouts u32, poll period u16 LE           (19 bytes)
+                         current1..3 f32, age u16 LE,
+                         [tx_dropped_sat u8, extra_flags u8 (bit0
+                          tx_dropped_known)]                (25 or 27 bytes --
+                         the last two bytes are V2, added 2026-08-23; a peer
+                         ESP built before that change sends 25 and
+                         tx_dropped_sat decodes as None/unknown, never 0)
+        GET_LINK_STATS:  byte0=0x04, sent u32, received u32 (GET_STATUS
+                         replies ONLY, despite the name -- see
+                         SafetyLinkStats.frames_received's own doc comment),
+                         crc u32, timeouts u32, poll period u16 LE,
+                         [broadcast_dropped u32 LE,
+                          [diag_applied u32 LE, power_applied u32 LE,
+                           [frames_deframed u32 LE, frames_routed_nowhere
+                            u32 LE, frame_length_mismatch u32 LE,
+                            frame_crc_mismatch u32 LE, frame_resync u32 LE,
+                            [dequeued_total u32 LE, unmatched_cmd_count
+                             u32 LE, last_unmatched_cmd_byte u8,
+                             [nine u32 LE per-command dequeue counts --
+                              status/fw_version/update_status/power/diag/
+                              trip_event/ct_cal/config_page/
+                              commit_config_rejected, in that order]]]]]
+                         (19, 23, 31, 51, 60, or 96 bytes -- V2/V3/V4/V5/V6,
+                         all added 2026-08-23; a peer ESP built before any
+                         given change decodes that change's field(s) as
+                         None/unknown, never 0)
         GET_DIAG:        byte0=0x0C, flags u8 (bit0 ever_received),
                          trip_reason u8, warn_mask u16 LE, trip_mask u16 LE,
                          uptime_ms u32 LE, boot_reason u8,
@@ -2266,9 +2420,15 @@ def parse_safety_response(
     subcommand = payload[0]
 
     if subcommand == SAFETY_CMD_GET_STATUS:
-        if len(payload) != 25:
+        # V1 (25 bytes, pre-2026-08-23) and V2 (27, + tx_dropped_sat/
+        # extra_flags) both accepted -- never just one: an ESP flashed before
+        # this change and a pc_tools build flashed after it (or vice versa)
+        # must not simply stop talking to each other over one extra field,
+        # the same reasoning Frame A's own V1/V2 split documents on the
+        # SaftyFW<->ESP hop this field originates from.
+        if len(payload) not in (25, 27):
             raise SafetyResponseError(
-                f"GET_STATUS response must be 25 bytes, got {len(payload)}"
+                f"GET_STATUS response must be 25 or 27 bytes, got {len(payload)}"
             )
         (
             flags,
@@ -2280,6 +2440,11 @@ def parse_safety_response(
             current3,
             age_ms,
         ) = struct.unpack_from("<BffBfffH", payload, 1)
+        tx_dropped_sat: "int | None" = None
+        if len(payload) == 27:
+            tx_dropped_raw, extra_flags = struct.unpack_from("<BB", payload, 25)
+            if extra_flags & 0x01:  # SAFETY_LINK_STATUS_EXTRA_FLAG_TX_DROPPED_KNOWN
+                tx_dropped_sat = tx_dropped_raw
         # NaN is how "no valid reading" arrives here (the Pico's own TC can be
         # invalid); an infinity is not a value this protocol can carry, and a
         # bogus current reading is exactly the kind of thing that must not
@@ -2301,22 +2466,100 @@ def parse_safety_response(
             fault_status=ThermoFault(fault_status),
             current_a=(current1, current2, current3),
             age_ms=age_ms,
+            tx_dropped_sat=tx_dropped_sat,
         )
 
     if subcommand == SAFETY_CMD_GET_LINK_STATS:
-        if len(payload) != 19:
+        # V1 (19 bytes, pre-2026-08-23), V2 (23, + broadcast_dropped u32),
+        # V3 (31, + diag_applied u32 + power_applied u32), V4 (51, +
+        # frames_deframed/frames_routed_nowhere/frame_length_mismatch/
+        # frame_crc_mismatch/frame_resync, all u32), V5 (60, +
+        # dequeued_total u32 + unmatched_cmd_count u32 +
+        # last_unmatched_cmd_byte u8), and V6 (96, + nine u32 per-command
+        # dequeue counts) all accepted, same reasoning as GET_STATUS's own
+        # V1/V2 split above: whichever of ESP/pc_tools gets rebuilt first
+        # must not stop talking to the other over an extra counter.
+        if len(payload) not in (19, 23, 31, 51, 60, 96):
             raise SafetyResponseError(
-                f"GET_LINK_STATS response must be 19 bytes, got {len(payload)}"
+                f"GET_LINK_STATS response must be 19, 23, 31, 51, 60, or 96 "
+                f"bytes, got {len(payload)}"
             )
         sent, received, crc_errors, timeouts, poll_period = struct.unpack_from(
             "<IIIIH", payload, 1
         )
+        broadcast_dropped: "int | None" = None
+        if len(payload) >= 23:
+            (broadcast_dropped,) = struct.unpack_from("<I", payload, 19)
+        diag_applied: "int | None" = None
+        power_applied: "int | None" = None
+        if len(payload) >= 31:
+            diag_applied, power_applied = struct.unpack_from("<II", payload, 23)
+        frames_deframed: "int | None" = None
+        frames_routed_nowhere: "int | None" = None
+        frame_length_mismatch: "int | None" = None
+        frame_crc_mismatch: "int | None" = None
+        frame_resync: "int | None" = None
+        if len(payload) >= 51:
+            (
+                frames_deframed,
+                frames_routed_nowhere,
+                frame_length_mismatch,
+                frame_crc_mismatch,
+                frame_resync,
+            ) = struct.unpack_from("<IIIII", payload, 31)
+        dequeued_total: "int | None" = None
+        unmatched_cmd_count: "int | None" = None
+        last_unmatched_cmd_byte: "int | None" = None
+        if len(payload) >= 60:
+            dequeued_total, unmatched_cmd_count = struct.unpack_from("<II", payload, 51)
+            (last_unmatched_cmd_byte,) = struct.unpack_from("<B", payload, 59)
+        cmd_status_count: "int | None" = None
+        cmd_fw_version_count: "int | None" = None
+        cmd_update_status_count: "int | None" = None
+        cmd_power_count: "int | None" = None
+        cmd_diag_count: "int | None" = None
+        cmd_trip_event_count: "int | None" = None
+        cmd_ct_cal_count: "int | None" = None
+        cmd_config_page_count: "int | None" = None
+        cmd_commit_config_rejected_count: "int | None" = None
+        if len(payload) == 96:
+            (
+                cmd_status_count,
+                cmd_fw_version_count,
+                cmd_update_status_count,
+                cmd_power_count,
+                cmd_diag_count,
+                cmd_trip_event_count,
+                cmd_ct_cal_count,
+                cmd_config_page_count,
+                cmd_commit_config_rejected_count,
+            ) = struct.unpack_from("<IIIIIIIII", payload, 60)
         return subcommand, SafetyLinkStats(
             frames_sent=sent,
             frames_received=received,
             crc_errors=crc_errors,
             timeouts=timeouts,
             poll_period_ms=poll_period,
+            broadcast_dropped=broadcast_dropped,
+            diag_applied=diag_applied,
+            power_applied=power_applied,
+            frames_deframed=frames_deframed,
+            frames_routed_nowhere=frames_routed_nowhere,
+            frame_length_mismatch=frame_length_mismatch,
+            frame_crc_mismatch=frame_crc_mismatch,
+            frame_resync=frame_resync,
+            dequeued_total=dequeued_total,
+            unmatched_cmd_count=unmatched_cmd_count,
+            last_unmatched_cmd_byte=last_unmatched_cmd_byte,
+            cmd_status_count=cmd_status_count,
+            cmd_fw_version_count=cmd_fw_version_count,
+            cmd_update_status_count=cmd_update_status_count,
+            cmd_power_count=cmd_power_count,
+            cmd_diag_count=cmd_diag_count,
+            cmd_trip_event_count=cmd_trip_event_count,
+            cmd_ct_cal_count=cmd_ct_cal_count,
+            cmd_config_page_count=cmd_config_page_count,
+            cmd_commit_config_rejected_count=cmd_commit_config_rejected_count,
         )
 
     if subcommand == SAFETY_CMD_GET_DIAG:

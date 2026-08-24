@@ -300,6 +300,26 @@ typedef struct {
                                    // change that contract.
     uint8_t  ct_channel_map[3];   // zone/relay id watched by each CT channel;
                                    // gated by _SET_CT_CHANNEL_MAP as a whole
+    uint8_t  safety_tc_installed; // 0/1, param 0x0211 -- "is the Pico's own
+                                   // safety thermocouple physically wired
+                                   // up." Default 1 (installed): the safe
+                                   // default is "I expect a sensor and I
+                                   // will trip if it is missing", not the
+                                   // reverse. NOT fields_set-gated -- see
+                                   // config_params.c's 0x0211 comment for
+                                   // why 1 is a real, safe compiled default
+                                   // rather than an unset-until-commissioned
+                                   // flag. When 0, S5 (safety_guards.c)
+                                   // downgrades a persistent bad-read streak
+                                   // from TRIP to a permanent WARN (never
+                                   // auto-promoted), and safety_core_request_
+                                   // enable() unconditionally refuses the ON
+                                   // direction -- the trade documented on
+                                   // that function: S5 is only allowed to
+                                   // stop trying to protect a sensor that
+                                   // does not exist because the enable path
+                                   // is the one refusing unconditionally
+                                   // instead.
     bool     calibration_missing; // true until a real commissioning pass
                                    // clears it. A blank/corrupt/unreadable
                                    // store, and any record migrated forward
@@ -389,11 +409,14 @@ typedef struct {
     config_store_ct_channel_cal_t ct_cal[CONFIG_STORE_CT_CAL_NUM_CHANNELS];
 
     // Reserved, unused, packed as 0xFF (matches the erased-flash background,
-    // same convention as metadata.h's per-slot reserved bytes). ~300 B of
-    // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC) -- adding a
-    // field later is a struct/pack/unpack/host-test change, not a layout
-    // change, same as metadata.h's own signature/sig_required reservation.
-    uint8_t  reserved[300];
+    // same convention as metadata.h's per-slot reserved bytes). ~299 B of
+    // headroom (config_store.c's REC_OFF_RESERVED..REC_OFF_CRC; one byte of
+    // the original 300 was carved off the FRONT of this block for
+    // safety_tc_installed above -- see REC_OFF_SAFETY_TC_INSTALLED in
+    // config_store.c) -- adding a field later is a struct/pack/unpack/
+    // host-test change, not a layout change, same as metadata.h's own
+    // signature/sig_required reservation.
+    uint8_t  reserved[299];
 } config_store_record_t;
 
 // Compile-time budget check, mirroring bootloader/metadata.c's
