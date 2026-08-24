@@ -824,8 +824,52 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _subcommand_names(parser: argparse.ArgumentParser) -> "set[str]":
+    """Every top-level subcommand name registered on ``parser`` (the
+    ``add_subparsers`` choices), read back from the parser itself rather than
+    duplicated as a literal list here -- a new ``sub.add_parser(...)`` call
+    in :func:`build_parser` must never require a matching update in
+    :func:`_fixup_bare_virtual` or the two silently drift apart."""
+    for action in parser._actions:  # noqa: SLF001 -- argparse has no public accessor for this
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            return set(action.choices.keys())
+    return set()
+
+
+def _fixup_bare_virtual(argv: list, subcommands: "set[str]") -> list:
+    """Work around ``--virtual``'s ``nargs='?'`` swallowing the subcommand.
+
+    ``argparse`` gives an ``nargs='?'`` option the very next token as its
+    value whenever that token doesn't itself look like an option string --
+    it has no idea a subparser further down the chain would rather have had
+    it. So ``kilnsim --virtual testmgr --quick`` parses ``testmgr`` as
+    ``--virtual``'s address and then fails with "the following arguments are
+    required: command", eating the subcommand entirely (not just for
+    ``testmgr`` -- every subcommand is affected the same way). This was
+    previously "documented as a known issue" (`firmware/SimFW/docs/
+    TEST_MANAGER.md`) with the workaround of always spelling it
+    ``--virtual=`` (explicit ``=``, forces argparse to treat the value as the
+    empty string instead of consuming a token) -- now that workaround is
+    applied automatically: a bare ``--virtual`` immediately followed by a
+    known subcommand name is rewritten to ``--virtual=`` before parsing, so
+    the documented bare form (`kilnsim --virtual testmgr --quick`, no
+    address) works without the caller having to know the trick.
+    ``--virtual=HOST:PORT`` and ``--virtual HOST:PORT`` (an address that
+    isn't itself a subcommand name) are untouched -- both still work exactly
+    as before.
+    """
+    out = list(argv)
+    for i, tok in enumerate(out):
+        if tok == "--virtual" and i + 1 < len(out) and out[i + 1] in subcommands:
+            out[i] = "--virtual="
+    return out
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = _fixup_bare_virtual(list(argv), _subcommand_names(parser))
     args = parser.parse_args(argv)
     return args.func(args)
 

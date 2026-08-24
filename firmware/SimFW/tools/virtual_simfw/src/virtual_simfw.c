@@ -191,7 +191,19 @@ typedef struct {
     bool k1, k2, k3, k5, k4;
     bool fault_line_asserted;
     bool estop_open;
-    bool dut_power_on;
+    bool dut_power_on;         // main domain (J18) -- DUT_POWER_SET/GET (0x06/0x08)
+    bool dut_power_safety_on;  // safety domain (J19) -- DUT_POWER_SAFETY_SET/GET
+                                // (0x09/0x0A). Independently commanded, never
+                                // derived from dut_power_on -- PROTOCOL.md sec 5.5:
+                                // ganging the two would bond GND_Main and GND_Safty
+                                // through a shared control path. Not part of the
+                                // sim_snapshot.h-shaped published state below
+                                // (snap_dut_power_on): real sim_engine.c's own
+                                // snapshot only ever carries the main-domain bit
+                                // (i2c_owner_get_dut_power_on() is main-only), so
+                                // there is nothing to mirror here for the safety
+                                // domain -- it is read back only via
+                                // DUT_POWER_SAFETY_GET, never the event/snapshot path.
     uint64_t relay_sample_time_us;
     uint16_t relay_mask_prev;
 
@@ -1404,6 +1416,22 @@ static bool dispatch_io(device_t *d, uint8_t cmd, ar_t *r, rw_t *w)
         rw_u8(w, SIMFW_CMD_STATUS_OK);
         rw_u8(w, d->dut_power_on ? 1u : 0u);
         return true;
+    case SIMFW_CMD_IO_DUT_POWER_SAFETY_SET: {
+        // Safety domain (J19) only -- mirrors DUT_POWER_SET's main-domain-only
+        // handler above but writes dut_power_safety_on, never dut_power_on.
+        // PROTOCOL.md sec 5.5: the two relays are independently commanded so
+        // GND_Main and GND_Safty are never bonded through a shared control
+        // path -- this handler must never touch d->dut_power_on.
+        uint8_t on = ar_u8(r);
+        if (r->overflow) { rw_u8(w, SIMFW_CMD_STATUS_ERR_BAD_ARGS); return true; }
+        d->dut_power_safety_on = on != 0;
+        rw_u8(w, SIMFW_CMD_STATUS_OK);
+        return true;
+    }
+    case SIMFW_CMD_IO_DUT_POWER_SAFETY_GET:
+        rw_u8(w, SIMFW_CMD_STATUS_OK);
+        rw_u8(w, d->dut_power_safety_on ? 1u : 0u);
+        return true;
     default:
         rw_u8(w, SIMFW_CMD_STATUS_ERR_NOT_IMPL);
         return true;
@@ -1791,6 +1819,15 @@ static void device_init(device_t *d, uint32_t seed)
                              // does not itself pick an E-stop default, but a
                              // DUT power relay defaulting OFF would make
                              // every scenario start with a dead board)
+    d->dut_power_safety_on = true; // same rationale, safety domain (J19) --
+                                    // see dut_power_on's comment above. Real
+                                    // i2c_owner.c boots both relays OFF
+                                    // (s_dut_power_main_on/s_dut_power_safety_on
+                                    // default false); this harness deviates for
+                                    // both domains identically so a scenario
+                                    // never starts with a dead board on either
+                                    // rail without an explicit FT_DUT_POWER_CUT
+                                    // or DUT_POWER_SAFETY_SET(off).
     d->estop_open = true; // fail-safe default: STOP -- see the field's comment above
     for (unsigned c = 0; c < CT_NUM_CHANNELS; c++) d->ct[c].apply_immediately = true;
     reset_device(d, false);

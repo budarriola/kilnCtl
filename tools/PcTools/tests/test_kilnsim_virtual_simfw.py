@@ -592,3 +592,46 @@ expect: []
         "same scenario + same seed must draw the same repeat-jitter sequence from the "
         "seeded PRNG (DESIGN_NOTES.md sec 4.2/7.2's determinism contract)"
     )
+
+
+def test_dut_power_safety_get_set_independent_of_main():
+    """Defect fixed 2026-08-24: virtual_simfw used to answer IO/
+    DUT_POWER_SAFETY_GET (0x0A) with ERR_NOT_IMPL, which failed kilnsim
+    selftest's command_groups_reachable check and dragged every `--virtual`
+    run's exit code to 1 for a reason unrelated to whatever scenario was
+    actually being tested (see this repo's task notes / PROTOCOL.md sec
+    5.5). This proves the safety-domain (J19) SET/GET pair now works, and --
+    the actual point of two independent relays existing at all -- that
+    commanding one domain never leaks into the other's readback."""
+    from kilnsim.protocol import CommandGroup, IoCmd
+
+    with _VirtualSimFW() as device:
+        link = TcpSimLink()
+        link.connect(f"127.0.0.1:{device.port}")
+        try:
+            # Both domains default on (virtual_simfw.c device_init()'s
+            # documented deviation from real firmware's power-off boot
+            # default -- see that function's comment).
+            main_reply = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)
+            safety_reply = link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)
+            assert main_reply["on"] is True
+            assert safety_reply["on"] is True
+
+            # Turning the safety domain off must not touch the main domain.
+            link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_SET, {"on": False})
+            assert link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)["on"] is False
+            assert link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)["on"] is True
+
+            # And the reverse: turning the main domain off must not touch
+            # the (now off) safety domain, nor turn it back on.
+            link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SET, {"on": False})
+            assert link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)["on"] is False
+            assert link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)["on"] is False
+
+            # Turning the safety domain back on independently must not
+            # revive the main domain either.
+            link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_SET, {"on": True})
+            assert link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_SAFETY_GET)["on"] is True
+            assert link.send_command(CommandGroup.IO, IoCmd.DUT_POWER_GET)["on"] is False
+        finally:
+            link.disconnect()

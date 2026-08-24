@@ -27,7 +27,7 @@ kilnsim testmgr --quick         # fast subset -- "I just reflashed, is it still 
 kilnsim testmgr --json          # machine-readable, for CI
 kilnsim testmgr --mock          # against MockSimLink, no hardware at all (smoke test)
 kilnsim testmgr --port COM11    # explicit fixture port, same convention as every other kilnsim subcommand
-kilnsim --virtual= testmgr --quick               # against virtual_simfw (real sim code, host-compiled), no real hardware
+kilnsim --virtual testmgr --quick                 # against virtual_simfw (real sim code, host-compiled), no real hardware
 kilnsim --virtual=127.0.0.1:8765 testmgr --quick  # explicit host:port (this is virtual_simfw's own default anyway)
 ```
 
@@ -399,14 +399,18 @@ section with what actually happened, the same discipline
   `tools/PcTools/tests/test_kilnsim_cli.py` are out of this pass's scope,
   so neither was touched to chase that gap down.)
 
-  One separate, pre-existing wrinkle surfaced while documenting this,
-  **not** introduced by this wiring and left alone (out of scope, and
-  shared by every `kilnsim` subcommand, not just `testmgr`): the top-level
-  `--virtual [HOST:PORT]` flag's `nargs='?'` means `kilnsim --virtual
-  testmgr` (bare, space-separated, no address) has argparse swallow
-  `testmgr` itself as `--virtual`'s value, producing a confusing "the
-  following arguments are required: command" error. The fix is the
-  standard argparse workaround -- `kilnsim --virtual= testmgr` (an explicit
-  `=`, even with nothing after it) -- shown in section 1's command list
-  above; `kilnsim --virtual=HOST:PORT testmgr` for an explicit address has
-  never been ambiguous.
+  One separate wrinkle surfaced while documenting this, shared by every
+  `kilnsim` subcommand, not just `testmgr` -- **since fixed**: the
+  top-level `--virtual [HOST:PORT]` flag's `nargs='?'` meant `kilnsim
+  --virtual testmgr` (bare, space-separated, no address) had argparse
+  swallow `testmgr` itself as `--virtual`'s value, producing a confusing
+  "the following arguments are required: command" error.
+  `tools/PcTools/src/kilnsim/cli.py`'s `main()` now rewrites a bare
+  `--virtual` immediately followed by a known subcommand name to
+  `--virtual=` before handing `argv` to `argparse`
+  (`_fixup_bare_virtual()`/`_subcommand_names()`), which is exactly the
+  workaround this section used to tell you to type by hand. So the bare
+  form in section 1's command list above (`kilnsim --virtual testmgr
+  --quick`) now works directly; `kilnsim --virtual=HOST:PORT testmgr` for
+  an explicit address, and `kilnsim --virtual HOST:PORT testmgr` (address
+  that isn't itself a subcommand name), both still work exactly as before.
