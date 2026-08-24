@@ -27,6 +27,8 @@ kilnsim testmgr --quick         # fast subset -- "I just reflashed, is it still 
 kilnsim testmgr --json          # machine-readable, for CI
 kilnsim testmgr --mock          # against MockSimLink, no hardware at all (smoke test)
 kilnsim testmgr --port COM11    # explicit fixture port, same convention as every other kilnsim subcommand
+kilnsim --virtual= testmgr --quick               # against virtual_simfw (real sim code, host-compiled), no real hardware
+kilnsim --virtual=127.0.0.1:8765 testmgr --quick  # explicit host:port (this is virtual_simfw's own default anyway)
 ```
 
 Exit code, same convention as `kilnsim run`:
@@ -51,12 +53,22 @@ having to remember to update a curated subset.
 ### Hardware presence
 
 ```
+link: serial -- real SimFW hardware over a serial link
 hardware presence:
   fixture: PRESENT -- SimFW fixture responded to PING on COM11
   SaftyFW: absent -- ESP has no live status from the safety processor (age_ms=4294967295, link_up=False)
   ESP:     absent -- ESP not reachable: ...
   max tier available: 0 (fixture alone)
 ```
+
+The `link:` line is report provenance (requirement 3, closed alongside
+`--virtual` above): every saved report -- text or JSON (`SuiteReport
+.link_kind`) -- says which of the three link kinds it actually ran
+against, `serial` / `virtual` / `mock`, so a report on disk can be told
+apart from the other two after the fact. A `--virtual` run's line reads
+`link: virtual -- virtual_simfw over TCP (host-simulated fixture code, no
+real hardware)`; `--mock` reads `link: mock -- MockSimLink (in-memory
+fake, no hardware and no simulation code)`.
 
 Three tiers, gated in a strict staircase (`HardwarePresence.max_tier`):
 
@@ -262,7 +274,11 @@ report as everything else.
 
 ## 8. What this suite has actually been run against
 
-**Never real hardware, as of this writing.** It is built and unit-tested
+**Never real hardware, as of this writing.** Run once end-to-end against
+`virtual_simfw` (2026-08-24, `kilnsim --virtual=... testmgr --quick` --
+see sec 9's last bullet for the result), which is real host-compiled SimFW
+simulation code but is still not the real board, so this section's "never
+real hardware" claim stands unchanged. It is built and unit-tested
 (`tools/PcTools/tests/test_kilnsim_testmgr.py`) entirely against
 `MockSimLink` and injected fake presence probes — no real
 `SerialSimLink`/`kilnctrl.serial_link.UartLink` connection has been opened
@@ -324,8 +340,73 @@ section with what actually happened, the same discipline
   need the OpenOCD/SWD `debug_*` path. Reported as absent whenever the ESP
   link is down, even if the Pico itself is fine.
 - **Timed `operator_actions` are not replayed** — see §6.
-- **`--virtual` (TCP link to `virtual_simfw`) is not wired into `testmgr`**
-  in this pass, only into the per-command `kilnsim` subcommands. Adding it
-  is straightforward (the same `SimLink` interface) if a CI environment
-  without real hardware wants to run this suite against the virtual
-  fixture instead of `--mock`.
+- **`--virtual` (TCP link to `virtual_simfw`) IS now wired into `testmgr`**
+  (closed 2026-08-24) -- exactly the "same `SimLink` interface" wiring this
+  bullet used to say would be straightforward, and it was: `kilnsim.cli
+  .cmd_testmgr` derives `virtual=isinstance(link, TcpSimLink)` from
+  `_make_link`'s own result and passes it, plus a `fixture_address` (the
+  `"host:port"` string, kept a SEPARATE parameter from `port` -- see below)
+  straight through to `kilnsim.testmgr.run_suite`. Because `TcpSimLink`
+  implements the identical `SimLink` interface `SerialSimLink` does, every
+  scenario that DOES run against it runs through the real, unmodified
+  `kilnsim.runner.run_scenario` -- unlike `--mock`, which bypasses that
+  function entirely (`run_one_scenario`'s own mock branch calls
+  `evaluate_expectations` directly). A `--virtual` run is therefore a
+  genuinely different, fourth kind of evidence from `--mock`'s smoke test:
+  `virtual_simfw` is the real, host-compiled SimFW simulation code
+  (`firmware/SimFW/tools/virtual_simfw`), so `testmgr --virtual` exercises
+  the same orchestration, tier-classification, and scenario logic a real-
+  hardware run does, just against a simulated fixture instead of the SimFW
+  board.
+
+  Two things a `--virtual` run genuinely does NOT have, reported honestly
+  rather than silently assumed: SaftyFW and the ESP are never attached to a
+  TCP-only virtual run, so `run_suite(virtual=True)` forces both absent
+  with a reason that says `--virtual` explicitly (never falls through to
+  the real `kilnctrl` serial probe, the same way `mock=True` already
+  refuses to touch it) -- a virtual run therefore always caps at tier 0
+  (fixture alone), the same ceiling `--mock` has, just with real simulation
+  code doing the fixture-alone work instead of nothing. And `--guards
+  --virtual` is refused the same way `--guards --mock` already is
+  (`GuardObserverUnavailable`, raised before the link is even connected) --
+  there is no real (or virtual) SaftyFW for a guard observer to attach to.
+
+  `run_suite`'s `port` parameter stayed reserved for the real `kilnctrl`
+  ESP/SaftyFW probe and the operator-enable link (both always a real serial
+  COM port, even during a `--virtual` run) -- a new `fixture_address`
+  parameter carries the fixture's own connect address instead (defaults to
+  `port` when omitted, so every pre-existing serial call site is
+  unaffected), which is what let `cmd_testmgr` route a `TcpSimLink`'s
+  `"host:port"` to the fixture without it colliding with an unrelated real
+  COM port passed via `--port`.
+
+  **Verified end-to-end** (2026-08-24): built `virtual_simfw.exe` was
+  already present under `firmware/SimFW/tools/virtual_simfw/build/`;
+  launched it, then ran `kilnsim --virtual=127.0.0.1:<port> testmgr
+  --quick` against it for real. It connected over TCP, reported `link:
+  virtual` in the report, correctly reported SaftyFW/ESP absent with the
+  `--virtual`-specific reason, capped at tier 0, reported every tier-1/2
+  scenario `NOT_RUNNABLE` rather than FAIL, and ran `kilnsim selftest`
+  against the virtual link for real -- which surfaced one genuine, pre-
+  existing gap unrelated to this wiring: virtual_simfw's `command_groups
+  _reachable` check FAILs on `IO/DUT_POWER_SAFETY_GET: IO/10: ERR_NOT_IMPL`
+  (that command isn't implemented in virtual_simfw today), which drags the
+  suite's overall exit code to 1 on an otherwise-clean virtual run. That is
+  an honest result -- not a bug in this wiring -- but is worth knowing
+  about before reading a `--virtual` run's exit code as "everything at tier
+  0 passed"; see `firmware/SimFW/tools/virtual_simfw`'s own docs for that
+  gap. (`firmware/SimFW/tools/virtual_simfw/**` and
+  `tools/PcTools/tests/test_kilnsim_cli.py` are out of this pass's scope,
+  so neither was touched to chase that gap down.)
+
+  One separate, pre-existing wrinkle surfaced while documenting this,
+  **not** introduced by this wiring and left alone (out of scope, and
+  shared by every `kilnsim` subcommand, not just `testmgr`): the top-level
+  `--virtual [HOST:PORT]` flag's `nargs='?'` means `kilnsim --virtual
+  testmgr` (bare, space-separated, no address) has argparse swallow
+  `testmgr` itself as `--virtual`'s value, producing a confusing "the
+  following arguments are required: command" error. The fix is the
+  standard argparse workaround -- `kilnsim --virtual= testmgr` (an explicit
+  `=`, even with nothing after it) -- shown in section 1's command list
+  above; `kilnsim --virtual=HOST:PORT testmgr` for an explicit address has
+  never been ambiguous.

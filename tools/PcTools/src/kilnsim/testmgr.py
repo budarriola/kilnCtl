@@ -191,6 +191,24 @@ _POLARITY_WORDS = {
     "closed", "close", "off", "deasserted", "false", "absent",
 }
 
+#: Report provenance (requirement 3): which kind of SimLink a SuiteReport was
+#: actually run against, stamped into every SuiteReport so a saved JSON/text
+#: report can be told apart after the fact -- this closes the same defect
+#: class as the vacuous-pass bugs this project has been fixing all week
+#: (a report that cannot say what it ran against is exactly as untrustworthy
+#: as one that reports a false PASS). Three, and only three, values: this
+#: module's own run_suite() is the only place a SuiteReport gets constructed
+#: for a real run.
+LINK_KIND_SERIAL = "serial"
+LINK_KIND_VIRTUAL = "virtual"
+LINK_KIND_MOCK = "mock"
+
+_LINK_KIND_DESCRIPTIONS = {
+    LINK_KIND_SERIAL: "real SimFW hardware over a serial link",
+    LINK_KIND_VIRTUAL: "virtual_simfw over TCP (host-simulated fixture code, no real hardware)",
+    LINK_KIND_MOCK: "MockSimLink (in-memory fake, no hardware and no simulation code)",
+}
+
 
 def default_scenarios_dir() -> Path:
     """``firmware/SimFW/scenarios``, resolved relative to this file rather
@@ -852,6 +870,13 @@ class SuiteReport:
     #: True here always means every real (non-mock, non-NOT_RUNNABLE)
     #: scenario outcome's own guard_observer_attached is also True.
     guards: bool = False
+    #: Report provenance (requirement 3) -- one of LINK_KIND_SERIAL /
+    #: LINK_KIND_VIRTUAL / LINK_KIND_MOCK, stamped by run_suite() from the
+    #: `mock`/`virtual` arguments it was called with. Defaults to "serial"
+    #: only so existing direct-construction call sites (tests) that predate
+    #: this field keep working -- run_suite() itself always passes it
+    #: explicitly.
+    link_kind: str = LINK_KIND_SERIAL
 
     @property
     def exit_code(self) -> int:
@@ -889,6 +914,7 @@ class SuiteReport:
             "presence": self.presence.to_dict(),
             "quick": self.quick,
             "guards": self.guards,
+            "link_kind": self.link_kind,
             "selftest": self.selftest.to_dict() if self.selftest is not None else None,
             "scenario_outcomes": [o.to_dict() for o in self.scenario_outcomes],
             "guard_coverage": {g: c.to_dict() for g, c in self.guard_coverage.items()},
@@ -904,6 +930,10 @@ class SuiteReport:
 
     def to_text(self) -> str:
         lines = ["=== kilnsim testmgr ===", ""]
+        lines.append(
+            f"link: {self.link_kind} -- "
+            f"{_LINK_KIND_DESCRIPTIONS.get(self.link_kind, self.link_kind)}"
+        )
         lines.append("hardware presence:")
         lines.append(f"  fixture: {'PRESENT' if self.presence.fixture.present else 'absent'} -- {self.presence.fixture.detail}")
         lines.append(f"  SaftyFW: {'PRESENT' if self.presence.saftyfw.present else 'absent'} -- {self.presence.saftyfw.detail}")
@@ -975,7 +1005,9 @@ def run_suite(
     *,
     quick: bool = False,
     mock: bool = False,
+    virtual: bool = False,
     port: Optional[str] = None,
+    fixture_address: Optional[str] = None,
     fixture_probe: "Optional[Callable[[SimLink, Optional[str]], PresenceResult]]" = None,
     esp_saftyfw_probe: "Optional[Callable[[], tuple[PresenceResult, PresenceResult]]]" = None,
     request_enable_fn_factory: "Optional[Callable[[Optional[str]], Optional[Callable[[], None]]]]" = None,
@@ -990,6 +1022,28 @@ def run_suite(
     :func:`make_request_enable_fn`, :func:`default_guard_observer_factory`)
     and exists as a parameter specifically so tests can inject fakes -- see
     ``tests/test_kilnsim_testmgr.py``.
+
+    ``virtual`` (default **False**): the suite is running against
+    :class:`~kilnsim.link.TcpSimLink` (``kilnsim --virtual`` /
+    ``firmware/SimFW/tools/virtual_simfw``) instead of real serial hardware.
+    ``virtual_simfw`` runs the real, host-compiled SimFW simulation code, so
+    every scenario still runs for real through :func:`run_one_scenario` and
+    :func:`~kilnsim.runner.run_scenario` -- unlike ``mock``, which bypasses
+    ``run_scenario`` entirely. What ``virtual`` genuinely does NOT have is a
+    real SaftyFW or ESP: nothing is attached at all, so (module docstring
+    point 1's presence detection, extended here) ``esp_saftyfw_probe``
+    defaults to reporting both absent with a reason that says ``--virtual``
+    explicitly, the same way the ``mock`` branch already does, rather than
+    trying to open a real ``kilnctrl`` serial link that has no bearing on a
+    TCP run. ``fixture_address`` is the ``"host:port"`` string
+    :class:`~kilnsim.link.TcpSimLink` needs (kilnsim's own ``--virtual
+    [HOST:PORT]``); it is deliberately a SEPARATE parameter from ``port``,
+    because ``port`` is also reused below for the real ``kilnctrl`` ESP/
+    SaftyFW probe and the operator-enable link, both of which are always a
+    real serial COM port even during a ``--virtual`` run -- conflating the
+    two would make ``kilnctrl`` try to open the fixture's TCP address as a
+    serial port name. When ``fixture_address`` is omitted it defaults to
+    ``port``, matching this function's pre-``--virtual`` behaviour exactly.
 
     ``guards`` (default **False** -- opt-in): attach a real
     :class:`~kilnsim.guard_observer.SafetyGuardObserver` to every scenario run
@@ -1017,6 +1071,9 @@ def run_suite(
     t0 = time.monotonic()
     scenarios_dir = scenarios_dir or default_scenarios_dir()
     fixture_probe = fixture_probe or default_fixture_probe
+    if fixture_address is None:
+        fixture_address = port
+    link_kind = LINK_KIND_MOCK if mock else (LINK_KIND_VIRTUAL if virtual else LINK_KIND_SERIAL)
     if guards and mock:
         # Fail fast, before touching `link` at all: mock=True never runs
         # kilnsim.runner.run_scenario (run_one_scenario's mock branch calls
@@ -1031,6 +1088,23 @@ def run_suite(
             "attaches to, is never called against MockSimLink), so a guard observer can "
             "never be attached; drop --mock or drop --guards"
         )
+    if guards and virtual:
+        # Requirement (4): a --virtual run talks to virtual_simfw, which
+        # simulates the FIXTURE only -- there is no real (or virtual)
+        # SaftyFW board on the other end of a second kilnctrl link for a
+        # guard observer to attach to. Fail fast, before touching `link`,
+        # the same way the --mock case above does, rather than letting this
+        # fall through to the generic "SaftyFW not reachable" check below
+        # (which would still catch it, since esp_saftyfw_probe reports
+        # SaftyFW absent for --virtual too, but only after connecting to
+        # the fixture -- this is both a clearer message and avoids that
+        # unnecessary connect).
+        raise GuardObserverUnavailable(
+            "--guards requested together with --virtual -- virtual_simfw simulates the "
+            "SimFW fixture only, not the safety processor, so no real SaftyFW is ever "
+            "reachable on a --virtual run and a guard observer can never be attached; "
+            "drop --virtual or drop --guards"
+        )
     if esp_saftyfw_probe is None:
         if mock:
             # --mock means "no real hardware at all, ever" -- the default
@@ -1040,6 +1114,22 @@ def run_suite(
             # real COM port for the ESP probe before this guard existed).
             na = PresenceResult(False, "not probed: --mock requested, no real hardware is touched")
             esp_saftyfw_probe = lambda: (na, na)  # noqa: E731
+        elif virtual:
+            # --virtual is a real link (TcpSimLink talks to virtual_simfw,
+            # which runs the real host-compiled SimFW simulation code), so
+            # the fixture itself is genuinely present in a real sense -- but
+            # SaftyFW and the ESP are never attached to a TCP-only virtual
+            # run, and reporting them via the real kilnctrl serial probe
+            # would either open an unrelated real COM port or, worse, find
+            # one and misreport a virtual run as having real SaftyFW/ESP
+            # hardware. Report both absent honestly instead, same shape as
+            # the --mock branch above.
+            na = PresenceResult(
+                False,
+                "not probed: --virtual requested -- virtual_simfw simulates the SimFW "
+                "fixture only; no real SaftyFW or ESP is attached to a virtual run",
+            )
+            esp_saftyfw_probe = lambda: (na, na)  # noqa: E731
         else:
             esp_saftyfw_probe = lambda: default_esp_and_saftyfw_probe(port)  # noqa: E731
     request_enable_fn_factory = request_enable_fn_factory or make_request_enable_fn
@@ -1047,7 +1137,7 @@ def run_suite(
 
     scenarios, load_errors = discover_scenarios(scenarios_dir)
 
-    fixture = fixture_probe(link, port)
+    fixture = fixture_probe(link, fixture_address)
     if fixture.present:
         esp, saftyfw = esp_saftyfw_probe()
     else:
@@ -1081,7 +1171,7 @@ def run_suite(
         return SuiteReport(
             presence=presence, quick=quick, selftest=None, scenario_outcomes=outcomes,
             guard_coverage=coverage, started_at=started_at, duration_s=time.monotonic() - t0,
-            guards=guards,
+            guards=guards, link_kind=link_kind,
         )
 
     outcomes = list(load_errors)
@@ -1127,7 +1217,7 @@ def run_suite(
     return SuiteReport(
         presence=presence, quick=quick, selftest=selftest_report, scenario_outcomes=outcomes,
         guard_coverage=coverage, started_at=started_at, duration_s=time.monotonic() - t0,
-        guards=guards,
+        guards=guards, link_kind=link_kind,
     )
 
 

@@ -546,10 +546,23 @@ def cmd_tasks(args) -> int:
 def cmd_testmgr(args) -> int:
     link = _make_link(args)
     scenarios_dir = Path(args.scenarios_dir) if args.scenarios_dir else None
+    # `_make_link` already resolves --mock/--virtual/plain-serial into the
+    # concrete SimLink (--mock wins if both were somehow given, same as
+    # every other subcommand's _make_link/_connect pair) -- inspect the link
+    # it actually returned rather than re-deriving the same precedence here
+    # a second time. `fixture_address` mirrors `_connect`'s own TcpSimLink
+    # special-case: a TcpSimLink needs the "host:port" string from
+    # `--virtual`, never the serial `--port` value (kilnsim.testmgr.run_suite
+    # keeps the two deliberately separate -- see its own docstring -- because
+    # `--port` is also reused for the real kilnctrl ESP/SaftyFW probe, which
+    # stays a real serial COM port even during a --virtual run).
+    virtual = isinstance(link, TcpSimLink)
+    fixture_address = (getattr(args, "virtual", None) or None) if virtual else args.port
     try:
         report = _testmgr.run_suite(
             link, scenarios_dir,
-            quick=args.quick, mock=args.mock, port=args.port,
+            quick=args.quick, mock=args.mock, virtual=virtual, port=args.port,
+            fixture_address=fixture_address,
             guards=args.guards,
         )
     except _testmgr.GuardObserverUnavailable as exc:

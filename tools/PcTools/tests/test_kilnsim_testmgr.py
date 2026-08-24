@@ -887,5 +887,227 @@ class CliGuardsFlagTests(unittest.TestCase):
         self.assertEqual(rc, 1, "a guard-observer-unavailable error must be a real failure, not exit 0")
 
 
+# ---------------------------------------------------------------------------
+# --virtual wiring (TcpSimLink over TEST_MANAGER.md sec 9's last bullet):
+# testmgr honoring kilnsim's top-level --virtual flag, honest tier reporting
+# under it, --guards refusal, and report provenance (link_kind) for all
+# three link kinds. Not test_kilnsim_cli.py (owned by a concurrent session)
+# -- same rationale as CliGuardsFlagTests above.
+# ---------------------------------------------------------------------------
+class LinkKindProvenanceTests(unittest.TestCase):
+    """Requirement (3): a saved report must say which link it ran against.
+    Exercised via the fixture-absent fast path so no scenario actually runs
+    -- this is purely about the stamp, not scenario execution."""
+
+    def _report(self, **kw):
+        link = MockSimLink()
+        return tm.run_suite(
+            link, tm.default_scenarios_dir(),
+            fixture_probe=lambda link_, addr: tm.PresenceResult(False, "simulated: absent"),
+            **kw,
+        )
+
+    def test_mock_run_is_stamped_mock(self):
+        report = self._report(mock=True)
+        self.assertEqual(report.link_kind, tm.LINK_KIND_MOCK)
+        self.assertEqual(report.to_dict()["link_kind"], "mock")
+        self.assertIn("link: mock", report.to_text())
+
+    def test_serial_run_is_stamped_serial(self):
+        report = self._report(mock=False, virtual=False)
+        self.assertEqual(report.link_kind, tm.LINK_KIND_SERIAL)
+        self.assertEqual(report.to_dict()["link_kind"], "serial")
+        self.assertIn("link: serial", report.to_text())
+
+    def test_virtual_run_is_stamped_virtual(self):
+        report = self._report(mock=False, virtual=True)
+        self.assertEqual(report.link_kind, tm.LINK_KIND_VIRTUAL)
+        self.assertEqual(report.to_dict()["link_kind"], "virtual")
+        self.assertIn("link: virtual", report.to_text())
+
+    def test_default_direct_construction_still_defaults_to_serial(self):
+        """Pre-existing direct-construction call sites (this file's own
+        SuiteReportExitCodeTests._report, e.g.) that predate link_kind must
+        keep working with an implicit, honest default rather than raising a
+        missing-argument TypeError."""
+        presence = tm.HardwarePresence(
+            tm.PresenceResult(True, "ok"), tm.PresenceResult(True, "ok"), tm.PresenceResult(True, "ok")
+        )
+        report = tm.SuiteReport(presence=presence, quick=False, selftest=None,
+                                 scenario_outcomes=[], guard_coverage={}, started_at=0.0, duration_s=0.0)
+        self.assertEqual(report.link_kind, tm.LINK_KIND_SERIAL)
+
+
+class VirtualPresenceTests(unittest.TestCase):
+    """Requirement (2): a virtual fixture is real (it answers, it runs the
+    real SimFW simulation code), but SaftyFW/ESP are never attached to a
+    TCP-only virtual run -- tiers 1/2 must report absent with an honest
+    reason, and the real kilnctrl ESP/SaftyFW probe (a real serial I/O call)
+    must never be invoked for a --virtual run, mirroring the existing --mock
+    regression test above (test_mock_never_touches_the_real_esp_saftyfw_probe)."""
+
+    def test_virtual_never_touches_the_real_esp_saftyfw_probe(self):
+        link = MockSimLink()
+        calls = []
+        orig_probe = tm.default_esp_and_saftyfw_probe
+        tm.default_esp_and_saftyfw_probe = lambda *a, **k: (
+            calls.append(1) or (tm.PresenceResult(False, "x"), tm.PresenceResult(False, "x"))
+        )
+
+        def fake_run_scenario(link_, scenario_, *, seed, timescale, guard_observer=None):
+            return _StubReport(report_mod.PASS)
+
+        orig_run = tm.run_scenario
+        tm.run_scenario = fake_run_scenario
+        try:
+            report = tm.run_suite(
+                link, tm.default_scenarios_dir(), quick=True, mock=False, virtual=True,
+                fixture_probe=lambda link_, addr: tm.default_fixture_probe(link_, addr),
+            )
+        finally:
+            tm.default_esp_and_saftyfw_probe = orig_probe
+            tm.run_scenario = orig_run
+
+        self.assertEqual(calls, [], "default_esp_and_saftyfw_probe (real kilnctrl I/O) was called during --virtual")
+        self.assertFalse(report.presence.esp.present)
+        self.assertFalse(report.presence.saftyfw.present)
+        self.assertIn("--virtual", report.presence.esp.detail)
+        self.assertIn("--virtual", report.presence.saftyfw.detail)
+        self.assertEqual(report.presence.max_tier, 0, "SaftyFW/ESP absence must cap a virtual run at tier 0")
+
+    def test_guards_with_virtual_raises_before_touching_the_link(self):
+        link = MockSimLink()
+        probe_calls = []
+
+        def spy_fixture_probe(link_, addr):
+            probe_calls.append(1)
+            return tm.default_fixture_probe(link_, addr)
+
+        with self.assertRaises(tm.GuardObserverUnavailable) as ctx:
+            tm.run_suite(
+                link, tm.default_scenarios_dir(), quick=True, mock=False, virtual=True, guards=True,
+                fixture_probe=spy_fixture_probe,
+            )
+        self.assertIn("--virtual", str(ctx.exception))
+        self.assertEqual(probe_calls, [], "must fail before even probing for the fixture")
+        self.assertFalse(link.is_connected, "must fail before ever connecting the fixture link")
+
+
+class FixtureAddressTests(unittest.TestCase):
+    """run_suite's `fixture_address` must be handed to fixture_probe -- and
+    kept SEPARATE from `port` (which stays the real kilnctrl ESP/SaftyFW
+    serial port even during a --virtual run, per run_suite's own docstring)."""
+
+    def test_fixture_probe_receives_fixture_address_not_port(self):
+        link = MockSimLink()
+        seen = []
+
+        def spy_fixture_probe(link_, addr):
+            seen.append(addr)
+            return tm.PresenceResult(False, "simulated: absent")
+
+        tm.run_suite(
+            link, tm.default_scenarios_dir(),
+            port="COM7", fixture_address="127.0.0.1:9000",
+            fixture_probe=spy_fixture_probe,
+        )
+        self.assertEqual(seen, ["127.0.0.1:9000"], "fixture_probe must see fixture_address, not the unrelated port")
+
+    def test_fixture_address_defaults_to_port_when_omitted(self):
+        """Backward compatibility: every pre-existing call site that only
+        ever passed `port` (never fixture_address) must keep connecting the
+        fixture with that same value."""
+        link = MockSimLink()
+        seen = []
+
+        def spy_fixture_probe(link_, addr):
+            seen.append(addr)
+            return tm.PresenceResult(False, "simulated: absent")
+
+        tm.run_suite(
+            link, tm.default_scenarios_dir(),
+            port="COM7", fixture_probe=spy_fixture_probe,
+        )
+        self.assertEqual(seen, ["COM7"])
+
+
+class CliVirtualFlagWiringTests(unittest.TestCase):
+    """kilnsim.cli.cmd_testmgr must resolve --virtual into run_suite's
+    virtual=True and a TcpSimLink-appropriate fixture_address -- the actual
+    "wiring" this task closes. run_suite itself is monkeypatched to capture
+    what it was called with, the same technique CliGuardsFlagTests above
+    uses for GuardObserverUnavailable (tm.run_suite is the exact same
+    module attribute kilnsim.cli's own `_testmgr.run_suite` call resolves,
+    since cli.py does `from . import testmgr as _testmgr`)."""
+
+    def _capture_run_suite_kwargs(self, argv):
+        from kilnsim.cli import build_parser, cmd_testmgr
+
+        args = build_parser().parse_args(argv)
+        captured = {}
+
+        def fake_run_suite(link, scenarios_dir=None, **kwargs):
+            captured["link"] = link
+            captured.update(kwargs)
+            return tm.SuiteReport(
+                presence=tm.HardwarePresence(
+                    tm.PresenceResult(False, "n/a"), tm.PresenceResult(False, "n/a"), tm.PresenceResult(False, "n/a")
+                ),
+                quick=False, selftest=None, scenario_outcomes=[],
+                guard_coverage=tm.compute_guard_coverage([], []),
+                started_at=0.0, duration_s=0.0,
+            )
+
+        orig = tm.run_suite
+        tm.run_suite = fake_run_suite
+        try:
+            cmd_testmgr(args)
+        finally:
+            tm.run_suite = orig
+        return captured
+
+    def test_virtual_with_explicit_address_wires_through(self):
+        from kilnsim.link import TcpSimLink
+
+        captured = self._capture_run_suite_kwargs(["--virtual", "10.0.0.5:9999", "testmgr", "--quick"])
+        self.assertIsInstance(captured["link"], TcpSimLink)
+        self.assertTrue(captured["virtual"])
+        self.assertFalse(captured["mock"])
+        self.assertEqual(captured["fixture_address"], "10.0.0.5:9999")
+
+    def test_virtual_with_no_address_passes_none_through(self):
+        """`kilnsim --virtual -- testmgr` (bare, no HOST:PORT) must let
+        run_suite/TcpSimLink fall back to their own default
+        (127.0.0.1:8765) rather than wiring through the empty string
+        argparse's `const=""` produces. (The `--` is a pre-existing
+        argparse wrinkle of this top-level, already-shipped `--virtual
+        [HOST:PORT]` flag -- nargs='?' greedily consumes the very next
+        token, including a bare `kilnsim --virtual testmgr` subcommand
+        name, unless `--` marks the boundary; out of this task's scope
+        since --virtual predates it and every other subcommand shares the
+        same parser, but worth a note for whoever next touches cli.py.)"""
+        captured = self._capture_run_suite_kwargs(["--virtual", "--", "testmgr", "--quick"])
+        self.assertTrue(captured["virtual"])
+        self.assertIsNone(captured["fixture_address"])
+
+    def test_plain_serial_run_passes_virtual_false_and_port_as_fixture_address(self):
+        captured = self._capture_run_suite_kwargs(["--port", "COM3", "testmgr", "--quick"])
+        self.assertFalse(captured["virtual"])
+        self.assertFalse(captured["mock"])
+        self.assertEqual(captured["fixture_address"], "COM3")
+
+    def test_mock_wins_over_virtual_when_both_given(self):
+        """_make_link's own precedence (--mock checked first) -- cmd_testmgr
+        must derive `virtual` from the LINK IT ACTUALLY GOT, not by
+        re-reading args.virtual independently, so this stays in sync even
+        if a caller passes both."""
+        from kilnsim.link import MockSimLink as _MockSimLink
+
+        captured = self._capture_run_suite_kwargs(["--mock", "--virtual", "--", "testmgr", "--quick"])
+        self.assertIsInstance(captured["link"], _MockSimLink)
+        self.assertFalse(captured["virtual"])
+        self.assertTrue(captured["mock"])
+
+
 if __name__ == "__main__":
     unittest.main()
